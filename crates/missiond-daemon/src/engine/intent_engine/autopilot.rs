@@ -1956,14 +1956,14 @@ async fn dispatch_board_tasks_with_config(
 
     // V3 execution-ownership :: delegated-boardtask :: dispatch-guard.
     // Concurrent slot dispatch: each ready BoardTask hands its prepared
-    // send + post-send tail to a `tokio::task::JoinSet` task so different
-    // slots' state.pty.send calls start in the same dispatch tick. The
-    // OwnedSlotDispatchGuard travels into each spawned task and is dropped
-    // only after the post-send tail completes, so same-slot exclusion still
-    // covers the entire send + close-owner / KB-feedback / deploy-review
-    // sequence. The legacy serial loop awaited state.pty.send inline, which
-    // starved every other ready slot for the duration of one slot's send.
-    let mut send_jobs: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+    // send + post-send tail to a detached `tokio::spawn` task so different
+    // slots' state.pty.send calls can run while the Autopilot event loop
+    // keeps processing later Board/Slot events. The OwnedSlotDispatchGuard
+    // travels into each spawned task and is dropped only after the post-send
+    // tail completes, so same-slot exclusion still covers the entire send +
+    // close-owner / KB-feedback / deploy-review sequence. The legacy serial
+    // loop awaited state.pty.send inline, and the later JoinSet drain variant
+    // still blocked later ticks until early workers completed.
 
     // Excluded roles: these slots have dedicated purposes, not for ad-hoc tasks
     const EXCLUDED_ROLES: &[&str] = &[
@@ -2440,34 +2440,33 @@ async fn dispatch_board_tasks_with_config(
             }
         }
 
-        // Spawn the send + post-send tail so different-slot dispatches start
-        // their state.pty.send calls concurrently within this tick. The
+        // Spawn the send + post-send tail as a detached task. The
         // OwnedSlotDispatchGuard moves into the spawned task and is dropped
         // only after the post-send tail completes, so the per-slot dispatch
         // guard is held across the entire state.pty.send call. Each spawned
         // task carries an `AppState` clone (Arc-backed) plus a cloned
-        // `BoardTask`, the resolved slot_id, and the assembled prompt; the
-        // outer dispatch_board_tasks awaits the JoinSet drain so quota /
-        // KB-feedback / deploy-review / retry semantics still complete
-        // before the tick returns.
+        // `BoardTask`, the resolved slot_id, and the assembled prompt.
+        // Quota / KB-feedback / deploy-review / retry semantics update
+        // durable state from the background tail instead of blocking the next
+        // dispatch tick.
         let timeout_ms = derive_pty_timeout_ms(runtime_config, task.timeout_secs);
         let deploy_review_timeout_ms = runtime_config.deploy_review_timeout_ms();
         let send_state = state.clone();
         let send_task = task.clone();
         let send_slot_id = slot_id.clone();
         let send_full_prompt = full_prompt;
-        send_jobs.spawn(async move {
+        tokio::spawn(async move {
             let _slot_guard = slot_guard;
             let state: &AppState = &send_state;
             let task: &missiond_core::types::BoardTask = &send_task;
             let slot_id: String = send_slot_id;
             let full_prompt: String = send_full_prompt;
             match state.pty.send(&slot_id, &full_prompt, timeout_ms).await {
-            Ok(res) => {
-                // Check for auth errors in successful PTY response
-                if is_auth_error(&res.response) {
-                    warn!(slot_id = %slot_id, task_id = %task.id, "Autopilot: auth error detected in PTY response, treating as failure");
-                    let _ = state.store.add_board_task_note(
+                Ok(res) => {
+                    // Check for auth errors in successful PTY response
+                    if is_auth_error(&res.response) {
+                        warn!(slot_id = %slot_id, task_id = %task.id, "Autopilot: auth error detected in PTY response, treating as failure");
+                        let _ = state.store.add_board_task_note(
                         &missiond_core::types::AddBoardTaskNoteInput {
                             task_id: task.id.to_string(),
                             content: format!("⚠️ **Auth Error** — slot {} OAuth token 可能已过期，需要 `/login`\n\n{}", slot_id, &truncate_safe(&res.response, 500)),
@@ -2475,64 +2474,65 @@ async fn dispatch_board_tasks_with_config(
                             author: Some("autopilot".to_string()),
                         },
                     ).await;
-                    // Treat as failure: increment slot_fail_counts
-                    {
-                        let mut fail_map = state.slot_fail_counts.lock().unwrap();
-                        let entry = fail_map.entry(slot_id.clone()).or_insert((0, 0));
-                        entry.0 += 1;
-                        entry.1 = chrono::Utc::now().timestamp();
-                        if entry.0 >= 2 {
-                            warn!(slot_id = %slot_id, failures = entry.0, "Slot auth-throttled: OAuth expired, needs /login");
+                        // Treat as failure: increment slot_fail_counts
+                        {
+                            let mut fail_map = state.slot_fail_counts.lock().unwrap();
+                            let entry = fail_map.entry(slot_id.clone()).or_insert((0, 0));
+                            entry.0 += 1;
+                            entry.1 = chrono::Utc::now().timestamp();
+                            if entry.0 >= 2 {
+                                warn!(slot_id = %slot_id, failures = entry.0, "Slot auth-throttled: OAuth expired, needs /login");
+                            }
                         }
+                        // Back to open for retry (don't mark done)
+                        let new_retry = task.retry_count + 1;
+                        if new_retry >= task.max_retries {
+                            let _ = state
+                                .store
+                                .update_board_task(
+                                    task.id.as_str(),
+                                    &missiond_core::types::UpdateBoardTaskInput {
+                                        status: Some("failed".to_string()),
+                                        ..Default::default()
+                                    },
+                                )
+                                .await;
+                            let _ = state
+                                .bus
+                                .publish_board(BoardEvent::StatusChanged {
+                                    task_id: task.id.to_string(),
+                                    old_status: format!("{:?}", task.status),
+                                    new_status: "failed".to_string(),
+                                })
+                                .await;
+                            notify_jarvis_failure(state, &task, "OAuth token 过期，工位认证失败")
+                                .await;
+                        } else {
+                            let _ = state
+                                .store
+                                .increment_board_task_retry(task.id.as_str(), new_retry)
+                                .await;
+                        }
+                        return;
                     }
-                    // Back to open for retry (don't mark done)
-                    let new_retry = task.retry_count + 1;
-                    if new_retry >= task.max_retries {
-                        let _ = state
-                            .store
-                            .update_board_task(
-                                task.id.as_str(),
-                                &missiond_core::types::UpdateBoardTaskInput {
-                                    status: Some("failed".to_string()),
-                                    ..Default::default()
-                                },
-                            )
-                            .await;
-                        let _ = state
-                            .bus
-                            .publish_board(BoardEvent::StatusChanged {
-                                task_id: task.id.to_string(),
-                                old_status: format!("{:?}", task.status),
-                                new_status: "failed".to_string(),
-                            })
-                            .await;
-                        notify_jarvis_failure(state, &task, "OAuth token 过期，工位认证失败").await;
-                    } else {
-                        let _ = state
-                            .store
-                            .increment_board_task_retry(task.id.as_str(), new_retry)
-                            .await;
-                    }
-                    return;
-                }
 
-                // Check for quota exhaustion — circuit breaker: auto global_pause
-                if is_quota_exhausted(&res.response) {
-                    warn!(slot_id = %slot_id, task_id = %task.id, "🚨 Autopilot: API quota exhausted! Activating global pause circuit breaker");
-                    // Activate global pause
-                    state
-                        .global_paused
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
-                    let now = chrono::Utc::now().timestamp();
-                    state
-                        .global_paused_at
-                        .store(now, std::sync::atomic::Ordering::Relaxed);
-                    let _ = std::fs::write(
-                        crate::helpers::default_mission_home().join("global_paused"),
-                        now.to_string(),
-                    );
-                    // Add note to the task
-                    let _ = state.store.add_board_task_note(
+                    // Check for quota exhaustion — circuit breaker: auto global_pause
+                    if is_quota_exhausted(&res.response) {
+                        warn!(slot_id = %slot_id, task_id = %task.id, "🚨 Autopilot: API quota exhausted! Activating global pause circuit breaker");
+                        // Activate global pause
+                        state
+                            .global_paused
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                        let now = chrono::Utc::now().timestamp();
+                        state
+                            .global_paused_at
+                            .store(now, std::sync::atomic::Ordering::Relaxed);
+                        let _ = std::fs::write(
+                            crate::helpers::default_mission_home().join("global_paused"),
+                            now.to_string(),
+                        );
+                        // Add note to the task
+                        let _ = state.store.add_board_task_note(
                         &missiond_core::types::AddBoardTaskNoteInput {
                             task_id: task.id.to_string(),
                             content: format!(
@@ -2544,86 +2544,86 @@ async fn dispatch_board_tasks_with_config(
                             author: Some("circuit-breaker".to_string()),
                         },
                     ).await;
-                    // Return task to open for retry after quota resets
-                    let _ = state
-                        .store
-                        .update_board_task(
-                            task.id.as_str(),
-                            &missiond_core::types::UpdateBoardTaskInput {
-                                status: Some("open".to_string()),
-                                ..Default::default()
-                            },
-                        )
-                        .await;
-                    // Create incident for visibility
-                    let incident = missiond_core::types::MissionIncident {
-                        id: format!("inc-{}", uuid::Uuid::new_v4()),
-                        severity: missiond_core::types::IncidentSeverity::Critical,
-                        source: missiond_core::types::IncidentSource::PtySlot,
-                        title: "API 配额耗尽 — 全局暂停已激活".to_string(),
-                        description: format!(
-                            "工位 {} 检测到 API 配额耗尽，系统已自动激活全局暂停。\n\
+                        // Return task to open for retry after quota resets
+                        let _ = state
+                            .store
+                            .update_board_task(
+                                task.id.as_str(),
+                                &missiond_core::types::UpdateBoardTaskInput {
+                                    status: Some("open".to_string()),
+                                    ..Default::default()
+                                },
+                            )
+                            .await;
+                        // Create incident for visibility
+                        let incident = missiond_core::types::MissionIncident {
+                            id: format!("inc-{}", uuid::Uuid::new_v4()),
+                            severity: missiond_core::types::IncidentSeverity::Critical,
+                            source: missiond_core::types::IncidentSource::PtySlot,
+                            title: "API 配额耗尽 — 全局暂停已激活".to_string(),
+                            description: format!(
+                                "工位 {} 检测到 API 配额耗尽，系统已自动激活全局暂停。\n\
                              所有任务派发已停止，需手动 mission_pause(action=\"resume\") 恢复。",
-                            slot_id
-                        ),
-                        server_id: None,
-                        raw_payload: serde_json::json!({
-                            "slot_id": slot_id,
-                            "task_id": task.id,
-                            "trigger": "quota_exhausted",
-                        }),
-                        created_at: chrono::Utc::now().to_rfc3339(),
-                    };
-                    let _ = state
-                        .bus
-                        .publish_incident(IncidentEvent::Reported { incident })
-                        .await;
-                    notify_jarvis_failure(state, &task, "API 配额耗尽，系统已全局暂停").await;
-                    // Quota is gone — stop this task's post-send tail. Other
-                    // in-flight sends already started concurrently (different
-                    // slots), so they finish on their own; the next dispatch
-                    // tick will short-circuit on global_paused above.
-                    return;
-                }
+                                slot_id
+                            ),
+                            server_id: None,
+                            raw_payload: serde_json::json!({
+                                "slot_id": slot_id,
+                                "task_id": task.id,
+                                "trigger": "quota_exhausted",
+                            }),
+                            created_at: chrono::Utc::now().to_rfc3339(),
+                        };
+                        let _ = state
+                            .bus
+                            .publish_incident(IncidentEvent::Reported { incident })
+                            .await;
+                        notify_jarvis_failure(state, &task, "API 配额耗尽，系统已全局暂停").await;
+                        // Quota is gone — stop this task's post-send tail. Other
+                        // in-flight sends already started concurrently (different
+                        // slots), so they finish on their own; the next dispatch
+                        // tick will short-circuit on global_paused above.
+                        return;
+                    }
 
-                // V3 resident-master-control :: evidence-authority / settle-policy.
-                // `pty.send` completion is a high-confidence turn-level signal,
-                // but provider JSONL/SSE final text and MissionD conversation
-                // ingestion can lag the prompt returning. Wait briefly before
-                // writing the durable BoardTask close state; PTY idle alone is
-                // never used as completion authority.
-                wait_for_worker_final_settle_window().await;
+                    // V3 resident-master-control :: evidence-authority / settle-policy.
+                    // `pty.send` completion is a high-confidence turn-level signal,
+                    // but provider JSONL/SSE final text and MissionD conversation
+                    // ingestion can lag the prompt returning. Wait briefly before
+                    // writing the durable BoardTask close state; PTY idle alone is
+                    // never used as completion authority.
+                    wait_for_worker_final_settle_window().await;
 
-                // JSONL/session discovery can race the pre-send binding,
-                // especially for external-project persistent ClaudeCode
-                // sessions whose provider log lands after the first prompt.
-                // Re-bind after the durable-final settle window so
-                // mission_conversation_query(taskId=...) has a stable
-                // BoardTask -> provider conversation join for worker audit.
-                let rebound = crate::flow_engine::bind_conversation_to_task(
-                    state,
-                    &slot_id,
-                    task.id.as_str(),
-                )
-                .await;
-                if rebound {
-                    debug!(
-                        task_id = %task.id,
-                        slot_id = %slot_id,
-                        "Autopilot: rebound provider conversation to BoardTask after settle"
-                    );
-                }
-                // V3 execution-ownership :: delegated-boardtask :: summary-note source.
-                // Prefer the durable provider final after the JSONL/chat-store
-                // settle + single-session reconcile. If the first reconcile
-                // still races the provider final write, poll the durable log
-                // for one more settle budget before falling back to the TUI
-                // screen. The TUI `res.response` screen is only the fallback
-                // because it can lag, clip, or render an intermediate frame
-                // even after the prompt returns. Auth/quota diagnostic notes
-                // above intentionally bypass this path and keep the raw
-                // response.
-                let durable_completion = await_durable_provider_completion_for_slot_task(
+                    // JSONL/session discovery can race the pre-send binding,
+                    // especially for external-project persistent ClaudeCode
+                    // sessions whose provider log lands after the first prompt.
+                    // Re-bind after the durable-final settle window so
+                    // mission_conversation_query(taskId=...) has a stable
+                    // BoardTask -> provider conversation join for worker audit.
+                    let rebound = crate::flow_engine::bind_conversation_to_task(
+                        state,
+                        &slot_id,
+                        task.id.as_str(),
+                    )
+                    .await;
+                    if rebound {
+                        debug!(
+                            task_id = %task.id,
+                            slot_id = %slot_id,
+                            "Autopilot: rebound provider conversation to BoardTask after settle"
+                        );
+                    }
+                    // V3 execution-ownership :: delegated-boardtask :: summary-note source.
+                    // Prefer the durable provider final after the JSONL/chat-store
+                    // settle + single-session reconcile. If the first reconcile
+                    // still races the provider final write, poll the durable log
+                    // for one more settle budget before falling back to the TUI
+                    // screen. The TUI `res.response` screen is only the fallback
+                    // because it can lag, clip, or render an intermediate frame
+                    // even after the prompt returns. Auth/quota diagnostic notes
+                    // above intentionally bypass this path and keep the raw
+                    // response.
+                    let durable_completion = await_durable_provider_completion_for_slot_task(
                     state,
                     task,
                     &slot_id,
@@ -2638,19 +2638,21 @@ async fn dispatch_board_tasks_with_config(
                     );
                     None
                 });
-                let final_summary = durable_completion
-                    .as_ref()
-                    .map(|completion| completion.summary.trim().to_string())
-                    .filter(|summary| !summary.is_empty())
-                    .unwrap_or_else(|| extract_worker_final_summary(&res.response, &full_prompt));
-                if is_probably_active_tui_summary(&final_summary) {
-                    warn!(
-                        task_id = %task.id,
-                        slot_id = %slot_id,
-                        duration_ms = res.duration_ms,
-                        "Autopilot: pty.send returned an active/progress frame; preserving running task state"
-                    );
-                    let _ = state
+                    let final_summary = durable_completion
+                        .as_ref()
+                        .map(|completion| completion.summary.trim().to_string())
+                        .filter(|summary| !summary.is_empty())
+                        .unwrap_or_else(|| {
+                            extract_worker_final_summary(&res.response, &full_prompt)
+                        });
+                    if is_probably_active_tui_summary(&final_summary) {
+                        warn!(
+                            task_id = %task.id,
+                            slot_id = %slot_id,
+                            duration_ms = res.duration_ms,
+                            "Autopilot: pty.send returned an active/progress frame; preserving running task state"
+                        );
+                        let _ = state
                         .store
                         .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
                             task_id: task.id.to_string(),
@@ -2659,182 +2661,36 @@ async fn dispatch_board_tasks_with_config(
                             author: Some("autopilot".to_string()),
                         })
                         .await;
-                    return;
-                }
-                if let Some(blocker) = worker_final_close_blocker(&final_summary) {
-                    warn!(
-                        task_id = %task.id,
-                        slot_id = %slot_id,
-                        duration_ms = res.duration_ms,
-                        blocker,
-                        "Autopilot: worker final reports a blocking commit/tool failure; preserving task for recovery"
-                    );
-                    let note = format!(
+                        return;
+                    }
+                    if let Some(blocker) = worker_final_close_blocker(&final_summary) {
+                        warn!(
+                            task_id = %task.id,
+                            slot_id = %slot_id,
+                            duration_ms = res.duration_ms,
+                            blocker,
+                            "Autopilot: worker final reports a blocking commit/tool failure; preserving task for recovery"
+                        );
+                        let note = format!(
                         "⚠️ **Autopilot blocked close** — worker final indicates `{}`. The BoardTask stays blocked so a supervisor/worker can recover instead of recording a false done state.\n\n{}",
                         blocker,
                         truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES),
                     );
-                    let _ = state
-                        .store
-                        .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
-                            task_id: task.id.to_string(),
-                            content: note,
-                            note_type: Some("note".to_string()),
-                            author: Some("autopilot".to_string()),
-                        })
-                        .await;
-                    let _ = state
-                        .store
-                        .update_board_task(
-                            task.id.as_str(),
-                            &missiond_core::types::UpdateBoardTaskInput {
-                                status: Some("blocked".to_string()),
-                                ..Default::default()
-                            },
-                        )
-                        .await;
-                    let _ = state
-                        .bus
-                        .publish_board(BoardEvent::StatusChanged {
-                            task_id: task.id.to_string(),
-                            old_status: format!("{:?}", task.status),
-                            new_status: "blocked".to_string(),
-                        })
-                        .await;
-                    let _ = state
-                        .store
-                        .update_prompt_snapshot_outcome(task.id.as_str(), "blocked")
-                        .await;
-                    return;
-                }
-                if let Some(blocker) = delegated_write_close_evidence_blocker(
-                    &task.description,
-                    durable_completion.is_some(),
-                    &final_summary,
-                ) {
-                    warn!(
-                        task_id = %task.id,
-                        slot_id = %slot_id,
-                        duration_ms = res.duration_ms,
-                        blocker,
-                        "Autopilot: write-scope task lacks durable completion/acceptance evidence; preserving task for recovery"
-                    );
-                    let note = format!(
-                        "⚠️ **Autopilot blocked close** — write-scope task is missing `{}`. The BoardTask stays blocked so a supervisor/worker can recover instead of recording a false done state.\n\n{}",
-                        blocker,
-                        truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES),
-                    );
-                    let _ = state
-                        .store
-                        .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
-                            task_id: task.id.to_string(),
-                            content: note,
-                            note_type: Some("note".to_string()),
-                            author: Some("autopilot".to_string()),
-                        })
-                        .await;
-                    let _ = state
-                        .store
-                        .update_board_task(
-                            task.id.as_str(),
-                            &missiond_core::types::UpdateBoardTaskInput {
-                                status: Some("blocked".to_string()),
-                                ..Default::default()
-                            },
-                        )
-                        .await;
-                    let _ = state
-                        .bus
-                        .publish_board(BoardEvent::StatusChanged {
-                            task_id: task.id.to_string(),
-                            old_status: format!("{:?}", task.status),
-                            new_status: "blocked".to_string(),
-                        })
-                        .await;
-                    let _ = state
-                        .store
-                        .update_prompt_snapshot_outcome(task.id.as_str(), "blocked")
-                        .await;
-                    return;
-                }
-                let summary_for_note =
-                    truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES);
-                let durable_source = durable_completion
-                    .as_ref()
-                    .map(|completion| {
-                        format!(
-                            "; durable final {} / {}",
-                            completion.source, completion.session_id
-                        )
-                    })
-                    .unwrap_or_default();
-                let note_content = format!(
-                    "**Autopilot 执行完成** ({}ms{})\n\n{}",
-                    res.duration_ms, durable_source, summary_for_note
-                );
-                let _ = state
-                    .store
-                    .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
-                        task_id: task.id.to_string(),
-                        content: note_content,
-                        note_type: Some("summary".to_string()),
-                        author: Some("autopilot".to_string()),
-                    })
-                    .await;
-                match maybe_complete_delegated_execution_log(
-                    state,
-                    task,
-                    &full_prompt,
-                    &final_summary,
-                    res.duration_ms,
-                )
-                .await
-                {
-                    Ok(true) => {
-                        info!(task_id = %task.id, "Autopilot: synthesized mission_execution completion");
-                    }
-                    Ok(false) => {}
-                    Err(err) => {
-                        warn!(task_id = %task.id, error = %err, "Autopilot: mission_execution completion synthesis failed");
-                    }
-                }
-                // V3 execution-ownership :: delegated-boardtask :: close-owner.
-                // Autopilot owns closure unless the worker self-closed via
-                // attached board MCP tools (Done) or the task transitioned to
-                // Blocked (e.g. mission_question_create). Pure helper
-                // `decide_close_action` projects the rule.
-                let current_status = state
-                    .store
-                    .get_board_task(task.id.as_str())
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|t| t.status);
-                match decide_close_action(current_status) {
-                    DispatchCloseAction::AlreadySelfClosed => {
-                        // Worker self-closed via attached board MCP tools.
-                        info!(task_id = %task.id, duration_ms = res.duration_ms, "Autopilot: task already done (self-closed)");
-                    }
-                    DispatchCloseAction::PreserveBlocked => {
-                        // Task was blocked by pending questions — do NOT overwrite
-                        let _ = state.store.add_board_task_note(
-                            &missiond_core::types::AddBoardTaskNoteInput {
+                        let _ = state
+                            .store
+                            .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
                                 task_id: task.id.to_string(),
-                                content: "⚠️ PTY 执行已返回，但任务有未回答的 pending questions，保持 blocked 状态。".to_string(),
+                                content: note,
                                 note_type: Some("note".to_string()),
                                 author: Some("autopilot".to_string()),
-                            },
-                        ).await;
-                        warn!(task_id = %task.id, "Autopilot: pty.send completed but task is blocked — preserving blocked status");
-                    }
-                    DispatchCloseAction::OwnerClosesAsDone => {
-                        // Normal case: running → done. Autopilot is the close owner.
+                            })
+                            .await;
                         let _ = state
                             .store
                             .update_board_task(
                                 task.id.as_str(),
                                 &missiond_core::types::UpdateBoardTaskInput {
-                                    status: Some("done".to_string()),
+                                    status: Some("blocked".to_string()),
                                     ..Default::default()
                                 },
                             )
@@ -2844,138 +2700,287 @@ async fn dispatch_board_tasks_with_config(
                             .publish_board(BoardEvent::StatusChanged {
                                 task_id: task.id.to_string(),
                                 old_status: format!("{:?}", task.status),
-                                new_status: "done".to_string(),
+                                new_status: "blocked".to_string(),
                             })
                             .await;
-                        info!(task_id = %task.id, duration_ms = res.duration_ms, "Autopilot: task completed");
-                        // Record outcome for Skill auto-verification replay
                         let _ = state
                             .store
-                            .update_prompt_snapshot_outcome(task.id.as_str(), "success")
+                            .update_prompt_snapshot_outcome(task.id.as_str(), "blocked")
                             .await;
+                        return;
                     }
-                }
-                // Reset slot failure count on success
-                {
-                    let mut fail_map = state.slot_fail_counts.lock().unwrap();
-                    fail_map.remove(&slot_id);
-                }
-
-                // Positive confidence feedback: reinforce cited KB entries on task success
-                // Self-supervision: entries below 0.8 (likely penalized by prior attribution)
-                // get a higher boost (+0.05) to recover faster from misattribution
-                {
-                    let cited = state
-                        .task_cited_kbs
-                        .lock()
-                        .unwrap()
-                        .remove(task.id.as_str());
-                    if let Some(kb_ids) = cited {
-                        let count = kb_ids.len();
-                        for kb_id in &kb_ids {
-                            // Check current confidence to determine boost amount
-                            let delta = state
+                    if let Some(blocker) = delegated_write_close_evidence_blocker(
+                        &task.description,
+                        durable_completion.is_some(),
+                        &final_summary,
+                    ) {
+                        warn!(
+                            task_id = %task.id,
+                            slot_id = %slot_id,
+                            duration_ms = res.duration_ms,
+                            blocker,
+                            "Autopilot: write-scope task lacks durable completion/acceptance evidence; preserving task for recovery"
+                        );
+                        let note = format!(
+                        "⚠️ **Autopilot blocked close** — write-scope task is missing `{}`. The BoardTask stays blocked so a supervisor/worker can recover instead of recording a false done state.\n\n{}",
+                        blocker,
+                        truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES),
+                    );
+                        let _ = state
+                            .store
+                            .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+                                task_id: task.id.to_string(),
+                                content: note,
+                                note_type: Some("note".to_string()),
+                                author: Some("autopilot".to_string()),
+                            })
+                            .await;
+                        let _ = state
+                            .store
+                            .update_board_task(
+                                task.id.as_str(),
+                                &missiond_core::types::UpdateBoardTaskInput {
+                                    status: Some("blocked".to_string()),
+                                    ..Default::default()
+                                },
+                            )
+                            .await;
+                        let _ = state
+                            .bus
+                            .publish_board(BoardEvent::StatusChanged {
+                                task_id: task.id.to_string(),
+                                old_status: format!("{:?}", task.status),
+                                new_status: "blocked".to_string(),
+                            })
+                            .await;
+                        let _ = state
+                            .store
+                            .update_prompt_snapshot_outcome(task.id.as_str(), "blocked")
+                            .await;
+                        return;
+                    }
+                    let summary_for_note =
+                        truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES);
+                    let durable_source = durable_completion
+                        .as_ref()
+                        .map(|completion| {
+                            format!(
+                                "; durable final {} / {}",
+                                completion.source, completion.session_id
+                            )
+                        })
+                        .unwrap_or_default();
+                    let note_content = format!(
+                        "**Autopilot 执行完成** ({}ms{})\n\n{}",
+                        res.duration_ms, durable_source, summary_for_note
+                    );
+                    let _ = state
+                        .store
+                        .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+                            task_id: task.id.to_string(),
+                            content: note_content,
+                            note_type: Some("summary".to_string()),
+                            author: Some("autopilot".to_string()),
+                        })
+                        .await;
+                    match maybe_complete_delegated_execution_log(
+                        state,
+                        task,
+                        &full_prompt,
+                        &final_summary,
+                        res.duration_ms,
+                    )
+                    .await
+                    {
+                        Ok(true) => {
+                            info!(task_id = %task.id, "Autopilot: synthesized mission_execution completion");
+                        }
+                        Ok(false) => {}
+                        Err(err) => {
+                            warn!(task_id = %task.id, error = %err, "Autopilot: mission_execution completion synthesis failed");
+                        }
+                    }
+                    // V3 execution-ownership :: delegated-boardtask :: close-owner.
+                    // Autopilot owns closure unless the worker self-closed via
+                    // attached board MCP tools (Done) or the task transitioned to
+                    // Blocked (e.g. mission_question_create). Pure helper
+                    // `decide_close_action` projects the rule.
+                    let current_status = state
+                        .store
+                        .get_board_task(task.id.as_str())
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|t| t.status);
+                    match decide_close_action(current_status) {
+                        DispatchCloseAction::AlreadySelfClosed => {
+                            // Worker self-closed via attached board MCP tools.
+                            info!(task_id = %task.id, duration_ms = res.duration_ms, "Autopilot: task already done (self-closed)");
+                        }
+                        DispatchCloseAction::PreserveBlocked => {
+                            // Task was blocked by pending questions — do NOT overwrite
+                            let _ = state.store.add_board_task_note(
+                            &missiond_core::types::AddBoardTaskNoteInput {
+                                task_id: task.id.to_string(),
+                                content: "⚠️ PTY 执行已返回，但任务有未回答的 pending questions，保持 blocked 状态。".to_string(),
+                                note_type: Some("note".to_string()),
+                                author: Some("autopilot".to_string()),
+                            },
+                        ).await;
+                            warn!(task_id = %task.id, "Autopilot: pty.send completed but task is blocked — preserving blocked status");
+                        }
+                        DispatchCloseAction::OwnerClosesAsDone => {
+                            // Normal case: running → done. Autopilot is the close owner.
+                            let _ = state
                                 .store
-                                .kb_get_by_id(kb_id)
-                                .await
-                                .ok()
-                                .flatten()
-                                .map(|e| if e.confidence < 0.8 { 0.05 } else { 0.03 })
-                                .unwrap_or(0.03);
-                            match state.store.kb_adjust_confidence(kb_id, delta).await {
-                                Ok(Some(new_conf)) => {
-                                    debug!(kb_id = %kb_id, delta, new_conf, "KB confidence boost (task success)")
+                                .update_board_task(
+                                    task.id.as_str(),
+                                    &missiond_core::types::UpdateBoardTaskInput {
+                                        status: Some("done".to_string()),
+                                        ..Default::default()
+                                    },
+                                )
+                                .await;
+                            let _ = state
+                                .bus
+                                .publish_board(BoardEvent::StatusChanged {
+                                    task_id: task.id.to_string(),
+                                    old_status: format!("{:?}", task.status),
+                                    new_status: "done".to_string(),
+                                })
+                                .await;
+                            info!(task_id = %task.id, duration_ms = res.duration_ms, "Autopilot: task completed");
+                            // Record outcome for Skill auto-verification replay
+                            let _ = state
+                                .store
+                                .update_prompt_snapshot_outcome(task.id.as_str(), "success")
+                                .await;
+                        }
+                    }
+                    // Reset slot failure count on success
+                    {
+                        let mut fail_map = state.slot_fail_counts.lock().unwrap();
+                        fail_map.remove(&slot_id);
+                    }
+
+                    // Positive confidence feedback: reinforce cited KB entries on task success
+                    // Self-supervision: entries below 0.8 (likely penalized by prior attribution)
+                    // get a higher boost (+0.05) to recover faster from misattribution
+                    {
+                        let cited = state
+                            .task_cited_kbs
+                            .lock()
+                            .unwrap()
+                            .remove(task.id.as_str());
+                        if let Some(kb_ids) = cited {
+                            let count = kb_ids.len();
+                            for kb_id in &kb_ids {
+                                // Check current confidence to determine boost amount
+                                let delta = state
+                                    .store
+                                    .kb_get_by_id(kb_id)
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                    .map(|e| if e.confidence < 0.8 { 0.05 } else { 0.03 })
+                                    .unwrap_or(0.03);
+                                match state.store.kb_adjust_confidence(kb_id, delta).await {
+                                    Ok(Some(new_conf)) => {
+                                        debug!(kb_id = %kb_id, delta, new_conf, "KB confidence boost (task success)")
+                                    }
+                                    Ok(None) => {
+                                        debug!(kb_id = %kb_id, "KB entry not found for confidence adjustment")
+                                    }
+                                    Err(e) => {
+                                        warn!(kb_id = %kb_id, error = %e, "Failed to adjust KB confidence")
+                                    }
                                 }
-                                Ok(None) => {
-                                    debug!(kb_id = %kb_id, "KB entry not found for confidence adjustment")
+                            }
+                            if count > 0 {
+                                info!(task_id = %task.id, kb_count = count, "KB feedback: boosted confidence for {} cited entries", count);
+                            }
+                            // Phase 4a: Utility score boost on task success (atomic SQL)
+                            match state
+                                .store
+                                .kb_batch_apply_utility_feedback(&kb_ids, true)
+                                .await
+                            {
+                                Ok(n) if n > 0 => {
+                                    info!(task_id = %task.id, boosted = n, "KB utility: boosted for task success")
                                 }
                                 Err(e) => {
-                                    warn!(kb_id = %kb_id, error = %e, "Failed to adjust KB confidence")
+                                    warn!(task_id = %task.id, error = %e, "KB utility: boost failed")
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+
+                    // Working Memory graduation: promote worthy scratchpad entries to global KB
+                    {
+                        let scratchpad = state.store.kb_list_by_scope(task.id.as_str()).await;
+                        if let Ok(entries) = scratchpad {
+                            let mut graduated = 0u32;
+                            let mut expired = 0u32;
+                            for entry in &entries {
+                                if entry.confidence >= 0.7 && entry.access_count > 0 {
+                                    // Graduate: clear scope to make it global
+                                    let _ = state.store.kb_clear_scope(&entry.id).await;
+                                    graduated += 1;
+                                } else {
+                                    // Expire: remove low-value scratchpad entries
+                                    let _ = state.store.kb_forget(&entry.key).await;
+                                    expired += 1;
+                                }
+                            }
+                            if graduated + expired > 0 {
+                                info!(task_id = %task.id, graduated, expired, "Working memory: graduated {} entries, expired {}", graduated, expired);
+                            }
+                        }
+                    }
+
+                    // Jarvis task post-completion: append result to conversation
+                    if task.category == "jarvis" {
+                        if let Ok(meta) =
+                            serde_json::from_str::<serde_json::Value>(&task.description)
+                        {
+                            if let Some(conv_id) =
+                                meta.get("conversation_id").and_then(|v| v.as_str())
+                            {
+                                if !conv_id.is_empty() {
+                                    let _ = state
+                                        .store
+                                        .router_chat_append_messages(
+                                            conv_id,
+                                            &[("assistant".to_string(), res.response.clone())],
+                                        )
+                                        .await;
+                                    let _ = state
+                                        .bus
+                                        .publish_session(SessionEvent::JarvisTaskCompleted {
+                                            conversation_id: conv_id.to_string(),
+                                            task_id: task.id.to_string(),
+                                        })
+                                        .await;
+                                    info!(task_id = %task.id, conv_id = %conv_id, "Jarvis async: result appended to conversation");
                                 }
                             }
                         }
-                        if count > 0 {
-                            info!(task_id = %task.id, kb_count = count, "KB feedback: boosted confidence for {} cited entries", count);
-                        }
-                        // Phase 4a: Utility score boost on task success (atomic SQL)
-                        match state
-                            .store
-                            .kb_batch_apply_utility_feedback(&kb_ids, true)
-                            .await
-                        {
-                            Ok(n) if n > 0 => {
-                                info!(task_id = %task.id, boosted = n, "KB utility: boosted for task success")
-                            }
-                            Err(e) => {
-                                warn!(task_id = %task.id, error = %e, "KB utility: boost failed")
-                            }
-                            _ => {}
-                        }
                     }
-                }
 
-                // Working Memory graduation: promote worthy scratchpad entries to global KB
-                {
-                    let scratchpad = state.store.kb_list_by_scope(task.id.as_str()).await;
-                    if let Ok(entries) = scratchpad {
-                        let mut graduated = 0u32;
-                        let mut expired = 0u32;
-                        for entry in &entries {
-                            if entry.confidence >= 0.7 && entry.access_count > 0 {
-                                // Graduate: clear scope to make it global
-                                let _ = state.store.kb_clear_scope(&entry.id).await;
-                                graduated += 1;
-                            } else {
-                                // Expire: remove low-value scratchpad entries
-                                let _ = state.store.kb_forget(&entry.key).await;
-                                expired += 1;
+                    // Deploy task post-mortem: trigger memory-slow to review
+                    if task.category == "deploy" {
+                        let review_state = state.clone();
+                        let review_task_id = task.id.clone();
+                        let review_title = task.title.clone();
+                        let review_slot = slot_id.clone();
+                        tokio::spawn(async move {
+                            if !ensure_memory_slot_by_id(&review_state, MEMORY_SLOW_SLOT_ID).await {
+                                warn!("Cannot spawn memory-slow for deploy review");
+                                return;
                             }
-                        }
-                        if graduated + expired > 0 {
-                            info!(task_id = %task.id, graduated, expired, "Working memory: graduated {} entries, expired {}", graduated, expired);
-                        }
-                    }
-                }
-
-                // Jarvis task post-completion: append result to conversation
-                if task.category == "jarvis" {
-                    if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&task.description) {
-                        if let Some(conv_id) = meta.get("conversation_id").and_then(|v| v.as_str())
-                        {
-                            if !conv_id.is_empty() {
-                                let _ = state
-                                    .store
-                                    .router_chat_append_messages(
-                                        conv_id,
-                                        &[("assistant".to_string(), res.response.clone())],
-                                    )
-                                    .await;
-                                let _ = state
-                                    .bus
-                                    .publish_session(SessionEvent::JarvisTaskCompleted {
-                                        conversation_id: conv_id.to_string(),
-                                        task_id: task.id.to_string(),
-                                    })
-                                    .await;
-                                info!(task_id = %task.id, conv_id = %conv_id, "Jarvis async: result appended to conversation");
-                            }
-                        }
-                    }
-                }
-
-                // Deploy task post-mortem: trigger memory-slow to review
-                if task.category == "deploy" {
-                    let review_state = state.clone();
-                    let review_task_id = task.id.clone();
-                    let review_title = task.title.clone();
-                    let review_slot = slot_id.clone();
-                    tokio::spawn(async move {
-                        if !ensure_memory_slot_by_id(&review_state, MEMORY_SLOW_SLOT_ID).await {
-                            warn!("Cannot spawn memory-slow for deploy review");
-                            return;
-                        }
-                        let prompt = format!(
-                            "部署任务刚刚完成，请复盘：\n\
+                            let prompt = format!(
+                                "部署任务刚刚完成，请复盘：\n\
                             - 任务: {} (id: {})\n\
                             - 执行工位: {}\n\n\
                             请做以下工作：\n\
@@ -2985,146 +2990,136 @@ async fn dispatch_board_tasks_with_config(
                             4. 提炼有价值的经验 → mission_kb_remember(category=\"memory:ops\")\n\
                             5. 如发现缺失 MCP 工具或 Skill → mission_board_create 建改进任务\n\
                             6. 如一切顺利，简要记录即可，不需要过度分析",
-                            review_title, review_task_id, review_slot, review_task_id,
-                        );
-                        let _ = review_state
-                            .pty
-                            .send(MEMORY_SLOW_SLOT_ID, &prompt, deploy_review_timeout_ms)
-                            .await;
-                        info!(task_id = %review_task_id, "Deploy post-mortem review dispatched to memory-slow");
-                    });
-                }
-            }
-            Err(e) => {
-                // Use {:#} to print full anyhow error chain (prevents .context() from hiding inner message)
-                let err_msg = format!("{:#}", e);
-                let is_transient = err_msg.contains("Cannot send message in state:");
-
-                if is_transient {
-                    // Slot not ready — transient failure, just unclaim without penalty
-                    debug!(task_id = %task.id, slot_id = %slot_id, error = %err_msg,
-                        "Autopilot: slot not ready (transient), returning task to queue");
-                    let _ = state.store.unclaim_board_task(task.id.as_str()).await;
-                } else {
-                    // Real execution failure — track and retry
-                    let note_content = format!(
-                        "**Autopilot 执行失败** (retry {}/{})\n\n{}",
-                        task.retry_count + 1,
-                        task.max_retries,
-                        err_msg
-                    );
-                    let _ = state
-                        .store
-                        .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
-                            task_id: task.id.to_string(),
-                            content: note_content,
-                            note_type: Some("note".to_string()),
-                            author: Some("autopilot".to_string()),
-                        })
-                        .await;
-
-                    // Track slot consecutive failures
-                    {
-                        let mut fail_map = state.slot_fail_counts.lock().unwrap();
-                        let entry = fail_map.entry(slot_id.clone()).or_insert((0, 0));
-                        entry.0 += 1;
-                        entry.1 = chrono::Utc::now().timestamp();
-                        if entry.0 >= 3 {
-                            warn!(slot_id = %slot_id, failures = entry.0, "Slot throttled for 30 min due to consecutive failures");
-                        }
+                                review_title, review_task_id, review_slot, review_task_id,
+                            );
+                            let _ = review_state
+                                .pty
+                                .send(MEMORY_SLOW_SLOT_ID, &prompt, deploy_review_timeout_ms)
+                                .await;
+                            info!(task_id = %review_task_id, "Deploy post-mortem review dispatched to memory-slow");
+                        });
                     }
+                }
+                Err(e) => {
+                    // Use {:#} to print full anyhow error chain (prevents .context() from hiding inner message)
+                    let err_msg = format!("{:#}", e);
+                    let is_transient = err_msg.contains("Cannot send message in state:");
 
-                    // Retry logic: increment count, mark failed if exhausted
-                    let new_retry = task.retry_count + 1;
-                    if new_retry >= task.max_retries {
+                    if is_transient {
+                        // Slot not ready — transient failure, just unclaim without penalty
+                        debug!(task_id = %task.id, slot_id = %slot_id, error = %err_msg,
+                        "Autopilot: slot not ready (transient), returning task to queue");
+                        let _ = state.store.unclaim_board_task(task.id.as_str()).await;
+                    } else {
+                        // Real execution failure — track and retry
+                        let note_content = format!(
+                            "**Autopilot 执行失败** (retry {}/{})\n\n{}",
+                            task.retry_count + 1,
+                            task.max_retries,
+                            err_msg
+                        );
                         let _ = state
                             .store
-                            .update_board_task(
-                                task.id.as_str(),
-                                &missiond_core::types::UpdateBoardTaskInput {
-                                    status: Some("failed".to_string()),
-                                    ..Default::default()
-                                },
-                            )
-                            .await;
-                        let _ = state
-                            .bus
-                            .publish_board(BoardEvent::StatusChanged {
+                            .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
                                 task_id: task.id.to_string(),
-                                old_status: format!("{:?}", task.status),
-                                new_status: "failed".to_string(),
+                                content: note_content,
+                                note_type: Some("note".to_string()),
+                                author: Some("autopilot".to_string()),
                             })
                             .await;
-                        warn!(task_id = %task.id, retries = new_retry, "Autopilot: task failed after max retries");
-                        let _ = state
-                            .store
-                            .update_prompt_snapshot_outcome(task.id.as_str(), "failed")
-                            .await;
-                        notify_jarvis_failure(state, &task, &err_msg).await;
 
-                        // Negative feedback: confidence (LLM-attributed) + utility_score (blanket)
+                        // Track slot consecutive failures
                         {
-                            let cited = state
-                                .task_cited_kbs
-                                .lock()
-                                .unwrap()
-                                .remove(task.id.as_str());
-                            if let Some(kb_ids) = cited {
-                                if !kb_ids.is_empty() {
-                                    // Phase 4a: Utility score penalty (sync, atomic SQL)
-                                    match state
-                                        .store
-                                        .kb_batch_apply_utility_feedback(&kb_ids, false)
-                                        .await
-                                    {
-                                        Ok(n) if n > 0 => {
-                                            info!(task_id = %task.id, penalized = n, "KB utility: penalized for task failure")
-                                        }
-                                        Err(e) => {
-                                            warn!(task_id = %task.id, error = %e, "KB utility: penalty failed")
-                                        }
-                                        _ => {}
-                                    }
-                                    // Confidence penalty (async, LLM-attributed)
-                                    let state2 = state.clone();
-                                    let task_id2 = task.id.to_string();
-                                    let err_msg2 = err_msg.clone();
-                                    let task_title2 = task.title.clone();
-                                    tokio::spawn(async move {
-                                        apply_attributed_penalty(
-                                            &state2,
-                                            &task_id2,
-                                            &task_title2,
-                                            &err_msg2,
-                                            &kb_ids,
-                                        )
-                                        .await;
-                                    });
-                                }
+                            let mut fail_map = state.slot_fail_counts.lock().unwrap();
+                            let entry = fail_map.entry(slot_id.clone()).or_insert((0, 0));
+                            entry.0 += 1;
+                            entry.1 = chrono::Utc::now().timestamp();
+                            if entry.0 >= 3 {
+                                warn!(slot_id = %slot_id, failures = entry.0, "Slot throttled for 30 min due to consecutive failures");
                             }
                         }
-                    } else {
-                        // Back to open for retry, increment retry_count
-                        let _ = state
-                            .store
-                            .increment_board_task_retry(task.id.as_str(), new_retry)
-                            .await;
-                        warn!(task_id = %task.id, retry = new_retry, max = task.max_retries, error = %err_msg, "Autopilot: task failed, will retry");
+
+                        // Retry logic: increment count, mark failed if exhausted
+                        let new_retry = task.retry_count + 1;
+                        if new_retry >= task.max_retries {
+                            let _ = state
+                                .store
+                                .update_board_task(
+                                    task.id.as_str(),
+                                    &missiond_core::types::UpdateBoardTaskInput {
+                                        status: Some("failed".to_string()),
+                                        ..Default::default()
+                                    },
+                                )
+                                .await;
+                            let _ = state
+                                .bus
+                                .publish_board(BoardEvent::StatusChanged {
+                                    task_id: task.id.to_string(),
+                                    old_status: format!("{:?}", task.status),
+                                    new_status: "failed".to_string(),
+                                })
+                                .await;
+                            warn!(task_id = %task.id, retries = new_retry, "Autopilot: task failed after max retries");
+                            let _ = state
+                                .store
+                                .update_prompt_snapshot_outcome(task.id.as_str(), "failed")
+                                .await;
+                            notify_jarvis_failure(state, &task, &err_msg).await;
+
+                            // Negative feedback: confidence (LLM-attributed) + utility_score (blanket)
+                            {
+                                let cited = state
+                                    .task_cited_kbs
+                                    .lock()
+                                    .unwrap()
+                                    .remove(task.id.as_str());
+                                if let Some(kb_ids) = cited {
+                                    if !kb_ids.is_empty() {
+                                        // Phase 4a: Utility score penalty (sync, atomic SQL)
+                                        match state
+                                            .store
+                                            .kb_batch_apply_utility_feedback(&kb_ids, false)
+                                            .await
+                                        {
+                                            Ok(n) if n > 0 => {
+                                                info!(task_id = %task.id, penalized = n, "KB utility: penalized for task failure")
+                                            }
+                                            Err(e) => {
+                                                warn!(task_id = %task.id, error = %e, "KB utility: penalty failed")
+                                            }
+                                            _ => {}
+                                        }
+                                        // Confidence penalty (async, LLM-attributed)
+                                        let state2 = state.clone();
+                                        let task_id2 = task.id.to_string();
+                                        let err_msg2 = err_msg.clone();
+                                        let task_title2 = task.title.clone();
+                                        tokio::spawn(async move {
+                                            apply_attributed_penalty(
+                                                &state2,
+                                                &task_id2,
+                                                &task_title2,
+                                                &err_msg2,
+                                                &kb_ids,
+                                            )
+                                            .await;
+                                        });
+                                    }
+                                }
+                            }
+                        } else {
+                            // Back to open for retry, increment retry_count
+                            let _ = state
+                                .store
+                                .increment_board_task_retry(task.id.as_str(), new_retry)
+                                .await;
+                            warn!(task_id = %task.id, retry = new_retry, max = task.max_retries, error = %err_msg, "Autopilot: task failed, will retry");
+                        }
                     }
                 }
             }
-        }
         });
-    }
-
-    // Drain the JoinSet so KB feedback, retries, deploy post-mortem triggers,
-    // and quota / global-pause side effects all complete before this dispatch
-    // tick returns. Different-slot sends ran concurrently above; here we
-    // simply join them.
-    while let Some(res) = send_jobs.join_next().await {
-        if let Err(join_err) = res {
-            warn!(error = %join_err, "Autopilot: dispatch send task failed to join");
-        }
     }
 
     Ok(())
@@ -5930,7 +5925,7 @@ Review only.
     fn owned_dispatch_guard_allows_concurrent_different_slots() {
         // The legacy borrow-shaped SlotAcquireGuard tied the lock lifetime
         // to `&AppState`, which prevented dispatch_board_tasks from holding
-        // a guard while moving it into a tokio::task::JoinSet send-task. The
+        // a guard while moving it into a detached tokio send-task. The
         // owned shape MUST allow two different slots to hold a guard at the
         // same time so different-slot pty.send calls can start concurrently
         // within a single dispatch tick.
@@ -5959,28 +5954,29 @@ Review only.
     }
 
     #[test]
-    fn dispatch_board_tasks_uses_concurrent_send_pipeline() {
+    fn dispatch_board_tasks_detaches_send_tail_without_joinset_drain() {
         // Source-level guard: the implementation MUST stop awaiting one
-        // slot's pty.send before scheduling another slot's send. The needle
-        // pins the JoinSet-based concurrent dispatch shape so a refactor
-        // that re-introduces a serial `.await` on state.pty.send inside the
-        // for loop fails before it ships. The needles are composed at
-        // runtime so the guard cannot trip on its own assertion text.
+        // slot's pty.send before scheduling another slot's send, and it must
+        // not drain a JoinSet inside the dispatch tick. The detached send
+        // tail lets pre-provisioned dynamic slots that become idle after the
+        // first tick get picked up by later ticks while earlier workers keep
+        // running. The needles are composed at runtime so the guard cannot
+        // trip on its own assertion text.
         let src = include_str!("./autopilot.rs");
-        let join_set_decl = format!("{}::JoinSet<()>", "tokio::task");
-        let spawn_call = format!("send_jobs.{}(async move", "spawn");
+        let detached_spawn_call = format!("tokio::{}(async move", "spawn");
         let drain_call = format!("send_jobs.{}().await", "join_next");
+        let join_set_decl = format!("{}::JoinSet<()>", "tokio::task");
         assert!(
-            src.contains(&join_set_decl),
-            "dispatch_board_tasks must declare a tokio::task::JoinSet for concurrent dispatch"
+            src.contains(&detached_spawn_call),
+            "dispatch_board_tasks must detach each pty.send + post-send tail"
         );
         assert!(
-            src.contains(&spawn_call),
-            "dispatch_board_tasks must spawn each pty.send + post-send tail into the JoinSet"
+            !src.contains(&drain_call),
+            "dispatch_board_tasks must not wait for worker completion via JoinSet drain"
         );
         assert!(
-            src.contains(&drain_call),
-            "dispatch_board_tasks must drain the JoinSet so KB feedback / quota / retries still complete"
+            !src.contains(&join_set_decl),
+            "dispatch_board_tasks must not declare a JoinSet that aborts or drains long-running send tails"
         );
     }
 

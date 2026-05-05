@@ -175,8 +175,8 @@ function checkFiles(root, files) {
     'mission_task_delegate auto-provision (compute_slot/spawner) MAY warm a dynamic slot but MUST NOT send the task objective',
     'The per-slot dispatch guard MUST be held across the entire state.pty.send call',
     'Autopilot MUST synthesize mission_execution(action=complete',
-    'Autopilot dispatch_board_tasks MUST start state.pty.send work concurrently across different slots within a single dispatch tick',
-    'tokio::task::JoinSet task with an OwnedSlotDispatchGuard moved in',
+    'Autopilot dispatch_board_tasks MUST start state.pty.send work concurrently across different slots and MUST NOT wait for worker turn completion inside the dispatch tick',
+    'detached tokio task with an OwnedSlotDispatchGuard moved in',
     'Restart recovery MUST clear stale slot-dyn-* BoardTask assignee pins',
     'BoardStore::clear_board_task_assignee',
     'node scripts/check-v3-workstation-config-isomorphism.mjs',
@@ -445,9 +445,8 @@ function checkFiles(root, files) {
     'clear_board_task_assignee(task.id.as_str(), id)',
     'OwnedSlotDispatchGuard::try_acquire(&state.slot_dispatch, &slot_id)',
     'state.pty.send(&slot_id, &full_prompt, timeout_ms).await',
-    'tokio::task::JoinSet',
-    'send_jobs.spawn',
-    'send_jobs.join_next',
+    'tokio::spawn(async move',
+    'dispatch_board_tasks_detaches_send_tail_without_joinset_drain',
     'DispatchCloseAction::AlreadySelfClosed',
     'DispatchCloseAction::PreserveBlocked',
     'DispatchCloseAction::OwnerClosesAsDone',
@@ -611,7 +610,7 @@ function buildFixture() {
 	      :prompt-owner "mission_task_delegate auto-provision (compute_slot/spawner) MAY warm a dynamic slot but MUST NOT send the task objective"
 	      :dispatch-guard "The per-slot dispatch guard MUST be held across the entire state.pty.send call"
 	      :execution-log-synthesis "Autopilot MUST synthesize mission_execution(action=complete, commit_status=\"not-required\", enforce_scoped_commit=true)"
-      :concurrent-slot-dispatch "Autopilot dispatch_board_tasks MUST start state.pty.send work concurrently across different slots within a single dispatch tick. The implementation MUST hand each ready BoardTask's send + post-send tail to a tokio::task::JoinSet task with an OwnedSlotDispatchGuard moved in."))
+      :concurrent-slot-dispatch "Autopilot dispatch_board_tasks MUST start state.pty.send work concurrently across different slots and MUST NOT wait for worker turn completion inside the dispatch tick. The implementation MUST hand each ready BoardTask's send + post-send tail to a detached tokio task with an OwnedSlotDispatchGuard moved in."))
   (implementation-map
     (surface workstation-config
       :status "code-aligned"
@@ -756,9 +755,8 @@ fn should_clear_stale_dynamic_assignee() {}
 clear_board_task_assignee(task.id.as_str(), id);
 OwnedSlotDispatchGuard::try_acquire(&state.slot_dispatch, &slot_id);
 state.pty.send(&slot_id, &full_prompt, timeout_ms).await;
-let mut send_jobs: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
-send_jobs.spawn(async move {});
-while let Some(_) = send_jobs.join_next().await {}
+tokio::spawn(async move {});
+dispatch_board_tasks_detaches_send_tail_without_joinset_drain();
 DispatchCloseAction::AlreadySelfClosed;
 DispatchCloseAction::PreserveBlocked;
 DispatchCloseAction::OwnerClosesAsDone;`);

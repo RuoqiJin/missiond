@@ -110,8 +110,11 @@ function checkFiles(root) {
 	    'no space left on device',
 	    'bare Bash(...)-style tool-call lines',
 	    'wait_for_worker_final_settle_window',
-	    'durable provider-or-note evidence + idle slot diagnosis',
+    'durable provider-or-note evidence + idle slot diagnosis',
 	    'paste again to expand',
+	    'MUST NOT wait for worker turn completion inside the dispatch tick',
+	    'pre-provisioned dynamic slots',
+	    'detached tokio task',
 	  ]);
 
   requireAll(diagnostics, FILES.subscribers, sources.subscribers, [
@@ -202,6 +205,9 @@ function checkFiles(root) {
     'provider_final_summary_rejects_exact_git_diff_clean_then_append_progress',
     'durable_completion',
     'durable final',
+    'tokio::spawn(async move',
+    'dispatch_board_tasks_detaches_send_tail_without_joinset_drain',
+    'dispatch_board_tasks must detach each pty.send + post-send tail',
     'latest_assistant_after_task_prompt',
     'provider_completion_summary_for_task',
     'provider_final_summary_prefers_current_task_prompt_anchor_in_reused_session',
@@ -216,6 +222,8 @@ function checkFiles(root) {
 	  ]);
   forbidAll(diagnostics, FILES.autopilot, sources.autopilot, [
     'res.duration_ms, res.response',
+    'send_jobs.join_next().await',
+    'tokio::task::JoinSet<()>',
   ]);
 
   requireAll(diagnostics, FILES.flowEngine, sources.flowEngine, [
