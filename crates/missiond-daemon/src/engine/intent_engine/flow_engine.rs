@@ -769,6 +769,36 @@ pub(crate) async fn ensure_autopilot_pty(
             true
         }
         Err(e) => {
+            if is_pty_already_running_error(&e) {
+                info!(
+                    task_id = %task.id,
+                    slot_id,
+                    error = %e,
+                    "Autopilot: spawn raced with pre-provisioned running PTY; reusing session"
+                );
+                for _ in 0..30 {
+                    if let Some(info) = state.pty.get_status(slot_id).await {
+                        if info.state == SessionState::Idle {
+                            return true;
+                        }
+                        if info.state == SessionState::Exited {
+                            break;
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+                if let Some(info) = state.pty.get_status(slot_id).await {
+                    if info.state != SessionState::Exited {
+                        debug!(
+                            task_id = %task.id,
+                            slot_id,
+                            state = ?info.state,
+                            "Autopilot: pre-provisioned PTY exists but is not idle; retry later"
+                        );
+                        return false;
+                    }
+                }
+            }
             warn!(task_id = %task.id, slot_id, error = %e, "Autopilot: failed to spawn PTY (process may still be loading)");
             let _ = state
                 .store
@@ -814,6 +844,11 @@ pub(crate) async fn ensure_autopilot_pty(
             false
         }
     }
+}
+
+fn is_pty_already_running_error(err: &anyhow::Error) -> bool {
+    let message = err.to_string().to_ascii_lowercase();
+    message.contains("pty session already running") || message.contains("session already running")
 }
 
 async fn resolve_task_target_project_root(
@@ -1077,7 +1112,8 @@ content: "<commit hash 或提交摘要>"
 
 #[cfg(test)]
 mod tests {
-    use super::conversation_task_binding_update_allowed;
+    use super::{conversation_task_binding_update_allowed, is_pty_already_running_error};
+    use anyhow::anyhow;
 
     #[test]
     fn conversation_task_binding_preserves_existing_different_task() {
@@ -1091,5 +1127,18 @@ mod tests {
             !conversation_task_binding_update_allowed(Some("task-a"), "task-b"),
             "a reused provider session must not overwrite its existing durable task binding"
         );
+    }
+
+    #[test]
+    fn pty_already_running_error_is_retryable_preprovision_race() {
+        assert!(is_pty_already_running_error(&anyhow!(
+            "PTY session already running: slot-dyn-abc123"
+        )));
+        assert!(is_pty_already_running_error(&anyhow!(
+            "session already running for slot"
+        )));
+        assert!(!is_pty_already_running_error(&anyhow!(
+            "spawn_tracked_slot rejected: cwd is outside project"
+        )));
     }
 }

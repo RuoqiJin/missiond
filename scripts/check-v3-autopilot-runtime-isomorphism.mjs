@@ -22,6 +22,7 @@ const FILES = {
   subscribers: 'crates/missiond-daemon/src/bus/v2_subscribers.rs',
   taskDelegate: 'crates/missiond-daemon/src/handlers/compute/task_delegate.rs',
   autopilot: 'crates/missiond-daemon/src/engine/intent_engine/autopilot.rs',
+  flowEngine: 'crates/missiond-daemon/src/engine/intent_engine/flow_engine.rs',
   boardEvents: 'crates/missiond-daemon/src/handlers/knowledge/board/events.rs',
   boardEvent: 'crates/missiond-core/src/event/events/board.rs',
   slotEvent: 'crates/missiond-core/src/event/events/slot.rs',
@@ -93,7 +94,10 @@ function checkFiles(root) {
     'Subscribers only notify the dedicated Autopilot task and ack immediately',
     'crates/missiond-daemon/src/bus/v2_subscribers.rs',
     'crates/missiond-daemon/src/engine/intent_engine/autopilot.rs',
+    'crates/missiond-daemon/src/engine/intent_engine/flow_engine.rs',
     'node scripts/check-v3-autopilot-runtime-isomorphism.mjs',
+    'PTY session already running',
+    'pre-provisioned dynamic-slot race',
     // Summary-note pollution invariant: raw res.response forbidden as note source.
 	    ':summary-note-source',
 	    ':settle-window',
@@ -214,6 +218,14 @@ function checkFiles(root) {
     'res.duration_ms, res.response',
   ]);
 
+  requireAll(diagnostics, FILES.flowEngine, sources.flowEngine, [
+    'fn is_pty_already_running_error',
+    'PTY session already running',
+    'Autopilot: spawn raced with pre-provisioned running PTY; reusing session',
+    'pre-provisioned PTY exists but is not idle; retry later',
+    'pty_already_running_error_is_retryable_preprovision_race',
+  ]);
+
   requireAll(diagnostics, FILES.boardEvents, sources.boardEvents, [
     'publish_board_created',
     'BoardEvent::TaskCreated',
@@ -277,8 +289,8 @@ function buildFixture() {
   (implementation-map
     (surface autopilot-runtime
       :status "code-aligned"
-      :code ["crates/missiond-daemon/src/bus/v2_subscribers.rs" "crates/missiond-daemon/src/engine/intent_engine/autopilot.rs"]
-      :note "n"))
+      :code ["crates/missiond-daemon/src/bus/v2_subscribers.rs" "crates/missiond-daemon/src/engine/intent_engine/autopilot.rs" "crates/missiond-daemon/src/engine/intent_engine/flow_engine.rs"]
+      :note "PTY session already running is a pre-provisioned dynamic-slot race"))
   (compression-contract
     :checks ["node scripts/check-v3-autopilot-runtime-isomorphism.mjs"]))`);
   write(root, 'subscribers', `
@@ -339,6 +351,14 @@ async fn x() { let ev = BoardEvent::TaskCreated { task_id, title, category }; no
     maybe_complete_delegated_execution_log();
     publish_slot(SlotEvent::TaskDispatched{});
 }`);
+  write(root, 'flowEngine', `
+    fn is_pty_already_running_error() {}
+    fn pty_already_running_error_is_retryable_preprovision_race() {}
+    fn ensure_autopilot_pty() {
+      let _ = "PTY session already running";
+      let _ = "Autopilot: spawn raced with pre-provisioned running PTY; reusing session";
+      let _ = "pre-provisioned PTY exists but is not idle; retry later";
+    }`);
   write(root, 'boardEvents', `
 fn publish_board_created() { let ev = BoardEvent::TaskCreated {}; bus.publish_board(ev).await; }`);
   write(root, 'boardEvent', `
