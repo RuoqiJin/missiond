@@ -629,6 +629,12 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
     let mut provisioned_slots = Vec::new();
     if !dry_run {
         for planned_task in &planned {
+            let (task_project_id, task_project_root) = planned_task_primary_project(
+                &project_id,
+                &project_root,
+                &target_projects,
+                planned_task,
+            );
             let mut assignee: Option<String> = None;
             if auto_provision_slots && planned_task.engine_hint == "claude-code" {
                 match auto_provision_slot(
@@ -636,7 +642,7 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
                     "coder",
                     &planned_task.title,
                     &runtime_config,
-                    Some(&project_root),
+                    Some(&task_project_root),
                     None,
                     Some("coding-default-opus-4-7"),
                 )
@@ -671,8 +677,8 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
             }
             let description = render_swarm_task_description(
                 &objective,
-                &project_id,
-                &project_root,
+                &task_project_id,
+                &task_project_root,
                 &target_projects,
                 &context_pack_path,
                 parent_id.as_deref(),
@@ -685,7 +691,7 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
                 description: Some(description),
                 priority: Some("medium".to_string()),
                 category: Some("dev".to_string()),
-                project: Some(project_id.clone()),
+                project: Some(task_project_id),
                 auto_execute: Some(true),
                 assignee,
                 parent_id: parent_id.clone(),
@@ -993,7 +999,8 @@ fn render_swarm_task_description(
     acceptance: &[String],
     planned: &SwarmPlannedTask,
 ) -> String {
-    let completion_protocol = if write_policy == "read-only" {
+    let task_write_policy = swarm_task_effective_write_policy(write_policy, planned);
+    let completion_protocol = if task_write_policy == "read-only" {
         "Completion protocol: do not edit files, do not stage, do not commit. read_scope lists readable evidence; must_not_touch is a write/stage/commit prohibition, not a read ban by itself. Return a structured artifact with Findings / Evidence / Recommendations / Verification in the final summary or BoardTask note; do not paste raw KB JSON/log blobs. The master or integrator compiles the context-pack."
     } else {
         "Completion protocol: implementation lanes may read declared read_scope, may write only declared write_scope, must not write/stage/commit forbidden paths, and must report acceptance evidence as a structured artifact."
@@ -1003,7 +1010,7 @@ fn render_swarm_task_description(
         .unwrap_or_default();
 
     format!(
-        "{objective}\n\n## Swarm metadata\n- project_id: {project_id}\n- project_root: {project_root}\n- target_projects: {}\n{parent_line}- lane: {}\n- task_class: {}\n- pool_hint: {}\n- engine_hint: {}\n- context_pack_path: {context_pack_path}\n- write_policy: {write_policy}\n- read_scope: {}\n- write_scope: {}\n- must_not_touch: {}\n- acceptance: {}\n\n{}",
+        "{objective}\n\n## Swarm metadata\n- project_id: {project_id}\n- project_root: {project_root}\n- target_projects: {}\n{parent_line}- lane: {}\n- task_class: {}\n- pool_hint: {}\n- engine_hint: {}\n- context_pack_path: {context_pack_path}\n- write_policy: {task_write_policy}\n- read_scope: {}\n- write_scope: {}\n- must_not_touch: {}\n- acceptance: {}\n\n{}",
         render_target_projects_inline(target_projects),
         planned.lane,
         planned.task_class,
@@ -1031,6 +1038,49 @@ fn render_swarm_task_description(
         },
         completion_protocol,
     )
+}
+
+fn swarm_task_effective_write_policy<'a>(
+    global_write_policy: &'a str,
+    planned: &SwarmPlannedTask,
+) -> &'a str {
+    if planned.write_scope.is_empty() {
+        "read-only"
+    } else {
+        global_write_policy
+    }
+}
+
+fn planned_task_primary_project(
+    fallback_project_id: &str,
+    fallback_project_root: &str,
+    target_projects: &[SwarmTargetProject],
+    planned: &SwarmPlannedTask,
+) -> (String, String) {
+    let mut matches = Vec::<&SwarmTargetProject>::new();
+    for target in target_projects {
+        let root = target.root.trim_end_matches('/');
+        let in_read_scope = planned
+            .read_scope
+            .iter()
+            .any(|path| path.trim_end_matches('/') == root);
+        let in_write_scope = planned
+            .write_scope
+            .iter()
+            .any(|path| path == &target.root || path.starts_with(&format!("{}/", root)));
+        if in_read_scope || in_write_scope {
+            matches.push(target);
+        }
+    }
+    matches.dedup_by(|left, right| left.id == right.id);
+    if matches.len() == 1 {
+        (matches[0].id.clone(), matches[0].root.clone())
+    } else {
+        (
+            fallback_project_id.to_string(),
+            fallback_project_root.to_string(),
+        )
+    }
 }
 
 fn render_target_projects_inline(target_projects: &[SwarmTargetProject]) -> String {
@@ -1858,6 +1908,73 @@ mod tests {
             description.contains("- read_scope: /Users/jin/Projects/jarvis"),
             "swarm metadata missing target-project read_scope:\n{description}"
         );
+    }
+
+    #[test]
+    fn swarm_read_only_lane_keeps_read_only_policy_under_lisp_first_wave() {
+        let planned = SwarmPlannedTask {
+            lane: "investigate".to_string(),
+            engine_hint: "claude-code".to_string(),
+            pool_hint: "claude-code-default".to_string(),
+            task_class: "context-pack".to_string(),
+            title: "Survey shards".to_string(),
+            intent: "code".to_string(),
+            read_scope: vec!["/repo/semantic-terminal".to_string()],
+            write_scope: Vec::new(),
+            must_not_touch: vec!["**/*".to_string()],
+        };
+        let description = render_swarm_task_description(
+            "M7 wave",
+            "semantic-terminal",
+            "/repo/semantic-terminal",
+            &[SwarmTargetProject {
+                id: "semantic-terminal".to_string(),
+                root: "/repo/semantic-terminal".to_string(),
+            }],
+            "/missiond/.missiond/v3/runtime/swarm/test.lisp",
+            None,
+            "lisp-first",
+            &[],
+            &planned,
+        );
+        assert!(
+            description.contains("- write_policy: read-only"),
+            "read-only/context-pack lane must not inherit lisp-first write permission:\n{description}"
+        );
+        assert!(
+            description.contains("do not edit files, do not stage, do not commit"),
+            "read-only lane must render the strict completion protocol:\n{description}"
+        );
+    }
+
+    #[test]
+    fn swarm_single_external_target_projects_child_task_to_target_root() {
+        let target = SwarmTargetProject {
+            id: "semantic-terminal".to_string(),
+            root: "/Users/jinchen/Projects/semantic-terminal".to_string(),
+        };
+        let planned = SwarmPlannedTask {
+            lane: "implement".to_string(),
+            engine_hint: "claude-code".to_string(),
+            pool_hint: "claude-code-default".to_string(),
+            task_class: "code".to_string(),
+            title: "Implement shard".to_string(),
+            intent: "code".to_string(),
+            read_scope: vec![
+                "/Users/jinchen/Projects/semantic-terminal".to_string(),
+                "/Users/jinchen/Projects/missiond/scripts/check-project-maturity.mjs".to_string(),
+            ],
+            write_scope: vec!["/Users/jinchen/Projects/semantic-terminal/.missiond/**".to_string()],
+            must_not_touch: Vec::new(),
+        };
+        let (project_id, project_root) = planned_task_primary_project(
+            "missiond",
+            "/Users/jinchen/Projects/missiond",
+            &[target],
+            &planned,
+        );
+        assert_eq!(project_id, "semantic-terminal");
+        assert_eq!(project_root, "/Users/jinchen/Projects/semantic-terminal");
     }
 
     #[test]

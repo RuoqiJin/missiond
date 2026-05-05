@@ -253,6 +253,10 @@ function checkFiles(root, files) {
     'auto_provision_slots',
     '"provisioned_slots": provisioned_slots',
     'planned_task.engine_hint == "claude-code"',
+    'planned_task_primary_project',
+    'swarm_task_effective_write_policy',
+    'swarm_read_only_lane_keeps_read_only_policy_under_lisp_first_wave',
+    'swarm_single_external_target_projects_child_task_to_target_root',
     'assignee,',
     '"suppress_initial_prompt": true',
     'create_args["model_profile"]',
@@ -668,6 +672,10 @@ resolve_model_projection();
 model_projection_matches();
 find_and_reserve_slot();
 let target_project_root = None;
+planned_task_primary_project();
+swarm_task_effective_write_policy();
+swarm_read_only_lane_keeps_read_only_policy_under_lisp_first_wave();
+swarm_single_external_target_projects_child_task_to_target_root();
 auto_provision_slot();
 auto_provision_slot_ttl_secs();
 runtime_config.clamp_slot_ttl_secs(None);

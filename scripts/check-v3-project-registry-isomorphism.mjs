@@ -28,6 +28,7 @@ const DEFAULT_FILES = {
   coreProject: 'crates/missiond-core/src/types/project.rs',
   rootResolver: 'crates/missiond-daemon/src/slot_orchestrator/project_root.rs',
   mcp: 'crates/missiond-mcp/src/tools/knowledge/project.rs',
+  maturityChecker: 'scripts/check-project-maturity.mjs',
 };
 
 function main() {
@@ -123,6 +124,7 @@ function checkFiles(root, files) {
 	    ':common-m6-to-v3-gap [runtime-projection event-bus commit-backfill worker-operational final-convergence]',
 	    'scripts/check-project-maturity.mjs --min-level M6',
 	    'scripts/check-project-maturity.mjs --min-level M10',
+	    'It resolves the MissionD blueprint from the checker script directory',
 	    '(maturity :id missiond :current M10 :target M10',
 	    '(maturity :id auth :current M6 :target M10',
 	    '(project-blueprint-registry',
@@ -309,6 +311,13 @@ function checkFiles(root, files) {
     '"survey"',
   ]);
 
+  requireAll(diagnostics, files.maturityChecker, sources.maturityChecker, [
+    'fileURLToPath(import.meta.url)',
+    'DEFAULT_REPO_ROOT',
+    'opts.dryFixture ? buildFixture() : DEFAULT_REPO_ROOT',
+    '--evidence-only',
+  ]);
+
   return diagnostics;
 }
 
@@ -333,6 +342,7 @@ function buildFixture() {
 	  (project-maturity-model
 	    :schema "missiond.project-maturity-model.v1"
 	    :gate "scripts/check-project-maturity.mjs --min-level M6 and scripts/check-project-maturity.mjs --min-level M10"
+	    :note "It resolves the MissionD blueprint from the checker script directory"
 	    :v3-alias M10
 	    :levels ((level M6 :name ssot-closure)
 	             (level M7 :name runtime-projected)
@@ -471,6 +481,13 @@ fallback_project_id_used_when_no_explicit
 ToolDefinition::new
 "mission_project"
 "list" "get" "set_active" "sync" "init" "context" "memories" "universe" "vault_sync" "import_universe" "survey"
+`);
+
+  writeFixture(root, DEFAULT_FILES.maturityChecker, `
+fileURLToPath(import.meta.url)
+DEFAULT_REPO_ROOT
+opts.dryFixture ? buildFixture() : DEFAULT_REPO_ROOT
+--evidence-only
 `);
 
   return root;

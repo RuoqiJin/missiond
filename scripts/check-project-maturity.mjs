@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   head,
@@ -14,6 +15,8 @@ import {
 import { readBlueprintWithEvidenceSidecars } from './lib/v3_blueprint_contract_source.mjs';
 
 const BLUEPRINT_PATH = '.missiond/v3/missiond-blueprint.lisp';
+const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
+const DEFAULT_REPO_ROOT = path.resolve(SCRIPT_DIR, '..');
 const LEVEL_ORDER = new Map(
   Array.from({ length: 11 }, (_, index) => [`M${index}`, index]),
 );
@@ -33,7 +36,7 @@ registry is advanced.
 
 function main() {
   const opts = parseArgs(process.argv.slice(2));
-  const repoRoot = opts.dryFixture ? buildFixture() : process.cwd();
+  const repoRoot = opts.dryFixture ? buildFixture() : DEFAULT_REPO_ROOT;
   const result = runProjectMaturityCheck(repoRoot, opts);
 
   if (opts.json) {
