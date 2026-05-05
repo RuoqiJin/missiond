@@ -113,6 +113,27 @@ impl ToolResult {
             "poll": "mission_job_poll(job_id)",
         }))
     }
+
+    /// Create an async job accepted result with caller-specific correlation data.
+    ///
+    /// Some tools, such as `mission_compute_slot create`, allocate a durable
+    /// identifier before the async job finishes. Returning that identifier in the
+    /// accepted response lets downstream orchestrators bind BoardTasks to the
+    /// future runtime object immediately instead of losing ownership while the
+    /// background spawn warms up.
+    pub fn job_accepted_with_metadata(job_id: &str, tool_name: &str, metadata: Value) -> Self {
+        let mut payload = serde_json::Map::new();
+        payload.insert("job_id".to_string(), json!(job_id));
+        payload.insert("status".to_string(), json!("running"));
+        payload.insert("tool".to_string(), json!(tool_name));
+        payload.insert("poll".to_string(), json!("mission_job_poll(job_id)"));
+        if let Value::Object(extra) = metadata {
+            for (key, value) in extra {
+                payload.insert(key, value);
+            }
+        }
+        ToolResult::json_pretty(&Value::Object(payload))
+    }
 }
 
 /// Structured error with machine-readable code and AI-actionable suggestion.
@@ -318,6 +339,23 @@ mod tests {
             ToolContent::Text { text } => {
                 assert!(text.contains("job-12345678"));
                 assert!(text.contains("running"));
+                assert!(text.contains("mission_job_poll"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_job_accepted_with_metadata() {
+        let result = ToolResult::job_accepted_with_metadata(
+            "job-12345678",
+            "mission_compute_slot:create",
+            json!({ "slot_id": "slot-dyn-abcd1234" }),
+        );
+        assert!(result.is_error.is_none());
+        match &result.content[0] {
+            ToolContent::Text { text } => {
+                assert!(text.contains("job-12345678"));
+                assert!(text.contains("slot-dyn-abcd1234"));
                 assert!(text.contains("mission_job_poll"));
             }
         }

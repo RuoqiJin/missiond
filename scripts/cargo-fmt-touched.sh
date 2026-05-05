@@ -12,6 +12,11 @@
 # nothing more. Safe to run inside any wave with confidence that the diff
 # stays scoped.
 #
+# Important: invoke this script instead of running `rustfmt path/to/mod.rs`
+# directly. rustfmt treats module roots as traversal anchors even with a
+# file-shaped CLI argument, which can churn sibling modules that the task did
+# not touch. This wrapper always passes `--config skip_children=true`.
+#
 # Usage:
 #   scripts/cargo-fmt-touched.sh                # format staged + unstaged
 #   scripts/cargo-fmt-touched.sh --check        # check only, exit 1 if dirty

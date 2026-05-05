@@ -35,7 +35,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             return Ok(ToolResult::structured_error(ToolError::new(
                 error_codes::MISSING_PARAM,
                 "'objective' is required and must be non-empty",
-            )))
+            )));
         }
     };
 
@@ -46,7 +46,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             return Ok(ToolResult::structured_error(ToolError::new(
                 error_codes::INVALID_PARAM,
                 &format!("Invalid intent '{}'. Valid: {:?}", i, VALID_INTENTS),
-            )))
+            )));
         }
         None => "general",
     };
@@ -185,7 +185,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             return Ok(ToolResult::structured_error(ToolError::new(
                 error_codes::INVALID_PARAM,
                 message,
-            )))
+            )));
         }
     };
 
@@ -377,7 +377,7 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
             return Ok(ToolResult::structured_error(ToolError::new(
                 error_codes::MISSING_PARAM,
                 "'objective' is required and must be non-empty",
-            )))
+            )));
         }
     };
     let project_id = string_arg(&args, &["project_id", "projectId"])
@@ -776,12 +776,23 @@ async fn auto_provision_slot(
     // Delegate to existing compute_slot handler
     let result = super::compute_slot::handle(state, "mission_compute_slot", create_args).await?;
 
-    // Parse the job_accepted response to get the slot info
+    parse_auto_provision_slot_id(&result)
+}
+
+fn parse_auto_provision_slot_id(result: &ToolResult) -> Result<String> {
     if let Some(missiond_mcp::tools::ToolContent::Text { text }) = result.content.first() {
         if let Ok(parsed) = serde_json::from_str::<Value>(text) {
+            if let Some(slot_id) = parsed
+                .get("slot_id")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                return Ok(slot_id.to_string());
+            }
             if parsed.get("job_id").is_some() {
                 return Err(anyhow!(
-                    "Slot spawning async (job_id: {}), task will be picked up by autopilot",
+                    "Slot spawning async did not return slot_id (job_id: {}); cannot bind BoardTask to dynamic slot",
                     parsed["job_id"].as_str().unwrap_or("unknown")
                 ));
             }
@@ -1063,6 +1074,30 @@ mod tests {
         assert_eq!(args["template"], json!("researcher"));
         assert_eq!(args["objective"], json!("investigate"));
         assert_eq!(args["max_ttl"], json!(7200));
+    }
+
+    #[test]
+    fn parse_auto_provision_slot_id_accepts_async_job_metadata() {
+        let result = ToolResult::job_accepted_with_metadata(
+            "job-abc12345",
+            "mission_compute_slot:create",
+            json!({ "slot_id": "slot-dyn-abc12345" }),
+        );
+        assert_eq!(
+            parse_auto_provision_slot_id(&result).unwrap(),
+            "slot-dyn-abc12345"
+        );
+    }
+
+    #[test]
+    fn parse_auto_provision_slot_id_rejects_job_without_slot_id() {
+        let result = ToolResult::job_accepted("job-abc12345", "mission_compute_slot:create");
+        let err = parse_auto_provision_slot_id(&result)
+            .expect_err("slot_id-less async job must not be accepted");
+        assert!(
+            err.to_string().contains("did not return slot_id"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

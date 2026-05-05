@@ -1469,10 +1469,11 @@
        "Dev-only fast deploy may select debug profile and sccache through explicit operator flags/env, but must preserve release manifest, active symlink, smoke, and rollback semantics unless smoke is explicitly disabled."
        "AST repository-wide startup full sync MUST be opt-in through MISSIOND_AST_FULL_SYNC_ON_STARTUP; routine blue-green restarts stay event-driven and must not rewrite topology KB when no stale code files were synced."
        "Deploy scripts MUST NOT write git state or delete the launchd-owned socket; rollback may restore only the installed binary and restart the launchd job."
-       "Rust formatting MUST be scoped to Rust files touched in the current diff, including staged, unstaged, and branch-diff modes."
-       "missiond-rustfmt-exempt legacy-large-file facades are skipped only during physical V3 split."
-       "rustfmt MUST run with skip_children=true so formatting a crate root cannot recursively churn untouched Rust modules."
-       "The no-Rust-files path MUST exit 0 under set -euo pipefail; filters must not turn an empty grep match into a script failure."]
+	       "Rust formatting MUST be scoped to Rust files touched in the current diff, including staged, unstaged, and branch-diff modes."
+	       "missiond-rustfmt-exempt legacy-large-file facades are skipped only during physical V3 split."
+	       "rustfmt MUST run with skip_children=true so formatting a crate root cannot recursively churn untouched Rust modules."
+	       "Workers/operators MUST use scripts/cargo-fmt-touched.sh rather than direct rustfmt on module roots such as mod.rs; direct rustfmt can traverse child modules and rewrite untouched files."
+	       "The no-Rust-files path MUST exit 0 under set -euo pipefail; filters must not turn an empty grep match into a script failure."]
     :checks ["bash -n scripts/deploy-daemon.sh"
              "bash -n scripts/cargo-fmt-touched.sh"
              "scripts/cargo-fmt-touched.sh --check"
@@ -2173,9 +2174,9 @@
         :surface ops-infra
         :entry [scripts/deploy-daemon.sh scripts/cargo-fmt-touched.sh]
         :core ((step s1 :logic "build, backup, codesign, install, kickstart, and smoke daemon as one command")
-               (step s2 :logic "retry IPC initialize smoke after socket readiness and rollback on real failure")
-               (step s3 :logic "format only Rust files touched in current diff with rustfmt skip_children")
-               (step s4 :logic "keep restart-time background indexing event-driven unless an operator explicitly opts into repository-wide AST full sync"))
+	               (step s2 :logic "retry IPC initialize smoke after socket readiness and rollback on real failure")
+	               (step s3 :logic "format only Rust files touched in current diff through cargo-fmt-touched, never direct rustfmt on module roots, with rustfmt skip_children")
+	               (step s4 :logic "keep restart-time background indexing event-driven unless an operator explicitly opts into repository-wide AST full sync"))
         :egress [deployed-daemon rollback-result scoped-rustfmt-result])))
 
   (implementation-map
@@ -2972,7 +2973,7 @@
              "crates/missiond-daemon/src/workers/local/ast_sync_worker.rs"
              "scripts/check-v3-ops-infra-isomorphism.mjs"
              "scripts/check-missiond-blue-green-deploy.mjs"]
-      :note "ops-infra owns deploy-daemon.sh plus scoped Rust formatting and restart-time background CPU policy. deploy-daemon.sh builds paired missiond/mission-mcp release candidates under ~/.xjp-mission/releases/<release-id>, writes release-manifest.json, switches ~/.xjp-mission/active, keeps stable entrypoints through active, kickstarts launchd, runs MCP smoke, rolls back to previous active on failure, and cleans retained releases. cargo-fmt-touched.sh formats only touched Rust files with skip_children=true and skips only explicit missiond-rustfmt-exempt facades. main.rs keeps repository-wide AST startup full sync opt-in via MISSIOND_AST_FULL_SYNC_ON_STARTUP, and ast_sync_worker skips topology KB rewrites when no stale files were synced.")
+      :note "ops-infra owns deploy-daemon.sh plus scoped Rust formatting and restart-time background CPU policy. deploy-daemon.sh builds paired missiond/mission-mcp release candidates under ~/.xjp-mission/releases/<release-id>, writes release-manifest.json, switches ~/.xjp-mission/active, keeps stable entrypoints through active, kickstarts launchd, runs MCP smoke, rolls back to previous active on failure, and cleans retained releases. cargo-fmt-touched.sh formats only touched Rust files with skip_children=true, skips only explicit missiond-rustfmt-exempt facades, and is the required entrypoint because direct rustfmt on module roots such as mod.rs can recurse into untouched modules. main.rs keeps repository-wide AST startup full sync opt-in via MISSIOND_AST_FULL_SYNC_ON_STARTUP, and ast_sync_worker skips topology KB rewrites when no stale files were synced.")
 
     (surface missiond-blue-green-self-update
       :status "code-aligned"

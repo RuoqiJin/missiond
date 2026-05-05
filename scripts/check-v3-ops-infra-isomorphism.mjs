@@ -96,11 +96,12 @@ function checkFiles(root, files) {
     'Deploy scripts MUST emit timing for cargo-build',
     'Dev-only fast deploy may select debug profile and sccache',
     'AST repository-wide startup full sync MUST be opt-in through MISSIOND_AST_FULL_SYNC_ON_STARTUP',
-    'Rust formatting MUST be scoped to Rust files touched in the current diff',
-    'missiond-rustfmt-exempt legacy-large-file facades',
-    'rustfmt MUST run with skip_children=true',
-    'node scripts/check-v3-ops-infra-isomorphism.mjs',
-  ]);
+	    'Rust formatting MUST be scoped to Rust files touched in the current diff',
+	    'missiond-rustfmt-exempt legacy-large-file facades',
+	    'rustfmt MUST run with skip_children=true',
+	    'direct rustfmt on module roots such as mod.rs',
+	    'node scripts/check-v3-ops-infra-isomorphism.mjs',
+	  ]);
 
   requireAll(diagnostics, files.deployDaemon, sources.deployDaemon, [
     'scripts/deploy-daemon.sh                  # build + blue-green deploy + smoke',
@@ -160,11 +161,13 @@ function checkFiles(root, files) {
     'git diff --name-only --diff-filter=ACMR "${BRANCH}...HEAD"',
     "awk '/\\.rs$/ { print }'",
     'no Rust files in diff',
-    'missiond-rustfmt-exempt',
-    'skipped rustfmt-exempt legacy file(s)',
-    'command -v rustfmt',
-    '--config skip_children=true --check',
-    'xargs rustfmt --edition "$EDITION" --config skip_children=true',
+	    'missiond-rustfmt-exempt',
+	    'skipped rustfmt-exempt legacy file(s)',
+	    'invoke this script instead of running `rustfmt path/to/mod.rs`',
+	    'module roots as traversal anchors',
+	    'command -v rustfmt',
+	    '--config skip_children=true --check',
+	    'xargs rustfmt --edition "$EDITION" --config skip_children=true',
   ]);
 
   requireAll(diagnostics, files.daemonMain, sources.daemonMain, [
@@ -204,9 +207,10 @@ function buildFixture() {
        "Deploy scripts MUST emit timing for cargo-build."
        "Dev-only fast deploy may select debug profile and sccache."
        "AST repository-wide startup full sync MUST be opt-in through MISSIOND_AST_FULL_SYNC_ON_STARTUP."
-       "Rust formatting MUST be scoped to Rust files touched in the current diff."
-       "missiond-rustfmt-exempt legacy-large-file facades are skipped only during physical V3 split."
-       "rustfmt MUST run with skip_children=true."])
+	       "Rust formatting MUST be scoped to Rust files touched in the current diff."
+	       "missiond-rustfmt-exempt legacy-large-file facades are skipped only during physical V3 split."
+	       "rustfmt MUST run with skip_children=true."
+	       "Workers/operators MUST use scripts/cargo-fmt-touched.sh rather than direct rustfmt on module roots such as mod.rs."])
   (implementation-map
     (surface ops-infra
       :status "code-aligned"
@@ -259,12 +263,15 @@ MODE="all"
 CHECK_ONLY=0
 git diff --name-only --diff-filter=ACMR
 git diff --cached --name-only --diff-filter=ACMR
+git ls-files --others --exclude-standard
 git diff --name-only --diff-filter=ACMR "\${BRANCH}...HEAD"
 awk '/\\.rs$/ { print }'
 no Rust files in diff
-missiond-rustfmt-exempt
-skipped rustfmt-exempt legacy file(s)
-command -v rustfmt
+	missiond-rustfmt-exempt
+	skipped rustfmt-exempt legacy file(s)
+	invoke this script instead of running \`rustfmt path/to/mod.rs\`
+	module roots as traversal anchors
+	command -v rustfmt
 --config skip_children=true --check
 xargs rustfmt --edition "$EDITION" --config skip_children=true
 `);

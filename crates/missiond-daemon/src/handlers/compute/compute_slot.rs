@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use missiond_core::event::events::SlotEvent;
 use missiond_core::pty::{PTYSpawnOptions, Slot as PTYSlot};
 use missiond_core::types::{AsyncJob, DynamicSlot, Lifecycle, SlotConfig};
 use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
@@ -155,7 +156,7 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
             return Ok(ToolResult::structured_error(
                 ToolError::new(error_codes::MISSING_PARAM, "'template' is required")
                     .with_suggestion(available_templates_suggestion(&workstation_config)),
-            ))
+            ));
         }
     };
 
@@ -168,7 +169,7 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
                     format!("Unknown template '{}'", template_name),
                 )
                 .with_suggestion(available_templates_suggestion(&workstation_config)),
-            ))
+            ));
         }
     };
     // Check slot limit
@@ -201,7 +202,7 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
             return Ok(ToolResult::structured_error(ToolError::new(
                 error_codes::INVALID_PARAM,
                 format!("cwd '{}' does not exist or is not accessible", cwd),
-            )))
+            )));
         }
     };
 
@@ -296,7 +297,7 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
                     format!("Unknown template '{}'", template_name),
                 )
                 .with_suggestion(available_templates_suggestion(&runtime_config)),
-            ))
+            ));
         }
     };
     let ttl = runtime_config.clamp_slot_ttl_secs(args.get("max_ttl").and_then(|v| v.as_i64()));
@@ -312,7 +313,7 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
             return Ok(ToolResult::structured_error(ToolError::new(
                 error_codes::INVALID_PARAM,
                 message,
-            )))
+            )));
         }
     };
 
@@ -466,37 +467,60 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
         )
         .await;
 
-        let mut store = state_clone.job_store.write().await;
-        if let Some(job) = store.get_mut(&job_id_bg) {
-            match result {
-                Ok(_) => {
-                    job.complete(json!({
-                        "slot_id": slot_id_owned,
-                        "status": "spawned",
-                        "template": template_owned,
-                        "model": slot_config.model.clone(),
-                        "model_profile": if slot_config.model.is_none() { CODING_DEFAULT_PROFILE } else { "explicit-model" },
-                        "ttl_seconds": ttl,
-                        "expires_at": expires_at_str,
-                        "objective": objective_owned,
-                    }));
-                }
-                Err(e) => {
-                    state_clone
-                        .store
-                        .terminate_dynamic_slot(&slot_id_owned, "spawn_failed")
-                        .await
-                        .ok();
-                    state_clone.mission.unregister_dynamic_slot(&slot_id_owned);
-                    job.fail(format!("Failed to spawn slot: {}", e));
+        let mut became_idle = false;
+        let mut spawn_failed = None;
+        {
+            let mut store = state_clone.job_store.write().await;
+            if let Some(job) = store.get_mut(&job_id_bg) {
+                match result {
+                    Ok(_) => {
+                        job.complete(json!({
+                            "slot_id": slot_id_owned.clone(),
+                            "status": "spawned",
+                            "template": template_owned,
+                            "model": slot_config.model.clone(),
+                            "model_profile": if slot_config.model.is_none() { CODING_DEFAULT_PROFILE } else { "explicit-model" },
+                            "ttl_seconds": ttl,
+                            "expires_at": expires_at_str,
+                            "objective": objective_owned,
+                        }));
+                        became_idle = true;
+                    }
+                    Err(e) => {
+                        let message = format!("Failed to spawn slot: {}", e);
+                        job.fail(message.clone());
+                        spawn_failed = Some(message);
+                    }
                 }
             }
         }
+        if spawn_failed.is_some() {
+            state_clone
+                .store
+                .terminate_dynamic_slot(&slot_id_owned, "spawn_failed")
+                .await
+                .ok();
+            state_clone.mission.unregister_dynamic_slot(&slot_id_owned);
+        }
+        if became_idle {
+            let _ = state_clone
+                .bus
+                .publish_slot(SlotEvent::BecameIdle {
+                    slot_id: slot_id_owned.clone(),
+                })
+                .await;
+            state_clone.board_dispatch_notify.notify_one();
+        }
     });
 
-    Ok(ToolResult::job_accepted(
+    Ok(ToolResult::job_accepted_with_metadata(
         &job_id,
         "mission_compute_slot:create",
+        json!({
+            "slot_id": slot_id,
+            "template": template_name,
+            "status_detail": "spawn_pending",
+        }),
     ))
 }
 
@@ -507,7 +531,7 @@ async fn terminate_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
             return Ok(ToolResult::structured_error(ToolError::new(
                 error_codes::MISSING_PARAM,
                 "'slot_id' is required",
-            )))
+            )));
         }
     };
 
@@ -558,7 +582,7 @@ async fn extend_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
             return Ok(ToolResult::structured_error(ToolError::new(
                 error_codes::MISSING_PARAM,
                 "'slot_id' is required",
-            )))
+            )));
         }
     };
 
