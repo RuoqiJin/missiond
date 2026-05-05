@@ -12,7 +12,75 @@
 // schema entries below.
 
 use crate::ToolDefinition;
-use serde_json::json;
+use serde_json::{json, Value};
+
+/// BoardTask 31a99a30 :: dedup-linkage knobs added on top of the legacy
+/// `mission_task_delegate` schema. Kept in a sibling helper so the json!
+/// macro inside `task_delegate_schema` stays under the default recursion
+/// limit (each properties entry recurses through the macro twice).
+fn dedup_linkage_properties() -> Value {
+    json!({
+        "parent_board_task_id": {"type": "string", "description": "父 BoardTask ID。Dedup 守护以此识别同一委派链"},
+        "parentBoardTaskId": {"type": "string", "description": "parent_board_task_id camelCase alias"},
+        "parent_id": {"type": "string", "description": "parent_board_task_id alias"},
+        "parentId": {"type": "string", "description": "parent_board_task_id camelCase alias"},
+        "source_board_task_id": {"type": "string", "description": "源 BoardTask ID。多跳 master/plan 链路保留原始锚点；Dedup 守护以此识别相同 source"},
+        "sourceBoardTaskId": {"type": "string", "description": "source_board_task_id camelCase alias"},
+        "source_id": {"type": "string", "description": "source_board_task_id alias"},
+        "sourceId": {"type": "string", "description": "source_board_task_id camelCase alias"},
+        "allow_duplicate_code_worker": {"type": "boolean", "default": false, "description": "默认 false：当现有 active BoardTask 已经覆盖重叠 write_scope 时，拒绝再生 code worker。设为 true 显式允许并发"},
+        "allowDuplicateCodeWorker": {"type": "boolean", "description": "allow_duplicate_code_worker camelCase alias"},
+        "force_duplicate_code_worker": {"type": "boolean", "description": "allow_duplicate_code_worker alias"},
+        "forceDuplicateCodeWorker": {"type": "boolean", "description": "allow_duplicate_code_worker camelCase alias"}
+    })
+}
+
+fn task_delegate_schema() -> Value {
+    let mut schema = json!({
+        "type": "object",
+        "required": ["objective"],
+        "properties": {
+            "objective": {"type": "string", "description": "任务目标(自然语言)"},
+            "intent": {"type": "string", "description": "意图类型决定 slot 模板", "enum": ["code", "ops", "research", "general"], "default": "general"},
+            "cwd": {"type": "string", "description": "工作目录", "default": "~/Projects"},
+            "timeout_secs": {"type": "integer", "description": "超时秒数(上限 7200)", "default": 1800},
+            "priority": {"type": "string", "enum": ["high", "medium", "low"], "default": "medium"},
+            "depends_on": {"type": "array", "description": "前置任务 ID 列表(DAG)"},
+            "context_hints": {"type": "array", "description": "兼容字段；默认不预加载 KB/Skill。请使用 read_scope/context_pack_path 明确上下文"},
+            "model": {"type": "string", "description": "可选 CLI 模型覆盖；default/claude-code-default 表示不传 --model"},
+            "model_profile": {"type": "string", "description": "可选模型 profile；coding-default-opus-4-7 表示 Claude Code Default(Opus 4.7/1M)"},
+            "modelProfile": {"type": "string", "description": "model_profile camelCase alias"},
+            "task_class": {"type": "string", "description": "两阶段工位任务类型，如 context-pack/code/review/ops"},
+            "taskClass": {"type": "string", "description": "task_class camelCase alias"},
+            "pool_hint": {"type": "string", "description": "建议工位池，如 claude-code-default / gemini-ultra-pro"},
+            "poolHint": {"type": "string", "description": "pool_hint camelCase alias"},
+            "engine_hint": {"type": "string", "description": "建议引擎，如 claude-code / gemini / codex"},
+            "engineHint": {"type": "string", "description": "engine_hint camelCase alias"},
+            "context_pack_path": {"type": "string", "description": "两阶段 context-pack Lisp 路径"},
+            "contextPackPath": {"type": "string", "description": "context_pack_path camelCase alias"},
+            "read_scope": {"type": "array", "description": "允许读取路径列表 (review-class 任务必填，与 write_scope 区分)"},
+            "readScope": {"type": "array", "description": "read_scope camelCase alias"},
+            "write_scope": {"type": "array", "description": "允许写入路径列表"},
+            "writeScope": {"type": "array", "description": "write_scope camelCase alias"},
+            "must_not_touch": {"type": "array", "description": "禁止修改路径列表"},
+            "mustNotTouch": {"type": "array", "description": "must_not_touch camelCase alias"},
+            "acceptance": {"type": "array", "description": "验收命令列表"},
+            "acceptance_commands": {"type": "array", "description": "acceptance alias"},
+            "acceptanceCommands": {"type": "array", "description": "acceptance_commands camelCase alias"}
+        }
+    });
+    if let (Some(properties), Value::Object(extras)) = (
+        schema
+            .get_mut("properties")
+            .and_then(|v| v.as_object_mut()),
+        dedup_linkage_properties(),
+    ) {
+        for (key, value) in extras {
+            properties.insert(key, value);
+        }
+    }
+    schema
+}
 
 pub fn definitions() -> Vec<ToolDefinition> {
     vec![
@@ -20,39 +88,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         ToolDefinition::new(
             "mission_task_delegate",
             "声明式任务委派：描述目标，Daemon 自主选 slot/创建/执行/回报",
-            json!({
-                "type": "object",
-                "required": ["objective"],
-                "properties": {
-                    "objective": {"type": "string", "description": "任务目标(自然语言)"},
-                    "intent": {"type": "string", "description": "意图类型决定 slot 模板", "enum": ["code", "ops", "research", "general"], "default": "general"},
-                    "cwd": {"type": "string", "description": "工作目录", "default": "~/Projects"},
-                    "timeout_secs": {"type": "integer", "description": "超时秒数(上限 7200)", "default": 1800},
-                    "priority": {"type": "string", "enum": ["high", "medium", "low"], "default": "medium"},
-                    "depends_on": {"type": "array", "description": "前置任务 ID 列表(DAG)"},
-                    "context_hints": {"type": "array", "description": "兼容字段；默认不预加载 KB/Skill。请使用 read_scope/context_pack_path 明确上下文"},
-                    "model": {"type": "string", "description": "可选 CLI 模型覆盖；default/claude-code-default 表示不传 --model"},
-                    "model_profile": {"type": "string", "description": "可选模型 profile；coding-default-opus-4-7 表示 Claude Code Default(Opus 4.7/1M)"},
-                    "modelProfile": {"type": "string", "description": "model_profile camelCase alias"},
-                    "task_class": {"type": "string", "description": "两阶段工位任务类型，如 context-pack/code/review/ops"},
-                    "taskClass": {"type": "string", "description": "task_class camelCase alias"},
-                    "pool_hint": {"type": "string", "description": "建议工位池，如 claude-code-default / gemini-ultra-pro"},
-                    "poolHint": {"type": "string", "description": "pool_hint camelCase alias"},
-                    "engine_hint": {"type": "string", "description": "建议引擎，如 claude-code / gemini / codex"},
-                    "engineHint": {"type": "string", "description": "engine_hint camelCase alias"},
-                    "context_pack_path": {"type": "string", "description": "两阶段 context-pack Lisp 路径"},
-                    "contextPackPath": {"type": "string", "description": "context_pack_path camelCase alias"},
-                    "read_scope": {"type": "array", "description": "允许读取路径列表 (review-class 任务必填，与 write_scope 区分)"},
-                    "readScope": {"type": "array", "description": "read_scope camelCase alias"},
-                    "write_scope": {"type": "array", "description": "允许写入路径列表"},
-                    "writeScope": {"type": "array", "description": "write_scope camelCase alias"},
-                    "must_not_touch": {"type": "array", "description": "禁止修改路径列表"},
-                    "mustNotTouch": {"type": "array", "description": "must_not_touch camelCase alias"},
-                    "acceptance": {"type": "array", "description": "验收命令列表"},
-                    "acceptance_commands": {"type": "array", "description": "acceptance alias"},
-                    "acceptanceCommands": {"type": "array", "description": "acceptance_commands camelCase alias"}
-                }
-            }),
+            task_delegate_schema(),
         ),
         // ===== mission_swarm_run =====
         ToolDefinition::new(

@@ -239,6 +239,164 @@ fn build_internal_args_for_task_delegate_derives_objective() {
     assert!(inner.get("dispatch_strategy").is_none());
 }
 
+/// BoardTask 31a99a30 :: dedup linkage. The plan-runner internal dispatch
+/// must forward enough metadata for the `mission_task_delegate` dedup guard
+/// to recognise overlapping code workers spawned by the same plan. Default
+/// linkage (no caller override) anchors both `parent_board_task_id` and
+/// `source_board_task_id` to `plan.board_task_id` so the next code worker
+/// against the same plan can be refused when its write_scope overlaps.
+#[test]
+fn build_internal_args_for_task_delegate_forwards_dedup_linkage_by_default() {
+    let plan = fixture_plan("(plan-draft :goal :align)\n");
+    let args = json!({});
+    let inner = build_internal_dispatch_args(
+        &args,
+        &plan,
+        "mission_task_delegate",
+        "unknown",
+        &empty_hints(),
+    )
+    .expect("default task_delegate args");
+    assert_eq!(inner["parent_board_task_id"], json!(plan.board_task_id));
+    assert_eq!(inner["source_board_task_id"], json!(plan.board_task_id));
+    // No write_scope declared → guard short-circuits, so we MUST NOT inject
+    // an empty list (would otherwise paint a read-only call as code-class
+    // and trip the dedup guard against unrelated existing tasks).
+    assert!(inner.get("write_scope").is_none());
+    assert!(inner.get("must_not_touch").is_none());
+}
+
+#[test]
+fn build_internal_args_for_task_delegate_passes_explicit_dedup_overrides() {
+    let plan = fixture_plan("(plan-draft :goal :align)\n");
+    let args = json!({
+        "parent_board_task_id": "explicit-parent",
+        "source_board_task_id": "explicit-source",
+        "write_scope": ["crates/auth", "crates/router/src/lib.rs"],
+        "must_not_touch": ["target/**"],
+    });
+    let inner = build_internal_dispatch_args(
+        &args,
+        &plan,
+        "mission_task_delegate",
+        "unknown",
+        &empty_hints(),
+    )
+    .expect("dedup overrides accepted");
+    assert_eq!(inner["parent_board_task_id"], json!("explicit-parent"));
+    assert_eq!(inner["source_board_task_id"], json!("explicit-source"));
+    let scope: Vec<String> = inner["write_scope"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        scope,
+        vec![
+            "crates/auth".to_string(),
+            "crates/router/src/lib.rs".to_string(),
+        ]
+    );
+    let mnt: Vec<String> = inner["must_not_touch"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(mnt, vec!["target/**".to_string()]);
+    // Code-intent + non-empty write_scope ⇒ task_class auto-defaults to
+    // "code" so the downstream dedup guard fires (read-only / context-pack
+    // delegations override task_class explicitly).
+    assert_eq!(inner["task_class"], json!("code"));
+}
+
+#[test]
+fn build_internal_args_for_task_delegate_uses_plan_hint_owned_files() {
+    let plan = fixture_plan("(plan-draft :goal :align)\n");
+    let args = json!({});
+    let mut hints = ParsedPlanHints::default();
+    hints.owned_files_raw = Some("[\"crates/foo.rs\" \"crates/bar.rs\"]".to_string());
+    hints.forbidden_files_raw = Some("[\"target/**\"]".to_string());
+    let inner =
+        build_internal_dispatch_args(&args, &plan, "mission_task_delegate", "unknown", &hints)
+            .expect("plan-hint backed dispatch");
+    let scope: Vec<String> = inner["write_scope"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        scope,
+        vec!["crates/foo.rs".to_string(), "crates/bar.rs".to_string()]
+    );
+    assert_eq!(
+        inner["must_not_touch"],
+        json!(["target/**"]),
+        "plan hint forbidden_files must round-trip into must_not_touch"
+    );
+}
+
+/// BoardTask 31a99a30 :: dedup linkage. The workstation-dispatch runner is
+/// the second of the three resident/plan/workstation paths into
+/// `mission_task_delegate`. It MUST forward `parent_board_task_id`,
+/// `source_board_task_id`, `write_scope`, `must_not_touch`, and
+/// `task_class` so the dedup guard can refuse a second concurrent code
+/// worker against the same plan when their write scopes overlap.
+///
+/// Static test (no live PTY): scans the runner source for the inner-args
+/// stamping. Sidesteps the AppState/runtime requirement of a full
+/// integration harness while still failing loudly if a future edit drops
+/// any dedup field. The companion check in
+/// `scripts/check-v3-plan-execution-isomorphism.mjs` enforces the same
+/// contract from a Lisp/CI perspective.
+#[test]
+fn workstation_dispatch_runner_forwards_dedup_linkage_to_inner_args() {
+    let src = include_str!(
+        "../../../handlers/knowledge/workstation_dispatch/runner.rs"
+    );
+    for needle in [
+        "\"parent_board_task_id\": plan.board_task_id",
+        "\"source_board_task_id\": plan.board_task_id",
+        "\"task_class\": \"code\"",
+        "inner_args[\"write_scope\"] = json!(hints.owned_files.clone())",
+        "inner_args[\"must_not_touch\"] = json!(hints.forbidden_files.clone())",
+    ] {
+        assert!(
+            src.contains(needle),
+            "workstation_dispatch runner must stamp dedup linkage `{needle}` into inner_args; \
+             without it, the mission_task_delegate dedup guard cannot recognise repeat \
+             code workers spawned by the same plan"
+        );
+    }
+}
+
+#[test]
+fn build_internal_args_for_task_delegate_keeps_read_only_dispatch_unattributed() {
+    // No write_scope at all (caller args + plan hints both empty) should
+    // leave the inner args without `write_scope`/`task_class`/`must_not_touch`
+    // so the dedup guard's `dedup_applies` short-circuits to false. This
+    // pins the "read-only / research delegations stay unaffected" rule.
+    let plan = fixture_plan("(plan-draft :goal :align)\n");
+    let args = json!({ "intent": "research" });
+    let inner = build_internal_dispatch_args(
+        &args,
+        &plan,
+        "mission_task_delegate",
+        "unknown",
+        &empty_hints(),
+    )
+    .expect("research dispatch with no scope");
+    assert_eq!(inner["intent"], json!("research"));
+    assert!(inner.get("write_scope").is_none());
+    assert!(inner.get("must_not_touch").is_none());
+    assert!(
+        inner.get("task_class").is_none(),
+        "read-only research delegations must not auto-fill task_class=code"
+    );
+}
+
 #[test]
 fn build_internal_args_for_task_delegate_rejects_unknown_intent() {
     let plan = fixture_plan("(plan)");

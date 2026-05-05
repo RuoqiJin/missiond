@@ -308,9 +308,22 @@ pub(crate) async fn run_workstation_dispatch_with_contract_and_trace(
     //    the same way; we forward it explicitly so the inner handler does
     //    not have to re-resolve when the caller only supplied a project
     //    id).
+    //
+    //    Dedup linkage (BoardTask 31a99a30): the workstation-dispatch path
+    //    is one of the resident/plan/workstation chains that hits
+    //    `mission_task_delegate`. Forward `parent_board_task_id`,
+    //    `source_board_task_id`, `write_scope`, `must_not_touch`, and
+    //    `task_class` so the dedup guard in `mission_task_delegate` can
+    //    refuse to spawn a second concurrent code worker against the same
+    //    plan / source when their write scopes overlap. The plan's
+    //    BoardTask is the natural anchor for both `parent` and `source`
+    //    in the wave-15..23 path; multi-hop chains will override
+    //    `source_board_task_id` upstream when they need a different
+    //    semantic anchor.
     let mut inner_args = json!({
         "objective": brief,
         "intent": "code",
+        "task_class": "code",
         "context_hints": [
             format!("plan:{}", plan.id),
             format!("board_task:{}", plan.board_task_id),
@@ -318,7 +331,15 @@ pub(crate) async fn run_workstation_dispatch_with_contract_and_trace(
             format!("workstation_dispatch:v0"),
         ],
         "cwd": resolution.project_root.to_string_lossy().to_string(),
+        "parent_board_task_id": plan.board_task_id,
+        "source_board_task_id": plan.board_task_id,
     });
+    if !hints.owned_files.is_empty() {
+        inner_args["write_scope"] = json!(hints.owned_files.clone());
+    }
+    if !hints.forbidden_files.is_empty() {
+        inner_args["must_not_touch"] = json!(hints.forbidden_files.clone());
+    }
     if let Some(ds) = hints.dispatch_strategy.as_deref() {
         inner_args["dispatch_strategy"] = json!(ds);
     } else {

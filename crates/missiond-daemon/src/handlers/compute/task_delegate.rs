@@ -90,6 +90,26 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     let model_arg = string_arg(&args, &["model"]).map(str::to_string);
     let model_profile_arg =
         string_arg(&args, &["model_profile", "modelProfile"]).map(str::to_string);
+    let source_id = string_arg(
+        &args,
+        &[
+            "source_id",
+            "sourceId",
+            "source_board_task_id",
+            "sourceBoardTaskId",
+        ],
+    )
+    .map(str::to_string);
+    let allow_duplicate_code_worker = bool_arg(
+        &args,
+        &[
+            "allow_duplicate_code_worker",
+            "allowDuplicateCodeWorker",
+            "force_duplicate_code_worker",
+            "forceDuplicateCodeWorker",
+        ],
+    )
+    .unwrap_or(false);
     let delegation_metadata = DelegationMetadata {
         task_class: string_arg(&args, &["task_class", "taskClass"]).map(str::to_string),
         pool_hint: string_arg(&args, &["pool_hint", "poolHint"]).map(str::to_string),
@@ -103,6 +123,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             &args,
             &["acceptance", "acceptance_commands", "acceptanceCommands"],
         ),
+        source_id: source_id.clone(),
     };
 
     let cwd = args.get("cwd").and_then(|v| v.as_str());
@@ -203,6 +224,41 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         .map(str::to_string);
     let prefer_gemini_researcher =
         routes_to_gemini_researcher && gemini_researcher_slot_id.is_some();
+
+    // Default-on guard: when this delegation would spawn a CODE worker that
+    // shares the same semantic parent/source as an active BoardTask AND its
+    // declared write_scope overlaps the existing one, refuse the spawn so
+    // two concurrent workers cannot race on the same files. Read-only /
+    // context-pack / research delegations never trip the guard because
+    // `dedup_applies` requires both `intent=code` (or `task_class=code`) AND
+    // a non-empty write_scope. Callers can override with
+    // `allow_duplicate_code_worker=true` when the overlap is intentional.
+    let dedup_check = DuplicateCodeCheck {
+        parent_id: parent_id.as_deref(),
+        source_id: source_id.as_deref(),
+        intent,
+        task_class: delegation_metadata.task_class.as_deref(),
+        write_scope: &delegation_metadata.write_scope,
+    };
+    if !allow_duplicate_code_worker {
+        if let Some(dup) = find_overlapping_active_code_worker(state, &dedup_check).await {
+            let note_attached = attach_duplicate_delegation_note(
+                state,
+                &dup,
+                objective,
+                parent_id.as_deref(),
+                source_id.as_deref(),
+                &delegation_metadata.write_scope,
+            )
+            .await;
+            return Ok(build_duplicate_code_worker_refusal(
+                &dup,
+                parent_id.as_deref(),
+                source_id.as_deref(),
+                note_attached,
+            ));
+        }
+    }
 
     // Phase 6.1: Find idle slot with RAII guard (atomic check+reserve).
     // intent-flow.lisp F-task-delegate-autoprovision :: s2 requires
@@ -1206,6 +1262,263 @@ struct DelegationMetadata {
     write_scope: Vec<String>,
     must_not_touch: Vec<String>,
     acceptance: Vec<String>,
+    /// Upstream BoardTask whose objective spawned this delegation. Distinct
+    /// from `parent_id`: callers may chain through several master/plan layers
+    /// before reaching `mission_task_delegate`, and `source_id` keeps the
+    /// original anchor visible so dedup can refuse a second concurrent code
+    /// worker even when the immediate parent shifts.
+    source_id: Option<String>,
+}
+
+/// Inputs for the duplicate-code-worker dedup guard. Built from the parsed
+/// `mission_task_delegate` args before slot reservation; the guard refuses
+/// to spawn a second concurrent code worker when an active BoardTask shares
+/// the same semantic parent/source AND declares an overlapping write_scope.
+#[derive(Debug, Clone, Copy)]
+struct DuplicateCodeCheck<'a> {
+    parent_id: Option<&'a str>,
+    source_id: Option<&'a str>,
+    intent: &'a str,
+    task_class: Option<&'a str>,
+    write_scope: &'a [String],
+}
+
+#[derive(Debug, Clone)]
+struct DuplicateCodeWorker {
+    task_id: String,
+    title: String,
+    status: String,
+    /// Pairs of (requested_path, existing_path) that triggered the overlap.
+    overlap: Vec<(String, String)>,
+    /// Why the candidate was bound to the same chain — `parent`, `source`, or
+    /// `parent+source`. Surfaces the linkage the guard used so callers can
+    /// reason about whether the dedup decision is what they intended.
+    linkage: String,
+}
+
+/// True iff this delegation is a code-class request that declares a write
+/// scope. Read-only / context-pack / research delegations short-circuit out
+/// because they cannot collide with another worker on the same files.
+fn dedup_applies(check: &DuplicateCodeCheck<'_>) -> bool {
+    let is_code = check.intent == "code"
+        || matches!(check.task_class, Some("code"));
+    is_code && !check.write_scope.is_empty()
+}
+
+/// Scan active BoardTasks (`open` / `running` / `verifying`) for one that
+/// shares the same parent OR source and has at least one overlapping
+/// write_scope path. Returns `None` for read-only callers, callers without
+/// a parent/source linkage, or when no overlap is found.
+async fn find_overlapping_active_code_worker(
+    state: &AppState,
+    check: &DuplicateCodeCheck<'_>,
+) -> Option<DuplicateCodeWorker> {
+    if !dedup_applies(check) {
+        return None;
+    }
+    if check.parent_id.is_none() && check.source_id.is_none() {
+        return None;
+    }
+
+    let mut candidates = Vec::new();
+    for status in ["open", "running", "verifying"] {
+        match state.store.list_board_tasks(Some(status), true).await {
+            Ok(tasks) => candidates.extend(tasks),
+            Err(err) => {
+                tracing::warn!(
+                    status = status,
+                    error = %err,
+                    "task_delegate dedup: list_board_tasks failed; skipping status"
+                );
+            }
+        }
+    }
+
+    for task in candidates {
+        let parent_match = match (check.parent_id, task.parent_id.as_ref()) {
+            (Some(left), Some(right)) => left == right.as_ref(),
+            _ => false,
+        };
+        let source_match = match check.source_id {
+            Some(src) => description_references_source(&task.description, src),
+            None => false,
+        };
+        if !(parent_match || source_match) {
+            continue;
+        }
+        let candidate_scope = parse_write_scope_from_description(&task.description);
+        if candidate_scope.is_empty() {
+            continue;
+        }
+        let overlap = compute_scope_overlap(check.write_scope, &candidate_scope);
+        if overlap.is_empty() {
+            continue;
+        }
+        let linkage = match (parent_match, source_match) {
+            (true, true) => "parent+source",
+            (true, false) => "parent",
+            (false, true) => "source",
+            _ => "unknown",
+        };
+        return Some(DuplicateCodeWorker {
+            task_id: task.id.to_string(),
+            title: task.title.clone(),
+            status: task.status.as_str().to_string(),
+            overlap,
+            linkage: linkage.to_string(),
+        });
+    }
+    None
+}
+
+/// Parse the `- write_scope:` line emitted by `render_delegation_metadata_block`
+/// out of a BoardTask description so we can read back what scope the existing
+/// code worker reserved. Conservative: missing line → empty list.
+fn parse_write_scope_from_description(description: &str) -> Vec<String> {
+    description
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("- write_scope:")
+                .map(|tail| {
+                    tail.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<_>>()
+                })
+        })
+        .unwrap_or_default()
+}
+
+/// Look for a `:source_board_task_id` / `:source_id` reference inside a
+/// BoardTask description. Used when the dedup caller anchors on a source
+/// chain rather than on the structured `parent_id` column.
+fn description_references_source(description: &str, source_id: &str) -> bool {
+    description.lines().any(|line| {
+        let trimmed = line.trim();
+        let matches_label = trimmed.starts_with("- source_board_task_id:")
+            || trimmed.starts_with("- source_id:")
+            || trimmed.starts_with("- parent_board_task_id:");
+        matches_label && trimmed.contains(source_id)
+    })
+}
+
+/// Cross-product of requested vs existing write scopes; returns every pair
+/// that overlaps under the same prefix-matching rule
+/// `mission_swarm_run` already uses for its conflict detector.
+fn compute_scope_overlap(
+    requested: &[String],
+    existing: &[String],
+) -> Vec<(String, String)> {
+    let mut overlaps = Vec::new();
+    for left in requested {
+        for right in existing {
+            if write_scopes_overlap(left, right) {
+                overlaps.push((left.clone(), right.clone()));
+            }
+        }
+    }
+    overlaps
+}
+
+/// Attach a `note` to the existing active BoardTask describing the refused
+/// delegation. The note carries the new objective excerpt + the overlap
+/// summary so an operator (or the autopilot) can see what got merged in.
+async fn attach_duplicate_delegation_note(
+    state: &AppState,
+    dup: &DuplicateCodeWorker,
+    objective: &str,
+    parent_id: Option<&str>,
+    source_id: Option<&str>,
+    requested_scope: &[String],
+) -> bool {
+    let preview_end = crate::helpers::char_boundary_at(objective, 600);
+    let preview = &objective[..preview_end];
+    let overlap_summary = dup
+        .overlap
+        .iter()
+        .map(|(req, exist)| format!("requested `{}` ⇆ existing `{}`", req, exist))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let scope_summary = if requested_scope.is_empty() {
+        "[]".to_string()
+    } else {
+        requested_scope.join(", ")
+    };
+    let content = format!(
+        "🛑 task_delegate refused a duplicate code-worker spawn (linkage={}).\n\
+         New objective excerpt:\n{}\n\n\
+         Requested write_scope: {}\n\
+         Overlap with this task: {}\n\
+         Source linkage — parent_id: {} | source_id: {}\n\
+         Override hint: rerun mission_task_delegate with allow_duplicate_code_worker=true if this overlap is intentional.",
+        dup.linkage,
+        preview,
+        scope_summary,
+        overlap_summary,
+        parent_id.unwrap_or("-"),
+        source_id.unwrap_or("-"),
+    );
+    match state
+        .store
+        .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+            task_id: dup.task_id.clone(),
+            content,
+            note_type: Some("note".to_string()),
+            author: Some("task_delegate-dedup".to_string()),
+        })
+        .await
+    {
+        Ok(_) => true,
+        Err(err) => {
+            tracing::warn!(
+                task_id = %dup.task_id,
+                error = %err,
+                "task_delegate dedup: failed to append duplicate-delegation note"
+            );
+            false
+        }
+    }
+}
+
+/// Build the structured refusal returned to a caller whose code-worker
+/// delegation got blocked. Mirrors the `ToolError` JSON shape so existing
+/// dashboards can keep parsing `error_code`/`reason`/`suggestion`, then
+/// layers extra fields (`existing_task_*`, `overlap`, `note_attached`) so
+/// the caller can audit what the guard saw and decide whether to override.
+fn build_duplicate_code_worker_refusal(
+    dup: &DuplicateCodeWorker,
+    parent_id: Option<&str>,
+    source_id: Option<&str>,
+    note_attached: bool,
+) -> ToolResult {
+    let reason = format!(
+        "active BoardTask {} (`{}`, status={}, linkage={}) already covers an overlapping write_scope; refusing to spawn a second concurrent code worker",
+        dup.task_id, dup.title, dup.status, dup.linkage,
+    );
+    let payload = json!({
+        "error_code": "DUPLICATE_CODE_WORKER_BLOCKED",
+        "reason": reason,
+        "suggestion": "wait for the active task to finish, split the write_scope into disjoint shards, or rerun with allow_duplicate_code_worker=true when the overlap is intentional",
+        "existing_task_id": dup.task_id,
+        "existing_task_title": dup.title,
+        "existing_task_status": dup.status,
+        "linkage": dup.linkage,
+        "parent_id": parent_id,
+        "source_id": source_id,
+        "overlap": dup
+            .overlap
+            .iter()
+            .map(|(req, exist)| json!({"requested": req, "existing": exist}))
+            .collect::<Vec<_>>(),
+        "note_attached": note_attached,
+    });
+    ToolResult {
+        content: vec![missiond_mcp::tools::ToolContent::Text {
+            text: serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string()),
+        }],
+        is_error: Some(true),
+    }
 }
 
 /// V3 workstation-pool :: gemini researcher acquire.
@@ -1475,6 +1788,9 @@ fn render_delegation_metadata_block(metadata: &DelegationMetadata) -> String {
     if !metadata.acceptance.is_empty() {
         lines.push(format!("- acceptance: {}", metadata.acceptance.join(" | ")));
     }
+    if let Some(value) = &metadata.source_id {
+        lines.push(format!("- source_board_task_id: {}", value));
+    }
     if !metadata.read_scope.is_empty()
         || !metadata.write_scope.is_empty()
         || !metadata.must_not_touch.is_empty()
@@ -1690,6 +2006,7 @@ mod tests {
             write_scope: vec!["crates/a.rs".to_string()],
             must_not_touch: vec!["packages/**".to_string()],
             acceptance: vec!["cargo test -p missiond-daemon autopilot".to_string()],
+            source_id: None,
         };
         let block = render_delegation_metadata_block(&metadata);
         for expected in [
@@ -2281,5 +2598,203 @@ mod tests {
                 "coding-default-opus-4-7"
             )
         );
+    }
+
+    // ── Duplicate code-worker dedup guard ──────────────────────────────────
+    //
+    // BoardTask 31a99a30 :: prevent two concurrent code workers from racing on
+    // the same files. The guard short-circuits on read-only/context-pack/
+    // research delegations and only fires when:
+    //   * intent == "code" OR task_class == "code", AND
+    //   * write_scope is non-empty.
+    // These tests pin the pure helpers (no AppState) — DB-touching paths are
+    // covered by the integration suite via mocked board task fixtures.
+
+    #[test]
+    fn dedup_skips_read_only_research_delegations() {
+        let scope = vec!["crates/foo.rs".to_string()];
+        let check = DuplicateCodeCheck {
+            parent_id: Some("parent-1"),
+            source_id: None,
+            intent: "research",
+            task_class: Some("research"),
+            write_scope: &scope,
+        };
+        assert!(!dedup_applies(&check));
+    }
+
+    #[test]
+    fn dedup_skips_context_pack_class_even_when_scope_set() {
+        let scope = vec!["crates/foo.rs".to_string()];
+        let check = DuplicateCodeCheck {
+            parent_id: Some("parent-1"),
+            source_id: None,
+            intent: "general",
+            task_class: Some("context-pack"),
+            write_scope: &scope,
+        };
+        assert!(!dedup_applies(&check));
+    }
+
+    #[test]
+    fn dedup_skips_code_class_when_write_scope_is_empty() {
+        let empty: Vec<String> = Vec::new();
+        let check = DuplicateCodeCheck {
+            parent_id: Some("parent-1"),
+            source_id: None,
+            intent: "code",
+            task_class: Some("code"),
+            write_scope: &empty,
+        };
+        assert!(
+            !dedup_applies(&check),
+            "code-class with empty write_scope is read-only-by-default; dedup must not block it"
+        );
+    }
+
+    #[test]
+    fn dedup_fires_on_code_class_with_write_scope() {
+        let scope = vec!["crates/foo.rs".to_string()];
+        let check = DuplicateCodeCheck {
+            parent_id: Some("parent-1"),
+            source_id: None,
+            intent: "code",
+            task_class: Some("code"),
+            write_scope: &scope,
+        };
+        assert!(dedup_applies(&check));
+    }
+
+    #[test]
+    fn dedup_fires_when_only_intent_is_code() {
+        let scope = vec!["crates/foo.rs".to_string()];
+        let check = DuplicateCodeCheck {
+            parent_id: Some("parent-1"),
+            source_id: None,
+            intent: "code",
+            task_class: None,
+            write_scope: &scope,
+        };
+        assert!(dedup_applies(&check));
+    }
+
+    #[test]
+    fn parse_write_scope_extracts_csv_metadata_line() {
+        let desc = "Some objective\n\n## Dispatch metadata\n\
+                    - task_class: code\n\
+                    - write_scope: crates/foo.rs, crates/bar/**\n\
+                    - must_not_touch: target/**";
+        assert_eq!(
+            parse_write_scope_from_description(desc),
+            vec!["crates/foo.rs".to_string(), "crates/bar/**".to_string()],
+        );
+    }
+
+    #[test]
+    fn parse_write_scope_returns_empty_when_label_missing() {
+        let desc = "Some objective without metadata";
+        assert!(parse_write_scope_from_description(desc).is_empty());
+    }
+
+    #[test]
+    fn description_references_source_matches_canonical_labels() {
+        let desc = "objective\n\n## Dispatch metadata\n- source_board_task_id: 31a99a30";
+        assert!(description_references_source(desc, "31a99a30"));
+        let parent_only = "objective\n\n## Parent linkage\n- parent_board_task_id: parent-1";
+        assert!(description_references_source(parent_only, "parent-1"));
+        let alt_label = "objective\n- source_id: src-9";
+        assert!(description_references_source(alt_label, "src-9"));
+        let other = "objective\n- write_scope: src-9";
+        assert!(
+            !description_references_source(other, "src-9"),
+            "matches must be anchored to a parent/source label, not arbitrary lines"
+        );
+    }
+
+    #[test]
+    fn compute_scope_overlap_reports_each_pair() {
+        let requested = vec!["crates/auth".to_string(), "crates/router".to_string()];
+        let existing = vec!["crates/auth/routes.rs".to_string(), "docs/**".to_string()];
+        let overlap = compute_scope_overlap(&requested, &existing);
+        assert_eq!(overlap.len(), 1);
+        assert_eq!(overlap[0].0, "crates/auth");
+        assert_eq!(overlap[0].1, "crates/auth/routes.rs");
+    }
+
+    #[test]
+    fn compute_scope_overlap_reports_no_pairs_when_disjoint() {
+        let requested = vec!["crates/foo".to_string()];
+        let existing = vec!["crates/bar".to_string()];
+        assert!(compute_scope_overlap(&requested, &existing).is_empty());
+    }
+
+    /// Refusal payload pins the structured schema callers / dashboards rely
+    /// on. Critical fields:
+    ///   * `error_code` ⇒ `DUPLICATE_CODE_WORKER_BLOCKED` (machine-readable)
+    ///   * `existing_task_id` / `existing_task_status` / `linkage` so the
+    ///     caller knows which active task collided and how it was matched
+    ///   * `overlap` lists every requested-vs-existing pair
+    ///   * `is_error: true` (consistent with other structured errors)
+    #[test]
+    fn build_duplicate_code_worker_refusal_emits_full_diagnostic_payload() {
+        let dup = DuplicateCodeWorker {
+            task_id: "btk-active-1".to_string(),
+            title: "Refactor auth".to_string(),
+            status: "running".to_string(),
+            overlap: vec![("crates/auth".to_string(), "crates/auth/routes.rs".to_string())],
+            linkage: "parent".to_string(),
+        };
+        let result = build_duplicate_code_worker_refusal(
+            &dup,
+            Some("parent-1"),
+            Some("source-9"),
+            true,
+        );
+        assert_eq!(result.is_error, Some(true));
+        let text = match result.content.first() {
+            Some(missiond_mcp::tools::ToolContent::Text { text }) => text.clone(),
+            _ => panic!("refusal must emit text content"),
+        };
+        let payload: Value = serde_json::from_str(&text).expect("refusal must be valid JSON");
+        assert_eq!(payload["error_code"], json!("DUPLICATE_CODE_WORKER_BLOCKED"));
+        assert_eq!(payload["existing_task_id"], json!("btk-active-1"));
+        assert_eq!(payload["existing_task_status"], json!("running"));
+        assert_eq!(payload["linkage"], json!("parent"));
+        assert_eq!(payload["parent_id"], json!("parent-1"));
+        assert_eq!(payload["source_id"], json!("source-9"));
+        assert_eq!(payload["note_attached"], json!(true));
+        assert_eq!(payload["overlap"][0]["requested"], json!("crates/auth"));
+        assert_eq!(
+            payload["overlap"][0]["existing"],
+            json!("crates/auth/routes.rs")
+        );
+        assert!(
+            payload["suggestion"]
+                .as_str()
+                .unwrap()
+                .contains("allow_duplicate_code_worker=true"),
+            "suggestion must surface the override flag"
+        );
+    }
+
+    /// Pins the metadata block contract for source-id readback: the dedup
+    /// scanner relies on the rendered description carrying
+    /// `- source_board_task_id: <id>` so a downstream `mission_task_delegate`
+    /// call can detect the source linkage even when the structured
+    /// `parent_id` column is unset (e.g. multi-hop master/plan chains).
+    #[test]
+    fn delegation_metadata_block_renders_source_id_for_dedup_readback() {
+        let metadata = DelegationMetadata {
+            task_class: Some("code".to_string()),
+            write_scope: vec!["crates/foo.rs".to_string()],
+            source_id: Some("source-9".to_string()),
+            ..DelegationMetadata::default()
+        };
+        let block = render_delegation_metadata_block(&metadata);
+        assert!(
+            block.contains("- source_board_task_id: source-9"),
+            "metadata block must surface source_board_task_id so dedup readback works:\n{block}"
+        );
+        assert!(description_references_source(&block, "source-9"));
     }
 }

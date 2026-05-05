@@ -141,6 +141,78 @@ pub(in crate::handlers::knowledge) fn build_internal_dispatch_args(
                     format!("board_task:{}", plan.board_task_id),
                 ],
             });
+            // Dedup linkage (BoardTask 31a99a30): the rendered-internal path
+            // is the legacy resident/plan dispatch into mission_task_delegate.
+            // Forward parent / source ids and write_scope / must_not_touch /
+            // task_class so the dedup guard in mission_task_delegate refuses
+            // a second concurrent code worker against the same plan when
+            // their write_scope overlaps. Caller args win over plan hints —
+            // mirrors the precedence the rest of this branch already uses.
+            let parent_explicit = args
+                .get("parent_board_task_id")
+                .or_else(|| args.get("parentBoardTaskId"))
+                .or_else(|| args.get("parent_id"))
+                .or_else(|| args.get("parentId"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| plan.board_task_id.clone());
+            let source_explicit = args
+                .get("source_board_task_id")
+                .or_else(|| args.get("sourceBoardTaskId"))
+                .or_else(|| args.get("source_id"))
+                .or_else(|| args.get("sourceId"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| plan.board_task_id.clone());
+            inner["parent_board_task_id"] = json!(parent_explicit);
+            inner["source_board_task_id"] = json!(source_explicit);
+            // write_scope / must_not_touch precedence: explicit args > plan
+            // hint owned/forbidden files. We only inject when at least one
+            // source is non-empty so read-only delegations stay free of the
+            // dedup guard (which short-circuits on empty write_scope).
+            let arg_write_scope = collect_string_list_arg(
+                args,
+                &["write_scope", "writeScope", "owned_files", "ownedFiles"],
+            );
+            let effective_write_scope = if !arg_write_scope.is_empty() {
+                arg_write_scope
+            } else {
+                split_lisp_string_list(hints.owned_files_raw.as_deref())
+            };
+            if !effective_write_scope.is_empty() {
+                inner["write_scope"] = json!(effective_write_scope);
+                // task_class default = "code" for code-intent dispatches
+                // with declared write_scope. Lets the dedup guard short
+                // circuit on context-pack / research delegations even
+                // when the caller forwards the same intent string.
+                if intent == "code" && args.get("task_class").is_none() {
+                    inner["task_class"] = json!("code");
+                }
+            }
+            let arg_must_not_touch = collect_string_list_arg(
+                args,
+                &[
+                    "must_not_touch",
+                    "mustNotTouch",
+                    "forbidden_files",
+                    "forbiddenFiles",
+                ],
+            );
+            let effective_must_not_touch = if !arg_must_not_touch.is_empty() {
+                arg_must_not_touch
+            } else {
+                split_lisp_string_list(hints.forbidden_files_raw.as_deref())
+            };
+            if !effective_must_not_touch.is_empty() {
+                inner["must_not_touch"] = json!(effective_must_not_touch);
+            }
+            if let Some(tc) = args.get("task_class").and_then(|v| v.as_str()) {
+                if !tc.trim().is_empty() {
+                    inner["task_class"] = json!(tc);
+                }
+            }
             // cwd precedence:
             //   explicit args.cwd
             //   > args.target_project (only if path-like)
@@ -249,4 +321,22 @@ pub(in crate::handlers::knowledge) fn tool_result_payload(result: &ToolResult) -
         }
         None => Value::Null,
     }
+}
+
+/// Pull a string-list argument from the caller-supplied JSON, accepting any
+/// of `keys` as the source. Empty / whitespace entries drop out so the
+/// downstream `mission_task_delegate` dedup guard sees a clean scope set.
+pub(super) fn collect_string_list_arg(args: &Value, keys: &[&str]) -> Vec<String> {
+    keys.iter()
+        .find_map(|key| args.get(*key))
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::trim))
+                .filter(|item| !item.is_empty())
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }

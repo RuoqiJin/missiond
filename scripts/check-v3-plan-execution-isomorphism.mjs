@@ -208,6 +208,15 @@ const DEFAULT_FILES = {
   planDagTests: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/tests.rs',
   unifiedEntryPlanner: 'crates/missiond-daemon/src/handlers/knowledge/unified_entry/planner.rs',
   mcpPlan: 'crates/missiond-mcp/src/tools/knowledge/plan.rs',
+  // BoardTask 31a99a30 :: dedup linkage. The workstation-dispatch runner is
+  // the third path (alongside compute/task_delegate.rs and
+  // plan/internal_dispatch.rs) into mission_task_delegate. The isomorphism
+  // check pins that all three paths stamp parent/source/write-scope so the
+  // duplicate-code-worker dedup guard always sees enough metadata.
+  workstationDispatchRunner:
+    'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/runner.rs',
+  computeTaskDelegate: 'crates/missiond-daemon/src/handlers/compute/task_delegate.rs',
+  mcpTaskDelegate: 'crates/missiond-mcp/src/tools/compute/task_delegate.rs',
 };
 
 function main() {
@@ -474,6 +483,71 @@ function checkFiles(root, files) {
     'pub(super) fn derive_objective_from_plan',
     'pub(super) fn truncate_chars',
     'pub(in crate::handlers::knowledge) fn tool_result_payload',
+    // BoardTask 31a99a30 :: dedup linkage for the resident/plan dispatch
+    // path. The internal dispatcher MUST forward parent_board_task_id,
+    // source_board_task_id, write_scope, and must_not_touch into inner_args
+    // so the mission_task_delegate dedup guard can refuse to spawn a second
+    // concurrent code worker against the same plan when their write scopes
+    // overlap. Without these stamps, the guard cannot recognise the chain
+    // and degenerates to a no-op for plan-driven delegations.
+    'inner["parent_board_task_id"] = json!(parent_explicit)',
+    'inner["source_board_task_id"] = json!(source_explicit)',
+    'inner["write_scope"] = json!(effective_write_scope)',
+    'inner["must_not_touch"] = json!(effective_must_not_touch)',
+    'pub(super) fn collect_string_list_arg',
+  ]);
+
+  // BoardTask 31a99a30 :: dedup linkage in the workstation-dispatch runner.
+  // The runner is the resident/plan path that wraps mission_task_delegate
+  // for ClaudeCode workstation tasks; if it drops parent/source/scope, the
+  // dedup guard cannot block a second concurrent code worker against the
+  // same plan. The strings below pin the inner_args stamping verbatim.
+  requireAll(
+    diagnostics,
+    files.workstationDispatchRunner,
+    sources.workstationDispatchRunner,
+    [
+      'pub(crate) async fn run_workstation_dispatch_with_contract_and_trace',
+      '"parent_board_task_id": plan.board_task_id',
+      '"source_board_task_id": plan.board_task_id',
+      '"task_class": "code"',
+      'inner_args["write_scope"] = json!(hints.owned_files.clone())',
+      'inner_args["must_not_touch"] = json!(hints.forbidden_files.clone())',
+    ],
+  );
+
+  // BoardTask 31a99a30 :: duplicate-code-worker dedup guard surface. The
+  // guard lives in compute/task_delegate.rs; the strings below pin the
+  // helper functions, refusal payload, and override flag so future edits
+  // cannot silently delete the dedup contract or short-circuit it.
+  requireAll(
+    diagnostics,
+    files.computeTaskDelegate,
+    sources.computeTaskDelegate,
+    [
+      'struct DuplicateCodeCheck',
+      'struct DuplicateCodeWorker',
+      'fn dedup_applies',
+      'async fn find_overlapping_active_code_worker',
+      'fn parse_write_scope_from_description',
+      'fn description_references_source',
+      'fn compute_scope_overlap',
+      'async fn attach_duplicate_delegation_note',
+      'fn build_duplicate_code_worker_refusal',
+      '"DUPLICATE_CODE_WORKER_BLOCKED"',
+      'allow_duplicate_code_worker',
+      '"- source_board_task_id:',
+    ],
+  );
+
+  // BoardTask 31a99a30 :: MCP schema must surface the dedup knobs (override
+  // flag + parent/source ids) so external callers can opt into the same
+  // contract that resident/plan/workstation paths already forward.
+  requireAll(diagnostics, files.mcpTaskDelegate, sources.mcpTaskDelegate, [
+    '"parent_board_task_id"',
+    '"source_board_task_id"',
+    '"allow_duplicate_code_worker"',
+    '"forceDuplicateCodeWorker"',
   ]);
 
   requireAll(diagnostics, files.planCompileAuthoring, sources.planCompileAuthoring, [
@@ -2012,10 +2086,47 @@ pub(in crate::handlers::knowledge) fn build_internal_dispatch_args() {
   DERIVED_OBJECTIVE_MAX;
   VALID_DELEGATE_INTENTS;
   AGENT_TEAM_OBJECTIVE_HINT;
+  inner["parent_board_task_id"] = json!(parent_explicit);
+  inner["source_board_task_id"] = json!(source_explicit);
+  inner["write_scope"] = json!(effective_write_scope);
+  inner["must_not_touch"] = json!(effective_must_not_touch);
 }
 pub(super) fn derive_objective_from_plan() {}
 pub(super) fn truncate_chars() {}
 pub(in crate::handlers::knowledge) fn tool_result_payload() {}
+pub(super) fn collect_string_list_arg() {}
+`);
+  writeFixture(root, DEFAULT_FILES.workstationDispatchRunner, `
+pub(crate) async fn run_workstation_dispatch_with_contract_and_trace() {
+  json!({
+    "parent_board_task_id": plan.board_task_id,
+    "source_board_task_id": plan.board_task_id,
+    "task_class": "code",
+  });
+  inner_args["write_scope"] = json!(hints.owned_files.clone());
+  inner_args["must_not_touch"] = json!(hints.forbidden_files.clone());
+}
+`);
+  writeFixture(root, DEFAULT_FILES.computeTaskDelegate, `
+struct DuplicateCodeCheck<'a> {}
+struct DuplicateCodeWorker {}
+fn dedup_applies() {}
+async fn find_overlapping_active_code_worker() {}
+fn parse_write_scope_from_description() {}
+fn description_references_source() {}
+fn compute_scope_overlap() {}
+async fn attach_duplicate_delegation_note() {}
+fn build_duplicate_code_worker_refusal() {
+  let _ = "DUPLICATE_CODE_WORKER_BLOCKED";
+  let _ = "allow_duplicate_code_worker";
+  let _ = "- source_board_task_id:";
+}
+`);
+  writeFixture(root, DEFAULT_FILES.mcpTaskDelegate, `
+let _ = "parent_board_task_id";
+let _ = "source_board_task_id";
+let _ = "allow_duplicate_code_worker";
+let _ = "forceDuplicateCodeWorker";
 `);
   writeFixture(root, DEFAULT_FILES.planCompileAuthoring, `
 pub(super) async fn action_compile() {}
