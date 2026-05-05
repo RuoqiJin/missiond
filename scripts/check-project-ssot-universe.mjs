@@ -11,7 +11,7 @@ const usage = `Usage:
 Checks MissionD multi-project SSOT registry convergence:
   - V3 project-blueprint-registry names MissionD, Forge, Part1 devtools (jarvis,
     jarvis-mechanic, xjpcode, neural-codegen, semantic-terminal), XJP services,
-    PCEA, plus the App + external-infra group (secret-store-rs, xiaojin-blog,
+    PCEA, plus the App + external-infra group (secret-store, xiaojin-blog,
     cuthub).
   - V3 service-runtime-universe exposes production service deployment facts.
   - project-ssot-convergence workflow exists.
@@ -19,7 +19,7 @@ Checks MissionD multi-project SSOT registry convergence:
     its declared cheap/static project-local runner (jarvis and jarvis-forge run
     bash .missiond/check.sh in default mode; jarvis-mechanic and xjpcode run
     their node SSOT checkers; neural-codegen and semantic-terminal run
-    check.sh --dry-run); secret-store-rs / xiaojin-blog / cuthub each execute
+    check.sh --dry-run); secret-store / xiaojin-blog / cuthub each execute
     bash .missiond/check.sh in default mode (read-only, sub-second).
 `;
 
@@ -42,7 +42,7 @@ const PROJECTS = [
   { id: 'timeline', root: '/Users/jinchen/Projects/xiaojinpro-backend/services/timeline' },
   { id: 'pcea', root: '/Users/jinchen/Downloads/PCEA develop', checker: ['node', ['scripts/check-pcea-ssot-complete.mjs', '--json']] },
   // App + external-infra projects — already-converged with project-local check.sh runners (default mode is read-only static, sub-second).
-  { id: 'secret-store-rs', root: '/Users/jinchen/Downloads/xiaojinpro-gateway/services/secret-store-rs', checker: ['bash', ['.missiond/check.sh']] },
+  { id: 'secret-store', root: '/Users/jinchen/Downloads/xiaojinpro-gateway/services/secret-store-rs', checker: ['bash', ['.missiond/check.sh']] },
   { id: 'xiaojin-blog', root: '/Users/jinchen/Projects/xiaojin-blog', checker: ['bash', ['.missiond/check.sh']] },
   { id: 'cuthub', root: '/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/cuthub-frontend', checker: ['bash', ['.missiond/check.sh']] },
 ];
@@ -78,7 +78,8 @@ function main() {
     ':id asr',
     ':id timeline',
     ':id pcea',
-    ':id secret-store-rs',
+    ':id secret-store',
+    ':aliases [secret-store-rs]',
     ':id xiaojin-blog',
     ':id cuthub',
     '/Users/jinchen/Downloads/PCEA develop',

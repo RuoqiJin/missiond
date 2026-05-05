@@ -1237,7 +1237,8 @@
 	      :capability deploy-ops
 	      :surface project-registry)
     ;; ── App + external-infra projects — already-converged with project-local check.sh runners ──
-    (project :id secret-store-rs
+    (project :id secret-store
+      :aliases [secret-store-rs]
       :kind rust-axum-microservice
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/services/secret-store-rs"
       :intent ".missiond/intent.lisp"

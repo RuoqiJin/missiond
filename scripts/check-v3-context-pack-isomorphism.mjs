@@ -250,6 +250,9 @@ function checkFiles(root, files) {
     'render_swarm_context_pack',
     'missiond.swarm-context-pack.v1',
     'context_pack_materialized',
+    'SWARM_CONTEXT_PACK_COUNTER',
+    'timestamp_subsec_nanos',
+    'fetch_add',
     'tokio::fs::create_dir_all',
     'tokio::fs::write',
   ]);

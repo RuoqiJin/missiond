@@ -5,6 +5,7 @@ use missiond_core::types::CreateBoardTaskInput;
 use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
 use crate::slot_dispatch::SlotAcquireGuard;
@@ -20,6 +21,7 @@ const VALID_INTENTS: &[&str] = &["code", "ops", "research", "general"];
 const MAX_ENTRY_CHARS: usize = 500; // Per KB/Skill entry
 const MAX_CONTEXT_CHARS: usize = 2000; // Total context block
 const MAX_DESCRIPTION_CHARS: usize = 16000; // Final description
+static SWARM_CONTEXT_PACK_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     if name == "mission_swarm_run" {
@@ -1139,9 +1141,13 @@ fn normalize_context_pack_path_for_worker(path: &str, missiond_root: Option<&Pat
 }
 
 fn default_swarm_context_pack_path(missiond_root: Option<&Path>) -> String {
+    let now = chrono::Utc::now();
+    let sequence = SWARM_CONTEXT_PACK_COUNTER.fetch_add(1, Ordering::Relaxed);
     let rel = format!(
-        ".missiond/v3/runtime/swarm/{}-context-pack.lisp",
-        chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
+        ".missiond/v3/runtime/swarm/{}-{:09}-{:06}-context-pack.lisp",
+        now.format("%Y%m%dT%H%M%SZ"),
+        now.timestamp_subsec_nanos(),
+        sequence
     );
     normalize_context_pack_path_for_worker(&rel, missiond_root)
 }
@@ -1694,6 +1700,19 @@ mod tests {
             "launchd cwd must never leak into context-pack paths: {path}"
         );
         assert!(path.ends_with("-context-pack.lisp"));
+    }
+
+    #[test]
+    fn default_swarm_context_pack_path_is_collision_resistant_for_fanout() {
+        let root = std::path::Path::new("/Users/jinchen/Projects/missiond");
+        let first = default_swarm_context_pack_path(Some(root));
+        let second = default_swarm_context_pack_path(Some(root));
+        assert_ne!(
+            first, second,
+            "multiple mission_swarm_run calls in the same second must not overwrite one context pack"
+        );
+        assert!(first.ends_with("-context-pack.lisp"));
+        assert!(second.ends_with("-context-pack.lisp"));
     }
 
     #[test]
