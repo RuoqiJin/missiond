@@ -171,8 +171,10 @@ function checkFiles(root) {
     'let me create',
     'let me capture',
     'i have enough context',
+    'now i have a complete picture',
     'now i have the full picture',
     'let me make the planned edits',
+    'let me share insights',
     'then update ssot',
     'declare the blocker via ssot',
     'writing the',
@@ -182,6 +184,7 @@ function checkFiles(root) {
     'provider_final_summary_rejects_intermediate_writing_narration',
     'provider_final_summary_rejects_intermediate_write_narration',
     'provider_final_summary_rejects_intermediate_investigation_narration',
+    'provider_final_summary_rejects_complete_picture_share_insights_progress',
     'provider_final_summary_rejects_full_clarity_explanation_progress',
     'provider_final_summary_rejects_full_picture_planned_edits_progress',
     'provider_final_summary_rejects_working_tree_clean_full_picture_edit_progress',
@@ -311,6 +314,7 @@ async fn x() { let ev = BoardEvent::TaskCreated { task_id, title, category }; no
     fn provider_final_summary_rejects_intermediate_writing_narration() {}
     fn provider_final_summary_rejects_intermediate_write_narration() {}
     fn provider_final_summary_rejects_intermediate_investigation_narration() {}
+    fn provider_final_summary_rejects_complete_picture_share_insights_progress() {}
     fn provider_final_summary_rejects_full_clarity_explanation_progress() {}
     fn provider_final_summary_rejects_full_picture_planned_edits_progress() {}
     fn provider_final_summary_rejects_working_tree_clean_full_picture_edit_progress() {}

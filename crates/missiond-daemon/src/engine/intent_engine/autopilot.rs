@@ -1106,6 +1106,7 @@ fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
         "acknowledged;",
         "i have enough context",
         "now i have all the context",
+        "now i have a complete picture",
         "now i have the full picture",
         "now i have full clarity",
         "now i'll ",
@@ -1126,6 +1127,7 @@ fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
         "let me make the planned edits",
         "now let me append",
         "now let me update",
+        "let me share insights",
         "then update ssot",
         "declare the blocker via ssot",
         "retrying once",
@@ -4417,6 +4419,39 @@ mod tests {
         assert!(
             is_probably_active_tui_summary(progress),
             "context-then-plan progress must not be treated as durable final"
+        );
+    }
+
+    /// V3 autopilot-runtime regression :: exact progress frame observed while
+    /// supervising auth child `2b8b04fe-d8ec-4a5e-a9d9-6707dbd4d724` and
+    /// wrapper `b1ba3cd8-fc14-400f-a4b7-6be7b92b9860`. Autopilot accepted
+    /// this "complete picture / share insights / start executing" narration
+    /// as durable final before the worker wrote SSOT/checker edits and commit
+    /// `1fb19fe`. Keep it non-final.
+    #[test]
+    fn provider_final_summary_rejects_complete_picture_share_insights_progress() {
+        let progress = "Now I have a complete picture. Let me share insights and start executing.";
+        let messages = vec![
+            test_conversation_message(
+                1,
+                "system",
+                "BoardTask task-123 prompt",
+                "2026-05-05T00:03:00Z",
+            ),
+            test_conversation_message(2, "assistant", progress, "2026-05-05T00:08:00Z"),
+        ];
+        assert_eq!(
+            latest_assistant_after_task_prompt(
+                &messages,
+                "task-123",
+                Some("2026-05-05T00:02:50Z")
+            ),
+            None,
+            "complete-picture/share-insights/start-executing progress frame must not be selected as durable final"
+        );
+        assert!(
+            is_probably_active_tui_summary(progress),
+            "complete-picture/share-insights/start-executing frame must classify as active progress"
         );
     }
 
