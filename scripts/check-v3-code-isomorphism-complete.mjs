@@ -107,6 +107,7 @@ export const PER_SURFACE_CHECKERS = [
   'scripts/check-v3-router-policy-isomorphism.mjs',
   'scripts/check-v3-incident-governance-isomorphism.mjs',
   'scripts/check-v3-capability-governance-isomorphism.mjs',
+  'scripts/check-v3-mechanic-boundary-isomorphism.mjs',
   'scripts/check-v3-compute-primitives-isomorphism.mjs',
   'scripts/check-v3-pty-recognition-isomorphism.mjs',
   'scripts/check-v3-sysinfra-control-isomorphism.mjs',

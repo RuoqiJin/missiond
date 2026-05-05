@@ -1193,7 +1193,7 @@
       :intent ".missiond/intent.lisp"
       :status project-ssot-owned
       :checks ["node scripts/check-mechanic-ssot.mjs"]
-      :missiond-role "registered devtool; compiler-as-judge auto-repair CLI"
+      :missiond-role "registered devtool; opt-in repair executor CLI, not a MissionD orchestrator or automatic runtime worker"
       :surface project-registry)
     (project :id xjpcode
       :kind rust-cli
@@ -1323,6 +1323,29 @@
       :checks ["bash .missiond/check.sh"]
       :missiond-role "registered app; cuthub.ai frontend (Next.js 16 + React 19 + Tailwind 4 + Konva); independent repo rickyjim626/cuthub-frontend"
       :surface project-registry))
+
+  (mechanic-collaboration-boundary
+    :schema "missiond.mechanic-collaboration-boundary.v1"
+    :status declared-not-runtime-enabled
+    :owner missiond
+    :executor jarvis-mechanic
+    :rule "MissionD owns workflows, Board, event bus, project registry, Universe, worker dispatch, checkpoints, and approval. Jarvis Mechanic is only an opt-in repair executor used after MissionD has produced an explicit repair shard."
+    :missiond-responsibilities [ssot-universe workflow-lisp boardtask-lifecycle eventbus resident-master-control swarm-dispatch approval checkpoint verification]
+    :mechanic-responsibilities [compiler-as-judge-repair narrow-code-transform dry-run-diagnostics patch-proposal repair-report]
+    :runtime-policy (:enabled false
+                     :default-mode disabled
+                     :allowed-entrypoints [approved-repair-shard dry-run-diagnostics]
+                     :forbidden-entrypoints [resident-master-control night-scheduler nightly-evolution-loop autonomous-orchestrator generic-worker-pool])
+    :handoff-contract (:entry [BoardTaskApproved repair-shard write_scope acceptance]
+                       :core ((step s1 :logic "MissionD creates an exact repair shard with project_id, files, allowed ranges, acceptance, and rollback policy.")
+                              (step s2 :logic "Mechanic runs compiler-as-judge repair only inside the approved write_scope or returns a no-change diagnostic.")
+                              (step s3 :logic "MissionD verifies diff, checker, tests, and commit/Lisp convergence before closing the parent BoardTask."))
+                       :egress [patch-proposal repair-report verification-result])
+    :safety ["Mechanic MUST NOT read Board/KB/provider logs as an architect unless MissionD passes a bounded context pack."
+             "Mechanic MUST NOT be called by nightly-evolution by default."
+             "Mechanic MUST NOT become a resident master or project orchestrator."
+             "Mechanic runtime enablement requires a future Lisp delta, checker update, and explicit operator approval."]
+    :checker "node scripts/check-v3-mechanic-boundary-isomorphism.mjs")
 
   (service-runtime-universe
     :schema "missiond.service-runtime-universe.v1"
@@ -3071,6 +3094,7 @@
              "node scripts/check-v3-cli-conversation-ingestion-isomorphism.mjs"
              "node scripts/check-v3-pty-recognition-isomorphism.mjs"
              "node scripts/check-v3-capability-governance-isomorphism.mjs"
+             "node scripts/check-v3-mechanic-boundary-isomorphism.mjs"
              "node scripts/check-v3-compute-primitives-isomorphism.mjs"
              "node scripts/check-v3-sysinfra-control-isomorphism.mjs"
              "node scripts/check-v3-router-policy-isomorphism.mjs"
