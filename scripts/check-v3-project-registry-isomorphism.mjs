@@ -126,7 +126,7 @@ function checkFiles(root, files) {
 	    'scripts/check-project-maturity.mjs --min-level M10',
 	    'It resolves the MissionD blueprint from the checker script directory',
 	    '(maturity :id missiond :current M10 :target M10',
-	    '(maturity :id auth :current M6 :target M10',
+	    '(maturity :id auth :current M9 :target M10',
 	    '(project-blueprint-registry',
 	    ':id jarvis-forge',
 	    ':backend ".missiond/backend/forge-backend-blueprint.lisp"',
@@ -353,7 +353,7 @@ function buildFixture() {
 	    :schema "missiond.project-maturity-registry.v1"
 	    :common-m6-to-v3-gap [runtime-projection event-bus commit-backfill worker-operational final-convergence]
 	    (maturity :id missiond :current M10 :target M10)
-	    (maturity :id auth :current M6 :target M10))
+	    (maturity :id auth :current M9 :target M10))
 	  (project-blueprint-registry
 	    (project :id jarvis-forge :root "/Users/jinchen/Projects/jarvis-forge" :backend ".missiond/backend/forge-backend-blueprint.lisp" :frontend ".missiond/frontend/forge-ui-blueprint.lisp")
 	    (project :id xiaojinpro-backend :root "/Users/jinchen/Projects/xiaojinpro-backend")
