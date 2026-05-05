@@ -111,6 +111,28 @@ print_timing_summary() {
   done
 }
 
+codesign_or_verify() {
+  local bin="$1"
+  if codesign --verify --verbose=2 "$bin" >/dev/null 2>&1; then
+    log "codesign: existing signature verified for $(basename "$bin")"
+    return 0
+  fi
+  local output
+  if output="$(codesign --force --sign - "$bin" 2>&1)"; then
+    echo "$output" | tail -5
+    return 0
+  fi
+  echo "$output" | tail -5 >&2
+  # Rust Mach-O binaries are usually already linker-signed. On some macOS
+  # versions, force-signing an already-valid binary can fail with an internal
+  # Code Signing subsystem error. A candidate that verifies remains deployable.
+  if codesign --verify --verbose=2 "$bin" >/dev/null 2>&1; then
+    log "codesign: force-sign failed but verified linker signature for $(basename "$bin")"
+    return 0
+  fi
+  return 1
+}
+
 resolve_link_target() {
   local link="$1"
   local target
@@ -352,8 +374,8 @@ record_timing "release-copy" "$RELEASE_START"
 
 if command -v codesign >/dev/null 2>&1; then
   CODESIGN_START="$(date +%s)"
-  codesign --force --sign - "$CANDIDATE_DIR/bin/missiond" 2>&1 | tail -5
-  codesign --force --sign - "$CANDIDATE_DIR/bin/mission-mcp" 2>&1 | tail -5
+  codesign_or_verify "$CANDIDATE_DIR/bin/missiond"
+  codesign_or_verify "$CANDIDATE_DIR/bin/mission-mcp"
   record_timing "codesign" "$CODESIGN_START"
 fi
 xattr -d com.apple.quarantine "$CANDIDATE_DIR/bin/missiond" 2>/dev/null || true
