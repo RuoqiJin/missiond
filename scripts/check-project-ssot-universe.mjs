@@ -47,6 +47,29 @@ const PROJECTS = [
   { id: 'cuthub', root: '/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/cuthub-frontend', checker: ['bash', ['.missiond/check.sh']] },
 ];
 
+const MATURITY = {
+  missiond: { current: 'M10', target: 'M10', gap: [] },
+  board: { current: 'M10', target: 'M10', gap: [] },
+  jarvis: { current: 'M6', target: 'M10', gap: ['runtime-projection', 'event-bus', 'commit-backfill', 'worker-operational', 'final-convergence'] },
+  'jarvis-forge': { current: 'M6', target: 'M10', gap: ['runtime-projection', 'event-bus', 'commit-backfill', 'worker-operational', 'final-convergence'] },
+  'jarvis-mechanic': { current: 'M6', target: 'M10', gap: ['runtime-projection', 'event-bus', 'commit-backfill', 'worker-operational', 'final-convergence'] },
+  xjpcode: { current: 'M6', target: 'M10', gap: ['runtime-projection', 'event-bus', 'commit-backfill', 'worker-operational', 'final-convergence'] },
+  'neural-codegen': { current: 'M6', target: 'M10', gap: ['runtime-projection', 'event-bus', 'commit-backfill', 'worker-operational', 'final-convergence'] },
+  'semantic-terminal': { current: 'M6', target: 'M10', gap: ['runtime-projection', 'event-bus', 'commit-backfill', 'worker-operational', 'final-convergence'] },
+  'xiaojinpro-backend': { current: 'M6', target: 'M10', gap: ['runtime-projection', 'event-bus', 'commit-backfill', 'worker-operational', 'final-convergence'] },
+  'deploy-center': { current: 'M6', target: 'M10', gap: ['runtime-projection', 'event-bus', 'commit-backfill', 'worker-operational', 'final-convergence'] },
+  'deploy-agent': { current: 'M6', target: 'M10', gap: ['runtime-projection', 'event-bus', 'commit-backfill', 'worker-operational', 'final-convergence'] },
+  auth: { current: 'M6', target: 'M10', gap: ['runtime-projection', 'event-bus', 'commit-backfill', 'worker-operational', 'final-convergence'] },
+  router: { current: 'M6', target: 'M10', gap: ['runtime-projection', 'event-bus', 'commit-backfill', 'worker-operational', 'final-convergence'] },
+  payments: { current: 'M6', target: 'M10', gap: ['runtime-projection', 'event-bus', 'commit-backfill', 'worker-operational', 'final-convergence'] },
+  asr: { current: 'M6', target: 'M10', gap: ['runtime-projection', 'event-bus', 'commit-backfill', 'worker-operational', 'final-convergence'] },
+  timeline: { current: 'M6', target: 'M10', gap: ['runtime-projection', 'event-bus', 'commit-backfill', 'worker-operational', 'final-convergence'] },
+  pcea: { current: 'M6', target: 'M10', gap: ['runtime-projection', 'event-bus', 'commit-backfill', 'worker-operational', 'final-convergence'] },
+  'secret-store': { current: 'M6', target: 'M10', gap: ['runtime-projection', 'event-bus', 'commit-backfill', 'worker-operational', 'final-convergence'] },
+  'xiaojin-blog': { current: 'M6', target: 'M10', gap: ['runtime-projection', 'event-bus', 'commit-backfill', 'worker-operational', 'final-convergence'] },
+  cuthub: { current: 'M6', target: 'M10', gap: ['runtime-projection', 'event-bus', 'commit-backfill', 'worker-operational', 'final-convergence'] },
+};
+
 function main() {
   const args = process.argv.slice(2);
   const json = args.includes('--json');
@@ -62,6 +85,20 @@ function main() {
   const diagnostics = [];
   const blueprint = readBlueprintWithEvidenceSidecars(process.cwd(), '.missiond/v3/missiond-blueprint.lisp');
   requireAll(diagnostics, '.missiond/v3/missiond-blueprint.lisp', blueprint, [
+    '(project-maturity-model',
+    ':schema "missiond.project-maturity-model.v1"',
+    ':v3-alias M10',
+    '(level M6 :name ssot-closure',
+    '(level M7 :name runtime-projected',
+    '(level M8 :name event-driven',
+    '(level M9 :name worker-operational',
+    '(level M10 :name v3-runtime-ssot',
+    '(project-maturity-registry',
+    ':schema "missiond.project-maturity-registry.v1"',
+    ':default-target M10',
+    ':common-m6-to-v3-gap [runtime-projection event-bus commit-backfill worker-operational final-convergence]',
+    '(maturity :id missiond :current M10 :target M10 :gap [])',
+    '(maturity :id auth :current M6 :target M10',
     '(project-blueprint-registry',
     ':id jarvis-forge',
     ':id jarvis',
@@ -107,6 +144,7 @@ function main() {
     ':default-mode read-only-inventory',
     'explicit Board approval',
   ]);
+  checkMaturityRegistry(diagnostics, blueprint);
 
   requireExistingText(diagnostics, '/Users/jinchen/Projects/xiaojinpro-backend/services/auth/.missiond/intent.lisp', [
     ':public-base-url "https://auth.xiaojinpro.com"',
@@ -164,9 +202,15 @@ function main() {
     }
   }
 
-  const result = { ok: diagnostics.length === 0, projects: PROJECTS.map((p) => p.id), checkerResults, diagnostics };
+  const result = {
+    ok: diagnostics.length === 0,
+    projects: PROJECTS.map((p) => p.id),
+    maturity: MATURITY,
+    checkerResults,
+    diagnostics,
+  };
   if (json) {
-    console.log(JSON.stringify(result, null, 2));
+    fs.writeSync(1, `${JSON.stringify(result, null, 2)}\n`);
   } else if (result.ok) {
     console.log(`project SSOT universe check OK (${PROJECTS.length} projects/services)`);
   } else {
@@ -174,6 +218,31 @@ function main() {
     console.error(`project SSOT universe check FAILED -- ${diagnostics.length} diagnostic(s)`);
   }
   process.exit(result.ok ? 0 : 1);
+}
+
+function checkMaturityRegistry(diagnostics, blueprint) {
+  const expectedIds = ['missiond', 'board', ...PROJECTS.map((p) => p.id)];
+  for (const id of expectedIds) {
+    const entry = MATURITY[id];
+    if (!entry) {
+      diagnostics.push({ file: 'scripts/check-project-ssot-universe.mjs', message: `missing checker maturity entry for ${id}` });
+      continue;
+    }
+    if (!blueprint.includes(`(maturity :id ${id} :current ${entry.current} :target ${entry.target}`)) {
+      diagnostics.push({ file: '.missiond/v3/missiond-blueprint.lisp', message: `missing maturity registry entry for ${id}` });
+    }
+    if (maturityValue(entry.current) < 6) {
+      diagnostics.push({ file: '.missiond/v3/missiond-blueprint.lisp', message: `${id} is below M6 in registered universe maturity` });
+    }
+    if (entry.current !== 'M10' && entry.gap.length === 0) {
+      diagnostics.push({ file: '.missiond/v3/missiond-blueprint.lisp', message: `${id} is not M10 but has no M6->V3 gap` });
+    }
+  }
+}
+
+function maturityValue(level) {
+  const match = /^M(\d+)$/.exec(level);
+  return match ? Number(match[1]) : -1;
 }
 
 function requireAll(diagnostics, file, source, needles) {

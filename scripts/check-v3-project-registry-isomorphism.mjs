@@ -107,8 +107,21 @@ function checkFiles(root, files) {
     'scripts/check-v3-project-registry-isomorphism.mjs',
     'project.rs is the thin mission_project facade',
     'ProjectRegistryRuntimeConfig loads V3 project-registry-policy',
-    'ProjectRegistry::resolve owns longest-prefix project lookup',
+	    'ProjectRegistry::resolve owns longest-prefix project lookup',
 	    'resolve_target_project_root owns project-root spawn cwd policy',
+	    '(project-maturity-model',
+	    ':schema "missiond.project-maturity-model.v1"',
+	    ':v3-alias M10',
+	    '(level M6 :name ssot-closure',
+	    '(level M7 :name runtime-projected',
+	    '(level M8 :name event-driven',
+	    '(level M9 :name worker-operational',
+	    '(level M10 :name v3-runtime-ssot',
+	    '(project-maturity-registry',
+	    ':schema "missiond.project-maturity-registry.v1"',
+	    ':common-m6-to-v3-gap [runtime-projection event-bus commit-backfill worker-operational final-convergence]',
+	    '(maturity :id missiond :current M10 :target M10',
+	    '(maturity :id auth :current M6 :target M10',
 	    '(project-blueprint-registry',
 	    ':id jarvis-forge',
 	    ':backend ".missiond/backend/forge-backend-blueprint.lisp"',
@@ -314,6 +327,19 @@ function buildFixture() {
 	  (project-registry-policy
 	    :intent-path-candidates [".missiond/intent.lisp" ".jarvis/intent.lisp" "intent.lisp"]
 	    :default-universe-manifest "/Users/jinchen/Projects/universe.intent.lisp")
+	  (project-maturity-model
+	    :schema "missiond.project-maturity-model.v1"
+	    :v3-alias M10
+	    :levels ((level M6 :name ssot-closure)
+	             (level M7 :name runtime-projected)
+	             (level M8 :name event-driven)
+	             (level M9 :name worker-operational)
+	             (level M10 :name v3-runtime-ssot)))
+	  (project-maturity-registry
+	    :schema "missiond.project-maturity-registry.v1"
+	    :common-m6-to-v3-gap [runtime-projection event-bus commit-backfill worker-operational final-convergence]
+	    (maturity :id missiond :current M10 :target M10)
+	    (maturity :id auth :current M6 :target M10))
 	  (project-blueprint-registry
 	    (project :id jarvis-forge :root "/Users/jinchen/Projects/jarvis-forge" :backend ".missiond/backend/forge-backend-blueprint.lisp" :frontend ".missiond/frontend/forge-ui-blueprint.lisp")
 	    (project :id xiaojinpro-backend :root "/Users/jinchen/Projects/xiaojinpro-backend")
@@ -328,7 +354,7 @@ function buildFixture() {
 	    (project :id xjp-deploy-center :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/deploy-center" :capability deploy-ops))
     (service-runtime-universe
       :schema "missiond.service-runtime-universe.v1"
-      (service :id auth :public-base-url "https://auth.xiaojinpro.com" :dns-provider cloudflare :deployment (:substrate kubernetes :namespace production :deployment "xjp-auth-center"))
+      (service :id auth :public-base-url "https://auth.xiaojinpro.com" :dns-provider cloudflare :deployment (:substrate kubernetes :namespace production :deployment "xjp-auth-center") :event-ingest (:endpoint "/webhooks/auth-event" :domain system :event ExternalServiceEvent :source auth-audit-events))
       ;; mission_project(action=universe)
       )
 	  (implementation-map

@@ -1101,6 +1101,52 @@
        "mission_project import_universe MUST project its default manifest from project-registry-policy; UNIVERSE_MANIFEST is only an explicit override."
        "A real MissionD project with .missiond but no project-registry-policy MUST return V3_BLUEPRINT_CONFIG_ERROR rather than silently using embedded defaults."])
 
+  (project-maturity-model
+    :schema "missiond.project-maturity-model.v1"
+    :rule "M6 is checker-owned current-code SSOT closure; V3 parity is M10. The M6->V3 gap MUST be explicit as M7 runtime projection, M8 event-driven integration, M9 worker operation, and M10 full runtime SSOT."
+    :v3-alias M10
+    :levels
+      ((level M0 :name unknown :requires [])
+       (level M1 :name registered :requires [project-id root intent-path])
+       (level M2 :name l1-index :requires [compact-intent project-identity invariants])
+       (level M3 :name blueprint-seeded :requires [backend/frontend-blueprint pillar/function])
+       (level M4 :name surface-mapped :requires [entry core egress surface code-files])
+       (level M5 :name checker-owned :requires [schema-checker code-isomorphism-checker local-aggregate])
+       (level M6 :name ssot-closure :requires [M5 manifest evidence current-code-mapping drift-policy universe-registration] :meaning "MissionD can manage the project as an SSOT-owned project, but runtime may still duplicate facts outside Lisp.")
+       (level M7 :name runtime-projected :requires [M6 runtime-config-from-lisp deployment-domain-health-constants no-hardcoded-runtime-duplicates])
+       (level M8 :name event-driven :requires [M7 project-events-to-missiond-event-bus commit-lisp-convergence-backfill durable-provider-evidence])
+       (level M9 :name worker-operational :requires [M8 context-pack-shards mission_swarm_run scoped-write-guards durable-completion-evidence])
+       (level M10 :name v3-runtime-ssot :requires [M9 final-convergence-gate resident-master-integration decision-inbox ui-runtime-projection restart/reload-policy] :meaning "MissionD V3 parity: Lisp drives runtime, workers, events, UI, decisions, deploy/recovery, and final convergence."))
+    :invariants
+      ["project SSOT reports MUST distinguish M6 closure from M10/V3 parity."
+       "Universe status MUST expose current and target maturity for each registered project."
+       "A project marked M6 but not M10 MUST list concrete M7/M8/M9/M10 gaps instead of claiming full V3 parity."])
+
+  (project-maturity-registry
+    :schema "missiond.project-maturity-registry.v1"
+    :default-target M10
+    :common-m6-to-v3-gap [runtime-projection event-bus commit-backfill worker-operational final-convergence]
+    (maturity :id missiond :current M10 :target M10 :gap [])
+    (maturity :id board :current M10 :target M10 :gap [])
+    (maturity :id jarvis :current M6 :target M10 :gap [runtime-projection event-bus commit-backfill worker-operational final-convergence])
+    (maturity :id jarvis-forge :current M6 :target M10 :gap [runtime-projection event-bus commit-backfill worker-operational final-convergence])
+    (maturity :id jarvis-mechanic :current M6 :target M10 :gap [runtime-projection event-bus commit-backfill worker-operational final-convergence])
+    (maturity :id xjpcode :current M6 :target M10 :gap [runtime-projection event-bus commit-backfill worker-operational final-convergence])
+    (maturity :id neural-codegen :current M6 :target M10 :gap [runtime-projection event-bus commit-backfill worker-operational final-convergence])
+    (maturity :id semantic-terminal :current M6 :target M10 :gap [runtime-projection event-bus commit-backfill worker-operational final-convergence])
+    (maturity :id xiaojinpro-backend :current M6 :target M10 :gap [runtime-projection event-bus commit-backfill worker-operational final-convergence])
+    (maturity :id deploy-center :current M6 :target M10 :gap [runtime-projection event-bus commit-backfill worker-operational final-convergence])
+    (maturity :id deploy-agent :current M6 :target M10 :gap [runtime-projection event-bus commit-backfill worker-operational final-convergence])
+    (maturity :id auth :current M6 :target M10 :gap [runtime-projection event-bus commit-backfill worker-operational final-convergence])
+    (maturity :id router :current M6 :target M10 :gap [runtime-projection event-bus commit-backfill worker-operational final-convergence])
+    (maturity :id payments :current M6 :target M10 :gap [runtime-projection event-bus commit-backfill worker-operational final-convergence])
+    (maturity :id asr :current M6 :target M10 :gap [runtime-projection event-bus commit-backfill worker-operational final-convergence])
+    (maturity :id timeline :current M6 :target M10 :gap [runtime-projection event-bus commit-backfill worker-operational final-convergence])
+    (maturity :id pcea :current M6 :target M10 :gap [runtime-projection event-bus commit-backfill worker-operational final-convergence])
+    (maturity :id secret-store :current M6 :target M10 :gap [runtime-projection event-bus commit-backfill worker-operational final-convergence])
+    (maturity :id xiaojin-blog :current M6 :target M10 :gap [runtime-projection event-bus commit-backfill worker-operational final-convergence])
+    (maturity :id cuthub :current M6 :target M10 :gap [runtime-projection event-bus commit-backfill worker-operational final-convergence]))
+
   (project-blueprint-registry
     :schema "missiond.project-blueprint-registry.v1"
     :rule "Project-local app blueprints are independent SSOT files registered from V3; backend V3 stays compact and aggregate checkers follow the registry pointer."
