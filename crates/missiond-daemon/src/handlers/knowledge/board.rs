@@ -52,7 +52,7 @@ fn copy_alias(map: &mut Map<String, Value>, canonical: &str, aliases: &[&str]) {
         return;
     }
     for alias in aliases {
-        if let Some(value) = map.get(*alias).cloned() {
+        if let Some(value) = map.remove(*alias) {
             map.insert(canonical.to_string(), value);
             return;
         }
@@ -112,6 +112,8 @@ mod tests {
         assert_eq!(normalized["autoExecute"], true);
         assert_eq!(normalized["timeoutSecs"], 600);
         assert_eq!(normalized["contextIntent"], "code");
+        assert!(normalized.get("task_id").is_none());
+        assert!(normalized.get("note_type").is_none());
     }
 }
 
