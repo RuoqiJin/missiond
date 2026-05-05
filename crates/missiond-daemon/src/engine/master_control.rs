@@ -1293,11 +1293,10 @@ async fn classify_master_decision_state(
     let summary = snapshot.last_event_summary.as_deref().unwrap_or("");
     let event_task_id = extract_task_id(summary);
     let terminal_status_event = is_terminal_board_status_event(summary);
-    let active_objective_id = if terminal_status_event
-        && event_task_id.as_deref() == snapshot.active_objective_id.as_deref()
-    {
-        None
-    } else if terminal_status_event && snapshot.active_objective_id.is_none() {
+    let terminal_active_objective_event = terminal_status_event
+        && (event_task_id.as_deref() == snapshot.active_objective_id.as_deref()
+            || snapshot.active_objective_id.is_none());
+    let active_objective_id = if terminal_active_objective_event {
         None
     } else {
         snapshot.active_objective_id.clone().or_else(|| {
@@ -1308,7 +1307,9 @@ async fn classify_master_decision_state(
             }
         })
     };
-    let phase = if reason == "daemon-startup" || reason == "periodic-heartbeat" {
+    let phase = if terminal_active_objective_event {
+        "observe_event"
+    } else if reason == "daemon-startup" || reason == "periodic-heartbeat" {
         "observe_event"
     } else if summary.contains("QuestionEvent.") {
         "blocked"
@@ -2175,12 +2176,14 @@ mod tests {
             Some("BoardEvent.status_changed: task_id=parent-objective Running->Done".to_string());
         let decision = classify_master_decision_state("event-wakeup", &snapshot, root).await;
         assert_eq!(decision.active_objective_id, None);
+        assert_eq!(decision.phase, "observe_event");
 
         snapshot.active_objective_id = Some("parent-objective".to_string());
         snapshot.last_event_summary =
             Some("BoardEvent.status_changed: task_id=parent-objective Running->done".to_string());
         let decision = classify_master_decision_state("event-wakeup", &snapshot, root).await;
         assert_eq!(decision.active_objective_id, None);
+        assert_eq!(decision.phase, "observe_event");
         assert!(should_consume_event_without_control(
             "event-wakeup",
             &snapshot,
@@ -2192,6 +2195,7 @@ mod tests {
             Some("BoardEvent.status_changed: task_id=parent-objective Done->terminal".to_string());
         let decision = classify_master_decision_state("periodic-heartbeat", &snapshot, root).await;
         assert_eq!(decision.active_objective_id, None);
+        assert_eq!(decision.phase, "observe_event");
         assert_eq!(decision.context_pack_path, None);
 
         snapshot.active_objective_id = None;
