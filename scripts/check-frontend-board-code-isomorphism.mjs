@@ -17,7 +17,7 @@ const CHECK_COMMAND = 'node scripts/check-frontend-board-code-isomorphism.mjs';
 
 const REQUIRED_SURFACES = new Map([
   ['app-shell', ['packages/board/src/App.tsx', 'packages/board/src/generated/board-frontend-config.ts', 'packages/board/src/app/page.tsx', 'scripts/project-frontend-board-config.mjs']],
-  ['missiond-proxy', ['packages/board/src/lib/missiond.ts', 'packages/board/src/app/api/tasks/route.ts', 'packages/board/src/app/api/slots/route.ts']],
+  ['missiond-proxy', ['packages/board/src/lib/missiond.ts', 'packages/board/src/app/api/tasks/route.ts', 'packages/board/src/app/api/slots/route.ts', 'packages/board/src/app/api/master/status/route.ts']],
   ['board-task-ui', ['packages/board/src/types.ts', 'packages/board/src/api.ts', 'packages/board/src/store.ts', 'packages/board/src/constants.ts', 'packages/board/src/generated/board-frontend-config.ts', 'packages/board/src/components/TaskDialog.tsx']],
   ['workstation-terminal-ui', ['packages/board/src/components/Terminal.tsx', 'packages/board/src/components/ExecDashboard.tsx', 'packages/board/src/components/AutopilotMonitor.tsx', 'packages/board/src/app/api/pty/status/route.ts']],
   ['event-stream-ui', ['packages/board/src/eventStream.ts', 'packages/board/src/generated/board-frontend-config.ts', 'packages/board/src/hooks/useEventStream.ts']],
@@ -46,6 +46,7 @@ const REQUIRED_MAJOR_FILES = [
   'packages/board/src/components/timeline/constants.tsx',
   'packages/board/src/components/timeline/helpers.ts',
   'packages/board/src/app/api/slots/route.ts',
+  'packages/board/src/app/api/master/status/route.ts',
   'packages/board/src/app/api/tasks/route.ts',
   'scripts/project-frontend-board-config.mjs',
 ];

@@ -59,6 +59,11 @@
               "packages/board/src/store.ts"
               "packages/board/src/app/api/tasks/route.ts"]
       :fields [status priority category assignee autoExecute promptTemplate flowTemplate dependsOn leaseExpiresAt notes])
+    (projection next-api-runtime-boundary
+      :source [nextjs-route-handler missiond-ipc]
+      :entry ["packages/board/src/app/api/master/status/route.ts"]
+      :fields [runtime dynamic revalidate]
+      :rule "Runtime-only MissionD proxy API routes must export nodejs runtime, force-dynamic, and revalidate=0 so production builds never collect MissionD IPC data at build time.")
     (projection service-runtime-universe
       :source [mission_project.universe service-runtime-universe]
       :entry ["packages/board/src/app/api/projects/route.ts"
@@ -247,7 +252,8 @@
         :core ((step s1 :logic "resolve the MissionD IPC socket from env or default paths")
                (step s2 :logic "forward tool calls as JSON-RPC tools/call with a bounded timeout")
                (step s3 :logic "parse tool text payloads as JSON for browser routes")
-               (step s4 :logic "return typed route responses or explicit 502 errors"))
+               (step s4 :logic "return typed route responses or explicit 502 errors")
+               (step s5 :logic "mark runtime-only MissionD IPC routes as Next.js force-dynamic nodejs routes so build-time page-data collection never calls the daemon"))
         :egress [json-response route-error missiond-tool-result]))
 
     (pillar board-task-ui
@@ -335,6 +341,7 @@
       :code ["packages/board/src/lib/missiond.ts"
              "packages/board/src/app/api/tasks/route.ts"
              "packages/board/src/app/api/slots/route.ts"
+             "packages/board/src/app/api/master/status/route.ts"
              "packages/board/src/app/api/pty/status/route.ts"
              "packages/board/src/app/api/pty/spawn/route.ts"
              "packages/board/src/app/api/pty/kill/route.ts"

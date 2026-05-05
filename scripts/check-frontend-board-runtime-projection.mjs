@@ -16,6 +16,7 @@ const FILES = {
   store: 'packages/board/src/store.ts',
   tasksRoute: 'packages/board/src/app/api/tasks/route.ts',
   slotsRoute: 'packages/board/src/app/api/slots/route.ts',
+  masterStatusRoute: 'packages/board/src/app/api/master/status/route.ts',
   taskDialog: 'packages/board/src/components/TaskDialog.tsx',
   terminal: 'packages/board/src/components/Terminal.tsx',
   systemDashboard: 'packages/board/src/components/SystemDashboard.tsx',
@@ -91,6 +92,8 @@ function checkRepo(repo) {
     ':checker "node scripts/project-frontend-board-config.mjs --check"',
     ':output "packages/board/src/generated/board-frontend-config.ts"',
     '(board-task-api-contract',
+    '(projection next-api-runtime-boundary',
+    'Runtime-only MissionD proxy API routes must export nodejs runtime, force-dynamic, and revalidate=0',
     '(projection service-runtime-universe',
     ':source [mission_project.universe service-runtime-universe]',
     'SystemDashboard must show production service domain/deployment/DNS capability',
@@ -196,6 +199,13 @@ function checkRepo(repo) {
     'confidence',
   ]);
 
+  requireText(diagnostics, FILES.masterStatusRoute, src.masterStatusRoute, [
+    "export const runtime = 'nodejs'",
+    "export const dynamic = 'force-dynamic'",
+    'export const revalidate = 0',
+    "callTool('mission_master_status')",
+  ]);
+
   requireText(diagnostics, 'packages/board/src/components/SystemDashboard.tsx', src.systemDashboard ?? fs.readFileSync(path.join(repo, 'packages/board/src/components/SystemDashboard.tsx'), 'utf8'), [
     'DecisionDashboard',
     'runtimeServices',
@@ -296,6 +306,7 @@ function buildFixture() {
   fs.writeFileSync(path.join(root, FILES.store), 'BOARD_TASK_DEFAULTS; BOARD_TASK_DEFAULTS.status; BOARD_TASK_DEFAULTS.priority; BOARD_TASK_DEFAULTS.category;\n');
   fs.writeFileSync(path.join(root, FILES.tasksRoute), "BOARD_TASK_FIELD_MAP; mapToFrontend; mapToBackend; callTool('mission_board_create'); callTool('mission_board_update');\n");
   fs.writeFileSync(path.join(root, FILES.slotsRoute), "callTool('mission_slots'); callTool('mission_pty_status'); provider; engine; modelProfile; latestConversation; acceptsBoardTask; confidence;\n");
+  fs.writeFileSync(path.join(root, FILES.masterStatusRoute), "export const runtime = 'nodejs'; export const dynamic = 'force-dynamic'; export const revalidate = 0; callTool('mission_master_status');\n");
   fs.writeFileSync(path.join(root, FILES.taskDialog), "import type { SlotDef } from '../types'; fetch('/api/slots'); availableSlots; setAvailableSlots;\n");
   fs.writeFileSync(path.join(root, FILES.terminal), 'providerLabel; Starting session; No active session;\n');
   fs.writeFileSync(path.join(root, FILES.app), "import type { SlotDef } from './types'; BOARD_TABS; DEFAULT_TAB; TAB_MIGRATION; fetchSlots; /api/slots; slotStateLabel; overflow-x-auto overflow-y-hidden whitespace-nowrap; min-w-[160px] max-w-[280px]; truncate;\n");
