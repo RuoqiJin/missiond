@@ -549,7 +549,24 @@ impl MasterControlService {
                 *self.runtime.resume_instruction.write().await = resume_instruction;
                 *self.runtime.last_event_summary.write().await = Some(event_summary);
             }
-            Ok(Some(_)) | Ok(None) => {}
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                let resume_instruction = format!(
+                    "active objective {} no longer exists; observe next durable event",
+                    active_id
+                );
+                let event_summary = format!("BoardEvent.deleted: task_id={} -> missing", active_id);
+                snapshot.active_objective_id = None;
+                snapshot.phase = "observe_event".to_string();
+                snapshot.context_pack_path = None;
+                snapshot.resume_instruction = resume_instruction.clone();
+                snapshot.last_event_summary = Some(event_summary.clone());
+                *self.runtime.active_objective_id.write().await = None;
+                *self.runtime.phase.write().await = "observe_event".to_string();
+                *self.runtime.context_pack_path.write().await = None;
+                *self.runtime.resume_instruction.write().await = resume_instruction;
+                *self.runtime.last_event_summary.write().await = Some(event_summary);
+            }
             Err(err) => {
                 warn!(
                     task_id = %active_id,
@@ -1283,10 +1300,13 @@ async fn classify_master_decision_state(
     } else if terminal_status_event && snapshot.active_objective_id.is_none() {
         None
     } else {
-        snapshot
-            .active_objective_id
-            .clone()
-            .or_else(|| event_task_id.clone())
+        snapshot.active_objective_id.clone().or_else(|| {
+            if event_summary_can_start_objective(summary) {
+                event_task_id.clone()
+            } else {
+                None
+            }
+        })
     };
     let phase = if reason == "daemon-startup" || reason == "periodic-heartbeat" {
         "observe_event"
@@ -1691,10 +1711,15 @@ pub(crate) fn board_event_preview(event: &BoardEvent) -> String {
 
 fn should_wake_for_board_event(event: &BoardEvent, direct_notify: bool) -> bool {
     match event {
-        BoardEvent::TaskCreated { title, .. } => !is_swarm_worker_task_title(title),
+        BoardEvent::TaskCreated {
+            title, category, ..
+        } => !is_test_board_category(category) && !is_swarm_worker_task_title(title),
         BoardEvent::Updated {
             status, category, ..
         } => {
+            if is_test_board_category(category) {
+                return false;
+            }
             let normalized = status.trim().to_ascii_lowercase();
             is_terminal_worker_status(&normalized)
                 || !(category == "dev" && normalized == "running")
@@ -1709,11 +1734,22 @@ fn should_wake_for_board_event(event: &BoardEvent, direct_notify: bool) -> bool 
     }
 }
 
+fn event_summary_can_start_objective(summary: &str) -> bool {
+    summary.contains("BoardEvent.task_created:")
+        && !summary.contains(" category=test ")
+        && !summary.contains(" title=[smoke]")
+}
+
 fn is_terminal_worker_status(status: &str) -> bool {
     matches!(
         status,
         "done" | "completed" | "closed" | "failed" | "blocked"
     )
+}
+
+fn is_test_board_category(category: &str) -> bool {
+    let category = category.trim().to_ascii_lowercase();
+    matches!(category.as_str(), "test" | "smoke")
 }
 
 fn is_swarm_worker_task_title(title: &str) -> bool {
@@ -2161,6 +2197,66 @@ mod tests {
         snapshot.active_objective_id = None;
         let decision = classify_master_decision_state("daemon-startup", &snapshot, root).await;
         assert_eq!(decision.active_objective_id, None);
+    }
+
+    #[tokio::test]
+    async fn note_events_do_not_create_master_objectives() {
+        let root = Path::new("/repo");
+        let snapshot = MasterControlRuntimeSnapshot {
+            queued_events: 1,
+            processed_ticks: 1,
+            last_event_seq: 88,
+            last_checkpoint_at_epoch: 0,
+            drift_backfill_tasks_created: 0,
+            control_turns_sent: 0,
+            last_control_turn_at_epoch: 0,
+            last_control_objective_id: None,
+            last_event_cursor: Some("BoardEvent:88".to_string()),
+            last_event_summary: Some(
+                "BoardEvent.note_added: task_id=smoke-task note_id=n preview=done".to_string(),
+            ),
+            last_tick_id: None,
+            blocked_reason: None,
+            last_mcp_ready: Some(true),
+            last_control_turn_error: None,
+            last_drift_backfill_task_id: None,
+            active_objective_id: None,
+            phase: "observe_event".to_string(),
+            context_pack_path: None,
+            delegated_task_ids: Vec::new(),
+            last_verified_commit: None,
+            resume_instruction: "resume".to_string(),
+        };
+
+        let decision = classify_master_decision_state("event-wakeup", &snapshot, root).await;
+        assert_eq!(decision.active_objective_id, None);
+        assert_eq!(decision.context_pack_path, None);
+    }
+
+    #[test]
+    fn test_and_smoke_board_events_do_not_wake_master() {
+        assert!(!should_wake_for_board_event(
+            &BoardEvent::TaskCreated {
+                task_id: "t".to_string(),
+                title: "[smoke] board alias + large note receipt".to_string(),
+                category: "test".to_string(),
+            },
+            true,
+        ));
+        assert!(!should_wake_for_board_event(
+            &BoardEvent::Updated {
+                task_id: "t".to_string(),
+                status: "running".to_string(),
+                category: "smoke".to_string(),
+            },
+            true,
+        ));
+        assert!(event_summary_can_start_objective(
+            "BoardEvent.task_created: task_id=real category=dev title=Run M6 SSOT convergence"
+        ));
+        assert!(!event_summary_can_start_objective(
+            "BoardEvent.task_created: task_id=smoke category=test title=[smoke] large note debug"
+        ));
     }
 
     #[test]
