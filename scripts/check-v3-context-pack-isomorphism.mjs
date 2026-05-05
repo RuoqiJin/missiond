@@ -253,6 +253,8 @@ function checkFiles(root, files) {
     'SWARM_CONTEXT_PACK_COUNTER',
     'timestamp_subsec_nanos',
     'fetch_add',
+    'auto_provision_slots',
+    '"provisioned_slots": provisioned_slots',
     'tokio::fs::create_dir_all',
     'tokio::fs::write',
   ]);

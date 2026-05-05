@@ -185,6 +185,8 @@ function checkFiles(root) {
     'SessionState::Exited',
     'SessionState::Error',
     'Autopilot: selected V3 workstation-pool slot',
+    'ensure_autopilot_pty(state, &task, &slot_id, task_env).await',
+    'state.store.unclaim_board_task(task.id.as_str()).await',
   ]);
 
   requireAll(diagnostics, FILES.computeSlot, sources.computeSlot, [
@@ -199,6 +201,7 @@ function checkFiles(root) {
     '"dispatchable":',
     '"legacy":',
     '"v3_authoritative"',
+    's.config.id.starts_with("slot-dyn-")',
     'state\n            .pty\n            .get_status(&s.config.id)',
   ]);
   forbidAll(diagnostics, FILES.computeSlot, sources.computeSlot, [

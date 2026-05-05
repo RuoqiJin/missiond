@@ -32,8 +32,9 @@ pub(crate) const DEFAULT_SLOT_EXTEND_SECS: i64 = 3600;
 pub(crate) const MAX_SLOT_EXTEND_SECS: i64 = 3600;
 pub(crate) const DEFAULT_SLOT_DEFAULT_CWD: &str = "/Users/jinchen/Projects";
 pub(crate) const DEFAULT_SLOT_MCP_CONFIG: &str = "/Users/jinchen/.xjp-mission/xjp-mcp-config.json";
-pub(crate) const DEFAULT_ALLOWED_CWD_PREFIXES: [&str; 3] = [
+pub(crate) const DEFAULT_ALLOWED_CWD_PREFIXES: [&str; 4] = [
     "/Users/jinchen/Projects",
+    "/Users/jinchen/Downloads",
     "/Users/jinchen/Documents",
     "/tmp",
 ];
@@ -2746,7 +2747,7 @@ mod tests {
     (slot-template researcher :role coder :description "Dynamic researcher slot (read-only analysis)" :default-model-profile coding-default-opus-4-7 :mcp-config "/Users/jinchen/.xjp-mission/xjp-mcp-config.json" :default-cwd "/Users/jinchen/Projects")
     (slot-template ops :role operator :description "Dynamic ops slot (ephemeral)" :default-model-profile daily-sonnet :mcp-config "/Users/jinchen/.xjp-mission/xjp-mcp-config.json" :default-cwd "/Users/jinchen/Projects")
     (cwd-policy dynamic-slot
-      :allowed-prefixes ["/Users/jinchen/Projects" "/Users/jinchen/Documents" "/tmp"])
+      :allowed-prefixes ["/Users/jinchen/Projects" "/Users/jinchen/Downloads" "/Users/jinchen/Documents" "/tmp"])
     (startup-slot arch_maintenance :engine claude-code :lifecycle persistent :slot_id "slot-arch-maint" :role arch-maint :model_profile coding-default-opus-4-7 :timeout_secs 600 :skip_permissions true)
     (startup-slot strategy_analyst :engine gemini :lifecycle persistent :slot_id "slot-gemini-strategy" :role strategy :model_profile nil :timeout_secs 600 :skip_permissions true)
     (startup-slot gemini_router :engine gemini :lifecycle persistent :slot_id "slot-gemini-router" :role gemini-router :model_profile nil :timeout_secs 120 :skip_permissions true)
@@ -3011,6 +3012,7 @@ mod tests {
             cfg.allowed_cwd_prefixes(),
             &[
                 PathBuf::from("/Users/jinchen/Projects"),
+                PathBuf::from("/Users/jinchen/Downloads"),
                 PathBuf::from("/Users/jinchen/Documents"),
                 PathBuf::from("/tmp")
             ]

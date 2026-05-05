@@ -121,7 +121,7 @@ function checkFiles(root, files) {
     '(startup-slot arch_maintenance',
     '(startup-slot lisp_survey',
     '(cwd-policy dynamic-slot',
-    ':allowed-prefixes ["/Users/jinchen/Projects" "/Users/jinchen/Documents" "/tmp"]',
+    ':allowed-prefixes ["/Users/jinchen/Projects" "/Users/jinchen/Downloads" "/Users/jinchen/Documents" "/tmp"]',
     ':description "Dynamic coder slot (ephemeral)"',
     ':default-cwd "/Users/jinchen/Projects"',
     'model_profile=coding-default-opus-4-7 both mean no CLI --model override',
@@ -142,8 +142,9 @@ function checkFiles(root, files) {
     'Autopilot BoardTask claim lease MUST equal the smart-watchdog idle-recovery threshold',
     'mission_cc_swarm pty.send budget MUST project from workstation-config timeout-policy claudecode-swarm',
 	    'mission_pty_send waitForResponse budget MUST project from workstation-config timeout-policy pty-send-blocking',
-	    'mission_compute_slot and Claude/Gemini slot-orchestrator dynamic slot spawn wait_for_idle timeouts MUST project from workstation-config timeout-policy dynamic-slot-spawn',
+    'mission_compute_slot and Claude/Gemini slot-orchestrator dynamic slot spawn wait_for_idle timeouts MUST project from workstation-config timeout-policy dynamic-slot-spawn',
 	    'mission_swarm_run fanout defaults/caps and dynamic slot limits MUST project from workstation-config capacity-policy swarm-workers',
+	    'mission_swarm_run MUST auto-provision per-Claude dynamic slots by default',
 	    'Claude/Gemini slot-orchestrator spawn',
 	    'autopilot-policy',
 	    'AutopilotRuntimeConfig MUST load autopilot-policy',
@@ -245,6 +246,10 @@ function checkFiles(root, files) {
     'auto_provision_slot_ttl_secs',
     'runtime_config.clamp_slot_ttl_secs(None)',
     'build_compute_slot_create_args',
+    'auto_provision_slots',
+    '"provisioned_slots": provisioned_slots',
+    'planned_task.engine_hint == "claude-code"',
+    'assignee,',
     '"suppress_initial_prompt": true',
     'create_args["model_profile"]',
     'starts idle and Autopilot remains the sole task-prompt owner',
@@ -513,7 +518,7 @@ function buildFixture() {
       :mcp-config "/Users/jinchen/.xjp-mission/xjp-mcp-config.json"
       :default-cwd "/Users/jinchen/Projects")
     (cwd-policy dynamic-slot
-      :allowed-prefixes ["/Users/jinchen/Projects" "/Users/jinchen/Documents" "/tmp"])
+      :allowed-prefixes ["/Users/jinchen/Projects" "/Users/jinchen/Downloads" "/Users/jinchen/Documents" "/tmp"])
     (startup-slot arch_maintenance
       :engine claude-code
       :lifecycle persistent

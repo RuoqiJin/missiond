@@ -38,6 +38,7 @@ export const DEFAULT_SLOT_DEFAULT_CWD = '/Users/jinchen/Projects';
 export const DEFAULT_SLOT_MCP_CONFIG = '/Users/jinchen/.xjp-mission/xjp-mcp-config.json';
 export const DEFAULT_ALLOWED_CWD_PREFIXES = [
   '/Users/jinchen/Projects',
+  '/Users/jinchen/Downloads',
   '/Users/jinchen/Documents',
   '/tmp',
 ];

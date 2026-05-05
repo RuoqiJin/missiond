@@ -757,6 +757,9 @@ async fn list_slots(state: &AppState, args: &Value) -> Result<ToolResult> {
     let mut legacy_static_entries: Vec<Value> = Vec::new();
     let v3_active = workstation_config_result.is_ok();
     for s in &static_slots {
+        if s.config.id.starts_with("slot-dyn-") {
+            continue;
+        }
         let pty_status = state
             .pty
             .get_status(&s.config.id)
@@ -1025,6 +1028,15 @@ mod tests {
     fn derive_static_status_no_pty_falls_back_to_session_flag() {
         assert_eq!(derive_static_status(None, false), "stopped");
         assert_eq!(derive_static_status(None, true), "running");
+    }
+
+    #[test]
+    fn list_slots_does_not_echo_dynamic_slots_as_legacy_static() {
+        let src = include_str!("./compute_slot.rs");
+        assert!(
+            src.contains("s.config.id.starts_with(\"slot-dyn-\")"),
+            "dynamic runtime slots are already represented by dynamic_slots and must not be duplicated under legacy_static_slots"
+        );
     }
 
     #[test]

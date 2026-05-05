@@ -2264,6 +2264,7 @@ async fn dispatch_board_tasks_with_config(
 
         // Check if PTY session exists, spawn if needed
         if !ensure_autopilot_pty(state, &task, &slot_id, task_env).await {
+            let _ = state.store.unclaim_board_task(task.id.as_str()).await;
             continue;
         }
 
@@ -5980,6 +5981,21 @@ Review only.
         assert!(
             src.contains(&drain_call),
             "dispatch_board_tasks must drain the JoinSet so KB feedback / quota / retries still complete"
+        );
+    }
+
+    #[test]
+    fn dispatch_board_tasks_unclaims_when_pty_not_ready() {
+        let src = include_str!("./autopilot.rs");
+        let ensure_call = "if !ensure_autopilot_pty(state, &task, &slot_id, task_env).await";
+        let unclaim_call = "state.store.unclaim_board_task(task.id.as_str()).await";
+        assert!(
+            src.contains(ensure_call),
+            "dispatch must check ensure_autopilot_pty before sending"
+        );
+        assert!(
+            src.contains(unclaim_call),
+            "a claimed BoardTask must be released when PTY spawn/readiness is transiently unavailable"
         );
     }
 

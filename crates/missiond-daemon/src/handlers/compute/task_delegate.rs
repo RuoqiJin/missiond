@@ -461,6 +461,8 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
         .unwrap_or("read-only")
         .to_string();
     let dry_run = bool_arg(&args, &["dry_run", "dryRun"]).unwrap_or(true);
+    let auto_provision_slots =
+        bool_arg(&args, &["auto_provision_slots", "autoProvisionSlots"]).unwrap_or(true);
     let acceptance = string_list_arg(
         &args,
         &["acceptance", "acceptance_commands", "acceptanceCommands"],
@@ -576,8 +578,49 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
     };
 
     let mut created_task_ids = Vec::new();
+    let mut provisioned_slots = Vec::new();
     if !dry_run {
         for planned_task in &planned {
+            let mut assignee: Option<String> = None;
+            if auto_provision_slots && planned_task.engine_hint == "claude-code" {
+                match auto_provision_slot(
+                    state,
+                    "coder",
+                    &planned_task.title,
+                    &runtime_config,
+                    Some(&project_root),
+                    None,
+                    Some("coding-default-opus-4-7"),
+                )
+                .await
+                {
+                    Ok(slot_id) => {
+                        assignee = Some(slot_id.clone());
+                        provisioned_slots.push(json!({
+                            "task_title": planned_task.title,
+                            "slot_id": slot_id,
+                            "engine_hint": planned_task.engine_hint,
+                            "pool_hint": planned_task.pool_hint,
+                            "status": "spawn_pending",
+                        }));
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            project_id = %project_id,
+                            title = %planned_task.title,
+                            error = %err,
+                            "mission_swarm_run: Claude dynamic slot auto-provision failed; child task will queue unassigned"
+                        );
+                        provisioned_slots.push(json!({
+                            "task_title": planned_task.title,
+                            "engine_hint": planned_task.engine_hint,
+                            "pool_hint": planned_task.pool_hint,
+                            "status": "provision_failed",
+                            "error": err.to_string(),
+                        }));
+                    }
+                }
+            }
             let description = render_swarm_task_description(
                 &objective,
                 &project_id,
@@ -595,6 +638,7 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
                 category: Some("dev".to_string()),
                 project: Some(project_id.clone()),
                 auto_execute: Some(true),
+                assignee,
                 parent_id: parent_id.clone(),
                 timeout_secs: Some(timeout_secs),
                 context_intent: Some(planned_task.intent.clone()),
@@ -635,6 +679,8 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
             "dynamic_slot_limit": runtime_config.dynamic_slot_limit(),
             "delegate_rate_per_minute": runtime_config.delegate_rate_per_minute()
         },
+        "auto_provision_slots": auto_provision_slots,
+        "provisioned_slots": provisioned_slots,
         "planned_tasks": planned.iter().map(SwarmPlannedTask::to_json).collect::<Vec<_>>(),
         "created_task_ids": created_task_ids,
         "conflicts": conflicts,
@@ -1713,6 +1759,27 @@ mod tests {
         );
         assert!(first.ends_with("-context-pack.lisp"));
         assert!(second.ends_with("-context-pack.lisp"));
+    }
+
+    #[test]
+    fn swarm_run_auto_provisions_claude_children_by_default() {
+        let src = include_str!("./task_delegate.rs");
+        assert!(
+            src.contains("auto_provision_slots"),
+            "mission_swarm_run must expose an explicit diagnostic override for slot preallocation"
+        );
+        assert!(
+            src.contains("auto_provision_slots && planned_task.engine_hint == \"claude-code\""),
+            "non-dry-run Claude swarm children must preallocate dynamic slots by default"
+        );
+        assert!(
+            src.contains("assignee,"),
+            "the preallocated dynamic slot id must be persisted as CreateBoardTaskInput.assignee"
+        );
+        assert!(
+            src.contains("\"provisioned_slots\": provisioned_slots"),
+            "mission_swarm_run response must report slot fanout results for operator monitoring"
+        );
     }
 
     #[test]
