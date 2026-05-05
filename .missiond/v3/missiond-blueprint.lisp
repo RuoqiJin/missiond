@@ -2258,8 +2258,9 @@
         :entry [mission_task_submit mission_task_query mission_task_cancel mission_job_poll mission_flow_run mission_pty_spawn mission_pty_send mission_pty_read mission_pty_signal mission_pty_confirm mission_pty_status mission_pty_screenshot mission_slots mission_slot_history mission_agent mission_inbox mission_sonnet_process mission_minimax_process mission_cc_query mission_cc_swarm mission_worker mission_control mission_pause mission_forge_build mission_forge_lint CodexCliStateParser GeminiCliUpstreamStateParser recognize_screen]
         :core ((step s1 :logic "normalize low-level runtime requests into slot, job, task, PTY, flow, forge, or process operations")
                (step s2 :logic "apply project-root, permission, timeout, and pause/control policies before side effects")
-               (step s3 :logic "classify provider PTY text into running/idle/blocked/complete/unknown with confidence and reason")
-               (step s4 :logic "return durable runtime handles and status without bypassing BoardTask or plan execution when a higher-level surface exists"))
+               (step s3 :logic "for mission_task_query status/list, read both legacy tasks and BoardTask-backed delegated workers so running BoardTasks are visible to master/control callers")
+               (step s4 :logic "classify provider PTY text into running/idle/blocked/complete/unknown with confidence and reason")
+               (step s5 :logic "return durable runtime handles and status without bypassing BoardTask or plan execution when a higher-level surface exists"))
         :egress [runtime_handle job_status pty_snapshot PtyRecognitionSnapshot flow_result forge_result])
       (function skill-runtime
         :surface skill-runtime
@@ -3036,7 +3037,7 @@
              "crates/missiond-mcp/src/tools/compute/forge.rs"
              "scripts/check-v3-compute-primitives-isomorphism.mjs"
              "scripts/check-v3-pty-recognition-isomorphism.mjs"]
-      :note "Code-aligned V3 destination for low-level worker runtime primitives. task.rs owns mission_task_submit/query/cancel plus async/sync/status/list/ack/track and TaskEvent::Created egress, and projects auto-spawn tracked PTY wait_for_idle timeout from compute-runtime-policy; job.rs owns mission_job_poll poll/list/cancel over AsyncJobStatus; flow_run.rs owns mission_flow_run BoardTask-backed flow execution and project-root resolution; engine/flow/mod.rs owns FlowDefinition shape constants, engine/flow/loader.rs loads flow-runtime-policy through context/v3_blueprint_runtime.rs and projects missing YAML node defaults while preserving explicit fields; pty.rs owns mission_pty_spawn/send/read/signal/confirm/status/screenshot plus kill/interrupt/read screen-history-logs, task requeue, and permission learning; process.rs owns mission_agent spawn/kill/restart/list and projects trac... [details: .missiond/v3/evidence/blueprint-notes.lisp#note-019]")
+      :note "Code-aligned V3 destination for low-level worker runtime primitives. task.rs owns mission_task_submit/query/cancel plus async/sync/status/list/ack/track and TaskEvent::Created egress; mission_task_query bridges legacy tasks with BoardTask-backed delegated workers so running BoardTasks are visible to master/control callers; task.rs projects auto-spawn tracked PTY wait_for_idle timeout from compute-runtime-policy; job.rs owns mission_job_poll poll/list/cancel over AsyncJobStatus; flow_run.rs owns mission_flow_run BoardTask-backed flow execution and project-root resolution; engine/flow/mod.rs owns FlowDefinition shape constants, engine/flow/loader.rs loads flow-runtime-policy through context/v3_blueprint_runtime.rs and projects missing YAML node defaults while preserving explicit fields; pty.rs owns mission_pty_spawn/send/read/signal/confirm/status/screenshot plus kill/interrupt/read screen-history-logs, task requeue, and permission learning; process.rs owns mission_agent spawn/kill/restart/list and projects trac... [details: .missiond/v3/evidence/blueprint-notes.lisp#note-019]")
 
     (surface skill-runtime
       :status "code-aligned"

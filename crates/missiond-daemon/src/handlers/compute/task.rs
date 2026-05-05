@@ -7,6 +7,7 @@ use tracing::{info, warn};
 use crate::context::v3_blueprint_runtime::ComputePrimitivesRuntimeConfig;
 use crate::lenient;
 use crate::state::AppState;
+use missiond_core::types::{BoardTask, BoardTaskStatus, Task, TaskStatus};
 use missiond_core::PTYSpawnOptions;
 
 #[derive(Deserialize)]
@@ -378,6 +379,9 @@ async fn handle_status(state: &AppState, args: Value) -> Result<ToolResult> {
     let StatusArgs { task_id } = serde_json::from_value(args)?;
     if let Some(task) = state.store.get_task(&task_id).await.ok().flatten() {
         Ok(ToolResult::json(&task))
+    } else if let Some(task) = state.store.get_board_task(&task_id).await.ok().flatten() {
+        let value = board_task_query_json(state, &task).await;
+        Ok(ToolResult::json(&value))
     } else {
         Ok(ToolResult::error("Task not found"))
     }
@@ -426,19 +430,33 @@ async fn handle_task_list(state: &AppState, args: Value) -> Result<ToolResult> {
         limit: None,
     });
     let limit = args.limit.unwrap_or(20);
-    let tasks = if let Some(ref status_str) = args.status {
-        if let Some(status) = missiond_core::types::TaskStatus::from_str(status_str) {
-            state.store.get_tasks_by_status(status).await?
+    if let Some(ref status_str) = args.status {
+        if let Some(status) = TaskStatus::from_str(status_str) {
+            let mut tasks = Vec::new();
+            for task in state.store.get_tasks_by_status(status).await? {
+                tasks.push(legacy_task_query_json(task));
+            }
+            for board_status in board_statuses_for_task_query(status) {
+                for task in state
+                    .store
+                    .list_board_tasks(Some(board_status.as_str()), true)
+                    .await?
+                {
+                    tasks.push(board_task_query_json(state, &task).await);
+                }
+            }
+            tasks.truncate(limit.max(0) as usize);
+            Ok(ToolResult::json(&tasks))
         } else {
-            return Ok(ToolResult::error(format!(
+            Ok(ToolResult::error(format!(
                 "Invalid status: {}. Use: queued, running, done, failed",
                 status_str
-            )));
+            )))
         }
     } else {
-        state.store.get_all_tasks(limit).await?
-    };
-    Ok(ToolResult::json(&tasks))
+        let tasks = state.store.get_all_tasks(limit).await?;
+        Ok(ToolResult::json(&tasks))
+    }
 }
 
 async fn handle_task_ack(state: &AppState, args: Value) -> Result<ToolResult> {
@@ -528,4 +546,153 @@ async fn handle_task_track(state: &AppState, args: Value) -> Result<ToolResult> 
     }
 
     Ok(ToolResult::json_pretty(&result))
+}
+
+fn legacy_task_query_json(task: Task) -> Value {
+    serde_json::to_value(task).unwrap_or_else(|_| json!({}))
+}
+
+fn board_statuses_for_task_query(status: TaskStatus) -> &'static [BoardTaskStatus] {
+    match status {
+        TaskStatus::Queued => &[BoardTaskStatus::Open],
+        TaskStatus::Running => &[BoardTaskStatus::Running, BoardTaskStatus::Verifying],
+        TaskStatus::Done => &[BoardTaskStatus::Done, BoardTaskStatus::Skipped],
+        TaskStatus::Failed => &[BoardTaskStatus::Failed, BoardTaskStatus::Blocked],
+        TaskStatus::Cancelled => &[],
+    }
+}
+
+fn board_task_query_status(status: BoardTaskStatus) -> &'static str {
+    match status {
+        BoardTaskStatus::Open => "queued",
+        BoardTaskStatus::Running | BoardTaskStatus::Verifying => "running",
+        BoardTaskStatus::Done | BoardTaskStatus::Skipped => "done",
+        BoardTaskStatus::Failed | BoardTaskStatus::Blocked => "failed",
+    }
+}
+
+fn board_task_slot_id(task: &BoardTask) -> Option<&str> {
+    task.claim_executor_id
+        .as_deref()
+        .or(task.assignee.as_deref())
+}
+
+async fn board_task_query_json(state: &AppState, task: &BoardTask) -> Value {
+    let slot_id = board_task_slot_id(task);
+    let session_id = if let Some(slot_id) = slot_id {
+        state.store.get_slot_session(slot_id).await.ok().flatten()
+    } else {
+        None
+    };
+    board_task_query_json_with_session(task, session_id.as_deref())
+}
+
+fn board_task_query_json_with_session(task: &BoardTask, session_id: Option<&str>) -> Value {
+    let slot_id = board_task_slot_id(task);
+    json!({
+        "id": task.id.as_str(),
+        "role": task.context_intent.as_deref().unwrap_or(task.category.as_str()),
+        "prompt": task.description.as_str(),
+        "status": board_task_query_status(task.status),
+        "boardStatus": task.status.as_str(),
+        "slotId": slot_id,
+        "sessionId": session_id,
+        "result": Value::Null,
+        "error": Value::Null,
+        "createdAt": task.created_at.as_str(),
+        "startedAt": task.claimed_at.as_deref(),
+        "finishedAt": match task.status {
+            BoardTaskStatus::Done | BoardTaskStatus::Skipped | BoardTaskStatus::Failed => {
+                Some(task.updated_at.as_str())
+            }
+            _ => None,
+        },
+        "source": "board_task",
+        "boardTask": {
+            "id": task.id.as_str(),
+            "title": task.title.as_str(),
+            "status": task.status.as_str(),
+            "project": task.project.as_deref(),
+            "category": task.category.as_str(),
+            "parentId": task.parent_id.as_ref().map(|id| id.as_str()),
+            "assignee": task.assignee.as_deref(),
+            "claimExecutorId": task.claim_executor_id.as_deref(),
+            "claimExecutorType": task.claim_executor_type.as_deref(),
+            "updatedAt": task.updated_at.as_str(),
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use missiond_core::types::TaskId;
+
+    fn sample_board_task(status: BoardTaskStatus) -> BoardTask {
+        BoardTask {
+            id: TaskId::from_trusted("11111111-1111-4111-8111-111111111111".to_string()),
+            title: "Fix running visibility".to_string(),
+            description: "Bridge BoardTask into mission_task_query".to_string(),
+            status,
+            priority: "high".to_string(),
+            category: "dev".to_string(),
+            project: Some("missiond".to_string()),
+            server: None,
+            due_date: None,
+            parent_id: Some(TaskId::from_trusted(
+                "22222222-2222-4222-8222-222222222222".to_string(),
+            )),
+            assignee: Some("slot-dyn-example".to_string()),
+            auto_execute: true,
+            prompt_template: None,
+            hidden: false,
+            retry_count: 0,
+            max_retries: 2,
+            order_idx: 1,
+            created_at: "2026-05-05T17:35:42Z".to_string(),
+            updated_at: "2026-05-05T17:36:42Z".to_string(),
+            claim_executor_id: Some("slot-dyn-example".to_string()),
+            claim_executor_type: Some("pty_slot".to_string()),
+            claimed_at: Some("2026-05-05T17:35:43Z".to_string()),
+            flow_phase: None,
+            flow_context: None,
+            flow_template: None,
+            depends_on: vec![],
+            lease_expires_at: None,
+            dedupe_key: None,
+            timeout_secs: Some(5400),
+            context_intent: Some("code".to_string()),
+            trigger_source: Some("mission_task_delegate".to_string()),
+            notes_count: 0,
+        }
+    }
+
+    #[test]
+    fn task_query_running_status_covers_active_board_tasks() {
+        assert_eq!(
+            board_statuses_for_task_query(TaskStatus::Running),
+            &[BoardTaskStatus::Running, BoardTaskStatus::Verifying]
+        );
+        assert_eq!(board_task_query_status(BoardTaskStatus::Running), "running");
+        assert_eq!(
+            board_task_query_status(BoardTaskStatus::Verifying),
+            "running"
+        );
+    }
+
+    #[test]
+    fn board_task_query_json_preserves_slot_and_board_linkage() {
+        let task = sample_board_task(BoardTaskStatus::Running);
+        let value = board_task_query_json_with_session(&task, Some("session-1"));
+        assert_eq!(value["source"], "board_task");
+        assert_eq!(value["status"], "running");
+        assert_eq!(value["boardStatus"], "running");
+        assert_eq!(value["slotId"], "slot-dyn-example");
+        assert_eq!(value["sessionId"], "session-1");
+        assert_eq!(value["boardTask"]["claimExecutorId"], "slot-dyn-example");
+        assert_eq!(
+            value["boardTask"]["parentId"],
+            "22222222-2222-4222-8222-222222222222"
+        );
+    }
 }
