@@ -65,17 +65,15 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             (legacy, args)
         }
         "mission_kb_ops" => {
-            let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("gc");
+            let action = args
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("gc")
+                .to_string();
             if action == "compact" {
                 return handle_kb_compact(state, args).await;
             }
-            let legacy = match action {
-                "analyze" => "mission_kb_analyze",
-                "discover" => "mission_kb_discover",
-                "queue_status" => "mission_kb_queue_status",
-                "execute_plan" => "mission_kb_execute_plan",
-                _ => "mission_kb_gc",
-            };
+            let (legacy, args) = route_kb_ops_to_legacy(&action, args);
             (legacy, args)
         }
         "mission_beacon" => route_beacon_action(args),
@@ -114,5 +112,106 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "mission_code_search" => handle_code_search(state, args).await,
 
         _ => Err(anyhow!("Unknown kb tool: {name}")),
+    }
+}
+
+/// Rewrite a `mission_kb_ops` envelope into the legacy direct-tool form.
+///
+/// The unified `mission_kb_ops` schema uses the outer `action` field to
+/// select the family (gc/analyze/discover/queue_status/execute_plan), and an
+/// inner `gc_action` field to select the gc verb (stats/stale/duplicates/...).
+/// Legacy direct handlers (e.g. `mission_kb_gc`) read their verb from
+/// `action`. When forwarding to gc we must substitute the outer `action` with
+/// the inner `gc_action` value, otherwise the gc handler sees `action="gc"`
+/// and returns "Unknown gc action: gc".
+fn route_kb_ops_to_legacy(action: &str, args: Value) -> (&'static str, Value) {
+    match action {
+        "analyze" => ("mission_kb_analyze", args),
+        "discover" => ("mission_kb_discover", args),
+        "queue_status" => ("mission_kb_queue_status", args),
+        "execute_plan" => ("mission_kb_execute_plan", args),
+        _ => {
+            let mut args = args;
+            if let Some(gc_action) = args.get("gc_action").cloned() {
+                if let Some(obj) = args.as_object_mut() {
+                    obj.insert("action".to_string(), gc_action);
+                }
+            }
+            ("mission_kb_gc", args)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn kb_ops_routes_gc_stats_substitutes_action() {
+        let args = json!({"action": "gc", "gc_action": "stats"});
+        let (legacy, rewritten) = route_kb_ops_to_legacy("gc", args);
+        assert_eq!(legacy, "mission_kb_gc");
+        assert_eq!(rewritten["action"], json!("stats"));
+        assert_eq!(rewritten["gc_action"], json!("stats"));
+    }
+
+    #[test]
+    fn kb_ops_routes_gc_duplicates_substitutes_action() {
+        let args = json!({"action": "gc", "gc_action": "duplicates"});
+        let (legacy, rewritten) = route_kb_ops_to_legacy("gc", args);
+        assert_eq!(legacy, "mission_kb_gc");
+        assert_eq!(rewritten["action"], json!("duplicates"));
+    }
+
+    #[test]
+    fn kb_ops_routes_gc_stale_with_days() {
+        let args = json!({"action": "gc", "gc_action": "stale", "days": 60});
+        let (legacy, rewritten) = route_kb_ops_to_legacy("gc", args);
+        assert_eq!(legacy, "mission_kb_gc");
+        assert_eq!(rewritten["action"], json!("stale"));
+        assert_eq!(rewritten["days"], json!(60));
+    }
+
+    #[test]
+    fn kb_ops_routes_gc_clean_actions_substitutes_action() {
+        for verb in ["clean_stale", "clean_duplicates"] {
+            let args = json!({"action": "gc", "gc_action": verb});
+            let (legacy, rewritten) = route_kb_ops_to_legacy("gc", args);
+            assert_eq!(legacy, "mission_kb_gc");
+            assert_eq!(rewritten["action"], json!(verb));
+        }
+    }
+
+    #[test]
+    fn kb_ops_gc_without_gc_action_preserves_action_for_clear_error() {
+        let args = json!({"action": "gc"});
+        let (legacy, rewritten) = route_kb_ops_to_legacy("gc", args);
+        assert_eq!(legacy, "mission_kb_gc");
+        assert_eq!(rewritten["action"], json!("gc"));
+    }
+
+    #[test]
+    fn kb_ops_routes_analyze_without_rewriting_args() {
+        let args = json!({"action": "analyze", "mode": "overview", "limit": 10});
+        let (legacy, rewritten) = route_kb_ops_to_legacy("analyze", args);
+        assert_eq!(legacy, "mission_kb_analyze");
+        assert_eq!(rewritten["action"], json!("analyze"));
+        assert_eq!(rewritten["mode"], json!("overview"));
+    }
+
+    #[test]
+    fn kb_ops_routes_discover_queue_status_execute_plan_intact() {
+        let cases = [
+            ("discover", "mission_kb_discover"),
+            ("queue_status", "mission_kb_queue_status"),
+            ("execute_plan", "mission_kb_execute_plan"),
+        ];
+        for (action, expected) in cases {
+            let args = json!({"action": action});
+            let (legacy, rewritten) = route_kb_ops_to_legacy(action, args);
+            assert_eq!(legacy, expected);
+            assert_eq!(rewritten["action"], json!(action));
+        }
     }
 }

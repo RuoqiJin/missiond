@@ -297,6 +297,46 @@ mod tests {
     }
 
     #[test]
+    fn kb_ops_schema_exposes_gc_action_and_required_action() {
+        // Guard the public contract that the daemon dispatcher relies on:
+        // mission_kb_ops splits the family verb (`action`) from the gc verb
+        // (`gc_action`). If either field disappears, the daemon's
+        // route_kb_ops_to_legacy substitution becomes a silent no-op and
+        // gc stats/duplicates again return "Unknown gc action: gc".
+        let def = get_tool("mission_kb_ops").expect("mission_kb_ops registered");
+        let schema = &def.input_schema;
+
+        let required = schema
+            .get("required")
+            .and_then(|v| v.as_array())
+            .expect("mission_kb_ops schema must declare required");
+        assert!(
+            required.iter().any(|v| v.as_str() == Some("action")),
+            "mission_kb_ops must require `action`"
+        );
+
+        let props = schema
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .expect("mission_kb_ops schema must declare properties");
+        let action_enum = props
+            .get("action")
+            .and_then(|v| v.get("enum"))
+            .and_then(|v| v.as_array())
+            .expect("mission_kb_ops.action must be an enum");
+        for verb in ["gc", "analyze", "discover", "queue_status", "execute_plan", "compact"] {
+            assert!(
+                action_enum.iter().any(|v| v.as_str() == Some(verb)),
+                "mission_kb_ops.action enum must include {verb}"
+            );
+        }
+        assert!(
+            props.contains_key("gc_action"),
+            "mission_kb_ops must expose `gc_action` so gc verbs can reach the handler"
+        );
+    }
+
+    #[test]
     fn test_tool_result_json() {
         let result = ToolResult::json(&serde_json::json!({"key": "value"}));
         match &result.content[0] {
