@@ -987,6 +987,76 @@ fn worker_final_close_blocker(summary: &str) -> Option<&'static str> {
         .find_map(|(needle, reason)| lower.contains(needle).then_some(*reason))
 }
 
+fn delegated_write_close_evidence_blocker(
+    task_description: &str,
+    has_durable_provider_final: bool,
+    summary: &str,
+) -> Option<&'static str> {
+    if delegated_task_is_read_only(task_description) {
+        return None;
+    }
+    if delegated_write_scope(task_description).is_empty() {
+        return None;
+    }
+    if !has_durable_provider_final {
+        return Some("missing-durable-provider-final");
+    }
+    if !worker_final_has_acceptance_evidence(summary) {
+        return Some("missing-acceptance-evidence");
+    }
+    None
+}
+
+fn delegated_task_is_read_only(task_description: &str) -> bool {
+    metadata_line_value(task_description, "write_policy")
+        .map(|value| value.eq_ignore_ascii_case("read-only"))
+        .unwrap_or(false)
+}
+
+fn delegated_write_scope(task_description: &str) -> Vec<String> {
+    metadata_line_value(task_description, "write_scope")
+        .map(split_metadata_list)
+        .unwrap_or_default()
+}
+
+fn metadata_line_value<'a>(task_description: &'a str, key: &str) -> Option<&'a str> {
+    let prefix = format!("- {key}:");
+    task_description.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix(&prefix)
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && *value != "[]")
+    })
+}
+
+fn split_metadata_list(value: &str) -> Vec<String> {
+    value
+        .split(|ch| ch == ',' || ch == '|')
+        .map(str::trim)
+        .filter(|item| !item.is_empty() && *item != "[]")
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn worker_final_has_acceptance_evidence(summary: &str) -> bool {
+    let lower = summary.to_ascii_lowercase();
+    const EVIDENCE_MARKERS: &[&str] = &[
+        "acceptance",
+        "changed file",
+        "changed files",
+        "created",
+        "files changed",
+        "git diff --check",
+        "passed",
+        "test result",
+        "tests pass",
+        "verification",
+        "verified",
+        "worktree",
+    ];
+    EVIDENCE_MARKERS.iter().any(|marker| lower.contains(marker))
+}
+
 fn looks_like_active_tui_progress(text: &str) -> bool {
     text.lines()
         .any(|line| is_tui_progress_line(line.trim_start()))
@@ -2600,6 +2670,56 @@ async fn dispatch_board_tasks_with_config(
                     );
                     let note = format!(
                         "⚠️ **Autopilot blocked close** — worker final indicates `{}`. The BoardTask stays blocked so a supervisor/worker can recover instead of recording a false done state.\n\n{}",
+                        blocker,
+                        truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES),
+                    );
+                    let _ = state
+                        .store
+                        .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+                            task_id: task.id.to_string(),
+                            content: note,
+                            note_type: Some("note".to_string()),
+                            author: Some("autopilot".to_string()),
+                        })
+                        .await;
+                    let _ = state
+                        .store
+                        .update_board_task(
+                            task.id.as_str(),
+                            &missiond_core::types::UpdateBoardTaskInput {
+                                status: Some("blocked".to_string()),
+                                ..Default::default()
+                            },
+                        )
+                        .await;
+                    let _ = state
+                        .bus
+                        .publish_board(BoardEvent::StatusChanged {
+                            task_id: task.id.to_string(),
+                            old_status: format!("{:?}", task.status),
+                            new_status: "blocked".to_string(),
+                        })
+                        .await;
+                    let _ = state
+                        .store
+                        .update_prompt_snapshot_outcome(task.id.as_str(), "blocked")
+                        .await;
+                    return;
+                }
+                if let Some(blocker) = delegated_write_close_evidence_blocker(
+                    &task.description,
+                    durable_completion.is_some(),
+                    &final_summary,
+                ) {
+                    warn!(
+                        task_id = %task.id,
+                        slot_id = %slot_id,
+                        duration_ms = res.duration_ms,
+                        blocker,
+                        "Autopilot: write-scope task lacks durable completion/acceptance evidence; preserving task for recovery"
+                    );
+                    let note = format!(
+                        "⚠️ **Autopilot blocked close** — write-scope task is missing `{}`. The BoardTask stays blocked so a supervisor/worker can recover instead of recording a false done state.\n\n{}",
                         blocker,
                         truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES),
                     );
@@ -4681,6 +4801,63 @@ mod tests {
             worker_final_close_blocker(
                 "The analysis is complete and no file mutation was required."
             ),
+            None
+        );
+    }
+
+    #[test]
+    fn write_scope_close_requires_durable_provider_final() {
+        let description = "\
+Implement the shard.
+
+## Swarm metadata
+- write_policy: write
+- write_scope: services/auth/.missiond/backend/auth.lisp
+- acceptance: node scripts/check-service-ssot.mjs auth --json";
+        assert_eq!(
+            delegated_write_close_evidence_blocker(
+                description,
+                false,
+                "Verification: check-service-ssot passed."
+            ),
+            Some("missing-durable-provider-final")
+        );
+    }
+
+    #[test]
+    fn write_scope_close_requires_acceptance_evidence() {
+        let description = "\
+Implement the shard.
+
+## Swarm metadata
+- write_policy: write
+- write_scope: services/auth/.missiond/backend/auth.lisp
+- acceptance: node scripts/check-service-ssot.mjs auth --json";
+        assert_eq!(
+            delegated_write_close_evidence_blocker(description, true, "Done."),
+            Some("missing-acceptance-evidence")
+        );
+        assert_eq!(
+            delegated_write_close_evidence_blocker(
+                description,
+                true,
+                "Changed files: services/auth/.missiond/backend/auth.lisp\nVerification: node scripts/check-service-ssot.mjs auth --json passed."
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn read_only_close_does_not_require_write_evidence() {
+        let description = "\
+Review only.
+
+## Swarm metadata
+- write_policy: read-only
+- write_scope: []
+- must_not_touch: **/*";
+        assert_eq!(
+            delegated_write_close_evidence_blocker(description, false, "Findings complete."),
             None
         );
     }

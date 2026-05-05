@@ -11,7 +11,12 @@ use crate::slot_dispatch::SlotAcquireGuard;
 use crate::state::AppState;
 
 /// Rate limit: max delegates per minute (per Jarvis session).
-const MAX_DELEGATES_PER_MINUTE: usize = 5;
+///
+/// The resident master now runs context-pack fanout across several projects;
+/// keep the limit high enough for supervised waves, while write-scope conflict
+/// detection still prevents unsafe overlapping implementers.
+const MAX_DELEGATES_PER_MINUTE: usize = 12;
+const MAX_DYNAMIC_SLOTS: i64 = 12;
 
 /// Roles excluded from auto-selection (meta agents, Jarvis itself).
 const EXCLUDED_ROLES: &[&str] = &["jarvis", "memory", "supervisor", "decision"];
@@ -419,9 +424,9 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
         .map(|value| normalize_context_pack_path_for_worker(value, None))
         .unwrap_or_else(default_swarm_context_pack_path);
     let max_claude_workers =
-        clamp_usize_arg(&args, &["max_claude_workers", "maxClaudeWorkers"], 4, 0, 4);
+        clamp_usize_arg(&args, &["max_claude_workers", "maxClaudeWorkers"], 6, 0, 12);
     let max_gemini_workers =
-        clamp_usize_arg(&args, &["max_gemini_workers", "maxGeminiWorkers"], 2, 0, 2);
+        clamp_usize_arg(&args, &["max_gemini_workers", "maxGeminiWorkers"], 2, 0, 4);
     let write_policy = string_arg(&args, &["write_policy", "writePolicy"])
         .unwrap_or("read-only")
         .to_string();
@@ -494,6 +499,19 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
         });
     }
 
+    let conflicts = detect_swarm_write_conflicts(&planned);
+    if !conflicts.is_empty() && !dry_run {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(
+                "SWARM_WRITE_SCOPE_CONFLICT",
+                "mission_swarm_run refused to create overlapping write-scope implementers",
+            )
+            .with_suggestion(
+                "split the objective into disjoint write_scope shards or rerun dry_run=true and inspect conflicts",
+            ),
+        ));
+    }
+
     let mut created_task_ids = Vec::new();
     if !dry_run {
         for planned_task in &planned {
@@ -553,7 +571,7 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
         },
         "planned_tasks": planned.iter().map(SwarmPlannedTask::to_json).collect::<Vec<_>>(),
         "created_task_ids": created_task_ids,
-        "conflicts": [],
+        "conflicts": conflicts,
         "next_action": if dry_run {
             "rerun mission_swarm_run with dry_run=false after reviewing planned_tasks"
         } else {
@@ -589,6 +607,79 @@ impl SwarmPlannedTask {
             "must_not_touch": self.must_not_touch,
         })
     }
+}
+
+fn detect_swarm_write_conflicts(planned: &[SwarmPlannedTask]) -> Vec<Value> {
+    let mut conflicts = Vec::new();
+    for (left_idx, left) in planned.iter().enumerate() {
+        if left.write_scope.is_empty() {
+            continue;
+        }
+        for (right_idx, right) in planned.iter().enumerate().skip(left_idx + 1) {
+            if right.write_scope.is_empty() {
+                continue;
+            }
+            for left_path in &left.write_scope {
+                for right_path in &right.write_scope {
+                    if write_scopes_overlap(left_path, right_path) {
+                        conflicts.push(json!({
+                            "left_index": left_idx,
+                            "left_title": left.title,
+                            "left_path": left_path,
+                            "right_index": right_idx,
+                            "right_title": right.title,
+                            "right_path": right_path,
+                            "reason": "overlapping write_scope"
+                        }));
+                    }
+                }
+            }
+        }
+    }
+    conflicts
+}
+
+fn write_scopes_overlap(left: &str, right: &str) -> bool {
+    let left = normalize_scope_for_overlap(left);
+    let right = normalize_scope_for_overlap(right);
+    if left.is_empty() || right.is_empty() {
+        return false;
+    }
+    if left == "**/*" || right == "**/*" || left == "*" || right == "*" {
+        return true;
+    }
+    if left == right {
+        return true;
+    }
+    let left_prefix = glob_static_prefix(&left);
+    let right_prefix = glob_static_prefix(&right);
+    if left_prefix.is_empty() || right_prefix.is_empty() {
+        return false;
+    }
+    left_prefix == right_prefix
+        || left_prefix.starts_with(&format!("{right_prefix}/"))
+        || right_prefix.starts_with(&format!("{left_prefix}/"))
+}
+
+fn normalize_scope_for_overlap(scope: &str) -> String {
+    scope
+        .trim()
+        .trim_end_matches('/')
+        .trim_start_matches("./")
+        .to_string()
+}
+
+fn glob_static_prefix(scope: &str) -> String {
+    let wildcard = scope
+        .char_indices()
+        .find_map(|(idx, ch)| matches!(ch, '*' | '?' | '[' | '{').then_some(idx));
+    let prefix = wildcard.map(|idx| &scope[..idx]).unwrap_or(scope);
+    prefix
+        .trim_end_matches('/')
+        .trim_end_matches("/**")
+        .trim_end_matches("/*")
+        .trim_end_matches('/')
+        .to_string()
 }
 
 fn render_swarm_task_description(
@@ -756,8 +847,12 @@ async fn auto_provision_slot(
         .count_active_dynamic_slots()
         .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
-    if active >= 5 {
-        return Err(anyhow!("Dynamic slot quota full ({}/5)", active));
+    if active >= MAX_DYNAMIC_SLOTS {
+        return Err(anyhow!(
+            "Dynamic slot quota full ({}/{})",
+            active,
+            MAX_DYNAMIC_SLOTS
+        ));
     }
 
     // V3 workstation-config :: ttl-policy dynamic-slot projection.
@@ -1205,6 +1300,67 @@ mod tests {
             string_list_arg(&args, &["acceptance", "acceptance_commands"]),
             vec!["cargo test"]
         );
+    }
+
+    #[test]
+    fn swarm_write_scope_conflicts_detect_overlap_before_dispatch() {
+        let planned = vec![
+            SwarmPlannedTask {
+                lane: "implement".to_string(),
+                engine_hint: "claude-code".to_string(),
+                pool_hint: "claude-code-default".to_string(),
+                task_class: "code".to_string(),
+                title: "Shard A".to_string(),
+                intent: "code".to_string(),
+                read_scope: vec!["/repo".to_string()],
+                write_scope: vec!["src/auth".to_string()],
+                must_not_touch: Vec::new(),
+            },
+            SwarmPlannedTask {
+                lane: "implement".to_string(),
+                engine_hint: "claude-code".to_string(),
+                pool_hint: "claude-code-default".to_string(),
+                task_class: "code".to_string(),
+                title: "Shard B".to_string(),
+                intent: "code".to_string(),
+                read_scope: vec!["/repo".to_string()],
+                write_scope: vec!["src/auth/routes.rs".to_string()],
+                must_not_touch: Vec::new(),
+            },
+        ];
+        let conflicts = detect_swarm_write_conflicts(&planned);
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0]["left_title"], json!("Shard A"));
+        assert_eq!(conflicts[0]["right_title"], json!("Shard B"));
+    }
+
+    #[test]
+    fn swarm_write_scope_conflicts_ignore_read_only_lanes() {
+        let planned = vec![
+            SwarmPlannedTask {
+                lane: "investigate".to_string(),
+                engine_hint: "gemini".to_string(),
+                pool_hint: "gemini-ultra-pro".to_string(),
+                task_class: "context-pack".to_string(),
+                title: "Survey".to_string(),
+                intent: "research".to_string(),
+                read_scope: vec!["src/auth".to_string()],
+                write_scope: Vec::new(),
+                must_not_touch: vec!["**/*".to_string()],
+            },
+            SwarmPlannedTask {
+                lane: "implement".to_string(),
+                engine_hint: "claude-code".to_string(),
+                pool_hint: "claude-code-default".to_string(),
+                task_class: "code".to_string(),
+                title: "Implement".to_string(),
+                intent: "code".to_string(),
+                read_scope: vec!["src/auth".to_string()],
+                write_scope: vec!["src/auth".to_string()],
+                must_not_touch: Vec::new(),
+            },
+        ];
+        assert!(detect_swarm_write_conflicts(&planned).is_empty());
     }
 
     // ── V3 workstation-pool :: gemini researcher binding ─────────────────

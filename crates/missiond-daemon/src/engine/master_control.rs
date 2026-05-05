@@ -142,6 +142,7 @@ pub(crate) struct MasterControlRuntime {
     drift_backfill_tasks_created: AtomicU64,
     control_turns_sent: AtomicU64,
     last_control_turn_at_epoch: AtomicI64,
+    last_control_objective_id: RwLock<Option<String>>,
     notify: Notify,
     last_event_cursor: RwLock<Option<String>>,
     last_event_summary: RwLock<Option<String>>,
@@ -168,6 +169,7 @@ impl Default for MasterControlRuntime {
             drift_backfill_tasks_created: AtomicU64::new(0),
             control_turns_sent: AtomicU64::new(0),
             last_control_turn_at_epoch: AtomicI64::new(0),
+            last_control_objective_id: RwLock::new(None),
             notify: Notify::new(),
             last_event_cursor: RwLock::new(None),
             last_event_summary: RwLock::new(None),
@@ -231,13 +233,18 @@ impl MasterControlRuntime {
         tick_id
     }
 
-    async fn record_control_turn(&self, result: Result<(), String>) {
+    async fn record_control_turn(
+        &self,
+        result: Result<(), String>,
+        active_objective_id: Option<String>,
+    ) {
         match result {
             Ok(()) => {
                 self.control_turns_sent.fetch_add(1, Ordering::Relaxed);
                 self.queued_events.store(0, Ordering::Relaxed);
                 self.last_control_turn_at_epoch
                     .store(chrono::Utc::now().timestamp(), Ordering::Relaxed);
+                *self.last_control_objective_id.write().await = active_objective_id;
                 *self.last_control_turn_error.write().await = None;
             }
             Err(err) => {
@@ -259,6 +266,7 @@ impl MasterControlRuntime {
             drift_backfill_tasks_created: self.drift_backfill_tasks_created.load(Ordering::Relaxed),
             control_turns_sent: self.control_turns_sent.load(Ordering::Relaxed),
             last_control_turn_at_epoch: self.last_control_turn_at_epoch.load(Ordering::Relaxed),
+            last_control_objective_id: self.last_control_objective_id.read().await.clone(),
             last_event_cursor: self.last_event_cursor.read().await.clone(),
             last_event_summary: self.last_event_summary.read().await.clone(),
             last_tick_id: self.last_tick_id.read().await.clone(),
@@ -285,6 +293,7 @@ pub(crate) struct MasterControlRuntimeSnapshot {
     pub(crate) drift_backfill_tasks_created: u64,
     pub(crate) control_turns_sent: u64,
     pub(crate) last_control_turn_at_epoch: i64,
+    pub(crate) last_control_objective_id: Option<String>,
     pub(crate) last_event_cursor: Option<String>,
     pub(crate) last_event_summary: Option<String>,
     pub(crate) last_tick_id: Option<String>,
@@ -469,8 +478,11 @@ impl MasterControlService {
             let active_objective = self.active_objective_prompt_context(&snapshot).await;
             let prompt =
                 build_master_tick_prompt(&snapshot, reason, mcp_ready, active_objective.as_ref());
+            let active_objective_id = snapshot.active_objective_id.clone();
             let result = self.dispatch_control_turn(&prompt).await;
-            self.runtime.record_control_turn(result).await;
+            self.runtime
+                .record_control_turn(result, active_objective_id)
+                .await;
         }
     }
 
@@ -1041,7 +1053,7 @@ struct MasterCheckpointRender<'a> {
 fn render_checkpoint(input: &MasterCheckpointRender<'_>) -> String {
     let updated_at = chrono::Utc::now().to_rfc3339();
     format!(
-        "(master-control-checkpoint\n  :schema \"missiond.master-control-checkpoint.v3\"\n  :worker codex-master-control\n  :slot-id {}\n  :tick-id {}\n  :reason {}\n  :checkpoint-at {}\n  :event-cursor {}\n  :last-event-seq {}\n  :last-event {}\n  :queued-events {}\n  :processed-ticks {}\n  :active-objective-id {}\n  :phase {}\n  :context-pack-path {}\n  :delegated-task-ids {}\n  :blocked-reason {}\n  :last-verified-commit {}\n  :resume-instruction {}\n  :drift-backfill-tasks-created {}\n  :last-drift-backfill-task-id {}\n  :control-turns-sent {}\n  :last-control-turn-at-epoch {}\n  :last-control-turn-error {}\n  :mcp-ready {}\n  :objective \"resident master-control watches MissionD events and delegates through BoardTask/Autopilot\"\n  :resume-from [latest-master-control-checkpoint BoardTask mission_execution event-bus provider-log]\n  :resume-plan ((step s1 :logic \"observe_event then classify_objective from durable event evidence\")\n                (step s2 :logic \"create_context_pack and dispatch_investigators before compile_shards\")\n                (step s3 :logic \"dispatch_implementers only with exact write_scope/must_not_touch/acceptance\")\n                (step s4 :logic \"verify durable evidence before close_or_backfill\"))\n  :last-control-prompt {}\n  :updated-at {}\n)\n",
+        "(master-control-checkpoint\n  :schema \"missiond.master-control-checkpoint.v3\"\n  :worker codex-master-control\n  :slot-id {}\n  :tick-id {}\n  :reason {}\n  :checkpoint-at {}\n  :event-cursor {}\n  :last-event-seq {}\n  :last-event {}\n  :queued-events {}\n  :processed-ticks {}\n  :active-objective-id {}\n  :phase {}\n  :context-pack-path {}\n  :delegated-task-ids {}\n  :blocked-reason {}\n  :last-verified-commit {}\n  :resume-instruction {}\n  :drift-backfill-tasks-created {}\n  :last-drift-backfill-task-id {}\n  :control-turns-sent {}\n  :last-control-turn-at-epoch {}\n  :last-control-objective-id {}\n  :last-control-turn-error {}\n  :mcp-ready {}\n  :objective \"resident master-control watches MissionD events and delegates through BoardTask/Autopilot\"\n  :resume-from [latest-master-control-checkpoint BoardTask mission_execution event-bus provider-log]\n  :resume-plan ((step s1 :logic \"observe_event then classify_objective from durable event evidence\")\n                (step s2 :logic \"create_context_pack and dispatch_investigators before compile_shards\")\n                (step s3 :logic \"dispatch_implementers only with exact write_scope/must_not_touch/acceptance\")\n                (step s4 :logic \"verify durable evidence before close_or_backfill\"))\n  :last-control-prompt {}\n  :updated-at {}\n)\n",
         lisp_string(input.slot_id),
         lisp_string(input.tick_id),
         lisp_string(input.reason),
@@ -1062,6 +1074,7 @@ fn render_checkpoint(input: &MasterCheckpointRender<'_>) -> String {
         lisp_option_string(input.snapshot.last_drift_backfill_task_id.as_deref()),
         input.snapshot.control_turns_sent,
         input.snapshot.last_control_turn_at_epoch,
+        lisp_option_string(input.snapshot.last_control_objective_id.as_deref()),
         lisp_option_string(input.snapshot.last_control_turn_error.as_deref()),
         if input.mcp_ready { "true" } else { "false" },
         lisp_option_string(input.prompt_preview.as_deref()),
@@ -1237,7 +1250,17 @@ pub(crate) fn should_dispatch_control_turn(
         || now.saturating_sub(snapshot.last_control_turn_at_epoch)
             >= MASTER_ACTIVE_OBJECTIVE_HEARTBEAT_SECS;
     if reason == "event-wakeup" {
-        return outside_rate_limit && snapshot.active_objective_id.is_some();
+        let Some(active_id) = snapshot.active_objective_id.as_deref() else {
+            return false;
+        };
+        // A newly-created top-level objective must wake the resident master
+        // immediately even if a previous objective just sent a control turn.
+        // The last-control objective key prevents the direct BoardEvent notify
+        // and the bus subscriber copy from double-sending the same objective.
+        if snapshot.last_control_objective_id.as_deref() != Some(active_id) {
+            return true;
+        }
+        return outside_rate_limit;
     }
     if reason == "periodic-heartbeat" && snapshot.active_objective_id.is_some() {
         return outside_objective_heartbeat;
@@ -1509,6 +1532,7 @@ pub(crate) async fn mission_master_status(state: &AppState) -> Value {
     });
     status["service"]["commitConvergence"] = commit_convergence;
     status["service"]["nightlyEvolution"] = nightly_evolution;
+    status["service"]["lastControlObjectiveId"] = json!(runtime_snapshot.last_control_objective_id);
     status
 }
 
@@ -1954,6 +1978,7 @@ mod tests {
             drift_backfill_tasks_created: 0,
             control_turns_sent: 0,
             last_control_turn_at_epoch: 0,
+            last_control_objective_id: None,
             last_event_cursor: Some("BoardEvent:42".to_string()),
             last_event_summary: None,
             last_tick_id: None,
@@ -1995,6 +2020,17 @@ mod tests {
             &snapshot,
             true
         ));
+        snapshot.last_control_turn_at_epoch = chrono::Utc::now().timestamp();
+        snapshot.last_control_objective_id = Some("previous".to_string());
+        assert!(
+            should_dispatch_control_turn("event-wakeup", &snapshot, true),
+            "new objective must bypass the duplicate-turn rate limit"
+        );
+        snapshot.last_control_objective_id = Some("abc".to_string());
+        assert!(
+            !should_dispatch_control_turn("event-wakeup", &snapshot, true),
+            "same objective should be rate-limited after a sent control turn"
+        );
     }
 
     #[test]
@@ -2007,6 +2043,7 @@ mod tests {
             drift_backfill_tasks_created: 0,
             control_turns_sent: 0,
             last_control_turn_at_epoch: 0,
+            last_control_objective_id: None,
             last_event_cursor: Some("BoardEvent:42".to_string()),
             last_event_summary: Some("BoardEvent.task_created: task_id=abc".to_string()),
             last_tick_id: None,
@@ -2058,6 +2095,7 @@ mod tests {
             drift_backfill_tasks_created: 0,
             control_turns_sent: 1,
             last_control_turn_at_epoch: 0,
+            last_control_objective_id: Some("parent-objective".to_string()),
             last_event_cursor: Some("SlotEvent:77".to_string()),
             last_event_summary: Some(
                 "SlotEvent.state_changed: slot_id=slot-gemini-ultra Responding->Idle".to_string(),
@@ -2146,6 +2184,7 @@ mod tests {
             drift_backfill_tasks_created: 0,
             control_turns_sent: 0,
             last_control_turn_at_epoch: 0,
+            last_control_objective_id: None,
             last_event_cursor: Some("BoardEvent:42".to_string()),
             last_event_summary: Some("BoardEvent.task_created: task_id=abc".to_string()),
             last_tick_id: None,
@@ -2200,6 +2239,7 @@ mod tests {
             drift_backfill_tasks_created: 0,
             control_turns_sent: 0,
             last_control_turn_at_epoch: 0,
+            last_control_objective_id: None,
             last_event_cursor: Some("BoardEvent:7".to_string()),
             last_event_summary: Some("BoardEvent.task_created: task_id=auth-parent".to_string()),
             last_tick_id: None,
@@ -2250,6 +2290,7 @@ mod tests {
             drift_backfill_tasks_created: 0,
             control_turns_sent: 1,
             last_control_turn_at_epoch: 0,
+            last_control_objective_id: None,
             last_event_cursor: Some("BoardEvent:99".to_string()),
             last_event_summary: Some("BoardEvent.task_created: task_id=abc".to_string()),
             last_tick_id: None,
