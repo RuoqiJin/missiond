@@ -248,6 +248,9 @@ pub fn audit_historical_classification(
         raw_role_present: input.raw_role_present,
     });
     if let Some(f) = direct {
+        if f.reason == "codex_raw_role_missing" && input.first_message.is_none() {
+            return None;
+        }
         return Some(HistoricalClassificationFinding {
             session_id: f.session_id,
             stored_conversation_type: f.stored_conversation_type,
@@ -547,6 +550,21 @@ mod conversation_classification_tests {
         let finding = audit_classification(&input).expect("missing raw_role must flag");
         assert_eq!(finding.reason, "codex_raw_role_missing");
         assert!(!finding.raw_role_present);
+    }
+
+    #[test]
+    fn historical_audit_ignores_empty_codex_placeholder_without_raw_role() {
+        let input = HistoricalClassificationInput {
+            session_id: "pty-slot-codex-master-control",
+            stored_conversation_type: "worker",
+            source: "codex_cli",
+            slot_id: Some("slot-codex-master-control"),
+            slot_category: Some("worker"),
+            task_id: None,
+            raw_role_present: false,
+            first_message: None,
+        };
+        assert!(audit_historical_classification(&input).is_none());
     }
 
     #[test]

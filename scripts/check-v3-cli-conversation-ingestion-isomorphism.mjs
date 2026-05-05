@@ -126,6 +126,7 @@ function checkFiles(root, files) {
     'mission_conversation_query(action=turn_backfill, sessionId=...)',
     'codex_user_without_slot',
     'codex_raw_role_missing',
+    'backfill_missing_raw_roles_for_session',
     'claude_worker_prompt_signature',
     'rebuild_session_turns',
   ]);
@@ -239,6 +240,7 @@ function checkFiles(root, files) {
     'classification_audit_rows',
     'audit_historical_classification',
     'set_conversation_type',
+    'backfill_missing_raw_roles_for_session',
     'rebuild_turns_for_session',
     'mission_conversation_classification_audit',
     'mission_conversation_classification_backfill',

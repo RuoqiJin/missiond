@@ -92,6 +92,10 @@ pub trait ConversationStore: Send + Sync {
     /// Historical repair surface: update durable conversation classification after
     /// provider-aware audit has high-confidence evidence that a row was misfiled.
     async fn set_conversation_type(&self, id: &str, conversation_type: &str) -> DbResult<usize>;
+    /// Historical repair surface: older provider ingesters sometimes left
+    /// `raw_role` NULL. Backfill it from the normalized `role` column so
+    /// provider-aware audits can distinguish human turns from worker/provider turns.
+    async fn backfill_missing_raw_roles_for_session(&self, id: &str) -> DbResult<usize>;
     async fn get_conversations_by_task_id(&self, task_id: &str) -> DbResult<Vec<Conversation>>;
     async fn reactivate_conversation(&self, id: &str) -> DbResult<usize>;
 

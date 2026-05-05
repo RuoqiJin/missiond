@@ -467,6 +467,15 @@ pub(super) async fn handle_maintenance(
                         .set_conversation_type(&row.session_id, &row.expected_conversation_type)
                         .await
                         .map_err(|e| anyhow!("DB error: {e}"))?;
+                    let raw_roles_backfilled = if row.source == "codex_cli" && !row.raw_role_present {
+                        state
+                            .store
+                            .backfill_missing_raw_roles_for_session(&row.session_id)
+                            .await
+                            .map_err(|e| anyhow!("DB error: {e}"))?
+                    } else {
+                        0
+                    };
                     let rebuilt_turns = if rebuild_turns {
                         Some(rebuild_turns_for_session(state, &row.session_id).await?)
                     } else {
@@ -479,6 +488,7 @@ pub(super) async fn handle_maintenance(
                         "reason": row.reason,
                         "confidence": row.confidence,
                         "updatedRows": updated,
+                        "rawRolesBackfilled": raw_roles_backfilled,
                         "rebuiltTurns": rebuilt_turns,
                     }));
                 }

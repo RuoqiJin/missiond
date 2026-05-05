@@ -1095,6 +1095,21 @@ impl ConversationStore for PgMissionStore {
         Ok(result.rows_affected() as usize)
     }
 
+    async fn backfill_missing_raw_roles_for_session(&self, id: &str) -> DbResult<usize> {
+        let result = sqlx::query(
+            "UPDATE conversation_messages
+             SET raw_role = role
+             WHERE session_id = $1
+               AND raw_role IS NULL
+               AND role IS NOT NULL
+               AND role <> ''",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() as usize)
+    }
+
     async fn get_conversations_by_task_id(&self, task_id: &str) -> DbResult<Vec<Conversation>> {
         let rows =
             sqlx::query("SELECT * FROM conversations WHERE task_id = $1 ORDER BY started_at ASC")
