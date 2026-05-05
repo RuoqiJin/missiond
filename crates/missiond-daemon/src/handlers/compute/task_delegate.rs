@@ -532,6 +532,39 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
         ));
     }
 
+    let context_pack_materialized = if dry_run {
+        false
+    } else {
+        match materialize_swarm_context_pack(
+            &context_pack_path,
+            &objective,
+            &project_id,
+            &project_root,
+            parent_id.as_deref(),
+            &write_policy,
+            &acceptance,
+            &planned,
+        )
+        .await
+        {
+            Ok(()) => true,
+            Err(err) => {
+                return Ok(ToolResult::structured_error(
+                    ToolError::new(
+                        "SWARM_CONTEXT_PACK_WRITE_FAILED",
+                        format!(
+                            "failed to materialize swarm context_pack_path {}: {}",
+                            context_pack_path, err
+                        ),
+                    )
+                    .with_suggestion(
+                        "ensure the MissionD project root is writable and rerun mission_swarm_run",
+                    ),
+                ));
+            }
+        }
+    };
+
     let mut created_task_ids = Vec::new();
     if !dry_run {
         for planned_task in &planned {
@@ -583,6 +616,7 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
         "project_id": project_id,
         "project_root": project_root,
         "context_pack_path": context_pack_path,
+        "context_pack_materialized": context_pack_materialized,
         "parent_id": parent_id,
         "write_policy": write_policy,
         "fanout": {
@@ -598,6 +632,117 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
             "watch BoardTask lifecycle and provider durable logs before closing the swarm objective"
         }
     })))
+}
+
+async fn materialize_swarm_context_pack(
+    path: &str,
+    objective: &str,
+    project_id: &str,
+    project_root: &str,
+    parent_id: Option<&str>,
+    write_policy: &str,
+    acceptance: &[String],
+    planned: &[SwarmPlannedTask],
+) -> Result<()> {
+    let path = Path::new(path);
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let source = render_swarm_context_pack(
+        objective,
+        project_id,
+        project_root,
+        parent_id,
+        write_policy,
+        acceptance,
+        planned,
+    );
+    tokio::fs::write(path, source).await?;
+    Ok(())
+}
+
+fn render_swarm_context_pack(
+    objective: &str,
+    project_id: &str,
+    project_root: &str,
+    parent_id: Option<&str>,
+    write_policy: &str,
+    acceptance: &[String],
+    planned: &[SwarmPlannedTask],
+) -> String {
+    let mut out = String::new();
+    out.push_str("(swarm-context-pack\n");
+    out.push_str("  :schema \"missiond.swarm-context-pack.v1\"\n");
+    out.push_str(&format!(
+        "  :created_at {}\n",
+        lisp_string(&chrono::Utc::now().to_rfc3339())
+    ));
+    out.push_str(&format!("  :project_id {}\n", lisp_string(project_id)));
+    out.push_str(&format!("  :project_root {}\n", lisp_string(project_root)));
+    if let Some(parent) = parent_id {
+        out.push_str(&format!(
+            "  :parent_board_task_id {}\n",
+            lisp_string(parent)
+        ));
+    }
+    out.push_str(&format!("  :write_policy {}\n", lisp_string(write_policy)));
+    out.push_str(&format!(
+        "  :acceptance {}\n",
+        lisp_string_vector(acceptance)
+    ));
+    out.push_str(&format!("  :objective {}\n", lisp_string(objective)));
+    out.push_str("  :tasks\n  (\n");
+    for (idx, task) in planned.iter().enumerate() {
+        out.push_str(&format!(
+            "    (task :index {} :lane {} :engine_hint {} :pool_hint {} :task_class {} :title {} :intent {}\n",
+            idx,
+            lisp_string(&task.lane),
+            lisp_string(&task.engine_hint),
+            lisp_string(&task.pool_hint),
+            lisp_string(&task.task_class),
+            lisp_string(&task.title),
+            lisp_string(&task.intent),
+        ));
+        out.push_str(&format!(
+            "          :read_scope {} :write_scope {} :must_not_touch {})\n",
+            lisp_string_vector(&task.read_scope),
+            lisp_string_vector(&task.write_scope),
+            lisp_string_vector(&task.must_not_touch),
+        ));
+    }
+    out.push_str("  ))\n");
+    out
+}
+
+fn lisp_string_vector(values: &[String]) -> String {
+    if values.is_empty() {
+        return "[]".to_string();
+    }
+    format!(
+        "[{}]",
+        values
+            .iter()
+            .map(|value| lisp_string(value))
+            .collect::<Vec<_>>()
+            .join(" ")
+    )
+}
+
+fn lisp_string(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('"');
+    for ch in value.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped.push('"');
+    escaped
 }
 
 #[derive(Debug, Clone)]
@@ -1544,6 +1689,51 @@ mod tests {
             "launchd cwd must never leak into context-pack paths: {path}"
         );
         assert!(path.ends_with("-context-pack.lisp"));
+    }
+
+    #[test]
+    fn swarm_context_pack_materializes_worker_contract() {
+        let planned = vec![
+            SwarmPlannedTask {
+                lane: "investigate".to_string(),
+                engine_hint: "gemini".to_string(),
+                pool_hint: "gemini-ultra-pro".to_string(),
+                task_class: "context-pack".to_string(),
+                title: "Investigate".to_string(),
+                intent: "research".to_string(),
+                read_scope: vec!["/repo".to_string()],
+                write_scope: Vec::new(),
+                must_not_touch: vec!["**/*".to_string()],
+            },
+            SwarmPlannedTask {
+                lane: "implement".to_string(),
+                engine_hint: "claude-code".to_string(),
+                pool_hint: "claude-code-default".to_string(),
+                task_class: "code".to_string(),
+                title: "Patch \"quoted\"".to_string(),
+                intent: "code".to_string(),
+                read_scope: vec!["/repo".to_string()],
+                write_scope: vec!["src/auth.rs".to_string()],
+                must_not_touch: vec!["target/**".to_string()],
+            },
+        ];
+        let source = render_swarm_context_pack(
+            "Objective with\nnewline",
+            "missiond",
+            "/repo",
+            Some("parent-1"),
+            "scoped-write",
+            &["cargo test".to_string()],
+            &planned,
+        );
+        assert!(source.contains("(swarm-context-pack"));
+        assert!(source.contains(":schema \"missiond.swarm-context-pack.v1\""));
+        assert!(source.contains(":parent_board_task_id \"parent-1\""));
+        assert!(source.contains(":read_scope [\"/repo\"]"));
+        assert!(source.contains(":write_scope [\"src/auth.rs\"]"));
+        assert!(source.contains(":must_not_touch [\"target/**\"]"));
+        assert!(source.contains(":title \"Patch \\\"quoted\\\"\""));
+        assert!(source.contains(":objective \"Objective with\\nnewline\""));
     }
 
     #[test]

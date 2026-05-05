@@ -23,6 +23,7 @@ const DEFAULT_FILES = {
   materializer: 'scripts/context-pack-materialize-wave.mjs',
   runner: 'scripts/context-pack-run-wave.mjs',
   v3Runtime: 'scripts/lib/v3_workstation_runtime.mjs',
+  taskDelegate: 'crates/missiond-daemon/src/handlers/compute/task_delegate.rs',
 };
 
 function main() {
@@ -244,6 +245,15 @@ function checkFiles(root, files) {
     ':default_max_parallel',
   ]);
 
+  requireAll(diagnostics, files.taskDelegate, sources.taskDelegate, [
+    'materialize_swarm_context_pack',
+    'render_swarm_context_pack',
+    'missiond.swarm-context-pack.v1',
+    'context_pack_materialized',
+    'tokio::fs::create_dir_all',
+    'tokio::fs::write',
+  ]);
+
   return diagnostics;
 }
 
@@ -286,8 +296,9 @@ function buildFixture() {
 	             "scripts/context-pack-compile-shards.mjs"
 	             "scripts/context-pack-materialize-wave.mjs"
 	             "scripts/context-pack-run-wave.mjs"
-	             "scripts/lib/v3_workstation_runtime.mjs"]
-		      :note "context-pack-materialize-wave context-pack-run-wave materialize-wave run-wave task-runner-manifest task-contracts default max_parallel from workstation-config dispatch-policy context-pack-run-wave create-only initializes missing shared-memory/session-trace ledgers before prepare fixture"))
+	             "scripts/lib/v3_workstation_runtime.mjs"
+	             "crates/missiond-daemon/src/handlers/compute/task_delegate.rs"]
+		      :note "context-pack-materialize-wave context-pack-run-wave materialize-wave run-wave task-runner-manifest task-contracts default max_parallel from workstation-config dispatch-policy context-pack-run-wave create-only initializes missing shared-memory/session-trace ledgers before prepare fixture mission_swarm_run MUST materialize missiond.swarm-context-pack.v1"))
   (compression-contract
     :checks ["node scripts/check-v3-context-pack-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.checker, fs.readFileSync(DEFAULT_FILES.checker, 'utf8'));
@@ -296,6 +307,7 @@ function buildFixture() {
   writeFixture(root, DEFAULT_FILES.materializer, fs.readFileSync(DEFAULT_FILES.materializer, 'utf8'));
   writeFixture(root, DEFAULT_FILES.runner, fs.readFileSync(DEFAULT_FILES.runner, 'utf8'));
   writeFixture(root, DEFAULT_FILES.v3Runtime, fs.readFileSync(DEFAULT_FILES.v3Runtime, 'utf8'));
+  writeFixture(root, DEFAULT_FILES.taskDelegate, fs.readFileSync(DEFAULT_FILES.taskDelegate, 'utf8'));
   writeFixture(root, 'scripts/lib/missiond_lisp.mjs', fs.readFileSync('scripts/lib/missiond_lisp.mjs', 'utf8'));
   writeFixture(root, 'scripts/check-task-contract.mjs', fs.readFileSync('scripts/check-task-contract.mjs', 'utf8'));
   writeFixture(root, 'scripts/check-task-runner-manifest.mjs', fs.readFileSync('scripts/check-task-runner-manifest.mjs', 'utf8'));
