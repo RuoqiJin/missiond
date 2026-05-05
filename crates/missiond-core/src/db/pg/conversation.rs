@@ -29,6 +29,10 @@ fn task_scoped_type_clause(conv_type: Option<&str>, type_clause: &str) -> String
     }
 }
 
+fn task_scoped_order_clause() -> &'static str {
+    "ORDER BY CASE WHEN task_id = $1 THEN 0 ELSE 1 END, started_at DESC"
+}
+
 /// Zero-allocation pgvector literal serializer.
 /// Pre-allocates a single String for 512-dim halfvec (~7KB) instead of 513 heap allocs.
 fn vec_to_pg_literal(v: &[f32]) -> String {
@@ -332,8 +336,11 @@ impl ConversationStore for PgMissionStore {
                     FROM conversation_messages m
                     WHERE m.content ILIKE ('%' || $1 || '%')
                     LIMIT 50
-                )){}{}{} ORDER BY started_at ASC LIMIT $2",
-                task_type_clause, source_clause, time_clause
+                )){}{}{} {} LIMIT $2",
+                task_type_clause,
+                source_clause,
+                time_clause,
+                task_scoped_order_clause()
             );
             let rows = sqlx::query(&sql)
                 .bind(tid)
@@ -2589,7 +2596,7 @@ impl ConversationStore for PgMissionStore {
 
 #[cfg(test)]
 mod tests {
-    use super::{task_scoped_type_clause, COMPACTION_FRAGMENTS_QUERY};
+    use super::{task_scoped_order_clause, task_scoped_type_clause, COMPACTION_FRAGMENTS_QUERY};
 
     #[test]
     fn task_scoped_query_without_type_includes_provider_conversations() {
@@ -2607,6 +2614,13 @@ mod tests {
     fn task_scoped_query_keeps_explicit_type_filters() {
         let clause = " AND conversation_type = 'gemini_chat'";
         assert_eq!(task_scoped_type_clause(Some("gemini"), clause), clause);
+    }
+
+    #[test]
+    fn task_scoped_query_prefers_direct_binding_then_latest() {
+        let clause = task_scoped_order_clause();
+        assert!(clause.contains("CASE WHEN task_id = $1 THEN 0 ELSE 1 END"));
+        assert!(clause.contains("started_at DESC"));
     }
 
     #[test]

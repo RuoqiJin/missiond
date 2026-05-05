@@ -2177,7 +2177,7 @@
         :entry [mission_conversation_query mission_conversation_analyze mission_conversation_reconcile mission_timeline mission_retrospective_manage mission_embedding_ops]
         :core ((step s1 :logic "load conversation-ingestion-policy for read-model default and max limits")
                (step s2 :logic "ingest or query conversation/session/timeline records by project scope")
-	               (step s3 :logic "when mission_conversation_query list is scoped by taskId and conversationType is omitted, query all provider conversation rows for that BoardTask by direct conversations.task_id plus message-anchored BoardTask id fallback, so Claude/Codex/Gemini durable logs remain first-class evidence even after a reused slot is rebound to a later task")
+	               (step s3 :logic "when mission_conversation_query list is scoped by taskId and conversationType is omitted, query all provider conversation rows for that BoardTask by direct conversations.task_id plus message-anchored BoardTask id fallback, order direct bindings before message-only anchors and newest sessions before older sessions, so Claude/Codex/Gemini durable logs remain first-class evidence even after a reused slot is rebound to a later task without returning stale parent/subagent sessions first")
                (step s4 :logic "compaction timeline reconstruction tolerates legacy NULL started_at/message_count rows by coalescing before tuple decode")
                (step s5 :logic "derive analysis, reconciliation, retrospective, and embedding work items")
                (step s6 :logic "surface durable facts for context assembly and later memory projection"))
