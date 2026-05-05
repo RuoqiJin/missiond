@@ -297,39 +297,41 @@ async fn process_commit_event(
         return Err(anyhow!("not a ContextualCommitDetected event"));
     };
 
-    let resolution = match resolve_project_for_commit(state, slot_id.as_deref(), commit_hash).await
-    {
-        Some(resolution) => resolution,
-        None => {
-            let root = missiond_fallback_root(state).await;
-            let report_path = write_report(
-                &root,
-                &CommitConvergenceReport {
+    let resolution =
+        match resolve_project_for_commit(state, slot_id.as_deref(), conversation_id, commit_hash)
+            .await
+        {
+            Some(resolution) => resolution,
+            None => {
+                let root = missiond_fallback_root(state).await;
+                let report_path = write_report(
+                    &root,
+                    &CommitConvergenceReport {
+                        project_id: "unknown".to_string(),
+                        commit_hash: commit_hash.clone(),
+                        status: CommitCoverageStatus::UnknownProject,
+                        files: Vec::new(),
+                        classes: ChangedFileClasses::default(),
+                        backfill_task_id: None,
+                        dedupe_key: None,
+                        summary: summary.clone(),
+                        conversation_id: conversation_id.clone(),
+                        message_id: *message_id,
+                        session_id: session_id.clone(),
+                        slot_id: slot_id.clone(),
+                    },
+                )
+                .await?;
+                return Ok(CommitConvergenceResult {
                     project_id: "unknown".to_string(),
-                    commit_hash: commit_hash.clone(),
                     status: CommitCoverageStatus::UnknownProject,
-                    files: Vec::new(),
-                    classes: ChangedFileClasses::default(),
                     backfill_task_id: None,
-                    dedupe_key: None,
-                    summary: summary.clone(),
-                    conversation_id: conversation_id.clone(),
-                    message_id: *message_id,
-                    session_id: session_id.clone(),
-                    slot_id: slot_id.clone(),
-                },
-            )
-            .await?;
-            return Ok(CommitConvergenceResult {
-                project_id: "unknown".to_string(),
-                status: CommitCoverageStatus::UnknownProject,
-                backfill_task_id: None,
-                created_task: false,
-                dedupe_hit: false,
-                report_path,
-            });
-        }
-    };
+                    created_task: false,
+                    dedupe_hit: false,
+                    report_path,
+                });
+            }
+        };
 
     let files = git_diff_tree_changed_files(&resolution.root, commit_hash).await?;
     let (status, classes) = classify_changed_files(&files);
@@ -389,6 +391,7 @@ async fn process_commit_event(
 async fn resolve_project_for_commit(
     state: &AppState,
     slot_id: Option<&str>,
+    conversation_id: &str,
     commit_hash: &str,
 ) -> Option<ProjectResolution> {
     if let Some(slot_id) = slot_id {
@@ -411,6 +414,12 @@ async fn resolve_project_for_commit(
         }
     }
 
+    if let Some(resolution) =
+        resolve_project_from_conversation(state, conversation_id, commit_hash).await
+    {
+        return Some(resolution);
+    }
+
     let registry = state.project_registry.read().await;
     for project in registry.all_projects() {
         let root = PathBuf::from(&project.path);
@@ -421,6 +430,44 @@ async fn resolve_project_for_commit(
             });
         }
     }
+    None
+}
+
+async fn resolve_project_from_conversation(
+    state: &AppState,
+    conversation_id: &str,
+    commit_hash: &str,
+) -> Option<ProjectResolution> {
+    let conversation = state.store.get_conversation(conversation_id).await.ok()??;
+    let registry = state.project_registry.read().await;
+    let mut candidates: Vec<(Option<String>, PathBuf)> = Vec::new();
+
+    if let Some(project_id) = conversation.project_id.as_deref() {
+        if let Some(project) = registry.get(project_id) {
+            candidates.push((Some(project.id.clone()), PathBuf::from(&project.path)));
+        }
+    }
+
+    if let Some(project_path) = conversation.project.as_deref() {
+        candidates.push((
+            registry.resolve(project_path).map(ToOwned::to_owned),
+            PathBuf::from(project_path),
+        ));
+    }
+
+    for (project_id, root) in candidates {
+        if git_commit_exists(&root, commit_hash).await {
+            let project_id = project_id
+                .or_else(|| {
+                    registry
+                        .resolve(&root.to_string_lossy())
+                        .map(ToOwned::to_owned)
+                })
+                .or_else(|| infer_project_id_from_root(&root))?;
+            return Some(ProjectResolution { project_id, root });
+        }
+    }
+
     None
 }
 

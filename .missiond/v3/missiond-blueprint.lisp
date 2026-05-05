@@ -889,7 +889,7 @@
       :entry [SystemEvent::ContextualCommitDetected mission_execution.complete provider-durable-log]
       :core
         ((step s1 :logic "CommitConvergenceService subscribes to SystemEvent::ContextualCommitDetected with StartFrom::Latest and PerEvent cursor flush")
-         (step s2 :logic "resolve project from slot project_root/cwd or project registry; unknown project writes a diagnostic report only")
+         (step s2 :logic "resolve project from slot project_root/cwd, provider conversation project/project_id metadata, or project registry; unknown project writes a diagnostic report only")
          (step s3 :logic "read committed snapshot with git diff-tree --root --no-commit-id -r --name-only <sha>, never current worktree diff")
          (step s4 :logic "classify changed files into code, lisp, checker, evidence, docs, or other")
          (step s5 :logic "for code-only commits create one visible deduped BoardTask commit-lisp-backfill:<project>:<sha>; lisp/checker/evidence-only commits do not recurse")
@@ -2600,7 +2600,7 @@
              "crates/missiond-daemon/src/engine/master_control.rs"
              "scripts/check-v3-commit-convergence-loop.mjs"
              "scripts/check-v3-code-isomorphism-complete.mjs"]
-      :note "commit-lisp-convergence-loop is the event-driven code->Lisp backfill muscle. CommitConvergenceService subscribes to SystemEvent::ContextualCommitDetected, resolves project from the committing slot or registry, inspects committed snapshots with git diff-tree --root --no-commit-id -r --name-only <sha>, classifies code/lisp/checker/evidence/doc files, writes commit convergence reports, and creates one visible deduped BoardTask commit-lisp-backfill:<project>:<sha> for code-only commits. Lisp/checker/evidence-only commits do not recurse.")
+      :note "commit-lisp-convergence-loop is the event-driven code->Lisp backfill muscle. CommitConvergenceService subscribes to SystemEvent::ContextualCommitDetected, resolves project from the committing slot, provider conversation project/project_id metadata, or registry, inspects committed snapshots with git diff-tree --root --no-commit-id -r --name-only <sha>, classifies code/lisp/checker/evidence/doc files, writes commit convergence reports, and creates one visible deduped BoardTask commit-lisp-backfill:<project>:<sha> for code-only commits. Lisp/checker/evidence-only commits do not recurse.")
 
     (surface nightly-evolution-loop
       :status "code-aligned"
