@@ -179,6 +179,10 @@ function checkFiles(root, files) {
     'detached tokio task with an OwnedSlotDispatchGuard moved in',
     'Restart recovery MUST clear stale slot-dyn-* BoardTask assignee pins',
     'BoardStore::clear_board_task_assignee',
+    '(claude-code-mcp-recovery',
+    ':forbid-numeric-shortcut true',
+    ':missing-incident-kind "claude_code_mcp_missing"',
+    ':reconnect-failed-incident-kind "claude_code_mcp_reconnect_failed"',
     'node scripts/check-v3-workstation-config-isomorphism.mjs',
   ]);
 

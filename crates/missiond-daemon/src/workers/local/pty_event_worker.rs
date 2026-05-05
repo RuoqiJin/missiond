@@ -11,6 +11,9 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
+use crate::engine::master_control::{
+    CLAUDE_CODE_MCP_MISSING_INCIDENT_KIND, CLAUDE_CODE_MCP_RECONNECT_FAILED_INCIDENT_KIND,
+};
 use crate::infra::message_handler::handle_pty_text_complete;
 use crate::state::{
     AppState, EmbeddingTask, ExtractionPhase, CURRENT_ANALYSIS_VERSION, MEMORY_SLOT_ID,
@@ -713,6 +716,10 @@ fn handle_mcp_tool_error(s: &AppState, slot_id: &str, tool_name: &str, error: &s
     }
 
     warn!(slot_id = %slot_id, tool = %tool_name, "MCP tool error detected, creating incident");
+    // Tag the initial incident with the Lisp-pinned `claude_code_mcp_missing`
+    // kind from `claude-code-mcp-recovery`; master_control's IncidentEvent
+    // subscriber filters on this kind to wake the resident master without
+    // requiring the operator to notice the PTY screen.
     let incident = missiond_core::types::MissionIncident {
         id: uuid::Uuid::new_v4().to_string(),
         severity: missiond_core::types::IncidentSeverity::High,
@@ -724,6 +731,7 @@ fn handle_mcp_tool_error(s: &AppState, slot_id: &str, tool_name: &str, error: &s
         ),
         server_id: None,
         raw_payload: serde_json::json!({
+            "kind": CLAUDE_CODE_MCP_MISSING_INCIDENT_KIND,
             "slot_id": slot_id,
             "tool_name": tool_name,
             "error": error,
@@ -731,9 +739,110 @@ fn handle_mcp_tool_error(s: &AppState, slot_id: &str, tool_name: &str, error: &s
         created_at: chrono::Utc::now().to_rfc3339(),
     };
     let bus = std::sync::Arc::clone(&s.bus);
+    let pty = std::sync::Arc::clone(&s.pty);
+    let slot_id_owned = slot_id.to_string();
+    let tool_name_owned = tool_name.to_string();
     tokio::spawn(async move {
+        // Publish the initial `claude_code_mcp_missing` incident first so the
+        // master is woken even if the reconnect attempt below stalls.
         let _ = bus
             .publish_incident(IncidentEvent::Reported { incident })
+            .await;
+
+        // Reconnect ritual is ClaudeCode-only (the `/mcp` picker is a Claude
+        // Code TUI surface); skip silently for other engines and let the
+        // initial incident be the wakeup signal.
+        let engine = match pty.get_status(&slot_id_owned).await {
+            Some(info) => info.engine,
+            None => return,
+        };
+        if engine != missiond_core::CliEngine::ClaudeCode {
+            return;
+        }
+
+        // Budget = 1 attempt per `claude-code-mcp-recovery
+        // :reconnect-budget-attempts 1` — we never silently retry.
+        let outcome = match pty.mcp_reconnect(&slot_id_owned).await {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                warn!(
+                    slot_id = %slot_id_owned,
+                    error = %err,
+                    "Arrow-key MCP reconnect ritual could not run"
+                );
+                let follow_up = missiond_core::types::MissionIncident {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    severity: missiond_core::types::IncidentSeverity::High,
+                    source: missiond_core::types::IncidentSource::PtySlot,
+                    title: format!(
+                        "MCP 重连失败: {} (无法启动重连仪式)",
+                        slot_id_owned
+                    ),
+                    description: format!(
+                        "工位 `{}` 的 `/mcp` 重连仪式无法启动。\n\n原因:\n```\n{}\n```",
+                        slot_id_owned, err
+                    ),
+                    server_id: None,
+                    raw_payload: serde_json::json!({
+                        "kind": CLAUDE_CODE_MCP_RECONNECT_FAILED_INCIDENT_KIND,
+                        "slot_id": slot_id_owned,
+                        "tool_name": tool_name_owned,
+                        "reason": err.to_string(),
+                    }),
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                };
+                let _ = bus
+                    .publish_incident(IncidentEvent::Reported {
+                        incident: follow_up,
+                    })
+                    .await;
+                return;
+            }
+        };
+
+        if outcome.success {
+            info!(
+                slot_id = %slot_id_owned,
+                down_arrows = outcome.down_arrows_used,
+                "ClaudeCode MCP arrow-key reconnect ritual reported success"
+            );
+            // Successful reconnect is observable on the next PTY message;
+            // emitting a `claude_code_mcp_reconnect_failed` here would be
+            // misleading. The master-control wakeup from the original
+            // missing-incident is sufficient signal.
+            return;
+        }
+
+        warn!(
+            slot_id = %slot_id_owned,
+            down_arrows = outcome.down_arrows_used,
+            reason = %outcome.reason,
+            "ClaudeCode MCP arrow-key reconnect ritual failed within budget"
+        );
+        let follow_up = missiond_core::types::MissionIncident {
+            id: uuid::Uuid::new_v4().to_string(),
+            severity: missiond_core::types::IncidentSeverity::High,
+            source: missiond_core::types::IncidentSource::PtySlot,
+            title: format!("MCP 重连失败: {} ({})", slot_id_owned, outcome.reason),
+            description: format!(
+                "工位 `{}` 的 `/mcp` 仪式按 Lisp 合约执行 (键盘箭头, 拒绝数字快捷键), 但仍未恢复 mission_* 工具。\n\n原因: {}\nDown 按键次数: {}\n\n屏幕摘录:\n```\n{}\n```",
+                slot_id_owned, outcome.reason, outcome.down_arrows_used, outcome.screen_excerpt
+            ),
+            server_id: None,
+            raw_payload: serde_json::json!({
+                "kind": CLAUDE_CODE_MCP_RECONNECT_FAILED_INCIDENT_KIND,
+                "slot_id": slot_id_owned,
+                "tool_name": tool_name_owned,
+                "reason": outcome.reason,
+                "down_arrows_used": outcome.down_arrows_used,
+                "screen_excerpt": outcome.screen_excerpt,
+            }),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+        let _ = bus
+            .publish_incident(IncidentEvent::Reported {
+                incident: follow_up,
+            })
             .await;
     });
 }

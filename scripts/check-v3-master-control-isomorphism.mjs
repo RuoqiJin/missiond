@@ -261,9 +261,18 @@ function check(s, diagnostics) {
     'BoardEvent',
     'SlotEvent',
     'QuestionEvent',
+    // ClaudeCode MCP-recovery wakeup contract — pinned so a regression that
+    // drops the IncidentEvent live subscription leaves the resident master
+    // dependent on the operator noticing PTY failure output.
+    'IncidentEvent',
     'MASTER_BOARD_SUBSCRIPTION',
     'MASTER_SLOT_SUBSCRIPTION',
     'MASTER_QUESTION_SUBSCRIPTION',
+    'MASTER_INCIDENT_SUBSCRIPTION',
+    'spawn_incident_event_sub',
+    'should_wake_for_incident_event',
+    'CLAUDE_CODE_MCP_MISSING_INCIDENT_KIND',
+    'CLAUDE_CODE_MCP_RECONNECT_FAILED_INCIDENT_KIND',
     'master_live_subscription_opts',
     'StartFrom::Latest',
     'CursorFlush::PerEvent',

@@ -676,7 +676,21 @@
       :restart-recovery
         "Restart recovery MUST clear stale slot-dyn-* BoardTask assignee pins when the runtime slot is absent and the dynamic_slots row is not active, using BoardStore::clear_board_task_assignee before normal no-assignee routing resumes."
 	    :rationale
-	        "Wave33 evidence: a delegated BoardTask was sent twice — once via spawner.initial_prompt fire-and-forget, then again via Autopilot pty.send — and the slot's TextOutputEvent::Complete arrived without Autopilot transitioning the BoardTask to done. Single ownership of prompt+close eliminates the orphaned-task class entirely."))
+	        "Wave33 evidence: a delegated BoardTask was sent twice — once via spawner.initial_prompt fire-and-forget, then again via Autopilot pty.send — and the slot's TextOutputEvent::Complete arrived without Autopilot transitioning the BoardTask to done. Single ownership of prompt+close eliminates the orphaned-task class entirely.")
+    (claude-code-mcp-recovery
+      :desc "Lisp-owned ClaudeCode MCP reconnect ritual and missing-MCP incident contract; the mounting and reconnect navigation are Lisp-pinned, never tool-registry-decided at runtime."
+      :reconnect-keystrokes ["/mcp" "<enter>" "<arrow-down>*N" "<enter>" "<enter>"]
+      :forbid-numeric-shortcut true
+      :missing-incident-kind "claude_code_mcp_missing"
+      :reconnect-failed-incident-kind "claude_code_mcp_reconnect_failed"
+      :reconnect-budget-attempts 1
+      :wake-resident-master true
+      :surfaces ["crates/missiond-pty/src/session.rs::Session::mcp_reconnect_sequence"
+                 "crates/missiond-pty/src/session.rs::PTYSession::mcp_reconnect"
+                 "crates/missiond-pty/src/manager.rs::PTYManager::mcp_reconnect"
+                 "crates/missiond-daemon/src/workers/local/pty_event_worker.rs::handle_mcp_tool_error"
+                 "crates/missiond-daemon/src/engine/master_control.rs::spawn_incident_event_sub"]
+      :rationale "Claude Code's /mcp picker numeric shortcuts have shifted between TUI versions; arrow-key navigation is the only stable substrate. When supports_mcp=true is advertised but no mission_* tool surfaces after slot ready, the worker is operating without orchestration tools and the master must be woken via a durable incident, not a silent reconnect retry loop."))
 
   (workstation-pool
     :desc "Compact V3 SSOT for human-owned external compute accounts exposed as MissionD workers."
@@ -820,18 +834,21 @@
       :surfaces ["crates/missiond-daemon/src/engine/master_control.rs::write_startup_checkpoint_for_slot"
                  "crates/missiond-daemon/src/engine/master_control.rs::render_checkpoint"])
     (master-event-subscriber
-      :entry [BoardEvent SlotEvent QuestionEvent ProjectRegistryChanged DaemonRestart StaleTask NightSchedule]
+      :entry [BoardEvent SlotEvent QuestionEvent IncidentEvent ProjectRegistryChanged DaemonRestart StaleTask NightSchedule]
       :core
-        ((step s1 :logic "subscribe to BoardEvent, SlotEvent, and QuestionEvent with live-only v2 subscription names, StartFrom::Latest, and PerEvent cursor flush so daemon restart does not replay historical backlog")
+        ((step s1 :logic "subscribe to BoardEvent, SlotEvent, QuestionEvent, and IncidentEvent with live-only v2 subscription names, StartFrom::Latest, and PerEvent cursor flush so daemon restart does not replay historical backlog")
          (step s2 :logic "ignore slot-codex-master-control self SlotEvents so the resident brain cannot trigger an infinite self-prompt loop")
          (step s3 :logic "ignore seq=0 volatile events, ordinary SlotEvent.became_idle noise, and SlotEvent.task_dispatched worker lifecycle noise; PTY idle/task-dispatched is diagnostic evidence, not a master-control wakeup authority")
          (step s4 :logic "filter worker creation/running noise before the model while preserving terminal worker edges: swarm worker TaskCreated and dev/running updates do not wake the resident master, but status_changed/updated done/completed/closed/failed/blocked MUST wake it so parent objectives can advance from durable worker completion")
          (step s5 :logic "filter swarm-created worker BoardTasks such as Investigate context for swarm objective, Survey exact shards for swarm objective, and Implement accepted swarm shard, because those terminal worker units belong to Autopilot/provider evidence rather than recursive master delegation")
          (step s6 :logic "same-process Board tool handlers also call notify_board_event_direct immediately after durable DB mutation and before/alongside event-log publish, so master wakeup is not blocked behind dispatcher backlog; Board notes authored by codex-master-control or the legacy resident-codex-master/resident-master aliases MUST NOT direct-notify the master again")
+         (step s6b :logic "IncidentEvent live subscription wakes the master only on Lisp-pinned MCP-recovery kinds claude_code_mcp_missing and claude_code_mcp_reconnect_failed (matched against MissionIncident.raw_payload.kind stamped by pty_event_worker::handle_mcp_tool_error); other incident kinds flow through aiops/question-incident pipelines and are diagnostic-only here so MCP recovery does not depend on the operator noticing PTY screen output")
          (step s7 :logic "record only wakeup metadata and ack immediately")
          (step s8 :logic "notify master-decision-loop; never run long worker dispatch inline"))
       :egress [master-control-runtime.event-cursor master-control-runtime.queued-events master-control-runtime.notify]
-      :surfaces ["crates/missiond-daemon/src/engine/master_control.rs::spawn_master_event_subscriber"])
+      :surfaces ["crates/missiond-daemon/src/engine/master_control.rs::spawn_master_event_subscriber"
+                 "crates/missiond-daemon/src/engine/master_control.rs::spawn_incident_event_sub"
+                 "crates/missiond-daemon/src/engine/master_control.rs::should_wake_for_incident_event"])
     (master-decision-loop
       :entry [master-control-runtime.notify periodic-heartbeat]
       :core
@@ -1543,7 +1560,9 @@
        "Exited/terminal SessionState overrides stale running screen evidence; mission_pty_status and mission_slots MUST NOT expose recognition.state=running when the durable PTY session state is exited or error."
        "Codex MCP approval menus (`Allow the ... MCP server to run tool`, `Allow for this session`, `enter to submit | esc to cancel`) are explicit blocked TUI source signatures and MUST NOT be demoted to Running just because the SessionState is Thinking."
        "mission_pty_confirm MUST confirm option menus by human-like keyboard navigation (Down/Up then Enter), never by sending numeric shortcut keys; this applies to ClaudeCode, Codex CLI, and Gemini CLI."
-       "recognize_claude_code Blocked MUST require explicit confirmation/model-picker UI (Enter to confirm, Do you want to proceed/make this edit/allow/use this api key, Select model, approval request); the bare words `approval` or `permission(s)` -- including the `bypass permissions on` composer-mode footer toggle and historical task-brief prose -- MUST NOT trigger Blocked on Idle or completed screens."]
+       "recognize_claude_code Blocked MUST require explicit confirmation/model-picker UI (Enter to confirm, Do you want to proceed/make this edit/allow/use this api key, Select model, approval request); the bare words `approval` or `permission(s)` -- including the `bypass permissions on` composer-mode footer toggle and historical task-brief prose -- MUST NOT trigger Blocked on Idle or completed screens."
+       "ClaudeCode worker MCP reconnect MUST follow `/mcp` -> Enter -> ArrowDown until missiond -> Enter -> Enter using arrow-key keystrokes only; numeric shortcut selection is forbidden because Claude Code's MCP picker numeric shortcuts have shifted between releases. The keystroke sequence is the SSOT and missiond-pty Session::mcp_reconnect_sequence MUST project from it."
+       "When a ClaudeCode worker advertises supports_mcp=true but its mounted tool list does not include any mission_* tool after slot ready, master_control MUST file a durable claude_code_mcp_missing incident so the resident master is woken; if the /mcp arrow-key reconnect ritual does not surface mission_* tools within the policy budget, a follow-up claude_code_mcp_reconnect_failed incident is required, never a silent retry loop."]
     :checker "node scripts/check-v3-pty-recognition-isomorphism.mjs")
 
   (ops-infra

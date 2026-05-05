@@ -1870,6 +1870,16 @@ impl PTYSession {
         Ok(())
     }
 
+    /// Static `Session::mcp_reconnect_sequence` accessor — the contract
+    /// surface pinned by `claude-code-mcp-recovery` in
+    /// `.missiond/v3/missiond-blueprint.lisp` and asserted by the V3 PTY
+    /// recognition checker. Delegates to the module-level helper so the
+    /// runtime `mcp_reconnect` method and tests share a single byte
+    /// template.
+    pub fn mcp_reconnect_sequence(missiond_index: usize) -> String {
+        mcp_reconnect_sequence(missiond_index)
+    }
+
     async fn reject_option_index(&self) -> usize {
         let pending = self.pending_tool_confirm.read().await.clone();
         if let Some(info) = pending {
@@ -1901,6 +1911,153 @@ impl PTYSession {
     /// Send interrupt (Ctrl+C)
     pub async fn interrupt(&self) -> Result<()> {
         self.write("\x03").await
+    }
+
+    /// ClaudeCode MCP reconnect ritual.
+    ///
+    /// Pinned by `.missiond/v3/missiond-blueprint.lisp ::
+    /// claude-code-mcp-recovery`: types `/mcp`, presses Enter, presses
+    /// ArrowDown until the `missiond` row is selected, presses Enter to
+    /// open the details screen, then Enter again on the default Reconnect
+    /// action. Numeric shortcut keystrokes are intentionally never sent —
+    /// see `mcp_reconnect_sequence` for the static SSOT the V3 checker
+    /// pins.
+    ///
+    /// Returns a bounded outcome with success flag, the number of Down
+    /// arrows actually issued, a short reason, and a screen excerpt for
+    /// incident evidence. Never panics; reports `success=false` with the
+    /// excerpt when the picker, server row, details screen, or outcome
+    /// banner cannot be observed within the bounded budgets.
+    pub async fn mcp_reconnect(&self) -> Result<McpReconnectOutcome> {
+        if self.engine != missiond_shared::CliEngine::ClaudeCode {
+            return Err(anyhow!(
+                "mcp_reconnect is ClaudeCode-only; engine={:?}",
+                self.engine
+            ));
+        }
+        if !self.running.load(Ordering::SeqCst) {
+            return Err(anyhow!("Session not running"));
+        }
+
+        // 1. Open the /mcp picker. We write the literal slash command and
+        //    submit with Enter; bracketed paste must NOT be used because
+        //    Claude Code interprets `/mcp` as a slash command only when it
+        //    arrives as inline text.
+        self.write("/mcp").await?;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        self.write("\r").await?;
+
+        // 2. Wait for the picker to render with the missiond row.
+        let mut menu_seen = false;
+        for _ in 0..30 {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let screen = self.get_screen_text().await;
+            if screen.contains("missiond")
+                || screen.contains("MCP servers")
+                || screen.contains("MCP Server")
+            {
+                menu_seen = true;
+                break;
+            }
+        }
+        if !menu_seen {
+            let excerpt = bounded_screen_excerpt(&self.get_screen_text().await, 1500);
+            return Ok(McpReconnectOutcome {
+                success: false,
+                down_arrows_used: 0,
+                screen_excerpt: excerpt,
+                reason: "mcp picker did not render".to_string(),
+            });
+        }
+
+        // 3. Press Down until the missiond row carries the selection
+        //    arrow. Bounded by `max_down`; numeric shortcut keys are never
+        //    sent.
+        const MAX_DOWN: usize = 16;
+        let mut down_used: usize = 0;
+        let mut selected = false;
+        for _ in 0..=MAX_DOWN {
+            let screen = self.get_screen_text().await;
+            if line_with_missiond_is_selected(&screen) {
+                selected = true;
+                break;
+            }
+            if down_used >= MAX_DOWN {
+                break;
+            }
+            self.write("\x1b[B").await?;
+            down_used += 1;
+            tokio::time::sleep(Duration::from_millis(120)).await;
+        }
+        if !selected {
+            let excerpt = bounded_screen_excerpt(&self.get_screen_text().await, 1500);
+            return Ok(McpReconnectOutcome {
+                success: false,
+                down_arrows_used: down_used,
+                screen_excerpt: excerpt,
+                reason: "could not select missiond row via arrow-key navigation".to_string(),
+            });
+        }
+
+        // 4. Enter on the missiond row → details screen. Default action is
+        //    Reconnect.
+        self.write("\r").await?;
+        let mut details_seen = false;
+        for _ in 0..30 {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let screen = self.get_screen_text().await;
+            if screen.contains("Reconnect") {
+                details_seen = true;
+                break;
+            }
+        }
+        if !details_seen {
+            let excerpt = bounded_screen_excerpt(&self.get_screen_text().await, 1500);
+            return Ok(McpReconnectOutcome {
+                success: false,
+                down_arrows_used: down_used,
+                screen_excerpt: excerpt,
+                reason: "details screen did not render Reconnect option".to_string(),
+            });
+        }
+
+        // 5. Enter on the default Reconnect button.
+        self.write("\r").await?;
+
+        // 6. Wait for an outcome banner. Treat the absence of a banner
+        //    inside the budget as failure so the caller publishes a
+        //    `claude_code_mcp_reconnect_failed` follow-up incident rather
+        //    than silently retrying.
+        let mut outcome_text = String::new();
+        let mut success = false;
+        let mut reason = "reconnect outcome unknown".to_string();
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let screen = self.get_screen_text().await;
+            outcome_text = screen.clone();
+            let lower = screen.to_lowercase();
+            if lower.contains("connected")
+                || lower.contains("reconnected")
+                || lower.contains("✓ missiond")
+            {
+                success = true;
+                reason = "reconnect reported success".to_string();
+                break;
+            }
+            if lower.contains("failed") || lower.contains("error") || lower.contains("disconnected")
+            {
+                success = false;
+                reason = "reconnect reported failure".to_string();
+                break;
+            }
+        }
+        let excerpt = bounded_screen_excerpt(&outcome_text, 1500);
+        Ok(McpReconnectOutcome {
+            success,
+            down_arrows_used: down_used,
+            screen_excerpt: excerpt,
+            reason,
+        })
     }
 
     /// Set permission check callback
@@ -2035,6 +2192,86 @@ fn confirmation_navigation_steps(target_index: usize) -> Vec<&'static str> {
 
 fn confirmation_navigation_sequence(target_index: usize) -> String {
     confirmation_navigation_steps(target_index).concat()
+}
+
+// ── Claude Code MCP reconnect ritual ──
+//
+// Lisp SSOT: `.missiond/v3/missiond-blueprint.lisp ::
+// claude-code-mcp-recovery :: :reconnect-keystrokes
+// ["/mcp" "<enter>" "<arrow-down>*N" "<enter>" "<enter>"]` with
+// `:forbid-numeric-shortcut true`. Claude Code's TUI numeric shortcuts
+// have shifted between releases; arrow-key navigation is the only stable
+// substrate, and `Session::mcp_reconnect_sequence` is the contract surface
+// the V3 PTY-recognition checker pins.
+
+/// Outcome of one ClaudeCode MCP reconnect ritual. Carried in the
+/// `claude_code_mcp_reconnect_failed` / `claude_code_mcp_recovered`
+/// follow-up incidents the master-control IncidentEvent subscriber wakes
+/// on.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpReconnectOutcome {
+    /// Whether the reconnect attempt observed a success indicator on screen.
+    pub success: bool,
+    /// How many `\x1b[B` (Down) presses were issued before the missiond row
+    /// became selected. Bounded by the loop cap; never the result of a
+    /// numeric shortcut.
+    pub down_arrows_used: usize,
+    /// Bounded screen excerpt suitable for an incident `raw_payload`
+    /// (~1.5 KB). Trimmed from the tail so the most recent provider output
+    /// — including any error banner — is preserved.
+    pub screen_excerpt: String,
+    /// Short human-readable reason describing why the attempt ended.
+    pub reason: String,
+}
+
+fn line_with_missiond_is_selected(screen: &str) -> bool {
+    for line in screen.lines() {
+        let trimmed = line.trim_start();
+        if !trimmed.contains("missiond") {
+            continue;
+        }
+        // Selection markers used by Claude Code's TUI for the highlighted
+        // picker row. ❯ is the ClaudeCode default; `>` and `●` are the
+        // fallbacks observed across older releases.
+        if trimmed.starts_with('❯') || trimmed.starts_with('>') || trimmed.starts_with('●') {
+            return true;
+        }
+    }
+    false
+}
+
+fn bounded_screen_excerpt(screen: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = screen.chars().collect();
+    if chars.len() <= max_chars {
+        return screen.to_string();
+    }
+    let start = chars.len() - max_chars;
+    chars[start..].iter().collect()
+}
+
+/// Render the ClaudeCode MCP reconnect ritual as a single byte sequence.
+///
+/// The keystroke template is Lisp-pinned in
+/// `.missiond/v3/missiond-blueprint.lisp::workstation-config::claude-code-mcp-recovery`:
+/// `/mcp` -> Enter -> ArrowDown until missiond -> Enter -> Enter. `missiond_index`
+/// is the 1-based row index of the missiond entry in the picker; numeric shortcut
+/// selection is forbidden because the Claude Code picker shortcut digits have
+/// shifted between releases.
+pub(crate) fn mcp_reconnect_sequence(missiond_index: usize) -> String {
+    mcp_reconnect_steps(missiond_index).concat()
+}
+
+fn mcp_reconnect_steps(missiond_index: usize) -> Vec<&'static str> {
+    let arrow_down_count = missiond_index.saturating_sub(1);
+    let mut steps = Vec::with_capacity(2 + arrow_down_count + 2);
+    steps.push("/mcp");
+    steps.push("\r");
+    for _ in 0..arrow_down_count {
+        steps.push("\x1b[B");
+    }
+    steps.push("\r");
+    steps.push("\r");
+    steps
 }
 
 // ========== Helper Functions ==========
@@ -2456,6 +2693,23 @@ mod tests {
         assert_eq!(confirmation_navigation_sequence(4), "\x1b[B\x1b[B\x1b[B\r");
         assert!(!confirmation_navigation_sequence(2).contains('2'));
         assert!(!confirmation_navigation_sequence(4).contains('4'));
+
+        // ClaudeCode MCP reconnect ritual is Lisp-pinned to arrow-key keystrokes:
+        // /mcp -> Enter -> ArrowDown until missiond -> Enter -> Enter. Numeric
+        // shortcut digits in the picker have shifted between TUI releases and
+        // MUST NOT appear in the byte template.
+        assert_eq!(mcp_reconnect_sequence(1), "/mcp\r\r\r");
+        assert_eq!(mcp_reconnect_sequence(2), "/mcp\r\x1b[B\r\r");
+        assert_eq!(mcp_reconnect_sequence(3), "/mcp\r\x1b[B\x1b[B\r\r");
+        // Only the literal "/mcp" command may carry digits; selection digits
+        // ('2', '3', '4') must not be emitted as keystrokes outside that token.
+        let seq = mcp_reconnect_sequence(4);
+        let after_command = seq.strip_prefix("/mcp").unwrap();
+        assert!(!after_command.contains('2'));
+        assert!(!after_command.contains('3'));
+        assert!(!after_command.contains('4'));
+        assert!(after_command.contains("\x1b[B"));
+        assert!(after_command.ends_with("\r\r"));
     }
 
     /// Live shape from BoardTask 42b2385e: the streamed `TextOutput::Complete`

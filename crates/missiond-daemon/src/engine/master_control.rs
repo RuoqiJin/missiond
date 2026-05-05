@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use missiond_core::event::events::{BoardEvent, QuestionEvent, SlotEvent};
+use missiond_core::event::events::{BoardEvent, IncidentEvent, QuestionEvent, SlotEvent};
 use missiond_core::event::subscription::{CursorFlush, StartFrom, SubscriptionOpts};
 use missiond_core::event::DomainEvent;
 use missiond_core::types::{BoardTask, BoardTaskStatus, CreateBoardTaskInput};
@@ -30,6 +30,11 @@ const MASTER_EVENT_SUBSCRIBER_CONSUMER: &str = "master_event_subscriber";
 const MASTER_BOARD_SUBSCRIPTION: &str = "master_event_subscriber_board_v2_live";
 const MASTER_SLOT_SUBSCRIPTION: &str = "master_event_subscriber_slot_v2_live";
 const MASTER_QUESTION_SUBSCRIPTION: &str = "master_event_subscriber_question_v2_live";
+/// Live IncidentEvent subscription used by master_control to wake on
+/// `claude_code_mcp_missing` and `claude_code_mcp_reconnect_failed`
+/// incidents; pinned by `claude-code-mcp-recovery :wake-resident-master`
+/// so MCP recovery does not depend on the operator noticing PTY output.
+const MASTER_INCIDENT_SUBSCRIPTION: &str = "master_event_subscriber_incident_v2_live";
 const MASTER_MCP_APPROVED_TOOLS: &[&str] = &[
     "mission_agent",
     "mission_audit",
@@ -865,7 +870,8 @@ fn spawn_master_event_subscriber(
 ) {
     spawn_board_event_sub(service.clone(), shutdown.clone());
     spawn_slot_event_sub(service.clone(), shutdown.clone());
-    spawn_question_event_sub(service, shutdown);
+    spawn_question_event_sub(service.clone(), shutdown.clone());
+    spawn_incident_event_sub(service, shutdown);
 }
 
 fn master_live_subscription_opts() -> SubscriptionOpts {
@@ -941,6 +947,102 @@ fn spawn_slot_event_sub(service: Arc<MasterControlService>, mut shutdown: watch:
             }
         }
     });
+}
+
+/// Live IncidentEvent subscriber. Pinned by `claude-code-mcp-recovery
+/// :wake-resident-master true`: when `pty_event_worker` publishes a
+/// `claude_code_mcp_missing` or `claude_code_mcp_reconnect_failed`
+/// incident, master_control records a wakeup so the resident master is
+/// rescheduled without requiring the operator to observe the PTY screen.
+/// All other incident kinds are diagnostic-only here and are acked
+/// without waking the master.
+fn spawn_incident_event_sub(
+    service: Arc<MasterControlService>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    tokio::spawn(async move {
+        let mut sub = match service
+            .bus
+            .subscribe::<IncidentEvent>(MASTER_INCIDENT_SUBSCRIPTION, master_live_subscription_opts())
+            .await
+        {
+            Ok(sub) => sub,
+            Err(err) => {
+                warn!(error = %err, "master-control incident subscription failed");
+                return;
+            }
+        };
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown.changed() => break,
+                ack = sub.next() => {
+                    let Some(ack) = ack else { break; };
+                    let seq = ack.seq().0;
+                    if seq <= 0 || !should_wake_for_incident_event(ack.event()) {
+                        ack.ack().await;
+                        continue;
+                    }
+                    let kind = ack.event().kind();
+                    let preview = incident_event_preview(ack.event());
+                    service
+                        .runtime
+                        .record_wakeup("IncidentEvent", kind, seq, preview)
+                        .await;
+                    ack.ack().await;
+                }
+            }
+        }
+    });
+}
+
+/// Filter for IncidentEvent live subscription: master_control only wakes
+/// on Lisp-pinned MCP-recovery incidents
+/// (`claude_code_mcp_missing` / `claude_code_mcp_reconnect_failed`),
+/// matched against the `kind` field stamped into `raw_payload` by
+/// `pty_event_worker::handle_mcp_tool_error`. Other incidents flow through
+/// the existing aiops/question-incident pipelines and must not trigger a
+/// resident-master control turn.
+fn should_wake_for_incident_event(event: &IncidentEvent) -> bool {
+    let incident = match event {
+        IncidentEvent::Reported { incident } => incident,
+        IncidentEvent::StaleSubscription { .. } | IncidentEvent::Resolved { .. } => return false,
+    };
+    matches!(
+        incident
+            .raw_payload
+            .get("kind")
+            .and_then(|value| value.as_str()),
+        Some(CLAUDE_CODE_MCP_MISSING_INCIDENT_KIND)
+            | Some(CLAUDE_CODE_MCP_RECONNECT_FAILED_INCIDENT_KIND)
+    )
+}
+
+/// Bounded preview for IncidentEvent record_wakeup metadata. Includes the
+/// stamped `kind` (when present) and a short prefix of the title so the
+/// resident master's checkpoint records why it was woken.
+fn incident_event_preview(event: &IncidentEvent) -> String {
+    match event {
+        IncidentEvent::Reported { incident } => {
+            let kind = incident
+                .raw_payload
+                .get("kind")
+                .and_then(|value| value.as_str())
+                .unwrap_or("incident_reported");
+            let mut title = incident.title.clone();
+            if title.chars().count() > 120 {
+                title = title.chars().take(120).collect();
+            }
+            format!("kind={kind} id={} title={title}", incident.id)
+        }
+        IncidentEvent::Resolved {
+            incident_id,
+            reason,
+        } => format!("incident_id={incident_id} reason={reason}"),
+        IncidentEvent::StaleSubscription { incident } => {
+            format!("stale_subscription id={}", incident.id)
+        }
+    }
 }
 
 fn spawn_question_event_sub(
@@ -1636,6 +1738,58 @@ fn home_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// Lisp-pinned incident kind: ClaudeCode worker advertised supports_mcp but no
+/// `mission_*` tools surfaced after slot ready. The value is projected from
+/// `claude-code-mcp-recovery :missing-incident-kind` in the V3 blueprint and is
+/// the durable signal that wakes the resident master.
+pub(crate) const CLAUDE_CODE_MCP_MISSING_INCIDENT_KIND: &str = "claude_code_mcp_missing";
+
+/// Lisp-pinned incident kind: the `/mcp` arrow-key reconnect ritual completed
+/// without surfacing any `mission_*` tool within the policy budget. Mirrors
+/// `claude-code-mcp-recovery :reconnect-failed-incident-kind`.
+pub(crate) const CLAUDE_CODE_MCP_RECONNECT_FAILED_INCIDENT_KIND: &str =
+    "claude_code_mcp_reconnect_failed";
+
+/// Diagnosis of a ClaudeCode worker's MCP mounting state, derived from the
+/// slot's advertised `supports_mcp` trait and the actual mounted tool list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClaudeCodeMcpState {
+    /// `supports_mcp=false` — the slot never claimed MCP, no incident is owed.
+    NotAdvertised,
+    /// `supports_mcp=true` AND at least one `mission_*` tool is mounted.
+    Healthy,
+    /// `supports_mcp=true` BUT zero `mission_*` tools are mounted; this is the
+    /// case that requires a durable `claude_code_mcp_missing` incident plus an
+    /// arrow-key `/mcp` reconnect attempt before escalating to
+    /// `claude_code_mcp_reconnect_failed`.
+    AdvertisedButMissing,
+}
+
+/// Classify a slot's MCP state from its advertised capability and mounted
+/// tool list. Pure function so master_control can unit-test the policy.
+pub(crate) fn classify_claude_code_mcp_state(
+    supports_mcp: bool,
+    mounted_tools: &[String],
+) -> ClaudeCodeMcpState {
+    if !supports_mcp {
+        return ClaudeCodeMcpState::NotAdvertised;
+    }
+    if mounted_tools
+        .iter()
+        .any(|name| name.starts_with("mission_"))
+    {
+        ClaudeCodeMcpState::Healthy
+    } else {
+        ClaudeCodeMcpState::AdvertisedButMissing
+    }
+}
+
+/// Whether the given MCP state requires master_control to file the
+/// `claude_code_mcp_missing` incident (and wake the resident master).
+pub(crate) fn should_record_mcp_missing_incident(state: ClaudeCodeMcpState) -> bool {
+    matches!(state, ClaudeCodeMcpState::AdvertisedButMissing)
+}
+
 pub(crate) fn codex_mcp_ready_from_output(stdout: &str, stderr: &str) -> bool {
     let combined = format!("{stdout}\n{stderr}");
     combined.lines().any(|line| {
@@ -1853,6 +2007,114 @@ fn question_event_preview(event: &QuestionEvent) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn master_control_records_mcp_missing_incident_when_supports_mcp_but_no_mission_tools() {
+        // ClaudeCode worker advertised supports_mcp=true but the mounted tool
+        // list does not contain any mission_* tool. Per the V3 blueprint
+        // claude-code-mcp-recovery contract, master_control owes a durable
+        // claude_code_mcp_missing incident so the resident master is woken.
+        let mounted: Vec<String> = vec![
+            "Bash".to_string(),
+            "Read".to_string(),
+            "Edit".to_string(),
+        ];
+        let state = classify_claude_code_mcp_state(true, &mounted);
+        assert_eq!(state, ClaudeCodeMcpState::AdvertisedButMissing);
+        assert!(should_record_mcp_missing_incident(state));
+        assert_eq!(
+            CLAUDE_CODE_MCP_MISSING_INCIDENT_KIND,
+            "claude_code_mcp_missing"
+        );
+
+        // Healthy slot: at least one mission_* tool is mounted -> no incident.
+        let healthy: Vec<String> = vec![
+            "Bash".to_string(),
+            "mission_pty_status".to_string(),
+        ];
+        let healthy_state = classify_claude_code_mcp_state(true, &healthy);
+        assert_eq!(healthy_state, ClaudeCodeMcpState::Healthy);
+        assert!(!should_record_mcp_missing_incident(healthy_state));
+
+        // Slot never advertised supports_mcp: nothing to reconnect, no incident.
+        let not_advertised = classify_claude_code_mcp_state(false, &[]);
+        assert_eq!(not_advertised, ClaudeCodeMcpState::NotAdvertised);
+        assert!(!should_record_mcp_missing_incident(not_advertised));
+
+        // The reconnect-failed kind is the escalation after the arrow-key
+        // ritual; pinned here so checker drift surfaces as a test failure.
+        assert_eq!(
+            CLAUDE_CODE_MCP_RECONNECT_FAILED_INCIDENT_KIND,
+            "claude_code_mcp_reconnect_failed"
+        );
+    }
+
+    #[test]
+    fn incident_event_filter_only_wakes_on_claude_code_mcp_recovery_kinds() {
+        use missiond_core::types::{IncidentSeverity, IncidentSource, MissionIncident};
+
+        // Helper: build an IncidentEvent::Reported with `raw_payload.kind`.
+        fn reported(kind: Option<&str>) -> IncidentEvent {
+            let raw_payload = match kind {
+                Some(k) => serde_json::json!({"kind": k, "slot_id": "slot-x"}),
+                None => serde_json::json!({"slot_id": "slot-x"}),
+            };
+            IncidentEvent::Reported {
+                incident: MissionIncident {
+                    id: "inc-test".into(),
+                    severity: IncidentSeverity::High,
+                    source: IncidentSource::PtySlot,
+                    title: "test".into(),
+                    description: "test".into(),
+                    server_id: None,
+                    raw_payload,
+                    created_at: "2026-05-06T00:00:00Z".into(),
+                },
+            }
+        }
+
+        // Lisp-pinned MCP-recovery kinds wake the master.
+        assert!(should_wake_for_incident_event(&reported(Some(
+            CLAUDE_CODE_MCP_MISSING_INCIDENT_KIND
+        ))));
+        assert!(should_wake_for_incident_event(&reported(Some(
+            CLAUDE_CODE_MCP_RECONNECT_FAILED_INCIDENT_KIND
+        ))));
+
+        // Other incident kinds and missing kind tags are diagnostic-only —
+        // master_control ignores them so unrelated aiops/question-incident
+        // pipelines do not drag the resident master into a control turn.
+        assert!(!should_wake_for_incident_event(&reported(Some(
+            "disk_high"
+        ))));
+        assert!(!should_wake_for_incident_event(&reported(None)));
+
+        // Resolved and StaleSubscription variants must never wake the
+        // master from this subscription; they belong to retention/cleanup
+        // pipelines.
+        assert!(!should_wake_for_incident_event(
+            &IncidentEvent::Resolved {
+                incident_id: "inc-test".into(),
+                reason: "manual".into(),
+            }
+        ));
+        assert!(!should_wake_for_incident_event(
+            &IncidentEvent::StaleSubscription {
+                incident: MissionIncident {
+                    id: "inc-test".into(),
+                    severity: IncidentSeverity::Warning,
+                    source: IncidentSource::HealthCheck,
+                    title: "stale".into(),
+                    description: "stale".into(),
+                    server_id: None,
+                    raw_payload: serde_json::json!({
+                        "kind": CLAUDE_CODE_MCP_MISSING_INCIDENT_KIND,
+                    }),
+                    created_at: "2026-05-06T00:00:00Z".into(),
+                },
+            }
+        ));
+    }
 
     #[test]
     fn codex_mcp_ready_requires_enabled_missiond_row() {

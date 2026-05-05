@@ -15,8 +15,8 @@ use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, error, info, warn};
 
 use super::session::{
-    ConfirmInfo, ConfirmResponse, PTYSession, PTYSessionOptions, PermissionDecision, SessionEvent,
-    SessionState, TextOutputEvent,
+    ConfirmInfo, ConfirmResponse, McpReconnectOutcome, PTYSession, PTYSessionOptions,
+    PermissionDecision, SessionEvent, SessionState, TextOutputEvent,
 };
 use crate::pty_recognition::{session_state_snapshot, PtyRecognitionSnapshot};
 
@@ -843,6 +843,24 @@ impl PTYManager {
 
         let session = session.read().await;
         session.interrupt().await
+    }
+
+    /// Drive a single ClaudeCode `/mcp` arrow-key reconnect ritual on the
+    /// given slot. Pinned by `claude-code-mcp-recovery` in
+    /// `.missiond/v3/missiond-blueprint.lisp`; the manager is the only
+    /// public surface that callers (e.g. `pty_event_worker`) use to schedule
+    /// the budget-1 attempt without reaching into PTYSession directly.
+    pub async fn mcp_reconnect(&self, slot_id: &str) -> Result<McpReconnectOutcome> {
+        let session = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .get(slot_id)
+                .cloned()
+                .ok_or_else(|| anyhow!("No PTY session for slot: {}", slot_id))?
+        };
+
+        let session = session.read().await;
+        session.mcp_reconnect().await
     }
 
     /// Take a screenshot of a PTY session

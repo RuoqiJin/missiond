@@ -25,7 +25,7 @@ pub use pty_recognition::{
     recognize_screen, session_state_snapshot, PtyCanonicalState, PtyRecognitionSnapshot,
 };
 pub use session::{
-    ConfirmInfo, ConfirmResponse, Message, MessageRole, PTYSession, PTYSessionOptions,
-    PermissionDecision, ScreenTextEvent, ScreenTextSource, SessionEvent, SessionState,
-    TextOutputEvent, ToolInfo,
+    ConfirmInfo, ConfirmResponse, McpReconnectOutcome, Message, MessageRole, PTYSession,
+    PTYSessionOptions, PermissionDecision, ScreenTextEvent, ScreenTextSource, SessionEvent,
+    SessionState, TextOutputEvent, ToolInfo,
 };
