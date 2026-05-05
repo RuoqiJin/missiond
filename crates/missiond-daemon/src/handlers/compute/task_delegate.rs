@@ -420,9 +420,29 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
                 ),
             )),
         };
+    let missiond_root = match crate::slot_orchestrator::project_root::resolve_target_project_root(
+        Some("missiond"),
+        None,
+        None,
+        &state.project_registry,
+    )
+    .await
+    {
+        Ok(resolution) => resolution.project_root,
+        Err(err) => {
+            let tool_error = ToolError::new(
+                "MISSIOND_ROOT_UNRESOLVED",
+                format!("mission_swarm_run missiond root unresolved: {}", err),
+            )
+            .with_suggestion(
+                "register the missiond project so shared context-pack paths never depend on daemon cwd",
+            );
+            return Ok(ToolResult::structured_error(tool_error));
+        }
+    };
     let context_pack_path = string_arg(&args, &["context_pack_path", "contextPackPath"])
-        .map(|value| normalize_context_pack_path_for_worker(value, None))
-        .unwrap_or_else(default_swarm_context_pack_path);
+        .map(|value| normalize_context_pack_path_for_worker(value, Some(&missiond_root)))
+        .unwrap_or_else(|| default_swarm_context_pack_path(Some(&missiond_root)));
     let max_claude_workers =
         clamp_usize_arg(&args, &["max_claude_workers", "maxClaudeWorkers"], 6, 0, 12);
     let max_gemini_workers =
@@ -968,12 +988,12 @@ fn normalize_context_pack_path_for_worker(path: &str, missiond_root: Option<&Pat
     root.join(candidate).to_string_lossy().to_string()
 }
 
-fn default_swarm_context_pack_path() -> String {
+fn default_swarm_context_pack_path(missiond_root: Option<&Path>) -> String {
     let rel = format!(
         ".missiond/v3/runtime/swarm/{}-context-pack.lisp",
         chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
     );
-    normalize_context_pack_path_for_worker(&rel, None)
+    normalize_context_pack_path_for_worker(&rel, missiond_root)
 }
 
 /// V3 resident-master-control :: master-delegation projection.
@@ -1509,6 +1529,21 @@ mod tests {
         let absolute =
             normalize_context_pack_path_for_worker("/tmp/missiond/context-pack.lisp", Some(root));
         assert_eq!(absolute, "/tmp/missiond/context-pack.lisp");
+    }
+
+    #[test]
+    fn default_swarm_context_pack_path_is_anchored_to_missiond_root() {
+        let root = std::path::Path::new("/Users/jinchen/Projects/missiond");
+        let path = default_swarm_context_pack_path(Some(root));
+        assert!(
+            path.starts_with("/Users/jinchen/Projects/missiond/.missiond/v3/runtime/swarm/"),
+            "default context-pack path must not depend on daemon cwd: {path}"
+        );
+        assert!(
+            !path.starts_with("/.missiond/"),
+            "launchd cwd must never leak into context-pack paths: {path}"
+        );
+        assert!(path.ends_with("-context-pack.lisp"));
     }
 
     #[test]

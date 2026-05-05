@@ -219,7 +219,7 @@ function checkFiles(root, files) {
     'cargo build ${BUILD_ARG} -p missiond-daemon -p missiond-mcp',
     'MCP_ARTIFACT',
     'release-manifest.json',
-    'codesign --force --sign - "$CANDIDATE_DIR/bin/mission-mcp"',
+    'codesign_or_verify "$CANDIDATE_DIR/bin/mission-mcp"',
     'switch_active_release',
     'rollback_to_previous',
     'cleanup_old_releases',
@@ -373,7 +373,7 @@ function buildFixture() {
   );
   fs.appendFileSync(
     path.join(root, DEFAULT_FILES.deployScript),
-    ' MISSIOND_MCP_BIN_PATH MISSIOND_RELEASES_DIR MISSIOND_ACTIVE_LINK cargo build ${BUILD_ARG} -p missiond-daemon -p missiond-mcp MCP_ARTIFACT release-manifest.json codesign --force --sign - "$CANDIDATE_DIR/bin/mission-mcp" switch_active_release rollback_to_previous cleanup_old_releases $ACTIVE_LINK/bin/mission-mcp',
+    ' MISSIOND_MCP_BIN_PATH MISSIOND_RELEASES_DIR MISSIOND_ACTIVE_LINK cargo build ${BUILD_ARG} -p missiond-daemon -p missiond-mcp MCP_ARTIFACT release-manifest.json codesign_or_verify "$CANDIDATE_DIR/bin/mission-mcp" switch_active_release rollback_to_previous cleanup_old_releases $ACTIVE_LINK/bin/mission-mcp',
   );
   fs.appendFileSync(
     path.join(root, DEFAULT_FILES.globalInstruction),

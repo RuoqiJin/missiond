@@ -284,6 +284,13 @@ rollback_to_previous() {
   return 0
 }
 
+release_complete() {
+  local dir="$1"
+  [ -f "$dir/release-manifest.json" ] &&
+    [ -x "$dir/bin/missiond" ] &&
+    [ -x "$dir/bin/mission-mcp" ]
+}
+
 cleanup_old_releases() {
   local apply="$1"
   mkdir -p "$RELEASES_DIR"
@@ -297,6 +304,15 @@ $newest"
 
   log "cleanup: mode=$([ "$apply" -eq 1 ] && echo apply || echo dry-run), keep_newest=$RELEASE_KEEP"
   find "$RELEASES_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | while IFS= read -r dir; do
+    if [ "$dir" != "$active" ] && [ "$dir" != "$previous" ] && ! release_complete "$dir"; then
+      if [ "$apply" -eq 1 ]; then
+        rm -rf "$dir"
+        log "cleanup: removed incomplete release $dir"
+      else
+        log "cleanup: would remove incomplete release $dir"
+      fi
+      continue
+    fi
     case "
 $keep_paths
 " in

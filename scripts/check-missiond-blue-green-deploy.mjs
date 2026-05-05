@@ -80,6 +80,8 @@ function check(root) {
     'switch_active_release',
     'rollback_to_previous',
     'cleanup_old_releases',
+    'release_complete',
+    'removed incomplete release',
     'create_legacy_release_if_needed',
     'codesign_or_verify',
     'force-sign failed but verified linker signature',

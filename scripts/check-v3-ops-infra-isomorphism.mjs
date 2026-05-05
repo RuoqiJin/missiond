@@ -134,8 +134,8 @@ function checkFiles(root, files) {
     'rollback_to_previous',
     'cleanup_old_releases',
     'create_legacy_release_if_needed',
-    'codesign --force --sign - "$CANDIDATE_DIR/bin/missiond"',
-    'codesign --force --sign - "$CANDIDATE_DIR/bin/mission-mcp"',
+    'codesign_or_verify "$CANDIDATE_DIR/bin/missiond"',
+    'codesign_or_verify "$CANDIDATE_DIR/bin/mission-mcp"',
     'launchctl kickstart -k "gui/$(id -u)/$LABEL"',
     'lsof "$SOCK_PATH"',
     'run_mcp_initialize_smoke()',
@@ -240,8 +240,8 @@ switch_active_release
 rollback_to_previous
 cleanup_old_releases
 create_legacy_release_if_needed
-codesign --force --sign - "$CANDIDATE_DIR/bin/missiond"
-codesign --force --sign - "$CANDIDATE_DIR/bin/mission-mcp"
+codesign_or_verify "$CANDIDATE_DIR/bin/missiond"
+codesign_or_verify "$CANDIDATE_DIR/bin/mission-mcp"
 launchctl kickstart -k "gui/$(id -u)/$LABEL"
 lsof "$SOCK_PATH"
 run_mcp_initialize_smoke()
