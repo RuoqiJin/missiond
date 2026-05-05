@@ -1211,6 +1211,19 @@ fn split_metadata_list(value: &str) -> Vec<String> {
 
 fn worker_final_has_acceptance_evidence(summary: &str) -> bool {
     let lower = summary.to_ascii_lowercase();
+    const EVIDENCE_PHRASES: &[&str] = &[
+        "all gates green",
+        "both gates green",
+        "both gates pass",
+        "gates green",
+        "gates pass",
+        "gate confirmation",
+        "evidence-only gate confirmation",
+        "final m10 evidence-only gate",
+    ];
+    if EVIDENCE_PHRASES.iter().any(|phrase| lower.contains(phrase)) {
+        return true;
+    }
     const EVIDENCE_MARKERS: &[&str] = &[
         "acceptance",
         "changed file",
@@ -5086,6 +5099,22 @@ Implement the shard.
                 description,
                 true,
                 "Changed files: services/auth/.missiond/backend/auth.lisp\nVerification: node scripts/check-service-ssot.mjs auth --json passed."
+            ),
+            None
+        );
+        assert_eq!(
+            delegated_write_close_evidence_blocker(
+                description,
+                true,
+                "Both gates green. Run the JSON evidence-only gate to capture full evidence/structural snapshot, then verify git status shows only the intended changes."
+            ),
+            None
+        );
+        assert_eq!(
+            delegated_write_close_evidence_blocker(
+                description,
+                true,
+                "Clean — must-not-touch paths are untouched. Final M10 evidence-only gate confirmation:"
             ),
             None
         );

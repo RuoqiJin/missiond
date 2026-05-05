@@ -493,6 +493,21 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
         &args,
         &["acceptance", "acceptance_commands", "acceptanceCommands"],
     );
+    let implement_write_scope = string_list_arg(&args, &["write_scope", "writeScope"]);
+    let implement_must_not_touch = string_list_arg(&args, &["must_not_touch", "mustNotTouch"]);
+    if swarm_policy_requires_implement_write_scope(&write_policy)
+        && implement_write_scope.is_empty()
+    {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(
+                "SWARM_IMPLEMENT_WRITE_SCOPE_REQUIRED",
+                "mission_swarm_run refused to plan implement workers without an explicit write_scope",
+            )
+            .with_suggestion(
+                "rerun with write_policy=read-only for investigation only, or provide exact disjoint write_scope entries for every implement shard",
+            ),
+        ));
+    }
     let caller_read_scope = string_list_arg(&args, &["read_scope", "readScope"]);
     let mut read_scope = caller_read_scope.clone();
     let target_roots = target_projects
@@ -564,7 +579,7 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
         });
     }
 
-    if write_policy != "read-only" {
+    if swarm_policy_requires_implement_write_scope(&write_policy) {
         planned.push(SwarmPlannedTask {
             lane: "implement".to_string(),
             engine_hint: "claude-code".to_string(),
@@ -573,8 +588,8 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
             title: "Implement accepted swarm shard after context-pack integration".to_string(),
             intent: "code".to_string(),
             read_scope: read_scope.clone(),
-            write_scope: string_list_arg(&args, &["write_scope", "writeScope"]),
-            must_not_touch: string_list_arg(&args, &["must_not_touch", "mustNotTouch"]),
+            write_scope: implement_write_scope.clone(),
+            must_not_touch: implement_must_not_touch.clone(),
         });
     }
 
@@ -913,6 +928,10 @@ impl SwarmPlannedTask {
             "must_not_touch": self.must_not_touch,
         })
     }
+}
+
+fn swarm_policy_requires_implement_write_scope(write_policy: &str) -> bool {
+    !write_policy.eq_ignore_ascii_case("read-only")
 }
 
 fn detect_swarm_write_conflicts(planned: &[SwarmPlannedTask]) -> Vec<Value> {
@@ -1802,6 +1821,14 @@ mod tests {
             },
         ];
         assert!(detect_swarm_write_conflicts(&planned).is_empty());
+    }
+
+    #[test]
+    fn swarm_implement_policy_requires_explicit_write_scope() {
+        assert!(!swarm_policy_requires_implement_write_scope("read-only"));
+        assert!(!swarm_policy_requires_implement_write_scope("READ-ONLY"));
+        assert!(swarm_policy_requires_implement_write_scope("lisp-first"));
+        assert!(swarm_policy_requires_implement_write_scope("scoped-write"));
     }
 
     // ── V3 workstation-pool :: gemini researcher binding ─────────────────
