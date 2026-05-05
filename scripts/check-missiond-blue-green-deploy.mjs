@@ -72,6 +72,7 @@ function check(root) {
     'MISSIOND_ACTIVE_LINK',
     'MISSIOND_RELEASE_KEEP',
     'MISSIOND_BACKUP_RETENTION_DAYS',
+    'CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"',
     'release-manifest.json',
     '"schema":"missiond.release-manifest.v1"',
     'daemon_sha256',

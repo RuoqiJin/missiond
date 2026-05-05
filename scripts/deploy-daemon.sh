@@ -25,6 +25,8 @@
 #   MISSIOND_DEPLOY_SMOKE_TIMEOUT  MCP smoke timeout, default: 30
 #   MISSIOND_APPLY_BACKUP_CLEANUP  delete old .bak/.new files when cleanup applies, default: 0
 #   MISSIOND_USE_SCCACHE        when 1 and sccache exists, export RUSTC_WRAPPER=sccache
+#   CARGO_INCREMENTAL           defaults to 0 for deploy builds to avoid filling
+#                               disk with target/debug/incremental query caches
 #
 # Exit codes:
 #   0 success
@@ -355,6 +357,8 @@ if [ "${MISSIOND_USE_SCCACHE:-0}" = "1" ] && command -v sccache >/dev/null 2>&1;
 elif [ "${MISSIOND_USE_SCCACHE:-0}" = "1" ]; then
   log "build: MISSIOND_USE_SCCACHE=1 but sccache is not installed; continuing without wrapper"
 fi
+export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
+log "build: CARGO_INCREMENTAL=$CARGO_INCREMENTAL"
 log "build: cargo build ${BUILD_ARG} -p missiond-daemon -p missiond-mcp"
 BUILD_START="$(date +%s)"
 if ! cargo build ${BUILD_ARG} -p missiond-daemon -p missiond-mcp 2>&1 | tail -30; then

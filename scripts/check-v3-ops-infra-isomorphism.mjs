@@ -124,6 +124,7 @@ function checkFiles(root, files) {
     'MISSIOND_DEPLOY_TIMEOUT',
     'MISSIOND_DEPLOY_SMOKE_TIMEOUT',
     'set -euo pipefail',
+    'CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"',
     'cargo build ${BUILD_ARG} -p missiond-daemon -p missiond-mcp',
     'record_timing "cargo-build"',
     'print_timing_summary',
@@ -230,6 +231,7 @@ MISSIOND_INSTALL_ROOT MISSIOND_RELEASES_DIR MISSIOND_ACTIVE_LINK MISSIOND_RELEAS
 MISSIOND_BIN_PATH MISSIOND_MCP_BIN_PATH MISSIOND_SOCKET_PATH MISSIOND_LAUNCHCTL_LABEL MISSIOND_DEPLOY_TIMEOUT MISSIOND_DEPLOY_SMOKE_TIMEOUT
 MISSIOND_USE_SCCACHE
 set -euo pipefail
+CARGO_INCREMENTAL="\${CARGO_INCREMENTAL:-0}"
 cargo build \${BUILD_ARG} -p missiond-daemon -p missiond-mcp
 record_timing "cargo-build"
 print_timing_summary
