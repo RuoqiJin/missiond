@@ -414,6 +414,32 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
                 ),
             )),
         };
+    let target_project_ids = string_list_arg(
+        &args,
+        &[
+            "target_project_ids",
+            "targetProjectIds",
+            "target_projects",
+            "targetProjects",
+        ],
+    );
+    let target_projects =
+        match resolve_swarm_target_projects(state, &project_id, &project_root, &target_project_ids)
+            .await
+        {
+            Ok(targets) => targets,
+            Err(err) => {
+                return Ok(ToolResult::structured_error(
+                    ToolError::new(
+                        "SWARM_TARGET_PROJECT_UNRESOLVED",
+                        format!("mission_swarm_run target project unresolved: {}", err),
+                    )
+                    .with_suggestion(
+                        "register every target project before spawning multi-project swarm workers",
+                    ),
+                ));
+            }
+        };
     let missiond_root = match crate::slot_orchestrator::project_root::resolve_target_project_root(
         Some("missiond"),
         None,
@@ -468,8 +494,14 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
         &["acceptance", "acceptance_commands", "acceptanceCommands"],
     );
     let mut read_scope = string_list_arg(&args, &["read_scope", "readScope"]);
+    let target_roots = target_projects
+        .iter()
+        .map(|target| target.root.clone())
+        .collect::<Vec<_>>();
     if read_scope.is_empty() {
-        read_scope.push(project_root.clone());
+        read_scope = target_roots.clone();
+    } else {
+        append_unique_strings(&mut read_scope, target_roots);
     }
     let timeout_secs = args
         .get("timeout_secs")
@@ -552,6 +584,7 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
             &objective,
             &project_id,
             &project_root,
+            &target_projects,
             parent_id.as_deref(),
             &write_policy,
             &acceptance,
@@ -625,6 +658,7 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
                 &objective,
                 &project_id,
                 &project_root,
+                &target_projects,
                 &context_pack_path,
                 parent_id.as_deref(),
                 &write_policy,
@@ -669,6 +703,7 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
         "objective": objective,
         "project_id": project_id,
         "project_root": project_root,
+        "target_projects": target_projects.iter().map(SwarmTargetProject::to_json).collect::<Vec<_>>(),
         "context_pack_path": context_pack_path,
         "context_pack_materialized": context_pack_materialized,
         "parent_id": parent_id,
@@ -697,6 +732,7 @@ async fn materialize_swarm_context_pack(
     objective: &str,
     project_id: &str,
     project_root: &str,
+    target_projects: &[SwarmTargetProject],
     parent_id: Option<&str>,
     write_policy: &str,
     acceptance: &[String],
@@ -710,6 +746,7 @@ async fn materialize_swarm_context_pack(
         objective,
         project_id,
         project_root,
+        target_projects,
         parent_id,
         write_policy,
         acceptance,
@@ -723,6 +760,7 @@ fn render_swarm_context_pack(
     objective: &str,
     project_id: &str,
     project_root: &str,
+    target_projects: &[SwarmTargetProject],
     parent_id: Option<&str>,
     write_policy: &str,
     acceptance: &[String],
@@ -737,6 +775,15 @@ fn render_swarm_context_pack(
     ));
     out.push_str(&format!("  :project_id {}\n", lisp_string(project_id)));
     out.push_str(&format!("  :project_root {}\n", lisp_string(project_root)));
+    out.push_str("  :target_projects\n  (\n");
+    for target in target_projects {
+        out.push_str(&format!(
+            "    (project :id {} :root {})\n",
+            lisp_string(&target.id),
+            lisp_string(&target.root)
+        ));
+    }
+    out.push_str("  )\n");
     if let Some(parent) = parent_id {
         out.push_str(&format!(
             "  :parent_board_task_id {}\n",
@@ -814,6 +861,21 @@ struct SwarmPlannedTask {
     read_scope: Vec<String>,
     write_scope: Vec<String>,
     must_not_touch: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct SwarmTargetProject {
+    id: String,
+    root: String,
+}
+
+impl SwarmTargetProject {
+    fn to_json(&self) -> Value {
+        json!({
+            "id": self.id,
+            "root": self.root,
+        })
+    }
 }
 
 impl SwarmPlannedTask {
@@ -909,6 +971,7 @@ fn render_swarm_task_description(
     objective: &str,
     project_id: &str,
     project_root: &str,
+    target_projects: &[SwarmTargetProject],
     context_pack_path: &str,
     parent_id: Option<&str>,
     write_policy: &str,
@@ -925,7 +988,8 @@ fn render_swarm_task_description(
         .unwrap_or_default();
 
     format!(
-        "{objective}\n\n## Swarm metadata\n- project_id: {project_id}\n- project_root: {project_root}\n{parent_line}- lane: {}\n- task_class: {}\n- pool_hint: {}\n- engine_hint: {}\n- context_pack_path: {context_pack_path}\n- write_policy: {write_policy}\n- read_scope: {}\n- write_scope: {}\n- must_not_touch: {}\n- acceptance: {}\n\n{}",
+        "{objective}\n\n## Swarm metadata\n- project_id: {project_id}\n- project_root: {project_root}\n- target_projects: {}\n{parent_line}- lane: {}\n- task_class: {}\n- pool_hint: {}\n- engine_hint: {}\n- context_pack_path: {context_pack_path}\n- write_policy: {write_policy}\n- read_scope: {}\n- write_scope: {}\n- must_not_touch: {}\n- acceptance: {}\n\n{}",
+        render_target_projects_inline(target_projects),
         planned.lane,
         planned.task_class,
         planned.pool_hint,
@@ -952,6 +1016,62 @@ fn render_swarm_task_description(
         },
         completion_protocol,
     )
+}
+
+fn render_target_projects_inline(target_projects: &[SwarmTargetProject]) -> String {
+    if target_projects.is_empty() {
+        return "[]".to_string();
+    }
+    target_projects
+        .iter()
+        .map(|target| format!("{}={}", target.id, target.root))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+async fn resolve_swarm_target_projects(
+    state: &AppState,
+    project_id: &str,
+    project_root: &str,
+    target_project_ids: &[String],
+) -> Result<Vec<SwarmTargetProject>> {
+    if target_project_ids.is_empty() {
+        return Ok(vec![SwarmTargetProject {
+            id: project_id.to_string(),
+            root: project_root.to_string(),
+        }]);
+    }
+
+    let mut targets = Vec::new();
+    for target_id in target_project_ids {
+        let resolution = crate::slot_orchestrator::project_root::resolve_target_project_root(
+            Some(target_id),
+            None,
+            None,
+            &state.project_registry,
+        )
+        .await
+        .map_err(|err| anyhow!("{}: {}", target_id, err))?;
+        let target = SwarmTargetProject {
+            id: target_id.clone(),
+            root: resolution.project_root.to_string_lossy().to_string(),
+        };
+        if !targets
+            .iter()
+            .any(|existing: &SwarmTargetProject| existing.id == target.id)
+        {
+            targets.push(target);
+        }
+    }
+    Ok(targets)
+}
+
+fn append_unique_strings(target: &mut Vec<String>, values: Vec<String>) {
+    for value in values {
+        if !target.iter().any(|existing| existing == &value) {
+            target.push(value);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1667,6 +1787,10 @@ mod tests {
             "M6 wave",
             "jarvis",
             "/Users/jin/Projects/jarvis",
+            &[SwarmTargetProject {
+                id: "jarvis".to_string(),
+                root: "/Users/jin/Projects/jarvis".to_string(),
+            }],
             ".missiond/v3/runtime/swarm/test.lisp",
             None,
             "read-only",
@@ -1688,6 +1812,56 @@ mod tests {
     }
 
     #[test]
+    fn swarm_task_description_includes_multi_project_targets() {
+        let planned = SwarmPlannedTask {
+            lane: "investigate".to_string(),
+            engine_hint: "claude-code".to_string(),
+            pool_hint: "claude-code-default".to_string(),
+            task_class: "context-pack".to_string(),
+            title: "Survey shards".to_string(),
+            intent: "code".to_string(),
+            read_scope: vec![
+                "/Users/jin/Projects/jarvis".to_string(),
+                "/Users/jin/Projects/xjpcode".to_string(),
+            ],
+            write_scope: Vec::new(),
+            must_not_touch: vec!["**/*".to_string()],
+        };
+        let targets = vec![
+            SwarmTargetProject {
+                id: "jarvis".to_string(),
+                root: "/Users/jin/Projects/jarvis".to_string(),
+            },
+            SwarmTargetProject {
+                id: "xjpcode".to_string(),
+                root: "/Users/jin/Projects/xjpcode".to_string(),
+            },
+        ];
+        let description = render_swarm_task_description(
+            "M6 universe wave",
+            "missiond",
+            "/Users/jin/Projects/missiond",
+            &targets,
+            ".missiond/v3/runtime/swarm/test.lisp",
+            None,
+            "read-only",
+            &[],
+            &planned,
+        );
+        assert!(
+            description.contains(
+                "- target_projects: jarvis=/Users/jin/Projects/jarvis, xjpcode=/Users/jin/Projects/xjpcode"
+            ),
+            "multi-project swarm prompt must expose resolved targets:\n{description}"
+        );
+        assert!(
+            description
+                .contains("- read_scope: /Users/jin/Projects/jarvis, /Users/jin/Projects/xjpcode"),
+            "multi-project swarm prompt must expose all target roots as read_scope:\n{description}"
+        );
+    }
+
+    #[test]
     fn swarm_task_description_carries_parent_board_task_id_when_supplied() {
         let planned = SwarmPlannedTask {
             lane: "implement".to_string(),
@@ -1704,6 +1878,10 @@ mod tests {
             "M6 closure",
             "jarvis-forge",
             "/repo",
+            &[SwarmTargetProject {
+                id: "jarvis-forge".to_string(),
+                root: "/repo".to_string(),
+            }],
             "/missiond/.missiond/v3/runtime/swarm/context.lisp",
             Some("parent-task-123"),
             "scoped-write",
@@ -1812,6 +1990,10 @@ mod tests {
             "Objective with\nnewline",
             "missiond",
             "/repo",
+            &[SwarmTargetProject {
+                id: "missiond".to_string(),
+                root: "/repo".to_string(),
+            }],
             Some("parent-1"),
             "scoped-write",
             &["cargo test".to_string()],
@@ -1819,6 +2001,8 @@ mod tests {
         );
         assert!(source.contains("(swarm-context-pack"));
         assert!(source.contains(":schema \"missiond.swarm-context-pack.v1\""));
+        assert!(source.contains(":target_projects"));
+        assert!(source.contains("(project :id \"missiond\" :root \"/repo\")"));
         assert!(source.contains(":parent_board_task_id \"parent-1\""));
         assert!(source.contains(":read_scope [\"/repo\"]"));
         assert!(source.contains(":write_scope [\"src/auth.rs\"]"));
