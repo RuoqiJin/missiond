@@ -522,4 +522,53 @@ mod tests {
             assert!(enums.contains(a), "mission_workflow missing action `{}`", a);
         }
     }
+
+    /// Regression for BoardTask 31e5449c-e315-4003-ad59-c3eebd5eb837:
+    /// resident master called mission_swarm_run with project list only in prose,
+    /// the MCP schema did not expose `target_project_ids`, so the tool resolved
+    /// targets to `missiond` only and the swarm could not fan out.
+    /// V3 swarm-dispatch-policy now requires the structural pass; pin the schema.
+    #[test]
+    fn mission_swarm_run_schema_exposes_target_project_ids() {
+        let def = get_tool("mission_swarm_run").expect("mission_swarm_run tool must be registered");
+        let props = def
+            .input_schema
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .expect("mission_swarm_run input_schema.properties must be an object");
+        for alias in [
+            "target_project_ids",
+            "targetProjectIds",
+            "target_projects",
+            "targetProjects",
+        ] {
+            let entry = props
+                .get(alias)
+                .unwrap_or_else(|| panic!("mission_swarm_run schema missing alias `{alias}`"));
+            assert_eq!(
+                entry.get("type").and_then(|v| v.as_str()),
+                Some("array"),
+                "alias `{alias}` must be array typed so callers can pass project ids structurally"
+            );
+        }
+    }
+
+    /// Pin mission_swarm_run does not require target_project_ids structurally
+    /// (single-project mode still works) but advertises every alias so MCP
+    /// clients aren't forced to guess naming conventions.
+    #[test]
+    fn mission_swarm_run_only_requires_objective() {
+        let def = get_tool("mission_swarm_run").expect("mission_swarm_run tool must be registered");
+        let required: Vec<String> = def
+            .input_schema
+            .get("required")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(required, vec!["objective".to_string()]);
+    }
 }

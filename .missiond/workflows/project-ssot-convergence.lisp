@@ -26,6 +26,8 @@
        :logic "map every declared public behavior to Lisp surface; mark gaps as designed/backfill, not invisible")
      (step s7 :id dispatch-backfill-workers
        :logic "create disjoint BoardTasks with context_pack_path, read_scope, write_scope, must_not_touch, acceptance, model_profile, timeout_secs, completion protocol; read_scope is readable evidence, write_scope is the only writable set, and must_not_touch forbids write/stage/commit rather than reads")
+     (step s7b :id swarm-target-projects-structural-pass
+       :logic "Multi-project objectives MUST pass target_project_ids/targetProjectIds/target_projects/targetProjects to mission_swarm_run as a structured array. Project lists embedded only in the natural-language objective are discarded by the tool because the schema does not parse prose; the swarm then collapses target_projects to project_id only and the universe wave cannot fan out. Repro: BoardTask 31e5449c-e315-4003-ad59-c3eebd5eb837 first call resolved targets to missiond only because the prose project list was not passed structurally. The corrected dispatch passes target_project_ids = [<id>...].")
      (step s8 :id verify-and-report
        :logic "run project checker, build/test, diff check; when dirty-baseline is outside this task's ownership, run scoped diff checks for owned paths and record full diff-check blockers as diagnostics instead of formatting or touching operator code")
      (step s9 :id worker-stall-recovery
@@ -41,7 +43,9 @@
      (gate g7 :rule "Evaluation workers produce structured artifacts (Findings/Evidence/Recommendations/Verification), not raw KB JSON dumps.")
      (gate g8 :rule "Rust projects must expose a project-local touched-file rustfmt checker; workers must not run cargo fmt -p or cargo fmt --all unless an explicit maintainer task owns repo-wide formatting.")
      (gate g9 :rule "Dirty worktree SSOT convergence commits must stage explicit .missiond paths only; full git diff --check failures in non-owned files are diagnostics, not permission to edit those files.")
-     (gate g10 :rule "Large existing intent files should use M6 overlay+manifest unless the task explicitly owns a full SSOT rewrite."))
+     (gate g10 :rule "Large existing intent files should use M6 overlay+manifest unless the task explicitly owns a full SSOT rewrite.")
+     (gate g11 :rule "PTY-only completion of a delegated worker BoardTask MUST NOT close unless the screen carries a structured artifact (Findings / Evidence / Recommendations / Verification / Summary heading) or durable provider final evidence is available; intermediate assistant sentences captured between the prompt return and the JSONL final write are not valid finals.")
+     (gate g12 :rule "A slot may be the running owner of at most ONE BoardTask at a time. Autopilot dispatch unclaims any other BoardTask whose claim_executor still points at the slot before the new dispatch claims it; conversations.task_id is force-rebound to the incoming task so mission_conversation_query(taskId=...) always returns the current dispatch's conversation."))
   :completion
     ((criterion c1 :rule "Lisp has pillar/function/entry/core/egress/surface shape.")
      (criterion c2 :rule "Checker proves root, blueprint, surfaces, and public code anchors.")

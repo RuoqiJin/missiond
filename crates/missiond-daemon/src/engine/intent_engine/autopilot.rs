@@ -185,6 +185,102 @@ fn decide_close_action(
     }
 }
 
+/// V3 slot-attribution :: stale-running-claim detector.
+///
+/// Walk the running BoardTask list and collect every task other than
+/// `incoming_task_id` whose claim_executor still points at `slot_id` via
+/// pty_slot. The returned ids are unclaimed at the dispatch site so the slot
+/// only ever has one running BoardTask attribution at a time.
+///
+/// Pure helper over `state.store` so callers can swap in a stub for tests; the
+/// inline pure-data check lives in `is_stale_running_claim_for_slot` below.
+async fn stale_running_claims_for_slot(
+    state: &AppState,
+    slot_id: &str,
+    incoming_task_id: &str,
+) -> Result<Vec<String>> {
+    let running = state
+        .store
+        .list_board_tasks(Some("running"), true)
+        .await
+        .map_err(|e| anyhow!("list_board_tasks(running) failed: {}", e))?;
+    Ok(running
+        .into_iter()
+        .filter(|task| is_stale_running_claim_for_slot(task, slot_id, incoming_task_id))
+        .map(|task| task.id.to_string())
+        .collect())
+}
+
+/// Pure predicate so the slot-attribution invariant can be unit-tested without
+/// an `AppState`. Returns true when this BoardTask is a running row claimed by
+/// `slot_id` (pty_slot) but is *not* the dispatch we're about to start.
+fn is_stale_running_claim_for_slot(
+    task: &missiond_core::types::BoardTask,
+    slot_id: &str,
+    incoming_task_id: &str,
+) -> bool {
+    if task.status != missiond_core::types::BoardTaskStatus::Running {
+        return false;
+    }
+    if task.id.as_str() == incoming_task_id {
+        return false;
+    }
+    let executor_type = task
+        .claim_executor_type
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("");
+    let executor_id = task
+        .claim_executor_id
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("");
+    executor_type == "pty_slot" && executor_id == slot_id
+}
+
+/// V3 slot-attribution :: dispatch-time conversation rebind.
+///
+/// Authoritatively rewrite the slot's active provider conversation row to
+/// point at `task_id`, displacing any stale binding from a previous dispatch
+/// on the same session. Best-effort: silent no-op when the slot session is
+/// not yet registered (the post-completion backfill path will reconcile via
+/// `conversation_task_binding_update_allowed`).
+async fn rebind_slot_conversation_for_dispatch(state: &AppState, slot_id: &str, task_id: &str) {
+    let session_uuid = match state.store.get_slot_session(slot_id).await {
+        Ok(Some(uuid)) => uuid,
+        _ => return,
+    };
+    if let Ok(Some(conv)) = state.store.get_conversation(&session_uuid).await {
+        if let Some(existing) = conv
+            .task_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && *value != task_id)
+        {
+            warn!(
+                slot_id,
+                task_id,
+                session_id = %session_uuid,
+                displaced_task_id = %existing,
+                "Autopilot: dispatch-time conversation rebind displaced previous task binding"
+            );
+        }
+    }
+    if let Err(err) = state
+        .store
+        .set_conversation_task_id(&session_uuid, task_id)
+        .await
+    {
+        warn!(
+            slot_id,
+            task_id,
+            session_id = %session_uuid,
+            error = %err,
+            "Autopilot: dispatch-time conversation rebind failed"
+        );
+    }
+}
+
 fn is_durable_completion_summary_note(note: &missiond_core::types::BoardTaskNote) -> bool {
     if note.note_type != missiond_core::types::BoardNoteType::Summary {
         return false;
@@ -1005,6 +1101,81 @@ fn delegated_write_close_evidence_blocker(
         return Some("missing-acceptance-evidence");
     }
     None
+}
+
+/// V3 evidence-authority :: PTY-only close gate.
+///
+/// When the durable provider final is unavailable, the PTY screen is the only
+/// source for the BoardTask close summary. PTY captures can include
+/// intermediate assistant sentences (research narration, "now let me ...",
+/// share-insights progress) that look complete enough to skip the existing
+/// `is_probably_active_tui_summary` check but are not the final artifact.
+///
+/// For delegated worker BoardTasks (`## Swarm metadata` or
+/// `## Dispatch metadata` block) the artifact is the structured report the
+/// worker emits — `Findings / Evidence / Recommendations / Verification`,
+/// `Summary`, `acceptance`, etc. Require at least one of those structural
+/// markers when there is no durable provider final; otherwise preserve
+/// running so the watchdog/next tick can re-extract once the provider log
+/// settles.
+///
+/// Repro task ids: a5ebf6c4..., 5599b07a..., b5be6eed....
+///
+/// Pure helper so the gate can be unit-tested without an `AppState`.
+fn pty_only_close_blocker(
+    task_description: &str,
+    has_durable_provider_final: bool,
+    summary: &str,
+) -> Option<&'static str> {
+    if has_durable_provider_final {
+        return None;
+    }
+    if !is_delegated_worker_description(task_description) {
+        return None;
+    }
+    if pty_summary_has_structured_artifact(summary) {
+        return None;
+    }
+    Some("missing-pty-final-artifact")
+}
+
+/// Detect a delegated worker BoardTask by its description envelope.
+/// `mission_task_delegate` injects `## Dispatch metadata`; `mission_swarm_run`
+/// injects `## Swarm metadata`. Either marker is the V3 envelope guarantee
+/// that this task is a worker dispatch with a write_policy / read_scope /
+/// acceptance contract — and therefore should produce a structured artifact
+/// rather than a single-sentence chat answer.
+fn is_delegated_worker_description(task_description: &str) -> bool {
+    task_description.contains("## Swarm metadata")
+        || task_description.contains("## Dispatch metadata")
+}
+
+/// Pure check: does `summary` look like a structured worker artifact?
+/// Matches the section headings the V3 worker prompt contracts ask for plus
+/// the existing acceptance-evidence markers. Match is case-insensitive on the
+/// heading body so `# Findings`, `## Findings`, `Findings:` all qualify.
+fn pty_summary_has_structured_artifact(summary: &str) -> bool {
+    if worker_final_has_acceptance_evidence(summary) {
+        return true;
+    }
+    let lower = summary.to_ascii_lowercase();
+    const STRUCTURAL_MARKERS: &[&str] = &[
+        "findings",
+        "recommendations",
+        "verification",
+        "evidence",
+        "## summary",
+        "# summary",
+        "final summary",
+        "smoke summary",
+        "diagnostic summary",
+        "evaluation report",
+        "final report",
+        "next shards",
+    ];
+    STRUCTURAL_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
 }
 
 fn delegated_task_is_read_only(task_description: &str) -> bool {
@@ -2224,6 +2395,42 @@ async fn dispatch_board_tasks_with_config(
 
         info!(task_id = %task.id, slot_id = %slot_id, title = %task.title, "Autopilot: executing task");
 
+        // V3 slot-attribution :: single-running-task-per-slot invariant.
+        //
+        // Defensively unclaim any other task whose claim_executor still points
+        // at this slot before the new dispatch claims it. Without this guard,
+        // a task that finished without clearing its claim (crash, killed PTY,
+        // race in update path) leaves a stale running row glued to the slot.
+        // The display layer (`active_board_task_for_slot`) then sees two
+        // running tasks for one slot and reported `task 738c96f5 and 5599b07a
+        // running` on slot-claude-code-default during BoardTask
+        // 31e5449c-e315-4003-ad59-c3eebd5eb837. Take the dispatch site as the
+        // last write authority and reset the slot to a single-claim state.
+        let stale_running_claims = stale_running_claims_for_slot(state, &slot_id, task.id.as_str())
+            .await
+            .unwrap_or_default();
+        for stale_id in &stale_running_claims {
+            warn!(
+                slot_id = %slot_id,
+                task_id = %task.id,
+                stale_task_id = %stale_id,
+                "Autopilot: clearing stale running claim before new dispatch"
+            );
+            let _ = state.store.unclaim_board_task(stale_id).await;
+            let _ = state
+                .store
+                .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+                    task_id: stale_id.clone(),
+                    content: format!(
+                        "🧹 Autopilot dispatch reset: claim on slot `{}` displaced by task `{}`. The previous run left this row claimed without closing — releasing so the new dispatch owns the slot.",
+                        slot_id, task.id
+                    ),
+                    note_type: Some("note".to_string()),
+                    author: Some("autopilot".to_string()),
+                })
+                .await;
+        }
+
         // Atomically claim the task (CAS: only succeeds if open + unclaimed)
         match state
             .store
@@ -2273,6 +2480,19 @@ async fn dispatch_board_tasks_with_config(
         // completion-time backfill in durable_provider_completion_for_slot_task).
         let _ =
             crate::flow_engine::bind_conversation_to_task(state, &slot_id, task.id.as_str()).await;
+        // V3 slot-attribution :: dispatch is the rebind authority.
+        //
+        // bind_conversation_to_task preserves an existing binding when it
+        // disagrees with the new task id — that protects the post-completion
+        // reconciliation path but lets a stale conv.task_id from the previous
+        // dispatch survive into the next one. During BoardTask
+        // 31e5449c-e315-4003-ad59-c3eebd5eb837, this caused
+        // `mission_conversation_query(taskId=738c96f5)` to return the 5599b07a
+        // conversation. Force-rebind here so the dispatch site is the single
+        // source of truth for "which BoardTask owns this slot's session right
+        // now". Best-effort: if the slot session is not yet registered, the
+        // bounded-retry loop above already deferred to durable backfill.
+        rebind_slot_conversation_for_dispatch(state, &slot_id, task.id.as_str()).await;
 
         // Inject answered questions as context (Phase 2 linkage)
         let full_prompt = {
@@ -2706,6 +2926,34 @@ async fn dispatch_board_tasks_with_config(
                         let _ = state
                             .store
                             .update_prompt_snapshot_outcome(task.id.as_str(), "blocked")
+                            .await;
+                        return;
+                    }
+                    if let Some(blocker) = pty_only_close_blocker(
+                        &task.description,
+                        durable_completion.is_some(),
+                        &final_summary,
+                    ) {
+                        warn!(
+                            task_id = %task.id,
+                            slot_id = %slot_id,
+                            duration_ms = res.duration_ms,
+                            blocker,
+                            "Autopilot: PTY-only completion lacks structured artifact; preserving task until provider final settles"
+                        );
+                        let note = format!(
+                            "⚠️ **Autopilot blocked close** — PTY-only summary missing `{}`. Final artifact not durable yet (no provider JSONL/SSE final after settle window). The BoardTask stays running so the watchdog/next tick can re-extract once the provider log lands.\n\n{}",
+                            blocker,
+                            truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES),
+                        );
+                        let _ = state
+                            .store
+                            .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+                                task_id: task.id.to_string(),
+                                content: note,
+                                note_type: Some("note".to_string()),
+                                author: Some("autopilot".to_string()),
+                            })
                             .await;
                         return;
                     }
@@ -6296,6 +6544,217 @@ Review only.
             suffix.contains("===<repo-name>==="),
             "advisory must show the label-before-output format: {suffix}"
         );
+    }
+
+    // ── Slot-attribution invariants (BoardTask 31e5449c regression) ─────
+
+    fn make_running_task_claimed_by(
+        task_id: &str,
+        slot_id: &str,
+    ) -> missiond_core::types::BoardTask {
+        let mut task = make_board_task(
+            "running task",
+            "## Dispatch metadata\n- task_class: code",
+            "dev",
+            None,
+        );
+        task.id = missiond_core::types::TaskId::from_trusted(task_id.to_string());
+        task.status = missiond_core::types::BoardTaskStatus::Running;
+        task.claim_executor_id = Some(slot_id.to_string());
+        task.claim_executor_type = Some("pty_slot".to_string());
+        task.claimed_at = Some("2026-05-05T00:00:00Z".to_string());
+        task
+    }
+
+    /// Pin V3 slot-attribution :: stale claim must be detected so a new
+    /// dispatch on the same slot displaces it. Repro: BoardTask
+    /// 31e5449c-e315-4003-ad59-c3eebd5eb837 saw `task 738c96f5 and 5599b07a
+    /// running` on slot-claude-code-default because the previous task left
+    /// its claim live.
+    #[test]
+    fn stale_running_claim_for_slot_matches_other_running_pty_slot_task() {
+        let other = make_running_task_claimed_by("5599b07a", "slot-claude-code-default");
+        assert!(is_stale_running_claim_for_slot(
+            &other,
+            "slot-claude-code-default",
+            "738c96f5"
+        ));
+    }
+
+    /// The newly-incoming dispatch's own task id must NOT be reported as
+    /// stale — that would unclaim the dispatch we're about to start.
+    #[test]
+    fn stale_running_claim_for_slot_excludes_incoming_task() {
+        let incoming = make_running_task_claimed_by("738c96f5", "slot-claude-code-default");
+        assert!(!is_stale_running_claim_for_slot(
+            &incoming,
+            "slot-claude-code-default",
+            "738c96f5"
+        ));
+    }
+
+    /// A task in done/open/blocked status is not "running on this slot" even
+    /// if the claim_executor still points at the slot — only running rows
+    /// matter for the single-running-task-per-slot invariant.
+    #[test]
+    fn stale_running_claim_for_slot_ignores_non_running_status() {
+        let mut task = make_running_task_claimed_by("done-task", "slot-claude-code-default");
+        task.status = missiond_core::types::BoardTaskStatus::Done;
+        assert!(!is_stale_running_claim_for_slot(
+            &task,
+            "slot-claude-code-default",
+            "738c96f5"
+        ));
+        task.status = missiond_core::types::BoardTaskStatus::Open;
+        assert!(!is_stale_running_claim_for_slot(
+            &task,
+            "slot-claude-code-default",
+            "738c96f5"
+        ));
+        task.status = missiond_core::types::BoardTaskStatus::Blocked;
+        assert!(!is_stale_running_claim_for_slot(
+            &task,
+            "slot-claude-code-default",
+            "738c96f5"
+        ));
+    }
+
+    /// A claim on a different slot must not be touched — only this slot's
+    /// dispatch is the authority for this slot's attribution.
+    #[test]
+    fn stale_running_claim_for_slot_does_not_touch_other_slots() {
+        let other_slot = make_running_task_claimed_by("other-task", "slot-other");
+        assert!(!is_stale_running_claim_for_slot(
+            &other_slot,
+            "slot-claude-code-default",
+            "738c96f5"
+        ));
+    }
+
+    /// An assignee-only claim (assignee=slot, claim_executor=None) is queued,
+    /// not running on this slot — leave it alone so queued tasks don't get
+    /// silently unclaimed during another task's dispatch.
+    #[test]
+    fn stale_running_claim_for_slot_excludes_assignee_only_attribution() {
+        let mut queued = make_board_task(
+            "queued task",
+            "## Dispatch metadata\n- task_class: code",
+            "dev",
+            None,
+        );
+        queued.id = missiond_core::types::TaskId::from_trusted("queued".to_string());
+        queued.status = missiond_core::types::BoardTaskStatus::Running;
+        queued.assignee = Some("slot-claude-code-default".to_string());
+        queued.claim_executor_id = None;
+        queued.claim_executor_type = None;
+        assert!(!is_stale_running_claim_for_slot(
+            &queued,
+            "slot-claude-code-default",
+            "738c96f5"
+        ));
+    }
+
+    // ── PTY-only close gate (Defect 2 regression) ─────────────────────────
+
+    fn delegated_dispatch_description() -> &'static str {
+        "Audit something\n\n## Dispatch metadata\n- task_class: code\n- write_policy: read-only\n"
+    }
+
+    fn delegated_swarm_description() -> &'static str {
+        "Survey shards\n\n## Swarm metadata\n- task_class: context-pack\n- write_policy: read-only\n"
+    }
+
+    /// Durable provider final available → never block, regardless of summary.
+    #[test]
+    fn pty_only_close_blocker_passes_when_durable_final_present() {
+        assert_eq!(
+            pty_only_close_blocker(
+                delegated_dispatch_description(),
+                /* has_durable_provider_final */ true,
+                "anything",
+            ),
+            None
+        );
+    }
+
+    /// Non-delegated tasks (no Dispatch/Swarm metadata) — nothing to gate.
+    /// Chat-style ad-hoc BoardTasks do not have a structured artifact contract.
+    #[test]
+    fn pty_only_close_blocker_passes_for_non_delegated_tasks() {
+        assert_eq!(
+            pty_only_close_blocker(
+                "freeform task description",
+                /* has_durable_provider_final */ false,
+                "OK done",
+            ),
+            None
+        );
+    }
+
+    /// Delegated worker, no durable final, intermediate sentence in PTY → block.
+    /// Mirrors the b5be6eed.../5599b07a.../a5ebf6c4... evidence.
+    #[test]
+    fn pty_only_close_blocker_blocks_intermediate_sentence_for_delegated_task() {
+        let summary = "Now I have a complete picture. Let me share insights.";
+        assert_eq!(
+            pty_only_close_blocker(
+                delegated_dispatch_description(),
+                /* has_durable_provider_final */ false,
+                summary,
+            ),
+            Some("missing-pty-final-artifact")
+        );
+    }
+
+    /// Delegated worker, no durable final, but the PTY summary already has a
+    /// structured artifact heading (e.g. `Findings`/`Verification`) → close
+    /// is allowed because the artifact is on screen.
+    #[test]
+    fn pty_only_close_blocker_passes_when_structured_artifact_present() {
+        let summary = "## Findings\n- ok\n\n## Verification\n- git status clean";
+        assert_eq!(
+            pty_only_close_blocker(
+                delegated_dispatch_description(),
+                /* has_durable_provider_final */ false,
+                summary,
+            ),
+            None
+        );
+    }
+
+    /// `## Swarm metadata` is honored the same way as `## Dispatch metadata`.
+    #[test]
+    fn pty_only_close_blocker_blocks_swarm_dispatch_without_artifact() {
+        assert_eq!(
+            pty_only_close_blocker(
+                delegated_swarm_description(),
+                /* has_durable_provider_final */ false,
+                "narrating",
+            ),
+            Some("missing-pty-final-artifact")
+        );
+    }
+
+    /// Existing acceptance-evidence markers (e.g. `verified`) also satisfy the
+    /// structured-artifact check — preserves the prior write-scope-task path.
+    #[test]
+    fn pty_summary_with_acceptance_evidence_marker_passes() {
+        assert!(pty_summary_has_structured_artifact(
+            "All acceptance gates passed; verification done."
+        ));
+    }
+
+    /// `is_delegated_worker_description` only fires on the V3 envelope
+    /// markers — chat-style descriptions stay out of the gate.
+    #[test]
+    fn delegated_worker_detector_ignores_chat_descriptions() {
+        assert!(!is_delegated_worker_description("just a chat note"));
+        assert!(is_delegated_worker_description(
+            "objective\n\n## Dispatch metadata\n- task_class: code"
+        ));
+        assert!(is_delegated_worker_description(
+            "objective\n\n## Swarm metadata\n- target_projects: a=...\n"
+        ));
     }
 }
 
