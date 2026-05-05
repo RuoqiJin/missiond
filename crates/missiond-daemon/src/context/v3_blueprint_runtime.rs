@@ -170,6 +170,7 @@ pub(crate) struct WorkstationRuntimeConfig {
     pub cc_swarm_timeout_policy: SimpleTimeoutPolicy,
     pub pty_send_timeout_policy: SimpleTimeoutPolicy,
     pub dynamic_slot_spawn_timeout_policy: SimpleTimeoutPolicy,
+    pub swarm_capacity_policy: SwarmCapacityPolicy,
     pub slot_ttl_policy: SlotTtlPolicy,
 }
 
@@ -193,6 +194,16 @@ pub(crate) struct StartupSlotRuntimeConfig {
     pub model_profile: Option<String>,
     pub timeout_secs: u64,
     pub skip_permissions: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SwarmCapacityPolicy {
+    pub default_claude_workers: usize,
+    pub max_claude_workers: usize,
+    pub default_gemini_workers: usize,
+    pub max_gemini_workers: usize,
+    pub dynamic_slot_limit: i64,
+    pub delegate_rate_per_minute: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -459,6 +470,19 @@ impl Default for SlotTtlPolicy {
             max_secs: MAX_SLOT_TTL_SECS,
             default_extend_secs: DEFAULT_SLOT_EXTEND_SECS,
             max_extend_secs: MAX_SLOT_EXTEND_SECS,
+        }
+    }
+}
+
+impl Default for SwarmCapacityPolicy {
+    fn default() -> Self {
+        Self {
+            default_claude_workers: 8,
+            max_claude_workers: 16,
+            default_gemini_workers: 2,
+            max_gemini_workers: 6,
+            dynamic_slot_limit: 20,
+            delegate_rate_per_minute: 24,
         }
     }
 }
@@ -751,6 +775,7 @@ impl Default for WorkstationRuntimeConfig {
             cc_swarm_timeout_policy: SimpleTimeoutPolicy::default(),
             pty_send_timeout_policy: SimpleTimeoutPolicy::pty_send_default(),
             dynamic_slot_spawn_timeout_policy: SimpleTimeoutPolicy::dynamic_slot_spawn_default(),
+            swarm_capacity_policy: SwarmCapacityPolicy::default(),
             slot_ttl_policy: SlotTtlPolicy::default(),
         }
     }
@@ -1117,6 +1142,26 @@ impl WorkstationRuntimeConfig {
                 self.dynamic_slot_spawn_timeout_policy.max_secs,
             )
             .max(1) as u64
+    }
+
+    pub(crate) fn clamp_swarm_claude_workers(&self, value: Option<usize>) -> usize {
+        value
+            .unwrap_or(self.swarm_capacity_policy.default_claude_workers)
+            .clamp(0, self.swarm_capacity_policy.max_claude_workers)
+    }
+
+    pub(crate) fn clamp_swarm_gemini_workers(&self, value: Option<usize>) -> usize {
+        value
+            .unwrap_or(self.swarm_capacity_policy.default_gemini_workers)
+            .clamp(0, self.swarm_capacity_policy.max_gemini_workers)
+    }
+
+    pub(crate) fn dynamic_slot_limit(&self) -> i64 {
+        self.swarm_capacity_policy.dynamic_slot_limit.max(1)
+    }
+
+    pub(crate) fn delegate_rate_per_minute(&self) -> usize {
+        self.swarm_capacity_policy.delegate_rate_per_minute.max(1)
     }
 
     pub(crate) fn clamp_slot_ttl_secs(&self, ttl_secs: Option<i64>) -> i64 {
@@ -1747,6 +1792,26 @@ pub(crate) fn parse_workstation_config(
         min_secs: int_keyword(&dynamic_slot_spawn_timeout_tokens, ":min_secs")?,
         max_secs: int_keyword(&dynamic_slot_spawn_timeout_tokens, ":max_secs")?,
     };
+    let capacity_form = find_forms(&block, "capacity-policy")
+        .into_iter()
+        .find(|form| {
+            let tokens = tokenize_lisp(form);
+            tokens.get(2).is_some_and(|name| name == "swarm-workers")
+        })
+        .ok_or_else(|| {
+            BlueprintConfigError::Parse(
+                "missing (capacity-policy swarm-workers ...) in workstation-config".into(),
+            )
+        })?;
+    let capacity_tokens = tokenize_lisp(&capacity_form);
+    config.swarm_capacity_policy = SwarmCapacityPolicy {
+        default_claude_workers: usize_keyword(&capacity_tokens, ":default_claude_workers")?,
+        max_claude_workers: usize_keyword(&capacity_tokens, ":max_claude_workers")?,
+        default_gemini_workers: usize_keyword(&capacity_tokens, ":default_gemini_workers")?,
+        max_gemini_workers: usize_keyword(&capacity_tokens, ":max_gemini_workers")?,
+        dynamic_slot_limit: int_keyword(&capacity_tokens, ":dynamic_slot_limit")?,
+        delegate_rate_per_minute: usize_keyword(&capacity_tokens, ":delegate_rate_per_minute")?,
+    };
     let ttl_form = find_forms(&block, "ttl-policy")
         .into_iter()
         .find(|form| {
@@ -1793,6 +1858,30 @@ pub(crate) fn parse_workstation_config(
     {
         return Err(BlueprintConfigError::Parse(
             "pty-send-blocking timeout :default_secs must be within :min_secs..:max_secs".into(),
+        ));
+    }
+    if config.swarm_capacity_policy.default_claude_workers
+        > config.swarm_capacity_policy.max_claude_workers
+    {
+        return Err(BlueprintConfigError::Parse(
+            "swarm-workers :default_claude_workers must be <= :max_claude_workers".into(),
+        ));
+    }
+    if config.swarm_capacity_policy.default_gemini_workers
+        > config.swarm_capacity_policy.max_gemini_workers
+    {
+        return Err(BlueprintConfigError::Parse(
+            "swarm-workers :default_gemini_workers must be <= :max_gemini_workers".into(),
+        ));
+    }
+    if config.swarm_capacity_policy.dynamic_slot_limit <= 0 {
+        return Err(BlueprintConfigError::Parse(
+            "swarm-workers :dynamic_slot_limit must be positive".into(),
+        ));
+    }
+    if config.swarm_capacity_policy.delegate_rate_per_minute == 0 {
+        return Err(BlueprintConfigError::Parse(
+            "swarm-workers :delegate_rate_per_minute must be positive".into(),
         ));
     }
     if config.slot_ttl_policy.min_secs > config.slot_ttl_policy.max_secs {
@@ -2680,6 +2769,13 @@ mod tests {
       :default_secs 60
       :min_secs 10
       :max_secs 600)
+    (capacity-policy swarm-workers
+      :default_claude_workers 8
+      :max_claude_workers 16
+      :default_gemini_workers 2
+      :max_gemini_workers 6
+      :dynamic_slot_limit 20
+      :delegate_rate_per_minute 24)
     (ttl-policy dynamic-slot
       :default_secs 14400
       :min_secs 300
@@ -2995,6 +3091,12 @@ mod tests {
         assert_eq!(cfg.dynamic_slot_spawn_timeout_policy.default_secs, 60);
         assert_eq!(cfg.dynamic_slot_spawn_timeout_policy.min_secs, 10);
         assert_eq!(cfg.dynamic_slot_spawn_timeout_policy.max_secs, 600);
+        assert_eq!(cfg.swarm_capacity_policy.default_claude_workers, 8);
+        assert_eq!(cfg.swarm_capacity_policy.max_claude_workers, 16);
+        assert_eq!(cfg.swarm_capacity_policy.default_gemini_workers, 2);
+        assert_eq!(cfg.swarm_capacity_policy.max_gemini_workers, 6);
+        assert_eq!(cfg.dynamic_slot_limit(), 20);
+        assert_eq!(cfg.delegate_rate_per_minute(), 24);
         assert_eq!(cfg.slot_ttl_policy.default_secs, 14400);
         assert_eq!(cfg.slot_ttl_policy.min_secs, 300);
         assert_eq!(cfg.slot_ttl_policy.max_secs, 28800);
@@ -3018,6 +3120,10 @@ mod tests {
         assert_eq!(cfg.clamp_pty_send_timeout_ms(Some(99_999_999)), 7_200_000);
         assert_eq!(cfg.clamp_pty_send_timeout_ms(Some(42_000)), 42_000);
         assert_eq!(cfg.dynamic_slot_spawn_timeout_secs(), 60);
+        assert_eq!(cfg.clamp_swarm_claude_workers(None), 8);
+        assert_eq!(cfg.clamp_swarm_claude_workers(Some(999)), 16);
+        assert_eq!(cfg.clamp_swarm_gemini_workers(None), 2);
+        assert_eq!(cfg.clamp_swarm_gemini_workers(Some(999)), 6);
         assert_eq!(cfg.clamp_slot_ttl_secs(None), 14400);
         assert_eq!(cfg.clamp_slot_ttl_secs(Some(5)), 300);
         assert_eq!(cfg.clamp_slot_ttl_secs(Some(99_999)), 28800);
@@ -3243,7 +3349,14 @@ mod tests {
     (timeout-policy dynamic-slot-spawn
       :default_secs 60
       :min_secs 10
-      :max_secs 600))
+      :max_secs 600)
+    (capacity-policy swarm-workers
+      :default_claude_workers 8
+      :max_claude_workers 16
+      :default_gemini_workers 2
+      :max_gemini_workers 6
+      :dynamic_slot_limit 20
+      :delegate_rate_per_minute 24))
   (workstation-pool
     (worker claude-code-default :engine claude-code :role coder :slot-id "slot-claude-code-default" :task-type claude_code_default :model-profile coding-default-opus-4-7 :model nil :task-classes [code] :capabilities [code-write] :max-concurrency 1 :timeout-secs 1800 :default-use code-implementation :accepts-boardtask true :write-allowed true)
     (worker gemini-ultra-pro :engine gemini :role researcher :slot-id "slot-gemini-ultra" :task-type gemini_ultra :model-profile gemini-ultra-pro-preview :model nil :approval-policy plan :tool-policy-path ".missiond/v3/policies/gemini-readonly-policy.toml" :task-classes [research] :capabilities [read-only] :max-concurrency 1 :timeout-secs 900 :default-use research-review :accepts-boardtask true :write-allowed false)
@@ -3251,6 +3364,16 @@ mod tests {
 "#;
         let err = parse_workstation_config(source).expect_err("missing ttl policy");
         assert!(err.to_string().contains("ttl-policy dynamic-slot"));
+    }
+
+    #[test]
+    fn missing_capacity_policy_is_rejected() {
+        let source = BLUEPRINT.replace(
+            "(capacity-policy swarm-workers",
+            "(capacity-policy-disabled swarm-workers",
+        );
+        let err = parse_workstation_config(&source).expect_err("missing capacity policy");
+        assert!(err.to_string().contains("capacity-policy swarm-workers"));
     }
 
     #[test]

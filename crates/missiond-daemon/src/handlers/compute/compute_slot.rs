@@ -10,9 +10,6 @@ use std::path::PathBuf;
 use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
 use crate::state::AppState;
 
-/// Max dynamic slots allowed concurrently.
-const MAX_DYNAMIC_SLOTS: i64 = 5;
-
 const CODING_DEFAULT_PROFILE: &str = "coding-default-opus-4-7";
 
 pub(crate) fn resolve_model_projection(
@@ -178,13 +175,14 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
         .count_active_dynamic_slots()
         .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
-    if active_count >= MAX_DYNAMIC_SLOTS {
+    let dynamic_limit = workstation_config.dynamic_slot_limit();
+    if active_count >= dynamic_limit {
         return Ok(ToolResult::structured_error(
             ToolError::new(
                 error_codes::LIMIT_REACHED,
                 format!(
                     "Dynamic slot limit reached ({}/{})",
-                    active_count, MAX_DYNAMIC_SLOTS
+                    active_count, dynamic_limit
                 ),
             )
             .with_suggestion("Terminate existing slots with action=terminate first"),
@@ -836,7 +834,10 @@ async fn list_slots(state: &AppState, args: &Value) -> Result<ToolResult> {
         "dynamic_slots": dynamic_entries,
         "workstation_pool": workstation_pool,
         "dynamic_active": dynamic_slots.iter().filter(|s| s.status == "active").count(),
-        "dynamic_limit": MAX_DYNAMIC_SLOTS,
+        "dynamic_limit": workstation_config_result
+            .as_ref()
+            .map(WorkstationRuntimeConfig::dynamic_slot_limit)
+            .unwrap_or(0),
         "v3_authoritative": v3_active,
     })))
 }

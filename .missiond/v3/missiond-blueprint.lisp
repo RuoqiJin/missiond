@@ -588,6 +588,13 @@
       :default_max_parallel 4
       :min_parallel 1
       :max_parallel 8)
+    (capacity-policy swarm-workers
+      :default_claude_workers 8
+      :max_claude_workers 16
+      :default_gemini_workers 2
+      :max_gemini_workers 6
+      :dynamic_slot_limit 20
+      :delegate_rate_per_minute 24)
     (ttl-policy dynamic-slot
       :default_secs 14400
       :min_secs 300
@@ -620,6 +627,7 @@
        "mission_pty_send waitForResponse budget MUST project from workstation-config timeout-policy pty-send-blocking (default 300s, clamped 1..7200) — never a local 300_000ms literal"
        "mission_compute_slot and Claude/Gemini slot-orchestrator dynamic slot spawn wait_for_idle timeouts MUST project from workstation-config timeout-policy dynamic-slot-spawn (default 60s, clamped 10..600) — never local Some(60)/Some(120) literals"
        "context-pack-run-wave default worker fanout MUST project from workstation-config dispatch-policy context-pack-run-wave (default 4, clamped 1..8), while caller --max-parallel remains an explicit override"
+       "mission_swarm_run fanout defaults/caps and dynamic slot limits MUST project from workstation-config capacity-policy swarm-workers (default Claude 8 max 16, default Gemini 2 max 6, dynamic slots 20, delegate rate 24/min) so supervised waves can scale without divergent Rust constants"
        "Dynamic slot TTL and per-request extension budget MUST project from workstation-config ttl-policy dynamic-slot (create default 14400s, clamped 300..28800; extend default/max 3600s) — direct mission_compute_slot create/extend and delegated task_delegate auto-provision must not hardcode the TTL window"
        "Smart watchdog idle-recovery threshold MUST equal the projected pty.send budget plus a small grace (default 120s); only the no-PTY-session branch may reclaim sooner so a missing process can never wedge the slot"
        "Autopilot BoardTask claim lease MUST equal the smart-watchdog idle-recovery threshold (projected pty.send budget plus grace); the legacy fixed 20-minute lease is forbidden because it lets the watchdog reclaim a slot whose claim is still legitimately ticking inside the declared timeout"

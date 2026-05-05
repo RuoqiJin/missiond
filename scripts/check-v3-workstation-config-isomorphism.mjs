@@ -143,6 +143,7 @@ function checkFiles(root, files) {
     'mission_cc_swarm pty.send budget MUST project from workstation-config timeout-policy claudecode-swarm',
 	    'mission_pty_send waitForResponse budget MUST project from workstation-config timeout-policy pty-send-blocking',
 	    'mission_compute_slot and Claude/Gemini slot-orchestrator dynamic slot spawn wait_for_idle timeouts MUST project from workstation-config timeout-policy dynamic-slot-spawn',
+	    'mission_swarm_run fanout defaults/caps and dynamic slot limits MUST project from workstation-config capacity-policy swarm-workers',
 	    'Claude/Gemini slot-orchestrator spawn',
 	    'autopilot-policy',
 	    'AutopilotRuntimeConfig MUST load autopilot-policy',
@@ -153,6 +154,13 @@ function checkFiles(root, files) {
     'timeout-policy claudecode-swarm',
     'timeout-policy pty-send-blocking',
     'timeout-policy dynamic-slot-spawn',
+    'capacity-policy swarm-workers',
+    ':default_claude_workers 8',
+    ':max_claude_workers 16',
+    ':default_gemini_workers 2',
+    ':max_gemini_workers 6',
+    ':dynamic_slot_limit 20',
+    ':delegate_rate_per_minute 24',
     'ttl-policy dynamic-slot',
     ':default_secs 1800',
     ':default_secs 600',
@@ -190,6 +198,7 @@ function checkFiles(root, files) {
     'WorkstationRuntimeConfig::load_for_project_root',
     'clamp_slot_ttl_secs',
     'dynamic_slot_spawn_timeout_secs',
+    'dynamic_slot_limit',
     'timeout_secs: Some(spawn_timeout_secs)',
     'default_slot_extend_secs',
     'max_slot_extend_secs',
@@ -670,7 +679,7 @@ runtime_config.clamp_slot_ttl_secs(None);
 	fn x() {
   find_form(source, "workstation-config");
   find_form(source, "autopilot-policy");
-  let a = "startup_slots slot_templates allowed_cwd_prefixes optional_non_nil_keyword model_profile_spawn_args default_spawn_model_for_template parse_spawn_model_arg slot_template available_slot_template_names timeout-policy boardtask-dispatch timeout-policy claudecode-swarm timeout-policy pty-send-blocking timeout-policy dynamic-slot-spawn ttl-policy dynamic-slot cwd-policy dynamic-slot string_list_keyword slot-template DEFAULT_MODEL_PROFILE DEFAULT_TIMEOUT_SECS MIN_TIMEOUT_SECS MAX_TIMEOUT_SECS WATCHDOG_GRACE_SECS MISSING_SESSION_PROBE_SECS DEFAULT_SLOT_TTL_SECS MIN_SLOT_TTL_SECS MAX_SLOT_TTL_SECS DEFAULT_SLOT_EXTEND_SECS MAX_SLOT_EXTEND_SECS DEFAULT_CC_SWARM_TIMEOUT_SECS MIN_CC_SWARM_TIMEOUT_SECS MAX_CC_SWARM_TIMEOUT_SECS DEFAULT_PTY_SEND_TIMEOUT_SECS MIN_PTY_SEND_TIMEOUT_SECS MAX_PTY_SEND_TIMEOUT_SECS DEFAULT_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS MIN_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS MAX_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS DEFAULT_AUTOPILOT_SLOT_TASK_REAP_STALE_SECS DEFAULT_AUTOPILOT_DEPLOY_REVIEW_TIMEOUT_SECS DEFAULT_AUTOPILOT_RECENT_INTENTS_WINDOW_SECS DEFAULT_AUTOPILOT_DIRECTION_SHIFT_COOLDOWN_SECS default_slot_extend_secs max_slot_extend_secs clamp_cc_swarm_timeout_ms clamp_pty_send_timeout_ms dynamic_slot_spawn_timeout_secs deploy_review_timeout_ms load_blueprint_source locate_orchestrator_blueprint orchestrator blueprint";
+  let a = "startup_slots slot_templates allowed_cwd_prefixes optional_non_nil_keyword model_profile_spawn_args default_spawn_model_for_template parse_spawn_model_arg slot_template available_slot_template_names timeout-policy boardtask-dispatch timeout-policy claudecode-swarm timeout-policy pty-send-blocking timeout-policy dynamic-slot-spawn capacity-policy swarm-workers ttl-policy dynamic-slot cwd-policy dynamic-slot string_list_keyword slot-template DEFAULT_MODEL_PROFILE DEFAULT_TIMEOUT_SECS MIN_TIMEOUT_SECS MAX_TIMEOUT_SECS WATCHDOG_GRACE_SECS MISSING_SESSION_PROBE_SECS DEFAULT_SLOT_TTL_SECS MIN_SLOT_TTL_SECS MAX_SLOT_TTL_SECS DEFAULT_SLOT_EXTEND_SECS MAX_SLOT_EXTEND_SECS DEFAULT_CC_SWARM_TIMEOUT_SECS MIN_CC_SWARM_TIMEOUT_SECS MAX_CC_SWARM_TIMEOUT_SECS DEFAULT_PTY_SEND_TIMEOUT_SECS MIN_PTY_SEND_TIMEOUT_SECS MAX_PTY_SEND_TIMEOUT_SECS DEFAULT_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS MIN_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS MAX_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS SwarmCapacityPolicy clamp_swarm_claude_workers clamp_swarm_gemini_workers dynamic_slot_limit delegate_rate_per_minute DEFAULT_AUTOPILOT_SLOT_TASK_REAP_STALE_SECS DEFAULT_AUTOPILOT_DEPLOY_REVIEW_TIMEOUT_SECS DEFAULT_AUTOPILOT_RECENT_INTENTS_WINDOW_SECS DEFAULT_AUTOPILOT_DIRECTION_SHIFT_COOLDOWN_SECS default_slot_extend_secs max_slot_extend_secs clamp_cc_swarm_timeout_ms clamp_pty_send_timeout_ms dynamic_slot_spawn_timeout_secs deploy_review_timeout_ms load_blueprint_source locate_orchestrator_blueprint orchestrator blueprint";
 }`);
   writeFixture(root, DEFAULT_FILES.slotEnv, `
 const A = 'MISSION_IPC_ENDPOINT settings.local.json SESSION_REGISTER_HOOK CONTEXT_INJECT_HOOK MISSIOND_CLAUDE_CONTEXT_PREFETCH SessionStart UserPromptSubmit missiond-session-register.sh missiond-context-inject-v2.sh';

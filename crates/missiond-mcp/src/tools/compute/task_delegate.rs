@@ -57,7 +57,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "projectId": {"type": "string", "description": "project_id camelCase alias"},
                     "context_pack_path": {"type": "string", "description": "可选 context-pack Lisp 路径"},
                     "contextPackPath": {"type": "string", "description": "context_pack_path alias"},
-                    "max_claude_workers": {"type": "integer", "default": 4},
+                    "max_claude_workers": {"type": "integer", "default": 8},
                     "maxClaudeWorkers": {"type": "integer"},
                     "max_gemini_workers": {"type": "integer", "default": 2},
                     "maxGeminiWorkers": {"type": "integer"},

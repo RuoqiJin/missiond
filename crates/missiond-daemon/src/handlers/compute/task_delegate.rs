@@ -10,14 +10,6 @@ use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
 use crate::slot_dispatch::SlotAcquireGuard;
 use crate::state::AppState;
 
-/// Rate limit: max delegates per minute (per Jarvis session).
-///
-/// The resident master now runs context-pack fanout across several projects;
-/// keep the limit high enough for supervised waves, while write-scope conflict
-/// detection still prevents unsafe overlapping implementers.
-const MAX_DELEGATES_PER_MINUTE: usize = 12;
-const MAX_DYNAMIC_SLOTS: i64 = 12;
-
 /// Roles excluded from auto-selection (meta agents, Jarvis itself).
 const EXCLUDED_ROLES: &[&str] = &["jarvis", "memory", "supervisor", "decision"];
 
@@ -443,10 +435,26 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
     let context_pack_path = string_arg(&args, &["context_pack_path", "contextPackPath"])
         .map(|value| normalize_context_pack_path_for_worker(value, Some(&missiond_root)))
         .unwrap_or_else(|| default_swarm_context_pack_path(Some(&missiond_root)));
-    let max_claude_workers =
-        clamp_usize_arg(&args, &["max_claude_workers", "maxClaudeWorkers"], 6, 0, 12);
-    let max_gemini_workers =
-        clamp_usize_arg(&args, &["max_gemini_workers", "maxGeminiWorkers"], 2, 0, 4);
+    let runtime_config = match WorkstationRuntimeConfig::load_for_project_root(Some(
+        &missiond_root.to_string_lossy(),
+    )) {
+        Ok(config) => config,
+        Err(err) => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new("V3_BLUEPRINT_CONFIG_ERROR", err.to_string()).with_suggestion(
+                    "ensure MissionD .missiond/v3/missiond-blueprint.lisp contains workstation-config capacity-policy swarm-workers",
+                ),
+            ));
+        }
+    };
+    let max_claude_workers = runtime_config.clamp_swarm_claude_workers(optional_usize_arg(
+        &args,
+        &["max_claude_workers", "maxClaudeWorkers"],
+    ));
+    let max_gemini_workers = runtime_config.clamp_swarm_gemini_workers(optional_usize_arg(
+        &args,
+        &["max_gemini_workers", "maxGeminiWorkers"],
+    ));
     let write_policy = string_arg(&args, &["write_policy", "writePolicy"])
         .unwrap_or("read-only")
         .to_string();
@@ -621,7 +629,9 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
         "write_policy": write_policy,
         "fanout": {
             "max_claude_workers": max_claude_workers,
-            "max_gemini_workers": max_gemini_workers
+            "max_gemini_workers": max_gemini_workers,
+            "dynamic_slot_limit": runtime_config.dynamic_slot_limit(),
+            "delegate_rate_per_minute": runtime_config.delegate_rate_per_minute()
         },
         "planned_tasks": planned.iter().map(SwarmPlannedTask::to_json).collect::<Vec<_>>(),
         "created_task_ids": created_task_ids,
@@ -1012,12 +1022,9 @@ async fn auto_provision_slot(
         .count_active_dynamic_slots()
         .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
-    if active >= MAX_DYNAMIC_SLOTS {
-        return Err(anyhow!(
-            "Dynamic slot quota full ({}/{})",
-            active,
-            MAX_DYNAMIC_SLOTS
-        ));
+    let limit = runtime_config.dynamic_slot_limit();
+    if active >= limit {
+        return Err(anyhow!("Dynamic slot quota full ({}/{})", active, limit));
     }
 
     // V3 workstation-config :: ttl-policy dynamic-slot projection.
@@ -1089,13 +1096,11 @@ fn bool_arg(args: &Value, keys: &[&str]) -> Option<bool> {
     })
 }
 
-fn clamp_usize_arg(args: &Value, keys: &[&str], default: usize, min: usize, max: usize) -> usize {
+fn optional_usize_arg(args: &Value, keys: &[&str]) -> Option<usize> {
     keys.iter()
         .find_map(|key| args.get(*key))
         .and_then(|value| value.as_u64())
         .map(|value| value as usize)
-        .unwrap_or(default)
-        .clamp(min, max)
 }
 
 fn string_list_arg(args: &Value, keys: &[&str]) -> Vec<String> {
