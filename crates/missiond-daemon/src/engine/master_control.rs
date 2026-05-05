@@ -20,6 +20,7 @@ use crate::control_tree::CtlDomain;
 use crate::state::AppState;
 
 pub(crate) const MASTER_WORKER_ID: &str = "codex-master-control";
+const MASTER_WORKER_LEGACY_AUTHOR_IDS: &[&str] = &["resident-codex-master"];
 pub(crate) const MASTER_SLOT_ID: &str = "slot-codex-master-control";
 pub(crate) const CHECKPOINT_RELATIVE_PATH: &str =
     ".missiond/v3/runtime/master-control-checkpoint.lisp";
@@ -820,6 +821,13 @@ pub(crate) fn notify_board_event_direct(event: &BoardEvent) {
             .record_wakeup("BoardEvent", kind, 0, preview)
             .await;
     });
+}
+
+pub(crate) fn is_master_control_note_author(author: Option<&str>) -> bool {
+    let Some(author) = author else {
+        return false;
+    };
+    author == MASTER_WORKER_ID || MASTER_WORKER_LEGACY_AUTHOR_IDS.contains(&author)
 }
 
 fn spawn_master_event_subscriber(
@@ -2371,6 +2379,14 @@ mod tests {
             category: "dev".to_string(),
         };
         assert!(should_wake_for_board_event(&worker_done, false));
+    }
+
+    #[test]
+    fn master_note_author_aliases_are_self_notifications() {
+        assert!(is_master_control_note_author(Some("codex-master-control")));
+        assert!(is_master_control_note_author(Some("resident-codex-master")));
+        assert!(!is_master_control_note_author(Some("autopilot")));
+        assert!(!is_master_control_note_author(None));
     }
 
     #[test]

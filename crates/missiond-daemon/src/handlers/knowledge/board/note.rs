@@ -16,7 +16,7 @@ pub(super) async fn handle_note_add(state: &AppState, args: Value) -> Result<Too
     let task_id = args.task_id.clone();
     let content_preview: String = args.content.chars().take(80).collect();
     let is_master_control_note =
-        args.author.as_deref() == Some(crate::engine::master_control::MASTER_WORKER_ID);
+        crate::engine::master_control::is_master_control_note_author(args.author.as_deref());
     let input = missiond_core::types::AddBoardTaskNoteInput {
         task_id: args.task_id,
         content: args.content,

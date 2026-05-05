@@ -69,7 +69,7 @@ function check(s, diagnostics) {
     'Implement accepted swarm shard',
     'status_changed/updated done/completed/closed/failed/blocked MUST wake',
     'same-process Board tool handlers also call notify_board_event_direct',
-    'Board notes authored by codex-master-control MUST NOT direct-notify the master again',
+    'Board notes authored by codex-master-control or the legacy resident-codex-master alias MUST NOT direct-notify the master again',
     '(master-decision-loop',
     'materialize context_pack_path as master-control-context-pack.v1 before prompting',
     'no active_objective_id means no control turn and no default self-review',
@@ -215,6 +215,9 @@ function check(s, diagnostics) {
     'fn slot_event_slot_id',
     'fn should_wake_for_slot_event',
     'pub(crate) fn notify_board_event_direct',
+    'MASTER_WORKER_LEGACY_AUTHOR_IDS',
+    '"resident-codex-master"',
+    'is_master_control_note_author',
     'MASTER_SLOT_READY_TIMEOUT_SECS',
     'MASTER_ACTIVE_OBJECTIVE_HEARTBEAT_SECS',
     'master_control_paused',
@@ -350,7 +353,7 @@ function check(s, diagnostics) {
   ]);
   requireAll(diagnostics, FILES.boardNote, s.boardNote, [
     'is_master_control_note',
-    'crate::engine::master_control::MASTER_WORKER_ID',
+    'crate::engine::master_control::is_master_control_note_author',
     'if !is_master_control_note',
     'notify_board_event_direct(&ev)',
   ]);
