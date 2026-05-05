@@ -2023,8 +2023,10 @@
         :surface mission_board
         :entry [mission_board.create mission_board.claim mission_board.update mission_board.note_add]
         :core ((step s1 :logic "persist BoardTask status, assignee, dependency, lease, and note state")
-               (step s2 :logic "claim only open unclaimed rows and recover stale running rows")
-               (step s3 :logic "publish BoardEvent projections for dashboards and autopilot"))
+               (step s2 :logic "normalize common MCP argument aliases such as task_id/taskId, note_type/noteType, parent_id/parentId, and timeout_secs/timeoutSecs before schema projection")
+               (step s3 :logic "return structured ToolError codes for invalid params, missing/not-found tasks, and store failures so agents can recover without flailing")
+               (step s4 :logic "claim only open unclaimed rows and recover stale running rows")
+               (step s5 :logic "publish BoardEvent projections for dashboards and autopilot; large BoardTask notes return compact receipts after durable storage instead of echoing full content through MCP"))
         :egress [board_task board_event board_note autopilot_task_list]))
 
     (pillar workstation
@@ -2721,7 +2723,7 @@
              "crates/missiond-core/src/db/pg/board.rs"
              "crates/missiond-mcp/src/tools/knowledge/board.rs"
              "scripts/check-v3-board-isomorphism.mjs"]
-      :note "mission_board is the durable BoardTask coordination surface underneath delegated ClaudeCode work: MCP exposes query/create/update/delete/claim/decompose/retry/note_add with a generated schema from .missiond/intent-tools.lisp. [details: .missiond/v3/evidence/blueprint-notes.lisp#note-014]")
+      :note "mission_board is the durable BoardTask coordination surface underneath delegated ClaudeCode work: MCP exposes query/create/update/delete/claim/decompose/retry/note_add with a generated schema from .missiond/intent-tools.lisp. Board handlers normalize common snake_case/camelCase aliases before schema projection, reject invalid status/noteType with structured ToolError codes, and return compact note receipts for large stored content so agents recover instead of flailing on unknown errors. [details: .missiond/v3/evidence/blueprint-notes.lisp#note-014]")
 
     (surface memory-kb
       :status "code-aligned"

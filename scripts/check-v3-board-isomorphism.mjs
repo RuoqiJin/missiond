@@ -110,6 +110,9 @@ function checkFiles(root, files) {
     'clear_dangling_dynamic_slot_assignees',
     'list_autopilot_tasks',
     'node scripts/check-v3-board-isomorphism.mjs',
+    'normalize common MCP argument aliases',
+    'structured ToolError codes',
+    'compact note receipts',
   ]);
 
   requireAll(diagnostics, files.handler, sources.handler, [
@@ -133,6 +136,9 @@ function checkFiles(root, files) {
     'create::handle_create',
     'query::handle_query',
     'retry::handle_retry',
+    'normalize_board_args',
+    'invalid_board_args',
+    'board_store_error',
   ]);
 
   requireAll(diagnostics, files.handlerSession, sources.handlerSession, [
@@ -166,6 +172,9 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.handlerCreate, sources.handlerCreate, [
     'handle_create',
     'CreateBoardTaskInput',
+    'normalize_board_args',
+    'invalid_board_args',
+    'board_store_error',
     'create_board_task',
     'flow_template',
     'FlowContext::default',
@@ -178,6 +187,9 @@ function checkFiles(root, files) {
     'handle_toggle',
     'handle_single_update',
     'UpdateBoardTaskInput',
+    'normalize_board_args',
+    'invalid_status_result',
+    'not_found_result',
     'toggle_board_task',
     'harvest_decisions_for_task',
     'publish_board_status_changed',
@@ -201,6 +213,10 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.handlerNote, sources.handlerNote, [
     'handle_note_add',
     'BoardNoteAddArgs',
+    'COMPACT_NOTE_RESPONSE_THRESHOLD_BYTES',
+    'note_add_response',
+    'invalid_board_args',
+    'board_store_error',
     'add_board_task_note',
     'BoardEvent::NoteAdded',
     'record_session_task_binding',
@@ -331,7 +347,7 @@ function buildFixture() {
              "crates/missiond-core/src/db/traits.rs"
              "crates/missiond-core/src/db/pg/board.rs"
              "crates/missiond-mcp/src/tools/knowledge/board.rs"]
-      :note "BoardTaskStatus claim_board_task clear_dangling_dynamic_slot_assignees list_autopilot_tasks"))
+      :note "BoardTaskStatus claim_board_task clear_dangling_dynamic_slot_assignees list_autopilot_tasks normalize common MCP argument aliases structured ToolError codes compact note receipts"))
   (compression-contract
     :checks ["node scripts/check-v3-board-isomorphism.mjs"]))`);
 
@@ -356,6 +372,9 @@ claim::handle_claim
 create::handle_create
 query::handle_query
 retry::handle_retry
+normalize_board_args
+invalid_board_args
+board_store_error
 `);
 
   writeFixture(root, DEFAULT_FILES.handlerSession, `
@@ -389,6 +408,9 @@ clear_done_board_tasks
   writeFixture(root, DEFAULT_FILES.handlerCreate, `
 handle_create
 CreateBoardTaskInput
+normalize_board_args
+invalid_board_args
+board_store_error
 create_board_task
 flow_template
 FlowContext::default
@@ -401,6 +423,9 @@ handle_batch_update
 handle_toggle
 handle_single_update
 UpdateBoardTaskInput
+normalize_board_args
+invalid_status_result
+not_found_result
 toggle_board_task
 harvest_decisions_for_task
 publish_board_status_changed
@@ -424,6 +449,10 @@ record_session_task_binding
   writeFixture(root, DEFAULT_FILES.handlerNote, `
 handle_note_add
 BoardNoteAddArgs
+COMPACT_NOTE_RESPONSE_THRESHOLD_BYTES
+note_add_response
+invalid_board_args
+board_store_error
 add_board_task_note
 BoardEvent::NoteAdded
 record_session_task_binding

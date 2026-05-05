@@ -1,19 +1,31 @@
 use super::*;
 
 pub(super) async fn handle_create(state: &AppState, args: Value) -> Result<ToolResult> {
-    let input: missiond_core::types::CreateBoardTaskInput = serde_json::from_value(args)?;
-    let mut task = state
-        .store
-        .create_board_task(&input)
-        .await
-        .map_err(|e| anyhow!("DB error: {}", e))?;
+    let input: missiond_core::types::CreateBoardTaskInput =
+        match serde_json::from_value(super::normalize_board_args(args)) {
+            Ok(input) => input,
+            Err(err) => return Ok(super::invalid_board_args("mission_board_create", err)),
+        };
+    if input.title.trim().is_empty() {
+        return Ok(ToolResult::structured_error(
+            missiond_mcp::tools::ToolError::new(
+                missiond_mcp::tools::error_codes::INVALID_PARAM,
+                "mission_board_create invalid arguments: title must be non-empty",
+            )
+            .with_suggestion("supply a concise title and put long details in description"),
+        ));
+    }
+    let mut task = match state.store.create_board_task(&input).await {
+        Ok(task) => task,
+        Err(err) => return Ok(super::board_store_error("mission_board_create", err)),
+    };
 
     // If flowTemplate is set, initialize flow fields.
     if input.flow_template.is_some() {
         let flow_phase = "investigate".to_string();
         let flow_ctx = serde_json::to_string(&missiond_core::types::FlowContext::default())
             .unwrap_or_else(|_| "{}".to_string());
-        let updated = state
+        let updated = match state
             .store
             .update_board_task(
                 task.id.as_str(),
@@ -25,7 +37,15 @@ pub(super) async fn handle_create(state: &AppState, args: Value) -> Result<ToolR
                 },
             )
             .await
-            .map_err(|e| anyhow!("DB error setting flow: {}", e))?;
+        {
+            Ok(updated) => updated,
+            Err(err) => {
+                return Ok(super::board_store_error(
+                    "mission_board_create flow init",
+                    err,
+                ));
+            }
+        };
         if let Some(t) = updated {
             task = t;
         }

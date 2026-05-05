@@ -6,6 +6,7 @@ struct BoardIdArgs {
 }
 
 pub(super) async fn handle_update(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
+    let args = super::normalize_board_args(args);
     // Detect batch mode: explicit ids array or old batch_update tool name.
     let has_ids = args
         .get("ids")
@@ -37,7 +38,16 @@ async fn handle_batch_update(state: &AppState, args: Value) -> Result<ToolResult
         .map(|s| s == "done")
         .unwrap_or(false);
     let is_status_change = args.get("status").and_then(|v| v.as_str()).is_some();
-    let update_template: missiond_core::types::UpdateBoardTaskInput = serde_json::from_value(args)?;
+    if let Some(status) = args.get("status").and_then(|v| v.as_str()) {
+        if missiond_core::types::BoardTaskStatus::from_str(status).is_none() {
+            return Ok(invalid_status_result(status));
+        }
+    }
+    let update_template: missiond_core::types::UpdateBoardTaskInput =
+        match serde_json::from_value(args) {
+            Ok(update) => update,
+            Err(err) => return Ok(super::invalid_board_args("mission_board_update", err)),
+        };
     if is_marking_done {
         if let Some(blocked) = guard_done_close_against_code_drift(state).await? {
             return Ok(blocked);
@@ -91,14 +101,17 @@ async fn handle_batch_update(state: &AppState, args: Value) -> Result<ToolResult
 }
 
 async fn handle_toggle(state: &AppState, args: Value) -> Result<ToolResult> {
-    let BoardIdArgs { id } = serde_json::from_value(args)?;
+    let BoardIdArgs { id } = match serde_json::from_value(args) {
+        Ok(args) => args,
+        Err(err) => return Ok(super::invalid_board_args("mission_board_toggle", err)),
+    };
     let Some(existing) = state
         .store
         .get_board_task(&id)
         .await
         .map_err(|e| anyhow!("DB error: {}", e))?
     else {
-        return Ok(ToolResult::error("Task not found"));
+        return Ok(not_found_result("mission_board_toggle", &id));
     };
     if existing.status != missiond_core::types::BoardTaskStatus::Done {
         if let Some(blocked) = guard_done_close_against_code_drift(state).await? {
@@ -124,17 +137,25 @@ async fn handle_toggle(state: &AppState, args: Value) -> Result<ToolResult> {
             }
             Ok(ToolResult::json_pretty(&t))
         }
-        None => Ok(ToolResult::error("Task not found")),
+        None => Ok(not_found_result("mission_board_toggle", &id)),
     }
 }
 
 async fn handle_single_update(state: &AppState, args: Value) -> Result<ToolResult> {
     let args_val: Value = args;
-    let id = args_val
+    let Some(id) = args_val
         .get("id")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("Either 'id' or 'ids' is required"))?
-        .to_string();
+        .map(str::to_string)
+    else {
+        return Ok(ToolResult::structured_error(
+            missiond_mcp::tools::ToolError::new(
+                missiond_mcp::tools::error_codes::MISSING_PARAM,
+                "mission_board_update requires either id or non-empty ids",
+            )
+            .with_suggestion("pass id for a single task update or ids for a batch update"),
+        ));
+    };
     let is_status_change = args_val.get("status").and_then(|v| v.as_str()).is_some();
     let is_marking_done = args_val
         .get("status")
@@ -144,6 +165,11 @@ async fn handle_single_update(state: &AppState, args: Value) -> Result<ToolResul
     if is_marking_done {
         if let Some(blocked) = guard_done_close_against_code_drift(state).await? {
             return Ok(blocked);
+        }
+    }
+    if let Some(status) = args_val.get("status").and_then(|v| v.as_str()) {
+        if missiond_core::types::BoardTaskStatus::from_str(status).is_none() {
+            return Ok(invalid_status_result(status));
         }
     }
     let old_status = if is_status_change {
@@ -157,12 +183,15 @@ async fn handle_single_update(state: &AppState, args: Value) -> Result<ToolResul
     } else {
         None
     };
-    let update: missiond_core::types::UpdateBoardTaskInput = serde_json::from_value(args_val)?;
-    let task = state
-        .store
-        .update_board_task(&id, &update)
-        .await
-        .map_err(|e| anyhow!("DB error: {}", e))?;
+    let update: missiond_core::types::UpdateBoardTaskInput = match serde_json::from_value(args_val)
+    {
+        Ok(update) => update,
+        Err(err) => return Ok(super::invalid_board_args("mission_board_update", err)),
+    };
+    let task = match state.store.update_board_task(&id, &update).await {
+        Ok(task) => task,
+        Err(err) => return Ok(super::board_store_error("mission_board_update", err)),
+    };
     match task {
         Some(t) => {
             super::record_session_task_binding(state, t.id.as_str(), &t.title);
@@ -181,8 +210,30 @@ async fn handle_single_update(state: &AppState, args: Value) -> Result<ToolResul
             }
             Ok(ToolResult::json_pretty(&t))
         }
-        None => Ok(ToolResult::error("Task not found")),
+        None => Ok(not_found_result("mission_board_update", &id)),
     }
+}
+
+fn invalid_status_result(status: &str) -> ToolResult {
+    ToolResult::structured_error(
+        missiond_mcp::tools::ToolError::new(
+            missiond_mcp::tools::error_codes::INVALID_PARAM,
+            format!("mission_board_update invalid status: {status}"),
+        )
+        .with_suggestion("use one of: open, running, verifying, done, blocked, failed, skipped"),
+    )
+}
+
+fn not_found_result(tool: &str, id: &str) -> ToolResult {
+    ToolResult::structured_error(
+        missiond_mcp::tools::ToolError::new(
+            missiond_mcp::tools::error_codes::NOT_FOUND,
+            format!("{tool} task not found: {id}"),
+        )
+        .with_suggestion(
+            "verify the BoardTask id; short ids are accepted only when they resolve uniquely",
+        ),
+    )
 }
 
 async fn guard_done_close_against_code_drift(state: &AppState) -> Result<Option<ToolResult>> {
