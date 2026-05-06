@@ -21,7 +21,7 @@ let print_diagnostics diagnostics =
 
 let usage () =
   prerr_endline
-    "Usage: missiond-lispc <emit-json|emit-v3|emit-universe|emit-workflows|check-v3|check-workflow|check-workflow-dir|check-project|check-project-dir|check-auth-domain> --file <path>|--dir <path>|--blueprint <path>|--workflow-dir <path>";
+    "Usage: missiond-lispc <emit-json|emit-v3|emit-universe|emit-workflows|check-v3|check-workflow|check-workflow-dir|check-project|check-project-dir|check-auth-domain|check-domain-hardening> --file <path>|--dir <path>|--blueprint <path>|--workflow-dir <path>";
   2
 
 let () =
@@ -72,5 +72,9 @@ let () =
       | Some file, _ -> exit (print_diagnostics (Project_schema.validate_auth_domain file))
       | None, Some dir -> exit (print_diagnostics (Project_schema.validate_auth_domain_dir dir))
       | None, None -> exit (usage ()))
+  | "check-domain-hardening" :: rest -> (
+      match find_arg "--dir" rest with
+      | Some dir -> exit (print_diagnostics (Project_schema.validate_domain_hardening_dir dir))
+      | None -> exit (usage ()))
   | _ when has_flag "--help" args -> exit (usage ())
   | _ -> exit (usage ())

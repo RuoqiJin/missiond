@@ -74,6 +74,12 @@ const LIVE_CHECKS = [
     timeoutMs: 60_000,
   },
   {
+    id: 'project-domain-hardening',
+    argv: ['scripts/check-project-domain-hardening.mjs', '--json', '--summary'],
+    json: true,
+    timeoutMs: 120_000,
+  },
+  {
     id: 'typed-lisp-runtime-compile',
     argv: ['scripts/compile-v3-runtime.mjs', '--json'],
     json: true,

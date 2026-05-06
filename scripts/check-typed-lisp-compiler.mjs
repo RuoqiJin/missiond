@@ -24,7 +24,10 @@ const REQUIRED_FILES = [
   'scripts/check-ocaml-toolchain.mjs',
   'scripts/check-typed-lisp-compiler.mjs',
   'scripts/compile-v3-runtime.mjs',
+  'scripts/check-project-domain-hardening.mjs',
   '.missiond/workflows/typed-lisp-compiler-convergence.lisp',
+  '.missiond/workflows/typed-lisp-compiler-cleanup.lisp',
+  '.missiond/workflows/multi-project-domain-hardening-wave.lisp',
 ];
 
 const REQUIRED_RUNTIME_LOADER = {
@@ -89,6 +92,7 @@ const REQUIRED_AUTH_DOMAIN_CHECKER = {
         'validate_project_function_form',
         'project.core_step_logic',
         'validate_auth_domain_structured_dir',
+        'validate_domain_hardening_dir',
         'validate_auth_structured_form',
         'auth.runtime_projection_missing',
         'auth.shard_missing',
@@ -108,6 +112,8 @@ const REQUIRED_BLUEPRINT_TOKENS = [
   '(surface typed-lisp-compiler',
   'tools/missiond_lispc/bin/main.ml',
   'check-workflow-dir',
+  'check-domain-hardening',
+  'project-domain-hardening-registry',
   'tools/missiond_lispc/bin/schema_v3.ml',
   'tools/missiond_lispc/bin/emit_json.ml',
   'node scripts/check-typed-lisp-compiler.mjs',
@@ -121,6 +127,8 @@ const REQUIRED_WORKFLOW_PROJECTIONS = [
   'pillar-refactor',
   'project-domain-hardening',
   'project-ssot-convergence',
+  'multi-project-domain-hardening-wave',
+  'typed-lisp-compiler-cleanup',
   'typed-lisp-compiler-convergence',
 ];
 
@@ -199,6 +207,7 @@ function main() {
       ['emit-workflows', '--workflow-dir', '.missiond/workflows'],
       ['check-workflow-dir', '--workflow-dir', '.missiond/workflows'],
       ['check-project-dir', '--dir', '.missiond/frontend'],
+      ['check-domain-hardening', '--dir', '.missiond/frontend'],
     ]) {
       const emit = runLispc(argv);
       emitChecks.push({ argv, ok: emit.ok === true, diagnostics: emit.diagnostics ?? [] });
@@ -219,7 +228,7 @@ function main() {
         if (!typedCompiler || typedCompiler.surface !== 'typed-lisp-compiler') {
           diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_V3_PROJECTION_MISSING_TYPED_COMPILER', 'emit-v3 must project the typed-lisp-compiler function with its surface'));
         }
-        if (!Array.isArray(typedCompiler?.steps) || !typedCompiler.steps.includes('s8')) {
+        if (!Array.isArray(typedCompiler?.steps) || !typedCompiler.steps.includes('s9')) {
           diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_V3_PROJECTION_MISSING_FUNCTION_STEPS', 'emit-v3 must project V3 function step ids'));
         }
       } else if (argv[0] === 'emit-universe') {
@@ -228,6 +237,9 @@ function main() {
         }
         if (!Array.isArray(emit.compiled?.payload?.maturity) || emit.compiled.payload.maturity.length === 0) {
           diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_UNIVERSE_PROJECTION_MISSING_MATURITY', 'emit-universe must project structured maturity[]'));
+        }
+        if (!Array.isArray(emit.compiled?.payload?.domain_hardening) || emit.compiled.payload.domain_hardening.length === 0) {
+          diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_UNIVERSE_PROJECTION_MISSING_DOMAIN_HARDENING', 'emit-universe must project structured domain_hardening[]'));
         }
       } else if (argv[0] === 'emit-workflows') {
         if (!Array.isArray(emit.compiled?.payload?.workflows) || emit.compiled.payload.workflows.length === 0) {

@@ -1175,6 +1175,50 @@
     (maturity :id xiaojin-blog :current M10 :target M10 :gap [])
     (maturity :id cuthub :current M10 :target M10 :gap []))
 
+  (project-domain-hardening-model
+    :schema "missiond.project-domain-hardening-model.v1"
+    :rule "M10 proves V3-style SSOT/runtime/worker/final-convergence closure. H5 proves Auth-grade domain hardening: domain model, policy, flow, event, runtime projection, implementation map, compatibility ledger, hot-path wiring, and regression matrix are fine-grained and code-aligned."
+    :workflow ".missiond/workflows/project-domain-hardening.lisp"
+    :levels
+      ((level H0 :name not-audited :requires [])
+       (level H1 :name domain-audited :requires [domain-model authority-chain boundary-map])
+       (level H2 :name lisp-split :requires [domain policy flow event runtime-projection implementation-map compatibility-ledger])
+       (level H3 :name checker-pinned :requires [H2 typed-domain-gate code-anchor-gate])
+       (level H4 :name hot-path-wired :requires [H3 runtime-callers event-egress compatibility-boundaries])
+       (level H5 :name regression-proven :requires [H4 regression-matrix final-hardening-report]))
+    :invariants
+      ["H-level MUST be reported separately from M-level; M10 alone cannot claim production-ready architecture."
+       "Auth is the reference H5 project-domain hardening sample."
+       "Every H5 project MUST expose domain, policy, flow, event, runtime-projection, implementation-map, compatibility-ledger, and final-hardening-report evidence."
+       "Critical architecture contracts MUST be wired into runtime hot paths, not only declared in Lisp or tests."
+       "project-domain-hardening workflow owns H-level advancement and exact worker shard generation."])
+
+  (project-domain-hardening-registry
+    :schema "missiond.project-domain-hardening-registry.v1"
+    :default-target H5
+    :common-gap [domain-model policy-flow-event-split compatibility-ledger hot-path-wiring regression-matrix]
+    (hardening :id missiond :current H2 :target H5 :gap [typed-compiler-cleanup runtime-projection-cutover global-hardening-report])
+    (hardening :id board :current H1 :target H5 :gap [frontend-domain-model cockpit-hot-path-regressions final-hardening-report])
+    (hardening :id jarvis :current H1 :target H5 :gap [domain-shard-split missiond-integration-boundary final-hardening-report])
+    (hardening :id jarvis-forge :current H1 :target H5 :gap [forge-missiond-boundary component-reuse-ledger final-hardening-report])
+    (hardening :id jarvis-mechanic :current H1 :target H5 :gap [mechanic-workflow-boundary missiond-overlap-ledger final-hardening-report])
+    (hardening :id xjpcode :current H1 :target H5 :gap [domain-shard-split codegen-policy-ledger final-hardening-report])
+    (hardening :id neural-codegen :current H1 :target H5 :gap [domain-shard-split generation-policy-hot-path final-hardening-report])
+    (hardening :id semantic-terminal :current H1 :target H5 :gap [domain-shard-split terminal-event-contract final-hardening-report])
+    (hardening :id xiaojinpro-backend :current H1 :target H5 :gap [monorepo-service-boundary deploy-fact-authority final-hardening-report])
+    (hardening :id deploy-center :current H2 :target H5 :gap [deployment-authority-chain adapter-hot-path-regressions final-hardening-report])
+    (hardening :id deploy-agent :current H1 :target H5 :gap [agent-execution-boundary server-fact-ledger final-hardening-report])
+    (hardening :id auth :current H5 :target H5 :gap [])
+    (hardening :id router :current H1 :target H5 :gap [model-policy-domain routing-hot-path-regressions final-hardening-report])
+    (hardening :id payments :current H1 :target H5 :gap [payment-domain-ledger webhook-regressions final-hardening-report])
+    (hardening :id asr :current H1 :target H5 :gap [job-provider-transcript-domain callback-regressions final-hardening-report])
+    (hardening :id timeline :current H2 :target H5 :gap [revision-event-authority service-event-regressions final-hardening-report])
+    (hardening :id pcea :current H1 :target H5 :gap [app-domain-model auth-product-dependency final-hardening-report])
+    (hardening :id xjp-deploy-center :current H1 :target H5 :gap [legacy-deploy-center-authority canonical-root-merge final-hardening-report])
+    (hardening :id secret-store :current H2 :target H5 :gap [secret-version-rotation-domain capability-regressions final-hardening-report])
+    (hardening :id xiaojin-blog :current H1 :target H5 :gap [content-publishing-domain deploy-auth-boundary final-hardening-report])
+    (hardening :id cuthub :current H1 :target H5 :gap [community-domain auth-product-dependency final-hardening-report]))
+
   (project-blueprint-registry
     :schema "missiond.project-blueprint-registry.v1"
     :rule "Project-local app blueprints are independent SSOT files registered from V3; backend V3 stays compact and aggregate checkers follow the registry pointer."
@@ -2099,7 +2143,7 @@
         :egress [workflow.lisp workflow_row compiled_yaml run_result])
       (function typed-lisp-compiler
         :surface typed-lisp-compiler
-        :entry [missiond-lispc.check-v3 missiond-lispc.check-workflow missiond-lispc.check-workflow-dir missiond-lispc.check-project missiond-lispc.check-project-dir missiond-lispc.check-auth-domain missiond-lispc.emit-json missiond-lispc.emit-v3 missiond-lispc.emit-universe missiond-lispc.emit-workflows]
+        :entry [missiond-lispc.check-v3 missiond-lispc.check-workflow missiond-lispc.check-workflow-dir missiond-lispc.check-project missiond-lispc.check-project-dir missiond-lispc.check-auth-domain missiond-lispc.check-domain-hardening missiond-lispc.emit-json missiond-lispc.emit-v3 missiond-lispc.emit-universe missiond-lispc.emit-workflows]
         :core ((step s1 :logic "parse Lisp SSOT files into source-located typed AST nodes")
                (step s2 :logic "validate pillar/function entry-core-egress surfaces, workflow contracts, universe registry, maturity gates, and event/outbox contracts")
                (step s3 :logic "emit stable JSON diagnostics for JS compatibility wrappers and CI gates")
@@ -2107,7 +2151,8 @@
                (step s5 :logic "let Rust runtime read compiled JSON first only when the compiled snapshot is not older than source Lisp, then diagnostic-fallback to Lisp/default behavior")
                (step s6 :logic "validate the full .missiond/workflows directory with typed AST so old methodology workflows and active runtime workflows carry explicit source plans, risk gates, completion criteria, and step contracts")
                (step s7 :logic "validate project-local .missiond blueprint directories with typed AST before M10 maturity can rely on project-local shape evidence")
-               (step s8 :logic "use Auth as the first external project-domain semantic checker sample before shrinking more project checkers"))
+               (step s8 :logic "use Auth as the first external project-domain semantic checker sample before shrinking more project checkers")
+               (step s9 :logic "validate generic project-domain hardening evidence through H-level gates before claiming production-ready architecture"))
         :egress [typed_diagnostics compiled_json compiled_runtime_snapshot compiled_project_universe compiled_workflow_contracts js_wrapper_result]))
 
     (pillar review
@@ -2643,7 +2688,7 @@
 
     (surface typed-lisp-compiler
       :status "code-aligned"
-      :implements [lisp-reader typed-ast semantic-validator diagnostic-json projection-json structured-project-universe-json structured-workflow-contract-json workflow-directory-structural-gate project-directory-structural-gate runtime-compiled-json-loader auth-domain-sample]
+      :implements [lisp-reader typed-ast semantic-validator diagnostic-json projection-json structured-project-universe-json structured-workflow-contract-json workflow-directory-structural-gate project-directory-structural-gate project-domain-hardening-gate runtime-compiled-json-loader auth-domain-sample]
       :code ["tools/missiond_lispc/dune-project"
              "tools/missiond_lispc/bin/dune"
              "tools/missiond_lispc/bin/main.ml"
@@ -2660,6 +2705,7 @@
              "scripts/check-typed-lisp-compiler.mjs"
              "scripts/compile-v3-runtime.mjs"
              "scripts/check-auth-domain-ssot.mjs"
+             "scripts/check-project-domain-hardening.mjs"
              "crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"
              ".missiond/workflows/typed-lisp-compiler-convergence.lisp"]
       :note "Lisp remains the canonical authoring SSOT. The OCaml layer is a dev-time typed compiler/checker/projection layer for source-located diagnostics and generated runtime JSON; project universe and workflow projections include structured project/maturity/workflow payloads, workflow-directory gates validate every .missiond/workflows/*.lisp contract, and project-directory structural gates validate each registered project's active blueprint shards before M10 maturity can rely on project-local shape evidence. OCaml is not in the daemon hot path. JS checkers remain compatibility wrappers and code-anchor validators while OCaml takes ownership of Lisp AST semantics.")

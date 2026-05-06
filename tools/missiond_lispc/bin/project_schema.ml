@@ -445,3 +445,42 @@ let validate_auth_domain_dir dir =
     let source = files |> List.map read_file |> String.concat "\n" in
     validate_auth_domain_source dir source @ validate_auth_domain_structured_dir dir
   with Sys_error msg -> [ diag dir { line = 1; column = 1 } "io.error" msg ]
+
+let domain_required_concepts =
+  [
+    ("project.domain_model", [ "domain"; "authority"; "business" ]);
+    ("project.policy_layer", [ "policy"; "guard"; "permission"; "capability" ]);
+    ("project.flow_layer", [ "flow"; "state-machine"; "state machine"; "workflow" ]);
+    ("project.event_contract", [ "event"; "outbox"; "event-bus"; "event bus" ]);
+    ("project.runtime_projection", [ "runtime-projection"; "runtime projection"; "runtime" ]);
+    ("project.implementation_map", [ "implementation"; "surface"; "code-isomorphism"; "current-code" ]);
+    ("project.compatibility_ledger", [ "compatibility"; "ledger"; "legacy"; "bridge" ]);
+    ("project.final_hardening_report", [ "final-hardening-report"; "domain-hardening-report"; "final convergence"; "final-convergence" ]);
+  ]
+
+let contains_any source needles =
+  List.exists (contains_substring source) needles
+
+let validate_domain_hardening_source file source =
+  domain_required_concepts
+  |> List.filter_map (fun (code, needles) ->
+         if contains_any source needles then None
+         else
+           Some
+             (diag file { line = 1; column = 1 } code
+                (Printf.sprintf "project domain hardening evidence missing one of: %s"
+                   (String.concat ", " needles))))
+
+let validate_domain_hardening_dir dir =
+  try
+    let files = lisp_files_under dir |> List.sort String.compare in
+    let source = files |> List.map read_file |> String.concat "\n" in
+    let diagnostics = ref [] in
+    let add d = diagnostics := d :: !diagnostics in
+    if files = [] then
+      add (diag dir { line = 1; column = 1 } "project.domain_lisp_missing"
+             "project .missiond directory has no Lisp files for domain hardening");
+    validate_domain_hardening_source dir source |> List.iter add;
+    validate_project_dir dir |> List.iter add;
+    List.rev !diagnostics
+  with Sys_error msg -> [ diag dir { line = 1; column = 1 } "io.error" msg ]

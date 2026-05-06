@@ -152,6 +152,19 @@ let maturity_entry_to_json node =
     (json_opt_string (prop_text ":target" props))
     (json_string_list gap)
 
+let hardening_entry_to_json node =
+  let props = keyword_props ~start:1 node in
+  let gap =
+    match prop ":gap" props with
+    | Some value -> list_texts value
+    | None -> []
+  in
+  Printf.sprintf {|{"id":%s,"current":%s,"target":%s,"gap":%s}|}
+    (json_opt_string (prop_text ":id" props))
+    (json_opt_string (prop_text ":current" props))
+    (json_opt_string (prop_text ":target" props))
+    (json_string_list gap)
+
 let workflow_entry_to_json file =
   let forms = Parser.parse_file file in
   match List.find_opt (fun n -> is_list n "workflow") forms with
@@ -251,6 +264,7 @@ let emit_universe blueprint =
     let root = find_root forms "missiond-blueprint" in
     let project_registry = Option.bind root (fun root -> find_child root "project-blueprint-registry") in
     let maturity_registry = Option.bind root (fun root -> find_child root "project-maturity-registry") in
+    let hardening_registry = Option.bind root (fun root -> find_child root "project-domain-hardening-registry") in
     let projects =
       project_registry
       |> Option.map (fun node -> list_forms "project" node |> List.map project_entry_to_json)
@@ -261,13 +275,20 @@ let emit_universe blueprint =
       |> Option.map (fun node -> list_forms "maturity" node |> List.map maturity_entry_to_json)
       |> Option.value ~default:[]
     in
+    let hardening =
+      hardening_registry
+      |> Option.map (fun node -> list_forms "hardening" node |> List.map hardening_entry_to_json)
+      |> Option.value ~default:[]
+    in
     let payload =
-      Printf.sprintf {|{"blueprint":%s,"project_registry_present":%s,"maturity_registry_present":%s,"projects":[%s],"maturity":[%s]}|}
+      Printf.sprintf {|{"blueprint":%s,"project_registry_present":%s,"maturity_registry_present":%s,"domain_hardening_registry_present":%s,"projects":[%s],"maturity":[%s],"domain_hardening":[%s]}|}
         (json_string blueprint)
         (if project_registry <> None then "true" else "false")
         (if maturity_registry <> None then "true" else "false")
+        (if hardening_registry <> None then "true" else "false")
         (String.concat "," projects)
         (String.concat "," maturities)
+        (String.concat "," hardening)
     in
     print_endline
       (result_json ~extra:[
