@@ -21,6 +21,7 @@ const DEFAULT_FILES = {
   eventsSync: 'crates/missiond-daemon/src/events_sync.rs',
   reconcileWorker: 'crates/missiond-daemon/src/workers/local/reconcile_worker.rs',
   conversationQuery: 'crates/missiond-daemon/src/handlers/comm/conversation/query.rs',
+  conversationFacade: 'crates/missiond-daemon/src/handlers/comm/conversation.rs',
   conversationRouter: 'crates/missiond-daemon/src/handlers/comm/conversation/router.rs',
   conversationMaintenance: 'crates/missiond-daemon/src/handlers/comm/conversation/maintenance.rs',
   mcpConversation: 'crates/missiond-mcp/src/tools/comm/conversation.rs',
@@ -240,6 +241,11 @@ function checkFiles(root, files) {
     '"audit_message_roles" => "mission_conversation_message_role_audit"',
     '"backfill_message_roles" => "mission_conversation_message_role_backfill"',
     '"turn_backfill" => "mission_conversation_turn_backfill"',
+  ]);
+
+  requireAll(diagnostics, files.conversationFacade, sources.conversationFacade, [
+    '"mission_conversation_message_role_audit"',
+    '"mission_conversation_message_role_backfill"',
   ]);
 
   requireAll(diagnostics, files.conversationMaintenance, sources.conversationMaintenance, [
