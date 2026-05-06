@@ -42,6 +42,19 @@ const REQUIRED_RUNTIME_LOADER = {
   ],
 };
 
+const REQUIRED_PROJECT_UNIVERSE_CHECKER = {
+  file: 'scripts/check-project-ssot-universe.mjs',
+  tokens: [
+    'loadTypedUniverseProjects',
+    "runLispc([",
+    "'emit-universe'",
+    'normalizeTypedUniversePayload',
+    'PROJECT_CHECKERS',
+    'OCaml owns project id/root/maturity facts',
+    'compiled-project-universe.json',
+  ],
+};
+
 const REQUIRED_BLUEPRINT_TOKENS = [
   '(function typed-lisp-compiler',
   ':surface typed-lisp-compiler',
@@ -73,6 +86,13 @@ function main() {
   for (const token of REQUIRED_RUNTIME_LOADER.tokens) {
     if (!runtimeLoader.includes(token)) {
       diagnostics.push(diag(REQUIRED_RUNTIME_LOADER.file, 'RUNTIME_LOADER_TOKEN_MISSING', `missing token ${JSON.stringify(token)}`));
+    }
+  }
+
+  const universeChecker = read(REQUIRED_PROJECT_UNIVERSE_CHECKER.file);
+  for (const token of REQUIRED_PROJECT_UNIVERSE_CHECKER.tokens) {
+    if (!universeChecker.includes(token)) {
+      diagnostics.push(diag(REQUIRED_PROJECT_UNIVERSE_CHECKER.file, 'UNIVERSE_CHECKER_TOKEN_MISSING', `missing token ${JSON.stringify(token)}`));
     }
   }
 

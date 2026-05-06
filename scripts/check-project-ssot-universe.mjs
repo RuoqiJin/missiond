@@ -4,16 +4,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { readBlueprintWithEvidenceSidecars } from './lib/v3_blueprint_contract_source.mjs';
-import { maybeRunLispc } from './lib/ocaml_lispc.mjs';
+import { maybeRunLispc, runLispc } from './lib/ocaml_lispc.mjs';
 
 const usage = `Usage:
   node scripts/check-project-ssot-universe.mjs [--json] [--engine=auto|js|ocaml]
 
 Checks MissionD multi-project SSOT registry convergence:
-  - V3 project-blueprint-registry names MissionD, Forge, Part1 devtools (jarvis,
-    jarvis-mechanic, xjpcode, neural-codegen, semantic-terminal), XJP services,
-    PCEA, plus the App + external-infra group (secret-store, xiaojin-blog,
-    cuthub).
+  - OCaml typed universe projection names MissionD, Board, Forge, Part1 devtools,
+    XJP services, PCEA, plus App + external-infra projects.
   - V3 service-runtime-universe exposes production service deployment facts.
   - project-ssot-convergence workflow exists.
   - XJP and PCEA local SSOT checkers pass; every Part1 devtools project executes
@@ -24,29 +22,21 @@ Checks MissionD multi-project SSOT registry convergence:
     bash .missiond/check.sh in default mode (read-only, sub-second).
 `;
 
-const PROJECTS = [
-  // Part1 devtools — sibling repos with project-local SSOT (executed via cheap/static project-local runners).
-  { id: 'jarvis', root: '/Users/jinchen/Projects/jarvis', checker: ['bash', ['.missiond/check.sh']] },
-  { id: 'jarvis-forge', root: '/Users/jinchen/Projects/jarvis-forge', checker: ['bash', ['.missiond/check.sh']] },
-  { id: 'jarvis-mechanic', root: '/Users/jinchen/Projects/jarvis-mechanic', checker: ['node', ['scripts/check-mechanic-ssot.mjs']] },
-  { id: 'xjpcode', root: '/Users/jinchen/Projects/xjpcode', checker: ['node', ['scripts/check-xjpcode-ssot-complete.mjs', '--json']] },
-  { id: 'neural-codegen', root: '/Users/jinchen/Projects/neural-codegen', checker: ['bash', ['.missiond/check.sh', '--dry-run']] },
-  { id: 'semantic-terminal', root: '/Users/jinchen/Projects/semantic-terminal', checker: ['bash', ['.missiond/check.sh', '--dry-run']] },
-  // XJP services + PCEA.
-	  { id: 'xiaojinpro-backend', root: '/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend' },
-  { id: 'deploy-center', root: '/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/deploy-center' },
-  { id: 'deploy-agent', root: '/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/apps/xjp-deploy-agent', checker: ['bash', ['.missiond/check.sh']] },
-  { id: 'auth', root: '/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/auth' },
-  { id: 'router', root: '/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/router' },
-  { id: 'payments', root: '/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/payments' },
-  { id: 'asr', root: '/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/asr' },
-  { id: 'timeline', root: '/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/timeline' },
-  { id: 'pcea', root: '/Users/jinchen/Downloads/PCEA develop', checker: ['node', ['scripts/check-pcea-ssot-complete.mjs', '--json']] },
-  // App + external-infra projects — already-converged with project-local check.sh runners (default mode is read-only static, sub-second).
-  { id: 'secret-store', root: '/Users/jinchen/Downloads/xiaojinpro-gateway/services/secret-store-rs', checker: ['bash', ['.missiond/check.sh']] },
-  { id: 'xiaojin-blog', root: '/Users/jinchen/Projects/xiaojin-blog', checker: ['bash', ['.missiond/check.sh']] },
-  { id: 'cuthub', root: '/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/cuthub-frontend', checker: ['bash', ['.missiond/check.sh']] },
-];
+const COMPILED_UNIVERSE = '.missiond/v3/runtime/compiled/compiled-project-universe.json';
+const PROJECT_CHECKERS = new Map([
+  // JS owns execution policy for cheap/static local runners. OCaml owns project id/root/maturity facts.
+  ['jarvis', ['bash', ['.missiond/check.sh']]],
+  ['jarvis-forge', ['bash', ['.missiond/check.sh']]],
+  ['jarvis-mechanic', ['node', ['scripts/check-mechanic-ssot.mjs']]],
+  ['xjpcode', ['node', ['scripts/check-xjpcode-ssot-complete.mjs', '--json']]],
+  ['neural-codegen', ['bash', ['.missiond/check.sh', '--dry-run']]],
+  ['semantic-terminal', ['bash', ['.missiond/check.sh', '--dry-run']]],
+  ['deploy-agent', ['bash', ['.missiond/check.sh']]],
+  ['pcea', ['node', ['scripts/check-pcea-ssot-complete.mjs', '--json']]],
+  ['secret-store', ['bash', ['.missiond/check.sh']]],
+  ['xiaojin-blog', ['bash', ['.missiond/check.sh']]],
+  ['cuthub', ['bash', ['.missiond/check.sh']]],
+]);
 
 function main() {
   const opts = parseArgs(process.argv.slice(2));
@@ -64,6 +54,13 @@ function main() {
       message: `${d.code ?? 'OCAML_UNIVERSE'}: ${d.message}`,
     })));
   }
+  const typedUniverse = loadTypedUniverseProjects(opts.engine);
+  diagnostics.push(...typedUniverse.diagnostics);
+  const projects = typedUniverse.projects.map((project) => ({
+    ...project,
+    checker: PROJECT_CHECKERS.get(project.id) ?? null,
+  }));
+
   const blueprint = readBlueprintWithEvidenceSidecars(process.cwd(), '.missiond/v3/missiond-blueprint.lisp');
   requireAll(diagnostics, '.missiond/v3/missiond-blueprint.lisp', blueprint, [
     '(project-maturity-model',
@@ -78,30 +75,7 @@ function main() {
 	    ':schema "missiond.project-maturity-registry.v1"',
 	    ':default-target M10',
 	    ':common-m6-to-v3-gap [runtime-projection event-bus commit-backfill worker-operational final-convergence]',
-	    '(maturity :id auth :current M10 :target M10 :gap []',
 	    '(project-blueprint-registry',
-    ':id jarvis-forge',
-    ':id jarvis',
-    ':id jarvis-mechanic',
-    ':id xjpcode',
-    ':id neural-codegen',
-    ':id semantic-terminal',
-    ':id xiaojinpro-backend',
-    ':id deploy-center',
-    ':id deploy-agent',
-    ':aliases [xjp-deploy-agent]',
-    ':root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/apps/xjp-deploy-agent"',
-    ':id auth',
-    ':id router',
-    ':id payments',
-    ':id asr',
-    ':id timeline',
-    ':id pcea',
-    ':id secret-store',
-    ':aliases [secret-store-rs]',
-    ':id xiaojin-blog',
-    ':id cuthub',
-    '/Users/jinchen/Downloads/PCEA develop',
     '(service-runtime-universe',
     ':schema "missiond.service-runtime-universe.v1"',
     '(service :id auth',
@@ -125,8 +99,8 @@ function main() {
     ':default-mode read-only-inventory',
     'explicit Board approval',
   ]);
-  const maturity = parseMaturityRegistry(blueprint);
-  checkMaturityRegistry(diagnostics, maturity);
+  checkMaturityRegistry(diagnostics, typedUniverse.maturity);
+  checkProjectMaturityCoverage(diagnostics, typedUniverse.projects, typedUniverse.maturity);
 
 	  requireExistingText(diagnostics, '/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/auth/.missiond/intent.lisp', [
 	    '(intent auth-center',
@@ -164,7 +138,8 @@ function main() {
   }
 
   const checkerResults = [];
-  for (const project of PROJECTS) {
+  for (const project of projects) {
+    if (!project.root) continue;
     if (!fs.existsSync(project.root)) {
       diagnostics.push({ file: project.root, message: `missing project root for ${project.id}` });
       continue;
@@ -188,15 +163,24 @@ function main() {
   const result = {
     ok: diagnostics.length === 0,
     engine,
-    projects: PROJECTS.map((p) => p.id),
-    maturity,
+    typedUniverse: {
+      source: typedUniverse.source,
+      project_count: typedUniverse.projects.length,
+      maturity_count: typedUniverse.maturity.length,
+    },
+    projects: projects.map((p) => p.id),
+    maturity: Object.fromEntries(typedUniverse.maturity.map((entry) => [entry.id, {
+      current: entry.current,
+      target: entry.target,
+      gap: entry.gap,
+    }])),
     checkerResults,
     diagnostics,
   };
   if (opts.json) {
     fs.writeSync(1, `${JSON.stringify(result, null, 2)}\n`);
   } else if (result.ok) {
-    console.log(`project SSOT universe check OK (${PROJECTS.length} projects/services)`);
+    console.log(`project SSOT universe check OK (${projects.filter((project) => project.root).length} rooted projects/services from ${typedUniverse.source})`);
   } else {
     for (const d of diagnostics) console.error(`${d.file}: ${d.message}`);
     console.error(`project SSOT universe check FAILED -- ${diagnostics.length} diagnostic(s)`);
@@ -254,21 +238,74 @@ function runOcamlUniverseCheck(engine) {
   };
 }
 
-function parseMaturityRegistry(blueprint) {
-  const maturity = {};
-  const re = /\(maturity\s+:id\s+([^\s)]+)\s+:current\s+(M\d+)\s+:target\s+(M\d+)(?:\s+:gap\s+\[([^\]]*)\])?/g;
-  for (const match of blueprint.matchAll(re)) {
-    maturity[match[1]] = {
-      current: match[2],
-      target: match[3],
-      gap: (match[4] ?? '').trim().split(/\s+/).filter(Boolean),
-    };
+function loadTypedUniverseProjects(engine) {
+  if (engine === 'js') return loadCompiledUniverseFile();
+  const result = runLispc([
+    'emit-universe',
+    '--blueprint',
+    '.missiond/v3/missiond-blueprint.lisp',
+  ]);
+  if (result?.ok === true && result.compiled?.payload) {
+    return normalizeTypedUniversePayload(result.compiled.payload, 'ocaml-emit-universe');
   }
-  return maturity;
+  return {
+    source: 'ocaml-emit-universe',
+    projects: [],
+    maturity: [],
+    diagnostics: (result?.diagnostics ?? []).map((d) => ({
+      file: d.file ?? '.missiond/v3/missiond-blueprint.lisp',
+      message: `${d.code ?? 'OCAML_EMIT_UNIVERSE'}: ${d.message}`,
+    })),
+  };
 }
 
-function checkMaturityRegistry(diagnostics, maturity) {
-  const expectedIds = ['missiond', 'board', ...PROJECTS.map((p) => p.id)];
+function loadCompiledUniverseFile() {
+  if (!fs.existsSync(COMPILED_UNIVERSE)) {
+    return {
+      source: COMPILED_UNIVERSE,
+      projects: [],
+      maturity: [],
+      diagnostics: [{ file: COMPILED_UNIVERSE, message: 'missing compiled universe projection; run node scripts/compile-v3-runtime.mjs --json' }],
+    };
+  }
+  try {
+    const compiled = JSON.parse(fs.readFileSync(COMPILED_UNIVERSE, 'utf8'));
+    return normalizeTypedUniversePayload(compiled.payload, COMPILED_UNIVERSE);
+  } catch (error) {
+    return {
+      source: COMPILED_UNIVERSE,
+      projects: [],
+      maturity: [],
+      diagnostics: [{ file: COMPILED_UNIVERSE, message: `invalid compiled universe projection: ${error.message}` }],
+    };
+  }
+}
+
+function normalizeTypedUniversePayload(payload, source) {
+  const diagnostics = [];
+  const rawProjects = Array.isArray(payload?.projects) ? payload.projects : [];
+  const rawMaturity = Array.isArray(payload?.maturity) ? payload.maturity : [];
+  if (rawProjects.length === 0) diagnostics.push({ file: source, message: 'typed universe projection has no projects[]' });
+  if (rawMaturity.length === 0) diagnostics.push({ file: source, message: 'typed universe projection has no maturity[]' });
+  const projects = rawProjects.map((project) => ({
+    id: project.id,
+    kind: project.kind ?? null,
+    root: project.root ?? null,
+    status: project.status ?? null,
+    checks: Array.isArray(project.checks) ? project.checks : [],
+  })).filter((project) => project.id);
+  const maturity = rawMaturity.map((entry) => ({
+    id: entry.id,
+    current: entry.current,
+    target: entry.target,
+    gap: Array.isArray(entry.gap) ? entry.gap : [],
+  })).filter((entry) => entry.id);
+  return { source, projects, maturity, diagnostics };
+}
+
+function checkMaturityRegistry(diagnostics, maturityEntries) {
+  const maturity = Object.fromEntries(maturityEntries.map((entry) => [entry.id, entry]));
+  const expectedIds = ['missiond', 'board', ...maturityEntries.map((entry) => entry.id).filter((id) => id !== 'missiond' && id !== 'board')];
   for (const id of expectedIds) {
     const entry = maturity[id];
     if (!entry) {
@@ -284,9 +321,17 @@ function checkMaturityRegistry(diagnostics, maturity) {
   }
 }
 
-function maturityValue(level) {
-  const match = /^M(\d+)$/.exec(level);
-  return match ? Number(match[1]) : -1;
+function checkProjectMaturityCoverage(diagnostics, projects, maturityEntries) {
+  const maturityIds = new Set(maturityEntries.map((entry) => entry.id));
+  for (const project of projects) {
+    if (project.status === 'runtime-registered') continue;
+    if (!maturityIds.has(project.id)) {
+      diagnostics.push({
+        file: '.missiond/v3/missiond-blueprint.lisp',
+        message: `typed project ${project.id} has no maturity registry entry`,
+      });
+    }
+  }
 }
 
 function requireAll(diagnostics, file, source, needles) {
