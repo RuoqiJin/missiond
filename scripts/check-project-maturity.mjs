@@ -13,6 +13,7 @@ import {
   readKeywordProps,
 } from './lib/missiond_lisp.mjs';
 import { readBlueprintWithEvidenceSidecars } from './lib/v3_blueprint_contract_source.mjs';
+import { maybeRunLispc } from './lib/ocaml_lispc.mjs';
 
 const BLUEPRINT_PATH = '.missiond/v3/missiond-blueprint.lisp';
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -24,7 +25,7 @@ const LEVEL_ORDER = new Map(
 const usage = `Usage:
   node scripts/check-project-maturity.mjs [--json] [--min-level M6] [--project <id> ...]
   node scripts/check-project-maturity.mjs --evidence-only --min-level M7 --project <id>
-  node scripts/check-project-maturity.mjs --dry-fixture [--json]
+  node scripts/check-project-maturity.mjs --dry-fixture [--json] [--engine=auto|js|ocaml]
 
 Checks MissionD's project maturity registry against project-local Lisp SSOT
 structure. The default gate is intentionally conservative: it proves every
@@ -38,6 +39,21 @@ function main() {
   const opts = parseArgs(process.argv.slice(2));
   const repoRoot = opts.dryFixture ? buildFixture() : DEFAULT_REPO_ROOT;
   const result = runProjectMaturityCheck(repoRoot, opts);
+  const engine = runOcamlMaturityCheck(repoRoot, opts);
+  result.engine = engine;
+  if (engine.strictResult) {
+    result.ok = false;
+    result.diagnostics.push(...(engine.strictResult.diagnostics ?? []).map((d) => ({
+      file: d.file ?? BLUEPRINT_PATH,
+      message: `${d.code ?? 'OCAML_PROJECT'}: ${d.message}`,
+    })));
+  } else if (engine.mode === 'ocaml' && engine.ok === false) {
+    result.ok = false;
+    result.diagnostics.push(...(engine.diagnostics ?? []).map((d) => ({
+      file: d.file ?? BLUEPRINT_PATH,
+      message: `${d.code ?? 'OCAML_PROJECT'}: ${d.message}`,
+    })));
+  }
 
   if (opts.json) {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
@@ -59,6 +75,7 @@ function parseArgs(argv) {
     evidenceOnly: false,
     minLevel: 'M6',
     projectIds: [],
+    engine: 'auto',
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -79,11 +96,16 @@ function parseArgs(argv) {
       opts.projectIds.push(argv[++i] ?? fail('--project requires a value'));
     } else if (arg.startsWith('--project=')) {
       opts.projectIds.push(arg.slice('--project='.length));
+    } else if (arg === '--engine') {
+      opts.engine = argv[++i] ?? fail('--engine requires a value');
+    } else if (arg.startsWith('--engine=')) {
+      opts.engine = arg.slice('--engine='.length);
     } else {
       fail(`unknown argument: ${arg}`);
     }
   }
   if (!LEVEL_ORDER.has(opts.minLevel)) fail(`unknown maturity level: ${opts.minLevel}`);
+  if (!['auto', 'js', 'ocaml'].includes(opts.engine)) fail(`unknown engine: ${opts.engine}`);
   return opts;
 }
 
@@ -143,6 +165,35 @@ export function runProjectMaturityCheck(repoRoot, opts = {}) {
     min_level: minLevel,
     projects: rows,
     diagnostics,
+  };
+}
+
+function runOcamlMaturityCheck(repoRoot, opts) {
+  if (opts.engine === 'js') return { requested: opts.engine, mode: 'js', ok: true, diagnostics: [] };
+  const attempt = maybeRunLispc([
+    'check-project',
+    '--blueprint',
+    BLUEPRINT_PATH,
+    '--min-level',
+    opts.minLevel ?? 'M6',
+  ], { engine: opts.engine, repoRoot });
+  if (attempt.mode === 'js-fallback') {
+    return {
+      requested: opts.engine,
+      mode: 'js-fallback',
+      ok: true,
+      diagnostics: attempt.result?.diagnostics ?? [],
+    };
+  }
+  const result = attempt.result;
+  if (opts.engine === 'ocaml' && result?.unavailable) {
+    return { requested: opts.engine, mode: 'ocaml', strictResult: result };
+  }
+  return {
+    requested: opts.engine,
+    mode: 'ocaml',
+    ok: result?.ok === true,
+    diagnostics: result?.diagnostics ?? [],
   };
 }
 

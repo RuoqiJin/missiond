@@ -1682,6 +1682,13 @@
       :v3-function workflow-distillation
       :surface mission_workflow
       :note "V2 workflow/methodology distillation remains V3 mission_workflow.")
+    (v2-item typed-lisp-compiler-gate
+      :status code-aligned
+      :v2-source ".missiond/v2/intent.lisp :: checker/token-pin debt and Lisp SSOT schema evidence"
+      :v3-pillar workflow
+      :v3-function typed-lisp-compiler
+      :surface typed-lisp-compiler
+      :note "The typed Lisp compiler is the V3 destination for fragile V2-era Lisp shape/token-pin checking; Lisp remains SSOT while OCaml owns typed AST diagnostics and generated projections.")
     (v2-item review-gate-policy
       :status code-aligned
       :v2-source ".missiond/v2/intent.lisp :: review-gate-policy / review-gate-resolution-v0"
@@ -2089,7 +2096,15 @@
         :core ((step s1 :logic "validate workflow_sexp or methodology Lisp")
                (step s2 :logic "persist/enrich workflow artifact with source_plans, match_rules, steps, status, and body")
                (step s3 :logic "compile methodology into executable YAML without bypassing receipt-only gates"))
-        :egress [workflow.lisp workflow_row compiled_yaml run_result]))
+        :egress [workflow.lisp workflow_row compiled_yaml run_result])
+      (function typed-lisp-compiler
+        :surface typed-lisp-compiler
+        :entry [missiond-lispc.check-v3 missiond-lispc.check-workflow missiond-lispc.check-project missiond-lispc.emit-json]
+        :core ((step s1 :logic "parse Lisp SSOT files into source-located typed AST nodes")
+               (step s2 :logic "validate pillar/function entry-core-egress surfaces, workflow contracts, universe registry, maturity gates, and event/outbox contracts")
+               (step s3 :logic "emit stable JSON diagnostics for JS compatibility wrappers and CI gates")
+               (step s4 :logic "generate compiled JSON projections only through checker/compiler commands, never by hand"))
+        :egress [typed_diagnostics compiled_json js_wrapper_result]))
 
     (pillar review
       (function review-gate
@@ -2622,6 +2637,20 @@
       :model-projection "mission_workflow sonnet distiller compiler_model labels project from router-runtime-policy queued_sonnet_model through RouterRuntimeConfig; local Rust model literals are forbidden on this production path."
       :note "workflow.rs remains the thin mission_workflow action facade. workflow/store_actions.rs owns list/get/match/apply/record_execution and parse_id_arg; workflow/project_root.rs owns the canonical project-root resolver and the no process-cwd fallback invariant; workflow/compile_methodology.rs owns CompileMode, parse_compile_mode, action_compile_methodology, dry-run preview, deterministic YAML compile, methodology V3 artifact projection, review-gate receipt emission, and count_top_form; workflow/run_methodology.rs owns compiled YAML resolution, mission_flow_run dispatch, parse_run_methodology_record_intent, and methodology_execution_record_payload. workflow/distill.rs owns DistillMode, parse_distill_mode, action_distill, action_distill_dry_run, action_distill_sonnet, evidence sidecar path/read/gate, workflow_sexp JSON extraction, balanced-S-expression validation, name-refer... [details: .missiond/v3/evidence/blueprint-notes.lisp#note-008]")
 
+    (surface typed-lisp-compiler
+      :status "code-aligned"
+      :implements [lisp-reader typed-ast semantic-validator diagnostic-json projection-json]
+      :code ["tools/missiond_lispc/dune-project"
+             "tools/missiond_lispc/bin/dune"
+             "tools/missiond_lispc/bin/main.ml"
+             "tools/missiond_lispc/test/dune"
+             "tools/missiond_lispc/test/parser_golden.ml"
+             "scripts/lib/ocaml_lispc.mjs"
+             "scripts/check-ocaml-toolchain.mjs"
+             "scripts/check-typed-lisp-compiler.mjs"
+             ".missiond/workflows/typed-lisp-compiler-convergence.lisp"]
+      :note "Lisp remains the canonical authoring SSOT. The OCaml layer is a dev-time typed compiler/checker/projection layer for source-located diagnostics and generated runtime JSON; it is not in the daemon hot path. JS checkers remain compatibility wrappers and code-anchor validators while OCaml takes ownership of Lisp AST semantics.")
+
     (surface review-gate
       :status "code-aligned"
       :implements [alignment-review-gate plan-review-gate workflow-review-gate two-gate-default]
@@ -3125,6 +3154,7 @@
     :v3 "Small executable contracts only: request, artifact, state-machine, policy, pillar-flow-map, implementation map."
     :checks ["node scripts/check-lisp-blueprint-compression.mjs"
              "node scripts/check-architecture-lisp.mjs --no-structure .missiond/v3/missiond-blueprint.lisp"
+             "node scripts/check-typed-lisp-compiler.mjs"
              "node scripts/check-v3-pillar-flow-schema.mjs"
              "node scripts/check-v3-v2-coverage.mjs"
              "node scripts/check-v3-runtime-path-hygiene.mjs"

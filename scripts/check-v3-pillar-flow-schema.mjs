@@ -10,6 +10,7 @@ import {
   parseLisp,
   readKeywordProps,
 } from './lib/missiond_lisp.mjs';
+import { maybeRunLispc } from './lib/ocaml_lispc.mjs';
 import { EXPECTED_SURFACES } from './check-v3-code-isomorphism-complete.mjs';
 
 const BLUEPRINT_PATH = '.missiond/v3/missiond-blueprint.lisp';
@@ -17,7 +18,7 @@ const CHECK_COMMAND = 'node scripts/check-v3-pillar-flow-schema.mjs';
 
 const usage = `Usage:
   node scripts/check-v3-pillar-flow-schema.mjs [--json] [--dry-fixture]
-    [--blueprint <path>]
+    [--blueprint <path>] [--engine=auto|js|ocaml]
 
 Validates V3's pillar/function flow map:
   - Every code-aligned implementation surface is mapped by exactly one function.
@@ -32,8 +33,36 @@ function main() {
     runDryFixture(opts);
     return;
   }
+  const ocamlAttempt = maybeRunLispc([
+    'check-v3',
+    '--blueprint',
+    opts.blueprint,
+    '--expected-surfaces',
+    EXPECTED_SURFACES.join(','),
+  ], { engine: opts.engine });
+  if (ocamlAttempt.mode === 'ocaml' || ocamlAttempt.mode === 'invalid') {
+    const result = normalizeOcamlResult(ocamlAttempt.result, opts.engine);
+    if (opts.json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else if (result.ok) {
+      console.log('v3 pillar-flow schema OK (ocaml engine)');
+    } else {
+      for (const d of result.diagnostics ?? []) {
+        console.error(`${d.file}:${d.line ?? 1}:${d.column ?? 1}: ${d.message}`);
+      }
+      console.error('v3 pillar-flow schema FAILED (ocaml engine)');
+    }
+    process.exit(result.ok ? 0 : 1);
+  }
   const source = fs.readFileSync(opts.blueprint, 'utf8');
   const result = validatePillarFlowSource(source, opts.blueprint);
+  result.engine = {
+    requested: opts.engine,
+    selected: 'js',
+    fallback_reason: ocamlAttempt.mode === 'js-fallback'
+      ? (ocamlAttempt.result?.diagnostics?.[0]?.message ?? 'OCaml engine unavailable')
+      : null,
+  };
   if (opts.json) {
     console.log(JSON.stringify(result, null, 2));
   } else if (result.ok) {
@@ -50,7 +79,7 @@ function main() {
 }
 
 function parseArgs(argv) {
-  const opts = { json: false, dryFixture: false, blueprint: BLUEPRINT_PATH };
+  const opts = { json: false, dryFixture: false, blueprint: BLUEPRINT_PATH, engine: 'auto' };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '-h' || arg === '--help') {
@@ -64,11 +93,30 @@ function parseArgs(argv) {
       opts.blueprint = argv[++i] ?? fail('--blueprint requires a value');
     } else if (arg.startsWith('--blueprint=')) {
       opts.blueprint = arg.slice('--blueprint='.length);
+    } else if (arg === '--engine') {
+      opts.engine = argv[++i] ?? fail('--engine requires a value');
+    } else if (arg.startsWith('--engine=')) {
+      opts.engine = arg.slice('--engine='.length);
     } else {
       fail(`unknown argument: ${arg}`);
     }
   }
+  if (!['auto', 'js', 'ocaml'].includes(opts.engine)) fail(`unknown engine: ${opts.engine}`);
   return opts;
+}
+
+function normalizeOcamlResult(result, requested) {
+  return {
+    ok: result?.ok === true,
+    engine: {
+      requested,
+      selected: 'ocaml',
+      unavailable: result?.unavailable === true,
+    },
+    diagnostics: result?.diagnostics ?? [],
+    toolchain: result?.toolchain ?? null,
+    raw: result ?? null,
+  };
 }
 
 function fail(message) {

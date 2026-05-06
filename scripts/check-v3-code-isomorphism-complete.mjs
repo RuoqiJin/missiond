@@ -22,7 +22,7 @@
 //   board-frontend,
 //   conversation-ingestion, skill-runtime, cascade-governance,
 //   router-policy, incident-governance, capability-governance,
-//   compute-primitives, sysinfra-control, ops-infra.
+//   compute-primitives, sysinfra-control, ops-infra, typed-lisp-compiler.
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -75,6 +75,7 @@ export const EXPECTED_SURFACES = [
   'compute-primitives',
   'sysinfra-control',
   'ops-infra',
+  'typed-lisp-compiler',
 ];
 
 export const PER_SURFACE_CHECKERS = [
@@ -127,6 +128,7 @@ export const PER_SURFACE_CHECKERS = [
   'scripts/check-frontend-board-code-isomorphism.mjs',
   'scripts/check-frontend-board-runtime-projection.mjs',
   'scripts/check-v3-ops-infra-isomorphism.mjs',
+  'scripts/check-typed-lisp-compiler.mjs',
   // Cross-surface request-flow smoke; aggregates the user-facing
   // request -> intent -> plan -> execute-review path declared in
   // unified-entry/review-packet/review-response. See wave42-01.

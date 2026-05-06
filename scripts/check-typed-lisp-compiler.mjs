@@ -1,0 +1,127 @@
+#!/usr/bin/env node
+
+import fs from 'node:fs';
+import { runLispc, toolchainStatus } from './lib/ocaml_lispc.mjs';
+import { EXPECTED_SURFACES } from './check-v3-code-isomorphism-complete.mjs';
+
+const BLUEPRINT = '.missiond/v3/missiond-blueprint.lisp';
+
+const REQUIRED_FILES = [
+  'tools/missiond_lispc/dune-project',
+  'tools/missiond_lispc/bin/dune',
+  'tools/missiond_lispc/bin/main.ml',
+  'tools/missiond_lispc/test/dune',
+  'tools/missiond_lispc/test/parser_golden.ml',
+  'scripts/lib/ocaml_lispc.mjs',
+  'scripts/check-ocaml-toolchain.mjs',
+  'scripts/check-typed-lisp-compiler.mjs',
+  '.missiond/workflows/typed-lisp-compiler-convergence.lisp',
+];
+
+const REQUIRED_BLUEPRINT_TOKENS = [
+  '(function typed-lisp-compiler',
+  ':surface typed-lisp-compiler',
+  '(surface typed-lisp-compiler',
+  'tools/missiond_lispc/bin/main.ml',
+  'node scripts/check-typed-lisp-compiler.mjs',
+];
+
+const usage = `Usage:
+  node scripts/check-typed-lisp-compiler.mjs [--json] [--strict-toolchain]
+
+Checks that the OCaml typed Lisp compiler/checker layer is registered in V3.
+Without --strict-toolchain, missing OCaml tooling is reported as a warning so
+the existing JS gates can still run on machines that have not installed OCaml.
+`;
+
+function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  const diagnostics = [];
+  const warnings = [];
+
+  for (const file of REQUIRED_FILES) {
+    if (!fs.existsSync(file)) diagnostics.push(diag(file, 'FILE_MISSING', 'required typed compiler file is missing'));
+  }
+
+  const blueprint = read(BLUEPRINT);
+  for (const token of REQUIRED_BLUEPRINT_TOKENS) {
+    if (!blueprint.includes(token)) diagnostics.push(diag(BLUEPRINT, 'BLUEPRINT_TOKEN_MISSING', `missing token ${JSON.stringify(token)}`));
+  }
+
+  const workflow = read('.missiond/workflows/typed-lisp-compiler-convergence.lisp');
+  for (const token of [':workflow_id typed-lisp-compiler-convergence', ':status active', 'OCaml structural gate', 'compiled JSON']) {
+    if (!workflow.includes(token)) diagnostics.push(diag('.missiond/workflows/typed-lisp-compiler-convergence.lisp', 'WORKFLOW_TOKEN_MISSING', `missing token ${JSON.stringify(token)}`));
+  }
+
+  const toolchain = toolchainStatus();
+  let ocaml = null;
+  if (toolchain.ok) {
+    ocaml = runLispc([
+      'check-v3',
+      '--blueprint',
+      BLUEPRINT,
+      '--expected-surfaces',
+      EXPECTED_SURFACES.join(','),
+    ]);
+    if (!ocaml.ok) {
+      for (const d of ocaml.diagnostics ?? []) diagnostics.push({ ...d, code: d.code ?? 'OCAML_CHECK_FAILED' });
+    }
+  } else if (opts.strictToolchain) {
+    diagnostics.push(diag('tools/missiond_lispc', 'OCAML_TOOLCHAIN_MISSING', `missing OCaml command(s): ${toolchain.missing.join(', ')}`));
+  } else {
+    warnings.push({
+      file: 'tools/missiond_lispc',
+      code: 'OCAML_TOOLCHAIN_UNAVAILABLE',
+      message: `OCaml strict gate skipped: missing ${toolchain.missing.join(', ')}. Existing JS gates remain authoritative on this host.`,
+    });
+  }
+
+  const result = {
+    ok: diagnostics.length === 0,
+    toolchain,
+    ocaml_strict_ran: toolchain.ok,
+    diagnostics,
+    warnings,
+    ocaml,
+  };
+  if (opts.json) {
+    console.log(JSON.stringify(result, null, 2));
+  } else if (result.ok) {
+    console.log('typed Lisp compiler registration OK');
+    for (const w of warnings) console.log(`warning: ${w.message}`);
+  } else {
+    for (const d of diagnostics) console.error(`${d.file}: ${d.code}: ${d.message}`);
+    console.error('typed Lisp compiler registration FAILED');
+  }
+  process.exit(result.ok ? 0 : 1);
+}
+
+function parseArgs(argv) {
+  const opts = { json: false, strictToolchain: false };
+  for (const arg of argv) {
+    if (arg === '--json') opts.json = true;
+    else if (arg === '--strict-toolchain') opts.strictToolchain = true;
+    else if (arg === '--help' || arg === '-h') {
+      console.log(usage);
+      process.exit(0);
+    } else {
+      console.error(`unknown argument: ${arg}\n\n${usage}`);
+      process.exit(2);
+    }
+  }
+  return opts;
+}
+
+function read(file) {
+  try {
+    return fs.readFileSync(file, 'utf8');
+  } catch {
+    return '';
+  }
+}
+
+function diag(file, code, message) {
+  return { file, line: 1, column: 1, code, message, path: '' };
+}
+
+main();

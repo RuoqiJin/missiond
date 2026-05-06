@@ -4,9 +4,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { readBlueprintWithEvidenceSidecars } from './lib/v3_blueprint_contract_source.mjs';
+import { maybeRunLispc } from './lib/ocaml_lispc.mjs';
 
 const usage = `Usage:
-  node scripts/check-v3-workflow-isomorphism.mjs [--json] [--dry-fixture]
+  node scripts/check-v3-workflow-isomorphism.mjs [--json] [--dry-fixture] [--engine=auto|js|ocaml]
 
 Checks the V3 workflow Lisp/code isomorphism contract:
   - V3 blueprint declares workflow.lisp as the reusable workflow artifact.
@@ -54,44 +55,112 @@ const DEFAULT_FILES = {
 };
 
 function main() {
-  const args = process.argv.slice(2);
-  let json = false;
-  let dryFixture = false;
-  for (const arg of args) {
+  const opts = parseArgs(process.argv.slice(2));
+
+  const repoRoot = opts.dryFixture ? buildFixture() : process.cwd();
+  const engineDiagnostics = [];
+  const engine = runOcamlWorkflowChecks(repoRoot, opts.engine);
+  if (engine.strictResult) {
+    const result = {
+      ok: engine.strictResult.ok === true,
+      files: Object.keys(DEFAULT_FILES).length,
+      engine,
+      diagnostics: engine.strictResult.diagnostics ?? [],
+    };
+    writeResult(result, opts.json);
+    process.exit(result.ok ? 0 : 1);
+  }
+  if (engine.mode === 'ocaml' && engine.ok === false) {
+    engineDiagnostics.push(...(engine.diagnostics ?? []));
+  }
+  const diagnostics = checkFiles(repoRoot, DEFAULT_FILES);
+  diagnostics.push(...engineDiagnostics.map((d) => ({
+    file: d.file ?? 'tools/missiond_lispc',
+    message: `${d.code ?? 'OCAML_WORKFLOW'}: ${d.message}`,
+  })));
+  const result = {
+    ok: diagnostics.length === 0,
+    files: Object.keys(DEFAULT_FILES).length,
+    engine,
+    diagnostics,
+  };
+
+  writeResult(result, opts.json);
+
+  process.exit(result.ok ? 0 : 1);
+}
+
+function parseArgs(args) {
+  const opts = { json: false, dryFixture: false, engine: 'auto' };
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
     if (arg === '--help' || arg === '-h') {
       console.log(usage);
       process.exit(0);
     } else if (arg === '--json') {
-      json = true;
+      opts.json = true;
     } else if (arg === '--dry-fixture') {
-      dryFixture = true;
+      opts.dryFixture = true;
+    } else if (arg === '--engine') {
+      opts.engine = args[++i] ?? fail('--engine requires a value');
+    } else if (arg.startsWith('--engine=')) {
+      opts.engine = arg.slice('--engine='.length);
     } else {
-      console.error(`unknown arg: ${arg}`);
-      console.error(usage);
-      process.exit(2);
+      fail(`unknown arg: ${arg}`);
     }
   }
+  if (!['auto', 'js', 'ocaml'].includes(opts.engine)) fail(`unknown engine: ${opts.engine}`);
+  return opts;
+}
 
-  const repoRoot = dryFixture ? buildFixture() : process.cwd();
-  const diagnostics = checkFiles(repoRoot, DEFAULT_FILES);
-  const result = {
-    ok: diagnostics.length === 0,
-    files: Object.keys(DEFAULT_FILES).length,
-    diagnostics,
-  };
+function fail(message) {
+  console.error(`${message}\n\n${usage}`);
+  process.exit(2);
+}
 
+function runOcamlWorkflowChecks(repoRoot, engine) {
+  if (engine === 'js') return { requested: engine, mode: 'js', ok: true, diagnostics: [] };
+  const files = [
+    DEFAULT_FILES.projectSsotConvergence,
+    DEFAULT_FILES.projectDomainHardening,
+    '.missiond/workflows/typed-lisp-compiler-convergence.lisp',
+  ];
+  const results = files.map((file) => ({
+    file,
+    attempt: maybeRunLispc(['check-workflow', '--file', file], { engine, repoRoot }),
+  }));
+  const firstUnavailable = results.find((r) => r.attempt.mode === 'js-fallback');
+  if (firstUnavailable) {
+    return {
+      requested: engine,
+      mode: 'js-fallback',
+      ok: true,
+      diagnostics: firstUnavailable.attempt.result?.diagnostics ?? [],
+    };
+  }
+  if (engine === 'ocaml' && results.some((r) => r.attempt.result?.unavailable)) {
+    const result = results.find((r) => r.attempt.result?.unavailable)?.attempt.result;
+    return { requested: engine, mode: 'ocaml', strictResult: result };
+  }
+  const diagnostics = [];
+  for (const row of results) {
+    const result = row.attempt.result;
+    if (result?.ok !== true) diagnostics.push(...(result?.diagnostics ?? []).map((d) => ({ ...d, file: d.file || row.file })));
+  }
+  return { requested: engine, mode: 'ocaml', ok: diagnostics.length === 0, diagnostics };
+}
+
+function writeResult(result, json) {
   if (json) {
     console.log(JSON.stringify(result, null, 2));
   } else if (result.ok) {
     console.log('v3 workflow Lisp/code isomorphism check OK');
   } else {
-    for (const d of diagnostics) {
+    for (const d of result.diagnostics) {
       console.error(`${d.file}: ${d.message}`);
     }
-    console.error(`v3 workflow Lisp/code isomorphism check FAILED -- ${diagnostics.length} diagnostic(s)`);
+    console.error(`v3 workflow Lisp/code isomorphism check FAILED -- ${result.diagnostics.length} diagnostic(s)`);
   }
-
-  process.exit(result.ok ? 0 : 1);
 }
 
 function checkFiles(root, files) {

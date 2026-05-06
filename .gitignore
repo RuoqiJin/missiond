@@ -5,6 +5,10 @@
 /target/
 **/*.rs.bk
 
+# OCaml / dune
+_build/
+.opam-switch/
+
 # Node.js
 node_modules/
 dist/
@@ -38,6 +42,7 @@ dist/
 .missiond/v3/runtime/nightly-evolution/*.report.lisp
 .missiond/v3/runtime/commit-lisp-convergence/*.report.lisp
 .missiond/v3/runtime/convergence-status-cache.json
+.missiond/v3/runtime/compiled/*.json
 .missiond/research/resident-codex-master-gpt-pro*.md
 
 # Claude Code (contains credentials and private config)

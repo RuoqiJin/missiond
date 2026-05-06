@@ -4,9 +4,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { readBlueprintWithEvidenceSidecars } from './lib/v3_blueprint_contract_source.mjs';
+import { maybeRunLispc } from './lib/ocaml_lispc.mjs';
 
 const usage = `Usage:
-  node scripts/check-project-ssot-universe.mjs [--json]
+  node scripts/check-project-ssot-universe.mjs [--json] [--engine=auto|js|ocaml]
 
 Checks MissionD multi-project SSOT registry convergence:
   - V3 project-blueprint-registry names MissionD, Forge, Part1 devtools (jarvis,
@@ -48,18 +49,21 @@ const PROJECTS = [
 ];
 
 function main() {
-  const args = process.argv.slice(2);
-  const json = args.includes('--json');
-  if (args.some((a) => !['--json', '--help', '-h'].includes(a))) {
-    console.error(usage);
-    process.exit(2);
-  }
-  if (args.includes('--help') || args.includes('-h')) {
-    console.log(usage);
-    process.exit(0);
-  }
+  const opts = parseArgs(process.argv.slice(2));
 
   const diagnostics = [];
+  const engine = runOcamlUniverseCheck(opts.engine);
+  if (engine.strictResult) {
+    diagnostics.push(...(engine.strictResult.diagnostics ?? []).map((d) => ({
+      file: d.file ?? '.missiond/v3/missiond-blueprint.lisp',
+      message: `${d.code ?? 'OCAML_UNIVERSE'}: ${d.message}`,
+    })));
+  } else if (engine.mode === 'ocaml' && engine.ok === false) {
+    diagnostics.push(...(engine.diagnostics ?? []).map((d) => ({
+      file: d.file ?? '.missiond/v3/missiond-blueprint.lisp',
+      message: `${d.code ?? 'OCAML_UNIVERSE'}: ${d.message}`,
+    })));
+  }
   const blueprint = readBlueprintWithEvidenceSidecars(process.cwd(), '.missiond/v3/missiond-blueprint.lisp');
   requireAll(diagnostics, '.missiond/v3/missiond-blueprint.lisp', blueprint, [
     '(project-maturity-model',
@@ -183,12 +187,13 @@ function main() {
 
   const result = {
     ok: diagnostics.length === 0,
+    engine,
     projects: PROJECTS.map((p) => p.id),
     maturity,
     checkerResults,
     diagnostics,
   };
-  if (json) {
+  if (opts.json) {
     fs.writeSync(1, `${JSON.stringify(result, null, 2)}\n`);
   } else if (result.ok) {
     console.log(`project SSOT universe check OK (${PROJECTS.length} projects/services)`);
@@ -197,6 +202,56 @@ function main() {
     console.error(`project SSOT universe check FAILED -- ${diagnostics.length} diagnostic(s)`);
   }
   process.exit(result.ok ? 0 : 1);
+}
+
+function parseArgs(args) {
+  const opts = { json: false, engine: 'auto' };
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === '--json') opts.json = true;
+    else if (arg === '--help' || arg === '-h') {
+      console.log(usage);
+      process.exit(0);
+    } else if (arg === '--engine') {
+      opts.engine = args[++i] ?? fail('--engine requires a value');
+    } else if (arg.startsWith('--engine=')) {
+      opts.engine = arg.slice('--engine='.length);
+    } else {
+      fail(`unknown argument: ${arg}`);
+    }
+  }
+  if (!['auto', 'js', 'ocaml'].includes(opts.engine)) fail(`unknown engine: ${opts.engine}`);
+  return opts;
+}
+
+function fail(message) {
+  console.error(`${message}\n\n${usage}`);
+  process.exit(2);
+}
+
+function runOcamlUniverseCheck(engine) {
+  if (engine === 'js') return { requested: engine, mode: 'js', ok: true, diagnostics: [] };
+  const attempt = maybeRunLispc([
+    'check-project',
+    '--blueprint',
+    '.missiond/v3/missiond-blueprint.lisp',
+  ], { engine });
+  if (attempt.mode === 'js-fallback') {
+    return {
+      requested: engine,
+      mode: 'js-fallback',
+      ok: true,
+      diagnostics: attempt.result?.diagnostics ?? [],
+    };
+  }
+  const result = attempt.result;
+  if (engine === 'ocaml' && result?.unavailable) return { requested: engine, mode: 'ocaml', strictResult: result };
+  return {
+    requested: engine,
+    mode: 'ocaml',
+    ok: result?.ok === true,
+    diagnostics: result?.diagnostics ?? [],
+  };
 }
 
 function parseMaturityRegistry(blueprint) {

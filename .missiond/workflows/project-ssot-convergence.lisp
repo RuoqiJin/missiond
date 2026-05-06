@@ -1,9 +1,13 @@
 (workflow project-ssot-convergence
   :schema "missiond.workflow.project-ssot-convergence.v1"
+  :workflow_id project-ssot-convergence
+  :status active
+  :source_plans [v3-runtime-ssot multi-project-maturity auth-domain-hardening]
   :purpose "Reusable multi-project SSOT convergence muscle memory: turn an existing code project into compact Lisp SSOT plus checker-backed code mapping."
   :owner resident-master-control
   :authority v3-project-blueprint-registry
   :inputs [project-id project-root canonical-intent existing-code dirty-baseline context-pack-path? acceptance]
+  :steps [s1 s1b s2 s3 s4 s5 s6 s7 s7b s8 s8b s8c s9]
   :workers
     ((codex-master :role integrator :write [board kb checkpoint context-pack] :code-write false)
      (claude-opus :role implementation :write exact-shard-only :code-write true)
