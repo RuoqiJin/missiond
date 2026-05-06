@@ -2104,7 +2104,7 @@
                (step s2 :logic "validate pillar/function entry-core-egress surfaces, workflow contracts, universe registry, maturity gates, and event/outbox contracts")
                (step s3 :logic "emit stable JSON diagnostics for JS compatibility wrappers and CI gates")
                (step s4 :logic "generate compiled JSON projections only through checker/compiler commands, never by hand; project universe and workflows emit structured payloads rather than token-presence booleans")
-               (step s5 :logic "let Rust runtime read compiled JSON first for workstation/project/workflow snapshots, then diagnostic-fallback to Lisp/default behavior")
+               (step s5 :logic "let Rust runtime read compiled JSON first only when the compiled snapshot is not older than source Lisp, then diagnostic-fallback to Lisp/default behavior")
                (step s6 :logic "use Auth as the first external project-domain semantic checker sample before shrinking more project checkers"))
         :egress [typed_diagnostics compiled_json compiled_runtime_snapshot compiled_project_universe compiled_workflow_contracts js_wrapper_result]))
 
