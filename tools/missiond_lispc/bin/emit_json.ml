@@ -53,6 +53,71 @@ let count_named_or_list_entries named value =
   let named_count = count_forms named value in
   if named_count > 0 then named_count else List.length (list_texts value)
 
+let prop_text_list key props =
+  match prop key props with
+  | Some value -> list_texts value
+  | None -> []
+
+let v3_surface_to_json node =
+  let props = keyword_props ~start:2 node in
+  let id =
+    match children node with
+    | _ :: id_node :: _ -> atom_text id_node
+    | _ -> None
+  in
+  Printf.sprintf
+    {|{"id":%s,"status":%s,"implements":%s,"code":%s}|}
+    (json_opt_string id)
+    (json_opt_string (prop_text ":status" props))
+    (json_string_list (prop_text_list ":implements" props))
+    (json_string_list (prop_text_list ":code" props))
+
+let v3_function_to_json pillar_id node =
+  let props = keyword_props ~start:2 node in
+  let id =
+    match children node with
+    | _ :: id_node :: _ -> atom_text id_node
+    | _ -> None
+  in
+  let steps =
+    match prop ":core" props with
+    | Some core -> collect_forms "step" core |> List.filter_map workflow_step_id
+    | None -> []
+  in
+  Printf.sprintf
+    {|{"pillar":%s,"id":%s,"surface":%s,"entry":%s,"egress":%s,"steps":%s}|}
+    (json_string pillar_id)
+    (json_opt_string id)
+    (json_opt_string (prop_text ":surface" props))
+    (json_string_list (prop_text_list ":entry" props))
+    (json_string_list (prop_text_list ":egress" props))
+    (json_string_list steps)
+
+let v3_functions_to_json root =
+  match find_child root "pillar-flow-map" with
+  | None -> []
+  | Some flow_map ->
+      children flow_map
+      |> List.filter (fun node -> is_list node "pillar")
+      |> List.map (fun pillar ->
+             let pillar_id =
+               match children pillar with
+               | _ :: id_node :: _ -> Option.value ~default:"<missing>" (atom_text id_node)
+               | _ -> "<missing>"
+             in
+             children pillar
+             |> List.filter (fun node -> is_list node "function")
+             |> List.map (v3_function_to_json pillar_id))
+      |> List.flatten
+
+let v3_surfaces_to_json root =
+  match find_child root "implementation-map" with
+  | None -> []
+  | Some implementation_map ->
+      children implementation_map
+      |> List.filter (fun node -> is_list node "surface")
+      |> List.map v3_surface_to_json
+
 let project_entry_to_json node =
   let props = keyword_props ~start:1 node in
   let checks =
@@ -147,10 +212,20 @@ let emit_v3 blueprint =
   try
     let source = read_file blueprint in
     let diagnostics = Schema_v3.validate blueprint [] in
+    let forms = Parser.parse_source blueprint source in
+    let root = find_root forms "missiond-blueprint" in
+    let surfaces =
+      root |> Option.map v3_surfaces_to_json |> Option.value ~default:[]
+    in
+    let functions =
+      root |> Option.map v3_functions_to_json |> Option.value ~default:[]
+    in
     let payload =
-      Printf.sprintf {|{"blueprint":%s,"forms":[%s]}|}
+      Printf.sprintf {|{"blueprint":%s,"surfaces":[%s],"functions":[%s],"forms":[%s]}|}
         (json_string blueprint)
-        (Parser.parse_source blueprint source |> List.map sexp_to_json |> String.concat ",")
+        (String.concat "," surfaces)
+        (String.concat "," functions)
+        (forms |> List.map sexp_to_json |> String.concat ",")
     in
     print_endline
       (result_json ~extra:[

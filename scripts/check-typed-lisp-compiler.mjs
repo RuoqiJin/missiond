@@ -206,6 +206,22 @@ function main() {
         diagnostics.push(diag('tools/missiond_lispc', 'OCAML_EMIT_FAILED', `emit command failed: ${argv.join(' ')}`));
       } else if (argv[0].startsWith('emit') && !emit.compiled) {
         diagnostics.push(diag('tools/missiond_lispc', 'OCAML_EMIT_FAILED', `emit command did not return compiled payload: ${argv.join(' ')}`));
+      } else if (argv[0] === 'emit-v3') {
+        const functions = emit.compiled?.payload?.functions ?? [];
+        const surfaces = emit.compiled?.payload?.surfaces ?? [];
+        if (!Array.isArray(functions) || functions.length === 0) {
+          diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_V3_PROJECTION_MISSING_FUNCTIONS', 'emit-v3 must project structured functions[]'));
+        }
+        if (!Array.isArray(surfaces) || surfaces.length === 0) {
+          diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_V3_PROJECTION_MISSING_SURFACES', 'emit-v3 must project structured surfaces[]'));
+        }
+        const typedCompiler = functions.find((fn) => fn.id === 'typed-lisp-compiler');
+        if (!typedCompiler || typedCompiler.surface !== 'typed-lisp-compiler') {
+          diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_V3_PROJECTION_MISSING_TYPED_COMPILER', 'emit-v3 must project the typed-lisp-compiler function with its surface'));
+        }
+        if (!Array.isArray(typedCompiler?.steps) || !typedCompiler.steps.includes('s8')) {
+          diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_V3_PROJECTION_MISSING_FUNCTION_STEPS', 'emit-v3 must project V3 function step ids'));
+        }
       } else if (argv[0] === 'emit-universe') {
         if (!Array.isArray(emit.compiled?.payload?.projects) || emit.compiled.payload.projects.length === 0) {
           diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_UNIVERSE_PROJECTION_MISSING_PROJECTS', 'emit-universe must project structured projects[]'));
