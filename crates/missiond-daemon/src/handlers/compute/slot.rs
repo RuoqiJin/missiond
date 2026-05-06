@@ -1,16 +1,16 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use missiond_core::types::{BoardTask, CliEngine, Conversation, Slot};
 use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::process::Command;
 use tracing::{info, warn};
 
 use crate::context::v3_blueprint_runtime::{
-    WorkstationRuntimeConfig, compiled_runtime_projection_status,
+    compiled_runtime_projection_status, WorkstationRuntimeConfig,
 };
 use crate::engine::{master_control, nightly_evolution};
 use crate::lenient;
@@ -191,9 +191,9 @@ async fn mission_convergence_status(state: &AppState) -> Value {
 
 fn stamp_convergence_status_metadata(
     value: &mut Value,
-    root: &std::path::Path,
+    root: &Path,
     status_source: &str,
-    cache_path: &std::path::Path,
+    cache_path: &Path,
 ) {
     value["source"] = json!("mission_convergence_status");
     value["repoRoot"] = json!(root.display().to_string());
@@ -201,6 +201,94 @@ fn stamp_convergence_status_metadata(
     value["cachePath"] = json!(cache_path.display().to_string());
     value["liveTimeoutSecs"] = json!(CONVERGENCE_STATUS_TIMEOUT_SECS);
     value["compiledRuntime"] = compiled_runtime_projection_status(root);
+    value["activeRelease"] = active_release_manifest_status();
+}
+
+fn active_release_manifest_status() -> Value {
+    let install_root = std::env::var("MISSIOND_INSTALL_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(|home| PathBuf::from(home).join(".xjp-mission"))
+                .unwrap_or_else(|_| PathBuf::from(".xjp-mission"))
+        });
+    let active_link = std::env::var("MISSIOND_ACTIVE_LINK")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| install_root.join("active"));
+    active_release_manifest_status_for(&active_link)
+}
+
+fn active_release_manifest_status_for(active_link: &Path) -> Value {
+    let active_target = std::fs::read_link(&active_link).ok();
+    let active_dir = active_target.as_deref().unwrap_or(active_link);
+    let manifest_path = active_dir.join("release-manifest.json");
+    let bytes = match std::fs::read(&manifest_path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return json!({
+                "ok": false,
+                "activeLink": active_link.display().to_string(),
+                "activeTarget": active_target.as_ref().map(|p| p.display().to_string()),
+                "manifestPath": manifest_path.display().to_string(),
+                "missing": true,
+                "diagnostic": err.to_string()
+            });
+        }
+    };
+    let manifest: Value = match serde_json::from_slice(&bytes) {
+        Ok(value) => value,
+        Err(err) => {
+            return json!({
+                "ok": false,
+                "activeLink": active_link.display().to_string(),
+                "activeTarget": active_target.as_ref().map(|p| p.display().to_string()),
+                "manifestPath": manifest_path.display().to_string(),
+                "missing": false,
+                "diagnostic": err.to_string()
+            });
+        }
+    };
+    let typed = manifest
+        .get("typed_lisp_runtime")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let projections = typed
+        .get("projections")
+        .and_then(Value::as_object)
+        .map(|obj| {
+            ["v3", "universe", "workflows"].into_iter().all(|id| {
+                obj.get(id)
+                    .and_then(Value::as_object)
+                    .is_some_and(|projection| {
+                        projection
+                            .get("schema_version")
+                            .and_then(Value::as_str)
+                            .is_some_and(|s| !s.trim().is_empty())
+                            && projection
+                                .get("source_hash")
+                                .and_then(Value::as_str)
+                                .is_some_and(|s| !s.trim().is_empty())
+                            && projection
+                                .get("file_sha256")
+                                .and_then(Value::as_str)
+                                .is_some_and(|s| !s.trim().is_empty())
+                    })
+            })
+        })
+        .unwrap_or(false);
+    json!({
+        "ok": projections,
+        "activeLink": active_link.display().to_string(),
+        "activeTarget": active_target.as_ref().map(|p| p.display().to_string()),
+        "manifestPath": manifest_path.display().to_string(),
+        "releaseId": manifest.get("release_id").cloned().unwrap_or(Value::Null),
+        "gitSha": manifest.get("git_sha").cloned().unwrap_or(Value::Null),
+        "daemonSha256": manifest.get("daemon_sha256").cloned().unwrap_or(Value::Null),
+        "mcpSha256": manifest.get("mcp_sha256").cloned().unwrap_or(Value::Null),
+        "typedLispRuntimePresent": !typed.is_null(),
+        "typedLispRuntimeComplete": projections,
+        "typedLispRuntime": typed
+    })
 }
 
 async fn write_convergence_status_cache(path: &std::path::Path, value: &Value) -> Result<()> {
@@ -282,12 +370,10 @@ async fn projected_mission_slots(state: &AppState) -> Vec<Value> {
             value["currentSlotTaskId"] = json!(slot_task_id);
         }
         if let Some(info) = state.pty.get_status(&slot.config.id).await {
-            value["ptyState"] = json!(
-                serde_json::to_value(&info.state)
-                    .ok()
-                    .and_then(|v| v.as_str().map(ToString::to_string))
-                    .unwrap_or_else(|| format!("{:?}", info.state))
-            );
+            value["ptyState"] = json!(serde_json::to_value(&info.state)
+                .ok()
+                .and_then(|v| v.as_str().map(ToString::to_string))
+                .unwrap_or_else(|| format!("{:?}", info.state)));
             if let Some(recognition) = info.recognition {
                 if let Ok(recognition) = serde_json::to_value(recognition) {
                     value["ptyRecognition"] = recognition;
@@ -506,5 +592,80 @@ async fn handle_slot_history(state: &AppState, args: Value) -> Result<ToolResult
             .await
             .map_err(|e| anyhow!("DB error: {}", e))?;
         Ok(ToolResult::json_pretty(&tasks))
+    }
+}
+
+#[cfg(test)]
+mod convergence_status_tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::symlink;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_root(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        std::env::temp_dir().join(format!("missiond-{name}-{}-{nanos}", std::process::id()))
+    }
+
+    fn write_active_manifest(root: &Path, manifest: &str) -> PathBuf {
+        let release = root.join("releases/r1");
+        fs::create_dir_all(&release).expect("release dir");
+        fs::write(release.join("release-manifest.json"), manifest).expect("manifest");
+        let active = root.join("active");
+        symlink(&release, &active).expect("active symlink");
+        active
+    }
+
+    #[test]
+    fn active_release_manifest_reports_typed_projection_completeness() {
+        let root = temp_root("active-release-complete");
+        fs::create_dir_all(&root).expect("root");
+        let active = write_active_manifest(
+            &root,
+            r#"{
+              "schema":"missiond.release-manifest.v1",
+              "release_id":"r1",
+              "git_sha":"abc123",
+              "daemon_sha256":"daemon",
+              "mcp_sha256":"mcp",
+              "typed_lisp_runtime":{
+                "compiled_dir":".missiond/v3/runtime/compiled",
+                "projections":{
+                  "v3":{"schema_version":"missiond.compiled-v3-blueprint.v1","source_hash":"h1","file_sha256":"f1"},
+                  "universe":{"schema_version":"missiond.compiled-project-universe.v1","source_hash":"h2","file_sha256":"f2"},
+                  "workflows":{"schema_version":"missiond.compiled-workflows.v1","source_hash":"h3","file_sha256":"f3"}
+                }
+              }
+            }"#,
+        );
+        let status = active_release_manifest_status_for(&active);
+        assert_eq!(status["ok"], json!(true));
+        assert_eq!(status["typedLispRuntimePresent"], json!(true));
+        assert_eq!(status["typedLispRuntimeComplete"], json!(true));
+        assert_eq!(status["releaseId"], json!("r1"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn active_release_manifest_flags_missing_typed_projection() {
+        let root = temp_root("active-release-missing-typed");
+        fs::create_dir_all(&root).expect("root");
+        let active = write_active_manifest(
+            &root,
+            r#"{
+              "schema":"missiond.release-manifest.v1",
+              "release_id":"legacy",
+              "daemon_sha256":"daemon",
+              "mcp_sha256":"mcp"
+            }"#,
+        );
+        let status = active_release_manifest_status_for(&active);
+        assert_eq!(status["ok"], json!(false));
+        assert_eq!(status["typedLispRuntimePresent"], json!(false));
+        assert_eq!(status["typedLispRuntimeComplete"], json!(false));
+        let _ = fs::remove_dir_all(root);
     }
 }
