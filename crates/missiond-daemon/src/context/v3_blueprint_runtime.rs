@@ -2759,6 +2759,13 @@ fn load_compiled_v3_lisp_source(project_root: &Path) -> Option<String> {
         .join("runtime")
         .join("compiled")
         .join("compiled-v3-blueprint.json");
+    let source_path = project_root
+        .join(".missiond")
+        .join("v3")
+        .join("missiond-blueprint.lisp");
+    if !compiled_v3_snapshot_is_current(&path, &source_path) {
+        return None;
+    }
     let raw = fs::read_to_string(&path).ok()?;
     let parsed: CompiledRuntimeEnvelope = serde_json::from_str(&raw).ok()?;
     if !parsed.diagnostics.is_empty() {
@@ -2774,6 +2781,22 @@ fn load_compiled_v3_lisp_source(project_root: &Path) -> Option<String> {
     }
     let source = rendered.join("\n");
     source.contains("(missiond-blueprint").then_some(source)
+}
+
+fn compiled_v3_snapshot_is_current(compiled_path: &Path, source_path: &Path) -> bool {
+    if !source_path.exists() {
+        return true;
+    }
+    let Ok(compiled_meta) = fs::metadata(compiled_path) else {
+        return false;
+    };
+    let Ok(source_meta) = fs::metadata(source_path) else {
+        return true;
+    };
+    match (compiled_meta.modified(), source_meta.modified()) {
+        (Ok(compiled_time), Ok(source_time)) => compiled_time >= source_time,
+        _ => true,
+    }
 }
 
 fn compiled_sexp_to_lisp(node: &CompiledSexpNode) -> Option<String> {
@@ -3811,10 +3834,9 @@ mod tests {
     (worker codex-master-control :engine codex :role orchestrator :slot-id "slot-codex-master-control" :task-type codex_master_control :model-profile codex-master-gpt-5-5-xhigh :model nil :reasoning-effort xhigh :search true :sandbox danger-full-access :approval-policy never :task-classes [master-control] :capabilities [board-write kb-write execution-log dispatch code-read code-write shell-exec search mcp full-access] :max-concurrency 1 :timeout-secs 7200 :default-use resident-master-control :accepts-boardtask false :write-allowed true)))"#,
         )
         .expect_err("missing policy");
-        assert!(
-            err.to_string()
-                .contains("timeout-policy boardtask-dispatch")
-        );
+        assert!(err
+            .to_string()
+            .contains("timeout-policy boardtask-dispatch"));
     }
 
     #[test]
@@ -4439,5 +4461,47 @@ mod tests {
             .expect("runtime source")
             .expect("source");
         assert!(source.contains("fallback-runtime-marker"), "{source}");
+    }
+
+    #[test]
+    fn runtime_blueprint_source_falls_back_when_compiled_snapshot_is_stale() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let v3_dir = temp.path().join(".missiond").join("v3");
+        let compiled_dir = v3_dir.join("runtime").join("compiled");
+        fs::create_dir_all(&compiled_dir).expect("compiled dir");
+        fs::write(
+            compiled_dir.join("compiled-v3-blueprint.json"),
+            r#"{
+              "schema_version": "missiond.compiled-v3-blueprint.v1",
+              "source_hash": "old",
+              "generated_at": null,
+              "diagnostics": [],
+              "payload": {
+                "forms": [{
+                  "type": "list",
+                  "kind": "paren",
+                  "children": [
+                    {"type": "atom", "value": "missiond-blueprint"},
+                    {"type": "list", "kind": "paren", "children": [
+                      {"type": "atom", "value": "stale-compiled-marker"}
+                    ]}
+                  ]
+                }]
+              }
+            }"#,
+        )
+        .expect("compiled snapshot");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        fs::write(
+            v3_dir.join("missiond-blueprint.lisp"),
+            r#"(missiond-blueprint (fresh-source-marker))"#,
+        )
+        .expect("fresh source");
+
+        let source = load_runtime_blueprint_source(Some(temp.path().to_string_lossy().as_ref()))
+            .expect("runtime source")
+            .expect("source");
+        assert!(source.contains("fresh-source-marker"), "{source}");
+        assert!(!source.contains("stale-compiled-marker"), "{source}");
     }
 }

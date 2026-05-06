@@ -32,6 +32,7 @@ const REQUIRED_RUNTIME_LOADER = {
   tokens: [
     'load_runtime_blueprint_source',
     'load_compiled_v3_lisp_source',
+    'compiled_v3_snapshot_is_current',
     'compiled_sexp_to_lisp',
     'CompiledV3Payload',
     'load_runtime_blueprint_source(project_root)',
