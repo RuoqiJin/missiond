@@ -74,7 +74,7 @@ function main() {
 	    ':schema "missiond.project-maturity-registry.v1"',
 	    ':default-target M10',
 	    ':common-m6-to-v3-gap [runtime-projection event-bus commit-backfill worker-operational final-convergence]',
-	    '(maturity :id auth :current M2 :target M10 :gap [canonical-root-corrected blueprint-split production-domain-backfill',
+	    '(maturity :id auth :current M7 :target M10 :gap [event-bus worker-operational final-convergence auth-architecture-hardening]',
 	    '(project-blueprint-registry',
     ':id jarvis-forge',
     ':id jarvis',

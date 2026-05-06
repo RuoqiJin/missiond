@@ -1161,14 +1161,14 @@
     (maturity :id xjpcode :current M6 :target M10 :gap [runtime-projection event-bus worker-operational final-convergence])
     (maturity :id neural-codegen :current M6 :target M10 :gap [runtime-projection event-bus worker-operational final-convergence])
     (maturity :id semantic-terminal :current M6 :target M10 :gap [runtime-projection event-bus worker-operational final-convergence])
-    (maturity :id xiaojinpro-backend :current M2 :target M10 :gap [canonical-root-corrected blueprint-split code-isomorphism runtime-projection event-bus worker-operational final-convergence])
-    (maturity :id deploy-center :current M2 :target M10 :gap [canonical-root-corrected blueprint-split code-isomorphism runtime-projection event-bus worker-operational final-convergence])
+    (maturity :id xiaojinpro-backend :current M7 :target M10 :gap [event-bus worker-operational final-convergence])
+    (maturity :id deploy-center :current M9 :target M10 :gap [final-convergence])
     (maturity :id deploy-agent :current M10 :target M10 :gap [])
-    (maturity :id auth :current M2 :target M10 :gap [canonical-root-corrected blueprint-split production-domain-backfill code-isomorphism runtime-projection event-bus worker-operational final-convergence])
-    (maturity :id router :current M2 :target M10 :gap [canonical-root-corrected blueprint-split code-isomorphism runtime-projection event-bus worker-operational final-convergence])
-    (maturity :id payments :current M2 :target M10 :gap [canonical-root-corrected blueprint-split code-isomorphism runtime-projection event-bus worker-operational final-convergence])
-    (maturity :id asr :current M2 :target M10 :gap [canonical-root-corrected blueprint-split code-isomorphism runtime-projection event-bus worker-operational final-convergence])
-    (maturity :id timeline :current M2 :target M10 :gap [canonical-root-corrected blueprint-split code-isomorphism runtime-projection event-bus worker-operational final-convergence])
+    (maturity :id auth :current M7 :target M10 :gap [event-bus worker-operational final-convergence auth-architecture-hardening])
+    (maturity :id router :current M7 :target M10 :gap [event-bus final-convergence])
+    (maturity :id payments :current M7 :target M10 :gap [event-bus final-convergence])
+    (maturity :id asr :current M9 :target M10 :gap [final-convergence])
+    (maturity :id timeline :current M9 :target M10 :gap [final-convergence])
     (maturity :id pcea :current M5 :target M10 :gap [code-isomorphism runtime-projection event-bus worker-operational final-convergence])
     (maturity :id secret-store :current M5 :target M10 :gap [code-isomorphism runtime-projection event-bus worker-operational final-convergence])
     (maturity :id xiaojin-blog :current M5 :target M10 :gap [code-isomorphism runtime-projection event-bus worker-operational final-convergence])
@@ -1251,7 +1251,7 @@
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/xiaojinpro-backend-blueprint.lisp"
-      :status canonical-root-corrected-needs-blueprint
+      :status ssot-current-code-mapped
       :checks ["node scripts/check-xjp-ssot-complete.mjs"]
       :surface project-registry)
 	    (project :id deploy-center
@@ -1259,7 +1259,7 @@
 	      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/deploy-center"
 	      :intent ".missiond/intent.lisp"
 	      :backend ".missiond/backend/deploy-center-backend-blueprint.lisp"
-		      :status canonical-root-corrected-needs-blueprint
+		      :status ssot-worker-operational
 	      :capability deploy-ops
 	      :surface project-registry)
     (project :id deploy-agent
@@ -1276,35 +1276,35 @@
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/auth"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/auth-backend-blueprint.lisp"
-      :status canonical-root-corrected-needs-blueprint
+      :status ssot-current-code-mapped
       :surface project-registry)
     (project :id router
       :kind rust-service
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/router"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/router-backend-blueprint.lisp"
-      :status canonical-root-corrected-needs-blueprint
+      :status ssot-current-code-mapped
       :surface project-registry)
     (project :id payments
       :kind rust-workspace-service
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/payments"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/payments-backend-blueprint.lisp"
-      :status canonical-root-corrected-needs-blueprint
+      :status ssot-current-code-mapped
       :surface project-registry)
     (project :id asr
       :kind rust-service
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/asr"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/asr-backend-blueprint.lisp"
-      :status canonical-root-corrected-needs-blueprint
+      :status ssot-worker-operational
       :surface project-registry)
     (project :id timeline
       :kind rust-service
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/timeline"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/timeline-backend-blueprint.lisp"
-      :status canonical-root-corrected-needs-blueprint
+      :status ssot-worker-operational
       :surface project-registry)
     (project :id pcea
       :kind rust-vite-app

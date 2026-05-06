@@ -128,7 +128,7 @@ function checkFiles(root, files) {
 	    'scripts/check-project-maturity.mjs --min-level M10',
 	    'It resolves the MissionD blueprint from the checker script directory',
 	    '(maturity :id missiond :current M10 :target M10',
-	    '(maturity :id auth :current M2 :target M10',
+	    '(maturity :id auth :current M7 :target M10',
 	    '(project-blueprint-registry',
 	    ':id jarvis-forge',
 	    ':backend ".missiond/backend/forge-backend-blueprint.lisp"',
@@ -358,7 +358,7 @@ function buildFixture() {
 	    :schema "missiond.project-maturity-registry.v1"
 	    :common-m6-to-v3-gap [runtime-projection event-bus commit-backfill worker-operational final-convergence]
 	    (maturity :id missiond :current M10 :target M10)
-	    (maturity :id auth :current M2 :target M10 :gap [canonical-root-corrected blueprint-split production-domain-backfill code-isomorphism runtime-projection event-bus worker-operational final-convergence]))
+	    (maturity :id auth :current M7 :target M10 :gap [event-bus worker-operational final-convergence auth-architecture-hardening]))
 	  (project-blueprint-registry
 	    (project :id jarvis-forge :root "/Users/jinchen/Projects/jarvis-forge" :backend ".missiond/backend/forge-backend-blueprint.lisp" :frontend ".missiond/frontend/forge-ui-blueprint.lisp")
 	    (project :id xiaojinpro-backend :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend")
@@ -391,7 +391,7 @@ function buildFixture() {
 	             "crates/missiond-mcp/src/tools/knowledge/project.rs"
 	             "scripts/check-v3-project-registry-isomorphism.mjs"
 	             "scripts/check-project-maturity.mjs"]
-      :note "project.rs is the thin mission_project facade. ProjectRegistryRuntimeConfig loads V3 project-registry-policy. ProjectRegistry::resolve owns longest-prefix project lookup. resolve_target_project_root owns project-root spawn cwd policy."))
+      :note "project.rs is the thin mission_project facade. ProjectRegistryRuntimeConfig loads V3 project-registry-policy. ProjectRegistry::resolve owns longest-prefix project lookup; inactive project aliases never participate in cwd resolution, and mission_project init archives inactive path aliases before upsert. resolve_target_project_root owns project-root spawn cwd policy."))
   (compression-contract
     :checks ["node scripts/check-v3-project-registry-isomorphism.mjs"]))`);
 
@@ -428,6 +428,7 @@ ProjectRegistryRuntimeConfig::load_for_current_dir V3_BLUEPRINT_CONFIG_ERROR
 env_or_default_universe_manifest discover_intent_path intent_path_candidates expand_tilde_path
 reload_project_registry scan_lisp_files github_url_for_path
 backfill_project_id ProjectRegistry::new(projects)
+archive_inactive_path_aliases
 `);
 
   writeFixture(root, DEFAULT_FILES.context, `
@@ -469,9 +470,11 @@ kind = "reference".to_string()
 pub struct ProjectConfig
 pub struct ProjectRegistry
 path_index.sort_by
+.filter(|p| p.active)
 cwd.starts_with(prefix.as_str())
 pub fn resolve(&self, cwd: &str) -> Option<&str>
 pub fn exclusive_slots(&self, project_id: &str) -> Vec<String>
+resolve_ignores_inactive_path_aliases
 `);
 
   writeFixture(root, DEFAULT_FILES.rootResolver, `
