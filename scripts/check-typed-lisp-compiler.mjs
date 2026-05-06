@@ -103,6 +103,17 @@ function main() {
       emitChecks.push({ argv, ok: emit.ok === true, diagnostics: emit.diagnostics ?? [] });
       if (!emit.ok || !emit.compiled) {
         diagnostics.push(diag('tools/missiond_lispc', 'OCAML_EMIT_FAILED', `emit command failed: ${argv.join(' ')}`));
+      } else if (argv[0] === 'emit-universe') {
+        if (!Array.isArray(emit.compiled?.payload?.projects) || emit.compiled.payload.projects.length === 0) {
+          diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_UNIVERSE_PROJECTION_MISSING_PROJECTS', 'emit-universe must project structured projects[]'));
+        }
+        if (!Array.isArray(emit.compiled?.payload?.maturity) || emit.compiled.payload.maturity.length === 0) {
+          diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_UNIVERSE_PROJECTION_MISSING_MATURITY', 'emit-universe must project structured maturity[]'));
+        }
+      } else if (argv[0] === 'emit-workflows') {
+        if (!Array.isArray(emit.compiled?.payload?.workflows) || emit.compiled.payload.workflows.length === 0) {
+          diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_WORKFLOW_PROJECTION_MISSING_WORKFLOWS', 'emit-workflows must project structured workflows[]'));
+        }
       }
     }
   } else if (opts.strictToolchain) {
