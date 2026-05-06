@@ -113,6 +113,17 @@ const REQUIRED_BLUEPRINT_TOKENS = [
   'node scripts/check-typed-lisp-compiler.mjs',
 ];
 
+const REQUIRED_WORKFLOW_PROJECTIONS = [
+  'bus-refactor',
+  'commit-lisp-convergence',
+  'conversation-memory-distillation',
+  'nightly-evolution',
+  'pillar-refactor',
+  'project-domain-hardening',
+  'project-ssot-convergence',
+  'typed-lisp-compiler-convergence',
+];
+
 const usage = `Usage:
   node scripts/check-typed-lisp-compiler.mjs [--json] [--strict-toolchain]
 
@@ -205,6 +216,27 @@ function main() {
       } else if (argv[0] === 'emit-workflows') {
         if (!Array.isArray(emit.compiled?.payload?.workflows) || emit.compiled.payload.workflows.length === 0) {
           diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_WORKFLOW_PROJECTION_MISSING_WORKFLOWS', 'emit-workflows must project structured workflows[]'));
+        }
+        const workflows = emit.compiled?.payload?.workflows ?? [];
+        const names = new Set(workflows.map((workflow) => workflow.name));
+        for (const required of REQUIRED_WORKFLOW_PROJECTIONS) {
+          if (!names.has(required)) {
+            diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_WORKFLOW_PROJECTION_MISSING_REQUIRED_WORKFLOW', `emit-workflows must project workflow ${required}`));
+          }
+        }
+        for (const workflow of workflows) {
+          if (!workflow.workflow_id || !workflow.status) {
+            diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_WORKFLOW_PROJECTION_MISSING_ID_STATUS', `workflow projection ${workflow.name ?? '<unknown>'} must include workflow_id and status`));
+          }
+          if (!Array.isArray(workflow.steps) || workflow.steps.length === 0) {
+            diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_WORKFLOW_PROJECTION_MISSING_STEPS', `workflow projection ${workflow.name ?? '<unknown>'} must include steps`));
+          }
+          if (!Number.isInteger(workflow.risk_gate_count) || workflow.risk_gate_count <= 0) {
+            diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_WORKFLOW_PROJECTION_MISSING_RISK_GATES', `workflow projection ${workflow.name ?? '<unknown>'} must include risk gates`));
+          }
+          if (!Number.isInteger(workflow.completion_criteria_count) || workflow.completion_criteria_count <= 0) {
+            diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_WORKFLOW_PROJECTION_MISSING_COMPLETION', `workflow projection ${workflow.name ?? '<unknown>'} must include completion criteria`));
+          }
         }
         const domainHardening = emit.compiled?.payload?.workflows?.find((workflow) => workflow.name === 'project-domain-hardening');
         if (!Array.isArray(domainHardening?.steps) || !domainHardening.steps.includes('s10')) {
