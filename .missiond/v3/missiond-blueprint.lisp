@@ -1147,7 +1147,8 @@
        "Universe status MUST expose current and target maturity for each registered project."
        "A project marked M6 but not M10 MUST list concrete M7/M8/M9/M10 gaps instead of claiming full V3 parity."
        "Intent-only projects MUST NOT be marked M6 or M10; they must first split project-local blueprints and prove code-isomorphism/current-code-mapping."
-       "Resident master and swarm runners MUST treat M7/M8/M9/M10 as separate gates: M7 runtime projection, M8 event bus and commit convergence, M9 worker smoke with durable evidence, and M10 final convergence report."])
+       "Resident master and swarm runners MUST treat M7/M8/M9/M10 as separate gates: M7 runtime projection, M8 event bus and commit convergence, M9 worker smoke with durable evidence, and M10 final convergence report."
+       "Core infrastructure can reach M10 while still needing project-domain-hardening; production-ready claims require .missiond/workflows/project-domain-hardening.lisp to audit domain model, compatibility ledger, runtime registration, event contract, hot-path wiring, and regression matrix."])
 
   (project-maturity-registry
     :schema "missiond.project-maturity-registry.v1"
