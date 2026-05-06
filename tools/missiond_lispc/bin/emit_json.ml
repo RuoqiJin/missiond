@@ -31,6 +31,28 @@ let rec count_forms named node =
   | List (_, _, xs) -> here + (xs |> List.map (count_forms named) |> List.fold_left ( + ) 0)
   | _ -> here
 
+let rec collect_forms named node =
+  let here = if is_list node named then [ node ] else [] in
+  match node with
+  | List (_, _, xs) -> here @ (xs |> List.map (collect_forms named) |> List.flatten)
+  | _ -> here
+
+let workflow_step_id = function
+  | List (_, _, _ :: id_node :: _) -> atom_text id_node
+  | _ -> None
+
+let collect_workflow_step_ids props wf =
+  match prop ":steps" props with
+  | Some value ->
+      let direct = list_texts value in
+      if direct <> [] then direct
+      else collect_forms "step" value |> List.filter_map workflow_step_id
+  | None -> collect_forms "step" wf |> List.filter_map workflow_step_id
+
+let count_named_or_list_entries named value =
+  let named_count = count_forms named value in
+  if named_count > 0 then named_count else List.length (list_texts value)
+
 let project_entry_to_json node =
   let props = keyword_props ~start:1 node in
   let checks =
@@ -80,9 +102,7 @@ let workflow_entry_to_json file =
         | None -> []
       in
       let steps =
-        match prop ":steps" props with
-        | Some value -> list_texts value
-        | None -> []
+        collect_workflow_step_ids props wf
       in
       let name =
         match children wf with
@@ -91,12 +111,12 @@ let workflow_entry_to_json file =
       in
       let risk_gate_count =
         match prop ":risk-gates" props with
-        | Some value -> count_forms "gate" value
+        | Some value -> count_named_or_list_entries "gate" value
         | None -> 0
       in
       let completion_criteria_count =
         match prop ":completion" props with
-        | Some value -> count_forms "criterion" value
+        | Some value -> count_named_or_list_entries "criterion" value
         | None -> 0
       in
       Printf.sprintf

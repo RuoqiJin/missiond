@@ -157,6 +157,10 @@ function main() {
         if (!Array.isArray(emit.compiled?.payload?.workflows) || emit.compiled.payload.workflows.length === 0) {
           diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_WORKFLOW_PROJECTION_MISSING_WORKFLOWS', 'emit-workflows must project structured workflows[]'));
         }
+        const domainHardening = emit.compiled?.payload?.workflows?.find((workflow) => workflow.name === 'project-domain-hardening');
+        if (!Array.isArray(domainHardening?.steps) || !domainHardening.steps.includes('s10')) {
+          diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_WORKFLOW_PROJECTION_MISSING_STRUCTURED_STEPS', 'emit-workflows must project step ids from structured (step sN ...) forms'));
+        }
       }
     }
   } else if (opts.strictToolchain) {
