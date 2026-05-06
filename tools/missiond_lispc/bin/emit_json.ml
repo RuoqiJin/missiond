@@ -209,19 +209,7 @@ let emit_workflows workflow_dir =
   try
     let files = read_sorted_files workflow_dir ".lisp" in
     let sources = files |> List.map read_file in
-    let strict_workflows =
-      [
-        "project-ssot-convergence.lisp";
-        "project-domain-hardening.lisp";
-        "typed-lisp-compiler-convergence.lisp";
-      ]
-    in
-    let diagnostics =
-      files
-      |> List.filter (fun file -> List.mem (Filename.basename file) strict_workflows)
-      |> List.map Workflow_schema.validate
-      |> List.flatten
-    in
+    let diagnostics = Workflow_schema.validate_dir workflow_dir in
     let payload =
       Printf.sprintf {|{"workflow_dir":%s,"files":[%s],"workflows":[%s]}|}
         (json_string workflow_dir)

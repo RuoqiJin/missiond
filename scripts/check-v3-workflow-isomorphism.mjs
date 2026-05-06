@@ -120,33 +120,21 @@ function fail(message) {
 
 function runOcamlWorkflowChecks(repoRoot, engine) {
   if (engine === 'js') return { requested: engine, mode: 'js', ok: true, diagnostics: [] };
-  const files = [
-    DEFAULT_FILES.projectSsotConvergence,
-    DEFAULT_FILES.projectDomainHardening,
-    '.missiond/workflows/typed-lisp-compiler-convergence.lisp',
-  ];
-  const results = files.map((file) => ({
-    file,
-    attempt: maybeRunLispc(['check-workflow', '--file', file], { engine, repoRoot }),
-  }));
-  const firstUnavailable = results.find((r) => r.attempt.mode === 'js-fallback');
-  if (firstUnavailable) {
+  const workflowDir = '.missiond/workflows';
+  const attempt = maybeRunLispc(['check-workflow-dir', '--workflow-dir', workflowDir], { engine, repoRoot });
+  if (attempt.mode === 'js-fallback') {
     return {
       requested: engine,
       mode: 'js-fallback',
       ok: true,
-      diagnostics: firstUnavailable.attempt.result?.diagnostics ?? [],
+      diagnostics: attempt.result?.diagnostics ?? [],
     };
   }
-  if (engine === 'ocaml' && results.some((r) => r.attempt.result?.unavailable)) {
-    const result = results.find((r) => r.attempt.result?.unavailable)?.attempt.result;
+  const result = attempt.result;
+  if (engine === 'ocaml' && result?.unavailable) {
     return { requested: engine, mode: 'ocaml', strictResult: result };
   }
-  const diagnostics = [];
-  for (const row of results) {
-    const result = row.attempt.result;
-    if (result?.ok !== true) diagnostics.push(...(result?.diagnostics ?? []).map((d) => ({ ...d, file: d.file || row.file })));
-  }
+  const diagnostics = result?.ok === true ? [] : (result?.diagnostics ?? []);
   return { requested: engine, mode: 'ocaml', ok: diagnostics.length === 0, diagnostics };
 }
 
@@ -581,6 +569,8 @@ function requireText(diagnostics, file, source, needle) {
 
 function buildFixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'missiond-v3-workflow-isomorphism-'));
+  fs.mkdirSync(path.join(root, 'tools'), { recursive: true });
+  fs.symlinkSync(path.resolve('tools/missiond_lispc'), path.join(root, 'tools/missiond_lispc'), 'dir');
   writeFixture(root, DEFAULT_FILES.blueprint, `
 (missiond-blueprint
   (artifact-contracts
@@ -876,6 +866,10 @@ manager action — see Lisp implemented-surface mission_workflow
 Lisp 源: intent-flow.lisp`);
   writeFixture(root, DEFAULT_FILES.projectSsotConvergence, `
 (workflow project-ssot-convergence
+  :workflow_id project-ssot-convergence
+  :status active
+  :source_plans [fixture]
+  :steps [s1b s2 s8 s8c s9]
   :inputs [project-id project-root canonical-intent existing-code dirty-baseline context-pack-path? acceptance]
   :core
     ((step s1b :id choose-write-strategy
@@ -912,7 +906,9 @@ Lisp 源: intent-flow.lisp`);
      (step s10 :id final-production-readiness-report :logic "report"))
   :risk-gates
     ((gate g1 :rule "No destructive DB migration")
-     (gate g2 :rule "No production deploy, DNS mutation, or secret mutation")))`);
+     (gate g2 :rule "No production deploy, DNS mutation, or secret mutation"))
+  :completion
+    ((criterion c1 :rule "Domain model and authority chain are explicit")))`);
   return root;
 }
 

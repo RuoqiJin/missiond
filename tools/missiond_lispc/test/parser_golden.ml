@@ -99,6 +99,38 @@ let test_workflow_missing_risk_gate () =
       assert_true "missing risk gate is diagnosed"
         (has_code "workflow.risk-gates_missing" diagnostics))
 
+let test_workflow_dir_validates_all_files () =
+  with_temp_dir "workflow-dir" (fun dir ->
+      let valid = Filename.concat dir "valid.lisp" in
+      let invalid = Filename.concat dir "invalid.lisp" in
+      let oc = open_out_bin valid in
+      output_string oc
+        {|
+(workflow valid-workflow
+  :workflow_id valid-workflow
+  :status active
+  :source_plans [fixture]
+  :steps [s1]
+  :risk-gates [manual]
+  :completion (:checks ["ok"])
+  :core ((step s1 :logic "run")))
+|};
+      close_out oc;
+      let oc = open_out_bin invalid in
+      output_string oc
+        {|
+(workflow invalid-workflow
+  :workflow_id invalid-workflow
+  :status active
+  :source_plans [fixture]
+  :steps [s1]
+  :core ((step s1 :logic "run")))
+|};
+      close_out oc;
+      let diagnostics = Workflow_schema.validate_dir dir in
+      assert_true "workflow dir catches invalid file"
+        (has_code "workflow.risk-gates_missing" diagnostics))
+
 let test_auth_domain_requires_compatibility_ledger () =
   let source =
     String.concat "\n"
@@ -200,6 +232,7 @@ let () =
   test_v3_missing_entry ();
   test_v3_step_order ();
   test_workflow_missing_risk_gate ();
+  test_workflow_dir_validates_all_files ();
   test_auth_domain_requires_compatibility_ledger ();
   test_auth_structured_function_requires_runtime_projection ();
   test_project_function_requires_ordered_steps ();

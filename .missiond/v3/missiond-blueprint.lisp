@@ -2099,14 +2099,15 @@
         :egress [workflow.lisp workflow_row compiled_yaml run_result])
       (function typed-lisp-compiler
         :surface typed-lisp-compiler
-        :entry [missiond-lispc.check-v3 missiond-lispc.check-workflow missiond-lispc.check-project missiond-lispc.check-project-dir missiond-lispc.check-auth-domain missiond-lispc.emit-json missiond-lispc.emit-v3 missiond-lispc.emit-universe missiond-lispc.emit-workflows]
+        :entry [missiond-lispc.check-v3 missiond-lispc.check-workflow missiond-lispc.check-workflow-dir missiond-lispc.check-project missiond-lispc.check-project-dir missiond-lispc.check-auth-domain missiond-lispc.emit-json missiond-lispc.emit-v3 missiond-lispc.emit-universe missiond-lispc.emit-workflows]
         :core ((step s1 :logic "parse Lisp SSOT files into source-located typed AST nodes")
                (step s2 :logic "validate pillar/function entry-core-egress surfaces, workflow contracts, universe registry, maturity gates, and event/outbox contracts")
                (step s3 :logic "emit stable JSON diagnostics for JS compatibility wrappers and CI gates")
                (step s4 :logic "generate compiled JSON projections only through checker/compiler commands, never by hand; project universe and workflows emit structured payloads rather than token-presence booleans")
                (step s5 :logic "let Rust runtime read compiled JSON first only when the compiled snapshot is not older than source Lisp, then diagnostic-fallback to Lisp/default behavior")
-               (step s6 :logic "validate project-local .missiond blueprint directories with typed AST before M10 maturity can rely on project-local shape evidence")
-               (step s7 :logic "use Auth as the first external project-domain semantic checker sample before shrinking more project checkers"))
+               (step s6 :logic "validate the full .missiond/workflows directory with typed AST so old methodology workflows and active runtime workflows carry explicit source plans, risk gates, completion criteria, and step contracts")
+               (step s7 :logic "validate project-local .missiond blueprint directories with typed AST before M10 maturity can rely on project-local shape evidence")
+               (step s8 :logic "use Auth as the first external project-domain semantic checker sample before shrinking more project checkers"))
         :egress [typed_diagnostics compiled_json compiled_runtime_snapshot compiled_project_universe compiled_workflow_contracts js_wrapper_result]))
 
     (pillar review
@@ -2642,7 +2643,7 @@
 
     (surface typed-lisp-compiler
       :status "code-aligned"
-      :implements [lisp-reader typed-ast semantic-validator diagnostic-json projection-json structured-project-universe-json structured-workflow-contract-json project-directory-structural-gate runtime-compiled-json-loader auth-domain-sample]
+      :implements [lisp-reader typed-ast semantic-validator diagnostic-json projection-json structured-project-universe-json structured-workflow-contract-json workflow-directory-structural-gate project-directory-structural-gate runtime-compiled-json-loader auth-domain-sample]
       :code ["tools/missiond_lispc/dune-project"
              "tools/missiond_lispc/bin/dune"
              "tools/missiond_lispc/bin/main.ml"
@@ -2661,7 +2662,7 @@
              "scripts/check-auth-domain-ssot.mjs"
              "crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"
              ".missiond/workflows/typed-lisp-compiler-convergence.lisp"]
-      :note "Lisp remains the canonical authoring SSOT. The OCaml layer is a dev-time typed compiler/checker/projection layer for source-located diagnostics and generated runtime JSON; project universe and workflow projections include structured project/maturity/workflow payloads, and project-directory structural gates validate each registered project's active blueprint shards before M10 maturity can rely on project-local shape evidence. OCaml is not in the daemon hot path. JS checkers remain compatibility wrappers and code-anchor validators while OCaml takes ownership of Lisp AST semantics.")
+      :note "Lisp remains the canonical authoring SSOT. The OCaml layer is a dev-time typed compiler/checker/projection layer for source-located diagnostics and generated runtime JSON; project universe and workflow projections include structured project/maturity/workflow payloads, workflow-directory gates validate every .missiond/workflows/*.lisp contract, and project-directory structural gates validate each registered project's active blueprint shards before M10 maturity can rely on project-local shape evidence. OCaml is not in the daemon hot path. JS checkers remain compatibility wrappers and code-anchor validators while OCaml takes ownership of Lisp AST semantics.")
 
     (surface review-gate
       :status "code-aligned"

@@ -27,6 +27,15 @@
      (step s6 :name write-report
        :logic "Write a candidate memory / infrastructure issue inventory report for review; do not create BoardTask until the old Board queue and project SSOT coverage are ready."))
   :egress [candidate-memory-report infrastructure-issue-inventory project-constant-candidates]
+  :risk-gates
+    ((gate g1 :rule "Default mode is observe-only and never writes/deletes active KB.")
+     (gate g2 :rule "Conversation samples are bounded and provider role attribution must be stable before any candidate extraction.")
+     (gate g3 :rule "Facts already represented in project SSOT Lisp are excluded from active memory candidates.")
+     (gate g4 :rule "Embedding, QWEN, and reranker jobs remain deferred until memory-search-v2 is explicitly enabled."))
+  :completion
+    ((criterion c1 :rule "The workflow can produce a candidate-memory report without mutating KB or Board.")
+     (criterion c2 :rule "Each candidate is routed to project constants, blueprint/evidence, Universe registry, workflow Lisp, or infrastructure issue inventory.")
+     (criterion c3 :rule "Rejected noise classes are explicit and machine-readable."))
   :guardrails
     ((rule :id no-default-kb-write :text "Default workflow never writes or deletes KB entries.")
      (rule :id ssot-supersedes-memory :text "Facts already represented in project SSOT Lisp are marked superseded-by-lisp and excluded from active memory candidates.")

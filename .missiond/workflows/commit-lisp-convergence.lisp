@@ -29,6 +29,15 @@
      (step s7 :name report
        :logic "Write .missiond/v3/runtime/commit-lisp-convergence/<sha>.report.lisp with status, task id, and evidence refs."))
   :egress [commit-convergence-report backfill-boardtask commit-convergence-status]
+  :risk-gates
+    ((gate g1 :rule "Commit coverage is computed from committed snapshots, not dirty worktree state.")
+     (gate g2 :rule "Backfill tasks are visible, deduped, and never hide/delete historical Board tasks.")
+     (gate g3 :rule "Lisp/checker/evidence-only backfill commits do not recursively create another backfill task.")
+     (gate g4 :rule "Routine implementation goes through BoardTask/Autopilot, not legacy direct slot execution."))
+  :completion
+    ((criterion c1 :rule "Each commit event is classified as covered, needs-backfill, lisp-only, checker-only, or unknown-project.")
+     (criterion c2 :rule "Needs-backfill creates exactly one visible deduped BoardTask with commit hash and changed code evidence.")
+     (criterion c3 :rule "A report is written under .missiond/v3/runtime/commit-lisp-convergence/<sha>.report.lisp."))
   :guardrails
     ((rule :id no-hidden-work :text "Backfill tasks are visible and deduped; old Board tasks are not hidden or deleted.")
      (rule :id no-recursion :text "Lisp/checker/evidence-only backfill commits must not create another backfill task.")

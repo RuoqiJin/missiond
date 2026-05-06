@@ -12,6 +12,14 @@
 ;;   "数据层向 lisp 对齐" 级别重构时, 参考本 workflow 避免重复踩坑.
 
 (workflow pillar-refactor
+  :schema "missiond.workflow.methodology.v1"
+  :workflow_id pillar-refactor
+  :status historical-methodology
+  :source_plans [memory-pillar-v0.5.0-refactor]
+  :steps [s1 s2 s3 s4 s5]
+  :risk-gates [manual-review-only no-runtime-autonomous-execution]
+  :completion (:checks ["methodology reference only; not a live execution contract"]
+               :artifact "historical pillar refactor workflow")
   (granularity meta-methodology)
   (reusable-for "一个 pillar 的完整 store-manager 重构 (lisp 设计 + execution 施工 + 双向同构验证 + drop migration + polish)")
   (not-for "单 module 小改 / 单 trait 重构 / 纯 feature add / 局部 bug fix")

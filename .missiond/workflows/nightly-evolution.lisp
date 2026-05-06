@@ -31,6 +31,15 @@
      (step s7 :name checkpoint
        :logic "Update resident master checkpoint so daemon restart can resume the next night; no KB task or memory mutation is created in default mode."))
   :egress [nightly-evolution-report boardtask master-control-checkpoint]
+  :risk-gates
+    ((gate g1 :rule "Default mode writes a report only and does not mutate code or KB.")
+     (gate g2 :rule "Default evidence is restricted to MissionD V3 blueprint, V3 checker output, static convergence snapshot, and recent .missiond/v3 commits.")
+     (gate g3 :rule "Follow-up BoardTasks are visible and never hide/delete historical tasks.")
+     (gate g4 :rule "Scheduled runs are opt-in while active supervision is ongoing."))
+  :completion
+    ((criterion c1 :rule "A nightly report is written with findings classified by risk.")
+     (criterion c2 :rule "No KB, provider log, historical conversation, or Board-open-task input is used in default mode.")
+     (criterion c3 :rule "Resident master checkpoint records the report path and next scheduled/resume state."))
   :guardrails
     ((rule :id observe-first :text "Default mode writes report only.")
      (rule :id visible-tasks :text "The workflow may create visible BoardTasks; it must not hide, delete, or bulk-mutate historical tasks.")

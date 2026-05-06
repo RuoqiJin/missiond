@@ -107,6 +107,7 @@ const REQUIRED_BLUEPRINT_TOKENS = [
   ':surface typed-lisp-compiler',
   '(surface typed-lisp-compiler',
   'tools/missiond_lispc/bin/main.ml',
+  'check-workflow-dir',
   'tools/missiond_lispc/bin/schema_v3.ml',
   'tools/missiond_lispc/bin/emit_json.ml',
   'node scripts/check-typed-lisp-compiler.mjs',
@@ -185,6 +186,7 @@ function main() {
       ['emit-v3', '--blueprint', BLUEPRINT],
       ['emit-universe', '--blueprint', BLUEPRINT],
       ['emit-workflows', '--workflow-dir', '.missiond/workflows'],
+      ['check-workflow-dir', '--workflow-dir', '.missiond/workflows'],
       ['check-project-dir', '--dir', '.missiond/frontend'],
     ]) {
       const emit = runLispc(argv);

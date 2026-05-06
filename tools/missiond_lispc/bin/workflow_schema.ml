@@ -102,3 +102,14 @@ let validate file =
   with
   | Reader_error (l, msg) -> [ diag file l "parse.error" msg ]
   | Sys_error msg -> [ diag file { line = 1; column = 1 } "io.error" msg ]
+
+let workflow_files dir =
+  Sys.readdir dir
+  |> Array.to_list
+  |> List.filter (fun name -> Filename.check_suffix name ".lisp")
+  |> List.sort String.compare
+  |> List.map (Filename.concat dir)
+
+let validate_dir dir =
+  try workflow_files dir |> List.map validate |> List.flatten
+  with Sys_error msg -> [ diag dir { line = 1; column = 1 } "io.error" msg ]

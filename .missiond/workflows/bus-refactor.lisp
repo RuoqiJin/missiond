@@ -11,6 +11,14 @@
 ;;   - 想上架构冻结锁时
 
 (workflow bus-refactor
+  :schema "missiond.workflow.methodology.v1"
+  :workflow_id bus-refactor
+  :status historical-methodology
+  :source_plans [event-bus-v2-refactor]
+  :steps [s1 s2 s3 s4 s5]
+  :risk-gates [manual-review-only no-runtime-autonomous-execution]
+  :completion (:checks ["methodology reference only; not a live execution contract"]
+               :artifact "historical bus refactor workflow")
   (granularity meta-methodology)
   (reusable-for "事件总线 / DB 层 / IPC 协议 / 状态机 / 跨 crate 抽象层 等'神经中枢级'重构")
   (not-for "局部 bug fix / 单文件重构 / feature add")
