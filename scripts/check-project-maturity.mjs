@@ -325,13 +325,13 @@ function hasChecker(root, registry) {
 function hasCodeIsomorphismEvidence(root, registry, allLispText, blueprintText) {
   const checks = (registry?.checks ?? []).join('\n');
   const source = `${checks}\n${blueprintText}\n${allLispText}`;
-  if (/\b(code[-_ ]isomorphism|code[-_ ]aligned|current[-_ ]code[-_ ]mapping|code[-_ ]mapping|surface[-_ ]map|implementation[-_ ]map)\b/i.test(source)) {
+  if (/\b(code[-_ ]isomorphism|code[-_ ]aligned|current[-_ ]code[-_ ]mapping|current[-_ ]code[-_ ]mapped|code[-_ ]mapping|code[-_ ]mapped|surface[-_ ]map|implementation[-_ ]map)\b/i.test(source)) {
     return true;
   }
   if (root) {
     for (const rel of ['.missiond/check.sh', 'scripts/check-project-ssot.mjs']) {
       const file = path.join(root, rel);
-      if (fs.existsSync(file) && /\b(code[-_ ]isomorphism|current[-_ ]code[-_ ]mapping|surface[-_ ]map)\b/i.test(safeRead(file))) {
+      if (fs.existsSync(file) && /\b(code[-_ ]isomorphism|current[-_ ]code[-_ ]mapping|current[-_ ]code[-_ ]mapped|surface[-_ ]map)\b/i.test(safeRead(file))) {
         return true;
       }
     }
@@ -469,7 +469,7 @@ function buildFixture() {
     :runtime-projection [APP_PORT]))`);
   fs.writeFileSync(path.join(root, 'projects/app/.missiond/backend/app-backend-blueprint.lisp'), `(project-backend-blueprint app
   :schema "project.backend-blueprint.v1"
-  :code-isomorphism current-code-mapping
+  :code-isomorphism current-code-mapped
   (pillar api
     (function app-api
       :entry [HTTP]

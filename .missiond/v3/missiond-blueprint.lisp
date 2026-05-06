@@ -627,7 +627,7 @@
 	       "Autopilot/flow-engine BoardTask dispatch MUST bind conversations.task_id to the active BoardTask via a bounded retry helper at dispatch time (5 attempts at 200 ms) and MUST re-bind after the worker final settle window to cover provider JSONL/session-discovery races; completion-time durable_provider_completion_for_slot_task remains a fallback. The dispatch site is the single rebind authority: when a new BoardTask claims a slot whose conversation row carries a different earlier task_id, Autopilot MUST authoritatively overwrite conversations.task_id to the incoming task. The conservative `conversation_task_binding_update_allowed` predicate is reserved for the post-completion durable backfill path (set only when unbound or already matching); the pre-dispatch path uses a force-rebind helper that logs the displaced task id for audit. Historical attribution lives in durable messages (mission_conversation_query(taskId=...) MUST also recover provider conversations whose durable messages contain the BoardTask id), so a stale conversations.task_id pointer is unnecessary and previously caused mission_conversation_query(taskId=<new>) to return the prior task's conversation (BoardTask 31e5449c-e315-4003-ad59-c3eebd5eb837 evidence: slot-claude-code-default returned the 5599b07a conversation when queried by 738c96f5)."
        "Autopilot dispatch MUST enforce a single-running-BoardTask-per-slot invariant: before claim_board_task, scan running tasks for any other BoardTask whose claim_executor_type=pty_slot and claim_executor_id matches the incoming slot id, and unclaim each one with a durable note. A queued task with assignee=slot but no claim_executor_id is NOT considered running on the slot and MUST NOT be unclaimed by this guard. The display layer (handlers/compute/slot.rs `active_board_task_for_slot`) projects the slot's running task from this single-claim invariant, so two tasks can never appear running on the same slot for the same dispatch tick."
        "Autopilot close path MUST gate PTY-only completion (durable provider final unavailable after settle) for delegated worker BoardTasks (description carries `## Swarm metadata` or `## Dispatch metadata`). pty_only_close_blocker requires the PTY summary to contain a structured artifact marker (Findings / Evidence / Recommendations / Verification / Summary heading / acceptance evidence) before close; otherwise the BoardTask stays running so the watchdog/next tick can re-extract once the provider log lands. Repro evidence: BoardTask 31e5449c-e315-4003-ad59-c3eebd5eb837 child tasks a5ebf6c4..., 5599b07a..., b5be6eed... had Board summary notes that captured an intermediate assistant sentence while the structured artifact landed only in Claude JSONL after settle."
-       "Autopilot durable final acceptance evidence MUST recognize provider final summaries that say gates green/pass or final M10 evidence-only gate confirmation, not just legacy words like verified/passed/changed files. Repro evidence: M10 child tasks 5ecb01cd..., d699c9c7..., and 66aed32d... produced durable ClaudeCode finals with `Both gates green` / `Final M10 evidence-only gate confirmation` but were incorrectly blocked as missing-acceptance-evidence."
+       "Autopilot durable final acceptance evidence MUST recognize provider final summaries that say gates green/pass, checks pass, checker passed, check.sh passed, acceptance commands passed, or final M10 evidence-only gate confirmation, not just legacy words like verified/passed/changed files. Repro evidence: M10 child tasks 5ecb01cd..., d699c9c7..., 66aed32d..., ae72b0ec..., and f6c5475d... produced durable ClaudeCode finals with gate/checker completion language but were incorrectly blocked as missing-acceptance-evidence."
        "mission_swarm_run callers (resident master, autopilot, ad-hoc operators) MUST pass multi-project objectives via target_project_ids/targetProjectIds/target_projects/targetProjects structurally; project lists embedded only in the objective prose are ignored by the tool because the schema does not parse natural language. The MCP schema MUST expose target_project_ids and aliases as an array property of mission_swarm_run so MCP clients can pass it without guessing naming conventions. Failure mode (BoardTask 31e5449c regression): when only project_id was supplied and the objective text named multiple registered projects in prose, target_projects collapsed to project_id only and the swarm could not fan out across the universe."
 	       "Autopilot MUST treat explicit engine_hint/pool_hint as hard constraints when the V3 workstation-pool declares at least one matching worker: resolve matching workers against the full workstation-pool before task_class fallback can narrow candidates away; if that worker is busy or stopped, the task waits instead of silently spending a different provider. Fallback to a non-matching worker is allowed only when no declared worker satisfies the hint at all, and that fallback MUST record a durable reroute_reason as a BoardTask note before dispatching so the operator can see why the requested engine/pool was not used. Autopilot close-owner MUST block task close when a worker final says it could not write the requested deliverable because of plan/read-only mode."
 	       "mission_task_delegate intent=research without an explicit Claude coding model/model_profile MUST prefer the workstation-pool gemini researcher slot (slot-gemini-ultra) when registered; the researcher slot-template's :default-model-profile is research-default, which binds to the gemini-ultra worker. Auto-provisioning a dynamic Claude slot for research is forbidden while a V3 gemini researcher slot exists; the BoardTask is queued unassigned and the autopilot routes it to the gemini slot once idle. Explicit model_profile=coding-default-opus-4-7 (or any Claude profile) still routes the BoardTask to Claude."
@@ -1155,24 +1155,24 @@
     :common-m6-to-v3-gap [runtime-projection event-bus commit-backfill worker-operational final-convergence]
     (maturity :id missiond :current M10 :target M10 :gap [])
     (maturity :id board :current M10 :target M10 :gap [])
-    (maturity :id jarvis :current M6 :target M10 :gap [runtime-projection event-bus worker-operational final-convergence])
+    (maturity :id jarvis :current M10 :target M10 :gap [])
     (maturity :id jarvis-forge :current M10 :target M10 :gap [])
-    (maturity :id jarvis-mechanic :current M6 :target M10 :gap [runtime-projection event-bus worker-operational final-convergence])
-    (maturity :id xjpcode :current M6 :target M10 :gap [runtime-projection event-bus worker-operational final-convergence])
-    (maturity :id neural-codegen :current M6 :target M10 :gap [runtime-projection event-bus worker-operational final-convergence])
-    (maturity :id semantic-terminal :current M6 :target M10 :gap [runtime-projection event-bus worker-operational final-convergence])
-    (maturity :id xiaojinpro-backend :current M7 :target M10 :gap [event-bus worker-operational final-convergence])
-    (maturity :id deploy-center :current M9 :target M10 :gap [final-convergence])
+    (maturity :id jarvis-mechanic :current M10 :target M10 :gap [])
+    (maturity :id xjpcode :current M10 :target M10 :gap [])
+    (maturity :id neural-codegen :current M10 :target M10 :gap [])
+    (maturity :id semantic-terminal :current M10 :target M10 :gap [])
+    (maturity :id xiaojinpro-backend :current M10 :target M10 :gap [])
+    (maturity :id deploy-center :current M10 :target M10 :gap [])
     (maturity :id deploy-agent :current M10 :target M10 :gap [])
-    (maturity :id auth :current M7 :target M10 :gap [event-bus worker-operational final-convergence auth-architecture-hardening])
-    (maturity :id router :current M7 :target M10 :gap [event-bus final-convergence])
-    (maturity :id payments :current M7 :target M10 :gap [event-bus final-convergence])
-    (maturity :id asr :current M9 :target M10 :gap [final-convergence])
-    (maturity :id timeline :current M9 :target M10 :gap [final-convergence])
-    (maturity :id pcea :current M5 :target M10 :gap [code-isomorphism runtime-projection event-bus worker-operational final-convergence])
-    (maturity :id secret-store :current M5 :target M10 :gap [code-isomorphism runtime-projection event-bus worker-operational final-convergence])
-    (maturity :id xiaojin-blog :current M5 :target M10 :gap [code-isomorphism runtime-projection event-bus worker-operational final-convergence])
-    (maturity :id cuthub :current M5 :target M10 :gap [code-isomorphism runtime-projection event-bus worker-operational final-convergence]))
+    (maturity :id auth :current M10 :target M10 :gap [])
+    (maturity :id router :current M10 :target M10 :gap [])
+    (maturity :id payments :current M10 :target M10 :gap [])
+    (maturity :id asr :current M10 :target M10 :gap [])
+    (maturity :id timeline :current M10 :target M10 :gap [])
+    (maturity :id pcea :current M10 :target M10 :gap [])
+    (maturity :id secret-store :current M10 :target M10 :gap [])
+    (maturity :id xiaojin-blog :current M10 :target M10 :gap [])
+    (maturity :id cuthub :current M10 :target M10 :gap []))
 
   (project-blueprint-registry
     :schema "missiond.project-blueprint-registry.v1"
@@ -1197,7 +1197,7 @@
       :checks ["bash .missiond/check.sh"]
       :missiond-role "registered project; Lisp/component reuse engine, not MissionD runtime orchestrator"
       :surface project-registry)
-    ;; ── Part1 devtools — sibling devtool repos with M6 SSOT, registered as a group ──
+    ;; ── Part1 devtools — sibling devtool repos with M10 SSOT, registered as a group ──
     (project :id jarvis
       :kind rust-multi-crate
       :root "/Users/jinchen/Projects/jarvis"
@@ -1251,7 +1251,7 @@
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/xiaojinpro-backend-blueprint.lisp"
-      :status ssot-current-code-mapped
+      :status v3-runtime-ssot
       :checks ["node scripts/check-xjp-ssot-complete.mjs"]
       :surface project-registry)
 	    (project :id deploy-center
@@ -1259,7 +1259,7 @@
 	      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/deploy-center"
 	      :intent ".missiond/intent.lisp"
 	      :backend ".missiond/backend/deploy-center-backend-blueprint.lisp"
-		      :status ssot-worker-operational
+		      :status v3-runtime-ssot
 	      :capability deploy-ops
 	      :surface project-registry)
     (project :id deploy-agent
@@ -1276,35 +1276,35 @@
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/auth"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/auth-backend-blueprint.lisp"
-      :status ssot-current-code-mapped
+      :status v3-runtime-ssot
       :surface project-registry)
     (project :id router
       :kind rust-service
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/router"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/router-backend-blueprint.lisp"
-      :status ssot-current-code-mapped
+      :status v3-runtime-ssot
       :surface project-registry)
     (project :id payments
       :kind rust-workspace-service
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/payments"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/payments-backend-blueprint.lisp"
-      :status ssot-current-code-mapped
+      :status v3-runtime-ssot
       :surface project-registry)
     (project :id asr
       :kind rust-service
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/asr"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/asr-backend-blueprint.lisp"
-      :status ssot-worker-operational
+      :status v3-runtime-ssot
       :surface project-registry)
     (project :id timeline
       :kind rust-service
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/timeline"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/timeline-backend-blueprint.lisp"
-      :status ssot-worker-operational
+      :status v3-runtime-ssot
       :surface project-registry)
     (project :id pcea
       :kind rust-vite-app
@@ -1312,7 +1312,7 @@
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/pcea-backend-blueprint.lisp"
       :frontend ".missiond/frontend/pcea-frontend-blueprint.lisp"
-      :status ssot-seeded
+      :status project-ssot-owned
       :surface project-registry)
 	    (project :id xjp-deploy-center
 	      :kind ops-service-source
@@ -2905,7 +2905,7 @@
              "crates/missiond-mcp/src/tools/knowledge/project.rs"
              "scripts/check-v3-project-registry-isomorphism.mjs"
              "scripts/check-project-maturity.mjs"]
-      :note "Code-aligned destination for project registry/root resolution. project.rs is the mission_project facade; project/registry.rs owns list/get/set_active/sync/init/import_universe; project/universe.rs owns mission_project(action=universe) and projects service-runtime-universe entries such as auth production domain/deployment/DNS capability to master, workers, and Board System. ProjectRegistry::resolve owns longest-prefix project lookup; inactive project aliases never participate in cwd resolution, and mission_project init archives inactive path aliases before upsert so stale aliases cannot block canonical root correction. check-project-maturity.mjs is the project-universe maturity gate: default --min-level M6 proves current-code SSOT closure, while --min-level M10 is the explicit closure gate for V3 parity across project-local runtime projection, event bus, worker operation, and final convergence. It resolves the MissionD blueprint from the checker script directory, not process.cwd, so external-project workers can run it from the target project root. [details: .missiond/v3/evidence/blueprint-notes.lisp#note-016]")
+      :note "Code-aligned destination for project registry/root resolution. project.rs is the mission_project facade; project/registry.rs owns list/get/set_active/sync/init/import_universe; project/universe.rs owns mission_project(action=universe) and projects service-runtime-universe entries such as auth production domain/deployment/DNS capability to master, workers, and Board System. ProjectRegistry::resolve owns longest-prefix project lookup; inactive project aliases never participate in cwd resolution, and mission_project init archives inactive path aliases before upsert so stale aliases cannot block canonical root correction. check-project-maturity.mjs is the project-universe maturity gate: --min-level M6 proves current-code SSOT closure; --min-level M10 proves V3 parity across runtime projection, event bus, worker operation, and final convergence. It resolves the MissionD blueprint from the checker script directory so external-project workers can run it from the target root. [details: .missiond/v3/evidence/blueprint-notes.lisp#note-016]")
 
     (surface board-frontend
       :status "code-aligned"

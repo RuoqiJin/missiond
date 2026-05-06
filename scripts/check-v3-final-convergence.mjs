@@ -70,7 +70,7 @@ const LIVE_CHECKS = [
   },
   {
     id: 'project-maturity',
-    argv: ['scripts/check-project-maturity.mjs', '--min-level', 'M6'],
+    argv: ['scripts/check-project-maturity.mjs', '--min-level', 'M10'],
     timeoutMs: 60_000,
   },
 ];

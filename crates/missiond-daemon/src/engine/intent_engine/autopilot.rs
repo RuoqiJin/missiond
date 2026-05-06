@@ -1220,6 +1220,19 @@ fn worker_final_has_acceptance_evidence(summary: &str) -> bool {
         "gate confirmation",
         "evidence-only gate confirmation",
         "final m10 evidence-only gate",
+        "checks pass",
+        "checks passed",
+        "checker passes",
+        "checker passed",
+        "check.sh passes",
+        "check.sh passed",
+        "acceptance commands pass",
+        "acceptance commands passed",
+        "acceptance output",
+        "final gate passes",
+        "final gate passed",
+        "m10 evidence-only passes",
+        "m10 evidence-only passed",
     ];
     if EVIDENCE_PHRASES.iter().any(|phrase| lower.contains(phrase)) {
         return true;
@@ -5115,6 +5128,14 @@ Implement the shard.
                 description,
                 true,
                 "Clean — must-not-touch paths are untouched. Final M10 evidence-only gate confirmation:"
+            ),
+            None
+        );
+        assert_eq!(
+            delegated_write_close_evidence_blocker(
+                description,
+                true,
+                "Acceptance commands passed. check.sh passed and the M10 evidence-only gate passed."
             ),
             None
         );
