@@ -3156,7 +3156,7 @@
              "scripts/check-missiond-blue-green-deploy.mjs"
              "scripts/check-v3-ops-infra-isomorphism.mjs"
              "scripts/check-v3-sysinfra-control-isomorphism.mjs"]
-      :note "MissionD self-update is owned as a blue-green release workflow. Release candidates are immutable directories under ~/.xjp-mission/releases/<release-id>; the active symlink is the only switch; daemon and MCP entrypoints both resolve through active so they share one release-manifest.json. The deploy path supports legacy direct-binary migration, verified linker signature acceptance before force-sign fallback, pre-switch MCP smoke, post-switch daemon IPC smoke, previous-release rollback, cleanup-only dry-run/apply, removal of incomplete release dirs, retention of active/previous/newest releases, and CARGO_INCREMENTAL=0 by default to keep self-update disk-bounded.")
+      :note "MissionD self-update is owned as a blue-green release workflow. Release candidates are immutable directories under ~/.xjp-mission/releases/<release-id>; the active symlink is the only switch; daemon and MCP entrypoints both resolve through active so they share one release-manifest.json. The deploy path compiles typed Lisp runtime projections via node scripts/compile-v3-runtime.mjs --json before building binaries, supports legacy direct-binary migration, verified linker signature acceptance before force-sign fallback, pre-switch MCP smoke, post-switch daemon IPC smoke, previous-release rollback, cleanup-only dry-run/apply, removal of incomplete release dirs, retention of active/previous/newest releases, and CARGO_INCREMENTAL=0 by default to keep self-update disk-bounded.")
     )
 
   (compression-contract

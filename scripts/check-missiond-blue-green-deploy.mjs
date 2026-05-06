@@ -73,6 +73,9 @@ function check(root) {
     'MISSIOND_RELEASE_KEEP',
     'MISSIOND_BACKUP_RETENTION_DAYS',
     'CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"',
+    'node scripts/compile-v3-runtime.mjs --json',
+    'typed-lisp-runtime-compile',
+    'typed Lisp runtime compile failed',
     'release-manifest.json',
     '"schema":"missiond.release-manifest.v1"',
     'daemon_sha256',
@@ -126,6 +129,10 @@ function buildFixture() {
       :note "Release candidates are immutable directories under ~/.xjp-mission/releases/<release-id>; daemon and MCP entrypoints both resolve through active.")))`);
   write(root, FILES.deploy, `
 MISSIOND_INSTALL_ROOT MISSIOND_RELEASES_DIR MISSIOND_ACTIVE_LINK MISSIOND_RELEASE_KEEP MISSIOND_BACKUP_RETENTION_DAYS
+CARGO_INCREMENTAL="\${CARGO_INCREMENTAL:-0}"
+node scripts/compile-v3-runtime.mjs --json
+typed-lisp-runtime-compile
+typed Lisp runtime compile failed
 release-manifest.json "schema":"missiond.release-manifest.v1" daemon_sha256 mcp_sha256
 atomic_symlink_update switch_active_release rollback_to_previous cleanup_old_releases create_legacy_release_if_needed
 codesign_or_verify force-sign failed but verified linker signature

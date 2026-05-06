@@ -351,6 +351,7 @@ if [ "$CLEANUP_ONLY" -eq 1 ]; then
 fi
 
 command -v cargo >/dev/null 2>&1 || fail "cargo not on PATH" 1
+command -v node >/dev/null 2>&1 || fail "node not on PATH; typed Lisp runtime compile cannot run" 1
 if [ "${MISSIOND_USE_SCCACHE:-0}" = "1" ] && command -v sccache >/dev/null 2>&1; then
   export RUSTC_WRAPPER="${RUSTC_WRAPPER:-sccache}"
   log "build: using RUSTC_WRAPPER=$RUSTC_WRAPPER"
@@ -359,6 +360,12 @@ elif [ "${MISSIOND_USE_SCCACHE:-0}" = "1" ]; then
 fi
 export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
 log "build: CARGO_INCREMENTAL=$CARGO_INCREMENTAL"
+log "typed-lisp: compile V3 runtime projections"
+TYPED_LISP_START="$(date +%s)"
+if ! node scripts/compile-v3-runtime.mjs --json 2>&1 | tail -30; then
+  fail "typed Lisp runtime compile failed" 1
+fi
+record_timing "typed-lisp-runtime-compile" "$TYPED_LISP_START"
 log "build: cargo build ${BUILD_ARG} -p missiond-daemon -p missiond-mcp"
 BUILD_START="$(date +%s)"
 if ! cargo build ${BUILD_ARG} -p missiond-daemon -p missiond-mcp 2>&1 | tail -30; then
