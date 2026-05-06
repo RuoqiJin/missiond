@@ -236,6 +236,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     let dedup_check = DuplicateCodeCheck {
         parent_id: parent_id.as_deref(),
         source_id: source_id.as_deref(),
+        project_id: target_project_resolution
+            .as_ref()
+            .map(|resolution| resolution.project_id.as_str()),
         intent,
         task_class: delegation_metadata.task_class.as_deref(),
         write_scope: &delegation_metadata.write_scope,
@@ -1278,6 +1281,7 @@ struct DelegationMetadata {
 struct DuplicateCodeCheck<'a> {
     parent_id: Option<&'a str>,
     source_id: Option<&'a str>,
+    project_id: Option<&'a str>,
     intent: &'a str,
     task_class: Option<&'a str>,
     write_scope: &'a [String],
@@ -1300,8 +1304,7 @@ struct DuplicateCodeWorker {
 /// scope. Read-only / context-pack / research delegations short-circuit out
 /// because they cannot collide with another worker on the same files.
 fn dedup_applies(check: &DuplicateCodeCheck<'_>) -> bool {
-    let is_code = check.intent == "code"
-        || matches!(check.task_class, Some("code"));
+    let is_code = check.intent == "code" || matches!(check.task_class, Some("code"));
     is_code && !check.write_scope.is_empty()
 }
 
@@ -1350,6 +1353,14 @@ async fn find_overlapping_active_code_worker(
         if candidate_scope.is_empty() {
             continue;
         }
+        if !same_project_or_absolute_scope(
+            check.project_id,
+            task.project.as_deref(),
+            check.write_scope,
+            &candidate_scope,
+        ) {
+            continue;
+        }
         let overlap = compute_scope_overlap(check.write_scope, &candidate_scope);
         if overlap.is_empty() {
             continue;
@@ -1371,6 +1382,33 @@ async fn find_overlapping_active_code_worker(
     None
 }
 
+/// Relative write scopes only collide inside the same registered project. A
+/// parent swarm may legitimately run several project-local `.missiond/check.sh`
+/// edits in parallel; treating those relative paths as global would serialize
+/// unrelated repos. Absolute scopes remain globally comparable because they
+/// already carry their project root.
+fn same_project_or_absolute_scope(
+    requested_project: Option<&str>,
+    candidate_project: Option<&str>,
+    requested: &[String],
+    existing: &[String],
+) -> bool {
+    match (requested_project, candidate_project) {
+        (Some(left), Some(right))
+            if left != right
+                && requested.iter().all(|scope| !scope_is_absolute(scope))
+                && existing.iter().all(|scope| !scope_is_absolute(scope)) =>
+        {
+            false
+        }
+        _ => true,
+    }
+}
+
+fn scope_is_absolute(scope: &str) -> bool {
+    scope.starts_with('/') || scope.starts_with("~/")
+}
+
 /// Parse the `- write_scope:` line emitted by `render_delegation_metadata_block`
 /// out of a BoardTask description so we can read back what scope the existing
 /// code worker reserved. Conservative: missing line → empty list.
@@ -1378,14 +1416,12 @@ fn parse_write_scope_from_description(description: &str) -> Vec<String> {
     description
         .lines()
         .find_map(|line| {
-            line.trim()
-                .strip_prefix("- write_scope:")
-                .map(|tail| {
-                    tail.split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect::<Vec<_>>()
-                })
+            line.trim().strip_prefix("- write_scope:").map(|tail| {
+                tail.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+            })
         })
         .unwrap_or_default()
 }
@@ -1406,10 +1442,7 @@ fn description_references_source(description: &str, source_id: &str) -> bool {
 /// Cross-product of requested vs existing write scopes; returns every pair
 /// that overlaps under the same prefix-matching rule
 /// `mission_swarm_run` already uses for its conflict detector.
-fn compute_scope_overlap(
-    requested: &[String],
-    existing: &[String],
-) -> Vec<(String, String)> {
+fn compute_scope_overlap(requested: &[String], existing: &[String]) -> Vec<(String, String)> {
     let mut overlaps = Vec::new();
     for left in requested {
         for right in existing {
@@ -2036,7 +2069,7 @@ mod tests {
             engine_hint: Some("claude-code".to_string()),
             pool_hint: Some("claude-code-default".to_string()),
             read_scope: vec![
-                "/Users/jinchen/Projects/xiaojinpro-backend".to_string(),
+                "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend".to_string(),
                 "/Users/jinchen/Projects/missiond".to_string(),
             ],
             write_scope: Vec::new(),
@@ -2046,7 +2079,7 @@ mod tests {
         };
         let block = render_delegation_metadata_block(&metadata);
         assert!(
-            block.contains("- read_scope: /Users/jinchen/Projects/xiaojinpro-backend, /Users/jinchen/Projects/missiond"),
+            block.contains("- read_scope: /Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend, /Users/jinchen/Projects/missiond"),
             "read_scope must list both repos: {block}"
         );
         assert!(
@@ -2616,6 +2649,7 @@ mod tests {
         let check = DuplicateCodeCheck {
             parent_id: Some("parent-1"),
             source_id: None,
+            project_id: Some("project-a"),
             intent: "research",
             task_class: Some("research"),
             write_scope: &scope,
@@ -2629,6 +2663,7 @@ mod tests {
         let check = DuplicateCodeCheck {
             parent_id: Some("parent-1"),
             source_id: None,
+            project_id: Some("project-a"),
             intent: "general",
             task_class: Some("context-pack"),
             write_scope: &scope,
@@ -2642,6 +2677,7 @@ mod tests {
         let check = DuplicateCodeCheck {
             parent_id: Some("parent-1"),
             source_id: None,
+            project_id: Some("project-a"),
             intent: "code",
             task_class: Some("code"),
             write_scope: &empty,
@@ -2658,6 +2694,7 @@ mod tests {
         let check = DuplicateCodeCheck {
             parent_id: Some("parent-1"),
             source_id: None,
+            project_id: Some("project-a"),
             intent: "code",
             task_class: Some("code"),
             write_scope: &scope,
@@ -2671,11 +2708,48 @@ mod tests {
         let check = DuplicateCodeCheck {
             parent_id: Some("parent-1"),
             source_id: None,
+            project_id: Some("project-a"),
             intent: "code",
             task_class: None,
             write_scope: &scope,
         };
         assert!(dedup_applies(&check));
+    }
+
+    #[test]
+    fn relative_write_scopes_do_not_overlap_across_projects() {
+        let requested = vec![
+            ".missiond/check.sh".to_string(),
+            ".missiond/evidence/current-code-mapping.md".to_string(),
+        ];
+        let existing = vec![
+            ".missiond/check.sh".to_string(),
+            ".missiond/evidence/current-code-mapping.md".to_string(),
+        ];
+        assert!(!same_project_or_absolute_scope(
+            Some("router"),
+            Some("payments"),
+            &requested,
+            &existing,
+        ));
+        assert!(same_project_or_absolute_scope(
+            Some("router"),
+            Some("router"),
+            &requested,
+            &existing,
+        ));
+    }
+
+    #[test]
+    fn absolute_write_scopes_still_compare_across_projects() {
+        let requested = vec!["/Users/jinchen/Projects/x/app.rs".to_string()];
+        let existing = vec!["/Users/jinchen/Projects/x".to_string()];
+        assert!(same_project_or_absolute_scope(
+            Some("left"),
+            Some("right"),
+            &requested,
+            &existing,
+        ));
     }
 
     #[test]
@@ -2741,22 +2815,24 @@ mod tests {
             task_id: "btk-active-1".to_string(),
             title: "Refactor auth".to_string(),
             status: "running".to_string(),
-            overlap: vec![("crates/auth".to_string(), "crates/auth/routes.rs".to_string())],
+            overlap: vec![(
+                "crates/auth".to_string(),
+                "crates/auth/routes.rs".to_string(),
+            )],
             linkage: "parent".to_string(),
         };
-        let result = build_duplicate_code_worker_refusal(
-            &dup,
-            Some("parent-1"),
-            Some("source-9"),
-            true,
-        );
+        let result =
+            build_duplicate_code_worker_refusal(&dup, Some("parent-1"), Some("source-9"), true);
         assert_eq!(result.is_error, Some(true));
         let text = match result.content.first() {
             Some(missiond_mcp::tools::ToolContent::Text { text }) => text.clone(),
             _ => panic!("refusal must emit text content"),
         };
         let payload: Value = serde_json::from_str(&text).expect("refusal must be valid JSON");
-        assert_eq!(payload["error_code"], json!("DUPLICATE_CODE_WORKER_BLOCKED"));
+        assert_eq!(
+            payload["error_code"],
+            json!("DUPLICATE_CODE_WORKER_BLOCKED")
+        );
         assert_eq!(payload["existing_task_id"], json!("btk-active-1"));
         assert_eq!(payload["existing_task_status"], json!("running"));
         assert_eq!(payload["linkage"], json!("parent"));

@@ -611,7 +611,8 @@
 	       "caller-supplied model wins over model_profile, but must be a single shell token"
 	       "task_delegate must pass model/model_profile through to compute_slot and must not reuse an idle slot with a conflicting model override"
 	       "mission_task_delegate MUST accept structured two-stage delegation metadata (task_class, pool_hint, engine_hint, context_pack_path, read_scope, write_scope, must_not_touch, acceptance) and persist it into the BoardTask description so Autopilot workers see context-pack path, explicit readable evidence, exact write scope, forbidden write paths, and acceptance commands without relying on side-channel PTY text. The generated scope_semantics line MUST state that must_not_touch forbids write/stage/commit and is not a read ban by itself; review/context-pack/research tasks MUST carry an output_contract requiring a structured artifact with Findings / Evidence / Recommendations / Verification rather than raw KB JSON or full logs."
-		       "mission_task_delegate MUST NOT auto-preload KB/Skill context from context_hints into worker prompts by default; current KB/skill stores are noisy and hidden prompt injection obscures task contracts. Context must come from explicit read_scope, context_pack_path, task contract, or a future explicit memory-audit workflow."
+	       "mission_task_delegate duplicate-code-worker guard MUST compare relative write_scope entries inside their resolved BoardTask.project/project_root only; cross-project sibling tasks may all write .missiond/check.sh or .missiond/evidence/current-code-mapping.md without false DUPLICATE_CODE_WORKER_BLOCKED refusals. Absolute write_scope entries remain globally comparable."
+	       "mission_task_delegate MUST NOT auto-preload KB/Skill context from context_hints into worker prompts by default; current KB/skill stores are noisy and hidden prompt injection obscures task contracts. Context must come from explicit read_scope, context_pack_path, task contract, or a future explicit memory-audit workflow."
 		       "Autopilot context prefetch defaults disabled until memory stores are cleaned: delegated worker prompts MUST NOT prepend KB/Skill/context-pipeline output unless an explicit memory-audit workflow opts in via MISSIOND_AUTOPILOT_CONTEXT_PREFETCH=1."
 		       "mission-mcp initialize MUST NOT inject KB summary / search-path instructions by default; noisy memory context is opt-in only via MISSIOND_MCP_PRELOAD_INSTRUCTIONS=1 for explicit memory-audit sessions."
 	       "mission_swarm_run MUST honor max_gemini_workers exactly: when max_gemini_workers=0, no spawned context-pack BoardTask may use intent=research or any other routing signal that sends the task to Gemini; Claude context-pack workers use code/coder routing plus read-only completion protocol."
@@ -1160,14 +1161,14 @@
     (maturity :id xjpcode :current M6 :target M10 :gap [runtime-projection event-bus worker-operational final-convergence])
     (maturity :id neural-codegen :current M6 :target M10 :gap [runtime-projection event-bus worker-operational final-convergence])
     (maturity :id semantic-terminal :current M6 :target M10 :gap [runtime-projection event-bus worker-operational final-convergence])
-    (maturity :id xiaojinpro-backend :current M5 :target M10 :gap [code-isomorphism runtime-projection event-bus worker-operational final-convergence])
-    (maturity :id deploy-center :current M5 :target M10 :gap [code-isomorphism runtime-projection event-bus worker-operational final-convergence])
+    (maturity :id xiaojinpro-backend :current M2 :target M10 :gap [canonical-root-corrected blueprint-split code-isomorphism runtime-projection event-bus worker-operational final-convergence])
+    (maturity :id deploy-center :current M2 :target M10 :gap [canonical-root-corrected blueprint-split code-isomorphism runtime-projection event-bus worker-operational final-convergence])
     (maturity :id deploy-agent :current M10 :target M10 :gap [])
-    (maturity :id auth :current M10 :target M10 :gap [])
-    (maturity :id router :current M5 :target M10 :gap [code-isomorphism runtime-projection event-bus worker-operational final-convergence])
-    (maturity :id payments :current M5 :target M10 :gap [code-isomorphism runtime-projection event-bus worker-operational final-convergence])
-    (maturity :id asr :current M5 :target M10 :gap [code-isomorphism runtime-projection event-bus worker-operational final-convergence])
-    (maturity :id timeline :current M5 :target M10 :gap [code-isomorphism runtime-projection event-bus worker-operational final-convergence])
+    (maturity :id auth :current M2 :target M10 :gap [canonical-root-corrected blueprint-split production-domain-backfill code-isomorphism runtime-projection event-bus worker-operational final-convergence])
+    (maturity :id router :current M2 :target M10 :gap [canonical-root-corrected blueprint-split code-isomorphism runtime-projection event-bus worker-operational final-convergence])
+    (maturity :id payments :current M2 :target M10 :gap [canonical-root-corrected blueprint-split code-isomorphism runtime-projection event-bus worker-operational final-convergence])
+    (maturity :id asr :current M2 :target M10 :gap [canonical-root-corrected blueprint-split code-isomorphism runtime-projection event-bus worker-operational final-convergence])
+    (maturity :id timeline :current M2 :target M10 :gap [canonical-root-corrected blueprint-split code-isomorphism runtime-projection event-bus worker-operational final-convergence])
     (maturity :id pcea :current M5 :target M10 :gap [code-isomorphism runtime-projection event-bus worker-operational final-convergence])
     (maturity :id secret-store :current M5 :target M10 :gap [code-isomorphism runtime-projection event-bus worker-operational final-convergence])
     (maturity :id xiaojin-blog :current M5 :target M10 :gap [code-isomorphism runtime-projection event-bus worker-operational final-convergence])
@@ -1247,18 +1248,18 @@
       :surface project-registry)
     (project :id xiaojinpro-backend
       :kind rust-monorepo
-      :root "/Users/jinchen/Projects/xiaojinpro-backend"
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/xiaojinpro-backend-blueprint.lisp"
-      :status ssot-seeded
+      :status canonical-root-corrected-needs-blueprint
       :checks ["node scripts/check-xjp-ssot-complete.mjs"]
       :surface project-registry)
 	    (project :id deploy-center
 	      :kind ops-service
-	      :root "/Users/jinchen/Projects/xiaojinpro-backend/services/deploy-center"
+	      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/deploy-center"
 	      :intent ".missiond/intent.lisp"
 	      :backend ".missiond/backend/deploy-center-backend-blueprint.lisp"
-	      :status universe-imported
+		      :status canonical-root-corrected-needs-blueprint
 	      :capability deploy-ops
 	      :surface project-registry)
     (project :id deploy-agent
@@ -1272,38 +1273,38 @@
       :surface project-registry)
     (project :id auth
       :kind rust-service
-      :root "/Users/jinchen/Projects/xiaojinpro-backend/services/auth"
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/auth"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/auth-backend-blueprint.lisp"
-      :status ssot-seeded
+      :status canonical-root-corrected-needs-blueprint
       :surface project-registry)
     (project :id router
       :kind rust-service
-      :root "/Users/jinchen/Projects/xiaojinpro-backend/services/router"
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/router"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/router-backend-blueprint.lisp"
-      :status ssot-seeded
+      :status canonical-root-corrected-needs-blueprint
       :surface project-registry)
     (project :id payments
       :kind rust-workspace-service
-      :root "/Users/jinchen/Projects/xiaojinpro-backend/services/payments"
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/payments"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/payments-backend-blueprint.lisp"
-      :status ssot-seeded
+      :status canonical-root-corrected-needs-blueprint
       :surface project-registry)
     (project :id asr
       :kind rust-service
-      :root "/Users/jinchen/Projects/xiaojinpro-backend/services/asr"
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/asr"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/asr-backend-blueprint.lisp"
-      :status ssot-seeded
+      :status canonical-root-corrected-needs-blueprint
       :surface project-registry)
     (project :id timeline
       :kind rust-service
-      :root "/Users/jinchen/Projects/xiaojinpro-backend/services/timeline"
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/timeline"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/timeline-backend-blueprint.lisp"
-      :status ssot-seeded
+      :status canonical-root-corrected-needs-blueprint
       :surface project-registry)
     (project :id pcea
       :kind rust-vite-app
@@ -1378,7 +1379,7 @@
     :rule "Production service runtime facts are Lisp-owned Universe data: project/service roots, domains, deployments, health, DNS capability, and ops owner are visible to resident master and workers through mission_project(action=universe). Secrets stay outside Lisp."
     (service :id auth
       :project xiaojinpro-backend
-      :root "/Users/jinchen/Projects/xiaojinpro-backend/services/auth"
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/auth"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/auth-backend-blueprint.lisp"
       :environment production
@@ -1388,13 +1389,13 @@
       :dns-provider cloudflare
       :dns-capability (:read-inventory true :mutate requires-board-approval :secret-source env)
       :deployment (:substrate kubernetes :namespace production :deployment "xjp-auth-center" :service "xjp-auth-center" :replicas 3 :hpa-min 3 :hpa-max 10 :image "xjp-auth-center:latest" :service-account "xjp-auth-center")
-      :proxy (:kind caddy :domain "auth.xiaojinpro.com" :file "/Users/jinchen/Projects/xiaojinpro-backend/services/auth/caddy/Caddyfile" :sse-no-buffer "/auth/login-stream")
+      :proxy (:kind caddy :domain "auth.xiaojinpro.com" :file "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/auth/caddy/Caddyfile" :sse-no-buffer "/auth/login-stream")
       :ports (:http 8081 :metrics 9090 :service 80)
       :health ["/health/live" "/health/ready" "/.well-known/openid-configuration" "/.well-known/jwks.json"]
       :event-ingest (:endpoint "/webhooks/auth-event" :domain system :event ExternalServiceEvent :source auth-audit-events :authority provider-durable-log-first :rule "Auth emits sanitized service events into MissionD EventBus; PTY is diagnostic only and MissionD must not require production probing to observe auth incidents.")
       :dependencies [postgres redis secret-store wechat-open-platform google-oauth sms-provider email-provider]
       :ops-capability deploy-ops
-      :source-evidence ["/Users/jinchen/Projects/xiaojinpro-backend/services/auth/k8s/production/configmap.yaml" "/Users/jinchen/Projects/xiaojinpro-backend/services/auth/k8s/production/deployment.yaml" "/Users/jinchen/Projects/xiaojinpro-backend/services/auth/caddy/Caddyfile"]
+      :source-evidence ["/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/auth/k8s/production/configmap.yaml" "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/auth/k8s/production/deployment.yaml" "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/auth/caddy/Caddyfile"]
       :risks [wechat-callback-prod-drift mysql-artifact-cleanup])
     (capability :id cloudflare-dns
       :provider cloudflare

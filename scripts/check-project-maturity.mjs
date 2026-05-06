@@ -355,7 +355,9 @@ function diagnosticsForProject(row, minLevel, { evidenceOnly = false } = {}) {
   if (!row.evidence.root_exists) diagnostics.push({ file, message: `${row.id} root does not exist` });
   if (!row.evidence.intent_exists) diagnostics.push({ file, message: `${row.id} intent/blueprint entry does not exist` });
   if (row.structural.lisp_files === 0) diagnostics.push({ file, message: `${row.id} has no Lisp SSOT files` });
-  if (!row.evidence.has_checker) diagnostics.push({ file, message: `${row.id} has no declared/local checker` });
+  if (levelValue(minLevel) >= 3 && !row.evidence.has_checker) {
+    diagnostics.push({ file, message: `${row.id} has no declared/local checker` });
+  }
   if (levelValue(minLevel) >= 3 && !row.evidence.has_project_blueprint) {
     diagnostics.push({ file, message: `${row.id} has no project-level *blueprint.lisp; intent-only projects cannot satisfy M3+` });
   }

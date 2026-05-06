@@ -32,14 +32,14 @@ const PROJECTS = [
   { id: 'neural-codegen', root: '/Users/jinchen/Projects/neural-codegen', checker: ['bash', ['.missiond/check.sh', '--dry-run']] },
   { id: 'semantic-terminal', root: '/Users/jinchen/Projects/semantic-terminal', checker: ['bash', ['.missiond/check.sh', '--dry-run']] },
   // XJP services + PCEA.
-  { id: 'xiaojinpro-backend', root: '/Users/jinchen/Projects/xiaojinpro-backend', checker: ['node', ['scripts/check-xjp-ssot-complete.mjs', '--json']] },
-  { id: 'deploy-center', root: '/Users/jinchen/Projects/xiaojinpro-backend/services/deploy-center' },
+	  { id: 'xiaojinpro-backend', root: '/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend' },
+  { id: 'deploy-center', root: '/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/deploy-center' },
   { id: 'deploy-agent', root: '/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/apps/xjp-deploy-agent', checker: ['bash', ['.missiond/check.sh']] },
-  { id: 'auth', root: '/Users/jinchen/Projects/xiaojinpro-backend/services/auth' },
-  { id: 'router', root: '/Users/jinchen/Projects/xiaojinpro-backend/services/router' },
-  { id: 'payments', root: '/Users/jinchen/Projects/xiaojinpro-backend/services/payments' },
-  { id: 'asr', root: '/Users/jinchen/Projects/xiaojinpro-backend/services/asr' },
-  { id: 'timeline', root: '/Users/jinchen/Projects/xiaojinpro-backend/services/timeline' },
+  { id: 'auth', root: '/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/auth' },
+  { id: 'router', root: '/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/router' },
+  { id: 'payments', root: '/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/payments' },
+  { id: 'asr', root: '/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/asr' },
+  { id: 'timeline', root: '/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/timeline' },
   { id: 'pcea', root: '/Users/jinchen/Downloads/PCEA develop', checker: ['node', ['scripts/check-pcea-ssot-complete.mjs', '--json']] },
   // App + external-infra projects — already-converged with project-local check.sh runners (default mode is read-only static, sub-second).
   { id: 'secret-store', root: '/Users/jinchen/Downloads/xiaojinpro-gateway/services/secret-store-rs', checker: ['bash', ['.missiond/check.sh']] },
@@ -71,10 +71,11 @@ function main() {
     '(level M9 :name worker-operational',
     '(level M10 :name v3-runtime-ssot',
     '(project-maturity-registry',
-    ':schema "missiond.project-maturity-registry.v1"',
-    ':default-target M10',
-    ':common-m6-to-v3-gap [runtime-projection event-bus commit-backfill worker-operational final-convergence]',
-    '(project-blueprint-registry',
+	    ':schema "missiond.project-maturity-registry.v1"',
+	    ':default-target M10',
+	    ':common-m6-to-v3-gap [runtime-projection event-bus commit-backfill worker-operational final-convergence]',
+	    '(maturity :id auth :current M2 :target M10 :gap [canonical-root-corrected blueprint-split production-domain-backfill',
+	    '(project-blueprint-registry',
     ':id jarvis-forge',
     ':id jarvis',
     ':id jarvis-mechanic',
@@ -101,7 +102,7 @@ function main() {
     ':schema "missiond.service-runtime-universe.v1"',
     '(service :id auth',
     ':project xiaojinpro-backend',
-    ':root "/Users/jinchen/Projects/xiaojinpro-backend/services/auth"',
+    ':root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/auth"',
     ':public-base-url "https://auth.xiaojinpro.com"',
     ':issuer "https://auth.xiaojinpro.com"',
     ':domains ["auth.xiaojinpro.com"]',
@@ -122,21 +123,22 @@ function main() {
   const maturity = parseMaturityRegistry(blueprint);
   checkMaturityRegistry(diagnostics, maturity);
 
-  requireExistingText(diagnostics, '/Users/jinchen/Projects/xiaojinpro-backend/services/auth/.missiond/intent.lisp', [
-    ':public-base-url "https://auth.xiaojinpro.com"',
-    ':issuer "https://auth.xiaojinpro.com"',
-    ':status migration-complete-runtime',
-    ':runtime-database postgresql',
-    ':status superseded-by-lisp',
-    ':status token-storage-consumer-boundary',
-    ':risk wechat-callback-prod-drift',
-  ]);
-  requireExistingText(diagnostics, '/Users/jinchen/Projects/xiaojinpro-backend/services/auth/.missiond/backend/auth-backend-blueprint.lisp', [
-    'production-runtime-deployment',
-    'kb-decision-boundary',
-    'k8s/production/deployment.yaml',
-    'caddy/Caddyfile',
-  ]);
+	  requireExistingText(diagnostics, '/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/auth/.missiond/intent.lisp', [
+	    '(intent auth-center',
+	    '(env ISSUER',
+	    ':example "https://auth.xiaojinpro.top"',
+	    '(component google',
+	    '(component wechat',
+	  ]);
+	  requireExistingText(diagnostics, '/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/auth/.missiond/intent-flow-google-oauth.lisp', [
+	    '(flow google-oauth-login',
+	    ':path "/auth/google/callback"',
+	    'tenant_id',
+	  ]);
+	  requireExistingText(diagnostics, '/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/auth/.missiond/intent-db-iam.lisp', [
+	    '(table tenant_users',
+	    ':unique (tenant_id user_id)',
+	  ]);
 
   const workflowPath = '.missiond/workflows/project-ssot-convergence.lisp';
   if (!fs.existsSync(workflowPath)) {

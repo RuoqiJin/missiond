@@ -126,28 +126,28 @@ function checkFiles(root, files) {
 	    'scripts/check-project-maturity.mjs --min-level M10',
 	    'It resolves the MissionD blueprint from the checker script directory',
 	    '(maturity :id missiond :current M10 :target M10',
-	    '(maturity :id auth :current M10 :target M10',
+	    '(maturity :id auth :current M2 :target M10',
 	    '(project-blueprint-registry',
 	    ':id jarvis-forge',
 	    ':backend ".missiond/backend/forge-backend-blueprint.lisp"',
 	    ':frontend ".missiond/frontend/forge-ui-blueprint.lisp"',
 	    ':id deploy-center',
-	    ':root "/Users/jinchen/Projects/xiaojinpro-backend/services/deploy-center"',
+	    ':root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/deploy-center"',
 	    ':id xiaojinpro-backend',
-	    ':root "/Users/jinchen/Projects/xiaojinpro-backend"',
+	    ':root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend"',
 	    ':id deploy-agent',
 	    ':aliases [xjp-deploy-agent]',
 	    ':root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/apps/xjp-deploy-agent"',
 	    ':id auth',
-	    ':root "/Users/jinchen/Projects/xiaojinpro-backend/services/auth"',
+	    ':root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/auth"',
 	    ':id router',
-	    ':root "/Users/jinchen/Projects/xiaojinpro-backend/services/router"',
+	    ':root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/router"',
 	    ':id payments',
-	    ':root "/Users/jinchen/Projects/xiaojinpro-backend/services/payments"',
+	    ':root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/payments"',
 	    ':id asr',
-	    ':root "/Users/jinchen/Projects/xiaojinpro-backend/services/asr"',
+	    ':root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/asr"',
 	    ':id timeline',
-	    ':root "/Users/jinchen/Projects/xiaojinpro-backend/services/timeline"',
+	    ':root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/timeline"',
 	    ':id pcea',
 	    ':root "/Users/jinchen/Downloads/PCEA develop"',
 	    ':backend ".missiond/backend/pcea-backend-blueprint.lisp"',
@@ -353,17 +353,17 @@ function buildFixture() {
 	    :schema "missiond.project-maturity-registry.v1"
 	    :common-m6-to-v3-gap [runtime-projection event-bus commit-backfill worker-operational final-convergence]
 	    (maturity :id missiond :current M10 :target M10)
-	    (maturity :id auth :current M10 :target M10))
+	    (maturity :id auth :current M2 :target M10 :gap [canonical-root-corrected blueprint-split production-domain-backfill code-isomorphism runtime-projection event-bus worker-operational final-convergence]))
 	  (project-blueprint-registry
 	    (project :id jarvis-forge :root "/Users/jinchen/Projects/jarvis-forge" :backend ".missiond/backend/forge-backend-blueprint.lisp" :frontend ".missiond/frontend/forge-ui-blueprint.lisp")
-	    (project :id xiaojinpro-backend :root "/Users/jinchen/Projects/xiaojinpro-backend")
-	    (project :id deploy-center :root "/Users/jinchen/Projects/xiaojinpro-backend/services/deploy-center" :capability deploy-ops)
+	    (project :id xiaojinpro-backend :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend")
+	    (project :id deploy-center :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/deploy-center" :capability deploy-ops)
 	    (project :id deploy-agent :aliases [xjp-deploy-agent] :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/apps/xjp-deploy-agent")
-	    (project :id auth :root "/Users/jinchen/Projects/xiaojinpro-backend/services/auth")
-	    (project :id router :root "/Users/jinchen/Projects/xiaojinpro-backend/services/router")
-	    (project :id payments :root "/Users/jinchen/Projects/xiaojinpro-backend/services/payments")
-	    (project :id asr :root "/Users/jinchen/Projects/xiaojinpro-backend/services/asr")
-	    (project :id timeline :root "/Users/jinchen/Projects/xiaojinpro-backend/services/timeline")
+	    (project :id auth :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/auth")
+	    (project :id router :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/router")
+	    (project :id payments :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/payments")
+	    (project :id asr :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/asr")
+	    (project :id timeline :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/timeline")
 	    (project :id pcea :root "/Users/jinchen/Downloads/PCEA develop" :backend ".missiond/backend/pcea-backend-blueprint.lisp" :frontend ".missiond/frontend/pcea-frontend-blueprint.lisp")
 	    (project :id xjp-deploy-center :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/deploy-center" :capability deploy-ops))
     (service-runtime-universe
