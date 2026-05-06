@@ -87,7 +87,7 @@ let test_workflow_missing_risk_gate () =
     (fun file ->
       let diagnostics = Workflow_schema.validate file in
       assert_true "missing risk gate is diagnosed"
-        (has_code "workflow.required_token_missing" diagnostics))
+        (has_code "workflow.risk-gates_missing" diagnostics))
 
 let test_auth_domain_requires_compatibility_ledger () =
   let source =

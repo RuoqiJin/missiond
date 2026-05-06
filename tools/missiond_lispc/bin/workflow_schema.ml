@@ -1,5 +1,80 @@
 open Ast
 
+let rec collect_forms named node =
+  let here = if is_list node named then [ node ] else [] in
+  match node with
+  | List (_, _, xs) -> here @ (xs |> List.map (collect_forms named) |> List.flatten)
+  | _ -> here
+
+let form_id = function
+  | List (_, _, _ :: id_node :: _) -> atom_text id_node
+  | _ -> None
+
+let collect_step_ids node = collect_forms "step" node |> List.filter_map form_id
+
+let list_nonempty node = list_texts node <> [] || collect_step_ids node <> []
+
+let count_named_or_list_entries named value =
+  let named_count = collect_forms named value |> List.length in
+  if named_count > 0 then named_count else List.length (list_texts value)
+
+let validate_required_prop file workflow props key diagnostics =
+  match prop key props with
+  | Some value when list_nonempty value -> diagnostics
+  | Some value ->
+      diag file (loc_of value) ("workflow." ^ String.sub key 1 (String.length key - 1) ^ "_empty")
+        (Printf.sprintf "%s must not be empty" key)
+      :: diagnostics
+  | None ->
+      diag file (loc_of workflow) ("workflow." ^ String.sub key 1 (String.length key - 1) ^ "_missing")
+        (Printf.sprintf "missing %s" key)
+      :: diagnostics
+
+let validate_steps file workflow props diagnostics =
+  let declared =
+    match prop ":steps" props with
+    | Some value ->
+        let direct = list_texts value in
+        if direct <> [] then direct else collect_step_ids value
+    | None -> []
+  in
+  let core_steps =
+    match prop ":core" props with
+    | Some core -> collect_step_ids core
+    | None -> []
+  in
+  let embedded_steps =
+    if declared <> [] then declared else collect_step_ids workflow
+  in
+  let diagnostics =
+    if embedded_steps = [] then
+      diag file (loc_of workflow) "workflow.steps_empty" "workflow has no steps"
+      :: diagnostics
+    else diagnostics
+  in
+  match (declared, core_steps) with
+  | [], _ -> diagnostics
+  | _, [] -> diagnostics
+  | a, b when a = b -> diagnostics
+  | a, b ->
+      diag file (loc_of workflow) "workflow.steps_core_mismatch"
+        (Printf.sprintf ":steps [%s] does not match :core step ids [%s]"
+           (String.concat " " a) (String.concat " " b))
+      :: diagnostics
+
+let validate_counted_block file workflow props key form_name diagnostics =
+  match prop key props with
+  | Some value ->
+      if count_named_or_list_entries form_name value > 0 then diagnostics
+      else
+        diag file (loc_of value) ("workflow." ^ String.sub key 1 (String.length key - 1) ^ "_empty")
+          (Printf.sprintf "%s must contain at least one %s or vector entry" key form_name)
+        :: diagnostics
+  | None ->
+      diag file (loc_of workflow) ("workflow." ^ String.sub key 1 (String.length key - 1) ^ "_missing")
+        (Printf.sprintf "missing %s" key)
+      :: diagnostics
+
 let validate file =
   try
     let forms = Parser.parse_file file in
@@ -14,24 +89,15 @@ let validate file =
           add (diag file (loc_of wf) "workflow.workflow_id_missing" "missing :workflow_id");
         if prop_text ":status" props = None then
           add (diag file (loc_of wf) "workflow.status_missing" "missing :status");
-        let text = read_file file in
-        let required = [ ":source_plans"; ":steps"; ":risk-gates"; ":completion" ] in
-        List.iter
-          (fun needle ->
-            if not (contains_substring text needle) then
-              add (diag file (loc_of wf) "workflow.required_token_missing"
-                     (Printf.sprintf "missing workflow token %s" needle)))
-          required;
-        let steps =
-          let rec collect acc = function
-            | List (_, _, xs) as n ->
-                let acc = if is_list n "step" then n :: acc else acc in
-                List.fold_left collect acc xs
-            | _ -> acc
-          in
-          collect [] wf
+        let structural_diagnostics =
+          []
+          |> validate_required_prop file wf props ":source_plans"
+          |> validate_required_prop file wf props ":steps"
+          |> validate_steps file wf props
+          |> validate_counted_block file wf props ":risk-gates" "gate"
+          |> validate_counted_block file wf props ":completion" "criterion"
         in
-        if steps = [] then add (diag file (loc_of wf) "workflow.steps_empty" "workflow has no steps"));
+        List.iter add structural_diagnostics);
     List.rev !diagnostics
   with
   | Reader_error (l, msg) -> [ diag file l "parse.error" msg ]
