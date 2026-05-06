@@ -220,11 +220,8 @@ function checkMaturityRegistry(diagnostics, maturity) {
     if (entry.target !== 'M10') {
       diagnostics.push({ file: '.missiond/v3/missiond-blueprint.lisp', message: `${id} target must be M10, got ${entry.target}` });
     }
-    if (maturityValue(entry.current) < 6) {
-      diagnostics.push({ file: '.missiond/v3/missiond-blueprint.lisp', message: `${id} is below M6 in registered universe maturity` });
-    }
     if (entry.current !== 'M10' && entry.gap.length === 0) {
-      diagnostics.push({ file: '.missiond/v3/missiond-blueprint.lisp', message: `${id} is not M10 but has no M6->V3 gap` });
+      diagnostics.push({ file: '.missiond/v3/missiond-blueprint.lisp', message: `${id} is not M10 but has no maturity gap` });
     }
   }
 }

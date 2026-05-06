@@ -1126,17 +1126,17 @@
 
   (project-maturity-model
     :schema "missiond.project-maturity-model.v1"
-    :rule "M6 is checker-owned current-code SSOT closure; V3 parity is M10. The M6->V3 gap MUST be explicit as M7 runtime projection, M8 event-driven integration, M9 worker operation, and M10 full runtime SSOT."
+    :rule "M6 is checker-owned current-code SSOT closure with a project-level *blueprint.lisp plus code-isomorphism/current-code-mapping evidence; intent-only projects cannot satisfy M3+ and projects without code-isomorphism evidence cannot satisfy M6. V3 parity is M10. The M6->V3 gap MUST be explicit as M7 runtime projection, M8 event-driven integration, M9 worker operation, and M10 full runtime SSOT."
     :gate "scripts/check-project-maturity.mjs --min-level M6 is the default universe health gate; project M10 closure MUST run scripts/check-project-maturity.mjs --min-level M10 so M6 baselines cannot be mistaken for V3 parity."
     :v3-alias M10
     :levels
       ((level M0 :name unknown :requires [])
        (level M1 :name registered :requires [project-id root intent-path])
        (level M2 :name l1-index :requires [compact-intent project-identity invariants])
-       (level M3 :name blueprint-seeded :requires [backend/frontend-blueprint pillar/function])
+       (level M3 :name blueprint-seeded :requires [backend/frontend/operations-blueprint pillar/function])
        (level M4 :name surface-mapped :requires [entry core egress surface code-files])
        (level M5 :name checker-owned :requires [schema-checker code-isomorphism-checker local-aggregate])
-       (level M6 :name ssot-closure :requires [M5 manifest evidence current-code-mapping drift-policy universe-registration] :meaning "MissionD can manage the project as an SSOT-owned project, but runtime may still duplicate facts outside Lisp.")
+       (level M6 :name ssot-closure :requires [M5 project-blueprint code-isomorphism-checker evidence current-code-mapping drift-policy universe-registration] :meaning "MissionD can manage the project as an SSOT-owned project, but runtime may still duplicate facts outside Lisp.")
        (level M7 :name runtime-projected :requires [M6 runtime-config-from-lisp deployment-domain-health-constants no-hardcoded-runtime-duplicates])
        (level M8 :name event-driven :requires [M7 project-events-to-missiond-event-bus commit-lisp-convergence-backfill durable-provider-evidence])
        (level M9 :name worker-operational :requires [M8 context-pack-shards mission_swarm_run scoped-write-guards durable-completion-evidence])
@@ -1145,6 +1145,7 @@
       ["project SSOT reports MUST distinguish M6 closure from M10/V3 parity."
        "Universe status MUST expose current and target maturity for each registered project."
        "A project marked M6 but not M10 MUST list concrete M7/M8/M9/M10 gaps instead of claiming full V3 parity."
+       "Intent-only projects MUST NOT be marked M6 or M10; they must first split project-local blueprints and prove code-isomorphism/current-code-mapping."
        "Resident master and swarm runners MUST treat M7/M8/M9/M10 as separate gates: M7 runtime projection, M8 event bus and commit convergence, M9 worker smoke with durable evidence, and M10 final convergence report."])
 
   (project-maturity-registry
@@ -1153,24 +1154,24 @@
     :common-m6-to-v3-gap [runtime-projection event-bus commit-backfill worker-operational final-convergence]
     (maturity :id missiond :current M10 :target M10 :gap [])
     (maturity :id board :current M10 :target M10 :gap [])
-    (maturity :id jarvis :current M10 :target M10 :gap [])
+    (maturity :id jarvis :current M2 :target M10 :gap [blueprint-split code-isomorphism runtime-projection event-bus worker-operational final-convergence])
     (maturity :id jarvis-forge :current M10 :target M10 :gap [])
-    (maturity :id jarvis-mechanic :current M10 :target M10 :gap [])
-    (maturity :id xjpcode :current M10 :target M10 :gap [])
-    (maturity :id neural-codegen :current M10 :target M10 :gap [])
-    (maturity :id semantic-terminal :current M10 :target M10 :gap [])
-    (maturity :id xiaojinpro-backend :current M10 :target M10 :gap [])
-    (maturity :id deploy-center :current M10 :target M10 :gap [])
+    (maturity :id jarvis-mechanic :current M2 :target M10 :gap [blueprint-split code-isomorphism runtime-projection event-bus worker-operational final-convergence])
+    (maturity :id xjpcode :current M2 :target M10 :gap [blueprint-split code-isomorphism runtime-projection event-bus worker-operational final-convergence])
+    (maturity :id neural-codegen :current M2 :target M10 :gap [blueprint-split code-isomorphism runtime-projection event-bus worker-operational final-convergence])
+    (maturity :id semantic-terminal :current M2 :target M10 :gap [blueprint-split code-isomorphism runtime-projection event-bus worker-operational final-convergence])
+    (maturity :id xiaojinpro-backend :current M5 :target M10 :gap [code-isomorphism runtime-projection event-bus worker-operational final-convergence])
+    (maturity :id deploy-center :current M5 :target M10 :gap [code-isomorphism runtime-projection event-bus worker-operational final-convergence])
     (maturity :id deploy-agent :current M10 :target M10 :gap [])
     (maturity :id auth :current M10 :target M10 :gap [])
-    (maturity :id router :current M10 :target M10 :gap [])
-    (maturity :id payments :current M10 :target M10 :gap [])
-    (maturity :id asr :current M10 :target M10 :gap [])
-    (maturity :id timeline :current M10 :target M10 :gap [])
-    (maturity :id pcea :current M10 :target M10 :gap [])
-    (maturity :id secret-store :current M10 :target M10 :gap [])
-    (maturity :id xiaojin-blog :current M10 :target M10 :gap [])
-    (maturity :id cuthub :current M10 :target M10 :gap []))
+    (maturity :id router :current M5 :target M10 :gap [code-isomorphism runtime-projection event-bus worker-operational final-convergence])
+    (maturity :id payments :current M5 :target M10 :gap [code-isomorphism runtime-projection event-bus worker-operational final-convergence])
+    (maturity :id asr :current M5 :target M10 :gap [code-isomorphism runtime-projection event-bus worker-operational final-convergence])
+    (maturity :id timeline :current M5 :target M10 :gap [code-isomorphism runtime-projection event-bus worker-operational final-convergence])
+    (maturity :id pcea :current M5 :target M10 :gap [code-isomorphism runtime-projection event-bus worker-operational final-convergence])
+    (maturity :id secret-store :current M5 :target M10 :gap [code-isomorphism runtime-projection event-bus worker-operational final-convergence])
+    (maturity :id xiaojin-blog :current M5 :target M10 :gap [code-isomorphism runtime-projection event-bus worker-operational final-convergence])
+    (maturity :id cuthub :current M5 :target M10 :gap [code-isomorphism runtime-projection event-bus worker-operational final-convergence]))
 
   (project-blueprint-registry
     :schema "missiond.project-blueprint-registry.v1"

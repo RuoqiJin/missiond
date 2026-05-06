@@ -183,6 +183,7 @@ function parseProjectRegistry(node) {
       intent: nodeText(props[':intent']?.value) ?? null,
       backend: nodeText(props[':backend']?.value) ?? null,
       frontend: nodeText(props[':frontend']?.value) ?? null,
+      operations: nodeText(props[':operations']?.value) ?? null,
       checks: vectorValues(props[':checks']?.value),
       status: nodeText(props[':status']?.value) ?? null,
     });
@@ -200,9 +201,12 @@ function vectorValues(node) {
 function assessProject(repoRoot, id, maturity, registry) {
   const root = registryRoot(repoRoot, registry);
   const files = lispFilesForProject(repoRoot, root, registry);
+  const blueprintFiles = blueprintFilesForProject(repoRoot, root, registry);
   const text = files.map((file) => safeRead(file)).join('\n');
+  const blueprintText = blueprintFiles.map((file) => safeRead(file)).join('\n');
   const structural = {
     lisp_files: files.length,
+    blueprint_files: blueprintFiles.length,
     pillars: count(text, /\(pillar\b|:pillars\b/g),
     functions: count(text, /\(function\b|:functions\b/g),
     entry: count(text, /:entry\b|\(entry\b/g),
@@ -218,9 +222,11 @@ function assessProject(repoRoot, id, maturity, registry) {
   const evidence = {
     root_exists: root ? fs.existsSync(root) : id === 'missiond',
     intent_exists: intentExists(repoRoot, root, registry),
+    has_project_blueprint: blueprintFiles.length > 0,
     has_checker: hasChecker(root, registry),
     has_lisp_shape: structural.entry > 0 && structural.core > 0 && structural.egress > 0 && structural.surfaces > 0,
     has_ordered_steps: structural.steps > 0,
+    has_code_isomorphism: hasCodeIsomorphismEvidence(root, registry, text, blueprintText),
     has_runtime_projection: structural.runtime_projection > 0,
     has_event_loop: structural.event_bus > 0,
     has_worker_contract: structural.worker_operational > 0,
@@ -261,6 +267,25 @@ function lispFilesForProject(repoRoot, root, registry) {
   return listLispFiles(missiondDir);
 }
 
+function blueprintFilesForProject(repoRoot, root, registry) {
+  const out = new Set();
+  for (const rel of [registry?.path, registry?.backend, registry?.frontend, registry?.operations]) {
+    if (!rel) continue;
+    const file = path.resolve(root ?? repoRoot, rel);
+    if (fs.existsSync(file) && fs.statSync(file).isFile()) out.add(file);
+  }
+  if (root && fs.existsSync(path.join(root, '.missiond'))) {
+    for (const file of listLispFiles(path.join(root, '.missiond'))) {
+      if (path.basename(file).endsWith('blueprint.lisp')) out.add(file);
+    }
+  }
+  if (registry?.path && root === repoRoot) {
+    const file = path.resolve(repoRoot, registry.path);
+    if (fs.existsSync(file) && path.basename(file).endsWith('blueprint.lisp')) out.add(file);
+  }
+  return [...out].sort();
+}
+
 function listLispFiles(dir) {
   const out = [];
   const stack = [dir];
@@ -297,8 +322,26 @@ function hasChecker(root, registry) {
   return fs.existsSync(path.join(root, '.missiond/check.sh')) || fs.existsSync(path.join(root, 'scripts'));
 }
 
+function hasCodeIsomorphismEvidence(root, registry, allLispText, blueprintText) {
+  const checks = (registry?.checks ?? []).join('\n');
+  const source = `${checks}\n${blueprintText}\n${allLispText}`;
+  if (/\b(code[-_ ]isomorphism|code[-_ ]aligned|current[-_ ]code[-_ ]mapping|code[-_ ]mapping|surface[-_ ]map|implementation[-_ ]map)\b/i.test(source)) {
+    return true;
+  }
+  if (root) {
+    for (const rel of ['.missiond/check.sh', 'scripts/check-project-ssot.mjs']) {
+      const file = path.join(root, rel);
+      if (fs.existsSync(file) && /\b(code[-_ ]isomorphism|current[-_ ]code[-_ ]mapping|surface[-_ ]map)\b/i.test(safeRead(file))) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 function nextGap(current, evidence) {
-  if (levelValue(current) < 6) return 'm6-ssot-closure';
+  if (levelValue(current) < 3 || !evidence.has_project_blueprint) return 'm3-blueprint-split';
+  if (levelValue(current) < 6 || !evidence.has_code_isomorphism) return 'm6-code-isomorphism';
   if (levelValue(current) < 7 || !evidence.has_runtime_projection) return 'm7-runtime-projection';
   if (levelValue(current) < 8 || !evidence.has_event_loop) return 'm8-event-driven';
   if (levelValue(current) < 9 || !evidence.has_worker_contract) return 'm9-worker-operational';
@@ -313,6 +356,9 @@ function diagnosticsForProject(row, minLevel, { evidenceOnly = false } = {}) {
   if (!row.evidence.intent_exists) diagnostics.push({ file, message: `${row.id} intent/blueprint entry does not exist` });
   if (row.structural.lisp_files === 0) diagnostics.push({ file, message: `${row.id} has no Lisp SSOT files` });
   if (!row.evidence.has_checker) diagnostics.push({ file, message: `${row.id} has no declared/local checker` });
+  if (levelValue(minLevel) >= 3 && !row.evidence.has_project_blueprint) {
+    diagnostics.push({ file, message: `${row.id} has no project-level *blueprint.lisp; intent-only projects cannot satisfy M3+` });
+  }
 
   if (evidenceOnly) {
     if (levelValue(row.evidence_level) < levelValue(minLevel)) {
@@ -332,6 +378,15 @@ function diagnosticsForProject(row, minLevel, { evidenceOnly = false } = {}) {
     return diagnostics;
   }
 
+  if (levelValue(row.evidence_level) < levelValue(minLevel)) {
+    diagnostics.push({
+      file,
+      message: `${row.id} evidence level ${row.evidence_level}, below required ${minLevel}; declared current is ${row.declared_current}; next gap ${row.next_gap}`,
+    });
+  }
+  if (levelValue(minLevel) >= 6 && !row.evidence.has_code_isomorphism) {
+    diagnostics.push({ file, message: `${row.id} lacks code-isomorphism/current-code-mapping evidence required for M6+` });
+  }
   if (levelValue(minLevel) >= 7 && !row.evidence.has_lisp_shape) {
     diagnostics.push({ file, message: `${row.id} lacks entry/core/egress/surface SSOT shape` });
   }
@@ -358,8 +413,10 @@ function diagnosticsForProject(row, minLevel, { evidenceOnly = false } = {}) {
 
 function evidenceLevel(evidence) {
   if (!evidence.root_exists || !evidence.intent_exists) return 'M1';
-  if (!evidence.has_checker) return 'M4';
-  if (!evidence.has_lisp_shape || !evidence.has_ordered_steps) return 'M5';
+  if (!evidence.has_checker) return 'M2';
+  if (!evidence.has_project_blueprint) return 'M2';
+  if (!evidence.has_lisp_shape || !evidence.has_ordered_steps) return 'M4';
+  if (!evidence.has_code_isomorphism) return 'M5';
   if (!evidence.has_runtime_projection) return 'M6';
   if (!evidence.has_event_loop) return 'M7';
   if (!evidence.has_worker_contract) return 'M8';
@@ -381,6 +438,14 @@ function buildFixture() {
   fs.mkdirSync(path.join(root, 'scripts'), { recursive: true });
   fs.mkdirSync(path.join(root, 'projects/app/.missiond/backend'), { recursive: true });
   fs.writeFileSync(path.join(root, '.missiond/v3/missiond-blueprint.lisp'), `(missiond-blueprint
+  :code-isomorphism current-code-mapping
+  (pillar runtime
+    (function missiond-runtime
+      :entry [mission_request]
+      :core ((step s1 :logic "read blueprint") (step s2 :logic "run checker"))
+      :egress [runtime-status]
+      :surfaces ["src/main.rs"]
+      :runtime-projection [runtime-policy]))
   (project-maturity-model
     :schema "missiond.project-maturity-model.v1"
     :levels ((level M6 :name ssot-closure) (level M10 :name v3-runtime-ssot)))
@@ -389,7 +454,7 @@ function buildFixture() {
     (maturity :id missiond :current M10 :target M10 :gap [])
     (maturity :id app :current M6 :target M10 :gap [runtime-projection]))
   (project-blueprint-registry
-    (project :id app :root "${path.join(root, 'projects/app')}" :intent ".missiond/intent.lisp" :checks ["bash .missiond/check.sh"])))`);
+    (project :id app :root "${path.join(root, 'projects/app')}" :intent ".missiond/intent.lisp" :backend ".missiond/backend/app-backend-blueprint.lisp" :checks ["bash .missiond/check.sh"])))`);
   fs.writeFileSync(path.join(root, 'projects/app/.missiond/intent.lisp'), `(project app
   :pillars [api]
   :maturity M6
@@ -400,6 +465,16 @@ function buildFixture() {
     :egress [JSON]
     :surfaces ["src/main.rs"]
     :runtime-projection [APP_PORT]))`);
+  fs.writeFileSync(path.join(root, 'projects/app/.missiond/backend/app-backend-blueprint.lisp'), `(project-backend-blueprint app
+  :schema "project.backend-blueprint.v1"
+  :code-isomorphism current-code-mapping
+  (pillar api
+    (function app-api
+      :entry [HTTP]
+      :core ((step s1 :logic "read") (step s2 :logic "write"))
+      :egress [JSON]
+      :surfaces ["src/main.rs"]
+      :runtime-projection [APP_PORT])))`);
   fs.writeFileSync(path.join(root, 'projects/app/.missiond/check.sh'), '#!/usr/bin/env bash\nexit 0\n');
   return root;
 }
