@@ -42,6 +42,7 @@ use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
+use crate::context::v3_blueprint_runtime::load_compiled_workflow_contracts;
 #[cfg(test)]
 use crate::handlers::knowledge::review_gate::ReviewDecision;
 use crate::handlers::knowledge::review_gate::{

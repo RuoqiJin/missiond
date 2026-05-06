@@ -326,6 +326,7 @@ function checkFiles(root, files) {
     'mod project_root;',
     'mod run_methodology;',
     'mod store_actions;',
+    'load_compiled_workflow_contracts',
     'use compile_methodology::action_compile_methodology;',
     'use distill::action_distill;',
     'use run_methodology::action_run_methodology;',
@@ -333,6 +334,10 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.workflowStoreActions, sources.workflowStoreActions, [
     'pub(super) async fn action_list',
+    'compiled_workflow_contracts_for_args',
+    '"compiledContracts"',
+    '"source": "compiled-workflows"',
+    'resolve_project_root_from_args(state, args)',
     'pub(super) async fn action_get',
     'pub(super) async fn action_match',
     'pub(super) async fn action_apply',
@@ -615,6 +620,7 @@ mod distill;
 mod project_root;
 mod run_methodology;
 mod store_actions;
+use crate::context::v3_blueprint_runtime::load_compiled_workflow_contracts;
 use compile_methodology::action_compile_methodology;
 use distill::action_distill;
 use run_methodology::action_run_methodology;
@@ -622,7 +628,11 @@ use run_methodology::action_run_methodology;
 mod tests;
 `);
   writeFixture(root, DEFAULT_FILES.workflowStoreActions, `
-pub(super) async fn action_list() {}
+pub(super) async fn action_list() { "compiledContracts"; }
+fn compiled_workflow_contracts_for_args() {
+  resolve_project_root_from_args(state, args);
+  "source": "compiled-workflows";
+}
 pub(super) async fn action_get() {}
 pub(super) async fn action_match() {}
 pub(super) async fn action_apply() {}
