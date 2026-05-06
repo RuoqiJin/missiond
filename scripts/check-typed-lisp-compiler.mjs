@@ -25,6 +25,17 @@ const REQUIRED_FILES = [
   '.missiond/workflows/typed-lisp-compiler-convergence.lisp',
 ];
 
+const REQUIRED_RUNTIME_LOADER = {
+  file: 'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
+  tokens: [
+    'load_runtime_blueprint_source',
+    'load_compiled_v3_lisp_source',
+    'compiled_sexp_to_lisp',
+    'CompiledV3Payload',
+    'load_runtime_blueprint_source(project_root)',
+  ],
+};
+
 const REQUIRED_BLUEPRINT_TOKENS = [
   '(function typed-lisp-compiler',
   ':surface typed-lisp-compiler',
@@ -50,6 +61,13 @@ function main() {
 
   for (const file of REQUIRED_FILES) {
     if (!fs.existsSync(file)) diagnostics.push(diag(file, 'FILE_MISSING', 'required typed compiler file is missing'));
+  }
+
+  const runtimeLoader = read(REQUIRED_RUNTIME_LOADER.file);
+  for (const token of REQUIRED_RUNTIME_LOADER.tokens) {
+    if (!runtimeLoader.includes(token)) {
+      diagnostics.push(diag(REQUIRED_RUNTIME_LOADER.file, 'RUNTIME_LOADER_TOKEN_MISSING', `missing token ${JSON.stringify(token)}`));
+    }
   }
 
   const blueprint = read(BLUEPRINT);

@@ -446,8 +446,25 @@ struct CompiledRuntimeEnvelope {
     #[allow(dead_code)]
     generated_at: Option<serde_json::Value>,
     diagnostics: Vec<serde_json::Value>,
-    #[allow(dead_code)]
     payload: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct CompiledV3Payload {
+    #[serde(default)]
+    forms: Vec<CompiledSexpNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CompiledSexpNode {
+    #[serde(rename = "type")]
+    node_type: String,
+    #[serde(default)]
+    value: Option<String>,
+    #[serde(rename = "kind", default)]
+    list_kind: Option<String>,
+    #[serde(default)]
+    children: Vec<CompiledSexpNode>,
 }
 
 impl Default for TimeoutPolicy {
@@ -1009,7 +1026,7 @@ impl WorkstationRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        match load_blueprint_source(project_root)? {
+        match load_runtime_blueprint_source(project_root)? {
             Some(source) => parse_workstation_config(&source),
             None => Ok(Self::default()),
         }
@@ -1217,7 +1234,7 @@ impl FlowRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        match load_blueprint_source(project_root)? {
+        match load_runtime_blueprint_source(project_root)? {
             Some(source) => parse_flow_runtime_policy(&source),
             None => Ok(Self::default()),
         }
@@ -1228,7 +1245,7 @@ impl ComputePrimitivesRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        match load_blueprint_source(project_root)? {
+        match load_runtime_blueprint_source(project_root)? {
             Some(source) => parse_compute_runtime_policy(&source),
             None => Ok(Self::default()),
         }
@@ -1258,7 +1275,7 @@ impl MinimaxRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        match load_blueprint_source(project_root)? {
+        match load_runtime_blueprint_source(project_root)? {
             Some(source) => parse_minimax_runtime_policy(&source),
             None => Ok(Self::default()),
         }
@@ -1286,7 +1303,7 @@ impl RouterRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        match load_blueprint_source(project_root)? {
+        match load_runtime_blueprint_source(project_root)? {
             Some(source) => parse_router_runtime_policy(&source),
             None => Ok(Self::default()),
         }
@@ -1338,7 +1355,7 @@ impl CascadeRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        match load_blueprint_source(project_root)? {
+        match load_runtime_blueprint_source(project_root)? {
             Some(source) => parse_cascade_policy(&source),
             None => Ok(Self::default()),
         }
@@ -1384,7 +1401,7 @@ impl ProjectRegistryRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        match load_blueprint_source(project_root)? {
+        match load_runtime_blueprint_source(project_root)? {
             Some(source) => parse_project_registry_policy(&source),
             None => Ok(Self::default()),
         }
@@ -1401,7 +1418,7 @@ impl CapabilityGovernanceRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        match load_blueprint_source(project_root)? {
+        match load_runtime_blueprint_source(project_root)? {
             Some(source) => parse_capability_governance_policy(&source),
             None => Ok(Self::default()),
         }
@@ -1437,7 +1454,7 @@ impl MemoryKbRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        match load_blueprint_source(project_root)? {
+        match load_runtime_blueprint_source(project_root)? {
             Some(source) => parse_memory_kb_policy(&source),
             None => Ok(Self::default()),
         }
@@ -1457,7 +1474,7 @@ impl ConversationIngestionRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        match load_blueprint_source(project_root)? {
+        match load_runtime_blueprint_source(project_root)? {
             Some(source) => parse_conversation_ingestion_policy(&source),
             None => Ok(Self::default()),
         }
@@ -1501,7 +1518,7 @@ impl AutopilotRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        match load_blueprint_source(project_root)? {
+        match load_runtime_blueprint_source(project_root)? {
             Some(source) => parse_autopilot_policy(&source),
             None => Ok(Self::default()),
         }
@@ -1525,7 +1542,7 @@ impl LearningEngineRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        match load_blueprint_source(project_root)? {
+        match load_runtime_blueprint_source(project_root)? {
             Some(source) => parse_learning_engine_policy(&source),
             None => Ok(Self::default()),
         }
@@ -2622,6 +2639,102 @@ fn load_blueprint_source(
         message: err.to_string(),
     })?;
     Ok(Some(source))
+}
+
+fn load_runtime_blueprint_source(
+    project_root: Option<&str>,
+) -> Result<Option<String>, BlueprintConfigError> {
+    let Some(root) = resolve_blueprint_root(project_root) else {
+        return Ok(None);
+    };
+    if let Some(source) = load_compiled_v3_lisp_source(&root) {
+        return Ok(Some(source));
+    }
+    load_blueprint_source(Some(root.to_string_lossy().as_ref()))
+}
+
+fn resolve_blueprint_root(project_root: Option<&str>) -> Option<PathBuf> {
+    if let Some(root) = project_root
+        .map(str::trim)
+        .filter(|root| !root.is_empty())
+        .map(PathBuf::from)
+    {
+        let target_blueprint = root
+            .join(".missiond")
+            .join("v3")
+            .join("missiond-blueprint.lisp");
+        if target_blueprint.exists() {
+            return Some(root);
+        }
+    }
+    locate_orchestrator_blueprint()
+        .and_then(|path| path.parent().and_then(|v3| v3.parent()).map(Path::to_path_buf))
+}
+
+fn load_compiled_v3_lisp_source(project_root: &Path) -> Option<String> {
+    let path = project_root
+        .join(".missiond")
+        .join("v3")
+        .join("runtime")
+        .join("compiled")
+        .join("compiled-v3-blueprint.json");
+    let raw = fs::read_to_string(&path).ok()?;
+    let parsed: CompiledRuntimeEnvelope = serde_json::from_str(&raw).ok()?;
+    if !parsed.diagnostics.is_empty() {
+        return None;
+    }
+    let payload: CompiledV3Payload = serde_json::from_value(parsed.payload).ok()?;
+    if payload.forms.is_empty() {
+        return None;
+    }
+    let mut rendered = Vec::with_capacity(payload.forms.len());
+    for form in &payload.forms {
+        rendered.push(compiled_sexp_to_lisp(form)?);
+    }
+    let source = rendered.join("\n");
+    source.contains("(missiond-blueprint").then_some(source)
+}
+
+fn compiled_sexp_to_lisp(node: &CompiledSexpNode) -> Option<String> {
+    match node.node_type.as_str() {
+        "atom" => node.value.clone(),
+        "string" => node.value.as_deref().map(quote_lisp_string),
+        "list" => {
+            let open = if node.list_kind.as_deref() == Some("bracket") {
+                "["
+            } else {
+                "("
+            };
+            let close = if node.list_kind.as_deref() == Some("bracket") {
+                "]"
+            } else {
+                ")"
+            };
+            let mut parts = Vec::with_capacity(node.children.len());
+            for child in &node.children {
+                parts.push(compiled_sexp_to_lisp(child)?);
+            }
+            Some(format!("{open}{}{close}", parts.join(" ")))
+        }
+        _ => None,
+    }
+}
+
+fn quote_lisp_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
 }
 
 pub(crate) fn load_compiled_runtime_snapshot(
@@ -3820,5 +3933,79 @@ mod tests {
             "{:?}",
             loaded.diagnostics
         );
+    }
+
+    #[test]
+    fn runtime_blueprint_source_prefers_compiled_v3_ast() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let compiled_dir = temp
+            .path()
+            .join(".missiond")
+            .join("v3")
+            .join("runtime")
+            .join("compiled");
+        fs::create_dir_all(&compiled_dir).expect("compiled dir");
+        fs::write(
+            temp.path()
+                .join(".missiond")
+                .join("v3")
+                .join("missiond-blueprint.lisp"),
+            r#"(missiond-blueprint (workstation-config (model-profile coding-default-opus-4-7 :spawn-model-arg nil)))"#,
+        )
+        .expect("fallback blueprint");
+        fs::write(
+            compiled_dir.join("compiled-v3-blueprint.json"),
+            r#"{
+              "schema_version": "missiond.compiled-v3-blueprint.v1",
+              "source_hash": "compiled",
+              "generated_at": null,
+              "diagnostics": [],
+              "payload": {
+                "forms": [{
+                  "type": "list",
+                  "kind": "paren",
+                  "children": [
+                    {"type": "atom", "value": "missiond-blueprint"},
+                    {"type": "list", "kind": "paren", "children": [
+                      {"type": "atom", "value": "compiled-runtime-marker"}
+                    ]}
+                  ]
+                }]
+              }
+            }"#,
+        )
+        .expect("compiled snapshot");
+
+        let source =
+            load_runtime_blueprint_source(Some(temp.path().to_string_lossy().as_ref()))
+                .expect("runtime source")
+                .expect("source");
+        assert!(source.contains("compiled-runtime-marker"), "{source}");
+    }
+
+    #[test]
+    fn runtime_blueprint_source_falls_back_when_compiled_ast_is_invalid() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let v3_dir = temp.path().join(".missiond").join("v3");
+        fs::create_dir_all(v3_dir.join("runtime").join("compiled")).expect("compiled dir");
+        fs::write(
+            v3_dir.join("missiond-blueprint.lisp"),
+            r#"(missiond-blueprint (fallback-runtime-marker))"#,
+        )
+        .expect("fallback blueprint");
+        fs::write(
+            v3_dir
+                .join("runtime")
+                .join("compiled")
+                .join("compiled-v3-blueprint.json"),
+            r#"{"schema_version":"missiond.compiled-v3-blueprint.v1","source_hash":"bad","diagnostics":[],"payload":{"forms":[]}}"#,
+        )
+        .expect("invalid compiled snapshot");
+
+        let source =
+            load_runtime_blueprint_source(Some(temp.path().to_string_lossy().as_ref()))
+                .expect("runtime source")
+                .expect("source");
+        assert!(source.contains("fallback-runtime-marker"), "{source}");
     }
 }
