@@ -21,7 +21,7 @@ let print_diagnostics diagnostics =
 
 let usage () =
   prerr_endline
-    "Usage: missiond-lispc <emit-json|emit-v3|emit-universe|emit-workflows|check-v3|check-workflow|check-project|check-auth-domain> --file <path>|--dir <path>|--blueprint <path>|--workflow-dir <path>";
+    "Usage: missiond-lispc <emit-json|emit-v3|emit-universe|emit-workflows|check-v3|check-workflow|check-project|check-project-dir|check-auth-domain> --file <path>|--dir <path>|--blueprint <path>|--workflow-dir <path>";
   2
 
 let () =
@@ -58,6 +58,10 @@ let () =
           match find_arg "--blueprint" rest with
           | Some file -> exit (print_diagnostics (Project_schema.validate file))
           | None -> exit (usage ())))
+  | "check-project-dir" :: rest -> (
+      match find_arg "--dir" rest with
+      | Some dir -> exit (print_diagnostics (Project_schema.validate_project_dir dir))
+      | None -> exit (usage ()))
   | "check-auth-domain" :: rest -> (
       match (find_arg "--file" rest, find_arg "--dir" rest) with
       | Some file, _ -> exit (print_diagnostics (Project_schema.validate_auth_domain file))

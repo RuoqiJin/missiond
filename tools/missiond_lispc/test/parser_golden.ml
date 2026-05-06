@@ -12,6 +12,16 @@ let with_temp name source f =
   let file = write_temp name source in
   Fun.protect ~finally:(fun () -> Sys.remove file) (fun () -> f file)
 
+let with_temp_dir name f =
+  let marker = Filename.temp_file name ".tmp" in
+  Sys.remove marker;
+  let dir = marker ^ ".d" in
+  if Sys.command ("mkdir -p " ^ Filename.quote (Filename.concat dir "backend")) <> 0
+  then failwith "failed to create temp dir";
+  Fun.protect
+    ~finally:(fun () -> ignore (Sys.command ("rm -rf " ^ Filename.quote dir)))
+    (fun () -> f dir)
+
 let has_code code diagnostics =
   List.exists (fun (d : Ast.diagnostic) -> d.code = code) diagnostics
 
@@ -151,6 +161,40 @@ let test_project_function_requires_surface () =
       assert_true "missing project surface is diagnosed"
         (has_code "project.surface_missing" diagnostics))
 
+let test_project_dir_validates_active_blueprints () =
+  with_temp_dir "project-dir" (fun dir ->
+      let blueprint = Filename.concat dir "backend/demo-blueprint.lisp" in
+      let oc = open_out_bin blueprint in
+      output_string oc
+        {|
+(demo-blueprint
+  (function runtime-config
+    :entry [config]
+    :core ((step s1 :logic "load config"))
+    :egress [runtime]
+    :surfaces ["src/main.rs"]))
+|};
+      close_out oc;
+      let diagnostics = Project_schema.validate_project_dir dir in
+      assert_true "valid project dir has no diagnostics" (diagnostics = []))
+
+let test_project_dir_rejects_invalid_blueprint () =
+  with_temp_dir "project-dir-invalid" (fun dir ->
+      let blueprint = Filename.concat dir "backend/demo-blueprint.lisp" in
+      let oc = open_out_bin blueprint in
+      output_string oc
+        {|
+(demo-blueprint
+  (function runtime-config
+    :entry [config]
+    :core ((step s1 :logic "load config"))
+    :surfaces ["src/main.rs"]))
+|};
+      close_out oc;
+      let diagnostics = Project_schema.validate_project_dir dir in
+      assert_true "missing egress in project dir is diagnosed"
+        (has_code "project.egress_missing" diagnostics))
+
 let () =
   test_parser_locations ();
   test_v3_missing_entry ();
@@ -160,4 +204,6 @@ let () =
   test_auth_structured_function_requires_runtime_projection ();
   test_project_function_requires_ordered_steps ();
   test_project_function_requires_surface ();
+  test_project_dir_validates_active_blueprints ();
+  test_project_dir_rejects_invalid_blueprint ();
   print_endline "missiond_lispc parser and validator golden tests passed"

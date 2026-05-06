@@ -63,6 +63,8 @@ const REQUIRED_PROJECT_MATURITY_CHECKER = {
   tokens: [
     'loadMaturityInputs',
     'normalizeTypedMaturityInputs',
+    'runOcamlProjectDirChecks',
+    "'check-project-dir'",
     "'emit-universe'",
     'source: loaded.source',
     'mode: \'js-fixture\'',
@@ -82,6 +84,10 @@ const REQUIRED_AUTH_DOMAIN_CHECKER = {
     {
       file: 'tools/missiond_lispc/bin/project_schema.ml',
       tokens: [
+        'validate_project_dir',
+        'active_project_lisp_file',
+        'validate_project_function_form',
+        'project.core_step_logic',
         'validate_auth_domain_structured_dir',
         'validate_auth_structured_form',
         'auth.runtime_projection_missing',
@@ -179,11 +185,14 @@ function main() {
       ['emit-v3', '--blueprint', BLUEPRINT],
       ['emit-universe', '--blueprint', BLUEPRINT],
       ['emit-workflows', '--workflow-dir', '.missiond/workflows'],
+      ['check-project-dir', '--dir', '.missiond/frontend'],
     ]) {
       const emit = runLispc(argv);
       emitChecks.push({ argv, ok: emit.ok === true, diagnostics: emit.diagnostics ?? [] });
-      if (!emit.ok || !emit.compiled) {
+      if (!emit.ok) {
         diagnostics.push(diag('tools/missiond_lispc', 'OCAML_EMIT_FAILED', `emit command failed: ${argv.join(' ')}`));
+      } else if (argv[0].startsWith('emit') && !emit.compiled) {
+        diagnostics.push(diag('tools/missiond_lispc', 'OCAML_EMIT_FAILED', `emit command did not return compiled payload: ${argv.join(' ')}`));
       } else if (argv[0] === 'emit-universe') {
         if (!Array.isArray(emit.compiled?.payload?.projects) || emit.compiled.payload.projects.length === 0) {
           diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_UNIVERSE_PROJECTION_MISSING_PROJECTS', 'emit-universe must project structured projects[]'));

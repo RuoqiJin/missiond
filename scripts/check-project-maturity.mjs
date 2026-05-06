@@ -40,7 +40,8 @@ function main() {
   const repoRoot = opts.dryFixture ? buildFixture() : DEFAULT_REPO_ROOT;
   const result = runProjectMaturityCheck(repoRoot, opts);
   const engine = runOcamlMaturityCheck(repoRoot, opts);
-  result.engine = engine;
+  const projectDirEngine = runOcamlProjectDirChecks(repoRoot, result.projects ?? [], opts);
+  result.engine = { ...engine, project_dirs: projectDirEngine };
   if (engine.strictResult) {
     result.ok = false;
     result.diagnostics.push(...(engine.strictResult.diagnostics ?? []).map((d) => ({
@@ -52,6 +53,19 @@ function main() {
     result.diagnostics.push(...(engine.diagnostics ?? []).map((d) => ({
       file: d.file ?? BLUEPRINT_PATH,
       message: `${d.code ?? 'OCAML_PROJECT'}: ${d.message}`,
+    })));
+  }
+  if (projectDirEngine.strictResult) {
+    result.ok = false;
+    result.diagnostics.push(...(projectDirEngine.strictResult.diagnostics ?? []).map((d) => ({
+      file: d.file ?? 'project-dir',
+      message: `${d.code ?? 'OCAML_PROJECT_DIR'}: ${d.message}`,
+    })));
+  } else if (projectDirEngine.mode === 'ocaml' && projectDirEngine.ok === false) {
+    result.ok = false;
+    result.diagnostics.push(...(projectDirEngine.diagnostics ?? []).map((d) => ({
+      file: d.file ?? 'project-dir',
+      message: `${d.code ?? 'OCAML_PROJECT_DIR'}: ${d.message}`,
     })));
   }
 
@@ -281,6 +295,51 @@ function runOcamlMaturityCheck(repoRoot, opts) {
   };
 }
 
+function runOcamlProjectDirChecks(repoRoot, rows, opts) {
+  if (opts.dryFixture) {
+    return { requested: opts.engine, mode: 'js-fixture', ok: true, diagnostics: [], checked: [] };
+  }
+  if (opts.engine === 'js') return { requested: opts.engine, mode: 'js', ok: true, diagnostics: [], checked: [] };
+  if (levelValue(opts.minLevel ?? 'M6') < 6) {
+    return { requested: opts.engine, mode: 'ocaml-skipped', ok: true, diagnostics: [], checked: [] };
+  }
+  const diagnostics = [];
+  const checked = [];
+  const seen = new Set();
+  for (const row of rows) {
+    const dir = row.missiond_dir;
+    if (!dir || seen.has(dir)) continue;
+    seen.add(dir);
+    const attempt = maybeRunLispc(['check-project-dir', '--dir', dir], {
+      engine: opts.engine,
+      repoRoot,
+      timeoutMs: 60_000,
+    });
+    if (attempt.mode === 'js-fallback') {
+      return {
+        requested: opts.engine,
+        mode: 'js-fallback',
+        ok: true,
+        diagnostics: attempt.result?.diagnostics ?? [],
+        checked,
+      };
+    }
+    const result = attempt.result;
+    if (opts.engine === 'ocaml' && result?.unavailable) {
+      return { requested: opts.engine, mode: 'ocaml', strictResult: result, checked };
+    }
+    checked.push({ project: row.id, dir, ok: result?.ok === true });
+    if (!result?.ok) diagnostics.push(...(result?.diagnostics ?? []));
+  }
+  return {
+    requested: opts.engine,
+    mode: 'ocaml',
+    ok: diagnostics.length === 0,
+    diagnostics,
+    checked,
+  };
+}
+
 function firstChild(node, childHead) {
   if (!isList(node)) return null;
   return node.children.find((child) => isList(child) && head(child) === childHead) ?? null;
@@ -373,12 +432,13 @@ function assessProject(repoRoot, id, maturity, registry) {
     target: maturity.target,
     declared_gap: maturity.gap,
     registry_status: registry?.status ?? (id === 'missiond' ? 'code-aligned' : null),
-      root,
-      structural,
-      evidence,
-      evidence_level: evidenceLevel(evidence),
-      next_gap: nextGap(maturity.current, evidence),
-    };
+    root,
+    missiond_dir: projectMissiondDir(repoRoot, root, registry, id),
+    structural,
+    evidence,
+    evidence_level: evidenceLevel(evidence),
+    next_gap: nextGap(maturity.current, evidence),
+  };
 }
 
 function registryRoot(repoRoot, registry) {
@@ -386,6 +446,17 @@ function registryRoot(repoRoot, registry) {
   if (registry.root) return registry.root;
   if (registry.path) return repoRoot;
   return null;
+}
+
+function projectMissiondDir(repoRoot, root, registry, id) {
+  if (id === 'missiond') return null;
+  if (registry?.path) {
+    const file = path.resolve(root ?? repoRoot, registry.path);
+    return fs.existsSync(file) && fs.statSync(file).isFile() ? path.dirname(file) : null;
+  }
+  if (!root) return null;
+  const missiondDir = path.join(root, '.missiond');
+  return fs.existsSync(missiondDir) ? missiondDir : null;
 }
 
 function lispFilesForProject(repoRoot, root, registry) {

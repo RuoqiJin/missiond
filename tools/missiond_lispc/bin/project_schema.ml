@@ -20,24 +20,65 @@ let has_suffix s suffix =
   let lx = String.length suffix in
   ls >= lx && String.sub s (ls - lx) lx = suffix
 
+let prop_or_child key child props form =
+  match prop key props with Some node -> Some node | None -> find_child form child
+
+let has_prop_or_child key child props form = prop_or_child key child props form <> None
+
+let parse_step_id id =
+  let len = String.length id in
+  let rec split i =
+    if i >= len then None
+    else
+      let c = id.[i] in
+      if c >= '0' && c <= '9' then
+        let prefix = String.sub id 0 i in
+        let digits = String.sub id i (len - i) in
+        try Some (prefix, int_of_string digits) with Failure _ -> None
+      else split (i + 1)
+  in
+  split 0
+
+let expected_step_id first_prefix first_number index =
+  first_prefix ^ string_of_int (first_number + index)
+
 let validate_project_core_steps file form_id_label form =
   let props = keyword_props ~start:2 form in
-  match prop ":core" props with
-  | Some (List (_, _, xs) as core) ->
-      let steps = xs |> List.filter (fun node -> is_list node "step") in
+  match prop_or_child ":core" "core" props form with
+  | Some (List (_, _, _) as core) ->
+      let steps = collect_forms "step" core in
       if steps = [] then
         [ diag file (loc_of core) "project.core_empty"
             (Printf.sprintf "%s :core must contain at least one ordered step" form_id_label)
         ]
-      else
+      else (
+        let first =
+          match steps with
+          | first_step :: _ -> (
+              match children first_step with
+              | _ :: id_node :: _ -> Option.bind (atom_text id_node) parse_step_id
+              | _ -> None)
+          | [] -> None
+        in
         steps
         |> List.mapi (fun i step ->
-               let expected = "s" ^ string_of_int (i + 1) in
+               let expected =
+                 match first with
+                 | Some (prefix, n) when n = 0 || n = 1 -> expected_step_id prefix n i
+                 | _ -> "s" ^ string_of_int (i + 1)
+               in
                let got =
                  match children step with _ :: id_node :: _ -> atom_text id_node | _ -> None
                in
                let step_props = keyword_props ~start:2 step in
-               let logic = prop_text ":logic" step_props in
+               let logic =
+                 match prop_text ":logic" step_props with
+                 | Some value -> Some value
+                 | None -> (
+                     match children step with
+                     | _ :: _ :: logic_node :: _ -> atom_text logic_node
+                     | _ -> None)
+               in
                let diagnostics =
                  if got = Some expected then []
                  else
@@ -52,7 +93,7 @@ let validate_project_core_steps file form_id_label form =
                    diag file (loc_of step) "project.core_step_logic"
                      (Printf.sprintf "%s step %s must declare :logic" form_id_label expected)
                    :: diagnostics)
-        |> List.flatten
+        |> List.flatten)
   | Some node ->
       [ diag file (loc_of node) "project.core_invalid"
           (Printf.sprintf "%s must declare list :core" form_id_label)
@@ -72,13 +113,30 @@ let validate_project_function_form file form =
   let add d = diagnostics := d :: !diagnostics in
   if id = None then
     add (diag file (loc_of form) "project.function_id_missing" (label ^ " missing id"));
-  if prop ":entry" props = None then
+  if not (has_prop_or_child ":entry" "entry" props form) then
     add (diag file (loc_of form) "project.entry_missing" (label ^ " missing :entry"));
   validate_project_core_steps file label form |> List.iter add;
-  if prop ":egress" props = None then
+  if not (has_prop_or_child ":egress" "egress" props form) then
     add (diag file (loc_of form) "project.egress_missing" (label ^ " missing :egress"));
-  if prop ":surface" props = None && not (nonempty_list_prop ":surfaces" props) then
+  if
+    prop ":surface" props = None
+    && not (nonempty_list_prop ":surfaces" props)
+    && find_child form "surface" = None
+    && find_child form "surfaces" = None
+  then
     add (diag file (loc_of form) "project.surface_missing" (label ^ " missing :surface or non-empty :surfaces"));
+  List.rev !diagnostics
+
+let validate_project_root_form file form =
+  let props = keyword_props ~start:2 form in
+  let root_label = match head form with Some value -> value | None -> "project-root" in
+  let diagnostics = ref [] in
+  let add d = diagnostics := d :: !diagnostics in
+  if not (has_prop_or_child ":entry" "entry" props form) then
+    add (diag file (loc_of form) "project.entry_missing" (root_label ^ " missing :entry"));
+  validate_project_core_steps file root_label form |> List.iter add;
+  if not (has_prop_or_child ":egress" "egress" props form) then
+    add (diag file (loc_of form) "project.egress_missing" (root_label ^ " missing :egress"));
   List.rev !diagnostics
 
 let validate file =
@@ -113,6 +171,84 @@ let validate file =
   with
   | Reader_error (l, msg) -> [ diag file l "parse.error" msg ]
   | Sys_error msg -> [ diag file { line = 1; column = 1 } "io.error" msg ]
+
+let active_project_lisp_file file =
+  let base = Filename.basename file in
+  has_suffix base "blueprint.lisp"
+  || has_suffix base "runtime-projection.lisp"
+  || has_suffix base "implementation-map.lisp"
+  || has_suffix base "compatibility-ledger.lisp"
+
+let validate_project_forms_in_file file forms =
+  let diagnostics = ref [] in
+  let add d = diagnostics := d :: !diagnostics in
+  let functions = forms |> List.map (collect_forms "function") |> List.flatten in
+  functions
+  |> List.iter (fun form -> validate_project_function_form file form |> List.iter add);
+  List.rev !diagnostics
+
+let validate_project_file file =
+  try Parser.parse_file file |> validate_project_forms_in_file file
+  with
+  | Reader_error (l, msg) -> [ diag file l "parse.error" msg ]
+  | Sys_error msg -> [ diag file { line = 1; column = 1 } "io.error" msg ]
+
+let rec lisp_files_under dir =
+  Sys.readdir dir
+  |> Array.to_list
+  |> List.map (Filename.concat dir)
+  |> List.map (fun path ->
+         if Sys.is_directory path then lisp_files_under path
+         else if Filename.check_suffix path ".lisp" then [ path ]
+         else [])
+  |> List.flatten
+
+let validate_project_dir dir =
+  try
+    let files =
+      lisp_files_under dir
+      |> List.filter active_project_lisp_file
+      |> List.sort String.compare
+    in
+    let diagnostics = ref [] in
+    let add d = diagnostics := d :: !diagnostics in
+    if files = [] then
+      add
+        (diag dir { line = 1; column = 1 } "project.lisp_missing"
+           "project .missiond directory has no active Lisp SSOT files");
+    let structured_count = ref 0 in
+    files
+    |> List.iter (fun file ->
+           match Parser.parse_file file with
+           | forms ->
+               let functions =
+                 forms |> List.map (collect_forms "function") |> List.flatten
+               in
+               structured_count := !structured_count + List.length functions;
+               validate_project_forms_in_file file forms |> List.iter add;
+               if functions = [] then
+                 forms
+                 |> List.iter (fun root ->
+                        match head root with
+                        | Some h when has_suffix h "blueprint" -> (
+                            let props = keyword_props ~start:2 root in
+                            if
+                              has_prop_or_child ":entry" "entry" props root
+                              && has_prop_or_child ":core" "core" props root
+                              && has_prop_or_child ":egress" "egress" props root
+                            then (
+                              structured_count := !structured_count + 1;
+                              validate_project_root_form file root |> List.iter add))
+                        | _ -> ())
+           | exception Reader_error (loc, msg) -> add (diag file loc "parse.error" msg)
+           | exception Sys_error msg ->
+               add (diag file { line = 1; column = 1 } "io.error" msg));
+    if !structured_count = 0 then
+      add
+        (diag dir { line = 1; column = 1 } "project.function_missing"
+           "project .missiond active SSOT files must declare at least one function or structured blueprint root");
+    List.rev !diagnostics
+  with Sys_error msg -> [ diag dir { line = 1; column = 1 } "io.error" msg ]
 
 let validate_auth_domain_source file source =
   let required =
@@ -302,16 +438,6 @@ let validate_auth_domain file =
   try
     validate_auth_domain_source file (read_file file)
   with Sys_error msg -> [ diag file { line = 1; column = 1 } "io.error" msg ]
-
-let rec lisp_files_under dir =
-  Sys.readdir dir
-  |> Array.to_list
-  |> List.map (Filename.concat dir)
-  |> List.map (fun path ->
-         if Sys.is_directory path then lisp_files_under path
-         else if Filename.check_suffix path ".lisp" then [ path ]
-         else [])
-  |> List.flatten
 
 let validate_auth_domain_dir dir =
   try
