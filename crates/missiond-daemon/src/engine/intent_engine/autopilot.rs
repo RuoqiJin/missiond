@@ -1139,6 +1139,46 @@ fn pty_only_close_blocker(
     Some("missing-pty-final-artifact")
 }
 
+/// Some worker prompts declare an explicit structured artifact contract, e.g.
+/// `Findings / Evidence / Recommendations / Verification`. A long-lived
+/// provider session can briefly expose an older durable assistant summary after
+/// dispatch-time rebind but before the current task's final lands. Generic
+/// acceptance words such as "changed files" are not enough for those tasks; the
+/// close summary must satisfy the declared sections.
+fn output_contract_close_blocker(task_description: &str, summary: &str) -> Option<&'static str> {
+    if !is_delegated_worker_description(task_description) {
+        return None;
+    }
+    if !task_description
+        .to_ascii_lowercase()
+        .contains("findings / evidence / recommendations / verification")
+    {
+        return None;
+    }
+    const REQUIRED: [&str; 4] = ["findings", "evidence", "recommendations", "verification"];
+    if REQUIRED
+        .iter()
+        .all(|heading| summary_has_report_heading(summary, heading))
+    {
+        return None;
+    }
+    Some("missing-output-contract-sections")
+}
+
+fn summary_has_report_heading(summary: &str, expected: &str) -> bool {
+    summary.lines().any(|line| {
+        let normalized = line
+            .trim()
+            .trim_start_matches('#')
+            .trim_start_matches('*')
+            .trim()
+            .trim_end_matches(':')
+            .trim()
+            .to_ascii_lowercase();
+        normalized == expected || normalized.starts_with(&format!("{expected} "))
+    })
+}
+
 /// Detect a delegated worker BoardTask by its description envelope.
 /// `mission_task_delegate` injects `## Dispatch metadata`; `mission_swarm_run`
 /// injects `## Swarm metadata`. Either marker is the V3 envelope guarantee
@@ -2907,6 +2947,32 @@ async fn dispatch_board_tasks_with_config(
                             author: Some("autopilot".to_string()),
                         })
                         .await;
+                        return;
+                    }
+                    if let Some(blocker) =
+                        output_contract_close_blocker(&task.description, &final_summary)
+                    {
+                        warn!(
+                            task_id = %task.id,
+                            slot_id = %slot_id,
+                            duration_ms = res.duration_ms,
+                            blocker,
+                            "Autopilot: completion summary does not satisfy worker output contract; preserving task"
+                        );
+                        let note = format!(
+                            "⚠️ **Autopilot blocked close** — worker summary is missing `{}`. The BoardTask stays running so the next settle/recovery pass can capture the current task's structured artifact instead of a stale provider-session summary.\n\n{}",
+                            blocker,
+                            truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES),
+                        );
+                        let _ = state
+                            .store
+                            .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+                                task_id: task.id.to_string(),
+                                content: note,
+                                note_type: Some("note".to_string()),
+                                author: Some("autopilot".to_string()),
+                            })
+                            .await;
                         return;
                     }
                     if let Some(blocker) = worker_final_close_blocker(&final_summary) {
@@ -6714,6 +6780,10 @@ Review only.
         "Survey shards\n\n## Swarm metadata\n- task_class: context-pack\n- write_policy: read-only\n"
     }
 
+    fn delegated_context_pack_with_output_contract() -> &'static str {
+        "Survey shards\n\n## Dispatch metadata\n- task_class: context-pack\n- write_policy: read-only\n- output_contract: return a structured artifact with Findings / Evidence / Recommendations / Verification\n"
+    }
+
     /// Durable provider final available → never block, regardless of summary.
     #[test]
     fn pty_only_close_blocker_passes_when_durable_final_present() {
@@ -6792,6 +6862,28 @@ Review only.
         assert!(pty_summary_has_structured_artifact(
             "All acceptance gates passed; verification done."
         ));
+    }
+
+    /// Durable provider summaries from a reused long-lived session can contain
+    /// an older task's acceptance text. When the worker prompt asks for an
+    /// explicit Findings/Evidence/Recommendations/Verification artifact, that
+    /// stale acceptance text must not close the new task.
+    #[test]
+    fn output_contract_close_blocker_rejects_stale_structured_summary() {
+        let stale = "## Changed files\n- services/deploy-center/.missiond/m10-convergence.lisp\n\n## Acceptance\n- M10 gate passed";
+        assert_eq!(
+            output_contract_close_blocker(delegated_context_pack_with_output_contract(), stale),
+            Some("missing-output-contract-sections")
+        );
+    }
+
+    #[test]
+    fn output_contract_close_blocker_accepts_declared_sections() {
+        let report = "# Context-Pack\n\n## Findings\n- one\n\n## Evidence\n- two\n\n## Recommendations\n- three\n\n## Verification\n- no edits";
+        assert_eq!(
+            output_contract_close_blocker(delegated_context_pack_with_output_contract(), report),
+            None
+        );
     }
 
     /// `is_delegated_worker_description` only fires on the V3 envelope

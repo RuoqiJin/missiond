@@ -126,7 +126,7 @@ function main() {
 	  requireExistingText(diagnostics, '/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/auth/.missiond/intent.lisp', [
 	    '(intent auth-center',
 	    '(env ISSUER',
-	    ':example "https://auth.xiaojinpro.top"',
+	    ':example "https://auth.xiaojinpro.com"',
 	    '(component google',
 	    '(component wechat',
 	  ]);

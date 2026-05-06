@@ -219,6 +219,11 @@ function checkFiles(root) {
     'get_board_task_with_notes',
     'extract_worker_final_summary(&res.response, &full_prompt)',
 	    'truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES)',
+    'output_contract_close_blocker',
+    'missing-output-contract-sections',
+    'summary_has_report_heading',
+    'Findings / Evidence / Recommendations / Verification',
+    'output_contract_close_blocker_rejects_stale_structured_summary',
 	  ]);
   forbidAll(diagnostics, FILES.autopilot, sources.autopilot, [
     'res.duration_ms, res.response',
