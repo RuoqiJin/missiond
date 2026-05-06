@@ -102,10 +102,31 @@ let test_auth_domain_requires_compatibility_ledger () =
   assert_true "missing compatibility ledger is diagnosed"
     (has_code "auth.compatibility_ledger" diagnostics)
 
+let test_auth_structured_function_requires_runtime_projection () =
+  let forms =
+    Parser.parse_source "auth-struct"
+      {|
+(function product-access-policy
+  :entry "context"
+  :core ((step s1 :logic "load policy"))
+  :egress "decision"
+  :surfaces ["src/services/product_policy.rs"])
+|}
+  in
+  match forms with
+  | form :: _ ->
+      let diagnostics =
+        Project_schema.validate_auth_structured_form "auth" "function" form
+      in
+      assert_true "missing runtime projection is diagnosed"
+        (has_code "auth.runtime_projection_missing" diagnostics)
+  | [] -> failwith "missing parsed auth function"
+
 let () =
   test_parser_locations ();
   test_v3_missing_entry ();
   test_v3_step_order ();
   test_workflow_missing_risk_gate ();
   test_auth_domain_requires_compatibility_ledger ();
+  test_auth_structured_function_requires_runtime_projection ();
   print_endline "missiond_lispc parser and validator golden tests passed"
