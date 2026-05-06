@@ -556,6 +556,18 @@ async fn process_thread(
         }
     }
 
+    if let Err(e) = state
+        .store
+        .refresh_conversation_message_count(&thread.id)
+        .await
+    {
+        warn!(
+            thread_id = %&thread.id[..8.min(thread.id.len())],
+            error = %e,
+            "Codex ingestion: failed to refresh conversation message_count"
+        );
+    }
+
     Ok(ProcessedThread {
         ingested: total,
         total_lines: parsed.total_lines,
