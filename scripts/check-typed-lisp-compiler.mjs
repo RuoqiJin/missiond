@@ -5,6 +5,8 @@ import { runLispc, toolchainStatus } from './lib/ocaml_lispc.mjs';
 import { EXPECTED_SURFACES } from './check-v3-code-isomorphism-complete.mjs';
 
 const BLUEPRINT = '.missiond/v3/missiond-blueprint.lisp';
+const DEFAULT_AUTH_MISSIOND =
+  '/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/auth/.missiond';
 
 const REQUIRED_FILES = [
   'tools/missiond_lispc/dune-project',
@@ -66,6 +68,33 @@ const REQUIRED_PROJECT_MATURITY_CHECKER = {
   ],
 };
 
+const REQUIRED_AUTH_DOMAIN_CHECKER = {
+  files: [
+    {
+      file: 'scripts/check-auth-domain-ssot.mjs',
+      tokens: [
+        "runLispc(['check-auth-domain'",
+        '--dir',
+        'DEFAULT_AUTH_MISSIOND',
+      ],
+    },
+    {
+      file: 'tools/missiond_lispc/bin/project_schema.ml',
+      tokens: [
+        'validate_auth_domain_structured_dir',
+        'validate_auth_structured_form',
+        'auth.runtime_projection_missing',
+        'auth.shard_missing',
+        '"runtime-registration-domain"',
+        '"product-access-policy"',
+        '"token-claim-contract"',
+        '"outbox-delivery-state-machine"',
+        '"legacy-callback-domain"',
+      ],
+    },
+  ],
+};
+
 const REQUIRED_BLUEPRINT_TOKENS = [
   '(function typed-lisp-compiler',
   ':surface typed-lisp-compiler',
@@ -110,6 +139,14 @@ function main() {
   for (const token of REQUIRED_PROJECT_MATURITY_CHECKER.tokens) {
     if (!maturityChecker.includes(token)) {
       diagnostics.push(diag(REQUIRED_PROJECT_MATURITY_CHECKER.file, 'MATURITY_CHECKER_TOKEN_MISSING', `missing token ${JSON.stringify(token)}`));
+    }
+  }
+  for (const spec of REQUIRED_AUTH_DOMAIN_CHECKER.files) {
+    const source = read(spec.file);
+    for (const token of spec.tokens) {
+      if (!source.includes(token)) {
+        diagnostics.push(diag(spec.file, 'AUTH_DOMAIN_CHECKER_TOKEN_MISSING', `missing token ${JSON.stringify(token)}`));
+      }
     }
   }
 
@@ -162,6 +199,24 @@ function main() {
           diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_WORKFLOW_PROJECTION_MISSING_STRUCTURED_STEPS', 'emit-workflows must project step ids from structured (step sN ...) forms'));
         }
       }
+    }
+    if (fs.existsSync(DEFAULT_AUTH_MISSIOND)) {
+      const authDomain = runLispc(['check-auth-domain', '--dir', DEFAULT_AUTH_MISSIOND]);
+      emitChecks.push({
+        argv: ['check-auth-domain', '--dir', DEFAULT_AUTH_MISSIOND],
+        ok: authDomain.ok === true,
+        diagnostics: authDomain.diagnostics ?? [],
+      });
+      if (!authDomain.ok) {
+        diagnostics.push(diag('tools/missiond_lispc/bin/project_schema.ml', 'OCAML_AUTH_DOMAIN_GATE_FAILED', 'Auth domain structural sample gate failed'));
+        for (const d of authDomain.diagnostics ?? []) diagnostics.push({ ...d, code: d.code ?? 'OCAML_AUTH_DOMAIN_DIAGNOSTIC' });
+      }
+    } else {
+      warnings.push({
+        file: DEFAULT_AUTH_MISSIOND,
+        code: 'AUTH_DOMAIN_SAMPLE_UNAVAILABLE',
+        message: 'Auth domain sample path not present on this machine; skipped external project structural gate.',
+      });
     }
   } else if (opts.strictToolchain) {
     diagnostics.push(diag('tools/missiond_lispc', 'OCAML_TOOLCHAIN_MISSING', `missing OCaml command(s): ${toolchain.missing.join(', ')}`));
