@@ -213,6 +213,11 @@ function checkFiles(root, files) {
     'handle_sync',
     'handle_init',
     'handle_import_universe',
+    'load_compiled_project_universe',
+    'compiled_project_to_config',
+    '"source": "compiled-project-universe"',
+    '"schema": "missiond.project-import.compiled-universe.v1"',
+    '"manifestFallback": false',
     'archive_inactive_path_aliases',
     'ProjectRegistryRuntimeConfig::load_for_current_dir',
     'V3_BLUEPRINT_CONFIG_ERROR',
@@ -425,6 +430,10 @@ Unknown project action
 
   writeFixture(root, DEFAULT_FILES.registry, `
 handle_list handle_get handle_set_active handle_sync handle_init handle_import_universe
+load_compiled_project_universe compiled_project_to_config
+"source": "compiled-project-universe"
+"schema": "missiond.project-import.compiled-universe.v1"
+"manifestFallback": false
 ProjectRegistryRuntimeConfig::load_for_current_dir V3_BLUEPRINT_CONFIG_ERROR
 env_or_default_universe_manifest discover_intent_path intent_path_candidates expand_tilde_path
 reload_project_registry scan_lisp_files github_url_for_path

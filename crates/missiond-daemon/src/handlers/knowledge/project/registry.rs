@@ -1,11 +1,13 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use missiond_core::types::ProjectConfig;
 use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-use crate::context::v3_blueprint_runtime::ProjectRegistryRuntimeConfig;
+use crate::context::v3_blueprint_runtime::{
+    CompiledProjectUniverseEntry, ProjectRegistryRuntimeConfig, load_compiled_project_universe,
+};
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -265,6 +267,13 @@ pub(super) async fn handle_import_universe(state: &AppState, args: Value) -> Res
             )));
         }
     };
+    let explicit_manifest = args.get("manifest").and_then(|v| v.as_str()).is_some();
+    if !explicit_manifest {
+        if let Some(result) = import_compiled_universe(state, &runtime_config).await? {
+            return Ok(ToolResult::json(&result));
+        }
+    }
+
     let manifest_path = args
         .get("manifest")
         .and_then(|v| v.as_str())
@@ -382,7 +391,117 @@ pub(super) async fn handle_import_universe(state: &AppState, args: Value) -> Res
         "updated": updated,
         "reference_noted": reference_synced,
         "manifest": manifest_path.display().to_string(),
+        "manifestFallback": true,
     })))
+}
+
+async fn import_compiled_universe(
+    state: &AppState,
+    runtime_config: &ProjectRegistryRuntimeConfig,
+) -> Result<Option<serde_json::Value>> {
+    let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let compiled = load_compiled_project_universe(&project_root, None);
+    let Some(payload) = compiled.payload else {
+        return Ok(None);
+    };
+
+    let mut imported = 0u32;
+    let mut updated = 0u32;
+    let mut skipped = 0u32;
+    let mut imported_ids = Vec::new();
+
+    for entry in payload.projects {
+        let Some(config) = compiled_project_to_config(&project_root, &entry, runtime_config) else {
+            skipped += 1;
+            continue;
+        };
+        let existed = state
+            .store
+            .get_project(&config.id)
+            .await
+            .map(|p| p.is_some())
+            .unwrap_or(false);
+
+        state
+            .store
+            .upsert_project(&config)
+            .await
+            .map_err(|e| anyhow!("DB error: {}", e))?;
+
+        if existed {
+            updated += 1;
+        } else {
+            imported += 1;
+        }
+        imported_ids.push(config.id);
+    }
+
+    reload_project_registry(state).await;
+
+    Ok(Some(serde_json::json!({
+        "source": "compiled-project-universe",
+        "schema": "missiond.project-import.compiled-universe.v1",
+        "imported": imported,
+        "updated": updated,
+        "skipped": skipped,
+        "reference_noted": 0,
+        "manifestFallback": false,
+        "importedIds": imported_ids,
+        "compiledRuntime": {
+            "snapshot": compiled.snapshot.as_ref().map(|snapshot| serde_json::json!({
+                "kind": snapshot.kind,
+                "path": snapshot.path.display().to_string(),
+                "schemaVersion": snapshot.schema_version,
+                "sourceHash": snapshot.source_hash,
+            })),
+            "diagnostics": compiled.diagnostics,
+        },
+    })))
+}
+
+fn compiled_project_to_config(
+    missiond_root: &Path,
+    entry: &CompiledProjectUniverseEntry,
+    runtime_config: &ProjectRegistryRuntimeConfig,
+) -> Option<ProjectConfig> {
+    let id = entry.id.as_ref()?.to_lowercase();
+    let raw_root = entry.root.as_deref().or_else(|| {
+        entry
+            .path
+            .as_deref()
+            .filter(|path| !path.ends_with(".lisp"))
+    })?;
+    let expanded = expand_tilde_path(raw_root);
+    let resolved = if expanded.is_absolute() {
+        expanded
+    } else {
+        missiond_root.join(expanded)
+    };
+    let path = resolved
+        .canonicalize()
+        .unwrap_or_else(|_| resolved.clone())
+        .display()
+        .to_string();
+    let root = Path::new(&path);
+    let intent_path = entry
+        .intent
+        .clone()
+        .or_else(|| discover_intent_path(root, runtime_config));
+    let github_url = github_url_for_path(root);
+
+    Some(ProjectConfig {
+        id,
+        path,
+        intent_path,
+        active: entry.status.as_deref() != Some("retired"),
+        slots: vec![],
+        github_url,
+        kind: entry.kind.clone().unwrap_or_else(|| "managed".to_string()),
+        vault_path: None,
+        parent_id: None,
+        created_at: None,
+        updated_at: None,
+    })
 }
 
 pub(super) fn discover_intent_path(
@@ -468,11 +587,7 @@ fn github_url_for_path(path: impl AsRef<Path>) -> Option<String> {
         .ok()
         .and_then(|out| {
             let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if url.is_empty() {
-                None
-            } else {
-                Some(url)
-            }
+            if url.is_empty() { None } else { Some(url) }
         })
 }
 
