@@ -1213,7 +1213,8 @@
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/jarvis-mechanic-backend-blueprint.lisp"
       :status project-ssot-owned
-      :checks ["bash .missiond/check.sh"]
+      :checks ["node scripts/check-mechanic-ssot.mjs"
+               "bash .missiond/check.sh"]
       :missiond-role "registered devtool; opt-in repair executor CLI, not a MissionD orchestrator or automatic runtime worker"
       :surface project-registry)
     (project :id xjpcode
