@@ -1154,12 +1154,12 @@
     :common-m6-to-v3-gap [runtime-projection event-bus commit-backfill worker-operational final-convergence]
     (maturity :id missiond :current M10 :target M10 :gap [])
     (maturity :id board :current M10 :target M10 :gap [])
-    (maturity :id jarvis :current M2 :target M10 :gap [blueprint-split code-isomorphism runtime-projection event-bus worker-operational final-convergence])
+    (maturity :id jarvis :current M6 :target M10 :gap [runtime-projection event-bus worker-operational final-convergence])
     (maturity :id jarvis-forge :current M10 :target M10 :gap [])
-    (maturity :id jarvis-mechanic :current M2 :target M10 :gap [blueprint-split code-isomorphism runtime-projection event-bus worker-operational final-convergence])
-    (maturity :id xjpcode :current M2 :target M10 :gap [blueprint-split code-isomorphism runtime-projection event-bus worker-operational final-convergence])
-    (maturity :id neural-codegen :current M2 :target M10 :gap [blueprint-split code-isomorphism runtime-projection event-bus worker-operational final-convergence])
-    (maturity :id semantic-terminal :current M2 :target M10 :gap [blueprint-split code-isomorphism runtime-projection event-bus worker-operational final-convergence])
+    (maturity :id jarvis-mechanic :current M6 :target M10 :gap [runtime-projection event-bus worker-operational final-convergence])
+    (maturity :id xjpcode :current M6 :target M10 :gap [runtime-projection event-bus worker-operational final-convergence])
+    (maturity :id neural-codegen :current M6 :target M10 :gap [runtime-projection event-bus worker-operational final-convergence])
+    (maturity :id semantic-terminal :current M6 :target M10 :gap [runtime-projection event-bus worker-operational final-convergence])
     (maturity :id xiaojinpro-backend :current M5 :target M10 :gap [code-isomorphism runtime-projection event-bus worker-operational final-convergence])
     (maturity :id deploy-center :current M5 :target M10 :gap [code-isomorphism runtime-projection event-bus worker-operational final-convergence])
     (maturity :id deploy-agent :current M10 :target M10 :gap [])
@@ -1201,6 +1201,8 @@
       :kind rust-multi-crate
       :root "/Users/jinchen/Projects/jarvis"
       :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/jarvis-backend-blueprint.lisp"
+      :frontend ".missiond/frontend/jarvis-ui-blueprint.lisp"
       :status project-ssot-owned
       :checks ["bash .missiond/check.sh"]
       :missiond-role "registered devtool; clean MissionD rewrite (intent.lisp + 14 intent-*.lisp shards + GAP_ANALYSIS.md)"
@@ -1209,32 +1211,37 @@
       :kind rust-cli
       :root "/Users/jinchen/Projects/jarvis-mechanic"
       :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/jarvis-mechanic-backend-blueprint.lisp"
       :status project-ssot-owned
-      :checks ["node scripts/check-mechanic-ssot.mjs"]
+      :checks ["bash .missiond/check.sh"]
       :missiond-role "registered devtool; opt-in repair executor CLI, not a MissionD orchestrator or automatic runtime worker"
       :surface project-registry)
     (project :id xjpcode
       :kind rust-cli
       :root "/Users/jinchen/Projects/xjpcode"
       :intent ".missiond/intent.lisp"
+      :backend ".missiond/xjpcode-app-blueprint.lisp"
       :status project-ssot-owned
-      :checks ["node scripts/check-xjpcode-ssot-complete.mjs --json"]
+      :checks ["node scripts/check-xjpcode-ssot-complete.mjs --json"
+               "node scripts/check-xjpcode-code-isomorphism.mjs"]
       :missiond-role "registered devtool; ratatui TUI Rust CLI agent"
       :surface project-registry)
     (project :id neural-codegen
       :kind rust-multi-crate
       :root "/Users/jinchen/Projects/neural-codegen"
       :intent ".missiond/intent.lisp"
+      :backend ".missiond/neural-codegen-blueprint.lisp"
       :status project-ssot-owned
-      :checks ["bash .missiond/check.sh --dry-run"]
+      :checks ["bash .missiond/check.sh"]
       :missiond-role "registered devtool; deterministic Lisp→IR→Rust codegen pipeline"
       :surface project-registry)
     (project :id semantic-terminal
       :kind rust-napi-cdylib
       :root "/Users/jinchen/Projects/semantic-terminal"
       :intent ".missiond/intent.lisp"
+      :backend ".missiond/semantic-terminal-blueprint.lisp"
       :status project-ssot-owned
-      :checks ["bash .missiond/check.sh --dry-run"]
+      :checks ["bash .missiond/check.sh"]
       :missiond-role "registered devtool; PTY semantic event parser (Rust core + N-API)"
       :surface project-registry)
     (project :id xiaojinpro-backend
