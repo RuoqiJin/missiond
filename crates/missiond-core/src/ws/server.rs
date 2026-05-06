@@ -45,7 +45,10 @@ pub struct ContextEnrichResult {
 /// Implemented by daemon to inject KB/Skill/Code context into Jarvis messages.
 /// Takes user query, returns enrichment result with context and intent.
 pub type ContextEnricherFn = Arc<
-    dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ContextEnrichResult> + Send>>
+    dyn Fn(
+            String,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = ContextEnrichResult> + Send>>
         + Send
         + Sync,
 >;
@@ -125,7 +128,10 @@ fn clean_jarvis_response(raw: &str, boundary_id: &str) -> String {
         &raw[pos + marker.len()..]
     } else {
         // Fallback: boundary not found (PTY buffer overflow or truncation).
-        tracing::warn!(boundary_id, "Boundary marker not found in PTY output, using fallback");
+        tracing::warn!(
+            boundary_id,
+            "Boundary marker not found in PTY output, using fallback"
+        );
         raw
     };
 
@@ -135,19 +141,41 @@ fn clean_jarvis_response(raw: &str, boundary_id: &str) -> String {
         .filter(|line| {
             let trimmed = line.trim();
             // Drop Claude Code status bar lines
-            if trimmed.contains("Auto-update failed") { return false; }
-            if trimmed.contains("bypass permissions on") { return false; }
-            if trimmed.contains("Try claude doctor") { return false; }
-            if trimmed.contains("npm i -g @anthropic-ai") { return false; }
-            if trimmed.contains("switched from npm to native installer") { return false; }
-            if trimmed.contains("claude install") && trimmed.contains("docs.anthro") { return false; }
-            if trimmed.starts_with("Pasting") && trimmed.len() < 20 { return false; }
-            if trimmed.starts_with("▸▸") || trimmed.starts_with(">>") { return false; }
-            if trimmed.starts_with("✕ ") || trimmed.starts_with("✗ ") { return false; }
+            if trimmed.contains("Auto-update failed") {
+                return false;
+            }
+            if trimmed.contains("bypass permissions on") {
+                return false;
+            }
+            if trimmed.contains("Try claude doctor") {
+                return false;
+            }
+            if trimmed.contains("npm i -g @anthropic-ai") {
+                return false;
+            }
+            if trimmed.contains("switched from npm to native installer") {
+                return false;
+            }
+            if trimmed.contains("claude install") && trimmed.contains("docs.anthro") {
+                return false;
+            }
+            if trimmed.starts_with("Pasting") && trimmed.len() < 20 {
+                return false;
+            }
+            if trimmed.starts_with("▸▸") || trimmed.starts_with(">>") {
+                return false;
+            }
+            if trimmed.starts_with("✕ ") || trimmed.starts_with("✗ ") {
+                return false;
+            }
             // Drop tool output border lines (safety net for block classifier)
-            if trimmed.starts_with('⎿') || trimmed.starts_with('│') { return false; }
+            if trimmed.starts_with('⎿') || trimmed.starts_with('│') {
+                return false;
+            }
             // Drop tool result file path references
-            if trimmed.contains("tool-results/") { return false; }
+            if trimmed.contains("tool-results/") {
+                return false;
+            }
             true
         })
         .map(|line| {
@@ -272,6 +300,26 @@ fn parse_external_service_webhook(body: &str, default_service_id: &str) -> Optio
     })
 }
 
+fn header_value<'a>(headers: &'a str, name: &str) -> Option<&'a str> {
+    headers.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        if key.trim().eq_ignore_ascii_case(name) {
+            Some(value.trim())
+        } else {
+            None
+        }
+    })
+}
+
+fn webhook_token_matches(headers: &str, expected_token: Option<&str>) -> bool {
+    let Some(expected) = expected_token.filter(|token| !token.is_empty()) else {
+        return true;
+    };
+    header_value(headers, "X-MissionD-Webhook-Token")
+        .map(|actual| actual == expected)
+        .unwrap_or(false)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Route<'a> {
     Pty { slot_id: &'a str },
@@ -303,7 +351,10 @@ fn close_frame(code: u16, reason: impl Into<String>) -> CloseFrame<'static> {
 }
 
 async fn send_json<S: Serialize>(
-    ws_tx: &mut futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<TcpStream>, Message>,
+    ws_tx: &mut futures_util::stream::SplitSink<
+        tokio_tungstenite::WebSocketStream<TcpStream>,
+        Message,
+    >,
     msg: &S,
 ) -> anyhow::Result<()> {
     let text = serde_json::to_string(msg)?;
@@ -315,8 +366,12 @@ async fn send_json<S: Serialize>(
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum PtyOutMessage {
-    Screen { data: String },
-    Data { data: String },
+    Screen {
+        data: String,
+    },
+    Data {
+        data: String,
+    },
     State {
         state: SessionState,
         #[serde(rename = "prevState")]
@@ -324,7 +379,9 @@ enum PtyOutMessage {
         #[serde(rename = "statusText", skip_serializing_if = "Option::is_none")]
         status_text: Option<String>,
     },
-    Exit { code: i32 },
+    Exit {
+        code: i32,
+    },
     #[serde(rename = "screenshot_request")]
     ScreenshotRequest {
         #[serde(rename = "requestId")]
@@ -336,7 +393,9 @@ enum PtyOutMessage {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum PtyInMessage {
-    Input { data: String },
+    Input {
+        data: String,
+    },
     #[serde(rename = "screenshot_response")]
     ScreenshotResponse {
         #[serde(rename = "requestId")]
@@ -419,8 +478,7 @@ impl PTYWebSocketServer {
 
     /// Start the server
     pub async fn start(&mut self) -> anyhow::Result<()> {
-        let bind_addr = std::env::var("MISSION_WS_BIND")
-            .unwrap_or_else(|_| "0.0.0.0".to_string());
+        let bind_addr = std::env::var("MISSION_WS_BIND").unwrap_or_else(|_| "0.0.0.0".to_string());
         let addr = format!("{}:{}", bind_addr, self.port);
 
         // Mirror IPC's stale-socket pattern: if bind fails with EADDRINUSE,
@@ -439,7 +497,10 @@ impl PTYWebSocketServer {
                     }
                     Err(_) => {
                         // Stale listener — OS hasn't reclaimed yet. Wait briefly and retry.
-                        warn!(port = self.port, "WS port in TIME_WAIT, waiting for OS to release...");
+                        warn!(
+                            port = self.port,
+                            "WS port in TIME_WAIT, waiting for OS to release..."
+                        );
                         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                         TcpListener::bind(&addr).await?
                     }
@@ -525,7 +586,10 @@ impl PTYWebSocketServer {
     }
 
     /// #2: HTTP API — slot status endpoint
-    async fn handle_slot_status(mut stream: TcpStream, pty_manager: Arc<PTYManager>) -> anyhow::Result<()> {
+    async fn handle_slot_status(
+        mut stream: TcpStream,
+        pty_manager: Arc<PTYManager>,
+    ) -> anyhow::Result<()> {
         // Consume the request
         let mut buf = vec![0u8; 4096];
         let _ = stream.read(&mut buf).await;
@@ -576,7 +640,10 @@ impl PTYWebSocketServer {
                 }
                 _ => {
                     // video_url, file_url etc — log and skip for now
-                    debug!(part_type, "Multimodal: unsupported content part type, skipping");
+                    debug!(
+                        part_type,
+                        "Multimodal: unsupported content part type, skipping"
+                    );
                 }
             }
         }
@@ -596,10 +663,7 @@ impl PTYWebSocketServer {
 
     /// Decode a data URL (data:image/jpeg;base64,...) and save to a temp file.
     /// Returns the local file path on success.
-    async fn save_data_url_to_file(
-        url: &str,
-        media_dir: &std::path::Path,
-    ) -> Option<String> {
+    async fn save_data_url_to_file(url: &str, media_dir: &std::path::Path) -> Option<String> {
         use base64::Engine;
 
         // Parse data URL: data:<mime>;base64,<data>
@@ -692,10 +756,7 @@ impl PTYWebSocketServer {
                 anyhow::bail!("Connection closed before headers complete");
             }
             buf.extend_from_slice(&tmp[..n]);
-            if let Some(pos) = buf
-                .windows(4)
-                .position(|w| w == b"\r\n\r\n")
-            {
+            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
                 header_end = pos + 4;
                 break;
             }
@@ -712,7 +773,11 @@ impl PTYWebSocketServer {
             .find_map(|line| {
                 let lower = line.to_lowercase();
                 if lower.starts_with("content-length:") {
-                    lower.trim_start_matches("content-length:").trim().parse().ok()
+                    lower
+                        .trim_start_matches("content-length:")
+                        .trim()
+                        .parse()
+                        .ok()
                 } else {
                     None
                 }
@@ -730,7 +795,8 @@ impl PTYWebSocketServer {
             body_buf.extend_from_slice(&tmp[..n]);
         }
 
-        let body = String::from_utf8_lossy(&body_buf[..content_length.min(body_buf.len())]).to_string();
+        let body =
+            String::from_utf8_lossy(&body_buf[..content_length.min(body_buf.len())]).to_string();
         Ok((headers_str, body))
     }
 
@@ -741,22 +807,50 @@ impl PTYWebSocketServer {
         incident_tx: Option<tokio::sync::mpsc::Sender<crate::types::MissionIncident>>,
         system_event_tx: Option<tokio::sync::mpsc::Sender<SystemEvent>>,
     ) -> anyhow::Result<()> {
-        let (_headers, body) = Self::read_http_request(&mut stream).await?;
+        let (headers, body) = Self::read_http_request(&mut stream).await?;
 
         // Extract path from request line (e.g. "POST /webhooks/deploy HTTP/1.1")
         let path = request_line.split_whitespace().nth(1).unwrap_or("");
 
         if path == "/webhooks/service-event" || path == "/webhooks/auth-event" {
+            let expected_token = std::env::var("MISSIOND_EXTERNAL_WEBHOOK_TOKEN").ok();
+            if !webhook_token_matches(&headers, expected_token.as_deref()) {
+                Self::send_http_error(
+                    &mut stream,
+                    401,
+                    "Unauthorized",
+                    r#"{"error":"invalid webhook token"}"#,
+                )
+                .await?;
+                return Ok(());
+            }
+
             let tx = match system_event_tx {
                 Some(tx) => tx,
                 None => {
-                    Self::send_http_error(&mut stream, 503, "Service Unavailable", r#"{"error":"system event bus not configured"}"#).await?;
+                    Self::send_http_error(
+                        &mut stream,
+                        503,
+                        "Service Unavailable",
+                        r#"{"error":"system event bus not configured"}"#,
+                    )
+                    .await?;
                     return Ok(());
                 }
             };
-            let default_service_id = if path == "/webhooks/auth-event" { "auth" } else { "external" };
+            let default_service_id = if path == "/webhooks/auth-event" {
+                "auth"
+            } else {
+                "external"
+            };
             let Some(event) = parse_external_service_webhook(&body, default_service_id) else {
-                Self::send_http_error(&mut stream, 400, "Bad Request", r#"{"error":"invalid service event envelope"}"#).await?;
+                Self::send_http_error(
+                    &mut stream,
+                    400,
+                    "Bad Request",
+                    r#"{"error":"invalid service event envelope"}"#,
+                )
+                .await?;
                 return Ok(());
             };
             let event_id = match &event {
@@ -765,7 +859,13 @@ impl PTYWebSocketServer {
             };
             if let Err(e) = tx.try_send(event) {
                 warn!("Webhook: system event channel full, dropping: {}", e);
-                Self::send_http_error(&mut stream, 503, "Service Unavailable", r#"{"error":"system event queue full"}"#).await?;
+                Self::send_http_error(
+                    &mut stream,
+                    503,
+                    "Service Unavailable",
+                    r#"{"error":"system event queue full"}"#,
+                )
+                .await?;
                 return Ok(());
             }
             let resp_body = serde_json::json!({"ok": true, "event_id": event_id}).to_string();
@@ -781,7 +881,13 @@ impl PTYWebSocketServer {
         let tx = match incident_tx {
             Some(tx) => tx,
             None => {
-                Self::send_http_error(&mut stream, 503, "Service Unavailable", r#"{"error":"incident bus not configured"}"#).await?;
+                Self::send_http_error(
+                    &mut stream,
+                    503,
+                    "Service Unavailable",
+                    r#"{"error":"incident bus not configured"}"#,
+                )
+                .await?;
                 return Ok(());
             }
         };
@@ -790,7 +896,13 @@ impl PTYWebSocketServer {
             "/webhooks/deploy" => parse_deploy_webhook(&body),
             "/webhooks/test" => parse_test_webhook(&body),
             _ => {
-                Self::send_http_error(&mut stream, 404, "Not Found", r#"{"error":"unknown webhook path"}"#).await?;
+                Self::send_http_error(
+                    &mut stream,
+                    404,
+                    "Not Found",
+                    r#"{"error":"unknown webhook path"}"#,
+                )
+                .await?;
                 return Ok(());
             }
         };
@@ -849,17 +961,15 @@ impl PTYWebSocketServer {
         };
 
         // Auth check: extract Bearer token
-        let auth_token = headers
-            .lines()
-            .find_map(|line| {
-                let lower = line.to_lowercase();
-                if lower.starts_with("authorization:") {
-                    let val = line.splitn(2, ':').nth(1)?.trim();
-                    val.strip_prefix("Bearer ").map(|t| t.to_string())
-                } else {
-                    None
-                }
-            });
+        let auth_token = headers.lines().find_map(|line| {
+            let lower = line.to_lowercase();
+            if lower.starts_with("authorization:") {
+                let val = line.splitn(2, ':').nth(1)?.trim();
+                val.strip_prefix("Bearer ").map(|t| t.to_string())
+            } else {
+                None
+            }
+        });
 
         // Validate Bearer token: require match against MISSIOND_API_TOKEN if set.
         // If env var is unset, accept any non-empty token (backward compatible).
@@ -873,7 +983,8 @@ impl PTYWebSocketServer {
                 if let Ok(expected) = std::env::var("MISSIOND_API_TOKEN") {
                     if token != &expected {
                         let err = serde_json::json!({"error": {"message": "Invalid API token"}});
-                        Self::send_http_error(&mut stream, 401, "Unauthorized", &err.to_string()).await?;
+                        Self::send_http_error(&mut stream, 401, "Unauthorized", &err.to_string())
+                            .await?;
                         return Ok(());
                     }
                 }
@@ -891,19 +1002,26 @@ impl PTYWebSocketServer {
         };
 
         // Parse conversation_id for Jarvis UI history persistence
-        let conversation_id = req.get("conversation_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let conversation_id = req
+            .get("conversation_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
         let messages = req.get("messages").and_then(|m| m.as_array());
 
         // Extract raw user text for DB persistence (before system prompt wrapping)
-        let raw_user_text: String = messages.as_ref().and_then(|msgs| {
-            msgs.iter().rev()
-                .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
-                .and_then(|m| match m.get("content") {
-                    Some(serde_json::Value::String(s)) => Some(s.clone()),
-                    _ => None,
-                })
-        }).unwrap_or_default();
+        let raw_user_text: String = messages
+            .as_ref()
+            .and_then(|msgs| {
+                msgs.iter()
+                    .rev()
+                    .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+                    .and_then(|m| match m.get("content") {
+                        Some(serde_json::Value::String(s)) => Some(s.clone()),
+                        _ => None,
+                    })
+            })
+            .unwrap_or_default();
         if messages.is_none() || messages.unwrap().is_empty() {
             let err = serde_json::json!({"error": {"message": "messages array is required"}});
             Self::send_http_error(&mut stream, 400, "Bad Request", &err.to_string()).await?;
@@ -929,10 +1047,18 @@ impl PTYWebSocketServer {
                     }
                     _ => continue,
                 };
-                if content.is_empty() { continue; }
+                if content.is_empty() {
+                    continue;
+                }
                 match role {
-                    "system" => parts.push(format!("[System Instructions]\n{}\n[End System Instructions]", content)),
-                    "assistant" => parts.push(format!("[Previous Assistant Response]\n{}\n[End Previous Response]", content)),
+                    "system" => parts.push(format!(
+                        "[System Instructions]\n{}\n[End System Instructions]",
+                        content
+                    )),
+                    "assistant" => parts.push(format!(
+                        "[Previous Assistant Response]\n{}\n[End Previous Response]",
+                        content
+                    )),
                     _ => parts.push(content), // user messages as-is
                 }
             }
@@ -943,7 +1069,10 @@ impl PTYWebSocketServer {
                 .iter()
                 .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
                 .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
-                .reduce(|a, b| { let _ = a; b })
+                .reduce(|a, b| {
+                    let _ = a;
+                    b
+                })
                 .map(|s| s.to_string());
 
             let last_user_msg = messages
@@ -952,15 +1081,13 @@ impl PTYWebSocketServer {
                 .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"));
 
             let raw_user_message = match last_user_msg {
-                Some(msg) => {
-                    match msg.get("content") {
-                        Some(serde_json::Value::String(text)) => text.clone(),
-                        Some(serde_json::Value::Array(parts)) => {
-                            Self::extract_multimodal_content(parts).await
-                        }
-                        _ => String::new(),
+                Some(msg) => match msg.get("content") {
+                    Some(serde_json::Value::String(text)) => text.clone(),
+                    Some(serde_json::Value::Array(parts)) => {
+                        Self::extract_multimodal_content(parts).await
                     }
-                }
+                    _ => String::new(),
+                },
                 None => String::new(),
             };
 
@@ -990,19 +1117,21 @@ impl PTYWebSocketServer {
                 }
             })
             .unwrap_or_else(|| "slot-jarvis".to_string());
-        let chat_id = format!("chatcmpl-{}-{}", &slot_id, chrono::Utc::now().timestamp_millis());
+        let chat_id = format!(
+            "chatcmpl-{}-{}",
+            &slot_id,
+            chrono::Utc::now().timestamp_millis()
+        );
 
         // Extract Router's trace_id from X-Trace-Id header
-        let router_trace_id = headers
-            .lines()
-            .find_map(|line| {
-                let lower = line.to_lowercase();
-                if lower.starts_with("x-trace-id:") {
-                    Some(line.splitn(2, ':').nth(1)?.trim().to_string())
-                } else {
-                    None
-                }
-            });
+        let router_trace_id = headers.lines().find_map(|line| {
+            let lower = line.to_lowercase();
+            if lower.starts_with("x-trace-id:") {
+                Some(line.splitn(2, ':').nth(1)?.trim().to_string())
+            } else {
+                None
+            }
+        });
 
         info!(?addr, slot_id, msg_len = user_message.len(), trace_id = %chat_id, "Chat completions request");
 
@@ -1013,18 +1142,33 @@ impl PTYWebSocketServer {
         match &state {
             None | Some(SessionState::Exited) => {
                 let error_msg = format!("Slot {} not running.", slot_id);
-                trace_store.unavailable_trace(
-                    chat_id, addr, &slot_id, &user_message, &error_msg, router_trace_id,
-                ).await;
+                trace_store
+                    .unavailable_trace(
+                        chat_id,
+                        addr,
+                        &slot_id,
+                        &user_message,
+                        &error_msg,
+                        router_trace_id,
+                    )
+                    .await;
                 let err = serde_json::json!({"error": {"message": &error_msg}});
-                Self::send_http_error(&mut stream, 503, "Service Unavailable", &err.to_string()).await?;
+                Self::send_http_error(&mut stream, 503, "Service Unavailable", &err.to_string())
+                    .await?;
                 return Ok(());
             }
             Some(s) if *s != SessionState::Idle => {
                 let error_msg = format!("{} is busy (state: {:?}). Try again later.", slot_id, s);
-                trace_store.unavailable_trace(
-                    chat_id, addr, &slot_id, &user_message, &error_msg, router_trace_id,
-                ).await;
+                trace_store
+                    .unavailable_trace(
+                        chat_id,
+                        addr,
+                        &slot_id,
+                        &user_message,
+                        &error_msg,
+                        router_trace_id,
+                    )
+                    .await;
                 let err = serde_json::json!({"error": {"message": &error_msg}, "retry_after": 5});
                 let response = format!(
                     "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nRetry-After: 5\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -1039,7 +1183,10 @@ impl PTYWebSocketServer {
 
         // Proxy mode: /clear Claude Code context before each request for stateless operation
         if proxy_mode {
-            debug!(slot_id, "Proxy mode: clearing Claude Code context before request");
+            debug!(
+                slot_id,
+                "Proxy mode: clearing Claude Code context before request"
+            );
             if let Err(e) = pty_manager.send_fire_and_forget(&slot_id, "/clear").await {
                 warn!(slot_id, error = %e, "Failed to send /clear");
             } else {
@@ -1056,9 +1203,15 @@ impl PTYWebSocketServer {
         }
 
         // Start trace
-        trace_store.start_trace(
-            chat_id.clone(), addr, &slot_id, &user_message, router_trace_id,
-        ).await;
+        trace_store
+            .start_trace(
+                chat_id.clone(),
+                addr,
+                &slot_id,
+                &user_message,
+                router_trace_id,
+            )
+            .await;
 
         // Create or reuse Jarvis UI conversation for persistence
         let jarvis_conv_id = if let Some(ref db) = db {
@@ -1109,12 +1262,22 @@ impl PTYWebSocketServer {
                 let msg = if enrich_result.assembled.is_empty() {
                     format!("{}\n\n{}", sys_prompt, user_message)
                 } else {
-                    debug!(slot_id, ctx_len = enrich_result.assembled.len(), "Jarvis: context enrichment injected");
-                    format!("{}\n\n{}\n\n{}", sys_prompt, enrich_result.assembled, user_message)
+                    debug!(
+                        slot_id,
+                        ctx_len = enrich_result.assembled.len(),
+                        "Jarvis: context enrichment injected"
+                    );
+                    format!(
+                        "{}\n\n{}\n\n{}",
+                        sys_prompt, enrich_result.assembled, user_message
+                    )
                 };
                 (msg, intent)
             } else {
-                (format!("{}\n\n{}", jarvis_system_prompt(tool_count), user_message), None)
+                (
+                    format!("{}\n\n{}", jarvis_system_prompt(tool_count), user_message),
+                    None,
+                )
             }
         };
 
@@ -1123,7 +1286,8 @@ impl PTYWebSocketServer {
         // Only dispatch async when intent is explicitly marked "async:" (e.g. long-running
         // deploy/build operations). This gives the user a conversational Jarvis instead of
         // one-line ack stubs.
-        let needs_async_dispatch = enrich_intent.as_deref()
+        let needs_async_dispatch = enrich_intent
+            .as_deref()
             .map(|i| i.starts_with("async:"))
             .unwrap_or(false);
 
@@ -1171,9 +1335,12 @@ impl PTYWebSocketServer {
                         // Save user message only (autopilot saves assistant response on completion)
                         if let Some(ref cid) = jarvis_conv_id {
                             if !raw_user_text.is_empty() {
-                                let _ = db.router_chat_append_messages(cid, &[
-                                    ("user".to_string(), raw_user_text.clone()),
-                                ]).await;
+                                let _ = db
+                                    .router_chat_append_messages(
+                                        cid,
+                                        &[("user".to_string(), raw_user_text.clone())],
+                                    )
+                                    .await;
                                 if conversation_id.is_none() {
                                     let _ = db.jarvis_update_title(cid, &task_title).await;
                                 }
@@ -1185,11 +1352,20 @@ impl PTYWebSocketServer {
                             "conversation_id": conv_id_str,
                             "task_id": &task_id,
                         });
-                        let _ = stream.write_all(format!("event: async_dispatch\ndata: {}\n\n", dispatch_event).as_bytes()).await;
+                        let _ = stream
+                            .write_all(
+                                format!("event: async_dispatch\ndata: {}\n\n", dispatch_event)
+                                    .as_bytes(),
+                            )
+                            .await;
 
                         // Send status: waiting for dispatch
                         let status_evt = serde_json::json!({"phase": "dispatching", "text": format!("等待调度 #{}...", task_short_id)});
-                        let _ = stream.write_all(format!("event: status\ndata: {}\n\n", status_evt).as_bytes()).await;
+                        let _ = stream
+                            .write_all(
+                                format!("event: status\ndata: {}\n\n", status_evt).as_bytes(),
+                            )
+                            .await;
                         let _ = stream.flush().await;
 
                         let bridge_start = std::time::Instant::now();
@@ -1205,7 +1381,9 @@ impl PTYWebSocketServer {
                                 let err_msg = "任务调度超时，120秒内未被分配到工位";
                                 warn!(?addr, task_id = %task_id, err_msg);
                                 let err = serde_json::json!({"error": {"message": err_msg}});
-                                let _ = stream.write_all(format!("data: {}\n\n", err).as_bytes()).await;
+                                let _ = stream
+                                    .write_all(format!("data: {}\n\n", err).as_bytes())
+                                    .await;
                                 let _ = stream.write_all(b"data: [DONE]\n\n").await;
                                 let _ = stream.flush().await;
                                 trace_store.error_trace(&chat_id, err_msg, None).await;
@@ -1245,16 +1423,24 @@ impl PTYWebSocketServer {
 
                         if let Some(ref exec_slot) = target_slot {
                             let status_evt = serde_json::json!({"phase": "thinking", "text": format!("已分配到 {}", exec_slot)});
-                            let _ = stream.write_all(format!("event: status\ndata: {}\n\n", status_evt).as_bytes()).await;
+                            let _ = stream
+                                .write_all(
+                                    format!("event: status\ndata: {}\n\n", status_evt).as_bytes(),
+                                )
+                                .await;
                             let _ = stream.flush().await;
 
                             match pty_manager.subscribe_session(exec_slot).await {
                                 Ok(mut rx) => {
                                     // Check current slot state: if already past echo phase, enable text forwarding
                                     let mut past_first_thinking = false;
-                                    if let Some(current_status) = pty_manager.get_status(exec_slot).await {
+                                    if let Some(current_status) =
+                                        pty_manager.get_status(exec_slot).await
+                                    {
                                         match current_status.state {
-                                            SessionState::Thinking | SessionState::Responding | SessionState::ToolRunning => {
+                                            SessionState::Thinking
+                                            | SessionState::Responding
+                                            | SessionState::ToolRunning => {
                                                 past_first_thinking = true;
                                             }
                                             _ => {}
@@ -1264,7 +1450,8 @@ impl PTYWebSocketServer {
                                     let mut tool_seq: u32 = 0;
                                     let mut had_activity = false;
                                     let mut last_status_phase = String::new();
-                                    let mut last_status_sent = std::time::Instant::now() - std::time::Duration::from_secs(1);
+                                    let mut last_status_sent = std::time::Instant::now()
+                                        - std::time::Duration::from_secs(1);
                                     let status_throttle = std::time::Duration::from_millis(500);
                                     let heartbeat_interval = tokio::time::Duration::from_secs(15);
                                     let bridge_timeout = tokio::time::Duration::from_secs(600); // 10 min max
@@ -1276,24 +1463,34 @@ impl PTYWebSocketServer {
                                             break;
                                         }
 
-                                        let recv_timeout = heartbeat_interval.saturating_sub(last_event_time.elapsed());
+                                        let recv_timeout = heartbeat_interval
+                                            .saturating_sub(last_event_time.elapsed());
                                         match tokio::time::timeout(recv_timeout, rx.recv()).await {
                                             Ok(Ok(event)) => {
                                                 last_event_time = std::time::Instant::now();
                                                 match event {
                                                     SessionEvent::StatusUpdate(ref status) => {
                                                         let phase = format!("{}", status.phase);
-                                                        let phase_changed = phase != last_status_phase;
-                                                        let throttle_elapsed = last_status_sent.elapsed() >= status_throttle;
+                                                        let phase_changed =
+                                                            phase != last_status_phase;
+                                                        let throttle_elapsed = last_status_sent
+                                                            .elapsed()
+                                                            >= status_throttle;
                                                         if phase_changed || throttle_elapsed {
                                                             last_status_phase = phase.clone();
-                                                            last_status_sent = std::time::Instant::now();
+                                                            last_status_sent =
+                                                                std::time::Instant::now();
                                                             let evt = serde_json::json!({
                                                                 "phase": phase,
                                                                 "text": status.status_text,
                                                             });
-                                                            let sse = format!("event: status\ndata: {}\n\n", evt);
-                                                            let _ = stream.write_all(sse.as_bytes()).await;
+                                                            let sse = format!(
+                                                                "event: status\ndata: {}\n\n",
+                                                                evt
+                                                            );
+                                                            let _ = stream
+                                                                .write_all(sse.as_bytes())
+                                                                .await;
                                                             let _ = stream.flush().await;
                                                         }
                                                     }
@@ -1304,14 +1501,18 @@ impl PTYWebSocketServer {
                                                             ToolStatus::Running => {
                                                                 tool_seq += 1;
                                                                 let id = format!("t{}", tool_seq);
-                                                                let params_json = serde_json::json!(tool_output.params);
+                                                                let params_json = serde_json::json!(
+                                                                    tool_output.params
+                                                                );
                                                                 let evt = serde_json::json!({
                                                                     "id": id,
                                                                     "tool": tool_output.tool_name,
                                                                     "params": params_json,
                                                                 });
                                                                 let sse = format!("event: tool_start\ndata: {}\n\n", evt);
-                                                                let _ = stream.write_all(sse.as_bytes()).await;
+                                                                let _ = stream
+                                                                    .write_all(sse.as_bytes())
+                                                                    .await;
                                                                 let _ = stream.flush().await;
                                                             }
                                                             ToolStatus::Completed => {
@@ -1329,13 +1530,20 @@ impl PTYWebSocketServer {
                                                                     "duration_ms": tool_output.duration_ms,
                                                                     "output": output,
                                                                 });
-                                                                let sse = format!("event: tool_end\ndata: {}\n\n", evt);
-                                                                let _ = stream.write_all(sse.as_bytes()).await;
+                                                                let sse = format!(
+                                                                    "event: tool_end\ndata: {}\n\n",
+                                                                    evt
+                                                                );
+                                                                let _ = stream
+                                                                    .write_all(sse.as_bytes())
+                                                                    .await;
                                                                 let _ = stream.flush().await;
                                                             }
                                                         }
                                                     }
-                                                    SessionEvent::StateChange { new_state, .. } => {
+                                                    SessionEvent::StateChange {
+                                                        new_state, ..
+                                                    } => {
                                                         match new_state {
                                                             SessionState::Thinking => {
                                                                 if !past_first_thinking {
@@ -1343,14 +1551,24 @@ impl PTYWebSocketServer {
                                                                     debug!(task_id = %task_id, "SSE bridge: past first thinking, text forwarding enabled");
                                                                 }
                                                                 let evt = serde_json::json!({"phase": "thinking", "text": "Thinking..."});
-                                                                let sse = format!("event: status\ndata: {}\n\n", evt);
-                                                                let _ = stream.write_all(sse.as_bytes()).await;
+                                                                let sse = format!(
+                                                                    "event: status\ndata: {}\n\n",
+                                                                    evt
+                                                                );
+                                                                let _ = stream
+                                                                    .write_all(sse.as_bytes())
+                                                                    .await;
                                                                 let _ = stream.flush().await;
                                                             }
                                                             SessionState::ToolRunning => {
                                                                 let evt = serde_json::json!({"phase": "tool_running", "text": ""});
-                                                                let sse = format!("event: status\ndata: {}\n\n", evt);
-                                                                let _ = stream.write_all(sse.as_bytes()).await;
+                                                                let sse = format!(
+                                                                    "event: status\ndata: {}\n\n",
+                                                                    evt
+                                                                );
+                                                                let _ = stream
+                                                                    .write_all(sse.as_bytes())
+                                                                    .await;
                                                                 let _ = stream.flush().await;
                                                             }
                                                             SessionState::Idle => {
@@ -1366,10 +1584,16 @@ impl PTYWebSocketServer {
                                                     SessionEvent::TextOutput(ref text_event) => {
                                                         use crate::TextOutputEvent;
                                                         match text_event {
-                                                            TextOutputEvent::Stream { content, .. } => {
-                                                                if past_first_thinking && !content.is_empty() {
+                                                            TextOutputEvent::Stream {
+                                                                content,
+                                                                ..
+                                                            } => {
+                                                                if past_first_thinking
+                                                                    && !content.is_empty()
+                                                                {
                                                                     had_activity = true;
-                                                                    streamed_response.push_str(content);
+                                                                    streamed_response
+                                                                        .push_str(content);
                                                                     let chunk = serde_json::json!({
                                                                         "id": &chat_id,
                                                                         "object": "chat.completion.chunk",
@@ -1380,14 +1604,27 @@ impl PTYWebSocketServer {
                                                                             "finish_reason": serde_json::Value::Null,
                                                                         }]
                                                                     });
-                                                                    let _ = stream.write_all(format!("data: {}\n\n", chunk).as_bytes()).await;
+                                                                    let _ = stream
+                                                                        .write_all(
+                                                                            format!(
+                                                                                "data: {}\n\n",
+                                                                                chunk
+                                                                            )
+                                                                            .as_bytes(),
+                                                                        )
+                                                                        .await;
                                                                     let _ = stream.flush().await;
                                                                 }
                                                             }
-                                                            TextOutputEvent::Complete { .. } => {}
+                                                            TextOutputEvent::Complete {
+                                                                ..
+                                                            } => {}
                                                         }
                                                     }
-                                                    SessionEvent::ConfirmRequired { ref prompt, ref info } => {
+                                                    SessionEvent::ConfirmRequired {
+                                                        ref prompt,
+                                                        ref info,
+                                                    } => {
                                                         let evt = serde_json::json!({
                                                             "action_id": format!("confirm-{}", tool_seq),
                                                             "prompt": prompt,
@@ -1408,8 +1645,12 @@ impl PTYWebSocketServer {
                                                                 })
                                                             }),
                                                         });
-                                                        let sse = format!("event: confirm_required\ndata: {}\n\n", evt);
-                                                        let _ = stream.write_all(sse.as_bytes()).await;
+                                                        let sse = format!(
+                                                            "event: confirm_required\ndata: {}\n\n",
+                                                            evt
+                                                        );
+                                                        let _ =
+                                                            stream.write_all(sse.as_bytes()).await;
                                                         let _ = stream.flush().await;
                                                     }
                                                     SessionEvent::Exit(code) => {
@@ -1419,10 +1660,14 @@ impl PTYWebSocketServer {
                                                     _ => {} // Ignore Data, ScreenText, TitleChange
                                                 }
                                             }
-                                            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
+                                            Ok(Err(
+                                                tokio::sync::broadcast::error::RecvError::Lagged(n),
+                                            )) => {
                                                 warn!(task_id = %task_id, lagged = n, "SSE bridge broadcast lagged");
                                             }
-                                            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                                            Ok(Err(
+                                                tokio::sync::broadcast::error::RecvError::Closed,
+                                            )) => {
                                                 break;
                                             }
                                             Err(_) => {
@@ -1430,7 +1675,9 @@ impl PTYWebSocketServer {
                                                 let _ = stream.write_all(b":\n\n").await;
                                                 let _ = stream.flush().await;
                                                 last_event_time = std::time::Instant::now();
-                                                if let Ok(Some(t)) = db.get_board_task(task_id.as_str()).await {
+                                                if let Ok(Some(t)) =
+                                                    db.get_board_task(task_id.as_str()).await
+                                                {
                                                     match t.status {
                                                         crate::types::BoardTaskStatus::Done
                                                         | crate::types::BoardTaskStatus::Failed => {
@@ -1465,14 +1712,18 @@ impl PTYWebSocketServer {
                                 // Retry a few times in case autopilot hasn't saved yet
                                 for attempt in 0..3 {
                                     if attempt > 0 {
-                                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                                        tokio::time::sleep(tokio::time::Duration::from_secs(1))
+                                            .await;
                                     }
                                     if let Ok(msgs) = db.router_chat_load_history(cid).await {
                                         // Find last assistant message
                                         if let Some(last_asst) = msgs.iter().rev().find(|m| {
-                                            m.get("role").and_then(|v| v.as_str()) == Some("assistant")
+                                            m.get("role").and_then(|v| v.as_str())
+                                                == Some("assistant")
                                         }) {
-                                            if let Some(content) = last_asst.get("content").and_then(|v| v.as_str()) {
+                                            if let Some(content) =
+                                                last_asst.get("content").and_then(|v| v.as_str())
+                                            {
                                                 if !content.is_empty() {
                                                     let chunk = serde_json::json!({
                                                         "id": &chat_id,
@@ -1484,7 +1735,12 @@ impl PTYWebSocketServer {
                                                             "finish_reason": serde_json::Value::Null,
                                                         }]
                                                     });
-                                                    let _ = stream.write_all(format!("data: {}\n\n", chunk).as_bytes()).await;
+                                                    let _ = stream
+                                                        .write_all(
+                                                            format!("data: {}\n\n", chunk)
+                                                                .as_bytes(),
+                                                        )
+                                                        .await;
                                                     break;
                                                 }
                                             }
@@ -1501,11 +1757,15 @@ impl PTYWebSocketServer {
                             "model": "jarvis-missiond",
                             "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }]
                         });
-                        let _ = stream.write_all(format!("data: {}\n\n", stop).as_bytes()).await;
+                        let _ = stream
+                            .write_all(format!("data: {}\n\n", stop).as_bytes())
+                            .await;
                         let _ = stream.write_all(b"data: [DONE]\n\n").await;
                         let _ = stream.flush().await;
 
-                        trace_store.complete_trace(&chat_id, "[async SSE bridge]", duration_ms).await;
+                        trace_store
+                            .complete_trace(&chat_id, "[async SSE bridge]", duration_ms)
+                            .await;
                         info!(?addr, slot_id, task_id = %task_id, duration_ms, "Jarvis SSE bridge completed");
                         stream.shutdown().await?;
                         return Ok(());
@@ -1526,7 +1786,8 @@ impl PTYWebSocketServer {
         let mut rx = match pty_manager.subscribe_session(&slot_id).await {
             Ok(rx) => rx,
             Err(e) => {
-                let err = serde_json::json!({"error": {"message": format!("Subscribe failed: {}", e)}});
+                let err =
+                    serde_json::json!({"error": {"message": format!("Subscribe failed: {}", e)}});
                 let event = format!("data: {}\n\n", err);
                 let _ = stream.write_all(event.as_bytes()).await;
                 let _ = stream.write_all(b"data: [DONE]\n\n").await;
@@ -1540,13 +1801,14 @@ impl PTYWebSocketServer {
             Some(db) => db.get_slot_session(&slot_id).await.ok().flatten(),
             None => None,
         };
-        let mut jsonl_rx: Option<broadcast::Receiver<WatcherEvent>> = match (&cc_tasks_watcher, &target_session_id) {
-            (Some(watcher), Some(_)) => {
-                let w = watcher.lock().await;
-                Some(w.subscribe())
-            }
-            _ => None,
-        };
+        let mut jsonl_rx: Option<broadcast::Receiver<WatcherEvent>> =
+            match (&cc_tasks_watcher, &target_session_id) {
+                (Some(watcher), Some(_)) => {
+                    let w = watcher.lock().await;
+                    Some(w.subscribe())
+                }
+                _ => None,
+            };
         if target_session_id.is_some() {
             debug!(slot_id, session_id = ?target_session_id, "JSONL watcher subscribed for chat content");
         }
@@ -1761,15 +2023,20 @@ impl PTYWebSocketServer {
 
         // ── Drain: after send() completes, catch final JSONL messages (500ms window) ──
         if let Some(ref mut jrx) = jsonl_rx {
-            let drain_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(500);
+            let drain_deadline =
+                tokio::time::Instant::now() + tokio::time::Duration::from_millis(500);
             loop {
                 match tokio::time::timeout_at(drain_deadline, jrx.recv()).await {
-                    Ok(Ok(WatcherEvent::NewMessages { session_id, messages, .. })) => {
+                    Ok(Ok(WatcherEvent::NewMessages {
+                        session_id,
+                        messages,
+                        ..
+                    })) => {
                         if target_session_id.as_deref() == Some(session_id.as_str()) {
                             process_jsonl_messages!(messages);
                         }
                     }
-                    Ok(Ok(_)) => {} // other watcher events
+                    Ok(Ok(_)) => {}  // other watcher events
                     Ok(Err(_)) => {} // lagged/closed
                     Err(_) => break, // drain timeout reached
                 }
@@ -1788,12 +2055,17 @@ impl PTYWebSocketServer {
                     // No JSONL content — use PTY response with cleaning as fallback
                     clean_jarvis_response(&result.response, "")
                 };
-                trace_store.complete_trace(&chat_id, &final_response, duration_ms).await;
+                trace_store
+                    .complete_trace(&chat_id, &final_response, duration_ms)
+                    .await;
 
                 // Persist conversation to DB
                 if let (Some(ref db), Some(ref cid)) = (&db, &jarvis_conv_id) {
                     if !raw_user_text.is_empty() {
-                        if let Err(e) = db.jarvis_save_exchange(cid, &raw_user_text, &final_response).await {
+                        if let Err(e) = db
+                            .jarvis_save_exchange(cid, &raw_user_text, &final_response)
+                            .await
+                        {
                             warn!(error = %e, conv_id = %cid, "Failed to save jarvis exchange");
                         } else if conversation_id.is_none() {
                             let title = if raw_user_text.chars().count() > 80 {
@@ -1815,7 +2087,9 @@ impl PTYWebSocketServer {
                         "model": "jarvis-missiond",
                         "choices": [{"index": 0, "delta": {"content": final_response}, "finish_reason": serde_json::Value::Null}]
                     });
-                    let _ = stream.write_all(format!("data: {}\n\n", chunk).as_bytes()).await;
+                    let _ = stream
+                        .write_all(format!("data: {}\n\n", chunk).as_bytes())
+                        .await;
                 }
 
                 let stop = serde_json::json!({
@@ -1824,21 +2098,33 @@ impl PTYWebSocketServer {
                     "model": "jarvis-missiond",
                     "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
                 });
-                let _ = stream.write_all(format!("data: {}\n\n", stop).as_bytes()).await;
+                let _ = stream
+                    .write_all(format!("data: {}\n\n", stop).as_bytes())
+                    .await;
                 let _ = stream.write_all(b"data: [DONE]\n\n").await;
                 info!(?addr, slot_id, response_len = final_response.len(), duration_ms, trace_id = %chat_id, "Chat completions done (JSONL+PTY)");
             }
             Ok(Err(e)) => {
-                trace_store.error_trace(&chat_id, &e.to_string(), None).await;
-                let err = serde_json::json!({"error": {"message": format!("Claude Code error: {}", e)}});
-                let _ = stream.write_all(format!("data: {}\n\n", err).as_bytes()).await;
+                trace_store
+                    .error_trace(&chat_id, &e.to_string(), None)
+                    .await;
+                let err =
+                    serde_json::json!({"error": {"message": format!("Claude Code error: {}", e)}});
+                let _ = stream
+                    .write_all(format!("data: {}\n\n", err).as_bytes())
+                    .await;
                 let _ = stream.write_all(b"data: [DONE]\n\n").await;
                 warn!(?addr, slot_id, error = %e, trace_id = %chat_id, "Chat completions error");
             }
             Err(e) => {
-                trace_store.error_trace(&chat_id, &e.to_string(), None).await;
-                let err = serde_json::json!({"error": {"message": format!("Internal error: {}", e)}});
-                let _ = stream.write_all(format!("data: {}\n\n", err).as_bytes()).await;
+                trace_store
+                    .error_trace(&chat_id, &e.to_string(), None)
+                    .await;
+                let err =
+                    serde_json::json!({"error": {"message": format!("Internal error: {}", e)}});
+                let _ = stream
+                    .write_all(format!("data: {}\n\n", err).as_bytes())
+                    .await;
                 let _ = stream.write_all(b"data: [DONE]\n\n").await;
             }
         }
@@ -1872,16 +2158,31 @@ impl PTYWebSocketServer {
             }
             // AIOps webhook endpoint
             if request_line.starts_with("POST /webhooks/") {
-                return Self::handle_webhook(stream, &request_line, incident_tx, system_event_tx).await;
+                return Self::handle_webhook(stream, &request_line, incident_tx, system_event_tx)
+                    .await;
             }
             // Chat completions SSE endpoint
             if request_line.starts_with("POST /v1/chat/completions") {
                 return match pty_manager {
-                    Some(pm) => Self::handle_chat_completions(stream, addr, pm, jarvis_trace, context_enricher, db, cc_tasks_watcher, tool_count).await,
+                    Some(pm) => {
+                        Self::handle_chat_completions(
+                            stream,
+                            addr,
+                            pm,
+                            jarvis_trace,
+                            context_enricher,
+                            db,
+                            cc_tasks_watcher,
+                            tool_count,
+                        )
+                        .await
+                    }
                     None => {
                         let mut s = stream;
-                        let err = serde_json::json!({"error": {"message": "PTY manager not available"}});
-                        Self::send_http_error(&mut s, 503, "Service Unavailable", &err.to_string()).await
+                        let err =
+                            serde_json::json!({"error": {"message": "PTY manager not available"}});
+                        Self::send_http_error(&mut s, 503, "Service Unavailable", &err.to_string())
+                            .await
                     }
                 };
             }
@@ -1891,8 +2192,10 @@ impl PTYWebSocketServer {
                     Some(pm) => Self::handle_slot_status(stream, pm).await,
                     None => {
                         let mut s = stream;
-                        let err = serde_json::json!({"error": {"message": "PTY manager not available"}});
-                        Self::send_http_error(&mut s, 503, "Service Unavailable", &err.to_string()).await
+                        let err =
+                            serde_json::json!({"error": {"message": "PTY manager not available"}});
+                        Self::send_http_error(&mut s, 503, "Service Unavailable", &err.to_string())
+                            .await
                     }
                 };
             }
@@ -1931,10 +2234,21 @@ impl PTYWebSocketServer {
             .unwrap_or_else(|_| "/".to_string());
 
         match parse_route(&path) {
-            Route::Tasks => Self::handle_tasks_subscription(addr, ws_stream, cc_tasks_watcher).await,
-            Route::Events => Self::handle_events_subscription(addr, ws_stream, frontend_events_tx, db).await,
+            Route::Tasks => {
+                Self::handle_tasks_subscription(addr, ws_stream, cc_tasks_watcher).await
+            }
+            Route::Events => {
+                Self::handle_events_subscription(addr, ws_stream, frontend_events_tx, db).await
+            }
             Route::Pty { slot_id } => {
-                Self::handle_pty_subscription(addr, ws_stream, pty_manager, screenshot_broker, slot_id).await
+                Self::handle_pty_subscription(
+                    addr,
+                    ws_stream,
+                    pty_manager,
+                    screenshot_broker,
+                    slot_id,
+                )
+                .await
             }
             Route::Invalid => {
                 let (mut ws_tx, _ws_rx) = ws_stream.split();
@@ -2294,7 +2608,10 @@ impl PTYWebSocketServer {
 
     /// Handle catch-up: replay historical events from DB since a given seq.
     async fn handle_catch_up(
-        ws_tx: &mut futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<TcpStream>, Message>,
+        ws_tx: &mut futures_util::stream::SplitSink<
+            tokio_tungstenite::WebSocketStream<TcpStream>,
+            Message,
+        >,
         db: &Arc<dyn crate::db::traits::MissionStore>,
         since_seq: i64,
     ) {
@@ -2325,11 +2642,12 @@ impl PTYWebSocketServer {
         match db.query_timeline_since(since_seq, 1000).await {
             Ok(rows) => {
                 for row in &rows {
-                    let payload: serde_json::Value = serde_json::from_str(&row.payload)
-                        .unwrap_or(serde_json::json!({}));
-                    let ts = chrono::NaiveDateTime::parse_from_str(&row.created_at, "%Y-%m-%d %H:%M:%S")
-                        .map(|dt| dt.and_utc().timestamp_millis())
-                        .unwrap_or(0);
+                    let payload: serde_json::Value =
+                        serde_json::from_str(&row.payload).unwrap_or(serde_json::json!({}));
+                    let ts =
+                        chrono::NaiveDateTime::parse_from_str(&row.created_at, "%Y-%m-%d %H:%M:%S")
+                            .map(|dt| dt.and_utc().timestamp_millis())
+                            .unwrap_or(0);
                     let event = serde_json::json!({
                         "type": row.event_type,
                         "ts": ts,
@@ -2500,5 +2818,45 @@ impl PTYWebSocketServer {
 
         info!(?addr, "Client unsubscribed from Tasks events");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_event_webhook_accepts_default_auth_service_id() {
+        let event = parse_external_service_webhook(
+            r#"{"event_id":"auth_evt_1","event_kind":"login_succeeded","summary":"login ok"}"#,
+            "auth",
+        )
+        .unwrap();
+        match event {
+            SystemEvent::ExternalServiceEvent {
+                service_id,
+                event_id,
+                event_kind,
+                ..
+            } => {
+                assert_eq!(service_id, "auth");
+                assert_eq!(event_id, "auth_evt_1");
+                assert_eq!(event_kind, "login_succeeded");
+            }
+            _ => panic!("unexpected event"),
+        }
+    }
+
+    #[test]
+    fn webhook_token_optional_or_required() {
+        let headers =
+            "POST /webhooks/auth-event HTTP/1.1\r\nX-MissionD-Webhook-Token: secret\r\n\r\n";
+        assert!(webhook_token_matches(headers, None));
+        assert!(webhook_token_matches(headers, Some("secret")));
+        assert!(!webhook_token_matches(headers, Some("wrong")));
+        assert!(!webhook_token_matches(
+            "POST / HTTP/1.1\r\n\r\n",
+            Some("secret")
+        ));
     }
 }

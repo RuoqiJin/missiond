@@ -165,6 +165,7 @@ function checkFiles(root, files) {
 	    ':dns-provider cloudflare',
 	    ':event-ingest (:endpoint "/webhooks/auth-event" :domain system :event ExternalServiceEvent',
 	    ':source auth-audit-events',
+	    ':token-env MISSIOND_EXTERNAL_WEBHOOK_TOKEN',
 	    'mission_project(action=universe)',
 	    'node scripts/check-v3-project-registry-isomorphism.mjs',
 	  ]);
@@ -373,7 +374,7 @@ function buildFixture() {
 	    (project :id xjp-deploy-center :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/deploy-center" :capability deploy-ops))
     (service-runtime-universe
       :schema "missiond.service-runtime-universe.v1"
-      (service :id auth :public-base-url "https://auth.xiaojinpro.com" :dns-provider cloudflare :deployment (:substrate kubernetes :namespace production :deployment "xjp-auth-center") :event-ingest (:endpoint "/webhooks/auth-event" :domain system :event ExternalServiceEvent :source auth-audit-events))
+      (service :id auth :public-base-url "https://auth.xiaojinpro.com" :dns-provider cloudflare :deployment (:substrate kubernetes :namespace production :deployment "xjp-auth-center") :event-ingest (:endpoint "/webhooks/auth-event" :domain system :event ExternalServiceEvent :source auth-audit-events :token-env MISSIOND_EXTERNAL_WEBHOOK_TOKEN))
       ;; mission_project(action=universe)
       )
 	  (implementation-map

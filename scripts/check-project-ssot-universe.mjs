@@ -113,6 +113,7 @@ function main() {
     ':health ["/health/live" "/health/ready" "/.well-known/openid-configuration" "/.well-known/jwks.json"]',
     ':event-ingest (:endpoint "/webhooks/auth-event" :domain system :event ExternalServiceEvent',
     ':source auth-audit-events',
+    ':token-env MISSIOND_EXTERNAL_WEBHOOK_TOKEN',
     ':authority provider-durable-log-first',
     ':dependencies [postgres redis secret-store wechat-open-platform google-oauth sms-provider email-provider]',
     ':ops-capability deploy-ops',
