@@ -34,10 +34,14 @@ impl ProjectRegistry {
     pub fn new(projects: Vec<ProjectConfig>) -> Self {
         let mut path_index: Vec<(String, String)> = projects
             .iter()
+            .filter(|p| p.active)
             .map(|p| (p.path.clone(), p.id.clone()))
             .collect();
         path_index.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
-        Self { projects, path_index }
+        Self {
+            projects,
+            path_index,
+        }
     }
 
     pub fn resolve(&self, cwd: &str) -> Option<&str> {
@@ -70,11 +74,15 @@ impl ProjectRegistry {
             Some(p) => p,
             None => return vec![],
         };
-        let other_active_slots: HashSet<&str> = self.projects.iter()
+        let other_active_slots: HashSet<&str> = self
+            .projects
+            .iter()
             .filter(|p| p.id != project_id && p.active)
             .flat_map(|p| p.slots.iter().map(|s| s.as_str()))
             .collect();
-        target.slots.iter()
+        target
+            .slots
+            .iter()
             .filter(|s| !other_active_slots.contains(s.as_str()))
             .cloned()
             .collect()
@@ -82,3 +90,37 @@ impl ProjectRegistry {
 }
 
 pub type SharedProjectRegistry = std::sync::Arc<tokio::sync::RwLock<ProjectRegistry>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn project(id: &str, path: &str, active: bool) -> ProjectConfig {
+        ProjectConfig {
+            id: id.to_string(),
+            path: path.to_string(),
+            intent_path: None,
+            active,
+            slots: vec![],
+            github_url: None,
+            kind: "managed".to_string(),
+            vault_path: None,
+            parent_id: None,
+            created_at: None,
+            updated_at: None,
+        }
+    }
+
+    #[test]
+    fn resolve_ignores_inactive_path_aliases() {
+        let registry = ProjectRegistry::new(vec![
+            project("legacy-alias", "/repo/services/auth", false),
+            project("auth", "/repo/services/auth", true),
+        ]);
+
+        assert_eq!(
+            registry.resolve("/repo/services/auth/src/main.rs"),
+            Some("auth")
+        );
+    }
+}

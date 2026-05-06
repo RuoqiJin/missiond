@@ -110,6 +110,8 @@ function checkFiles(root, files) {
     'project.rs is the thin mission_project facade',
     'ProjectRegistryRuntimeConfig loads V3 project-registry-policy',
 	    'ProjectRegistry::resolve owns longest-prefix project lookup',
+	    'inactive project aliases never participate in cwd resolution',
+	    'mission_project init archives inactive path aliases before upsert',
 	    'resolve_target_project_root owns project-root spawn cwd policy',
 	    '(project-maturity-model',
 	    ':schema "missiond.project-maturity-model.v1"',
@@ -210,6 +212,7 @@ function checkFiles(root, files) {
     'handle_sync',
     'handle_init',
     'handle_import_universe',
+    'archive_inactive_path_aliases',
     'ProjectRegistryRuntimeConfig::load_for_current_dir',
     'V3_BLUEPRINT_CONFIG_ERROR',
     'env_or_default_universe_manifest',
@@ -273,10 +276,12 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.coreProject, sources.coreProject, [
     'pub struct ProjectConfig',
     'pub struct ProjectRegistry',
+    '.filter(|p| p.active)',
     'path_index.sort_by',
     'cwd.starts_with(prefix.as_str())',
     'pub fn resolve(&self, cwd: &str) -> Option<&str>',
     'pub fn exclusive_slots(&self, project_id: &str) -> Vec<String>',
+    'resolve_ignores_inactive_path_aliases',
   ]);
 
   requireAll(diagnostics, files.rootResolver, sources.rootResolver, [

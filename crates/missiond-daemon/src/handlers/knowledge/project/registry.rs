@@ -184,6 +184,7 @@ pub(super) async fn handle_init(state: &AppState, args: Value) -> Result<ToolRes
         created_at: None,
         updated_at: None,
     };
+    archive_inactive_path_aliases(state, &id, &path_str).await?;
     state
         .store
         .upsert_project(&config)
@@ -213,6 +214,46 @@ pub(super) async fn handle_init(state: &AppState, args: Value) -> Result<ToolRes
         "backfilledConversations": backfilled + backfilled2,
         "status": "registered"
     })))
+}
+
+async fn archive_inactive_path_aliases(
+    state: &AppState,
+    target_id: &str,
+    target_path: &str,
+) -> Result<()> {
+    let projects = state
+        .store
+        .list_projects()
+        .await
+        .map_err(|e| anyhow!("DB error: {}", e))?;
+
+    for mut project in projects {
+        if project.id == target_id || project.path != target_path {
+            continue;
+        }
+        if project.active {
+            return Err(anyhow!(
+                "Project path {} is already owned by active project {}",
+                target_path,
+                project.id
+            ));
+        }
+
+        let archive_path = dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".missiond")
+            .join("project-aliases")
+            .join(&project.id);
+        let _ = std::fs::create_dir_all(&archive_path);
+        project.path = archive_path.display().to_string();
+        state
+            .store
+            .upsert_project(&project)
+            .await
+            .map_err(|e| anyhow!("DB error: {}", e))?;
+    }
+
+    Ok(())
 }
 
 pub(super) async fn handle_import_universe(state: &AppState, args: Value) -> Result<ToolResult> {
