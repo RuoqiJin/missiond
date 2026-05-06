@@ -39,7 +39,7 @@ let project_entry_to_json node =
     | None -> []
   in
   Printf.sprintf
-    {|{"id":%s,"kind":%s,"root":%s,"path":%s,"intent":%s,"backend":%s,"frontend":%s,"status":%s,"surface":%s,"checks":%s}|}
+    {|{"id":%s,"kind":%s,"root":%s,"path":%s,"intent":%s,"backend":%s,"frontend":%s,"operations":%s,"status":%s,"surface":%s,"checks":%s}|}
     (json_opt_string (prop_text ":id" props))
     (json_opt_string (prop_text ":kind" props))
     (json_opt_string (prop_text ":root" props))
@@ -47,6 +47,7 @@ let project_entry_to_json node =
     (json_opt_string (prop_text ":intent" props))
     (json_opt_string (prop_text ":backend" props))
     (json_opt_string (prop_text ":frontend" props))
+    (json_opt_string (prop_text ":operations" props))
     (json_opt_string (prop_text ":status" props))
     (json_opt_string (prop_text ":surface" props))
     (json_string_list checks)

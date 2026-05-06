@@ -13,7 +13,7 @@ import {
   readKeywordProps,
 } from './lib/missiond_lisp.mjs';
 import { readBlueprintWithEvidenceSidecars } from './lib/v3_blueprint_contract_source.mjs';
-import { maybeRunLispc } from './lib/ocaml_lispc.mjs';
+import { maybeRunLispc, runLispc } from './lib/ocaml_lispc.mjs';
 
 const BLUEPRINT_PATH = '.missiond/v3/missiond-blueprint.lisp';
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -117,27 +117,19 @@ function fail(message) {
 export function runProjectMaturityCheck(repoRoot, opts = {}) {
   const minLevel = opts.minLevel ?? 'M6';
   const diagnostics = [];
-  const blueprintSource = readBlueprintWithEvidenceSidecars(repoRoot, BLUEPRINT_PATH);
-  const forms = parseLisp(blueprintSource, BLUEPRINT_PATH);
-  const root = forms.find((form) => isList(form) && head(form) === 'missiond-blueprint');
-  if (!root) {
+  const loaded = loadMaturityInputs(repoRoot, opts);
+  diagnostics.push(...loaded.diagnostics);
+  if (loaded.diagnostics.length > 0) {
     return {
       ok: false,
+      source: loaded.source,
       min_level: minLevel,
       projects: [],
-      diagnostics: [{ file: BLUEPRINT_PATH, message: 'missing missiond-blueprint root' }],
+      diagnostics,
     };
   }
-
-  const maturityModel = firstChild(root, 'project-maturity-model');
-  const maturityRegistry = firstChild(root, 'project-maturity-registry');
-  const projectRegistry = firstChild(root, 'project-blueprint-registry');
-  if (!maturityModel) diagnostics.push({ file: BLUEPRINT_PATH, message: 'missing project-maturity-model' });
-  if (!maturityRegistry) diagnostics.push({ file: BLUEPRINT_PATH, message: 'missing project-maturity-registry' });
-  if (!projectRegistry) diagnostics.push({ file: BLUEPRINT_PATH, message: 'missing project-blueprint-registry' });
-
-  const maturity = maturityRegistry ? parseMaturityRegistry(maturityRegistry) : new Map();
-  const projects = projectRegistry ? parseProjectRegistry(projectRegistry) : new Map();
+  const maturity = loaded.maturity;
+  const projects = loaded.projects;
 
   const specialProjects = new Map([
     ['missiond', { id: 'missiond', root: repoRoot, intent: BLUEPRINT_PATH }],
@@ -162,13 +154,105 @@ export function runProjectMaturityCheck(repoRoot, opts = {}) {
 
   return {
     ok: diagnostics.length === 0,
+    source: loaded.source,
     min_level: minLevel,
     projects: rows,
     diagnostics,
   };
 }
 
+function loadMaturityInputs(repoRoot, opts) {
+  if (opts.engine !== 'js' && opts.dryFixture !== true) {
+    const result = runLispc([
+      'emit-universe',
+      '--blueprint',
+      BLUEPRINT_PATH,
+    ], { repoRoot });
+    if (result?.ok === true && result.compiled?.payload) {
+      return normalizeTypedMaturityInputs(result.compiled.payload, 'ocaml-emit-universe');
+    }
+    return {
+      source: 'ocaml-emit-universe',
+      maturity: new Map(),
+      projects: new Map(),
+      diagnostics: (result?.diagnostics ?? []).map((d) => ({
+        file: d.file ?? BLUEPRINT_PATH,
+        message: `${d.code ?? 'OCAML_EMIT_UNIVERSE'}: ${d.message}`,
+      })),
+    };
+  }
+  return loadMaturityInputsFromJs(repoRoot);
+}
+
+function normalizeTypedMaturityInputs(payload, source) {
+  const diagnostics = [];
+  const maturity = new Map();
+  const projects = new Map();
+  if (!Array.isArray(payload?.maturity)) {
+    diagnostics.push({ file: source, message: 'typed universe projection missing maturity[]' });
+  } else {
+    for (const entry of payload.maturity) {
+      if (!entry?.id) continue;
+      maturity.set(entry.id, {
+        id: entry.id,
+        current: entry.current ?? 'M0',
+        target: entry.target ?? 'M10',
+        gap: Array.isArray(entry.gap) ? entry.gap : [],
+      });
+    }
+  }
+  if (!Array.isArray(payload?.projects)) {
+    diagnostics.push({ file: source, message: 'typed universe projection missing projects[]' });
+  } else {
+    for (const project of payload.projects) {
+      if (!project?.id) continue;
+      projects.set(project.id, {
+        id: project.id,
+        kind: project.kind ?? null,
+        root: project.root ?? null,
+        path: project.path ?? null,
+        intent: project.intent ?? null,
+        backend: project.backend ?? null,
+        frontend: project.frontend ?? null,
+        operations: project.operations ?? null,
+        checks: Array.isArray(project.checks) ? project.checks : [],
+        status: project.status ?? null,
+      });
+    }
+  }
+  return { source, maturity, projects, diagnostics };
+}
+
+function loadMaturityInputsFromJs(repoRoot) {
+  const diagnostics = [];
+  const blueprintSource = readBlueprintWithEvidenceSidecars(repoRoot, BLUEPRINT_PATH);
+  const forms = parseLisp(blueprintSource, BLUEPRINT_PATH);
+  const root = forms.find((form) => isList(form) && head(form) === 'missiond-blueprint');
+  if (!root) {
+    return {
+      source: 'js-blueprint-parser',
+      maturity: new Map(),
+      projects: new Map(),
+      diagnostics: [{ file: BLUEPRINT_PATH, message: 'missing missiond-blueprint root' }],
+    };
+  }
+
+  const maturityModel = firstChild(root, 'project-maturity-model');
+  const maturityRegistry = firstChild(root, 'project-maturity-registry');
+  const projectRegistry = firstChild(root, 'project-blueprint-registry');
+  if (!maturityModel) diagnostics.push({ file: BLUEPRINT_PATH, message: 'missing project-maturity-model' });
+  if (!maturityRegistry) diagnostics.push({ file: BLUEPRINT_PATH, message: 'missing project-maturity-registry' });
+  if (!projectRegistry) diagnostics.push({ file: BLUEPRINT_PATH, message: 'missing project-blueprint-registry' });
+
+  const maturity = maturityRegistry ? parseMaturityRegistry(maturityRegistry) : new Map();
+  const projects = projectRegistry ? parseProjectRegistry(projectRegistry) : new Map();
+  return { source: 'js-blueprint-parser', maturity, projects, diagnostics };
+}
+
 function runOcamlMaturityCheck(repoRoot, opts) {
+  if (opts.dryFixture) {
+    return { requested: opts.engine, mode: 'js-fixture', ok: true, diagnostics: [] };
+  }
   if (opts.engine === 'js') return { requested: opts.engine, mode: 'js', ok: true, diagnostics: [] };
   const attempt = maybeRunLispc([
     'check-project',

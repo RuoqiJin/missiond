@@ -55,6 +55,17 @@ const REQUIRED_PROJECT_UNIVERSE_CHECKER = {
   ],
 };
 
+const REQUIRED_PROJECT_MATURITY_CHECKER = {
+  file: 'scripts/check-project-maturity.mjs',
+  tokens: [
+    'loadMaturityInputs',
+    'normalizeTypedMaturityInputs',
+    "'emit-universe'",
+    'source: loaded.source',
+    'mode: \'js-fixture\'',
+  ],
+};
+
 const REQUIRED_BLUEPRINT_TOKENS = [
   '(function typed-lisp-compiler',
   ':surface typed-lisp-compiler',
@@ -93,6 +104,12 @@ function main() {
   for (const token of REQUIRED_PROJECT_UNIVERSE_CHECKER.tokens) {
     if (!universeChecker.includes(token)) {
       diagnostics.push(diag(REQUIRED_PROJECT_UNIVERSE_CHECKER.file, 'UNIVERSE_CHECKER_TOKEN_MISSING', `missing token ${JSON.stringify(token)}`));
+    }
+  }
+  const maturityChecker = read(REQUIRED_PROJECT_MATURITY_CHECKER.file);
+  for (const token of REQUIRED_PROJECT_MATURITY_CHECKER.tokens) {
+    if (!maturityChecker.includes(token)) {
+      diagnostics.push(diag(REQUIRED_PROJECT_MATURITY_CHECKER.file, 'MATURITY_CHECKER_TOKEN_MISSING', `missing token ${JSON.stringify(token)}`));
     }
   }
 
