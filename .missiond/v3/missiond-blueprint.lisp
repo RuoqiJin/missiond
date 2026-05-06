@@ -2099,12 +2099,14 @@
         :egress [workflow.lisp workflow_row compiled_yaml run_result])
       (function typed-lisp-compiler
         :surface typed-lisp-compiler
-        :entry [missiond-lispc.check-v3 missiond-lispc.check-workflow missiond-lispc.check-project missiond-lispc.emit-json]
+        :entry [missiond-lispc.check-v3 missiond-lispc.check-workflow missiond-lispc.check-project missiond-lispc.check-auth-domain missiond-lispc.emit-json missiond-lispc.emit-v3 missiond-lispc.emit-universe missiond-lispc.emit-workflows]
         :core ((step s1 :logic "parse Lisp SSOT files into source-located typed AST nodes")
                (step s2 :logic "validate pillar/function entry-core-egress surfaces, workflow contracts, universe registry, maturity gates, and event/outbox contracts")
                (step s3 :logic "emit stable JSON diagnostics for JS compatibility wrappers and CI gates")
-               (step s4 :logic "generate compiled JSON projections only through checker/compiler commands, never by hand"))
-        :egress [typed_diagnostics compiled_json js_wrapper_result]))
+               (step s4 :logic "generate compiled JSON projections only through checker/compiler commands, never by hand")
+               (step s5 :logic "let Rust runtime read compiled JSON first for workstation/project/workflow snapshots, then diagnostic-fallback to Lisp/default behavior")
+               (step s6 :logic "use Auth as the first external project-domain semantic checker sample before shrinking more project checkers"))
+        :egress [typed_diagnostics compiled_json compiled_runtime_snapshot js_wrapper_result]))
 
     (pillar review
       (function review-gate
@@ -2639,15 +2641,24 @@
 
     (surface typed-lisp-compiler
       :status "code-aligned"
-      :implements [lisp-reader typed-ast semantic-validator diagnostic-json projection-json]
+      :implements [lisp-reader typed-ast semantic-validator diagnostic-json projection-json runtime-compiled-json-loader auth-domain-sample]
       :code ["tools/missiond_lispc/dune-project"
              "tools/missiond_lispc/bin/dune"
              "tools/missiond_lispc/bin/main.ml"
+             "tools/missiond_lispc/bin/ast.ml"
+             "tools/missiond_lispc/bin/parser.ml"
+             "tools/missiond_lispc/bin/schema_v3.ml"
+             "tools/missiond_lispc/bin/workflow_schema.ml"
+             "tools/missiond_lispc/bin/project_schema.ml"
+             "tools/missiond_lispc/bin/emit_json.ml"
              "tools/missiond_lispc/test/dune"
              "tools/missiond_lispc/test/parser_golden.ml"
              "scripts/lib/ocaml_lispc.mjs"
              "scripts/check-ocaml-toolchain.mjs"
              "scripts/check-typed-lisp-compiler.mjs"
+             "scripts/compile-v3-runtime.mjs"
+             "scripts/check-auth-domain-ssot.mjs"
+             "crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"
              ".missiond/workflows/typed-lisp-compiler-convergence.lisp"]
       :note "Lisp remains the canonical authoring SSOT. The OCaml layer is a dev-time typed compiler/checker/projection layer for source-located diagnostics and generated runtime JSON; it is not in the daemon hot path. JS checkers remain compatibility wrappers and code-anchor validators while OCaml takes ownership of Lisp AST semantics.")
 

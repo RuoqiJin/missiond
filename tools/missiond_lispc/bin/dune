@@ -1,2 +1,9 @@
+(library
+ (name missiond_lispc_core)
+ (wrapped false)
+ (modules ast parser schema_v3 workflow_schema project_schema emit_json))
+
 (executable
- (name main))
+ (name main)
+ (modules main)
+ (libraries missiond_lispc_core))

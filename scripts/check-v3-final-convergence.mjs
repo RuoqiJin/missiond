@@ -73,6 +73,12 @@ const LIVE_CHECKS = [
     argv: ['scripts/check-project-maturity.mjs', '--min-level', 'M10'],
     timeoutMs: 60_000,
   },
+  {
+    id: 'typed-lisp-runtime-compile',
+    argv: ['scripts/compile-v3-runtime.mjs', '--json'],
+    json: true,
+    timeoutMs: 60_000,
+  },
 ];
 
 const RUNTIME_CHECKS = [

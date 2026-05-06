@@ -3,6 +3,8 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde::Deserialize;
+
 pub(crate) const DEFAULT_MODEL_PROFILE: &str = "coding-default-opus-4-7";
 pub(crate) const DEFAULT_TIMEOUT_SECS: i64 = 1800;
 pub(crate) const MIN_TIMEOUT_SECS: i64 = 60;
@@ -422,6 +424,31 @@ impl fmt::Display for BlueprintConfigError {
 }
 
 impl std::error::Error for BlueprintConfigError {}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CompiledRuntimeSnapshot {
+    pub kind: String,
+    pub path: PathBuf,
+    pub schema_version: String,
+    pub source_hash: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CompiledRuntimeLoad {
+    pub snapshot: Option<CompiledRuntimeSnapshot>,
+    pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CompiledRuntimeEnvelope {
+    schema_version: String,
+    source_hash: String,
+    #[allow(dead_code)]
+    generated_at: Option<serde_json::Value>,
+    diagnostics: Vec<serde_json::Value>,
+    #[allow(dead_code)]
+    payload: serde_json::Value,
+}
 
 impl Default for TimeoutPolicy {
     fn default() -> Self {
@@ -2597,6 +2624,94 @@ fn load_blueprint_source(
     Ok(Some(source))
 }
 
+pub(crate) fn load_compiled_runtime_snapshot(
+    project_root: &Path,
+    kind: &str,
+    expected_source_hash: Option<&str>,
+) -> CompiledRuntimeLoad {
+    let file_name = match kind {
+        "v3" => "compiled-v3-blueprint.json",
+        "universe" => "compiled-project-universe.json",
+        "workflows" => "compiled-workflows.json",
+        other => {
+            return CompiledRuntimeLoad {
+                snapshot: None,
+                diagnostics: vec![format!("unknown compiled runtime kind `{other}`")],
+            };
+        }
+    };
+    let path = project_root
+        .join(".missiond")
+        .join("v3")
+        .join("runtime")
+        .join("compiled")
+        .join(file_name);
+    if !path.exists() {
+        return CompiledRuntimeLoad {
+            snapshot: None,
+            diagnostics: vec![format!(
+                "compiled runtime snapshot missing: {}",
+                path.display()
+            )],
+        };
+    }
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(err) => {
+            return CompiledRuntimeLoad {
+                snapshot: None,
+                diagnostics: vec![format!(
+                    "failed to read compiled runtime snapshot {}: {err}",
+                    path.display()
+                )],
+            };
+        }
+    };
+    let parsed: CompiledRuntimeEnvelope = match serde_json::from_str(&raw) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            return CompiledRuntimeLoad {
+                snapshot: None,
+                diagnostics: vec![format!(
+                    "failed to parse compiled runtime snapshot {}: {err}",
+                    path.display()
+                )],
+            };
+        }
+    };
+    let mut diagnostics = Vec::new();
+    if !parsed.diagnostics.is_empty() {
+        diagnostics.push(format!(
+            "compiled runtime snapshot {} contains {} diagnostic(s)",
+            path.display(),
+            parsed.diagnostics.len()
+        ));
+    }
+    if let Some(expected) = expected_source_hash {
+        if parsed.source_hash != expected {
+            diagnostics.push(format!(
+                "compiled runtime snapshot {} source_hash mismatch: expected {}, got {}",
+                path.display(),
+                expected,
+                parsed.source_hash
+            ));
+            return CompiledRuntimeLoad {
+                snapshot: None,
+                diagnostics,
+            };
+        }
+    }
+    CompiledRuntimeLoad {
+        snapshot: Some(CompiledRuntimeSnapshot {
+            kind: kind.to_string(),
+            path,
+            schema_version: parsed.schema_version,
+            source_hash: parsed.source_hash,
+        }),
+        diagnostics,
+    }
+}
+
 fn find_forms(source: &str, head: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut offset = 0;
@@ -3626,5 +3741,84 @@ mod tests {
         let err = parse_conversation_ingestion_policy("(missiond-blueprint)")
             .expect_err("missing conversation ingestion policy should fail");
         assert!(err.to_string().contains("conversation-ingestion-policy"));
+    }
+
+    #[test]
+    fn compiled_runtime_snapshot_loads_generated_shape() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let compiled_dir = temp
+            .path()
+            .join(".missiond")
+            .join("v3")
+            .join("runtime")
+            .join("compiled");
+        fs::create_dir_all(&compiled_dir).expect("compiled dir");
+        fs::write(
+            compiled_dir.join("compiled-v3-blueprint.json"),
+            r#"{
+              "schema_version": "missiond.compiled-v3-blueprint.v1",
+              "source_hash": "abc123",
+              "generated_at": null,
+              "diagnostics": [],
+              "payload": {"blueprint": ".missiond/v3/missiond-blueprint.lisp"}
+            }"#,
+        )
+        .expect("write compiled snapshot");
+
+        let loaded = load_compiled_runtime_snapshot(temp.path(), "v3", Some("abc123"));
+        assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
+        let snapshot = loaded.snapshot.expect("snapshot");
+        assert_eq!(snapshot.kind, "v3");
+        assert_eq!(snapshot.schema_version, "missiond.compiled-v3-blueprint.v1");
+        assert_eq!(snapshot.source_hash, "abc123");
+    }
+
+    #[test]
+    fn compiled_runtime_snapshot_hash_mismatch_is_diagnostic_not_panic() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let compiled_dir = temp
+            .path()
+            .join(".missiond")
+            .join("v3")
+            .join("runtime")
+            .join("compiled");
+        fs::create_dir_all(&compiled_dir).expect("compiled dir");
+        fs::write(
+            compiled_dir.join("compiled-project-universe.json"),
+            r#"{
+              "schema_version": "missiond.compiled-project-universe.v1",
+              "source_hash": "actual",
+              "generated_at": null,
+              "diagnostics": [],
+              "payload": {"project_registry_present": true}
+            }"#,
+        )
+        .expect("write compiled snapshot");
+
+        let loaded = load_compiled_runtime_snapshot(temp.path(), "universe", Some("expected"));
+        assert!(loaded.snapshot.is_none());
+        assert!(
+            loaded
+                .diagnostics
+                .iter()
+                .any(|line| line.contains("source_hash mismatch")),
+            "{:?}",
+            loaded.diagnostics
+        );
+    }
+
+    #[test]
+    fn missing_compiled_runtime_snapshot_falls_back_with_diagnostic() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let loaded = load_compiled_runtime_snapshot(temp.path(), "workflows", None);
+        assert!(loaded.snapshot.is_none());
+        assert!(
+            loaded
+                .diagnostics
+                .iter()
+                .any(|line| line.contains("compiled runtime snapshot missing")),
+            "{:?}",
+            loaded.diagnostics
+        );
     }
 }

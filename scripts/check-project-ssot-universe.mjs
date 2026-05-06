@@ -205,7 +205,7 @@ function main() {
 }
 
 function parseArgs(args) {
-  const opts = { json: false, engine: 'auto' };
+  const opts = { json: false, engine: 'ocaml' };
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
     if (arg === '--json') opts.json = true;

@@ -79,7 +79,7 @@ function main() {
 }
 
 function parseArgs(argv) {
-  const opts = { json: false, dryFixture: false, blueprint: BLUEPRINT_PATH, engine: 'auto' };
+  const opts = { json: false, dryFixture: false, blueprint: BLUEPRINT_PATH, engine: 'ocaml' };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '-h' || arg === '--help') {

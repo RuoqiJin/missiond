@@ -10,11 +10,18 @@ const REQUIRED_FILES = [
   'tools/missiond_lispc/dune-project',
   'tools/missiond_lispc/bin/dune',
   'tools/missiond_lispc/bin/main.ml',
+  'tools/missiond_lispc/bin/ast.ml',
+  'tools/missiond_lispc/bin/parser.ml',
+  'tools/missiond_lispc/bin/schema_v3.ml',
+  'tools/missiond_lispc/bin/workflow_schema.ml',
+  'tools/missiond_lispc/bin/project_schema.ml',
+  'tools/missiond_lispc/bin/emit_json.ml',
   'tools/missiond_lispc/test/dune',
   'tools/missiond_lispc/test/parser_golden.ml',
   'scripts/lib/ocaml_lispc.mjs',
   'scripts/check-ocaml-toolchain.mjs',
   'scripts/check-typed-lisp-compiler.mjs',
+  'scripts/compile-v3-runtime.mjs',
   '.missiond/workflows/typed-lisp-compiler-convergence.lisp',
 ];
 
@@ -23,6 +30,8 @@ const REQUIRED_BLUEPRINT_TOKENS = [
   ':surface typed-lisp-compiler',
   '(surface typed-lisp-compiler',
   'tools/missiond_lispc/bin/main.ml',
+  'tools/missiond_lispc/bin/schema_v3.ml',
+  'tools/missiond_lispc/bin/emit_json.ml',
   'node scripts/check-typed-lisp-compiler.mjs',
 ];
 
@@ -55,6 +64,7 @@ function main() {
 
   const toolchain = toolchainStatus();
   let ocaml = null;
+  const emitChecks = [];
   if (toolchain.ok) {
     ocaml = runLispc([
       'check-v3',
@@ -65,6 +75,17 @@ function main() {
     ]);
     if (!ocaml.ok) {
       for (const d of ocaml.diagnostics ?? []) diagnostics.push({ ...d, code: d.code ?? 'OCAML_CHECK_FAILED' });
+    }
+    for (const argv of [
+      ['emit-v3', '--blueprint', BLUEPRINT],
+      ['emit-universe', '--blueprint', BLUEPRINT],
+      ['emit-workflows', '--workflow-dir', '.missiond/workflows'],
+    ]) {
+      const emit = runLispc(argv);
+      emitChecks.push({ argv, ok: emit.ok === true, diagnostics: emit.diagnostics ?? [] });
+      if (!emit.ok || !emit.compiled) {
+        diagnostics.push(diag('tools/missiond_lispc', 'OCAML_EMIT_FAILED', `emit command failed: ${argv.join(' ')}`));
+      }
     }
   } else if (opts.strictToolchain) {
     diagnostics.push(diag('tools/missiond_lispc', 'OCAML_TOOLCHAIN_MISSING', `missing OCaml command(s): ${toolchain.missing.join(', ')}`));
@@ -83,6 +104,7 @@ function main() {
     diagnostics,
     warnings,
     ocaml,
+    emit_checks: emitChecks,
   };
   if (opts.json) {
     console.log(JSON.stringify(result, null, 2));
