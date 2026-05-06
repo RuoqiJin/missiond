@@ -30,11 +30,11 @@ export function runLispc(args, { repoRoot = process.cwd(), timeoutMs = 60_000 } 
     };
   }
 
-  const proc = spawnSync(
+  const proc = withDuneLock(toolRoot, timeoutMs, () => spawnSync(
     'dune',
     ['exec', '--root', toolRoot, './bin/main.exe', '--', ...args],
     { cwd: repoRoot, encoding: 'utf8', timeout: timeoutMs },
-  );
+  ));
   const stdout = proc.stdout ?? '';
   const stderr = proc.stderr ?? '';
   let parsed = null;
@@ -96,6 +96,51 @@ function commandExists(cmd) {
     encoding: 'utf8',
   });
   return proc.status === 0;
+}
+
+function withDuneLock(toolRoot, timeoutMs, fn) {
+  const lockPath = path.join(toolRoot, '_build', 'missiond-lispc.dune.lock');
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+  const deadline = Date.now() + timeoutMs;
+  let fd = null;
+  while (fd === null) {
+    try {
+      fd = fs.openSync(lockPath, 'wx');
+      fs.writeFileSync(fd, `${process.pid} ${new Date().toISOString()}\n`);
+    } catch (err) {
+      if (err?.code !== 'EEXIST') throw err;
+      if (Date.now() >= deadline) {
+        return {
+          status: 124,
+          stdout: '',
+          stderr: `timed out waiting for missiond-lispc Dune lock: ${lockPath}`,
+          error: null,
+        };
+      }
+      sleepSync(100);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    try {
+      if (fd !== null) fs.closeSync(fd);
+    } catch {
+      // Ignore close errors; stale lock cleanup below is best effort.
+    }
+    try {
+      fs.unlinkSync(lockPath);
+    } catch {
+      // A later checker invocation will time out rather than silently proceed
+      // if the lock cannot be removed.
+    }
+  }
+}
+
+function sleepSync(ms) {
+  const sab = new SharedArrayBuffer(4);
+  const view = new Int32Array(sab);
+  Atomics.wait(view, 0, 0, ms);
 }
 
 function quoteShell(value) {

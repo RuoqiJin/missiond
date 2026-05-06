@@ -100,13 +100,12 @@ let read_file file =
 module Parser = struct
   type t = {
     source : string;
-    file : string;
     mutable i : int;
     mutable line : int;
     mutable column : int;
   }
 
-  let make file source = { source; file; i = 0; line = 1; column = 1 }
+  let make _file source = { source; i = 0; line = 1; column = 1 }
   let eof p = p.i >= String.length p.source
   let peek p = if eof p then '\000' else p.source.[p.i]
   let loc p = { line = p.line; column = p.column }
@@ -208,7 +207,7 @@ let parse_file file =
   let p = Parser.make file source in
   Parser.parse_forms p None
 
-let diag ?(path = "") file loc code message =
+let diag ?(path = "") (file : string) (loc : loc) code message =
   { file; line = loc.line; column = loc.column; code; message; path }
 
 let find_root forms expected =
@@ -245,11 +244,12 @@ let surface_ids implementation_map =
 
 let validate_core_steps file fn_id core =
   match core with
-  | Some (List (_, _, xs)) ->
+  | Some (List (_, _, xs) as core_node) ->
       let steps = List.filter (fun n -> is_list n "step") xs in
       if steps = [] then
-        [ diag file (loc_of core |> fun l -> l) "core.empty"
+        [ (diag file (loc_of core_node) "core.empty"
             (Printf.sprintf "function %s :core must contain at least one step" fn_id)
+          )
         ]
       else
         steps
@@ -478,7 +478,7 @@ let find_arg name args =
   let rec loop = function
     | [] -> None
     | x :: y :: _ when x = name -> Some y
-    | x :: xs when starts_with ~prefix:(name ^ "=") x ->
+    | x :: _ when starts_with ~prefix:(name ^ "=") x ->
         Some (String.sub x (String.length name + 1) (String.length x - String.length name - 1))
     | _ :: xs -> loop xs
   in
