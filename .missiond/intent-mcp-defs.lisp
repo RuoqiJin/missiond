@@ -638,13 +638,13 @@
   :target "crates/missiond-mcp/src/tools/comm/conversation.rs"
 
   (tool mission_conversation_query
-    :description "对话统一查询。list/get/search/message_search/context/events/audit_classification/backfill_classification/turn_backfill"
+    :description "对话统一查询。list/get/search/message_search/context/events/audit_classification/backfill_classification/audit_message_roles/backfill_message_roles/turn_backfill"
     (input
-      (action   string :enum (list get search message_search context events audit_classification backfill_classification turn_backfill) :default "list")
+      (action   string :enum (list get search message_search context events audit_classification backfill_classification audit_message_roles backfill_message_roles turn_backfill) :default "list")
       (status   string :description "[list] active/completed")
       (conversationType string :description "[list] user/worker/meta/system/all")
       (taskId   string :description "[list] 按 Board 任务 ID 过滤")
-      (sessionId string :description "[get/search/events/turn_backfill] 会话 ID")
+      (sessionId string :description "[get/search/events/audit_message_roles/backfill_message_roles/turn_backfill] 会话 ID")
       (tail     integer :default 50 :description "[get] 最近 N 条消息")
       (sinceId  integer :description "[get] 增量拉取(ID 大于此值)")
       (includeRaw boolean :default false :description "[get] 完整消息含 rawContent/model")
@@ -665,8 +665,8 @@
       (until    string :description "[list] 结束时间")
       (source   string :description "[audit_classification/backfill_classification] provider source filter, e.g. claude_code")
       (minConfidence number :description "[audit_classification/backfill_classification] minimum confidence threshold")
-      (apply    boolean :description "[backfill_classification] true to write classification repairs")
-      (rebuildTurns boolean :description "[backfill_classification] rebuild conversation_turns after classification repair"))
+      (apply    boolean :description "[backfill_classification/backfill_message_roles] true to write reviewed repairs")
+      (rebuildTurns boolean :description "[backfill_classification/backfill_message_roles] rebuild conversation_turns after repair"))
     :returns "Value"
     :dispatch-on action)
 

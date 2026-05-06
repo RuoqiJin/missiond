@@ -5,6 +5,7 @@ use missiond_core::db::conversation_query::{
 use missiond_mcp::tools::ToolResult;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeSet;
 
 use crate::state::{AppState, EmbeddingTask};
 
@@ -511,6 +512,104 @@ pub(super) async fn handle_maintenance(
                 "candidateCount": rows.len(),
                 "changed": changed,
                 "skipped": skipped,
+            })))
+        }
+        "mission_conversation_message_role_audit" => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                #[serde(alias = "session_id")]
+                session_id: Option<String>,
+                limit: Option<i64>,
+            }
+            let Args { session_id, limit } = serde_json::from_value(args).unwrap_or(Args {
+                session_id: None,
+                limit: Some(200),
+            });
+            let rows = state
+                .store
+                .claude_worker_user_role_backfill_candidates(
+                    session_id.as_deref(),
+                    limit.unwrap_or(200),
+                )
+                .await
+                .map_err(|e| anyhow!("DB error: {e}"))?;
+            Ok(ToolResult::json_pretty(&serde_json::json!({
+                "mode": "dry-run",
+                "source": "claude_code",
+                "rule": "worker sessions with role=user/raw_role=user that match local-command or worker-prompt signatures",
+                "candidateCount": rows.len(),
+                "findings": rows,
+            })))
+        }
+        "mission_conversation_message_role_backfill" => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                #[serde(alias = "session_id")]
+                session_id: Option<String>,
+                limit: Option<i64>,
+                apply: Option<bool>,
+                #[serde(alias = "rebuild_turns")]
+                rebuild_turns: Option<bool>,
+            }
+            let Args {
+                session_id,
+                limit,
+                apply,
+                rebuild_turns,
+            } = serde_json::from_value(args).unwrap_or(Args {
+                session_id: None,
+                limit: Some(200),
+                apply: Some(false),
+                rebuild_turns: Some(true),
+            });
+            let apply = apply.unwrap_or(false);
+            let rebuild_turns = rebuild_turns.unwrap_or(true);
+            let rows = state
+                .store
+                .claude_worker_user_role_backfill_candidates(
+                    session_id.as_deref(),
+                    limit.unwrap_or(200),
+                )
+                .await
+                .map_err(|e| anyhow!("DB error: {e}"))?;
+
+            if !apply {
+                return Ok(ToolResult::json_pretty(&serde_json::json!({
+                    "mode": "dry-run",
+                    "source": "claude_code",
+                    "candidateCount": rows.len(),
+                    "skipped": rows,
+                })));
+            }
+
+            let message_ids = rows.iter().map(|r| r.message_id).collect::<Vec<_>>();
+            let updated_messages = state
+                .store
+                .backfill_claude_worker_user_message_roles(&message_ids)
+                .await
+                .map_err(|e| anyhow!("DB error: {e}"))?;
+            let mut rebuilt = Vec::new();
+            if rebuild_turns {
+                let sessions = rows
+                    .iter()
+                    .map(|r| r.session_id.clone())
+                    .collect::<BTreeSet<_>>();
+                for sid in sessions {
+                    rebuilt.push(serde_json::json!({
+                        "sessionId": sid,
+                        "insertedTurns": rebuild_turns_for_session(state, &sid).await?,
+                    }));
+                }
+            }
+            Ok(ToolResult::json_pretty(&serde_json::json!({
+                "mode": "apply",
+                "source": "claude_code",
+                "candidateCount": rows.len(),
+                "updatedMessages": updated_messages,
+                "rebuiltTurns": rebuilt,
+                "changed": rows,
             })))
         }
         "mission_conversation_turn_backfill" => {

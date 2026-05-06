@@ -11,6 +11,7 @@
 
 use super::PgMissionStore;
 use crate::db::error::DbResult;
+use crate::db::shared::MessageRoleBackfillCandidate;
 use crate::db::traits::ConversationStore;
 use crate::types::*;
 use async_trait::async_trait;
@@ -1105,6 +1106,113 @@ impl ConversationStore for PgMissionStore {
                AND role <> ''",
         )
         .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() as usize)
+    }
+
+    async fn claude_worker_user_role_backfill_candidates(
+        &self,
+        session_id: Option<&str>,
+        limit: i64,
+    ) -> DbResult<Vec<MessageRoleBackfillCandidate>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+              m.id,
+              m.session_id,
+              c.conversation_type,
+              c.slot_id,
+              c.task_id,
+              m.role,
+              m.raw_role,
+              COALESCE(m.timestamp::text, '') AS timestamp,
+              CASE
+                WHEN m.content LIKE '<local-command-%' THEN 'local-command'
+                WHEN m.content LIKE '<command-name>%' THEN 'local-command'
+                WHEN m.content LIKE '<command-message>%' THEN 'local-command'
+                WHEN m.content LIKE '<command-args>%' THEN 'local-command'
+                WHEN m.content LIKE 'Execute MissionD task %' THEN 'worker-prompt'
+                WHEN m.content LIKE 'Fix MissionD-side swarm %' THEN 'worker-prompt'
+                WHEN m.content LIKE 'Implement accepted swarm shard%' THEN 'worker-prompt'
+                WHEN m.content LIKE 'Survey exact shards for swarm objective%' THEN 'worker-prompt'
+                WHEN m.content ILIKE '%BoardTask ID%' THEN 'worker-prompt'
+                WHEN m.content ILIKE '%Task contract SSOT%' THEN 'worker-prompt'
+                WHEN m.content ILIKE '%completion protocol%' THEN 'worker-prompt'
+                WHEN m.content ILIKE '%write_scope%' THEN 'worker-prompt'
+                WHEN m.content ILIKE '%must_not_touch%' THEN 'worker-prompt'
+                ELSE 'worker-user-raw-role'
+              END AS reason,
+              LEFT(regexp_replace(COALESCE(m.content, ''), '\s+', ' ', 'g'), 240) AS content_preview
+            FROM conversation_messages m
+            JOIN conversations c ON c.id = m.session_id
+            WHERE c.source = 'claude_code'
+              AND c.conversation_type = 'worker'
+              AND m.role = 'user'
+              AND m.raw_role = 'user'
+              AND ($1::text IS NULL OR m.session_id = $1)
+              AND (
+                   m.content LIKE '<local-command-%'
+                OR m.content LIKE '<command-name>%'
+                OR m.content LIKE '<command-message>%'
+                OR m.content LIKE '<command-args>%'
+                OR m.content LIKE 'Execute MissionD task %'
+                OR m.content LIKE 'Fix MissionD-side swarm %'
+                OR m.content LIKE 'Implement accepted swarm shard%'
+                OR m.content LIKE 'Survey exact shards for swarm objective%'
+                OR m.content ILIKE '%BoardTask ID%'
+                OR m.content ILIKE '%Task contract SSOT%'
+                OR m.content ILIKE '%completion protocol%'
+                OR m.content ILIKE '%write_scope%'
+                OR m.content ILIKE '%must_not_touch%'
+              )
+            ORDER BY m.timestamp DESC NULLS LAST, m.id DESC
+            LIMIT $2
+            "#,
+        )
+        .bind(session_id)
+        .bind(limit.max(1))
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| MessageRoleBackfillCandidate {
+                message_id: row.get("id"),
+                session_id: row.get("session_id"),
+                conversation_type: row.get("conversation_type"),
+                slot_id: row.get("slot_id"),
+                task_id: row.get("task_id"),
+                role: row.get("role"),
+                raw_role: row.get("raw_role"),
+                timestamp: row.get("timestamp"),
+                reason: row.get("reason"),
+                content_preview: row.get("content_preview"),
+            })
+            .collect())
+    }
+
+    async fn backfill_claude_worker_user_message_roles(
+        &self,
+        message_ids: &[i64],
+    ) -> DbResult<usize> {
+        if message_ids.is_empty() {
+            return Ok(0);
+        }
+        let result = sqlx::query(
+            r#"
+            UPDATE conversation_messages m
+            SET role = 'worker_user'
+            FROM conversations c
+            WHERE c.id = m.session_id
+              AND c.source = 'claude_code'
+              AND c.conversation_type = 'worker'
+              AND m.role = 'user'
+              AND m.raw_role = 'user'
+              AND m.id = ANY($1)
+            "#,
+        )
+        .bind(message_ids)
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected() as usize)

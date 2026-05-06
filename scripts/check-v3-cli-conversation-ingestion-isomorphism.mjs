@@ -124,11 +124,14 @@ function checkFiles(root, files) {
     'audit_historical_classification',
     'mission_conversation_query(action=audit_classification)',
     'mission_conversation_query(action=backfill_classification, apply=true)',
+    'mission_conversation_query(action=audit_message_roles)',
+    'mission_conversation_query(action=backfill_message_roles, apply=true)',
     'mission_conversation_query(action=turn_backfill, sessionId=...)',
     'codex_user_without_slot',
     'codex_raw_role_missing',
     'backfill_missing_raw_roles_for_session',
     'claude_worker_prompt_signature',
+    'local-command or worker-prompt signatures',
     'rebuild_session_turns',
   ]);
 
@@ -234,23 +237,31 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.conversationRouter, sources.conversationRouter, [
     '"audit_classification" => "mission_conversation_classification_audit"',
     '"backfill_classification" => "mission_conversation_classification_backfill"',
+    '"audit_message_roles" => "mission_conversation_message_role_audit"',
+    '"backfill_message_roles" => "mission_conversation_message_role_backfill"',
     '"turn_backfill" => "mission_conversation_turn_backfill"',
   ]);
 
   requireAll(diagnostics, files.conversationMaintenance, sources.conversationMaintenance, [
     'classification_audit_rows',
+    'claude_worker_user_role_backfill_candidates',
+    'backfill_claude_worker_user_message_roles',
     'audit_historical_classification',
     'set_conversation_type',
     'backfill_missing_raw_roles_for_session',
     'rebuild_turns_for_session',
     'mission_conversation_classification_audit',
     'mission_conversation_classification_backfill',
+    'mission_conversation_message_role_audit',
+    'mission_conversation_message_role_backfill',
     'mission_conversation_turn_backfill',
   ]);
 
   requireAll(diagnostics, files.mcpConversation, sources.mcpConversation, [
     '"audit_classification"',
     '"backfill_classification"',
+    '"audit_message_roles"',
+    '"backfill_message_roles"',
     '"turn_backfill"',
     '"minConfidence"',
     '"rebuildTurns"',
@@ -259,6 +270,8 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.mcpDefs, sources.mcpDefs, [
     'audit_classification',
     'backfill_classification',
+    'audit_message_roles',
+    'backfill_message_roles',
     'turn_backfill',
     'minConfidence',
     'rebuildTurns',
@@ -367,6 +380,8 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.pgConversation, sources.pgConversation, [
     'async fn set_conversation_type',
+    'async fn claude_worker_user_role_backfill_candidates',
+    'async fn backfill_claude_worker_user_message_roles',
     'DELETE FROM conversation_turns WHERE session_id = $1',
     'async fn clear_conversation_turns',
   ]);

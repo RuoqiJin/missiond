@@ -14,6 +14,7 @@ use std::collections::HashMap;
 // Re-export shared types (always available regardless of feature flags)
 pub use super::shared::{TimelineRow, TimelineStats, LatencyStats};
 pub use super::shared::BackfillPhaseStatus;
+pub use super::shared::MessageRoleBackfillCandidate;
 pub use super::shared::{BeaconInfo, BeaconNode};
 pub use super::shared::{AstSyncResult, AstSearchHit, AstNodeRow, AstStats, ModuleAstSummary};
 pub use crate::ast::CodeNode;
@@ -96,6 +97,14 @@ pub trait ConversationStore: Send + Sync {
     /// `raw_role` NULL. Backfill it from the normalized `role` column so
     /// provider-aware audits can distinguish human turns from worker/provider turns.
     async fn backfill_missing_raw_roles_for_session(&self, id: &str) -> DbResult<usize>;
+    /// Historical repair surface: find ClaudeCode worker-session messages
+    /// whose provider raw_role=user was stored as human role=user before
+    /// worker_user normalization was enforced.
+    async fn claude_worker_user_role_backfill_candidates(&self, session_id: Option<&str>, limit: i64) -> DbResult<Vec<MessageRoleBackfillCandidate>>;
+    /// Reviewed repair surface: rewrite selected historical worker messages
+    /// from role=user to role=worker_user. Callers must rebuild turns for
+    /// touched sessions after this update.
+    async fn backfill_claude_worker_user_message_roles(&self, message_ids: &[i64]) -> DbResult<usize>;
     async fn get_conversations_by_task_id(&self, task_id: &str) -> DbResult<Vec<Conversation>>;
     async fn reactivate_conversation(&self, id: &str) -> DbResult<usize>;
 

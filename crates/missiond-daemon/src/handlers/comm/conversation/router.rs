@@ -21,6 +21,8 @@ pub(super) async fn handle_conversation_query(state: &AppState, args: Value) -> 
         "delete_label" => "mission_conversation_delete_label",
         "audit_classification" => "mission_conversation_classification_audit",
         "backfill_classification" => "mission_conversation_classification_backfill",
+        "audit_message_roles" => "mission_conversation_message_role_audit",
+        "backfill_message_roles" => "mission_conversation_message_role_backfill",
         "turn_backfill" => "mission_conversation_turn_backfill",
         other => return Err(anyhow!("Unknown conversation action: {other}")),
     };

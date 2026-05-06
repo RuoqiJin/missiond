@@ -48,6 +48,20 @@ pub struct BackfillPhaseStatus {
     pub completed_at: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MessageRoleBackfillCandidate {
+    pub message_id: i64,
+    pub session_id: String,
+    pub conversation_type: String,
+    pub slot_id: Option<String>,
+    pub task_id: Option<String>,
+    pub role: String,
+    pub raw_role: Option<String>,
+    pub timestamp: String,
+    pub reason: String,
+    pub content_preview: String,
+}
+
 // ── Beacon types ──
 
 #[derive(Debug, Clone, serde::Serialize)]
