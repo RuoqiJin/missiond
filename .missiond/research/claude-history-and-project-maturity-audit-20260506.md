@@ -117,12 +117,33 @@ Final convergence now fails honestly at `project-maturity` until the M2 and M5 p
 
 ## Next infrastructure work
 
-1. Add a reviewed ClaudeCode message-role backfill for worker sessions:
-   - dry-run first;
-   - update only `source='claude_code'`, `conversation_type='worker'`, `role='user'`, `raw_role='user'`;
-   - target local-command and worker-prompt rows;
-   - rebuild turns for touched sessions.
-2. Use the stricter maturity gate as the dispatch source for project M10 work:
+1. Use the stricter maturity gate as the dispatch source for project M10 work:
    - M2 projects first need blueprint split;
    - M5 projects need explicit code-isomorphism/current-code-mapping evidence and checker anchors.
-3. Keep Universe honest: target remains M10 for all projects, but current maturity must reflect actual evidence.
+2. Keep Universe honest: target remains M10 for all projects, but current maturity must reflect actual evidence.
+
+## Follow-up execution, 2026-05-06
+
+Implemented the reviewed ClaudeCode message-role repair as first-class MissionD MCP actions:
+
+- `mission_conversation_query(action=audit_message_roles)`
+- `mission_conversation_query(action=backfill_message_roles, apply=true, rebuildTurns=true)`
+
+Runtime backfill result after blue/green deploy:
+
+| Step | Result |
+| --- | ---: |
+| Initial reviewed candidates | 599 |
+| Initial updated messages | 599 |
+| Initial rebuilt sessions | 131 |
+| Follow-up candidates from the current default slot exit | 3 |
+| Follow-up updated messages | 3 |
+| Follow-up rebuilt sessions | 1 |
+| Remaining `audit_message_roles` candidates | 0 |
+| Remaining `audit_classification` candidates | 0 |
+
+The repair updated only ClaudeCode worker-session rows matching the reviewed rule:
+
+`source='claude_code' + conversation_type='worker' + role='user' + raw_role='user' + local-command/worker-prompt signature`
+
+No provider messages were deleted, and no human/Jarvis user conversations were bulk-relabelled.
