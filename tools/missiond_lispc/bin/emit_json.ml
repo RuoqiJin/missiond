@@ -189,8 +189,8 @@ let emit_universe blueprint =
     let payload =
       Printf.sprintf {|{"blueprint":%s,"project_registry_present":%s,"maturity_registry_present":%s,"projects":[%s],"maturity":[%s]}|}
         (json_string blueprint)
-        (if contains_substring source "(project-blueprint-registry" then "true" else "false")
-        (if contains_substring source "(project-maturity-registry" then "true" else "false")
+        (if project_registry <> None then "true" else "false")
+        (if maturity_registry <> None then "true" else "false")
         (String.concat "," projects)
         (String.concat "," maturities)
     in

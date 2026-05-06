@@ -1,22 +1,109 @@
 open Ast
 
+let rec collect_forms named node =
+  let here = if is_list node named then [ node ] else [] in
+  match node with
+  | List (_, _, xs) -> here @ (xs |> List.map (collect_forms named) |> List.flatten)
+  | _ -> here
+
+let form_id = function
+  | List (_, _, _ :: id_node :: _) -> atom_text id_node
+  | _ -> None
+
+let nonempty_list_prop key props =
+  match prop key props with
+  | Some value -> list_texts value <> []
+  | None -> false
+
+let has_suffix s suffix =
+  let ls = String.length s in
+  let lx = String.length suffix in
+  ls >= lx && String.sub s (ls - lx) lx = suffix
+
+let validate_project_core_steps file form_id_label form =
+  let props = keyword_props ~start:2 form in
+  match prop ":core" props with
+  | Some (List (_, _, xs) as core) ->
+      let steps = xs |> List.filter (fun node -> is_list node "step") in
+      if steps = [] then
+        [ diag file (loc_of core) "project.core_empty"
+            (Printf.sprintf "%s :core must contain at least one ordered step" form_id_label)
+        ]
+      else
+        steps
+        |> List.mapi (fun i step ->
+               let expected = "s" ^ string_of_int (i + 1) in
+               let got =
+                 match children step with _ :: id_node :: _ -> atom_text id_node | _ -> None
+               in
+               let step_props = keyword_props ~start:2 step in
+               let logic = prop_text ":logic" step_props in
+               let diagnostics =
+                 if got = Some expected then []
+                 else
+                   [ diag file (loc_of step) "project.core_step_order"
+                       (Printf.sprintf "%s step %d must be %s" form_id_label
+                          (i + 1) expected)
+                   ]
+               in
+               match logic with
+               | Some value when String.trim value <> "" -> diagnostics
+               | _ ->
+                   diag file (loc_of step) "project.core_step_logic"
+                     (Printf.sprintf "%s step %s must declare :logic" form_id_label expected)
+                   :: diagnostics)
+        |> List.flatten
+  | Some node ->
+      [ diag file (loc_of node) "project.core_invalid"
+          (Printf.sprintf "%s must declare list :core" form_id_label)
+      ]
+  | None ->
+      [ diag file (loc_of form) "project.core_missing"
+          (Printf.sprintf "%s missing :core" form_id_label)
+      ]
+
+let validate_project_function_form file form =
+  let props = keyword_props ~start:2 form in
+  let id = form_id form in
+  let label =
+    match id with Some id -> "function " ^ id | None -> "function <missing-id>"
+  in
+  let diagnostics = ref [] in
+  let add d = diagnostics := d :: !diagnostics in
+  if id = None then
+    add (diag file (loc_of form) "project.function_id_missing" (label ^ " missing id"));
+  if prop ":entry" props = None then
+    add (diag file (loc_of form) "project.entry_missing" (label ^ " missing :entry"));
+  validate_project_core_steps file label form |> List.iter add;
+  if prop ":egress" props = None then
+    add (diag file (loc_of form) "project.egress_missing" (label ^ " missing :egress"));
+  if prop ":surface" props = None && not (nonempty_list_prop ":surfaces" props) then
+    add (diag file (loc_of form) "project.surface_missing" (label ^ " missing :surface or non-empty :surfaces"));
+  List.rev !diagnostics
+
 let validate file =
   try
     let forms = Parser.parse_file file in
     let diagnostics = ref [] in
     let add d = diagnostics := d :: !diagnostics in
-    let text = read_file file in
     (match find_root forms "missiond-blueprint" with
     | None ->
         if forms = [] then
           add (diag file { line = 1; column = 1 } "project.root_missing" "missing Lisp root");
-        if contains_substring text "blueprint" || contains_substring text "(function" then (
-          if not (contains_substring text ":entry") then
-            add (diag file { line = 1; column = 1 } "project.entry_missing" "project blueprint/function text missing :entry");
-          if not (contains_substring text ":core") then
-            add (diag file { line = 1; column = 1 } "project.core_missing" "project blueprint/function text missing :core");
-          if not (contains_substring text ":egress") then
-            add (diag file { line = 1; column = 1 } "project.egress_missing" "project blueprint/function text missing :egress"))
+        let functions =
+          forms |> List.map (collect_forms "function") |> List.flatten
+        in
+        functions
+        |> List.iter (fun form -> validate_project_function_form file form |> List.iter add);
+        if functions = [] then
+          let project_like_root =
+            forms
+            |> List.filter_map head
+            |> List.exists (fun h -> has_suffix h "blueprint" || has_suffix h "intent")
+          in
+          if project_like_root then
+            add (diag file { line = 1; column = 1 } "project.function_missing"
+                   "project blueprint/intent must declare at least one function")
     | Some root ->
         if find_child root "project-maturity-registry" = None then
           add (diag file (loc_of root) "project.maturity_missing" "missing project-maturity-registry");
@@ -51,21 +138,6 @@ let validate_auth_domain_source file source =
            Some
              (diag file { line = 1; column = 1 } code
                 (Printf.sprintf "auth domain SSOT missing required concept: %s" needle)))
-
-let rec collect_forms named node =
-  let here = if is_list node named then [ node ] else [] in
-  match node with
-  | List (_, _, xs) -> here @ (xs |> List.map (collect_forms named) |> List.flatten)
-  | _ -> here
-
-let form_id = function
-  | List (_, _, _ :: id_node :: _) -> atom_text id_node
-  | _ -> None
-
-let nonempty_list_prop key props =
-  match prop key props with
-  | Some value -> list_texts value <> []
-  | None -> false
 
 let validate_core_steps file form_id_label form =
   let props =

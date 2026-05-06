@@ -122,6 +122,35 @@ let test_auth_structured_function_requires_runtime_projection () =
         (has_code "auth.runtime_projection_missing" diagnostics)
   | [] -> failwith "missing parsed auth function"
 
+let test_project_function_requires_ordered_steps () =
+  with_temp "project-blueprint-invalid"
+    {|
+(jarvis-blueprint
+  (function runtime-config
+    :surface runtime-config
+    :entry [config]
+    :core ((step s2 :logic "load config"))
+    :egress [runtime]))
+|}
+    (fun file ->
+      let diagnostics = Project_schema.validate file in
+      assert_true "unordered project step is diagnosed"
+        (has_code "project.core_step_order" diagnostics))
+
+let test_project_function_requires_surface () =
+  with_temp "project-blueprint-invalid"
+    {|
+(jarvis-blueprint
+  (function runtime-config
+    :entry [config]
+    :core ((step s1 :logic "load config"))
+    :egress [runtime]))
+|}
+    (fun file ->
+      let diagnostics = Project_schema.validate file in
+      assert_true "missing project surface is diagnosed"
+        (has_code "project.surface_missing" diagnostics))
+
 let () =
   test_parser_locations ();
   test_v3_missing_entry ();
@@ -129,4 +158,6 @@ let () =
   test_workflow_missing_risk_gate ();
   test_auth_domain_requires_compatibility_ledger ();
   test_auth_structured_function_requires_runtime_projection ();
+  test_project_function_requires_ordered_steps ();
+  test_project_function_requires_surface ();
   print_endline "missiond_lispc parser and validator golden tests passed"
