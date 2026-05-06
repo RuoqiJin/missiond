@@ -149,7 +149,8 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.slotEnv, sources.slotEnv, [
     'updated.source = "claude_code".to_string();',
-    '&updated.source',
+    'active_board_task_id_for_slot(',
+    'set_conversation_task_id(&session_uuid, task_id)',
   ]);
   rejectAll(diagnostics, files.slotEnv, sources.slotEnv, [
     'updated.source = "pty_jsonl".to_string();',
@@ -227,6 +228,8 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.reconcileWorker, sources.reconcileWorker, [
     'normalize_claude_message_role(',
     'raw_role: Some(msg.message.role.clone())',
+    'bind_reconciled_conversation_to_active_board_task',
+    'set_conversation_task_id(session_id, &task_id)',
   ]);
 
   requireAll(diagnostics, files.conversationQuery, sources.conversationQuery, [

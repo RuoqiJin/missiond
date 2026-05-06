@@ -389,9 +389,41 @@ pub(crate) async fn resolve_cmd_value(raw_value: &str, cmd_str: &str) -> String 
 }
 
 use missiond_core::db::traits::MissionStore;
+use missiond_core::types::{BoardTask, BoardTaskStatus};
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+pub(crate) fn active_board_task_id_for_slot_from_tasks(
+    tasks: &[BoardTask],
+    slot_id: &str,
+) -> Option<String> {
+    tasks
+        .iter()
+        .find(|task| {
+            task.status == BoardTaskStatus::Running
+                && task.claim_executor_type.as_deref() == Some("pty_slot")
+                && task.claim_executor_id.as_deref() == Some(slot_id)
+        })
+        .map(|task| task.id.to_string())
+}
+
+pub(crate) async fn active_board_task_id_for_slot(
+    store: &Arc<dyn MissionStore>,
+    slot_id: &str,
+) -> Option<String> {
+    match store.list_board_tasks(Some("running"), true).await {
+        Ok(tasks) => active_board_task_id_for_slot_from_tasks(&tasks, slot_id),
+        Err(e) => {
+            warn!(
+                slot_id = %slot_id,
+                error = %e,
+                "Failed to resolve active BoardTask for slot session linkage"
+            );
+            None
+        }
+    }
+}
 
 /// After a PTY spawn with wait_for_idle, read the session UUID
 /// written by the SessionStart hook and register it in DB + cache.
@@ -443,21 +475,62 @@ pub(crate) async fn capture_slot_session_uuid(
             // Update in-memory cache
             pty_session_uuids.write().await.insert(session_uuid.clone());
 
-            // Retroactive fix: if conversation already exists with slot_id=None, tag it
+            let active_task_id = active_board_task_id_for_slot(store, slot_id).await;
+
+            // Retroactive fix: if the conversation already exists before the hook fires,
+            // tag it as a slot-bound Claude worker session.
             if let Ok(Some(conv)) = store.get_conversation(&session_uuid).await {
-                if conv.slot_id.is_none() {
+                let category: Option<String> = None;
+                let expected_type = missiond_core::db::derive_conversation_type(
+                    category.as_deref(),
+                    Some(slot_id),
+                    &session_uuid,
+                    "claude_code",
+                );
+                if conv.slot_id.as_deref() != Some(slot_id)
+                    || conv.source != "claude_code"
+                    || conv.conversation_type != expected_type
+                {
                     let mut updated = conv.clone();
                     updated.slot_id = Some(slot_id.to_string());
                     updated.source = "claude_code".to_string();
-                    let category: Option<String> = None;
-                    updated.conversation_type = missiond_core::db::derive_conversation_type(
-                        category.as_deref(),
-                        Some(slot_id),
-                        &session_uuid,
-                        &updated.source,
-                    );
+                    updated.conversation_type = expected_type;
                     let _ = store.upsert_conversation(&updated).await;
                     info!(session = %session_uuid, slot_id = %slot_id, "Retroactively tagged conversation with slot_id and conversation_type");
+                }
+                if let Some(task_id) = active_task_id.as_deref() {
+                    let existing_task_id = conv
+                        .task_id
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty());
+                    if existing_task_id.is_none() {
+                        if let Err(e) = store.set_conversation_task_id(&session_uuid, task_id).await
+                        {
+                            warn!(
+                                session = %session_uuid,
+                                slot_id = %slot_id,
+                                task_id = %task_id,
+                                error = %e,
+                                "Failed to bind conversation to active BoardTask after session capture"
+                            );
+                        } else {
+                            info!(
+                                session = %session_uuid,
+                                slot_id = %slot_id,
+                                task_id = %task_id,
+                                "Bound conversation to active BoardTask after session capture"
+                            );
+                        }
+                    } else if existing_task_id != Some(task_id) {
+                        warn!(
+                            session = %session_uuid,
+                            slot_id = %slot_id,
+                            existing_task_id = %existing_task_id.unwrap_or_default(),
+                            active_task_id = %task_id,
+                            "Skipped active BoardTask binding because conversation already has a different task_id"
+                        );
+                    }
                 }
             }
         }
@@ -473,7 +546,60 @@ pub(crate) async fn capture_slot_session_uuid(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use missiond_core::types::TaskId;
     use tempfile::tempdir;
+
+    fn board_task_for_slot(id: &str, slot_id: Option<&str>, status: BoardTaskStatus) -> BoardTask {
+        BoardTask {
+            id: TaskId::from_trusted(id.to_string()),
+            title: "task".to_string(),
+            description: String::new(),
+            status,
+            priority: "medium".to_string(),
+            category: "dev".to_string(),
+            project: None,
+            server: None,
+            due_date: None,
+            parent_id: None,
+            assignee: slot_id.map(str::to_string),
+            auto_execute: true,
+            prompt_template: None,
+            hidden: false,
+            retry_count: 0,
+            max_retries: 2,
+            order_idx: 0,
+            created_at: "2026-05-06T00:00:00Z".to_string(),
+            updated_at: "2026-05-06T00:00:00Z".to_string(),
+            claim_executor_id: slot_id.map(str::to_string),
+            claim_executor_type: slot_id.map(|_| "pty_slot".to_string()),
+            claimed_at: None,
+            flow_phase: None,
+            flow_context: None,
+            flow_template: None,
+            depends_on: Vec::new(),
+            lease_expires_at: None,
+            dedupe_key: None,
+            timeout_secs: None,
+            context_intent: None,
+            trigger_source: None,
+            notes_count: 0,
+        }
+    }
+
+    #[test]
+    fn active_board_task_id_for_slot_requires_running_pty_claim() {
+        let tasks = vec![
+            board_task_for_slot("open-task", Some("slot-a"), BoardTaskStatus::Open),
+            board_task_for_slot("running-other", Some("slot-b"), BoardTaskStatus::Running),
+            board_task_for_slot("running-target", Some("slot-a"), BoardTaskStatus::Running),
+        ];
+
+        assert_eq!(
+            active_board_task_id_for_slot_from_tasks(&tasks, "slot-a").as_deref(),
+            Some("running-target")
+        );
+        assert!(active_board_task_id_for_slot_from_tasks(&tasks, "missing").is_none());
+    }
 
     #[tokio::test]
     async fn build_slot_tracking_env_includes_hook_runtime_env() {

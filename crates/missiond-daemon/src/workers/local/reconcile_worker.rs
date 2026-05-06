@@ -476,6 +476,7 @@ async fn reconcile_file_gap(
             .store
             .refresh_conversation_message_count(session_id)
             .await;
+        bind_reconciled_conversation_to_active_board_task(state, session_id).await;
         info!(
             session = %session_id,
             recovered = total_recovered,
@@ -485,4 +486,43 @@ async fn reconcile_file_gap(
     }
 
     total_recovered
+}
+
+async fn bind_reconciled_conversation_to_active_board_task(state: &AppState, session_id: &str) {
+    match state.store.get_conversation(session_id).await {
+        Ok(Some(conv))
+            if conv
+                .task_id
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|task_id| !task_id.is_empty()) =>
+        {
+            return;
+        }
+        Ok(Some(_)) => {}
+        _ => return,
+    }
+    let slot_id = match state.store.get_slot_for_session(session_id).await {
+        Ok(Some(slot_id)) => slot_id,
+        _ => return,
+    };
+    let task_id =
+        match crate::context::slot_env::active_board_task_id_for_slot(&state.store, &slot_id).await
+        {
+            Some(task_id) => task_id,
+            None => return,
+        };
+    if let Err(e) = state
+        .store
+        .set_conversation_task_id(session_id, &task_id)
+        .await
+    {
+        warn!(
+            session = %session_id,
+            slot_id = %slot_id,
+            task_id = %task_id,
+            error = %e,
+            "Reconcile: failed to bind conversation to active BoardTask"
+        );
+    }
 }
