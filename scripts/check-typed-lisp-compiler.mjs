@@ -33,6 +33,11 @@ const REQUIRED_RUNTIME_LOADER = {
     'compiled_sexp_to_lisp',
     'CompiledV3Payload',
     'load_runtime_blueprint_source(project_root)',
+    'CompiledProjectUniverse',
+    'CompiledWorkflowContracts',
+    'CompiledPayloadLoad',
+    'load_compiled_project_universe',
+    'load_compiled_workflow_contracts',
   ],
 };
 

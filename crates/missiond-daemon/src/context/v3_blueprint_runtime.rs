@@ -439,6 +439,70 @@ pub(crate) struct CompiledRuntimeLoad {
     pub diagnostics: Vec<String>,
 }
 
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CompiledProjectUniverse {
+    pub projects: Vec<CompiledProjectUniverseEntry>,
+    pub maturity: Vec<CompiledProjectMaturityEntry>,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub(crate) struct CompiledProjectUniverseEntry {
+    pub id: Option<String>,
+    pub kind: Option<String>,
+    pub root: Option<String>,
+    pub path: Option<String>,
+    pub intent: Option<String>,
+    pub backend: Option<String>,
+    pub frontend: Option<String>,
+    pub status: Option<String>,
+    pub surface: Option<String>,
+    #[serde(default)]
+    pub checks: Vec<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub(crate) struct CompiledProjectMaturityEntry {
+    pub id: Option<String>,
+    pub current: Option<String>,
+    pub target: Option<String>,
+    #[serde(default)]
+    pub gap: Vec<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CompiledWorkflowContracts {
+    pub workflows: Vec<CompiledWorkflowEntry>,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub(crate) struct CompiledWorkflowEntry {
+    pub file: String,
+    pub name: Option<String>,
+    pub workflow_id: Option<String>,
+    pub status: Option<String>,
+    pub owner: Option<String>,
+    pub authority: Option<String>,
+    #[serde(default)]
+    pub source_plans: Vec<String>,
+    #[serde(default)]
+    pub steps: Vec<String>,
+    pub risk_gate_count: usize,
+    pub completion_criteria_count: usize,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CompiledPayloadLoad<T> {
+    pub payload: Option<T>,
+    pub snapshot: Option<CompiledRuntimeSnapshot>,
+    pub diagnostics: Vec<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct CompiledRuntimeEnvelope {
     schema_version: String,
@@ -465,6 +529,20 @@ struct CompiledSexpNode {
     list_kind: Option<String>,
     #[serde(default)]
     children: Vec<CompiledSexpNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CompiledProjectUniversePayload {
+    #[serde(default)]
+    projects: Vec<CompiledProjectUniverseEntry>,
+    #[serde(default)]
+    maturity: Vec<CompiledProjectMaturityEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CompiledWorkflowsPayload {
+    #[serde(default)]
+    workflows: Vec<CompiledWorkflowEntry>,
 }
 
 impl Default for TimeoutPolicy {
@@ -2825,6 +2903,163 @@ pub(crate) fn load_compiled_runtime_snapshot(
     }
 }
 
+#[allow(dead_code)]
+pub(crate) fn load_compiled_project_universe(
+    project_root: &Path,
+    expected_source_hash: Option<&str>,
+) -> CompiledPayloadLoad<CompiledProjectUniverse> {
+    let loaded = load_compiled_payload::<CompiledProjectUniversePayload>(
+        project_root,
+        "universe",
+        expected_source_hash,
+    );
+    CompiledPayloadLoad {
+        payload: loaded.payload.map(|payload| CompiledProjectUniverse {
+            projects: payload.projects,
+            maturity: payload.maturity,
+        }),
+        snapshot: loaded.snapshot,
+        diagnostics: loaded.diagnostics,
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn load_compiled_workflow_contracts(
+    project_root: &Path,
+    expected_source_hash: Option<&str>,
+) -> CompiledPayloadLoad<CompiledWorkflowContracts> {
+    let loaded = load_compiled_payload::<CompiledWorkflowsPayload>(
+        project_root,
+        "workflows",
+        expected_source_hash,
+    );
+    CompiledPayloadLoad {
+        payload: loaded.payload.map(|payload| CompiledWorkflowContracts {
+            workflows: payload.workflows,
+        }),
+        snapshot: loaded.snapshot,
+        diagnostics: loaded.diagnostics,
+    }
+}
+
+fn load_compiled_payload<T>(
+    project_root: &Path,
+    kind: &str,
+    expected_source_hash: Option<&str>,
+) -> CompiledPayloadLoad<T>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let file_name = match compiled_runtime_file_name(kind) {
+        Some(file_name) => file_name,
+        None => {
+            return CompiledPayloadLoad {
+                payload: None,
+                snapshot: None,
+                diagnostics: vec![format!("unknown compiled runtime kind `{kind}`")],
+            };
+        }
+    };
+    let path = project_root
+        .join(".missiond")
+        .join("v3")
+        .join("runtime")
+        .join("compiled")
+        .join(file_name);
+    if !path.exists() {
+        return CompiledPayloadLoad {
+            payload: None,
+            snapshot: None,
+            diagnostics: vec![format!(
+                "compiled runtime snapshot missing: {}",
+                path.display()
+            )],
+        };
+    }
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(err) => {
+            return CompiledPayloadLoad {
+                payload: None,
+                snapshot: None,
+                diagnostics: vec![format!(
+                    "failed to read compiled runtime snapshot {}: {err}",
+                    path.display()
+                )],
+            };
+        }
+    };
+    let parsed: CompiledRuntimeEnvelope = match serde_json::from_str(&raw) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            return CompiledPayloadLoad {
+                payload: None,
+                snapshot: None,
+                diagnostics: vec![format!(
+                    "failed to parse compiled runtime snapshot {}: {err}",
+                    path.display()
+                )],
+            };
+        }
+    };
+    let mut diagnostics = Vec::new();
+    if !parsed.diagnostics.is_empty() {
+        diagnostics.push(format!(
+            "compiled runtime snapshot {} contains {} diagnostic(s)",
+            path.display(),
+            parsed.diagnostics.len()
+        ));
+    }
+    if let Some(expected) = expected_source_hash {
+        if parsed.source_hash != expected {
+            diagnostics.push(format!(
+                "compiled runtime snapshot {} source_hash mismatch: expected {}, got {}",
+                path.display(),
+                expected,
+                parsed.source_hash
+            ));
+            return CompiledPayloadLoad {
+                payload: None,
+                snapshot: None,
+                diagnostics,
+            };
+        }
+    }
+    let payload = match serde_json::from_value(parsed.payload) {
+        Ok(payload) => payload,
+        Err(err) => {
+            diagnostics.push(format!(
+                "failed to decode compiled runtime payload {}: {err}",
+                path.display()
+            ));
+            return CompiledPayloadLoad {
+                payload: None,
+                snapshot: None,
+                diagnostics,
+            };
+        }
+    };
+    CompiledPayloadLoad {
+        payload: Some(payload),
+        snapshot: Some(CompiledRuntimeSnapshot {
+            kind: kind.to_string(),
+            path,
+            schema_version: parsed.schema_version,
+            source_hash: parsed.source_hash,
+        }),
+        diagnostics,
+    }
+}
+
+fn compiled_runtime_file_name(kind: &str) -> Option<&'static str> {
+    match kind {
+        "v3" => Some("compiled-v3-blueprint.json"),
+        "universe" => Some("compiled-project-universe.json"),
+        "workflows" => Some("compiled-workflows.json"),
+        _ => None,
+    }
+}
+
 fn find_forms(source: &str, head: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut offset = 0;
@@ -3933,6 +4168,103 @@ mod tests {
             "{:?}",
             loaded.diagnostics
         );
+    }
+
+    #[test]
+    fn compiled_project_universe_loads_structured_payload() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let compiled_dir = temp
+            .path()
+            .join(".missiond")
+            .join("v3")
+            .join("runtime")
+            .join("compiled");
+        fs::create_dir_all(&compiled_dir).expect("compiled dir");
+        fs::write(
+            compiled_dir.join("compiled-project-universe.json"),
+            r#"{
+              "schema_version": "missiond.compiled-project-universe.v1",
+              "source_hash": "universe-hash",
+              "generated_at": null,
+              "diagnostics": [],
+              "payload": {
+                "projects": [{
+                  "id": "auth",
+                  "kind": "rust-service",
+                  "root": "/repo/services/auth",
+                  "path": null,
+                  "intent": ".missiond/intent.lisp",
+                  "backend": ".missiond/backend/auth-backend-blueprint.lisp",
+                  "frontend": null,
+                  "status": "v3-runtime-ssot",
+                  "surface": "project-registry",
+                  "checks": ["bash .missiond/check.sh"]
+                }],
+                "maturity": [{
+                  "id": "auth",
+                  "current": "M10",
+                  "target": "M10",
+                  "gap": []
+                }]
+              }
+            }"#,
+        )
+        .expect("write compiled universe");
+
+        let loaded = load_compiled_project_universe(temp.path(), Some("universe-hash"));
+        assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
+        let payload = loaded.payload.expect("payload");
+        assert_eq!(payload.projects.len(), 1);
+        assert_eq!(payload.projects[0].id.as_deref(), Some("auth"));
+        assert_eq!(payload.projects[0].checks, vec!["bash .missiond/check.sh"]);
+        assert_eq!(payload.maturity[0].current.as_deref(), Some("M10"));
+    }
+
+    #[test]
+    fn compiled_workflow_contracts_load_structured_payload() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let compiled_dir = temp
+            .path()
+            .join(".missiond")
+            .join("v3")
+            .join("runtime")
+            .join("compiled");
+        fs::create_dir_all(&compiled_dir).expect("compiled dir");
+        fs::write(
+            compiled_dir.join("compiled-workflows.json"),
+            r#"{
+              "schema_version": "missiond.compiled-workflows.v1",
+              "source_hash": "workflow-hash",
+              "generated_at": null,
+              "diagnostics": [],
+              "payload": {
+                "workflows": [{
+                  "file": ".missiond/workflows/project-ssot-convergence.lisp",
+                  "name": "project-ssot-convergence",
+                  "workflow_id": "project-ssot-convergence",
+                  "status": "active",
+                  "owner": "resident-master-control",
+                  "authority": "v3-project-blueprint-registry",
+                  "source_plans": ["v3-runtime-ssot"],
+                  "steps": ["s1", "s2"],
+                  "risk_gate_count": 2,
+                  "completion_criteria_count": 3
+                }]
+              }
+            }"#,
+        )
+        .expect("write compiled workflows");
+
+        let loaded = load_compiled_workflow_contracts(temp.path(), Some("workflow-hash"));
+        assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
+        let payload = loaded.payload.expect("payload");
+        assert_eq!(payload.workflows.len(), 1);
+        assert_eq!(
+            payload.workflows[0].workflow_id.as_deref(),
+            Some("project-ssot-convergence")
+        );
+        assert_eq!(payload.workflows[0].risk_gate_count, 2);
+        assert_eq!(payload.workflows[0].completion_criteria_count, 3);
     }
 
     #[test]
