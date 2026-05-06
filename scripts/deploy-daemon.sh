@@ -293,6 +293,34 @@ release_complete() {
     [ -x "$dir/bin/mission-mcp" ]
 }
 
+typed_lisp_runtime_manifest_json() {
+  node <<'NODE'
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
+
+const compiledDir = '.missiond/v3/runtime/compiled';
+const targets = {
+  v3: 'compiled-v3-blueprint.json',
+  universe: 'compiled-project-universe.json',
+  workflows: 'compiled-workflows.json',
+};
+const projections = {};
+for (const [id, file] of Object.entries(targets)) {
+  const rel = path.join(compiledDir, file);
+  const raw = fs.readFileSync(rel);
+  const json = JSON.parse(raw.toString('utf8'));
+  projections[id] = {
+    file,
+    schema_version: json.schema_version,
+    source_hash: json.source_hash,
+    file_sha256: crypto.createHash('sha256').update(raw).digest('hex'),
+  };
+}
+process.stdout.write(JSON.stringify({ compiled_dir: compiledDir, projections }));
+NODE
+}
+
 cleanup_old_releases() {
   local apply="$1"
   mkdir -p "$RELEASES_DIR"
@@ -366,6 +394,7 @@ if ! node scripts/compile-v3-runtime.mjs --json 2>&1 | tail -30; then
   fail "typed Lisp runtime compile failed" 1
 fi
 record_timing "typed-lisp-runtime-compile" "$TYPED_LISP_START"
+TYPED_LISP_RUNTIME_MANIFEST="$(typed_lisp_runtime_manifest_json)" || fail "typed Lisp runtime manifest failed" 1
 log "build: cargo build ${BUILD_ARG} -p missiond-daemon -p missiond-mcp"
 BUILD_START="$(date +%s)"
 if ! cargo build ${BUILD_ARG} -p missiond-daemon -p missiond-mcp 2>&1 | tail -30; then
@@ -409,7 +438,7 @@ xattr -d com.apple.quarantine "$CANDIDATE_DIR/bin/missiond" 2>/dev/null || true
 xattr -d com.apple.quarantine "$CANDIDATE_DIR/bin/mission-mcp" 2>/dev/null || true
 
 cat > "$CANDIDATE_DIR/release-manifest.json" <<EOF
-{"schema":"missiond.release-manifest.v1","release_id":"$RELEASE_ID","profile":"$PROFILE","git_sha":"$GIT_SHA","daemon_sha256":"$NEW_HASH","mcp_sha256":"$NEW_MCP_HASH","created_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","source":"scripts/deploy-daemon.sh"}
+{"schema":"missiond.release-manifest.v1","release_id":"$RELEASE_ID","profile":"$PROFILE","git_sha":"$GIT_SHA","daemon_sha256":"$NEW_HASH","mcp_sha256":"$NEW_MCP_HASH","typed_lisp_runtime":$TYPED_LISP_RUNTIME_MANIFEST,"created_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","source":"scripts/deploy-daemon.sh"}
 EOF
 log "candidate: $CANDIDATE_DIR"
 
