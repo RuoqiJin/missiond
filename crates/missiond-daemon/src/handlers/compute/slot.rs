@@ -1,15 +1,17 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use missiond_core::types::{BoardTask, CliEngine, Conversation, Slot};
 use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::process::Command;
 use tracing::{info, warn};
 
-use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
+use crate::context::v3_blueprint_runtime::{
+    WorkstationRuntimeConfig, compiled_runtime_projection_status,
+};
 use crate::engine::{master_control, nightly_evolution};
 use crate::lenient;
 use crate::state::AppState;
@@ -198,6 +200,7 @@ fn stamp_convergence_status_metadata(
     value["statusSource"] = json!(status_source);
     value["cachePath"] = json!(cache_path.display().to_string());
     value["liveTimeoutSecs"] = json!(CONVERGENCE_STATUS_TIMEOUT_SECS);
+    value["compiledRuntime"] = compiled_runtime_projection_status(root);
 }
 
 async fn write_convergence_status_cache(path: &std::path::Path, value: &Value) -> Result<()> {
@@ -279,10 +282,12 @@ async fn projected_mission_slots(state: &AppState) -> Vec<Value> {
             value["currentSlotTaskId"] = json!(slot_task_id);
         }
         if let Some(info) = state.pty.get_status(&slot.config.id).await {
-            value["ptyState"] = json!(serde_json::to_value(&info.state)
-                .ok()
-                .and_then(|v| v.as_str().map(ToString::to_string))
-                .unwrap_or_else(|| format!("{:?}", info.state)));
+            value["ptyState"] = json!(
+                serde_json::to_value(&info.state)
+                    .ok()
+                    .and_then(|v| v.as_str().map(ToString::to_string))
+                    .unwrap_or_else(|| format!("{:?}", info.state))
+            );
             if let Some(recognition) = info.recognition {
                 if let Ok(recognition) = serde_json::to_value(recognition) {
                     value["ptyRecognition"] = recognition;

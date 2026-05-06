@@ -2745,8 +2745,11 @@ fn resolve_blueprint_root(project_root: Option<&str>) -> Option<PathBuf> {
             return Some(root);
         }
     }
-    locate_orchestrator_blueprint()
-        .and_then(|path| path.parent().and_then(|v3| v3.parent()).map(Path::to_path_buf))
+    locate_orchestrator_blueprint().and_then(|path| {
+        path.parent()
+            .and_then(|v3| v3.parent())
+            .map(Path::to_path_buf)
+    })
 }
 
 fn load_compiled_v3_lisp_source(project_root: &Path) -> Option<String> {
@@ -2939,6 +2942,39 @@ pub(crate) fn load_compiled_workflow_contracts(
         }),
         snapshot: loaded.snapshot,
         diagnostics: loaded.diagnostics,
+    }
+}
+
+pub(crate) fn compiled_runtime_projection_status(project_root: &Path) -> serde_json::Value {
+    let universe = load_compiled_project_universe(project_root, None);
+    let workflow_contracts = load_compiled_workflow_contracts(project_root, None);
+    serde_json::json!({
+        "schema": "missiond.compiled-runtime-projection-status.v1",
+        "projectUniverse": {
+            "ok": universe.payload.is_some() && universe.diagnostics.is_empty(),
+            "snapshot": compiled_runtime_snapshot_json(universe.snapshot.as_ref()),
+            "projectCount": universe.payload.as_ref().map(|payload| payload.projects.len()).unwrap_or(0),
+            "maturityCount": universe.payload.as_ref().map(|payload| payload.maturity.len()).unwrap_or(0),
+            "diagnostics": universe.diagnostics,
+        },
+        "workflowContracts": {
+            "ok": workflow_contracts.payload.is_some() && workflow_contracts.diagnostics.is_empty(),
+            "snapshot": compiled_runtime_snapshot_json(workflow_contracts.snapshot.as_ref()),
+            "workflowCount": workflow_contracts.payload.as_ref().map(|payload| payload.workflows.len()).unwrap_or(0),
+            "diagnostics": workflow_contracts.diagnostics,
+        }
+    })
+}
+
+fn compiled_runtime_snapshot_json(snapshot: Option<&CompiledRuntimeSnapshot>) -> serde_json::Value {
+    match snapshot {
+        Some(snapshot) => serde_json::json!({
+            "kind": snapshot.kind,
+            "path": snapshot.path.display().to_string(),
+            "schemaVersion": snapshot.schema_version,
+            "sourceHash": snapshot.source_hash,
+        }),
+        None => serde_json::Value::Null,
     }
 }
 
@@ -3775,9 +3811,10 @@ mod tests {
     (worker codex-master-control :engine codex :role orchestrator :slot-id "slot-codex-master-control" :task-type codex_master_control :model-profile codex-master-gpt-5-5-xhigh :model nil :reasoning-effort xhigh :search true :sandbox danger-full-access :approval-policy never :task-classes [master-control] :capabilities [board-write kb-write execution-log dispatch code-read code-write shell-exec search mcp full-access] :max-concurrency 1 :timeout-secs 7200 :default-use resident-master-control :accepts-boardtask false :write-allowed true)))"#,
         )
         .expect_err("missing policy");
-        assert!(err
-            .to_string()
-            .contains("timeout-policy boardtask-dispatch"));
+        assert!(
+            err.to_string()
+                .contains("timeout-policy boardtask-dispatch")
+        );
     }
 
     #[test]
@@ -4268,6 +4305,71 @@ mod tests {
     }
 
     #[test]
+    fn compiled_runtime_projection_status_reports_counts_and_hashes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let compiled_dir = temp
+            .path()
+            .join(".missiond")
+            .join("v3")
+            .join("runtime")
+            .join("compiled");
+        fs::create_dir_all(&compiled_dir).expect("compiled dir");
+        fs::write(
+            compiled_dir.join("compiled-project-universe.json"),
+            r#"{
+              "schema_version": "missiond.compiled-project-universe.v1",
+              "source_hash": "universe-hash",
+              "generated_at": null,
+              "diagnostics": [],
+              "payload": {
+                "projects": [{"id": "missiond"}],
+                "maturity": [{"id": "missiond", "current": "M10", "target": "M10"}]
+              }
+            }"#,
+        )
+        .expect("write compiled universe");
+        fs::write(
+            compiled_dir.join("compiled-workflows.json"),
+            r#"{
+              "schema_version": "missiond.compiled-workflows.v1",
+              "source_hash": "workflow-hash",
+              "generated_at": null,
+              "diagnostics": [],
+              "payload": {
+                "workflows": [{
+                  "file": ".missiond/workflows/example.lisp",
+                  "workflow_id": "example",
+                  "risk_gate_count": 1,
+                  "completion_criteria_count": 1
+                }]
+              }
+            }"#,
+        )
+        .expect("write compiled workflows");
+
+        let status = compiled_runtime_projection_status(temp.path());
+        assert_eq!(
+            status["schema"].as_str(),
+            Some("missiond.compiled-runtime-projection-status.v1")
+        );
+        assert_eq!(status["projectUniverse"]["ok"].as_bool(), Some(true));
+        assert_eq!(status["projectUniverse"]["projectCount"].as_u64(), Some(1));
+        assert_eq!(
+            status["projectUniverse"]["snapshot"]["sourceHash"].as_str(),
+            Some("universe-hash")
+        );
+        assert_eq!(status["workflowContracts"]["ok"].as_bool(), Some(true));
+        assert_eq!(
+            status["workflowContracts"]["workflowCount"].as_u64(),
+            Some(1)
+        );
+        assert_eq!(
+            status["workflowContracts"]["snapshot"]["sourceHash"].as_str(),
+            Some("workflow-hash")
+        );
+    }
+
+    #[test]
     fn runtime_blueprint_source_prefers_compiled_v3_ast() {
         let temp = tempfile::tempdir().expect("tempdir");
         let compiled_dir = temp
@@ -4308,10 +4410,9 @@ mod tests {
         )
         .expect("compiled snapshot");
 
-        let source =
-            load_runtime_blueprint_source(Some(temp.path().to_string_lossy().as_ref()))
-                .expect("runtime source")
-                .expect("source");
+        let source = load_runtime_blueprint_source(Some(temp.path().to_string_lossy().as_ref()))
+            .expect("runtime source")
+            .expect("source");
         assert!(source.contains("compiled-runtime-marker"), "{source}");
     }
 
@@ -4334,10 +4435,9 @@ mod tests {
         )
         .expect("invalid compiled snapshot");
 
-        let source =
-            load_runtime_blueprint_source(Some(temp.path().to_string_lossy().as_ref()))
-                .expect("runtime source")
-                .expect("source");
+        let source = load_runtime_blueprint_source(Some(temp.path().to_string_lossy().as_ref()))
+            .expect("runtime source")
+            .expect("source");
         assert!(source.contains("fallback-runtime-marker"), "{source}");
     }
 }

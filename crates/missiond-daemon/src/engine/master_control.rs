@@ -3,19 +3,21 @@ use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use missiond_core::event::DomainEvent;
 use missiond_core::event::events::{BoardEvent, IncidentEvent, QuestionEvent, SlotEvent};
 use missiond_core::event::subscription::{CursorFlush, StartFrom, SubscriptionOpts};
-use missiond_core::event::DomainEvent;
 use missiond_core::types::{BoardTask, BoardTaskStatus, CreateBoardTaskInput};
 use missiond_core::{PTYSlot, PTYSpawnOptions, SessionState};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::process::Command;
-use tokio::sync::{watch, Notify, RwLock};
+use tokio::sync::{Notify, RwLock, watch};
 use tracing::{info, warn};
 
 use crate::bus::BusServices;
-use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
+use crate::context::v3_blueprint_runtime::{
+    WorkstationRuntimeConfig, compiled_runtime_projection_status,
+};
 use crate::control_tree::CtlDomain;
 use crate::state::AppState;
 
@@ -963,7 +965,10 @@ fn spawn_incident_event_sub(
     tokio::spawn(async move {
         let mut sub = match service
             .bus
-            .subscribe::<IncidentEvent>(MASTER_INCIDENT_SUBSCRIPTION, master_live_subscription_opts())
+            .subscribe::<IncidentEvent>(
+                MASTER_INCIDENT_SUBSCRIPTION,
+                master_live_subscription_opts(),
+            )
             .await
         {
             Ok(sub) => sub,
@@ -1211,22 +1216,10 @@ pub(crate) fn build_master_tick_prompt(
     format!(
         "MissionD resident master tick.\nreason: {reason}\nphase: {}\nactive_objective_id: {}\ncontext_pack_path: {}\nevent_cursor: {}\nevent_summary: {}\nqueued_events: {}\nmcp_ready: {}\nactive_boardtask:\n{}\n\nNo active objective means no-op: do not perform default self-review from this control turn. Scheduled/nightly self-review is a separate manual-first workflow and only runs through mission_nightly_evolution or MISSIOND_NIGHTLY_EVOLUTION_SCHEDULE=true. The active BoardTask shown above is the only load-bearing objective. First query exactly that BoardTask by id only if the embedded summary is insufficient, then follow its description as the load-bearing objective. Any mission_board_create call while active_boardtask is present MUST set parentId to the active BoardTask id and MUST directly advance that active objective; do not create resident-master/self-maintenance tasks from PTY screen text, convergence-status disagreement, Board backlog, KB, provider logs, historical conversation, or recent commit drift unless the active BoardTask explicitly asks for that maintenance. You may read only the project roots / files explicitly named by that BoardTask and its context_pack_path; do not browse Board open backlog. Do not call mission_kb_query, mission_conversation_query, provider-log tools, mission_intent, or mission_convergence_status unless the active BoardTask explicitly requests those sources. Do not call mission_daemon_update from a resident-master control turn; supervised deploys are operator/deploy BoardTask actions, not objective-classification actions. PTY recognition is diagnostic only.\n\nHard workflow contracts are enforced by MissionD runtime/workflow.lisp/checkers. Do not restate or solve them manually in prompt text. If this event is already a worker BoardTask (## Swarm metadata or task_class=context-pack/code), do not recursively delegate; observe only the active objective state and wait for explicit durable task evidence. Use mission_swarm_run or mission_task_delegate only when the next shard is already concrete enough; otherwise write a concise context-pack diagnosis. If your decision is create/update BoardTask or close_or_backfill, perform the corresponding MissionD MCP mutation (mission_board_note_add / mission_board_update / mission_board_create) before returning; if the mutation is not possible, return blocked with the reason. Do not edit code directly from the resident slot.\n\nReturn one compact decision after any required MCP mutation: no-op, create/update BoardTask, delegate worker, blocked, or close_or_backfill.",
         snapshot.phase,
-        snapshot
-            .active_objective_id
-            .as_deref()
-            .unwrap_or("none"),
-        snapshot
-            .context_pack_path
-            .as_deref()
-            .unwrap_or("none"),
-        snapshot
-            .last_event_cursor
-            .as_deref()
-            .unwrap_or("none"),
-        snapshot
-            .last_event_summary
-            .as_deref()
-            .unwrap_or("none"),
+        snapshot.active_objective_id.as_deref().unwrap_or("none"),
+        snapshot.context_pack_path.as_deref().unwrap_or("none"),
+        snapshot.last_event_cursor.as_deref().unwrap_or("none"),
+        snapshot.last_event_summary.as_deref().unwrap_or("none"),
         snapshot.queued_events,
         mcp_ready,
         active_boardtask
@@ -1655,6 +1648,7 @@ pub(crate) async fn mission_master_status(state: &AppState) -> Value {
     });
     status["service"]["commitConvergence"] = commit_convergence;
     status["service"]["nightlyEvolution"] = nightly_evolution;
+    status["service"]["compiledRuntime"] = compiled_runtime_projection_status(&checkpoint_root);
     status["service"]["lastControlObjectiveId"] = json!(runtime_snapshot.last_control_objective_id);
     status
 }
@@ -2014,11 +2008,7 @@ mod tests {
         // list does not contain any mission_* tool. Per the V3 blueprint
         // claude-code-mcp-recovery contract, master_control owes a durable
         // claude_code_mcp_missing incident so the resident master is woken.
-        let mounted: Vec<String> = vec![
-            "Bash".to_string(),
-            "Read".to_string(),
-            "Edit".to_string(),
-        ];
+        let mounted: Vec<String> = vec!["Bash".to_string(), "Read".to_string(), "Edit".to_string()];
         let state = classify_claude_code_mcp_state(true, &mounted);
         assert_eq!(state, ClaudeCodeMcpState::AdvertisedButMissing);
         assert!(should_record_mcp_missing_incident(state));
@@ -2028,10 +2018,7 @@ mod tests {
         );
 
         // Healthy slot: at least one mission_* tool is mounted -> no incident.
-        let healthy: Vec<String> = vec![
-            "Bash".to_string(),
-            "mission_pty_status".to_string(),
-        ];
+        let healthy: Vec<String> = vec!["Bash".to_string(), "mission_pty_status".to_string()];
         let healthy_state = classify_claude_code_mcp_state(true, &healthy);
         assert_eq!(healthy_state, ClaudeCodeMcpState::Healthy);
         assert!(!should_record_mcp_missing_incident(healthy_state));
@@ -2092,12 +2079,10 @@ mod tests {
         // Resolved and StaleSubscription variants must never wake the
         // master from this subscription; they belong to retention/cleanup
         // pipelines.
-        assert!(!should_wake_for_incident_event(
-            &IncidentEvent::Resolved {
-                incident_id: "inc-test".into(),
-                reason: "manual".into(),
-            }
-        ));
+        assert!(!should_wake_for_incident_event(&IncidentEvent::Resolved {
+            incident_id: "inc-test".into(),
+            reason: "manual".into(),
+        }));
         assert!(!should_wake_for_incident_event(
             &IncidentEvent::StaleSubscription {
                 incident: MissionIncident {
@@ -2141,9 +2126,11 @@ mod tests {
         let partial = "[mcp_servers.missiond.tools.mission_intent]\napproval_mode = \"approve\"\n";
         let readiness = codex_mcp_approval_ready_from_config(partial);
         assert!(!readiness.ready);
-        assert!(readiness
-            .missing_tools
-            .contains(&"mission_board_query".to_string()));
+        assert!(
+            readiness
+                .missing_tools
+                .contains(&"mission_board_query".to_string())
+        );
     }
 
     #[test]

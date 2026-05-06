@@ -38,6 +38,7 @@ const REQUIRED_RUNTIME_LOADER = {
     'CompiledPayloadLoad',
     'load_compiled_project_universe',
     'load_compiled_workflow_contracts',
+    'compiled_runtime_projection_status',
   ],
 };
 
