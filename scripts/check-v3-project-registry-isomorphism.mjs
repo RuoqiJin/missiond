@@ -130,7 +130,9 @@ function checkFiles(root, files) {
 	    ':backend ".missiond/backend/forge-backend-blueprint.lisp"',
 	    ':frontend ".missiond/frontend/forge-ui-blueprint.lisp"',
 	    ':id deploy-center',
+	    ':aliases [xjp-deploy-center]',
 	    ':root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/deploy-center"',
+	    'xjp-deploy-center is a historical alias for this same canonical service root, not an active Universe project.',
 	    ':id xiaojinpro-backend',
 	    ':root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend"',
 	    ':id deploy-agent',
@@ -150,8 +152,6 @@ function checkFiles(root, files) {
 	    ':root "/Users/jinchen/Downloads/PCEA develop"',
 	    ':backend ".missiond/backend/pcea-backend-blueprint.lisp"',
 	    ':frontend ".missiond/frontend/pcea-frontend-blueprint.lisp"',
-	    ':id xjp-deploy-center',
-	    ':root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/deploy-center"',
 	    ':capability deploy-ops',
 	    '(service-runtime-universe',
 	    ':schema "missiond.service-runtime-universe.v1"',
@@ -165,6 +165,13 @@ function checkFiles(root, files) {
 	    'mission_project(action=universe)',
 	    'node scripts/check-v3-project-registry-isomorphism.mjs',
 	  ]);
+  if (sources.blueprint.includes('(project :id xjp-deploy-center')) {
+    diagnostics.push({
+      file: files.blueprint,
+      message:
+        'xjp-deploy-center must not be registered as an active project; keep it only as a deploy-center alias/evidence note',
+    });
+  }
 
   requireAll(diagnostics, files.runtimeConfig, sources.runtimeConfig, [
     'ProjectRegistryRuntimeConfig',
@@ -360,15 +367,14 @@ function buildFixture() {
 	  (project-blueprint-registry
 	    (project :id jarvis-forge :root "/Users/jinchen/Projects/jarvis-forge" :backend ".missiond/backend/forge-backend-blueprint.lisp" :frontend ".missiond/frontend/forge-ui-blueprint.lisp")
 	    (project :id xiaojinpro-backend :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend")
-	    (project :id deploy-center :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/deploy-center" :capability deploy-ops)
+	    (project :id deploy-center :aliases [xjp-deploy-center] :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/deploy-center" :capability deploy-ops :note "xjp-deploy-center is a historical alias for this same canonical service root, not an active Universe project.")
 	    (project :id deploy-agent :aliases [xjp-deploy-agent] :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/apps/xjp-deploy-agent")
 	    (project :id auth :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/auth")
 	    (project :id router :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/router")
 	    (project :id payments :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/payments")
 	    (project :id asr :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/asr")
 	    (project :id timeline :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/timeline")
-	    (project :id pcea :root "/Users/jinchen/Downloads/PCEA develop" :backend ".missiond/backend/pcea-backend-blueprint.lisp" :frontend ".missiond/frontend/pcea-frontend-blueprint.lisp")
-	    (project :id xjp-deploy-center :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/deploy-center" :capability deploy-ops))
+	    (project :id pcea :root "/Users/jinchen/Downloads/PCEA develop" :backend ".missiond/backend/pcea-backend-blueprint.lisp" :frontend ".missiond/frontend/pcea-frontend-blueprint.lisp"))
     (service-runtime-universe
       :schema "missiond.service-runtime-universe.v1"
       (service :id auth :public-base-url "https://auth.xiaojinpro.com" :dns-provider cloudflare :deployment (:substrate kubernetes :namespace production :deployment "xjp-auth-center") :event-ingest (:endpoint "/webhooks/auth-event" :domain system :event ExternalServiceEvent :source auth-audit-events :token-env MISSIOND_EXTERNAL_WEBHOOK_TOKEN))

@@ -1282,14 +1282,16 @@
       :status v3-runtime-ssot
       :checks ["node scripts/check-xjp-ssot-complete.mjs"]
       :surface project-registry)
-	    (project :id deploy-center
-	      :kind ops-service
-	      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/deploy-center"
-	      :intent ".missiond/intent.lisp"
-	      :backend ".missiond/backend/deploy-center-backend-blueprint.lisp"
-		      :status v3-runtime-ssot
-	      :capability deploy-ops
-	      :surface project-registry)
+    (project :id deploy-center
+      :aliases [xjp-deploy-center]
+      :kind ops-service
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/deploy-center"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/deploy-center-backend-blueprint.lisp"
+      :status v3-runtime-ssot
+      :capability deploy-ops
+      :note "xjp-deploy-center is a historical alias for this same canonical service root, not an active Universe project."
+      :surface project-registry)
     (project :id deploy-agent
       :aliases [xjp-deploy-agent]
       :kind ops-agent
@@ -1342,13 +1344,6 @@
       :frontend ".missiond/frontend/pcea-frontend-blueprint.lisp"
       :status project-ssot-owned
       :surface project-registry)
-	    (project :id xjp-deploy-center
-	      :kind ops-service-source
-	      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/deploy-center"
-	      :intent ".missiond/intent.lisp"
-	      :status runtime-registered
-	      :capability deploy-ops
-	      :surface project-registry)
     ;; ── App + external-infra projects — already-converged with project-local check.sh runners ──
     (project :id secret-store
       :aliases [secret-store-rs]
