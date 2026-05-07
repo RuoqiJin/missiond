@@ -34,7 +34,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "skill": {"type": "string", "description": "直接指定 skill name 跳过搜索"},
                     "project_id": {"type": "string", "description": "[resolve] 项目 ID，用于优先匹配项目 skill 并返回项目上下文"},
                     "project": {"type": "string", "description": "[resolve] project_id alias"},
-                    "include_board": {"type": "boolean", "description": "[resolve] 包含 Board 相关任务"}
+                    "include_board": {"type": "boolean", "description": "[resolve] 包含 Board 相关任务"},
+                    "include_kb": {"type": "boolean", "description": "[resolve] 显式包含 KB 记忆；默认 false，避免噪声预加载"}
                 }
             }),
         ),

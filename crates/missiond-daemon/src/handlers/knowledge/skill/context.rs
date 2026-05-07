@@ -53,9 +53,12 @@ pub(super) async fn handle_resolve(state: &AppState, args: Value) -> Result<Tool
         project_id: Option<String>,
         #[serde(default, deserialize_with = "lenient::option_bool")]
         include_board: Option<bool>,
+        #[serde(default, deserialize_with = "lenient::option_bool")]
+        include_kb: Option<bool>,
     }
     let args: ContextResolveArgs = serde_json::from_value(args)?;
     let include_board = args.include_board.unwrap_or(false);
+    let include_kb = args.include_kb.unwrap_or(false);
     let project_config = if let Some(ref project_id) = args.project_id {
         state.project_registry.read().await.get(project_id).cloned()
     } else {
@@ -177,7 +180,7 @@ pub(super) async fn handle_resolve(state: &AppState, args: Value) -> Result<Tool
         }
     }
 
-    let kb_batch = {
+    let kb_batch = if include_kb {
         let mut results: Vec<(missiond_core::KnowledgeEntry, &'static str)> = Vec::new();
         for cat in &kb_categories {
             if let Ok(entries) = state.store.kb_search(&search_query, Some(cat)).await {
@@ -194,6 +197,8 @@ pub(super) async fn handle_resolve(state: &AppState, args: Value) -> Result<Tool
             }
         }
         results
+    } else {
+        Vec::new()
     };
     let mut kb_results: Vec<Value> = Vec::new();
     let mut kb_seen = std::collections::HashSet::new();

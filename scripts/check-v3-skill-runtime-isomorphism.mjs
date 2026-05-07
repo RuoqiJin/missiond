@@ -96,6 +96,7 @@ function checkFiles(root, files) {
     'composite registry/topic/action/embedding/execution statistics',
     'project-skill-link readiness',
     'project-aware context resolution',
+    'explicit opt-in KB dependency aggregation',
     'skill/context.rs owns context build/resolve',
     'skill/mutate.rs owns upsert/record/render/rollback',
     'skill/exec.rs owns mission_skill_exec',
@@ -146,6 +147,7 @@ function checkFiles(root, files) {
     'kb_search',
     'SkillRequires',
     'include_board',
+    'include_kb',
     'project_id',
     'project_registry',
     '"project": project_config',
@@ -198,6 +200,7 @@ function checkFiles(root, files) {
     '"rollback"',
     '"project_id"',
     '"project"',
+    '"include_kb"',
   ]);
 
   return diagnostics;
@@ -225,7 +228,7 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/skill/exec.rs"
              "crates/missiond-mcp/src/tools/knowledge/skill.rs"
              "scripts/check-v3-skill-runtime-isomorphism.mjs"]
-      :note "skill.rs is the thin mission_skill facade; skill/query.rs owns list/search/topics/actions/stats, composite registry/topic/action/embedding/execution statistics, and project-skill-link readiness; skill/context.rs owns context build/resolve plus project-aware context resolution; skill/mutate.rs owns upsert/record/render/rollback; skill/exec.rs owns mission_skill_exec."))
+      :note "skill.rs is the thin mission_skill facade; skill/query.rs owns list/search/topics/actions/stats, composite registry/topic/action/embedding/execution statistics, and project-skill-link readiness; skill/context.rs owns context build/resolve plus project-aware context resolution and explicit opt-in KB dependency aggregation; skill/mutate.rs owns upsert/record/render/rollback; skill/exec.rs owns mission_skill_exec."))
   (compression-contract
     :checks ["node scripts/check-v3-skill-runtime-isomorphism.mjs"]))`);
 
@@ -250,7 +253,7 @@ missiond.skill-stats.v1 loadedSkills skill_topic_list skill_embedding_cache acti
 `);
 
   writeFixture(root, DEFAULT_FILES.context, `
-handle_build handle_resolve build_context kb_search SkillRequires include_board project_id project_registry
+handle_build handle_resolve build_context kb_search SkillRequires include_board include_kb project_id project_registry
 "project": project_config
 list_board_tasks state.infra.read
 "skills": skill_results
@@ -271,7 +274,7 @@ handle_exec execute_workflow dry_run params Workflow execution failed
 ToolDefinition::new
 "mission_skill_query" "mission_skill_context" "mission_skill_mutate" "mission_skill_exec"
 "list" "search" "topics" "actions" "stats" "build" "resolve" "upsert" "record" "render" "rollback"
-"project_id" "project"
+"project_id" "project" "include_kb"
 `);
 
   return root;
