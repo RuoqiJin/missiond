@@ -1078,17 +1078,23 @@ fn render_swarm_task_description(
     planned: &SwarmPlannedTask,
 ) -> String {
     let task_write_policy = swarm_task_effective_write_policy(write_policy, planned);
-    let completion_protocol = if task_write_policy == "read-only" {
-        "Completion protocol: do not edit files, do not stage, do not commit. read_scope lists readable evidence; must_not_touch is a write/stage/commit prohibition, not a read ban by itself. Return a structured artifact with Findings / Evidence / Recommendations / Verification in the final summary or BoardTask note; do not paste raw KB JSON/log blobs. The master or integrator compiles the context-pack."
+    let (interaction_preamble, completion_protocol) = if task_write_policy == "read-only" {
+        (
+            "请审视这个目标和上下文，比较现有 SSOT/代码证据，找出缺口与更优雅的设计空间。不要直接改文件；把发现整理为后续 context-pack。",
+            "Completion protocol: this is a read-only investigation lane; do not edit files, do not stage, do not commit. read_scope lists readable evidence; must_not_touch is a write/stage/commit prohibition, not a read ban by itself. Return a structured artifact with Findings / Evidence / Recommendations / Verification in the final summary or BoardTask note; do not paste raw KB JSON/log blobs. The master or integrator compiles the context-pack.",
+        )
     } else {
-        "Completion protocol: implementation lanes may read declared read_scope, may write only declared write_scope, must not write/stage/commit forbidden paths, and must report acceptance evidence as a structured artifact."
+        (
+            "基于已接受 shard 和上下文，请完成这个最小同构改动；优先保持现有行为，只在 declared write_scope 内修改。",
+            "Completion protocol: this is an implementation lane. You may read declared read_scope, may write only declared write_scope, must not write/stage/commit forbidden paths, and must report acceptance evidence as a structured artifact.",
+        )
     };
     let parent_line = parent_id
         .map(|id| format!("- parent_board_task_id: {id}\n"))
         .unwrap_or_default();
 
     format!(
-        "{objective}\n\n## Swarm metadata\n- project_id: {project_id}\n- project_root: {project_root}\n- target_projects: {}\n{parent_line}- lane: {}\n- task_class: {}\n- pool_hint: {}\n- engine_hint: {}\n- context_pack_path: {context_pack_path}\n- write_policy: {task_write_policy}\n- read_scope: {}\n- write_scope: {}\n- must_not_touch: {}\n- acceptance: {}\n\n{}",
+        "{interaction_preamble}\n\nObjective:\n{objective}\n\n## Swarm metadata\n- project_id: {project_id}\n- project_root: {project_root}\n- target_projects: {}\n{parent_line}- lane: {}\n- task_class: {}\n- pool_hint: {}\n- engine_hint: {}\n- context_pack_path: {context_pack_path}\n- write_policy: {task_write_policy}\n- read_scope: {}\n- write_scope: {}\n- must_not_touch: {}\n- acceptance: {}\n\n{}",
         render_target_projects_inline(target_projects),
         planned.lane,
         planned.task_class,
@@ -2322,6 +2328,14 @@ mod tests {
             description.contains("do not edit files, do not stage, do not commit"),
             "read-only lane must render the strict completion protocol:\n{description}"
         );
+        assert!(
+            description.contains("请审视这个目标和上下文"),
+            "read-only lane must start with a heuristic investigation question:\n{description}"
+        );
+        assert!(
+            description.contains("更优雅的设计空间"),
+            "read-only lane should ask for architecture/design gaps rather than only command execution:\n{description}"
+        );
     }
 
     #[test]
@@ -2483,6 +2497,14 @@ mod tests {
         assert!(
             description.contains("- parent_board_task_id: parent-task-123"),
             "swarm metadata must carry parent id so worker notes and UI hierarchy can close the objective:\n{description}"
+        );
+        assert!(
+            description.contains("基于已接受 shard 和上下文"),
+            "implementation lane must use context-prepared prompt style:\n{description}"
+        );
+        assert!(
+            description.contains("this is an implementation lane"),
+            "implementation lane must still carry structured runtime completion protocol:\n{description}"
         );
     }
 

@@ -52,6 +52,7 @@ const DEFAULT_FILES = {
   mcpWorkflow: 'crates/missiond-mcp/src/tools/knowledge/workflow.rs',
   projectSsotConvergence: '.missiond/workflows/project-ssot-convergence.lisp',
   projectM6Depth: '.missiond/workflows/project-m6-depth.lisp',
+  multiProjectM6Wave: '.missiond/workflows/multi-project-m6-wave.lisp',
 };
 
 function main() {
@@ -210,6 +211,16 @@ function checkFiles(root, files) {
     'workflow/review_resolution.rs owns resolve_review',
     'WorkflowSubscriberOutcome',
     'node scripts/check-v3-workflow-isomorphism.mjs',
+    '(agent-interaction-policy',
+    ':schema "missiond.agent-interaction-policy.v1"',
+    '(role resident-master',
+    '(role investigator-worker',
+    '(role implementer-worker',
+    '(role deterministic-llm-tool',
+    ':required-output-fields [decision reasoning_summary evidence_needed delegation_plan? next_question_or_action]',
+    ':forbidden-default-inputs [kb board-backlog historical-conversation provider-durable-logs]',
+    'exact-shard-ready=true',
+    'questions, hypotheses, evidence_needed, findings, design_options, and accepted_shards',
   ]);
 
   requireAll(diagnostics, files.projectSsotConvergence, sources.projectSsotConvergence, [
@@ -233,6 +244,11 @@ function checkFiles(root, files) {
     ':workflow_id project-m6-depth',
     ':status active',
     ':source_plans [auth-m6-depth project-ssot-convergence v3-runtime-ssot]',
+    ':id review-question',
+    ':id evidence-plan',
+    ':id investigation',
+    ':id synthesis',
+    ':id design-proposal',
     ':id domain-model-audit',
     ':id target-architecture-draft',
     ':id authority-chain-check',
@@ -241,13 +257,34 @@ function checkFiles(root, files) {
     ':id event-contract-check',
     ':id hot-path-wiring-check',
     ':id regression-matrix',
-    ':id exact-code-shards',
-    ':id final-m6-report',
+    ':id exact-shards',
+    ':id implementation',
+    ':id verification',
+    ':context-pack-artifacts [questions hypotheses evidence_needed findings design_options accepted_shards]',
+    'exact-shard-ready=true',
     'tenant -> application -> product -> product_user -> product_user_group',
     'Critical contracts must be hot-path wired',
     'No destructive DB migration',
     'No production deploy, DNS mutation, or secret mutation',
     'Runtime registration of new business objects does not require rebuild or redeploy',
+  ]);
+
+  requireAll(diagnostics, files.multiProjectM6Wave, sources.multiProjectM6Wave, [
+    ':workflow_id multi-project-m6-wave',
+    ':status active',
+    ':id select-wave',
+    ':id review-question',
+    ':id evidence-plan',
+    ':id investigation',
+    ':id synthesis',
+    ':id design-proposal',
+    ':id exact-shards',
+    ':id implementation',
+    ':id verification',
+    ':context-pack-artifacts [questions hypotheses evidence_needed findings design_options accepted_shards]',
+    'Findings / Evidence / Recommendations / Verification',
+    'exact-shard-ready=true',
+    'check-project-maturity --min-level M6',
   ]);
 
   const workflowSurface = `${sources.workflowHandler}\n${sources.workflowArtifacts}\n${sources.workflowAutoChain}\n${sources.workflowAutoChainRecorder}\n${sources.workflowAutoChainRules}\n${sources.workflowAutoSonnet}\n${sources.workflowAutoSonnetPolicy}\n${sources.workflowCompileMethodology}\n${sources.workflowDistill}\n${sources.workflowMethodology}\n${sources.workflowMethodologyExtract}\n${sources.workflowMethodologyIo}\n${sources.workflowMethodologySource}\n${sources.workflowMethodologyTypes}\n${sources.workflowMethodologyYaml}\n${sources.workflowProjectRoot}\n${sources.workflowReviewResolution}\n${sources.workflowRunMethodology}\n${sources.workflowStoreActions}\n${sources.workflowTests}`;
@@ -602,6 +639,16 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/workflow/tests.rs"]
       :model-projection "mission_workflow sonnet distiller compiler_model labels project from router-runtime-policy queued_sonnet_model"
       :note "workflow/distill.rs owns DistillMode and action_distill. distill dry_run emits workflow-draft Lisp; sonnet distiller requires JSON workflow_sexp + object match_rules; distill persist+write_file writes an enriched V3 workflow artifact with :body workflow_sexp; workflow/run_methodology.rs owns parse_run_methodology_record_intent and methodology_execution_record_payload; workflow/methodology.rs is the compile_methodology facade; methodology/types.rs owns methodology compiler data shapes; methodology/source.rs owns methodology path/source/hash/flow resolution; methodology/extract.rs owns step and higher-order form lifting; methodology/yaml.rs owns generated executable YAML projection; methodology/io.rs owns unique temp path and atomic write. compile_methodology reads methodology Lisp from .missiond/workflows/<name>.lisp; persist+write_file path now also projects the methodology compile through render_workflow_artifact_sexp with :match_rules carrying source_kind=methodology / compiler / compiler_version / source_hash / flow_id, :status compiled, :body methodology lisp body, instead of canonicalizing the raw methodology source — no Workflow DB row is introduced; ArtifactKind::Workflow; run_methodology returns artifact_only_no_workflow_row unless caller supplies workflow_id, then records workflow_record_execution(success=true,cost_usd?); workflow/auto_chain/recorder.rs owns the wave-19 explicit recorder; workflow/auto_chain/rules.rs owns deterministic auto-trigger rule evaluation; workflow/auto_sonnet.rs owns the wave-21 dual opt-in gate; workflow/auto_sonnet/policy.rs owns auto_sonnet_policy={off|safe_after_rules|dry_run}; workflow/review_resolution.rs owns resolve_review and WorkflowSubscriberOutcome"))
+  (agent-interaction-policy
+    :schema "missiond.agent-interaction-policy.v1"
+    (role resident-master
+      :required-output-fields [decision reasoning_summary evidence_needed delegation_plan? next_question_or_action]
+      :forbidden-default-inputs [kb board-backlog historical-conversation provider-durable-logs]
+      :rule "exact-shard-ready=true")
+    (role investigator-worker :rule "Findings / Evidence / Recommendations / Verification")
+    (role implementer-worker :rule "accepted shard")
+    (role deterministic-llm-tool :rule "precise prompts")
+    :runtime-invariants ["questions, hypotheses, evidence_needed, findings, design_options, and accepted_shards"])
   (compression-contract
     :checks ["node scripts/check-v3-workflow-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.workflowHandler, `
@@ -894,21 +941,45 @@ Lisp 源: intent-flow.lisp`);
   :status active
   :source_plans [auth-m6-depth project-ssot-convergence v3-runtime-ssot]
   :steps
-    ((step s1 :id domain-model-audit :logic "read model")
-     (step s2 :id target-architecture-draft :logic "write lisp")
-     (step s3 :id authority-chain-check :logic "tenant -> application -> product -> product_user -> product_user_group")
-     (step s4 :id compatibility-ledger :logic "legacy bridge")
-     (step s5 :id runtime-registration-check :logic "Runtime registration of new business objects does not require rebuild or redeploy")
-     (step s6 :id event-contract-check :logic "producer outbox adapter sink retry ack")
-     (step s7 :id hot-path-wiring-check :logic "Critical contracts must be hot-path wired")
-     (step s8 :id regression-matrix :logic "old and new behavior")
-     (step s9 :id exact-code-shards :logic "worker shards")
-     (step s10 :id final-m6-report :logic "report"))
+    ((step s1 :id review-question :logic "ask architecture review")
+     (step s2 :id evidence-plan :logic "questions hypotheses evidence_needed")
+     (step s3 :id investigation :logic "Findings / Evidence / Recommendations / Verification")
+     (step s4 :id synthesis :logic "findings")
+     (step s5 :id design-proposal :logic "design_options")
+     (step s6 :id domain-model-audit :logic "read model")
+     (step s7 :id target-architecture-draft :logic "write lisp")
+     (step s8 :id authority-chain-check :logic "tenant -> application -> product -> product_user -> product_user_group")
+     (step s9 :id compatibility-ledger :logic "legacy bridge")
+     (step s10 :id runtime-registration-check :logic "Runtime registration of new business objects does not require rebuild or redeploy")
+     (step s11 :id event-contract-check :logic "producer outbox adapter sink retry ack")
+     (step s12 :id hot-path-wiring-check :logic "Critical contracts must be hot-path wired")
+     (step s13 :id regression-matrix :logic "old and new behavior")
+     (step s14 :id exact-shards :logic "accepted_shards")
+     (step s15 :id implementation :logic "worker shards")
+     (step s16 :id verification :logic "report"))
+  :context-pack-artifacts [questions hypotheses evidence_needed findings design_options accepted_shards]
   :risk-gates
     ((gate g1 :rule "No destructive DB migration")
-     (gate g2 :rule "No production deploy, DNS mutation, or secret mutation"))
+     (gate g2 :rule "No production deploy, DNS mutation, or secret mutation")
+     (gate g3 :rule "exact-shard-ready=true"))
   :completion
     ((criterion c1 :rule "Domain model and authority chain are explicit")))`);
+  writeFixture(root, DEFAULT_FILES.multiProjectM6Wave, `
+(workflow multi-project-m6-wave
+  :workflow_id multi-project-m6-wave
+  :status active
+  :steps
+    ((step s1 :id select-wave :logic "select")
+     (step s2 :id review-question :logic "ask")
+     (step s3 :id evidence-plan :logic "questions hypotheses evidence_needed")
+     (step s4 :id investigation :logic "Findings / Evidence / Recommendations / Verification")
+     (step s5 :id synthesis :logic "findings")
+     (step s6 :id design-proposal :logic "design_options")
+     (step s7 :id exact-shards :logic "accepted_shards")
+     (step s8 :id implementation :logic "implement")
+     (step s9 :id verification :logic "check-project-maturity --min-level M6"))
+  :context-pack-artifacts [questions hypotheses evidence_needed findings design_options accepted_shards]
+  :risk-gates ((gate g1 :rule "exact-shard-ready=true")))`);
   return root;
 }
 

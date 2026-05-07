@@ -791,8 +791,40 @@
        "mission_compute_slot list status MUST derive from PTYManager (state.pty.get_status) for every slot it surfaces, so it cannot contradict mission_pty_status for V3 pool slots; the SlotManager session_id field is only a fallback when no PTY status exists, and it MUST NOT report 'running' when no PTY is attached."]
     :checker "node scripts/check-v3-workstation-pool-isomorphism.mjs")
 
+  (agent-interaction-policy
+    :schema "missiond.agent-interaction-policy.v1"
+    :desc "Prompt style is an interaction aid, not the safety boundary. Agents receive heuristic questions and prepared context; hard constraints live in BoardTask metadata, workflow Lisp, checker gates, and Rust runtime guards."
+    (role resident-master
+      :style heuristic-review
+      :prompt-question "请审视当前目标和 SSOT Lisp：颗粒度是否足够细？哪些架构可以更优雅？你还需要哪些证据、调查工位或 exact shard？"
+      :required-output-fields [decision reasoning_summary evidence_needed delegation_plan? next_question_or_action]
+      :default-inputs [active-boardtask context-pack-path current-phase event-summary]
+      :forbidden-default-inputs [kb board-backlog historical-conversation provider-durable-logs]
+      :rule "resident-master must complete review-question and evidence-plan before investigation/implementation unless the active BoardTask explicitly declares exact-shard-ready=true.")
+    (role investigator-worker
+      :style context-prepared-question
+      :prompt-opening "请审视、比较、找缺口并给出建议；只使用给定 read_scope/context_pack_path 的证据。"
+      :metadata [BoardTask-ID project_id context_pack_path read_scope write_scope must_not_touch acceptance completion_protocol]
+      :output-contract [Findings Evidence Recommendations Verification]
+      :rule "investigator workers are read-only by default and produce context-pack evidence, not implementation patches or raw KB/log dumps.")
+    (role implementer-worker
+      :style accepted-shard-question
+      :prompt-opening "基于已接受 shard 和上下文，请完成这个最小同构改动；保持现有行为，只在 declared write_scope 内修改。"
+      :metadata [BoardTask-ID project_id context_pack_path read_scope write_scope must_not_touch acceptance completion_protocol]
+      :output-contract [Changed-Files Acceptance-Evidence Residual-Risk]
+      :rule "implementer workers may write only declared write_scope; exact shard ownership is enforced by task_delegate/Autopilot, not by prompt prose.")
+    (role deterministic-llm-tool
+      :style precise-instruction
+      :rule "non-agent deterministic LLM calls may use exact prompts because they do not autonomously dispatch tools or workers.")
+    :runtime-invariants
+      ["Prompt text MUST NOT be the primary safety boundary; read/write scope, acceptance, pool routing, and closure policy are structured BoardTask/runtime fields."
+       "Worker prompts MUST NOT prepend KB/Skill/history/provider-log context unless an explicit memory-audit workflow opts in."
+       "M6 workflows MUST materialize context-pack artifacts with questions, hypotheses, evidence_needed, findings, design_options, and accepted_shards before implementation shards."
+       "Direct implementation from an initial objective is allowed only when exact-shard-ready=true is explicitly present in the BoardTask metadata or description."]
+    :checker "node scripts/check-v3-workflow-isomorphism.mjs")
+
   (resident-master-control
-    :desc "Resident Codex brain layer: event-driven orchestrator that reads Lisp SSOT, Board, KB, project registry, execution logs, and worker telemetry, then delegates exact work to pool workers."
+    :desc "Resident Codex brain layer: event-driven orchestrator that reads the active objective, Lisp SSOT, project registry, explicit context packs, and allowed evidence, then delegates exact work to pool workers."
     :worker codex-master-control
     :slot-id "slot-codex-master-control"
     :engine codex
@@ -812,11 +844,11 @@
     :event-subscriptions
       [BoardTaskCreated BoardTaskStatusChanged SlotEvent QuestionEvent SystemEvent::ContextualCommitDetected DaemonRestart StaleTask NightSchedule ProjectRegistryChanged]
     :loop
-      ((step s1 :logic "load latest checkpoint, active Board objectives, V3/project Lisp registries, and recent event tail")
-       (step s2 :logic "classify events into decision-required, dispatchable, blocked, stale, or informational")
-       (step s3 :logic "for dispatchable work, emit context-pack organizer tasks first, then exact write-scope shards")
+      ((step s1 :logic "load latest checkpoint, active Board objective, explicit context_pack_path, V3/project Lisp registries, and current event summary")
+       (step s2 :logic "ask the heuristic review question and classify whether the objective needs evidence-plan, investigation, design-proposal, exact-shards, implementation, verification, blocked, or no-op")
+       (step s3 :logic "for non-exact work, materialize context-pack questions, hypotheses, and evidence_needed before delegation; skip directly to implementation only when exact-shard-ready=true is explicit")
        (step s4 :logic "delegate Claude/Gemini/Codex workers through BoardTask/Autopilot only; never bypass durable event/Board state")
-       (step s5 :logic "write checkpoint + Board note + execution companion log after every decision boundary"))
+       (step s5 :logic "return decision, reasoning_summary, evidence_needed, delegation_plan?, and next_question_or_action, then write checkpoint + Board note + execution companion log after every decision boundary"))
     :evidence-authority
       ((tier t1 :source [provider-jsonl codex-sqlite claude-jsonl gemini-chat-file] :use "durable final/progress facts")
        (tier t2 :source [missiond-event-bus BoardTask-lifecycle mission_execution] :use "causal workflow state")

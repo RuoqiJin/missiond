@@ -1214,7 +1214,7 @@ pub(crate) fn build_master_tick_prompt(
 ) -> String {
     let active_boardtask = render_active_objective_prompt_block(active_objective);
     format!(
-        "MissionD resident master tick.\nreason: {reason}\nphase: {}\nactive_objective_id: {}\ncontext_pack_path: {}\nevent_cursor: {}\nevent_summary: {}\nqueued_events: {}\nmcp_ready: {}\nactive_boardtask:\n{}\n\nNo active objective means no-op: do not perform default self-review from this control turn. Scheduled/nightly self-review is a separate manual-first workflow and only runs through mission_nightly_evolution or MISSIOND_NIGHTLY_EVOLUTION_SCHEDULE=true. The active BoardTask shown above is the only load-bearing objective. First query exactly that BoardTask by id only if the embedded summary is insufficient, then follow its description as the load-bearing objective. Any mission_board_create call while active_boardtask is present MUST set parentId to the active BoardTask id and MUST directly advance that active objective; do not create resident-master/self-maintenance tasks from PTY screen text, convergence-status disagreement, Board backlog, KB, provider logs, historical conversation, or recent commit drift unless the active BoardTask explicitly asks for that maintenance. You may read only the project roots / files explicitly named by that BoardTask and its context_pack_path; do not browse Board open backlog. Do not call mission_kb_query, mission_conversation_query, provider-log tools, mission_intent, or mission_convergence_status unless the active BoardTask explicitly requests those sources. Do not call mission_daemon_update from a resident-master control turn; supervised deploys are operator/deploy BoardTask actions, not objective-classification actions. PTY recognition is diagnostic only.\n\nHard workflow contracts are enforced by MissionD runtime/workflow.lisp/checkers. Do not restate or solve them manually in prompt text. If this event is already a worker BoardTask (## Swarm metadata or task_class=context-pack/code), do not recursively delegate; observe only the active objective state and wait for explicit durable task evidence. Use mission_swarm_run or mission_task_delegate only when the next shard is already concrete enough; otherwise write a concise context-pack diagnosis. If your decision is create/update BoardTask or close_or_backfill, perform the corresponding MissionD MCP mutation (mission_board_note_add / mission_board_update / mission_board_create) before returning; if the mutation is not possible, return blocked with the reason. Do not edit code directly from the resident slot.\n\nReturn one compact decision after any required MCP mutation: no-op, create/update BoardTask, delegate worker, blocked, or close_or_backfill.",
+        "MissionD resident master tick.\nreason: {reason}\nphase: {}\nactive_objective_id: {}\ncontext_pack_path: {}\nevent_cursor: {}\nevent_summary: {}\nqueued_events: {}\nmcp_ready: {}\nactive_boardtask:\n{}\n\nHeuristic review question:\n请先审视 active objective 和相关 SSOT Lisp：颗粒度是否足够细？哪些架构可以更优雅？你还需要哪些证据、调查工位或 exact shard？\n\nDecision context:\n- If active_objective_id is none, return decision=no-op.\n- The active BoardTask above is the only load-bearing objective; if you need more detail, query that task by id, then follow its description.\n- For non-exact work, produce evidence_needed and a context-pack/evidence plan before delegation.\n- Delegate only after an evidence-plan exists, or when exact-shard-ready=true is explicit.\n- If creating child BoardTasks while active_boardtask is present, set parentId to the active BoardTask id.\n\nAllowed action summary:\n- no-op\n- create/update BoardTask after performing the matching MissionD MCP mutation\n- delegate worker through mission_swarm_run or mission_task_delegate when the next shard is concrete\n- blocked\n- close_or_backfill\n\nHard safety/tool rules are enforced by MissionD runtime metadata, workflow.lisp, and checkers; do not restate them as long prompt prose. PTY recognition is diagnostic only.\n\nReturn compact fields:\ndecision:\nreasoning_summary:\nevidence_needed:\ndelegation_plan?:\nnext_question_or_action:",
         snapshot.phase,
         snapshot.active_objective_id.as_deref().unwrap_or("none"),
         snapshot.context_pack_path.as_deref().unwrap_or("none"),
@@ -2555,27 +2555,27 @@ mod tests {
         assert!(prompt.contains("event_summary: BoardEvent.task_created: task_id=abc"));
         assert!(prompt.contains("phase: classify_objective"));
         assert!(prompt.contains("active_objective_id: abc"));
-        assert!(prompt.contains("No active objective means no-op"));
-        assert!(prompt.contains("mission_nightly_evolution"));
-        assert!(prompt.contains("MISSIOND_NIGHTLY_EVOLUTION_SCHEDULE=true"));
-        assert!(
-            prompt.contains("The active BoardTask shown above is the only load-bearing objective")
-        );
-        assert!(prompt.contains("then follow its description"));
-        assert!(prompt.contains("Hard workflow contracts are enforced"));
-        assert!(prompt.contains("MissionD runtime/workflow.lisp/checkers"));
-        assert!(prompt.contains("query exactly that BoardTask by id"));
-        assert!(prompt.contains("Do not call mission_kb_query"));
-        assert!(prompt.contains("Do not call mission_daemon_update"));
+        assert!(prompt.contains("Heuristic review question"));
+        assert!(prompt.contains("颗粒度是否足够细"));
+        assert!(prompt.contains("哪些架构可以更优雅"));
+        assert!(prompt.contains("If active_objective_id is none, return decision=no-op"));
+        assert!(prompt.contains("The active BoardTask above is the only load-bearing objective"));
+        assert!(prompt.contains("query that task by id"));
+        assert!(prompt.contains("produce evidence_needed and a context-pack/evidence plan"));
+        assert!(prompt.contains("exact-shard-ready=true"));
+        assert!(prompt.contains("Hard safety/tool rules are enforced by MissionD runtime metadata"));
+        assert!(prompt.contains("workflow.lisp"));
         assert!(prompt.contains("PTY recognition is diagnostic only"));
-        assert!(prompt.contains("already a worker BoardTask"));
-        assert!(prompt.contains("do not recursively delegate"));
         assert!(prompt.contains("mission_swarm_run"));
         assert!(prompt.contains("mission_task_delegate"));
-        assert!(prompt.contains("context-pack diagnosis"));
-        assert!(prompt.contains("perform the corresponding MissionD MCP mutation"));
-        assert!(prompt.contains("Do not edit code directly from the resident slot"));
+        assert!(prompt.contains("decision:"));
+        assert!(prompt.contains("reasoning_summary:"));
+        assert!(prompt.contains("evidence_needed:"));
+        assert!(prompt.contains("delegation_plan?:"));
+        assert!(prompt.contains("next_question_or_action:"));
         assert!(prompt.contains("close_or_backfill"));
+        assert!(!prompt.contains("Do not call mission_kb_query"));
+        assert!(!prompt.contains("Do not call mission_daemon_update"));
     }
 
     #[test]
@@ -2622,11 +2622,9 @@ mod tests {
         assert!(prompt.contains("- id: auth-parent"));
         assert!(prompt.contains("- project: auth"));
         assert!(prompt.contains("Auth must reach M6"));
-        assert!(prompt.contains("No active objective means no-op"));
-        assert!(prompt.contains(
-            "mission_board_create call while active_boardtask is present MUST set parentId"
-        ));
-        assert!(prompt.contains("do not create resident-master/self-maintenance tasks"));
+        assert!(prompt.contains("If active_objective_id is none, return decision=no-op"));
+        assert!(prompt.contains("set parentId to the active BoardTask id"));
+        assert!(prompt.contains("evidence_needed:"));
     }
 
     #[test]

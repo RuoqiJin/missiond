@@ -24,27 +24,40 @@
      (claude-sonnet :role narrow-patch :write exact-file-region-only :code-write true)
      (gemini :role readonly-wide-scan :write context-pack-only :code-write false))
   :steps
-    ((step s1 :id domain-model-audit
+    ((step s1 :id review-question
+       :logic "Start with a heuristic architecture question: please review this project's SSOT Lisp, decide whether the granularity is fine enough, identify design smells, and state what evidence or workers are needed. Do not jump to implementation unless exact-shard-ready=true is explicitly present.")
+     (step s2 :id evidence-plan
+       :logic "Write context-pack questions, hypotheses, evidence_needed, read_scope, and proposed investigation lanes. The plan must name the Lisp shards, code surfaces, tests, and compatibility evidence needed before design acceptance.")
+     (step s3 :id investigation
+       :logic "Dispatch read-only investigator workers or perform bounded local reads. Investigator prompts ask them to审视/比较/找缺口/给建议 and return Findings / Evidence / Recommendations / Verification.")
+     (step s4 :id synthesis
+       :logic "Merge investigator findings into a single context-pack synthesis: confirmed facts, contradictions, missing anchors, design risks, and evidence confidence.")
+     (step s5 :id design-proposal
+       :logic "Produce design_options and select the accepted architecture direction before code shards. Accepted design must preserve entry/core ordered steps/egress/surfaces and declare compatibility implications.")
+     (step s6 :id domain-model-audit
        :logic "Extract durable domain nouns, ownership chain, identity boundaries, permission boundaries, state machines, and external dependencies from Lisp plus code. Reject naming that lets protocol clients, runtime configs, or bridge tables masquerade as domain objects.")
-     (step s2 :id target-architecture-draft
+     (step s7 :id target-architecture-draft
        :logic "Write or refine fine-grained domain/policy/flow/token/event/runtime/implementation Lisp shards. Every function must use entry/core ordered steps/egress/surfaces/runtime-projection; long prose moves to evidence.")
-     (step s3 :id authority-chain-check
+     (step s8 :id authority-chain-check
        :logic "State the canonical authority chain in one place and map every public route, API, job, event, and DB mutation to one authority node. Auth example: tenant -> application -> product -> product_user -> product_user_group.")
-     (step s4 :id compatibility-ledger
+     (step s9 :id compatibility-ledger
        :logic "For each legacy bridge, record owner, allowed reads, allowed writes, compatibility reason, diagnostic event, and exit condition. New semantic ownership in bridge fields is forbidden.")
-     (step s5 :id runtime-registration-check
+     (step s10 :id runtime-registration-check
        :logic "Prove that registering new business objects is runtime data through DB/API/audit/event surfaces, not env/config/rebuild/redeploy. If registration still needs deploy, create implementation shards before claiming M6.")
-     (step s6 :id event-contract-check
+     (step s11 :id event-contract-check
        :logic "Split producer, local durable outbox/audit, adapter owner, sink payload, ack, retry, failure status, privacy class, severity, trace id, dedupe key, and non-blocking policy. The primary user path must not depend on downstream event delivery.")
-     (step s7 :id hot-path-wiring-check
+     (step s12 :id hot-path-wiring-check
        :logic "For every architecture contract and policy service, grep-map the real runtime callers. A contract that is only in Lisp, tests, or dead service code remains design-only and cannot satisfy M6.")
-     (step s8 :id regression-matrix
+     (step s13 :id regression-matrix
        :logic "Build focused tests for existing production flows, old compatibility inputs, new target model paths, event failure behavior, authorization boundaries, and backward compatibility.")
-     (step s9 :id exact-code-shards
-       :logic "Compile context-pack accepted shards with file/region ownership. Claude Opus implements Lisp/checker/runtime code; Sonnet handles only narrow patches; Gemini remains read-only.")
-     (step s10 :id final-m6-report
-       :logic "Write a report that classifies each function as code-aligned, runtime-projected, hot-path-wired, design-only, blocked, or requires-user-decision. Do not call M6 while any critical hot path is design-only."))
-  :egress [final-m6-report refined-blueprints compatibility-ledger checker-hard-gates code-shards regression-results decision-items]
+     (step s14 :id exact-shards
+       :logic "Compile accepted_shards with file/region ownership from the accepted design. Claude Opus implements Lisp/checker/runtime code; Sonnet handles only narrow patches; Gemini remains read-only.")
+     (step s15 :id implementation
+       :logic "Implement only accepted shards with exact write_scope. Worker prompts begin with context-prepared questions, but scope and acceptance are enforced by BoardTask metadata and runtime guards.")
+     (step s16 :id verification
+       :logic "Run focused regression matrix, project checks, and M6 maturity gate; write final report and residual gap list before closing the objective."))
+  :context-pack-artifacts [questions hypotheses evidence_needed findings design_options accepted_shards]
+  :egress [questions hypotheses evidence_needed findings design_options accepted_shards final-m6-report refined-blueprints compatibility-ledger checker-hard-gates code-shards regression-results decision-items]
   :risk-gates
     ((gate g1 :rule "Lisp-first: target architecture and checker gates are updated before runtime code changes.")
      (gate g2 :rule "No destructive DB migration in an M6 pass; use additive-first migrations plus compatibility ledger exit criteria.")
@@ -53,7 +66,8 @@
      (gate g5 :rule "Existing production flows must have regression coverage before refactoring shared login/token/admin/event paths.")
      (gate g6 :rule "Event delivery must be durable and retryable, but primary request paths must remain non-blocking.")
      (gate g7 :rule "Every user decision is written to Decision Inbox with evidence and recommended options; worker prompts must not bury decisions in prose.")
-     (gate g8 :rule "No recursive cargo fmt or broad formatter runs; format/check only touched files unless a dedicated formatting task owns the repo."))
+     (gate g8 :rule "No recursive cargo fmt or broad formatter runs; format/check only touched files unless a dedicated formatting task owns the repo.")
+     (gate g9 :rule "Initial objectives must pass through review-question and evidence-plan before investigation or implementation, unless exact-shard-ready=true is explicit."))
   :completion
     ((criterion c1 :rule "Domain model and authority chain are explicit and not conflated with protocol/runtime bridge objects.")
      (criterion c2 :rule "Compatibility ledger covers every legacy bridge with owner, read/write boundary, diagnostics, and exit condition.")
