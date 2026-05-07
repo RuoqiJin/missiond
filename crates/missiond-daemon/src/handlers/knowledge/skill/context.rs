@@ -250,6 +250,30 @@ pub(super) async fn handle_resolve(state: &AppState, args: Value) -> Result<Tool
         }
     }
 
+    let project_skill_links = if args.project_id.is_some() {
+        let projects = {
+            let registry = state.project_registry.read().await;
+            registry
+                .active_projects()
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let registry_skills = state.skills.list().to_vec();
+        match state.store.skill_topic_list().await {
+            Ok(topics) => super::query::derive_project_skill_links(
+                &projects,
+                &registry_skills,
+                &topics,
+                args.project_id.as_deref(),
+                None,
+            ),
+            Err(_) => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+
     let result = json!({
         "query": {
             "original": query,
@@ -264,6 +288,7 @@ pub(super) async fn handle_resolve(state: &AppState, args: Value) -> Result<Tool
             "parent_id": project.parent_id,
         })),
         "skills": skill_results,
+        "project_skill_links": project_skill_links,
         "infra": infra_results,
         "kb": kb_results,
         "board": board_results,

@@ -439,7 +439,7 @@ pub(super) async fn handle_stats(state: &AppState, args: Value) -> Result<ToolRe
     })))
 }
 
-fn derive_project_skill_links(
+pub(super) fn derive_project_skill_links(
     projects: &[missiond_core::types::ProjectConfig],
     registry_skills: &[missiond_core::SkillMeta],
     topics: &[missiond_core::types::SkillTopic],
@@ -521,8 +521,14 @@ fn derive_project_skill_links(
     }
 
     links.sort_by(|a, b| {
-        let pa = a.get("projectId").and_then(Value::as_str).unwrap_or_default();
-        let pb = b.get("projectId").and_then(Value::as_str).unwrap_or_default();
+        let pa = a
+            .get("projectId")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let pb = b
+            .get("projectId")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         pa.cmp(pb).then_with(|| {
             let sa = a.get("skill").and_then(Value::as_str).unwrap_or_default();
             let sb = b.get("skill").and_then(Value::as_str).unwrap_or_default();
