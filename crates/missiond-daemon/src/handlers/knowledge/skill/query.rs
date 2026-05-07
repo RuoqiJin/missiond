@@ -10,6 +10,14 @@ struct SkillSearchArgs {
     query: String,
 }
 
+#[derive(Deserialize)]
+struct ProjectLinksArgs {
+    #[serde(default, alias = "project", alias = "projectId")]
+    project_id: Option<String>,
+    #[serde(default)]
+    skill: Option<String>,
+}
+
 pub(super) async fn handle_list(state: &AppState) -> Result<ToolResult> {
     let skills: Vec<Value> = state
         .skills
@@ -209,6 +217,52 @@ pub(super) async fn handle_actions(state: &AppState, args: Value) -> Result<Tool
     Ok(ToolResult::json_pretty(&all_actions))
 }
 
+pub(super) async fn handle_project_links(state: &AppState, args: Value) -> Result<ToolResult> {
+    let args: ProjectLinksArgs = serde_json::from_value(args).unwrap_or(ProjectLinksArgs {
+        project_id: None,
+        skill: None,
+    });
+    let projects = {
+        let registry = state.project_registry.read().await;
+        registry
+            .active_projects()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let registry_skills = state.skills.list().to_vec();
+    let topics = state
+        .store
+        .skill_topic_list()
+        .await
+        .map_err(|e| anyhow!("DB: {}", e))?;
+    let links = derive_project_skill_links(
+        &projects,
+        &registry_skills,
+        &topics,
+        args.project_id.as_deref(),
+        args.skill.as_deref(),
+    );
+    let linked_projects = links
+        .iter()
+        .filter_map(|link| link.get("projectId").and_then(Value::as_str))
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+
+    Ok(ToolResult::json_pretty(&serde_json::json!({
+        "schema": "missiond.project-skill-links.v1",
+        "source": "derived-from-project-registry-skill-index-skill-topics",
+        "filter": {
+            "projectId": args.project_id,
+            "skill": args.skill,
+        },
+        "projects": projects.len(),
+        "linkedProjects": linked_projects,
+        "total": links.len(),
+        "links": links,
+    })))
+}
+
 pub(super) async fn handle_stats(state: &AppState, args: Value) -> Result<ToolResult> {
     #[derive(Deserialize)]
     struct StatsArgs {
@@ -317,6 +371,30 @@ pub(super) async fn handle_stats(state: &AppState, args: Value) -> Result<ToolRe
     let execution_total: i64 = stats.iter().map(|stat| stat.total).sum();
     let execution_successes: i64 = stats.iter().map(|stat| stat.successes).sum();
     let execution_failures: i64 = stats.iter().map(|stat| stat.failures).sum();
+    let projects = {
+        let registry = state.project_registry.read().await;
+        registry
+            .active_projects()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let registry_skill_values = registry_skills
+        .iter()
+        .map(|skill| (*skill).clone())
+        .collect::<Vec<_>>();
+    let project_skill_links = derive_project_skill_links(
+        &projects,
+        &registry_skill_values,
+        &topics,
+        None,
+        args.skill.as_deref(),
+    );
+    let linked_projects = project_skill_links
+        .iter()
+        .filter_map(|link| link.get("projectId").and_then(Value::as_str))
+        .collect::<std::collections::HashSet<_>>()
+        .len();
 
     Ok(ToolResult::json_pretty(&serde_json::json!({
         "schema": "missiond.skill-stats.v1",
@@ -352,8 +430,149 @@ pub(super) async fn handle_stats(state: &AppState, args: Value) -> Result<ToolRe
             "source": "skill_executions",
         },
         "projectSkillLinks": {
-            "status": "pending-contract",
-            "message": "Project-specific skill links are not yet a first-class runtime table; use search/context until the project-skill link contract lands.",
+            "status": "derived",
+            "source": "ProjectRegistry+SkillIndex+skill_topics",
+            "projectsWithLinks": linked_projects,
+            "total": project_skill_links.len(),
+            "sample": project_skill_links.into_iter().take(20).collect::<Vec<_>>(),
         },
     })))
+}
+
+fn derive_project_skill_links(
+    projects: &[missiond_core::types::ProjectConfig],
+    registry_skills: &[missiond_core::SkillMeta],
+    topics: &[missiond_core::types::SkillTopic],
+    filter_project: Option<&str>,
+    filter_skill: Option<&str>,
+) -> Vec<Value> {
+    let mut links = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for project in projects {
+        if filter_project.is_some_and(|id| id != project.id) {
+            continue;
+        }
+        let project_norm = normalize_link_key(&project.id);
+        if project_norm.len() < 3 {
+            continue;
+        }
+
+        for topic in topics {
+            if filter_skill.is_some_and(|skill| skill != topic.topic) {
+                continue;
+            }
+            if let Some((matched_by, confidence)) = match_skill_to_project(
+                &project.id,
+                &project_norm,
+                &topic.topic,
+                topic.aka.as_deref(),
+                topic.description.as_deref(),
+                &topic.file_path,
+            ) {
+                let key = format!("{}|{}", project.id, topic.topic);
+                if seen.insert(key) {
+                    links.push(serde_json::json!({
+                        "projectId": project.id,
+                        "projectRoot": project.path,
+                        "skill": topic.topic,
+                        "path": topic.file_path,
+                        "description": topic.description,
+                        "source": "skill_topics",
+                        "matchedBy": matched_by,
+                        "confidence": confidence,
+                    }));
+                }
+            }
+        }
+
+        for skill in registry_skills {
+            if filter_skill.is_some_and(|name| name != skill.name) {
+                continue;
+            }
+            let aka_text = skill
+                .aka
+                .as_ref()
+                .map(|aka| aka.join(" "))
+                .unwrap_or_default();
+            if let Some((matched_by, confidence)) = match_skill_to_project(
+                &project.id,
+                &project_norm,
+                &skill.name,
+                Some(&aka_text),
+                skill.description.as_deref(),
+                &skill.path.display().to_string(),
+            ) {
+                let key = format!("{}|{}", project.id, skill.name);
+                if seen.insert(key) {
+                    links.push(serde_json::json!({
+                        "projectId": project.id,
+                        "projectRoot": project.path,
+                        "skill": skill.name,
+                        "path": skill.path,
+                        "description": skill.description,
+                        "source": "SkillIndex",
+                        "matchedBy": matched_by,
+                        "confidence": confidence,
+                    }));
+                }
+            }
+        }
+    }
+
+    links.sort_by(|a, b| {
+        let pa = a.get("projectId").and_then(Value::as_str).unwrap_or_default();
+        let pb = b.get("projectId").and_then(Value::as_str).unwrap_or_default();
+        pa.cmp(pb).then_with(|| {
+            let sa = a.get("skill").and_then(Value::as_str).unwrap_or_default();
+            let sb = b.get("skill").and_then(Value::as_str).unwrap_or_default();
+            sa.cmp(sb)
+        })
+    });
+    links
+}
+
+fn match_skill_to_project(
+    project_id: &str,
+    project_norm: &str,
+    skill_name: &str,
+    aka: Option<&str>,
+    description: Option<&str>,
+    path: &str,
+) -> Option<(&'static str, f64)> {
+    let skill_norm = normalize_link_key(skill_name);
+    if skill_name == project_id || skill_norm == project_norm {
+        return Some(("exact", 1.0));
+    }
+    if skill_norm.len() >= 4
+        && (skill_norm.ends_with(project_norm) || project_norm.ends_with(&skill_norm))
+    {
+        return Some(("normalized-suffix", 0.86));
+    }
+    let project_lower = project_id.to_ascii_lowercase();
+    let path_lower = path.to_ascii_lowercase();
+    if path_lower.contains(&format!("/{project_lower}/")) || path_lower.contains(&project_lower) {
+        return Some(("path", 0.78));
+    }
+    if aka
+        .map(|text| normalize_link_key(text).contains(project_norm))
+        .unwrap_or(false)
+    {
+        return Some(("aka", 0.74));
+    }
+    if description
+        .map(|text| normalize_link_key(text).contains(project_norm))
+        .unwrap_or(false)
+    {
+        return Some(("description", 0.62));
+    }
+    None
+}
+
+fn normalize_link_key(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect()
 }

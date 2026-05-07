@@ -9,14 +9,16 @@ pub fn definitions() -> Vec<ToolDefinition> {
         // ===== mission_skill_query =====
         ToolDefinition::new(
             "mission_skill_query",
-            "Skill 知识库查询。list/search/topics/actions/stats",
+            "Skill 知识库查询。list/search/topics/actions/stats/project_links",
             json!({
                 "type": "object",
                 "required": ["action"],
                 "properties": {
-                    "action": {"type": "string", "enum": ["list", "search", "topics", "actions", "stats"]},
+                    "action": {"type": "string", "enum": ["list", "search", "topics", "actions", "stats", "project_links"]},
                     "query": {"type": "string", "description": "[search] 搜索关键词"},
-                    "skill": {"type": "string", "description": "按 Skill 名筛选"}
+                    "skill": {"type": "string", "description": "按 Skill 名筛选"},
+                    "project_id": {"type": "string", "description": "[project_links] 按 MissionD project_id 筛选"},
+                    "project": {"type": "string", "description": "[project_links] project_id alias"}
                 }
             }),
         ),

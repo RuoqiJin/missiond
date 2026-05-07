@@ -48,6 +48,7 @@ async fn route_skill_query(state: &AppState, args: Value) -> Result<ToolResult> 
         "topics" => query::handle_topics(state).await,
         "actions" => query::handle_actions(state, args).await,
         "stats" => query::handle_stats(state, args).await,
+        "project_links" => query::handle_project_links(state, args).await,
         _ => Ok(ToolResult::error(format!("Unknown action: {}", action))),
     }
 }

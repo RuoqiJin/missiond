@@ -92,9 +92,9 @@ function checkFiles(root, files) {
     'crates/missiond-mcp/src/tools/knowledge/skill.rs',
     'scripts/check-v3-skill-runtime-isomorphism.mjs',
     'skill.rs is the thin mission_skill facade',
-    'skill/query.rs owns list/search/topics/actions/stats',
+    'skill/query.rs owns list/search/topics/actions/stats/project_links',
     'composite registry/topic/action/embedding/execution statistics',
-    'project-skill-link readiness',
+    'derived project-skill links',
     'project-aware context resolution',
     'explicit opt-in KB dependency aggregation',
     'skill/context.rs owns context build/resolve',
@@ -127,6 +127,8 @@ function checkFiles(root, files) {
     'handle_topics',
     'handle_actions',
     'handle_stats',
+    'handle_project_links',
+    'derive_project_skill_links',
     'skill_search_fts',
     'rrf_score',
     'skill_topic_hit',
@@ -138,6 +140,7 @@ function checkFiles(root, files) {
     'skill_embedding_cache',
     'actionCount',
     'projectSkillLinks',
+    'missiond.project-skill-links.v1',
   ]);
 
   requireAll(diagnostics, files.context, sources.context, [
@@ -192,6 +195,7 @@ function checkFiles(root, files) {
     '"topics"',
     '"actions"',
     '"stats"',
+    '"project_links"',
     '"build"',
     '"resolve"',
     '"upsert"',
@@ -228,7 +232,7 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/skill/exec.rs"
              "crates/missiond-mcp/src/tools/knowledge/skill.rs"
              "scripts/check-v3-skill-runtime-isomorphism.mjs"]
-      :note "skill.rs is the thin mission_skill facade; skill/query.rs owns list/search/topics/actions/stats, composite registry/topic/action/embedding/execution statistics, and project-skill-link readiness; skill/context.rs owns context build/resolve plus project-aware context resolution and explicit opt-in KB dependency aggregation; skill/mutate.rs owns upsert/record/render/rollback; skill/exec.rs owns mission_skill_exec."))
+      :note "skill.rs is the thin mission_skill facade; skill/query.rs owns list/search/topics/actions/stats/project_links, composite registry/topic/action/embedding/execution statistics, and derived project-skill links; skill/context.rs owns context build/resolve plus project-aware context resolution and explicit opt-in KB dependency aggregation; skill/mutate.rs owns upsert/record/render/rollback; skill/exec.rs owns mission_skill_exec."))
   (compression-contract
     :checks ["node scripts/check-v3-skill-runtime-isomorphism.mjs"]))`);
 
@@ -247,9 +251,9 @@ Unknown skill tool
 `);
 
   writeFixture(root, DEFAULT_FILES.query, `
-handle_list handle_search handle_topics handle_actions handle_stats
+handle_list handle_search handle_topics handle_actions handle_stats handle_project_links derive_project_skill_links
 skill_search_fts rrf_score skill_topic_hit parse_workflow_blocks skill_execution_stats
-missiond.skill-stats.v1 loadedSkills skill_topic_list skill_embedding_cache actionCount projectSkillLinks
+missiond.skill-stats.v1 missiond.project-skill-links.v1 loadedSkills skill_topic_list skill_embedding_cache actionCount projectSkillLinks
 `);
 
   writeFixture(root, DEFAULT_FILES.context, `
@@ -273,7 +277,7 @@ handle_exec execute_workflow dry_run params Workflow execution failed
   writeFixture(root, DEFAULT_FILES.mcp, `
 ToolDefinition::new
 "mission_skill_query" "mission_skill_context" "mission_skill_mutate" "mission_skill_exec"
-"list" "search" "topics" "actions" "stats" "build" "resolve" "upsert" "record" "render" "rollback"
+"list" "search" "topics" "actions" "stats" "project_links" "build" "resolve" "upsert" "record" "render" "rollback"
 "project_id" "project" "include_kb"
 `);
 
