@@ -1193,7 +1193,7 @@
     (maturity :id deploy-center :current M6 :target M6 :gap [])
     (maturity :id deploy-agent :current M5 :target M6 :gap [agent-execution-boundary server-fact-ledger final-m6-report])
     (maturity :id auth :current M6 :target M6 :gap [])
-    (maturity :id router :current M5 :target M6 :gap [model-policy-domain routing-hot-path-regressions final-m6-report])
+    (maturity :id router :current M6 :target M6 :gap [])
     (maturity :id payments :current M5 :target M6 :gap [payment-domain-ledger webhook-regressions final-m6-report])
     (maturity :id asr :current M5 :target M6 :gap [job-provider-transcript-domain callback-regressions final-m6-report])
     (maturity :id timeline :current M5 :target M6 :gap [revision-event-authority service-event-regressions final-m6-report])
