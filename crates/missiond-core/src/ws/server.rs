@@ -249,11 +249,17 @@ fn parse_test_webhook(body: &str) -> Option<crate::types::MissionIncident> {
 
 /// Parse an external service domain event into the MissionD system bus.
 ///
-/// Minimal envelope expected from project-local reporters:
+/// Minimal legacy envelope:
 /// `{ service_id, event_id, event_kind, summary, trace_id?, payload? }`.
-/// Missing fields are derived conservatively so producers can start with a
-/// low-risk fire-and-forget integration.
-fn parse_external_service_webhook(body: &str, default_service_id: &str) -> Option<SystemEvent> {
+/// New producers should send `missiond.event-envelope.v1`, whose identity
+/// fields are preserved under `payload._envelope` so waiters can filter by
+/// project/correlation without widening `SystemEvent` every time a cloud
+/// service adds a field.
+fn parse_external_service_webhook(
+    body: &str,
+    default_service_id: &str,
+    require_event_id: bool,
+) -> Option<SystemEvent> {
     let v: serde_json::Value = serde_json::from_str(body).ok()?;
     let service_id = v
         .get("service_id")
@@ -273,8 +279,11 @@ fn parse_external_service_webhook(body: &str, default_service_id: &str) -> Optio
         .or_else(|| v.get("eventId"))
         .or_else(|| v.get("id"))
         .and_then(|v| v.as_str())
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("external-{}", uuid::Uuid::new_v4()));
+        .map(str::to_string);
+    if require_event_id && event_id.is_none() {
+        return None;
+    }
+    let event_id = event_id.unwrap_or_else(|| format!("external-{}", uuid::Uuid::new_v4()));
     let summary = v
         .get("summary")
         .and_then(|v| v.as_str())
@@ -285,10 +294,29 @@ fn parse_external_service_webhook(body: &str, default_service_id: &str) -> Optio
         .or_else(|| v.get("traceId"))
         .and_then(|v| v.as_str())
         .map(str::to_string);
-    let payload = v
-        .get("payload")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!({}));
+    let mut payload = match v.get("payload").cloned() {
+        Some(serde_json::Value::Object(map)) => serde_json::Value::Object(map),
+        Some(other) => serde_json::json!({ "value": other }),
+        None => serde_json::json!({}),
+    };
+    let envelope = serde_json::json!({
+        "schema_version": json_string(&v, &["schema_version", "schemaVersion"]).unwrap_or_else(|| "missiond.event-envelope.v1".to_string()),
+        "event_id": event_id.clone(),
+        "source": json_string(&v, &["source"]),
+        "project_id": json_string(&v, &["project_id", "projectId"]),
+        "service_id": service_id.clone(),
+        "event_kind": event_kind.clone(),
+        "subject": json_string(&v, &["subject"]),
+        "correlation_id": json_string(&v, &["correlation_id", "correlationId"]),
+        "trace_id": trace_id.clone(),
+        "occurred_at": json_string(&v, &["occurred_at", "occurredAt"]),
+        "observed_at": json_string(&v, &["observed_at", "observedAt"]),
+        "authority": json_string(&v, &["authority"]),
+        "privacy_class": json_string(&v, &["privacy_class", "privacyClass"]),
+    });
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert("_envelope".to_string(), envelope);
+    }
 
     Some(SystemEvent::ExternalServiceEvent {
         service_id,
@@ -298,6 +326,12 @@ fn parse_external_service_webhook(body: &str, default_service_id: &str) -> Optio
         trace_id,
         payload_json: payload.to_string(),
     })
+}
+
+fn json_string(v: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| v.get(*key).and_then(|value| value.as_str()))
+        .map(str::to_string)
 }
 
 fn header_value<'a>(headers: &'a str, name: &str) -> Option<&'a str> {
@@ -812,7 +846,10 @@ impl PTYWebSocketServer {
         // Extract path from request line (e.g. "POST /webhooks/deploy HTTP/1.1")
         let path = request_line.split_whitespace().nth(1).unwrap_or("");
 
-        if path == "/webhooks/service-event" || path == "/webhooks/auth-event" {
+        if path == "/webhooks/service-event"
+            || path == "/webhooks/auth-event"
+            || path == "/webhooks/deploy-center-event"
+        {
             let expected_token = std::env::var("MISSIOND_EXTERNAL_WEBHOOK_TOKEN").ok();
             if !webhook_token_matches(&headers, expected_token.as_deref()) {
                 Self::send_http_error(
@@ -838,12 +875,15 @@ impl PTYWebSocketServer {
                     return Ok(());
                 }
             };
-            let default_service_id = if path == "/webhooks/auth-event" {
-                "auth"
-            } else {
-                "external"
+            let default_service_id = match path {
+                "/webhooks/auth-event" => "auth",
+                "/webhooks/deploy-center-event" => "deploy-center",
+                _ => "external",
             };
-            let Some(event) = parse_external_service_webhook(&body, default_service_id) else {
+            let require_event_id = path == "/webhooks/deploy-center-event";
+            let Some(event) =
+                parse_external_service_webhook(&body, default_service_id, require_event_id)
+            else {
                 Self::send_http_error(
                     &mut stream,
                     400,
@@ -2830,6 +2870,7 @@ mod tests {
         let event = parse_external_service_webhook(
             r#"{"event_id":"auth_evt_1","event_kind":"login_succeeded","summary":"login ok"}"#,
             "auth",
+            false,
         )
         .unwrap();
         match event {
@@ -2842,6 +2883,48 @@ mod tests {
                 assert_eq!(service_id, "auth");
                 assert_eq!(event_id, "auth_evt_1");
                 assert_eq!(event_kind, "login_succeeded");
+            }
+            _ => panic!("unexpected event"),
+        }
+    }
+
+    #[test]
+    fn deploy_center_event_requires_stable_event_id_and_preserves_envelope() {
+        assert!(parse_external_service_webhook(
+            r#"{"event_kind":"deploy_succeeded"}"#,
+            "deploy-center",
+            true
+        )
+        .is_none());
+
+        let event = parse_external_service_webhook(
+            r#"{
+              "schema_version":"missiond.event-envelope.v1",
+              "event_id":"deploy-center:deploy_events:42",
+              "source":"deploy-center",
+              "project_id":"auth",
+              "service_id":"deploy-center",
+              "event_kind":"deploy_succeeded",
+              "correlation_id":"session-1",
+              "payload":{"deploy_event_id":42}
+            }"#,
+            "deploy-center",
+            true,
+        )
+        .unwrap();
+        match event {
+            SystemEvent::ExternalServiceEvent {
+                service_id,
+                event_id,
+                payload_json,
+                ..
+            } => {
+                assert_eq!(service_id, "deploy-center");
+                assert_eq!(event_id, "deploy-center:deploy_events:42");
+                let payload: serde_json::Value = serde_json::from_str(&payload_json).unwrap();
+                assert_eq!(payload["deploy_event_id"], 42);
+                assert_eq!(payload["_envelope"]["project_id"], "auth");
+                assert_eq!(payload["_envelope"]["correlation_id"], "session-1");
             }
             _ => panic!("unexpected event"),
         }

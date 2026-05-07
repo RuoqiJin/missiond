@@ -25,6 +25,7 @@ pub(super) async fn handle_universe(args: Value) -> Result<ToolResult> {
         let deployment_form = keyword_form(&form, ":deployment");
         let proxy_form = keyword_form(&form, ":proxy");
         let ports_form = keyword_form(&form, ":ports");
+        let event_ingest_form = keyword_form(&form, ":event-ingest");
         services.push(json!({
             "id": id,
             "project": keyword_scalar(&form, ":project"),
@@ -60,6 +61,14 @@ pub(super) async fn handle_universe(args: Value) -> Result<ToolResult> {
                 "service": ports_form.as_deref().and_then(|s| keyword_scalar(s, ":service")),
             },
             "health": keyword_list(&form, ":health"),
+            "eventIngest": {
+                "endpoint": event_ingest_form.as_deref().and_then(|s| keyword_scalar(s, ":endpoint")),
+                "domain": event_ingest_form.as_deref().and_then(|s| keyword_scalar(s, ":domain")),
+                "event": event_ingest_form.as_deref().and_then(|s| keyword_scalar(s, ":event")),
+                "source": event_ingest_form.as_deref().and_then(|s| keyword_scalar(s, ":source")),
+                "authority": event_ingest_form.as_deref().and_then(|s| keyword_scalar(s, ":authority")),
+                "tokenEnv": event_ingest_form.as_deref().and_then(|s| keyword_scalar(s, ":token-env")),
+            },
             "dependencies": keyword_list(&form, ":dependencies"),
             "opsCapability": keyword_scalar(&form, ":ops-capability"),
             "sourceEvidence": keyword_list(&form, ":source-evidence"),

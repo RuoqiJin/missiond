@@ -381,13 +381,12 @@ async fn process_thread(
     let slot_category = slot_id
         .as_deref()
         .and_then(|id| state.mission.get_slot_category(id));
-    let conversation_type =
-        missiond_core::db::conversation_query::classify_conversation_type(
-            slot_category.as_deref(),
-            slot_id.as_deref(),
-            &thread.id,
-            "codex_cli",
-        );
+    let conversation_type = missiond_core::db::conversation_query::classify_conversation_type(
+        slot_category.as_deref(),
+        slot_id.as_deref(),
+        &thread.id,
+        "codex_cli",
+    );
     // Durable task linkage: when the slot has a running task, persist
     // its id on the conversation row so worker chains stay queryable
     // by `task_id` without relying on the in-memory

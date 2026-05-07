@@ -14,7 +14,7 @@ import { SystemDashboard } from './components/SystemDashboard';
 import { KnowledgeConsolidated } from './components/KnowledgeConsolidated';
 import { LogsConsolidated } from './components/LogsConsolidated';
 import { JarvisChat } from './components/JarvisChat';
-import { useEventStream, useConnectionState } from './hooks/useEventStream';
+import { useEventStream, useConnectionState, useEventInvalidation } from './hooks/useEventStream';
 import { BOARD_TABS, DEFAULT_TAB, TAB_MIGRATION, type BoardTabId } from './generated/board-frontend-config';
 import type { SlotDef } from './types';
 
@@ -87,6 +87,7 @@ function formatSlotTime(value?: string | null): string | null {
 export default function App() {
   useEventStream(); // Global EventBus WS connection
   const wsState = useConnectionState();
+  const slotVersion = useEventInvalidation('slot');
   const openAddDialog = useTaskCenterStore((s) => s.openAddDialog);
   const fetchTasks = useTaskCenterStore((s) => s.fetchTasks);
   const isLoading = useTaskCenterStore((s) => s.isLoading);
@@ -171,10 +172,16 @@ export default function App() {
     fetchSlots();
   }, [fetchTasks, fetchSlots]);
 
-  // Refresh slots when on Terminal or Exec tab
+  // EventBus drives slot refresh; the interval is only a bounded fallback
+  // when a backend event is missed or the browser reconnects late.
   useEffect(() => {
     if (tab !== 'terminal' && tab !== 'exec') return;
-    const id = setInterval(fetchSlots, 5000);
+    fetchSlots();
+  }, [tab, slotVersion, fetchSlots]);
+
+  useEffect(() => {
+    if (tab !== 'terminal' && tab !== 'exec') return;
+    const id = setInterval(fetchSlots, 30000);
     return () => clearInterval(id);
   }, [tab, fetchSlots]);
 
@@ -393,7 +400,7 @@ export default function App() {
           </aside>
         </div>
       ) : tab === 'exec' ? (
-        <ExecDashboard slots={slots} />
+        <ExecDashboard slots={slots} tasks={tasks} />
       ) : tab === 'system' ? (
         <SystemDashboard />
       ) : tab === 'knowledge' ? (

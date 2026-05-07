@@ -774,10 +774,7 @@ fn handle_mcp_tool_error(s: &AppState, slot_id: &str, tool_name: &str, error: &s
                     id: uuid::Uuid::new_v4().to_string(),
                     severity: missiond_core::types::IncidentSeverity::High,
                     source: missiond_core::types::IncidentSource::PtySlot,
-                    title: format!(
-                        "MCP 重连失败: {} (无法启动重连仪式)",
-                        slot_id_owned
-                    ),
+                    title: format!("MCP 重连失败: {} (无法启动重连仪式)", slot_id_owned),
                     description: format!(
                         "工位 `{}` 的 `/mcp` 重连仪式无法启动。\n\n原因:\n```\n{}\n```",
                         slot_id_owned, err

@@ -468,7 +468,8 @@ pub(super) async fn handle_maintenance(
                         .set_conversation_type(&row.session_id, &row.expected_conversation_type)
                         .await
                         .map_err(|e| anyhow!("DB error: {e}"))?;
-                    let raw_roles_backfilled = if row.source == "codex_cli" && !row.raw_role_present {
+                    let raw_roles_backfilled = if row.source == "codex_cli" && !row.raw_role_present
+                    {
                         state
                             .store
                             .backfill_missing_raw_roles_for_session(&row.session_id)

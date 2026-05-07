@@ -1,6 +1,9 @@
 import { NextResponse } from 'next/server';
 import { callTool } from '@/lib/missiond';
 
+export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
+
 export async function GET() {
   try {
     const result = await callTool('mission_beacon_list') as { name: string }[];

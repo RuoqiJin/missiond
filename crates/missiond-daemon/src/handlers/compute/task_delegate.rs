@@ -116,6 +116,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         engine_hint: string_arg(&args, &["engine_hint", "engineHint"]).map(str::to_string),
         context_pack_path: string_arg(&args, &["context_pack_path", "contextPackPath"])
             .map(str::to_string),
+        accepted_shard_id: string_arg(&args, &["accepted_shard_id", "acceptedShardId"])
+            .map(str::to_string),
         read_scope: string_list_arg(&args, &["read_scope", "readScope"]),
         write_scope: string_list_arg(&args, &["write_scope", "writeScope"]),
         must_not_touch: string_list_arg(&args, &["must_not_touch", "mustNotTouch"]),
@@ -125,6 +127,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         ),
         source_id: source_id.clone(),
     };
+
+    if let Some(error) = exact_shard_contract_error(intent, &delegation_metadata) {
+        return Ok(error);
+    }
 
     let cwd = args.get("cwd").and_then(|v| v.as_str());
 
@@ -554,6 +560,8 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
     );
     let implement_write_scope = string_list_arg(&args, &["write_scope", "writeScope"]);
     let implement_must_not_touch = string_list_arg(&args, &["must_not_touch", "mustNotTouch"]);
+    let accepted_shard_id =
+        string_arg(&args, &["accepted_shard_id", "acceptedShardId"]).map(str::to_string);
     if swarm_policy_requires_implement_write_scope(&write_policy)
         && implement_write_scope.is_empty()
     {
@@ -564,6 +572,17 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
             )
             .with_suggestion(
                 "rerun with write_policy=read-only for investigation only, or provide exact disjoint write_scope entries for every implement shard",
+            ),
+        ));
+    }
+    if swarm_policy_requires_implement_write_scope(&write_policy) && accepted_shard_id.is_none() {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(
+                "SWARM_ACCEPTED_SHARD_REQUIRED",
+                "mission_swarm_run refused to create implementation workers without accepted_shard_id",
+            )
+            .with_suggestion(
+                "run an investigation/synthesis pass first, then rerun with accepted_shard_id pointing at the accepted exact shard",
             ),
         ));
     }
@@ -608,6 +627,7 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
             ),
             write_scope: Vec::new(),
             must_not_touch: vec!["**/*".to_string()],
+            accepted_shard_id: None,
         });
     }
     for idx in 0..max_claude_workers {
@@ -635,6 +655,7 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
             ),
             write_scope: Vec::new(),
             must_not_touch: vec!["**/*".to_string()],
+            accepted_shard_id: None,
         });
     }
 
@@ -649,6 +670,7 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
             read_scope: read_scope.clone(),
             write_scope: implement_write_scope.clone(),
             must_not_touch: implement_must_not_touch.clone(),
+            accepted_shard_id: accepted_shard_id.clone(),
         });
     }
 
@@ -800,6 +822,7 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
         "project_root": project_root,
         "target_projects": target_projects.iter().map(SwarmTargetProject::to_json).collect::<Vec<_>>(),
         "context_pack_path": context_pack_path,
+        "accepted_shard_id": accepted_shard_id,
         "context_pack_materialized": context_pack_materialized,
         "parent_id": parent_id,
         "write_policy": write_policy,
@@ -891,6 +914,20 @@ fn render_swarm_context_pack(
         lisp_string_vector(acceptance)
     ));
     out.push_str(&format!("  :objective {}\n", lisp_string(objective)));
+    out.push_str("  :accepted_shards\n  (\n");
+    for task in planned.iter().filter(|task| !task.write_scope.is_empty()) {
+        if let Some(shard_id) = task.accepted_shard_id.as_deref() {
+            out.push_str(&format!(
+                "    (shard :id {} :lane {} :task_class {} :write_scope {} :acceptance {})\n",
+                lisp_string(shard_id),
+                lisp_string(&task.lane),
+                lisp_string(&task.task_class),
+                lisp_string_vector(&task.write_scope),
+                lisp_string_vector(acceptance),
+            ));
+        }
+    }
+    out.push_str("  )\n");
     out.push_str("  :tasks\n  (\n");
     for (idx, task) in planned.iter().enumerate() {
         out.push_str(&format!(
@@ -904,11 +941,15 @@ fn render_swarm_context_pack(
             lisp_string(&task.intent),
         ));
         out.push_str(&format!(
-            "          :read_scope {} :write_scope {} :must_not_touch {})\n",
+            "          :read_scope {} :write_scope {} :must_not_touch {}",
             lisp_string_vector(&task.read_scope),
             lisp_string_vector(&task.write_scope),
             lisp_string_vector(&task.must_not_touch),
         ));
+        if let Some(shard_id) = task.accepted_shard_id.as_deref() {
+            out.push_str(&format!(" :accepted_shard_id {}", lisp_string(shard_id)));
+        }
+        out.push_str(")\n");
     }
     out.push_str("  ))\n");
     out
@@ -956,6 +997,7 @@ struct SwarmPlannedTask {
     read_scope: Vec<String>,
     write_scope: Vec<String>,
     must_not_touch: Vec<String>,
+    accepted_shard_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -985,6 +1027,7 @@ impl SwarmPlannedTask {
             "read_scope": self.read_scope,
             "write_scope": self.write_scope,
             "must_not_touch": self.must_not_touch,
+            "accepted_shard_id": self.accepted_shard_id,
         })
     }
 }
@@ -1086,7 +1129,7 @@ fn render_swarm_task_description(
     } else {
         (
             "基于已接受 shard 和上下文，请完成这个最小同构改动；优先保持现有行为，只在 declared write_scope 内修改。",
-            "Completion protocol: this is an implementation lane. You may read declared read_scope, may write only declared write_scope, must not write/stage/commit forbidden paths, and must report acceptance evidence as a structured artifact.",
+            "Completion protocol: this is an implementation lane. You may read declared read_scope, may write only declared write_scope, must not write/stage/commit forbidden paths, must not create internal ClaudeCode Task/TaskCreate/TaskUpdate subagents, and must report acceptance evidence as a structured artifact.",
         )
     };
     let parent_line = parent_id
@@ -1094,12 +1137,13 @@ fn render_swarm_task_description(
         .unwrap_or_default();
 
     format!(
-        "{interaction_preamble}\n\nObjective:\n{objective}\n\n## Swarm metadata\n- project_id: {project_id}\n- project_root: {project_root}\n- target_projects: {}\n{parent_line}- lane: {}\n- task_class: {}\n- pool_hint: {}\n- engine_hint: {}\n- context_pack_path: {context_pack_path}\n- write_policy: {task_write_policy}\n- read_scope: {}\n- write_scope: {}\n- must_not_touch: {}\n- acceptance: {}\n\n{}",
+        "{interaction_preamble}\n\nObjective:\n{objective}\n\n## Swarm metadata\n- project_id: {project_id}\n- project_root: {project_root}\n- target_projects: {}\n{parent_line}- lane: {}\n- task_class: {}\n- pool_hint: {}\n- engine_hint: {}\n- context_pack_path: {context_pack_path}\n- accepted_shard_id: {}\n- write_policy: {task_write_policy}\n- read_scope: {}\n- write_scope: {}\n- must_not_touch: {}\n- acceptance: {}\n\n{}",
         render_target_projects_inline(target_projects),
         planned.lane,
         planned.task_class,
         planned.pool_hint,
         planned.engine_hint,
+        planned.accepted_shard_id.as_deref().unwrap_or("-"),
         if planned.read_scope.is_empty() {
             "[]".to_string()
         } else {
@@ -1263,6 +1307,7 @@ struct DelegationMetadata {
     pool_hint: Option<String>,
     engine_hint: Option<String>,
     context_pack_path: Option<String>,
+    accepted_shard_id: Option<String>,
     /// Paths the worker is explicitly allowed (and expected) to READ. Distinct
     /// from `write_scope` / `must_not_touch`: review-class tasks ship with a
     /// non-empty `read_scope` and an empty `write_scope`, making the
@@ -1277,6 +1322,53 @@ struct DelegationMetadata {
     /// original anchor visible so dedup can refuse a second concurrent code
     /// worker even when the immediate parent shifts.
     source_id: Option<String>,
+}
+
+fn exact_shard_contract_error(intent: &str, metadata: &DelegationMetadata) -> Option<ToolResult> {
+    let is_implementation_class = matches!(
+        metadata.task_class.as_deref(),
+        Some("code") | Some("implementation") | Some("implement") | Some("implementer")
+    );
+    let is_code_write =
+        (intent == "code" || is_implementation_class) && !metadata.write_scope.is_empty();
+    if !is_code_write {
+        return None;
+    }
+    if metadata
+        .context_pack_path
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .is_empty()
+    {
+        return Some(ToolResult::structured_error(
+            ToolError::new(
+                "EXACT_SHARD_CONTEXT_PACK_REQUIRED",
+                "mission_task_delegate refused an implementation worker without context_pack_path",
+            )
+            .with_suggestion(
+                "run investigation/synthesis first and pass the materialized context_pack_path with the accepted exact shard",
+            ),
+        ));
+    }
+    if metadata
+        .accepted_shard_id
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .is_empty()
+    {
+        return Some(ToolResult::structured_error(
+            ToolError::new(
+                "EXACT_SHARD_ID_REQUIRED",
+                "mission_task_delegate refused an implementation worker without accepted_shard_id",
+            )
+            .with_suggestion(
+                "compile accepted_shards in the context pack, then pass accepted_shard_id/acceptedShardId for this code worker",
+            ),
+        ));
+    }
+    None
 }
 
 /// Inputs for the duplicate-code-worker dedup guard. Built from the parsed
@@ -1809,6 +1901,9 @@ fn render_delegation_metadata_block(metadata: &DelegationMetadata) -> String {
     if let Some(value) = &metadata.context_pack_path {
         lines.push(format!("- context_pack_path: {}", value));
     }
+    if let Some(value) = &metadata.accepted_shard_id {
+        lines.push(format!("- accepted_shard_id: {}", value));
+    }
     if !metadata.read_scope.is_empty() {
         lines.push(format!("- read_scope: {}", metadata.read_scope.join(", ")));
     }
@@ -1845,6 +1940,15 @@ fn render_delegation_metadata_block(metadata: &DelegationMetadata) -> String {
     ) {
         lines.push(
             "- output_contract: return a structured artifact with Findings / Evidence / Recommendations / Verification; do not paste raw KB JSON or full logs as the final answer"
+                .to_string(),
+        );
+    }
+    if matches!(
+        metadata.task_class.as_deref(),
+        Some("code") | Some("implementation") | Some("implement") | Some("implementer")
+    ) {
+        lines.push(
+            "- implementation_contract: accepted_shard_id is the only implementation target; do not create internal ClaudeCode Task/TaskCreate/TaskUpdate subagents"
                 .to_string(),
         );
     }
@@ -2041,6 +2145,7 @@ mod tests {
             pool_hint: Some("claude-code-default".to_string()),
             engine_hint: Some("claude-code".to_string()),
             context_pack_path: Some(".missiond/tasks/wave99/context-pack.lisp".to_string()),
+            accepted_shard_id: None,
             read_scope: vec!["crates/missiond-core/src/types/board.rs".to_string()],
             write_scope: vec!["crates/a.rs".to_string()],
             must_not_touch: vec!["packages/**".to_string()],
@@ -2131,6 +2236,7 @@ mod tests {
                 read_scope: vec!["/repo".to_string()],
                 write_scope: vec!["src/auth".to_string()],
                 must_not_touch: Vec::new(),
+                accepted_shard_id: Some("shard-a".to_string()),
             },
             SwarmPlannedTask {
                 lane: "implement".to_string(),
@@ -2142,6 +2248,7 @@ mod tests {
                 read_scope: vec!["/repo".to_string()],
                 write_scope: vec!["src/auth/routes.rs".to_string()],
                 must_not_touch: Vec::new(),
+                accepted_shard_id: Some("shard-b".to_string()),
             },
         ];
         let conflicts = detect_swarm_write_conflicts(&planned);
@@ -2163,6 +2270,7 @@ mod tests {
                 read_scope: vec!["src/auth".to_string()],
                 write_scope: Vec::new(),
                 must_not_touch: vec!["**/*".to_string()],
+                accepted_shard_id: None,
             },
             SwarmPlannedTask {
                 lane: "implement".to_string(),
@@ -2174,6 +2282,7 @@ mod tests {
                 read_scope: vec!["src/auth".to_string()],
                 write_scope: vec!["src/auth".to_string()],
                 must_not_touch: Vec::new(),
+                accepted_shard_id: Some("shard-impl".to_string()),
             },
         ];
         assert!(detect_swarm_write_conflicts(&planned).is_empty());
@@ -2264,6 +2373,7 @@ mod tests {
             read_scope: vec!["/Users/jin/Projects/jarvis".to_string()],
             write_scope: Vec::new(),
             must_not_touch: vec!["**/*".to_string()],
+            accepted_shard_id: None,
         };
         let description = render_swarm_task_description(
             "M6 wave",
@@ -2305,6 +2415,7 @@ mod tests {
             read_scope: vec!["/repo/semantic-terminal".to_string()],
             write_scope: Vec::new(),
             must_not_touch: vec!["**/*".to_string()],
+            accepted_shard_id: None,
         };
         let description = render_swarm_task_description(
             "M7 wave",
@@ -2357,6 +2468,7 @@ mod tests {
             ],
             write_scope: vec!["/Users/jinchen/Projects/semantic-terminal/.missiond/**".to_string()],
             must_not_touch: Vec::new(),
+            accepted_shard_id: Some("shard-semantic-terminal-impl".to_string()),
         };
         let (project_id, project_root) = planned_task_primary_project(
             "missiond",
@@ -2383,6 +2495,7 @@ mod tests {
             ],
             write_scope: Vec::new(),
             must_not_touch: vec!["**/*".to_string()],
+            accepted_shard_id: None,
         };
         let targets = vec![
             SwarmTargetProject {
@@ -2479,6 +2592,7 @@ mod tests {
             read_scope: vec!["/repo".to_string()],
             write_scope: vec![".missiond/evidence/m6.md".to_string()],
             must_not_touch: vec!["src/**".to_string()],
+            accepted_shard_id: Some("shard-m6-evidence".to_string()),
         };
         let description = render_swarm_task_description(
             "M6 closure",
@@ -2587,6 +2701,7 @@ mod tests {
                 read_scope: vec!["/repo".to_string()],
                 write_scope: Vec::new(),
                 must_not_touch: vec!["**/*".to_string()],
+                accepted_shard_id: None,
             },
             SwarmPlannedTask {
                 lane: "implement".to_string(),
@@ -2598,6 +2713,7 @@ mod tests {
                 read_scope: vec!["/repo".to_string()],
                 write_scope: vec!["src/auth.rs".to_string()],
                 must_not_touch: vec!["target/**".to_string()],
+                accepted_shard_id: Some("shard-auth-rs".to_string()),
             },
         ];
         let source = render_swarm_context_pack(
@@ -2894,5 +3010,32 @@ mod tests {
             "metadata block must surface source_board_task_id so dedup readback works:\n{block}"
         );
         assert!(description_references_source(&block, "source-9"));
+    }
+
+    #[test]
+    fn exact_shard_contract_blocks_code_write_without_context_pack_or_shard_id() {
+        let missing_both = DelegationMetadata {
+            task_class: Some("code".to_string()),
+            write_scope: vec!["crates/foo.rs".to_string()],
+            ..DelegationMetadata::default()
+        };
+        assert!(exact_shard_contract_error("code", &missing_both).is_some());
+
+        let missing_shard = DelegationMetadata {
+            task_class: Some("implementation".to_string()),
+            context_pack_path: Some("/tmp/context-pack.lisp".to_string()),
+            write_scope: vec!["crates/foo.rs".to_string()],
+            ..DelegationMetadata::default()
+        };
+        assert!(exact_shard_contract_error("code", &missing_shard).is_some());
+
+        let accepted = DelegationMetadata {
+            task_class: Some("implementation".to_string()),
+            context_pack_path: Some("/tmp/context-pack.lisp".to_string()),
+            accepted_shard_id: Some("shard-auth-001".to_string()),
+            write_scope: vec!["crates/foo.rs".to_string()],
+            ..DelegationMetadata::default()
+        };
+        assert!(exact_shard_contract_error("code", &accepted).is_none());
     }
 }

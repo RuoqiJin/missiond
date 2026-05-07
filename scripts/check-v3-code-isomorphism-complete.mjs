@@ -22,7 +22,7 @@
 //   board-frontend,
 //   conversation-ingestion, skill-runtime, cascade-governance,
 //   router-policy, incident-governance, capability-governance,
-//   compute-primitives, sysinfra-control, ops-infra, typed-lisp-compiler.
+//   compute-primitives, sysinfra-control, ops-infra, eventbridge, typed-lisp-compiler.
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -75,6 +75,7 @@ export const EXPECTED_SURFACES = [
   'compute-primitives',
   'sysinfra-control',
   'ops-infra',
+  'eventbridge',
   'typed-lisp-compiler',
 ];
 
@@ -128,6 +129,7 @@ export const PER_SURFACE_CHECKERS = [
   'scripts/check-frontend-board-code-isomorphism.mjs',
   'scripts/check-frontend-board-runtime-projection.mjs',
   'scripts/check-v3-ops-infra-isomorphism.mjs',
+  'scripts/check-v3-eventbridge-isomorphism.mjs',
   'scripts/check-typed-lisp-compiler.mjs',
   // Cross-surface request-flow smoke; aggregates the user-facing
   // request -> intent -> plan -> execute-review path declared in
@@ -585,6 +587,14 @@ function runDryFixture(opts) {
     (surface ops-infra
       :status "code-aligned"
       :code ["a"]
+      :note "n")
+    (surface eventbridge
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
+    (surface typed-lisp-compiler
+      :status "code-aligned"
+      :code ["a"]
       :note "n"))
   (compression-contract
     :checks ["${AGGREGATE_COMMAND}"]))`;
@@ -730,6 +740,14 @@ function runDryFixture(opts) {
       :code ["a"]
       :note "n")
     (surface ops-infra
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
+    (surface eventbridge
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
+    (surface typed-lisp-compiler
       :status "code-aligned"
       :code ["a"]
       :note "n"))

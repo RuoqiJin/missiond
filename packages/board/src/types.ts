@@ -28,6 +28,7 @@ export interface SlotDef {
   blockedKind?: string;
   currentTaskId?: string;
   activeBoardTaskId?: string;
+  diagnostics?: string[];
   latestConversation?: {
     id?: string;
     source?: string;

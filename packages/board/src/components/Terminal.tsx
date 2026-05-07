@@ -25,6 +25,21 @@ function truncateStatusText(value: string | null | undefined): string | null {
   return flat.length > STATUS_TEXT_MAX ? `${flat.slice(0, STATUS_TEXT_MAX - 1)}…` : flat;
 }
 
+function durableConversationFallback(slot?: SlotDef): string[] {
+  const conv = slot?.latestConversation;
+  if (!conv?.id) return [];
+  const lines = [
+    `● No live PTY. Showing durable conversation for this slot.`,
+    `  conversation: ${conv.id}`,
+  ];
+  if (conv.source) lines.push(`  source: ${conv.source}`);
+  if (conv.status) lines.push(`  status: ${conv.status}`);
+  if (conv.messageCount != null) lines.push(`  messages: ${conv.messageCount}`);
+  if (conv.updatedAt) lines.push(`  updated: ${conv.updatedAt}`);
+  if (conv.title) lines.push(`  title: ${conv.title}`);
+  return lines;
+}
+
 type PTYState = 'unknown' | 'not_running' | 'starting' | 'idle' | 'slash_menu' | 'thinking' | 'responding' | 'tool_running' | 'confirming' | 'error' | 'exited';
 
 // --- Error Boundary ---
@@ -186,8 +201,14 @@ function TerminalInner({ slotId, slot, activeTask }: TerminalProps) {
           setPtyState(data.state || 'idle');
           connectWs(term, slotId);
         } else {
-          setPtyState('not_running');
-          safeWriteln(term, `\x1b[90m● No active session. Press Start to launch ${providerLabel}.\x1b[0m`);
+          setPtyState(data.state === 'exited' ? 'exited' : 'not_running');
+          const fallback = durableConversationFallback(slot);
+          if (fallback.length > 0) {
+            for (const line of fallback) safeWriteln(term, `\x1b[90m${line}\x1b[0m`);
+            safeWriteln(term, `\x1b[90m  Open Logs/Exec for full durable transcript, or press Start to launch ${providerLabel}.\x1b[0m`);
+          } else {
+            safeWriteln(term, `\x1b[90m● No active session. Press Start to launch ${providerLabel}.\x1b[0m`);
+          }
         }
       })
       .catch(() => {
@@ -197,7 +218,17 @@ function TerminalInner({ slotId, slot, activeTask }: TerminalProps) {
       });
 
     return () => { cancelled = true; };
-  }, [slotId, ready]);
+  }, [
+    slotId,
+    ready,
+    providerLabel,
+    slot?.latestConversation?.id,
+    slot?.latestConversation?.source,
+    slot?.latestConversation?.status,
+    slot?.latestConversation?.messageCount,
+    slot?.latestConversation?.updatedAt,
+    slot?.latestConversation?.title,
+  ]);
 
   function clearReconnectTimer() {
     if (reconnectTimerRef.current) {

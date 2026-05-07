@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { callTool } from '@/lib/missiond';
 
+export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
+
 interface BeaconNode {
   beacon_name: string;
   repo: string;

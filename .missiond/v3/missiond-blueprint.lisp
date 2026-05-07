@@ -620,6 +620,9 @@
 	       "mission_swarm_run MUST auto-provision per-Claude dynamic slots by default for non-dry-run Claude context-pack / implement shards and persist each created slot id as the child BoardTask assignee before publishing BoardTaskCreated. This is the productized fanout path for M6 SSOT waves; otherwise all children collapse onto the single persistent ClaudeCode slot. auto_provision_slots=false is allowed only as an explicit diagnostic override."
 	       "mission_swarm_run context-pack/read-only lanes MUST render write_policy=read-only and the strict no-edit/no-stage/no-commit completion protocol even when the parent wave write_policy is lisp-first or code; write permission is granted only to lanes with a non-empty write_scope."
 	       "mission_swarm_run MUST fail fast with SWARM_IMPLEMENT_WRITE_SCOPE_REQUIRED when write_policy is not read-only and the caller did not pass an explicit write_scope; the tool must never dry-run or dispatch an implementation shard with an empty write_scope because that turns disjoint ownership into prompt prose."
+	       "mission_swarm_run MUST fail fast with SWARM_ACCEPTED_SHARD_REQUIRED when write_policy is not read-only and the caller did not pass accepted_shard_id/acceptedShardId; implementation workers consume already-accepted exact shards, never broad M6 objectives."
+	       "mission_task_delegate MUST fail fast with EXACT_SHARD_CONTEXT_PACK_REQUIRED / EXACT_SHARD_ID_REQUIRED when a code/implementation worker declares write_scope but lacks context_pack_path or accepted_shard_id. Broad review/design goals belong to investigator lanes; implementation lanes must name the accepted shard id."
+	       "Implementation worker prompts MUST explicitly forbid internal ClaudeCode TaskCreate/TaskUpdate subagent delegation; recursive decomposition belongs to MissionD master/workflow and is audited from provider durable logs as a workflow violation."
 	       "mission_task_delegate and mission_swarm_run MUST accept parent_id/parentId aliases and persist them into CreateBoardTaskInput.parent_id when a master objective spawns child shards; mission_swarm_run MUST also render parent_board_task_id in the worker-facing Swarm metadata so the Board hierarchy, parent-note closeout, and master recovery loop can connect child completion evidence back to the active objective."
 	       "Autopilot ensure_pty MUST override pty_slot.cwd to the BoardTask.project's registered project_root when the BoardTask carries a project label that resolves under ProjectRegistry and that root differs from slot.config.cwd; spawn_tracked_slot's project-root-spawn-cwd contract then handles Gemini/Codex hard-fail and ClaudeCode normalization. Slot reuse for cross-project dispatch MUST require slot.project_root == BoardTask project_root (already enforced for mission_task_delegate; mission_swarm_run BoardTasks rely on the spawn-side cwd override for the same effect)."
 	       "Autopilot MUST unclaim a BoardTask when ensure_pty returns false after a claim, because spawn-pending / busy / transient PTY states are retryable dispatch conditions and must not wedge the task in running with no prompt delivered."
@@ -1031,6 +1034,10 @@
          :causes [ExecutionEvent::Completed BoardEvent::StatusChanged]))
     :autopilot-trigger-contract
       "BoardEvent::TaskCreated, BoardEvent::Updated(status=open), BoardEvent::StatusChanged(new_status=open), and SlotEvent::BecameIdle MUST wake Autopilot through event-bus subscribers. Subscribers only notify the dedicated Autopilot task and ack immediately; they MUST NOT run pty.send inline."
+    :waiting-contract
+      "BoardTask/Slot/Conversation/Execution waits MUST use EventBus-driven waiters whenever a causally linked event exists. Fixed sleep/poll loops are permitted only as bounded fallback with an explicit diagnostic reason; PTY idle is a diagnosis, not task-completion authority."
+    :conversation-final-contract
+      "Provider durable finals MUST produce a conversation-final/settled transition before Autopilot closes delegated work. Completion tails rebind conversation.task_id, mark worker conversations completed with ended_at, and publish enough event evidence for frontends and master-control to advance without polling hidden state."
     :causation-rule
       "Every generated artifact/event should preserve a predecessor handle when the producer has one. Missing causation is allowed only at external ingress boundaries such as the first user message."
     :implementation ["crates/missiond-daemon/src/bus/v2_subscribers.rs"
@@ -1156,6 +1163,56 @@
       ["mission_project init/import_universe/survey MUST project intent-path candidates from project-registry-policy."
        "mission_project import_universe MUST project its default manifest from project-registry-policy; UNIVERSE_MANIFEST is only an explicit override."
        "A real MissionD project with .missiond but no project-registry-policy MUST return V3_BLUEPRINT_CONFIG_ERROR rather than silently using embedded defaults."])
+
+  (eventbridge-policy
+    :schema "missiond.eventbridge-policy.v1"
+    :envelope missiond.event-envelope.v1
+    :fields [event_id source project_id service_id event_kind subject correlation_id trace_id occurred_at observed_at authority schema_version payload privacy_class]
+    :taxonomy [deploy_created build_started build_succeeded build_failed deploy_started deploy_succeeded deploy_failed smoke_succeeded smoke_failed rollback_started rollback_succeeded rollback_failed agent_heartbeat agent_update_started agent_update_succeeded agent_update_failed provenance_changed]
+    :rule "MissionD remains the local orchestrator and EventBridge. Cloud services send durable provider events through typed webhooks; MissionD stores them as SystemEvent::ExternalServiceEvent with idempotent event_id dedupe. PTY remains diagnostic only."
+    :invariants
+      ["External deploy events MUST enter through /webhooks/deploy-center-event or /webhooks/service-event with X-MissionD-Webhook-Token when MISSIOND_EXTERNAL_WEBHOOK_TOKEN is configured."
+       "Deploy-center event envelopes MUST carry stable event_id values derived from deploy-center durable rows; MissionD MUST reject deploy-center events without event_id."
+       "mission_timeline(action=wait, domain=system) MUST support serviceId, eventKind, projectId, and correlationId predicates for deployment events."
+       "ExternalServiceEvent append MUST use deterministic dedupe by service_id + event_id."])
+
+  (deployment-event-ingest
+    :schema "missiond.deployment-event-ingest.v1"
+    :entry [/webhooks/deploy-center-event mission_timeline.wait deployment-event-response.workflow]
+    :core ((step s1 :logic "validate optional MissionD webhook token and parse missiond.event-envelope.v1")
+           (step s2 :logic "preserve event identity and project/correlation fields under payload._envelope")
+           (step s3 :logic "publish SystemEvent::ExternalServiceEvent through EventBus with service/event dedupe")
+           (step s4 :logic "allow master, Autopilot, and deploy-ops workflows to wait by service_id, event_kind, project_id, and correlation_id")
+           (step s5 :logic "create BoardTask suggestions for deploy/smoke/agent-update failures; never auto rollback without deploy-center policy or user approval"))
+    :egress [ExternalServiceEvent mission_timeline.wait deployment-ops-BoardTask]
+    :surfaces [eventbridge project-registry])
+
+  (project-identity-contract
+    :schema "missiond.project-identity-contract.v1"
+    :fields [project_id canonical_root repo_remote ssot_paths deploy_center_slug forge_project_name service_ids aliases status]
+    :rule "MissionD is project identity and SSOT registry authority; deploy-center is deployment fact authority; Forge is component/pattern/reality catalog authority."
+    :reconcile-action mission_project.reconcile
+    :invariants
+      ["MissionD Universe owns canonical project ids, roots, SSOT paths, maturity, Board links, and workstation dispatch."
+       "deploy-center owns deployment targets, runtime location, release provenance, deploy agents, and executor state."
+       "Forge owns component/pattern catalog, code reality mirror, and Universe DAG recommendations; Forge-only references are not deployable unless MissionD registers them."
+       "Historical aliases such as xjp-deploy-center MUST NOT become active project roots."])
+
+  (registry-authority-map
+    :schema "missiond.registry-authority-map.v1"
+    :authorities ((missiond :owns [project-identity ssot-paths maturity board-workstation-scheduling])
+                  (deploy-center :owns [deployment-targets runtime-location release-provenance agent-executor-state])
+                  (forge :owns [component-catalog pattern-catalog code-reality-mirror universe-dag-recommendations]))
+    :workflow project-registry-reconciliation
+    :rule "Registry reconciliation reads MissionD, deploy-center, and Forge facts, reports missing_in_*, alias_conflict, root_mismatch, and deploy_fact_missing, and never silently overwrites identities.")
+
+  (deploy-agent-self-update-governance
+    :schema "missiond.deploy-agent-self-update-governance.v1"
+    :owner deploy-center
+    :authority-table deploy_agent_update_provenance
+    :facts [agent_id current_version desired_version s3_latest update_status canary_status rollback_marker last_error]
+    :events [agent_update_started agent_update_succeeded agent_update_failed rollback_started rollback_succeeded rollback_failed agent_heartbeat]
+    :rule "deploy-agent self-update status is a deploy-center runtime fact stored in deploy_agent_update_provenance; deploy-center relays update events into MissionD EventBridge so deploy-ops BoardTasks can be triggered from durable events.")
 
   (project-maturity-model
     :schema "missiond.project-maturity-model.v2"
@@ -1420,6 +1477,17 @@
       :ops-capability deploy-ops
       :source-evidence ["/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/auth/k8s/production/configmap.yaml" "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/auth/k8s/production/deployment.yaml" "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/auth/caddy/Caddyfile"]
       :risks [wechat-callback-prod-drift mysql-artifact-cleanup])
+    (service :id deploy-center
+      :project deploy-center
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/deploy-center"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/deploy-center-backend-blueprint.lisp"
+      :environment production
+      :deployment (:substrate deploy-center :authority release-provenance :provenance-api "/api/deploy/provenance/:project")
+      :event-ingest (:endpoint "/webhooks/deploy-center-event" :domain system :event ExternalServiceEvent :source deploy_events :token-env MISSIOND_EXTERNAL_WEBHOOK_TOKEN :authority deploy-center.deploy_events :rule "deploy-center relays durable deploy_events rows into MissionD EventBridge with stable event_id and MissionD idempotency; MissionD must not infer production release state by stitching GitHub/curl/git when deploy-center has provenance.")
+      :events [deploy_created build_started build_succeeded build_failed deploy_started deploy_succeeded deploy_failed smoke_succeeded smoke_failed rollback_started rollback_succeeded rollback_failed agent_heartbeat agent_update_started agent_update_succeeded agent_update_failed provenance_changed]
+      :ops-capability deploy-ops
+      :surface service-runtime-universe)
     (capability :id cloudflare-dns
       :provider cloudflare
       :default-mode read-only-inventory
@@ -1515,6 +1583,7 @@
       ["mission_conversation_get/search/message_search/context_around MUST project default limits from conversation-ingestion-policy."
        "mission_conversation_events and mission_agent_trajectory MUST project default limits from conversation-ingestion-policy."
        "mission_timeline query/search MUST project default and max limits from conversation-ingestion-policy."
+       "mission_timeline(action=wait) MUST expose bounded EventBus waits for board/slot/task/system predicates; timeout/lag returns diagnostic JSON so polling remains only an explicit fallback."
        "Explicit opt-in UserPromptSubmit context prefetch intent router model and timeout MUST project from conversation-ingestion-policy instead of local claude-opus/10000ms literals; default workstation hook sync removes UserPromptSubmit prefetch until a memory-audit workflow enables it."
        "Codex vision worker binary/model/idle timeout and CodexCli absolute timeout MUST project from conversation-ingestion-policy instead of local gpt-5.4/120s/300s literals."
        "A real MissionD project with .missiond but no conversation-ingestion-policy MUST return V3_BLUEPRINT_CONFIG_ERROR rather than silently using embedded defaults."])
@@ -1711,6 +1780,13 @@
       :v3-function typed-lisp-compiler
       :surface typed-lisp-compiler
       :note "The typed Lisp compiler is the V3 destination for fragile V2-era Lisp shape/token-pin checking; Lisp remains SSOT while OCaml owns typed AST diagnostics and generated projections.")
+    (v2-item cloud-local-eventbridge
+      :status code-aligned
+      :v2-source ".missiond/v2/intent-event-bus.lisp :: event_router / external service event ingress"
+      :v3-pillar communication
+      :v3-function eventbridge
+      :surface eventbridge
+      :note "V2 event bus intent becomes the V3 EventBridge: local Board/slot/agent events and deploy-center/auth/timeline cloud events share missiond.event-envelope.v1, SystemEvent::ExternalServiceEvent, token-checked webhooks, idempotent durable event_log append, and mission_timeline EventBus waits.")
     (v2-item review-gate-policy
       :status code-aligned
       :v2-source ".missiond/v2/intent.lisp :: review-gate-policy / review-gate-resolution-v0"
@@ -2286,6 +2362,15 @@
                (step s5 :logic "derive analysis, reconciliation, retrospective, and embedding work items")
                (step s6 :logic "surface durable facts for context assembly and later memory projection"))
         :egress [conversation_rows timeline_events retrospective_result embedding_jobs])
+      (function eventbridge
+        :surface eventbridge
+        :entry [/webhooks/service-event /webhooks/auth-event /webhooks/deploy-center-event mission_timeline.wait deployment-event-response project-registry-reconciliation]
+        :core ((step s1 :logic "validate external webhook token and parse missiond.event-envelope.v1 or supported legacy service/auth event payloads")
+               (step s2 :logic "preserve event identity, project_id, service_id, correlation_id, trace_id, authority, privacy_class, and source payload under ExternalServiceEvent payload._envelope")
+               (step s3 :logic "publish SystemEvent::ExternalServiceEvent through the EventBus with deterministic service_id/event_id dedupe")
+               (step s4 :logic "allow bounded mission_timeline waits by service_id, event_kind, project_id, and correlation_id so deployment and worker orchestration can advance from durable events instead of PTY polling")
+               (step s5 :logic "trigger deployment-event-response and project-registry-reconciliation workflows while keeping deploy-center as deployment fact authority and Forge as catalog authority"))
+        :egress [ExternalServiceEvent event_log mission_timeline_wait deploy_ops_boardtask project_reconcile_report])
       (function router-policy
         :surface router-policy
         :entry [mission_router_chat mission_router_chat_manage router-policy-dry-run]
@@ -2965,6 +3050,7 @@
              "crates/missiond-daemon/src/handlers/knowledge/project/registry.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/context.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/universe.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/project/reconcile.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/survey.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/vault.rs"
              "crates/missiond-core/src/types/project.rs"
@@ -2973,6 +3059,19 @@
              "scripts/check-v3-project-registry-isomorphism.mjs"
              "scripts/check-project-maturity.mjs"]
       :note "Code-aligned destination for project registry/root resolution. project.rs is the mission_project facade; project/registry.rs owns list/get/set_active/sync/init/import_universe; project/universe.rs owns mission_project(action=universe) and projects service-runtime-universe entries such as auth production domain/deployment/DNS capability to master, workers, and Board System. ProjectRegistry::resolve owns longest-prefix project lookup; inactive project aliases never participate in cwd resolution, and mission_project init archives inactive path aliases before upsert so stale aliases cannot block canonical root correction. check-project-maturity.mjs is the project-universe maturity gate: --min-level M5 proves worker-operational SSOT closure; --min-level M6 proves Auth-grade domain/policy/flow/event/runtime/compatibility depth. It resolves the MissionD blueprint from the checker script directory so external-project workers can run it from the target root. [details: .missiond/v3/evidence/blueprint-notes.lisp#note-016]")
+
+    (surface eventbridge
+      :status "code-aligned"
+      :implements [eventbridge-policy deployment-event-ingest deploy-agent-self-update-governance]
+      :code ["crates/missiond-core/src/ws/server.rs"
+             "crates/missiond-core/src/event/events/system.rs"
+             "crates/missiond-daemon/src/bus/bootstrap.rs"
+             "crates/missiond-daemon/src/bus/v2_subscribers.rs"
+             "crates/missiond-daemon/src/handlers/comm/timeline.rs"
+             "crates/missiond-mcp/src/tools/comm/timeline.rs"
+             ".missiond/workflows/deployment-event-response.lisp"
+             "scripts/check-v3-eventbridge-isomorphism.mjs"]
+      :note "MissionD local EventBridge accepts missiond.event-envelope.v1 cloud/service events, preserves project/correlation metadata under ExternalServiceEvent payload._envelope, dedupes by service/event id, and exposes EventBus waits for deployment workflows. deploy-center remains deployment fact authority; MissionD caches, displays, and triggers Board workflows only.")
 
     (surface board-frontend
       :status "code-aligned"

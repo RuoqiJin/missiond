@@ -5,6 +5,7 @@ use serde_json::Value;
 use crate::state::AppState;
 
 mod context;
+mod reconcile;
 mod registry;
 mod survey;
 mod universe;
@@ -25,11 +26,12 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
         "context" => context::handle_context(state, args).await,
         "memories" => context::handle_memories(state, args).await,
         "universe" => universe::handle_universe(args).await,
+        "reconcile" => reconcile::handle_reconcile(state, args).await,
         "survey" => survey::handle_survey(state, args).await,
         "vault_sync" => vault::handle_vault_sync(state, args).await,
         "import_universe" => registry::handle_import_universe(state, args).await,
         _ => Ok(ToolResult::error(format!(
-            "Unknown project action: {}. Use: list, get, set_active, sync, init, context, memories, universe, vault_sync, import_universe, survey",
+            "Unknown project action: {}. Use: list, get, set_active, sync, init, context, memories, universe, reconcile, vault_sync, import_universe, survey",
             action
         ))),
     }

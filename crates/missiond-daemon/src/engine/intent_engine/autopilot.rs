@@ -443,6 +443,9 @@ async fn durable_provider_completion_for_slot_task(
                     .set_conversation_task_id(&conv.id, task.id.as_str())
                     .await;
             }
+            if conv.status == "active" {
+                let _ = state.store.complete_conversation(&conv.id).await;
+            }
             return Ok(Some(DurableProviderCompletion {
                 session_id: conv.id,
                 source: conv.source,

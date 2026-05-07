@@ -58,6 +58,8 @@ fn task_delegate_schema() -> Value {
             "engineHint": {"type": "string", "description": "engine_hint camelCase alias"},
             "context_pack_path": {"type": "string", "description": "两阶段 context-pack Lisp 路径"},
             "contextPackPath": {"type": "string", "description": "context_pack_path camelCase alias"},
+            "accepted_shard_id": {"type": "string", "description": "已接受 exact shard ID。code/implementation 工位必填，防止宽目标直接进入实现工位"},
+            "acceptedShardId": {"type": "string", "description": "accepted_shard_id camelCase alias"},
             "read_scope": {"type": "array", "description": "允许读取路径列表 (review-class 任务必填，与 write_scope 区分)"},
             "readScope": {"type": "array", "description": "read_scope camelCase alias"},
             "write_scope": {"type": "array", "description": "允许写入路径列表"},
@@ -70,9 +72,7 @@ fn task_delegate_schema() -> Value {
         }
     });
     if let (Some(properties), Value::Object(extras)) = (
-        schema
-            .get_mut("properties")
-            .and_then(|v| v.as_object_mut()),
+        schema.get_mut("properties").and_then(|v| v.as_object_mut()),
         dedup_linkage_properties(),
     ) {
         for (key, value) in extras {
@@ -123,6 +123,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     },
                     "context_pack_path": {"type": "string", "description": "可选 context-pack Lisp 路径"},
                     "contextPackPath": {"type": "string", "description": "context_pack_path alias"},
+                    "accepted_shard_id": {"type": "string", "description": "实现阶段必填：accepted shard ID。read-only 调查阶段无需提供"},
+                    "acceptedShardId": {"type": "string", "description": "accepted_shard_id alias"},
                     "max_claude_workers": {"type": "integer", "default": 8},
                     "maxClaudeWorkers": {"type": "integer"},
                     "max_gemini_workers": {"type": "integer", "default": 2},

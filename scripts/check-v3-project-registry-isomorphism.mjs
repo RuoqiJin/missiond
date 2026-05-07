@@ -22,6 +22,7 @@ const DEFAULT_FILES = {
   facade: 'crates/missiond-daemon/src/handlers/knowledge/project.rs',
   registry: 'crates/missiond-daemon/src/handlers/knowledge/project/registry.rs',
   context: 'crates/missiond-daemon/src/handlers/knowledge/project/context.rs',
+  reconcile: 'crates/missiond-daemon/src/handlers/knowledge/project/reconcile.rs',
   universe: 'crates/missiond-daemon/src/handlers/knowledge/project/universe.rs',
   survey: 'crates/missiond-daemon/src/handlers/knowledge/project/survey.rs',
   vault: 'crates/missiond-daemon/src/handlers/knowledge/project/vault.rs',
@@ -100,6 +101,7 @@ function checkFiles(root, files) {
     'crates/missiond-daemon/src/handlers/knowledge/project.rs',
     'crates/missiond-daemon/src/handlers/knowledge/project/registry.rs',
     'crates/missiond-daemon/src/handlers/knowledge/project/context.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/project/reconcile.rs',
     'crates/missiond-daemon/src/handlers/knowledge/project/survey.rs',
     'crates/missiond-daemon/src/handlers/knowledge/project/vault.rs',
     'crates/missiond-core/src/types/project.rs',
@@ -123,6 +125,9 @@ function checkFiles(root, files) {
 	    'scripts/check-project-maturity.mjs --min-level M5',
 	    'scripts/check-project-maturity.mjs --min-level M6',
 	    'It resolves the MissionD blueprint from the checker script directory',
+	    '(project-identity-contract',
+	    '(registry-authority-map',
+	    'mission_project.reconcile',
 	    '(maturity :id missiond :current M5 :target M6',
 	    '(maturity :id auth :current M6 :target M6',
 	    '(project-blueprint-registry',
@@ -160,6 +165,7 @@ function checkFiles(root, files) {
 	    ':deployment (:substrate kubernetes :namespace production :deployment "xjp-auth-center"',
 	    ':dns-provider cloudflare',
 	    ':event-ingest (:endpoint "/webhooks/auth-event" :domain system :event ExternalServiceEvent',
+	    ':event-ingest (:endpoint "/webhooks/deploy-center-event" :domain system :event ExternalServiceEvent',
 	    ':source auth-audit-events',
 	    ':token-env MISSIOND_EXTERNAL_WEBHOOK_TOKEN',
 	    'mission_project(action=universe)',
@@ -191,6 +197,7 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.facade, sources.facade, [
     'mod context;',
+    'mod reconcile;',
     'mod registry;',
     'mod survey;',
     'mod universe;',
@@ -203,6 +210,7 @@ function checkFiles(root, files) {
     '"context" => context::handle_context(state, args).await',
     '"memories" => context::handle_memories(state, args).await',
     '"universe" => universe::handle_universe(args).await',
+    '"reconcile" => reconcile::handle_reconcile(state, args).await',
     '"survey" => survey::handle_survey(state, args).await',
     '"vault_sync" => vault::handle_vault_sync(state, args).await',
     '"import_universe" => registry::handle_import_universe(state, args).await',
@@ -248,12 +256,22 @@ function checkFiles(root, files) {
     'project_memory::read_memory_index',
   ]);
 
+  requireAll(diagnostics, files.reconcile, sources.reconcile, [
+    'handle_reconcile',
+    'missiond.project-registry-reconcile.v1',
+    'deploy_fact_missing',
+    'root_mismatch',
+    'alias_conflict',
+    'missing_in_missiond',
+  ]);
+
   requireAll(diagnostics, files.universe, sources.universe, [
     'handle_universe',
     'service-runtime-universe',
     'extract_forms(&block, "(service ")',
     'extract_forms(&block, "(capability ")',
     'publicBaseUrl',
+    'eventIngest',
     'dnsProvider',
     'opsCapability',
     'sourceEvidence',
@@ -320,6 +338,7 @@ function checkFiles(root, files) {
     '"context"',
     '"memories"',
     '"universe"',
+    '"reconcile"',
     '"vault_sync"',
     '"import_universe"',
     '"survey"',
@@ -364,6 +383,8 @@ function buildFixture() {
 	    :common-m5-to-m6-gap [domain-model policy-flow-event-split compatibility-ledger hot-path-wiring regression-matrix final-m6-report]
 	    (maturity :id missiond :current M5 :target M6)
 	    (maturity :id auth :current M6 :target M6 :gap []))
+	  (project-identity-contract :reconcile-action mission_project.reconcile)
+	  (registry-authority-map :authorities ((missiond) (deploy-center) (forge)))
 	  (project-blueprint-registry
 	    (project :id jarvis-forge :root "/Users/jinchen/Projects/jarvis-forge" :backend ".missiond/backend/forge-backend-blueprint.lisp" :frontend ".missiond/frontend/forge-ui-blueprint.lisp")
 	    (project :id xiaojinpro-backend :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend")
@@ -378,6 +399,7 @@ function buildFixture() {
     (service-runtime-universe
       :schema "missiond.service-runtime-universe.v1"
       (service :id auth :public-base-url "https://auth.xiaojinpro.com" :dns-provider cloudflare :deployment (:substrate kubernetes :namespace production :deployment "xjp-auth-center") :event-ingest (:endpoint "/webhooks/auth-event" :domain system :event ExternalServiceEvent :source auth-audit-events :token-env MISSIOND_EXTERNAL_WEBHOOK_TOKEN))
+      (service :id deploy-center :event-ingest (:endpoint "/webhooks/deploy-center-event" :domain system :event ExternalServiceEvent))
       ;; mission_project(action=universe)
       )
 	  (implementation-map
@@ -387,6 +409,7 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/project.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/registry.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/context.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/project/reconcile.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/universe.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/survey.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/vault.rs"
@@ -408,6 +431,7 @@ env_or_default_universe_manifest nearest_missiond_root UNIVERSE_MANIFEST
 
   writeFixture(root, DEFAULT_FILES.facade, `
 mod context;
+mod reconcile;
 mod registry;
 mod survey;
 mod universe;
@@ -420,6 +444,7 @@ mod vault;
 "context" => context::handle_context(state, args).await
 "memories" => context::handle_memories(state, args).await
 "universe" => universe::handle_universe(args).await
+"reconcile" => reconcile::handle_reconcile(state, args).await
 "survey" => survey::handle_survey(state, args).await
 "vault_sync" => vault::handle_vault_sync(state, args).await
 "import_universe" => registry::handle_import_universe(state, args).await
@@ -445,11 +470,16 @@ conversation_stats_by_project recent_conversations_by_project kb_stats_by_projec
 build_slots_info project_memory::list_memories project_memory::read_memory_index
 `);
 
+  writeFixture(root, DEFAULT_FILES.reconcile, `
+project-registry-reconcile.v1 root_mismatch deploy_fact_missing alias_conflict missing_in_missiond
+`);
+
   writeFixture(root, DEFAULT_FILES.universe, `
 handle_universe service-runtime-universe
 extract_forms(&block, "(service ")
 extract_forms(&block, "(capability ")
 publicBaseUrl dnsProvider opsCapability sourceEvidence locate_v3_blueprint
+eventIngest
 `);
 
   writeFixture(root, DEFAULT_FILES.survey, `
@@ -496,7 +526,7 @@ fallback_project_id_used_when_no_explicit
   writeFixture(root, DEFAULT_FILES.mcp, `
 ToolDefinition::new
 "mission_project"
-"list" "get" "set_active" "sync" "init" "context" "memories" "universe" "vault_sync" "import_universe" "survey"
+"list" "get" "set_active" "sync" "init" "context" "memories" "universe" "reconcile" "vault_sync" "import_universe" "survey"
 `);
 
   writeFixture(root, DEFAULT_FILES.maturityChecker, `

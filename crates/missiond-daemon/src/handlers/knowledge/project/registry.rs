@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use missiond_core::types::ProjectConfig;
 use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
@@ -6,7 +6,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 use crate::context::v3_blueprint_runtime::{
-    CompiledProjectUniverseEntry, ProjectRegistryRuntimeConfig, load_compiled_project_universe,
+    load_compiled_project_universe, CompiledProjectUniverseEntry, ProjectRegistryRuntimeConfig,
 };
 use crate::state::AppState;
 
@@ -587,7 +587,11 @@ fn github_url_for_path(path: impl AsRef<Path>) -> Option<String> {
         .ok()
         .and_then(|out| {
             let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if url.is_empty() { None } else { Some(url) }
+            if url.is_empty() {
+                None
+            } else {
+                Some(url)
+            }
         })
 }
 

@@ -1502,7 +1502,7 @@ async fn main() -> Result<()> {
         let bus = Arc::clone(&bus_services);
         tokio::spawn(async move {
             while let Some(event) = system_webhook_rx.recv().await {
-                let _ = bus.publish_system(event).await;
+                let _ = bus.publish_system_webhook(event).await;
             }
         });
     }

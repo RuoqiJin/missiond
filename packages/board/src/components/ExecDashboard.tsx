@@ -2,9 +2,17 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
-import { Activity, AlertTriangle, Bot, BrainCircuit, CheckCircle2, Circle, TerminalSquare, Wrench } from 'lucide-react';
+import {
+  BrainCircuit,
+  CheckCircle2,
+  Circle,
+  GitBranch,
+  ListChecks,
+  Radio,
+  TerminalSquare,
+} from 'lucide-react';
 import { Terminal } from './Terminal';
-import type { SlotDef } from '../types';
+import type { SlotDef, Task } from '../types';
 import { cn } from '@/lib/utils';
 
 const PROVIDER_LABELS: Record<string, string> = {
@@ -24,9 +32,9 @@ function providerKey(slot: SlotDef) {
   return 'other';
 }
 
-function stateTone(slot: SlotDef) {
-  const state = (slot.state || '').toLowerCase();
-  if (slot.running || ['running', 'thinking', 'responding', 'tool_running', 'confirming', 'blocked'].includes(state)) {
+function stateTone(slot?: SlotDef | null) {
+  const state = (slot?.state || '').toLowerCase();
+  if (slot?.running || ['running', 'thinking', 'responding', 'tool_running', 'confirming', 'blocked'].includes(state)) {
     return 'text-emerald-400';
   }
   if (['idle', 'slash_menu'].includes(state)) return 'text-blue-400';
@@ -34,13 +42,45 @@ function stateTone(slot: SlotDef) {
   return 'text-amber-400';
 }
 
-function stateLabel(slot: SlotDef) {
+function stateLabel(slot?: SlotDef | null) {
+  if (!slot) return '-';
   if (slot.blockedKind) return `blocked:${slot.blockedKind}`;
   return slot.state || (slot.running ? 'running' : 'unknown');
 }
 
-export function ExecDashboard({ slots }: { slots: SlotDef[] }) {
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+function taskStatusRank(task: Task) {
+  if (task.status === 'running') return 0;
+  if (task.status === 'blocked') return 1;
+  if (task.status === 'open') return 2;
+  if (task.status === 'verifying') return 3;
+  return 4;
+}
+
+function slotForTask(task: Task | null, slots: SlotDef[]) {
+  if (!task) return null;
+  return slots.find((slot) =>
+    slot.activeBoardTaskId === task.id
+    || slot.currentTaskId === task.id
+    || task.claimExecutorId === slot.id
+    || task.assignee === slot.id
+  ) ?? null;
+}
+
+function formatTime(value?: string | null) {
+  if (!value) return '-';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
+export function ExecDashboard({ slots, tasks }: { slots: SlotDef[]; tasks: Task[] }) {
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [selectedSlotId, setSelectedSlotId] = useState<string | null>(null);
+
+  const activeTasks = useMemo(() => {
+    return tasks
+      .filter((task) => ['running', 'blocked', 'open', 'verifying'].includes(task.status))
+      .sort((a, b) => taskStatusRank(a) - taskStatusRank(b) || b.updatedAt.localeCompare(a.updatedAt));
+  }, [tasks]);
 
   const sortedSlots = useMemo(() => {
     return [...slots].sort((a, b) => {
@@ -55,129 +95,157 @@ export function ExecDashboard({ slots }: { slots: SlotDef[] }) {
   }, [slots]);
 
   useEffect(() => {
-    if (selectedId && sortedSlots.some((s) => s.id === selectedId)) return;
-    setSelectedId(sortedSlots[0]?.id ?? null);
-  }, [selectedId, sortedSlots]);
+    if (selectedTaskId && activeTasks.some((task) => task.id === selectedTaskId)) return;
+    setSelectedTaskId(activeTasks[0]?.id ?? null);
+  }, [activeTasks, selectedTaskId]);
 
-  const selected = sortedSlots.find((s) => s.id === selectedId) || sortedSlots[0] || null;
-  const grouped = useMemo(() => {
-    const groups = new Map<string, SlotDef[]>();
-    for (const slot of sortedSlots) {
-      const key = providerKey(slot);
-      groups.set(key, [...(groups.get(key) || []), slot]);
+  const selectedTask = activeTasks.find((task) => task.id === selectedTaskId) ?? activeTasks[0] ?? null;
+  const taskSlot = slotForTask(selectedTask, sortedSlots);
+  const selectedSlot = sortedSlots.find((slot) => slot.id === selectedSlotId) ?? taskSlot ?? sortedSlots[0] ?? null;
+
+  useEffect(() => {
+    if (selectedSlotId && sortedSlots.some((slot) => slot.id === selectedSlotId)) return;
+    if (taskSlot) {
+      setSelectedSlotId(taskSlot.id);
+      return;
     }
-    return [...groups.entries()];
-  }, [sortedSlots]);
+    setSelectedSlotId(sortedSlots[0]?.id ?? null);
+  }, [selectedSlotId, sortedSlots, taskSlot]);
 
   return (
-    <div className="flex-1 grid grid-cols-[260px_minmax(0,1fr)_340px] min-h-0 overflow-hidden bg-neutral-950">
+    <div className="flex-1 grid grid-cols-[320px_minmax(0,1fr)_430px] min-h-0 overflow-hidden bg-neutral-950">
       <aside className="min-h-0 border-r border-neutral-800 flex flex-col">
         <div className="px-3 py-3 border-b border-neutral-800">
           <div className="flex items-center gap-2 text-sm font-medium text-neutral-200">
-            <TerminalSquare className="w-4 h-4 text-cyan-400" />
-            Workstation Cockpit
+            <ListChecks className="w-4 h-4 text-orange-400" />
+            Execution Queue
           </div>
           <div className="mt-1 text-[11px] text-neutral-500">
-            V3 projected slots only
+            BoardTask first, PTY as evidence
           </div>
         </div>
-        <div className="flex-1 min-h-0 overflow-y-auto p-2 space-y-3">
-          {grouped.map(([provider, providerSlots]) => (
-            <section key={provider}>
-              <div className="px-2 pb-1 text-[10px] uppercase tracking-wider text-neutral-600">
-                {PROVIDER_LABELS[provider] || provider}
-              </div>
-              <div className="space-y-1">
-                {providerSlots.map((slot) => (
-                  <button
-                    key={slot.id}
-                    onClick={() => setSelectedId(slot.id)}
-                    className={cn(
-                      'w-full text-left rounded-md border px-2.5 py-2 transition-colors',
-                      selected?.id === slot.id
-                        ? 'border-cyan-500/40 bg-cyan-500/10'
-                        : 'border-neutral-850 bg-neutral-900/40 hover:border-neutral-700 hover:bg-neutral-900',
-                    )}
-                  >
-                    <div className="flex items-center gap-2 min-w-0">
-                      <Circle className={cn('w-2.5 h-2.5 fill-current shrink-0', stateTone(slot))} />
-                      <span className="text-xs text-neutral-200 truncate">{slot.label || slot.id}</span>
-                    </div>
-                    <div className="mt-1 flex items-center gap-2 text-[10px] text-neutral-500">
-                      <span className="truncate">{stateLabel(slot)}</span>
-                      {slot.activeBoardTaskId && <span className="text-amber-400/80">task</span>}
-                      {slot.mcpReady === false && <span className="text-red-400">mcp</span>}
-                    </div>
-                  </button>
-                ))}
-              </div>
-            </section>
-          ))}
+        <div className="flex-1 min-h-0 overflow-y-auto p-2 space-y-1">
+          {activeTasks.length === 0 ? (
+            <div className="rounded-md border border-neutral-850 bg-neutral-900/40 p-3 text-xs text-neutral-600">
+              No active BoardTasks.
+            </div>
+          ) : activeTasks.map((task) => {
+            const slot = slotForTask(task, sortedSlots);
+            const active = selectedTask?.id === task.id;
+            return (
+              <button
+                key={task.id}
+                onClick={() => {
+                  setSelectedTaskId(task.id);
+                  if (slot) setSelectedSlotId(slot.id);
+                }}
+                className={cn(
+                  'w-full rounded-md border px-2.5 py-2 text-left transition-colors',
+                  active
+                    ? 'border-orange-500/40 bg-orange-500/10 text-orange-100'
+                    : 'border-neutral-850 bg-neutral-900/35 text-neutral-400 hover:border-neutral-700 hover:bg-neutral-900',
+                )}
+              >
+                <div className="flex min-w-0 items-center gap-2">
+                  <Circle className={cn('w-2.5 h-2.5 fill-current shrink-0', task.status === 'running' ? 'text-emerald-400' : task.status === 'blocked' ? 'text-amber-400' : 'text-neutral-600')} />
+                  <span className="truncate text-xs font-medium">{task.title}</span>
+                </div>
+                <div className="mt-1 flex items-center gap-2 text-[10px] text-neutral-600">
+                  <span className="font-mono">#{task.id.slice(0, 8)}</span>
+                  <span>{task.status}</span>
+                  {slot ? <span className="truncate text-neutral-500">{slot.label || slot.id}</span> : null}
+                </div>
+              </button>
+            );
+          })}
         </div>
       </aside>
 
-      <main className="min-h-0 min-w-0 flex flex-col">
-        {selected ? (
-          <Terminal
-            slotId={selected.id}
-            slot={selected}
-            activeTask={selected.activeBoardTaskId ? {
-              id: selected.activeBoardTaskId,
-              title: 'Active BoardTask',
-              status: selected.state,
-            } : null}
-          />
-        ) : (
-          <div className="flex-1 flex items-center justify-center text-sm text-neutral-600">
-            No workstation slots projected.
-          </div>
-        )}
-      </main>
-
-      <aside className="min-h-0 border-l border-neutral-800 flex flex-col bg-neutral-950">
+      <main className="min-h-0 min-w-0 flex flex-col border-r border-neutral-800">
         <div className="px-4 py-3 border-b border-neutral-800">
           <div className="flex items-center gap-2 text-sm font-medium text-neutral-200">
-            <BrainCircuit className="w-4 h-4 text-purple-400" />
-            Evidence
+            <GitBranch className="w-4 h-4 text-cyan-400" />
+            Execution Evidence
           </div>
           <div className="mt-1 text-[11px] text-neutral-500 truncate">
-            {selected?.id || 'No slot selected'}
+            {selectedTask ? `${selectedTask.project || 'missiond'} · ${selectedTask.status}` : 'No task selected'}
           </div>
         </div>
-
-        <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4 text-xs">
-          <DiagnosticBlock icon={<Bot className="w-4 h-4" />} title="Provider">
-            <KeyValue label="provider" value={selected?.provider || '-'} />
-            <KeyValue label="engine" value={selected?.engine || '-'} />
-            <KeyValue label="model" value={selected?.modelProfile || '-'} />
-            <KeyValue label="task class" value={selected?.taskClass || '-'} />
+        <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4">
+          <DiagnosticBlock icon={<BrainCircuit className="w-4 h-4" />} title="BoardTask">
+            <KeyValue label="id" value={selectedTask?.id || '-'} mono />
+            <KeyValue label="title" value={selectedTask?.title || '-'} multiline />
+            <KeyValue label="status" value={selectedTask?.status || '-'} />
+            <KeyValue label="project" value={selectedTask?.project || '-'} />
+            <KeyValue label="updated" value={formatTime(selectedTask?.updatedAt)} />
           </DiagnosticBlock>
 
-          <DiagnosticBlock icon={<Activity className="w-4 h-4" />} title="PTY Recognition">
-            <KeyValue label="state" value={selected ? stateLabel(selected) : '-'} tone={selected ? stateTone(selected) : undefined} />
-            <KeyValue label="confidence" value={selected?.confidence == null ? '-' : String(selected.confidence)} />
-            <KeyValue label="tool" value={selected?.activeTool || '-'} />
-            <KeyValue label="reason" value={selected?.reason || '-'} multiline />
+          <DiagnosticBlock icon={<Radio className="w-4 h-4" />} title="EventBus Wait State">
+            <KeyValue label="driver" value="BoardEvent / SlotEvent / Conversation final" />
+            <KeyValue label="fallback" value="bounded HTTP refresh only" />
+            <KeyValue label="slot" value={taskSlot?.id || '-'} mono />
+            <KeyValue label="slot state" value={stateLabel(taskSlot)} tone={stateTone(taskSlot)} />
           </DiagnosticBlock>
 
           <DiagnosticBlock icon={<CheckCircle2 className="w-4 h-4" />} title="Durable Conversation">
-            <KeyValue label="id" value={selected?.latestConversation?.id || '-'} mono />
-            <KeyValue label="source" value={selected?.latestConversation?.source || '-'} />
-            <KeyValue label="messages" value={selected?.latestConversation?.messageCount == null ? '-' : String(selected.latestConversation.messageCount)} />
-            <KeyValue label="updated" value={selected?.latestConversation?.updatedAt || '-'} />
+            <KeyValue label="id" value={selectedSlot?.latestConversation?.id || '-'} mono />
+            <KeyValue label="source" value={selectedSlot?.latestConversation?.source || '-'} />
+            <KeyValue label="status" value={selectedSlot?.latestConversation?.status || '-'} />
+            <KeyValue label="messages" value={selectedSlot?.latestConversation?.messageCount == null ? '-' : String(selectedSlot.latestConversation.messageCount)} />
+            <KeyValue label="updated" value={formatTime(selectedSlot?.latestConversation?.updatedAt)} />
           </DiagnosticBlock>
+        </div>
+      </main>
 
-          <DiagnosticBlock icon={<Wrench className="w-4 h-4" />} title="Control Plane">
-            <KeyValue label="mcp ready" value={selected?.mcpReady == null ? '-' : String(selected.mcpReady)} tone={selected?.mcpReady ? 'text-emerald-400' : 'text-amber-400'} />
-            <KeyValue label="approval ready" value={selected?.mcpApprovalReady == null ? '-' : String(selected.mcpApprovalReady)} />
-            <KeyValue label="active task" value={selected?.activeBoardTaskId || '-'} mono />
-            {selected?.mcpApprovalMissingTools?.length ? (
-              <div className="mt-2 flex items-start gap-2 rounded border border-amber-500/20 bg-amber-500/5 p-2 text-amber-300">
-                <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-                <span>{selected.mcpApprovalMissingTools.join(', ')}</span>
-              </div>
-            ) : null}
-          </DiagnosticBlock>
+      <aside className="min-h-0 flex flex-col bg-neutral-950">
+        <div className="px-4 py-3 border-b border-neutral-800">
+          <div className="flex items-center gap-2 text-sm font-medium text-neutral-200">
+            <TerminalSquare className="w-4 h-4 text-purple-400" />
+            PTY Detail
+          </div>
+          <div className="mt-1 text-[11px] text-neutral-500">
+            Diagnostic, not completion authority
+          </div>
+        </div>
+        <div className="max-h-44 overflow-y-auto border-b border-neutral-800 p-2">
+          <div className="grid grid-cols-1 gap-1">
+            {sortedSlots.map((slot) => (
+              <button
+                key={slot.id}
+                onClick={() => setSelectedSlotId(slot.id)}
+                className={cn(
+                  'rounded-md border px-2 py-1.5 text-left transition-colors',
+                  selectedSlot?.id === slot.id
+                    ? 'border-purple-500/40 bg-purple-500/10'
+                    : 'border-neutral-850 bg-neutral-900/35 hover:border-neutral-700',
+                )}
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <Circle className={cn('w-2.5 h-2.5 fill-current shrink-0', stateTone(slot))} />
+                  <span className="truncate text-xs text-neutral-200">{slot.label || slot.id}</span>
+                  <span className="ml-auto text-[10px] text-neutral-500">{PROVIDER_LABELS[providerKey(slot)] || providerKey(slot)}</span>
+                </div>
+                <div className="mt-0.5 text-[10px] text-neutral-600 truncate">{stateLabel(slot)}</div>
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="min-h-0 flex-1">
+          {selectedSlot ? (
+            <Terminal
+              slotId={selectedSlot.id}
+              slot={selectedSlot}
+              activeTask={selectedTask ? {
+                id: selectedTask.id,
+                title: selectedTask.title,
+                status: selectedTask.status,
+              } : null}
+            />
+          ) : (
+            <div className="flex h-full items-center justify-center text-sm text-neutral-600">
+              No workstation slots projected.
+            </div>
+          )}
         </div>
       </aside>
     </div>
@@ -204,7 +272,7 @@ function KeyValue({ label, value, tone, mono, multiline }: {
   multiline?: boolean;
 }) {
   return (
-    <div className={cn('grid grid-cols-[90px_minmax(0,1fr)] gap-2', multiline && 'items-start')}>
+    <div className={cn('grid grid-cols-[92px_minmax(0,1fr)] gap-2 text-xs', multiline && 'items-start')}>
       <span className="text-neutral-600">{label}</span>
       <span className={cn('text-neutral-300 break-words', tone, mono && 'font-mono text-[11px]', !multiline && 'truncate')} title={value}>
         {value}

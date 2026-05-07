@@ -295,6 +295,21 @@ impl BusServices {
         self.publish(ev, default_opts("system")).await
     }
 
+    pub async fn publish_system_webhook(&self, ev: SystemEvent) -> Result<AppendAck, AppendError> {
+        match &ev {
+            SystemEvent::ExternalServiceEvent {
+                service_id,
+                event_id,
+                ..
+            } => {
+                let mut opts = default_opts(&format!("external/{service_id}"));
+                opts.dedupe_key = Some(external_service_dedupe_key(service_id, event_id));
+                self.publish(ev, opts).await
+            }
+            _ => self.publish_system(ev).await,
+        }
+    }
+
     pub async fn publish_observability(
         &self,
         ev: ObservabilityEvent,
@@ -384,6 +399,13 @@ fn default_opts(producer: &str) -> AppendOpts {
     }
 }
 
+fn external_service_dedupe_key(service_id: &str, event_id: &str) -> uuid::Uuid {
+    uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_URL,
+        format!("missiond:external-service:{service_id}:{event_id}").as_bytes(),
+    )
+}
+
 /// Adapter so the metrics emitter can append via the PG `LogWriterHandle`
 /// without the caller needing to know about generic `Log::append`.
 struct LogObservabilityAdapter {
@@ -441,6 +463,15 @@ mod tests {
         assert_eq!(o.producer_id, "daemon/compute/task");
         assert!(!o.ephemeral);
         assert!(o.dedupe_key.is_none());
+    }
+
+    #[test]
+    fn external_service_dedupe_key_is_stable_and_scoped() {
+        let a = external_service_dedupe_key("deploy-center", "deploy-center:deploy_events:1");
+        let b = external_service_dedupe_key("deploy-center", "deploy-center:deploy_events:1");
+        let c = external_service_dedupe_key("auth", "deploy-center:deploy_events:1");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
     }
 
     #[test]

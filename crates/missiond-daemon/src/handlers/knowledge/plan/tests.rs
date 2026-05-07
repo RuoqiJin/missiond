@@ -353,9 +353,7 @@ fn build_internal_args_for_task_delegate_uses_plan_hint_owned_files() {
 /// contract from a Lisp/CI perspective.
 #[test]
 fn workstation_dispatch_runner_forwards_dedup_linkage_to_inner_args() {
-    let src = include_str!(
-        "../../../handlers/knowledge/workstation_dispatch/runner.rs"
-    );
+    let src = include_str!("../../../handlers/knowledge/workstation_dispatch/runner.rs");
     for needle in [
         "\"parent_board_task_id\": plan.board_task_id",
         "\"source_board_task_id\": plan.board_task_id",

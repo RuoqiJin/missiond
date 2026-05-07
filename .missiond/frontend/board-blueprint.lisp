@@ -270,17 +270,29 @@
     (pillar workstation-terminal-ui
       (function workstation-terminal
         :surface workstation-terminal-ui
-        :entry [slots-api mission_pty_status pty-websocket Terminal ExecDashboard AutopilotMonitor]
+        :entry [slots-api mission_pty_status mission_master_status pty-websocket Terminal AutopilotMonitor]
         :core ((step s1 :logic "load slot rows from MissionD runtime projection and PTY recognition snapshots")
                (step s2 :logic "normalize PTY state case; sort running slots first, then active idle sessions, then terminal sessions")
-               (step s3 :logic "render Terminal as a cockpit: provider-grouped slot rail on the left, selected PTY in the center, evidence/diagnostics rail on the right")
+               (step s3 :logic "render Terminal as a raw PTY/slot viewer: provider-grouped slot rail on the left, selected PTY in the center, evidence/diagnostics rail on the right")
                (step s4 :logic "keep dynamic slot labels bounded and truncated; long labels must not wrap or occlude the terminal")
                (step s5 :logic "connect xterm to the selected PTY websocket only when the slot is running")
                (step s6 :logic "render provider-neutral state, spawn, reconnect, stop, screenshot, MCP readiness, and blocked-status controls")
                (step s7 :logic "show Autopilot slot/task correlation from activeBoardTaskId/currentTaskId or running BoardTask claimExecutorId/assignee without owning dispatch or closure")
                (step s8 :logic "show latest durable provider conversation, recognition confidence/reason, MCP readiness, active tool, and blocked kind as diagnostics beside the PTY")
-               (step s9 :logic "ExecDashboard uses the same slot/runtime sources as Terminal and must not keep separate static slot pools"))
+               (step s9 :logic "for stopped/exited/complete slots, keep the slot selectable and show latest durable conversation metadata instead of a blank PTY screen")
+               (step s10 :logic "slot refresh is driven by EventBus slotVersion invalidation; interval polling is only a bounded fallback with diagnostic intent"))
         :egress [provider-slot-rail terminal-screen pty-state evidence-diagnostics autopilot-monitor]))
+
+    (pillar execution-cockpit-ui
+      (function execution-cockpit
+        :surface execution-cockpit-ui
+        :entry [BoardTasks slots-api mission_pty_status mission_master_status eventbus-websocket ExecDashboard Terminal]
+        :core ((step s1 :logic "render Exec as an orchestration cockpit rather than a second Terminal surface")
+               (step s2 :logic "start from active BoardTasks, then join each task to claimExecutorId/assignee/currentTaskId/activeBoardTaskId slot evidence")
+               (step s3 :logic "show BoardTask status, dispatch/evidence/checkpoint diagnostics, latest durable conversation, and EventBus wait state")
+               (step s4 :logic "embed the selected PTY as a detail pane for diagnosis only; durable provider logs and MissionD events remain completion authority")
+               (step s5 :logic "surface stale/future timestamps, stopped PTY with durable conversation fallback, and missing MCP readiness as diagnostics"))
+        :egress [execution-queue evidence-panel eventbus-wait-state pty-detail diagnostics]))
 
     (pillar event-stream-ui
       (function event-stream-cache
@@ -366,12 +378,19 @@
       :status "code-aligned"
       :implements [workstation-terminal]
       :code ["packages/board/src/components/Terminal.tsx"
-             "packages/board/src/components/ExecDashboard.tsx"
              "packages/board/src/components/AutopilotMonitor.tsx"
              "packages/board/src/app/api/slots/route.ts"
              "packages/board/src/app/api/pty/status/route.ts"
              "packages/board/src/app/api/pty/screen/route.ts"
              "packages/board/src/app/api/pty/agents/route.ts"])
+    (surface execution-cockpit-ui
+      :status "code-aligned"
+      :implements [execution-cockpit]
+      :code ["packages/board/src/components/ExecDashboard.tsx"
+             "packages/board/src/components/Terminal.tsx"
+             "packages/board/src/App.tsx"
+             "packages/board/src/app/api/slots/route.ts"
+             "packages/board/src/eventStream.ts"])
     (surface event-stream-ui
       :status "code-aligned"
       :implements [event-stream-cache]

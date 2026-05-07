@@ -50,10 +50,12 @@ use std::time::{Duration, Instant};
 
 use missiond_core::event::events::{
     BoardEvent, ExecutionEvent, IncidentEvent, MemoryEvent, MessageEvent, QuestionEvent,
-    SessionEndStatus, SessionEvent, SlotEvent, TaskEvent, WorkerEvent,
+    SessionEndStatus, SessionEvent, SlotEvent, SystemEvent, TaskEvent, WorkerEvent,
 };
 use missiond_core::event::subscription::{Subscription, SubscriptionOpts};
 use missiond_core::event::DomainEvent;
+use missiond_core::types::CreateBoardTaskInput;
+use serde_json::Value;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
@@ -92,6 +94,7 @@ pub(crate) fn start_v2_subscribers(
     spawn_submit_sub(bus.clone(), state.clone(), shutdown_rx.clone());
     spawn_autopilot_board_event_sub(bus.clone(), state.clone(), shutdown_rx.clone());
     spawn_autopilot_slot_event_sub(bus.clone(), state.clone(), shutdown_rx.clone());
+    spawn_deployment_event_response_sub(bus.clone(), state.clone(), shutdown_rx.clone());
     spawn_decision_sub(bus.clone(), state.clone(), shutdown_rx.clone());
     spawn_harvest_sub(bus.clone(), state.clone(), shutdown_rx.clone());
     spawn_realtime_extraction_sub(bus.clone(), state.clone(), shutdown_rx.clone());
@@ -118,7 +121,7 @@ pub(crate) fn start_v2_subscribers(
     // Strictly observation-only — never publishes / mutates DB.
     spawn_event_ref_cache_sub(bus.clone(), shutdown_rx.clone());
 
-    info!("v2 event-bus subscribers started (8 router consumers + 2 autopilot handoff nerves + 1 incident reactor + 1 review-resolution listener + 1 event-ref cache populator)");
+    info!("v2 event-bus subscribers started (8 router consumers + 2 autopilot handoff nerves + 1 deployment event response nerve + 1 incident reactor + 1 review-resolution listener + 1 event-ref cache populator)");
 }
 
 /// Incident reactor — subscribes to IncidentEvent and triages via
@@ -324,6 +327,142 @@ fn board_event_should_wake_autopilot(event: &BoardEvent) -> bool {
 
 fn slot_event_should_wake_autopilot(event: &SlotEvent) -> bool {
     matches!(event, SlotEvent::BecameIdle { .. })
+}
+
+/// Deployment EventBridge nerve — deploy-center remains the release authority,
+/// but MissionD turns failure-class deployment events into visible deploy-ops
+/// BoardTasks so a deployment lane can investigate from durable evidence.
+fn spawn_deployment_event_response_sub(
+    bus: Arc<BusServices>,
+    state: AppState,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    tokio::spawn(async move {
+        let Some(mut sub) = subscribe_or_warn::<SystemEvent>(
+            &bus,
+            "v2_deployment_event_response",
+            "deployment_event_response",
+        )
+        .await
+        else {
+            return;
+        };
+        info!("v2[deployment_event_response]: subscription live");
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown.changed() => break,
+                ack = sub.next() => {
+                    let Some(ack) = ack else { break; };
+                    if let SystemEvent::ExternalServiceEvent {
+                        service_id,
+                        event_id,
+                        event_kind,
+                        summary,
+                        trace_id,
+                        payload_json,
+                    } = ack.event()
+                    {
+                        if let Some(input) = deployment_event_board_task_input(
+                            service_id,
+                            event_id,
+                            event_kind,
+                            summary,
+                            trace_id.as_deref(),
+                            payload_json,
+                        ) {
+                            match state.store.create_board_task(&input).await {
+                                Ok(task) => {
+                                    let ev = BoardEvent::TaskCreated {
+                                        task_id: task.id.to_string(),
+                                        title: task.title.clone(),
+                                        category: task.category.clone(),
+                                    };
+                                    crate::engine::master_control::notify_board_event_direct(&ev);
+                                    let _ = state.bus.publish_board(ev).await;
+                                }
+                                Err(err) => {
+                                    warn!(
+                                        service_id = %service_id,
+                                        event_id = %event_id,
+                                        event_kind = %event_kind,
+                                        error = %err,
+                                        "v2[deployment_event_response]: failed to create deploy-ops BoardTask"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    ack.ack().await;
+                }
+            }
+        }
+        info!("v2[deployment_event_response]: shutdown");
+    });
+}
+
+fn deployment_event_board_task_input(
+    service_id: &str,
+    event_id: &str,
+    event_kind: &str,
+    summary: &str,
+    trace_id: Option<&str>,
+    payload_json: &str,
+) -> Option<CreateBoardTaskInput> {
+    if service_id != "deploy-center" || !deployment_event_is_actionable(event_kind) {
+        return None;
+    }
+    let payload: Value = serde_json::from_str(payload_json).unwrap_or(Value::Null);
+    let project_id = external_event_field(&payload, "project_id")
+        .or_else(|| external_event_field(&payload, "projectId"))
+        .unwrap_or_else(|| "deploy-center".to_string());
+    let subject = external_event_field(&payload, "subject").unwrap_or_else(|| project_id.clone());
+    let correlation_id = external_event_field(&payload, "correlation_id")
+        .or_else(|| external_event_field(&payload, "correlationId"))
+        .or_else(|| trace_id.map(str::to_string));
+    let deploy_event_id = payload
+        .get("deploy_event_id")
+        .and_then(Value::as_i64)
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| event_id.to_string());
+    let description = format!(
+        "Deployment EventBridge created this task from a durable deploy-center event.\n\nService: {service_id}\nEvent: {event_kind}\nEvent ID: {event_id}\nDeploy event row: {deploy_event_id}\nProject: {project_id}\nSubject: {subject}\nCorrelation: {}\nTrace: {}\n\nSummary:\n{summary}\n\nNext checks:\n1. Query deploy-center provenance for the project/service before using curl/git as fallback.\n2. Inspect deploy_events/deploy_logs around the event id and correlation id.\n3. Propose rollback or redeploy only through deploy-center policy or explicit Board approval.\n4. Do not mutate DNS, Cloudflare, secrets, or production state from this task without approval.",
+        correlation_id.as_deref().unwrap_or(""),
+        trace_id.unwrap_or(""),
+    );
+    Some(CreateBoardTaskInput {
+        title: format!("Deploy event response: {event_kind} ({project_id})"),
+        description: Some(description),
+        priority: Some("high".to_string()),
+        category: Some("ops".to_string()),
+        project: Some(project_id),
+        auto_execute: Some(false),
+        hidden: Some(false),
+        dedupe_key: Some(format!("deployment-event-response:{service_id}:{event_id}")),
+        context_intent: Some("deploy-ops".to_string()),
+        ..Default::default()
+    })
+}
+
+fn deployment_event_is_actionable(event_kind: &str) -> bool {
+    matches!(
+        event_kind,
+        "build_failed"
+            | "deploy_failed"
+            | "smoke_failed"
+            | "rollback_failed"
+            | "agent_update_failed"
+    )
+}
+
+fn external_event_field(payload: &Value, key: &str) -> Option<String> {
+    payload
+        .get("_envelope")
+        .and_then(|v| v.get(key))
+        .or_else(|| payload.get(key))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 /// Router A3 — decision: QuestionEvent::Created → process pending.

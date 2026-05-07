@@ -4,12 +4,15 @@
   :blueprint ".missiond/frontend/board-blueprint.lisp"
   :status code-aligned
   :generated_by codex
-  :summary "Board frontend now has a project-local Lisp SSOT registered from backend V3. Current UI behavior is preserved; runtime workstation identity projects from MissionD slots/PTY state, and tabs/task taxonomy/flow phases/EventBus routes project from board-blueprint.lisp into generated TypeScript."
-  :surfaces [app-shell missiond-proxy board-task-ui workstation-terminal-ui event-stream-ui timeline-log-ui knowledge-system-ui frontend-design-system]
+  :summary "Board frontend now has a project-local Lisp SSOT registered from backend V3. Current UI behavior is preserved; runtime workstation identity projects from MissionD slots/PTY state, Terminal remains the raw PTY viewer, Exec is the execution cockpit, and tabs/task taxonomy/flow phases/EventBus routes project from board-blueprint.lisp into generated TypeScript."
+  :surfaces [app-shell missiond-proxy board-task-ui workstation-terminal-ui execution-cockpit-ui event-stream-ui timeline-log-ui knowledge-system-ui frontend-design-system]
   :runtime-projections [workstation-slots pty-recognition terminal-slot-selector frontend-runtime-config timeline-visuals board-task-api-contract eventbus-cache-invalidation board-task-contract]
   :terminal-slot-selector
     (:status code-aligned
-     :result "Terminal slot selection is now pinned in Lisp and code to live inside the Terminal panel, list all projected slots, keep dynamic labels single-line, and use horizontal overflow instead of consuming the global top bar.")
+     :result "Terminal slot selection is now pinned in Lisp and code as the raw PTY viewer, list all projected slots, keep dynamic labels single-line, keep stopped slots visible through durable conversation fallback, and use EventBus slot invalidation before interval fallback.")
+  :execution-cockpit
+    (:status code-aligned
+     :result "Exec is split from Terminal as an orchestration cockpit: BoardTask queue, durable evidence, EventBus wait state, checkpoint/diagnostics, and PTY only as a detail pane.")
   :checks ["node scripts/check-frontend-board-lisp-schema.mjs"
            "node scripts/project-frontend-board-config.mjs --check"
            "node scripts/check-frontend-board-code-isomorphism.mjs"

@@ -3,20 +3,20 @@ use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use missiond_core::event::DomainEvent;
 use missiond_core::event::events::{BoardEvent, IncidentEvent, QuestionEvent, SlotEvent};
 use missiond_core::event::subscription::{CursorFlush, StartFrom, SubscriptionOpts};
+use missiond_core::event::DomainEvent;
 use missiond_core::types::{BoardTask, BoardTaskStatus, CreateBoardTaskInput};
 use missiond_core::{PTYSlot, PTYSpawnOptions, SessionState};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::process::Command;
-use tokio::sync::{Notify, RwLock, watch};
+use tokio::sync::{watch, Notify, RwLock};
 use tracing::{info, warn};
 
 use crate::bus::BusServices;
 use crate::context::v3_blueprint_runtime::{
-    WorkstationRuntimeConfig, compiled_runtime_projection_status,
+    compiled_runtime_projection_status, WorkstationRuntimeConfig,
 };
 use crate::control_tree::CtlDomain;
 use crate::state::AppState;
@@ -2126,11 +2126,9 @@ mod tests {
         let partial = "[mcp_servers.missiond.tools.mission_intent]\napproval_mode = \"approve\"\n";
         let readiness = codex_mcp_approval_ready_from_config(partial);
         assert!(!readiness.ready);
-        assert!(
-            readiness
-                .missing_tools
-                .contains(&"mission_board_query".to_string())
-        );
+        assert!(readiness
+            .missing_tools
+            .contains(&"mission_board_query".to_string()));
     }
 
     #[test]

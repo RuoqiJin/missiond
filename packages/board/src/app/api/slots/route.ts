@@ -28,6 +28,19 @@ interface SlotInfo {
   providerConversationId?: string;
   latest_conversation?: PtyStatus['latest_conversation'];
   latestConversation?: PtyStatus['latestConversation'];
+  diagnostics?: string[];
+}
+
+interface MasterStatus {
+  mcpReady?: boolean;
+  mcpEnabled?: boolean;
+  mcpApprovalReady?: boolean;
+  mcpApprovalMissingTools?: string[];
+  state?: string;
+  slotId?: string;
+  slot_id?: string;
+  activeObjectiveId?: string;
+  active_objective_id?: string;
 }
 
 interface PtyStatus {
@@ -129,7 +142,12 @@ function latestConversation(status: PtyStatus | null, slot: SlotInfo) {
 
 export async function GET() {
   try {
-    const result = await callTool('mission_slots') as SlotInfo[];
+    const [slotResult, masterResult] = await Promise.allSettled([
+      callTool('mission_slots') as Promise<SlotInfo[]>,
+      callTool('mission_master_status') as Promise<MasterStatus>,
+    ]);
+    const result = slotResult.status === 'fulfilled' ? slotResult.value : [];
+    const master = masterResult.status === 'fulfilled' ? masterResult.value : null;
     const filtered = result || [];
 
     // Check PTY status for all slots in parallel
@@ -147,6 +165,17 @@ export async function GET() {
       const state = normalizeState(recognition?.state ?? status?.state);
       const running = !!state && RUNNING_STATES.has(state);
       const active = !!state && !INACTIVE_STATES.has(state);
+      const isMasterSlot = s.id === 'slot-codex-master-control' || s.id === master?.slotId || s.id === master?.slot_id;
+      const diagnostics = [...(s.diagnostics ?? [])];
+      const latest = latestConversation(status, s);
+      const updatedAt = latest?.updatedAt;
+      if (updatedAt) {
+        const ts = new Date(updatedAt).getTime();
+        if (!Number.isNaN(ts) && ts > Date.now() + 60_000) {
+          diagnostics.push('future-timestamp');
+        }
+      }
+      if (!running && latest?.id) diagnostics.push('durable-conversation-fallback');
       return {
         id: s.id,
         role: s.role,
@@ -162,11 +191,11 @@ export async function GET() {
         approvalPolicy: s.approvalPolicy ?? s.approval_policy,
         taskClass: s.taskClass ?? s.task_class,
         acceptsBoardTask: s.acceptsBoardTask ?? s.accepts_boardtask,
-        mcpReady: s.mcpReady,
-        mcpEnabled: s.mcpEnabled,
-        mcpApprovalReady: s.mcpApprovalReady,
-        mcpApprovalMissingTools: s.mcpApprovalMissingTools,
-        mcpSource: s.mcpSource,
+        mcpReady: isMasterSlot ? (master?.mcpReady ?? s.mcpReady) : s.mcpReady,
+        mcpEnabled: isMasterSlot ? (master?.mcpEnabled ?? s.mcpEnabled) : s.mcpEnabled,
+        mcpApprovalReady: isMasterSlot ? (master?.mcpApprovalReady ?? s.mcpApprovalReady) : s.mcpApprovalReady,
+        mcpApprovalMissingTools: isMasterSlot ? (master?.mcpApprovalMissingTools ?? s.mcpApprovalMissingTools) : s.mcpApprovalMissingTools,
+        mcpSource: isMasterSlot ? 'mission_master_status+mission_slots' : s.mcpSource,
         providerConversationId: s.providerConversationId,
         confidence: recognition?.confidence ?? status?.confidence,
         reason: recognition?.reason ?? status?.reason,
@@ -174,7 +203,8 @@ export async function GET() {
         blockedKind: recognition?.blockedKind ?? recognition?.blocked_kind ?? status?.blockedKind ?? status?.blocked_kind,
         currentTaskId: status?.currentTaskId ?? status?.current_task_id,
         activeBoardTaskId: status?.activeBoardTaskId ?? status?.active_board_task_id ?? status?.currentTaskId ?? status?.current_task_id,
-        latestConversation: latestConversation(status, s),
+        latestConversation: latest,
+        diagnostics,
         // Internal sort hint; consumers may ignore.
         __activeRank: active ? 1 : 2,
       };
