@@ -215,10 +215,145 @@ pub(super) async fn handle_stats(state: &AppState, args: Value) -> Result<ToolRe
         skill: Option<String>,
     }
     let args: StatsArgs = serde_json::from_value(args).unwrap_or(StatsArgs { skill: None });
+    let registry_skills: Vec<_> = state
+        .skills
+        .list()
+        .iter()
+        .filter(|skill| {
+            args.skill
+                .as_deref()
+                .map(|name| skill.name == name)
+                .unwrap_or(true)
+        })
+        .collect();
+    let registry_paths = registry_skills
+        .iter()
+        .map(|skill| skill.path.display().to_string())
+        .collect::<std::collections::HashSet<_>>();
+    let registry_action_count: usize = registry_skills
+        .iter()
+        .map(|skill| {
+            skill
+                .actions
+                .as_ref()
+                .map(|actions| actions.len())
+                .unwrap_or(0)
+        })
+        .sum();
+    let registry_context_hook_count: usize = registry_skills
+        .iter()
+        .map(|skill| {
+            skill
+                .context_hooks
+                .as_ref()
+                .map(|hooks| hooks.len())
+                .unwrap_or(0)
+        })
+        .sum();
+
+    let topics = if let Some(ref skill) = args.skill {
+        state
+            .store
+            .skill_topic_get(skill)
+            .await
+            .map_err(|e| anyhow!("DB: {}", e))?
+            .into_iter()
+            .collect::<Vec<_>>()
+    } else {
+        state
+            .store
+            .skill_topic_list()
+            .await
+            .map_err(|e| anyhow!("DB: {}", e))?
+    };
+
+    let topic_action_count: usize = topics
+        .iter()
+        .map(|topic| {
+            topic
+                .actions_json
+                .as_deref()
+                .and_then(|actions| serde_json::from_str::<Vec<Value>>(actions).ok())
+                .map(|actions| actions.len())
+                .unwrap_or(0)
+        })
+        .sum();
+    let topic_with_actions = topics
+        .iter()
+        .filter(|topic| {
+            topic
+                .actions_json
+                .as_deref()
+                .is_some_and(|json| !json.is_empty())
+        })
+        .count();
+    let topic_with_requires = topics
+        .iter()
+        .filter(|topic| {
+            topic
+                .requires_json
+                .as_deref()
+                .is_some_and(|json| !json.is_empty())
+        })
+        .count();
+    let topic_with_context_hooks = topics
+        .iter()
+        .filter(|topic| {
+            topic
+                .context_hooks_json
+                .as_deref()
+                .is_some_and(|json| !json.is_empty())
+        })
+        .count();
+    let total_fragments: i64 = topics.iter().map(|topic| topic.fragment_count).sum();
+    let total_lines: i64 = topics.iter().map(|topic| topic.total_lines).sum();
+
+    let skill_embedding_cache_size = state.skill_embedding_cache.read().await.len();
     let stats = state
         .store
         .skill_execution_stats(args.skill.as_deref())
         .await
         .map_err(|e| anyhow!("DB: {}", e))?;
-    Ok(ToolResult::json_pretty(&stats))
+    let execution_total: i64 = stats.iter().map(|stat| stat.total).sum();
+    let execution_successes: i64 = stats.iter().map(|stat| stat.successes).sum();
+    let execution_failures: i64 = stats.iter().map(|stat| stat.failures).sum();
+
+    Ok(ToolResult::json_pretty(&serde_json::json!({
+        "schema": "missiond.skill-stats.v1",
+        "filter": {
+            "skill": args.skill,
+        },
+        "registry": {
+            "loadedSkills": registry_skills.len(),
+            "uniquePaths": registry_paths.len(),
+            "actions": registry_action_count,
+            "contextHooks": registry_context_hook_count,
+            "source": "SkillIndex",
+        },
+        "topics": {
+            "total": topics.len(),
+            "withActions": topic_with_actions,
+            "withRequires": topic_with_requires,
+            "withContextHooks": topic_with_context_hooks,
+            "actionCount": topic_action_count,
+            "fragmentCount": total_fragments,
+            "totalLines": total_lines,
+            "source": "skill_topics",
+        },
+        "embeddings": {
+            "cachedSkillTopics": skill_embedding_cache_size,
+            "source": "skill_embedding_cache",
+        },
+        "execution": {
+            "total": execution_total,
+            "successes": execution_successes,
+            "failures": execution_failures,
+            "stats": stats,
+            "source": "skill_executions",
+        },
+        "projectSkillLinks": {
+            "status": "pending-contract",
+            "message": "Project-specific skill links are not yet a first-class runtime table; use search/context until the project-skill link contract lands.",
+        },
+    })))
 }

@@ -93,6 +93,8 @@ function checkFiles(root, files) {
     'scripts/check-v3-skill-runtime-isomorphism.mjs',
     'skill.rs is the thin mission_skill facade',
     'skill/query.rs owns list/search/topics/actions/stats',
+    'composite registry/topic/action/embedding/execution statistics',
+    'project-skill-link readiness',
     'skill/context.rs owns context build/resolve',
     'skill/mutate.rs owns upsert/record/render/rollback',
     'skill/exec.rs owns mission_skill_exec',
@@ -128,6 +130,12 @@ function checkFiles(root, files) {
     'skill_topic_hit',
     'parse_workflow_blocks',
     'skill_execution_stats',
+    'missiond.skill-stats.v1',
+    'loadedSkills',
+    'skill_topic_list',
+    'skill_embedding_cache',
+    'actionCount',
+    'projectSkillLinks',
   ]);
 
   requireAll(diagnostics, files.context, sources.context, [
@@ -211,7 +219,7 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/skill/exec.rs"
              "crates/missiond-mcp/src/tools/knowledge/skill.rs"
              "scripts/check-v3-skill-runtime-isomorphism.mjs"]
-      :note "skill.rs is the thin mission_skill facade; skill/query.rs owns list/search/topics/actions/stats; skill/context.rs owns context build/resolve; skill/mutate.rs owns upsert/record/render/rollback; skill/exec.rs owns mission_skill_exec."))
+      :note "skill.rs is the thin mission_skill facade; skill/query.rs owns list/search/topics/actions/stats, composite registry/topic/action/embedding/execution statistics, and project-skill-link readiness; skill/context.rs owns context build/resolve; skill/mutate.rs owns upsert/record/render/rollback; skill/exec.rs owns mission_skill_exec."))
   (compression-contract
     :checks ["node scripts/check-v3-skill-runtime-isomorphism.mjs"]))`);
 
@@ -232,6 +240,7 @@ Unknown skill tool
   writeFixture(root, DEFAULT_FILES.query, `
 handle_list handle_search handle_topics handle_actions handle_stats
 skill_search_fts rrf_score skill_topic_hit parse_workflow_blocks skill_execution_stats
+missiond.skill-stats.v1 loadedSkills skill_topic_list skill_embedding_cache actionCount projectSkillLinks
 `);
 
   writeFixture(root, DEFAULT_FILES.context, `
