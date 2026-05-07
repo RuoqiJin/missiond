@@ -1190,7 +1190,7 @@
     (maturity :id neural-codegen :current M5 :target M6 :gap [domain-shard-split generation-policy-hot-path final-m6-report])
     (maturity :id semantic-terminal :current M5 :target M6 :gap [domain-shard-split terminal-event-contract final-m6-report])
     (maturity :id xiaojinpro-backend :current M5 :target M6 :gap [monorepo-service-boundary deploy-fact-authority final-m6-report])
-    (maturity :id deploy-center :current M5 :target M6 :gap [deployment-authority-chain adapter-hot-path-regressions final-m6-report])
+    (maturity :id deploy-center :current M6 :target M6 :gap [])
     (maturity :id deploy-agent :current M5 :target M6 :gap [agent-execution-boundary server-fact-ledger final-m6-report])
     (maturity :id auth :current M6 :target M6 :gap [])
     (maturity :id router :current M5 :target M6 :gap [model-policy-domain routing-hot-path-regressions final-m6-report])
