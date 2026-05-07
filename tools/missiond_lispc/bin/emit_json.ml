@@ -264,7 +264,6 @@ let emit_universe blueprint =
     let root = find_root forms "missiond-blueprint" in
     let project_registry = Option.bind root (fun root -> find_child root "project-blueprint-registry") in
     let maturity_registry = Option.bind root (fun root -> find_child root "project-maturity-registry") in
-    let hardening_registry = Option.bind root (fun root -> find_child root "project-domain-hardening-registry") in
     let projects =
       project_registry
       |> Option.map (fun node -> list_forms "project" node |> List.map project_entry_to_json)
@@ -275,20 +274,13 @@ let emit_universe blueprint =
       |> Option.map (fun node -> list_forms "maturity" node |> List.map maturity_entry_to_json)
       |> Option.value ~default:[]
     in
-    let hardening =
-      hardening_registry
-      |> Option.map (fun node -> list_forms "hardening" node |> List.map hardening_entry_to_json)
-      |> Option.value ~default:[]
-    in
     let payload =
-      Printf.sprintf {|{"blueprint":%s,"project_registry_present":%s,"maturity_registry_present":%s,"domain_hardening_registry_present":%s,"projects":[%s],"maturity":[%s],"domain_hardening":[%s]}|}
+      Printf.sprintf {|{"blueprint":%s,"project_registry_present":%s,"maturity_registry_present":%s,"projects":[%s],"maturity":[%s]}|}
         (json_string blueprint)
         (if project_registry <> None then "true" else "false")
         (if maturity_registry <> None then "true" else "false")
-        (if hardening_registry <> None then "true" else "false")
         (String.concat "," projects)
         (String.concat "," maturities)
-        (String.concat "," hardening)
     in
     print_endline
       (result_json ~extra:[

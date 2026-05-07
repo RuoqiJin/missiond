@@ -19,18 +19,19 @@ const BLUEPRINT_PATH = '.missiond/v3/missiond-blueprint.lisp';
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_REPO_ROOT = path.resolve(SCRIPT_DIR, '..');
 const LEVEL_ORDER = new Map(
-  Array.from({ length: 11 }, (_, index) => [`M${index}`, index]),
+  Array.from({ length: 7 }, (_, index) => [`M${index}`, index]),
 );
 
 const usage = `Usage:
-  node scripts/check-project-maturity.mjs [--json] [--min-level M6] [--project <id> ...]
-  node scripts/check-project-maturity.mjs --evidence-only --min-level M7 --project <id>
+  node scripts/check-project-maturity.mjs [--json] [--min-level M5] [--project <id> ...]
+  node scripts/check-project-maturity.mjs --evidence-only --min-level M6 --project <id>
   node scripts/check-project-maturity.mjs --dry-fixture [--json] [--engine=auto|js|ocaml]
 
 Checks MissionD's project maturity registry against project-local Lisp SSOT
-structure. The default gate is intentionally conservative: it proves every
-registered project is at least M6 current-code SSOT closure. Use
---min-level M10 when closing a project-universe convergence wave.
+structure. The default gate proves every registered project is at least M5
+worker-operational SSOT closure. Use --min-level M6 for Auth-grade final
+maturity: domain, policy, flow, event, runtime, implementation,
+compatibility, hot-path wiring, and regression evidence.
 Use --evidence-only inside worker shards before the central V3 maturity
 registry is advanced.
 `;
@@ -87,7 +88,7 @@ function parseArgs(argv) {
     json: false,
     dryFixture: false,
     evidenceOnly: false,
-    minLevel: 'M6',
+    minLevel: 'M5',
     projectIds: [],
     engine: 'ocaml',
   };
@@ -210,7 +211,7 @@ function normalizeTypedMaturityInputs(payload, source) {
       maturity.set(entry.id, {
         id: entry.id,
         current: entry.current ?? 'M0',
-        target: entry.target ?? 'M10',
+        target: entry.target ?? 'M6',
         gap: Array.isArray(entry.gap) ? entry.gap : [],
       });
     }
@@ -300,9 +301,10 @@ function runOcamlProjectDirChecks(repoRoot, rows, opts) {
     return { requested: opts.engine, mode: 'js-fixture', ok: true, diagnostics: [], checked: [] };
   }
   if (opts.engine === 'js') return { requested: opts.engine, mode: 'js', ok: true, diagnostics: [], checked: [] };
-  if (levelValue(opts.minLevel ?? 'M6') < 6) {
+  if (levelValue(opts.minLevel ?? 'M5') < 2) {
     return { requested: opts.engine, mode: 'ocaml-skipped', ok: true, diagnostics: [], checked: [] };
   }
+  const command = levelValue(opts.minLevel ?? 'M5') >= 6 ? 'check-m6-depth' : 'check-project-dir';
   const diagnostics = [];
   const checked = [];
   const seen = new Set();
@@ -310,7 +312,7 @@ function runOcamlProjectDirChecks(repoRoot, rows, opts) {
     const dir = row.missiond_dir;
     if (!dir || seen.has(dir)) continue;
     seen.add(dir);
-    const attempt = maybeRunLispc(['check-project-dir', '--dir', dir], {
+    const attempt = maybeRunLispc([command, '--dir', dir], {
       engine: opts.engine,
       repoRoot,
       timeoutMs: 60_000,
@@ -328,7 +330,7 @@ function runOcamlProjectDirChecks(repoRoot, rows, opts) {
     if (opts.engine === 'ocaml' && result?.unavailable) {
       return { requested: opts.engine, mode: 'ocaml', strictResult: result, checked };
     }
-    checked.push({ project: row.id, dir, ok: result?.ok === true });
+    checked.push({ project: row.id, dir, command, ok: result?.ok === true });
     if (!result?.ok) diagnostics.push(...(result?.diagnostics ?? []));
   }
   return {
@@ -355,7 +357,7 @@ function parseMaturityRegistry(node) {
     out.set(id, {
       id,
       current: nodeText(props[':current']?.value) ?? 'M0',
-      target: nodeText(props[':target']?.value) ?? 'M10',
+      target: nodeText(props[':target']?.value) ?? 'M6',
       gap: vectorValues(props[':gap']?.value),
     });
   }
@@ -411,7 +413,8 @@ function assessProject(repoRoot, id, maturity, registry) {
     runtime_projection: count(text, /:runtime-projection\b|\(runtime-projection\b|runtime-projection/g),
     event_bus: count(text, /event-bus|event bus|eventbus|event-stream|websocket|ExternalServiceEvent|missiond-event|commit-lisp-convergence|event-ingest/gi),
     worker_operational: count(text, /mission_swarm_run|context-pack|BoardTask|write_scope|write-scope|worker-operational|worker/gi),
-    final_convergence: count(text, /final-convergence|final convergence gate|M10|v3-runtime-ssot/gi),
+    final_convergence: count(text, /final-convergence|final convergence gate|final-m6-report|M6|M10|v3-runtime-ssot/gi),
+    m6_depth: count(text, /auth-grade|final-m6-report|domain-model|product-access-policy|policy-layer|flow-layer|event-contract|compatibility-ledger|hot-path-wiring|regression-matrix|runtime-registration|token-claim-contract/gi),
   };
   const evidence = {
     root_exists: root ? fs.existsSync(root) : id === 'missiond',
@@ -425,6 +428,7 @@ function assessProject(repoRoot, id, maturity, registry) {
     has_event_loop: structural.event_bus > 0,
     has_worker_contract: structural.worker_operational > 0,
     has_final_convergence: structural.final_convergence > 0,
+    has_m6_depth: hasM6DepthEvidence(text, blueprintText),
   };
   return {
     id,
@@ -545,13 +549,30 @@ function hasCodeIsomorphismEvidence(root, registry, allLispText, blueprintText) 
   return false;
 }
 
+function hasM6DepthEvidence(allLispText, blueprintText) {
+  const source = `${blueprintText}\n${allLispText}`.toLowerCase();
+  const groups = [
+    ['domain-model', 'domain model', 'authority-chain', 'authority chain'],
+    ['policy', 'policy-layer', 'guard', 'capability'],
+    ['flow', 'flow-layer', 'state-machine', 'state machine'],
+    ['event-contract', 'event contract', 'event-bus', 'outbox'],
+    ['runtime-projection', 'runtime projection', 'runtime-registration'],
+    ['implementation-map', 'implementation map', 'code-isomorphism', 'current-code'],
+    ['compatibility-ledger', 'compatibility ledger', 'legacy bridge'],
+    ['hot-path-wiring', 'hot path', 'runtime caller'],
+    ['regression-matrix', 'regression matrix', 'regression-tests', 'regression tests', 'backward compatibility'],
+    ['final-m6-report', 'auth-grade', 'final-hardening-report', 'domain-hardening-report', 'final convergence', 'final-convergence'],
+  ];
+  return groups.every((needles) => needles.some((needle) => source.includes(needle)));
+}
+
 function nextGap(current, evidence) {
-  if (levelValue(current) < 3 || !evidence.has_project_blueprint) return 'm3-blueprint-split';
-  if (levelValue(current) < 6 || !evidence.has_code_isomorphism) return 'm6-code-isomorphism';
-  if (levelValue(current) < 7 || !evidence.has_runtime_projection) return 'm7-runtime-projection';
-  if (levelValue(current) < 8 || !evidence.has_event_loop) return 'm8-event-driven';
-  if (levelValue(current) < 9 || !evidence.has_worker_contract) return 'm9-worker-operational';
-  if (levelValue(current) < 10 || !evidence.has_final_convergence) return 'm10-final-convergence';
+  if (levelValue(current) < 1 || !evidence.intent_exists) return 'm1-registered-intent';
+  if (levelValue(current) < 2 || !evidence.has_project_blueprint || !evidence.has_lisp_shape || !evidence.has_ordered_steps) return 'm2-blueprint-split';
+  if (levelValue(current) < 3 || !evidence.has_code_isomorphism) return 'm3-code-mapping';
+  if (levelValue(current) < 4 || !evidence.has_runtime_projection || !evidence.has_event_loop) return 'm4-runtime-projection';
+  if (levelValue(current) < 5 || !evidence.has_worker_contract || !evidence.has_final_convergence) return 'm5-worker-operational';
+  if (levelValue(current) < 6 || !evidence.has_m6_depth) return 'm6-auth-grade-depth';
   return null;
 }
 
@@ -561,11 +582,11 @@ function diagnosticsForProject(row, minLevel, { evidenceOnly = false } = {}) {
   if (!row.evidence.root_exists) diagnostics.push({ file, message: `${row.id} root does not exist` });
   if (!row.evidence.intent_exists) diagnostics.push({ file, message: `${row.id} intent/blueprint entry does not exist` });
   if (row.structural.lisp_files === 0) diagnostics.push({ file, message: `${row.id} has no Lisp SSOT files` });
-  if (levelValue(minLevel) >= 3 && !row.evidence.has_checker) {
+  if (levelValue(minLevel) >= 2 && !row.evidence.has_checker) {
     diagnostics.push({ file, message: `${row.id} has no declared/local checker` });
   }
-  if (levelValue(minLevel) >= 3 && !row.evidence.has_project_blueprint) {
-    diagnostics.push({ file, message: `${row.id} has no project-level *blueprint.lisp; intent-only projects cannot satisfy M3+` });
+  if (levelValue(minLevel) >= 2 && !row.evidence.has_project_blueprint) {
+    diagnostics.push({ file, message: `${row.id} has no project-level *blueprint.lisp; intent-only projects cannot satisfy M2+` });
   }
 
   if (evidenceOnly) {
@@ -592,44 +613,44 @@ function diagnosticsForProject(row, minLevel, { evidenceOnly = false } = {}) {
       message: `${row.id} evidence level ${row.evidence_level}, below required ${minLevel}; declared current is ${row.declared_current}; next gap ${row.next_gap}`,
     });
   }
-  if (levelValue(minLevel) >= 6 && !row.evidence.has_code_isomorphism) {
-    diagnostics.push({ file, message: `${row.id} lacks code-isomorphism/current-code-mapping evidence required for M6+` });
+  if (levelValue(minLevel) >= 2 && !row.evidence.has_lisp_shape) {
+    diagnostics.push({ file, message: `${row.id} lacks entry/core/egress/surface SSOT shape required for M2+` });
   }
-  if (levelValue(minLevel) >= 7 && !row.evidence.has_lisp_shape) {
-    diagnostics.push({ file, message: `${row.id} lacks entry/core/egress/surface SSOT shape` });
+  if (levelValue(minLevel) >= 2 && !row.evidence.has_ordered_steps) {
+    diagnostics.push({ file, message: `${row.id} lacks ordered core steps required for M2+` });
   }
-  if (levelValue(minLevel) >= 7 && !row.evidence.has_ordered_steps) {
-    diagnostics.push({ file, message: `${row.id} lacks ordered core steps` });
+  if (levelValue(minLevel) >= 3 && !row.evidence.has_code_isomorphism) {
+    diagnostics.push({ file, message: `${row.id} lacks code-isomorphism/current-code-mapping evidence required for M3+` });
   }
-  if (levelValue(minLevel) >= 7 && !row.evidence.has_runtime_projection) {
-    diagnostics.push({ file, message: `${row.id} missing M7 runtime projection evidence` });
+  if (levelValue(minLevel) >= 4 && !row.evidence.has_runtime_projection) {
+    diagnostics.push({ file, message: `${row.id} missing M4 runtime projection evidence` });
   }
-  if (levelValue(minLevel) >= 8 && !row.evidence.has_event_loop) {
-    diagnostics.push({ file, message: `${row.id} missing M8 event-bus evidence` });
+  if (levelValue(minLevel) >= 4 && !row.evidence.has_event_loop) {
+    diagnostics.push({ file, message: `${row.id} missing M4 event-contract evidence` });
   }
-  if (levelValue(minLevel) >= 9 && !row.evidence.has_worker_contract) {
-    diagnostics.push({ file, message: `${row.id} missing M9 worker-operational evidence` });
+  if (levelValue(minLevel) >= 5 && !row.evidence.has_worker_contract) {
+    diagnostics.push({ file, message: `${row.id} missing M5 worker-operational evidence` });
   }
-  if (levelValue(minLevel) >= 10 && !row.evidence.has_final_convergence) {
-    diagnostics.push({ file, message: `${row.id} missing M10 final-convergence evidence` });
+  if (levelValue(minLevel) >= 5 && !row.evidence.has_final_convergence) {
+    diagnostics.push({ file, message: `${row.id} missing M5 final-convergence evidence` });
   }
-  if (levelValue(row.declared_current) < 10 && row.declared_gap.length === 0) {
-    diagnostics.push({ file, message: `${row.id} is below M10 but declares no gap` });
+  if (levelValue(minLevel) >= 6 && !row.evidence.has_m6_depth) {
+    diagnostics.push({ file, message: `${row.id} missing M6 Auth-grade depth evidence` });
+  }
+  if (levelValue(row.declared_current) < 6 && row.declared_gap.length === 0) {
+    diagnostics.push({ file, message: `${row.id} is below M6 but declares no gap` });
   }
   return diagnostics;
 }
 
 function evidenceLevel(evidence) {
-  if (!evidence.root_exists || !evidence.intent_exists) return 'M1';
-  if (!evidence.has_checker) return 'M2';
-  if (!evidence.has_project_blueprint) return 'M2';
-  if (!evidence.has_lisp_shape || !evidence.has_ordered_steps) return 'M4';
-  if (!evidence.has_code_isomorphism) return 'M5';
-  if (!evidence.has_runtime_projection) return 'M6';
-  if (!evidence.has_event_loop) return 'M7';
-  if (!evidence.has_worker_contract) return 'M8';
-  if (!evidence.has_final_convergence) return 'M9';
-  return 'M10';
+  if (!evidence.root_exists || !evidence.intent_exists) return 'M0';
+  if (!evidence.has_checker || !evidence.has_project_blueprint || !evidence.has_lisp_shape || !evidence.has_ordered_steps) return 'M1';
+  if (!evidence.has_code_isomorphism) return 'M2';
+  if (!evidence.has_runtime_projection || !evidence.has_event_loop) return 'M3';
+  if (!evidence.has_worker_contract || !evidence.has_final_convergence) return 'M4';
+  if (!evidence.has_m6_depth) return 'M5';
+  return 'M6';
 }
 
 function levelValue(level) {
@@ -655,12 +676,12 @@ function buildFixture() {
       :surfaces ["src/main.rs"]
       :runtime-projection [runtime-policy]))
   (project-maturity-model
-    :schema "missiond.project-maturity-model.v1"
-    :levels ((level M6 :name ssot-closure) (level M10 :name v3-runtime-ssot)))
+    :schema "missiond.project-maturity-model.v2"
+    :levels ((level M5 :name worker-operational) (level M6 :name auth-grade)))
   (project-maturity-registry
-    :schema "missiond.project-maturity-registry.v1"
-    (maturity :id missiond :current M10 :target M10 :gap [])
-    (maturity :id app :current M6 :target M10 :gap [runtime-projection]))
+    :schema "missiond.project-maturity-registry.v2"
+    (maturity :id missiond :current M5 :target M6 :gap [final-m6-report])
+    (maturity :id app :current M5 :target M6 :gap [final-m6-report]))
   (project-blueprint-registry
     (project :id app :root "${path.join(root, 'projects/app')}" :intent ".missiond/intent.lisp" :backend ".missiond/backend/app-backend-blueprint.lisp" :checks ["bash .missiond/check.sh"])))`);
   fs.writeFileSync(path.join(root, 'projects/app/.missiond/intent.lisp'), `(project app

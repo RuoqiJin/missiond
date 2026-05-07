@@ -13,13 +13,14 @@
          (step s4 :logic "emit stable JSON diagnostics and compiled JSON projections; compiled JSON is generated output and must not be hand-authored")
          (step s5 :logic "load compiled JSON from Rust only as a read-only projection cache with source-hash diagnostics and existing fallback behavior")
          (step s6 :logic "validate the full .missiond/workflows directory through missiond-lispc check-workflow-dir before compiled workflow projections can claim contract coverage")
-         (step s7 :logic "validate registered project .missiond blueprint directories through missiond-lispc check-project-dir before maturity evidence can claim M10")
-         (step s8 :logic "migrate external project semantic checks one sample at a time, starting with Auth domain hardening")
+         (step s7 :logic "validate registered project .missiond blueprint directories through missiond-lispc check-project-dir before maturity evidence can claim M5")
+         (step s8 :logic "migrate external project semantic checks one sample at a time, starting with Auth M6 depth")
          (step s9 :logic "allow code-anchor JS checkers to continue validating Rust/TS/MJS file anchors after the OCaml Lisp structural gate succeeds"))
   :risk-gates [no-runtime-hot-path no-auto-toolchain-install no-handwritten-compiled-json no-silent-js-fallback]
   :completion (:checks ["node scripts/check-typed-lisp-compiler.mjs"
                         "node scripts/compile-v3-runtime.mjs --json"
                         "node scripts/check-v3-pillar-flow-schema.mjs --engine=ocaml --json"
                         "node scripts/check-v3-workflow-isomorphism.mjs --engine=ocaml --json"
-                        "node scripts/check-project-maturity.mjs --engine=ocaml --json --min-level M10"]
+                        "node scripts/check-project-maturity.mjs --engine=ocaml --json --min-level M5"
+                        "node scripts/check-project-maturity.mjs --engine=ocaml --json --min-level M6 --project auth"]
                :fallback "If OCaml tooling is absent, strict --engine=ocaml checks fail with OCAML_TOOLCHAIN_MISSING; default gates keep running through JS wrappers until the toolchain is installed."))

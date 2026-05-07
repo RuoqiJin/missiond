@@ -70,14 +70,14 @@ const LIVE_CHECKS = [
   },
   {
     id: 'project-maturity',
-    argv: ['scripts/check-project-maturity.mjs', '--min-level', 'M10'],
+    argv: ['scripts/check-project-maturity.mjs', '--min-level', 'M5'],
     timeoutMs: 60_000,
   },
   {
-    id: 'project-domain-hardening',
-    argv: ['scripts/check-project-domain-hardening.mjs', '--json', '--summary'],
+    id: 'auth-m6-depth',
+    argv: ['scripts/check-project-maturity.mjs', '--min-level', 'M6', '--project', 'auth', '--json'],
     json: true,
-    timeoutMs: 120_000,
+    timeoutMs: 60_000,
   },
   {
     id: 'typed-lisp-runtime-compile',

@@ -51,7 +51,7 @@ const DEFAULT_FILES = {
   workflowTests: 'crates/missiond-daemon/src/handlers/knowledge/workflow/tests.rs',
   mcpWorkflow: 'crates/missiond-mcp/src/tools/knowledge/workflow.rs',
   projectSsotConvergence: '.missiond/workflows/project-ssot-convergence.lisp',
-  projectDomainHardening: '.missiond/workflows/project-domain-hardening.lisp',
+  projectM6Depth: '.missiond/workflows/project-m6-depth.lisp',
 };
 
 function main() {
@@ -218,9 +218,9 @@ function checkFiles(root, files) {
     'prefer overlay+manifest mode',
     'if present and large, add an M6 overlay rather than replacing the whole file',
     'run scoped diff checks for owned paths',
-    ':id domain-hardening-handoff',
-    '.missiond/workflows/project-domain-hardening.lisp',
-    'M10 is not a substitute for project-domain-hardening',
+    ':id m6-depth-handoff',
+    '.missiond/workflows/project-m6-depth.lisp',
+    'M6 production-readiness claims require domain model audit',
     ':id worker-stall-recovery',
     "stalls after intermediate narration such as 'let me write'",
     'reduce the shard to an atomic overlay/manifest patch',
@@ -229,10 +229,10 @@ function checkFiles(root, files) {
     'Dirty-baseline handling is explicit',
   ]);
 
-  requireAll(diagnostics, files.projectDomainHardening, sources.projectDomainHardening, [
-    ':workflow_id project-domain-hardening',
+  requireAll(diagnostics, files.projectM6Depth, sources.projectM6Depth, [
+    ':workflow_id project-m6-depth',
     ':status active',
-    ':source_plans [auth-v3-hardening project-ssot-convergence v3-runtime-ssot]',
+    ':source_plans [auth-m6-depth project-ssot-convergence v3-runtime-ssot]',
     ':id domain-model-audit',
     ':id target-architecture-draft',
     ':id authority-chain-check',
@@ -242,7 +242,7 @@ function checkFiles(root, files) {
     ':id hot-path-wiring-check',
     ':id regression-matrix',
     ':id exact-code-shards',
-    ':id final-production-readiness-report',
+    ':id final-m6-report',
     'tenant -> application -> product -> product_user -> product_user_group',
     'Critical contracts must be hot-path wired',
     'No destructive DB migration',
@@ -878,21 +878,21 @@ Lisp 源: intent-flow.lisp`);
        :logic "if present and large, add an M6 overlay rather than replacing the whole file")
      (step s8 :id verify-and-report
        :logic "run scoped diff checks for owned paths")
-     (step s8c :id domain-hardening-handoff
-       :logic ".missiond/workflows/project-domain-hardening.lisp")
+     (step s8c :id m6-depth-handoff
+       :logic ".missiond/workflows/project-m6-depth.lisp")
      (step s9 :id worker-stall-recovery
        :logic "if a ClaudeCode worker stalls after intermediate narration such as 'let me write' without file changes, reduce the shard to an atomic overlay/manifest patch"))
   :risk-gates
     ((gate g9 :rule "Dirty worktree SSOT convergence commits must stage explicit .missiond paths only")
      (gate g10 :rule "Large existing intent files should use M6 overlay+manifest")
-     (gate g14 :rule "M10 is not a substitute for project-domain-hardening"))
+     (gate g14 :rule "M6 production-readiness claims require domain model audit"))
   :completion
     ((criterion c5 :rule "Dirty-baseline handling is explicit")))`);
-  writeFixture(root, DEFAULT_FILES.projectDomainHardening, `
-(workflow project-domain-hardening
-  :workflow_id project-domain-hardening
+  writeFixture(root, DEFAULT_FILES.projectM6Depth, `
+(workflow project-m6-depth
+  :workflow_id project-m6-depth
   :status active
-  :source_plans [auth-v3-hardening project-ssot-convergence v3-runtime-ssot]
+  :source_plans [auth-m6-depth project-ssot-convergence v3-runtime-ssot]
   :steps
     ((step s1 :id domain-model-audit :logic "read model")
      (step s2 :id target-architecture-draft :logic "write lisp")
@@ -903,7 +903,7 @@ Lisp 源: intent-flow.lisp`);
      (step s7 :id hot-path-wiring-check :logic "Critical contracts must be hot-path wired")
      (step s8 :id regression-matrix :logic "old and new behavior")
      (step s9 :id exact-code-shards :logic "worker shards")
-     (step s10 :id final-production-readiness-report :logic "report"))
+     (step s10 :id final-m6-report :logic "report"))
   :risk-gates
     ((gate g1 :rule "No destructive DB migration")
      (gate g2 :rule "No production deploy, DNS mutation, or secret mutation"))

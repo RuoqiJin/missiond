@@ -1126,98 +1126,49 @@
        "A real MissionD project with .missiond but no project-registry-policy MUST return V3_BLUEPRINT_CONFIG_ERROR rather than silently using embedded defaults."])
 
   (project-maturity-model
-    :schema "missiond.project-maturity-model.v1"
-    :rule "M6 is checker-owned current-code SSOT closure with a project-level *blueprint.lisp plus code-isomorphism/current-code-mapping evidence; intent-only projects cannot satisfy M3+ and projects without code-isomorphism evidence cannot satisfy M6. V3 parity is M10. The M6->V3 gap MUST be explicit as M7 runtime projection, M8 event-driven integration, M9 worker operation, and M10 full runtime SSOT."
-    :gate "scripts/check-project-maturity.mjs --min-level M6 is the default universe health gate; project M10 closure MUST run scripts/check-project-maturity.mjs --min-level M10 so M6 baselines cannot be mistaken for V3 parity."
-    :v3-alias M10
+    :schema "missiond.project-maturity-model.v2"
+    :rule "M6 is the highest maturity level and means Auth-grade production-ready SSOT/code/runtime/test clarity: domain model, policy, flow, event, runtime projection, implementation map, compatibility ledger, hot-path wiring, and regression matrix are fine-grained and code-aligned."
+    :gate "scripts/check-project-maturity.mjs --min-level M5 is the default universe operational gate; scripts/check-project-maturity.mjs --min-level M6 proves Auth-grade final maturity."
     :levels
-      ((level M0 :name unknown :requires [])
-       (level M1 :name registered :requires [project-id root intent-path])
-       (level M2 :name l1-index :requires [compact-intent project-identity invariants])
-       (level M3 :name blueprint-seeded :requires [backend/frontend/operations-blueprint pillar/function])
-       (level M4 :name surface-mapped :requires [entry core egress surface code-files])
-       (level M5 :name checker-owned :requires [schema-checker code-isomorphism-checker local-aggregate])
-       (level M6 :name ssot-closure :requires [M5 project-blueprint code-isomorphism-checker evidence current-code-mapping drift-policy universe-registration] :meaning "MissionD can manage the project as an SSOT-owned project, but runtime may still duplicate facts outside Lisp.")
-       (level M7 :name runtime-projected :requires [M6 runtime-config-from-lisp deployment-domain-health-constants no-hardcoded-runtime-duplicates])
-       (level M8 :name event-driven :requires [M7 project-events-to-missiond-event-bus commit-lisp-convergence-backfill durable-provider-evidence])
-       (level M9 :name worker-operational :requires [M8 context-pack-shards mission_swarm_run scoped-write-guards durable-completion-evidence])
-       (level M10 :name v3-runtime-ssot :requires [M9 final-convergence-gate resident-master-integration decision-inbox ui-runtime-projection restart/reload-policy] :meaning "MissionD V3 parity: Lisp drives runtime, workers, events, UI, decisions, deploy/recovery, and final convergence."))
+      ((level M0 :name raw :requires [] :meaning "unregistered or only scattered facts")
+       (level M1 :name registered-intent :requires [project-registration intent-l1-index])
+       (level M2 :name blueprint-split :requires [M1 project-blueprint pillar-function-entry-core-egress-surface ordered-steps])
+       (level M3 :name code-mapped :requires [M2 code-isomorphism-checker current-code-mapping drift-policy])
+       (level M4 :name runtime-projected :requires [M3 runtime-config-from-lisp event-contract deploy-runtime-constants no-hardcoded-runtime-duplicates])
+       (level M5 :name worker-operational :requires [M4 mission_swarm_run context-pack-shards scoped-write-guards durable-completion-evidence final-convergence-gate])
+       (level M6 :name auth-grade :requires [M5 domain-model policy flow event runtime-projection implementation-map compatibility-ledger hot-path-wiring regression-matrix final-m6-report] :meaning "Auth-grade: the project is fine-grained, clear, runtime-wired, regression-proven, and safe for long-term dependency."))
     :invariants
-      ["project SSOT reports MUST distinguish M6 closure from M10/V3 parity."
+      ["Project SSOT reports MUST use only M0..M6; H-levels and M10 are retired public maturity vocabulary."
+       "Old M10 maps to new M5 unless the project also has Auth-grade depth evidence."
+       "M6 requires Auth-grade domain/policy/flow/event/runtime/implementation/compatibility/hot-path/regression evidence."
        "Universe status MUST expose current and target maturity for each registered project."
-       "A project marked M6 but not M10 MUST list concrete M7/M8/M9/M10 gaps instead of claiming full V3 parity."
-       "Intent-only projects MUST NOT be marked M6 or M10; they must first split project-local blueprints and prove code-isomorphism/current-code-mapping."
-       "Resident master and swarm runners MUST treat M7/M8/M9/M10 as separate gates: M7 runtime projection, M8 event bus and commit convergence, M9 worker smoke with durable evidence, and M10 final convergence report."
-       "Core infrastructure can reach M10 while still needing project-domain-hardening; production-ready claims require .missiond/workflows/project-domain-hardening.lisp to audit domain model, compatibility ledger, runtime registration, event contract, hot-path wiring, and regression matrix."])
+       "Intent-only projects MUST NOT be marked M2+; projects without code-isomorphism evidence MUST NOT be marked M3+."
+       "Resident master and swarm runners MUST use M6 SSOT convergence language and never create H-level tasks."])
 
   (project-maturity-registry
-    :schema "missiond.project-maturity-registry.v1"
-    :default-target M10
-    :common-m6-to-v3-gap [runtime-projection event-bus commit-backfill worker-operational final-convergence]
-    (maturity :id missiond :current M10 :target M10 :gap [])
-    (maturity :id board :current M10 :target M10 :gap [])
-    (maturity :id jarvis :current M10 :target M10 :gap [])
-    (maturity :id jarvis-forge :current M10 :target M10 :gap [])
-    (maturity :id jarvis-mechanic :current M10 :target M10 :gap [])
-    (maturity :id xjpcode :current M10 :target M10 :gap [])
-    (maturity :id neural-codegen :current M10 :target M10 :gap [])
-    (maturity :id semantic-terminal :current M10 :target M10 :gap [])
-    (maturity :id xiaojinpro-backend :current M10 :target M10 :gap [])
-    (maturity :id deploy-center :current M10 :target M10 :gap [])
-    (maturity :id deploy-agent :current M10 :target M10 :gap [])
-    (maturity :id auth :current M10 :target M10 :gap [])
-    (maturity :id router :current M10 :target M10 :gap [])
-    (maturity :id payments :current M10 :target M10 :gap [])
-    (maturity :id asr :current M10 :target M10 :gap [])
-    (maturity :id timeline :current M10 :target M10 :gap [])
-    (maturity :id pcea :current M10 :target M10 :gap [])
-    (maturity :id secret-store :current M10 :target M10 :gap [])
-    (maturity :id xiaojin-blog :current M10 :target M10 :gap [])
-    (maturity :id cuthub :current M10 :target M10 :gap []))
-
-  (project-domain-hardening-model
-    :schema "missiond.project-domain-hardening-model.v1"
-    :rule "M10 proves V3-style SSOT/runtime/worker/final-convergence closure. H5 proves Auth-grade domain hardening: domain model, policy, flow, event, runtime projection, implementation map, compatibility ledger, hot-path wiring, and regression matrix are fine-grained and code-aligned."
-    :workflow ".missiond/workflows/project-domain-hardening.lisp"
-    :levels
-      ((level H0 :name not-audited :requires [])
-       (level H1 :name domain-audited :requires [domain-model authority-chain boundary-map])
-       (level H2 :name lisp-split :requires [domain policy flow event runtime-projection implementation-map compatibility-ledger])
-       (level H3 :name checker-pinned :requires [H2 typed-domain-gate code-anchor-gate])
-       (level H4 :name hot-path-wired :requires [H3 runtime-callers event-egress compatibility-boundaries])
-       (level H5 :name regression-proven :requires [H4 regression-matrix final-hardening-report]))
-    :invariants
-      ["H-level MUST be reported separately from M-level; M10 alone cannot claim production-ready architecture."
-       "Auth is the reference H5 project-domain hardening sample."
-       "Every H5 project MUST expose domain, policy, flow, event, runtime-projection, implementation-map, compatibility-ledger, and final-hardening-report evidence."
-       "Critical architecture contracts MUST be wired into runtime hot paths, not only declared in Lisp or tests."
-       "project-domain-hardening workflow owns H-level advancement and exact worker shard generation."])
-
-  (project-domain-hardening-registry
-    :schema "missiond.project-domain-hardening-registry.v1"
-    :default-target H5
-    :common-gap [domain-model policy-flow-event-split compatibility-ledger hot-path-wiring regression-matrix]
-    (hardening :id missiond :current H2 :target H5 :gap [typed-compiler-cleanup runtime-projection-cutover global-hardening-report])
-    (hardening :id board :current H1 :target H5 :gap [frontend-domain-model cockpit-hot-path-regressions final-hardening-report])
-    (hardening :id jarvis :current H1 :target H5 :gap [domain-shard-split missiond-integration-boundary final-hardening-report])
-    (hardening :id jarvis-forge :current H1 :target H5 :gap [forge-missiond-boundary component-reuse-ledger final-hardening-report])
-    (hardening :id jarvis-mechanic :current H1 :target H5 :gap [mechanic-workflow-boundary missiond-overlap-ledger final-hardening-report])
-    (hardening :id xjpcode :current H1 :target H5 :gap [domain-shard-split codegen-policy-ledger final-hardening-report])
-    (hardening :id neural-codegen :current H1 :target H5 :gap [domain-shard-split generation-policy-hot-path final-hardening-report])
-    (hardening :id semantic-terminal :current H1 :target H5 :gap [domain-shard-split terminal-event-contract final-hardening-report])
-    (hardening :id xiaojinpro-backend :current H1 :target H5 :gap [monorepo-service-boundary deploy-fact-authority final-hardening-report])
-    (hardening :id deploy-center :current H2 :target H5 :gap [deployment-authority-chain adapter-hot-path-regressions final-hardening-report])
-    (hardening :id deploy-agent :current H1 :target H5 :gap [agent-execution-boundary server-fact-ledger final-hardening-report])
-    (hardening :id auth :current H5 :target H5 :gap [])
-    (hardening :id router :current H1 :target H5 :gap [model-policy-domain routing-hot-path-regressions final-hardening-report])
-    (hardening :id payments :current H1 :target H5 :gap [payment-domain-ledger webhook-regressions final-hardening-report])
-    (hardening :id asr :current H1 :target H5 :gap [job-provider-transcript-domain callback-regressions final-hardening-report])
-    (hardening :id timeline :current H2 :target H5 :gap [revision-event-authority service-event-regressions final-hardening-report])
-    (hardening :id pcea :current H1 :target H5 :gap [app-domain-model auth-product-dependency final-hardening-report])
-    (hardening :id xjp-deploy-center :current H1 :target H5 :gap [legacy-deploy-center-authority canonical-root-merge final-hardening-report])
-    (hardening :id secret-store :current H2 :target H5 :gap [secret-version-rotation-domain capability-regressions final-hardening-report])
-    (hardening :id xiaojin-blog :current H1 :target H5 :gap [content-publishing-domain deploy-auth-boundary final-hardening-report])
-    (hardening :id cuthub :current H1 :target H5 :gap [community-domain auth-product-dependency final-hardening-report]))
+    :schema "missiond.project-maturity-registry.v2"
+    :default-target M6
+    :common-m5-to-m6-gap [domain-model policy-flow-event-split compatibility-ledger hot-path-wiring regression-matrix final-m6-report]
+    (maturity :id missiond :current M5 :target M6 :gap [typed-compiler-cleanup runtime-projection-cutover global-m6-report])
+    (maturity :id board :current M5 :target M6 :gap [frontend-domain-model cockpit-hot-path-regressions final-m6-report])
+    (maturity :id jarvis :current M5 :target M6 :gap [domain-shard-split missiond-integration-boundary final-m6-report])
+    (maturity :id jarvis-forge :current M5 :target M6 :gap [forge-missiond-boundary component-reuse-ledger final-m6-report])
+    (maturity :id jarvis-mechanic :current M5 :target M6 :gap [mechanic-workflow-boundary missiond-overlap-ledger final-m6-report])
+    (maturity :id xjpcode :current M5 :target M6 :gap [domain-shard-split codegen-policy-ledger final-m6-report])
+    (maturity :id neural-codegen :current M5 :target M6 :gap [domain-shard-split generation-policy-hot-path final-m6-report])
+    (maturity :id semantic-terminal :current M5 :target M6 :gap [domain-shard-split terminal-event-contract final-m6-report])
+    (maturity :id xiaojinpro-backend :current M5 :target M6 :gap [monorepo-service-boundary deploy-fact-authority final-m6-report])
+    (maturity :id deploy-center :current M5 :target M6 :gap [deployment-authority-chain adapter-hot-path-regressions final-m6-report])
+    (maturity :id deploy-agent :current M5 :target M6 :gap [agent-execution-boundary server-fact-ledger final-m6-report])
+    (maturity :id auth :current M6 :target M6 :gap [])
+    (maturity :id router :current M5 :target M6 :gap [model-policy-domain routing-hot-path-regressions final-m6-report])
+    (maturity :id payments :current M5 :target M6 :gap [payment-domain-ledger webhook-regressions final-m6-report])
+    (maturity :id asr :current M5 :target M6 :gap [job-provider-transcript-domain callback-regressions final-m6-report])
+    (maturity :id timeline :current M5 :target M6 :gap [revision-event-authority service-event-regressions final-m6-report])
+    (maturity :id pcea :current M5 :target M6 :gap [app-domain-model auth-product-dependency final-m6-report])
+    (maturity :id secret-store :current M5 :target M6 :gap [secret-version-rotation-domain capability-regressions final-m6-report])
+    (maturity :id xiaojin-blog :current M5 :target M6 :gap [content-publishing-domain deploy-auth-boundary final-m6-report])
+    (maturity :id cuthub :current M5 :target M6 :gap [community-domain auth-product-dependency final-m6-report]))
 
   (project-blueprint-registry
     :schema "missiond.project-blueprint-registry.v1"
@@ -1242,7 +1193,7 @@
       :checks ["bash .missiond/check.sh"]
       :missiond-role "registered project; Lisp/component reuse engine, not MissionD runtime orchestrator"
       :surface project-registry)
-    ;; ── Part1 devtools — sibling devtool repos with M10 SSOT, registered as a group ──
+    ;; ── Part1 devtools — sibling devtool repos with M5 SSOT, registered as a group ──
     (project :id jarvis
       :kind rust-multi-crate
       :root "/Users/jinchen/Projects/jarvis"
@@ -2143,16 +2094,16 @@
         :egress [workflow.lisp workflow_row compiled_yaml run_result])
       (function typed-lisp-compiler
         :surface typed-lisp-compiler
-        :entry [missiond-lispc.check-v3 missiond-lispc.check-workflow missiond-lispc.check-workflow-dir missiond-lispc.check-project missiond-lispc.check-project-dir missiond-lispc.check-auth-domain missiond-lispc.check-domain-hardening missiond-lispc.emit-json missiond-lispc.emit-v3 missiond-lispc.emit-universe missiond-lispc.emit-workflows]
+        :entry [missiond-lispc.check-v3 missiond-lispc.check-workflow missiond-lispc.check-workflow-dir missiond-lispc.check-project missiond-lispc.check-project-dir missiond-lispc.check-auth-domain missiond-lispc.check-m6-depth missiond-lispc.check-domain-hardening-deprecated-alias missiond-lispc.emit-json missiond-lispc.emit-v3 missiond-lispc.emit-universe missiond-lispc.emit-workflows]
         :core ((step s1 :logic "parse Lisp SSOT files into source-located typed AST nodes")
                (step s2 :logic "validate pillar/function entry-core-egress surfaces, workflow contracts, universe registry, maturity gates, and event/outbox contracts")
                (step s3 :logic "emit stable JSON diagnostics for JS compatibility wrappers and CI gates")
                (step s4 :logic "generate compiled JSON projections only through checker/compiler commands, never by hand; project universe and workflows emit structured payloads rather than token-presence booleans")
                (step s5 :logic "let Rust runtime read compiled JSON first only when the compiled snapshot is not older than source Lisp, then diagnostic-fallback to Lisp/default behavior")
                (step s6 :logic "validate the full .missiond/workflows directory with typed AST so old methodology workflows and active runtime workflows carry explicit source plans, risk gates, completion criteria, and step contracts")
-               (step s7 :logic "validate project-local .missiond blueprint directories with typed AST before M10 maturity can rely on project-local shape evidence")
-               (step s8 :logic "use Auth as the first external project-domain semantic checker sample before shrinking more project checkers")
-               (step s9 :logic "validate generic project-domain hardening evidence through H-level gates before claiming production-ready architecture"))
+               (step s7 :logic "validate project-local .missiond blueprint directories with typed AST before M5 maturity can rely on project-local shape evidence")
+               (step s8 :logic "use Auth as the first external project M6-depth semantic checker sample before shrinking more project checkers")
+               (step s9 :logic "validate generic Auth-grade M6 evidence before claiming production-ready architecture"))
         :egress [typed_diagnostics compiled_json compiled_runtime_snapshot compiled_project_universe compiled_workflow_contracts js_wrapper_result]))
 
     (pillar review
@@ -2688,7 +2639,7 @@
 
     (surface typed-lisp-compiler
       :status "code-aligned"
-      :implements [lisp-reader typed-ast semantic-validator diagnostic-json projection-json structured-project-universe-json structured-workflow-contract-json workflow-directory-structural-gate project-directory-structural-gate project-domain-hardening-gate runtime-compiled-json-loader auth-domain-sample]
+      :implements [lisp-reader typed-ast semantic-validator diagnostic-json projection-json structured-project-universe-json structured-workflow-contract-json workflow-directory-structural-gate project-directory-structural-gate project-m6-depth-gate runtime-compiled-json-loader auth-domain-sample]
       :code ["tools/missiond_lispc/dune-project"
              "tools/missiond_lispc/bin/dune"
              "tools/missiond_lispc/bin/main.ml"
@@ -2708,7 +2659,7 @@
              "scripts/check-project-domain-hardening.mjs"
              "crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"
              ".missiond/workflows/typed-lisp-compiler-convergence.lisp"]
-      :note "Lisp remains the canonical authoring SSOT. The OCaml layer is a dev-time typed compiler/checker/projection layer for source-located diagnostics and generated runtime JSON; project universe and workflow projections include structured project/maturity/workflow payloads, workflow-directory gates validate every .missiond/workflows/*.lisp contract, and project-directory structural gates validate each registered project's active blueprint shards before M10 maturity can rely on project-local shape evidence. OCaml is not in the daemon hot path. JS checkers remain compatibility wrappers and code-anchor validators while OCaml takes ownership of Lisp AST semantics.")
+      :note "Lisp remains the canonical authoring SSOT. The OCaml layer is a dev-time typed compiler/checker/projection layer for source-located diagnostics and generated runtime JSON; project universe and workflow projections include structured project/maturity/workflow payloads, workflow-directory gates validate every .missiond/workflows/*.lisp contract, project-directory structural gates validate each registered project's active blueprint shards before M5 maturity can rely on project-local shape evidence, and M6-depth gates validate Auth-grade domain/policy/flow/event/runtime/compatibility evidence. OCaml is not in the daemon hot path. JS checkers remain compatibility wrappers and code-anchor validators while OCaml takes ownership of Lisp AST semantics.")
 
     (surface review-gate
       :status "code-aligned"
@@ -2994,7 +2945,7 @@
              "crates/missiond-mcp/src/tools/knowledge/project.rs"
              "scripts/check-v3-project-registry-isomorphism.mjs"
              "scripts/check-project-maturity.mjs"]
-      :note "Code-aligned destination for project registry/root resolution. project.rs is the mission_project facade; project/registry.rs owns list/get/set_active/sync/init/import_universe; project/universe.rs owns mission_project(action=universe) and projects service-runtime-universe entries such as auth production domain/deployment/DNS capability to master, workers, and Board System. ProjectRegistry::resolve owns longest-prefix project lookup; inactive project aliases never participate in cwd resolution, and mission_project init archives inactive path aliases before upsert so stale aliases cannot block canonical root correction. check-project-maturity.mjs is the project-universe maturity gate: --min-level M6 proves current-code SSOT closure; --min-level M10 proves V3 parity across runtime projection, event bus, worker operation, and final convergence. It resolves the MissionD blueprint from the checker script directory so external-project workers can run it from the target root. [details: .missiond/v3/evidence/blueprint-notes.lisp#note-016]")
+      :note "Code-aligned destination for project registry/root resolution. project.rs is the mission_project facade; project/registry.rs owns list/get/set_active/sync/init/import_universe; project/universe.rs owns mission_project(action=universe) and projects service-runtime-universe entries such as auth production domain/deployment/DNS capability to master, workers, and Board System. ProjectRegistry::resolve owns longest-prefix project lookup; inactive project aliases never participate in cwd resolution, and mission_project init archives inactive path aliases before upsert so stale aliases cannot block canonical root correction. check-project-maturity.mjs is the project-universe maturity gate: --min-level M5 proves worker-operational SSOT closure; --min-level M6 proves Auth-grade domain/policy/flow/event/runtime/compatibility depth. It resolves the MissionD blueprint from the checker script directory so external-project workers can run it from the target root. [details: .missiond/v3/evidence/blueprint-notes.lisp#note-016]")
 
     (surface board-frontend
       :status "code-aligned"

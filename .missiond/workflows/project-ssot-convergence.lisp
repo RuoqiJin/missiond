@@ -2,7 +2,7 @@
   :schema "missiond.workflow.project-ssot-convergence.v1"
   :workflow_id project-ssot-convergence
   :status active
-  :source_plans [v3-runtime-ssot multi-project-maturity auth-domain-hardening]
+  :source_plans [v3-runtime-ssot multi-project-maturity auth-m6-depth]
   :purpose "Reusable multi-project SSOT convergence muscle memory: turn an existing code project into compact Lisp SSOT plus checker-backed code mapping."
   :owner resident-master-control
   :authority v3-project-blueprint-registry
@@ -35,9 +35,9 @@
      (step s8 :id verify-and-report
        :logic "run project checker, build/test, diff check; when dirty-baseline is outside this task's ownership, run scoped diff checks for owned paths and record full diff-check blockers as diagnostics instead of formatting or touching operator code")
      (step s8b :id maturity-gate
-       :logic "run node scripts/check-project-maturity.mjs --project <project-id> --min-level <target-level> before claiming a maturity upgrade; M7, M8, M9, and M10 are separate gates, so a project cannot jump from M6 to M10 by updating prose alone")
-     (step s8c :id domain-hardening-handoff
-       :logic "if the project is core infrastructure, a long-lived application dependency, or the user asks whether the architecture is elegant/production-ready, hand off to .missiond/workflows/project-domain-hardening.lisp after M10 shape closure; M10 proves V3-style SSOT/runtime governance, while domain-hardening proves the architecture itself is not muddled and critical contracts are hot-path-wired")
+       :logic "run node scripts/check-project-maturity.mjs --project <project-id> --min-level <target-level> before claiming a maturity upgrade; M1 through M6 are separate gates, so a project cannot jump from intent or surface mapping to M6 by updating prose alone")
+     (step s8c :id m6-depth-handoff
+       :logic "if the project is core infrastructure, a long-lived application dependency, or the user asks whether the architecture is elegant/production-ready, continue through .missiond/workflows/project-m6-depth.lisp; M5 proves worker-operational SSOT, while M6 proves the architecture itself is clear and critical contracts are hot-path-wired")
      (step s9 :id worker-stall-recovery
        :logic "if a ClaudeCode worker stalls after intermediate narration such as 'let me write' without file changes, interrupt once, reduce the shard to an atomic overlay/manifest patch, and record the stall as dispatch telemetry; do not retry the same full-rewrite prompt indefinitely"))
   :egress [project-blueprint project-checkers boardtasks convergence-report kb-note]
@@ -54,13 +54,13 @@
      (gate g10 :rule "Large existing intent files should use M6 overlay+manifest unless the task explicitly owns a full SSOT rewrite.")
      (gate g11 :rule "PTY-only completion of a delegated worker BoardTask MUST NOT close unless the screen carries a structured artifact (Findings / Evidence / Recommendations / Verification / Summary heading) or durable provider final evidence is available; intermediate assistant sentences captured between the prompt return and the JSONL final write are not valid finals.")
      (gate g12 :rule "A slot may be the running owner of at most ONE BoardTask at a time. Autopilot dispatch unclaims any other BoardTask whose claim_executor still points at the slot before the new dispatch claims it; conversations.task_id is force-rebound to the incoming task so mission_conversation_query(taskId=...) always returns the current dispatch's conversation.")
-     (gate g13 :rule "Project maturity claims MUST be backed by check-project-maturity.mjs at the claimed --min-level; M6 universe success is not evidence of M10 parity.")
-     (gate g14 :rule "M10 is not a substitute for project-domain-hardening on core infra: production-readiness claims require domain model audit, compatibility ledger, runtime registration, event contract, hot-path wiring, and regression matrix."))
+     (gate g13 :rule "Project maturity claims MUST be backed by check-project-maturity.mjs at the claimed --min-level; M5 universe success is not evidence of M6 Auth-grade maturity.")
+     (gate g14 :rule "M6 production-readiness claims require domain model audit, compatibility ledger, runtime registration, event contract, hot-path wiring, and regression matrix."))
   :completion
     ((criterion c1 :rule "Lisp has pillar/function/entry/core/egress/surface shape.")
      (criterion c2 :rule "Checker proves root, blueprint, surfaces, and public code anchors.")
      (criterion c3 :rule "Build/test command is known even when deferred.")
      (criterion c4 :rule "MissionD project registry can locate the project by id and root.")
      (criterion c5 :rule "Dirty-baseline handling is explicit: preserved, staged only by owned path, and reported in the manifest or convergence note.")
-     (criterion c6 :rule "Maturity level is explicit and machine-checkable: M7 runtime projection, M8 event bus, M9 worker operation, M10 final convergence.")
-     (criterion c7 :rule "For core infrastructure, the convergence report states whether project-domain-hardening is completed, deferred, or blocked by user decision.")))
+     (criterion c6 :rule "Maturity level is explicit and machine-checkable from M1 registration through M6 Auth-grade depth.")
+     (criterion c7 :rule "For core infrastructure, the convergence report states whether M6 depth is completed, deferred, or blocked by user decision.")))

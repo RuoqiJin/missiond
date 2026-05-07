@@ -27,7 +27,8 @@ const REQUIRED_FILES = [
   'scripts/check-project-domain-hardening.mjs',
   '.missiond/workflows/typed-lisp-compiler-convergence.lisp',
   '.missiond/workflows/typed-lisp-compiler-cleanup.lisp',
-  '.missiond/workflows/multi-project-domain-hardening-wave.lisp',
+  '.missiond/workflows/multi-project-m6-wave.lisp',
+  '.missiond/workflows/project-m6-depth.lisp',
 ];
 
 const REQUIRED_RUNTIME_LOADER = {
@@ -92,6 +93,7 @@ const REQUIRED_AUTH_DOMAIN_CHECKER = {
         'validate_project_function_form',
         'project.core_step_logic',
         'validate_auth_domain_structured_dir',
+        'validate_m6_depth_dir',
         'validate_domain_hardening_dir',
         'validate_auth_structured_form',
         'auth.runtime_projection_missing',
@@ -112,8 +114,8 @@ const REQUIRED_BLUEPRINT_TOKENS = [
   '(surface typed-lisp-compiler',
   'tools/missiond_lispc/bin/main.ml',
   'check-workflow-dir',
-  'check-domain-hardening',
-  'project-domain-hardening-registry',
+  'check-m6-depth',
+  'check-domain-hardening-deprecated-alias',
   'tools/missiond_lispc/bin/schema_v3.ml',
   'tools/missiond_lispc/bin/emit_json.ml',
   'node scripts/check-typed-lisp-compiler.mjs',
@@ -125,9 +127,9 @@ const REQUIRED_WORKFLOW_PROJECTIONS = [
   'conversation-memory-distillation',
   'nightly-evolution',
   'pillar-refactor',
-  'project-domain-hardening',
+  'project-m6-depth',
   'project-ssot-convergence',
-  'multi-project-domain-hardening-wave',
+  'multi-project-m6-wave',
   'typed-lisp-compiler-cleanup',
   'typed-lisp-compiler-convergence',
 ];
@@ -207,7 +209,6 @@ function main() {
       ['emit-workflows', '--workflow-dir', '.missiond/workflows'],
       ['check-workflow-dir', '--workflow-dir', '.missiond/workflows'],
       ['check-project-dir', '--dir', '.missiond/frontend'],
-      ['check-domain-hardening', '--dir', '.missiond/frontend'],
     ]) {
       const emit = runLispc(argv);
       emitChecks.push({ argv, ok: emit.ok === true, diagnostics: emit.diagnostics ?? [] });
@@ -238,9 +239,6 @@ function main() {
         if (!Array.isArray(emit.compiled?.payload?.maturity) || emit.compiled.payload.maturity.length === 0) {
           diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_UNIVERSE_PROJECTION_MISSING_MATURITY', 'emit-universe must project structured maturity[]'));
         }
-        if (!Array.isArray(emit.compiled?.payload?.domain_hardening) || emit.compiled.payload.domain_hardening.length === 0) {
-          diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_UNIVERSE_PROJECTION_MISSING_DOMAIN_HARDENING', 'emit-universe must project structured domain_hardening[]'));
-        }
       } else if (argv[0] === 'emit-workflows') {
         if (!Array.isArray(emit.compiled?.payload?.workflows) || emit.compiled.payload.workflows.length === 0) {
           diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_WORKFLOW_PROJECTION_MISSING_WORKFLOWS', 'emit-workflows must project structured workflows[]'));
@@ -266,13 +264,23 @@ function main() {
             diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_WORKFLOW_PROJECTION_MISSING_COMPLETION', `workflow projection ${workflow.name ?? '<unknown>'} must include completion criteria`));
           }
         }
-        const domainHardening = emit.compiled?.payload?.workflows?.find((workflow) => workflow.name === 'project-domain-hardening');
-        if (!Array.isArray(domainHardening?.steps) || !domainHardening.steps.includes('s10')) {
+        const m6Depth = emit.compiled?.payload?.workflows?.find((workflow) => workflow.name === 'project-m6-depth');
+        if (!Array.isArray(m6Depth?.steps) || !m6Depth.steps.includes('s10')) {
           diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_WORKFLOW_PROJECTION_MISSING_STRUCTURED_STEPS', 'emit-workflows must project step ids from structured (step sN ...) forms'));
         }
       }
     }
     if (fs.existsSync(DEFAULT_AUTH_MISSIOND)) {
+      const authM6Depth = runLispc(['check-m6-depth', '--dir', DEFAULT_AUTH_MISSIOND]);
+      emitChecks.push({
+        argv: ['check-m6-depth', '--dir', DEFAULT_AUTH_MISSIOND],
+        ok: authM6Depth.ok === true,
+        diagnostics: authM6Depth.diagnostics ?? [],
+      });
+      if (!authM6Depth.ok) {
+        diagnostics.push(diag('tools/missiond_lispc/bin/project_schema.ml', 'OCAML_AUTH_M6_DEPTH_GATE_FAILED', 'Auth M6 depth structural sample gate failed'));
+        for (const d of authM6Depth.diagnostics ?? []) diagnostics.push({ ...d, code: d.code ?? 'OCAML_AUTH_M6_DEPTH_DIAGNOSTIC' });
+      }
       const authDomain = runLispc(['check-auth-domain', '--dir', DEFAULT_AUTH_MISSIOND]);
       emitChecks.push({
         argv: ['check-auth-domain', '--dir', DEFAULT_AUTH_MISSIOND],

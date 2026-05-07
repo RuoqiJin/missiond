@@ -64,17 +64,13 @@ function main() {
   const blueprint = readBlueprintWithEvidenceSidecars(process.cwd(), '.missiond/v3/missiond-blueprint.lisp');
   requireAll(diagnostics, '.missiond/v3/missiond-blueprint.lisp', blueprint, [
     '(project-maturity-model',
-    ':schema "missiond.project-maturity-model.v1"',
-    ':v3-alias M10',
-    '(level M6 :name ssot-closure',
-    '(level M7 :name runtime-projected',
-    '(level M8 :name event-driven',
-    '(level M9 :name worker-operational',
-    '(level M10 :name v3-runtime-ssot',
+    ':schema "missiond.project-maturity-model.v2"',
+    '(level M5 :name worker-operational',
+    '(level M6 :name auth-grade',
     '(project-maturity-registry',
-	    ':schema "missiond.project-maturity-registry.v1"',
-	    ':default-target M10',
-	    ':common-m6-to-v3-gap [runtime-projection event-bus commit-backfill worker-operational final-convergence]',
+	    ':schema "missiond.project-maturity-registry.v2"',
+	    ':default-target M6',
+	    ':common-m5-to-m6-gap [domain-model policy-flow-event-split compatibility-ledger hot-path-wiring regression-matrix final-m6-report]',
 	    '(project-blueprint-registry',
     '(service-runtime-universe',
     ':schema "missiond.service-runtime-universe.v1"',
@@ -312,11 +308,11 @@ function checkMaturityRegistry(diagnostics, maturityEntries) {
       diagnostics.push({ file: '.missiond/v3/missiond-blueprint.lisp', message: `missing maturity registry entry for ${id}` });
       continue;
     }
-    if (entry.target !== 'M10') {
-      diagnostics.push({ file: '.missiond/v3/missiond-blueprint.lisp', message: `${id} target must be M10, got ${entry.target}` });
+    if (entry.target !== 'M6') {
+      diagnostics.push({ file: '.missiond/v3/missiond-blueprint.lisp', message: `${id} target must be M6, got ${entry.target}` });
     }
-    if (entry.current !== 'M10' && entry.gap.length === 0) {
-      diagnostics.push({ file: '.missiond/v3/missiond-blueprint.lisp', message: `${id} is not M10 but has no maturity gap` });
+    if (entry.current !== 'M6' && entry.gap.length === 0) {
+      diagnostics.push({ file: '.missiond/v3/missiond-blueprint.lisp', message: `${id} is not M6 but has no maturity gap` });
     }
   }
 }

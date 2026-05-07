@@ -4261,8 +4261,8 @@ mod tests {
                 }],
                 "maturity": [{
                   "id": "auth",
-                  "current": "M10",
-                  "target": "M10",
+                  "current": "M6",
+                  "target": "M6",
                   "gap": []
                 }]
               }
@@ -4276,7 +4276,7 @@ mod tests {
         assert_eq!(payload.projects.len(), 1);
         assert_eq!(payload.projects[0].id.as_deref(), Some("auth"));
         assert_eq!(payload.projects[0].checks, vec!["bash .missiond/check.sh"]);
-        assert_eq!(payload.maturity[0].current.as_deref(), Some("M10"));
+        assert_eq!(payload.maturity[0].current.as_deref(), Some("M6"));
     }
 
     #[test]
@@ -4345,7 +4345,7 @@ mod tests {
               "diagnostics": [],
               "payload": {
                 "projects": [{"id": "missiond"}],
-                "maturity": [{"id": "missiond", "current": "M10", "target": "M10"}]
+                "maturity": [{"id": "missiond", "current": "M5", "target": "M6"}]
               }
             }"#,
         )

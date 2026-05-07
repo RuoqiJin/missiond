@@ -114,21 +114,17 @@ function checkFiles(root, files) {
 	    'mission_project init archives inactive path aliases before upsert',
 	    'resolve_target_project_root owns project-root spawn cwd policy',
 	    '(project-maturity-model',
-	    ':schema "missiond.project-maturity-model.v1"',
-	    ':v3-alias M10',
-	    '(level M6 :name ssot-closure',
-	    '(level M7 :name runtime-projected',
-	    '(level M8 :name event-driven',
-	    '(level M9 :name worker-operational',
-	    '(level M10 :name v3-runtime-ssot',
+	    ':schema "missiond.project-maturity-model.v2"',
+	    '(level M5 :name worker-operational',
+	    '(level M6 :name auth-grade',
 	    '(project-maturity-registry',
-	    ':schema "missiond.project-maturity-registry.v1"',
-	    ':common-m6-to-v3-gap [runtime-projection event-bus commit-backfill worker-operational final-convergence]',
+	    ':schema "missiond.project-maturity-registry.v2"',
+	    ':common-m5-to-m6-gap [domain-model policy-flow-event-split compatibility-ledger hot-path-wiring regression-matrix final-m6-report]',
+	    'scripts/check-project-maturity.mjs --min-level M5',
 	    'scripts/check-project-maturity.mjs --min-level M6',
-	    'scripts/check-project-maturity.mjs --min-level M10',
 	    'It resolves the MissionD blueprint from the checker script directory',
-	    '(maturity :id missiond :current M10 :target M10',
-	    '(maturity :id auth :current M10 :target M10',
+	    '(maturity :id missiond :current M5 :target M6',
+	    '(maturity :id auth :current M6 :target M6',
 	    '(project-blueprint-registry',
 	    ':id jarvis-forge',
 	    ':backend ".missiond/backend/forge-backend-blueprint.lisp"',
@@ -351,20 +347,16 @@ function buildFixture() {
 	    :intent-path-candidates [".missiond/intent.lisp" ".jarvis/intent.lisp" "intent.lisp"]
 	    :default-universe-manifest "/Users/jinchen/Projects/universe.intent.lisp")
 	  (project-maturity-model
-	    :schema "missiond.project-maturity-model.v1"
-	    :gate "scripts/check-project-maturity.mjs --min-level M6 and scripts/check-project-maturity.mjs --min-level M10"
+	    :schema "missiond.project-maturity-model.v2"
+	    :gate "scripts/check-project-maturity.mjs --min-level M5 and scripts/check-project-maturity.mjs --min-level M6"
 	    :note "It resolves the MissionD blueprint from the checker script directory"
-	    :v3-alias M10
-	    :levels ((level M6 :name ssot-closure)
-	             (level M7 :name runtime-projected)
-	             (level M8 :name event-driven)
-	             (level M9 :name worker-operational)
-	             (level M10 :name v3-runtime-ssot)))
+	    :levels ((level M5 :name worker-operational)
+	             (level M6 :name auth-grade)))
 	  (project-maturity-registry
-	    :schema "missiond.project-maturity-registry.v1"
-	    :common-m6-to-v3-gap [runtime-projection event-bus commit-backfill worker-operational final-convergence]
-	    (maturity :id missiond :current M10 :target M10)
-	    (maturity :id auth :current M10 :target M10 :gap []))
+	    :schema "missiond.project-maturity-registry.v2"
+	    :common-m5-to-m6-gap [domain-model policy-flow-event-split compatibility-ledger hot-path-wiring regression-matrix final-m6-report]
+	    (maturity :id missiond :current M5 :target M6)
+	    (maturity :id auth :current M6 :target M6 :gap []))
 	  (project-blueprint-registry
 	    (project :id jarvis-forge :root "/Users/jinchen/Projects/jarvis-forge" :backend ".missiond/backend/forge-backend-blueprint.lisp" :frontend ".missiond/frontend/forge-ui-blueprint.lisp")
 	    (project :id xiaojinpro-backend :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend")
