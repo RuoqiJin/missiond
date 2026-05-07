@@ -49,17 +49,45 @@ pub(super) async fn handle_resolve(state: &AppState, args: Value) -> Result<Tool
     struct ContextResolveArgs {
         query: String,
         skill: Option<String>,
+        #[serde(default, alias = "project", alias = "projectId")]
+        project_id: Option<String>,
         #[serde(default, deserialize_with = "lenient::option_bool")]
         include_board: Option<bool>,
     }
     let args: ContextResolveArgs = serde_json::from_value(args)?;
     let include_board = args.include_board.unwrap_or(false);
+    let project_config = if let Some(ref project_id) = args.project_id {
+        state.project_registry.read().await.get(project_id).cloned()
+    } else {
+        None
+    };
+    let search_query = if let Some(ref project_id) = args.project_id {
+        format!("{project_id} {}", args.query)
+    } else {
+        args.query.clone()
+    };
 
     let mut primary_topics: Vec<String> = Vec::new();
     if let Some(ref name) = args.skill {
         primary_topics.push(name.clone());
     } else {
-        for s in state.skills.search(&args.query).iter().take(3) {
+        if let Some(ref project_id) = args.project_id {
+            if state.skills.get(project_id).is_some() {
+                primary_topics.push(project_id.clone());
+            } else if state
+                .store
+                .skill_topic_get(project_id)
+                .await
+                .map(|topic| topic.is_some())
+                .unwrap_or(false)
+            {
+                primary_topics.push(project_id.clone());
+            }
+        }
+        for s in state.skills.search(&search_query).iter().take(3) {
+            if primary_topics.iter().any(|topic| topic == &s.name) {
+                continue;
+            }
             primary_topics.push(s.name.clone());
         }
     }
@@ -152,14 +180,14 @@ pub(super) async fn handle_resolve(state: &AppState, args: Value) -> Result<Tool
     let kb_batch = {
         let mut results: Vec<(missiond_core::KnowledgeEntry, &'static str)> = Vec::new();
         for cat in &kb_categories {
-            if let Ok(entries) = state.store.kb_search(&args.query, Some(cat)).await {
+            if let Ok(entries) = state.store.kb_search(&search_query, Some(cat)).await {
                 for entry in entries.into_iter().take(5) {
                     results.push((entry, "category_filter"));
                 }
             }
         }
         if results.is_empty() {
-            if let Ok(entries) = state.store.kb_search(&args.query, None).await {
+            if let Ok(entries) = state.store.kb_search(&search_query, None).await {
                 for entry in entries.into_iter().take(5) {
                     results.push((entry, "query"));
                 }
@@ -202,6 +230,18 @@ pub(super) async fn handle_resolve(state: &AppState, args: Value) -> Result<Tool
     }
 
     let result = json!({
+        "query": {
+            "original": args.query,
+            "augmented": search_query,
+        },
+        "project": project_config.map(|project| json!({
+            "id": project.id,
+            "path": project.path,
+            "intent_path": project.intent_path,
+            "active": project.active,
+            "kind": project.kind,
+            "parent_id": project.parent_id,
+        })),
         "skills": skill_results,
         "infra": infra_results,
         "kb": kb_results,

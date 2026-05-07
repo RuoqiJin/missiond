@@ -32,6 +32,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "action": {"type": "string", "enum": ["build", "resolve"]},
                     "query": {"type": "string", "description": "任务关键词/描述"},
                     "skill": {"type": "string", "description": "直接指定 skill name 跳过搜索"},
+                    "project_id": {"type": "string", "description": "[resolve] 项目 ID，用于优先匹配项目 skill 并返回项目上下文"},
+                    "project": {"type": "string", "description": "[resolve] project_id alias"},
                     "include_board": {"type": "boolean", "description": "[resolve] 包含 Board 相关任务"}
                 }
             }),
