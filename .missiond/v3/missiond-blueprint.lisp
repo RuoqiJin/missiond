@@ -1196,7 +1196,7 @@
            (step s4 :logic "compare deployed commit to local service paths where the project lives in a git checkout; do not mark a service current when service-relevant files changed after the deployed commit")
            (step s5 :logic "order rollout through deploy-center before dependent services and emit a machine-readable deployment gap report"))
     :egress [m6-deployment-status-json deploy-ops-BoardTask m6-rollout-report]
-    :surfaces ["scripts/check-m6-deployment-status.mjs" ".missiond/workflows/m6-deployment-rollout.lisp" "scripts/check-v3-project-registry-isomorphism.mjs"]
+    :surfaces ["scripts/check-m6-deployment-status.mjs" ".missiond/workflows/m6-deployment-rollout.lisp" ".missiond/workflows/pcea-deployment-rollout.lisp" "scripts/check-v3-project-registry-isomorphism.mjs"]
     :rule "M6 maturity is not deployment evidence. Production deployment confirmation must come from deploy-center status/provenance, with curl/git probes only as diagnostics.")
 
   (project-identity-contract

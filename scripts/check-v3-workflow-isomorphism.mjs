@@ -54,6 +54,7 @@ const DEFAULT_FILES = {
   projectM6Depth: '.missiond/workflows/project-m6-depth.lisp',
   multiProjectM6Wave: '.missiond/workflows/multi-project-m6-wave.lisp',
   m6DeploymentRollout: '.missiond/workflows/m6-deployment-rollout.lisp',
+  pceaDeploymentRollout: '.missiond/workflows/pcea-deployment-rollout.lisp',
 };
 
 function main() {
@@ -298,6 +299,22 @@ function checkFiles(root, files) {
     'deploy-center first, then router, then pcea',
     'deploy_succeeded and smoke_succeeded',
     'M6 maturity is not deployment evidence',
+  ]);
+
+  requireAll(diagnostics, files.pceaDeploymentRollout, sources.pceaDeploymentRollout, [
+    ':workflow_id pcea-deployment-rollout',
+    ':status active',
+    'mission_skill_context(resolve,skill=pcea,include_kb=false)',
+    'pcea-video-vault',
+    'pcea-api',
+    '/Users/jinchen/Downloads/PCEA develop/pcea-video-vault',
+    '/Users/jinchen/Downloads/PCEA develop/pcea-api',
+    'deploy pcea-video-vault before pcea-api',
+    'video-vault owns shared docker-compose.yml, deploy.sh, deploy-api.sh, and sql/ bundle files',
+    'pcea-api image delivery is OSS bundle/local image tag',
+    'Wait through EventBridge for deploy_started, deploy_succeeded, smoke_succeeded, deploy_failed, or smoke_failed',
+    'No Cloudflare, DNS, secret, or production env mutation',
+    'The rollout report captures any skill drift, manifest gap, migration/manual step gap, or deploy-agent evidence gap',
   ]);
 
   const workflowSurface = `${sources.workflowHandler}\n${sources.workflowArtifacts}\n${sources.workflowAutoChain}\n${sources.workflowAutoChainRecorder}\n${sources.workflowAutoChainRules}\n${sources.workflowAutoSonnet}\n${sources.workflowAutoSonnetPolicy}\n${sources.workflowCompileMethodology}\n${sources.workflowDistill}\n${sources.workflowMethodology}\n${sources.workflowMethodologyExtract}\n${sources.workflowMethodologyIo}\n${sources.workflowMethodologySource}\n${sources.workflowMethodologyTypes}\n${sources.workflowMethodologyYaml}\n${sources.workflowProjectRoot}\n${sources.workflowReviewResolution}\n${sources.workflowRunMethodology}\n${sources.workflowStoreActions}\n${sources.workflowTests}`;
@@ -981,6 +998,7 @@ Lisp 源: intent-flow.lisp`);
 (workflow multi-project-m6-wave
   :workflow_id multi-project-m6-wave
   :status active
+  :source_plans [fixture]
   :steps
     ((step s1 :id select-wave :logic "select")
      (step s2 :id review-question :logic "ask")
@@ -992,18 +1010,42 @@ Lisp 源: intent-flow.lisp`);
      (step s8 :id implementation :logic "implement")
      (step s9 :id verification :logic "check-project-maturity --min-level M6"))
   :context-pack-artifacts [questions hypotheses evidence_needed findings design_options accepted_shards]
-  :risk-gates ((gate g1 :rule "exact-shard-ready=true")))`);
+  :risk-gates ((gate g1 :rule "exact-shard-ready=true"))
+  :completion ((criterion c1 :rule "project wave verified")))`);
   writeFixture(root, DEFAULT_FILES.m6DeploymentRollout, `
 (workflow m6-deployment-rollout
   :workflow_id m6-deployment-rollout
   :status active
+  :source_plans [fixture]
   :entry ["scripts/check-m6-deployment-status.mjs --json" "deploy-center /api/deploy/status" "deploy-center provenance endpoint"]
   :steps
     ((step s1 :logic "classify deployed-current, deployed-stale, not-confirmed, or deployed-unknown")
      (step s2 :logic "deploy-center first, then router, then pcea")
      (step s3 :logic "wait for deploy_succeeded and smoke_succeeded"))
   :risk-gates
-    ((gate g1 :rule "M6 maturity is not deployment evidence")))`);
+    ((gate g1 :rule "M6 maturity is not deployment evidence"))
+  :completion ((criterion c1 :rule "deployment status verified")))`);
+  writeFixture(root, DEFAULT_FILES.pceaDeploymentRollout, `
+(workflow pcea-deployment-rollout
+  :workflow_id pcea-deployment-rollout
+  :status active
+  :source_plans [fixture]
+  :entry ["mission_skill_context(resolve,skill=pcea,include_kb=false)" "deploy-center provenance endpoint"]
+  :components
+    ((component pcea-video-vault
+       :repo "/Users/jinchen/Downloads/PCEA develop/pcea-video-vault"
+       :deploy_slug pcea-video-vault)
+     (component pcea-api
+       :repo "/Users/jinchen/Downloads/PCEA develop/pcea-api"
+       :deploy_slug pcea-api))
+  :steps
+    ((step s1 :logic "deploy pcea-video-vault before pcea-api because video-vault owns shared docker-compose.yml, deploy.sh, deploy-api.sh, and sql/ bundle files")
+     (step s2 :logic "Wait through EventBridge for deploy_started, deploy_succeeded, smoke_succeeded, deploy_failed, or smoke_failed"))
+  :risk-gates
+    ((gate g1 :rule "No Cloudflare, DNS, secret, or production env mutation")
+     (gate g2 :rule "pcea-api image delivery is OSS bundle/local image tag"))
+  :completion
+    ((criterion c1 :rule "The rollout report captures any skill drift, manifest gap, migration/manual step gap, or deploy-agent evidence gap")))`);
   return root;
 }
 
