@@ -227,9 +227,12 @@
       :description-zh "Skill 上下文构建。build: 简单匹配; resolve: 递归聚合含 requires 依赖"
       (input
         (action)
-        (query :description-zh "任务关键词/描述")
+        (query :description-zh "任务关键词/描述；build 必填，resolve 可由 project_id 或 skill 推导")
         (skill :description-zh "直接指定 skill name 跳过搜索")
-        (include_board :description-zh "[resolve] 包含 Board 相关任务")))
+        (project_id :description-zh "[resolve] 项目 ID，用于优先匹配项目 skill 并返回项目上下文")
+        (project :description-zh "[resolve] project_id alias")
+        (include_board :description-zh "[resolve] 包含 Board 相关任务")
+        (include_kb :description-zh "[resolve] 显式包含 KB 记忆；默认 false，避免噪声预加载")))
 
     (tool mission_skill_mutate
       :zh "工具: mission_skill_mutate"

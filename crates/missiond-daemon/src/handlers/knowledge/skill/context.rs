@@ -47,7 +47,8 @@ pub(super) async fn handle_build(state: &AppState, args: Value) -> Result<ToolRe
 pub(super) async fn handle_resolve(state: &AppState, args: Value) -> Result<ToolResult> {
     #[derive(Deserialize)]
     struct ContextResolveArgs {
-        query: String,
+        #[serde(default)]
+        query: Option<String>,
         skill: Option<String>,
         #[serde(default, alias = "project", alias = "projectId")]
         project_id: Option<String>,
@@ -64,10 +65,25 @@ pub(super) async fn handle_resolve(state: &AppState, args: Value) -> Result<Tool
     } else {
         None
     };
+    let query = resolve_context_query(
+        args.query.as_deref(),
+        args.project_id.as_deref(),
+        args.skill.as_deref(),
+    );
     let search_query = if let Some(ref project_id) = args.project_id {
-        format!("{project_id} {}", args.query)
+        if args
+            .query
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
+        {
+            project_id.clone()
+        } else {
+            format!("{project_id} {query}")
+        }
     } else {
-        args.query.clone()
+        query.clone()
     };
 
     let mut primary_topics: Vec<String> = Vec::new();
@@ -216,7 +232,7 @@ pub(super) async fn handle_resolve(state: &AppState, args: Value) -> Result<Tool
     let mut board_results: Vec<Value> = Vec::new();
     if include_board {
         if let Ok(tasks) = state.store.list_board_tasks(None, false).await {
-            let query_lower = args.query.to_lowercase();
+            let query_lower = query.to_lowercase();
             for task in tasks.iter().take(100) {
                 if task.title.to_lowercase().contains(&query_lower)
                     || task.description.to_lowercase().contains(&query_lower)
@@ -236,7 +252,7 @@ pub(super) async fn handle_resolve(state: &AppState, args: Value) -> Result<Tool
 
     let result = json!({
         "query": {
-            "original": args.query,
+            "original": query,
             "augmented": search_query,
         },
         "project": project_config.map(|project| json!({
@@ -254,4 +270,44 @@ pub(super) async fn handle_resolve(state: &AppState, args: Value) -> Result<Tool
     });
 
     Ok(ToolResult::json_pretty(&result))
+}
+
+fn resolve_context_query(
+    query: Option<&str>,
+    project_id: Option<&str>,
+    skill: Option<&str>,
+) -> String {
+    query
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| project_id.map(str::trim).filter(|s| !s.is_empty()))
+        .or_else(|| skill.map(str::trim).filter(|s| !s.is_empty()))
+        .unwrap_or("")
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_context_query;
+
+    #[test]
+    fn resolve_context_query_prefers_explicit_query() {
+        assert_eq!(
+            resolve_context_query(Some("deploy pcea"), Some("pcea"), Some("pcea")),
+            "deploy pcea"
+        );
+    }
+
+    #[test]
+    fn resolve_context_query_can_use_project_without_query() {
+        assert_eq!(resolve_context_query(None, Some("pcea"), None), "pcea");
+    }
+
+    #[test]
+    fn resolve_context_query_can_use_skill_without_query() {
+        assert_eq!(
+            resolve_context_query(Some("  "), None, Some("deploy-ops")),
+            "deploy-ops"
+        );
+    }
 }
