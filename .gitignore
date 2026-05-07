@@ -76,6 +76,7 @@ scripts/backfill_labels.sql
 
 # Env files (business config)
 "$ENV_FILE"
+.mcp.json
 
 # Temp media/audio files
 *_temp/
