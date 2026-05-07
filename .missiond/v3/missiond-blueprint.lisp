@@ -1187,6 +1187,18 @@
     :egress [ExternalServiceEvent mission_timeline.wait deployment-ops-BoardTask]
     :surfaces [eventbridge project-registry])
 
+  (m6-deployment-confirmation
+    :schema "missiond.m6-deployment-confirmation.v1"
+    :entry [project-maturity-registry service-runtime-universe deploy-center.status deploy-center.provenance]
+    :core ((step s1 :logic "select projects whose project-maturity-registry current level is M6")
+           (step s2 :logic "map each project to deploy-center service slug(s), for example auth→xjp-auth-center, deploy-center→xjp-deploy-center, router→xjp-router, pcea→pcea/pcea-api/pcea-video-vault")
+           (step s3 :logic "query deploy-center /api/deploy/status and provenance surfaces; classify deployed-current, deployed-stale, not-confirmed, or deployed-unknown")
+           (step s4 :logic "compare deployed commit to local service paths where the project lives in a git checkout; do not mark a service current when service-relevant files changed after the deployed commit")
+           (step s5 :logic "order rollout through deploy-center before dependent services and emit a machine-readable deployment gap report"))
+    :egress [m6-deployment-status-json deploy-ops-BoardTask m6-rollout-report]
+    :surfaces ["scripts/check-m6-deployment-status.mjs" ".missiond/workflows/m6-deployment-rollout.lisp" "scripts/check-v3-project-registry-isomorphism.mjs"]
+    :rule "M6 maturity is not deployment evidence. Production deployment confirmation must come from deploy-center status/provenance, with curl/git probes only as diagnostics.")
+
   (project-identity-contract
     :schema "missiond.project-identity-contract.v1"
     :fields [project_id canonical_root repo_remote ssot_paths deploy_center_slug forge_project_name service_ids aliases status]
@@ -1484,6 +1496,7 @@
       :backend ".missiond/backend/deploy-center-backend-blueprint.lisp"
       :environment production
       :deployment (:substrate deploy-center :authority release-provenance :provenance-api "/api/deploy/provenance/:project")
+      :deployment-confirmation (:checker "node scripts/check-m6-deployment-status.mjs --json" :status-api "/api/deploy/status" :rollout-workflow ".missiond/workflows/m6-deployment-rollout.lisp")
       :event-ingest (:endpoint "/webhooks/deploy-center-event" :domain system :event ExternalServiceEvent :source deploy_events :token-env MISSIOND_EXTERNAL_WEBHOOK_TOKEN :authority deploy-center.deploy_events :rule "deploy-center relays durable deploy_events rows into MissionD EventBridge with stable event_id and MissionD idempotency; MissionD must not infer production release state by stitching GitHub/curl/git when deploy-center has provenance.")
       :events [deploy_created build_started build_succeeded build_failed deploy_started deploy_succeeded deploy_failed smoke_succeeded smoke_failed rollback_started rollback_succeeded rollback_failed agent_heartbeat agent_update_started agent_update_succeeded agent_update_failed provenance_changed]
       :ops-capability deploy-ops

@@ -53,6 +53,7 @@ const DEFAULT_FILES = {
   projectSsotConvergence: '.missiond/workflows/project-ssot-convergence.lisp',
   projectM6Depth: '.missiond/workflows/project-m6-depth.lisp',
   multiProjectM6Wave: '.missiond/workflows/multi-project-m6-wave.lisp',
+  m6DeploymentRollout: '.missiond/workflows/m6-deployment-rollout.lisp',
 };
 
 function main() {
@@ -285,6 +286,18 @@ function checkFiles(root, files) {
     'Findings / Evidence / Recommendations / Verification',
     'exact-shard-ready=true',
     'check-project-maturity --min-level M6',
+  ]);
+
+  requireAll(diagnostics, files.m6DeploymentRollout, sources.m6DeploymentRollout, [
+    ':workflow_id m6-deployment-rollout',
+    ':status active',
+    'scripts/check-m6-deployment-status.mjs --json',
+    'deploy-center /api/deploy/status',
+    'deploy-center provenance endpoint',
+    'deployed-current, deployed-stale, not-confirmed, or deployed-unknown',
+    'deploy-center first, then router, then pcea',
+    'deploy_succeeded and smoke_succeeded',
+    'M6 maturity is not deployment evidence',
   ]);
 
   const workflowSurface = `${sources.workflowHandler}\n${sources.workflowArtifacts}\n${sources.workflowAutoChain}\n${sources.workflowAutoChainRecorder}\n${sources.workflowAutoChainRules}\n${sources.workflowAutoSonnet}\n${sources.workflowAutoSonnetPolicy}\n${sources.workflowCompileMethodology}\n${sources.workflowDistill}\n${sources.workflowMethodology}\n${sources.workflowMethodologyExtract}\n${sources.workflowMethodologyIo}\n${sources.workflowMethodologySource}\n${sources.workflowMethodologyTypes}\n${sources.workflowMethodologyYaml}\n${sources.workflowProjectRoot}\n${sources.workflowReviewResolution}\n${sources.workflowRunMethodology}\n${sources.workflowStoreActions}\n${sources.workflowTests}`;
@@ -980,6 +993,17 @@ Lisp 源: intent-flow.lisp`);
      (step s9 :id verification :logic "check-project-maturity --min-level M6"))
   :context-pack-artifacts [questions hypotheses evidence_needed findings design_options accepted_shards]
   :risk-gates ((gate g1 :rule "exact-shard-ready=true")))`);
+  writeFixture(root, DEFAULT_FILES.m6DeploymentRollout, `
+(workflow m6-deployment-rollout
+  :workflow_id m6-deployment-rollout
+  :status active
+  :entry ["scripts/check-m6-deployment-status.mjs --json" "deploy-center /api/deploy/status" "deploy-center provenance endpoint"]
+  :steps
+    ((step s1 :logic "classify deployed-current, deployed-stale, not-confirmed, or deployed-unknown")
+     (step s2 :logic "deploy-center first, then router, then pcea")
+     (step s3 :logic "wait for deploy_succeeded and smoke_succeeded"))
+  :risk-gates
+    ((gate g1 :rule "M6 maturity is not deployment evidence")))`);
   return root;
 }
 

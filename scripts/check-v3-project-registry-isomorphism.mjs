@@ -166,6 +166,11 @@ function checkFiles(root, files) {
 	    ':dns-provider cloudflare',
 	    ':event-ingest (:endpoint "/webhooks/auth-event" :domain system :event ExternalServiceEvent',
 	    ':event-ingest (:endpoint "/webhooks/deploy-center-event" :domain system :event ExternalServiceEvent',
+	    '(m6-deployment-confirmation',
+	    ':schema "missiond.m6-deployment-confirmation.v1"',
+	    'scripts/check-m6-deployment-status.mjs',
+	    '.missiond/workflows/m6-deployment-rollout.lisp',
+	    ':deployment-confirmation (:checker "node scripts/check-m6-deployment-status.mjs --json"',
 	    ':source auth-audit-events',
 	    ':token-env MISSIOND_EXTERNAL_WEBHOOK_TOKEN',
 	    'mission_project(action=universe)',
@@ -399,9 +404,12 @@ function buildFixture() {
     (service-runtime-universe
       :schema "missiond.service-runtime-universe.v1"
       (service :id auth :public-base-url "https://auth.xiaojinpro.com" :dns-provider cloudflare :deployment (:substrate kubernetes :namespace production :deployment "xjp-auth-center") :event-ingest (:endpoint "/webhooks/auth-event" :domain system :event ExternalServiceEvent :source auth-audit-events :token-env MISSIOND_EXTERNAL_WEBHOOK_TOKEN))
-      (service :id deploy-center :event-ingest (:endpoint "/webhooks/deploy-center-event" :domain system :event ExternalServiceEvent))
+      (service :id deploy-center :event-ingest (:endpoint "/webhooks/deploy-center-event" :domain system :event ExternalServiceEvent) :deployment-confirmation (:checker "node scripts/check-m6-deployment-status.mjs --json"))
       ;; mission_project(action=universe)
       )
+    (m6-deployment-confirmation
+      :schema "missiond.m6-deployment-confirmation.v1"
+      :surfaces ["scripts/check-m6-deployment-status.mjs" ".missiond/workflows/m6-deployment-rollout.lisp"])
 	  (implementation-map
     (surface project-registry
       :status "code-aligned"
