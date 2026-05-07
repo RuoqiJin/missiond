@@ -22,23 +22,48 @@ const DEFAULT_BASE_URL = process.env.DEPLOY_CENTER_PUBLIC_BASE_URL ?? 'https://a
 const DEPLOYMENT_MAP = {
   auth: {
     slugs: ['xjp-auth-center'],
-    repo: '/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend',
-    paths: ['services/auth', 'crates/xjp-auth-verifier'],
+    components: [
+      {
+        slug: 'xjp-auth-center',
+        repo: '/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend',
+        paths: ['services/auth', 'crates/xjp-auth-verifier'],
+      },
+    ],
   },
   'deploy-center': {
     slugs: ['xjp-deploy-center'],
-    repo: '/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend',
-    paths: ['services/deploy-center'],
+    components: [
+      {
+        slug: 'xjp-deploy-center',
+        repo: '/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend',
+        paths: ['services/deploy-center'],
+      },
+    ],
   },
   router: {
     slugs: ['xjp-router'],
-    repo: '/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend',
-    paths: ['services/router', 'crates/xjp-billing', 'crates/xjp-auth-verifier'],
+    components: [
+      {
+        slug: 'xjp-router',
+        repo: '/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend',
+        paths: ['services/router', 'crates/xjp-billing', 'crates/xjp-auth-verifier'],
+      },
+    ],
   },
   pcea: {
     slugs: ['pcea', 'pcea-api', 'pcea-video-vault'],
-    repo: '/Users/jinchen/Downloads/PCEA develop',
-    paths: ['.missiond', 'pcea-api', 'pcea-video-vault'],
+    components: [
+      {
+        slug: 'pcea-api',
+        repo: '/Users/jinchen/Downloads/PCEA develop/pcea-api',
+        paths: ['.'],
+      },
+      {
+        slug: 'pcea-video-vault',
+        repo: '/Users/jinchen/Downloads/PCEA develop/pcea-video-vault',
+        paths: ['.'],
+      },
+    ],
   },
 };
 
@@ -47,7 +72,10 @@ async function main() {
   const m6Projects = readM6Projects(process.cwd());
   const deployStatus = await fetchDeployStatus(opts.baseUrl);
   const recentDeployments = deployStatus?.recent_deployments ?? [];
-  const projects = m6Projects.map((projectId) => classifyProject(projectId, recentDeployments));
+  const projects = [];
+  for (const projectId of m6Projects) {
+    projects.push(await classifyProject(projectId, recentDeployments, opts.baseUrl));
+  }
   const blocking = projects.filter((project) => !['deployed-current', 'no-deploy-target'].includes(project.status));
   const result = {
     ok: blocking.length === 0,
@@ -149,7 +177,7 @@ function fetchJson(url) {
   });
 }
 
-function classifyProject(projectId, recentDeployments) {
+async function classifyProject(projectId, recentDeployments, baseUrl) {
   const map = DEPLOYMENT_MAP[projectId];
   if (!map) {
     return {
@@ -162,47 +190,120 @@ function classifyProject(projectId, recentDeployments) {
     };
   }
 
-  const latest = recentDeployments.find((row) => map.slugs.includes(row.project) && row.status === 'success') ?? null;
-  if (!latest) {
+  const components = [];
+  for (const component of map.components ?? []) {
+    components.push(await classifyComponent(component, recentDeployments, baseUrl));
+  }
+  const blocking = components.filter((component) => component.status !== 'deployed-current');
+  if (components.length === 0) {
     return {
       project_id: projectId,
       status: 'not-confirmed',
-      reason: 'no successful recent deploy-center row matched the project deploy slugs',
+      reason: 'project has deploy slugs but no concrete deploy components in MissionD deployment checker',
       deploy_slugs: map.slugs,
       latest_deploy: null,
       changed_paths_since_deploy: [],
+      component_deploys: [],
     };
   }
-
-  const changed = changedPathsSinceDeploy(map.repo, latest.commit_hash, map.paths);
-  if (changed.unknown) {
+  if (blocking.length > 0) {
     return {
       project_id: projectId,
-      status: 'deployed-unknown',
-      reason: changed.reason,
+      status: blocking.some((component) => component.status === 'deployed-stale') ? 'deployed-stale' : 'not-confirmed',
+      reason: summarizeComponentBlocking(blocking),
       deploy_slugs: map.slugs,
-      latest_deploy: latest,
-      changed_paths_since_deploy: [],
-    };
-  }
-  if (changed.paths.length > 0) {
-    return {
-      project_id: projectId,
-      status: 'deployed-stale',
-      reason: 'deploy-center has a successful deploy row, but local M6-relevant files changed after the deployed commit',
-      deploy_slugs: map.slugs,
-      latest_deploy: latest,
-      changed_paths_since_deploy: changed.paths,
+      latest_deploy: components.find((component) => component.latest_deploy)?.latest_deploy ?? null,
+      changed_paths_since_deploy: blocking.flatMap((component) =>
+        component.changed_paths_since_deploy.map((changedPath) => `${component.slug}:${changedPath}`)
+      ),
+      component_deploys: components,
     };
   }
   return {
     project_id: projectId,
     status: 'deployed-current',
-    reason: 'latest successful deploy-center row covers current M6-relevant files',
+    reason:
+      components.length === 1
+        ? 'deploy-center provenance covers current M6-relevant files'
+        : 'all deploy-center component provenances cover current M6-relevant files',
     deploy_slugs: map.slugs,
+    latest_deploy: components[0].latest_deploy,
+    changed_paths_since_deploy: [],
+    component_deploys: components,
+  };
+}
+
+async function classifyComponent(component, recentDeployments, baseUrl) {
+  const latestFromStatus = recentDeployments.find((row) => row.project === component.slug && row.status === 'success') ?? null;
+  const provenance = await fetchDeployProvenance(baseUrl, component.slug);
+  const latest = latestFromStatus ?? deployFromProvenance(provenance);
+  if (!latest) {
+    return {
+      slug: component.slug,
+      status: 'not-confirmed',
+      reason: `no deploy-center success/provenance found for ${component.slug}`,
+      latest_deploy: null,
+      changed_paths_since_deploy: [],
+      provenance,
+    };
+  }
+  const changed = changedPathsSinceDeploy(component.repo, latest.commit_hash, component.paths);
+  if (changed.unknown) {
+    return {
+      slug: component.slug,
+      status: 'not-confirmed',
+      reason: changed.reason,
+      latest_deploy: latest,
+      changed_paths_since_deploy: [],
+      provenance,
+    };
+  }
+  if (changed.paths.length > 0) {
+    return {
+      slug: component.slug,
+      status: 'deployed-stale',
+      reason: `${component.slug} has local M6-relevant changes after deployed commit`,
+      latest_deploy: latest,
+      changed_paths_since_deploy: changed.paths,
+      provenance,
+    };
+  }
+  return {
+    slug: component.slug,
+    status: 'deployed-current',
+    reason: `${component.slug} deployed commit covers local M6-relevant files`,
     latest_deploy: latest,
     changed_paths_since_deploy: [],
+    provenance,
   };
+}
+
+async function fetchDeployProvenance(baseUrl, slug) {
+  const url = `${baseUrl.replace(/\/$/, '')}/api/deploy/provenance/${encodeURIComponent(slug)}`;
+  try {
+    return await fetchJson(url);
+  } catch (err) {
+    return { project: slug, status: 'unavailable', diagnostics: [err.message] };
+  }
+}
+
+function deployFromProvenance(provenance) {
+  if (!provenance || provenance.status !== 'confirmed' || !provenance.deployed_commit) return null;
+  return {
+    id: provenance.deploy_log_id,
+    project: provenance.project,
+    status: 'success',
+    trigger_source: provenance.trigger_source,
+    commit_hash: provenance.deployed_commit,
+    created_at: provenance.deployed_at,
+    updated_at: provenance.updated_at,
+    provenance_status: provenance.status,
+    provenance_confidence: provenance.confidence,
+  };
+}
+
+function summarizeComponentBlocking(blocking) {
+  return blocking.map((component) => `${component.slug}: ${component.reason}`).join('; ');
 }
 
 function changedPathsSinceDeploy(repo, commitHash, paths) {
