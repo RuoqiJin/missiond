@@ -1197,7 +1197,7 @@
     (maturity :id payments :current M5 :target M6 :gap [payment-domain-ledger webhook-regressions final-m6-report])
     (maturity :id asr :current M5 :target M6 :gap [job-provider-transcript-domain callback-regressions final-m6-report])
     (maturity :id timeline :current M5 :target M6 :gap [revision-event-authority service-event-regressions final-m6-report])
-    (maturity :id pcea :current M5 :target M6 :gap [app-domain-model auth-product-dependency final-m6-report])
+    (maturity :id pcea :current M6 :target M6 :gap [])
     (maturity :id secret-store :current M5 :target M6 :gap [secret-version-rotation-domain capability-regressions final-m6-report])
     (maturity :id xiaojin-blog :current M5 :target M6 :gap [content-publishing-domain deploy-auth-boundary final-m6-report])
     (maturity :id cuthub :current M5 :target M6 :gap [community-domain auth-product-dependency final-m6-report]))
