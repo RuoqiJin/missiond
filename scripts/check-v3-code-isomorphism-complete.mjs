@@ -78,6 +78,7 @@ export const EXPECTED_SURFACES = [
   'ops-infra',
   'eventbridge',
   'typed-lisp-compiler',
+  'mission-shared-memory',
 ];
 
 export const PER_SURFACE_CHECKERS = [
@@ -134,6 +135,7 @@ export const PER_SURFACE_CHECKERS = [
   'scripts/check-v3-ops-infra-isomorphism.mjs',
   'scripts/check-v3-eventbridge-isomorphism.mjs',
   'scripts/check-typed-lisp-compiler.mjs',
+  'scripts/check-v3-shared-memory-isomorphism.mjs',
   // Cross-surface request-flow smoke; aggregates the user-facing
   // request -> intent -> plan -> execute-review path declared in
   // unified-entry/review-packet/review-response. See wave42-01.

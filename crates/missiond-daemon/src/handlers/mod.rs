@@ -29,7 +29,7 @@ use compute::{
 };
 use knowledge::{
     agent_execution, board, cascade, directive, insight, intent, kb, memory, plan, project,
-    request, skill, workflow,
+    request, shared_memory, skill, workflow,
 };
 use sysinfra::{global_instruction, health, infra, misc, permission, power, system};
 
@@ -73,6 +73,9 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
         "mission_execution" => agent_execution::handle(state, name, args).await,
         "mission_capability_usage" => capability_usage::handle(state, name, args).await,
         "mission_project" => project::handle(state, name, args).await,
+        "mission_shared_memory" | "mission_context_slice" | "mission_claim_status" => {
+            shared_memory::handle(state, name, args).await
+        }
         "mission_memory" => memory::handle(state, name, args).await,
         "mission_insight" => insight::handle(state, name, args).await,
         "mission_audit" => audit::handle(state, name, args).await,

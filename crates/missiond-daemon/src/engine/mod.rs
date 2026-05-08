@@ -10,6 +10,7 @@ pub mod learning_engine;
 pub mod lisp_code_sync;
 pub mod master_control;
 pub mod nightly_evolution;
+pub mod shared_memory;
 
 // ── Backward-compatible re-exports ──
 // Keeps `use engine::autopilot` / `use crate::autopilot` working everywhere.

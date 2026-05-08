@@ -15,6 +15,11 @@ const targets = [
     file: 'compiled-v3-blueprint.json',
   },
   {
+    id: 'semantic-ir',
+    argv: ['emit-semantic-ir', '--blueprint', BLUEPRINT],
+    file: 'compiled-semantic-ir.json',
+  },
+  {
     id: 'universe',
     argv: ['emit-universe', '--blueprint', BLUEPRINT],
     file: 'compiled-project-universe.json',
@@ -45,6 +50,40 @@ function main() {
     const outPath = path.join(opts.outDir, target.file);
     fs.writeFileSync(outPath, `${JSON.stringify(compiled, null, 2)}\n`);
     results.push({ id: target.id, ok: true, path: outPath, source_hash: compiled.source_hash });
+  }
+  const semantic = results.find((row) => row.id === 'semantic-ir' && row.ok);
+  if (semantic) {
+    const semanticPath = path.join(opts.outDir, 'compiled-semantic-ir.json');
+    const semanticJson = JSON.parse(fs.readFileSync(semanticPath, 'utf8'));
+    const facts = semanticJson?.payload?.facts ?? [];
+    const slices = {
+      schema_version: 'missiond.compiled-agent-slices.v1',
+      source_hash: semanticJson.source_hash,
+      generated_at: null,
+      diagnostics: semanticJson.diagnostics ?? [],
+      payload: {
+        slice_policy: 'agents receive compact fact slices plus accepted shard metadata before full Lisp',
+        facts,
+      },
+    };
+    const slicePath = path.join(opts.outDir, 'compiled-agent-slices.json');
+    fs.writeFileSync(slicePath, `${JSON.stringify(slices, null, 2)}\n`);
+    results.push({ id: 'agent-slices', ok: true, path: slicePath, source_hash: semanticJson.source_hash });
+  }
+  const workflows = results.find((row) => row.id === 'workflows' && row.ok);
+  if (workflows) {
+    const workflowsPath = path.join(opts.outDir, 'compiled-workflows.json');
+    const workflowsJson = JSON.parse(fs.readFileSync(workflowsPath, 'utf8'));
+    const contracts = {
+      schema_version: 'missiond.compiled-workflow-contracts.v1',
+      source_hash: workflowsJson.source_hash,
+      generated_at: null,
+      diagnostics: workflowsJson.diagnostics ?? [],
+      payload: workflowsJson.payload,
+    };
+    const contractsPath = path.join(opts.outDir, 'compiled-workflow-contracts.json');
+    fs.writeFileSync(contractsPath, `${JSON.stringify(contracts, null, 2)}\n`);
+    results.push({ id: 'workflow-contracts', ok: true, path: contractsPath, source_hash: workflowsJson.source_hash });
   }
   const ok = results.every((row) => row.ok);
   const payload = { ok, out_dir: opts.outDir, results };

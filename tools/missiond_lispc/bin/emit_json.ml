@@ -118,6 +118,90 @@ let v3_surfaces_to_json root =
       |> List.filter (fun node -> is_list node "surface")
       |> List.map v3_surface_to_json
 
+let safe_id value =
+  String.map
+    (fun ch ->
+      match ch with
+      | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '-' | '_' | '.' | ':' -> ch
+      | _ -> '-')
+    value
+
+let source_map_json source_hash file node =
+  let loc = loc_of node in
+  Printf.sprintf {|{"source_file":%s,"source_line":%d,"source_column":%d,"source_hash":%s}|}
+    (json_string file) loc.line loc.column (json_string source_hash)
+
+let semantic_function_fact source_hash file pillar_id node =
+  let props = keyword_props ~start:2 node in
+  let id =
+    match children node with
+    | _ :: id_node :: _ -> Option.value ~default:"<missing>" (atom_text id_node)
+    | _ -> "<missing>"
+  in
+  let surface = prop_text ":surface" props in
+  let entry = prop_text_list ":entry" props in
+  let egress = prop_text_list ":egress" props in
+  let steps =
+    match prop ":core" props with
+    | Some core -> collect_forms "step" core |> List.filter_map workflow_step_id
+    | None -> []
+  in
+  Printf.sprintf
+    {|{"fact_id":%s,"kind":"function","project_id":"missiond","pillar":%s,"id":%s,"surface":%s,"entry":%s,"core_steps":%s,"egress":%s,"source":%s}|}
+    (json_string ("fn:" ^ safe_id pillar_id ^ ":" ^ safe_id id))
+    (json_string pillar_id)
+    (json_string id)
+    (json_opt_string surface)
+    (json_string_list entry)
+    (json_string_list steps)
+    (json_string_list egress)
+    (source_map_json source_hash file node)
+
+let semantic_surface_fact source_hash file node =
+  let props = keyword_props ~start:2 node in
+  let id =
+    match children node with
+    | _ :: id_node :: _ -> Option.value ~default:"<missing>" (atom_text id_node)
+    | _ -> "<missing>"
+  in
+  Printf.sprintf
+    {|{"fact_id":%s,"kind":"surface","project_id":"missiond","id":%s,"status":%s,"implements":%s,"code":%s,"source":%s}|}
+    (json_string ("surface:" ^ safe_id id))
+    (json_string id)
+    (json_opt_string (prop_text ":status" props))
+    (json_string_list (prop_text_list ":implements" props))
+    (json_string_list (prop_text_list ":code" props))
+    (source_map_json source_hash file node)
+
+let semantic_facts source_hash file root =
+  let function_facts =
+    match find_child root "pillar-flow-map" with
+    | None -> []
+    | Some flow_map ->
+        children flow_map
+        |> List.filter (fun node -> is_list node "pillar")
+        |> List.map (fun pillar ->
+               let pillar_id =
+                 match children pillar with
+                 | _ :: id_node :: _ ->
+                     Option.value ~default:"<missing>" (atom_text id_node)
+                 | _ -> "<missing>"
+               in
+               children pillar
+               |> List.filter (fun node -> is_list node "function")
+               |> List.map (semantic_function_fact source_hash file pillar_id))
+        |> List.flatten
+  in
+  let surface_facts =
+    match find_child root "implementation-map" with
+    | None -> []
+    | Some implementation_map ->
+        children implementation_map
+        |> List.filter (fun node -> is_list node "surface")
+        |> List.map (semantic_surface_fact source_hash file)
+  in
+  function_facts @ surface_facts
+
 let project_entry_to_json node =
   let props = keyword_props ~start:1 node in
   let checks =
@@ -244,6 +328,36 @@ let emit_v3 blueprint =
       (result_json ~extra:[
         Printf.sprintf {|"compiled":%s|}
           (compiled_envelope "missiond.compiled-v3-blueprint.v1" (source_hash source) diagnostics payload)
+      ] (diagnostics = []) diagnostics);
+    if diagnostics = [] then 0 else 1
+  with
+  | Reader_error (l, msg) ->
+      let d = diag blueprint l "parse.error" msg in
+      print_endline (result_json false [ d ]);
+      1
+  | Sys_error msg ->
+      let d = diag blueprint { line = 1; column = 1 } "io.error" msg in
+      print_endline (result_json false [ d ]);
+      1
+
+let emit_semantic_ir blueprint =
+  try
+    let source = read_file blueprint in
+    let hash = source_hash source in
+    let diagnostics = Schema_v3.validate blueprint [] in
+    let forms = Parser.parse_source blueprint source in
+    let root = find_root forms "missiond-blueprint" in
+    let facts = root |> Option.map (semantic_facts hash blueprint) |> Option.value ~default:[] in
+    let payload =
+      Printf.sprintf {|{"blueprint":%s,"facts":[%s],"fact_count":%d}|}
+        (json_string blueprint)
+        (String.concat "," facts)
+        (List.length facts)
+    in
+    print_endline
+      (result_json ~extra:[
+        Printf.sprintf {|"compiled":%s|}
+          (compiled_envelope "missiond.semantic-ir.v1" hash diagnostics payload)
       ] (diagnostics = []) diagnostics);
     if diagnostics = [] then 0 else 1
   with

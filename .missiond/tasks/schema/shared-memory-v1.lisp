@@ -8,13 +8,30 @@
 ;; its own task contract :write-scope. Appending here is allowed even
 ;; when the ledger path is not in the agent's :write-scope, because the
 ;; ledger is reserved for coordination metadata only — never code.
+;;
+;; Compatibility projection (2026-05): the durable shared-memory runtime
+;; (Rust SharedMemoryService + Postgres shared_events / shared_artifacts /
+;; shared_claims / agent_cursors, surfaced as mission_shared_memory /
+;; mission_context_slice / mission_claim_status) is now the concurrent
+;; write authority for parallel agents. This v1 ledger schema is retained
+;; as a compatibility projection only — it remains the file-level audit
+;; shape for legacy waves and the blueprint surface mission-shared-memory
+;; explicitly notes it is no longer used as concurrent write truth.
 
 (shared-memory-schema missiond.shared-memory.v1
   :version "v1"
-  :status "code-aligned — checker scripts/check-task-memory.mjs; full-run verifier scripts/verify-task-run.mjs"
+  :status "compatibility-projection — durable shared-memory runtime (mission_shared_memory / mission_context_slice / mission_claim_status backed by shared_events / shared_artifacts / shared_claims / agent_cursors) is the concurrent write authority; this ledger schema is retained for legacy waves only"
   :checker "scripts/check-task-memory.mjs"
   :run-verifier "scripts/verify-task-run.mjs"
   :seed ".missiond/tasks/wave19/shared-memory.lisp"
+  :supersedes-runtime
+    (durable-runtime missiond.shared-memory.runtime.v1
+      :surface "mission-shared-memory"
+      :tools ["mission_shared_memory" "mission_context_slice" "mission_claim_status"]
+      :tables ["shared_events" "shared_artifacts" "shared_claims" "agent_cursors"]
+      :migration "crates/missiond-core/migrations/20260508000000_shared_memory.sql"
+      :checker "scripts/check-v3-shared-memory-isomorphism.mjs"
+      :note "Use the durable runtime for any parallel-agent coordination; new waves SHOULD NOT add shared-memory.lisp ledgers as concurrent write authority")
 
   (purpose
     "Give parallel ClaudeCode agents a single S-expression ledger to publish claims, observations, blockers, completions, corrections, and handoffs."

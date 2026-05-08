@@ -110,7 +110,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         ],
     )
     .unwrap_or(false);
-    let delegation_metadata = DelegationMetadata {
+    let mut delegation_metadata = DelegationMetadata {
         task_class: string_arg(&args, &["task_class", "taskClass"]).map(str::to_string),
         pool_hint: string_arg(&args, &["pool_hint", "poolHint"]).map(str::to_string),
         engine_hint: string_arg(&args, &["engine_hint", "engineHint"]).map(str::to_string),
@@ -125,6 +125,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             &args,
             &["acceptance", "acceptance_commands", "acceptanceCommands"],
         ),
+        shared_claim_ids: Vec::new(),
         source_id: source_id.clone(),
     };
 
@@ -267,6 +268,57 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 note_attached,
             ));
         }
+    }
+
+    if code_worker_requires_write_lease(intent, &delegation_metadata) {
+        let owner_seed = source_id
+            .as_deref()
+            .or(parent_id.as_deref())
+            .unwrap_or(objective)
+            .chars()
+            .take(80)
+            .collect::<String>();
+        let claims = state
+            .shared_memory
+            .claim_write_scope(
+                target_project_resolution
+                    .as_ref()
+                    .map(|resolution| resolution.project_id.clone()),
+                None,
+                format!("mission_task_delegate:{owner_seed}"),
+                &delegation_metadata.write_scope,
+                delegation_metadata.accepted_shard_id.clone(),
+            )
+            .await
+            .map_err(|e| anyhow!("shared-memory claim error: {}", e))?;
+        let conflicts = claims
+            .iter()
+            .filter(|claim| claim.get("ok").and_then(|v| v.as_bool()) == Some(false))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !conflicts.is_empty() {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    "SHARED_MEMORY_WRITE_LEASE_CONFLICT",
+                    format!(
+                        "mission_task_delegate refused implementation worker because {} write_scope lease(s) are already active",
+                        conflicts.len()
+                    ),
+                )
+                .with_suggestion(
+                    "inspect mission_claim_status for the conflicting scope, then wait, split the shard, or release the stale claim",
+                ),
+            ));
+        }
+        delegation_metadata.shared_claim_ids = claims
+            .iter()
+            .filter_map(|claim| {
+                claim
+                    .pointer("/claim/id")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+            })
+            .collect();
     }
 
     // Phase 6.1: Find idle slot with RAII guard (atomic check+reserve).
@@ -425,6 +477,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "write_scope": delegation_metadata.write_scope,
         "must_not_touch": delegation_metadata.must_not_touch,
         "acceptance": delegation_metadata.acceptance,
+        "shared_claim_ids": delegation_metadata.shared_claim_ids,
         "provisioned_new_slot": provisioned,
         "timeout_secs": timeout_secs,
         "parent_id": parent_id,
@@ -628,6 +681,7 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
             write_scope: Vec::new(),
             must_not_touch: vec!["**/*".to_string()],
             accepted_shard_id: None,
+            shared_claim_ids: Vec::new(),
         });
     }
     for idx in 0..max_claude_workers {
@@ -656,6 +710,7 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
             write_scope: Vec::new(),
             must_not_touch: vec!["**/*".to_string()],
             accepted_shard_id: None,
+            shared_claim_ids: Vec::new(),
         });
     }
 
@@ -671,6 +726,7 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
             write_scope: implement_write_scope.clone(),
             must_not_touch: implement_must_not_touch.clone(),
             accepted_shard_id: accepted_shard_id.clone(),
+            shared_claim_ids: Vec::new(),
         });
     }
 
@@ -685,6 +741,57 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
                 "split the objective into disjoint write_scope shards or rerun dry_run=true and inspect conflicts",
             ),
         ));
+    }
+
+    if !dry_run && swarm_policy_requires_implement_write_scope(&write_policy) {
+        for planned_task in planned.iter_mut().filter(|task| !task.write_scope.is_empty()) {
+            let claims = state
+                .shared_memory
+                .claim_write_scope(
+                    Some(project_id.clone()),
+                    parent_id.clone(),
+                    format!(
+                        "mission_swarm_run:{}:{}",
+                        project_id,
+                        planned_task
+                            .accepted_shard_id
+                            .as_deref()
+                            .unwrap_or("accepted-shard")
+                    ),
+                    &planned_task.write_scope,
+                    planned_task.accepted_shard_id.clone(),
+                )
+                .await
+                .map_err(|e| anyhow!("shared-memory claim error: {}", e))?;
+            let conflicts = claims
+                .iter()
+                .filter(|claim| claim.get("ok").and_then(|v| v.as_bool()) == Some(false))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !conflicts.is_empty() {
+                return Ok(ToolResult::structured_error(
+                    ToolError::new(
+                        "SWARM_SHARED_MEMORY_WRITE_LEASE_CONFLICT",
+                        format!(
+                            "mission_swarm_run refused implementation shard because {} write_scope lease(s) are already active",
+                            conflicts.len()
+                        ),
+                    )
+                    .with_suggestion(
+                        "inspect mission_claim_status, wait/release stale claims, or split the accepted shard into disjoint write_scope entries",
+                    ),
+                ));
+            }
+            planned_task.shared_claim_ids = claims
+                .iter()
+                .filter_map(|claim| {
+                    claim
+                        .pointer("/claim/id")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string)
+                })
+                .collect();
+        }
     }
 
     let context_pack_materialized = if dry_run {
@@ -918,11 +1025,12 @@ fn render_swarm_context_pack(
     for task in planned.iter().filter(|task| !task.write_scope.is_empty()) {
         if let Some(shard_id) = task.accepted_shard_id.as_deref() {
             out.push_str(&format!(
-                "    (shard :id {} :lane {} :task_class {} :write_scope {} :acceptance {})\n",
+                "    (shard :id {} :lane {} :task_class {} :write_scope {} :shared_claim_ids {} :acceptance {})\n",
                 lisp_string(shard_id),
                 lisp_string(&task.lane),
                 lisp_string(&task.task_class),
                 lisp_string_vector(&task.write_scope),
+                lisp_string_vector(&task.shared_claim_ids),
                 lisp_string_vector(acceptance),
             ));
         }
@@ -948,6 +1056,12 @@ fn render_swarm_context_pack(
         ));
         if let Some(shard_id) = task.accepted_shard_id.as_deref() {
             out.push_str(&format!(" :accepted_shard_id {}", lisp_string(shard_id)));
+        }
+        if !task.shared_claim_ids.is_empty() {
+            out.push_str(&format!(
+                " :shared_claim_ids {}",
+                lisp_string_vector(&task.shared_claim_ids)
+            ));
         }
         out.push_str(")\n");
     }
@@ -998,6 +1112,7 @@ struct SwarmPlannedTask {
     write_scope: Vec<String>,
     must_not_touch: Vec<String>,
     accepted_shard_id: Option<String>,
+    shared_claim_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1028,6 +1143,7 @@ impl SwarmPlannedTask {
             "write_scope": self.write_scope,
             "must_not_touch": self.must_not_touch,
             "accepted_shard_id": self.accepted_shard_id,
+            "shared_claim_ids": self.shared_claim_ids,
         })
     }
 }
@@ -1137,13 +1253,18 @@ fn render_swarm_task_description(
         .unwrap_or_default();
 
     format!(
-        "{interaction_preamble}\n\nObjective:\n{objective}\n\n## Swarm metadata\n- project_id: {project_id}\n- project_root: {project_root}\n- target_projects: {}\n{parent_line}- lane: {}\n- task_class: {}\n- pool_hint: {}\n- engine_hint: {}\n- context_pack_path: {context_pack_path}\n- accepted_shard_id: {}\n- write_policy: {task_write_policy}\n- read_scope: {}\n- write_scope: {}\n- must_not_touch: {}\n- acceptance: {}\n\n{}",
+        "{interaction_preamble}\n\nObjective:\n{objective}\n\n## Swarm metadata\n- project_id: {project_id}\n- project_root: {project_root}\n- target_projects: {}\n{parent_line}- lane: {}\n- task_class: {}\n- pool_hint: {}\n- engine_hint: {}\n- context_pack_path: {context_pack_path}\n- accepted_shard_id: {}\n- shared_claim_ids: {}\n- write_policy: {task_write_policy}\n- read_scope: {}\n- write_scope: {}\n- must_not_touch: {}\n- acceptance: {}\n\n{}",
         render_target_projects_inline(target_projects),
         planned.lane,
         planned.task_class,
         planned.pool_hint,
         planned.engine_hint,
         planned.accepted_shard_id.as_deref().unwrap_or("-"),
+        if planned.shared_claim_ids.is_empty() {
+            "[]".to_string()
+        } else {
+            planned.shared_claim_ids.join(", ")
+        },
         if planned.read_scope.is_empty() {
             "[]".to_string()
         } else {
@@ -1316,6 +1437,7 @@ struct DelegationMetadata {
     write_scope: Vec<String>,
     must_not_touch: Vec<String>,
     acceptance: Vec<String>,
+    shared_claim_ids: Vec<String>,
     /// Upstream BoardTask whose objective spawned this delegation. Distinct
     /// from `parent_id`: callers may chain through several master/plan layers
     /// before reaching `mission_task_delegate`, and `source_id` keeps the
@@ -1325,13 +1447,7 @@ struct DelegationMetadata {
 }
 
 fn exact_shard_contract_error(intent: &str, metadata: &DelegationMetadata) -> Option<ToolResult> {
-    let is_implementation_class = matches!(
-        metadata.task_class.as_deref(),
-        Some("code") | Some("implementation") | Some("implement") | Some("implementer")
-    );
-    let is_code_write =
-        (intent == "code" || is_implementation_class) && !metadata.write_scope.is_empty();
-    if !is_code_write {
+    if !code_worker_requires_write_lease(intent, metadata) {
         return None;
     }
     if metadata
@@ -1369,6 +1485,14 @@ fn exact_shard_contract_error(intent: &str, metadata: &DelegationMetadata) -> Op
         ));
     }
     None
+}
+
+fn code_worker_requires_write_lease(intent: &str, metadata: &DelegationMetadata) -> bool {
+    let is_implementation_class = matches!(
+        metadata.task_class.as_deref(),
+        Some("code") | Some("implementation") | Some("implement") | Some("implementer")
+    );
+    (intent == "code" || is_implementation_class) && !metadata.write_scope.is_empty()
 }
 
 /// Inputs for the duplicate-code-worker dedup guard. Built from the parsed
@@ -1922,6 +2046,12 @@ fn render_delegation_metadata_block(metadata: &DelegationMetadata) -> String {
     if !metadata.acceptance.is_empty() {
         lines.push(format!("- acceptance: {}", metadata.acceptance.join(" | ")));
     }
+    if !metadata.shared_claim_ids.is_empty() {
+        lines.push(format!(
+            "- shared_claim_ids: {}",
+            metadata.shared_claim_ids.join(", ")
+        ));
+    }
     if let Some(value) = &metadata.source_id {
         lines.push(format!("- source_board_task_id: {}", value));
     }
@@ -2150,6 +2280,7 @@ mod tests {
             write_scope: vec!["crates/a.rs".to_string()],
             must_not_touch: vec!["packages/**".to_string()],
             acceptance: vec!["cargo test -p missiond-daemon autopilot".to_string()],
+            shared_claim_ids: Vec::new(),
             source_id: None,
         };
         let block = render_delegation_metadata_block(&metadata);
@@ -2237,6 +2368,7 @@ mod tests {
                 write_scope: vec!["src/auth".to_string()],
                 must_not_touch: Vec::new(),
                 accepted_shard_id: Some("shard-a".to_string()),
+                shared_claim_ids: Vec::new(),
             },
             SwarmPlannedTask {
                 lane: "implement".to_string(),
@@ -2249,6 +2381,7 @@ mod tests {
                 write_scope: vec!["src/auth/routes.rs".to_string()],
                 must_not_touch: Vec::new(),
                 accepted_shard_id: Some("shard-b".to_string()),
+                shared_claim_ids: Vec::new(),
             },
         ];
         let conflicts = detect_swarm_write_conflicts(&planned);
@@ -2271,6 +2404,7 @@ mod tests {
                 write_scope: Vec::new(),
                 must_not_touch: vec!["**/*".to_string()],
                 accepted_shard_id: None,
+                shared_claim_ids: Vec::new(),
             },
             SwarmPlannedTask {
                 lane: "implement".to_string(),
@@ -2283,6 +2417,7 @@ mod tests {
                 write_scope: vec!["src/auth".to_string()],
                 must_not_touch: Vec::new(),
                 accepted_shard_id: Some("shard-impl".to_string()),
+                shared_claim_ids: Vec::new(),
             },
         ];
         assert!(detect_swarm_write_conflicts(&planned).is_empty());
@@ -2374,6 +2509,7 @@ mod tests {
             write_scope: Vec::new(),
             must_not_touch: vec!["**/*".to_string()],
             accepted_shard_id: None,
+            shared_claim_ids: Vec::new(),
         };
         let description = render_swarm_task_description(
             "M6 wave",
@@ -2416,6 +2552,7 @@ mod tests {
             write_scope: Vec::new(),
             must_not_touch: vec!["**/*".to_string()],
             accepted_shard_id: None,
+            shared_claim_ids: Vec::new(),
         };
         let description = render_swarm_task_description(
             "M7 wave",
@@ -2469,6 +2606,7 @@ mod tests {
             write_scope: vec!["/Users/jinchen/Projects/semantic-terminal/.missiond/**".to_string()],
             must_not_touch: Vec::new(),
             accepted_shard_id: Some("shard-semantic-terminal-impl".to_string()),
+            shared_claim_ids: Vec::new(),
         };
         let (project_id, project_root) = planned_task_primary_project(
             "missiond",
@@ -2496,6 +2634,7 @@ mod tests {
             write_scope: Vec::new(),
             must_not_touch: vec!["**/*".to_string()],
             accepted_shard_id: None,
+            shared_claim_ids: Vec::new(),
         };
         let targets = vec![
             SwarmTargetProject {
@@ -2593,6 +2732,7 @@ mod tests {
             write_scope: vec![".missiond/evidence/m6.md".to_string()],
             must_not_touch: vec!["src/**".to_string()],
             accepted_shard_id: Some("shard-m6-evidence".to_string()),
+            shared_claim_ids: Vec::new(),
         };
         let description = render_swarm_task_description(
             "M6 closure",
@@ -2702,6 +2842,7 @@ mod tests {
                 write_scope: Vec::new(),
                 must_not_touch: vec!["**/*".to_string()],
                 accepted_shard_id: None,
+                shared_claim_ids: Vec::new(),
             },
             SwarmPlannedTask {
                 lane: "implement".to_string(),
@@ -2714,6 +2855,7 @@ mod tests {
                 write_scope: vec!["src/auth.rs".to_string()],
                 must_not_touch: vec!["target/**".to_string()],
                 accepted_shard_id: Some("shard-auth-rs".to_string()),
+                shared_claim_ids: Vec::new(),
             },
         ];
         let source = render_swarm_context_pack(

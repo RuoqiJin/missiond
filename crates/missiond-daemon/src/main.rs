@@ -673,6 +673,19 @@ async fn main() -> Result<()> {
         ))
     };
 
+    let shared_memory = {
+        let pool = pg_pool_for_bus
+            .as_ref()
+            .ok_or_else(|| anyhow!("shared memory requires the PG pool; postgres feature missing"))?
+            .clone();
+        let missiond_root = std::env::current_dir().unwrap_or_else(|_| home.clone());
+        Arc::new(engine::shared_memory::SharedMemoryService::new(
+            pool,
+            Arc::clone(&bus_services),
+            missiond_root,
+        ))
+    };
+
     let slot_mgr_pty2 = Arc::clone(&pty);
     let slot_mgr_store2 = Arc::clone(&store);
     let pty_for_gemini_transport = Arc::clone(&pty);
@@ -866,6 +879,7 @@ async fn main() -> Result<()> {
         kb_search_cache: missiond_core::embedding::new_cache(),
         embedding_tx: embedding_tx,
         bus: Arc::clone(&bus_services),
+        shared_memory,
         stats: Arc::clone(&daemon_stats),
         prompts: Arc::new(prompts::PromptStore::load()),
         strategy_notify: Arc::new(tokio::sync::Notify::new()),

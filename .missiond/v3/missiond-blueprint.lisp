@@ -1974,6 +1974,13 @@
       :v3-function knowledge-memory
       :surface memory-kb
       :note "KB, beacon, memory, insight, and intent snapshot tools are physically split under the V3 memory-kb surface; memory-kb-policy now projects realtime memory pending batch size and preview truncation budgets into mission_memory runtime.")
+    (v2-item durable-shared-memory
+      :status code-aligned
+      :v2-source ".missiond/tasks/schema/shared-memory-v1.lisp :: shared-memory-schema missiond.shared-memory.v1 (compatibility projection)"
+      :v3-pillar memory
+      :v3-function mission-shared-memory
+      :surface mission-shared-memory
+      :note "Durable concurrent-agent coordination substrate: Rust SharedMemoryService + Postgres shared_events / shared_artifacts / shared_claims / agent_cursors, surfaced as mission_shared_memory / mission_context_slice / mission_claim_status. The legacy v1 ledger remains as a file-level compatibility projection only; the durable runtime owns concurrent write authority.")
     (v2-item project-registry
       :status runtime-projected
       :v2-source ".missiond/v2/intent-worker.lisp :: project-root-spawn-cwd / ProjectRegistry"
@@ -2125,6 +2132,13 @@
         :surface memory-kb
         :tools [mission_kb_query mission_kb_remember mission_kb_mutate mission_kb_ops mission_beacon
                 mission_code_search mission_memory mission_insight mission_intent])
+      (tool-group shared-memory-tools
+        :status code-aligned
+        :v2-source ".missiond/tasks/schema/shared-memory-v1.lisp :: shared-memory-schema missiond.shared-memory.v1 (compatibility projection)"
+        :v3-pillar memory
+        :v3-function mission-shared-memory
+        :surface mission-shared-memory
+        :tools [mission_shared_memory mission_context_slice mission_claim_status])
       (tool-group project-registry-tools
         :status code-aligned
         :v2-source ".missiond/v2/intent-worker.lisp :: project registry"
@@ -2279,7 +2293,7 @@
         :egress [workflow.lisp workflow_row compiled_yaml run_result])
       (function typed-lisp-compiler
         :surface typed-lisp-compiler
-        :entry [missiond-lispc.check-v3 missiond-lispc.check-workflow missiond-lispc.check-workflow-dir missiond-lispc.check-project missiond-lispc.check-project-dir missiond-lispc.check-auth-domain missiond-lispc.check-m6-depth missiond-lispc.check-domain-hardening-deprecated-alias missiond-lispc.emit-json missiond-lispc.emit-v3 missiond-lispc.emit-universe missiond-lispc.emit-workflows]
+        :entry [missiond-lispc.check-v3 missiond-lispc.check-workflow missiond-lispc.check-workflow-dir missiond-lispc.check-project missiond-lispc.check-project-dir missiond-lispc.check-auth-domain missiond-lispc.check-m6-depth missiond-lispc.check-domain-hardening-deprecated-alias missiond-lispc.emit-json missiond-lispc.emit-v3 missiond-lispc.emit-semantic-ir missiond-lispc.emit-universe missiond-lispc.emit-workflows]
         :core ((step s1 :logic "parse Lisp SSOT files into source-located typed AST nodes")
                (step s2 :logic "validate pillar/function entry-core-egress surfaces, workflow contracts, universe registry, maturity gates, and event/outbox contracts")
                (step s3 :logic "emit stable JSON diagnostics for JS compatibility wrappers and CI gates")
@@ -2289,7 +2303,15 @@
                (step s7 :logic "validate project-local .missiond blueprint directories with typed AST before M5 maturity can rely on project-local shape evidence")
                (step s8 :logic "use Auth as the first external project M6-depth semantic checker sample before shrinking more project checkers")
                (step s9 :logic "validate generic Auth-grade M6 evidence before claiming production-ready architecture"))
-        :egress [typed_diagnostics compiled_json compiled_runtime_snapshot compiled_project_universe compiled_workflow_contracts js_wrapper_result]))
+        :egress [typed_diagnostics compiled_json compiled_runtime_snapshot compiled_project_universe compiled_workflow_contracts js_wrapper_result])
+      (function semantic-ir-compiler
+        :surface semantic-ir-compiler
+        :entry [missiond-lispc.emit-semantic-ir scripts/compile-v3-runtime.mjs]
+        :core ((step s1 :logic "compile source-located Lisp functions and implementation surfaces into compact typed facts")
+               (step s2 :logic "assign every fact a stable short id, source hash, file, line, and column for precise back-reference")
+               (step s3 :logic "generate compiled-semantic-ir.json, compiled-agent-slices.json, and compiled-workflow-contracts.json for agents and runtime readers")
+               (step s4 :logic "keep generated IR machine-oriented and compact while preserving diagnostics and source maps for human review"))
+        :egress [compiled-semantic-ir compiled-agent-slices compiled-workflow-contracts source-map-diagnostics]))
 
     (pillar review
       (function review-gate
@@ -2440,7 +2462,17 @@
                (step s2 :logic "require Board frontend pillar-flow, implementation-map, and runtime-projection checkers")
                (step s3 :logic "pin frontend code surfaces to Lisp so later workstation shards receive disjoint write scopes")
                (step s4 :logic "project MissionD runtime slot/PTY state into UI code instead of stale static workstation lists"))
-        :egress [frontend-blueprint-checks board-ui-surfaces runtime-projection-contract]))
+        :egress [frontend-blueprint-checks board-ui-surfaces runtime-projection-contract])
+      (function mission-shared-memory
+        :surface mission-shared-memory
+        :entry [mission_shared_memory mission_context_slice mission_claim_status mission_task_delegate mission_swarm_run EventBus]
+        :core ((step s1 :logic "append durable shared_events with idempotency, stream sequence, correlation, project/task/agent fields, and EventBus wakeup projection")
+               (step s2 :logic "store shared_artifacts by content hash so investigation reports, context packs, diagnostics, and accepted shards dedupe across agents")
+               (step s3 :logic "grant shared_claims leases for file/region/surface/test/db-migration write scopes with TTL, heartbeat, conflict, release, and expiry semantics")
+               (step s4 :logic "track agent_cursors per stream so resident master and workers resume after restart without rereading whole ledgers")
+               (step s5 :logic "serve mission_context_slice from compiled semantic IR plus task/shard artifacts so agents read compact facts before full Lisp")
+               (step s6 :logic "treat .missiond/tasks/**/shared-memory.lisp as compatibility projection only; concurrent truth lives in Rust/Postgres shared memory"))
+        :egress [shared-event shared-artifact shared-claim agent-cursor context-slice EventBus-signal]))
 
     (pillar communication
       (function conversation-ingestion
@@ -2842,7 +2874,7 @@
 
     (surface typed-lisp-compiler
       :status "code-aligned"
-      :implements [lisp-reader typed-ast semantic-validator diagnostic-json projection-json structured-project-universe-json structured-workflow-contract-json workflow-directory-structural-gate project-directory-structural-gate project-m6-depth-gate runtime-compiled-json-loader auth-domain-sample]
+      :implements [lisp-reader typed-ast semantic-validator diagnostic-json projection-json semantic-ir-json structured-project-universe-json structured-workflow-contract-json workflow-directory-structural-gate project-directory-structural-gate project-m6-depth-gate runtime-compiled-json-loader auth-domain-sample]
       :code ["tools/missiond_lispc/dune-project"
              "tools/missiond_lispc/bin/dune"
              "tools/missiond_lispc/bin/main.ml"
@@ -2863,6 +2895,32 @@
              "crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"
              ".missiond/workflows/typed-lisp-compiler-convergence.lisp"]
       :note "Lisp remains the canonical authoring SSOT. The OCaml layer is a dev-time typed compiler/checker/projection layer for source-located diagnostics and generated runtime JSON; project universe and workflow projections include structured project/maturity/workflow payloads, workflow-directory gates validate every .missiond/workflows/*.lisp contract, project-directory structural gates validate each registered project's active blueprint shards before M5 maturity can rely on project-local shape evidence, and M6-depth gates validate Auth-grade domain/policy/flow/event/runtime/compatibility evidence. OCaml is not in the daemon hot path. JS checkers remain compatibility wrappers and code-anchor validators while OCaml takes ownership of Lisp AST semantics.")
+
+    (surface semantic-ir-compiler
+      :status "code-aligned"
+      :implements [semantic-ir-json compact-agent-slices source-map-diagnostics compiled-workflow-contracts]
+      :code ["tools/missiond_lispc/bin/emit_json.ml"
+             "tools/missiond_lispc/bin/main.ml"
+             "scripts/compile-v3-runtime.mjs"
+             "scripts/check-v3-shared-memory-isomorphism.mjs"]
+      :note "The semantic IR compiler is the compact projection layer between human/agent Lisp SSOT and worker context slices. It emits typed facts with short ids and source maps into compiled-semantic-ir.json, derives compiled-agent-slices.json for agents, and keeps compiled-workflow-contracts.json aligned with workflow Lisp. Generated JSON is machine-oriented and never hand-authored.")
+
+    (surface mission-shared-memory
+      :status "code-aligned"
+      :implements [shared-events shared-artifacts shared-claims agent-cursors context-slices task-delegate-write-lease swarm-write-lease]
+      :code ["crates/missiond-core/migrations/20260508000000_shared_memory.sql"
+             "crates/missiond-daemon/src/engine/shared_memory.rs"
+             "crates/missiond-daemon/src/state.rs"
+             "crates/missiond-daemon/src/main.rs"
+             "crates/missiond-daemon/src/engine/master_control.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/shared_memory.rs"
+             "crates/missiond-daemon/src/handlers/mod.rs"
+             "crates/missiond-daemon/src/handlers/compute/task_delegate.rs"
+             "crates/missiond-mcp/src/tools/knowledge/shared_memory.rs"
+             "crates/missiond-mcp/src/tools/mod.rs"
+             "scripts/check-v3-shared-memory-isomorphism.mjs"
+             ".missiond/workflows/semantic-ir-shared-memory-convergence.lisp"]
+      :note "MissionD shared memory is the Rust/Postgres durable coordination substrate for concurrent agents. EventBus wakes and observes; shared_events/shared_artifacts/shared_claims/agent_cursors hold the coordination truth. Investigation workers write artifacts without claims; implementation workers must have an accepted shard and write-scope lease. Legacy shared-memory.lisp ledgers remain compatibility projections, not concurrent write authority.")
 
     (surface review-gate
       :status "code-aligned"
@@ -3437,6 +3495,7 @@
              "node scripts/check-frontend-board-code-isomorphism.mjs"
              "node scripts/check-frontend-board-runtime-projection.mjs"
              "node scripts/check-v3-ops-infra-isomorphism.mjs"
+             "node scripts/check-v3-shared-memory-isomorphism.mjs"
              "node scripts/check-v3-request-flow-smoke.mjs"
              "node scripts/check-v3-code-isomorphism-complete.mjs"
              "node scripts/check-v3-final-convergence.mjs"]

@@ -183,6 +183,11 @@ pub(crate) struct AppState {
     pub(crate) embedding_tx: tokio::sync::mpsc::Sender<EmbeddingTask>,
     /// v2 event bus — every producer in the daemon publishes through this.
     pub(crate) bus: Arc<BusServices>,
+    /// Durable multi-agent shared memory: event stream, artifacts, write leases,
+    /// and agent cursors. This supersedes direct concurrent writes to
+    /// `.missiond/tasks/**/shared-memory.lisp`; those files remain a
+    /// compatibility projection only.
+    pub(crate) shared_memory: Arc<crate::engine::shared_memory::SharedMemoryService>,
     /// Process-level daemon statistics (counters + histograms).
     pub(crate) stats: Arc<DaemonStats>,
     /// Centralized LLM prompts with file-based hot-reload.

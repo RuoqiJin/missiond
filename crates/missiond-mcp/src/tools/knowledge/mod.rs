@@ -10,4 +10,5 @@ pub(crate) mod plan;
 pub(crate) mod project;
 pub(crate) mod request;
 pub(crate) mod skill;
+pub(crate) mod shared_memory;
 pub(crate) mod workflow;

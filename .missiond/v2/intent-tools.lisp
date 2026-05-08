@@ -1351,6 +1351,107 @@
         :necessity-pending-review false
         :split-decision "keep consolidated: 3 actions share memory-domain operator surface; flow-ref already separates extraction/control/token read paths"))
 
+    ;; ── Shared Memory (3 tools) ──
+    ;; Durable concurrent-agent coordination substrate. The legacy
+    ;; .missiond/tasks/**/shared-memory.lisp ledger remains a compatibility
+    ;; projection only; concurrent write truth lives in Rust/Postgres via
+    ;; SharedMemoryService backed by shared_events / shared_artifacts /
+    ;; shared_claims / agent_cursors. V3 surface: mission-shared-memory.
+    (module shared_memory
+      :mcp-file "crates/missiond-mcp/src/tools/knowledge/shared_memory.rs"
+      :handler-file "crates/missiond-daemon/src/handlers/knowledge/shared_memory.rs"
+      :service-file "crates/missiond-daemon/src/engine/shared_memory.rs"
+      :migration-file "crates/missiond-core/migrations/20260508000000_shared_memory.sql"
+      :v3-surface "mission-shared-memory"
+      :checker "scripts/check-v3-shared-memory-isomorphism.mjs"
+      :legacy-projection ".missiond/tasks/schema/shared-memory-v1.lisp"
+      :tool-count 3
+      :capability-family "multi-agent-shared-memory"
+
+      (capability-family multi-agent-shared-memory
+        (ingress
+          :tools ["mission_shared_memory" "mission_context_slice" "mission_claim_status"]
+          :callers ["intent-layer" "task_delegate / swarm_run write-lease guard" "resident master-status projection" "external MCP client"])
+        (logic-core
+          (step s1 "mission_shared_memory routes durable actions append/query/artifact_put/artifact_get/claim/release/heartbeat/cursor against shared_events / shared_artifacts / shared_claims / agent_cursors")
+          (step s2 "mission_context_slice projects compiled semantic IR + recent shared_artifacts for a project/task/accepted_shard so workers read compact facts before full Lisp")
+          (step s3 "mission_claim_status inspects active/released/expired write leases by project/scope_kind/scope_key with stale claim expiry on read")
+          (step s4 "task_delegate / swarm_run claim each accepted shard's write_scope before dispatching implementation workers; lease conflict surfaces SHARED_MEMORY_WRITE_LEASE_CONFLICT")
+          (step s5 "master-status projects sharedMemory health (latestSeq / activeClaims / staleClaims / artifactCount / cursorLag) for resident master-control wakeups"))
+        (egress
+          :flows ["F-shared-memory-coordination :: append/query event journaling" "F-shared-memory-artifact :: artifact dedupe by hash" "F-shared-memory-lease :: claim/release/heartbeat write-scope leases" "F-context-slice-prefetch :: compact facts before full Lisp"]
+          :memory-cross-ref ["shared_events" "shared_artifacts" "shared_claims" "agent_cursors" "task_delegate write-scope guard" "master_control sharedMemory status projection"]
+          :events ["SystemEvent::ExternalServiceEvent (service_id=missiond-shared-memory)"])
+        :compatibility-projection
+          ["legacy .missiond/tasks/**/shared-memory.lisp ledgers remain readable for audit but MUST NOT be treated as concurrent write authority"
+           "scripts/check-task-memory.mjs continues to validate any retained ledgers; new waves SHOULD use the durable runtime instead"])
+
+      (tool mission_shared_memory
+        :desc "Durable shared memory: append/query events, put/get artifacts, claim/release/heartbeat write leases, manage agent cursors"
+        :actions ["query" "append" "artifact_put" "artifact_get" "claim" "release" "heartbeat" "cursor"]
+        :required ["action"]
+        :optional ["stream_id" "streamId" "project_id" "projectId" "task_id" "taskId" "agent_id" "agentId" "event_kind" "eventKind" "payload" "idempotency_key" "idempotencyKey" "correlation_id" "correlationId" "parent_event_ids" "parentEventIds" "kind" "media_type" "mediaType" "content" "json" "hash" "owner_id" "ownerId" "scope_kind" "scopeKind" "scope_key" "scopeKey" "lease_secs" "leaseSecs" "claim_id" "claimId" "last_seq" "lastSeq" "since_seq" "sinceSeq" "metadata" "limit"]
+        (ingress
+          :default-action "query"
+          :schema "action required; append/query use stream_id+project/task+payload; artifact_put accepts kind+content/json+metadata; claim requires scope_key; release/heartbeat require claim_id; cursor requires agent_id and optional last_seq write-back"
+          :callers ["intent-layer" "task_delegate / swarm_run write-lease guard" "external MCP client"])
+        (logic-core
+          (step s1 "route action via SharedMemoryService::handle_action")
+          (step s2 "append: insert shared_events row with idempotency_key uniqueness, BIGSERIAL seq, parent_event_ids, then publish ExternalServiceEvent for EventBus wakeup")
+          (step s3 "query: select shared_events since since_seq filtered by stream/project/task with bounded LIMIT")
+          (step s4 "artifact_put: dedupe by SHA-256 hash, store kind/media_type/metadata; artifact_get: return bytes UTF-8 lossy with metadata")
+          (step s5 "claim: expire stale leases, refuse on active conflict, otherwise insert active lease with TTL clamped 30..7200s; release/heartbeat update by id/owner")
+          (step s6 "cursor: upsert agent_cursors(last_seq) and return current cursor row"))
+        (egress
+          :reads ["shared_events" "shared_artifacts" "shared_claims" "agent_cursors"]
+          :writes ["shared_events append" "shared_artifacts dedupe insert" "shared_claims active/released/expired transitions" "agent_cursors upsert"]
+          :returns "missiond.shared-event.v1 / missiond.shared-memory.query.v1 / missiond.shared-artifact.v1 / missiond.shared-claim.v1 / missiond.shared-claim-release.v1 / missiond.shared-claim-heartbeat.v1 / missiond.agent-cursor.v1"
+          :events ["SystemEvent::ExternalServiceEvent service_id=missiond-shared-memory"])
+        :dispatches-to-worker "N/A — daemon-resident PG service"
+        :memory-cross-ref ["shared_events" "shared_artifacts" "shared_claims" "agent_cursors"]
+        :flow-ref "F-shared-memory-coordination / F-shared-memory-artifact / F-shared-memory-lease"
+        :called-by ["intent-layer" "task_delegate / swarm_run" "external MCP client"]
+        :necessity-pending-review false)
+
+      (tool mission_context_slice
+        :desc "Compact agent context slice: compiled semantic IR facts + recent shared_artifacts for a task/shard"
+        :optional ["project" "project_id" "projectId" "task_id" "taskId" "accepted_shard_id" "acceptedShardId"]
+        (ingress
+          :default-project "missiond"
+          :schema "all fields optional; project defaults to missiond; task_id and accepted_shard_id narrow artifact selection"
+          :callers ["intent-layer worker prefetch" "resident master prep" "external MCP client"])
+        (logic-core
+          (step s1 "read .missiond/v3/runtime/compiled/compiled-semantic-ir.json best-effort")
+          (step s2 "filter top 80 facts relevant to project (missiond returns all; otherwise match payload.facts[].project_id)")
+          (step s3 "fetch top 20 recent shared_artifacts filtered by project/task and metadata.accepted_shard_id"))
+        (egress
+          :reads ["compiled-semantic-ir.json" "shared_artifacts"]
+          :returns "missiond.context-slice.v1 with facts, artifacts, source pointers")
+        :dispatches-to-worker "N/A — read-only projection"
+        :memory-cross-ref ["compiled-semantic-ir" "shared_artifacts"]
+        :flow-ref "F-context-slice-prefetch :: agent reads compact facts before full Lisp"
+        :called-by ["intent-layer" "worker prefetch" "external MCP client"]
+        :necessity-pending-review false)
+
+      (tool mission_claim_status
+        :desc "Inspect active/released/expired shared-memory write leases by project / scope_kind / scope_key"
+        :optional ["project_id" "projectId" "scope_kind" "scopeKind" "scope_key" "scopeKey" "limit"]
+        (ingress
+          :schema "filters optional; expires stale active claims on read; bounded LIMIT 1..500 default 50"
+          :callers ["intent-layer lease audit" "task_delegate conflict triage" "external MCP client"])
+        (logic-core
+          (step s1 "expire_stale_claims: flip active claims past lease_expires_at to expired")
+          (step s2 "select shared_claims filtered by project_id / scope_kind / scope_key ordered by acquired_at DESC"))
+        (egress
+          :reads ["shared_claims"]
+          :writes ["shared_claims status=expired side effect from lease expiry"]
+          :returns "missiond.shared-memory.claim-status.v1 with claim rows")
+        :dispatches-to-worker "N/A — read-only with stale-claim sweep"
+        :memory-cross-ref ["shared_claims"]
+        :flow-ref "F-shared-memory-lease :: claim audit / triage"
+        :called-by ["intent-layer" "task_delegate conflict triage" "external MCP client"]
+        :necessity-pending-review false))
+
     ;; ── Board (8 tools) ──
     (module board
       :mcp-file "crates/missiond-mcp/src/tools/knowledge/board.rs"

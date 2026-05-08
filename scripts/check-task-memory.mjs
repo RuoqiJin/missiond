@@ -22,6 +22,13 @@ Checks MissionD shared-memory ledger v1 Lisp files:
   - enforces unique :id values, strictly increasing :seq, ISO-8601 :at,
     repo-relative :touched paths, and a kebab/dot/underscore id style
 
+Note: the v1 Lisp ledger is now a compatibility projection. The durable
+shared-memory runtime (mission_shared_memory / mission_context_slice /
+mission_claim_status backed by shared_events / shared_artifacts /
+shared_claims / agent_cursors) is the concurrent write authority — see
+scripts/check-v3-shared-memory-isomorphism.mjs and surface
+mission-shared-memory in .missiond/v3/missiond-blueprint.lisp.
+
 Use --dry-fixture to run self-contained pass/fail fixtures.
 `;
 

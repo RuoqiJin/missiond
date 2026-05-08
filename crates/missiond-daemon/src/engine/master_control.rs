@@ -1569,6 +1569,7 @@ pub(crate) async fn mission_master_status(state: &AppState) -> Value {
     let commit_convergence = crate::engine::commit_convergence::status_snapshot().await;
     let lisp_code_sync = crate::engine::lisp_code_sync::status_snapshot().await;
     let nightly_evolution = crate::engine::nightly_evolution::status_snapshot().await;
+    let shared_memory = state.shared_memory.status_snapshot().await;
     let mcp_enabled = probe_codex_mcp_ready().await;
     let approval = probe_codex_mcp_approval_ready();
     let mcp_ready = mcp_enabled && approval.ready;
@@ -1651,6 +1652,7 @@ pub(crate) async fn mission_master_status(state: &AppState) -> Value {
     status["service"]["commitConvergence"] = commit_convergence;
     status["service"]["lispCodeSync"] = lisp_code_sync;
     status["service"]["nightlyEvolution"] = nightly_evolution;
+    status["service"]["sharedMemory"] = shared_memory;
     status["service"]["compiledRuntime"] = compiled_runtime_projection_status(&checkpoint_root);
     status["service"]["lastControlObjectiveId"] = json!(runtime_snapshot.last_control_objective_id);
     status
