@@ -1,0 +1,157 @@
+{
+  "schema": "missiond.kb-memory-triage-report.v1",
+  "generated_at": "2026-05-08T16:46:24.470Z",
+  "batch_id": "kb-triage-20260508-full-v1",
+  "applied": true,
+  "rows_reviewed": 1108,
+  "active_count": 97,
+  "hidden_count": 1011,
+  "active_ratio": 0.0875,
+  "target_active_ratio": 0.1,
+  "state_counts": {
+    "active": 97,
+    "historical-evidence": 144,
+    "needs-human": 665,
+    "superseded-by-lisp": 37,
+    "superseded-by-code": 164,
+    "wrong-or-stale": 1
+  },
+  "category_state_counts": {
+    "preference:business_rule": {
+      "active": 1
+    },
+    "preference": {
+      "active": 48,
+      "historical-evidence": 2
+    },
+    "preference:environment": {
+      "active": 1
+    },
+    "system_rule": {
+      "active": 2
+    },
+    "memory:rule": {
+      "active": 4,
+      "needs-human": 1,
+      "historical-evidence": 1
+    },
+    "policy:decision": {
+      "active": 34,
+      "historical-evidence": 8,
+      "needs-human": 159
+    },
+    "memory:decision": {
+      "active": 2,
+      "needs-human": 5
+    },
+    "decision": {
+      "historical-evidence": 1
+    },
+    "memory:architecture": {
+      "needs-human": 272,
+      "superseded-by-lisp": 21,
+      "historical-evidence": 70,
+      "active": 5,
+      "superseded-by-code": 4
+    },
+    "architecture": {
+      "needs-human": 25,
+      "historical-evidence": 9,
+      "superseded-by-lisp": 2
+    },
+    "project": {
+      "historical-evidence": 3
+    },
+    "memory:feature": {
+      "needs-human": 35,
+      "superseded-by-lisp": 2,
+      "superseded-by-code": 19,
+      "wrong-or-stale": 1
+    },
+    "feature_request": {
+      "needs-human": 1,
+      "superseded-by-code": 1
+    },
+    "architecture:module": {
+      "needs-human": 37,
+      "historical-evidence": 10,
+      "superseded-by-lisp": 7
+    },
+    "design_spec": {
+      "historical-evidence": 1
+    },
+    "architecture:core": {
+      "needs-human": 2
+    },
+    "memory:bugfix": {
+      "superseded-by-code": 132,
+      "historical-evidence": 8
+    },
+    "feature": {
+      "superseded-by-code": 2,
+      "needs-human": 6
+    },
+    "memory:ops": {
+      "historical-evidence": 12,
+      "needs-human": 90,
+      "superseded-by-lisp": 2
+    },
+    "project-requirement": {
+      "historical-evidence": 1
+    },
+    "architecture:summary": {
+      "historical-evidence": 8,
+      "superseded-by-lisp": 3,
+      "needs-human": 15
+    },
+    "memory:plan": {
+      "historical-evidence": 1
+    },
+    "ops": {
+      "historical-evidence": 1
+    },
+    "memory:platform": {
+      "historical-evidence": 1
+    },
+    "frontend_standard": {
+      "historical-evidence": 1
+    },
+    "architecture:feature": {
+      "needs-human": 5,
+      "historical-evidence": 1
+    },
+    "architecture:pipeline": {
+      "needs-human": 3
+    },
+    "memory:concept": {
+      "historical-evidence": 1
+    },
+    "architecture:workflow": {
+      "needs-human": 1
+    },
+    "architecture:routing": {
+      "needs-human": 1
+    },
+    "architecture:mcp": {
+      "needs-human": 2
+    },
+    "architecture:security": {
+      "needs-human": 1
+    },
+    "procedure": {
+      "historical-evidence": 1
+    },
+    "memory:debug": {
+      "superseded-by-code": 6
+    },
+    "memory": {
+      "needs-human": 4
+    },
+    "ops:insight": {
+      "historical-evidence": 2
+    },
+    "architecture:principle": {
+      "historical-evidence": 1
+    }
+  }
+}

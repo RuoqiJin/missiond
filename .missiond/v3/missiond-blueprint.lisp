@@ -1619,11 +1619,13 @@
     :pending-message-limit 60
     :tool-result-preview-chars 1000
     :assistant-preview-chars 500
+    :active-memory-target-ratio 0.10
     :review-states [active superseded-by-lisp superseded-by-code historical-evidence duplicate wrong-or-stale delete-candidate needs-human]
     :default-query-policy "exclude current review states superseded-by-lisp/superseded-by-code/historical-evidence/duplicate/wrong-or-stale/delete-candidate/needs-human unless include_archived or state_filter is explicit"
     :invariants
       ["mission_memory_pending MUST project batch size and preview truncation lengths from memory-kb-policy."
        "mission_kb_review MUST write a non-destructive knowledge_review_state overlay; it MUST NOT mutate or delete the original knowledge row."
+       "Large KB cleanup MUST calibrate with at least five manual batches before batch overlay application; target active memory is about 10%, with needs-human hidden from default retrieval."
        "mission_kb_query default retrieval MUST honor the review overlay while include_archived=true and state_filter preserve audit access to historical evidence."
        "A real MissionD project with .missiond but no memory-kb-policy MUST return V3_BLUEPRINT_CONFIG_ERROR rather than silently using embedded defaults."])
 
@@ -2473,7 +2475,8 @@
                (step s2 :logic "resolve project/global memory scope and normalize KB or intent query")
                (step s3 :logic "read or mutate durable knowledge rows through one Lisp-described memory contract")
                (step s4 :logic "apply knowledge_review_state overlay before default retrieval so superseded/historical/duplicate/stale/delete-candidate memories leave the active reasoning path without deletion")
-               (step s5 :logic "project search, beacon, insight, and memory responses into reviewable evidence"))
+               (step s5 :logic "keep needs-human out of default retrieval until adjudicated, because uncertain memory is evidence rather than active guidance")
+               (step s6 :logic "project search, beacon, insight, and memory responses into reviewable evidence"))
         :egress [kb_result memory_projection search_hits insight_summary])
       (function project-registry
         :surface project-registry
