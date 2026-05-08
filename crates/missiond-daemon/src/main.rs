@@ -1233,6 +1233,11 @@ async fn main() -> Result<()> {
         &state,
         shutdown_rx.clone(),
     );
+    engine::lisp_code_sync::start_lisp_code_sync_service(
+        &bus_services,
+        &state,
+        shutdown_rx.clone(),
+    );
     engine::nightly_evolution::start_nightly_evolution_service(&state, shutdown_rx.clone());
 
     // Embedding Worker: event-driven actor (KB/Skill/Conv/AST embeddings + backfill)

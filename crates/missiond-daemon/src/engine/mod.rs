@@ -7,6 +7,7 @@ pub mod commit_convergence;
 pub mod flow;
 pub mod intent_engine;
 pub mod learning_engine;
+pub mod lisp_code_sync;
 pub mod master_control;
 pub mod nightly_evolution;
 

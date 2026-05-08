@@ -839,7 +839,7 @@
       :refactor-rule "Keep concrete model/slot/timeout/prompt/fanout rules addressable by function name; do not add new dispatch invariants only as long strings inside workstation-config.")
     (domain master-control-plane
       :owner resident-master-control
-      :source [resident-master-control master-checkpoint master-event-subscriber master-decision-loop master-delegation master-recovery night-scheduler commit-lisp-convergence-loop nightly-evolution-loop]
+      :source [resident-master-control master-checkpoint master-event-subscriber master-decision-loop master-delegation master-recovery night-scheduler commit-lisp-convergence-loop lisp-code-sync-loop nightly-evolution-loop]
       :functions [master-checkpoint master-event-intake master-objective-loop master-delegation-loop master-recovery-loop master-maintenance-loop mcp-readiness]
       :runtime-projection [MasterControlService mission_master_status mission_convergence_status master-control-checkpoint]
       :checker ["node scripts/check-v3-master-control-isomorphism.mjs" "node scripts/check-v3-control-plane-m6-split.mjs"]
@@ -1000,6 +1000,22 @@
          (step s5 :logic "for code-only commits create one visible deduped BoardTask commit-lisp-backfill:<project>:<sha>; lisp/checker/evidence-only commits do not recurse")
          (step s6 :logic "write .missiond/v3/runtime/commit-lisp-convergence/<sha>.report.lisp and expose commitConvergence status"))
       :egress [commit-convergence-report backfill-boardtask mission_master_status.commitConvergence])
+    (lisp-code-sync-loop
+      :entry [SystemEvent::ConfigChanged project-registry file-watcher]
+      :policy (:workflow ".missiond/workflows/lisp-code-sync.lisp"
+               :watch-env MISSIOND_LISP_CODE_SYNC_WATCH
+               :default-watch-enabled true
+               :dedupe-key "lisp-code-sync:<project>:<path-hash>"
+               :rule "Lisp/checker edits under .missiond are observed through EventBus, compiled/checked immediately, and only failing gates create visible BoardTasks.")
+      :core
+        ((step s1 :logic "watch active ProjectRegistry .missiond directories recursively for .lisp and .mjs changes")
+         (step s2 :logic "publish each relevant filesystem change as SystemEvent::ConfigChanged; sync processing subscribes to EventBus and does not bypass it")
+         (step s3 :logic "resolve project by longest-prefix ProjectRegistry match")
+         (step s4 :logic "for missiond run compile-v3-runtime then check-v3-code-isomorphism-complete; for external projects run .missiond/check.sh when present")
+         (step s5 :logic "write .missiond/v3/runtime/lisp-code-sync/<timestamp>-<path-hash>.report.lisp with synced/needs-sync/observed-only status")
+         (step s6 :logic "on failed code-isomorphism create or reuse one visible BoardTask lisp-code-sync:<project>:<path-hash> that requires evidence-plan and exact accepted shard before code mutation")
+         (step s7 :logic "expose lispCodeSync status in mission_master_status so the resident master and frontend can see the live Lisp->code loop"))
+      :egress [lisp-code-sync-report sync-boardtask mission_master_status.lispCodeSync])
     (nightly-evolution-loop
       :entry [night-scheduler mission_nightly_evolution final-convergence-snapshot]
       :core
@@ -1881,6 +1897,13 @@
       :v3-function commit-lisp-convergence
       :surface commit-lisp-convergence-loop
       :note "V2 commit-triggered Lisp survey is narrowed into a workflow-backed convergence loop: commit events inspect committed snapshots with git diff-tree, classify Lisp/checker/evidence coverage, and create visible backfill BoardTasks for code-only commits.")
+    (v2-item lisp-code-sync-after-ssot-edit
+      :status runtime-projected
+      :v2-source ".missiond/v2/architecture-dsl.lisp :: SSOT-before-code invariant / worker backfill expectation"
+      :v3-pillar source-control
+      :v3-function lisp-code-sync
+      :surface lisp-code-sync-loop
+      :note "The SSOT-before-code invariant is now event-driven for Lisp edits: .missiond Lisp/checker changes emit SystemEvent::ConfigChanged, run typed compile plus code-isomorphism gates, write lisp-code-sync reports, and create visible exact-shard BoardTasks when code falls behind Lisp.")
     (v2-item context-pack-two-stage-parallel-work
       :status runtime-projected
       :v2-source ".missiond/v2/intent.lisp :: task-runner loop evidence + wave29 context-pack upgrade"
@@ -2312,7 +2335,16 @@
                (step s3 :logic "classify files into code/lisp/checker/evidence/docs/other")
                (step s4 :logic "covered when code changes have same-commit Lisp/checker/evidence coverage; lisp-only commits do not recurse")
                (step s5 :logic "create one visible deduped backfill BoardTask for code-only commits"))
-        :egress [commit_convergence_report backfill_boardtask mission_master_status.commitConvergence]))
+        :egress [commit_convergence_report backfill_boardtask mission_master_status.commitConvergence])
+      (function lisp-code-sync
+        :surface lisp-code-sync-loop
+        :entry [SystemEvent::ConfigChanged file-watch project-registry]
+        :core ((step s1 :logic "watch active project .missiond directories and publish SystemEvent::ConfigChanged for .lisp/.mjs changes")
+               (step s2 :logic "compile typed runtime projection and run the project code-isomorphism checker")
+               (step s3 :logic "write a lisp-code-sync report for every accepted event")
+               (step s4 :logic "create exactly one visible deduped sync BoardTask for failing gates")
+               (step s5 :logic "require master evidence-plan and exact accepted shard before downstream code worker mutation"))
+        :egress [lisp_code_sync_report sync_boardtask mission_master_status.lispCodeSync]))
 
     (pillar coordination
       (function context-pack
@@ -2931,6 +2963,19 @@
              "scripts/check-v3-commit-convergence-loop.mjs"
              "scripts/check-v3-code-isomorphism-complete.mjs"]
       :note "commit-lisp-convergence-loop is the event-driven code->Lisp backfill muscle. CommitConvergenceService subscribes to SystemEvent::ContextualCommitDetected, resolves project from the committing slot, provider conversation project/project_id metadata, or registry, inspects committed snapshots with git diff-tree --root --no-commit-id -r --name-only <sha>, classifies code/lisp/checker/evidence/doc files, writes commit convergence reports, and creates one visible deduped BoardTask commit-lisp-backfill:<project>:<sha> for code-only commits. Lisp/checker/evidence-only commits do not recurse.")
+
+    (surface lisp-code-sync-loop
+      :status "code-aligned"
+      :implements [lisp-code-sync lisp-code-sync-loop]
+      :code [".missiond/v3/missiond-blueprint.lisp"
+             ".missiond/workflows/lisp-code-sync.lisp"
+             "crates/missiond-daemon/src/engine/lisp_code_sync.rs"
+             "crates/missiond-daemon/src/engine/mod.rs"
+             "crates/missiond-daemon/src/main.rs"
+             "crates/missiond-daemon/src/engine/master_control.rs"
+             "scripts/check-v3-lisp-code-sync-isomorphism.mjs"
+             "scripts/check-v3-code-isomorphism-complete.mjs"]
+      :note "lisp-code-sync-loop is the event-driven Lisp->code isomorphism muscle. LispCodeSyncService watches active ProjectRegistry .missiond directories, emits SystemEvent::ConfigChanged for .lisp/.mjs changes, consumes those events through EventBus, resolves the project, runs typed compile plus code-isomorphism gates, writes .missiond/v3/runtime/lisp-code-sync reports, and creates one visible deduped BoardTask lisp-code-sync:<project>:<path-hash> when the checker fails. It never edits code directly; downstream code mutation still requires master evidence-plan, accepted exact shard, write_scope, acceptance, and durable green gates.")
 
     (surface nightly-evolution-loop
       :status "code-aligned"

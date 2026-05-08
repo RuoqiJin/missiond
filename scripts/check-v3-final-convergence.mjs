@@ -116,6 +116,8 @@ const BLUEPRINT_NEEDLES = [
   ['workstation-config', '(workstation-config'],
   ['control-plane-m6-split', '(control-plane-m6-split'],
   ['control-plane split checker', 'check-v3-control-plane-m6-split.mjs'],
+  ['lisp-code-sync-loop', '(lisp-code-sync-loop'],
+  ['lisp-code-sync checker', 'check-v3-lisp-code-sync-isomorphism.mjs'],
   ['context-pack-run-wave', 'context-pack-run-wave'],
   ['context-pack dispatch policy', 'dispatch-policy context-pack-run-wave'],
   ['swarm-run resolves project_root', 'mission_swarm_run MUST resolve project_id to a registered project_root'],
