@@ -826,6 +826,49 @@
        "Direct implementation from an initial objective is allowed only when exact-shard-ready=true is explicitly present in the BoardTask metadata or description."]
     :checker "node scripts/check-v3-workflow-isomorphism.mjs")
 
+  (control-plane-m6-split
+    :schema "missiond.control-plane-m6-split.v1"
+    :purpose "Keep MissionD's fast-growing orchestration/control plane readable by splitting overloaded policy blocks into stable subplanes while preserving existing runtime projections."
+    :domains [workstation-control-plane master-control-plane eventbridge-deployment-plane project-universe-plane knowledge-skill-plane]
+    (domain workstation-control-plane
+      :owner workstation-config
+      :source [workstation-config workstation-pool agent-interaction-policy]
+      :functions [model-profile-policy slot-template-registry startup-slot-registry timeout-capacity-ttl-policy dispatch-routing-policy prompt-context-policy exact-shard-contract provider-interaction-policy]
+      :runtime-projection [WorkstationRuntimeConfig workstation-pool mission_compute_slot mission_task_delegate Autopilot]
+      :checker ["node scripts/check-v3-workstation-config-isomorphism.mjs" "node scripts/check-v3-workstation-pool-isomorphism.mjs" "node scripts/check-v3-control-plane-m6-split.mjs"]
+      :refactor-rule "Keep concrete model/slot/timeout/prompt/fanout rules addressable by function name; do not add new dispatch invariants only as long strings inside workstation-config.")
+    (domain master-control-plane
+      :owner resident-master-control
+      :source [resident-master-control master-checkpoint master-event-subscriber master-decision-loop master-delegation master-recovery night-scheduler commit-lisp-convergence-loop nightly-evolution-loop]
+      :functions [master-checkpoint master-event-intake master-objective-loop master-delegation-loop master-recovery-loop master-maintenance-loop mcp-readiness]
+      :runtime-projection [MasterControlService mission_master_status mission_convergence_status master-control-checkpoint]
+      :checker ["node scripts/check-v3-master-control-isomorphism.mjs" "node scripts/check-v3-control-plane-m6-split.mjs"]
+      :refactor-rule "Master control is a phase machine, not a prompt blob; every new behavior must attach to one loop and state whether it wakes the resident slot, writes checkpoint only, or delegates work.")
+    (domain eventbridge-deployment-plane
+      :owner eventbridge
+      :source [eventbridge-policy deployment-event-ingest m6-deployment-confirmation deploy-agent-self-update-governance deployment-event-response m6-deployment-rollout]
+      :functions [event-envelope-contract event-waiter-contract deployment-event-ingest deployment-provenance-policy deploy-center-relay-contract deploy-agent-update-provenance]
+      :runtime-projection [ExternalServiceEvent mission_timeline.wait deploy-center-event-webhook deployment-event-response]
+      :checker ["node scripts/check-v3-eventbridge-isomorphism.mjs" "node scripts/check-v3-project-registry-isomorphism.mjs" "node scripts/check-v3-control-plane-m6-split.mjs"]
+      :refactor-rule "Deployment closure uses deploy-center provenance plus smoke; CI/GitHub/curl are diagnostics unless deploy-center lacks data.")
+    (domain project-universe-plane
+      :owner project-registry
+      :source [project-registry-policy project-identity-contract registry-authority-map project-maturity-model project-maturity-registry project-blueprint-registry service-runtime-universe]
+      :functions [project-identity-root-resolution registry-authority-map maturity-contract service-runtime-summary deploy-fact-reference forge-catalog-reference registry-reconciliation]
+      :runtime-projection [mission_project.universe compiled-project-universe project_registry_reconcile Board-System-Universe]
+      :checker ["node scripts/check-project-ssot-universe.mjs" "node scripts/check-project-maturity.mjs --min-level M5" "node scripts/check-v3-control-plane-m6-split.mjs"]
+      :refactor-rule "MissionD owns identity/SSOT/maturity; deploy-center owns runtime release facts; Forge owns component/pattern catalog. New project metadata must declare which authority owns it.")
+	    (domain knowledge-skill-plane
+	      :owner memory-kb
+	      :source [memory-kb-policy learning-engine-policy conversation-memory-distillation skill-runtime]
+	      :functions [skill-registry skill-search skill-project-links skill-to-workflow-promotion memory-quarantine memory-distillation memory-search-v2]
+	      :runtime-projection [mission_skill mission_kb_query mission_kb_remember conversation-memory-distillation]
+	      :checker ["node scripts/check-v3-memory-kb-isomorphism.mjs" "node scripts/check-v3-skill-runtime-isomorphism.mjs" "node scripts/check-v3-control-plane-m6-split.mjs"]
+	      :refactor-rule "KB and Skill context remain opt-in until memory is cleaned; project constants should move to SSOT/Universe rather than worker prompt preloads.")
+	    :workflow ".missiond/workflows/missiond-control-plane-m6-split.lisp"
+	    :egress [control-plane-split-report checker-pins compiled-runtime-projection-gaps]
+	    :checker "node scripts/check-v3-control-plane-m6-split.mjs")
+
   (resident-master-control
     :desc "Resident Codex brain layer: event-driven orchestrator that reads the active objective, Lisp SSOT, project registry, explicit context packs, and allowed evidence, then delegates exact work to pool workers."
     :worker codex-master-control
@@ -3334,14 +3377,15 @@
              "node scripts/check-v3-cascade-governance-isomorphism.mjs"
              "node scripts/check-v3-incident-governance-isomorphism.mjs"
              "node scripts/check-v3-source-hygiene-isomorphism.mjs"
-	             "node scripts/check-v3-context-pack-isomorphism.mjs"
-	             "node scripts/check-v3-workstation-config-isomorphism.mjs"
-	             "node scripts/check-v3-workstation-pool-isomorphism.mjs"
-	             "node scripts/check-v3-master-control-isomorphism.mjs"
-	             "node scripts/check-v3-direct-code-drift-policy.mjs"
-	             "node scripts/check-v3-commit-convergence-loop.mjs"
-	             "node scripts/check-v3-nightly-evolution-isomorphism.mjs"
-		             "node scripts/check-v3-autopilot-runtime-isomorphism.mjs"
+             "node scripts/check-v3-context-pack-isomorphism.mjs"
+             "node scripts/check-v3-workstation-config-isomorphism.mjs"
+             "node scripts/check-v3-workstation-pool-isomorphism.mjs"
+             "node scripts/check-v3-control-plane-m6-split.mjs"
+             "node scripts/check-v3-master-control-isomorphism.mjs"
+             "node scripts/check-v3-direct-code-drift-policy.mjs"
+             "node scripts/check-v3-commit-convergence-loop.mjs"
+             "node scripts/check-v3-nightly-evolution-isomorphism.mjs"
+             "node scripts/check-v3-autopilot-runtime-isomorphism.mjs"
              "node scripts/check-v3-workstation-dispatch-isomorphism.mjs"
              "node scripts/check-v3-board-isomorphism.mjs"
              "node scripts/check-frontend-board-lisp-schema.mjs"

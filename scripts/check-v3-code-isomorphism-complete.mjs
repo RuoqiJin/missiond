@@ -119,6 +119,7 @@ export const PER_SURFACE_CHECKERS = [
   'scripts/check-v3-context-pack-isomorphism.mjs',
   'scripts/check-v3-workstation-config-isomorphism.mjs',
   'scripts/check-v3-workstation-pool-isomorphism.mjs',
+  'scripts/check-v3-control-plane-m6-split.mjs',
   'scripts/check-v3-master-control-isomorphism.mjs',
   'scripts/check-v3-autopilot-runtime-isomorphism.mjs',
   'scripts/check-v3-commit-convergence-loop.mjs',

@@ -114,6 +114,8 @@ const BLUEPRINT_NEEDLES = [
   ['pillar-flow-map', '(pillar-flow-map'],
   ['implementation-map', '(implementation-map'],
   ['workstation-config', '(workstation-config'],
+  ['control-plane-m6-split', '(control-plane-m6-split'],
+  ['control-plane split checker', 'check-v3-control-plane-m6-split.mjs'],
   ['context-pack-run-wave', 'context-pack-run-wave'],
   ['context-pack dispatch policy', 'dispatch-policy context-pack-run-wave'],
   ['swarm-run resolves project_root', 'mission_swarm_run MUST resolve project_id to a registered project_root'],
