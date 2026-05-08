@@ -298,6 +298,9 @@ function checkFiles(root, files) {
     'deployed-current, deployed-stale, not-confirmed, or deployed-unknown',
     'deploy-center first, then router, then pcea',
     'deploy_succeeded and smoke_succeeded',
+    'GitHub workflow success and deploy-center notify HTTP 200 only move the task into wait-for-provenance',
+    'digest_resolution_failed, reported_digest_missing, runner_queued, build_cache_unavailable, and provenance_partial',
+    'sccache/cache acceleration failure is diagnostic',
     'M6 maturity is not deployment evidence',
   ]);
 

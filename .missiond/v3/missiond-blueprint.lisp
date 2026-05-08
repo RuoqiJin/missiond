@@ -1194,10 +1194,13 @@
            (step s2 :logic "map each project to deploy-center service slug(s), for example auth→xjp-auth-center, deploy-center→xjp-deploy-center, router→xjp-router, pcea→pcea/pcea-api/pcea-video-vault")
            (step s3 :logic "query deploy-center /api/deploy/status and provenance surfaces; classify deployed-current, deployed-stale, not-confirmed, or deployed-unknown")
            (step s4 :logic "compare deployed commit to local service paths where the project lives in a git checkout; do not mark a service current when service-relevant files changed after the deployed commit")
-           (step s5 :logic "order rollout through deploy-center before dependent services and emit a machine-readable deployment gap report"))
+           (step s5 :logic "distinguish CI/build/push success, deploy-center notify HTTP 200, deploy-center provenance, and service smoke; only provenance plus smoke can close deployment confirmation")
+           (step s6 :logic "classify digest_resolution_failed, reported_digest_missing, runner_queued, build_cache_unavailable, and provenance_partial as typed diagnostics rather than burying them in free text")
+           (step s7 :logic "order rollout through deploy-center before dependent services and emit a machine-readable deployment gap report"))
     :egress [m6-deployment-status-json deploy-ops-BoardTask m6-rollout-report]
     :surfaces ["scripts/check-m6-deployment-status.mjs" ".missiond/workflows/m6-deployment-rollout.lisp" ".missiond/workflows/pcea-deployment-rollout.lisp" "scripts/check-v3-project-registry-isomorphism.mjs"]
-    :rule "M6 maturity is not deployment evidence. Production deployment confirmation must come from deploy-center status/provenance, with curl/git probes only as diagnostics.")
+    :diagnostics [runner_queued build_cache_unavailable digest_resolution_failed reported_digest_missing provenance_partial]
+    :rule "M6 maturity is not deployment evidence. Production deployment confirmation must come from deploy-center status/provenance and service smoke, with curl/git/GitHub probes only as diagnostics. Build-cache accelerators such as sccache/kellnr are performance aids and must not become implicit release blockers.")
 
   (project-identity-contract
     :schema "missiond.project-identity-contract.v1"
