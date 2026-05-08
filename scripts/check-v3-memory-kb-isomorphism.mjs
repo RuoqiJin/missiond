@@ -31,6 +31,11 @@ const DEFAULT_FILES = {
   kbOps: 'crates/missiond-daemon/src/handlers/knowledge/kb/ops.rs',
   kbBeacon: 'crates/missiond-daemon/src/handlers/knowledge/kb/beacon.rs',
   kbCodeSearch: 'crates/missiond-daemon/src/handlers/knowledge/kb/code_search.rs',
+  kbReview: 'crates/missiond-daemon/src/handlers/knowledge/kb/review.rs',
+  kbReviewMigration: 'crates/missiond-core/migrations/20260508001000_knowledge_review_state.sql',
+  kbReviewTypes: 'crates/missiond-core/src/types/knowledge.rs',
+  kbReviewTraits: 'crates/missiond-core/src/db/traits.rs',
+  kbReviewPg: 'crates/missiond-core/src/db/pg/knowledge.rs',
   memory: 'crates/missiond-daemon/src/handlers/knowledge/memory.rs',
   learningMod: 'crates/missiond-daemon/src/engine/learning_engine/mod.rs',
   learningExtraction: 'crates/missiond-daemon/src/engine/learning_engine/extraction.rs',
@@ -137,6 +142,7 @@ function checkFiles(root, files) {
 	    'crates/missiond-core/src/db/pg/conversation.rs',
 	    'scripts/check-v3-memory-kb-isomorphism.mjs',
 	    'memory-kb-policy realtime extraction batch size and preview truncation budgets',
+	    'knowledge_review_state overlay',
     'projects learning-engine-policy into learning_engine pty send budgets, maintenance cadences, timeline read windows, and KB reflection policy',
     'Realtime extraction MUST claim the extraction lane before running pending-message DB probes',
     'pending realtime SQL MUST use EXISTS/LATERAL LIMIT or bounded materialized-candidate shapes instead of global COUNT(DISTINCT)/ROW_NUMBER scans',
@@ -157,6 +163,15 @@ function checkFiles(root, files) {
     'kb/ops.rs owns queue-status and execute-plan operation egress',
     'kb/beacon.rs owns unified mission_beacon action routing plus legacy beacon list/map/tag/annotate',
     'kb/code_search.rs owns AST code-search egress',
+    'kb/review.rs owns non-destructive knowledge_review_state overlay',
+    ':review-states [active superseded-by-lisp superseded-by-code historical-evidence duplicate wrong-or-stale delete-candidate needs-human]',
+    'mission_kb_review MUST write a non-destructive knowledge_review_state overlay; it MUST NOT mutate or delete the original knowledge row.',
+    'mission_kb_query default retrieval MUST honor the review overlay while include_archived=true and state_filter preserve audit access to historical evidence.',
+    'apply knowledge_review_state overlay before default retrieval so superseded/historical/duplicate/stale/delete-candidate memories leave the active reasoning path without deletion',
+    'crates/missiond-core/migrations/20260508001000_knowledge_review_state.sql',
+    'crates/missiond-core/src/types/knowledge.rs',
+    'crates/missiond-core/src/db/traits.rs',
+    'crates/missiond-core/src/db/pg/knowledge.rs',
     'node scripts/check-v3-memory-kb-isomorphism.mjs',
   ]);
 
@@ -195,6 +210,7 @@ function checkFiles(root, files) {
     'mod quality;',
     'mod query;',
     'mod remember;',
+    'mod review;',
     'use analyze::handle_kb_analyze;',
     'route_beacon_action',
     'handle_code_search',
@@ -210,11 +226,13 @@ function checkFiles(root, files) {
     'handle_kb_queue_status',
     'handle_kb_analyze',
     'handle_kb_remember',
+    'handle_kb_review',
     'use query::{handle_kb_get, handle_kb_list, handle_kb_search};',
     'pub(crate) async fn handle',
     '"mission_kb_query"',
     '"mission_kb_mutate"',
     '"mission_kb_ops"',
+    '"mission_kb_review"',
     '"mission_beacon"',
     '"mission_kb_remember"',
   ]);
@@ -313,6 +331,9 @@ function checkFiles(root, files) {
     'pub(super) struct KBImportArgs',
     'pub(super) struct KBDiscoverArgs',
     'pub(super) struct KBGCArgs',
+    'pub(super) struct KBReviewArgs',
+    'pub(super) include_archived: bool',
+    'pub(super) state_filter: Option<String>',
     'lenient::option_i64',
     'fn default_list_limit()',
   ]);
@@ -386,6 +407,14 @@ function checkFiles(root, files) {
     'kb_list_paginated',
     '"compact": true',
     'Key not found',
+    'fn review_state_hidden',
+    'async fn filter_entries_by_review',
+    'kb_review_current_for_ids',
+    'kb_review_get_by_key',
+    'include_archived',
+    'state_filter',
+    '"unreviewed"',
+    'Key is archived by KB review overlay',
   ]);
 
   requireAll(diagnostics, files.kbDiscovery, sources.kbDiscovery, [
@@ -499,10 +528,89 @@ function checkFiles(root, files) {
     'No code nodes matched filters',
   ]);
 
+  requireAll(diagnostics, files.kbReview, sources.kbReview, [
+    'pub(super) async fn handle_kb_review',
+    'KnowledgeReviewInput',
+    'VALID_REVIEW_STATES',
+    '"active"',
+    '"superseded-by-lisp"',
+    '"superseded-by-code"',
+    '"historical-evidence"',
+    '"duplicate"',
+    '"wrong-or-stale"',
+    '"delete-candidate"',
+    '"needs-human"',
+    '"upsert"',
+    '"get"',
+    '"stats"',
+    'kb_review_upsert',
+    'kb_review_get_by_key',
+    'kb_review_current_for_ids',
+    'kb_review_stats',
+    'resolve_knowledge_id',
+    'non_destructive',
+  ]);
+
+  requireAll(diagnostics, files.kbReviewMigration, sources.kbReviewMigration, [
+    'CREATE TABLE IF NOT EXISTS knowledge_review_state',
+    'knowledge_id TEXT NOT NULL REFERENCES knowledge(id) ON DELETE CASCADE',
+    "'active'",
+    "'superseded-by-lisp'",
+    "'superseded-by-code'",
+    "'historical-evidence'",
+    "'duplicate'",
+    "'wrong-or-stale'",
+    "'delete-candidate'",
+    "'needs-human'",
+    'batch_id TEXT NOT NULL',
+    'reviewer TEXT NOT NULL',
+    'rationale TEXT NOT NULL',
+    'evidence_refs JSONB NOT NULL',
+    'is_current BOOLEAN NOT NULL DEFAULT TRUE',
+    'CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_review_state_current',
+    'WHERE is_current',
+  ]);
+
+  requireAll(diagnostics, files.kbReviewTypes, sources.kbReviewTypes, [
+    'pub struct KnowledgeReviewState',
+    'pub struct KnowledgeReviewInput',
+    'pub knowledge_id: String',
+    'pub state: String',
+    'pub batch_id: String',
+    'pub reviewer: String',
+    'pub rationale: String',
+    'pub evidence_refs: serde_json::Value',
+    'pub superseded_by: Option<String>',
+    'pub confidence: f64',
+    'pub is_current: bool',
+  ]);
+
+  requireAll(diagnostics, files.kbReviewTraits, sources.kbReviewTraits, [
+    'async fn kb_review_upsert',
+    'async fn kb_review_current_for_ids',
+    'async fn kb_review_get_by_key',
+    'async fn kb_review_stats',
+    'KnowledgeReviewInput',
+    'KnowledgeReviewState',
+  ]);
+
+  requireAll(diagnostics, files.kbReviewPg, sources.kbReviewPg, [
+    'async fn kb_review_upsert',
+    'async fn kb_review_current_for_ids',
+    'async fn kb_review_get_by_key',
+    'async fn kb_review_stats',
+    'INSERT INTO knowledge_review_state',
+    'SET is_current = FALSE',
+    'WHERE is_current = TRUE AND knowledge_id = ANY($1)',
+    'JOIN knowledge k ON k.id = r.knowledge_id',
+    'GROUP BY state',
+  ]);
+
   requireAll(diagnostics, files.mcpKb, sources.mcpKb, [
     '"mission_kb_query"',
     '"mission_kb_remember"',
     '"mission_kb_mutate"',
+    '"mission_kb_review"',
     '"mission_kb_ops"',
     '"mission_beacon"',
     '"mission_code_search"',
@@ -534,7 +642,13 @@ function buildFixture() {
 	  (memory-kb-policy
 	    :pending-message-limit 60
 	    :tool-result-preview-chars 1000
-	    :assistant-preview-chars 500)
+	    :assistant-preview-chars 500
+	    :review-states [active superseded-by-lisp superseded-by-code historical-evidence duplicate wrong-or-stale delete-candidate needs-human]
+	    :invariants ["mission_kb_review MUST write a non-destructive knowledge_review_state overlay; it MUST NOT mutate or delete the original knowledge row."
+	                 "mission_kb_query default retrieval MUST honor the review overlay while include_archived=true and state_filter preserve audit access to historical evidence."])
+	  (function knowledge-memory
+	    :surface memory-kb
+	    :core ((step s4 :logic "apply knowledge_review_state overlay before default retrieval so superseded/historical/duplicate/stale/delete-candidate memories leave the active reasoning path without deletion")))
 	  (learning-engine-policy
 	    :realtime-extraction-timeout-secs 300
 	    :decision-tier3-timeout-secs 300
@@ -562,6 +676,11 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/kb/ops.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/beacon.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/kb/code_search.rs"
+	             "crates/missiond-daemon/src/handlers/knowledge/kb/review.rs"
+	             "crates/missiond-core/migrations/20260508001000_knowledge_review_state.sql"
+	             "crates/missiond-core/src/types/knowledge.rs"
+	             "crates/missiond-core/src/db/traits.rs"
+	             "crates/missiond-core/src/db/pg/knowledge.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/memory.rs"
 	             "crates/missiond-daemon/src/engine/learning_engine/mod.rs"
 	             "crates/missiond-daemon/src/engine/learning_engine/extraction.rs"
@@ -571,7 +690,7 @@ function buildFixture() {
 	             "crates/missiond-daemon/src/engine/learning_engine/historical_scanner.rs"
 	             "crates/missiond-core/src/db/pg/conversation.rs"
 	             "scripts/check-v3-memory-kb-isomorphism.mjs"]
-	      :note "memory-kb-policy realtime extraction batch size and preview truncation budgets; projects learning-engine-policy into learning_engine pty send budgets, maintenance cadences, timeline read windows, and KB reflection policy; Realtime extraction MUST claim the extraction lane before running pending-message DB probes; pending realtime SQL MUST use EXISTS/LATERAL LIMIT or bounded materialized-candidate shapes instead of global COUNT(DISTINCT)/ROW_NUMBER scans; deep-analysis active-conversation probes MUST use bounded EXISTS/OFFSET checks instead of full message COUNT scans; kb.rs remains the memory-kb facade; kb/args.rs owns unified KB argument ingress; kb/remember.rs owns remember ingestion, graph edge side effects, embedding trigger, mutation event, and conflict downweighting; kb/quality.rs owns content-quality rejection; kb/compact.rs owns rule-based KB compaction; kb/conflicts.rs owns semantic conflict detection; kb/query.rs owns search/get/list retrieval egress; kb/discovery.rs owns SSH probe discovery and infra KB projection; kb/analyze.rs owns LLM analysis, context-budgeting, and consolidation-plan queue projection; kb/mutate.rs owns forget/update/project mutation side effects; kb/import.rs owns servers_yaml import projection; kb/gc.rs owns stats/stale/duplicates cleanup actions; kb/ops.rs owns queue-status and execute-plan operation egress; kb/beacon.rs owns unified mission_beacon action routing plus legacy beacon list/map/tag/annotate; kb/code_search.rs owns AST code-search egress."))
+	      :note "memory-kb-policy realtime extraction batch size and preview truncation budgets; knowledge_review_state overlay; projects learning-engine-policy into learning_engine pty send budgets, maintenance cadences, timeline read windows, and KB reflection policy; Realtime extraction MUST claim the extraction lane before running pending-message DB probes; pending realtime SQL MUST use EXISTS/LATERAL LIMIT or bounded materialized-candidate shapes instead of global COUNT(DISTINCT)/ROW_NUMBER scans; deep-analysis active-conversation probes MUST use bounded EXISTS/OFFSET checks instead of full message COUNT scans; kb.rs remains the memory-kb facade; kb/args.rs owns unified KB argument ingress; kb/remember.rs owns remember ingestion, graph edge side effects, embedding trigger, mutation event, and conflict downweighting; kb/quality.rs owns content-quality rejection; kb/compact.rs owns rule-based KB compaction; kb/conflicts.rs owns semantic conflict detection; kb/query.rs owns search/get/list retrieval egress; kb/discovery.rs owns SSH probe discovery and infra KB projection; kb/analyze.rs owns LLM analysis, context-budgeting, and consolidation-plan queue projection; kb/mutate.rs owns forget/update/project mutation side effects; kb/import.rs owns servers_yaml import projection; kb/gc.rs owns stats/stale/duplicates cleanup actions; kb/ops.rs owns queue-status and execute-plan operation egress; kb/beacon.rs owns unified mission_beacon action routing plus legacy beacon list/map/tag/annotate; kb/code_search.rs owns AST code-search egress; kb/review.rs owns non-destructive knowledge_review_state overlay."))
   (compression-contract
     :checks ["node scripts/check-v3-memory-kb-isomorphism.mjs"]))`);
 
@@ -590,6 +709,7 @@ mod ops;
 mod quality;
 mod query;
 mod remember;
+mod review;
 use analyze::handle_kb_analyze;
 route_beacon_action; handle_code_search;
 use compact::handle_kb_compact;
@@ -600,9 +720,10 @@ handle_kb_batch_forget; handle_kb_batch_set_project; handle_kb_forget; handle_kb
 handle_kb_execute_plan; handle_kb_queue_status;
 handle_kb_analyze;
 handle_kb_remember;
+handle_kb_review;
 use query::{handle_kb_get, handle_kb_list, handle_kb_search};
 pub(crate) async fn handle() {
-  "mission_kb_query"; "mission_kb_mutate"; "mission_kb_ops"; "mission_beacon"; "mission_kb_remember";
+  "mission_kb_query"; "mission_kb_mutate"; "mission_kb_ops"; "mission_kb_review"; "mission_beacon"; "mission_kb_remember";
 }`);
 	  writeFixture(root, DEFAULT_FILES.v3Runtime, `
 	MemoryKbRuntimeConfig; LearningEngineRuntimeConfig; parse_memory_kb_policy; parse_learning_engine_policy; DEFAULT_MEMORY_PENDING_MESSAGE_LIMIT; DEFAULT_MEMORY_TOOL_RESULT_PREVIEW_CHARS; DEFAULT_MEMORY_ASSISTANT_PREVIEW_CHARS; memory-kb-policy; :pending-message-limit; :tool-result-preview-chars; :assistant-preview-chars; DEFAULT_LEARNING_REALTIME_EXTRACTION_TIMEOUT_SECS; DEFAULT_LEARNING_TIMELINE_ANALYSIS_INTERVAL_SECS; DEFAULT_LEARNING_KB_REFLECTION_UTILITY_THRESHOLD; learning-engine-policy; :realtime-extraction-timeout-secs; :cooccurrence-refresh-interval-secs;
@@ -616,6 +737,10 @@ pub(super) struct KBListArgs;
 pub(super) struct KBImportArgs;
 pub(super) struct KBDiscoverArgs;
 pub(super) struct KBGCArgs;
+pub(super) struct KBReviewArgs {
+  pub(super) include_archived: bool,
+  pub(super) state_filter: Option<String>,
+}
 lenient::option_i64;
 fn default_list_limit() {}
 `);
@@ -641,9 +766,14 @@ pub(super) async fn handle_kb_search() {
 }
 pub(super) async fn handle_kb_get() {
   KBKeyArgs; kb_get(&key); Key not found;
+  Key is archived by KB review overlay;
 }
 pub(super) async fn handle_kb_list() {
   KBListArgs; kb_list_paginated(); "compact": true;
+}
+fn review_state_hidden() {}
+async fn filter_entries_by_review() {
+  kb_review_current_for_ids; kb_review_get_by_key; include_archived; state_filter; "unreviewed";
 }`);
   writeFixture(root, DEFAULT_FILES.kbDiscovery, `
 pub(super) async fn handle_kb_discover() {
@@ -686,6 +816,76 @@ pub(super) async fn handle_beacon_annotate() { beacon_node_annotate(); }
 pub(super) async fn handle_code_search() {
   CodeSearchArgs; ast_search(); node_type; ast_find_related(); No code nodes found matching query; No code nodes matched filters;
 }`);
+  writeFixture(root, DEFAULT_FILES.kbReview, `
+pub(super) async fn handle_kb_review() {
+  KnowledgeReviewInput; VALID_REVIEW_STATES;
+  "active"; "superseded-by-lisp"; "superseded-by-code"; "historical-evidence";
+  "duplicate"; "wrong-or-stale"; "delete-candidate"; "needs-human";
+  "upsert"; "get"; "stats";
+  kb_review_upsert(); kb_review_get_by_key(); kb_review_current_for_ids(); kb_review_stats();
+  resolve_knowledge_id; non_destructive;
+}`);
+  writeFixture(root, DEFAULT_FILES.kbReviewMigration, `
+CREATE TABLE IF NOT EXISTS knowledge_review_state (
+  id TEXT PRIMARY KEY,
+  knowledge_id TEXT NOT NULL REFERENCES knowledge(id) ON DELETE CASCADE,
+  state TEXT NOT NULL CHECK (
+    state IN ('active', 'superseded-by-lisp', 'superseded-by-code', 'historical-evidence', 'duplicate', 'wrong-or-stale', 'delete-candidate', 'needs-human')
+  ),
+  batch_id TEXT NOT NULL,
+  reviewer TEXT NOT NULL,
+  rationale TEXT NOT NULL,
+  evidence_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+  is_current BOOLEAN NOT NULL DEFAULT TRUE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_review_state_current ON knowledge_review_state (knowledge_id) WHERE is_current;
+`);
+  writeFixture(root, DEFAULT_FILES.kbReviewTypes, `
+pub struct KnowledgeReviewState {
+  pub knowledge_id: String,
+  pub state: String,
+  pub batch_id: String,
+  pub reviewer: String,
+  pub rationale: String,
+  pub evidence_refs: serde_json::Value,
+  pub superseded_by: Option<String>,
+  pub confidence: f64,
+  pub is_current: bool,
+}
+pub struct KnowledgeReviewInput {
+  pub knowledge_id: String,
+  pub state: String,
+  pub batch_id: String,
+  pub reviewer: String,
+  pub rationale: String,
+  pub evidence_refs: serde_json::Value,
+  pub superseded_by: Option<String>,
+  pub confidence: f64,
+  pub is_current: bool,
+}
+`);
+  writeFixture(root, DEFAULT_FILES.kbReviewTraits, `
+KnowledgeReviewInput; KnowledgeReviewState;
+async fn kb_review_upsert() {}
+async fn kb_review_current_for_ids() {}
+async fn kb_review_get_by_key() {}
+async fn kb_review_stats() {}
+`);
+  writeFixture(root, DEFAULT_FILES.kbReviewPg, `
+async fn kb_review_upsert() {
+  INSERT INTO knowledge_review_state;
+  SET is_current = FALSE;
+}
+async fn kb_review_current_for_ids() {
+  WHERE is_current = TRUE AND knowledge_id = ANY($1);
+}
+async fn kb_review_get_by_key() {
+  JOIN knowledge k ON k.id = r.knowledge_id;
+}
+async fn kb_review_stats() {
+  GROUP BY state;
+}
+`);
 	  writeFixture(root, DEFAULT_FILES.memory, `
 	MemoryKbRuntimeConfig; load_memory_kb_config; V3_BLUEPRINT_CONFIG_ERROR; pending_message_limit; tool_result_preview_chars; assistant_preview_chars; get_pending_realtime_messages_with_limit(pending_msg_limit);
 	`);
@@ -719,7 +919,7 @@ pub(super) async fn handle_code_search() {
 	LearningEngineRuntimeConfig; habit_scan_interval_secs; habit_scan_batch_size; habit_scan_timeout_ms;
 	`);
 	  writeFixture(root, DEFAULT_FILES.mcpKb, `
-"mission_kb_query"; "mission_kb_remember"; "mission_kb_mutate"; "mission_kb_ops"; "mission_beacon"; "mission_code_search";
+"mission_kb_query"; "mission_kb_remember"; "mission_kb_mutate"; "mission_kb_review"; "mission_kb_ops"; "mission_beacon"; "mission_code_search";
 `);
   return root;
 }

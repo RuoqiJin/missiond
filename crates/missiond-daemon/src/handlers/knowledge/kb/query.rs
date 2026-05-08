@@ -6,6 +6,50 @@ use crate::state::AppState;
 
 use super::args::{KBKeyArgs, KBListArgs, KBSearchArgs};
 
+fn review_state_hidden(state: &str) -> bool {
+    matches!(
+        state,
+        "superseded-by-lisp"
+            | "superseded-by-code"
+            | "historical-evidence"
+            | "duplicate"
+            | "wrong-or-stale"
+            | "delete-candidate"
+            | "needs-human"
+    )
+}
+
+async fn filter_entries_by_review(
+    state: &AppState,
+    entries: Vec<missiond_core::types::KnowledgeEntry>,
+    include_archived: bool,
+    state_filter: Option<&str>,
+) -> Vec<missiond_core::types::KnowledgeEntry> {
+    let ids: Vec<String> = entries.iter().map(|e| e.id.clone()).collect();
+    let review_states = state
+        .store
+        .kb_review_current_for_ids(&ids)
+        .await
+        .unwrap_or_default();
+
+    entries
+        .into_iter()
+        .filter(|entry| {
+            let review_state = review_states.get(&entry.id).map(|r| r.state.as_str());
+            if let Some(filter) = state_filter {
+                return match filter {
+                    "unreviewed" => review_state.is_none(),
+                    other => review_state == Some(other),
+                };
+            }
+            if include_archived {
+                return true;
+            }
+            !review_state.map(review_state_hidden).unwrap_or(false)
+        })
+        .collect()
+}
+
 pub(super) async fn handle_kb_search(state: &AppState, args: Value) -> Result<ToolResult> {
     let KBSearchArgs {
         query,
@@ -14,6 +58,8 @@ pub(super) async fn handle_kb_search(state: &AppState, args: Value) -> Result<To
         offset,
         search_mode,
         project,
+        include_archived,
+        state_filter,
     } = serde_json::from_value(args).unwrap_or(KBSearchArgs {
         query: None,
         category: None,
@@ -21,6 +67,8 @@ pub(super) async fn handle_kb_search(state: &AppState, args: Value) -> Result<To
         offset: None,
         search_mode: None,
         project: None,
+        include_archived: false,
+        state_filter: None,
     });
     let query = query.unwrap_or_default();
     if query.is_empty() && category.is_none() {
@@ -29,6 +77,9 @@ pub(super) async fn handle_kb_search(state: &AppState, args: Value) -> Result<To
             .kb_list(None)
             .await
             .map_err(|e| anyhow!("DB error: {}", e))?;
+        let entries =
+            filter_entries_by_review(state, entries, include_archived, state_filter.as_deref())
+                .await;
         return Ok(ToolResult::json_pretty(&entries));
     }
 
@@ -171,6 +222,9 @@ pub(super) async fn handle_kb_search(state: &AppState, args: Value) -> Result<To
             .filter_map(|&i| scored_entries.get(i).map(|(e, _)| e.clone()))
             .collect()
     };
+    results =
+        filter_entries_by_review(state, results, include_archived, state_filter.as_deref()).await;
+    results.truncate(top_k);
 
     for entry in &mut results {
         let cat = entry.category.as_str();
@@ -233,14 +287,36 @@ pub(super) async fn handle_kb_search(state: &AppState, args: Value) -> Result<To
 }
 
 pub(super) async fn handle_kb_get(state: &AppState, args: Value) -> Result<ToolResult> {
-    let KBKeyArgs { key } = serde_json::from_value(args)?;
+    let KBKeyArgs {
+        key,
+        include_archived,
+    } = serde_json::from_value(args)?;
     let entry = state
         .store
         .kb_get(&key)
         .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
     match entry {
-        Some(e) => Ok(ToolResult::json_pretty(&e)),
+        Some(e) => {
+            let review = state
+                .store
+                .kb_review_get_by_key(&key)
+                .await
+                .map_err(|e| anyhow!("DB error: {}", e))?;
+            if !include_archived
+                && review
+                    .as_ref()
+                    .map(|r| review_state_hidden(&r.state))
+                    .unwrap_or(false)
+            {
+                return Ok(ToolResult::error(format!(
+                    "Key is archived by KB review overlay: {} (state={}). Re-run with include_archived=true to inspect it.",
+                    key,
+                    review.map(|r| r.state).unwrap_or_else(|| "unknown".to_string())
+                )));
+            }
+            Ok(ToolResult::json_pretty(&e))
+        }
         None => Ok(ToolResult::error(format!("Key not found: {}", key))),
     }
 }
@@ -251,6 +327,8 @@ pub(super) async fn handle_kb_list(state: &AppState, args: Value) -> Result<Tool
         limit: 50,
         offset: 0,
         compact: false,
+        include_archived: false,
+        state_filter: None,
     });
     let entries = state
         .store
@@ -261,6 +339,13 @@ pub(super) async fn handle_kb_list(state: &AppState, args: Value) -> Result<Tool
         )
         .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
+    let entries = filter_entries_by_review(
+        state,
+        entries,
+        args_parsed.include_archived,
+        args_parsed.state_filter.as_deref(),
+    )
+    .await;
 
     if args_parsed.compact {
         let compact: Vec<serde_json::Value> = entries

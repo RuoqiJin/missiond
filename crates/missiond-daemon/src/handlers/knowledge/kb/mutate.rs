@@ -9,7 +9,7 @@ use super::args::{KBKeyArgs, KBUpdateArgs};
 use super::quality::check_content_quality;
 
 pub(super) async fn handle_kb_forget(state: &AppState, args: Value) -> Result<ToolResult> {
-    let KBKeyArgs { key } = serde_json::from_value(args)?;
+    let KBKeyArgs { key, .. } = serde_json::from_value(args)?;
     // Get entry ID before deletion for cache invalidation
     let entry_id = state.store.kb_get_id_by_key(&key).await.ok().flatten();
     let deleted = state

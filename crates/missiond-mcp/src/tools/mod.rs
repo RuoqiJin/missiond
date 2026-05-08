@@ -338,6 +338,52 @@ mod tests {
     }
 
     #[test]
+    fn kb_review_schema_exposes_non_destructive_overlay_actions() {
+        let def = get_tool("mission_kb_review").expect("mission_kb_review registered");
+        let schema = &def.input_schema;
+
+        let required = schema
+            .get("required")
+            .and_then(|v| v.as_array())
+            .expect("mission_kb_review schema must declare required");
+        assert!(
+            required.iter().any(|v| v.as_str() == Some("action")),
+            "mission_kb_review must require `action`"
+        );
+
+        let props = schema
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .expect("mission_kb_review schema must declare properties");
+        let action_enum = props
+            .get("action")
+            .and_then(|v| v.get("enum"))
+            .and_then(|v| v.as_array())
+            .expect("mission_kb_review.action must be an enum");
+        for verb in ["upsert", "get", "stats"] {
+            assert!(
+                action_enum.iter().any(|v| v.as_str() == Some(verb)),
+                "mission_kb_review.action enum must include {verb}"
+            );
+        }
+        assert!(
+            props.contains_key("state") && props.contains_key("evidence_refs"),
+            "mission_kb_review must expose review state and evidence refs"
+        );
+
+        let query = get_tool("mission_kb_query").expect("mission_kb_query registered");
+        let query_props = query
+            .input_schema
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .expect("mission_kb_query schema must declare properties");
+        assert!(
+            query_props.contains_key("include_archived") && query_props.contains_key("state_filter"),
+            "mission_kb_query must expose archived-query controls"
+        );
+    }
+
+    #[test]
     fn test_tool_result_json() {
         let result = ToolResult::json(&serde_json::json!({"key": "value"}));
         match &result.content[0] {

@@ -1106,34 +1106,35 @@
       :event-emits ["SlotSessionChanged" "ManagerEvent::*" "BoardEvent" "WorkerStatusChanged"]))
 
   ;; ══════════════════════════════════════════════════════════
-  ;; 3.3 Knowledge Domain — 29 tools
+  ;; 3.3 Knowledge Domain — 30 tools
   ;; ══════════════════════════════════════════════════════════
   (domain knowledge
     :desc "KB / board / skill / memory / insight / project / intent / cascade — 知识与规划相关"
-    :count 29
+    :count 30
     :mcp-shell-dir "crates/missiond-mcp/src/tools/knowledge/ (9 .rs)"
     :handler-dir "crates/missiond-daemon/src/handlers/knowledge/"
 
-    ;; ── KB module (7 tools) ──
+    ;; ── KB module (8 tools) ──
     (module kb
       :mcp-file "crates/missiond-mcp/src/tools/knowledge/kb.rs"
       :handler-file "crates/missiond-daemon/src/handlers/knowledge/kb.rs"
-      :tool-count 7
+      :tool-count 8
       :capability-family "kb-knowledge-lifecycle"
 
       (capability-family kb-knowledge-lifecycle
         (ingress
-          :tools ["mission_kb_query" "mission_kb_remember" "mission_kb_mutate" "mission_kb_ops" "mission_kb_batch_set_project" "mission_embedding_ops" "mission_code_search"]
+          :tools ["mission_kb_query" "mission_kb_remember" "mission_kb_mutate" "mission_kb_review" "mission_kb_ops" "mission_kb_batch_set_project" "mission_embedding_ops" "mission_code_search"]
           :callers ["intent-layer" "board-frontend" "external MCP client" "worker context assembly"])
         (logic-core
           (step s1 "query/code_search provide retrieval surfaces for context assembly and direct inspection")
           (step s2 "remember/mutate/batch_set_project mutate KB entries, metadata, graph edges, AST links, and embedding refresh triggers")
-          (step s3 "kb_ops governs KB quality through gc, compact, analyze, discover, queue_status, and execute_plan")
-          (step s4 "embedding_ops exposes message embedding stats/backfill into the shared embedding worker pipeline")
-          (step s5 "egress flows feed F10 context assembly, F7 embedding pipeline, and KB governance queues"))
+          (step s3 "kb_review writes a non-destructive knowledge_review_state overlay; query default retrieval honors the overlay while include_archived/state_filter preserve audit access")
+          (step s4 "kb_ops governs KB quality through gc, compact, analyze, discover, queue_status, and execute_plan")
+          (step s5 "embedding_ops exposes message embedding stats/backfill into the shared embedding worker pipeline")
+          (step s6 "egress flows feed F10 context assembly, F7 embedding pipeline, and KB governance queues"))
         (egress
           :flows ["F10-context-assembly :: s3 retrieval-fusion" "F-kb-mutation-to-index" "F-kb-governance-ops" "F7-embedding-pipeline"]
-          :memory-cross-ref ["kb-manager kb_entries/kb_embeddings/kb graph/ast links" "embedding-support" "project-management" "board context for analyze"]
+          :memory-cross-ref ["kb-manager kb_entries/kb_embeddings/kb graph/ast links" "kb-review-overlay knowledge_review_state" "embedding-support" "project-management" "board context for analyze"]
           :events ["MemoryEvent::KBBatchMutated" "TaskEvent::Created when execute_plan dispatches merge/distill"]))
 
       (tool mission_kb_query
@@ -1214,6 +1215,31 @@
         :flow-ref "F-kb-mutation-to-index"
         :called-by ["intent-layer" "board-frontend/api/kb DELETE/PATCH"]
         :necessity-pending-review false)
+
+      (tool mission_kb_review
+        :desc "非破坏性 KB review overlay upsert/get/stats — knowledge_review_state 覆盖默认检索, 不删除原 knowledge"
+        :actions ["upsert" "get" "stats"]
+        :required ["action"]
+        :added "code-first overlay backfilled by V3 SSOT (BoardTask 9d04c0c7)"
+        (ingress
+          :schema "action required; upsert needs key or knowledge_id plus state and rationale; get accepts key or knowledge_id; stats has no extra args"
+          :callers ["intent-layer" "board-frontend (KB triage UI)" "external MCP client" "consolidation worker"])
+        (logic-core
+          (step s1 "validate review state against active/superseded-by-lisp/superseded-by-code/historical-evidence/duplicate/wrong-or-stale/delete-candidate/needs-human")
+          (step s2 "upsert: resolve knowledge_id from key fallback, mark prior current row is_current=FALSE, insert new overlay row in single tx")
+          (step s3 "get: return current overlay for the knowledge entry (by key or knowledge_id)")
+          (step s4 "stats: aggregate knowledge / memory totals, reviewed_current count, and per-state counts for triage dashboards")
+          (step s5 "MUST NOT mutate or delete kb_entries — original knowledge stays the immutable source record"))
+        (egress
+          :reads ["knowledge" "knowledge_review_state" "kb-manager kb_entries"]
+          :writes ["knowledge_review_state insert + previous row is_current flip"]
+          :returns "{ok, review, non_destructive} for upsert; {key|knowledge_id, review} for get; aggregated stats for stats")
+        :dispatches-to-worker "N/A — direct DB overlay write"
+        :memory-cross-ref ["kb-manager (knowledge)" "kb-review-overlay (knowledge_review_state)"]
+        :flow-ref "F-kb-governance-ops :: review-overlay"
+        :called-by ["intent-layer" "board-frontend" "external MCP client" "consolidation worker"]
+        :necessity-pending-review false
+        :note "Filter is enforced by kb/query.rs filter_entries_by_review() before default retrieval; include_archived=true and state_filter preserve audit access for historical evidence.")
 
       (tool mission_kb_ops
         :desc "KB 运维 gc/analyze/discover/queue_status/execute_plan/compact"

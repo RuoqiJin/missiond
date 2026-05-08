@@ -59,6 +59,28 @@ const UTILITY_HIT_BOOST: f64 = 0.15;
 /// The common SELECT column list for knowledge entries.
 const KB_COLS: &str = "id, category, key, summary, detail, source, confidence, access_count, created_at, updated_at, last_accessed_at, linked_task_id, kb_type, scope_task_id, utility_score, project_id";
 
+type KnowledgeReviewRow = (
+    String, String, String, String, String, String, serde_json::Value,
+    Option<String>, f64, String, Option<String>, bool,
+);
+
+fn review_row_to_state(r: KnowledgeReviewRow) -> KnowledgeReviewState {
+    KnowledgeReviewState {
+        id: r.0,
+        knowledge_id: r.1,
+        state: r.2,
+        batch_id: r.3,
+        reviewer: r.4,
+        rationale: r.5,
+        evidence_refs: r.6,
+        superseded_by: r.7,
+        confidence: r.8,
+        reviewed_at: r.9,
+        applied_at: r.10,
+        is_current: r.11,
+    }
+}
+
 #[cfg(feature = "postgres")]
 #[async_trait]
 impl KbStore for PgMissionStore {
@@ -483,6 +505,119 @@ impl KbStore for PgMissionStore {
             .await?;
         }
         Ok(())
+    }
+
+    async fn kb_review_upsert(&self, input: &KnowledgeReviewInput) -> DbResult<KnowledgeReviewState> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut tx = self.pool.begin().await?;
+
+        sqlx::query(
+            "UPDATE knowledge_review_state
+             SET is_current = FALSE
+             WHERE knowledge_id = $1 AND is_current = TRUE"
+        )
+        .bind(&input.knowledge_id)
+        .execute(&mut *tx)
+        .await?;
+
+        let row: KnowledgeReviewRow = sqlx::query_as(
+            "INSERT INTO knowledge_review_state
+                (id, knowledge_id, state, batch_id, reviewer, rationale, evidence_refs,
+                 superseded_by, confidence, reviewed_at, applied_at, is_current)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, TRUE)
+             RETURNING id, knowledge_id, state, batch_id, reviewer, rationale, evidence_refs,
+                 superseded_by, confidence, reviewed_at, applied_at, is_current"
+        )
+        .bind(&id)
+        .bind(&input.knowledge_id)
+        .bind(&input.state)
+        .bind(&input.batch_id)
+        .bind(&input.reviewer)
+        .bind(&input.rationale)
+        .bind(&input.evidence_refs)
+        .bind(&input.superseded_by)
+        .bind(input.confidence)
+        .bind(&now)
+        .bind(&input.applied_at)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(review_row_to_state(row))
+    }
+
+    async fn kb_review_current_for_ids(&self, ids: &[String]) -> DbResult<HashMap<String, KnowledgeReviewState>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let rows: Vec<KnowledgeReviewRow> = sqlx::query_as(
+            "SELECT id, knowledge_id, state, batch_id, reviewer, rationale, evidence_refs,
+                    superseded_by, confidence, reviewed_at, applied_at, is_current
+             FROM knowledge_review_state
+             WHERE is_current = TRUE AND knowledge_id = ANY($1)"
+        )
+        .bind(ids.to_vec())
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(review_row_to_state)
+            .map(|state| (state.knowledge_id.clone(), state))
+            .collect())
+    }
+
+    async fn kb_review_get_by_key(&self, key: &str) -> DbResult<Option<KnowledgeReviewState>> {
+        let row: Option<KnowledgeReviewRow> = sqlx::query_as(
+            "SELECT r.id, r.knowledge_id, r.state, r.batch_id, r.reviewer, r.rationale, r.evidence_refs,
+                    r.superseded_by, r.confidence, r.reviewed_at, r.applied_at, r.is_current
+             FROM knowledge_review_state r
+             JOIN knowledge k ON k.id = r.knowledge_id
+             WHERE r.is_current = TRUE AND k.key = $1"
+        )
+        .bind(key)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(review_row_to_state))
+    }
+
+    async fn kb_review_stats(&self) -> DbResult<serde_json::Value> {
+        let total: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM knowledge")
+            .fetch_one(&self.pool)
+            .await?;
+        let reviewed: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM knowledge_review_state WHERE is_current = TRUE"
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        let memory_total: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM knowledge WHERE category = 'memory' OR category LIKE 'memory:%'"
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        let by_state: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT state, COUNT(*)
+             FROM knowledge_review_state
+             WHERE is_current = TRUE
+             GROUP BY state
+             ORDER BY state"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(serde_json::json!({
+            "knowledge_total": total.0,
+            "memory_total": memory_total.0,
+            "reviewed_current": reviewed.0,
+            "active_target_10pct_memory": (memory_total.0 as f64 * 0.10).round() as i64,
+            "states": by_state
+                .into_iter()
+                .map(|(state, count)| serde_json::json!({"state": state, "count": count}))
+                .collect::<Vec<_>>(),
+        }))
     }
 
     // ========== Search ==========

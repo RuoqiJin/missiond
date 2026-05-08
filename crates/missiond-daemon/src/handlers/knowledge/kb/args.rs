@@ -21,6 +21,8 @@ pub(super) struct KBRememberArgs {
 #[derive(Deserialize)]
 pub(super) struct KBKeyArgs {
     pub(super) key: String,
+    #[serde(default)]
+    pub(super) include_archived: bool,
 }
 
 #[derive(Deserialize)]
@@ -54,6 +56,10 @@ pub(super) struct KBSearchArgs {
     pub(super) search_mode: Option<String>,
     #[serde(default)]
     pub(super) project: Option<String>,
+    #[serde(default)]
+    pub(super) include_archived: bool,
+    #[serde(default)]
+    pub(super) state_filter: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -66,6 +72,10 @@ pub(super) struct KBListArgs {
     pub(super) offset: u32,
     #[serde(default)]
     pub(super) compact: bool,
+    #[serde(default)]
+    pub(super) include_archived: bool,
+    #[serde(default)]
+    pub(super) state_filter: Option<String>,
 }
 
 fn default_list_limit() -> u32 {
@@ -93,4 +103,29 @@ pub(super) struct KBGCArgs {
     pub(super) action: String,
     #[serde(default, deserialize_with = "lenient::option_i64")]
     pub(super) days: Option<i64>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct KBReviewArgs {
+    pub(super) action: String,
+    #[serde(default)]
+    pub(super) key: Option<String>,
+    #[serde(default)]
+    pub(super) knowledge_id: Option<String>,
+    #[serde(default)]
+    pub(super) state: Option<String>,
+    #[serde(default)]
+    pub(super) batch_id: Option<String>,
+    #[serde(default)]
+    pub(super) reviewer: Option<String>,
+    #[serde(default)]
+    pub(super) rationale: Option<String>,
+    #[serde(default)]
+    pub(super) evidence_refs: Option<Value>,
+    #[serde(default)]
+    pub(super) superseded_by: Option<String>,
+    #[serde(default)]
+    pub(super) confidence: Option<f64>,
+    #[serde(default)]
+    pub(super) applied_at: Option<String>,
 }

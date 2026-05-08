@@ -1619,8 +1619,12 @@
     :pending-message-limit 60
     :tool-result-preview-chars 1000
     :assistant-preview-chars 500
+    :review-states [active superseded-by-lisp superseded-by-code historical-evidence duplicate wrong-or-stale delete-candidate needs-human]
+    :default-query-policy "exclude current review states superseded-by-lisp/superseded-by-code/historical-evidence/duplicate/wrong-or-stale/delete-candidate/needs-human unless include_archived or state_filter is explicit"
     :invariants
       ["mission_memory_pending MUST project batch size and preview truncation lengths from memory-kb-policy."
+       "mission_kb_review MUST write a non-destructive knowledge_review_state overlay; it MUST NOT mutate or delete the original knowledge row."
+       "mission_kb_query default retrieval MUST honor the review overlay while include_archived=true and state_filter preserve audit access to historical evidence."
        "A real MissionD project with .missiond but no memory-kb-policy MUST return V3_BLUEPRINT_CONFIG_ERROR rather than silently using embedded defaults."])
 
   (learning-engine-policy
@@ -2150,7 +2154,7 @@
         :v3-pillar memory
         :v3-function knowledge-memory
         :surface memory-kb
-        :tools [mission_kb_query mission_kb_remember mission_kb_mutate mission_kb_ops mission_beacon
+        :tools [mission_kb_query mission_kb_remember mission_kb_mutate mission_kb_review mission_kb_ops mission_beacon
                 mission_code_search mission_memory mission_insight mission_intent])
       (tool-group shared-memory-tools
         :status code-aligned
@@ -2462,11 +2466,12 @@
     (pillar memory
       (function knowledge-memory
         :surface memory-kb
-        :entry [mission_kb_query mission_kb_remember mission_kb_mutate mission_kb_ops mission_beacon mission_code_search mission_memory mission_insight mission_intent]
+        :entry [mission_kb_query mission_kb_remember mission_kb_mutate mission_kb_review mission_kb_ops mission_beacon mission_code_search mission_memory mission_insight mission_intent]
         :core ((step s1 :logic "load memory-kb-policy and learning-engine-policy for realtime extraction batch, preview budgets, learning cadences, and pty send budgets")
                (step s2 :logic "resolve project/global memory scope and normalize KB or intent query")
                (step s3 :logic "read or mutate durable knowledge rows through one Lisp-described memory contract")
-               (step s4 :logic "project search, beacon, insight, and memory responses into reviewable evidence"))
+               (step s4 :logic "apply knowledge_review_state overlay before default retrieval so superseded/historical/duplicate/stale/delete-candidate memories leave the active reasoning path without deletion")
+               (step s5 :logic "project search, beacon, insight, and memory responses into reviewable evidence"))
         :egress [kb_result memory_projection search_hits insight_summary])
       (function project-registry
         :surface project-registry
@@ -3207,6 +3212,11 @@
              "crates/missiond-daemon/src/handlers/knowledge/kb/ops.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/beacon.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/code_search.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/kb/review.rs"
+             "crates/missiond-core/migrations/20260508001000_knowledge_review_state.sql"
+             "crates/missiond-core/src/types/knowledge.rs"
+             "crates/missiond-core/src/db/traits.rs"
+             "crates/missiond-core/src/db/pg/knowledge.rs"
              "crates/missiond-daemon/src/handlers/knowledge/memory.rs"
              "crates/missiond-daemon/src/engine/learning_engine/mod.rs"
              "crates/missiond-daemon/src/engine/learning_engine/extraction.rs"
@@ -3222,7 +3232,7 @@
              "crates/missiond-mcp/src/tools/knowledge/insight.rs"
              "crates/missiond-mcp/src/tools/knowledge/intent.rs"
              "scripts/check-v3-memory-kb-isomorphism.mjs"]
-	      :note "Runtime-projected V3 destination for memory/KB tools. memory-kb-policy and learning-engine-policy own realtime extraction budgets, pty send budgets, cadences, bounded SQL probes, and physical split ownership across kb/* modules. Conversation history distillation is intentionally deferred behind .missiond/workflows/conversation-memory-distillation.lisp: default mode produces candidate-memory / infrastructure issue inventory only, rejects facts already superseded by project SSOT Lisp, and does not write or delete KB until log role attribution and project SSOT coverage are stable. [details: .missiond/v3/evidence/blueprint-notes.lisp#note-015]")
+	      :note "Runtime-projected V3 destination for memory/KB tools. memory-kb-policy and learning-engine-policy own realtime extraction budgets, pty send budgets, cadences, bounded SQL probes, and physical split ownership across kb/* modules. kb/review.rs owns non-destructive knowledge_review_state overlay so 90%+ stale memories can leave default retrieval without deleting evidence. Conversation history distillation is intentionally deferred behind .missiond/workflows/conversation-memory-distillation.lisp: default mode produces candidate-memory / infrastructure issue inventory only, rejects facts already superseded by project SSOT Lisp, and does not write or delete KB until log role attribution and project SSOT coverage are stable. [details: .missiond/v3/evidence/blueprint-notes.lisp#note-015]")
 
     (surface project-registry
       :status "code-aligned"

@@ -42,9 +42,13 @@ pub struct KnowledgeEntry {
     pub project_id: Option<String>,
 }
 
-fn default_utility_score() -> f64 { 0.5 }
+fn default_utility_score() -> f64 {
+    0.5
+}
 
-fn default_kb_type() -> String { "fact".to_string() }
+fn default_kb_type() -> String {
+    "fact".to_string()
+}
 
 /// Input for remembering (upserting) knowledge
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,6 +80,53 @@ pub struct KBRememberResult {
     /// Similarity score if merged
     #[serde(skip_serializing_if = "Option::is_none")]
     pub similarity: Option<f64>,
+}
+
+/// Current or historical review overlay for a knowledge entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeReviewState {
+    pub id: String,
+    pub knowledge_id: String,
+    pub state: String,
+    pub batch_id: String,
+    pub reviewer: String,
+    pub rationale: String,
+    pub evidence_refs: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
+    pub confidence: f64,
+    pub reviewed_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applied_at: Option<String>,
+    pub is_current: bool,
+}
+
+/// Input for writing a non-destructive review overlay.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeReviewInput {
+    pub knowledge_id: String,
+    pub state: String,
+    pub batch_id: String,
+    pub reviewer: String,
+    pub rationale: String,
+    #[serde(default = "default_evidence_refs")]
+    pub evidence_refs: serde_json::Value,
+    #[serde(default)]
+    pub superseded_by: Option<String>,
+    #[serde(default = "default_review_confidence")]
+    pub confidence: f64,
+    #[serde(default)]
+    pub applied_at: Option<String>,
+}
+
+fn default_evidence_refs() -> serde_json::Value {
+    serde_json::Value::Array(vec![])
+}
+
+fn default_review_confidence() -> f64 {
+    0.8
 }
 
 // ============ KB Operation Queue Types ============

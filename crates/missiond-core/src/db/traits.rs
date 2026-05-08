@@ -310,6 +310,10 @@ pub trait KbStore: Send + Sync {
     async fn kb_list_by_scope(&self, task_id: &str) -> DbResult<Vec<KnowledgeEntry>>;
     async fn kb_clear_scope(&self, id: &str) -> DbResult<()>;
     async fn kb_update_access_stats(&self, entries: &[KnowledgeEntry]) -> DbResult<()>;
+    async fn kb_review_upsert(&self, input: &KnowledgeReviewInput) -> DbResult<KnowledgeReviewState>;
+    async fn kb_review_current_for_ids(&self, ids: &[String]) -> DbResult<HashMap<String, KnowledgeReviewState>>;
+    async fn kb_review_get_by_key(&self, key: &str) -> DbResult<Option<KnowledgeReviewState>>;
+    async fn kb_review_stats(&self) -> DbResult<serde_json::Value>;
 
     // -- Search --
     async fn kb_search(&self, query: &str, category: Option<&str>) -> DbResult<Vec<KnowledgeEntry>>;

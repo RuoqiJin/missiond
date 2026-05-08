@@ -17,6 +17,7 @@ mod ops;
 mod quality;
 mod query;
 mod remember;
+mod review;
 
 use analyze::handle_kb_analyze;
 use beacon::{
@@ -34,6 +35,7 @@ use mutate::{
 use ops::{handle_kb_execute_plan, handle_kb_queue_status};
 use query::{handle_kb_get, handle_kb_list, handle_kb_search};
 use remember::handle_kb_remember;
+use review::handle_kb_review;
 
 // @beacon: knowledge
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
@@ -90,6 +92,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "mission_kb_get" => handle_kb_get(state, args).await,
         "mission_kb_list" => handle_kb_list(state, args).await,
         "mission_kb_import" => handle_kb_import(state, args).await,
+        "mission_kb_review" => handle_kb_review(state, args).await,
 
         "mission_kb_discover" => handle_kb_discover(state, args).await,
 
