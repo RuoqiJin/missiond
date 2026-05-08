@@ -1322,6 +1322,8 @@
     (maturity :id semantic-terminal :current M5 :target M6 :gap [domain-shard-split terminal-event-contract final-m6-report])
     (maturity :id xiaojinpro-backend :current M5 :target M6 :gap [monorepo-service-boundary deploy-fact-authority final-m6-report])
     (maturity :id deploy-center :current M6 :target M6 :gap [])
+    (maturity :id xjp-mcp :current M5 :target M6 :gap [tool-policy-ledger mcp-permission-regressions final-m6-report])
+    (maturity :id xjp-cli :current M5 :target M6 :gap [command-policy-ledger mcp-parity-regressions final-m6-report])
     (maturity :id deploy-agent :current M5 :target M6 :gap [agent-execution-boundary server-fact-ledger final-m6-report])
     (maturity :id auth :current M6 :target M6 :gap [])
     (maturity :id router :current M6 :target M6 :gap [])
@@ -1412,6 +1414,24 @@
       :backend ".missiond/backend/xiaojinpro-backend-blueprint.lisp"
       :status v3-runtime-ssot
       :checks ["node scripts/check-xjp-ssot-complete.mjs"]
+      :surface project-registry)
+    (project :id xjp-mcp
+      :kind node-mcp-server
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/tools/xjp-mcp"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/xjp-mcp-backend-blueprint.lisp"
+      :status project-ssot-owned
+      :checks ["bash .missiond/check.sh"]
+      :missiond-role "registered XJP infra tool surface; ClaudeCode/MissionD-facing MCP bridge for deploy/auth/secret/storage/router operations, not deployment fact authority"
+      :surface project-registry)
+    (project :id xjp-cli
+      :kind rust-cli
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/crates/xjp-cli"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/xjp-cli-backend-blueprint.lisp"
+      :status project-ssot-owned
+      :checks ["bash .missiond/check.sh"]
+      :missiond-role "registered XJP infra operator CLI and embedded MCP server; distinct from apps/xjp-deploy-agent remote execution daemon"
       :surface project-registry)
     (project :id deploy-center
       :aliases [xjp-deploy-center]

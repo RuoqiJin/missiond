@@ -31,6 +31,8 @@ const PROJECT_CHECKERS = new Map([
   ['xjpcode', ['node', ['scripts/check-xjpcode-ssot-complete.mjs', '--json']]],
   ['neural-codegen', ['bash', ['.missiond/check.sh', '--dry-run']]],
   ['semantic-terminal', ['bash', ['.missiond/check.sh', '--dry-run']]],
+  ['xjp-mcp', ['bash', ['.missiond/check.sh']]],
+  ['xjp-cli', ['bash', ['.missiond/check.sh']]],
   ['deploy-agent', ['bash', ['.missiond/check.sh']]],
   ['pcea', ['node', ['scripts/check-pcea-ssot-complete.mjs', '--json']]],
   ['secret-store', ['bash', ['.missiond/check.sh']]],
