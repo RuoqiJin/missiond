@@ -26,14 +26,14 @@ use super::PgMissionStore;
 
 type DirectiveRow = (
     Uuid,
-    String,                  // utterance_text
-    String,                  // sexp_text
-    i32,                     // version
-    String,                  // status
-    Option<String>,          // compiler_model
-    Option<JsonValue>,       // references_json (JSONB)
-    DateTime<Utc>,           // created_at
-    Option<DateTime<Utc>>,   // approved_at
+    String,                // utterance_text
+    String,                // sexp_text
+    i32,                   // version
+    String,                // status
+    Option<String>,        // compiler_model
+    Option<JsonValue>,     // references_json (JSONB)
+    DateTime<Utc>,         // created_at
+    Option<DateTime<Utc>>, // approved_at
 );
 
 fn directive_row_to_directive(r: DirectiveRow) -> Directive {
@@ -52,17 +52,17 @@ fn directive_row_to_directive(r: DirectiveRow) -> Directive {
 
 type PlanRow = (
     Uuid,
-    String,                  // board_task_id
-    Option<Uuid>,            // source_directive_id
-    i32,                     // version
-    String,                  // sexp_text
-    String,                  // sexp_hash
-    String,                  // status
-    Option<String>,          // compiler_model
-    Option<String>,          // compiled_from
-    DateTime<Utc>,           // created_at
-    Option<DateTime<Utc>>,   // approved_at
-    Option<DateTime<Utc>>,   // finished_at
+    String,                // board_task_id
+    Option<Uuid>,          // source_directive_id
+    i32,                   // version
+    String,                // sexp_text
+    String,                // sexp_hash
+    String,                // status
+    Option<String>,        // compiler_model
+    Option<String>,        // compiled_from
+    DateTime<Utc>,         // created_at
+    Option<DateTime<Utc>>, // approved_at
+    Option<DateTime<Utc>>, // finished_at
 );
 
 fn plan_row_to_plan(r: PlanRow) -> Plan {
@@ -84,15 +84,15 @@ fn plan_row_to_plan(r: PlanRow) -> Plan {
 
 type WorkflowRow = (
     Uuid,
-    String,                  // name
-    String,                  // sexp_text
-    JsonValue,               // match_rules (JSONB)
-    Option<Uuid>,            // learned_from
-    i32,                     // executions
-    i32,                     // success_count
-    Option<f64>,             // avg_cost_usd (cast to float8)
-    Option<DateTime<Utc>>,   // last_used_at
-    DateTime<Utc>,           // created_at
+    String,                // name
+    String,                // sexp_text
+    JsonValue,             // match_rules (JSONB)
+    Option<Uuid>,          // learned_from
+    i32,                   // executions
+    i32,                   // success_count
+    Option<f64>,           // avg_cost_usd (cast to float8)
+    Option<DateTime<Utc>>, // last_used_at
+    DateTime<Utc>,         // created_at
 );
 
 fn workflow_row_to_workflow(r: WorkflowRow) -> Workflow {
@@ -167,14 +167,12 @@ impl DirectiveLayerStore for PgMissionStore {
         version: i32,
         new_status: DirectiveStatus,
     ) -> DbResult<()> {
-        sqlx::query(
-            "UPDATE directive SET status = $3 WHERE id = $1 AND version = $2",
-        )
-        .bind(id)
-        .bind(version)
-        .bind(new_status.as_str())
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("UPDATE directive SET status = $3 WHERE id = $1 AND version = $2")
+            .bind(id)
+            .bind(version)
+            .bind(new_status.as_str())
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -223,21 +221,25 @@ impl DirectiveLayerStore for PgMissionStore {
         limit: i64,
     ) -> DbResult<Vec<Directive>> {
         let rows: Vec<DirectiveRow> = match status {
-            Some(s) => sqlx::query_as(&format!(
-                "SELECT {} FROM directive WHERE status = $1 ORDER BY created_at DESC LIMIT $2",
-                DIRECTIVE_COLS
-            ))
-            .bind(s.as_str())
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await?,
-            None => sqlx::query_as(&format!(
-                "SELECT {} FROM directive ORDER BY created_at DESC LIMIT $1",
-                DIRECTIVE_COLS
-            ))
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await?,
+            Some(s) => {
+                sqlx::query_as(&format!(
+                    "SELECT {} FROM directive WHERE status = $1 ORDER BY created_at DESC LIMIT $2",
+                    DIRECTIVE_COLS
+                ))
+                .bind(s.as_str())
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            None => {
+                sqlx::query_as(&format!(
+                    "SELECT {} FROM directive ORDER BY created_at DESC LIMIT $1",
+                    DIRECTIVE_COLS
+                ))
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
         };
         Ok(rows.into_iter().map(directive_row_to_directive).collect())
     }
@@ -276,13 +278,11 @@ impl DirectiveLayerStore for PgMissionStore {
     }
 
     async fn plan_get(&self, id: Uuid) -> DbResult<Option<Plan>> {
-        let row: Option<PlanRow> = sqlx::query_as(&format!(
-            "SELECT {} FROM plan WHERE id = $1",
-            PLAN_COLS
-        ))
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row: Option<PlanRow> =
+            sqlx::query_as(&format!("SELECT {} FROM plan WHERE id = $1", PLAN_COLS))
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
         Ok(row.map(plan_row_to_plan))
     }
 
@@ -359,21 +359,25 @@ impl DirectiveLayerStore for PgMissionStore {
         limit: i64,
     ) -> DbResult<Vec<Plan>> {
         let rows: Vec<PlanRow> = match status {
-            Some(s) => sqlx::query_as(&format!(
-                "SELECT {} FROM plan WHERE status = $1 ORDER BY created_at DESC LIMIT $2",
-                PLAN_COLS
-            ))
-            .bind(s.as_str())
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await?,
-            None => sqlx::query_as(&format!(
-                "SELECT {} FROM plan ORDER BY created_at DESC LIMIT $1",
-                PLAN_COLS
-            ))
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await?,
+            Some(s) => {
+                sqlx::query_as(&format!(
+                    "SELECT {} FROM plan WHERE status = $1 ORDER BY created_at DESC LIMIT $2",
+                    PLAN_COLS
+                ))
+                .bind(s.as_str())
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            None => {
+                sqlx::query_as(&format!(
+                    "SELECT {} FROM plan ORDER BY created_at DESC LIMIT $1",
+                    PLAN_COLS
+                ))
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
         };
         Ok(rows.into_iter().map(plan_row_to_plan).collect())
     }
@@ -389,7 +393,8 @@ impl DirectiveLayerStore for PgMissionStore {
         match_rules: &JsonValue,
         learned_from: Option<Uuid>,
     ) -> DbResult<Uuid> {
-        let match_rules_str = serde_json::to_string(match_rules).unwrap_or_else(|_| "{}".to_string());
+        let match_rules_str =
+            serde_json::to_string(match_rules).unwrap_or_else(|_| "{}".to_string());
         let row: (Uuid,) = sqlx::query_as(
             "INSERT INTO workflow (name, sexp_text, match_rules, learned_from)
              VALUES ($1, $2, $3::jsonb, $4)

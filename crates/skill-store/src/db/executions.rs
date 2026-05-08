@@ -50,7 +50,10 @@ pub fn list_user_executions(
     rows.collect()
 }
 
-pub fn get_creator_stats(conn: &Connection, creator_id: &str) -> Result<CreatorStats, rusqlite::Error> {
+pub fn get_creator_stats(
+    conn: &Connection,
+    creator_id: &str,
+) -> Result<CreatorStats, rusqlite::Error> {
     let total_invocations: i64 = conn.query_row(
         "SELECT COALESCE(SUM(invoke_count), 0) FROM skills WHERE creator_id = ?1",
         [creator_id],

@@ -744,7 +744,10 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
     }
 
     if !dry_run && swarm_policy_requires_implement_write_scope(&write_policy) {
-        for planned_task in planned.iter_mut().filter(|task| !task.write_scope.is_empty()) {
+        for planned_task in planned
+            .iter_mut()
+            .filter(|task| !task.write_scope.is_empty())
+        {
             let claims = state
                 .shared_memory
                 .claim_write_scope(

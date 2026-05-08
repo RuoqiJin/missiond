@@ -44,14 +44,20 @@ struct Args {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum PtyMessage {
-    Screen { data: Option<String> },
-    Data { data: Option<String> },
+    Screen {
+        data: Option<String>,
+    },
+    Data {
+        data: Option<String>,
+    },
     State {
         state: String,
         #[serde(default, alias = "prevState")]
         prev_state: Option<String>,
     },
-    Exit { code: Option<i32> },
+    Exit {
+        code: Option<i32>,
+    },
 }
 
 /// Messages to PTY server

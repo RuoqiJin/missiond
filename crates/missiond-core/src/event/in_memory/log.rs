@@ -94,10 +94,7 @@ impl InMemoryLog {
     /// caller-facing `Arc<InMemoryLog>`.
     ///
     /// `metrics` receives `record_append` on each commit.
-    pub fn spawn(
-        blob_store: Arc<dyn BlobStore>,
-        metrics: Arc<dyn BusMetrics>,
-    ) -> Arc<Self> {
+    pub fn spawn(blob_store: Arc<dyn BlobStore>, metrics: Arc<dyn BusMetrics>) -> Arc<Self> {
         let (tx, rx) = mpsc::channel(IN_MEMORY_APPEND_CAPACITY);
         let log = Arc::new(Self {
             tx,
@@ -124,10 +121,7 @@ impl InMemoryLog {
     /// blob store).
     pub fn spawn_default() -> Arc<Self> {
         use super::blob_store::InMemoryBlobStore;
-        Self::spawn(
-            Arc::new(InMemoryBlobStore::new()),
-            Arc::new(NoopMetrics),
-        )
+        Self::spawn(Arc::new(InMemoryBlobStore::new()), Arc::new(NoopMetrics))
     }
 
     /// Flip the "failed" bit. New appends return `LogUnavailable`.
@@ -141,7 +135,8 @@ impl InMemoryLog {
     /// Snapshot of the current seq counter. Useful for test assertions
     /// that want to verify no seq was skipped during a dedupe path.
     pub fn head_seq_sync(&self) -> Seq {
-        Seq(self.rows
+        Seq(self
+            .rows
             .lock()
             .unwrap()
             .iter()
@@ -425,10 +420,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(
-            matches!(err, AppendError::LogUnavailable(_)),
-            "got {err:?}"
-        );
+        assert!(matches!(err, AppendError::LogUnavailable(_)), "got {err:?}");
     }
 
     #[tokio::test]

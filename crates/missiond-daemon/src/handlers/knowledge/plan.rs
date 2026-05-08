@@ -1,5 +1,3 @@
-// missiond-rustfmt-exempt: legacy-large-file; physical V3 split in progress.
-
 //! mission_plan — manager surface for the plan table.
 //!
 //! Lisp authority:

@@ -1,7 +1,13 @@
 use crate::models::{User, UserRole};
 use rusqlite::{params, Connection};
 
-pub fn create_user(conn: &Connection, id: &str, username: &str, email: &str, password_hash: &str) -> Result<User, rusqlite::Error> {
+pub fn create_user(
+    conn: &Connection,
+    id: &str,
+    username: &str,
+    email: &str,
+    password_hash: &str,
+) -> Result<User, rusqlite::Error> {
     conn.execute(
         "INSERT INTO users (id, username, email, password_hash) VALUES (?1, ?2, ?3, ?4)",
         params![id, username, email, password_hash],
@@ -45,7 +51,11 @@ pub fn get_user_by_email(conn: &Connection, email: &str) -> Result<User, rusqlit
     )
 }
 
-pub fn update_role(conn: &Connection, user_id: &str, role: &UserRole) -> Result<(), rusqlite::Error> {
+pub fn update_role(
+    conn: &Connection,
+    user_id: &str,
+    role: &UserRole,
+) -> Result<(), rusqlite::Error> {
     conn.execute(
         "UPDATE users SET role = ?1 WHERE id = ?2",
         params![role.as_str(), user_id],
@@ -53,10 +63,16 @@ pub fn update_role(conn: &Connection, user_id: &str, role: &UserRole) -> Result<
     Ok(())
 }
 
-pub fn update_balance(conn: &Connection, user_id: &str, delta: f64) -> Result<f64, rusqlite::Error> {
+pub fn update_balance(
+    conn: &Connection,
+    user_id: &str,
+    delta: f64,
+) -> Result<f64, rusqlite::Error> {
     conn.execute(
         "UPDATE users SET balance = balance + ?1 WHERE id = ?2",
         params![delta, user_id],
     )?;
-    conn.query_row("SELECT balance FROM users WHERE id = ?1", [user_id], |r| r.get(0))
+    conn.query_row("SELECT balance FROM users WHERE id = ?1", [user_id], |r| {
+        r.get(0)
+    })
 }

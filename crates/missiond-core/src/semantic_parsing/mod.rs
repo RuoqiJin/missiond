@@ -1,5 +1,5 @@
-mod generated;
 mod custom;
+mod generated;
 
-pub use generated::SemanticParsing;
 pub use custom::SemanticParsingImpl;
+pub use generated::SemanticParsing;

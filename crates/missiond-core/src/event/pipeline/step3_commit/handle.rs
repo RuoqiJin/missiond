@@ -24,8 +24,8 @@
 //! keeps the `Log` trait dyn-compatible in principle (modulo the generic
 //! `append<E>` method — see `LogReadable` split in `log/mod.rs`).
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};

@@ -7,18 +7,18 @@
 //! - server.rs: ⚠️ LEGACY — retained for backward compat, wraps McpGateway
 //! - tools/: Tool definitions and schemas (unchanged)
 
-pub mod gen_gateway;
 pub mod gateway_impl;
+pub mod gen_gateway;
 pub mod protocol;
 pub mod server;
 pub mod tools;
 
 // New API — Forge-generated types
-pub use gen_gateway::{
-    error_codes, dispatch_tool, run_stdio,
-    ErrorObject, MissiondMcp, Request, RequestId, Response, RpcError,
-};
 pub use gateway_impl::{McpGateway, PlaceholderHandler, ToolHandler};
+pub use gen_gateway::{
+    dispatch_tool, error_codes, run_stdio, ErrorObject, MissiondMcp, Request, RequestId, Response,
+    RpcError,
+};
 
 // Tool types
-pub use tools::{ToolContent, ToolDefinition, ToolResult, all_tools, get_tool};
+pub use tools::{all_tools, get_tool, ToolContent, ToolDefinition, ToolResult};

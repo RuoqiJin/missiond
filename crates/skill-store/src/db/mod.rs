@@ -1,8 +1,8 @@
+pub mod executions;
 pub mod migrations;
-pub mod users;
 pub mod skills;
 pub mod subscriptions;
-pub mod executions;
+pub mod users;
 
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};

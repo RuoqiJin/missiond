@@ -214,7 +214,11 @@ mod tests {
 
     #[test]
     fn start_from_round_trip() {
-        let all = [StartFrom::Latest, StartFrom::Earliest, StartFrom::Seq(Seq(42))];
+        let all = [
+            StartFrom::Latest,
+            StartFrom::Earliest,
+            StartFrom::Seq(Seq(42)),
+        ];
         for sf in all {
             let json = serde_json::to_string(&sf).unwrap();
             let back: StartFrom = serde_json::from_str(&json).unwrap();

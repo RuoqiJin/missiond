@@ -12,10 +12,10 @@
 pub mod ast;
 pub mod cc_tasks;
 pub mod core;
-pub mod gemini_cli;
 pub mod db;
 pub mod embedding;
 pub mod event;
+pub mod gemini_cli;
 pub mod ipc;
 pub use missiond_pty as pty;
 pub use semantic_terminal as semantic;
@@ -36,24 +36,25 @@ pub use crate::core::{
 // Re-export core types
 pub use types::{
     CliEngine, CreateTaskInput, Credential, EventType, InboxMessage, InfraConfig, InfraServer,
-    KBOperation, KBOperationRow, KBRememberInput, KnowledgeEntry, Lifecycle, SkillBlock, SkillSearchResult,
-    SkillExecutionStat, SkillTopic, SkillVersion, Slot, SlotConfig, SlotsConfig, Task, TaskEvent, TaskStatus, TaskUpdate,
+    KBOperation, KBOperationRow, KBRememberInput, KnowledgeEntry, Lifecycle, SkillBlock,
+    SkillExecutionStat, SkillSearchResult, SkillTopic, SkillVersion, Slot, SlotConfig, SlotsConfig,
+    Task, TaskEvent, TaskStatus, TaskUpdate,
 };
 
 // Re-export semantic parser types
 pub use semantic::{
-    ClaudeCodeConfirmParser, ClaudeCodeStateParser, ConfirmAction, ConfirmOption,
-    ConfirmParser, ConfirmType, ParserContext, ParserMeta, State,
-    StateDetectionResult, StateParser,
+    ClaudeCodeConfirmParser, ClaudeCodeStateParser, ConfirmAction, ConfirmOption, ConfirmParser,
+    ConfirmType, ParserContext, ParserMeta, State, StateDetectionResult, StateParser,
 };
 
 // Re-export PTY types
 pub use pty::{
     ConfirmInfo, ConfirmResponse, FrameDelta, IncrementalExtractor, LineData, ManagerEvent,
     ManagerStats, Message, MessageRole, PTYAgentInfo, PTYExecuteResult, PTYManager, PTYSession,
-    PTYSessionOptions, PTYSpawnOptions, PermissionDecision, PermissionPolicy as PTYPermissionPolicy,
-    ScreenSnapshot, ScreenTextEvent, ScreenTextSource, SessionEvent, SessionState, Slot as PTYSlot,
-    StableTextOp, TextAssembler, TextOutputEvent, ToolInfo,
+    PTYSessionOptions, PTYSpawnOptions, PermissionDecision,
+    PermissionPolicy as PTYPermissionPolicy, ScreenSnapshot, ScreenTextEvent, ScreenTextSource,
+    SessionEvent, SessionState, Slot as PTYSlot, StableTextOp, TextAssembler, TextOutputEvent,
+    ToolInfo,
 };
 
 // Re-export CC Tasks types
@@ -68,19 +69,21 @@ pub use cc_tasks::{
 pub use gemini_cli::{GeminiCliWatcher, GeminiCliWatcherOptions};
 
 // Re-export WebSocket types
-pub use ws::{PTYWebSocketServer, WSServerOptions, ContextEnricherFn, ContextEnricherSlot, ContextEnrichResult};
+pub use ws::{
+    ContextEnrichResult, ContextEnricherFn, ContextEnricherSlot, PTYWebSocketServer,
+    WSServerOptions,
+};
 
 // Re-export Sync types
 pub use sync::{SyncClient, SyncClientOptions, SyncEvent, SyncRelay, SyncRelayOptions};
 
 // Re-export IPC types
-pub use ipc::{
-    default_ipc_endpoint, default_mission_home, ipc_endpoint, IpcListener, IpcStream,
-};
+pub use ipc::{default_ipc_endpoint, default_mission_home, ipc_endpoint, IpcListener, IpcStream};
 
 // Re-export Skill types
 pub use skill::{
-    ContextHook, SkillAction, SkillIndex, SkillMeta, SkillRequires, WorkflowBlock, WorkflowResult,
-    WorkflowStep, WorkflowStepPreview, WorkflowStepResult, parse_workflow_blocks, resolve_vars,
+    parse_workflow_blocks, resolve_vars, ContextHook, SkillAction, SkillIndex, SkillMeta,
+    SkillRequires, WorkflowBlock, WorkflowResult, WorkflowStep, WorkflowStepPreview,
+    WorkflowStepResult,
 };
 pub mod services;

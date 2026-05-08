@@ -70,20 +70,22 @@ pub use dispatcher::{ControlGate, Dispatcher, DispatcherBuilder, NeverPaused, To
 // Egress layer. The subscription module exposes `subscribe` plus the
 // `Ack<T>` handshake + combinators.
 pub use subscription::{
-    subscribe, Ack, BackoffKind, BatchSize, BatchedSubscription, CoalescingSubscription,
-    Cursor, CursorFlush, CursorStore, DebouncedSubscription, FailurePolicy, FilteredSubscription,
+    subscribe, Ack, BackoffKind, BatchSize, BatchedSubscription, CoalescingSubscription, Cursor,
+    CursorFlush, CursorStore, DebouncedSubscription, FailurePolicy, FilteredSubscription,
     InMemoryCursorStore, InMemoryDlq, MappedSubscription, PauseBehavior, RateLimitedSubscription,
     StartFrom, SubscribeError, Subscription, SubscriptionOpts,
 };
 
 // Cross-cutting layer. Causation guard is re-exported from
 // `pipeline::step1_guard` for legacy callers; `metrics` + `in_memory` unchanged.
-pub use pipeline::step1_guard::{check_causation, MAX_CAUSATION_DEPTH};
-pub use in_memory::{InMemoryBlobStore, InMemoryBus, InMemoryBusHandle, InMemoryControlGate, InMemoryLog};
+pub use in_memory::{
+    InMemoryBlobStore, InMemoryBus, InMemoryBusHandle, InMemoryControlGate, InMemoryLog,
+};
 pub use metrics::{
     spawn_bus_metrics_emitter, AtomicBusMetrics, BusMetrics, BusMetricsEmitterHandle,
     MetricsSnapshot, NoopMetrics,
 };
+pub use pipeline::step1_guard::{check_causation, MAX_CAUSATION_DEPTH};
 
 // Back-compat: `event::guards::{check_causation, MAX_CAUSATION_DEPTH}` still
 // resolves. Canonical home is `pipeline::step1_guard`.

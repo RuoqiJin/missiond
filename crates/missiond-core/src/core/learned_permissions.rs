@@ -67,7 +67,9 @@ impl LearnedPermissions {
             let content = std::fs::read_to_string(&yaml_path)?;
             let perms: Vec<LearnedPermission> = serde_yaml::from_str(&content).unwrap_or_default();
             for p in perms {
-                if p.id > max_id { max_id = p.id; }
+                if p.id > max_id {
+                    max_id = p.id;
+                }
                 let key = PermKey {
                     scope_type: p.scope_type.clone(),
                     scope_id: p.scope_id.clone(),
@@ -82,7 +84,9 @@ impl LearnedPermissions {
             match Self::migrate_from_sqlite(db_path) {
                 Ok(perms) => {
                     for p in &perms {
-                        if p.id > max_id { max_id = p.id; }
+                        if p.id > max_id {
+                            max_id = p.id;
+                        }
                         let key = PermKey {
                             scope_type: p.scope_type.clone(),
                             scope_id: p.scope_id.clone(),
@@ -91,7 +95,10 @@ impl LearnedPermissions {
                         };
                         entries.insert(key, p.clone());
                     }
-                    info!(count = entries.len(), "Migrated learned permissions from SQLite → YAML");
+                    info!(
+                        count = entries.len(),
+                        "Migrated learned permissions from SQLite → YAML"
+                    );
                 }
                 Err(e) => {
                     warn!(error = %e, "Failed to migrate learned permissions from SQLite");
@@ -129,7 +136,10 @@ impl LearnedPermissions {
 
         let yaml = match serde_yaml::to_string(&perms) {
             Ok(y) => y,
-            Err(e) => { warn!(error = %e, "Failed to serialize learned permissions"); return; }
+            Err(e) => {
+                warn!(error = %e, "Failed to serialize learned permissions");
+                return;
+            }
         };
         drop(entries); // Release read lock before file I/O
 
@@ -183,28 +193,39 @@ impl LearnedPermissions {
                 let mut next_id = self.next_id.write().unwrap();
                 let id = *next_id;
                 *next_id += 1;
-                entries.insert(key, LearnedPermission {
-                    id,
-                    scope_type: scope_type.to_string(),
-                    scope_id: scope_id.to_string(),
-                    tool_pattern: tool_pattern.to_string(),
-                    decision: decision.to_string(),
-                    param_pattern: Some(param),
-                    learned_at: now,
-                    last_used_at: None,
-                    use_count: 1,
-                });
+                entries.insert(
+                    key,
+                    LearnedPermission {
+                        id,
+                        scope_type: scope_type.to_string(),
+                        scope_id: scope_id.to_string(),
+                        tool_pattern: tool_pattern.to_string(),
+                        decision: decision.to_string(),
+                        param_pattern: Some(param),
+                        learned_at: now,
+                        last_used_at: None,
+                        use_count: 1,
+                    },
+                );
             }
         }
 
         self.persist();
-        info!(scope_type, scope_id, tool_pattern, decision, "Learned permission");
+        info!(
+            scope_type,
+            scope_id, tool_pattern, decision, "Learned permission"
+        );
         Ok(())
     }
 
-    pub fn get_for_scope(&self, scope_type: &str, scope_id: &str) -> Result<Vec<LearnedPermission>> {
+    pub fn get_for_scope(
+        &self,
+        scope_type: &str,
+        scope_id: &str,
+    ) -> Result<Vec<LearnedPermission>> {
         let entries = self.entries.read().unwrap();
-        let mut result: Vec<LearnedPermission> = entries.values()
+        let mut result: Vec<LearnedPermission> = entries
+            .values()
             .filter(|p| p.scope_type == scope_type && p.scope_id == scope_id)
             .cloned()
             .collect();
@@ -285,7 +306,10 @@ impl LearnedPermissions {
         let decision_str = {
             let entries = self.entries.read().unwrap();
             entries.iter().find_map(|(k, v)| {
-                if k.scope_type == scope_type && k.scope_id == scope_id && k.tool_pattern == tool_name {
+                if k.scope_type == scope_type
+                    && k.scope_id == scope_id
+                    && k.tool_pattern == tool_name
+                {
                     Some((k.clone(), v.decision.clone()))
                 } else {
                     None
@@ -316,8 +340,13 @@ impl LearnedPermissions {
     pub fn forget(&self, scope_type: &str, scope_id: &str, tool_pattern: &str) -> Result<bool> {
         // Remove ALL entries matching this tool (regardless of param_pattern)
         let mut entries = self.entries.write().unwrap();
-        let keys_to_remove: Vec<PermKey> = entries.keys()
-            .filter(|k| k.scope_type == scope_type && k.scope_id == scope_id && k.tool_pattern == tool_pattern)
+        let keys_to_remove: Vec<PermKey> = entries
+            .keys()
+            .filter(|k| {
+                k.scope_type == scope_type
+                    && k.scope_id == scope_id
+                    && k.tool_pattern == tool_pattern
+            })
             .cloned()
             .collect();
         let removed = !keys_to_remove.is_empty();
@@ -350,16 +379,24 @@ mod tests {
         let db_path = dir.path().join("test.yaml");
         let lp = LearnedPermissions::new(&db_path).unwrap();
 
-        lp.learn("role", "worker", "read_file", "allow", None).unwrap();
+        lp.learn("role", "worker", "read_file", "allow", None)
+            .unwrap();
 
         let result = lp.check_learned("role", "worker", "read_file");
         assert!(result.is_some());
-        assert_eq!(result.unwrap(), super::super::permission::PermissionDecision::Allow);
+        assert_eq!(
+            result.unwrap(),
+            super::super::permission::PermissionDecision::Allow
+        );
 
-        lp.learn("role", "worker", "delete_file", "deny", None).unwrap();
+        lp.learn("role", "worker", "delete_file", "deny", None)
+            .unwrap();
         let result = lp.check_learned("role", "worker", "delete_file");
         assert!(result.is_some());
-        assert_eq!(result.unwrap(), super::super::permission::PermissionDecision::Deny);
+        assert_eq!(
+            result.unwrap(),
+            super::super::permission::PermissionDecision::Deny
+        );
 
         // Verify YAML file exists
         assert!(db_path.exists());
@@ -371,8 +408,14 @@ mod tests {
         assert!(LearnedPermissions::is_never_learn("Bash", None));
         assert!(LearnedPermissions::is_never_learn("Bash", Some("")));
         // Bash with specific param_pattern → learnable
-        assert!(!LearnedPermissions::is_never_learn("Bash", Some("python3:*")));
-        assert!(!LearnedPermissions::is_never_learn("Bash", Some("npm test:*")));
+        assert!(!LearnedPermissions::is_never_learn(
+            "Bash",
+            Some("python3:*")
+        ));
+        assert!(!LearnedPermissions::is_never_learn(
+            "Bash",
+            Some("npm test:*")
+        ));
         // Other tools always learnable
         assert!(!LearnedPermissions::is_never_learn("Write", None));
         assert!(!LearnedPermissions::is_never_learn("Edit", None));
@@ -387,13 +430,17 @@ mod tests {
         // global → baseline (should always appear)
         lp.learn("global", "", "Read", "allow", None).unwrap();
         // role → coder-wide Bash(python3:*)
-        lp.learn("role", "coder", "Bash", "allow", Some("python3:*")).unwrap();
+        lp.learn("role", "coder", "Bash", "allow", Some("python3:*"))
+            .unwrap();
         // project → missiond-wide Bash(python3:*) — duplicate; later scope must dedup.
-        lp.learn("project", "missiond", "Bash", "allow", Some("python3:*")).unwrap();
+        lp.learn("project", "missiond", "Bash", "allow", Some("python3:*"))
+            .unwrap();
         // project → WebFetch allow (unique to project scope)
-        lp.learn("project", "missiond", "WebFetch", "allow", None).unwrap();
+        lp.learn("project", "missiond", "WebFetch", "allow", None)
+            .unwrap();
         // slot → slot-1 overrides Bash(python3:*) with deny.
-        lp.learn("slot", "slot-1", "Bash", "deny", Some("python3:*")).unwrap();
+        lp.learn("slot", "slot-1", "Bash", "deny", Some("python3:*"))
+            .unwrap();
 
         // Full union: role + project + slot.
         let full = lp
@@ -404,12 +451,13 @@ mod tests {
         // (most specific wins).
         let bash_entries: Vec<_> = full
             .iter()
-            .filter(|e| {
-                e.tool_pattern == "Bash" && e.param_pattern.as_deref() == Some("python3:*")
-            })
+            .filter(|e| e.tool_pattern == "Bash" && e.param_pattern.as_deref() == Some("python3:*"))
             .collect();
         assert_eq!(bash_entries.len(), 1, "dedup should collapse to one entry");
-        assert_eq!(bash_entries[0].decision, "deny", "slot scope should win over role/project");
+        assert_eq!(
+            bash_entries[0].decision, "deny",
+            "slot scope should win over role/project"
+        );
 
         // Read must be present (from global).
         assert!(full.iter().any(|e| e.tool_pattern == "Read"));
@@ -431,9 +479,7 @@ mod tests {
         let proj = lp.get_for_spawn("coder", Some("missiond"), None).unwrap();
         let bash_entries: Vec<_> = proj
             .iter()
-            .filter(|e| {
-                e.tool_pattern == "Bash" && e.param_pattern.as_deref() == Some("python3:*")
-            })
+            .filter(|e| e.tool_pattern == "Bash" && e.param_pattern.as_deref() == Some("python3:*"))
             .collect();
         assert_eq!(bash_entries.len(), 1);
         assert_eq!(

@@ -121,12 +121,7 @@ impl JarvisTraceStore {
     }
 
     /// Complete a trace with success
-    pub async fn complete_trace(
-        &self,
-        trace_id: &str,
-        response: &str,
-        duration_ms: u64,
-    ) {
+    pub async fn complete_trace(&self, trace_id: &str, response: &str, duration_ms: u64) {
         let mut traces = self.traces.lock().await;
         if let Some(trace) = traces.iter_mut().rev().find(|t| t.trace_id == trace_id) {
             trace.finished_at = Some(Utc::now());
@@ -142,12 +137,7 @@ impl JarvisTraceStore {
     }
 
     /// Complete a trace with error
-    pub async fn error_trace(
-        &self,
-        trace_id: &str,
-        error: &str,
-        duration_ms: Option<u64>,
-    ) {
+    pub async fn error_trace(&self, trace_id: &str, error: &str, duration_ms: Option<u64>) {
         let mut traces = self.traces.lock().await;
         if let Some(trace) = traces.iter_mut().rev().find(|t| t.trace_id == trace_id) {
             trace.finished_at = Some(Utc::now());
@@ -200,7 +190,11 @@ impl JarvisTraceStore {
     /// Get a specific trace by ID
     pub async fn get_trace(&self, trace_id: &str) -> Option<JarvisTrace> {
         let traces = self.traces.lock().await;
-        traces.iter().rev().find(|t| t.trace_id == trace_id).cloned()
+        traces
+            .iter()
+            .rev()
+            .find(|t| t.trace_id == trace_id)
+            .cloned()
     }
 
     /// Get latest trace

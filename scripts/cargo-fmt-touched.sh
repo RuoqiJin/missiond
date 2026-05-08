@@ -1,21 +1,22 @@
 #!/usr/bin/env bash
-# Format only Rust files that are touched in the current diff, never the whole crate.
+# Format only Rust files that are touched in the current diff.
 #
 # Why this script exists:
-#   `cargo fmt -p <crate>` and `cargo fmt --all --check` both reformat every
-#   .rs file under the package, including hundreds of historically un-rustfmt'd
-#   files. Running them from a wave that only edited 2 files produces a 50+
-#   file diff full of unrelated whitespace churn that has to be manually
-#   rolled back. This bug bit us at least three times in the past month.
+#   Non-M6 or external-project waves still need a scoped formatter entrypoint
+#   so their diffs stay limited to the files they own. MissionD itself is M6
+#   formatter-converged; use scripts/rustfmt-missiond.sh when the task owns
+#   repository-wide MissionD Rust formatting.
 #
 # This script formats only the .rs files that appear in the current diff —
 # nothing more. Safe to run inside any wave with confidence that the diff
 # stays scoped.
 #
-# Important: invoke this script instead of running `rustfmt path/to/mod.rs`
-# directly. rustfmt treats module roots as traversal anchors even with a
-# file-shaped CLI argument, which can churn sibling modules that the task did
-# not touch. This wrapper always passes `--config skip_children=true`.
+# Important: this wrapper always passes `--config skip_children=true` so
+# touched module roots as traversal anchors cannot recursively descend into
+# untouched child modules outside the task's write scope. For that reason,
+# workers and operators MUST invoke this script instead of running
+# `rustfmt path/to/mod.rs` directly — direct rustfmt on a module root walks
+# the whole subtree.
 #
 # Usage:
 #   scripts/cargo-fmt-touched.sh                # format staged + unstaged
@@ -74,32 +75,7 @@ TOUCHED_RUST_FILES=$(printf '%s\n' "$FILES" \
   | awk '/\.rs$/ { print }' \
   | while read -r f; do [ -f "$f" ] && printf '%s\n' "$f"; done)
 
-# A few very large legacy Rust files predate rustfmt. During the V3
-# physical split, touching one of those facades only to replace a module
-# body with `mod foo;` must not trigger a whole-file whitespace rewrite.
-# The exemption must be explicit in the file header so new modules and
-# normal Rust files still format through this scoped path.
-SKIPPED_FILES=$(printf '%s\n' "$TOUCHED_RUST_FILES" \
-  | while read -r f; do
-      [ -n "$f" ] || continue
-      if sed -n '1,20p' "$f" | grep -q 'missiond-rustfmt-exempt'; then
-        printf '%s\n' "$f"
-      fi
-    done)
-
-RUST_FILES=$(printf '%s\n' "$TOUCHED_RUST_FILES" \
-  | while read -r f; do
-      [ -n "$f" ] || continue
-      if sed -n '1,20p' "$f" | grep -q 'missiond-rustfmt-exempt'; then
-        continue
-      fi
-      printf '%s\n' "$f"
-    done)
-
-if [ -n "$SKIPPED_FILES" ]; then
-  echo "[fmt-touched] skipped rustfmt-exempt legacy file(s):"
-  printf '%s\n' "$SKIPPED_FILES" | sed 's/^/  /'
-fi
+RUST_FILES="$TOUCHED_RUST_FILES"
 
 if [ -z "$RUST_FILES" ]; then
   echo "[fmt-touched] no Rust files in diff — nothing to do."

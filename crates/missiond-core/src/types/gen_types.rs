@@ -44,7 +44,6 @@ impl BoardTaskStatus {
     }
 }
 
-
 /// Board task note type
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Copy)]
 #[serde(rename_all = "lowercase")]
@@ -72,7 +71,6 @@ impl BoardNoteType {
         }
     }
 }
-
 
 /// Phase in the engineering task flow state machine
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Copy)]
@@ -114,7 +112,6 @@ impl EngineeringPhase {
     }
 }
 
-
 /// Background task queue status
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Copy)]
 #[serde(rename_all = "lowercase")]
@@ -145,7 +142,6 @@ impl TaskStatus {
         }
     }
 }
-
 
 /// Task event type
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Copy)]
@@ -184,7 +180,6 @@ impl EventType {
     }
 }
 
-
 /// Async job execution status
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Copy)]
 #[serde(rename_all = "lowercase")]
@@ -218,7 +213,6 @@ impl AsyncJobStatus {
         }
     }
 }
-
 
 /// Agent question lifecycle status
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Copy)]
@@ -254,7 +248,6 @@ impl AgentQuestionStatus {
     }
 }
 
-
 /// Incident severity level
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Copy)]
 #[serde(rename_all = "lowercase")]
@@ -288,7 +281,6 @@ impl IncidentSeverity {
         }
     }
 }
-
 
 /// Incident source system
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Copy)]
@@ -324,12 +316,9 @@ impl IncidentSource {
     }
 }
 
-
 /// DAG dependency resolution result
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum DependencyStatus {
-}
-
+pub enum DependencyStatus {}
 
 /// CLI engine for PTY slots
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Copy)]
@@ -356,7 +345,6 @@ impl CliEngine {
     }
 }
 
-
 /// Slot lifecycle mode
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Copy)]
 #[serde(rename_all = "lowercase")]
@@ -381,7 +369,6 @@ impl Lifecycle {
         }
     }
 }
-
 
 /// Slot capability trait
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Copy)]
@@ -416,7 +403,6 @@ impl SlotTrait {
         }
     }
 }
-
 
 /// Context passed between engineering flow phases
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -983,4 +969,3 @@ pub struct ToolCallRecord {
     pub duration_ms: Option<i32>,
     pub timestamp: String,
 }
-

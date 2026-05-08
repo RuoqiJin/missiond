@@ -63,6 +63,12 @@ const LIVE_CHECKS = [
     timeoutMs: 60_000,
   },
   {
+    id: 'missiond-rustfmt-convergence',
+    command: 'bash',
+    argv: ['scripts/rustfmt-missiond.sh', '--check'],
+    timeoutMs: 120_000,
+  },
+  {
     id: 'project-ssot-universe',
     argv: ['scripts/check-project-ssot-universe.mjs', '--json'],
     json: true,

@@ -71,12 +71,8 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 pub fn rrf_score(fts_rank: Option<usize>, vec_rank: Option<usize>, k: usize) -> f64 {
     const W_FTS: f64 = 0.4;
     const W_VEC: f64 = 0.6;
-    let fts = fts_rank
-        .map(|r| W_FTS / (k + r + 1) as f64)
-        .unwrap_or(0.0);
-    let vec = vec_rank
-        .map(|r| W_VEC / (k + r + 1) as f64)
-        .unwrap_or(0.0);
+    let fts = fts_rank.map(|r| W_FTS / (k + r + 1) as f64).unwrap_or(0.0);
+    let vec = vec_rank.map(|r| W_VEC / (k + r + 1) as f64).unwrap_or(0.0);
     fts + vec
 }
 
@@ -262,7 +258,8 @@ pub fn mmr_rerank(
         for &ri in &remaining {
             let relevance = candidates[ri].1;
             // Max similarity to any already-selected entry
-            let max_sim = selected.iter()
+            let max_sim = selected
+                .iter()
                 .map(|&si| token_jaccard(&candidates[ri].2, &candidates[si].2))
                 .fold(0.0_f64, f64::max);
             let mmr = lambda * relevance - (1.0 - lambda) * max_sim;
@@ -308,10 +305,15 @@ pub fn mmr_rerank_cosine(
             let max_sim = if ri_emb.is_empty() {
                 0.0
             } else {
-                selected.iter()
+                selected
+                    .iter()
                     .map(|&si| {
                         let si_emb = &candidates[si].2;
-                        if si_emb.is_empty() { 0.0 } else { cosine_similarity(ri_emb, si_emb) as f64 }
+                        if si_emb.is_empty() {
+                            0.0
+                        } else {
+                            cosine_similarity(ri_emb, si_emb) as f64
+                        }
                     })
                     .fold(0.0_f64, f64::max)
             };
@@ -378,8 +380,8 @@ mod backend {
         /// Model is auto-downloaded from HuggingFace on first use (~130MB).
         /// Returns None if initialization fails (graceful degradation).
         pub fn new() -> Option<Self> {
-            let options = InitOptions::new(EmbeddingModel::BGESmallZHV15)
-                .with_show_download_progress(true);
+            let options =
+                InitOptions::new(EmbeddingModel::BGESmallZHV15).with_show_download_progress(true);
             match TextEmbedding::try_new(options) {
                 Ok(model) => {
                     info!("EmbeddingService initialized (bge-small-zh-v1.5, 512-dim)");

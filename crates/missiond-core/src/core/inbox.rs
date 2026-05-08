@@ -34,7 +34,9 @@ impl Inbox {
     pub fn mark_all_read(&self) {}
 
     /// Get unread message count
-    pub fn get_unread_count(&self) -> usize { 0 }
+    pub fn get_unread_count(&self) -> usize {
+        0
+    }
 
     /// Add a message to the inbox
     pub fn add_message(&self, _task_id: &str, _from_role: &str, _content: &str) {}

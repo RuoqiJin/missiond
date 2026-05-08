@@ -33,12 +33,14 @@
 //!     can never stall another.
 
 // Re-export step-5/6/7 symbols under the legacy `dispatcher::` namespace.
+#[cfg(feature = "postgres")]
+pub use crate::event::pipeline::step5_tail::PgTailSource;
 pub use crate::event::pipeline::step5_tail::{
     DispatchError, DispatchMetrics, TailError, TailSource, TAIL_BATCH_LIMIT, TAIL_POLL_INTERVAL,
 };
-#[cfg(feature = "postgres")]
-pub use crate::event::pipeline::step5_tail::PgTailSource;
-pub use crate::event::pipeline::step6_gate::{domain_to_ctl_domain, ControlGate, CtlDomain, NeverPaused};
+pub use crate::event::pipeline::step6_gate::{
+    domain_to_ctl_domain, ControlGate, CtlDomain, NeverPaused,
+};
 pub use crate::event::pipeline::step7_fanout::{
     AnyTopic, Topic, TopicRegistry, TopicRegistryBuilder, TypedTopic, TOPIC_BUFFER_SIZE,
 };
@@ -58,8 +60,8 @@ pub mod topic {
     pub use crate::event::pipeline::step7_fanout::topic::*;
 }
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
 
 use tokio::sync::watch;
 
@@ -182,8 +184,8 @@ pub fn register_all_domains(builder: DispatcherBuilder) -> DispatcherBuilder {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::domain::Domain;
+    use super::*;
 
     /// Smoke-check: `DispatcherBuilder` + `register_all_domains` covers every
     /// value of [`Domain`] and every `.topic::<T>()` resolves.

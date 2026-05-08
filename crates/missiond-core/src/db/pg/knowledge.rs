@@ -1,21 +1,31 @@
 //! KbStore — PostgreSQL implementation.
 
-use async_trait::async_trait;
-use crate::db::error::DbResult;
-use crate::db::traits::KbStore;
-use crate::db::shared::{token_jaccard_similarity, infer_kb_type, contains_sensitive_data};
-use crate::types::*;
 use super::PgMissionStore;
+use crate::db::error::DbResult;
+use crate::db::shared::{contains_sensitive_data, infer_kb_type, token_jaccard_similarity};
+use crate::db::traits::KbStore;
+use crate::types::*;
+use async_trait::async_trait;
 use std::collections::HashMap;
 
 /// Helper: convert a sqlx Row into KnowledgeEntry.
 fn row_to_knowledge_entry(
-    id: String, category: String, key: String, summary: String,
-    detail: Option<String>, source: String, confidence: f64,
-    access_count: i64, created_at: String, updated_at: String,
-    last_accessed_at: Option<String>, linked_task_id: Option<String>,
-    kb_type: Option<String>, scope_task_id: Option<String>,
-    utility_score: Option<f64>, project_id: Option<String>,
+    id: String,
+    category: String,
+    key: String,
+    summary: String,
+    detail: Option<String>,
+    source: String,
+    confidence: f64,
+    access_count: i64,
+    created_at: String,
+    updated_at: String,
+    last_accessed_at: Option<String>,
+    linked_task_id: Option<String>,
+    kb_type: Option<String>,
+    scope_task_id: Option<String>,
+    utility_score: Option<f64>,
+    project_id: Option<String>,
 ) -> KnowledgeEntry {
     let detail_parsed = detail.and_then(|s| serde_json::from_str(&s).ok());
     KnowledgeEntry {
@@ -41,15 +51,27 @@ fn row_to_knowledge_entry(
 
 /// Tuple type matching the SELECT * columns we fetch from knowledge table.
 type KBRow = (
-    String, String, String, String, Option<String>, String, f64,
-    i64, String, String, Option<String>, Option<String>,
-    Option<String>, Option<String>, Option<f64>, Option<String>,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    String,
+    f64,
+    i64,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<f64>,
+    Option<String>,
 );
 
 fn kb_row_to_entry(r: KBRow) -> KnowledgeEntry {
     row_to_knowledge_entry(
-        r.0, r.1, r.2, r.3, r.4, r.5, r.6,
-        r.7, r.8, r.9, r.10, r.11, r.12, r.13, r.14, r.15,
+        r.0, r.1, r.2, r.3, r.4, r.5, r.6, r.7, r.8, r.9, r.10, r.11, r.12, r.13, r.14, r.15,
     )
 }
 
@@ -60,8 +82,18 @@ const UTILITY_HIT_BOOST: f64 = 0.15;
 const KB_COLS: &str = "id, category, key, summary, detail, source, confidence, access_count, created_at, updated_at, last_accessed_at, linked_task_id, kb_type, scope_task_id, utility_score, project_id";
 
 type KnowledgeReviewRow = (
-    String, String, String, String, String, String, serde_json::Value,
-    Option<String>, f64, String, Option<String>, bool,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    serde_json::Value,
+    Option<String>,
+    f64,
+    String,
+    Option<String>,
+    bool,
 );
 
 fn review_row_to_state(r: KnowledgeReviewRow) -> KnowledgeReviewState {
@@ -90,7 +122,10 @@ impl KbStore for PgMissionStore {
         let now = chrono::Utc::now().to_rfc3339();
         let source = input.source.as_deref().unwrap_or("conversation");
         let mut confidence = input.confidence.unwrap_or(1.0);
-        let detail_str = input.detail.as_ref().map(|d| serde_json::to_string(d).unwrap_or_default());
+        let detail_str = input
+            .detail
+            .as_ref()
+            .map(|d| serde_json::to_string(d).unwrap_or_default());
 
         // Guard: reject infra category
         if input.category == "infra" {
@@ -99,7 +134,8 @@ impl KbStore for PgMissionStore {
                     id: String::new(),
                     category: input.category.clone(),
                     key: input.key.clone(),
-                    summary: "REJECTED: infra entries should use servers.yaml + mission_infra_get".into(),
+                    summary: "REJECTED: infra entries should use servers.yaml + mission_infra_get"
+                        .into(),
                     detail: None,
                     source: source.to_string(),
                     confidence: 0.0,
@@ -121,7 +157,12 @@ impl KbStore for PgMissionStore {
         }
 
         // Sensitive data detection
-        let check_text = format!("{} {} {}", input.summary, detail_str.as_deref().unwrap_or(""), input.key);
+        let check_text = format!(
+            "{} {} {}",
+            input.summary,
+            detail_str.as_deref().unwrap_or(""),
+            input.key
+        );
         if contains_sensitive_data(&check_text) {
             confidence = confidence.min(0.5);
         }
@@ -143,7 +184,9 @@ impl KbStore for PgMissionStore {
         .await?;
 
         if updated.rows_affected() > 0 {
-            let entry = self.pg_get_by_category_key(&input.category, &input.key).await?;
+            let entry = self
+                .pg_get_by_category_key(&input.category, &input.key)
+                .await?;
             return Ok(KBRememberResult {
                 entry: entry.unwrap(),
                 action: "updated".to_string(),
@@ -153,12 +196,11 @@ impl KbStore for PgMissionStore {
         }
 
         // 1b. Same key, different category → re-categorize
-        let existing_by_key: Option<KBRow> = sqlx::query_as(&format!(
-            "SELECT {} FROM knowledge WHERE key = $1", KB_COLS
-        ))
-        .bind(&input.key)
-        .fetch_optional(&self.pool)
-        .await?;
+        let existing_by_key: Option<KBRow> =
+            sqlx::query_as(&format!("SELECT {} FROM knowledge WHERE key = $1", KB_COLS))
+                .bind(&input.key)
+                .fetch_optional(&self.pool)
+                .await?;
 
         if let Some(existing) = existing_by_key {
             let existing_entry = kb_row_to_entry(existing);
@@ -176,7 +218,9 @@ impl KbStore for PgMissionStore {
             .bind(&existing_entry.id)
             .execute(&self.pool)
             .await?;
-            let entry = self.pg_get_by_category_key(&input.category, &input.key).await?;
+            let entry = self
+                .pg_get_by_category_key(&input.category, &input.key)
+                .await?;
             return Ok(KBRememberResult {
                 entry: entry.unwrap(),
                 action: "updated".to_string(),
@@ -217,7 +261,9 @@ impl KbStore for PgMissionStore {
             .execute(&self.pool)
             .await?;
             let merged_key = existing.key.clone();
-            let entry = self.pg_get_by_category_key(&existing.category, &existing.key).await?;
+            let entry = self
+                .pg_get_by_category_key(&existing.category, &existing.key)
+                .await?;
             return Ok(KBRememberResult {
                 entry: entry.unwrap(),
                 action: "merged".to_string(),
@@ -282,21 +328,22 @@ impl KbStore for PgMissionStore {
     }
 
     async fn kb_get(&self, key: &str) -> DbResult<Option<KnowledgeEntry>> {
-        let row: Option<KBRow> = sqlx::query_as(&format!(
-            "SELECT {} FROM knowledge WHERE key = $1", KB_COLS
-        ))
-        .bind(key)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row: Option<KBRow> =
+            sqlx::query_as(&format!("SELECT {} FROM knowledge WHERE key = $1", KB_COLS))
+                .bind(key)
+                .fetch_optional(&self.pool)
+                .await?;
         match row {
             Some(r) => {
                 let mut entry = kb_row_to_entry(r);
                 // Bump access count + utility score
                 let now = chrono::Utc::now().to_rfc3339();
-                let new_utility = (entry.utility_score + UTILITY_HIT_BOOST * (1.0 - entry.utility_score)).min(1.0);
+                let new_utility = (entry.utility_score
+                    + UTILITY_HIT_BOOST * (1.0 - entry.utility_score))
+                    .min(1.0);
                 sqlx::query(
                     "UPDATE knowledge SET access_count = access_count + 1, last_accessed_at = $1,
-                     utility_score = $3 WHERE id = $2"
+                     utility_score = $3 WHERE id = $2",
                 )
                 .bind(&now)
                 .bind(&entry.id)
@@ -313,33 +360,38 @@ impl KbStore for PgMissionStore {
     }
 
     async fn kb_get_by_id(&self, id: &str) -> DbResult<Option<KnowledgeEntry>> {
-        let row: Option<KBRow> = sqlx::query_as(&format!(
-            "SELECT {} FROM knowledge WHERE id = $1", KB_COLS
-        ))
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row: Option<KBRow> =
+            sqlx::query_as(&format!("SELECT {} FROM knowledge WHERE id = $1", KB_COLS))
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
         Ok(row.map(kb_row_to_entry))
     }
 
     async fn kb_get_id_by_key(&self, key: &str) -> DbResult<Option<String>> {
-        let row: Option<(String,)> = sqlx::query_as(
-            "SELECT id FROM knowledge WHERE key = $1"
-        )
-        .bind(key)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row: Option<(String,)> = sqlx::query_as("SELECT id FROM knowledge WHERE key = $1")
+            .bind(key)
+            .fetch_optional(&self.pool)
+            .await?;
         Ok(row.map(|r| r.0))
     }
 
-    async fn kb_update(&self, key: &str, new_category: Option<&str>, new_summary: Option<&str>, new_detail: Option<&serde_json::Value>, new_confidence: Option<f64>, new_linked_task_id: Option<&str>, new_project_id: Option<&str>) -> DbResult<Option<(KnowledgeEntry, bool)>> {
+    async fn kb_update(
+        &self,
+        key: &str,
+        new_category: Option<&str>,
+        new_summary: Option<&str>,
+        new_detail: Option<&serde_json::Value>,
+        new_confidence: Option<f64>,
+        new_linked_task_id: Option<&str>,
+        new_project_id: Option<&str>,
+    ) -> DbResult<Option<(KnowledgeEntry, bool)>> {
         // Find existing entry
-        let existing_row: Option<KBRow> = sqlx::query_as(&format!(
-            "SELECT {} FROM knowledge WHERE key = $1", KB_COLS
-        ))
-        .bind(key)
-        .fetch_optional(&self.pool)
-        .await?;
+        let existing_row: Option<KBRow> =
+            sqlx::query_as(&format!("SELECT {} FROM knowledge WHERE key = $1", KB_COLS))
+                .bind(key)
+                .fetch_optional(&self.pool)
+                .await?;
         let existing = match existing_row {
             Some(r) => kb_row_to_entry(r),
             None => return Ok(None),
@@ -353,34 +405,74 @@ impl KbStore for PgMissionStore {
         let mut param_idx = 2u32;
         let detail_str = new_detail.map(|d| serde_json::to_string(d).unwrap_or_default());
 
-        if new_category.is_some() { sets.push(format!("category = ${}", param_idx)); param_idx += 1; }
-        if new_summary.is_some() { sets.push(format!("summary = ${}", param_idx)); param_idx += 1; content_changed = true; }
-        if detail_str.is_some() { sets.push(format!("detail = ${}", param_idx)); param_idx += 1; content_changed = true; }
-        if new_confidence.is_some() { sets.push(format!("confidence = ${}", param_idx)); param_idx += 1; }
-        if new_linked_task_id.is_some() { sets.push(format!("linked_task_id = ${}", param_idx)); param_idx += 1; }
-        if new_project_id.is_some() { sets.push(format!("project_id = ${}", param_idx)); param_idx += 1; }
+        if new_category.is_some() {
+            sets.push(format!("category = ${}", param_idx));
+            param_idx += 1;
+        }
+        if new_summary.is_some() {
+            sets.push(format!("summary = ${}", param_idx));
+            param_idx += 1;
+            content_changed = true;
+        }
+        if detail_str.is_some() {
+            sets.push(format!("detail = ${}", param_idx));
+            param_idx += 1;
+            content_changed = true;
+        }
+        if new_confidence.is_some() {
+            sets.push(format!("confidence = ${}", param_idx));
+            param_idx += 1;
+        }
+        if new_linked_task_id.is_some() {
+            sets.push(format!("linked_task_id = ${}", param_idx));
+            param_idx += 1;
+        }
+        if new_project_id.is_some() {
+            sets.push(format!("project_id = ${}", param_idx));
+            param_idx += 1;
+        }
 
         // Only updated_at — nothing else to change
         if param_idx == 2 {
             return Ok(Some((existing, false)));
         }
 
-        let sql = format!("UPDATE knowledge SET {} WHERE id = ${}", sets.join(", "), param_idx);
+        let sql = format!(
+            "UPDATE knowledge SET {} WHERE id = ${}",
+            sets.join(", "),
+            param_idx
+        );
 
         // We need to use a raw query with dynamic binds
         // Build the query dynamically
         let mut query = sqlx::query(&sql);
         query = query.bind(&now);
-        if let Some(v) = new_category { query = query.bind(v.to_string()); }
-        if let Some(v) = new_summary { query = query.bind(v.to_string()); }
-        if let Some(v) = &detail_str { query = query.bind(v.clone()); }
-        if let Some(v) = new_confidence { query = query.bind(v); }
+        if let Some(v) = new_category {
+            query = query.bind(v.to_string());
+        }
+        if let Some(v) = new_summary {
+            query = query.bind(v.to_string());
+        }
+        if let Some(v) = &detail_str {
+            query = query.bind(v.clone());
+        }
+        if let Some(v) = new_confidence {
+            query = query.bind(v);
+        }
         if let Some(v) = new_linked_task_id {
-            let val: Option<String> = if v.is_empty() { None } else { Some(v.to_string()) };
+            let val: Option<String> = if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            };
             query = query.bind(val);
         }
         if let Some(v) = new_project_id {
-            let val: Option<String> = if v.is_empty() { None } else { Some(v.to_string()) };
+            let val: Option<String> = if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            };
             query = query.bind(val);
         }
         query = query.bind(&existing.id);
@@ -394,13 +486,11 @@ impl KbStore for PgMissionStore {
     }
 
     async fn kb_set_linked_task_id(&self, key: &str, task_id: Option<&str>) -> DbResult<bool> {
-        let result = sqlx::query(
-            "UPDATE knowledge SET linked_task_id = $1 WHERE key = $2"
-        )
-        .bind(task_id)
-        .bind(key)
-        .execute(&self.pool)
-        .await?;
+        let result = sqlx::query("UPDATE knowledge SET linked_task_id = $1 WHERE key = $2")
+            .bind(task_id)
+            .bind(key)
+            .execute(&self.pool)
+            .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -438,7 +528,8 @@ impl KbStore for PgMissionStore {
             .await?
         } else {
             sqlx::query_as(&format!(
-                "SELECT {} FROM knowledge ORDER BY category, updated_at DESC", KB_COLS
+                "SELECT {} FROM knowledge ORDER BY category, updated_at DESC",
+                KB_COLS
             ))
             .fetch_all(&self.pool)
             .await?
@@ -446,7 +537,12 @@ impl KbStore for PgMissionStore {
         Ok(rows.into_iter().map(kb_row_to_entry).collect())
     }
 
-    async fn kb_list_paginated(&self, category: Option<&str>, limit: u32, offset: u32) -> DbResult<Vec<KnowledgeEntry>> {
+    async fn kb_list_paginated(
+        &self,
+        category: Option<&str>,
+        limit: u32,
+        offset: u32,
+    ) -> DbResult<Vec<KnowledgeEntry>> {
         let rows: Vec<KBRow> = if let Some(cat) = category {
             let like_pattern = format!("{}:%", cat);
             sqlx::query_as(&format!(
@@ -460,7 +556,8 @@ impl KbStore for PgMissionStore {
             .await?
         } else {
             sqlx::query_as(&format!(
-                "SELECT {} FROM knowledge ORDER BY category, updated_at DESC LIMIT $1 OFFSET $2", KB_COLS
+                "SELECT {} FROM knowledge ORDER BY category, updated_at DESC LIMIT $1 OFFSET $2",
+                KB_COLS
             ))
             .bind(limit as i64)
             .bind(offset as i64)
@@ -472,7 +569,8 @@ impl KbStore for PgMissionStore {
 
     async fn kb_list_by_scope(&self, task_id: &str) -> DbResult<Vec<KnowledgeEntry>> {
         let rows: Vec<KBRow> = sqlx::query_as(&format!(
-            "SELECT {} FROM knowledge WHERE scope_task_id = $1", KB_COLS
+            "SELECT {} FROM knowledge WHERE scope_task_id = $1",
+            KB_COLS
         ))
         .bind(task_id)
         .fetch_all(&self.pool)
@@ -507,7 +605,10 @@ impl KbStore for PgMissionStore {
         Ok(())
     }
 
-    async fn kb_review_upsert(&self, input: &KnowledgeReviewInput) -> DbResult<KnowledgeReviewState> {
+    async fn kb_review_upsert(
+        &self,
+        input: &KnowledgeReviewInput,
+    ) -> DbResult<KnowledgeReviewState> {
         let now = chrono::Utc::now().to_rfc3339();
         let id = uuid::Uuid::new_v4().to_string();
         let mut tx = self.pool.begin().await?;
@@ -515,7 +616,7 @@ impl KbStore for PgMissionStore {
         sqlx::query(
             "UPDATE knowledge_review_state
              SET is_current = FALSE
-             WHERE knowledge_id = $1 AND is_current = TRUE"
+             WHERE knowledge_id = $1 AND is_current = TRUE",
         )
         .bind(&input.knowledge_id)
         .execute(&mut *tx)
@@ -527,7 +628,7 @@ impl KbStore for PgMissionStore {
                  superseded_by, confidence, reviewed_at, applied_at, is_current)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, TRUE)
              RETURNING id, knowledge_id, state, batch_id, reviewer, rationale, evidence_refs,
-                 superseded_by, confidence, reviewed_at, applied_at, is_current"
+                 superseded_by, confidence, reviewed_at, applied_at, is_current",
         )
         .bind(&id)
         .bind(&input.knowledge_id)
@@ -547,7 +648,10 @@ impl KbStore for PgMissionStore {
         Ok(review_row_to_state(row))
     }
 
-    async fn kb_review_current_for_ids(&self, ids: &[String]) -> DbResult<HashMap<String, KnowledgeReviewState>> {
+    async fn kb_review_current_for_ids(
+        &self,
+        ids: &[String],
+    ) -> DbResult<HashMap<String, KnowledgeReviewState>> {
         if ids.is_empty() {
             return Ok(HashMap::new());
         }
@@ -556,7 +660,7 @@ impl KbStore for PgMissionStore {
             "SELECT id, knowledge_id, state, batch_id, reviewer, rationale, evidence_refs,
                     superseded_by, confidence, reviewed_at, applied_at, is_current
              FROM knowledge_review_state
-             WHERE is_current = TRUE AND knowledge_id = ANY($1)"
+             WHERE is_current = TRUE AND knowledge_id = ANY($1)",
         )
         .bind(ids.to_vec())
         .fetch_all(&self.pool)
@@ -588,13 +692,12 @@ impl KbStore for PgMissionStore {
         let total: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM knowledge")
             .fetch_one(&self.pool)
             .await?;
-        let reviewed: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM knowledge_review_state WHERE is_current = TRUE"
-        )
-        .fetch_one(&self.pool)
-        .await?;
+        let reviewed: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM knowledge_review_state WHERE is_current = TRUE")
+                .fetch_one(&self.pool)
+                .await?;
         let memory_total: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM knowledge WHERE category = 'memory' OR category LIKE 'memory:%'"
+            "SELECT COUNT(*) FROM knowledge WHERE category = 'memory' OR category LIKE 'memory:%'",
         )
         .fetch_one(&self.pool)
         .await?;
@@ -603,7 +706,7 @@ impl KbStore for PgMissionStore {
              FROM knowledge_review_state
              WHERE is_current = TRUE
              GROUP BY state
-             ORDER BY state"
+             ORDER BY state",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -622,7 +725,11 @@ impl KbStore for PgMissionStore {
 
     // ========== Search ==========
 
-    async fn kb_search(&self, query: &str, category: Option<&str>) -> DbResult<Vec<KnowledgeEntry>> {
+    async fn kb_search(
+        &self,
+        query: &str,
+        category: Option<&str>,
+    ) -> DbResult<Vec<KnowledgeEntry>> {
         // Phase 1: FTS search using tsvector
         let results = self.pg_search_fts(query, category).await?;
         if !results.is_empty() {
@@ -632,13 +739,28 @@ impl KbStore for PgMissionStore {
         self.pg_search_like(query, category).await
     }
 
-    async fn kb_search_ranked(&self, query: &str, category: Option<&str>, limit: usize) -> DbResult<Vec<(KnowledgeEntry, usize)>> {
+    async fn kb_search_ranked(
+        &self,
+        query: &str,
+        category: Option<&str>,
+        limit: usize,
+    ) -> DbResult<Vec<(KnowledgeEntry, usize)>> {
         let results = self.kb_search(query, category).await?;
-        Ok(results.into_iter().take(limit).enumerate().map(|(i, e)| (e, i)).collect())
+        Ok(results
+            .into_iter()
+            .take(limit)
+            .enumerate()
+            .map(|(i, e)| (e, i))
+            .collect())
     }
 
-    async fn kb_search_fts_ranked(&self, query: &str, category: Option<&str>) -> DbResult<Vec<(String, usize, Option<String>)>> {
-        let tsquery = query.split_whitespace()
+    async fn kb_search_fts_ranked(
+        &self,
+        query: &str,
+        category: Option<&str>,
+    ) -> DbResult<Vec<(String, usize, Option<String>)>> {
+        let tsquery = query
+            .split_whitespace()
             .map(|w| w.replace('\'', ""))
             .filter(|w| !w.is_empty())
             .collect::<Vec<_>>()
@@ -674,17 +796,28 @@ impl KbStore for PgMissionStore {
             .await?
         };
 
-        Ok(rows.into_iter().enumerate().map(|(rank, (id, snippet))| {
-            let snip = snippet.filter(|s| s.contains("**"));
-            (id, rank, snip)
-        }).collect())
+        Ok(rows
+            .into_iter()
+            .enumerate()
+            .map(|(rank, (id, snippet))| {
+                let snip = snippet.filter(|s| s.contains("**"));
+                (id, rank, snip)
+            })
+            .collect())
     }
 
-    async fn kb_search_like_ranked(&self, query: &str, category: Option<&str>) -> DbResult<Vec<(String, usize)>> {
+    async fn kb_search_like_ranked(
+        &self,
+        query: &str,
+        category: Option<&str>,
+    ) -> DbResult<Vec<(String, usize)>> {
         let keywords: Vec<String> = {
             let mut kw: Vec<String> = query.split_whitespace().map(|w| w.to_string()).collect();
             let trimmed = query.trim();
-            if !trimmed.is_empty() && trimmed.chars().any(|c| !c.is_ascii()) && !kw.contains(&trimmed.to_string()) {
+            if !trimmed.is_empty()
+                && trimmed.chars().any(|c| !c.is_ascii())
+                && !kw.contains(&trimmed.to_string())
+            {
                 kw.insert(0, trimmed.to_string());
             }
             kw
@@ -707,7 +840,10 @@ impl KbStore for PgMissionStore {
         if category.is_some() {
             let p_cat = keywords.len() + 1;
             let p_like = keywords.len() + 2;
-            sql.push_str(&format!(" AND (category = ${} OR category LIKE ${})", p_cat, p_like));
+            sql.push_str(&format!(
+                " AND (category = ${} OR category LIKE ${})",
+                p_cat, p_like
+            ));
         }
         sql.push_str(" ORDER BY access_count DESC, updated_at DESC LIMIT 30");
 
@@ -720,14 +856,24 @@ impl KbStore for PgMissionStore {
             q = q.bind(format!("{}:%", cat));
         }
         let rows = q.fetch_all(&self.pool).await?;
-        Ok(rows.into_iter().enumerate().map(|(rank, (id,))| (id, rank)).collect())
+        Ok(rows
+            .into_iter()
+            .enumerate()
+            .map(|(rank, (id,))| (id, rank))
+            .collect())
     }
 
-    async fn kb_search_fts_ranked_scoped(&self, query: &str, category: Option<&str>, project_id: Option<&str>) -> DbResult<Vec<(String, usize, Option<String>)>> {
+    async fn kb_search_fts_ranked_scoped(
+        &self,
+        query: &str,
+        category: Option<&str>,
+        project_id: Option<&str>,
+    ) -> DbResult<Vec<(String, usize, Option<String>)>> {
         if project_id.is_none() {
             return self.kb_search_fts_ranked(query, category).await;
         }
-        let tsquery = query.split_whitespace()
+        let tsquery = query
+            .split_whitespace()
             .map(|w| w.replace('\'', ""))
             .filter(|w| !w.is_empty())
             .collect::<Vec<_>>()
@@ -767,20 +913,32 @@ impl KbStore for PgMissionStore {
             .await?
         };
 
-        Ok(rows.into_iter().enumerate().map(|(rank, (id, snippet))| {
-            let snip = snippet.filter(|s| s.contains("**"));
-            (id, rank, snip)
-        }).collect())
+        Ok(rows
+            .into_iter()
+            .enumerate()
+            .map(|(rank, (id, snippet))| {
+                let snip = snippet.filter(|s| s.contains("**"));
+                (id, rank, snip)
+            })
+            .collect())
     }
 
-    async fn kb_search_like_ranked_scoped(&self, query: &str, category: Option<&str>, project_id: Option<&str>) -> DbResult<Vec<(String, usize)>> {
+    async fn kb_search_like_ranked_scoped(
+        &self,
+        query: &str,
+        category: Option<&str>,
+        project_id: Option<&str>,
+    ) -> DbResult<Vec<(String, usize)>> {
         if project_id.is_none() {
             return self.kb_search_like_ranked(query, category).await;
         }
         let keywords: Vec<String> = {
             let mut kw: Vec<String> = query.split_whitespace().map(|w| w.to_string()).collect();
             let trimmed = query.trim();
-            if !trimmed.is_empty() && trimmed.chars().any(|c| !c.is_ascii()) && !kw.contains(&trimmed.to_string()) {
+            if !trimmed.is_empty()
+                && trimmed.chars().any(|c| !c.is_ascii())
+                && !kw.contains(&trimmed.to_string())
+            {
                 kw.insert(0, trimmed.to_string());
             }
             kw
@@ -801,10 +959,17 @@ impl KbStore for PgMissionStore {
         sql.push(')');
         let mut next_param = keywords.len() + 1;
         if let Some(_cat) = category {
-            sql.push_str(&format!(" AND (category = ${} OR category LIKE ${})", next_param, next_param + 1));
+            sql.push_str(&format!(
+                " AND (category = ${} OR category LIKE ${})",
+                next_param,
+                next_param + 1
+            ));
             next_param += 2;
         }
-        sql.push_str(&format!(" AND (project_id = ${} OR project_id IS NULL)", next_param));
+        sql.push_str(&format!(
+            " AND (project_id = ${} OR project_id IS NULL)",
+            next_param
+        ));
         next_param += 1;
         let _ = next_param;
         sql.push_str(" ORDER BY access_count DESC, updated_at DESC LIMIT 30");
@@ -819,7 +984,11 @@ impl KbStore for PgMissionStore {
         }
         q = q.bind(project_id.unwrap().to_string());
         let rows = q.fetch_all(&self.pool).await?;
-        Ok(rows.into_iter().enumerate().map(|(rank, (id,))| (id, rank)).collect())
+        Ok(rows
+            .into_iter()
+            .enumerate()
+            .map(|(rank, (id,))| (id, rank))
+            .collect())
     }
 
     // ========== Embeddings ==========
@@ -827,7 +996,14 @@ impl KbStore for PgMissionStore {
     async fn kb_set_embedding(&self, id: &str, embedding: &[f32], provider: &str) -> DbResult<()> {
         let bytes = crate::embedding::f32_vec_to_bytes(embedding);
         // Format as PostgreSQL vector literal: [0.1,0.2,...]
-        let vec_str = format!("[{}]", embedding.iter().map(|f| f.to_string()).collect::<Vec<_>>().join(","));
+        let vec_str = format!(
+            "[{}]",
+            embedding
+                .iter()
+                .map(|f| f.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
         sqlx::query(
             "UPDATE knowledge SET embedding = $1, embedding_provider = $2, embedding_vec = $3::vector WHERE id = $4"
         )
@@ -844,34 +1020,38 @@ impl KbStore for PgMissionStore {
         let like_pattern = format!("{}:%", category);
         let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(
             "SELECT id, embedding FROM knowledge
-             WHERE (category = $1 OR category LIKE $2) AND embedding IS NOT NULL"
+             WHERE (category = $1 OR category LIKE $2) AND embedding IS NOT NULL",
         )
         .bind(category)
         .bind(like_pattern)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(|(id, blob)| {
-            (id, crate::embedding::bytes_to_f32_vec(&blob))
-        }).collect())
+        Ok(rows
+            .into_iter()
+            .map(|(id, blob)| (id, crate::embedding::bytes_to_f32_vec(&blob)))
+            .collect())
     }
 
     async fn kb_load_all_embeddings(&self) -> DbResult<Vec<(String, Vec<f32>)>> {
-        let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(
-            "SELECT id, embedding FROM knowledge WHERE embedding IS NOT NULL"
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows.into_iter().map(|(id, blob)| {
-            (id, crate::embedding::bytes_to_f32_vec(&blob))
-        }).collect())
+        let rows: Vec<(String, Vec<u8>)> =
+            sqlx::query_as("SELECT id, embedding FROM knowledge WHERE embedding IS NOT NULL")
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, blob)| (id, crate::embedding::bytes_to_f32_vec(&blob)))
+            .collect())
     }
 
-    async fn kb_entries_missing_embedding(&self, category: Option<&str>) -> DbResult<Vec<(String, String, String)>> {
+    async fn kb_entries_missing_embedding(
+        &self,
+        category: Option<&str>,
+    ) -> DbResult<Vec<(String, String, String)>> {
         if let Some(cat) = category {
             let like_pattern = format!("{}:%", cat);
             let rows: Vec<(String, String, String)> = sqlx::query_as(
                 "SELECT id, summary, COALESCE(detail, '') FROM knowledge
-                 WHERE (category = $1 OR category LIKE $2) AND embedding IS NULL"
+                 WHERE (category = $1 OR category LIKE $2) AND embedding IS NULL",
             )
             .bind(cat)
             .bind(like_pattern)
@@ -880,7 +1060,7 @@ impl KbStore for PgMissionStore {
             Ok(rows)
         } else {
             let rows: Vec<(String, String, String)> = sqlx::query_as(
-                "SELECT id, summary, COALESCE(detail, '') FROM knowledge WHERE embedding IS NULL"
+                "SELECT id, summary, COALESCE(detail, '') FROM knowledge WHERE embedding IS NULL",
             )
             .fetch_all(&self.pool)
             .await?;
@@ -888,12 +1068,16 @@ impl KbStore for PgMissionStore {
         }
     }
 
-    async fn kb_entries_stale_embedding(&self, current_provider: &str, limit: i64) -> DbResult<Vec<(String, String, String)>> {
+    async fn kb_entries_stale_embedding(
+        &self,
+        current_provider: &str,
+        limit: i64,
+    ) -> DbResult<Vec<(String, String, String)>> {
         let rows: Vec<(String, String, String)> = sqlx::query_as(
             "SELECT id, summary, COALESCE(detail, '') FROM knowledge
              WHERE embedding IS NOT NULL AND embedding_provider IS NOT NULL
                AND embedding_provider != $1
-             LIMIT $2"
+             LIMIT $2",
         )
         .bind(current_provider)
         .bind(limit)
@@ -906,20 +1090,30 @@ impl KbStore for PgMissionStore {
 
     async fn kb_stats(&self) -> DbResult<serde_json::Value> {
         let (total,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM knowledge")
-            .fetch_one(&self.pool).await?;
+            .fetch_one(&self.pool)
+            .await?;
         let (never_accessed,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM knowledge WHERE access_count = 0 AND last_accessed_at IS NULL"
-        ).fetch_one(&self.pool).await?;
+            "SELECT COUNT(*) FROM knowledge WHERE access_count = 0 AND last_accessed_at IS NULL",
+        )
+        .fetch_one(&self.pool)
+        .await?;
 
-        let (utility_high,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM knowledge WHERE utility_score >= 0.7"
-        ).fetch_one(&self.pool).await.unwrap_or((0,));
+        let (utility_high,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM knowledge WHERE utility_score >= 0.7")
+                .fetch_one(&self.pool)
+                .await
+                .unwrap_or((0,));
         let (utility_medium,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM knowledge WHERE utility_score >= 0.3 AND utility_score < 0.7"
-        ).fetch_one(&self.pool).await.unwrap_or((0,));
-        let (utility_low,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM knowledge WHERE utility_score < 0.3"
-        ).fetch_one(&self.pool).await.unwrap_or((0,));
+            "SELECT COUNT(*) FROM knowledge WHERE utility_score >= 0.3 AND utility_score < 0.7",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or((0,));
+        let (utility_low,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM knowledge WHERE utility_score < 0.3")
+                .fetch_one(&self.pool)
+                .await
+                .unwrap_or((0,));
 
         let (gc_candidates,): (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM knowledge WHERE
@@ -939,11 +1133,15 @@ impl KbStore for PgMissionStore {
         ).fetch_one(&self.pool).await.unwrap_or((0,));
 
         let most_accessed: Option<(String, String, i64)> = sqlx::query_as(
-            "SELECT category, key, access_count FROM knowledge ORDER BY access_count DESC LIMIT 1"
-        ).fetch_optional(&self.pool).await?;
+            "SELECT category, key, access_count FROM knowledge ORDER BY access_count DESC LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
         let oldest: Option<(String, String, String)> = sqlx::query_as(
-            "SELECT category, key, updated_at FROM knowledge ORDER BY updated_at ASC LIMIT 1"
-        ).fetch_optional(&self.pool).await?;
+            "SELECT category, key, updated_at FROM knowledge ORDER BY updated_at ASC LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
 
         let mut stats = serde_json::json!({
             "total": total,
@@ -956,10 +1154,12 @@ impl KbStore for PgMissionStore {
             "gcCandidates": gc_candidates,
         });
         if let Some((cat, key, count)) = most_accessed {
-            stats["mostAccessed"] = serde_json::json!({"category": cat, "key": key, "accessCount": count});
+            stats["mostAccessed"] =
+                serde_json::json!({"category": cat, "key": key, "accessCount": count});
         }
         if let Some((cat, key, updated)) = oldest {
-            stats["oldest"] = serde_json::json!({"category": cat, "key": key, "updatedAt": updated});
+            stats["oldest"] =
+                serde_json::json!({"category": cat, "key": key, "updatedAt": updated});
         }
 
         // Category breakdown
@@ -982,7 +1182,7 @@ impl KbStore for PgMissionStore {
 
     async fn kb_summary(&self) -> DbResult<Vec<(String, i64)>> {
         let rows: Vec<(String, i64)> = sqlx::query_as(
-            "SELECT category, COUNT(*) as cnt FROM knowledge GROUP BY category ORDER BY cnt DESC"
+            "SELECT category, COUNT(*) as cnt FROM knowledge GROUP BY category ORDER BY cnt DESC",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -991,7 +1191,7 @@ impl KbStore for PgMissionStore {
 
     async fn kb_hot_keys(&self, limit: i64) -> DbResult<Vec<String>> {
         let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT key FROM knowledge ORDER BY access_count DESC, updated_at DESC LIMIT $1"
+            "SELECT key FROM knowledge ORDER BY access_count DESC, updated_at DESC LIMIT $1",
         )
         .bind(limit)
         .fetch_all(&self.pool)
@@ -1004,7 +1204,8 @@ impl KbStore for PgMissionStore {
             "SELECT {} FROM knowledge WHERE access_count = 0
              AND last_accessed_at IS NULL
              AND EXTRACT(EPOCH FROM (NOW() - updated_at::timestamp)) / 86400 > $1
-             ORDER BY updated_at ASC", KB_COLS
+             ORDER BY updated_at ASC",
+            KB_COLS
         ))
         .bind(days)
         .fetch_all(&self.pool)
@@ -1041,28 +1242,35 @@ impl KbStore for PgMissionStore {
 
     async fn embedding_stats(&self) -> DbResult<serde_json::Value> {
         let (kb_total,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM knowledge")
-            .fetch_one(&self.pool).await?;
-        let (kb_embedded,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM knowledge WHERE embedding IS NOT NULL"
-        ).fetch_one(&self.pool).await?;
+            .fetch_one(&self.pool)
+            .await?;
+        let (kb_embedded,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM knowledge WHERE embedding IS NOT NULL")
+                .fetch_one(&self.pool)
+                .await?;
         let kb_providers: Vec<(String, i64)> = sqlx::query_as(
             "SELECT COALESCE(embedding_provider, 'none'), COUNT(*) FROM knowledge GROUP BY embedding_provider ORDER BY COUNT(*) DESC"
         ).fetch_all(&self.pool).await?;
 
         let (skill_total,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM skill_topics")
-            .fetch_one(&self.pool).await?;
-        let (skill_embedded,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM skill_topics WHERE embedding IS NOT NULL"
-        ).fetch_one(&self.pool).await?;
+            .fetch_one(&self.pool)
+            .await?;
+        let (skill_embedded,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM skill_topics WHERE embedding IS NOT NULL")
+                .fetch_one(&self.pool)
+                .await?;
 
         let (conv_total,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM conversations")
-            .fetch_one(&self.pool).await?;
-        let (conv_summarized,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM conversations WHERE llm_summary IS NOT NULL"
-        ).fetch_one(&self.pool).await?;
-        let (conv_embedded,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM conversations WHERE embedding IS NOT NULL"
-        ).fetch_one(&self.pool).await?;
+            .fetch_one(&self.pool)
+            .await?;
+        let (conv_summarized,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM conversations WHERE llm_summary IS NOT NULL")
+                .fetch_one(&self.pool)
+                .await?;
+        let (conv_embedded,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM conversations WHERE embedding IS NOT NULL")
+                .fetch_one(&self.pool)
+                .await?;
         let conv_providers: Vec<(String, i64)> = sqlx::query_as(
             "SELECT COALESCE(embedding_provider, 'none'), COUNT(*) FROM conversations WHERE embedding IS NOT NULL GROUP BY embedding_provider ORDER BY COUNT(*) DESC"
         ).fetch_all(&self.pool).await?;
@@ -1100,7 +1308,8 @@ impl KbStore for PgMissionStore {
 
         // Phase 1: Delete infra entries
         let r = sqlx::query("DELETE FROM knowledge WHERE category = 'infra'")
-            .execute(&self.pool).await?;
+            .execute(&self.pool)
+            .await?;
         deleted += r.rows_affected();
 
         // Phase 2: Darwinian pruning with read-time decay
@@ -1129,7 +1338,7 @@ impl KbStore for PgMissionStore {
         if deleted > 0 {
             sqlx::query(
                 "DELETE FROM knowledge_edges WHERE source_id NOT IN (SELECT id FROM knowledge)
-                 OR target_id NOT IN (SELECT id FROM knowledge)"
+                 OR target_id NOT IN (SELECT id FROM knowledge)",
             )
             .execute(&self.pool)
             .await?;
@@ -1147,17 +1356,21 @@ impl KbStore for PgMissionStore {
         .bind(id)
         .execute(&self.pool)
         .await?;
-        let row: Option<(f64,)> = sqlx::query_as(
-            "SELECT confidence FROM knowledge WHERE id = $1"
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row: Option<(f64,)> = sqlx::query_as("SELECT confidence FROM knowledge WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
         Ok(row.map(|r| r.0))
     }
 
-    async fn kb_batch_apply_utility_feedback(&self, kb_ids: &[String], success: bool) -> DbResult<usize> {
-        if kb_ids.is_empty() { return Ok(0); }
+    async fn kb_batch_apply_utility_feedback(
+        &self,
+        kb_ids: &[String],
+        success: bool,
+    ) -> DbResult<usize> {
+        if kb_ids.is_empty() {
+            return Ok(0);
+        }
         let now = chrono::Utc::now().to_rfc3339();
         let mut count = 0u64;
         if success {
@@ -1177,7 +1390,7 @@ impl KbStore for PgMissionStore {
             for id in kb_ids {
                 let r = sqlx::query(
                     "UPDATE knowledge SET utility_score = GREATEST(0.1, utility_score * 0.90),
-                     updated_at = $1 WHERE id = $2"
+                     updated_at = $1 WHERE id = $2",
                 )
                 .bind(&now)
                 .bind(id)
@@ -1189,9 +1402,14 @@ impl KbStore for PgMissionStore {
         Ok(count as usize)
     }
 
-    async fn kb_list_low_confidence(&self, threshold: f64, limit: usize) -> DbResult<Vec<KnowledgeEntry>> {
+    async fn kb_list_low_confidence(
+        &self,
+        threshold: f64,
+        limit: usize,
+    ) -> DbResult<Vec<KnowledgeEntry>> {
         let rows: Vec<KBRow> = sqlx::query_as(&format!(
-            "SELECT {} FROM knowledge WHERE confidence < $1 ORDER BY confidence ASC LIMIT $2", KB_COLS
+            "SELECT {} FROM knowledge WHERE confidence < $1 ORDER BY confidence ASC LIMIT $2",
+            KB_COLS
         ))
         .bind(threshold)
         .bind(limit as i64)
@@ -1200,10 +1418,16 @@ impl KbStore for PgMissionStore {
         Ok(rows.into_iter().map(kb_row_to_entry).collect())
     }
 
-    async fn kb_list_low_utility(&self, threshold: f64, min_access: i64, limit: usize) -> DbResult<Vec<KnowledgeEntry>> {
+    async fn kb_list_low_utility(
+        &self,
+        threshold: f64,
+        min_access: i64,
+        limit: usize,
+    ) -> DbResult<Vec<KnowledgeEntry>> {
         let rows: Vec<KBRow> = sqlx::query_as(&format!(
             "SELECT {} FROM knowledge WHERE utility_score < $1 AND access_count >= $2
-             ORDER BY utility_score ASC LIMIT $3", KB_COLS
+             ORDER BY utility_score ASC LIMIT $3",
+            KB_COLS
         ))
         .bind(threshold)
         .bind(min_access)
@@ -1214,12 +1438,14 @@ impl KbStore for PgMissionStore {
     }
 
     async fn kb_mark_needs_re_extraction(&self, ids: &[String]) -> DbResult<usize> {
-        if ids.is_empty() { return Ok(0); }
+        if ids.is_empty() {
+            return Ok(0);
+        }
         let now = chrono::Utc::now().to_rfc3339();
         let mut count = 0u64;
         for id in ids {
             let r = sqlx::query(
-                "UPDATE knowledge SET needs_re_extraction = 1, updated_at = $1 WHERE id = $2"
+                "UPDATE knowledge SET needs_re_extraction = 1, updated_at = $1 WHERE id = $2",
             )
             .bind(&now)
             .bind(id)
@@ -1230,7 +1456,11 @@ impl KbStore for PgMissionStore {
         Ok(count as usize)
     }
 
-    async fn kb_list_stale_state_entries(&self, stale_days: i64, limit: usize) -> DbResult<Vec<KnowledgeEntry>> {
+    async fn kb_list_stale_state_entries(
+        &self,
+        stale_days: i64,
+        limit: usize,
+    ) -> DbResult<Vec<KnowledgeEntry>> {
         let rows: Vec<KBRow> = sqlx::query_as(&format!(
             "SELECT {} FROM knowledge
              WHERE kb_type = 'state'
@@ -1255,7 +1485,12 @@ impl KbStore for PgMissionStore {
 
     // ========== KB Operations queue ==========
 
-    async fn kb_ops_save_plan(&self, plan_id: &str, task_id: Option<&str>, operations: &[KBOperation]) -> DbResult<usize> {
+    async fn kb_ops_save_plan(
+        &self,
+        plan_id: &str,
+        task_id: Option<&str>,
+        operations: &[KBOperation],
+    ) -> DbResult<usize> {
         let now = chrono::Utc::now().to_rfc3339();
         let mut saved = 0usize;
         for (i, op) in operations.iter().enumerate() {
@@ -1284,40 +1519,90 @@ impl KbStore for PgMissionStore {
         Ok(saved)
     }
 
-    async fn kb_ops_list(&self, plan_id: Option<&str>, status: Option<&str>) -> DbResult<Vec<KBOperationRow>> {
+    async fn kb_ops_list(
+        &self,
+        plan_id: Option<&str>,
+        status: Option<&str>,
+    ) -> DbResult<Vec<KBOperationRow>> {
         let base = "SELECT id, plan_id, task_id, operation, target_keys, rationale, status, priority, result, created_at, executed_at, error FROM kb_operation_queue";
-        type OpRow = (String, String, Option<String>, String, String, Option<String>, String, i32, Option<String>, String, Option<String>, Option<String>);
+        type OpRow = (
+            String,
+            String,
+            Option<String>,
+            String,
+            String,
+            Option<String>,
+            String,
+            i32,
+            Option<String>,
+            String,
+            Option<String>,
+            Option<String>,
+        );
         let rows: Vec<OpRow> = match (plan_id, status) {
             (Some(pid), Some(s)) => {
-                sqlx::query_as(&format!("{} WHERE plan_id = $1 AND status = $2 ORDER BY priority", base))
-                    .bind(pid).bind(s)
-                    .fetch_all(&self.pool).await?
+                sqlx::query_as(&format!(
+                    "{} WHERE plan_id = $1 AND status = $2 ORDER BY priority",
+                    base
+                ))
+                .bind(pid)
+                .bind(s)
+                .fetch_all(&self.pool)
+                .await?
             }
             (Some(pid), None) => {
                 sqlx::query_as(&format!("{} WHERE plan_id = $1 ORDER BY priority", base))
                     .bind(pid)
-                    .fetch_all(&self.pool).await?
+                    .fetch_all(&self.pool)
+                    .await?
             }
             (None, Some(s)) => {
-                sqlx::query_as(&format!("{} WHERE status = $1 ORDER BY created_at DESC, priority", base))
-                    .bind(s)
-                    .fetch_all(&self.pool).await?
+                sqlx::query_as(&format!(
+                    "{} WHERE status = $1 ORDER BY created_at DESC, priority",
+                    base
+                ))
+                .bind(s)
+                .fetch_all(&self.pool)
+                .await?
             }
             (None, None) => {
                 sqlx::query_as(&format!("{} ORDER BY created_at DESC, priority", base))
-                    .fetch_all(&self.pool).await?
+                    .fetch_all(&self.pool)
+                    .await?
             }
         };
-        Ok(rows.into_iter().map(|r| KBOperationRow {
-            id: r.0, plan_id: r.1, task_id: r.2, operation: r.3,
-            target_keys: r.4, rationale: r.5, status: r.6, priority: r.7,
-            result: r.8, created_at: r.9, executed_at: r.10, error: r.11,
-        }).collect())
+        Ok(rows
+            .into_iter()
+            .map(|r| KBOperationRow {
+                id: r.0,
+                plan_id: r.1,
+                task_id: r.2,
+                operation: r.3,
+                target_keys: r.4,
+                rationale: r.5,
+                status: r.6,
+                priority: r.7,
+                result: r.8,
+                created_at: r.9,
+                executed_at: r.10,
+                error: r.11,
+            })
+            .collect())
     }
 
-    async fn kb_ops_update_status(&self, op_id: &str, status: &str, result: Option<&str>, error: Option<&str>) -> DbResult<bool> {
+    async fn kb_ops_update_status(
+        &self,
+        op_id: &str,
+        status: &str,
+        result: Option<&str>,
+        error: Option<&str>,
+    ) -> DbResult<bool> {
         let now = chrono::Utc::now().to_rfc3339();
-        let executed_at: Option<&str> = if status == "done" || status == "failed" { Some(&now) } else { None };
+        let executed_at: Option<&str> = if status == "done" || status == "failed" {
+            Some(&now)
+        } else {
+            None
+        };
         let r = sqlx::query(
             "UPDATE kb_operation_queue SET status = $1, result = $2, error = $3, executed_at = $4 WHERE id = $5"
         )
@@ -1331,7 +1616,12 @@ impl KbStore for PgMissionStore {
         Ok(r.rows_affected() > 0)
     }
 
-    async fn kb_ops_complete_by_task_id(&self, task_id: &str, new_status: &str, result: Option<&str>) -> DbResult<bool> {
+    async fn kb_ops_complete_by_task_id(
+        &self,
+        task_id: &str,
+        new_status: &str,
+        result: Option<&str>,
+    ) -> DbResult<bool> {
         let now = chrono::Utc::now().to_rfc3339();
         let pattern = format!("%task_id={}%", task_id);
         let r = sqlx::query(
@@ -1352,7 +1642,7 @@ impl KbStore for PgMissionStore {
         let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(ttl_secs)).to_rfc3339();
         let r = sqlx::query(
             "UPDATE kb_operation_queue SET status = 'expired', executed_at = $1
-             WHERE status = 'pending' AND created_at < $2"
+             WHERE status = 'pending' AND created_at < $2",
         )
         .bind(&now)
         .bind(&cutoff)
@@ -1363,7 +1653,7 @@ impl KbStore for PgMissionStore {
 
     async fn kb_ops_plan_summary(&self, plan_id: &str) -> DbResult<serde_json::Value> {
         let rows: Vec<(String, i64)> = sqlx::query_as(
-            "SELECT status, COUNT(*) FROM kb_operation_queue WHERE plan_id = $1 GROUP BY status"
+            "SELECT status, COUNT(*) FROM kb_operation_queue WHERE plan_id = $1 GROUP BY status",
         )
         .bind(plan_id)
         .fetch_all(&self.pool)
@@ -1380,12 +1670,18 @@ impl KbStore for PgMissionStore {
 
     // ========== Knowledge Graph edges ==========
 
-    async fn kb_add_edge(&self, source_id: &str, target_id: &str, relation_type: &str, weight: f64) -> DbResult<()> {
+    async fn kb_add_edge(
+        &self,
+        source_id: &str,
+        target_id: &str,
+        relation_type: &str,
+        weight: f64,
+    ) -> DbResult<()> {
         sqlx::query(
             "INSERT INTO knowledge_edges (source_id, target_id, relation_type, weight, created_at)
              VALUES ($1, $2, $3, $4, NOW())
              ON CONFLICT (source_id, target_id, relation_type) DO UPDATE SET
-                weight = EXCLUDED.weight, created_at = EXCLUDED.created_at"
+                weight = EXCLUDED.weight, created_at = EXCLUDED.created_at",
         )
         .bind(source_id)
         .bind(target_id)
@@ -1399,25 +1695,34 @@ impl KbStore for PgMissionStore {
     async fn kb_get_edges(&self, id: &str) -> DbResult<Vec<KBEdge>> {
         let rows: Vec<(String, String, String, f64, String)> = sqlx::query_as(
             "SELECT source_id, target_id, relation_type, weight, created_at
-             FROM knowledge_edges WHERE source_id = $1 OR target_id = $1"
+             FROM knowledge_edges WHERE source_id = $1 OR target_id = $1",
         )
         .bind(id)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(|r| KBEdge {
-            source_id: r.0, target_id: r.1, relation_type: r.2, weight: r.3, created_at: r.4,
-        }).collect())
+        Ok(rows
+            .into_iter()
+            .map(|r| KBEdge {
+                source_id: r.0,
+                target_id: r.1,
+                relation_type: r.2,
+                weight: r.3,
+                created_at: r.4,
+            })
+            .collect())
     }
 
     async fn kb_expand_related(&self, ids: &[String], max_extra: usize) -> DbResult<Vec<String>> {
-        if ids.is_empty() || max_extra == 0 { return Ok(vec![]); }
+        if ids.is_empty() || max_extra == 0 {
+            return Ok(vec![]);
+        }
         let id_set: std::collections::HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
         let mut neighbors: Vec<(String, f64)> = Vec::new();
         for id in ids {
             let rows: Vec<(String, f64)> = sqlx::query_as(
                 "SELECT target_id, weight FROM knowledge_edges WHERE source_id = $1
                  UNION ALL
-                 SELECT source_id, weight FROM knowledge_edges WHERE target_id = $1"
+                 SELECT source_id, weight FROM knowledge_edges WHERE target_id = $1",
             )
             .bind(id)
             .fetch_all(&self.pool)
@@ -1443,10 +1748,21 @@ impl KbStore for PgMissionStore {
         Ok(())
     }
 
-    async fn kb_log_co_access(&self, kb_ids: &[String], source: &str, session_id: Option<&str>) -> DbResult<()> {
-        if kb_ids.len() < 2 { return Ok(()); }
+    async fn kb_log_co_access(
+        &self,
+        kb_ids: &[String],
+        source: &str,
+        session_id: Option<&str>,
+    ) -> DbResult<()> {
+        if kb_ids.len() < 2 {
+            return Ok(());
+        }
         for id in kb_ids {
-            let others: Vec<&str> = kb_ids.iter().filter(|x| *x != id).map(|s| s.as_str()).collect();
+            let others: Vec<&str> = kb_ids
+                .iter()
+                .filter(|x| *x != id)
+                .map(|s| s.as_str())
+                .collect();
             let others_json = serde_json::to_string(&others).unwrap_or_default();
             sqlx::query(
                 "INSERT INTO kb_access_log (kb_id, co_accessed_ids, context_source, session_id) VALUES ($1, $2, $3, $4)"
@@ -1462,29 +1778,30 @@ impl KbStore for PgMissionStore {
     }
 
     async fn get_session_cited_kb_ids(&self, session_id: &str) -> DbResult<Vec<String>> {
-        let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT DISTINCT kb_id FROM kb_access_log WHERE session_id = $1"
-        )
-        .bind(session_id)
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<(String,)> =
+            sqlx::query_as("SELECT DISTINCT kb_id FROM kb_access_log WHERE session_id = $1")
+                .bind(session_id)
+                .fetch_all(&self.pool)
+                .await?;
         Ok(rows.into_iter().map(|r| r.0).collect())
     }
 
-    async fn kb_compute_cooccurrence(&self, since_hours: i64, top_n: usize) -> DbResult<HashMap<String, Vec<String>>> {
+    async fn kb_compute_cooccurrence(
+        &self,
+        since_hours: i64,
+        top_n: usize,
+    ) -> DbResult<HashMap<String, Vec<String>>> {
         // Clean old data first (created_at is TEXT, cast to timestamp for comparison)
         let cleanup_window = format!("-{} hours", since_hours * 2);
-        sqlx::query(
-            "DELETE FROM kb_access_log WHERE created_at::timestamp < NOW() + $1::interval"
-        )
-        .bind(&cleanup_window)
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("DELETE FROM kb_access_log WHERE created_at::timestamp < NOW() + $1::interval")
+            .bind(&cleanup_window)
+            .execute(&self.pool)
+            .await?;
 
         let cutoff = format!("-{} hours", since_hours);
         let rows: Vec<(String, String)> = sqlx::query_as(
             "SELECT kb_id, co_accessed_ids FROM kb_access_log
-             WHERE created_at::timestamp >= NOW() + $1::interval"
+             WHERE created_at::timestamp >= NOW() + $1::interval",
         )
         .bind(&cutoff)
         .fetch_all(&self.pool)
@@ -1513,14 +1830,20 @@ impl KbStore for PgMissionStore {
 
     // ========== Prompt snapshots ==========
 
-    async fn save_prompt_snapshot(&self, task_id: &str, prompt: &str, cited_kb_ids: &[String], category: &str) -> DbResult<()> {
+    async fn save_prompt_snapshot(
+        &self,
+        task_id: &str,
+        prompt: &str,
+        cited_kb_ids: &[String],
+        category: &str,
+    ) -> DbResult<()> {
         let kb_ids_json = serde_json::to_string(cited_kb_ids).unwrap_or_else(|_| "[]".to_string());
         sqlx::query(
             "INSERT INTO prompt_snapshots (task_id, prompt, cited_kb_ids, category, created_at)
              VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT (task_id) DO UPDATE SET
                 prompt = EXCLUDED.prompt, cited_kb_ids = EXCLUDED.cited_kb_ids,
-                category = EXCLUDED.category, created_at = EXCLUDED.created_at"
+                category = EXCLUDED.category, created_at = EXCLUDED.created_at",
         )
         .bind(task_id)
         .bind(prompt)
@@ -1541,11 +1864,15 @@ impl KbStore for PgMissionStore {
         Ok(())
     }
 
-    async fn list_prompt_snapshots(&self, category: &str, limit: usize) -> DbResult<Vec<(String, String, String)>> {
+    async fn list_prompt_snapshots(
+        &self,
+        category: &str,
+        limit: usize,
+    ) -> DbResult<Vec<(String, String, String)>> {
         let rows: Vec<(String, String, String)> = sqlx::query_as(
             "SELECT task_id, prompt, task_outcome FROM prompt_snapshots
              WHERE category = $1 AND task_outcome IS NOT NULL
-             ORDER BY created_at DESC LIMIT $2"
+             ORDER BY created_at DESC LIMIT $2",
         )
         .bind(category)
         .bind(limit as i64)
@@ -1554,7 +1881,10 @@ impl KbStore for PgMissionStore {
         Ok(rows)
     }
 
-    async fn list_modified_snapshots(&self, limit: usize) -> DbResult<Vec<(String, String, String, String)>> {
+    async fn list_modified_snapshots(
+        &self,
+        limit: usize,
+    ) -> DbResult<Vec<(String, String, String, String)>> {
         let rows: Vec<(String, String, String, String)> = sqlx::query_as(
             "SELECT ps.task_id, ps.prompt, ps.cited_kb_ids, ps.created_at
              FROM prompt_snapshots ps
@@ -1566,7 +1896,7 @@ impl KbStore for PgMissionStore {
                      AND k.updated_at > ps.created_at
                )
              ORDER BY ps.created_at DESC
-             LIMIT $1"
+             LIMIT $1",
         )
         .bind(limit as i64)
         .fetch_all(&self.pool)
@@ -1576,7 +1906,15 @@ impl KbStore for PgMissionStore {
 
     // ========== AST links ==========
 
-    async fn kb_add_ast_link(&self, kb_id: &str, symbol_name: &str, file_path: Option<&str>, ast_node_id: Option<&str>, relation: &str, confidence: f64) -> DbResult<()> {
+    async fn kb_add_ast_link(
+        &self,
+        kb_id: &str,
+        symbol_name: &str,
+        file_path: Option<&str>,
+        ast_node_id: Option<&str>,
+        relation: &str,
+        confidence: f64,
+    ) -> DbResult<()> {
         sqlx::query(
             "INSERT INTO kb_ast_links (kb_id, ast_node_id, symbol_name, file_path, relation, confidence)
              VALUES ($1, $2, $3, $4, $5, $6)
@@ -1602,7 +1940,7 @@ impl KbStore for PgMissionStore {
              JOIN kb_ast_links l ON l.kb_id = k.id
              WHERE l.symbol_name = $1
              ORDER BY k.utility_score DESC, k.updated_at DESC
-             LIMIT 10"
+             LIMIT 10",
         )
         .bind(symbol_name)
         .fetch_all(&self.pool)
@@ -1610,7 +1948,10 @@ impl KbStore for PgMissionStore {
         Ok(rows.into_iter().map(kb_row_to_entry).collect())
     }
 
-    async fn kb_get_memories_for_file(&self, file_path: &str) -> DbResult<Vec<(String, KnowledgeEntry)>> {
+    async fn kb_get_memories_for_file(
+        &self,
+        file_path: &str,
+    ) -> DbResult<Vec<(String, KnowledgeEntry)>> {
         // Note: project_id omitted to stay within sqlx 16-field tuple limit (symbol_name + 15 KB cols)
         let rows: Vec<(String, String, String, String, String, Option<String>, String, f64, i64, String, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<f64>)> = sqlx::query_as(
             "SELECT l.symbol_name, k.id, k.category, k.key, k.summary, k.detail,
@@ -1625,14 +1966,17 @@ impl KbStore for PgMissionStore {
         .bind(file_path)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(|r| {
-            let symbol = r.0;
-            let entry = row_to_knowledge_entry(
-                r.1, r.2, r.3, r.4, r.5, r.6, r.7,
-                r.8, r.9, r.10, r.11, r.12, r.13, r.14, r.15, None,
-            );
-            (symbol, entry)
-        }).collect())
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let symbol = r.0;
+                let entry = row_to_knowledge_entry(
+                    r.1, r.2, r.3, r.4, r.5, r.6, r.7, r.8, r.9, r.10, r.11, r.12, r.13, r.14,
+                    r.15, None,
+                );
+                (symbol, entry)
+            })
+            .collect())
     }
 
     async fn kb_delete_ast_links_for(&self, kb_id: &str) -> DbResult<()> {
@@ -1643,13 +1987,16 @@ impl KbStore for PgMissionStore {
         Ok(())
     }
 
-    async fn kb_ast_lazy_resolve(&self, link_id: i64, symbol_name: &str) -> DbResult<Option<String>> {
-        let row: Option<(String,)> = sqlx::query_as(
-            "SELECT id FROM ast_nodes WHERE name = $1 LIMIT 1"
-        )
-        .bind(symbol_name)
-        .fetch_optional(&self.pool)
-        .await?;
+    async fn kb_ast_lazy_resolve(
+        &self,
+        link_id: i64,
+        symbol_name: &str,
+    ) -> DbResult<Option<String>> {
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT id FROM ast_nodes WHERE name = $1 LIMIT 1")
+                .bind(symbol_name)
+                .fetch_optional(&self.pool)
+                .await?;
         if let Some((ref nid,)) = row {
             sqlx::query("UPDATE kb_ast_links SET ast_node_id = $1 WHERE id = $2")
                 .bind(nid)
@@ -1666,9 +2013,14 @@ impl KbStore for PgMissionStore {
 #[cfg(feature = "postgres")]
 impl PgMissionStore {
     /// Get KB entry by category + key (no access bump).
-    async fn pg_get_by_category_key(&self, category: &str, key: &str) -> DbResult<Option<KnowledgeEntry>> {
+    async fn pg_get_by_category_key(
+        &self,
+        category: &str,
+        key: &str,
+    ) -> DbResult<Option<KnowledgeEntry>> {
         let row: Option<KBRow> = sqlx::query_as(&format!(
-            "SELECT {} FROM knowledge WHERE category = $1 AND key = $2", KB_COLS
+            "SELECT {} FROM knowledge WHERE category = $1 AND key = $2",
+            KB_COLS
         ))
         .bind(category)
         .bind(key)
@@ -1691,7 +2043,11 @@ impl PgMissionStore {
     }
 
     /// FTS search using PostgreSQL tsvector.
-    async fn pg_search_fts(&self, query: &str, category: Option<&str>) -> DbResult<Vec<KnowledgeEntry>> {
+    async fn pg_search_fts(
+        &self,
+        query: &str,
+        category: Option<&str>,
+    ) -> DbResult<Vec<KnowledgeEntry>> {
         if query.split_whitespace().count() == 0 {
             return Ok(Vec::new());
         }
@@ -1711,7 +2067,8 @@ impl PgMissionStore {
             sqlx::query_as(&format!(
                 "SELECT {} FROM knowledge
                  WHERE fts_doc @@ plainto_tsquery('simple', $1)
-                 ORDER BY ts_rank(fts_doc, plainto_tsquery('simple', $1)) DESC", KB_COLS
+                 ORDER BY ts_rank(fts_doc, plainto_tsquery('simple', $1)) DESC",
+                KB_COLS
             ))
             .bind(query)
             .fetch_all(&self.pool)
@@ -1721,11 +2078,18 @@ impl PgMissionStore {
     }
 
     /// LIKE fallback for Chinese text and partial matches.
-    async fn pg_search_like(&self, query: &str, category: Option<&str>) -> DbResult<Vec<KnowledgeEntry>> {
+    async fn pg_search_like(
+        &self,
+        query: &str,
+        category: Option<&str>,
+    ) -> DbResult<Vec<KnowledgeEntry>> {
         let keywords: Vec<String> = {
             let mut kw: Vec<String> = query.split_whitespace().map(|w| w.to_string()).collect();
             let trimmed = query.trim();
-            if !trimmed.is_empty() && trimmed.chars().any(|c| !c.is_ascii()) && !kw.contains(&trimmed.to_string()) {
+            if !trimmed.is_empty()
+                && trimmed.chars().any(|c| !c.is_ascii())
+                && !kw.contains(&trimmed.to_string())
+            {
                 kw.insert(0, trimmed.to_string());
             }
             kw
@@ -1747,7 +2111,10 @@ impl PgMissionStore {
         if category.is_some() {
             let p_cat = keywords.len() + 1;
             let p_like = keywords.len() + 2;
-            sql.push_str(&format!(" AND (category = ${} OR category LIKE ${})", p_cat, p_like));
+            sql.push_str(&format!(
+                " AND (category = ${} OR category LIKE ${})",
+                p_cat, p_like
+            ));
         }
         sql.push_str(" ORDER BY access_count DESC, updated_at DESC LIMIT 20");
 

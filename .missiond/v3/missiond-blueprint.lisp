@@ -1290,7 +1290,7 @@
 
   (project-maturity-model
     :schema "missiond.project-maturity-model.v2"
-    :rule "M6 is the highest maturity level and means Auth-grade production-ready SSOT/code/runtime/test clarity: domain model, policy, flow, event, runtime projection, implementation map, compatibility ledger, hot-path wiring, and regression matrix are fine-grained and code-aligned."
+    :rule "M6 is the highest maturity level and means Auth-grade production-ready SSOT/code/runtime/test clarity: domain model, policy, flow, event, runtime projection, implementation map, compatibility ledger, hot-path wiring, regression matrix, and source hygiene are fine-grained, code-aligned, and formatter-converged."
     :gate "scripts/check-project-maturity.mjs --min-level M5 is the default universe operational gate; scripts/check-project-maturity.mjs --min-level M6 proves Auth-grade final maturity."
     :levels
       ((level M0 :name raw :requires [] :meaning "unregistered or only scattered facts")
@@ -1299,11 +1299,11 @@
        (level M3 :name code-mapped :requires [M2 code-isomorphism-checker current-code-mapping drift-policy])
        (level M4 :name runtime-projected :requires [M3 runtime-config-from-lisp event-contract deploy-runtime-constants no-hardcoded-runtime-duplicates])
        (level M5 :name worker-operational :requires [M4 mission_swarm_run context-pack-shards scoped-write-guards durable-completion-evidence final-convergence-gate])
-       (level M6 :name auth-grade :requires [M5 domain-model policy flow event runtime-projection implementation-map compatibility-ledger hot-path-wiring regression-matrix final-m6-report] :meaning "Auth-grade: the project is fine-grained, clear, runtime-wired, regression-proven, and safe for long-term dependency."))
+       (level M6 :name auth-grade :requires [M5 domain-model policy flow event runtime-projection implementation-map compatibility-ledger hot-path-wiring regression-matrix formatter-converged final-m6-report] :meaning "Auth-grade: the project is fine-grained, clear, runtime-wired, regression-proven, formatter-safe, and safe for long-term dependency."))
     :invariants
       ["Project SSOT reports MUST use only M0..M6; H-levels and M10 are retired public maturity vocabulary."
        "Old M10 maps to new M5 unless the project also has Auth-grade depth evidence."
-       "M6 requires Auth-grade domain/policy/flow/event/runtime/implementation/compatibility/hot-path/regression evidence."
+       "M6 requires Auth-grade domain/policy/flow/event/runtime/implementation/compatibility/hot-path/regression evidence plus formatter convergence: official project formatter checks must be safe to run without unrelated churn."
        "Universe status MUST expose current and target maturity for each registered project."
        "Intent-only projects MUST NOT be marked M2+; projects without code-isomorphism evidence MUST NOT be marked M3+."
        "Resident master and swarm runners MUST use M6 SSOT convergence language and never create H-level tasks."])
@@ -1774,8 +1774,8 @@
     :checker "node scripts/check-v3-pty-recognition-isomorphism.mjs")
 
   (ops-infra
-    :desc "Lisp-owned operational scripts for deploy, smoke, and scoped formatting."
-    :scripts [scripts/deploy-daemon.sh scripts/cargo-fmt-touched.sh]
+    :desc "Lisp-owned operational scripts for deploy, smoke, and formatter-converged source hygiene."
+    :scripts [scripts/deploy-daemon.sh scripts/rustfmt-missiond.sh scripts/cargo-fmt-touched.sh]
     :invariants
       ["Daemon redeploy MUST stay one command: build -> candidate release -> manifest -> active symlink -> launchctl kickstart -> socket wait -> IPC smoke."
        "Active daemon and MCP entrypoints MUST resolve through ~/.xjp-mission/active."
@@ -1787,12 +1787,14 @@
        "Dev-only fast deploy may select debug profile and sccache through explicit operator flags/env, but must preserve release manifest, active symlink, smoke, and rollback semantics unless smoke is explicitly disabled."
        "AST repository-wide startup full sync MUST be opt-in through MISSIOND_AST_FULL_SYNC_ON_STARTUP; routine blue-green restarts stay event-driven and must not rewrite topology KB when no stale code files were synced."
        "Deploy scripts MUST NOT write git state or delete the launchd-owned socket; rollback may restore only the installed binary and restart the launchd job."
-	       "Rust formatting MUST be scoped to Rust files touched in the current diff, including staged, unstaged, and branch-diff modes."
-	       "missiond-rustfmt-exempt legacy-large-file facades are skipped only during physical V3 split."
-	       "rustfmt MUST run with skip_children=true so formatting a crate root cannot recursively churn untouched Rust modules."
-	       "Workers/operators MUST use scripts/cargo-fmt-touched.sh rather than direct rustfmt on module roots such as mod.rs; direct rustfmt can traverse child modules and rewrite untouched files."
-	       "The no-Rust-files path MUST exit 0 under set -euo pipefail; filters must not turn an empty grep match into a script failure."]
+       "M6 MissionD formatting MUST be converged: scripts/rustfmt-missiond.sh --check is the repository-owned Rust formatter gate for crates/**."
+       "No MissionD Rust source may carry formatter exemption markers; legacy rustfmt exemptions are incompatible with MissionD M6."
+       "rustfmt MUST run with skip_children=true so formatting a crate root cannot recursively churn child modules outside the intended formatter scope."
+       "Rust formatting for external or non-M6 projects MAY remain scoped through scripts/cargo-fmt-touched.sh, including staged, unstaged, and branch-diff modes."
+       "The no-Rust-files path MUST exit 0 under set -euo pipefail; filters must not turn an empty grep match into a script failure."]
     :checks ["bash -n scripts/deploy-daemon.sh"
+             "bash -n scripts/rustfmt-missiond.sh"
+             "scripts/rustfmt-missiond.sh --check"
              "bash -n scripts/cargo-fmt-touched.sh"
              "scripts/cargo-fmt-touched.sh --check"
              "node scripts/check-v3-ops-infra-isomorphism.mjs"])
@@ -2578,12 +2580,12 @@
         :egress [infra_result permission_receipt daemon_update_status global_instruction_state])
       (function ops-infra
         :surface ops-infra
-        :entry [scripts/deploy-daemon.sh scripts/cargo-fmt-touched.sh]
+        :entry [scripts/deploy-daemon.sh scripts/rustfmt-missiond.sh scripts/cargo-fmt-touched.sh]
         :core ((step s1 :logic "build, backup, codesign, install, kickstart, and smoke daemon as one command")
 	               (step s2 :logic "retry IPC initialize smoke after socket readiness and rollback on real failure")
-	               (step s3 :logic "format only Rust files touched in current diff through cargo-fmt-touched, never direct rustfmt on module roots, with rustfmt skip_children")
+	               (step s3 :logic "prove MissionD-owned crates are formatter-converged through rustfmt-missiond; use cargo-fmt-touched only for external or non-M6 scoped waves")
 	               (step s4 :logic "keep restart-time background indexing event-driven unless an operator explicitly opts into repository-wide AST full sync"))
-        :egress [deployed-daemon rollback-result scoped-rustfmt-result])))
+        :egress [deployed-daemon rollback-result formatter-convergence-result scoped-rustfmt-result])))
 
   (implementation-map
     (surface mission_request
@@ -3459,12 +3461,13 @@
       :status "code-aligned"
       :implements [ops-infra]
       :code ["scripts/deploy-daemon.sh"
+             "scripts/rustfmt-missiond.sh"
              "scripts/cargo-fmt-touched.sh"
              "crates/missiond-daemon/src/main.rs"
              "crates/missiond-daemon/src/workers/local/ast_sync_worker.rs"
              "scripts/check-v3-ops-infra-isomorphism.mjs"
              "scripts/check-missiond-blue-green-deploy.mjs"]
-      :note "ops-infra owns deploy-daemon.sh plus scoped Rust formatting and restart-time background CPU policy. deploy-daemon.sh builds paired missiond/mission-mcp release candidates under ~/.xjp-mission/releases/<release-id>, writes release-manifest.json, switches ~/.xjp-mission/active, keeps stable entrypoints through active, kickstarts launchd, runs MCP smoke, rolls back to previous active on failure, cleans retained releases, removes incomplete release dirs, and defaults deploy builds to CARGO_INCREMENTAL=0 so debug release updates do not fill target/debug/incremental. cargo-fmt-touched.sh formats only touched Rust files with skip_children=true, skips only explicit missiond-rustfmt-exempt facades, and is the required entrypoint because direct rustfmt on module roots such as mod.rs can recurse into untouched modules. main.rs keeps repository-wide AST startup full sync opt-in via MISSIOND_AST_FULL_SYNC_ON_STARTUP, and ast_sync_worker skips topology KB rewrites when no stale files were synced.")
+      :note "ops-infra owns deploy-daemon.sh plus formatter-converged Rust hygiene and restart-time background CPU policy. deploy-daemon.sh builds paired missiond/mission-mcp release candidates under ~/.xjp-mission/releases/<release-id>, writes release-manifest.json, switches ~/.xjp-mission/active, keeps stable entrypoints through active, kickstarts launchd, runs MCP smoke, rolls back to previous active, cleans retained releases, removes incomplete release dirs, and defaults deploy builds to CARGO_INCREMENTAL=0 so debug release updates do not fill target/debug/incremental. rustfmt-missiond.sh is the M6 repository formatter gate for MissionD-owned crates/** and rejects Rust source formatter exemption markers. cargo-fmt-touched.sh remains a scoped fallback for external/non-M6 project waves and touched-file checks. main.rs keeps repository-wide AST startup full sync opt-in via MISSIOND_AST_FULL_SYNC_ON_STARTUP, and ast_sync_worker skips topology KB rewrites when no stale files were synced.")
 
     (surface missiond-blue-green-self-update
       :status "code-aligned"

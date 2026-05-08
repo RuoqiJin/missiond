@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use missiond_core::event::blob_store::{BlobStore, LocalFileBlobStore};
-use missiond_core::event::dispatcher::{DispatcherBuilder, NeverPaused, register_all_domains};
+use missiond_core::event::dispatcher::{register_all_domains, DispatcherBuilder, NeverPaused};
 use missiond_core::event::events::board::BoardEvent;
 use missiond_core::event::log::{spawn_log_writer, AppendOpts, Log};
 use missiond_core::event::subscription::{
@@ -88,11 +88,9 @@ async fn subscribe_from_earliest_sees_all_persisted_events() {
     // Spawn dispatcher tail so live source is populated if we lose race
     // with bootstrap.
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let tail_source: Arc<dyn missiond_core::event::dispatcher::TailSource> =
-        Arc::new(missiond_core::event::dispatcher::PgTailSource::new(
-            pool.clone(),
-            blob.clone(),
-        ));
+    let tail_source: Arc<dyn missiond_core::event::dispatcher::TailSource> = Arc::new(
+        missiond_core::event::dispatcher::PgTailSource::new(pool.clone(), blob.clone()),
+    );
     let dispatcher_ref = dispatcher.clone();
     let tail_task = tokio::spawn(async move {
         dispatcher_ref

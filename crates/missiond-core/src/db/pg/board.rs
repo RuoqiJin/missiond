@@ -1,11 +1,11 @@
 //! BoardStore — PostgreSQL implementation.
 //! Covers board task CRUD, claiming, dependencies, notes, search, and agent questions.
 
-use async_trait::async_trait;
+use super::PgMissionStore;
 use crate::db::error::{DbError, DbResult};
 use crate::db::traits::BoardStore;
 use crate::types::*;
-use super::PgMissionStore;
+use async_trait::async_trait;
 
 #[cfg(feature = "postgres")]
 #[async_trait]
@@ -13,8 +13,8 @@ impl BoardStore for PgMissionStore {
     // ========== board.rs: task CRUD ==========
 
     async fn insert_board_task(&self, task: &BoardTask) -> DbResult<()> {
-        let depends_on_json = serde_json::to_string(&task.depends_on)
-            .unwrap_or_else(|_| "[]".to_string());
+        let depends_on_json =
+            serde_json::to_string(&task.depends_on).unwrap_or_else(|_| "[]".to_string());
         sqlx::query(
             "INSERT INTO board_tasks (id, title, description, status, priority, category, project, server, due_date, parent_id, assignee, auto_execute, prompt_template, hidden, retry_count, max_retries, order_idx, created_at, updated_at, depends_on, dedupe_key, timeout_secs, context_intent, trigger_source)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)"
@@ -56,7 +56,10 @@ impl BoardStore for PgMissionStore {
         const MAX_DESC_LEN: usize = 50_000;
         let description = match &input.description {
             Some(d) if d.len() > MAX_DESC_LEN => {
-                tracing::warn!(len = d.len(), "Board task description exceeds 50KB, truncating");
+                tracing::warn!(
+                    len = d.len(),
+                    "Board task description exceeds 50KB, truncating"
+                );
                 let end = crate::embedding::char_boundary_at(d, MAX_DESC_LEN);
                 format!("{}...(truncated from {} bytes)", &d[..end], d.len())
             }
@@ -67,7 +70,7 @@ impl BoardStore for PgMissionStore {
         // Get max order for siblings
         let max_order: i64 = if let Some(ref pid) = input.parent_id {
             let row: Option<(i64,)> = sqlx::query_as(
-                "SELECT COALESCE(MAX(order_idx), -1) FROM board_tasks WHERE parent_id = $1"
+                "SELECT COALESCE(MAX(order_idx), -1) FROM board_tasks WHERE parent_id = $1",
             )
             .bind(pid)
             .fetch_optional(&self.pool)
@@ -75,7 +78,7 @@ impl BoardStore for PgMissionStore {
             row.map(|r| r.0).unwrap_or(-1)
         } else {
             let row: Option<(i64,)> = sqlx::query_as(
-                "SELECT COALESCE(MAX(order_idx), -1) FROM board_tasks WHERE parent_id IS NULL"
+                "SELECT COALESCE(MAX(order_idx), -1) FROM board_tasks WHERE parent_id IS NULL",
             )
             .fetch_optional(&self.pool)
             .await?;
@@ -94,7 +97,10 @@ impl BoardStore for PgMissionStore {
         let mut resolved_depends_on = Vec::new();
         if let Some(ref deps) = input.depends_on {
             for raw in deps {
-                let full = self.resolve_board_task_id(raw).await?.unwrap_or_else(|| raw.clone());
+                let full = self
+                    .resolve_board_task_id(raw)
+                    .await?
+                    .unwrap_or_else(|| raw.clone());
                 resolved_depends_on.push(TaskId::from_trusted(full));
             }
         }
@@ -104,8 +110,14 @@ impl BoardStore for PgMissionStore {
             title: input.title.clone(),
             description,
             status: BoardTaskStatus::Open,
-            priority: input.priority.clone().unwrap_or_else(|| "medium".to_string()),
-            category: input.category.clone().unwrap_or_else(|| "other".to_string()),
+            priority: input
+                .priority
+                .clone()
+                .unwrap_or_else(|| "medium".to_string()),
+            category: input
+                .category
+                .clone()
+                .unwrap_or_else(|| "other".to_string()),
             project: input.project.clone(),
             server: input.server.clone(),
             due_date: input.due_date.clone(),
@@ -152,7 +164,11 @@ impl BoardStore for PgMissionStore {
         Ok(row.map(|r| r.into_board_task()))
     }
 
-    async fn list_board_tasks(&self, status: Option<&str>, include_hidden: bool) -> DbResult<Vec<BoardTask>> {
+    async fn list_board_tasks(
+        &self,
+        status: Option<&str>,
+        include_hidden: bool,
+    ) -> DbResult<Vec<BoardTask>> {
         let rows = if let Some(s) = status {
             if include_hidden {
                 sqlx::query_as::<_, PgBoardTaskRow>(
@@ -185,7 +201,12 @@ impl BoardStore for PgMissionStore {
         Ok(rows.into_iter().map(|r| r.into_board_task()).collect())
     }
 
-    async fn list_board_tasks_by_trigger(&self, trigger_source: &str, status: &str, limit: i64) -> DbResult<Vec<BoardTask>> {
+    async fn list_board_tasks_by_trigger(
+        &self,
+        trigger_source: &str,
+        status: &str,
+        limit: i64,
+    ) -> DbResult<Vec<BoardTask>> {
         let rows = sqlx::query_as::<_, PgBoardTaskRow>(
             "SELECT *, (SELECT COUNT(*) FROM board_task_notes WHERE task_id = board_tasks.id) AS notes_count
              FROM board_tasks
@@ -201,7 +222,11 @@ impl BoardStore for PgMissionStore {
         Ok(rows.into_iter().map(|r| r.into_board_task()).collect())
     }
 
-    async fn update_board_task(&self, id: &str, update: &UpdateBoardTaskInput) -> DbResult<Option<BoardTask>> {
+    async fn update_board_task(
+        &self,
+        id: &str,
+        update: &UpdateBoardTaskInput,
+    ) -> DbResult<Option<BoardTask>> {
         let full_id = match self.resolve_board_task_id(id).await? {
             Some(fid) => fid,
             None => return Ok(None),
@@ -222,42 +247,128 @@ impl BoardStore for PgMissionStore {
         }
         let mut fields: Vec<UpdateField> = Vec::new();
 
-        fields.push(UpdateField { column: "updated_at", value: now.clone() });
+        fields.push(UpdateField {
+            column: "updated_at",
+            value: now.clone(),
+        });
 
-        if let Some(ref v) = update.title { fields.push(UpdateField { column: "title", value: v.clone() }); }
-        if let Some(ref v) = update.description { fields.push(UpdateField { column: "description", value: v.clone() }); }
-        if let Some(ref v) = update.status { fields.push(UpdateField { column: "status", value: v.clone() }); }
-        if let Some(ref v) = update.priority { fields.push(UpdateField { column: "priority", value: v.clone() }); }
-        if let Some(ref v) = update.category { fields.push(UpdateField { column: "category", value: v.clone() }); }
-        if let Some(ref v) = update.project { fields.push(UpdateField { column: "project", value: v.clone() }); }
-        if let Some(ref v) = update.server { fields.push(UpdateField { column: "server", value: v.clone() }); }
-        if let Some(ref v) = update.due_date { fields.push(UpdateField { column: "due_date", value: v.clone() }); }
-        if let Some(ref raw_pid) = update.parent_id {
-            let resolved = self.resolve_board_task_id(raw_pid).await?.unwrap_or_else(|| raw_pid.clone());
-            fields.push(UpdateField { column: "parent_id", value: resolved });
+        if let Some(ref v) = update.title {
+            fields.push(UpdateField {
+                column: "title",
+                value: v.clone(),
+            });
         }
-        if let Some(ref v) = update.assignee { fields.push(UpdateField { column: "assignee", value: v.clone() }); }
-        if let Some(ref v) = update.prompt_template { fields.push(UpdateField { column: "prompt_template", value: v.clone() }); }
+        if let Some(ref v) = update.description {
+            fields.push(UpdateField {
+                column: "description",
+                value: v.clone(),
+            });
+        }
+        if let Some(ref v) = update.status {
+            fields.push(UpdateField {
+                column: "status",
+                value: v.clone(),
+            });
+        }
+        if let Some(ref v) = update.priority {
+            fields.push(UpdateField {
+                column: "priority",
+                value: v.clone(),
+            });
+        }
+        if let Some(ref v) = update.category {
+            fields.push(UpdateField {
+                column: "category",
+                value: v.clone(),
+            });
+        }
+        if let Some(ref v) = update.project {
+            fields.push(UpdateField {
+                column: "project",
+                value: v.clone(),
+            });
+        }
+        if let Some(ref v) = update.server {
+            fields.push(UpdateField {
+                column: "server",
+                value: v.clone(),
+            });
+        }
+        if let Some(ref v) = update.due_date {
+            fields.push(UpdateField {
+                column: "due_date",
+                value: v.clone(),
+            });
+        }
+        if let Some(ref raw_pid) = update.parent_id {
+            let resolved = self
+                .resolve_board_task_id(raw_pid)
+                .await?
+                .unwrap_or_else(|| raw_pid.clone());
+            fields.push(UpdateField {
+                column: "parent_id",
+                value: resolved,
+            });
+        }
+        if let Some(ref v) = update.assignee {
+            fields.push(UpdateField {
+                column: "assignee",
+                value: v.clone(),
+            });
+        }
+        if let Some(ref v) = update.prompt_template {
+            fields.push(UpdateField {
+                column: "prompt_template",
+                value: v.clone(),
+            });
+        }
 
         if let Some(ref eid) = update.claim_executor_id {
-            fields.push(UpdateField { column: "claim_executor_id", value: eid.clone() });
+            fields.push(UpdateField {
+                column: "claim_executor_id",
+                value: eid.clone(),
+            });
         }
         if let Some(ref etype) = update.claim_executor_type {
-            fields.push(UpdateField { column: "claim_executor_type", value: etype.clone() });
+            fields.push(UpdateField {
+                column: "claim_executor_type",
+                value: etype.clone(),
+            });
         }
 
-        if let Some(ref v) = update.flow_phase { fields.push(UpdateField { column: "flow_phase", value: v.clone() }); }
-        if let Some(ref v) = update.flow_context { fields.push(UpdateField { column: "flow_context", value: v.clone() }); }
-        if let Some(ref v) = update.flow_template { fields.push(UpdateField { column: "flow_template", value: v.clone() }); }
+        if let Some(ref v) = update.flow_phase {
+            fields.push(UpdateField {
+                column: "flow_phase",
+                value: v.clone(),
+            });
+        }
+        if let Some(ref v) = update.flow_context {
+            fields.push(UpdateField {
+                column: "flow_context",
+                value: v.clone(),
+            });
+        }
+        if let Some(ref v) = update.flow_template {
+            fields.push(UpdateField {
+                column: "flow_template",
+                value: v.clone(),
+            });
+        }
 
         if let Some(ref deps) = update.depends_on {
             let mut resolved = Vec::new();
             for raw in deps {
-                let full = self.resolve_board_task_id(raw).await?.unwrap_or_else(|| raw.clone());
+                let full = self
+                    .resolve_board_task_id(raw)
+                    .await?
+                    .unwrap_or_else(|| raw.clone());
                 resolved.push(full);
             }
             let json = serde_json::to_string(&resolved).unwrap_or_else(|_| "[]".to_string());
-            fields.push(UpdateField { column: "depends_on", value: json });
+            fields.push(UpdateField {
+                column: "depends_on",
+                value: json,
+            });
         }
 
         // Build SET clause from fields
@@ -339,12 +450,11 @@ impl BoardStore for PgMissionStore {
         let mut i = 0;
         while i < to_delete.len() {
             let current = to_delete[i].clone();
-            let children: Vec<(String,)> = sqlx::query_as(
-                "SELECT id FROM board_tasks WHERE parent_id = $1"
-            )
-            .bind(&current)
-            .fetch_all(&self.pool)
-            .await?;
+            let children: Vec<(String,)> =
+                sqlx::query_as("SELECT id FROM board_tasks WHERE parent_id = $1")
+                    .bind(&current)
+                    .fetch_all(&self.pool)
+                    .await?;
             for (child_id,) in children {
                 to_delete.push(child_id);
             }
@@ -384,24 +494,21 @@ impl BoardStore for PgMissionStore {
 
     async fn resolve_board_task_id(&self, id: &str) -> DbResult<Option<String>> {
         // Exact match
-        let exact: Option<(String,)> = sqlx::query_as(
-            "SELECT id FROM board_tasks WHERE id = $1"
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let exact: Option<(String,)> = sqlx::query_as("SELECT id FROM board_tasks WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
         if let Some((fid,)) = exact {
             return Ok(Some(fid));
         }
         // Prefix match for short IDs
         if id.len() >= 6 && id.len() < 36 {
             let prefix = format!("{}%", id);
-            let matches: Vec<(String,)> = sqlx::query_as(
-                "SELECT id FROM board_tasks WHERE id LIKE $1"
-            )
-            .bind(&prefix)
-            .fetch_all(&self.pool)
-            .await?;
+            let matches: Vec<(String,)> =
+                sqlx::query_as("SELECT id FROM board_tasks WHERE id LIKE $1")
+                    .bind(&prefix)
+                    .fetch_all(&self.pool)
+                    .await?;
             if matches.len() == 1 {
                 return Ok(Some(matches[0].0.clone()));
             }
@@ -421,7 +528,7 @@ impl BoardStore for PgMissionStore {
 
     async fn close_task_by_dedupe_key(&self, dedupe_key: &str) -> DbResult<Option<BoardTask>> {
         let task_id: Option<(String,)> = sqlx::query_as(
-            "SELECT id FROM board_tasks WHERE dedupe_key = $1 AND status = 'open' LIMIT 1"
+            "SELECT id FROM board_tasks WHERE dedupe_key = $1 AND status = 'open' LIMIT 1",
         )
         .bind(dedupe_key)
         .fetch_optional(&self.pool)
@@ -460,7 +567,8 @@ impl BoardStore for PgMissionStore {
                 for word in &words {
                     let param_idx = param_values.len() + 1;
                     word_conditions.push(format!(
-                        "(title LIKE ${p} OR description LIKE ${p})", p = param_idx
+                        "(title LIKE ${p} OR description LIKE ${p})",
+                        p = param_idx
                     ));
                     param_values.push(format!("%{}%", word));
                 }
@@ -518,25 +626,35 @@ impl BoardStore for PgMissionStore {
         }
         let rows = select_query.fetch_all(&self.pool).await?;
 
-        let data: Vec<CompactBoardTask> = rows.into_iter().map(|r| CompactBoardTask {
-            id: TaskId::from_trusted(r.id),
-            title: r.title,
-            status: BoardTaskStatus::from_str(&r.status).unwrap_or(BoardTaskStatus::Open),
-            priority: r.priority,
-            parent_id: r.parent_id.map(TaskId::from_trusted),
-            project: r.project,
-            category: r.category,
-        }).collect();
+        let data: Vec<CompactBoardTask> = rows
+            .into_iter()
+            .map(|r| CompactBoardTask {
+                id: TaskId::from_trusted(r.id),
+                title: r.title,
+                status: BoardTaskStatus::from_str(&r.status).unwrap_or(BoardTaskStatus::Open),
+                priority: r.priority,
+                parent_id: r.parent_id.map(TaskId::from_trusted),
+                project: r.project,
+                category: r.category,
+            })
+            .collect();
 
         let returned = data.len();
         let message = if returned < total {
-            Some(format!("Showing {} of {} results. Refine query for more.", returned, total))
+            Some(format!(
+                "Showing {} of {} results. Refine query for more.",
+                returned, total
+            ))
         } else {
             None
         };
 
         Ok(BoardSearchResult {
-            meta: BoardSearchMeta { total, returned, message },
+            meta: BoardSearchMeta {
+                total,
+                returned,
+                message,
+            },
             data,
         })
     }
@@ -544,31 +662,43 @@ impl BoardStore for PgMissionStore {
     async fn board_summary(&self, since: Option<&str>) -> DbResult<serde_json::Value> {
         let since_clause = since.unwrap_or("2000-01-01T00:00:00Z");
 
-        let (open,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM board_tasks WHERE status = 'open'")
-            .fetch_one(&self.pool).await?;
-        let (running,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM board_tasks WHERE status = 'running'")
-            .fetch_one(&self.pool).await?;
-        let (blocked,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM board_tasks WHERE status = 'blocked'")
-            .fetch_one(&self.pool).await?;
+        let (open,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM board_tasks WHERE status = 'open'")
+                .fetch_one(&self.pool)
+                .await?;
+        let (running,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM board_tasks WHERE status = 'running'")
+                .fetch_one(&self.pool)
+                .await?;
+        let (blocked,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM board_tasks WHERE status = 'blocked'")
+                .fetch_one(&self.pool)
+                .await?;
         let (completed,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM board_tasks WHERE status = 'done' AND updated_at >= $1"
-        ).bind(since_clause).fetch_one(&self.pool).await?;
-        let (failed,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM board_tasks WHERE status = 'failed' AND updated_at >= $1"
-        ).bind(since_clause).fetch_one(&self.pool).await?;
-
-        let (pending_questions,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM agent_questions WHERE status = 'pending'"
-        ).fetch_one(&self.pool).await?;
-
-        let new_kb: i64 = sqlx::query_as::<_, (i64,)>(
-            "SELECT COUNT(*) FROM knowledge WHERE created_at >= $1"
+            "SELECT COUNT(*) FROM board_tasks WHERE status = 'done' AND updated_at >= $1",
         )
         .bind(since_clause)
-        .fetch_optional(&self.pool)
-        .await?
-        .map(|r| r.0)
-        .unwrap_or(0);
+        .fetch_one(&self.pool)
+        .await?;
+        let (failed,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM board_tasks WHERE status = 'failed' AND updated_at >= $1",
+        )
+        .bind(since_clause)
+        .fetch_one(&self.pool)
+        .await?;
+
+        let (pending_questions,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM agent_questions WHERE status = 'pending'")
+                .fetch_one(&self.pool)
+                .await?;
+
+        let new_kb: i64 =
+            sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM knowledge WHERE created_at >= $1")
+                .bind(since_clause)
+                .fetch_optional(&self.pool)
+                .await?
+                .map(|r| r.0)
+                .unwrap_or(0);
 
         Ok(serde_json::json!({
             "open": open,
@@ -583,7 +713,12 @@ impl BoardStore for PgMissionStore {
 
     // ========== board.rs: claiming & autopilot ==========
 
-    async fn claim_board_task(&self, id: &str, executor_id: &str, executor_type: &str) -> DbResult<Option<BoardTask>> {
+    async fn claim_board_task(
+        &self,
+        id: &str,
+        executor_id: &str,
+        executor_type: &str,
+    ) -> DbResult<Option<BoardTask>> {
         let full_id = match self.resolve_board_task_id(id).await? {
             Some(fid) => fid,
             None => return Ok(None),
@@ -593,7 +728,7 @@ impl BoardStore for PgMissionStore {
             "UPDATE board_tasks
              SET claim_executor_id = $1, claim_executor_type = $2, claimed_at = $3,
                  status = 'running', updated_at = $3
-             WHERE id = $4 AND status = 'open' AND claim_executor_id IS NULL"
+             WHERE id = $4 AND status = 'open' AND claim_executor_id IS NULL",
         )
         .bind(executor_id)
         .bind(executor_type)
@@ -608,7 +743,11 @@ impl BoardStore for PgMissionStore {
         self.get_board_task(&full_id).await
     }
 
-    async fn clear_board_task_assignee(&self, task_id: &str, expected_assignee: &str) -> DbResult<usize> {
+    async fn clear_board_task_assignee(
+        &self,
+        task_id: &str,
+        expected_assignee: &str,
+    ) -> DbResult<usize> {
         let full_id = match self.resolve_board_task_id(task_id).await? {
             Some(fid) => fid,
             None => return Ok(0),
@@ -617,7 +756,7 @@ impl BoardStore for PgMissionStore {
         let result = sqlx::query(
             "UPDATE board_tasks
              SET assignee = NULL, updated_at = $1
-             WHERE id = $2 AND status = 'open' AND assignee = $3"
+             WHERE id = $2 AND status = 'open' AND assignee = $3",
         )
         .bind(&now)
         .bind(&full_id)
@@ -633,7 +772,7 @@ impl BoardStore for PgMissionStore {
             "UPDATE board_tasks
              SET claim_executor_id = NULL, claim_executor_type = NULL, claimed_at = NULL,
                  status = 'open', updated_at = $1
-             WHERE claim_executor_id = $2 AND status = 'running'"
+             WHERE claim_executor_id = $2 AND status = 'running'",
         )
         .bind(&now)
         .bind(executor_id)
@@ -641,7 +780,11 @@ impl BoardStore for PgMissionStore {
         .await?;
         let count = result.rows_affected() as usize;
         if count > 0 {
-            tracing::info!(count, executor_id, "Released board claims for disconnected executor");
+            tracing::info!(
+                count,
+                executor_id,
+                "Released board claims for disconnected executor"
+            );
         }
         Ok(count)
     }
@@ -679,7 +822,12 @@ impl BoardStore for PgMissionStore {
 
         let count = (leased + unleased) as usize;
         if count > 0 {
-            tracing::warn!(count, leased, unleased, "Recovered stale running tasks (lease-based + fallback)");
+            tracing::warn!(
+                count,
+                leased,
+                unleased,
+                "Recovered stale running tasks (lease-based + fallback)"
+            );
         }
         Ok(count)
     }
@@ -702,7 +850,7 @@ impl BoardStore for PgMissionStore {
                  SELECT 1 FROM dynamic_slots
                  WHERE id = board_tasks.assignee
                    AND status = 'active'
-               )"
+               )",
         )
         .bind(&now)
         .execute(&self.pool)
@@ -721,7 +869,7 @@ impl BoardStore for PgMissionStore {
         let now = chrono::Utc::now().to_rfc3339();
         let result = sqlx::query(
             "UPDATE board_tasks SET lease_expires_at = $1, updated_at = $2
-             WHERE id = $3 AND status = 'running'"
+             WHERE id = $3 AND status = 'running'",
         )
         .bind(lease_expires_at)
         .bind(&now)
@@ -737,7 +885,7 @@ impl BoardStore for PgMissionStore {
              WHERE auto_execute = 1
                AND status = 'running'
                AND claim_executor_id IS NOT NULL
-             ORDER BY claimed_at ASC"
+             ORDER BY claimed_at ASC",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -753,7 +901,7 @@ impl BoardStore for PgMissionStore {
                AND (due_date IS NULL OR due_date <= $1)
              ORDER BY
                CASE WHEN assignee IS NOT NULL THEN 0 ELSE 1 END,
-               order_idx ASC"
+               order_idx ASC",
         )
         .bind(&today)
         .fetch_all(&self.pool)
@@ -803,27 +951,35 @@ impl BoardStore for PgMissionStore {
             return Ok(DependencyStatus::Ready);
         }
         for dep_id in depends_on {
-            let row: Option<(String,)> = sqlx::query_as(
-                "SELECT status FROM board_tasks WHERE id = $1"
-            )
-            .bind(dep_id.as_str())
-            .fetch_optional(&self.pool)
-            .await?;
+            let row: Option<(String,)> =
+                sqlx::query_as("SELECT status FROM board_tasks WHERE id = $1")
+                    .bind(dep_id.as_str())
+                    .fetch_optional(&self.pool)
+                    .await?;
             match row.as_ref().map(|r| r.0.as_str()) {
                 Some("done") => {} // satisfied
                 Some("failed") | Some("skipped") => {
                     let title: String = sqlx::query_as::<_, (String,)>(
-                        "SELECT title FROM board_tasks WHERE id = $1"
+                        "SELECT title FROM board_tasks WHERE id = $1",
                     )
                     .bind(dep_id.as_str())
                     .fetch_optional(&self.pool)
                     .await?
                     .map(|r| r.0)
                     .unwrap_or_else(|| dep_id.to_string());
-                    return Ok(DependencyStatus::Blocked(format!("{} ({})", title, row.unwrap().0)));
+                    return Ok(DependencyStatus::Blocked(format!(
+                        "{} ({})",
+                        title,
+                        row.unwrap().0
+                    )));
                 }
                 Some(_) => return Ok(DependencyStatus::Pending),
-                None => return Ok(DependencyStatus::Blocked(format!("\u{4f9d}\u{8d56}\u{4efb}\u{52a1} {} \u{4e0d}\u{5b58}\u{5728}", dep_id))),
+                None => {
+                    return Ok(DependencyStatus::Blocked(format!(
+                        "\u{4f9d}\u{8d56}\u{4efb}\u{52a1} {} \u{4e0d}\u{5b58}\u{5728}",
+                        dep_id
+                    )))
+                }
             }
         }
         Ok(DependencyStatus::Ready)
@@ -832,7 +988,7 @@ impl BoardStore for PgMissionStore {
     async fn find_downstream_tasks(&self, task_id: &str) -> DbResult<Vec<String>> {
         // Fetch all tasks with non-empty depends_on
         let rows = sqlx::query_as::<_, PgBoardTaskRow>(
-            "SELECT *, 0::bigint AS notes_count FROM board_tasks WHERE depends_on != '[]'"
+            "SELECT *, 0::bigint AS notes_count FROM board_tasks WHERE depends_on != '[]'",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -857,7 +1013,11 @@ impl BoardStore for PgMissionStore {
         Ok(downstream)
     }
 
-    async fn retry_board_task(&self, task_id: &str, reset_downstream: bool) -> DbResult<Vec<String>> {
+    async fn retry_board_task(
+        &self,
+        task_id: &str,
+        reset_downstream: bool,
+    ) -> DbResult<Vec<String>> {
         let now = chrono::Utc::now().to_rfc3339();
 
         // Reset target task
@@ -890,7 +1050,11 @@ impl BoardStore for PgMissionStore {
 
     // ========== board.rs: context & notes ==========
 
-    async fn get_board_tasks_with_context(&self, ids: &[String], include_children: bool) -> DbResult<Vec<BoardTaskWithContext>> {
+    async fn get_board_tasks_with_context(
+        &self,
+        ids: &[String],
+        include_children: bool,
+    ) -> DbResult<Vec<BoardTaskWithContext>> {
         use std::collections::HashMap;
 
         if ids.is_empty() {
@@ -919,13 +1083,18 @@ impl BoardStore for PgMissionStore {
             query = query.bind(id);
         }
         let main_rows = query.fetch_all(&self.pool).await?;
-        let mut main_tasks: Vec<BoardTask> = main_rows.into_iter().map(|r| r.into_board_task()).collect();
+        let mut main_tasks: Vec<BoardTask> =
+            main_rows.into_iter().map(|r| r.into_board_task()).collect();
 
         // Query 2: Fetch children (if requested)
         let mut children_by_parent: HashMap<String, Vec<BoardTask>> = HashMap::new();
         if include_children && !main_tasks.is_empty() {
-            let parent_ids: Vec<String> = main_tasks.iter().map(|t| t.id.as_str().to_string()).collect();
-            let parent_placeholders: Vec<String> = (1..=parent_ids.len()).map(|i| format!("${}", i)).collect();
+            let parent_ids: Vec<String> = main_tasks
+                .iter()
+                .map(|t| t.id.as_str().to_string())
+                .collect();
+            let parent_placeholders: Vec<String> =
+                (1..=parent_ids.len()).map(|i| format!("${}", i)).collect();
             let child_sql = format!(
                 "SELECT *, 0::bigint AS notes_count FROM board_tasks WHERE parent_id IN ({}) ORDER BY order_idx ASC",
                 parent_placeholders.join(",")
@@ -938,13 +1107,19 @@ impl BoardStore for PgMissionStore {
             for row in child_rows {
                 let task = row.into_board_task();
                 if let Some(ref pid) = task.parent_id {
-                    children_by_parent.entry(pid.as_str().to_string()).or_default().push(task);
+                    children_by_parent
+                        .entry(pid.as_str().to_string())
+                        .or_default()
+                        .push(task);
                 }
             }
         }
 
         // Query 3: Fetch all notes in one batch
-        let mut all_task_ids: Vec<String> = main_tasks.iter().map(|t| t.id.as_str().to_string()).collect();
+        let mut all_task_ids: Vec<String> = main_tasks
+            .iter()
+            .map(|t| t.id.as_str().to_string())
+            .collect();
         for children in children_by_parent.values() {
             for child in children {
                 all_task_ids.push(child.id.as_str().to_string());
@@ -953,7 +1128,9 @@ impl BoardStore for PgMissionStore {
 
         let mut notes_by_task: HashMap<String, Vec<BoardTaskNote>> = HashMap::new();
         if !all_task_ids.is_empty() {
-            let note_placeholders: Vec<String> = (1..=all_task_ids.len()).map(|i| format!("${}", i)).collect();
+            let note_placeholders: Vec<String> = (1..=all_task_ids.len())
+                .map(|i| format!("${}", i))
+                .collect();
             let note_sql = format!(
                 "SELECT id, task_id, content, note_type, author, created_at FROM board_task_notes WHERE task_id IN ({}) ORDER BY created_at ASC",
                 note_placeholders.join(",")
@@ -965,7 +1142,10 @@ impl BoardStore for PgMissionStore {
             let note_rows = note_query.fetch_all(&self.pool).await?;
             for row in note_rows {
                 let note = row.into_note();
-                notes_by_task.entry(note.task_id.clone()).or_default().push(note);
+                notes_by_task
+                    .entry(note.task_id.clone())
+                    .or_default()
+                    .push(note);
             }
         }
 
@@ -977,15 +1157,21 @@ impl BoardStore for PgMissionStore {
                 let notes = notes_by_task.remove(&task_id_str).unwrap_or_default();
                 let children = if include_children {
                     let child_tasks = children_by_parent.remove(&task_id_str).unwrap_or_default();
-                    Some(child_tasks.into_iter().map(|child| {
-                        let child_id_str = child.id.as_str().to_string();
-                        let child_notes = notes_by_task.remove(&child_id_str).unwrap_or_default();
-                        BoardTaskWithContext {
-                            task: child,
-                            notes: child_notes,
-                            children: None,
-                        }
-                    }).collect())
+                    Some(
+                        child_tasks
+                            .into_iter()
+                            .map(|child| {
+                                let child_id_str = child.id.as_str().to_string();
+                                let child_notes =
+                                    notes_by_task.remove(&child_id_str).unwrap_or_default();
+                                BoardTaskWithContext {
+                                    task: child,
+                                    notes: child_notes,
+                                    children: None,
+                                }
+                            })
+                            .collect(),
+                    )
                 } else {
                     None
                 };
@@ -1006,21 +1192,23 @@ impl BoardStore for PgMissionStore {
         let note_type_str = input.note_type.as_deref().unwrap_or("note");
 
         // Verify task exists
-        let (exists,): (bool,) = sqlx::query_as(
-            "SELECT COUNT(*) > 0 FROM board_tasks WHERE id = $1"
-        )
-        .bind(&input.task_id)
-        .fetch_one(&self.pool)
-        .await?;
+        let (exists,): (bool,) =
+            sqlx::query_as("SELECT COUNT(*) > 0 FROM board_tasks WHERE id = $1")
+                .bind(&input.task_id)
+                .fetch_one(&self.pool)
+                .await?;
         if !exists {
-            return Err(DbError::NotFound { entity: "board_task", id: input.task_id.clone() });
+            return Err(DbError::NotFound {
+                entity: "board_task",
+                id: input.task_id.clone(),
+            });
         }
 
         let note_type = BoardNoteType::from_str(note_type_str).unwrap_or(BoardNoteType::Note);
 
         sqlx::query(
             "INSERT INTO board_task_notes (id, task_id, content, note_type, author, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6)"
+             VALUES ($1, $2, $3, $4, $5, $6)",
         )
         .bind(&id)
         .bind(&input.task_id)
@@ -1044,7 +1232,7 @@ impl BoardStore for PgMissionStore {
     async fn get_board_task_notes(&self, task_id: &str) -> DbResult<Vec<BoardTaskNote>> {
         let rows = sqlx::query_as::<_, PgBoardTaskNoteRow>(
             "SELECT id, task_id, content, note_type, author, created_at
-             FROM board_task_notes WHERE task_id = $1 ORDER BY created_at ASC"
+             FROM board_task_notes WHERE task_id = $1 ORDER BY created_at ASC",
         )
         .bind(task_id)
         .fetch_all(&self.pool)
@@ -1061,7 +1249,12 @@ impl BoardStore for PgMissionStore {
         }
     }
 
-    async fn query_board_tasks_in_range(&self, time_col: &str, since: &str, until: &str) -> DbResult<Vec<serde_json::Value>> {
+    async fn query_board_tasks_in_range(
+        &self,
+        time_col: &str,
+        since: &str,
+        until: &str,
+    ) -> DbResult<Vec<serde_json::Value>> {
         let col = match time_col {
             "created_at" | "updated_at" => time_col,
             _ => return Ok(Vec::new()),
@@ -1070,25 +1263,34 @@ impl BoardStore for PgMissionStore {
             "SELECT id, title, status, priority, project, {} as ts FROM board_tasks WHERE {} >= $1 AND {} <= $2 ORDER BY {} DESC LIMIT 50",
             col, col, col, col
         );
-        let rows = sqlx::query_as::<_, (String, String, String, String, Option<String>, String)>(&sql)
-            .bind(since)
-            .bind(until)
-            .fetch_all(&self.pool)
-            .await?;
-        let tasks: Vec<serde_json::Value> = rows.into_iter().map(|(id, title, status, priority, project, ts)| {
-            serde_json::json!({
-                "id": id,
-                "title": title,
-                "status": status,
-                "priority": priority,
-                "project": project,
-                "time": ts,
+        let rows =
+            sqlx::query_as::<_, (String, String, String, String, Option<String>, String)>(&sql)
+                .bind(since)
+                .bind(until)
+                .fetch_all(&self.pool)
+                .await?;
+        let tasks: Vec<serde_json::Value> = rows
+            .into_iter()
+            .map(|(id, title, status, priority, project, ts)| {
+                serde_json::json!({
+                    "id": id,
+                    "title": title,
+                    "status": status,
+                    "priority": priority,
+                    "project": project,
+                    "time": ts,
+                })
             })
-        }).collect();
+            .collect();
         Ok(tasks)
     }
 
-    async fn query_board_tasks_in_range_with_status(&self, status: &str, since: &str, until: &str) -> DbResult<Vec<serde_json::Value>> {
+    async fn query_board_tasks_in_range_with_status(
+        &self,
+        status: &str,
+        since: &str,
+        until: &str,
+    ) -> DbResult<Vec<serde_json::Value>> {
         let rows = sqlx::query_as::<_, (String, String, String, String, Option<String>, String)>(
             "SELECT id, title, status, priority, project, updated_at FROM board_tasks WHERE status = $1 AND updated_at >= $2 AND updated_at <= $3 ORDER BY updated_at DESC LIMIT 50"
         )
@@ -1097,22 +1299,28 @@ impl BoardStore for PgMissionStore {
         .bind(until)
         .fetch_all(&self.pool)
         .await?;
-        let tasks: Vec<serde_json::Value> = rows.into_iter().map(|(id, title, status, priority, project, updated_at)| {
-            serde_json::json!({
-                "id": id,
-                "title": title,
-                "status": status,
-                "priority": priority,
-                "project": project,
-                "completed_at": updated_at,
+        let tasks: Vec<serde_json::Value> = rows
+            .into_iter()
+            .map(|(id, title, status, priority, project, updated_at)| {
+                serde_json::json!({
+                    "id": id,
+                    "title": title,
+                    "status": status,
+                    "priority": priority,
+                    "project": project,
+                    "completed_at": updated_at,
+                })
             })
-        }).collect();
+            .collect();
         Ok(tasks)
     }
 
     // ========== question.rs: agent decision requests ==========
 
-    async fn create_agent_question(&self, input: &CreateAgentQuestionInput) -> DbResult<AgentQuestion> {
+    async fn create_agent_question(
+        &self,
+        input: &CreateAgentQuestionInput,
+    ) -> DbResult<AgentQuestion> {
         let now = chrono::Utc::now().to_rfc3339();
         let id = uuid::Uuid::new_v4().to_string();
         let q = AgentQuestion {
@@ -1126,7 +1334,10 @@ impl BoardStore for PgMissionStore {
             answer: None,
             target: input.target.clone().unwrap_or_else(|| "user".to_string()),
             options: input.options.clone(),
-            decision_type: input.decision_type.clone().unwrap_or_else(|| "implementation".to_string()),
+            decision_type: input
+                .decision_type
+                .clone()
+                .unwrap_or_else(|| "implementation".to_string()),
             retry_count: 0,
             routing_trace: None,
             created_at: now.clone(),
@@ -1170,16 +1381,20 @@ impl BoardStore for PgMissionStore {
     }
 
     async fn get_agent_question(&self, id: &str) -> DbResult<Option<AgentQuestion>> {
-        let row = sqlx::query_as::<_, PgAgentQuestionRow>(
-            "SELECT * FROM agent_questions WHERE id = $1"
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row =
+            sqlx::query_as::<_, PgAgentQuestionRow>("SELECT * FROM agent_questions WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
         Ok(row.map(|r| r.into_question()))
     }
 
-    async fn list_agent_questions(&self, status: Option<&str>, target: Option<&str>, limit: Option<usize>) -> DbResult<Vec<AgentQuestion>> {
+    async fn list_agent_questions(
+        &self,
+        status: Option<&str>,
+        target: Option<&str>,
+        limit: Option<usize>,
+    ) -> DbResult<Vec<AgentQuestion>> {
         let mut conditions = Vec::new();
         let mut param_values: Vec<String> = Vec::new();
 
@@ -1205,7 +1420,10 @@ impl BoardStore for PgMissionStore {
             None => String::new(),
         };
 
-        let sql = format!("SELECT * FROM agent_questions{} ORDER BY created_at DESC{}", where_clause, limit_clause);
+        let sql = format!(
+            "SELECT * FROM agent_questions{} ORDER BY created_at DESC{}",
+            where_clause, limit_clause
+        );
         let mut query = sqlx::query_as::<_, PgAgentQuestionRow>(&sql);
         for v in &param_values {
             query = query.bind(v);
@@ -1224,7 +1442,11 @@ impl BoardStore for PgMissionStore {
         Ok(rows.into_iter().map(|r| r.into_question()).collect())
     }
 
-    async fn answer_agent_question(&self, id: &str, answer: &str) -> DbResult<Option<AgentQuestion>> {
+    async fn answer_agent_question(
+        &self,
+        id: &str,
+        answer: &str,
+    ) -> DbResult<Option<AgentQuestion>> {
         let now = chrono::Utc::now().to_rfc3339();
 
         sqlx::query(
@@ -1237,16 +1459,15 @@ impl BoardStore for PgMissionStore {
         .await?;
 
         // Auto-unblock: if all questions for the linked task are resolved, unblock the task
-        let task_id: Option<(Option<String>,)> = sqlx::query_as(
-            "SELECT task_id FROM agent_questions WHERE id = $1"
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let task_id: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT task_id FROM agent_questions WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
 
         if let Some((Some(tid),)) = task_id {
             let (pending_count,): (i64,) = sqlx::query_as(
-                "SELECT COUNT(*) FROM agent_questions WHERE task_id = $1 AND status = 'pending'"
+                "SELECT COUNT(*) FROM agent_questions WHERE task_id = $1 AND status = 'pending'",
             )
             .bind(&tid)
             .fetch_one(&self.pool)
@@ -1270,7 +1491,7 @@ impl BoardStore for PgMissionStore {
     async fn dismiss_agent_question(&self, id: &str) -> DbResult<Option<AgentQuestion>> {
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query(
-            "UPDATE agent_questions SET status = 'dismissed', updated_at = $1 WHERE id = $2"
+            "UPDATE agent_questions SET status = 'dismissed', updated_at = $1 WHERE id = $2",
         )
         .bind(&now)
         .bind(id)
@@ -1281,26 +1502,22 @@ impl BoardStore for PgMissionStore {
 
     async fn set_question_routing_trace(&self, id: &str, trace_json: &str) -> DbResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
-        sqlx::query(
-            "UPDATE agent_questions SET routing_trace = $1, updated_at = $2 WHERE id = $3"
-        )
-        .bind(trace_json)
-        .bind(&now)
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("UPDATE agent_questions SET routing_trace = $1, updated_at = $2 WHERE id = $3")
+            .bind(trace_json)
+            .bind(&now)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
     async fn downgrade_question_to_user(&self, id: &str) -> DbResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
-        sqlx::query(
-            "UPDATE agent_questions SET target = 'user', updated_at = $1 WHERE id = $2"
-        )
-        .bind(&now)
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("UPDATE agent_questions SET target = 'user', updated_at = $1 WHERE id = $2")
+            .bind(&now)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -1320,7 +1537,7 @@ impl BoardStore for PgMissionStore {
         let rows = sqlx::query_as::<_, PgAgentQuestionRow>(
             "SELECT * FROM agent_questions
              WHERE target = 'master' AND status = 'pending'
-               AND EXTRACT(EPOCH FROM (NOW() - created_at::timestamp)) > $1"
+               AND EXTRACT(EPOCH FROM (NOW() - created_at::timestamp)) > $1",
         )
         .bind(max_age_secs)
         .fetch_all(&self.pool)
@@ -1328,7 +1545,10 @@ impl BoardStore for PgMissionStore {
         Ok(rows.into_iter().map(|r| r.into_question()).collect())
     }
 
-    async fn find_tasks_with_unharvested_decisions(&self, min_count: usize) -> DbResult<Vec<(String, String, usize)>> {
+    async fn find_tasks_with_unharvested_decisions(
+        &self,
+        min_count: usize,
+    ) -> DbResult<Vec<(String, String, usize)>> {
         let rows = sqlx::query_as::<_, (String, String, i64)>(
             "SELECT bt.id, bt.title, COUNT(aq.id) as q_count
              FROM board_tasks bt
@@ -1336,28 +1556,38 @@ impl BoardStore for PgMissionStore {
              WHERE bt.status NOT IN ('done', 'skipped', 'failed')
                AND aq.target = 'master' AND aq.status = 'answered'
              GROUP BY bt.id, bt.title
-             HAVING COUNT(aq.id) >= $1"
+             HAVING COUNT(aq.id) >= $1",
         )
         .bind(min_count as i64)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(|(id, title, count)| (id, title, count as usize)).collect())
+        Ok(rows
+            .into_iter()
+            .map(|(id, title, count)| (id, title, count as usize))
+            .collect())
     }
 
     async fn decision_stats(&self, hours: i64) -> DbResult<serde_json::Value> {
         let cutoff = (chrono::Utc::now() - chrono::TimeDelta::hours(hours)).to_rfc3339();
 
         let (total,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM agent_questions WHERE target = 'master' AND created_at > $1"
-        ).bind(&cutoff).fetch_one(&self.pool).await.unwrap_or((0,));
+            "SELECT COUNT(*) FROM agent_questions WHERE target = 'master' AND created_at > $1",
+        )
+        .bind(&cutoff)
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or((0,));
 
         let (answered,): (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM agent_questions WHERE target = 'master' AND status = 'answered' AND created_at > $1"
         ).bind(&cutoff).fetch_one(&self.pool).await.unwrap_or((0,));
 
         let (pending,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM agent_questions WHERE target = 'master' AND status = 'pending'"
-        ).fetch_one(&self.pool).await.unwrap_or((0,));
+            "SELECT COUNT(*) FROM agent_questions WHERE target = 'master' AND status = 'pending'",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or((0,));
 
         let (dismissed,): (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM agent_questions WHERE target = 'master' AND status = 'dismissed' AND created_at > $1"
@@ -1470,7 +1700,8 @@ struct PgBoardTaskRow {
 impl PgBoardTaskRow {
     fn into_board_task(self) -> BoardTask {
         let status = BoardTaskStatus::from_str(&self.status).unwrap_or(BoardTaskStatus::Open);
-        let depends_on: Vec<TaskId> = self.depends_on
+        let depends_on: Vec<TaskId> = self
+            .depends_on
             .as_deref()
             .and_then(|raw| serde_json::from_str(raw).ok())
             .unwrap_or_default();
@@ -1576,7 +1807,8 @@ struct PgAgentQuestionRow {
 #[cfg(feature = "postgres")]
 impl PgAgentQuestionRow {
     fn into_question(self) -> AgentQuestion {
-        let status = AgentQuestionStatus::from_str(&self.status).unwrap_or(AgentQuestionStatus::Pending);
+        let status =
+            AgentQuestionStatus::from_str(&self.status).unwrap_or(AgentQuestionStatus::Pending);
         AgentQuestion {
             id: self.id,
             task_id: self.task_id,
@@ -1588,7 +1820,9 @@ impl PgAgentQuestionRow {
             answer: self.answer,
             target: self.target.unwrap_or_else(|| "user".to_string()),
             options: self.options,
-            decision_type: self.decision_type.unwrap_or_else(|| "implementation".to_string()),
+            decision_type: self
+                .decision_type
+                .unwrap_or_else(|| "implementation".to_string()),
             retry_count: self.retry_count.unwrap_or(0),
             routing_trace: self.routing_trace,
             created_at: self.created_at,

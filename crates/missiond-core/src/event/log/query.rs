@@ -218,10 +218,7 @@ where
         // budget intentionally stays at the cap — bumping it here would
         // defeat the defensive limit.
         let rows = self.read_from(query.domain, after, cap).await?;
-        let filtered: Vec<LoggedEvent> = rows
-            .into_iter()
-            .filter(|r| query.matches(r))
-            .collect();
+        let filtered: Vec<LoggedEvent> = rows.into_iter().filter(|r| query.matches(r)).collect();
         Ok(filtered)
     }
 }
@@ -346,9 +343,17 @@ mod tests {
     async fn blanket_impl_filters_by_kind_and_correlation() {
         let stub = StubLog {
             rows: vec![
-                fixture(1, "plan_node_state_changed", json!({"plan_id": "p1", "node_id": "n1"})),
+                fixture(
+                    1,
+                    "plan_node_state_changed",
+                    json!({"plan_id": "p1", "node_id": "n1"}),
+                ),
                 fixture(2, "opened", json!({})),
-                fixture(3, "plan_node_state_changed", json!({"plan_id": "p2", "node_id": "n1"})),
+                fixture(
+                    3,
+                    "plan_node_state_changed",
+                    json!({"plan_id": "p2", "node_id": "n1"}),
+                ),
             ],
             last_limit: std::sync::Mutex::new(0),
         };

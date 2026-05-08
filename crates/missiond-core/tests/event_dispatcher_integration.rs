@@ -17,14 +17,13 @@ use std::time::Duration;
 
 use missiond_core::event::blob_store::{BlobStore, LocalFileBlobStore};
 use missiond_core::event::dispatcher::{
-    DispatcherBuilder, NeverPaused, PgTailSource, TailSource, register_all_domains,
+    register_all_domains, DispatcherBuilder, NeverPaused, PgTailSource, TailSource,
 };
 use missiond_core::event::events::{
-    BoardEvent, IncidentEvent, LlmEvent, MemoryEvent, MessageEvent, ObservabilityEvent,
-    Provider, QuestionEvent, SessionEndStatus, SessionEvent, SlotEvent, SystemEvent, TaskEvent,
-    WorkerEvent,
+    BoardEvent, IncidentEvent, LlmEvent, MemoryEvent, MessageEvent, ObservabilityEvent, Provider,
+    QuestionEvent, SessionEndStatus, SessionEvent, SlotEvent, SystemEvent, TaskEvent, WorkerEvent,
 };
-use missiond_core::event::log::{AppendOpts, Log, spawn_log_writer};
+use missiond_core::event::log::{spawn_log_writer, AppendOpts, Log};
 use missiond_core::event::{Domain, DomainEvent};
 use missiond_core::types::{IncidentSeverity, IncidentSource, MissionIncident};
 use tokio::sync::watch;

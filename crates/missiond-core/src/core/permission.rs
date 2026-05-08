@@ -73,7 +73,10 @@ impl PermissionPolicy {
     }
 
     /// Create a new PermissionPolicy with optional learned permissions
-    pub fn new_with_learned<P: AsRef<Path>>(config_path: P, learned: Option<Arc<LearnedPermissions>>) -> Self {
+    pub fn new_with_learned<P: AsRef<Path>>(
+        config_path: P,
+        learned: Option<Arc<LearnedPermissions>>,
+    ) -> Self {
         let config_path = config_path.as_ref().to_path_buf();
         let config = Self::load_config(&config_path);
 
@@ -352,7 +355,11 @@ impl PermissionPolicy {
         if config.roles.is_none() {
             config.roles = Some(HashMap::new());
         }
-        config.roles.as_mut().unwrap().insert(role.to_string(), rule);
+        config
+            .roles
+            .as_mut()
+            .unwrap()
+            .insert(role.to_string(), rule);
         drop(config);
         let _ = self.save_config();
     }
@@ -445,7 +452,11 @@ impl PermissionPolicy {
     }
 
     /// Get learned permissions for a scope
-    pub fn get_learned(&self, scope_type: &str, scope_id: &str) -> Result<Vec<super::LearnedPermission>> {
+    pub fn get_learned(
+        &self,
+        scope_type: &str,
+        scope_id: &str,
+    ) -> Result<Vec<super::LearnedPermission>> {
         if let Some(learned) = &self.learned {
             learned.get_for_scope(scope_type, scope_id)
         } else {
@@ -651,7 +662,9 @@ mod tests {
 
         let learned = Arc::new(super::super::LearnedPermissions::new(&db_path).unwrap());
         // Learned slot-level allow for dangerous_tool
-        learned.learn("slot", "slot-1", "dangerous_tool", "allow", None).unwrap();
+        learned
+            .learn("slot", "slot-1", "dangerous_tool", "allow", None)
+            .unwrap();
 
         let policy = PermissionPolicy::new_with_learned(&config_path, Some(learned));
 

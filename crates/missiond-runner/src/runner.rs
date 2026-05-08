@@ -115,7 +115,8 @@ impl ClaudeRunner {
                 let mut buf = String::new();
                 loop {
                     buf.clear();
-                    match tokio::io::AsyncBufReadExt::read_line(&mut stderr_reader, &mut buf).await {
+                    match tokio::io::AsyncBufReadExt::read_line(&mut stderr_reader, &mut buf).await
+                    {
                         Ok(0) => break,
                         Ok(_) => {
                             let line = buf.trim().to_string();
@@ -150,7 +151,9 @@ impl ClaudeRunner {
                         if let Some(event_type) = value.get("type").and_then(|v| v.as_str()) {
                             match event_type {
                                 "result" => {
-                                    if let Ok(evt) = serde_json::from_value::<ResultEvent>(value.clone()) {
+                                    if let Ok(evt) =
+                                        serde_json::from_value::<ResultEvent>(value.clone())
+                                    {
                                         result_event = Some(evt.clone());
                                         if let Some(ref cb) = on_progress {
                                             cb(StreamEvent::Result(evt));
@@ -158,21 +161,27 @@ impl ClaudeRunner {
                                     }
                                 }
                                 "assistant" => {
-                                    if let Ok(evt) = serde_json::from_value::<AssistantEvent>(value.clone()) {
+                                    if let Ok(evt) =
+                                        serde_json::from_value::<AssistantEvent>(value.clone())
+                                    {
                                         if let Some(ref cb) = on_progress {
                                             cb(StreamEvent::Assistant(evt));
                                         }
                                     }
                                 }
                                 "user" => {
-                                    if let Ok(evt) = serde_json::from_value::<UserEvent>(value.clone()) {
+                                    if let Ok(evt) =
+                                        serde_json::from_value::<UserEvent>(value.clone())
+                                    {
                                         if let Some(ref cb) = on_progress {
                                             cb(StreamEvent::User(evt));
                                         }
                                     }
                                 }
                                 "system" => {
-                                    if let Ok(evt) = serde_json::from_value::<SystemEvent>(value.clone()) {
+                                    if let Ok(evt) =
+                                        serde_json::from_value::<SystemEvent>(value.clone())
+                                    {
                                         if let Some(ref cb) = on_progress {
                                             cb(StreamEvent::System(evt));
                                         }
@@ -215,9 +224,7 @@ impl ClaudeRunner {
         }
 
         // Check for result
-        let result_event = result_event.ok_or_else(|| {
-            RunnerError::NoResult(errors.join("\n"))
-        })?;
+        let result_event = result_event.ok_or_else(|| RunnerError::NoResult(errors.join("\n")))?;
 
         // Convert to RunResult
         Ok(RunResult {

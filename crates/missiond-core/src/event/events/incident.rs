@@ -17,9 +17,7 @@ use crate::types::MissionIncident;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum IncidentEvent {
     /// A new incident was detected by a sensor (health check, PTY slot, etc.).
-    Reported {
-        incident: MissionIncident,
-    },
+    Reported { incident: MissionIncident },
     /// An incident was resolved (manual close, auto-resolve, or timeout).
     Resolved {
         incident_id: String,
@@ -30,9 +28,7 @@ pub enum IncidentEvent {
     /// got archived. Emitted by the retention cron. Wraps a full
     /// `MissionIncident` so ops tooling that consumes `Reported` can handle
     /// this variant uniformly.
-    StaleSubscription {
-        incident: MissionIncident,
-    },
+    StaleSubscription { incident: MissionIncident },
 }
 
 impl DomainEvent for IncidentEvent {

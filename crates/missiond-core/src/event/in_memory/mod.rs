@@ -51,8 +51,8 @@ use tokio::sync::watch;
 
 use super::blob_store::BlobStore;
 use super::dispatcher::{
-    register_all_domains, DispatchError, Dispatcher, DispatcherBuilder, DispatchMetrics,
-    TailError, TailSource,
+    register_all_domains, DispatchError, DispatchMetrics, Dispatcher, DispatcherBuilder, TailError,
+    TailSource,
 };
 use super::log::reader::LoggedEvent;
 use super::log::{Log, Seq};
@@ -131,17 +131,13 @@ impl InMemoryBus {
     /// Start the dispatcher tail loop and return a handle for shutdown.
     pub async fn start(&self) -> InMemoryBusHandle {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let tail_source: Arc<dyn TailSource> =
-            Arc::new(InMemoryTailSource::new(self.log.clone()));
+        let tail_source: Arc<dyn TailSource> = Arc::new(InMemoryTailSource::new(self.log.clone()));
         let dispatcher = self.dispatcher.clone();
         let gate = ArcControlGate::new(self.control_gate.clone());
         let blob: Arc<dyn BlobStore> = self.blob_store.clone();
 
-        let join = tokio::spawn(async move {
-            dispatcher
-                .run(tail_source, blob, gate, shutdown_rx)
-                .await
-        });
+        let join =
+            tokio::spawn(async move { dispatcher.run(tail_source, blob, gate, shutdown_rx).await });
 
         InMemoryBusHandle {
             shutdown_tx,
@@ -217,10 +213,7 @@ impl ArcControlGate {
 }
 
 impl super::dispatcher::ControlGate for ArcControlGate {
-    fn is_ctl_domain_paused(
-        &self,
-        d: super::dispatcher::control_gate::CtlDomain,
-    ) -> bool {
+    fn is_ctl_domain_paused(&self, d: super::dispatcher::control_gate::CtlDomain) -> bool {
         self.inner.is_ctl_domain_paused(d)
     }
 }
@@ -279,7 +272,11 @@ mod tests {
             .unwrap();
         }
         assert_eq!(bus.log.head_seq().await.unwrap(), Seq(5));
-        let got = bus.log.read_from(super::super::Domain::Board, Seq(0), 100).await.unwrap();
+        let got = bus
+            .log
+            .read_from(super::super::Domain::Board, Seq(0), 100)
+            .await
+            .unwrap();
         assert_eq!(got.len(), 5);
     }
 

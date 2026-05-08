@@ -88,7 +88,7 @@ mod tests {
     };
     use crate::event::dispatcher::control_gate::CtlDomain;
     use crate::event::dispatcher::registry::TopicRegistryBuilder;
-    use crate::event::dispatcher::{DispatcherBuilder, NeverPaused, register_all_domains};
+    use crate::event::dispatcher::{register_all_domains, DispatcherBuilder, NeverPaused};
     use crate::event::domain::Domain;
     use crate::event::events::{BoardEvent, MemoryEvent, ObservabilityEvent, SlotEvent};
     use crate::event::log::reader::LoggedEvent;
@@ -96,8 +96,8 @@ mod tests {
     use crate::event::pipeline::step6_gate::ControlGate;
     use async_trait::async_trait;
     use chrono::Utc;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicI64, Ordering};
+    use std::sync::Arc;
     use std::sync::Mutex;
     use std::time::Instant;
     use tokio::sync::watch;
@@ -280,10 +280,7 @@ mod tests {
         let reqs = mock.requests();
         let mut last = -1i64;
         for (cursor, _) in reqs {
-            assert!(
-                cursor >= last,
-                "cursor regressed: last={last} now={cursor}"
-            );
+            assert!(cursor >= last, "cursor regressed: last={last} now={cursor}");
             last = cursor;
         }
     }
@@ -473,9 +470,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn missing_registry_entry_is_dropped_not_crashed() {
         // Build a partial registry missing BoardEvent on purpose.
-        let partial = TopicRegistryBuilder::new()
-            .register::<SlotEvent>()
-            .build();
+        let partial = TopicRegistryBuilder::new().register::<SlotEvent>().build();
         let registry = Arc::new(partial);
         let cursor = Arc::new(AtomicI64::new(0));
 
@@ -540,9 +535,10 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let source: Arc<dyn TailSource> = Arc::new(mock);
         let blob = dummy_blob_store();
-        let task = tokio::spawn(async move {
-            dispatcher.run(source, blob, NeverPaused, shutdown_rx).await
-        });
+        let task =
+            tokio::spawn(
+                async move { dispatcher.run(source, blob, NeverPaused, shutdown_rx).await },
+            );
 
         for _ in 0..50 {
             if cursor_ref.last_dispatched_seq() == Seq(1) {

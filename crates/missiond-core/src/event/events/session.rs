@@ -44,9 +44,7 @@ pub enum SessionEvent {
     },
     /// S2 Organizer finished processing a session (parent links + compaction
     /// spliced).
-    Organized {
-        session_id: String,
-    },
+    Organized { session_id: String },
 }
 
 impl DomainEvent for SessionEvent {

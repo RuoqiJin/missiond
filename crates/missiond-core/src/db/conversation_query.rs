@@ -280,7 +280,11 @@ pub enum ConversationTypeFilter {
 
 impl ConversationTypeFilter {
     pub fn to_sql_clause(&self, alias: &str) -> String {
-        let prefix = if alias.is_empty() { String::new() } else { format!("{}.", alias) };
+        let prefix = if alias.is_empty() {
+            String::new()
+        } else {
+            format!("{}.", alias)
+        };
         match self {
             Self::All => String::new(),
             Self::User => format!(" AND {}conversation_type = 'user'", prefix),
@@ -288,10 +292,17 @@ impl ConversationTypeFilter {
             Self::Worker => format!(" AND {}conversation_type = 'worker'", prefix),
             Self::Jarvis => format!(" AND {}conversation_type = 'jarvis'", prefix),
             Self::System => format!(" AND {}conversation_type IN ('meta', 'worker')", prefix),
-            Self::Gemini => format!(" AND {}conversation_type IN ('gemini_chat', 'router_chat')", prefix),
+            Self::Gemini => format!(
+                " AND {}conversation_type IN ('gemini_chat', 'router_chat')",
+                prefix
+            ),
             Self::Subagent => format!(" AND {}conversation_type = 'subagent'", prefix),
             Self::Compaction => format!(" AND {}conversation_type = 'compaction'", prefix),
-            Self::Custom(s) => format!(" AND {}conversation_type = '{}'", prefix, s.replace('\'', "''")),
+            Self::Custom(s) => format!(
+                " AND {}conversation_type = '{}'",
+                prefix,
+                s.replace('\'', "''")
+            ),
         }
     }
 

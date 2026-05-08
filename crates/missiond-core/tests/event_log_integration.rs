@@ -18,9 +18,7 @@ use std::sync::Arc;
 use missiond_core::event::blob_store::{BlobStore, LocalFileBlobStore};
 use missiond_core::event::events::board::BoardEvent;
 use missiond_core::event::events::message::MessageEvent;
-use missiond_core::event::log::{
-    AppendAck, AppendError, AppendOpts, Log, Seq, spawn_log_writer,
-};
+use missiond_core::event::log::{spawn_log_writer, AppendAck, AppendError, AppendOpts, Log, Seq};
 use missiond_core::event::{Domain, DomainEvent};
 use uuid::Uuid;
 

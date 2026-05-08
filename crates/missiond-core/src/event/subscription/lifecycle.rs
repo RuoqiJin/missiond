@@ -417,7 +417,11 @@ mod tests {
             }
         };
 
-        let got = lc.next_from_live(&mut live, extract).await.unwrap().unwrap();
+        let got = lc
+            .next_from_live(&mut live, extract)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(got.seq, Seq(11));
     }
 

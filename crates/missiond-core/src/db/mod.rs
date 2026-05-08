@@ -1,18 +1,18 @@
 //! Database operations for missiond.
 
-pub mod error;
-pub mod traits;
-pub mod shared;
-pub(crate) mod directive;
-pub(crate) mod project;
-pub(crate) mod observability;
 pub mod conversation_query;
+pub(crate) mod directive;
+pub mod error;
+pub(crate) mod observability;
+pub(crate) mod project;
+pub mod shared;
+pub mod traits;
 
 #[cfg(feature = "postgres")]
 pub mod pg;
 
 // Re-exports from shared (always available)
-pub use shared::{BackfillPhaseStatus, TimelineRow, TimelineStats, LatencyStats};
+pub use shared::{BackfillPhaseStatus, LatencyStats, TimelineRow, TimelineStats};
 
 /// Extract parent session ID from a subagent's jsonl_path.
 /// Path pattern: .../PARENT_SESSION_ID/subagents/agent-xxx.jsonl
@@ -35,7 +35,12 @@ pub fn extract_parent_session_id(jsonl_path: &str) -> Option<String> {
 /// Derive conversation_type from slot_id and session_id.
 /// "meta" = memory slots, "compaction" = context compaction shards,
 /// "subagent" = agent-* IDs, "worker" = other slots, "user" = direct CLI.
-pub fn derive_conversation_type(slot_category: Option<&str>, slot_id: Option<&str>, session_id: &str, source: &str) -> String {
+pub fn derive_conversation_type(
+    slot_category: Option<&str>,
+    slot_id: Option<&str>,
+    session_id: &str,
+    source: &str,
+) -> String {
     // Top-level interception for all Gemini family conversations
     // Regardless of whether they have a slot or not, they belong in the Gemini tab.
     if source == "gemini_cli" || source == "router_chat" {

@@ -91,7 +91,9 @@ pub struct WorkflowStep {
     pub max_retries: u32,
 }
 
-fn default_on_error() -> String { "stop".to_string() }
+fn default_on_error() -> String {
+    "stop".to_string()
+}
 
 /// Parsed workflow block from ```workflow code fence
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,7 +104,9 @@ pub struct WorkflowBlock {
     pub steps: Vec<WorkflowStep>,
 }
 
-fn default_workflow_type() -> String { "sequential".to_string() }
+fn default_workflow_type() -> String {
+    "sequential".to_string()
+}
 
 /// Workflow execution result
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,10 +117,18 @@ pub enum WorkflowResult {
     Preview { steps: Vec<WorkflowStepPreview> },
     /// Execution completed successfully
     #[serde(rename = "success")]
-    Success { steps_completed: usize, results: Vec<WorkflowStepResult> },
+    Success {
+        steps_completed: usize,
+        results: Vec<WorkflowStepResult>,
+    },
     /// Execution failed at a step
     #[serde(rename = "failed")]
-    Failed { steps_completed: usize, error_step: usize, error: String, results: Vec<WorkflowStepResult> },
+    Failed {
+        steps_completed: usize,
+        error_step: usize,
+        error: String,
+        results: Vec<WorkflowStepResult>,
+    },
     /// Waiting for user approval
     #[serde(rename = "pending_approval")]
     PendingApproval { action_id: String, skill: String },
@@ -138,7 +150,10 @@ pub struct WorkflowStepResult {
 }
 
 /// Resolve `${var}` references in a JSON value using a context map
-pub fn resolve_vars(value: &serde_json::Value, context: &std::collections::HashMap<String, String>) -> serde_json::Value {
+pub fn resolve_vars(
+    value: &serde_json::Value,
+    context: &std::collections::HashMap<String, String>,
+) -> serde_json::Value {
     match value {
         serde_json::Value::String(s) => {
             let mut result = s.clone();
@@ -281,11 +296,7 @@ impl SkillIndex {
             .filter_map(|skill| {
                 let mut score = 0usize;
                 let name_lower = skill.name.to_lowercase();
-                let desc_lower = skill
-                    .description
-                    .as_deref()
-                    .unwrap_or("")
-                    .to_lowercase();
+                let desc_lower = skill.description.as_deref().unwrap_or("").to_lowercase();
                 let aka_joined = skill
                     .aka
                     .as_ref()
@@ -334,15 +345,19 @@ impl SkillIndex {
                 // Find INDEX section and key tables
                 let sections = extract_key_sections(&body);
 
-                context.push_str(&format!("## {} ({})\n", skill.name,
-                    skill.description.as_deref().unwrap_or("")));
+                context.push_str(&format!(
+                    "## {} ({})\n",
+                    skill.name,
+                    skill.description.as_deref().unwrap_or("")
+                ));
 
                 if !sections.is_empty() {
                     context.push_str(&sections);
                 }
                 context.push('\n');
             } else {
-                context.push_str(&format!("- {}: {}\n",
+                context.push_str(&format!(
+                    "- {}: {}\n",
                     skill.name,
                     skill.description.as_deref().unwrap_or("(no description)")
                 ));
@@ -513,7 +528,16 @@ fn extract_key_sections(body: &str) -> String {
     let mut result = String::new();
     let mut in_section = false;
     let mut section_name = String::new();
-    let key_sections = ["路径", "path", "服务端口", "port", "index", "连接", "config", "配置"];
+    let key_sections = [
+        "路径",
+        "path",
+        "服务端口",
+        "port",
+        "index",
+        "连接",
+        "config",
+        "配置",
+    ];
 
     for line in body.lines() {
         if line.starts_with("# ") || line.starts_with("## ") {
@@ -599,7 +623,10 @@ pub fn parse_sections(body: &str) -> Vec<ParsedSection> {
 
 /// Ingest all SKILL.md files into the database.
 /// Scans ~/.claude/skills/, parses frontmatter + sections, writes to skill_topics + skill_blocks.
-pub async fn ingest_skills(store: &dyn crate::db::traits::ProjectStore, skills_dir: &Path) -> usize {
+pub async fn ingest_skills(
+    store: &dyn crate::db::traits::ProjectStore,
+    skills_dir: &Path,
+) -> usize {
     let index = SkillIndex::build(skills_dir);
     let skills = index.list();
     let mut ingested = 0;
@@ -636,16 +663,19 @@ pub async fn ingest_skills(store: &dyn crate::db::traits::ProjectStore, skills_d
         let file_path_str = skill.path.to_string_lossy().to_string();
 
         // Upsert topic
-        if let Err(e) = store.skill_topic_upsert_full(
-            &skill.name,
-            skill.description.as_deref(),
-            aka_json.as_deref(),
-            skill.allowed_tools.as_deref(),
-            &file_path_str,
-            requires_json.as_deref(),
-            actions_json.as_deref(),
-            context_hooks_json.as_deref(),
-        ).await {
+        if let Err(e) = store
+            .skill_topic_upsert_full(
+                &skill.name,
+                skill.description.as_deref(),
+                aka_json.as_deref(),
+                skill.allowed_tools.as_deref(),
+                &file_path_str,
+                requires_json.as_deref(),
+                actions_json.as_deref(),
+                context_hooks_json.as_deref(),
+            )
+            .await
+        {
             warn!(topic = %skill.name, error = %e, "Failed to upsert skill topic");
             continue;
         }
@@ -665,13 +695,16 @@ pub async fn ingest_skills(store: &dyn crate::db::traits::ProjectStore, skills_d
             {
                 continue;
             }
-            if let Err(e) = store.skill_block_insert(
-                &skill.name,
-                "section",
-                Some(&section.title),
-                &section.content,
-                section.sort_order,
-            ).await {
+            if let Err(e) = store
+                .skill_block_insert(
+                    &skill.name,
+                    "section",
+                    Some(&section.title),
+                    &section.content,
+                    section.sort_order,
+                )
+                .await
+            {
                 warn!(
                     topic = %skill.name,
                     section = %section.title,
@@ -684,7 +717,9 @@ pub async fn ingest_skills(store: &dyn crate::db::traits::ProjectStore, skills_d
         // Update line count
         let total_lines = content.lines().count() as i32;
         let checksum = format!("{:x}", md5_hash(content.as_bytes()));
-        let _ = store.skill_topic_update_stats(&skill.name, total_lines, &checksum).await;
+        let _ = store
+            .skill_topic_update_stats(&skill.name, total_lines, &checksum)
+            .await;
 
         debug!(
             topic = %skill.name,
@@ -713,14 +748,19 @@ fn md5_hash(data: &[u8]) -> u64 {
 }
 
 /// Materialize a single topic from DB to SKILL.md
-pub async fn materialize_topic(store: &dyn crate::db::traits::ProjectStore, topic: &str) -> Result<String, String> {
+pub async fn materialize_topic(
+    store: &dyn crate::db::traits::ProjectStore,
+    topic: &str,
+) -> Result<String, String> {
     let topic_meta = store
-        .skill_topic_get(topic).await
+        .skill_topic_get(topic)
+        .await
         .map_err(|e| format!("DB error: {}", e))?
         .ok_or_else(|| format!("Topic not found: {}", topic))?;
 
     let blocks = store
-        .skill_blocks_for_topic(topic).await
+        .skill_blocks_for_topic(topic)
+        .await
         .map_err(|e| format!("DB error: {}", e))?;
 
     // Build frontmatter
@@ -736,18 +776,21 @@ pub async fn materialize_topic(store: &dyn crate::db::traits::ProjectStore, topi
         // aka is stored as JSON array string
         if let Ok(aliases) = serde_json::from_str::<Vec<String>>(aka) {
             if !aliases.is_empty() {
-                output.push_str(&format!(
-                    "aka: [{}]\n",
-                    aliases.join(", ")
-                ));
+                output.push_str(&format!("aka: [{}]\n", aliases.join(", ")));
             }
         }
     }
     output.push_str("---\n\n");
 
     // Separate sections and fragments
-    let sections: Vec<_> = blocks.iter().filter(|b| b.block_type == "section").collect();
-    let fragments: Vec<_> = blocks.iter().filter(|b| b.block_type == "fragment").collect();
+    let sections: Vec<_> = blocks
+        .iter()
+        .filter(|b| b.block_type == "section")
+        .collect();
+    let fragments: Vec<_> = blocks
+        .iter()
+        .filter(|b| b.block_type == "fragment")
+        .collect();
 
     // Write sections
     for block in &sections {
@@ -790,7 +833,9 @@ pub async fn materialize_topic(store: &dyn crate::db::traits::ProjectStore, topi
                 }
             }
 
-            let _ = store.skill_version_save(topic, &existing, &old_checksum).await;
+            let _ = store
+                .skill_version_save(topic, &existing, &old_checksum)
+                .await;
         }
     }
 
@@ -803,7 +848,9 @@ pub async fn materialize_topic(store: &dyn crate::db::traits::ProjectStore, topi
     // Update stats
     let total_lines = output.lines().count() as i32;
     let checksum = format!("{:x}", md5_hash(output.as_bytes()));
-    let _ = store.skill_topic_update_stats(topic, total_lines, &checksum).await;
+    let _ = store
+        .skill_topic_update_stats(topic, total_lines, &checksum)
+        .await;
 
     Ok(output)
 }
@@ -811,7 +858,8 @@ pub async fn materialize_topic(store: &dyn crate::db::traits::ProjectStore, topi
 /// Materialize all topics from DB to SKILL.md files
 pub async fn materialize_all(store: &dyn crate::db::traits::ProjectStore) -> Result<usize, String> {
     let topics = store
-        .skill_topic_list().await
+        .skill_topic_list()
+        .await
         .map_err(|e| format!("DB error: {}", e))?;
 
     let mut count = 0;
@@ -846,7 +894,8 @@ mod tests {
 
     #[test]
     fn test_parse_frontmatter_with_aka() {
-        let yaml = "name: backend-deploy\ndescription: 后端部署\naka: [部署, deploy]\nallowed-tools: Bash";
+        let yaml =
+            "name: backend-deploy\ndescription: 后端部署\naka: [部署, deploy]\nallowed-tools: Bash";
         let fm: Frontmatter = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(fm.name.unwrap(), "backend-deploy");
         assert_eq!(fm.aka.unwrap().len(), 2);

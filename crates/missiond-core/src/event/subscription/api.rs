@@ -30,9 +30,7 @@ use super::failure::{build_failure_info, DlqSink, FailureRouter};
 use super::lifecycle::Lifecycle;
 use super::live_source::{BroadcastLiveSource, LiveSource};
 use super::options::{CursorFlush, FailurePolicy, StartFrom, SubscriptionOpts};
-use super::{
-    FailureOutcome, FlushSignal, FlusherHandle, Subscription, SubscriptionState,
-};
+use super::{FailureOutcome, FlushSignal, FlusherHandle, Subscription, SubscriptionState};
 
 /// Errors returned by [`subscribe`].
 #[derive(Debug, thiserror::Error)]
@@ -113,8 +111,7 @@ pub async fn subscribe<T: DomainEvent>(
     );
 
     // 5) Attach the live receiver.
-    let live: Box<dyn LiveSource<T>> =
-        Box::new(BroadcastLiveSource::new(topic.subscribe()));
+    let live: Box<dyn LiveSource<T>> = Box::new(BroadcastLiveSource::new(topic.subscribe()));
 
     // 6) Build the subscription.
     let lifecycle = Lifecycle::<T>::new(initial_cursor_seq, opts.batch_size, domain);
@@ -345,7 +342,7 @@ async fn handle_nack(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::dispatcher::{DispatcherBuilder, register_all_domains};
+    use crate::event::dispatcher::{register_all_domains, DispatcherBuilder};
     use crate::event::domain::Domain;
     use crate::event::events::BoardEvent;
     use crate::event::log::reader::LoggedEvent;
@@ -422,16 +419,10 @@ mod tests {
         opts.start_from = StartFrom::Earliest;
         opts.cursor_flush = CursorFlush::PerEvent;
 
-        let mut sub = subscribe::<BoardEvent>(
-            "sub-a",
-            opts,
-            log,
-            topic,
-            store.clone(),
-            dlq.clone(),
-        )
-        .await
-        .expect("subscribe ok");
+        let mut sub =
+            subscribe::<BoardEvent>("sub-a", opts, log, topic, store.clone(), dlq.clone())
+                .await
+                .expect("subscribe ok");
 
         for i in 1..=3 {
             let ack = sub.next().await.expect("ack");
@@ -454,15 +445,8 @@ mod tests {
         let dispatcher = register_all_domains(DispatcherBuilder::new()).build();
         let topic = dispatcher.topic::<BoardEvent>();
 
-        let result = subscribe::<BoardEvent>(
-            "",
-            SubscriptionOpts::default(),
-            log,
-            topic,
-            store,
-            dlq,
-        )
-        .await;
+        let result =
+            subscribe::<BoardEvent>("", SubscriptionOpts::default(), log, topic, store, dlq).await;
         assert!(matches!(result, Err(SubscribeError::EmptyName)));
     }
 
@@ -492,16 +476,9 @@ mod tests {
         opts.start_from = StartFrom::Earliest; // should be ignored due to pre-existing cursor
         opts.cursor_flush = CursorFlush::PerEvent;
 
-        let mut sub = subscribe::<BoardEvent>(
-            "sub-r",
-            opts,
-            log,
-            topic,
-            store.clone(),
-            dlq,
-        )
-        .await
-        .unwrap();
+        let mut sub = subscribe::<BoardEvent>("sub-r", opts, log, topic, store.clone(), dlq)
+            .await
+            .unwrap();
 
         // The first event surfaced should be seq 6.
         let ack = sub.next().await.expect("ack");
@@ -520,14 +497,18 @@ mod tests {
     #[tokio::test]
     async fn start_from_earliest_is_zero() {
         let log = StaticLog(vec![]);
-        let seq = resolve_start_from(&StartFrom::Earliest, &log).await.unwrap();
+        let seq = resolve_start_from(&StartFrom::Earliest, &log)
+            .await
+            .unwrap();
         assert_eq!(seq, Seq(0));
     }
 
     #[tokio::test]
     async fn start_from_seq_echoes_value() {
         let log = StaticLog(vec![]);
-        let seq = resolve_start_from(&StartFrom::Seq(Seq(123)), &log).await.unwrap();
+        let seq = resolve_start_from(&StartFrom::Seq(Seq(123)), &log)
+            .await
+            .unwrap();
         assert_eq!(seq, Seq(123));
     }
 }

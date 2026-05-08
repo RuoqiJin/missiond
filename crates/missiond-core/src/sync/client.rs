@@ -66,9 +66,7 @@ pub struct SyncClient {
 impl SyncClient {
     /// Create a new sync client
     pub fn new(options: SyncClientOptions) -> Self {
-        let hostname = gethostname::gethostname()
-            .to_string_lossy()
-            .to_string();
+        let hostname = gethostname::gethostname().to_string_lossy().to_string();
         let (event_tx, _) = broadcast::channel(256);
 
         Self {
@@ -85,7 +83,10 @@ impl SyncClient {
     }
 
     /// Start the sync client with a CC Tasks watcher
-    pub async fn start(&mut self, cc_tasks_watcher: Arc<Mutex<CCTasksWatcher>>) -> anyhow::Result<()> {
+    pub async fn start(
+        &mut self,
+        cc_tasks_watcher: Arc<Mutex<CCTasksWatcher>>,
+    ) -> anyhow::Result<()> {
         if self.options.upstream_url.is_empty() {
             return Err(anyhow::anyhow!("No upstream URL configured"));
         }
@@ -94,7 +95,10 @@ impl SyncClient {
         self.shutdown_tx = Some(shutdown_tx.clone());
 
         let url = self.options.upstream_url.clone();
-        let machine_id = self.options.machine_id.clone()
+        let machine_id = self
+            .options
+            .machine_id
+            .clone()
             .unwrap_or_else(|| self.hostname.clone());
         let hostname = self.hostname.clone();
         let reconnect_interval = self.options.reconnect_interval;

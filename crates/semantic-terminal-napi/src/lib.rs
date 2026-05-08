@@ -250,12 +250,7 @@ impl StateParser {
         self.inner.detect_state(&context).map(|result| {
             let (needs_trust_confirm, confirm_type) = result
                 .meta
-                .map(|m| {
-                    (
-                        m.needs_trust_confirm,
-                        m.confirm_type.map(ConfirmType::from),
-                    )
-                })
+                .map(|m| (m.needs_trust_confirm, m.confirm_type.map(ConfirmType::from)))
                 .unwrap_or((None, None));
 
             StateResult {
@@ -562,11 +557,17 @@ pub fn extract_fingerprints(lines: Vec<String>) -> FingerprintResult {
 /// Known tool names
 #[napi]
 pub fn known_tools() -> Vec<String> {
-    semantic::KNOWN_TOOLS.iter().map(|s| s.to_string()).collect()
+    semantic::KNOWN_TOOLS
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 /// Spinner characters used by Claude Code
 #[napi]
 pub fn spinner_chars() -> Vec<String> {
-    semantic::SPINNER_CHARS.iter().map(|c| c.to_string()).collect()
+    semantic::SPINNER_CHARS
+        .iter()
+        .map(|c| c.to_string())
+        .collect()
 }

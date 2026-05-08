@@ -33,7 +33,10 @@ impl BlobStore for InMemoryBlobStore {
     async fn put(&self, bytes: &[u8]) -> BlobResult<PayloadRef> {
         let uri = format!("mem:{}", Uuid::new_v4());
         let checksum = sha256(bytes);
-        self.inner.lock().unwrap().insert(uri.clone(), bytes.to_vec());
+        self.inner
+            .lock()
+            .unwrap()
+            .insert(uri.clone(), bytes.to_vec());
         // Use LocalFile as the closest existing variant — the URI prefix
         // `mem:` tells the test code this is the in-memory backend.
         Ok(PayloadRef {
@@ -46,12 +49,13 @@ impl BlobStore for InMemoryBlobStore {
 
     async fn get(&self, payload_ref: &PayloadRef) -> BlobResult<Vec<u8>> {
         let guard = self.inner.lock().unwrap();
-        let bytes = guard
-            .get(&payload_ref.uri)
-            .cloned()
-            .ok_or_else(|| BlobStoreError::NotFound {
-                uri: payload_ref.uri.clone(),
-            })?;
+        let bytes =
+            guard
+                .get(&payload_ref.uri)
+                .cloned()
+                .ok_or_else(|| BlobStoreError::NotFound {
+                    uri: payload_ref.uri.clone(),
+                })?;
         let actual = sha256(&bytes);
         if actual != payload_ref.checksum {
             return Err(BlobStoreError::ChecksumMismatch {

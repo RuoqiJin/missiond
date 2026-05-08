@@ -22,8 +22,8 @@
 //!   machine_id: "macbook-pro"  # Optional, defaults to hostname
 //! ```
 
-mod relay;
 mod client;
+mod relay;
 
 pub use client::{SyncClient, SyncClientOptions, SyncEvent};
 pub use relay::{SyncRelay, SyncRelayOptions};

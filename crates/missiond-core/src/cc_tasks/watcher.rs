@@ -41,8 +41,14 @@ impl Default for CCTasksWatcherOptions {
 #[derive(Debug, Clone)]
 pub enum WatcherEvent {
     TasksChanged(CCTaskChangeEvent),
-    TaskStarted { session: CCSession, task: CCTask },
-    TaskCompleted { session: CCSession, task: CCTask },
+    TaskStarted {
+        session: CCSession,
+        task: CCTask,
+    },
+    TaskCompleted {
+        session: CCSession,
+        task: CCTask,
+    },
     SessionActive(CCSession),
     SessionInactive(CCSession),
     /// New messages detected in a JSONL file (for conversation logging)
@@ -264,7 +270,8 @@ impl CCTasksWatcher {
                     &event_tx,
                     &projects_dir,
                     Some(&persist_tx2),
-                ).await;
+                )
+                .await;
             }
         });
 
@@ -339,7 +346,10 @@ impl CCTasksWatcher {
     /// Called once at startup after scan_all_projects(), before the file watcher starts.
     /// This ensures any messages written while the daemon was down are ingested.
     async fn catchup_from_cursors(&self) {
-        let positions: Vec<(String, u64)> = self.file_positions.read().await
+        let positions: Vec<(String, u64)> = self
+            .file_positions
+            .read()
+            .await
             .iter()
             .map(|(k, v)| (k.clone(), *v))
             .collect();
@@ -365,7 +375,8 @@ impl CCTasksWatcher {
                     &self.projects_dir,
                     &self.file_positions,
                     Some(&self.cursor_persist_tx),
-                ).await;
+                )
+                .await;
                 caught_up += 1;
             }
         }
@@ -384,13 +395,18 @@ impl CCTasksWatcher {
             None => return,
         };
 
-        let positions: Vec<(String, u64)> = self.file_positions.read().await
+        let positions: Vec<(String, u64)> = self
+            .file_positions
+            .read()
+            .await
             .iter()
             .filter(|(_, &offset)| offset > 0) // Only check files that have been partially read
             .map(|(k, v)| (k.clone(), *v))
             .collect();
 
-        if positions.is_empty() { return; }
+        if positions.is_empty() {
+            return;
+        }
 
         // Read first user message UUID from each JSONL via streaming line reader.
         // Cannot use fixed-size buffer: some JSONL lines are multi-MB (e.g. image content).
@@ -403,9 +419,13 @@ impl CCTasksWatcher {
                 let mut checked = 0usize;
                 while let Ok(Some(line)) = lines.next_line().await {
                     checked += 1;
-                    if checked > 30 { break; } // Don't scan too deep
-                    // Fast pre-check before full JSON parse: line must contain "user"
-                    if !line.contains("\"type\":\"user\"") { continue; }
+                    if checked > 30 {
+                        break;
+                    } // Don't scan too deep
+                      // Fast pre-check before full JSON parse: line must contain "user"
+                    if !line.contains("\"type\":\"user\"") {
+                        continue;
+                    }
                     if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
                         if val.get("type").and_then(|t| t.as_str()) == Some("user") {
                             if let Some(uuid) = val.get("uuid").and_then(|u| u.as_str()) {
@@ -418,7 +438,9 @@ impl CCTasksWatcher {
             }
         }
 
-        if anchors.is_empty() { return; }
+        if anchors.is_empty() {
+            return;
+        }
 
         // Batch check which UUIDs exist in DB
         let uuids: Vec<&str> = anchors.iter().map(|(_, u)| u.as_str()).collect();
@@ -441,7 +463,10 @@ impl CCTasksWatcher {
         }
 
         if reset_count > 0 {
-            info!(reset_count, "Anchor check: reset cursors for files with missing first message");
+            info!(
+                reset_count,
+                "Anchor check: reset cursors for files with missing first message"
+            );
             // The main catchup_from_cursors has already run, but these newly reset files
             // will be caught by the regular FSEvent/rescan cycle
         }
@@ -470,8 +495,7 @@ impl CCTasksWatcher {
 
             if !sessions.contains_key(&session.session_id) {
                 if update_positions {
-                    let has_cursor = file_positions.read().await
-                        .contains_key(&session.full_path);
+                    let has_cursor = file_positions.read().await.contains_key(&session.full_path);
                     if !has_cursor {
                         // Set cursor to file_size: only accept future writes.
                         // Historical content before this point is handled by ReconcileWorker
@@ -479,7 +503,9 @@ impl CCTasksWatcher {
                         // This avoids the race where setting cursor=0 causes duplicate
                         // full-file reads when concurrent FS events arrive.
                         let file_size = get_file_size(Path::new(&session.full_path)).await;
-                        file_positions.write().await
+                        file_positions
+                            .write()
+                            .await
                             .insert(session.full_path.clone(), file_size);
                         if let Some(tx) = persist_tx {
                             let _ = tx.send((session.full_path.clone(), file_size));
@@ -579,7 +605,8 @@ impl CCTasksWatcher {
                                 let mut events: Vec<serde_json::Value> = Vec::new();
 
                                 for val in raw_lines {
-                                    let msg_type = val.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                                    let msg_type =
+                                        val.get("type").and_then(|t| t.as_str()).unwrap_or("");
                                     match msg_type {
                                         "user" | "assistant" | "tool_result" | "tool_use" => {
                                             let raw_backup = val.clone();
@@ -591,7 +618,10 @@ impl CCTasksWatcher {
                                                 }
                                             }
                                         }
-                                        "progress" | "system" | "queue-operation" | "file-history-snapshot" => {
+                                        "progress"
+                                        | "system"
+                                        | "queue-operation"
+                                        | "file-history-snapshot" => {
                                             events.push(val);
                                         }
                                         _ => {
@@ -814,7 +844,8 @@ impl CCTasksWatcher {
         // Collect active session file paths (release read lock before processing)
         let paths: Vec<String> = {
             let sessions = sessions.read().await;
-            sessions.values()
+            sessions
+                .values()
                 .filter(|s| s.is_active)
                 .map(|s| s.full_path.clone())
                 .collect()
@@ -826,7 +857,12 @@ impl CCTasksWatcher {
                 Ok(m) => m.len(),
                 Err(_) => continue,
             };
-            let tracked_size = file_positions.read().await.get(full_path).copied().unwrap_or(0);
+            let tracked_size = file_positions
+                .read()
+                .await
+                .get(full_path)
+                .copied()
+                .unwrap_or(0);
             if current_size > tracked_size {
                 debug!(
                     path = %full_path,
@@ -843,7 +879,8 @@ impl CCTasksWatcher {
                     projects_dir,
                     file_positions,
                     persist_tx,
-                ).await;
+                )
+                .await;
             }
         }
     }
@@ -872,7 +909,9 @@ impl CCTasksWatcher {
             .read()
             .await
             .values()
-            .filter(|s| s.project_path.contains(project_path) || s.project_name.contains(project_path))
+            .filter(|s| {
+                s.project_path.contains(project_path) || s.project_name.contains(project_path)
+            })
             .cloned()
             .collect()
     }

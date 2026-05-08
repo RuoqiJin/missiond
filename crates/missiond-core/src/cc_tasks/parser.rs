@@ -206,9 +206,17 @@ pub async fn entry_to_session(entry: &CCSessionIndexEntry) -> CCSession {
     let five_minutes_ago = now - Duration::minutes(5);
 
     // Extract project name from path (last 2 segments)
-    let path_parts: Vec<&str> = entry.project_path.split('/').filter(|s| !s.is_empty()).collect();
+    let path_parts: Vec<&str> = entry
+        .project_path
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
     let project_name = if path_parts.len() >= 2 {
-        format!("{}/{}", path_parts[path_parts.len() - 2], path_parts[path_parts.len() - 1])
+        format!(
+            "{}/{}",
+            path_parts[path_parts.len() - 2],
+            path_parts[path_parts.len() - 1]
+        )
     } else if !path_parts.is_empty() {
         path_parts.last().unwrap().to_string()
     } else {
@@ -232,10 +240,7 @@ pub async fn entry_to_session(entry: &CCSessionIndexEntry) -> CCSession {
 
 /// Get file size in bytes
 pub async fn get_file_size(file_path: &Path) -> u64 {
-    fs::metadata(file_path)
-        .await
-        .map(|m| m.len())
-        .unwrap_or(0)
+    fs::metadata(file_path).await.map(|m| m.len()).unwrap_or(0)
 }
 
 /// Read new content from file since last position.
@@ -327,8 +332,10 @@ pub fn diff_tasks(previous: &[CCTask], current: &[CCTask]) -> TaskDiff {
     let mut status_changed = Vec::new();
 
     // Map by content for comparison
-    let prev_map: HashMap<&str, &CCTask> = previous.iter().map(|t| (t.content.as_str(), t)).collect();
-    let curr_map: HashMap<&str, &CCTask> = current.iter().map(|t| (t.content.as_str(), t)).collect();
+    let prev_map: HashMap<&str, &CCTask> =
+        previous.iter().map(|t| (t.content.as_str(), t)).collect();
+    let curr_map: HashMap<&str, &CCTask> =
+        current.iter().map(|t| (t.content.as_str(), t)).collect();
 
     // Find added and status changes
     for task in current {
@@ -409,6 +416,9 @@ mod tests {
         assert_eq!(diff.added.len(), 0);
         assert_eq!(diff.removed.len(), 0);
         assert_eq!(diff.status_changed.len(), 1);
-        assert_eq!(diff.status_changed[0].previous_status, CCTaskStatus::Pending);
+        assert_eq!(
+            diff.status_changed[0].previous_status,
+            CCTaskStatus::Pending
+        );
     }
 }

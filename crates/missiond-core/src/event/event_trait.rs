@@ -9,7 +9,7 @@
 //! need these three things. Anything richer (trace context, producer id,
 //! ephemeral flag) lives in `AppendOpts`, not on the event itself.
 
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{de::DeserializeOwned, Serialize};
 
 use super::domain::Domain;
 

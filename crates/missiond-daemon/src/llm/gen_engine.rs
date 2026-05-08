@@ -7,7 +7,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-
 pub struct LlmGateway {
     pub(crate) gemini: GeminiGateway,
     pub(crate) sonnet: SonnetHandle,
@@ -16,7 +15,11 @@ pub struct LlmGateway {
 }
 
 impl LlmGateway {
-    pub fn new(gemini: GeminiGateway, sonnet: SonnetHandle, minimax: Option<MinimaxHandle>) -> Self {
+    pub fn new(
+        gemini: GeminiGateway,
+        sonnet: SonnetHandle,
+        minimax: Option<MinimaxHandle>,
+    ) -> Self {
         Self {
             gemini,
             sonnet,
@@ -40,6 +43,4 @@ pub trait LlmGatewayLogic {
 
     /// Route a translation request
     async fn route_translation(&self, text: &str, target_lang: &str) -> Result<String>;
-
 }
-

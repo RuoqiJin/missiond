@@ -159,10 +159,7 @@ mod pg {
 
     #[async_trait]
     impl CursorStore for PgCursorStore {
-        async fn get(
-            &self,
-            subscription_name: &str,
-        ) -> Result<Option<Cursor>, CursorError> {
+        async fn get(&self, subscription_name: &str) -> Result<Option<Cursor>, CursorError> {
             let row: Option<Row> = sqlx::query_as::<_, Row>(
                 r#"
                 SELECT subscription_name, consumer_name, domain, last_acked_seq,

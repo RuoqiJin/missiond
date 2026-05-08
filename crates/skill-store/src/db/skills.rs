@@ -30,7 +30,12 @@ pub fn get_skill_by_id(conn: &Connection, id: &str) -> Result<Skill, rusqlite::E
     )
 }
 
-pub fn list_skills_public(conn: &Connection, tier_max: i32, offset: i64, limit: i64) -> Result<Vec<SkillPublic>, rusqlite::Error> {
+pub fn list_skills_public(
+    conn: &Connection,
+    tier_max: i32,
+    offset: i64,
+    limit: i64,
+) -> Result<Vec<SkillPublic>, rusqlite::Error> {
     let mut stmt = conn.prepare(
         "SELECT s.id, s.creator_id, u.username, s.name, s.description, s.input_schema, s.tier, s.price_per_use, s.invoke_count, s.created_at
          FROM skills s JOIN users u ON s.creator_id = u.id
@@ -58,7 +63,10 @@ pub fn list_skills_public(conn: &Connection, tier_max: i32, offset: i64, limit: 
     rows.collect()
 }
 
-pub fn list_creator_skills(conn: &Connection, creator_id: &str) -> Result<Vec<Skill>, rusqlite::Error> {
+pub fn list_creator_skills(
+    conn: &Connection,
+    creator_id: &str,
+) -> Result<Vec<Skill>, rusqlite::Error> {
     let mut stmt = conn.prepare(
         "SELECT id, creator_id, name, description, prompt_template, input_schema, tier, price_per_use, is_active, invoke_count, created_at, updated_at
          FROM skills WHERE creator_id = ?1 ORDER BY created_at DESC",

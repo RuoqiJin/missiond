@@ -85,7 +85,9 @@ fn bench_split_args_optimized(c: &mut Criterion) {
 
     // Quoted args
     c.bench_function("opt_split_args_quoted", |b| {
-        b.iter(|| SemanticParsingImpl::split_args(black_box(r#"key: "hello, world", other: "foo""#)))
+        b.iter(|| {
+            SemanticParsingImpl::split_args(black_box(r#"key: "hello, world", other: "foo""#))
+        })
     });
 
     // Many args

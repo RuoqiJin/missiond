@@ -22,10 +22,7 @@ pub enum MessageEvent {
         preview: String,
     },
     /// A message with image content was inserted, needs async vision processing.
-    ImageInserted {
-        message_id: i64,
-        session_id: String,
-    },
+    ImageInserted { message_id: i64, session_id: String },
 }
 
 impl DomainEvent for MessageEvent {

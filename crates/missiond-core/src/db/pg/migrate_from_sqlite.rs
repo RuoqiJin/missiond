@@ -87,8 +87,8 @@ pub async fn migrate_sqlite_to_pg(
     info!(sqlite = %sqlite_path, pg = %pg_url, "Starting SQLite → PostgreSQL migration");
 
     // Open SQLite
-    let sqlite = MissionDB::new(sqlite_path)
-        .map_err(|e| format!("Failed to open SQLite: {}", e))?;
+    let sqlite =
+        MissionDB::new(sqlite_path).map_err(|e| format!("Failed to open SQLite: {}", e))?;
 
     // Connect to PostgreSQL
     let pool = PgPoolOptions::new()
@@ -125,7 +125,11 @@ pub async fn migrate_sqlite_to_pg(
     // Fix identity sequences after bulk import with explicit IDs
     fix_identity_sequences(&pool).await;
 
-    info!(tables = tables_done, rows = total_rows, "Migration complete");
+    info!(
+        tables = tables_done,
+        rows = total_rows,
+        "Migration complete"
+    );
     Ok((tables_done, total_rows))
 }
 
@@ -157,41 +161,51 @@ async fn migrate_table(
 
     loop {
         // Read one page from SQLite
-        let page = sqlite.with_read(|conn| {
-            let sql = format!("SELECT * FROM {} LIMIT {} OFFSET {}", table, PAGE_SIZE, offset);
-            let mut stmt = conn.prepare(&sql)
-                .map_err(|e| crate::db::error::DbError::Other(format!("prepare: {}", e)))?;
+        let page = sqlite
+            .with_read(|conn| {
+                let sql = format!(
+                    "SELECT * FROM {} LIMIT {} OFFSET {}",
+                    table, PAGE_SIZE, offset
+                );
+                let mut stmt = conn
+                    .prepare(&sql)
+                    .map_err(|e| crate::db::error::DbError::Other(format!("prepare: {}", e)))?;
 
-            let col_count = stmt.column_count();
-            let col_names: Vec<String> = (0..col_count)
-                .map(|i| stmt.column_name(i).unwrap_or("?").to_string())
-                .collect();
+                let col_count = stmt.column_count();
+                let col_names: Vec<String> = (0..col_count)
+                    .map(|i| stmt.column_name(i).unwrap_or("?").to_string())
+                    .collect();
 
-            let mut page_rows: Vec<Vec<(String, SqliteValue)>> = Vec::new();
+                let mut page_rows: Vec<Vec<(String, SqliteValue)>> = Vec::new();
 
-            let mut rows_iter = stmt.query([])
-                .map_err(|e| crate::db::error::DbError::Other(format!("query: {}", e)))?;
+                let mut rows_iter = stmt
+                    .query([])
+                    .map_err(|e| crate::db::error::DbError::Other(format!("query: {}", e)))?;
 
-            while let Some(row) = rows_iter.next()
-                .map_err(|e| crate::db::error::DbError::Other(format!("next: {}", e)))?
-            {
-                let mut row_data = Vec::new();
-                for (i, name) in col_names.iter().enumerate() {
-                    let val = match row.get_ref(i) {
-                        Ok(ValueRef::Null) => SqliteValue::Null,
-                        Ok(ValueRef::Integer(v)) => SqliteValue::Integer(v),
-                        Ok(ValueRef::Real(v)) => SqliteValue::Real(v),
-                        Ok(ValueRef::Text(v)) => SqliteValue::Text(String::from_utf8_lossy(v).to_string()),
-                        Ok(ValueRef::Blob(v)) => SqliteValue::Blob(v.to_vec()),
-                        Err(_) => SqliteValue::Null,
-                    };
-                    row_data.push((name.clone(), val));
+                while let Some(row) = rows_iter
+                    .next()
+                    .map_err(|e| crate::db::error::DbError::Other(format!("next: {}", e)))?
+                {
+                    let mut row_data = Vec::new();
+                    for (i, name) in col_names.iter().enumerate() {
+                        let val = match row.get_ref(i) {
+                            Ok(ValueRef::Null) => SqliteValue::Null,
+                            Ok(ValueRef::Integer(v)) => SqliteValue::Integer(v),
+                            Ok(ValueRef::Real(v)) => SqliteValue::Real(v),
+                            Ok(ValueRef::Text(v)) => {
+                                SqliteValue::Text(String::from_utf8_lossy(v).to_string())
+                            }
+                            Ok(ValueRef::Blob(v)) => SqliteValue::Blob(v.to_vec()),
+                            Err(_) => SqliteValue::Null,
+                        };
+                        row_data.push((name.clone(), val));
+                    }
+                    page_rows.push(row_data);
                 }
-                page_rows.push(row_data);
-            }
 
-            Ok(page_rows)
-        }).map_err(|e| format!("SQLite read: {}", e))?;
+                Ok(page_rows)
+            })
+            .map_err(|e| format!("SQLite read: {}", e))?;
 
         if page.is_empty() {
             break; // No more rows
@@ -205,15 +219,16 @@ async fn migrate_table(
             // Build placeholders: use SQL NULL literal for null values to avoid
             // sqlx sending typed-NULL (text OID) which PG rejects for integer columns.
             let mut param_idx = 0usize;
-            let placeholders: Vec<String> = row.iter().map(|(_, val)| {
-                match val {
+            let placeholders: Vec<String> = row
+                .iter()
+                .map(|(_, val)| match val {
                     SqliteValue::Null => "NULL".to_string(),
                     _ => {
                         param_idx += 1;
                         format!("${}", param_idx)
                     }
-                }
-            }).collect();
+                })
+                .collect();
 
             let sql = format!(
                 "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT DO NOTHING",
@@ -311,7 +326,11 @@ async fn backfill_table_embeddings(
     let mut cursor_values: Vec<String> = Vec::new();
 
     // Cast all PK columns to text in SELECT so try_get::<String> works for INTEGER PKs
-    let pk_select = pk_cols.iter().map(|c| format!("{c}::text")).collect::<Vec<_>>().join(", ");
+    let pk_select = pk_cols
+        .iter()
+        .map(|c| format!("{c}::text"))
+        .collect::<Vec<_>>()
+        .join(", ");
     let pk_order = pk_cols.join(", ");
 
     loop {
@@ -324,7 +343,13 @@ async fn backfill_table_embeddings(
         } else {
             // Tuple comparison: (col1, col2) > ($1, $2)
             let pk_tuple = format!("({})", pk_cols.join(", "));
-            let param_tuple = format!("({})", (1..=pk_cols.len()).map(|i| format!("${i}")).collect::<Vec<_>>().join(", "));
+            let param_tuple = format!(
+                "({})",
+                (1..=pk_cols.len())
+                    .map(|i| format!("${i}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
             format!(
                 "SELECT {pk_select}, embedding FROM {table} \
                  WHERE embedding IS NOT NULL AND embedding_vec IS NULL \
@@ -342,7 +367,8 @@ async fn backfill_table_embeddings(
                 q = q.bind(v.as_str());
             }
             q.fetch_all(pool).await
-        }.map_err(|e| format!("fetch: {}", e))?;
+        }
+        .map_err(|e| format!("fetch: {}", e))?;
 
         if rows.is_empty() {
             break;
@@ -373,12 +399,18 @@ async fn backfill_table_embeddings(
 
             let vec_str = format!(
                 "[{}]",
-                floats.iter().map(|f| f.to_string()).collect::<Vec<_>>().join(",")
+                floats
+                    .iter()
+                    .map(|f| f.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
             );
 
             // Build UPDATE with correct PK WHERE clause
             let set_param = 1; // $1 = vector string
-            let where_parts: Vec<String> = pk_cols.iter().enumerate()
+            let where_parts: Vec<String> = pk_cols
+                .iter()
+                .enumerate()
                 .map(|(i, col)| format!("{col} = ${}", set_param + 1 + i))
                 .collect();
             let update_sql = format!(
@@ -423,7 +455,11 @@ enum SqliteValue {
 #[cfg(all(feature = "sqlite", feature = "postgres"))]
 async fn fix_identity_sequences(pool: &sqlx::PgPool) {
     let sequences = [
-        ("conversation_messages", "id", "conversation_messages_id_seq"),
+        (
+            "conversation_messages",
+            "id",
+            "conversation_messages_id_seq",
+        ),
         ("conversation_events", "id", "conversation_events_id_seq"),
         ("token_usage_ledger", "id", "token_usage_ledger_id_seq"),
         // system_timeline dropped in v1.3.0 SSOT cutover.

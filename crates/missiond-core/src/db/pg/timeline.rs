@@ -6,17 +6,21 @@
 //! `20260420200000_drop_system_timeline.sql` and the timeline-writer v2
 //! subscriber was already removed in Phase 8 of the event-bus migration).
 
-use std::collections::HashMap;
-use async_trait::async_trait;
-use crate::db::error::DbResult;
-use crate::db::traits::{TimelineStore, TimelineRow, TimelineStats};
-use crate::event::projection;
 use super::PgMissionStore;
+use crate::db::error::DbResult;
+use crate::db::traits::{TimelineRow, TimelineStats, TimelineStore};
+use crate::event::projection;
+use async_trait::async_trait;
+use std::collections::HashMap;
 
 #[cfg(feature = "postgres")]
 #[async_trait]
 impl TimelineStore for PgMissionStore {
-    async fn query_timeline_since(&self, since_seq: i64, limit: usize) -> DbResult<Vec<TimelineRow>> {
+    async fn query_timeline_since(
+        &self,
+        since_seq: i64,
+        limit: usize,
+    ) -> DbResult<Vec<TimelineRow>> {
         projection::query_timeline_since(&self.pool, since_seq, limit).await
     }
 
@@ -33,7 +37,10 @@ impl TimelineStore for PgMissionStore {
         limit: i64,
         offset: i64,
     ) -> DbResult<Vec<TimelineRow>> {
-        projection::query_timeline_filtered(&self.pool, event_type, trace_id, since, until, limit, offset).await
+        projection::query_timeline_filtered(
+            &self.pool, event_type, trace_id, since, until, limit, offset,
+        )
+        .await
     }
 
     async fn query_timeline_stratified(
@@ -43,14 +50,19 @@ impl TimelineStore for PgMissionStore {
         per_type_limit: i64,
         type_limits: &HashMap<String, i64>,
     ) -> DbResult<Vec<TimelineRow>> {
-        projection::query_timeline_stratified(&self.pool, since, until, per_type_limit, type_limits).await
+        projection::query_timeline_stratified(&self.pool, since, until, per_type_limit, type_limits)
+            .await
     }
 
     async fn query_timeline_by_trace(&self, trace_id: &str) -> DbResult<Vec<TimelineRow>> {
         projection::query_timeline_by_trace(&self.pool, trace_id).await
     }
 
-    async fn query_timeline_stats(&self, since: Option<&str>, until: Option<&str>) -> DbResult<TimelineStats> {
+    async fn query_timeline_stats(
+        &self,
+        since: Option<&str>,
+        until: Option<&str>,
+    ) -> DbResult<TimelineStats> {
         projection::query_timeline_stats(&self.pool, since, until).await
     }
 

@@ -7,7 +7,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-
 pub struct Autopilot {
     pub(crate) db: DbExecutor,
     pub(crate) slots: Arc<SlotOrchestrator>,
@@ -17,7 +16,13 @@ pub struct Autopilot {
 }
 
 impl Autopilot {
-    pub fn new(db: DbExecutor, slots: Arc<SlotOrchestrator>, event_bus: EventBus, llm: LlmGateway, context: ContextPipeline) -> Self {
+    pub fn new(
+        db: DbExecutor,
+        slots: Arc<SlotOrchestrator>,
+        event_bus: EventBus,
+        llm: LlmGateway,
+        context: ContextPipeline,
+    ) -> Self {
         Self {
             db,
             slots,
@@ -42,6 +47,4 @@ pub trait AutopilotLogic {
 
     /// Resume the tick loop
     async fn resume(&self) -> ();
-
 }
-

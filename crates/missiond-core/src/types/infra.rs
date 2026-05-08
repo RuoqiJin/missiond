@@ -57,7 +57,8 @@ impl InfraServer {
 
         let mut targets = Vec::new();
         for cap in re.captures_iter(desc) {
-            let port = cap.get(1)
+            let port = cap
+                .get(1)
                 .and_then(|m| m.as_str().parse::<u16>().ok())
                 .unwrap_or(22);
             let user = cap[2].to_string();
@@ -68,7 +69,10 @@ impl InfraServer {
                 "lan"
             } else if host.starts_with("100.") {
                 "tailscale"
-            } else if host.starts_with("192.168.") || host.starts_with("10.") || host.starts_with("172.") {
+            } else if host.starts_with("192.168.")
+                || host.starts_with("10.")
+                || host.starts_with("172.")
+            {
                 "lan"
             } else {
                 "public"
@@ -105,11 +109,17 @@ impl InfraConfig {
     /// Load from YAML file, returns empty config if file doesn't exist
     pub fn load(path: &std::path::Path) -> Self {
         if !path.exists() {
-            return Self { servers: Vec::new() };
+            return Self {
+                servers: Vec::new(),
+            };
         }
         match std::fs::read_to_string(path) {
-            Ok(content) => serde_yaml::from_str(&content).unwrap_or(Self { servers: Vec::new() }),
-            Err(_) => Self { servers: Vec::new() },
+            Ok(content) => serde_yaml::from_str(&content).unwrap_or(Self {
+                servers: Vec::new(),
+            }),
+            Err(_) => Self {
+                servers: Vec::new(),
+            },
         }
     }
 
@@ -120,11 +130,17 @@ impl InfraConfig {
 
     /// Filter servers by role
     pub fn by_role(&self, role: &str) -> Vec<&InfraServer> {
-        self.servers.iter().filter(|s| s.roles.iter().any(|r| r == role)).collect()
+        self.servers
+            .iter()
+            .filter(|s| s.roles.iter().any(|r| r == role))
+            .collect()
     }
 
     /// Filter servers by provider
     pub fn by_provider(&self, provider: &str) -> Vec<&InfraServer> {
-        self.servers.iter().filter(|s| s.provider == provider).collect()
+        self.servers
+            .iter()
+            .filter(|s| s.provider == provider)
+            .collect()
     }
 }

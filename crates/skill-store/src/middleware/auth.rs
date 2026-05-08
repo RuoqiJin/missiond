@@ -29,11 +29,13 @@ where
             .headers
             .get("Authorization")
             .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| crate::error::AppError::Unauthorized("Missing Authorization header".into()))?;
+            .ok_or_else(|| {
+                crate::error::AppError::Unauthorized("Missing Authorization header".into())
+            })?;
 
-        let token = auth_header
-            .strip_prefix("Bearer ")
-            .ok_or_else(|| crate::error::AppError::Unauthorized("Invalid Authorization format".into()))?;
+        let token = auth_header.strip_prefix("Bearer ").ok_or_else(|| {
+            crate::error::AppError::Unauthorized("Invalid Authorization format".into())
+        })?;
 
         let claims = decode::<Claims>(
             token,

@@ -39,7 +39,10 @@ pub type AckSender = tokio::sync::oneshot::Sender<Result<AppendAck, AppendError>
 /// Convenience: build a matched `(AckSender, AckReceiver)` pair. The step-3
 /// code already inlines `oneshot::channel()`; callers that prefer an
 /// explicit name can use this.
-pub fn new_ack_channel() -> (AckSender, tokio::sync::oneshot::Receiver<Result<AppendAck, AppendError>>) {
+pub fn new_ack_channel() -> (
+    AckSender,
+    tokio::sync::oneshot::Receiver<Result<AppendAck, AppendError>>,
+) {
     tokio::sync::oneshot::channel()
 }
 

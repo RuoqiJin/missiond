@@ -12,12 +12,18 @@ pub struct TaskId(String);
 impl TaskId {
     /// Construct from a trusted source (DB row, internally generated UUID).
     /// Caller guarantees this is a valid, full-length UUID.
-    pub fn from_trusted(id: String) -> Self { Self(id) }
+    pub fn from_trusted(id: String) -> Self {
+        Self(id)
+    }
 
     /// Generate a new random TaskId (UUID v4).
-    pub fn new() -> Self { Self(uuid::Uuid::new_v4().to_string()) }
+    pub fn new() -> Self {
+        Self(uuid::Uuid::new_v4().to_string())
+    }
 
-    pub fn as_str(&self) -> &str { &self.0 }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl std::fmt::Display for TaskId {
@@ -27,7 +33,9 @@ impl std::fmt::Display for TaskId {
 }
 
 impl AsRef<str> for TaskId {
-    fn as_ref(&self) -> &str { &self.0 }
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
 }
 
 // ============ Board Task (Personal Task Board) ============
@@ -121,10 +129,10 @@ impl EngineeringPhase {
     /// Timeout in seconds for this phase
     pub fn timeout_secs(&self) -> u64 {
         match self {
-            Self::Investigate | Self::Plan => 900,        // 15min
+            Self::Investigate | Self::Plan => 900,              // 15min
             Self::ConsultGemini1 | Self::ConsultGemini2 => 120, // 2min
-            Self::Execute => 3600,                         // 60min (复杂任务需要更多时间)
-            Self::Finalize => 600,                         // 10min
+            Self::Execute => 3600,                              // 60min (复杂任务需要更多时间)
+            Self::Finalize => 600,                              // 10min
             Self::Done => 0,
         }
     }
@@ -192,8 +200,8 @@ pub struct BoardTask {
     pub title: String,
     pub description: String,
     pub status: BoardTaskStatus,
-    pub priority: String,   // high, medium, low
-    pub category: String,   // deploy, dev, infra, test, other
+    pub priority: String, // high, medium, low
+    pub category: String, // deploy, dev, infra, test, other
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -269,9 +277,13 @@ pub struct BoardTask {
     pub notes_count: i64,
 }
 
-fn is_zero(v: &i64) -> bool { *v == 0 }
+fn is_zero(v: &i64) -> bool {
+    *v == 0
+}
 
-fn default_max_retries() -> i64 { 2 }
+fn default_max_retries() -> i64 {
+    2
+}
 
 /// Compact board task for search results (high density, low token cost)
 #[derive(Debug, Clone, Serialize, Deserialize)]

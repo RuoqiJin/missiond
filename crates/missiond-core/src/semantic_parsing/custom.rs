@@ -11,10 +11,12 @@ impl SemanticParsing for SemanticParsingImpl {
     /// Braille pattern range: U+2800..=U+28FF
     /// Also matches common spinner chars: ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ ⣾⣽⣻⢿⡿⣟⣯⣷ ◐◑◒◓ ◴◷◶◵
     fn is_spinner_char(c: char) -> bool {
-        matches!(c,
-            '\u{2800}'..='\u{28FF}' | // Braille patterns block (covers all braille singles)
+        matches!(
+            c,
+            '\u{2800}'
+                ..='\u{28FF}' | // Braille patterns block (covers all braille singles)
             '◐' | '◑' | '◒' | '◓' | // Circle quarters
-            '◴' | '◵' | '◶' | '◷'   // Arc spinners
+            '◴' | '◵' | '◶' | '◷' // Arc spinners
         )
     }
 
@@ -149,10 +151,7 @@ impl SemanticParsing for SemanticParsingImpl {
 
     /// Check last non-empty line for prompt characters: ❯, >, $
     fn is_idle_prompt(lines: &[&str]) -> bool {
-        let last = lines
-            .iter()
-            .rev()
-            .find(|l| !l.trim().is_empty());
+        let last = lines.iter().rev().find(|l| !l.trim().is_empty());
 
         match last {
             Some(line) => {
@@ -281,9 +280,6 @@ mod tests {
 
     #[test]
     fn test_is_idle_prompt_output() {
-        assert_eq!(
-            SemanticParsingImpl::is_idle_prompt(&["Hello world"]),
-            false
-        );
+        assert_eq!(SemanticParsingImpl::is_idle_prompt(&["Hello world"]), false);
     }
 }

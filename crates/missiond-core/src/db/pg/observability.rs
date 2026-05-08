@@ -7,13 +7,13 @@
 //! Note: watermarks + backfill progress + daemon_state migrated to InfraStore
 //!       in Stage 2D. See pg/infra.rs.
 
-use async_trait::async_trait;
-use sqlx::{Column, Row};
+use super::PgMissionStore;
 use crate::db::error::DbResult;
 use crate::db::traits::ObservabilityStore;
 use crate::types::*;
+use async_trait::async_trait;
+use sqlx::{Column, Row};
 use std::collections::HashMap;
-use super::PgMissionStore;
 
 #[cfg(feature = "postgres")]
 #[async_trait]
@@ -75,7 +75,10 @@ impl ObservabilityStore for PgMissionStore {
         Ok(())
     }
 
-    async fn gemini_log_get_content(&self, request_id: &str) -> DbResult<Option<serde_json::Value>> {
+    async fn gemini_log_get_content(
+        &self,
+        request_id: &str,
+    ) -> DbResult<Option<serde_json::Value>> {
         let row = sqlx::query(
             "SELECT id, caller, model, prompt_chars, response_chars, duration_ms, status, error_msg, prompt_text, response_text, created_at
              FROM gemini_requests WHERE id = $1"
@@ -197,24 +200,27 @@ impl ObservabilityStore for PgMissionStore {
             }
         };
 
-        Ok(rows.iter().map(|r| {
-            use sqlx::Row;
-            serde_json::json!({
-                "id": r.get::<String, _>("id"),
-                "caller": r.get::<String, _>("caller"),
-                "session_id": r.get::<Option<String>, _>("session_id"),
-                "api_mode": r.get::<String, _>("api_mode"),
-                "model": r.get::<String, _>("model"),
-                "prompt_chars": r.get::<i64, _>("prompt_chars"),
-                "response_chars": r.get::<i64, _>("response_chars"),
-                "queue_wait_ms": r.get::<i64, _>("queue_wait_ms"),
-                "duration_ms": r.get::<i64, _>("duration_ms"),
-                "retry_count": r.get::<i64, _>("retry_count"),
-                "status": r.get::<String, _>("status"),
-                "error_msg": r.get::<Option<String>, _>("error_msg"),
-                "created_at": r.get::<String, _>("created_at"),
+        Ok(rows
+            .iter()
+            .map(|r| {
+                use sqlx::Row;
+                serde_json::json!({
+                    "id": r.get::<String, _>("id"),
+                    "caller": r.get::<String, _>("caller"),
+                    "session_id": r.get::<Option<String>, _>("session_id"),
+                    "api_mode": r.get::<String, _>("api_mode"),
+                    "model": r.get::<String, _>("model"),
+                    "prompt_chars": r.get::<i64, _>("prompt_chars"),
+                    "response_chars": r.get::<i64, _>("response_chars"),
+                    "queue_wait_ms": r.get::<i64, _>("queue_wait_ms"),
+                    "duration_ms": r.get::<i64, _>("duration_ms"),
+                    "retry_count": r.get::<i64, _>("retry_count"),
+                    "status": r.get::<String, _>("status"),
+                    "error_msg": r.get::<Option<String>, _>("error_msg"),
+                    "created_at": r.get::<String, _>("created_at"),
+                })
             })
-        }).collect())
+            .collect())
     }
 
     async fn gemini_log_stats(&self) -> DbResult<serde_json::Value> {
@@ -247,14 +253,17 @@ impl ObservabilityStore for PgMissionStore {
         .fetch_all(&self.pool)
         .await?;
 
-        let by_caller: Vec<serde_json::Value> = caller_rows.iter().map(|r| {
-            serde_json::json!({
-                "caller": r.get::<String, _>(0),
-                "count": r.get::<i64, _>(1),
-                "avg_duration_ms": r.get::<f64, _>(2) as i64,
-                "errors": r.get::<i64, _>(3),
+        let by_caller: Vec<serde_json::Value> = caller_rows
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "caller": r.get::<String, _>(0),
+                    "count": r.get::<i64, _>(1),
+                    "avg_duration_ms": r.get::<f64, _>(2) as i64,
+                    "errors": r.get::<i64, _>(3),
+                })
             })
-        }).collect();
+            .collect();
 
         // Slow requests (>30s)
         let slow_rows = sqlx::query(
@@ -266,20 +275,23 @@ impl ObservabilityStore for PgMissionStore {
         .fetch_all(&self.pool)
         .await?;
 
-        let slow: Vec<serde_json::Value> = slow_rows.iter().map(|r| {
-            serde_json::json!({
-                "id": r.get::<String, _>("id"),
-                "caller": r.get::<String, _>("caller"),
-                "session_id": r.get::<Option<String>, _>("session_id"),
-                "model": r.get::<String, _>("model"),
-                "duration_ms": r.get::<i64, _>("duration_ms"),
-                "queue_wait_ms": r.get::<i64, _>("queue_wait_ms"),
-                "prompt_chars": r.get::<i64, _>("prompt_chars"),
-                "response_chars": r.get::<i64, _>("response_chars"),
-                "status": r.get::<String, _>("status"),
-                "created_at": r.get::<String, _>("created_at"),
+        let slow: Vec<serde_json::Value> = slow_rows
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "id": r.get::<String, _>("id"),
+                    "caller": r.get::<String, _>("caller"),
+                    "session_id": r.get::<Option<String>, _>("session_id"),
+                    "model": r.get::<String, _>("model"),
+                    "duration_ms": r.get::<i64, _>("duration_ms"),
+                    "queue_wait_ms": r.get::<i64, _>("queue_wait_ms"),
+                    "prompt_chars": r.get::<i64, _>("prompt_chars"),
+                    "response_chars": r.get::<i64, _>("response_chars"),
+                    "status": r.get::<String, _>("status"),
+                    "created_at": r.get::<String, _>("created_at"),
+                })
             })
-        }).collect();
+            .collect();
 
         Ok(serde_json::json!({
             "period": "7d",
@@ -308,7 +320,7 @@ impl ObservabilityStore for PgMissionStore {
     async fn gemini_file_cache_get(&self, file_hash: &str) -> DbResult<Option<String>> {
         let now = chrono::Utc::now().timestamp();
         let row: Option<(String,)> = sqlx::query_as(
-            "SELECT file_uri FROM gemini_file_uploads WHERE file_hash = $1 AND expires_at > $2"
+            "SELECT file_uri FROM gemini_file_uploads WHERE file_hash = $1 AND expires_at > $2",
         )
         .bind(file_hash)
         .bind(now)
@@ -330,7 +342,7 @@ impl ObservabilityStore for PgMissionStore {
              ON CONFLICT (file_hash) DO UPDATE SET
                 file_uri = EXCLUDED.file_uri,
                 mime_type = EXCLUDED.mime_type,
-                expires_at = EXCLUDED.expires_at"
+                expires_at = EXCLUDED.expires_at",
         )
         .bind(file_hash)
         .bind(file_uri)
@@ -390,7 +402,7 @@ impl ObservabilityStore for PgMissionStore {
         let (count,): (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM incidents
              WHERE dedupe_key = $1
-               AND EXTRACT(EPOCH FROM ($2::timestamp - created_at::timestamp)) < $3"
+               AND EXTRACT(EPOCH FROM ($2::timestamp - created_at::timestamp)) < $3",
         )
         .bind(dedupe_key)
         .bind(&now)
@@ -409,20 +421,23 @@ impl ObservabilityStore for PgMissionStore {
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.iter().map(|r| {
-            use sqlx::Row;
-            IncidentRow {
-                id: r.get("id"),
-                severity: r.get("severity"),
-                source: r.get("source"),
-                title: r.get("title"),
-                description: r.get("description"),
-                server_id: r.get("server_id"),
-                board_task_id: r.get("board_task_id"),
-                dedupe_key: r.get("dedupe_key"),
-                created_at: r.get("created_at"),
-            }
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|r| {
+                use sqlx::Row;
+                IncidentRow {
+                    id: r.get("id"),
+                    severity: r.get("severity"),
+                    source: r.get("source"),
+                    title: r.get("title"),
+                    description: r.get("description"),
+                    server_id: r.get("server_id"),
+                    board_task_id: r.get("board_task_id"),
+                    dedupe_key: r.get("dedupe_key"),
+                    created_at: r.get("created_at"),
+                }
+            })
+            .collect())
     }
 
     async fn get_incident_by_id(&self, id: &str) -> DbResult<Option<IncidentRow>> {
@@ -451,13 +466,11 @@ impl ObservabilityStore for PgMissionStore {
     }
 
     async fn update_incident_board_task_id(&self, id: &str, board_task_id: &str) -> DbResult<bool> {
-        let result = sqlx::query(
-            "UPDATE incidents SET board_task_id = $2 WHERE id = $1"
-        )
-        .bind(id)
-        .bind(board_task_id)
-        .execute(&self.pool)
-        .await?;
+        let result = sqlx::query("UPDATE incidents SET board_task_id = $2 WHERE id = $1")
+            .bind(id)
+            .bind(board_task_id)
+            .execute(&self.pool)
+            .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -481,7 +494,7 @@ impl ObservabilityStore for PgMissionStore {
                  input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens,
                  message_id)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-             ON CONFLICT (message_id) WHERE message_id IS NOT NULL DO NOTHING"
+             ON CONFLICT (message_id) WHERE message_id IS NOT NULL DO NOTHING",
         )
         .bind(conversation_id)
         .bind(slot_id)
@@ -522,7 +535,7 @@ impl ObservabilityStore for PgMissionStore {
              SUM(cache_read_tokens) AS total_cache_read,
              SUM(output_tokens) AS total_output,
              COUNT(*) AS record_count
-             FROM token_usage_ledger WHERE 1=1"
+             FROM token_usage_ledger WHERE 1=1",
         );
 
         // Build filter params — use explicit branching for type safety with sqlx
@@ -552,9 +565,21 @@ impl ObservabilityStore for PgMissionStore {
 
         // We need to dynamically bind params. Use a raw query approach.
         let rows = sqlx::query(&sql);
-        let rows = if let Some(cid) = conversation_id { rows.bind(cid) } else { rows };
-        let rows = if let Some(sid) = slot_id { rows.bind(sid) } else { rows };
-        let rows = if let Some(s) = since { rows.bind(s) } else { rows };
+        let rows = if let Some(cid) = conversation_id {
+            rows.bind(cid)
+        } else {
+            rows
+        };
+        let rows = if let Some(sid) = slot_id {
+            rows.bind(sid)
+        } else {
+            rows
+        };
+        let rows = if let Some(s) = since {
+            rows.bind(s)
+        } else {
+            rows
+        };
         let fetched = rows.fetch_all(&self.pool).await?;
 
         let mut results = Vec::new();
@@ -584,13 +609,19 @@ impl ObservabilityStore for PgMissionStore {
 
     // ── labels ────────────────────────────────────────────────────
 
-    async fn label_set(&self, message_id: i64, label: &str, value: &str, source: &str) -> DbResult<()> {
+    async fn label_set(
+        &self,
+        message_id: i64,
+        label: &str,
+        value: &str,
+        source: &str,
+    ) -> DbResult<()> {
         sqlx::query(
             "INSERT INTO message_labels (message_id, label, value, source)
              VALUES ($1, $2, $3, $4)
              ON CONFLICT (message_id, label) DO UPDATE SET
                 value = EXCLUDED.value,
-                source = EXCLUDED.source"
+                source = EXCLUDED.source",
         )
         .bind(message_id)
         .bind(label)
@@ -612,7 +643,7 @@ impl ObservabilityStore for PgMissionStore {
                  VALUES ($1, $2, $3, $4)
                  ON CONFLICT (message_id, label) DO UPDATE SET
                     value = EXCLUDED.value,
-                    source = EXCLUDED.source"
+                    source = EXCLUDED.source",
             )
             .bind(msg_id)
             .bind(label)
@@ -627,7 +658,7 @@ impl ObservabilityStore for PgMissionStore {
 
     async fn label_get(&self, message_id: i64) -> DbResult<Vec<(String, String, String)>> {
         let rows: Vec<(String, String, String)> = sqlx::query_as(
-            "SELECT label, COALESCE(value, ''), source FROM message_labels WHERE message_id = $1"
+            "SELECT label, COALESCE(value, ''), source FROM message_labels WHERE message_id = $1",
         )
         .bind(message_id)
         .fetch_all(&self.pool)
@@ -635,7 +666,10 @@ impl ObservabilityStore for PgMissionStore {
         Ok(rows)
     }
 
-    async fn label_get_batch(&self, message_ids: &[i64]) -> DbResult<HashMap<i64, Vec<(String, String)>>> {
+    async fn label_get_batch(
+        &self,
+        message_ids: &[i64],
+    ) -> DbResult<HashMap<i64, Vec<(String, String)>>> {
         if message_ids.is_empty() {
             return Ok(HashMap::new());
         }
@@ -658,10 +692,15 @@ impl ObservabilityStore for PgMissionStore {
         Ok(result)
     }
 
-    async fn label_find_messages(&self, label: &str, value: Option<&str>, limit: i64) -> DbResult<Vec<i64>> {
+    async fn label_find_messages(
+        &self,
+        label: &str,
+        value: Option<&str>,
+        limit: i64,
+    ) -> DbResult<Vec<i64>> {
         if let Some(v) = value {
             let rows: Vec<(i64,)> = sqlx::query_as(
-                "SELECT message_id FROM message_labels WHERE label = $1 AND value = $2 LIMIT $3"
+                "SELECT message_id FROM message_labels WHERE label = $1 AND value = $2 LIMIT $3",
             )
             .bind(label)
             .bind(v)
@@ -670,47 +709,66 @@ impl ObservabilityStore for PgMissionStore {
             .await?;
             Ok(rows.into_iter().map(|r| r.0).collect())
         } else {
-            let rows: Vec<(i64,)> = sqlx::query_as(
-                "SELECT message_id FROM message_labels WHERE label = $1 LIMIT $2"
-            )
-            .bind(label)
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await?;
+            let rows: Vec<(i64,)> =
+                sqlx::query_as("SELECT message_id FROM message_labels WHERE label = $1 LIMIT $2")
+                    .bind(label)
+                    .bind(limit)
+                    .fetch_all(&self.pool)
+                    .await?;
             Ok(rows.into_iter().map(|r| r.0).collect())
         }
     }
 
     // ── conversation labels (EAV) ──────────────────────────────────
 
-    async fn conversation_label_set(&self, session_id: &str, label: &str, value: &str, source: &str) -> DbResult<()> {
+    async fn conversation_label_set(
+        &self,
+        session_id: &str,
+        label: &str,
+        value: &str,
+        source: &str,
+    ) -> DbResult<()> {
         sqlx::query(
             "INSERT INTO conversation_labels (session_id, label, value, source)
              VALUES ($1, $2, $3, $4)
              ON CONFLICT (session_id, label) DO UPDATE SET
-                value = EXCLUDED.value, source = EXCLUDED.source"
+                value = EXCLUDED.value, source = EXCLUDED.source",
         )
-        .bind(session_id).bind(label).bind(value).bind(source)
-        .execute(&self.pool).await?;
+        .bind(session_id)
+        .bind(label)
+        .bind(value)
+        .bind(source)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
     async fn conversation_label_delete(&self, session_id: &str, label: &str) -> DbResult<()> {
         sqlx::query("DELETE FROM conversation_labels WHERE session_id = $1 AND label = $2")
-            .bind(session_id).bind(label)
-            .execute(&self.pool).await?;
+            .bind(session_id)
+            .bind(label)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
     async fn conversation_label_get(&self, session_id: &str) -> DbResult<Vec<(String, String)>> {
         let rows: Vec<(String, String)> = sqlx::query_as(
-            "SELECT label, COALESCE(value, '') FROM conversation_labels WHERE session_id = $1"
-        ).bind(session_id).fetch_all(&self.pool).await?;
+            "SELECT label, COALESCE(value, '') FROM conversation_labels WHERE session_id = $1",
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows)
     }
 
-    async fn conversation_label_get_batch(&self, session_ids: &[&str]) -> DbResult<HashMap<String, Vec<(String, String)>>> {
-        if session_ids.is_empty() { return Ok(HashMap::new()); }
+    async fn conversation_label_get_batch(
+        &self,
+        session_ids: &[&str],
+    ) -> DbResult<HashMap<String, Vec<(String, String)>>> {
+        if session_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
         let rows = sqlx::query(
             "SELECT session_id, label, COALESCE(value, '') FROM conversation_labels WHERE session_id = ANY($1)"
         ).bind(session_ids).fetch_all(&self.pool).await?;
@@ -725,7 +783,12 @@ impl ObservabilityStore for PgMissionStore {
         Ok(result)
     }
 
-    async fn conversation_label_find(&self, label: &str, value: Option<&str>, limit: i64) -> DbResult<Vec<String>> {
+    async fn conversation_label_find(
+        &self,
+        label: &str,
+        value: Option<&str>,
+        limit: i64,
+    ) -> DbResult<Vec<String>> {
         if let Some(v) = value {
             let rows: Vec<(String,)> = sqlx::query_as(
                 "SELECT session_id FROM conversation_labels WHERE label = $1 AND value = $2 LIMIT $3"
@@ -733,15 +796,23 @@ impl ObservabilityStore for PgMissionStore {
             Ok(rows.into_iter().map(|r| r.0).collect())
         } else {
             let rows: Vec<(String,)> = sqlx::query_as(
-                "SELECT session_id FROM conversation_labels WHERE label = $1 LIMIT $2"
-            ).bind(label).bind(limit).fetch_all(&self.pool).await?;
+                "SELECT session_id FROM conversation_labels WHERE label = $1 LIMIT $2",
+            )
+            .bind(label)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?;
             Ok(rows.into_iter().map(|r| r.0).collect())
         }
     }
 
     // ── conversation-specific backfill cursors (stay in ObservabilityStore) ──
 
-    async fn conversations_missing_summary_cursor(&self, cursor: i64, limit: i64) -> DbResult<Vec<(i64, String)>> {
+    async fn conversations_missing_summary_cursor(
+        &self,
+        cursor: i64,
+        limit: i64,
+    ) -> DbResult<Vec<(i64, String)>> {
         // PG: conversations.id is TEXT. Use ROW_NUMBER() as a stable cursor surrogate
         // mirroring SQLite's implicit rowid pagination.
         let rows: Vec<(i64, String)> = sqlx::query_as(
@@ -752,7 +823,7 @@ impl ObservabilityStore for PgMissionStore {
                   AND status = 'completed' AND message_count >= 6
                   AND conversation_type IN ('user', 'worker')
             ) sub WHERE rn > $1
-            ORDER BY rn ASC LIMIT $2"
+            ORDER BY rn ASC LIMIT $2",
         )
         .bind(cursor)
         .bind(limit)
@@ -779,7 +850,7 @@ impl ObservabilityStore for PgMissionStore {
                       WHERE tv.session_id = c.id AND tv.embedding_provider = $1
                   )
             ) sub WHERE rn > $2
-            ORDER BY rn ASC LIMIT $3"
+            ORDER BY rn ASC LIMIT $3",
         )
         .bind(provider)
         .bind(cursor)
@@ -794,7 +865,7 @@ impl ObservabilityStore for PgMissionStore {
             "SELECT COUNT(*) FROM conversations
              WHERE (llm_summary IS NULL OR llm_summary = '[timeout]')
                AND status = 'completed' AND message_count >= 6
-               AND conversation_type IN ('user', 'worker')"
+               AND conversation_type IN ('user', 'worker')",
         )
         .fetch_one(&self.pool)
         .await?;
@@ -809,7 +880,7 @@ impl ObservabilityStore for PgMissionStore {
                AND NOT EXISTS (
                    SELECT 1 FROM conversation_topic_vectors tv
                    WHERE tv.session_id = c.id AND tv.embedding_provider = $1
-               )"
+               )",
         )
         .bind(provider)
         .fetch_one(&self.pool)
@@ -850,24 +921,27 @@ impl ObservabilityStore for PgMissionStore {
 
     async fn router_chat_load_history(&self, conv_id: &str) -> DbResult<Vec<serde_json::Value>> {
         let rows = sqlx::query(
-            "SELECT role, content FROM conversation_messages WHERE session_id = $1 ORDER BY id ASC"
+            "SELECT role, content FROM conversation_messages WHERE session_id = $1 ORDER BY id ASC",
         )
         .bind(conv_id)
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.iter().map(|r| {
-            use sqlx::Row;
-            let role: String = r.get("role");
-            let content: String = r.get("content");
-            serde_json::json!({"role": role, "content": content})
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|r| {
+                use sqlx::Row;
+                let role: String = r.get("role");
+                let content: String = r.get("content");
+                serde_json::json!({"role": role, "content": content})
+            })
+            .collect())
     }
 
     async fn router_chat_get_summary(&self, conv_id: &str) -> DbResult<(Option<String>, i64)> {
         let row: (Option<String>, i64) = sqlx::query_as(
             "SELECT rolling_summary, COALESCE(last_summarized_msg_id, 0)
-             FROM conversations WHERE id = $1"
+             FROM conversations WHERE id = $1",
         )
         .bind(conv_id)
         .fetch_one(&self.pool)
@@ -875,28 +949,35 @@ impl ObservabilityStore for PgMissionStore {
         Ok(row)
     }
 
-    async fn router_chat_load_active_history(&self, conv_id: &str, after_id: i64) -> DbResult<Vec<serde_json::Value>> {
+    async fn router_chat_load_active_history(
+        &self,
+        conv_id: &str,
+        after_id: i64,
+    ) -> DbResult<Vec<serde_json::Value>> {
         let rows = sqlx::query(
             "SELECT role, content FROM conversation_messages
              WHERE session_id = $1 AND id > $2
-             ORDER BY id ASC"
+             ORDER BY id ASC",
         )
         .bind(conv_id)
         .bind(after_id)
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.iter().map(|r| {
-            use sqlx::Row;
-            let role: String = r.get("role");
-            let content: String = r.get("content");
-            serde_json::json!({"role": role, "content": content})
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|r| {
+                use sqlx::Row;
+                let role: String = r.get("role");
+                let content: String = r.get("content");
+                serde_json::json!({"role": role, "content": content})
+            })
+            .collect())
     }
 
     async fn router_chat_unsummarized_count(&self, conv_id: &str, after_id: i64) -> DbResult<i64> {
         let (count,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM conversation_messages WHERE session_id = $1 AND id > $2"
+            "SELECT COUNT(*) FROM conversation_messages WHERE session_id = $1 AND id > $2",
         )
         .bind(conv_id)
         .bind(after_id)
@@ -914,7 +995,7 @@ impl ObservabilityStore for PgMissionStore {
         let rows: Vec<(i64, String, String)> = sqlx::query_as(
             "SELECT id, role, content FROM conversation_messages
              WHERE session_id = $1 AND id > $2
-             ORDER BY id ASC LIMIT $3"
+             ORDER BY id ASC LIMIT $3",
         )
         .bind(conv_id)
         .bind(after_id)
@@ -934,7 +1015,7 @@ impl ObservabilityStore for PgMissionStore {
         let result = sqlx::query(
             "UPDATE conversations
              SET rolling_summary = $1, last_summarized_msg_id = $2
-             WHERE id = $3 AND COALESCE(last_summarized_msg_id, 0) = $4"
+             WHERE id = $3 AND COALESCE(last_summarized_msg_id, 0) = $4",
         )
         .bind(new_summary)
         .bind(new_cursor)
@@ -954,7 +1035,7 @@ impl ObservabilityStore for PgMissionStore {
         for (role, content) in messages {
             sqlx::query(
                 "INSERT INTO conversation_messages (session_id, role, content, timestamp)
-                 VALUES ($1, $2, $3, $4)"
+                 VALUES ($1, $2, $3, $4)",
             )
             .bind(conv_id)
             .bind(role)
@@ -977,7 +1058,7 @@ impl ObservabilityStore for PgMissionStore {
         // Reuse existing conversation if ID provided
         if let Some(id) = conversation_id {
             let (exists,): (bool,) = sqlx::query_as(
-                "SELECT EXISTS(SELECT 1 FROM conversations WHERE id = $1 AND source = 'jarvis_ui')"
+                "SELECT EXISTS(SELECT 1 FROM conversations WHERE id = $1 AND source = 'jarvis_ui')",
             )
             .bind(id)
             .fetch_one(&self.pool)
@@ -1007,10 +1088,14 @@ impl ObservabilityStore for PgMissionStore {
         user_message: &str,
         assistant_message: &str,
     ) -> DbResult<()> {
-        self.router_chat_append_messages(conv_id, &[
-            ("user".to_string(), user_message.to_string()),
-            ("assistant".to_string(), assistant_message.to_string()),
-        ]).await
+        self.router_chat_append_messages(
+            conv_id,
+            &[
+                ("user".to_string(), user_message.to_string()),
+                ("assistant".to_string(), assistant_message.to_string()),
+            ],
+        )
+        .await
     }
 
     async fn jarvis_update_title(&self, conv_id: &str, title: &str) -> DbResult<()> {
@@ -1026,10 +1111,10 @@ impl ObservabilityStore for PgMissionStore {
         let row: Option<(String,)> = sqlx::query_as(
             "SELECT id FROM conversations \
              WHERE source = 'jarvis_ui' AND status = 'active' \
-             ORDER BY started_at DESC LIMIT 1"
+             ORDER BY started_at DESC LIMIT 1",
         )
-            .fetch_optional(&self.pool)
-            .await?;
+        .fetch_optional(&self.pool)
+        .await?;
         Ok(row.map(|r| r.0))
     }
 
@@ -1046,20 +1131,23 @@ impl ObservabilityStore for PgMissionStore {
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.iter().map(|r| {
-            use sqlx::Row;
-            let total_chars: i64 = r.get("total_chars");
-            serde_json::json!({
-                "id": r.get::<String, _>("id"),
-                "task_id": r.get::<Option<String>, _>("task_id"),
-                "model": r.get::<Option<String>, _>("model"),
-                "message_count": r.get::<i64, _>("message_count"),
-                "started_at": r.get::<String, _>("started_at"),
-                "status": r.get::<String, _>("status"),
-                "total_chars": total_chars,
-                "estimated_tokens": total_chars / 4,
+        Ok(rows
+            .iter()
+            .map(|r| {
+                use sqlx::Row;
+                let total_chars: i64 = r.get("total_chars");
+                serde_json::json!({
+                    "id": r.get::<String, _>("id"),
+                    "task_id": r.get::<Option<String>, _>("task_id"),
+                    "model": r.get::<Option<String>, _>("model"),
+                    "message_count": r.get::<i64, _>("message_count"),
+                    "started_at": r.get::<String, _>("started_at"),
+                    "status": r.get::<String, _>("status"),
+                    "total_chars": total_chars,
+                    "estimated_tokens": total_chars / 4,
+                })
             })
-        }).collect())
+            .collect())
     }
 
     async fn router_chat_stats(&self) -> DbResult<serde_json::Value> {
@@ -1069,7 +1157,7 @@ impl ObservabilityStore for PgMissionStore {
                     COALESCE(SUM(LENGTH(m.content)), 0)
              FROM conversations c
              LEFT JOIN conversation_messages m ON m.session_id = c.id
-             WHERE c.chat_type = 'router_chat'"
+             WHERE c.chat_type = 'router_chat'",
         )
         .fetch_one(&self.pool)
         .await?;
@@ -1090,16 +1178,19 @@ impl ObservabilityStore for PgMissionStore {
         .fetch_all(&self.pool)
         .await?;
 
-        let by_model: Vec<serde_json::Value> = model_rows.iter().map(|r| {
-            let chars: i64 = r.get(3);
-            serde_json::json!({
-                "model": r.get::<String, _>(0),
-                "conversations": r.get::<i64, _>(1),
-                "messages": r.get::<i64, _>(2),
-                "total_chars": chars,
-                "estimated_tokens": chars / 4,
+        let by_model: Vec<serde_json::Value> = model_rows
+            .iter()
+            .map(|r| {
+                let chars: i64 = r.get(3);
+                serde_json::json!({
+                    "model": r.get::<String, _>(0),
+                    "conversations": r.get::<i64, _>(1),
+                    "messages": r.get::<i64, _>(2),
+                    "total_chars": chars,
+                    "estimated_tokens": chars / 4,
+                })
             })
-        }).collect();
+            .collect();
 
         // By day (last 30 days)
         let day_rows = sqlx::query(
@@ -1112,16 +1203,19 @@ impl ObservabilityStore for PgMissionStore {
         .fetch_all(&self.pool)
         .await?;
 
-        let by_day: Vec<serde_json::Value> = day_rows.iter().map(|r| {
-            use sqlx::Row;
-            let chars: i64 = r.get("chars");
-            serde_json::json!({
-                "day": r.get::<String, _>("day"),
-                "messages": r.get::<i64, _>("msg_count"),
-                "total_chars": chars,
-                "estimated_tokens": chars / 4,
+        let by_day: Vec<serde_json::Value> = day_rows
+            .iter()
+            .map(|r| {
+                use sqlx::Row;
+                let chars: i64 = r.get("chars");
+                serde_json::json!({
+                    "day": r.get::<String, _>("day"),
+                    "messages": r.get::<i64, _>("msg_count"),
+                    "total_chars": chars,
+                    "estimated_tokens": chars / 4,
+                })
             })
-        }).collect();
+            .collect();
 
         Ok(serde_json::json!({
             "total_conversations": total_convs,
@@ -1133,10 +1227,14 @@ impl ObservabilityStore for PgMissionStore {
         }))
     }
 
-    async fn router_chat_clear(&self, conversation_id: &str, count: Option<i64>) -> DbResult<(i64, i64)> {
+    async fn router_chat_clear(
+        &self,
+        conversation_id: &str,
+        count: Option<i64>,
+    ) -> DbResult<(i64, i64)> {
         // Verify it's a router_chat conversation
         let (is_router,): (bool,) = sqlx::query_as(
-            "SELECT COUNT(*) > 0 FROM conversations WHERE id = $1 AND chat_type = 'router_chat'"
+            "SELECT COUNT(*) > 0 FROM conversations WHERE id = $1 AND chat_type = 'router_chat'",
         )
         .bind(conversation_id)
         .fetch_one(&self.pool)
@@ -1173,12 +1271,11 @@ impl ObservabilityStore for PgMissionStore {
             let deleted = del.rows_affected() as i64;
 
             // Update message_count
-            let (remaining,): (i64,) = sqlx::query_as(
-                "SELECT COUNT(*) FROM conversation_messages WHERE session_id = $1"
-            )
-            .bind(conversation_id)
-            .fetch_one(&mut *tx)
-            .await?;
+            let (remaining,): (i64,) =
+                sqlx::query_as("SELECT COUNT(*) FROM conversation_messages WHERE session_id = $1")
+                    .bind(conversation_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
 
             sqlx::query("UPDATE conversations SET message_count = $1 WHERE id = $2")
                 .bind(remaining)
@@ -1199,12 +1296,10 @@ impl ObservabilityStore for PgMissionStore {
             .execute(&mut *tx)
             .await?;
 
-            let del = sqlx::query(
-                "DELETE FROM conversation_messages WHERE session_id = $1"
-            )
-            .bind(conversation_id)
-            .execute(&mut *tx)
-            .await?;
+            let del = sqlx::query("DELETE FROM conversation_messages WHERE session_id = $1")
+                .bind(conversation_id)
+                .execute(&mut *tx)
+                .await?;
             let deleted = del.rows_affected() as i64;
 
             sqlx::query("UPDATE conversations SET message_count = 0 WHERE id = $1")
@@ -1220,7 +1315,7 @@ impl ObservabilityStore for PgMissionStore {
     async fn router_chat_clear_by_task(&self, task_id: &str, count: Option<i64>) -> DbResult<i64> {
         // Get all conversation IDs for this task
         let conv_ids: Vec<(String,)> = sqlx::query_as(
-            "SELECT id FROM conversations WHERE task_id = $1 AND chat_type = 'router_chat'"
+            "SELECT id FROM conversations WHERE task_id = $1 AND chat_type = 'router_chat'",
         )
         .bind(task_id)
         .fetch_all(&self.pool)
@@ -1239,7 +1334,7 @@ impl ObservabilityStore for PgMissionStore {
         let session_id: Option<(String,)> = sqlx::query_as(
             "SELECT cm.session_id FROM conversation_messages cm
              JOIN conversations c ON c.id = cm.session_id
-             WHERE cm.id = $1 AND c.chat_type = 'router_chat'"
+             WHERE cm.id = $1 AND c.chat_type = 'router_chat'",
         )
         .bind(message_id)
         .fetch_optional(&self.pool)
@@ -1296,19 +1391,18 @@ impl ObservabilityStore for PgMissionStore {
 
         let msg_del = sqlx::query(
             "DELETE FROM conversation_messages WHERE session_id = $1
-             AND EXISTS (SELECT 1 FROM conversations WHERE id = $1 AND chat_type = 'router_chat')"
+             AND EXISTS (SELECT 1 FROM conversations WHERE id = $1 AND chat_type = 'router_chat')",
         )
         .bind(conversation_id)
         .execute(&mut *tx)
         .await?;
         let msg_deleted = msg_del.rows_affected() as i64;
 
-        let conv_del = sqlx::query(
-            "DELETE FROM conversations WHERE id = $1 AND chat_type = 'router_chat'"
-        )
-        .bind(conversation_id)
-        .execute(&mut *tx)
-        .await?;
+        let conv_del =
+            sqlx::query("DELETE FROM conversations WHERE id = $1 AND chat_type = 'router_chat'")
+                .bind(conversation_id)
+                .execute(&mut *tx)
+                .await?;
         let conv_deleted = conv_del.rows_affected() as i64;
 
         tx.commit().await?;
@@ -1332,7 +1426,7 @@ impl ObservabilityStore for PgMissionStore {
 
         let msg_del = sqlx::query(
             "DELETE FROM conversation_messages WHERE session_id IN
-             (SELECT id FROM conversations WHERE task_id = $1 AND chat_type = 'router_chat')"
+             (SELECT id FROM conversations WHERE task_id = $1 AND chat_type = 'router_chat')",
         )
         .bind(task_id)
         .execute(&mut *tx)
@@ -1340,7 +1434,7 @@ impl ObservabilityStore for PgMissionStore {
         let msg_deleted = msg_del.rows_affected() as i64;
 
         let conv_del = sqlx::query(
-            "DELETE FROM conversations WHERE task_id = $1 AND chat_type = 'router_chat'"
+            "DELETE FROM conversations WHERE task_id = $1 AND chat_type = 'router_chat'",
         )
         .bind(task_id)
         .execute(&mut *tx)
@@ -1358,7 +1452,7 @@ impl ObservabilityStore for PgMissionStore {
             "INSERT INTO conversation_messages (session_id, role, content, timestamp)
              SELECT session_id, role, content, timestamp
              FROM router_chat_archive WHERE session_id = $1
-             ORDER BY original_id ASC"
+             ORDER BY original_id ASC",
         )
         .bind(conversation_id)
         .execute(&mut *tx)
@@ -1387,23 +1481,27 @@ impl ObservabilityStore for PgMissionStore {
     // Source: image_descriptions (system-support) + message_translations (conversation-logs)
 
     async fn get_image_description(&self, image_hash: &str) -> DbResult<Option<String>> {
-        let row: Option<(String,)> = sqlx::query_as(
-            "SELECT description FROM image_descriptions WHERE image_hash = $1"
-        )
-        .bind(image_hash)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT description FROM image_descriptions WHERE image_hash = $1")
+                .bind(image_hash)
+                .fetch_optional(&self.pool)
+                .await?;
         Ok(row.map(|r| r.0))
     }
 
-    async fn save_image_description(&self, image_hash: &str, media_type: &str, description: &str) -> DbResult<()> {
+    async fn save_image_description(
+        &self,
+        image_hash: &str,
+        media_type: &str,
+        description: &str,
+    ) -> DbResult<()> {
         sqlx::query(
             "INSERT INTO image_descriptions (image_hash, media_type, description, char_count)
              VALUES ($1, $2, $3, $4)
              ON CONFLICT (image_hash) DO UPDATE SET
                 media_type = EXCLUDED.media_type,
                 description = EXCLUDED.description,
-                char_count = EXCLUDED.char_count"
+                char_count = EXCLUDED.char_count",
         )
         .bind(image_hash)
         .bind(media_type)
@@ -1424,12 +1522,11 @@ impl ObservabilityStore for PgMissionStore {
     }
 
     async fn get_message_raw_content(&self, message_id: i64) -> DbResult<Option<String>> {
-        let row: Option<(Option<String>,)> = sqlx::query_as(
-            "SELECT raw_content FROM conversation_messages WHERE id = $1"
-        )
-        .bind(message_id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT raw_content FROM conversation_messages WHERE id = $1")
+                .bind(message_id)
+                .fetch_optional(&self.pool)
+                .await?;
         Ok(row.and_then(|r| r.0))
     }
 
@@ -1440,7 +1537,7 @@ impl ObservabilityStore for PgMissionStore {
                AND raw_content IS NOT NULL
                AND raw_content LIKE '%\"type\":\"image\"%'
              ORDER BY id DESC
-             LIMIT $1"
+             LIMIT $1",
         )
         .bind(limit as i64)
         .fetch_all(&self.pool)
@@ -1452,7 +1549,7 @@ impl ObservabilityStore for PgMissionStore {
         let result = sqlx::query(
             "UPDATE conversation_messages
              SET content = REPLACE(content, '[图片: ', '[图片(解析失败): ')
-             WHERE id = $1 AND content LIKE '%[图片: %'"
+             WHERE id = $1 AND content LIKE '%[图片: %'",
         )
         .bind(message_id)
         .execute(&self.pool)
@@ -1467,14 +1564,20 @@ impl ObservabilityStore for PgMissionStore {
         Ok(count)
     }
 
-    async fn insert_translation(&self, message_id: i64, translation: &str, model: &str, duration_ms: u64) -> DbResult<()> {
+    async fn insert_translation(
+        &self,
+        message_id: i64,
+        translation: &str,
+        model: &str,
+        duration_ms: u64,
+    ) -> DbResult<()> {
         sqlx::query(
             "INSERT INTO message_translations (message_id, translation, model, duration_ms)
              VALUES ($1, $2, $3, $4)
              ON CONFLICT (message_id) DO UPDATE SET
                 translation = EXCLUDED.translation,
                 model = EXCLUDED.model,
-                duration_ms = EXCLUDED.duration_ms"
+                duration_ms = EXCLUDED.duration_ms",
         )
         .bind(message_id)
         .bind(translation)
@@ -1487,7 +1590,7 @@ impl ObservabilityStore for PgMissionStore {
 
     async fn get_translation(&self, message_id: i64) -> DbResult<Option<(String, String)>> {
         let row: Option<(String, String)> = sqlx::query_as(
-            "SELECT translation, created_at FROM message_translations WHERE message_id = $1"
+            "SELECT translation, created_at FROM message_translations WHERE message_id = $1",
         )
         .bind(message_id)
         .fetch_optional(&self.pool)
@@ -1496,12 +1599,11 @@ impl ObservabilityStore for PgMissionStore {
     }
 
     async fn has_translation(&self, message_id: i64) -> DbResult<bool> {
-        let (count,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM message_translations WHERE message_id = $1"
-        )
-        .bind(message_id)
-        .fetch_one(&self.pool)
-        .await?;
+        let (count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM message_translations WHERE message_id = $1")
+                .bind(message_id)
+                .fetch_one(&self.pool)
+                .await?;
         Ok(count > 0)
     }
 }

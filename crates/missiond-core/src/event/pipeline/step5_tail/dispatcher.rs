@@ -28,8 +28,8 @@
 //!   * Tail source error → return [`DispatchError::Tail`] up to the
 //!     supervisor. Restart strategy is the daemon's job.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
 
 use tokio::sync::watch;
 use tokio::time::timeout;

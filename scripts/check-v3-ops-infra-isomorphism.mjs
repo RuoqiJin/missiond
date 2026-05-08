@@ -12,14 +12,14 @@ Checks the V3 ops-infra Lisp/code isomorphism contract:
   - deploy-daemon is the canonical one-command blue-green redeploy path.
   - deploy-daemon keeps build, candidate release, manifest, active symlink,
     kickstart, socket wait, bounded IPC smoke, rollback, and cleanup together.
-  - cargo-fmt-touched formats only Rust files present in the current diff.
-  - cargo-fmt-touched skips only explicit missiond-rustfmt-exempt legacy
-    facades while V3 physical split is in progress.
+  - rustfmt-missiond proves MissionD-owned Rust crates are formatter-converged.
+  - cargo-fmt-touched remains the scoped fallback for non-M6/external projects.
 `;
 
 const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   deployDaemon: 'scripts/deploy-daemon.sh',
+  rustfmtMissiond: 'scripts/rustfmt-missiond.sh',
   cargoFmtTouched: 'scripts/cargo-fmt-touched.sh',
   daemonMain: 'crates/missiond-daemon/src/main.rs',
   astSyncWorker: 'crates/missiond-daemon/src/workers/local/ast_sync_worker.rs',
@@ -84,6 +84,7 @@ function checkFiles(root, files) {
     '(surface ops-infra',
     ':status "code-aligned"',
     'scripts/deploy-daemon.sh',
+    'scripts/rustfmt-missiond.sh',
     'scripts/cargo-fmt-touched.sh',
     'scripts/check-v3-ops-infra-isomorphism.mjs',
     'Daemon redeploy MUST stay one command',
@@ -96,12 +97,13 @@ function checkFiles(root, files) {
     'Deploy scripts MUST emit timing for cargo-build',
     'Dev-only fast deploy may select debug profile and sccache',
     'AST repository-wide startup full sync MUST be opt-in through MISSIOND_AST_FULL_SYNC_ON_STARTUP',
-	    'Rust formatting MUST be scoped to Rust files touched in the current diff',
-	    'missiond-rustfmt-exempt legacy-large-file facades',
-	    'rustfmt MUST run with skip_children=true',
-	    'direct rustfmt on module roots such as mod.rs',
-	    'node scripts/check-v3-ops-infra-isomorphism.mjs',
-	  ]);
+    'M6 MissionD formatting MUST be converged',
+    'scripts/rustfmt-missiond.sh --check',
+    'No MissionD Rust source may carry formatter exemption markers',
+    'Rust formatting for external or non-M6 projects MAY remain scoped',
+    'rustfmt MUST run with skip_children=true',
+    'node scripts/check-v3-ops-infra-isomorphism.mjs',
+  ]);
 
   requireAll(diagnostics, files.deployDaemon, sources.deployDaemon, [
     'scripts/deploy-daemon.sh                  # build + blue-green deploy + smoke',
@@ -162,13 +164,21 @@ function checkFiles(root, files) {
     'git diff --name-only --diff-filter=ACMR "${BRANCH}...HEAD"',
     "awk '/\\.rs$/ { print }'",
     'no Rust files in diff',
-	    'missiond-rustfmt-exempt',
-	    'skipped rustfmt-exempt legacy file(s)',
-	    'invoke this script instead of running `rustfmt path/to/mod.rs`',
-	    'module roots as traversal anchors',
-	    'command -v rustfmt',
-	    '--config skip_children=true --check',
-	    'xargs rustfmt --edition "$EDITION" --config skip_children=true',
+    'Non-M6 or external-project waves still need a scoped formatter entrypoint',
+    'repository-wide MissionD Rust formatting',
+    'skip_children=true',
+    'command -v rustfmt',
+    '--config skip_children=true --check',
+    'xargs rustfmt --edition "$EDITION" --config skip_children=true',
+  ]);
+
+  requireAll(diagnostics, files.rustfmtMissiond, sources.rustfmtMissiond, [
+    'Format/check every Rust file owned by this MissionD repository',
+    'scripts/rustfmt-missiond.sh --check',
+    'find crates -name',
+    'missiond-rustfmt-exempt',
+    'rustfmt --edition 2021 --config skip_children=true --check',
+    'rustfmt --edition 2021 --config skip_children=true',
   ]);
 
   requireAll(diagnostics, files.daemonMain, sources.daemonMain, [
@@ -208,14 +218,16 @@ function buildFixture() {
        "Deploy scripts MUST emit timing for cargo-build."
        "Dev-only fast deploy may select debug profile and sccache."
        "AST repository-wide startup full sync MUST be opt-in through MISSIOND_AST_FULL_SYNC_ON_STARTUP."
-	       "Rust formatting MUST be scoped to Rust files touched in the current diff."
-	       "missiond-rustfmt-exempt legacy-large-file facades are skipped only during physical V3 split."
-	       "rustfmt MUST run with skip_children=true."
-	       "Workers/operators MUST use scripts/cargo-fmt-touched.sh rather than direct rustfmt on module roots such as mod.rs."])
+       "M6 MissionD formatting MUST be converged."
+       "scripts/rustfmt-missiond.sh --check MUST be the MissionD-owned Rust formatter gate."
+       "No MissionD Rust source may carry formatter exemption markers."
+       "Rust formatting for external or non-M6 projects MAY remain scoped through cargo-fmt-touched."
+       "rustfmt MUST run with skip_children=true."])
   (implementation-map
     (surface ops-infra
       :status "code-aligned"
       :code ["scripts/deploy-daemon.sh"
+             "scripts/rustfmt-missiond.sh"
              "scripts/cargo-fmt-touched.sh"
              "crates/missiond-daemon/src/main.rs"
              "crates/missiond-daemon/src/workers/local/ast_sync_worker.rs"
@@ -269,13 +281,21 @@ git ls-files --others --exclude-standard
 git diff --name-only --diff-filter=ACMR "\${BRANCH}...HEAD"
 awk '/\\.rs$/ { print }'
 no Rust files in diff
-	missiond-rustfmt-exempt
-	skipped rustfmt-exempt legacy file(s)
-	invoke this script instead of running \`rustfmt path/to/mod.rs\`
-	module roots as traversal anchors
-	command -v rustfmt
+Non-M6 or external-project waves still need a scoped formatter entrypoint
+repository-wide MissionD Rust formatting
+skip_children=true
+command -v rustfmt
 --config skip_children=true --check
 xargs rustfmt --edition "$EDITION" --config skip_children=true
+`);
+
+  writeFixture(root, DEFAULT_FILES.rustfmtMissiond, `
+Format/check every Rust file owned by this MissionD repository
+scripts/rustfmt-missiond.sh --check
+find crates -name
+missiond-rustfmt-exempt
+rustfmt --edition 2021 --config skip_children=true --check
+rustfmt --edition 2021 --config skip_children=true
 `);
 
   writeFixture(root, DEFAULT_FILES.daemonMain, `

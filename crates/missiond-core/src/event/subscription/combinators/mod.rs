@@ -95,7 +95,10 @@ impl<T: DomainEvent> Ack<T> {
             }
             st.dirty_since_flush = st.dirty_since_flush.saturating_add(1);
         }
-        let _ = self.flush_signal.send(FlushSignal::Dirty { count: 1 }).await;
+        let _ = self
+            .flush_signal
+            .send(FlushSignal::Dirty { count: 1 })
+            .await;
     }
 }
 
@@ -103,7 +106,10 @@ impl<T: DomainEvent> Subscription<T> {
     /// Fixed-window debounce: collect events for `window`; emit the last
     /// one received. Earlier events are silently acked.
     pub fn debounce(self, window: Duration) -> DebouncedSubscription<T> {
-        DebouncedSubscription { inner: self, window }
+        DebouncedSubscription {
+            inner: self,
+            window,
+        }
     }
 
     /// Cap the delivery rate to `max_per_sec` events. Excess events wait,
@@ -127,7 +133,10 @@ impl<T: DomainEvent> Subscription<T> {
     where
         F: Fn(&T, &T) -> T + Send + Sync + 'static,
     {
-        CoalescingSubscription { inner: self, fold: f }
+        CoalescingSubscription {
+            inner: self,
+            fold: f,
+        }
     }
 
     /// Pass-through filter. Dropped events are silently acked.
@@ -243,10 +252,7 @@ mod tests {
         }
     }
 
-    async fn make_sub(
-        events: Vec<LoggedEvent>,
-        name: &str,
-    ) -> Subscription<BoardEvent> {
+    async fn make_sub(events: Vec<LoggedEvent>, name: &str) -> Subscription<BoardEvent> {
         let log: Arc<dyn LogReadable> = Arc::new(StaticLog(events));
         let store = Arc::new(InMemoryCursorStore::new());
         let dlq = Arc::new(InMemoryDlq::new());

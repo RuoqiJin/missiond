@@ -62,8 +62,12 @@ pub struct AgentQuestion {
     pub updated_at: String,
 }
 
-fn default_target_user() -> String { "user".to_string() }
-fn default_decision_type() -> String { "implementation".to_string() }
+fn default_target_user() -> String {
+    "user".to_string()
+}
+fn default_decision_type() -> String {
+    "implementation".to_string()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

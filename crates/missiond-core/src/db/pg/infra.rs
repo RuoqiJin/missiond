@@ -14,17 +14,21 @@ use std::collections::HashMap;
 
 use super::PgMissionStore;
 use crate::db::error::DbResult;
-use crate::db::traits::{InfraStore, BackfillPhaseStatus};
+use crate::db::traits::{BackfillPhaseStatus, InfraStore};
 
 #[async_trait]
 impl InfraStore for PgMissionStore {
     // ── watermarks (from ObservabilityStore v0.4.x) ───────────────
     // ── consumer_watermarks ───────────────────────────────────────
 
-    async fn watermark_get(&self, consumer: &str, session_id: &str) -> DbResult<Option<(Option<i64>, Option<String>)>> {
+    async fn watermark_get(
+        &self,
+        consumer: &str,
+        session_id: &str,
+    ) -> DbResult<Option<(Option<i64>, Option<String>)>> {
         let row: Option<(Option<i64>, Option<String>)> = sqlx::query_as(
             "SELECT last_processed_msg_id, last_processed_time FROM consumer_watermarks
-             WHERE consumer_name = $1 AND session_id = $2"
+             WHERE consumer_name = $1 AND session_id = $2",
         )
         .bind(consumer)
         .bind(session_id)
@@ -33,11 +37,16 @@ impl InfraStore for PgMissionStore {
         Ok(row)
     }
 
-    async fn watermark_advance_time(&self, consumer: &str, session_id: &str, timestamp: &str) -> DbResult<()> {
+    async fn watermark_advance_time(
+        &self,
+        consumer: &str,
+        session_id: &str,
+        timestamp: &str,
+    ) -> DbResult<()> {
         sqlx::query(
             "INSERT INTO consumer_watermarks (consumer_name, session_id, last_processed_time)
              VALUES ($1, $2, $3)
-             ON CONFLICT(consumer_name, session_id) DO UPDATE SET last_processed_time = $3"
+             ON CONFLICT(consumer_name, session_id) DO UPDATE SET last_processed_time = $3",
         )
         .bind(consumer)
         .bind(session_id)
@@ -47,11 +56,16 @@ impl InfraStore for PgMissionStore {
         Ok(())
     }
 
-    async fn watermark_advance_msg_id(&self, consumer: &str, session_id: &str, msg_id: i64) -> DbResult<()> {
+    async fn watermark_advance_msg_id(
+        &self,
+        consumer: &str,
+        session_id: &str,
+        msg_id: i64,
+    ) -> DbResult<()> {
         sqlx::query(
             "INSERT INTO consumer_watermarks (consumer_name, session_id, last_processed_msg_id)
              VALUES ($1, $2, $3)
-             ON CONFLICT(consumer_name, session_id) DO UPDATE SET last_processed_msg_id = $3"
+             ON CONFLICT(consumer_name, session_id) DO UPDATE SET last_processed_msg_id = $3",
         )
         .bind(consumer)
         .bind(session_id)
@@ -87,10 +101,13 @@ impl InfraStore for PgMissionStore {
         Ok(())
     }
 
-    async fn watermark_list(&self, consumer: &str) -> DbResult<Vec<(String, Option<i64>, Option<String>)>> {
+    async fn watermark_list(
+        &self,
+        consumer: &str,
+    ) -> DbResult<Vec<(String, Option<i64>, Option<String>)>> {
         let rows: Vec<(String, Option<i64>, Option<String>)> = sqlx::query_as(
             "SELECT session_id, last_processed_msg_id, last_processed_time
-             FROM consumer_watermarks WHERE consumer_name = $1"
+             FROM consumer_watermarks WHERE consumer_name = $1",
         )
         .bind(consumer)
         .fetch_all(&self.pool)
@@ -101,11 +118,10 @@ impl InfraStore for PgMissionStore {
     // ── watcher_cursors ──────────────────────────────────────────
 
     async fn load_watcher_cursors(&self) -> DbResult<HashMap<String, u64>> {
-        let rows: Vec<(String, i64)> = sqlx::query_as(
-            "SELECT file_path, byte_offset FROM watcher_cursors"
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<(String, i64)> =
+            sqlx::query_as("SELECT file_path, byte_offset FROM watcher_cursors")
+                .fetch_all(&self.pool)
+                .await?;
         Ok(rows.into_iter().map(|(p, o)| (p, o as u64)).collect())
     }
 
@@ -115,7 +131,7 @@ impl InfraStore for PgMissionStore {
                 "INSERT INTO watcher_cursors (file_path, byte_offset, updated_at)
                  VALUES ($1, $2, to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'))
                  ON CONFLICT (file_path) DO UPDATE SET byte_offset = $2,
-                    updated_at = to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')"
+                    updated_at = to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')",
             )
             .bind(path)
             .bind(*offset as i64)
@@ -136,10 +152,12 @@ impl InfraStore for PgMissionStore {
     // ── reconcile_watermarks ─────────────────────────────────────
 
     async fn get_reconcile_watermark(&self, path: &str) -> DbResult<Option<i64>> {
-        let row = sqlx::query("SELECT last_reconciled_size FROM reconcile_watermarks WHERE jsonl_path = $1")
-            .bind(path)
-            .fetch_optional(&self.pool)
-            .await?;
+        let row = sqlx::query(
+            "SELECT last_reconciled_size FROM reconcile_watermarks WHERE jsonl_path = $1",
+        )
+        .bind(path)
+        .fetch_optional(&self.pool)
+        .await?;
         Ok(row.map(|r| r.get::<i64, _>("last_reconciled_size")))
     }
 
@@ -173,15 +191,19 @@ impl InfraStore for PgMissionStore {
     // ── gemini_cli_watermarks ────────────────────────────────────
 
     async fn load_gemini_cursors(&self) -> DbResult<HashMap<String, i64>> {
-        let rows: Vec<(String, i64)> = sqlx::query_as(
-            "SELECT session_file, last_msg_count FROM gemini_cli_watermarks"
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<(String, i64)> =
+            sqlx::query_as("SELECT session_file, last_msg_count FROM gemini_cli_watermarks")
+                .fetch_all(&self.pool)
+                .await?;
         Ok(rows.into_iter().collect())
     }
 
-    async fn save_gemini_cursor(&self, file_path: &str, session_id: &str, msg_count: i64) -> DbResult<()> {
+    async fn save_gemini_cursor(
+        &self,
+        file_path: &str,
+        session_id: &str,
+        msg_count: i64,
+    ) -> DbResult<()> {
         sqlx::query(
             "INSERT INTO gemini_cli_watermarks (session_file, session_id, last_msg_count, last_reconciled_at)
              VALUES ($1, $2, $3, NOW())
@@ -209,17 +231,15 @@ impl InfraStore for PgMissionStore {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row.map(|r| {
-            BackfillPhaseStatus {
-                phase: r.get("phase"),
-                status: r.get("status"),
-                last_cursor: r.get("last_cursor"),
-                total_estimated: r.get("total_estimated"),
-                processed: r.get("processed"),
-                failed: r.get("failed"),
-                started_at: r.get("started_at"),
-                completed_at: r.get("completed_at"),
-            }
+        Ok(row.map(|r| BackfillPhaseStatus {
+            phase: r.get("phase"),
+            status: r.get("status"),
+            last_cursor: r.get("last_cursor"),
+            total_estimated: r.get("total_estimated"),
+            processed: r.get("processed"),
+            failed: r.get("failed"),
+            started_at: r.get("started_at"),
+            completed_at: r.get("completed_at"),
         }))
     }
 
@@ -231,8 +251,9 @@ impl InfraStore for PgMissionStore {
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.iter().map(|r| {
-            BackfillPhaseStatus {
+        Ok(rows
+            .iter()
+            .map(|r| BackfillPhaseStatus {
                 phase: r.get("phase"),
                 status: r.get("status"),
                 last_cursor: r.get("last_cursor"),
@@ -241,8 +262,8 @@ impl InfraStore for PgMissionStore {
                 failed: r.get("failed"),
                 started_at: r.get("started_at"),
                 completed_at: r.get("completed_at"),
-            }
-        }).collect())
+            })
+            .collect())
     }
 
     async fn backfill_start_phase(&self, phase: &str, total_estimated: i64) -> DbResult<()> {
@@ -278,7 +299,7 @@ impl InfraStore for PgMissionStore {
         sqlx::query(
             "UPDATE backfill_progress
              SET last_cursor = $2, processed = processed + $3, failed = failed + $4, updated_at = $5
-             WHERE phase = $1"
+             WHERE phase = $1",
         )
         .bind(phase)
         .bind(new_cursor)
@@ -295,7 +316,7 @@ impl InfraStore for PgMissionStore {
         sqlx::query(
             "UPDATE backfill_progress
              SET status = 'completed', completed_at = $2, updated_at = $2
-             WHERE phase = $1"
+             WHERE phase = $1",
         )
         .bind(phase)
         .bind(&now)
@@ -304,7 +325,12 @@ impl InfraStore for PgMissionStore {
         Ok(())
     }
 
-    async fn backfill_record_failure(&self, session_id: &str, phase: &str, error: &str) -> DbResult<()> {
+    async fn backfill_record_failure(
+        &self,
+        session_id: &str,
+        phase: &str,
+        error: &str,
+    ) -> DbResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query(
             "INSERT INTO backfill_failures (session_id, phase, retry_count, last_error, updated_at)
@@ -312,7 +338,7 @@ impl InfraStore for PgMissionStore {
              ON CONFLICT(session_id, phase) DO UPDATE SET
                retry_count = backfill_failures.retry_count + 1,
                last_error = $3,
-               updated_at = $4"
+               updated_at = $4",
         )
         .bind(session_id)
         .bind(phase)
@@ -323,7 +349,12 @@ impl InfraStore for PgMissionStore {
         Ok(())
     }
 
-    async fn backfill_retryable_failures(&self, phase: &str, max_retries: i64, limit: i64) -> DbResult<Vec<String>> {
+    async fn backfill_retryable_failures(
+        &self,
+        phase: &str,
+        max_retries: i64,
+        limit: i64,
+    ) -> DbResult<Vec<String>> {
         let rows: Vec<(String,)> = sqlx::query_as(
             "SELECT session_id FROM backfill_failures
              WHERE phase = $1 AND retry_count < $2
@@ -338,9 +369,13 @@ impl InfraStore for PgMissionStore {
         Ok(rows.into_iter().map(|r| r.0).collect())
     }
 
-    async fn backfill_retryable_failures_no_cooldown(&self, phase: &str, max_retries: i64) -> DbResult<i64> {
+    async fn backfill_retryable_failures_no_cooldown(
+        &self,
+        phase: &str,
+        max_retries: i64,
+    ) -> DbResult<i64> {
         let (count,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM backfill_failures WHERE phase = $1 AND retry_count < $2"
+            "SELECT COUNT(*) FROM backfill_failures WHERE phase = $1 AND retry_count < $2",
         )
         .bind(phase)
         .bind(max_retries)
@@ -361,12 +396,11 @@ impl InfraStore for PgMissionStore {
     // ── daemon_state (from SlotStore v0.4.x) ─────────────────────
 
     async fn daemon_state_get(&self, key: &str) -> DbResult<Option<i64>> {
-        let row: Option<(String,)> = sqlx::query_as(
-            "SELECT value FROM daemon_state WHERE key = $1"
-        )
-        .bind(key)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT value FROM daemon_state WHERE key = $1")
+                .bind(key)
+                .fetch_optional(&self.pool)
+                .await?;
         Ok(row.map(|r| r.0.parse::<i64>().unwrap_or(0)))
     }
 
@@ -374,7 +408,7 @@ impl InfraStore for PgMissionStore {
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query(
             "INSERT INTO daemon_state (key, value, updated_at) VALUES ($1, $2, $3)
-             ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = $3"
+             ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = $3",
         )
         .bind(key)
         .bind(value.to_string())

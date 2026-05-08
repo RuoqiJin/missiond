@@ -1,5 +1,5 @@
-use crate::db::traits::MissionStore;
 use crate::db::conversation_query::{ConversationQuery, ConversationTypeFilter};
+use crate::db::traits::MissionStore;
 use crate::types::Conversation;
 use anyhow::Result;
 use std::sync::Arc;
@@ -31,15 +31,18 @@ impl ConversationManager {
             None => None,
         };
 
-        let mut convs = self.store.list_conversations(
-            query.status.as_deref(),
-            query.limit.unwrap_or(20),
-            conv_type_str.as_deref(),
-            query.task_id.as_deref(),
-            query.since.as_deref(),
-            query.until.as_deref(),
-            query.source.as_deref(),
-        ).await?;
+        let mut convs = self
+            .store
+            .list_conversations(
+                query.status.as_deref(),
+                query.limit.unwrap_or(20),
+                conv_type_str.as_deref(),
+                query.task_id.as_deref(),
+                query.since.as_deref(),
+                query.until.as_deref(),
+                query.source.as_deref(),
+            )
+            .await?;
 
         if let Some(ref proj) = query.project {
             convs.retain(|c| c.project_id.as_deref() == Some(proj.as_str()));
@@ -49,7 +52,7 @@ impl ConversationManager {
     }
 
     // 可以添加更多基于业务角色的查询：
-    
+
     /// 专门获取前端 Jarvis 面板的会话（不包含后台工作流）
     pub async fn list_jarvis_sessions(&self, limit: i64) -> Result<Vec<Conversation>> {
         let query = ConversationQuery::new()
@@ -57,7 +60,7 @@ impl ConversationManager {
             .limit(limit);
         self.list(query).await
     }
-    
+
     /// 获取后台运维大盘数据（Meta + Worker），不包含人类和前台助理
     pub async fn list_system_workflows(&self, limit: i64) -> Result<Vec<Conversation>> {
         let query = ConversationQuery::new()

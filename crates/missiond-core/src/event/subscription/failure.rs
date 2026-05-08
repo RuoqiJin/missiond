@@ -242,7 +242,10 @@ mod tests {
 
         let out = router.route(&sample_info(0)).await.unwrap();
         match out {
-            FailureOutcome::Retry { delay, next_attempt } => {
+            FailureOutcome::Retry {
+                delay,
+                next_attempt,
+            } => {
                 assert_eq!(delay, Duration::from_millis(10));
                 assert_eq!(next_attempt, 1);
             }

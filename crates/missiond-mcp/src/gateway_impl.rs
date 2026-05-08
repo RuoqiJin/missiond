@@ -6,9 +6,9 @@
 //!
 //! Business logic lives here. Protocol boilerplate lives in gen_gateway.rs.
 
-use std::sync::Arc;
 use anyhow::Result;
 use serde_json::{json, Value};
+use std::sync::Arc;
 use tracing::{debug, info};
 
 use crate::gen_gateway::*;
@@ -119,95 +119,141 @@ impl<H: ToolHandler + 'static> MissiondMcp for McpGateway<H> {
     // but at the MCP layer all groups go through the same IPC bridge.
 
     async fn handle_task(&self, tool_name: &str, args: Value) -> Result<Value> {
-        Ok(serde_json::to_value(self.handler.call(tool_name, args).await)?)
+        Ok(serde_json::to_value(
+            self.handler.call(tool_name, args).await,
+        )?)
     }
 
     async fn handle_pty(&self, tool_name: &str, args: Value) -> Result<Value> {
-        Ok(serde_json::to_value(self.handler.call(tool_name, args).await)?)
+        Ok(serde_json::to_value(
+            self.handler.call(tool_name, args).await,
+        )?)
     }
 
     async fn handle_slot(&self, tool_name: &str, args: Value) -> Result<Value> {
-        Ok(serde_json::to_value(self.handler.call(tool_name, args).await)?)
+        Ok(serde_json::to_value(
+            self.handler.call(tool_name, args).await,
+        )?)
     }
 
     async fn handle_cc_tasks(&self, tool_name: &str, args: Value) -> Result<Value> {
-        Ok(serde_json::to_value(self.handler.call(tool_name, args).await)?)
+        Ok(serde_json::to_value(
+            self.handler.call(tool_name, args).await,
+        )?)
     }
 
     async fn handle_worker(&self, tool_name: &str, args: Value) -> Result<Value> {
-        Ok(serde_json::to_value(self.handler.call(tool_name, args).await)?)
+        Ok(serde_json::to_value(
+            self.handler.call(tool_name, args).await,
+        )?)
     }
 
     async fn handle_job(&self, tool_name: &str, args: Value) -> Result<Value> {
-        Ok(serde_json::to_value(self.handler.call(tool_name, args).await)?)
+        Ok(serde_json::to_value(
+            self.handler.call(tool_name, args).await,
+        )?)
     }
 
     async fn handle_kb(&self, tool_name: &str, args: Value) -> Result<Value> {
-        Ok(serde_json::to_value(self.handler.call(tool_name, args).await)?)
+        Ok(serde_json::to_value(
+            self.handler.call(tool_name, args).await,
+        )?)
     }
 
     async fn handle_board(&self, tool_name: &str, args: Value) -> Result<Value> {
-        Ok(serde_json::to_value(self.handler.call(tool_name, args).await)?)
+        Ok(serde_json::to_value(
+            self.handler.call(tool_name, args).await,
+        )?)
     }
 
     async fn handle_skill(&self, tool_name: &str, args: Value) -> Result<Value> {
-        Ok(serde_json::to_value(self.handler.call(tool_name, args).await)?)
+        Ok(serde_json::to_value(
+            self.handler.call(tool_name, args).await,
+        )?)
     }
 
     async fn handle_memory(&self, tool_name: &str, args: Value) -> Result<Value> {
-        Ok(serde_json::to_value(self.handler.call(tool_name, args).await)?)
+        Ok(serde_json::to_value(
+            self.handler.call(tool_name, args).await,
+        )?)
     }
 
     async fn handle_insight(&self, tool_name: &str, args: Value) -> Result<Value> {
-        Ok(serde_json::to_value(self.handler.call(tool_name, args).await)?)
+        Ok(serde_json::to_value(
+            self.handler.call(tool_name, args).await,
+        )?)
     }
 
     async fn handle_embedding(&self, tool_name: &str, args: Value) -> Result<Value> {
-        Ok(serde_json::to_value(self.handler.call(tool_name, args).await)?)
+        Ok(serde_json::to_value(
+            self.handler.call(tool_name, args).await,
+        )?)
     }
 
     async fn handle_conversation(&self, tool_name: &str, args: Value) -> Result<Value> {
-        Ok(serde_json::to_value(self.handler.call(tool_name, args).await)?)
+        Ok(serde_json::to_value(
+            self.handler.call(tool_name, args).await,
+        )?)
     }
 
     async fn handle_question(&self, tool_name: &str, args: Value) -> Result<Value> {
-        Ok(serde_json::to_value(self.handler.call(tool_name, args).await)?)
+        Ok(serde_json::to_value(
+            self.handler.call(tool_name, args).await,
+        )?)
     }
 
     async fn handle_router_chat(&self, tool_name: &str, args: Value) -> Result<Value> {
-        Ok(serde_json::to_value(self.handler.call(tool_name, args).await)?)
+        Ok(serde_json::to_value(
+            self.handler.call(tool_name, args).await,
+        )?)
     }
 
     async fn handle_timeline(&self, tool_name: &str, args: Value) -> Result<Value> {
-        Ok(serde_json::to_value(self.handler.call(tool_name, args).await)?)
+        Ok(serde_json::to_value(
+            self.handler.call(tool_name, args).await,
+        )?)
     }
 
     async fn handle_audit(&self, tool_name: &str, args: Value) -> Result<Value> {
-        Ok(serde_json::to_value(self.handler.call(tool_name, args).await)?)
+        Ok(serde_json::to_value(
+            self.handler.call(tool_name, args).await,
+        )?)
     }
 
     async fn handle_retrospective(&self, tool_name: &str, args: Value) -> Result<Value> {
-        Ok(serde_json::to_value(self.handler.call(tool_name, args).await)?)
+        Ok(serde_json::to_value(
+            self.handler.call(tool_name, args).await,
+        )?)
     }
 
     async fn handle_decision(&self, tool_name: &str, args: Value) -> Result<Value> {
-        Ok(serde_json::to_value(self.handler.call(tool_name, args).await)?)
+        Ok(serde_json::to_value(
+            self.handler.call(tool_name, args).await,
+        )?)
     }
 
     async fn handle_infra(&self, tool_name: &str, args: Value) -> Result<Value> {
-        Ok(serde_json::to_value(self.handler.call(tool_name, args).await)?)
+        Ok(serde_json::to_value(
+            self.handler.call(tool_name, args).await,
+        )?)
     }
 
     async fn handle_permission(&self, tool_name: &str, args: Value) -> Result<Value> {
-        Ok(serde_json::to_value(self.handler.call(tool_name, args).await)?)
+        Ok(serde_json::to_value(
+            self.handler.call(tool_name, args).await,
+        )?)
     }
 
     async fn handle_system(&self, tool_name: &str, args: Value) -> Result<Value> {
-        Ok(serde_json::to_value(self.handler.call(tool_name, args).await)?)
+        Ok(serde_json::to_value(
+            self.handler.call(tool_name, args).await,
+        )?)
     }
 
     async fn handle_external(&self, tool_name: &str, args: Value) -> Result<Value> {
-        Ok(serde_json::to_value(self.handler.call(tool_name, args).await)?)
+        Ok(serde_json::to_value(
+            self.handler.call(tool_name, args).await,
+        )?)
     }
 }
 

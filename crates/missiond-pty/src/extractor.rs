@@ -18,8 +18,7 @@ static SPINNER_ONLY_PATTERN: Lazy<Regex> =
 static SEPARATOR_PATTERN: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[─━═]+$").unwrap());
 
 /// Status bar pattern
-static STATUSBAR_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)esc to interrupt").unwrap());
+static STATUSBAR_PATTERN: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)esc to interrupt").unwrap());
 
 /// Prompt-only line (e.g., "> " or "❯ ")
 static PROMPT_ONLY_PATTERN: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[❯>]\s*$").unwrap());
@@ -27,8 +26,7 @@ static PROMPT_ONLY_PATTERN: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[❯>]\s*$"
 /// Spinner status line (e.g., "✳ Determining…", "· Processing…", "* Honking…")
 /// These lines are transient — the spinner character and timer update every frame.
 /// Includes ASCII `*` for non-native/basic terminal mode (e.g., headless VPS).
-static SPINNER_LINE_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^\s*[·✻✽✶✳✢*]\s+\S").unwrap());
+static SPINNER_LINE_PATTERN: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\s*[·✻✽✶✳✢*]\s+\S").unwrap());
 
 // ========== Types ==========
 
@@ -481,8 +479,12 @@ impl TextAssembler {
                 self.buffer.push_str(text);
                 text.clone()
             }
-            StableTextOp::Line { text, is_wrapped, .. }
-            | StableTextOp::Replace { text, is_wrapped, .. } => {
+            StableTextOp::Line {
+                text, is_wrapped, ..
+            }
+            | StableTextOp::Replace {
+                text, is_wrapped, ..
+            } => {
                 let needs_newline =
                     !self.buffer.is_empty() && !self.buffer.ends_with('\n') && !is_wrapped;
 

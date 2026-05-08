@@ -122,7 +122,12 @@ impl LlmProxy {
     }
 
     /// Send raw messages for defense detection (uses clewdr endpoint if available)
-    pub async fn detect(&self, endpoint: &str, api_key: &str, prompt: &str) -> Result<DefenseResult> {
+    pub async fn detect(
+        &self,
+        endpoint: &str,
+        api_key: &str,
+        prompt: &str,
+    ) -> Result<DefenseResult> {
         let messages = vec![ChatMessage {
             role: "user".into(),
             content: prompt.to_string(),

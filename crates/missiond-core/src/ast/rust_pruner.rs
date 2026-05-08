@@ -179,11 +179,11 @@ fn extract_enum(node: Node, src: &[u8]) -> Option<CodeNode> {
 
 fn extract_impl(node: Node, src: &[u8], out: &mut Vec<CodeNode>) {
     // Extract each method inside the impl block
-    let impl_type = node.child_by_field_name("type")
+    let impl_type = node
+        .child_by_field_name("type")
         .map(|n| text(n, src))
         .unwrap_or_default();
-    let trait_name = node.child_by_field_name("trait")
-        .map(|n| text(n, src));
+    let trait_name = node.child_by_field_name("trait").map(|n| text(n, src));
 
     if let Some(body) = node.child_by_field_name("body") {
         let mut cursor = body.walk();
@@ -193,15 +193,10 @@ fn extract_impl(node: Node, src: &[u8], out: &mut Vec<CodeNode>) {
                     // Prefix method name with impl type for disambiguation
                     method.node_type = "method".to_string();
                     if let Some(ref t) = trait_name {
-                        method.signature = format!(
-                            "impl {} for {} > {}",
-                            t, impl_type, method.signature
-                        );
+                        method.signature =
+                            format!("impl {} for {} > {}", t, impl_type, method.signature);
                     } else {
-                        method.signature = format!(
-                            "impl {} > {}",
-                            impl_type, method.signature
-                        );
+                        method.signature = format!("impl {} > {}", impl_type, method.signature);
                     }
                     out.push(method);
                 }
@@ -369,10 +364,12 @@ fn build_signature(node: Node, src: &[u8]) -> String {
 /// Build type signature for struct/enum/trait (keyword + name + generics).
 fn build_type_signature(node: Node, src: &[u8], keyword: &str) -> String {
     let vis = if has_visibility(node) { "pub " } else { "" };
-    let name = node.child_by_field_name("name")
+    let name = node
+        .child_by_field_name("name")
         .map(|n| text(n, src))
         .unwrap_or_default();
-    let type_params = node.child_by_field_name("type_parameters")
+    let type_params = node
+        .child_by_field_name("type_parameters")
         .map(|n| text(n, src))
         .unwrap_or_default();
     format!("{}{} {}{}", vis, keyword, name, type_params)
@@ -456,7 +453,11 @@ impl Point {
 "#;
         let pruner = RustPruner;
         let nodes = pruner.extract_nodes(source);
-        assert!(nodes.len() >= 2, "Expected struct + method, got {}", nodes.len());
+        assert!(
+            nodes.len() >= 2,
+            "Expected struct + method, got {}",
+            nodes.len()
+        );
 
         let struct_node = nodes.iter().find(|n| n.node_type == "struct").unwrap();
         assert_eq!(struct_node.name, "Point");

@@ -264,14 +264,10 @@ mod tests {
     #[tokio::test]
     async fn emitter_stops_on_shutdown_signal() {
         let metrics = Arc::new(AtomicBusMetrics::new());
-        let appender: Arc<dyn ObservabilityAppender> =
-            Arc::new(RecordingAppender::default());
+        let appender: Arc<dyn ObservabilityAppender> = Arc::new(RecordingAppender::default());
 
-        let handle = spawn_bus_metrics_emitter(
-            metrics.clone(),
-            appender,
-            Duration::from_millis(20),
-        );
+        let handle =
+            spawn_bus_metrics_emitter(metrics.clone(), appender, Duration::from_millis(20));
 
         // Let one or two ticks run.
         tokio::time::sleep(Duration::from_millis(80)).await;

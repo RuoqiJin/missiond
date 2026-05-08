@@ -9,19 +9,18 @@
 //! block per crate. All 32 methods live here; `pg/project.rs` provides
 //! free-function helpers that delegate to sqlx directly.
 
-use async_trait::async_trait;
+use super::project::{
+    backfill_project_id, conversation_stats_by_project, get_project, kb_stats_by_project,
+    list_projects, recent_conversations_by_project, update_project_active, upsert_project,
+};
+use super::PgMissionStore;
 use crate::db::error::DbResult;
 use crate::db::traits::{
-    ProjectStore, BeaconInfo, BeaconNode, AstSyncResult, AstSearchHit, AstNodeRow, AstStats,
-    ModuleAstSummary, CodeNode,
+    AstNodeRow, AstSearchHit, AstStats, AstSyncResult, BeaconInfo, BeaconNode, CodeNode,
+    ModuleAstSummary, ProjectStore,
 };
 use crate::types::*;
-use super::PgMissionStore;
-use super::project::{
-    list_projects, get_project, upsert_project, update_project_active,
-    backfill_project_id, conversation_stats_by_project,
-    recent_conversations_by_project, kb_stats_by_project,
-};
+use async_trait::async_trait;
 
 #[cfg(feature = "postgres")]
 #[async_trait]
@@ -52,7 +51,11 @@ impl ProjectStore for PgMissionStore {
         Ok(conversation_stats_by_project(&self.pool, project_id).await?)
     }
 
-    async fn recent_conversations_by_project(&self, project_id: &str, limit: i64) -> DbResult<Vec<serde_json::Value>> {
+    async fn recent_conversations_by_project(
+        &self,
+        project_id: &str,
+        limit: i64,
+    ) -> DbResult<Vec<serde_json::Value>> {
         Ok(recent_conversations_by_project(&self.pool, project_id, limit).await?)
     }
 
@@ -72,7 +75,17 @@ impl ProjectStore for PgMissionStore {
         requires_json: Option<&str>,
         actions_json: Option<&str>,
     ) -> DbResult<()> {
-        self.skill_topic_upsert_full(topic, description, aka, allowed_tools, file_path, requires_json, actions_json, None).await
+        self.skill_topic_upsert_full(
+            topic,
+            description,
+            aka,
+            allowed_tools,
+            file_path,
+            requires_json,
+            actions_json,
+            None,
+        )
+        .await
     }
 
     async fn skill_topic_upsert_full(
@@ -113,7 +126,7 @@ impl ProjectStore for PgMissionStore {
             "SELECT topic, description, aka, allowed_tools, file_path,
                     hit_count, last_hit_at, fragment_count, total_lines, checksum,
                     requires_json, actions_json, context_hooks_json, created_at, updated_at
-             FROM skill_topics WHERE topic = $1"
+             FROM skill_topics WHERE topic = $1",
         )
         .bind(topic)
         .fetch_optional(&self.pool)
@@ -146,37 +159,40 @@ impl ProjectStore for PgMissionStore {
             "SELECT topic, description, aka, allowed_tools, file_path,
                     hit_count, last_hit_at, fragment_count, total_lines, checksum,
                     requires_json, actions_json, context_hooks_json, created_at, updated_at
-             FROM skill_topics ORDER BY topic"
+             FROM skill_topics ORDER BY topic",
         )
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.iter().map(|r| {
-            use sqlx::Row;
-            SkillTopic {
-                topic: r.get("topic"),
-                description: r.get("description"),
-                aka: r.get("aka"),
-                allowed_tools: r.get("allowed_tools"),
-                file_path: r.get("file_path"),
-                hit_count: r.get("hit_count"),
-                last_hit_at: r.get("last_hit_at"),
-                fragment_count: r.get("fragment_count"),
-                total_lines: r.get("total_lines"),
-                checksum: r.get("checksum"),
-                requires_json: r.get("requires_json"),
-                actions_json: r.get("actions_json"),
-                context_hooks_json: r.get("context_hooks_json"),
-                created_at: r.get("created_at"),
-                updated_at: r.get("updated_at"),
-            }
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|r| {
+                use sqlx::Row;
+                SkillTopic {
+                    topic: r.get("topic"),
+                    description: r.get("description"),
+                    aka: r.get("aka"),
+                    allowed_tools: r.get("allowed_tools"),
+                    file_path: r.get("file_path"),
+                    hit_count: r.get("hit_count"),
+                    last_hit_at: r.get("last_hit_at"),
+                    fragment_count: r.get("fragment_count"),
+                    total_lines: r.get("total_lines"),
+                    checksum: r.get("checksum"),
+                    requires_json: r.get("requires_json"),
+                    actions_json: r.get("actions_json"),
+                    context_hooks_json: r.get("context_hooks_json"),
+                    created_at: r.get("created_at"),
+                    updated_at: r.get("updated_at"),
+                }
+            })
+            .collect())
     }
 
     async fn skill_topic_hit(&self, topic: &str) -> DbResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query(
-            "UPDATE skill_topics SET hit_count = hit_count + 1, last_hit_at = $1 WHERE topic = $2"
+            "UPDATE skill_topics SET hit_count = hit_count + 1, last_hit_at = $1 WHERE topic = $2",
         )
         .bind(&now)
         .bind(topic)
@@ -185,7 +201,12 @@ impl ProjectStore for PgMissionStore {
         Ok(())
     }
 
-    async fn skill_topic_update_stats(&self, topic: &str, total_lines: i32, checksum: &str) -> DbResult<()> {
+    async fn skill_topic_update_stats(
+        &self,
+        topic: &str,
+        total_lines: i32,
+        checksum: &str,
+    ) -> DbResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query(
             "UPDATE skill_topics SET total_lines = $1, checksum = $2, updated_at = $3 WHERE topic = $4"
@@ -229,7 +250,7 @@ impl ProjectStore for PgMissionStore {
         // Update fragment count if fragment
         if block_type == "fragment" {
             sqlx::query(
-                "UPDATE skill_topics SET fragment_count = fragment_count + 1 WHERE topic = $1"
+                "UPDATE skill_topics SET fragment_count = fragment_count + 1 WHERE topic = $1",
             )
             .bind(topic)
             .execute(&self.pool)
@@ -263,32 +284,34 @@ impl ProjectStore for PgMissionStore {
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.iter().map(|r| {
-            use sqlx::Row;
-            SkillBlock {
-                id: r.get("id"),
-                topic: r.get("topic"),
-                block_type: r.get("block_type"),
-                title: r.get("title"),
-                content: r.get("content"),
-                sort_order: r.get("sort_order"),
-                status: r.get("status"),
-                created_at: r.get("created_at"),
-                updated_at: r.get("updated_at"),
-            }
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|r| {
+                use sqlx::Row;
+                SkillBlock {
+                    id: r.get("id"),
+                    topic: r.get("topic"),
+                    block_type: r.get("block_type"),
+                    title: r.get("title"),
+                    content: r.get("content"),
+                    sort_order: r.get("sort_order"),
+                    status: r.get("status"),
+                    created_at: r.get("created_at"),
+                    updated_at: r.get("updated_at"),
+                }
+            })
+            .collect())
     }
 
     async fn skill_block_set_status(&self, id: &str, status: &str) -> DbResult<bool> {
         let now = chrono::Utc::now().to_rfc3339();
-        let result = sqlx::query(
-            "UPDATE skill_blocks SET status = $1, updated_at = $2 WHERE id = $3"
-        )
-        .bind(status)
-        .bind(&now)
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+        let result =
+            sqlx::query("UPDATE skill_blocks SET status = $1, updated_at = $2 WHERE id = $3")
+                .bind(status)
+                .bind(&now)
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -324,16 +347,19 @@ impl ProjectStore for PgMissionStore {
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.iter().map(|r| {
-            use sqlx::Row;
-            SkillSearchResult {
-                topic: r.get("topic"),
-                section_title: r.get("title"),
-                snippet: r.get("snippet"),
-                file_path: r.get("file_path"),
-                description: r.get("description"),
-            }
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|r| {
+                use sqlx::Row;
+                SkillSearchResult {
+                    topic: r.get("topic"),
+                    section_title: r.get("title"),
+                    snippet: r.get("snippet"),
+                    file_path: r.get("file_path"),
+                    description: r.get("description"),
+                }
+            })
+            .collect())
     }
 
     async fn skill_search_topics(&self, query: &str) -> DbResult<Vec<SkillTopic>> {
@@ -347,32 +373,35 @@ impl ProjectStore for PgMissionStore {
                 OR LOWER(COALESCE(description, '')) LIKE $1
                 OR LOWER(COALESCE(aka, '')) LIKE $1
              ORDER BY hit_count DESC
-             LIMIT 10"
+             LIMIT 10",
         )
         .bind(&pattern)
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.iter().map(|r| {
-            use sqlx::Row;
-            SkillTopic {
-                topic: r.get("topic"),
-                description: r.get("description"),
-                aka: r.get("aka"),
-                allowed_tools: r.get("allowed_tools"),
-                file_path: r.get("file_path"),
-                hit_count: r.get("hit_count"),
-                last_hit_at: r.get("last_hit_at"),
-                fragment_count: r.get("fragment_count"),
-                total_lines: r.get("total_lines"),
-                checksum: r.get("checksum"),
-                requires_json: r.get("requires_json"),
-                actions_json: r.get("actions_json"),
-                context_hooks_json: r.get("context_hooks_json"),
-                created_at: r.get("created_at"),
-                updated_at: r.get("updated_at"),
-            }
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|r| {
+                use sqlx::Row;
+                SkillTopic {
+                    topic: r.get("topic"),
+                    description: r.get("description"),
+                    aka: r.get("aka"),
+                    allowed_tools: r.get("allowed_tools"),
+                    file_path: r.get("file_path"),
+                    hit_count: r.get("hit_count"),
+                    last_hit_at: r.get("last_hit_at"),
+                    fragment_count: r.get("fragment_count"),
+                    total_lines: r.get("total_lines"),
+                    checksum: r.get("checksum"),
+                    requires_json: r.get("requires_json"),
+                    actions_json: r.get("actions_json"),
+                    context_hooks_json: r.get("context_hooks_json"),
+                    created_at: r.get("created_at"),
+                    updated_at: r.get("updated_at"),
+                }
+            })
+            .collect())
     }
 
     async fn skill_rebuild_fts(&self) -> DbResult<()> {
@@ -382,9 +411,21 @@ impl ProjectStore for PgMissionStore {
 
     // ── skill embeddings ──────────────────────────────────────────
 
-    async fn skill_set_topic_embedding(&self, topic: &str, embedding: &[f32], provider: &str) -> DbResult<()> {
+    async fn skill_set_topic_embedding(
+        &self,
+        topic: &str,
+        embedding: &[f32],
+        provider: &str,
+    ) -> DbResult<()> {
         let bytes = crate::embedding::f32_vec_to_bytes(embedding);
-        let vec_str = format!("[{}]", embedding.iter().map(|f| f.to_string()).collect::<Vec<_>>().join(","));
+        let vec_str = format!(
+            "[{}]",
+            embedding
+                .iter()
+                .map(|f| f.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
         sqlx::query(
             "UPDATE skill_topics SET embedding = $1, embedding_provider = $2, embedding_vec = $4::vector WHERE topic = $3"
         )
@@ -398,15 +439,15 @@ impl ProjectStore for PgMissionStore {
     }
 
     async fn skill_load_topic_embeddings(&self) -> DbResult<Vec<(String, Vec<f32>)>> {
-        let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(
-            "SELECT topic, embedding FROM skill_topics WHERE embedding IS NOT NULL"
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<(String, Vec<u8>)> =
+            sqlx::query_as("SELECT topic, embedding FROM skill_topics WHERE embedding IS NOT NULL")
+                .fetch_all(&self.pool)
+                .await?;
 
-        Ok(rows.into_iter().map(|(topic, blob)| {
-            (topic, crate::embedding::bytes_to_f32_vec(&blob))
-        }).collect())
+        Ok(rows
+            .into_iter()
+            .map(|(topic, blob)| (topic, crate::embedding::bytes_to_f32_vec(&blob)))
+            .collect())
     }
 
     async fn skill_topics_missing_embedding(&self, limit: i64) -> DbResult<Vec<(String, String)>> {
@@ -423,7 +464,7 @@ impl ProjectStore for PgMissionStore {
         for (topic, description) in &topics {
             let blocks: Vec<(String, String)> = sqlx::query_as(
                 "SELECT COALESCE(title, ''), content FROM skill_blocks
-                 WHERE topic = $1 AND status = 'active' ORDER BY sort_order"
+                 WHERE topic = $1 AND status = 'active' ORDER BY sort_order",
             )
             .bind(topic)
             .fetch_all(&self.pool)
@@ -449,12 +490,16 @@ impl ProjectStore for PgMissionStore {
         Ok(results)
     }
 
-    async fn skill_topics_stale_embedding(&self, current_provider: &str, limit: i64) -> DbResult<Vec<(String, String)>> {
+    async fn skill_topics_stale_embedding(
+        &self,
+        current_provider: &str,
+        limit: i64,
+    ) -> DbResult<Vec<(String, String)>> {
         let topics: Vec<(String, String)> = sqlx::query_as(
             "SELECT topic, COALESCE(description, '') FROM skill_topics
              WHERE embedding IS NOT NULL AND embedding_provider IS NOT NULL
                AND embedding_provider != $1
-             LIMIT $2"
+             LIMIT $2",
         )
         .bind(current_provider)
         .bind(limit)
@@ -465,7 +510,7 @@ impl ProjectStore for PgMissionStore {
         for (topic, description) in &topics {
             let blocks: Vec<(String, String)> = sqlx::query_as(
                 "SELECT COALESCE(title, ''), content FROM skill_blocks
-                 WHERE topic = $1 AND status = 'active' ORDER BY sort_order"
+                 WHERE topic = $1 AND status = 'active' ORDER BY sort_order",
             )
             .bind(topic)
             .fetch_all(&self.pool)
@@ -525,7 +570,15 @@ impl ProjectStore for PgMissionStore {
         context_json: Option<&str>,
         error: Option<&str>,
     ) -> DbResult<()> {
-        self.skill_execution_update_with_duration(id, status, steps_completed, context_json, error, None).await
+        self.skill_execution_update_with_duration(
+            id,
+            status,
+            steps_completed,
+            context_json,
+            error,
+            None,
+        )
+        .await
     }
 
     async fn skill_execution_update_with_duration(
@@ -545,7 +598,7 @@ impl ProjectStore for PgMissionStore {
         sqlx::query(
             "UPDATE skill_executions SET status = $1, steps_completed = $2, context_json = $3,
                     error = $4, completed_at = $5, duration_ms = $6
-             WHERE id = $7"
+             WHERE id = $7",
         )
         .bind(status)
         .bind(steps_completed)
@@ -559,7 +612,10 @@ impl ProjectStore for PgMissionStore {
         Ok(())
     }
 
-    async fn skill_execution_stats(&self, topic: Option<&str>) -> DbResult<Vec<SkillExecutionStat>> {
+    async fn skill_execution_stats(
+        &self,
+        topic: Option<&str>,
+    ) -> DbResult<Vec<SkillExecutionStat>> {
         if let Some(t) = topic {
             let rows = sqlx::query(
                 "SELECT action_id, COUNT(*) AS total,
@@ -570,23 +626,26 @@ impl ProjectStore for PgMissionStore {
                  FROM skill_executions
                  WHERE skill_topic = $1
                  GROUP BY action_id
-                 ORDER BY last_run DESC"
+                 ORDER BY last_run DESC",
             )
             .bind(t)
             .fetch_all(&self.pool)
             .await?;
 
-            Ok(rows.iter().map(|r| {
-                use sqlx::Row;
-                SkillExecutionStat {
-                    action_id: r.get("action_id"),
-                    total: r.get("total"),
-                    successes: r.get("successes"),
-                    failures: r.get("failures"),
-                    avg_duration_ms: r.get("avg_duration_ms"),
-                    last_run: r.get("last_run"),
-                }
-            }).collect())
+            Ok(rows
+                .iter()
+                .map(|r| {
+                    use sqlx::Row;
+                    SkillExecutionStat {
+                        action_id: r.get("action_id"),
+                        total: r.get("total"),
+                        successes: r.get("successes"),
+                        failures: r.get("failures"),
+                        avg_duration_ms: r.get("avg_duration_ms"),
+                        last_run: r.get("last_run"),
+                    }
+                })
+                .collect())
         } else {
             let rows = sqlx::query(
                 "SELECT skill_topic || '/' || action_id AS action_id, COUNT(*) AS total,
@@ -596,26 +655,33 @@ impl ProjectStore for PgMissionStore {
                         MAX(created_at) AS last_run
                  FROM skill_executions
                  GROUP BY skill_topic, action_id
-                 ORDER BY last_run DESC"
+                 ORDER BY last_run DESC",
             )
             .fetch_all(&self.pool)
             .await?;
 
-            Ok(rows.iter().map(|r| {
-                use sqlx::Row;
-                SkillExecutionStat {
-                    action_id: r.get("action_id"),
-                    total: r.get("total"),
-                    successes: r.get("successes"),
-                    failures: r.get("failures"),
-                    avg_duration_ms: r.get("avg_duration_ms"),
-                    last_run: r.get("last_run"),
-                }
-            }).collect())
+            Ok(rows
+                .iter()
+                .map(|r| {
+                    use sqlx::Row;
+                    SkillExecutionStat {
+                        action_id: r.get("action_id"),
+                        total: r.get("total"),
+                        successes: r.get("successes"),
+                        failures: r.get("failures"),
+                        avg_duration_ms: r.get("avg_duration_ms"),
+                        last_run: r.get("last_run"),
+                    }
+                })
+                .collect())
         }
     }
 
-    async fn skill_execution_is_running(&self, skill_topic: &str, action_id: &str) -> DbResult<bool> {
+    async fn skill_execution_is_running(
+        &self,
+        skill_topic: &str,
+        action_id: &str,
+    ) -> DbResult<bool> {
         let (count,): (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM skill_executions WHERE skill_topic = $1 AND action_id = $2 AND status = 'running'"
         )
@@ -644,7 +710,7 @@ impl ProjectStore for PgMissionStore {
         sqlx::query(
             "DELETE FROM skill_versions WHERE topic = $1 AND id NOT IN (
                 SELECT id FROM skill_versions WHERE topic = $1 ORDER BY id DESC LIMIT 10
-            )"
+            )",
         )
         .bind(topic)
         .execute(&self.pool)
@@ -655,28 +721,31 @@ impl ProjectStore for PgMissionStore {
     async fn skill_version_list(&self, topic: &str, limit: i64) -> DbResult<Vec<SkillVersion>> {
         let rows = sqlx::query(
             "SELECT id, topic, content, checksum, created_at FROM skill_versions
-             WHERE topic = $1 ORDER BY id DESC LIMIT $2"
+             WHERE topic = $1 ORDER BY id DESC LIMIT $2",
         )
         .bind(topic)
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.iter().map(|r| {
-            use sqlx::Row;
-            SkillVersion {
-                id: r.get("id"),
-                topic: r.get("topic"),
-                content: r.get("content"),
-                checksum: r.get("checksum"),
-                created_at: r.get("created_at"),
-            }
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|r| {
+                use sqlx::Row;
+                SkillVersion {
+                    id: r.get("id"),
+                    topic: r.get("topic"),
+                    content: r.get("content"),
+                    checksum: r.get("checksum"),
+                    created_at: r.get("created_at"),
+                }
+            })
+            .collect())
     }
 
     async fn skill_version_get(&self, id: i64) -> DbResult<Option<SkillVersion>> {
         let row = sqlx::query(
-            "SELECT id, topic, content, checksum, created_at FROM skill_versions WHERE id = $1"
+            "SELECT id, topic, content, checksum, created_at FROM skill_versions WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -701,32 +770,33 @@ impl ProjectStore for PgMissionStore {
             "SELECT b.id, b.name, b.description, b.created_at, b.updated_at,
                     (SELECT COUNT(*) FROM beacon_nodes bn WHERE bn.beacon_id = b.id) AS node_count
              FROM beacons b
-             ORDER BY b.name"
+             ORDER BY b.name",
         )
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.iter().map(|r| {
-            use sqlx::Row;
-            BeaconInfo {
-                id: r.get("id"),
-                name: r.get("name"),
-                description: r.get("description"),
-                created_at: r.get("created_at"),
-                updated_at: r.get("updated_at"),
-                node_count: r.get::<i64, _>("node_count") as usize,
-            }
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|r| {
+                use sqlx::Row;
+                BeaconInfo {
+                    id: r.get("id"),
+                    name: r.get("name"),
+                    description: r.get("description"),
+                    created_at: r.get("created_at"),
+                    updated_at: r.get("updated_at"),
+                    node_count: r.get::<i64, _>("node_count") as usize,
+                }
+            })
+            .collect())
     }
 
     async fn beacon_ensure(&self, name: &str) -> DbResult<String> {
         // Try to get existing
-        let existing: Option<(String,)> = sqlx::query_as(
-            "SELECT id FROM beacons WHERE name = $1"
-        )
-        .bind(name)
-        .fetch_optional(&self.pool)
-        .await?;
+        let existing: Option<(String,)> = sqlx::query_as("SELECT id FROM beacons WHERE name = $1")
+            .bind(name)
+            .fetch_optional(&self.pool)
+            .await?;
 
         if let Some((id,)) = existing {
             return Ok(id);
@@ -746,18 +816,17 @@ impl ProjectStore for PgMissionStore {
         sqlx::query(
             "UPDATE beacons SET harvest_count = COALESCE(harvest_count, 0) + 1,
                     updated_at = to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')
-             WHERE name = $1"
+             WHERE name = $1",
         )
         .bind(name)
         .execute(&self.pool)
         .await?;
 
-        let row: Option<(i64,)> = sqlx::query_as(
-            "SELECT COALESCE(harvest_count, 0) FROM beacons WHERE name = $1"
-        )
-        .bind(name)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row: Option<(i64,)> =
+            sqlx::query_as("SELECT COALESCE(harvest_count, 0) FROM beacons WHERE name = $1")
+                .bind(name)
+                .fetch_optional(&self.pool)
+                .await?;
         Ok(row.map(|r| r.0).unwrap_or(0))
     }
 
@@ -765,7 +834,7 @@ impl ProjectStore for PgMissionStore {
         let result = sqlx::query(
             "UPDATE beacons SET description = $1,
                     updated_at = to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')
-             WHERE name = $2"
+             WHERE name = $2",
         )
         .bind(description)
         .bind(name)
@@ -786,7 +855,7 @@ impl ProjectStore for PgMissionStore {
             "INSERT INTO beacon_nodes (beacon_id, repo, file_path, symbol_name, annotation)
              VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT (beacon_id, repo, file_path, symbol_name)
-             DO UPDATE SET annotation = COALESCE($5, beacon_nodes.annotation)"
+             DO UPDATE SET annotation = COALESCE($5, beacon_nodes.annotation)",
         )
         .bind(beacon_id)
         .bind(repo)
@@ -812,32 +881,33 @@ impl ProjectStore for PgMissionStore {
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.iter().map(|r| {
-            use sqlx::Row;
-            BeaconNode {
-                beacon_id: r.get("beacon_id"),
-                beacon_name: r.get("name"),
-                repo: r.get("repo"),
-                file_path: r.get("file_path"),
-                symbol_name: r.get("symbol_name"),
-                annotation: r.get("annotation"),
-                signature: r.get("signature"),
-                stub_content: r.get("stub_content"),
-                start_line: r.get::<Option<i64>, _>("start_line").map(|v| v as usize),
-                end_line: r.get::<Option<i64>, _>("end_line").map(|v| v as usize),
-                node_type: r.get("node_type"),
-            }
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|r| {
+                use sqlx::Row;
+                BeaconNode {
+                    beacon_id: r.get("beacon_id"),
+                    beacon_name: r.get("name"),
+                    repo: r.get("repo"),
+                    file_path: r.get("file_path"),
+                    symbol_name: r.get("symbol_name"),
+                    annotation: r.get("annotation"),
+                    signature: r.get("signature"),
+                    stub_content: r.get("stub_content"),
+                    start_line: r.get::<Option<i64>, _>("start_line").map(|v| v as usize),
+                    end_line: r.get::<Option<i64>, _>("end_line").map(|v| v as usize),
+                    node_type: r.get("node_type"),
+                }
+            })
+            .collect())
     }
 
     async fn beacon_nodes_delete_file(&self, repo: &str, file_path: &str) -> DbResult<usize> {
-        let result = sqlx::query(
-            "DELETE FROM beacon_nodes WHERE repo = $1 AND file_path = $2"
-        )
-        .bind(repo)
-        .bind(file_path)
-        .execute(&self.pool)
-        .await?;
+        let result = sqlx::query("DELETE FROM beacon_nodes WHERE repo = $1 AND file_path = $2")
+            .bind(repo)
+            .bind(file_path)
+            .execute(&self.pool)
+            .await?;
         Ok(result.rows_affected() as usize)
     }
 
@@ -852,7 +922,7 @@ impl ProjectStore for PgMissionStore {
         let result = sqlx::query(
             "UPDATE beacon_nodes SET annotation = $1
              WHERE beacon_id = (SELECT id FROM beacons WHERE name = $2)
-               AND repo = $3 AND file_path = $4 AND symbol_name = $5"
+               AND repo = $3 AND file_path = $4 AND symbol_name = $5",
         )
         .bind(annotation)
         .bind(beacon_name)
@@ -872,28 +942,31 @@ impl ProjectStore for PgMissionStore {
              FROM beacons b
              WHERE b.name LIKE $1 OR b.description LIKE $1
              ORDER BY b.name
-             LIMIT 10"
+             LIMIT 10",
         )
         .bind(&pattern)
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.iter().map(|r| {
-            use sqlx::Row;
-            BeaconInfo {
-                id: r.get("id"),
-                name: r.get("name"),
-                description: r.get("description"),
-                created_at: r.get("created_at"),
-                updated_at: r.get("updated_at"),
-                node_count: r.get::<i64, _>("node_count") as usize,
-            }
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|r| {
+                use sqlx::Row;
+                BeaconInfo {
+                    id: r.get("id"),
+                    name: r.get("name"),
+                    description: r.get("description"),
+                    created_at: r.get("created_at"),
+                    updated_at: r.get("updated_at"),
+                    node_count: r.get::<i64, _>("node_count") as usize,
+                }
+            })
+            .collect())
     }
 
     async fn beacon_cleanup_empty(&self) -> DbResult<usize> {
         let result = sqlx::query(
-            "DELETE FROM beacons WHERE id NOT IN (SELECT DISTINCT beacon_id FROM beacon_nodes)"
+            "DELETE FROM beacons WHERE id NOT IN (SELECT DISTINCT beacon_id FROM beacon_nodes)",
         )
         .execute(&self.pool)
         .await?;
@@ -910,13 +983,11 @@ impl ProjectStore for PgMissionStore {
         nodes: &[CodeNode],
     ) -> DbResult<AstSyncResult> {
         // Delete existing nodes for this file
-        let del_result = sqlx::query(
-            "DELETE FROM ast_nodes WHERE repo = $1 AND file_path = $2"
-        )
-        .bind(repo)
-        .bind(file_path)
-        .execute(&self.pool)
-        .await?;
+        let del_result = sqlx::query("DELETE FROM ast_nodes WHERE repo = $1 AND file_path = $2")
+            .bind(repo)
+            .bind(file_path)
+            .execute(&self.pool)
+            .await?;
         let deleted = del_result.rows_affected() as usize;
 
         // Insert new nodes
@@ -928,7 +999,7 @@ impl ProjectStore for PgMissionStore {
             sqlx::query(
                 "INSERT INTO ast_nodes (id, repo, file_path, node_type, name, signature,
                     start_line, end_line, is_exported, docstring, stub_content, calls)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
             )
             .bind(&id)
             .bind(repo)
@@ -953,7 +1024,7 @@ impl ProjectStore for PgMissionStore {
              VALUES ($1, $2, $3, $4)
              ON CONFLICT (repo, file_path) DO UPDATE SET
                 commit_hash = EXCLUDED.commit_hash,
-                node_count = EXCLUDED.node_count"
+                node_count = EXCLUDED.node_count",
         )
         .bind(repo)
         .bind(file_path)
@@ -966,13 +1037,11 @@ impl ProjectStore for PgMissionStore {
     }
 
     async fn ast_delete_file(&self, repo: &str, file_path: &str) -> DbResult<usize> {
-        let result = sqlx::query(
-            "DELETE FROM ast_nodes WHERE repo = $1 AND file_path = $2"
-        )
-        .bind(repo)
-        .bind(file_path)
-        .execute(&self.pool)
-        .await?;
+        let result = sqlx::query("DELETE FROM ast_nodes WHERE repo = $1 AND file_path = $2")
+            .bind(repo)
+            .bind(file_path)
+            .execute(&self.pool)
+            .await?;
         let deleted = result.rows_affected() as usize;
 
         sqlx::query("DELETE FROM ast_file_meta WHERE repo = $1 AND file_path = $2")
@@ -993,7 +1062,7 @@ impl ProjectStore for PgMissionStore {
              FROM ast_nodes n
              WHERE n.fts_doc @@ plainto_tsquery('simple', $1)
              ORDER BY rank DESC
-             LIMIT $2"
+             LIMIT $2",
         )
         .bind(query)
         .bind(limit as i64)
@@ -1018,26 +1087,29 @@ impl ProjectStore for PgMissionStore {
             .await?;
         }
 
-        Ok(rows.iter().map(|r| {
-            use sqlx::Row;
-            let calls_json: String = r.get("calls");
-            let calls: Vec<String> = serde_json::from_str(&calls_json).unwrap_or_default();
-            AstSearchHit {
-                id: r.get("id"),
-                repo: r.get("repo"),
-                file_path: r.get("file_path"),
-                name: r.get("name"),
-                node_type: r.get("node_type"),
-                signature: r.get("signature"),
-                start_line: r.get::<i64, _>("start_line") as usize,
-                end_line: r.get::<i64, _>("end_line") as usize,
-                is_exported: r.get::<bool, _>("is_exported"),
-                docstring: r.get("docstring"),
-                stub_content: r.get("stub_content"),
-                calls,
-                rank: r.get::<f32, _>("rank") as f64,
-            }
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|r| {
+                use sqlx::Row;
+                let calls_json: String = r.get("calls");
+                let calls: Vec<String> = serde_json::from_str(&calls_json).unwrap_or_default();
+                AstSearchHit {
+                    id: r.get("id"),
+                    repo: r.get("repo"),
+                    file_path: r.get("file_path"),
+                    name: r.get("name"),
+                    node_type: r.get("node_type"),
+                    signature: r.get("signature"),
+                    start_line: r.get::<i64, _>("start_line") as usize,
+                    end_line: r.get::<i64, _>("end_line") as usize,
+                    is_exported: r.get::<bool, _>("is_exported"),
+                    docstring: r.get("docstring"),
+                    stub_content: r.get("stub_content"),
+                    calls,
+                    rank: r.get::<f32, _>("rank") as f64,
+                }
+            })
+            .collect())
     }
 
     async fn ast_get_file_nodes(&self, repo: &str, file_path: &str) -> DbResult<Vec<AstNodeRow>> {
@@ -1046,36 +1118,39 @@ impl ProjectStore for PgMissionStore {
                     start_line, end_line, is_exported, docstring, stub_content, calls,
                     embedding_provider
              FROM ast_nodes WHERE repo = $1 AND file_path = $2
-             ORDER BY start_line"
+             ORDER BY start_line",
         )
         .bind(repo)
         .bind(file_path)
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.iter().map(|r| {
-            use sqlx::Row;
-            let calls_json: String = r.get("calls");
-            let calls: Vec<String> = serde_json::from_str(&calls_json).unwrap_or_default();
-            AstNodeRow {
-                id: r.get("id"),
-                repo: r.get("repo"),
-                file_path: r.get("file_path"),
-                node: CodeNode {
-                    node_type: r.get("node_type"),
-                    name: r.get("name"),
-                    signature: r.get("signature"),
-                    start_line: r.get::<i64, _>("start_line") as usize,
-                    end_line: r.get::<i64, _>("end_line") as usize,
-                    is_exported: r.get::<bool, _>("is_exported"),
-                    docstring: r.get("docstring"),
-                    stub_content: r.get("stub_content"),
-                    calls,
-                    beacons: Vec::new(),
-                },
-                embedding_provider: r.get("embedding_provider"),
-            }
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|r| {
+                use sqlx::Row;
+                let calls_json: String = r.get("calls");
+                let calls: Vec<String> = serde_json::from_str(&calls_json).unwrap_or_default();
+                AstNodeRow {
+                    id: r.get("id"),
+                    repo: r.get("repo"),
+                    file_path: r.get("file_path"),
+                    node: CodeNode {
+                        node_type: r.get("node_type"),
+                        name: r.get("name"),
+                        signature: r.get("signature"),
+                        start_line: r.get::<i64, _>("start_line") as usize,
+                        end_line: r.get::<i64, _>("end_line") as usize,
+                        is_exported: r.get::<bool, _>("is_exported"),
+                        docstring: r.get("docstring"),
+                        stub_content: r.get("stub_content"),
+                        calls,
+                        beacons: Vec::new(),
+                    },
+                    embedding_provider: r.get("embedding_provider"),
+                }
+            })
+            .collect())
     }
 
     async fn ast_find_related(&self, name: &str, limit: usize) -> DbResult<Vec<AstSearchHit>> {
@@ -1084,38 +1159,41 @@ impl ProjectStore for PgMissionStore {
                     start_line, end_line, is_exported, docstring, stub_content, calls
              FROM ast_nodes
              WHERE name = $1 AND node_type IN ('struct', 'enum', 'trait')
-             LIMIT $2"
+             LIMIT $2",
         )
         .bind(name)
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.iter().map(|r| {
-            use sqlx::Row;
-            let calls_json: String = r.get("calls");
-            let calls: Vec<String> = serde_json::from_str(&calls_json).unwrap_or_default();
-            AstSearchHit {
-                id: r.get("id"),
-                repo: r.get("repo"),
-                file_path: r.get("file_path"),
-                name: r.get("name"),
-                node_type: r.get("node_type"),
-                signature: r.get("signature"),
-                start_line: r.get::<i64, _>("start_line") as usize,
-                end_line: r.get::<i64, _>("end_line") as usize,
-                is_exported: r.get::<bool, _>("is_exported"),
-                docstring: r.get("docstring"),
-                stub_content: r.get("stub_content"),
-                calls,
-                rank: 0.0,
-            }
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|r| {
+                use sqlx::Row;
+                let calls_json: String = r.get("calls");
+                let calls: Vec<String> = serde_json::from_str(&calls_json).unwrap_or_default();
+                AstSearchHit {
+                    id: r.get("id"),
+                    repo: r.get("repo"),
+                    file_path: r.get("file_path"),
+                    name: r.get("name"),
+                    node_type: r.get("node_type"),
+                    signature: r.get("signature"),
+                    start_line: r.get::<i64, _>("start_line") as usize,
+                    end_line: r.get::<i64, _>("end_line") as usize,
+                    is_exported: r.get::<bool, _>("is_exported"),
+                    docstring: r.get("docstring"),
+                    stub_content: r.get("stub_content"),
+                    calls,
+                    rank: 0.0,
+                }
+            })
+            .collect())
     }
 
     async fn ast_get_file_commit(&self, repo: &str, file_path: &str) -> DbResult<Option<String>> {
         let row: Option<(String,)> = sqlx::query_as(
-            "SELECT commit_hash FROM ast_file_meta WHERE repo = $1 AND file_path = $2"
+            "SELECT commit_hash FROM ast_file_meta WHERE repo = $1 AND file_path = $2",
         )
         .bind(repo)
         .bind(file_path)
@@ -1126,13 +1204,19 @@ impl ProjectStore for PgMissionStore {
 
     async fn ast_stats(&self) -> DbResult<AstStats> {
         let (total_nodes,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM ast_nodes")
-            .fetch_one(&self.pool).await?;
+            .fetch_one(&self.pool)
+            .await?;
         let (total_files,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM ast_file_meta")
-            .fetch_one(&self.pool).await?;
-        let (total_repos,): (i64,) = sqlx::query_as("SELECT COUNT(DISTINCT repo) FROM ast_file_meta")
-            .fetch_one(&self.pool).await?;
-        let (embedded_nodes,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM ast_nodes WHERE embedding IS NOT NULL")
-            .fetch_one(&self.pool).await?;
+            .fetch_one(&self.pool)
+            .await?;
+        let (total_repos,): (i64,) =
+            sqlx::query_as("SELECT COUNT(DISTINCT repo) FROM ast_file_meta")
+                .fetch_one(&self.pool)
+                .await?;
+        let (embedded_nodes,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM ast_nodes WHERE embedding IS NOT NULL")
+                .fetch_one(&self.pool)
+                .await?;
 
         Ok(AstStats {
             total_nodes: total_nodes as usize,
@@ -1142,10 +1226,22 @@ impl ProjectStore for PgMissionStore {
         })
     }
 
-    async fn ast_set_embedding(&self, node_id: &str, embedding: &[u8], provider: &str) -> DbResult<()> {
+    async fn ast_set_embedding(
+        &self,
+        node_id: &str,
+        embedding: &[u8],
+        provider: &str,
+    ) -> DbResult<()> {
         // Store BYTEA + pgvector embedding_vec for ANN search
         let floats = crate::embedding::bytes_to_f32_vec(embedding);
-        let vec_str = format!("[{}]", floats.iter().map(|f| f.to_string()).collect::<Vec<_>>().join(","));
+        let vec_str = format!(
+            "[{}]",
+            floats
+                .iter()
+                .map(|f| f.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
         sqlx::query(
             "UPDATE ast_nodes SET embedding = $1, embedding_provider = $2, embedding_vec = $4::vector WHERE id = $3"
         )
@@ -1163,7 +1259,7 @@ impl ProjectStore for PgMissionStore {
             "SELECT id, repo, file_path FROM ast_nodes
              WHERE embedding IS NULL
              ORDER BY is_exported DESC, id
-             LIMIT $1"
+             LIMIT $1",
         )
         .bind(limit as i64)
         .fetch_all(&self.pool)
@@ -1172,21 +1268,19 @@ impl ProjectStore for PgMissionStore {
     }
 
     async fn ast_load_all_embeddings(&self) -> DbResult<Vec<(String, Vec<f32>)>> {
-        let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(
-            "SELECT id, embedding FROM ast_nodes WHERE embedding IS NOT NULL"
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<(String, Vec<u8>)> =
+            sqlx::query_as("SELECT id, embedding FROM ast_nodes WHERE embedding IS NOT NULL")
+                .fetch_all(&self.pool)
+                .await?;
 
-        Ok(rows.into_iter().map(|(id, blob)| {
-            (id, crate::embedding::bytes_to_f32_vec(&blob))
-        }).collect())
+        Ok(rows
+            .into_iter()
+            .map(|(id, blob)| (id, crate::embedding::bytes_to_f32_vec(&blob)))
+            .collect())
     }
 
     async fn ast_search_ranked(&self, query: &str, limit: usize) -> DbResult<Vec<(String, usize)>> {
-        let tokens: Vec<&str> = query.split_whitespace()
-            .filter(|w| w.len() > 1)
-            .collect();
+        let tokens: Vec<&str> = query.split_whitespace().filter(|w| w.len() > 1).collect();
         if tokens.is_empty() {
             return Ok(Vec::new());
         }
@@ -1197,21 +1291,25 @@ impl ProjectStore for PgMissionStore {
              FROM ast_nodes n
              WHERE n.fts_doc @@ plainto_tsquery('simple', $1)
              ORDER BY ts_rank(n.fts_doc, plainto_tsquery('simple', $1)) DESC
-             LIMIT $2"
+             LIMIT $2",
         )
         .bind(query)
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.into_iter().enumerate().map(|(rank, (id,))| (id, rank)).collect())
+        Ok(rows
+            .into_iter()
+            .enumerate()
+            .map(|(rank, (id,))| (id, rank))
+            .collect())
     }
 
     async fn ast_get_search_hit(&self, node_id: &str) -> DbResult<Option<AstSearchHit>> {
         let row = sqlx::query(
             "SELECT id, repo, file_path, name, node_type, signature,
                     start_line, end_line, is_exported, docstring, stub_content, calls
-             FROM ast_nodes WHERE id = $1"
+             FROM ast_nodes WHERE id = $1",
         )
         .bind(node_id)
         .fetch_optional(&self.pool)
@@ -1244,7 +1342,7 @@ impl ProjectStore for PgMissionStore {
             "SELECT id, repo, file_path, node_type, name, signature,
                     start_line, end_line, is_exported, docstring, stub_content, calls,
                     embedding_provider
-             FROM ast_nodes WHERE id = $1"
+             FROM ast_nodes WHERE id = $1",
         )
         .bind(node_id)
         .fetch_optional(&self.pool)
@@ -1279,7 +1377,7 @@ impl ProjectStore for PgMissionStore {
         let rows = sqlx::query(
             "SELECT file_path, node_type, name, is_exported, docstring
              FROM ast_nodes WHERE repo = $1
-             ORDER BY file_path, start_line"
+             ORDER BY file_path, start_line",
         )
         .bind(repo)
         .fetch_all(&self.pool)
@@ -1289,16 +1387,19 @@ impl ProjectStore for PgMissionStore {
             return Ok(Vec::new());
         }
 
-        let nodes: Vec<(String, String, String, bool, Option<String>)> = rows.iter().map(|r| {
-            use sqlx::Row;
-            (
-                r.get::<String, _>("file_path"),
-                r.get::<String, _>("node_type"),
-                r.get::<String, _>("name"),
-                r.get::<bool, _>("is_exported"),
-                r.get::<Option<String>, _>("docstring"),
-            )
-        }).collect();
+        let nodes: Vec<(String, String, String, bool, Option<String>)> = rows
+            .iter()
+            .map(|r| {
+                use sqlx::Row;
+                (
+                    r.get::<String, _>("file_path"),
+                    r.get::<String, _>("node_type"),
+                    r.get::<String, _>("name"),
+                    r.get::<bool, _>("is_exported"),
+                    r.get::<Option<String>, _>("docstring"),
+                )
+            })
+            .collect();
 
         // Group by crate key — reuse the same logic as SQLite
         use std::collections::HashMap;
@@ -1313,9 +1414,7 @@ impl ProjectStore for PgMissionStore {
         const ADAPTIVE_THRESHOLD: usize = 30;
 
         for (crate_key, indices) in &crate_indices {
-            let public_count = indices.iter()
-                .filter(|&&i| nodes[i].3)
-                .count();
+            let public_count = indices.iter().filter(|&&i| nodes[i].3).count();
 
             if public_count > ADAPTIVE_THRESHOLD {
                 let mut subdir_indices: HashMap<String, Vec<usize>> = HashMap::new();
@@ -1350,11 +1449,16 @@ fn extract_crate_key(file_path: &str) -> String {
 }
 
 fn extract_subdir_key(file_path: &str, crate_key: &str) -> String {
-    let after_crate = file_path.strip_prefix(crate_key)
+    let after_crate = file_path
+        .strip_prefix(crate_key)
         .unwrap_or(file_path)
         .trim_start_matches('/');
     let parts: Vec<&str> = after_crate.split('/').collect();
-    let depth = if parts.len() > 2 { 2 } else { parts.len().saturating_sub(1) };
+    let depth = if parts.len() > 2 {
+        2
+    } else {
+        parts.len().saturating_sub(1)
+    };
     if depth == 0 {
         crate_key.to_string()
     } else {
@@ -1382,7 +1486,8 @@ fn aggregate_summary(
         if let Some(ref doc) = docstring {
             if !doc.is_empty() && seen_doc_files.insert(fp.clone()) {
                 let truncated = if doc.len() > 120 {
-                    let end = doc.char_indices()
+                    let end = doc
+                        .char_indices()
                         .take_while(|(i, _)| *i < 120)
                         .last()
                         .map(|(i, c)| i + c.len_utf8())

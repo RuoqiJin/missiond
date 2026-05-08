@@ -40,15 +40,15 @@ pub use combinators::{
     BatchedSubscription, CoalescingSubscription, DebouncedSubscription, FilteredSubscription,
     MappedSubscription, RateLimitedSubscription,
 };
-pub use cursor_store::{Cursor, CursorError, CursorStore, InMemoryCursorStore};
 #[cfg(feature = "postgres")]
 pub use cursor_store::PgCursorStore;
+pub use cursor_store::{Cursor, CursorError, CursorStore, InMemoryCursorStore};
+#[cfg(feature = "postgres")]
+pub use failure::PgDlqSink;
 pub use failure::{
     build_failure_info, DlqSink, FailureError, FailureInfo, FailureOutcome, FailureRouter,
     InMemoryDlq,
 };
-#[cfg(feature = "postgres")]
-pub use failure::PgDlqSink;
 pub use lifecycle::{Lifecycle, LifecycleError, Phase};
 pub use live_source::{BroadcastLiveSource, LiveSource, MpscLiveSource};
 pub use options::{
@@ -185,7 +185,10 @@ where
             }
             st.dirty_since_flush = st.dirty_since_flush.saturating_add(1);
         }
-        let _ = self.flush_signal.send(FlushSignal::Dirty { count: 1 }).await;
+        let _ = self
+            .flush_signal
+            .send(FlushSignal::Dirty { count: 1 })
+            .await;
     }
 
     /// Mark this event as failed. The subscription runtime's
@@ -404,7 +407,11 @@ where
             // protects advancement.
             let _ = cursor;
 
-            match self.lifecycle.next_from_live(&mut **live, extract_seq).await {
+            match self
+                .lifecycle
+                .next_from_live(&mut **live, extract_seq)
+                .await
+            {
                 Ok(Some(f)) => {
                     return Some(self.wrap_ack(f.event, f.seq, 0));
                 }
@@ -449,13 +456,7 @@ where
     /// Schedule a retry for an event. Used by the runtime after a nack
     /// returns `FailureOutcome::Retry`.
     #[allow(dead_code)]
-    pub(crate) fn schedule_retry(
-        &mut self,
-        event: Arc<T>,
-        seq: Seq,
-        attempt: u8,
-        delay: Duration,
-    ) {
+    pub(crate) fn schedule_retry(&mut self, event: Arc<T>, seq: Seq, attempt: u8, delay: Duration) {
         self.retry_queue.push(PendingRetry {
             event,
             seq,
@@ -580,15 +581,7 @@ mod tests {
             tx: tx.clone(),
         });
         let lifecycle = Lifecycle::<BoardEvent>::new(Seq(0), BatchSize(100), Domain::Board);
-        Subscription::new(
-            "sub-t".into(),
-            shared,
-            lifecycle,
-            log,
-            live,
-            tx,
-            flusher,
-        )
+        Subscription::new("sub-t".into(), shared, lifecycle, log, live, tx, flusher)
     }
 
     #[tokio::test]

@@ -18,7 +18,10 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader
 pub fn ipc_endpoint(base_dir: &Path, name: &str) -> String {
     #[cfg(unix)]
     {
-        base_dir.join(format!("{}.sock", name)).to_string_lossy().to_string()
+        base_dir
+            .join(format!("{}.sock", name))
+            .to_string_lossy()
+            .to_string()
     }
 
     #[cfg(windows)]
@@ -40,7 +43,9 @@ pub fn default_ipc_endpoint() -> String {
 #[cfg(windows)]
 fn ipc_port_for_name(name: &str) -> u16 {
     // Use a simple hash to get a port in the range 49152-65535 (dynamic ports)
-    let hash: u32 = name.bytes().fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
+    let hash: u32 = name
+        .bytes()
+        .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
     let port = 49152 + (hash % 16383) as u16;
     port
 }
@@ -50,9 +55,9 @@ fn ipc_port_for_name(name: &str) -> u16 {
 #[cfg(unix)]
 mod platform {
     use super::*;
-    use tokio::net::{UnixListener, UnixStream};
     use std::pin::Pin;
     use std::task::{Context as TaskContext, Poll};
+    use tokio::net::{UnixListener, UnixStream};
 
     pub struct IpcListener {
         inner: UnixListener,
@@ -66,7 +71,10 @@ mod platform {
             // Remove stale socket if exists
             if path.exists() {
                 if UnixStream::connect(&path).await.is_ok() {
-                    anyhow::bail!("Another instance is already listening on {}", path.display());
+                    anyhow::bail!(
+                        "Another instance is already listening on {}",
+                        path.display()
+                    );
                 }
                 std::fs::remove_file(&path).ok();
             }
@@ -151,9 +159,9 @@ mod platform {
 #[cfg(windows)]
 mod platform {
     use super::*;
-    use tokio::net::{TcpListener, TcpStream};
     use std::pin::Pin;
     use std::task::{Context as TaskContext, Poll};
+    use tokio::net::{TcpListener, TcpStream};
 
     pub struct IpcListener {
         inner: TcpListener,

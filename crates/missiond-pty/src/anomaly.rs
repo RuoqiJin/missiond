@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use semantic_terminal::State;
 use missiond_shared::CliEngine;
+use semantic_terminal::State;
 
 /// Anomaly detected by the PTY compatibility guardian
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -260,10 +260,7 @@ impl AnomalyDetector {
                     slot_id: sid,
                     engine,
                     severity: AnomalySeverity::Error,
-                    message: format!(
-                        "{} consecutive frames without state detection",
-                        count
-                    ),
+                    message: format!("{} consecutive frames without state detection", count),
                     sample_text: None,
                 }) {
                     anomalies.push(a);
@@ -372,11 +369,7 @@ impl AnomalyDetector {
     }
 
     /// Emit anomaly only if cooldown has passed for this anomaly type
-    fn emit_if_cool(
-        &mut self,
-        key: &str,
-        f: impl FnOnce() -> PtyAnomaly,
-    ) -> Option<PtyAnomaly> {
+    fn emit_if_cool(&mut self, key: &str, f: impl FnOnce() -> PtyAnomaly) -> Option<PtyAnomaly> {
         let now = Instant::now();
 
         // Periodically prune expired cooldown entries to prevent memory leak
@@ -422,7 +415,9 @@ mod tests {
         // Idle → Thinking → ToolRunning → Idle
         assert!(d.on_state_detected(Some(State::Idle), 0.9).is_empty());
         assert!(d.on_state_detected(Some(State::Thinking), 0.9).is_empty());
-        assert!(d.on_state_detected(Some(State::ToolRunning), 0.85).is_empty());
+        assert!(d
+            .on_state_detected(Some(State::ToolRunning), 0.85)
+            .is_empty());
         assert!(d.on_state_detected(Some(State::Idle), 0.9).is_empty());
     }
 
@@ -461,7 +456,9 @@ mod tests {
         // Wait for stuck timeout
         std::thread::sleep(Duration::from_millis(150));
         let anomalies = d.on_state_detected(Some(State::Thinking), 0.9);
-        assert!(anomalies.iter().any(|a| matches!(a.kind, AnomalyKind::StateStuck)));
+        assert!(anomalies
+            .iter()
+            .any(|a| matches!(a.kind, AnomalyKind::StateStuck)));
     }
 
     #[test]

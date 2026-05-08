@@ -9,8 +9,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, Mutex, RwLock};
-use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::accept_async;
+use tokio_tungstenite::tungstenite::Message;
 use tracing::{error, info, warn};
 
 use crate::cc_tasks::{CCTaskChangeEvent, CCTasksOverview};
@@ -49,9 +49,7 @@ pub enum SyncMessage {
         hostname: String,
     },
     /// Heartbeat
-    Heartbeat {
-        machine_id: String,
-    },
+    Heartbeat { machine_id: String },
     /// Tasks overview from a machine
     Overview {
         machine_id: String,
@@ -63,9 +61,7 @@ pub enum SyncMessage {
         payload: CCTaskChangeEvent,
     },
     /// All machines overview (sent by relay to clients)
-    AllMachines {
-        machines: Vec<MachineInfo>,
-    },
+    AllMachines { machines: Vec<MachineInfo> },
 }
 
 /// Machine info sent to clients

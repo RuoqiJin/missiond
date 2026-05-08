@@ -40,7 +40,10 @@ impl ScreenshotBroker {
 
     /// Register a screenshot request and broadcast to WS clients.
     /// Returns (request_id, receiver). Caller awaits the receiver with timeout.
-    pub async fn request(&self, slot_id: &str) -> (String, oneshot::Receiver<Result<ScreenshotResult, String>>) {
+    pub async fn request(
+        &self,
+        slot_id: &str,
+    ) -> (String, oneshot::Receiver<Result<ScreenshotResult, String>>) {
         let request_id = format!(
             "ss-{}-{}",
             chrono::Utc::now().timestamp_millis(),
@@ -55,7 +58,9 @@ impl ScreenshotBroker {
         }
 
         // Broadcast to all WS handlers
-        let _ = self.request_tx.send((slot_id.to_string(), request_id.clone()));
+        let _ = self
+            .request_tx
+            .send((slot_id.to_string(), request_id.clone()));
         debug!(slot_id, request_id, "Screenshot request broadcast");
 
         (request_id, rx)
@@ -72,7 +77,10 @@ impl ScreenshotBroker {
             let _ = tx.send(result);
             debug!(request_id, "Screenshot request resolved");
         } else {
-            warn!(request_id, "Screenshot response for unknown/expired request");
+            warn!(
+                request_id,
+                "Screenshot response for unknown/expired request"
+            );
         }
     }
 

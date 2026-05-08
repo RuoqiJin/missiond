@@ -13,7 +13,10 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/skills", get(list_skills))
         .route("/api/v1/skills/{skill_id}", get(get_skill))
-        .route("/api/v1/creator/skills", post(create_skill).get(list_my_skills))
+        .route(
+            "/api/v1/creator/skills",
+            post(create_skill).get(list_my_skills),
+        )
         .route("/api/v1/creator/skills/{skill_id}", put(update_skill))
 }
 
@@ -28,9 +31,15 @@ struct ListQuery {
     tier: i32,
 }
 
-fn default_offset() -> i64 { 0 }
-fn default_limit() -> i64 { 20 }
-fn default_tier() -> i32 { 3 }
+fn default_offset() -> i64 {
+    0
+}
+fn default_limit() -> i64 {
+    20
+}
+fn default_tier() -> i32 {
+    3
+}
 
 /// Public skill listing (no auth required, tier defaults to showing all)
 async fn list_skills(

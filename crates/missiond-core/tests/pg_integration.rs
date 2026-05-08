@@ -10,7 +10,10 @@ use missiond_core::db::traits::*;
 use missiond_core::types::*;
 
 /// Spin up a PostgreSQL container and return PgMissionStore connected to it.
-async fn setup_pg() -> (PgMissionStore, testcontainers::ContainerAsync<testcontainers_modules::postgres::Postgres>) {
+async fn setup_pg() -> (
+    PgMissionStore,
+    testcontainers::ContainerAsync<testcontainers_modules::postgres::Postgres>,
+) {
     use testcontainers::runners::AsyncRunner;
     use testcontainers_modules::postgres::Postgres;
 
@@ -24,7 +27,10 @@ async fn setup_pg() -> (PgMissionStore, testcontainers::ContainerAsync<testconta
         .await
         .expect("Failed to get PG port");
 
-    let url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", host_port);
+    let url = format!(
+        "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+        host_port
+    );
 
     let store = PgMissionStore::connect(&url)
         .await
@@ -39,13 +45,23 @@ async fn test_pg_vision_store() {
     let (store, _container) = setup_pg().await;
 
     // Test image description cache
-    assert!(store.get_image_description("abc123").await.unwrap().is_none());
-    store.save_image_description("abc123", "image/png", "A cat sitting on a desk").await.unwrap();
+    assert!(store
+        .get_image_description("abc123")
+        .await
+        .unwrap()
+        .is_none());
+    store
+        .save_image_description("abc123", "image/png", "A cat sitting on a desk")
+        .await
+        .unwrap();
     let desc = store.get_image_description("abc123").await.unwrap();
     assert_eq!(desc.unwrap(), "A cat sitting on a desk");
 
     // Upsert
-    store.save_image_description("abc123", "image/png", "Updated description").await.unwrap();
+    store
+        .save_image_description("abc123", "image/png", "Updated description")
+        .await
+        .unwrap();
     let desc = store.get_image_description("abc123").await.unwrap();
     assert_eq!(desc.unwrap(), "Updated description");
 
@@ -54,7 +70,10 @@ async fn test_pg_vision_store() {
 
     // Translation
     assert!(!store.has_translation(1).await.unwrap());
-    store.insert_translation(1, "翻译测试", "gemini", 100).await.unwrap();
+    store
+        .insert_translation(1, "翻译测试", "gemini", 100)
+        .await
+        .unwrap();
     assert!(store.has_translation(1).await.unwrap());
     let (trans, _) = store.get_translation(1).await.unwrap().unwrap();
     assert_eq!(trans, "翻译测试");
@@ -78,7 +97,11 @@ async fn test_pg_board_store() {
     assert_eq!(task.status.as_str(), "open");
 
     // Get
-    let fetched = store.get_board_task(task.id.as_str()).await.unwrap().unwrap();
+    let fetched = store
+        .get_board_task(task.id.as_str())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(fetched.id.as_str(), task.id.as_str());
 
     // List
@@ -90,7 +113,11 @@ async fn test_pg_board_store() {
         status: Some("done".into()),
         ..Default::default()
     };
-    let updated = store.update_board_task(task.id.as_str(), &update).await.unwrap().unwrap();
+    let updated = store
+        .update_board_task(task.id.as_str(), &update)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(updated.status.as_str(), "done");
 
     // Delete
@@ -152,12 +179,19 @@ async fn test_pg_slot_store() {
     let (store, _container) = setup_pg().await;
 
     // Slot session
-    store.set_slot_session("slot-1", "session-abc").await.unwrap();
+    store
+        .set_slot_session("slot-1", "session-abc")
+        .await
+        .unwrap();
     let session = store.get_slot_session("slot-1").await.unwrap().unwrap();
     assert_eq!(session, "session-abc");
 
     // Reverse lookup
-    let slot = store.get_slot_for_session("session-abc").await.unwrap().unwrap();
+    let slot = store
+        .get_slot_for_session("session-abc")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(slot, "slot-1");
 
     // Delete

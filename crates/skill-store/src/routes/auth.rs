@@ -20,13 +20,17 @@ async fn register(
     Json(req): Json<RegisterRequest>,
 ) -> AppResult<Json<AuthResponse>> {
     if req.username.len() < 3 || req.username.len() > 50 {
-        return Err(AppError::BadRequest("Username must be 3-50 characters".into()));
+        return Err(AppError::BadRequest(
+            "Username must be 3-50 characters".into(),
+        ));
     }
     if !req.email.contains('@') {
         return Err(AppError::BadRequest("Invalid email".into()));
     }
     if req.password.len() < 8 {
-        return Err(AppError::BadRequest("Password must be at least 8 characters".into()));
+        return Err(AppError::BadRequest(
+            "Password must be at least 8 characters".into(),
+        ));
     }
 
     let password_hash = hash_password(&req.password)?;
@@ -84,10 +88,7 @@ async fn login(
     Ok(Json(AuthResponse { token, user }))
 }
 
-async fn me(
-    State(state): State<AppState>,
-    auth: AuthUser,
-) -> AppResult<Json<serde_json::Value>> {
+async fn me(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<serde_json::Value>> {
     let conn = state.db.conn();
     let user = db::users::get_user_by_id(&*conn, &auth.user_id)?;
     let quota = db::subscriptions::get_quota_info(&*conn, &auth.user_id)?;

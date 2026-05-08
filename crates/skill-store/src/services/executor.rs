@@ -67,9 +67,8 @@ impl SkillExecutor {
         // Step 3: Input defense (concurrent with prompt assembly)
         let defense = self.defense.clone();
         let input_for_defense = rendered_input.clone();
-        let defense_handle = tokio::spawn(async move {
-            defense.check_input(&input_for_defense).await
-        });
+        let defense_handle =
+            tokio::spawn(async move { defense.check_input(&input_for_defense).await });
 
         // Step 4: Assemble sandwich prompt
         let (system_prompt, user_message) =
@@ -108,7 +107,10 @@ impl SkillExecutor {
             .map_err(|e| AppError::LlmError(e.to_string()))?;
 
         // Step 6: Output defense
-        if let Err(e) = self.defense.check_output(&llm_result.content, &skill.prompt_template) {
+        if let Err(e) = self
+            .defense
+            .check_output(&llm_result.content, &skill.prompt_template)
+        {
             let conn = self.db.conn();
             let _ = self.billing.record_execution(
                 &*conn,
@@ -152,18 +154,17 @@ impl SkillExecutor {
 /// Render JSON inputs into a flat string for prompt injection
 fn render_inputs(inputs: &serde_json::Value) -> String {
     match inputs {
-        serde_json::Value::Object(map) => {
-            map.iter()
-                .map(|(k, v)| {
-                    let val = match v {
-                        serde_json::Value::String(s) => s.clone(),
-                        other => other.to_string(),
-                    };
-                    format!("{k}: {val}")
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        }
+        serde_json::Value::Object(map) => map
+            .iter()
+            .map(|(k, v)| {
+                let val = match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                format!("{k}: {val}")
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
         serde_json::Value::String(s) => s.clone(),
         other => other.to_string(),
     }

@@ -26,8 +26,8 @@ const MIN_GLYPH_ALPHA: u8 = 60;
 
 /// Font search paths (macOS) - prefer Regular weight over Light
 const FONT_PATHS: &[(&str, u32)] = &[
-    ("/System/Library/Fonts/Menlo.ttc", 0),       // Menlo Regular (TTC index 0)
-    ("/System/Library/Fonts/SFNSMono.ttf", 0),     // SF Mono Light (fallback)
+    ("/System/Library/Fonts/Menlo.ttc", 0), // Menlo Regular (TTC index 0)
+    ("/System/Library/Fonts/SFNSMono.ttf", 0), // SF Mono Light (fallback)
 ];
 
 // ========== Captured Data ==========
@@ -160,15 +160,9 @@ pub fn capture_grid<T>(term: &Term<T>) -> CapturedGrid {
 
             let (raw_fg, raw_bg) = (cell.fg, cell.bg);
             let (fg, bg) = if inverse {
-                (
-                    resolve_color(raw_bg, true),
-                    resolve_color(raw_fg, false),
-                )
+                (resolve_color(raw_bg, true), resolve_color(raw_fg, false))
             } else {
-                (
-                    resolve_color(raw_fg, true),
-                    resolve_color(raw_bg, false),
-                )
+                (resolve_color(raw_fg, true), resolve_color(raw_bg, false))
             };
 
             row_cells.push(CapturedCell {
@@ -193,7 +187,12 @@ fn load_font_data() -> (&'static [u8], u32) {
     let (data, idx) = FONT_DATA.get_or_init(|| {
         for (path, index) in FONT_PATHS {
             if let Ok(data) = std::fs::read(path) {
-                tracing::info!(font_path = path, ttc_index = index, size = data.len(), "Loaded monospace font");
+                tracing::info!(
+                    font_path = path,
+                    ttc_index = index,
+                    size = data.len(),
+                    "Loaded monospace font"
+                );
                 return (data, *index);
             }
         }
@@ -288,7 +287,16 @@ pub fn render_to_png(grid: &CapturedGrid) -> anyhow::Result<Vec<u8>> {
             }
 
             if let Some(ref sf) = scaled_font {
-                render_glyph(&mut img, sf, cell, x_start, y_start, cell_w, &mut glyph_ok, &mut glyph_miss);
+                render_glyph(
+                    &mut img,
+                    sf,
+                    cell,
+                    x_start,
+                    y_start,
+                    cell_w,
+                    &mut glyph_ok,
+                    &mut glyph_miss,
+                );
             } else {
                 fallback_count += 1;
                 render_block_fallback(&mut img, cell, x_start, y_start, cell_w);
@@ -297,7 +305,8 @@ pub fn render_to_png(grid: &CapturedGrid) -> anyhow::Result<Vec<u8>> {
     }
 
     tracing::info!(
-        rows = grid.rows, cols = grid.cols,
+        rows = grid.rows,
+        cols = grid.cols,
         non_space_chars = char_count,
         glyph_rendered = glyph_ok,
         glyph_missed = glyph_miss,
@@ -365,11 +374,7 @@ fn render_block_fallback(
             let px = x_start + dx;
             let py = y_start + dy;
             if px < img.width() && py < img.height() {
-                img.put_pixel(
-                    px,
-                    py,
-                    Rgba([cell.fg[0], cell.fg[1], cell.fg[2], 180]),
-                );
+                img.put_pixel(px, py, Rgba([cell.fg[0], cell.fg[1], cell.fg[2], 180]));
             }
         }
     }
@@ -389,7 +394,11 @@ fn alpha_blend(fg: [u8; 3], bg: [u8; 3], alpha: u8) -> [u8; 3] {
 // ========== File Output ==========
 
 /// Render grid and save to file, return path
-pub fn save_screenshot(grid: &CapturedGrid, output_dir: &Path, slot_id: &str) -> anyhow::Result<PathBuf> {
+pub fn save_screenshot(
+    grid: &CapturedGrid,
+    output_dir: &Path,
+    slot_id: &str,
+) -> anyhow::Result<PathBuf> {
     std::fs::create_dir_all(output_dir)?;
 
     let timestamp = chrono::Utc::now().timestamp_millis();
@@ -413,9 +422,7 @@ fn cleanup_old(dir: &Path, slot_id: &str, keep: usize) {
         .flatten()
         .filter_map(|e| e.ok())
         .filter(|e| {
-            e.file_name()
-                .to_string_lossy()
-                .starts_with(&prefix)
+            e.file_name().to_string_lossy().starts_with(&prefix)
                 && e.file_name().to_string_lossy().ends_with(".png")
         })
         .collect();

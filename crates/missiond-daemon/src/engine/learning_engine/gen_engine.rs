@@ -7,7 +7,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-
 pub struct LearningEngine {
     pub(crate) db: DbExecutor,
     pub(crate) llm: LlmGateway,
@@ -40,6 +39,4 @@ pub trait LearningEngineLogic {
 
     /// Run one learning engine tick
     async fn tick(&self) -> Result<()>;
-
 }
-

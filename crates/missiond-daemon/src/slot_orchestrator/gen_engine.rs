@@ -7,7 +7,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-
 pub struct SlotOrchestrator {
     pub(crate) control: Arc<ControlManager>,
     pub(crate) registry: RwLock<HashMap<String, SlotTaskConfig>>,
@@ -41,6 +40,4 @@ pub trait SlotOrchestratorLogic {
 
     /// Check if a task type is registered
     fn is_registered(&self, task_type: &str) -> bool;
-
 }
-

@@ -1,11 +1,11 @@
 //! SlotStore — PostgreSQL implementation.
 
-use async_trait::async_trait;
-use sqlx::Row;
+use super::PgMissionStore;
 use crate::db::error::DbResult;
 use crate::db::traits::SlotStore;
 use crate::types::*;
-use super::PgMissionStore;
+use async_trait::async_trait;
+use sqlx::Row;
 
 #[cfg(feature = "postgres")]
 #[async_trait]
@@ -13,12 +13,11 @@ impl SlotStore for PgMissionStore {
     // -- slot.rs: session mapping --
 
     async fn get_slot_session(&self, slot_id: &str) -> DbResult<Option<String>> {
-        let row: Option<(String,)> = sqlx::query_as(
-            "SELECT session_id FROM slot_sessions WHERE slot_id = $1"
-        )
-        .bind(slot_id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT session_id FROM slot_sessions WHERE slot_id = $1")
+                .bind(slot_id)
+                .fetch_optional(&self.pool)
+                .await?;
         Ok(row.map(|r| r.0))
     }
 
@@ -27,7 +26,7 @@ impl SlotStore for PgMissionStore {
         sqlx::query(
             "INSERT INTO slot_sessions (slot_id, session_id, updated_at)
              VALUES ($1, $2, $3)
-             ON CONFLICT (slot_id) DO UPDATE SET session_id = $2, updated_at = $3"
+             ON CONFLICT (slot_id) DO UPDATE SET session_id = $2, updated_at = $3",
         )
         .bind(slot_id)
         .bind(session_id)
@@ -40,31 +39,31 @@ impl SlotStore for PgMissionStore {
     async fn cleanup_pty_placeholder(&self, slot_id: &str) -> DbResult<()> {
         let session_id = format!("pty-{}", slot_id);
         let mut tx = self.pool.begin().await?;
-        
+
         // Delete messages
         sqlx::query("DELETE FROM conversation_messages WHERE session_id = $1")
             .bind(&session_id)
             .execute(&mut *tx)
             .await?;
-            
+
         // Delete events
         sqlx::query("DELETE FROM conversation_events WHERE session_id = $1")
             .bind(&session_id)
             .execute(&mut *tx)
             .await?;
-            
+
         // Delete turns
         sqlx::query("DELETE FROM conversation_turns WHERE session_id = $1")
             .bind(&session_id)
             .execute(&mut *tx)
             .await?;
-            
+
         // Delete the conversation
         sqlx::query("DELETE FROM conversations WHERE id = $1")
             .bind(&session_id)
             .execute(&mut *tx)
             .await?;
-            
+
         tx.commit().await?;
         Ok(())
     }
@@ -78,21 +77,19 @@ impl SlotStore for PgMissionStore {
     }
 
     async fn get_all_slot_sessions(&self) -> DbResult<Vec<(String, String)>> {
-        let rows: Vec<(String, String)> = sqlx::query_as(
-            "SELECT slot_id, session_id FROM slot_sessions"
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT slot_id, session_id FROM slot_sessions")
+                .fetch_all(&self.pool)
+                .await?;
         Ok(rows)
     }
 
     async fn get_slot_for_session(&self, session_id: &str) -> DbResult<Option<String>> {
-        let row: Option<(String,)> = sqlx::query_as(
-            "SELECT slot_id FROM slot_sessions WHERE session_id = $1"
-        )
-        .bind(session_id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT slot_id FROM slot_sessions WHERE session_id = $1")
+                .bind(session_id)
+                .fetch_optional(&self.pool)
+                .await?;
         Ok(row.map(|r| r.0))
     }
 
@@ -123,13 +120,11 @@ impl SlotStore for PgMissionStore {
 
     async fn slot_task_set_running(&self, id: &str) -> DbResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
-        sqlx::query(
-            "UPDATE slot_tasks SET status = 'running', started_at = $1 WHERE id = $2"
-        )
-        .bind(&now)
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("UPDATE slot_tasks SET status = 'running', started_at = $1 WHERE id = $2")
+            .bind(&now)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -163,7 +158,13 @@ impl SlotStore for PgMissionStore {
         Ok(())
     }
 
-    async fn list_slot_tasks(&self, slot_id: Option<&str>, task_type: Option<&str>, status: Option<&str>, limit: i64) -> DbResult<Vec<SlotTask>> {
+    async fn list_slot_tasks(
+        &self,
+        slot_id: Option<&str>,
+        task_type: Option<&str>,
+        status: Option<&str>,
+        limit: i64,
+    ) -> DbResult<Vec<SlotTask>> {
         // Build dynamic query with optional filters
         let mut sql = String::from(
             "SELECT id, slot_id, task_type, status, prompt_summary, source_sessions,
@@ -189,37 +190,60 @@ impl SlotStore for PgMissionStore {
         // We need to bind dynamically; use a match on the number of optional params
         let rows = match (slot_id, task_type, status) {
             (Some(s), Some(t), Some(st)) => {
-                sqlx::query(&sql).bind(s).bind(t).bind(st).bind(limit)
-                    .fetch_all(&self.pool).await?
+                sqlx::query(&sql)
+                    .bind(s)
+                    .bind(t)
+                    .bind(st)
+                    .bind(limit)
+                    .fetch_all(&self.pool)
+                    .await?
             }
             (Some(s), Some(t), None) => {
-                sqlx::query(&sql).bind(s).bind(t).bind(limit)
-                    .fetch_all(&self.pool).await?
+                sqlx::query(&sql)
+                    .bind(s)
+                    .bind(t)
+                    .bind(limit)
+                    .fetch_all(&self.pool)
+                    .await?
             }
             (Some(s), None, Some(st)) => {
-                sqlx::query(&sql).bind(s).bind(st).bind(limit)
-                    .fetch_all(&self.pool).await?
+                sqlx::query(&sql)
+                    .bind(s)
+                    .bind(st)
+                    .bind(limit)
+                    .fetch_all(&self.pool)
+                    .await?
             }
             (None, Some(t), Some(st)) => {
-                sqlx::query(&sql).bind(t).bind(st).bind(limit)
-                    .fetch_all(&self.pool).await?
+                sqlx::query(&sql)
+                    .bind(t)
+                    .bind(st)
+                    .bind(limit)
+                    .fetch_all(&self.pool)
+                    .await?
             }
             (Some(s), None, None) => {
-                sqlx::query(&sql).bind(s).bind(limit)
-                    .fetch_all(&self.pool).await?
+                sqlx::query(&sql)
+                    .bind(s)
+                    .bind(limit)
+                    .fetch_all(&self.pool)
+                    .await?
             }
             (None, Some(t), None) => {
-                sqlx::query(&sql).bind(t).bind(limit)
-                    .fetch_all(&self.pool).await?
+                sqlx::query(&sql)
+                    .bind(t)
+                    .bind(limit)
+                    .fetch_all(&self.pool)
+                    .await?
             }
             (None, None, Some(st)) => {
-                sqlx::query(&sql).bind(st).bind(limit)
-                    .fetch_all(&self.pool).await?
+                sqlx::query(&sql)
+                    .bind(st)
+                    .bind(limit)
+                    .fetch_all(&self.pool)
+                    .await?
             }
-            (None, None, None) => {
-                sqlx::query(&sql).bind(limit)
-                    .fetch_all(&self.pool).await?
-            }
+            (None, None, None) => sqlx::query(&sql).bind(limit).fetch_all(&self.pool).await?,
         };
 
         let results = rows.iter().map(|row| row_to_slot_task(row)).collect();
@@ -248,7 +272,10 @@ impl SlotStore for PgMissionStore {
         );
 
         let rows = if has_param {
-            sqlx::query(&sql).bind(slot_id.unwrap()).fetch_all(&self.pool).await?
+            sqlx::query(&sql)
+                .bind(slot_id.unwrap())
+                .fetch_all(&self.pool)
+                .await?
         } else {
             sqlx::query(&sql).fetch_all(&self.pool).await?
         };
@@ -344,7 +371,9 @@ impl SlotStore for PgMissionStore {
         .fetch_optional(&self.pool)
         .await?;
         Ok(row.and_then(|r| {
-            chrono::DateTime::parse_from_rfc3339(&r.0).ok().map(|dt| dt.timestamp())
+            chrono::DateTime::parse_from_rfc3339(&r.0)
+                .ok()
+                .map(|dt| dt.timestamp())
         }))
     }
 
@@ -420,7 +449,11 @@ impl SlotStore for PgMissionStore {
             return Ok(());
         }
 
-        let sql = format!("UPDATE tasks SET {} WHERE id = ${}", fields.join(", "), param_idx);
+        let sql = format!(
+            "UPDATE tasks SET {} WHERE id = ${}",
+            fields.join(", "),
+            param_idx
+        );
 
         // Bind in the same order we built the SET clause
         let mut query = sqlx::query(&sql);
@@ -542,7 +575,7 @@ impl SlotStore for PgMissionStore {
     async fn insert_inbox_message(&self, msg: &InboxMessage) -> DbResult<()> {
         sqlx::query(
             "INSERT INTO inbox (id, task_id, from_role, content, read, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6)"
+             VALUES ($1, $2, $3, $4, $5, $6)",
         )
         .bind(&msg.id)
         .bind(&msg.task_id)
@@ -555,29 +588,33 @@ impl SlotStore for PgMissionStore {
         Ok(())
     }
 
-    async fn get_inbox_messages(&self, unread_only: bool, limit: i64) -> DbResult<Vec<InboxMessage>> {
+    async fn get_inbox_messages(
+        &self,
+        unread_only: bool,
+        limit: i64,
+    ) -> DbResult<Vec<InboxMessage>> {
         let sql = if unread_only {
             "SELECT id, task_id, from_role, content, read, created_at FROM inbox WHERE read = 0 ORDER BY created_at DESC LIMIT $1"
         } else {
             "SELECT id, task_id, from_role, content, read, created_at FROM inbox ORDER BY created_at DESC LIMIT $1"
         };
 
-        let rows = sqlx::query(sql)
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await?;
+        let rows = sqlx::query(sql).bind(limit).fetch_all(&self.pool).await?;
 
-        let results = rows.iter().map(|row| {
-            let read_val: i32 = row.get("read");
-            InboxMessage {
-                id: row.get("id"),
-                task_id: row.get("task_id"),
-                from_role: row.get("from_role"),
-                content: row.get("content"),
-                read: read_val == 1,
-                created_at: row.get("created_at"),
-            }
-        }).collect();
+        let results = rows
+            .iter()
+            .map(|row| {
+                let read_val: i32 = row.get("read");
+                InboxMessage {
+                    id: row.get("id"),
+                    task_id: row.get("task_id"),
+                    from_role: row.get("from_role"),
+                    content: row.get("content"),
+                    read: read_val == 1,
+                    created_at: row.get("created_at"),
+                }
+            })
+            .collect();
         Ok(results)
     }
 
@@ -616,7 +653,7 @@ impl SlotStore for PgMissionStore {
         let row = sqlx::query(
             "SELECT id, parent_slot_id, template, objective, config, status, termination_reason,
                     created_at, terminated_at, ttl_seconds, expires_at, extend_count
-             FROM dynamic_slots WHERE id = $1"
+             FROM dynamic_slots WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -650,11 +687,10 @@ impl SlotStore for PgMissionStore {
     }
 
     async fn count_active_dynamic_slots(&self) -> DbResult<i64> {
-        let (count,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM dynamic_slots WHERE status = 'active'"
-        )
-        .fetch_one(&self.pool)
-        .await?;
+        let (count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM dynamic_slots WHERE status = 'active'")
+                .fetch_one(&self.pool)
+                .await?;
         Ok(count)
     }
 
@@ -672,7 +708,11 @@ impl SlotStore for PgMissionStore {
         Ok(result.rows_affected() > 0)
     }
 
-    async fn extend_dynamic_slot(&self, id: &str, additional_seconds: i64) -> DbResult<Option<String>> {
+    async fn extend_dynamic_slot(
+        &self,
+        id: &str,
+        additional_seconds: i64,
+    ) -> DbResult<Option<String>> {
         // Check current state
         let row = sqlx::query(
             "SELECT expires_at, extend_count, created_at FROM dynamic_slots WHERE id = $1 AND status = 'active'"
@@ -712,7 +752,7 @@ impl SlotStore for PgMissionStore {
 
         sqlx::query(
             "UPDATE dynamic_slots SET expires_at = $1, extend_count = extend_count + 1
-             WHERE id = $2 AND status = 'active'"
+             WHERE id = $2 AND status = 'active'",
         )
         .bind(&new_expires_str)
         .bind(id)
@@ -727,7 +767,7 @@ impl SlotStore for PgMissionStore {
         let rows = sqlx::query(
             "SELECT id, parent_slot_id, template, objective, config, status, termination_reason,
                     created_at, terminated_at, ttl_seconds, expires_at, extend_count
-             FROM dynamic_slots WHERE status = 'active' AND expires_at <= $1"
+             FROM dynamic_slots WHERE status = 'active' AND expires_at <= $1",
         )
         .bind(&now)
         .fetch_all(&self.pool)
@@ -739,11 +779,12 @@ impl SlotStore for PgMissionStore {
 
     async fn find_expiring_dynamic_slots(&self, within_seconds: i64) -> DbResult<Vec<DynamicSlot>> {
         let now = chrono::Utc::now().to_rfc3339();
-        let deadline = (chrono::Utc::now() + chrono::Duration::seconds(within_seconds)).to_rfc3339();
+        let deadline =
+            (chrono::Utc::now() + chrono::Duration::seconds(within_seconds)).to_rfc3339();
         let rows = sqlx::query(
             "SELECT id, parent_slot_id, template, objective, config, status, termination_reason,
                     created_at, terminated_at, ttl_seconds, expires_at, extend_count
-             FROM dynamic_slots WHERE status = 'active' AND expires_at > $1 AND expires_at <= $2"
+             FROM dynamic_slots WHERE status = 'active' AND expires_at > $1 AND expires_at <= $2",
         )
         .bind(&now)
         .bind(&deadline)

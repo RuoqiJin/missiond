@@ -35,7 +35,10 @@ pub fn get_plan(conn: &Connection, plan_id: &str) -> Result<Plan, rusqlite::Erro
     )
 }
 
-pub fn get_active_subscription(conn: &Connection, user_id: &str) -> Result<Option<Subscription>, rusqlite::Error> {
+pub fn get_active_subscription(
+    conn: &Connection,
+    user_id: &str,
+) -> Result<Option<Subscription>, rusqlite::Error> {
     let mut stmt = conn.prepare(
         "SELECT id, user_id, plan_id, status, current_period_start, current_period_end, created_at
          FROM subscriptions WHERE user_id = ?1 AND status = 'active'
@@ -110,7 +113,11 @@ pub fn get_or_create_quota(
     }
 }
 
-pub fn increment_usage(conn: &Connection, user_id: &str, period_start: &str) -> Result<(), rusqlite::Error> {
+pub fn increment_usage(
+    conn: &Connection,
+    user_id: &str,
+    period_start: &str,
+) -> Result<(), rusqlite::Error> {
     conn.execute(
         "UPDATE quota_usage SET used = used + 1 WHERE user_id = ?1 AND period_start = ?2",
         params![user_id, period_start],
@@ -118,7 +125,12 @@ pub fn increment_usage(conn: &Connection, user_id: &str, period_start: &str) -> 
     Ok(())
 }
 
-pub fn add_extra_quota(conn: &Connection, user_id: &str, period_start: &str, amount: i64) -> Result<(), rusqlite::Error> {
+pub fn add_extra_quota(
+    conn: &Connection,
+    user_id: &str,
+    period_start: &str,
+    amount: i64,
+) -> Result<(), rusqlite::Error> {
     conn.execute(
         "UPDATE quota_usage SET extra_purchased = extra_purchased + ?1 WHERE user_id = ?2 AND period_start = ?3",
         params![amount, user_id, period_start],
@@ -126,13 +138,21 @@ pub fn add_extra_quota(conn: &Connection, user_id: &str, period_start: &str, amo
     Ok(())
 }
 
-pub fn get_quota_info(conn: &Connection, user_id: &str) -> Result<Option<QuotaInfo>, rusqlite::Error> {
+pub fn get_quota_info(
+    conn: &Connection,
+    user_id: &str,
+) -> Result<Option<QuotaInfo>, rusqlite::Error> {
     let sub = match get_active_subscription(conn, user_id)? {
         Some(s) => s,
         None => return Ok(None),
     };
     let plan = get_plan(conn, &sub.plan_id)?;
-    let (used, extra) = get_or_create_quota(conn, user_id, &sub.current_period_start, &sub.current_period_end)?;
+    let (used, extra) = get_or_create_quota(
+        conn,
+        user_id,
+        &sub.current_period_start,
+        &sub.current_period_end,
+    )?;
 
     let total = plan.monthly_quota + extra;
     let remaining = (total - used).max(0);

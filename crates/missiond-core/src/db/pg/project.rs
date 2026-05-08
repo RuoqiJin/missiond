@@ -3,9 +3,9 @@
 //! Free-function helpers consumed by the unified ProjectStore impl
 //! in `pg/skill.rs` (merged per memory pillar v0.4.23).
 
-use sqlx::PgPool;
-use serde_json::json;
 use crate::types::ProjectConfig;
+use serde_json::json;
+use sqlx::PgPool;
 
 pub async fn upsert_project(pool: &PgPool, config: &ProjectConfig) -> Result<(), sqlx::Error> {
     sqlx::query(
@@ -37,60 +37,87 @@ pub async fn upsert_project(pool: &PgPool, config: &ProjectConfig) -> Result<(),
     Ok(())
 }
 
-type ProjectRow = (String, String, Option<String>, bool, Vec<String>, Option<String>, String, Option<String>, Option<String>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>);
+type ProjectRow = (
+    String,
+    String,
+    Option<String>,
+    bool,
+    Vec<String>,
+    Option<String>,
+    String,
+    Option<String>,
+    Option<String>,
+    chrono::DateTime<chrono::Utc>,
+    chrono::DateTime<chrono::Utc>,
+);
 
 const PROJECT_COLS: &str = "id, path, intent_path, active, slots, github_url, kind, vault_path, parent_id, created_at, updated_at";
 
 pub async fn list_projects(pool: &PgPool) -> Result<Vec<ProjectConfig>, sqlx::Error> {
-    let rows: Vec<ProjectRow> =
-        sqlx::query_as(&format!("SELECT {} FROM projects ORDER BY id", PROJECT_COLS))
-        .fetch_all(pool)
-        .await?;
+    let rows: Vec<ProjectRow> = sqlx::query_as(&format!(
+        "SELECT {} FROM projects ORDER BY id",
+        PROJECT_COLS
+    ))
+    .fetch_all(pool)
+    .await?;
     Ok(rows.into_iter().map(row_to_config).collect())
 }
 
 pub async fn list_active_projects(pool: &PgPool) -> Result<Vec<ProjectConfig>, sqlx::Error> {
-    let rows: Vec<ProjectRow> =
-        sqlx::query_as(&format!("SELECT {} FROM projects WHERE active = true ORDER BY id", PROJECT_COLS))
-        .fetch_all(pool)
-        .await?;
+    let rows: Vec<ProjectRow> = sqlx::query_as(&format!(
+        "SELECT {} FROM projects WHERE active = true ORDER BY id",
+        PROJECT_COLS
+    ))
+    .fetch_all(pool)
+    .await?;
     Ok(rows.into_iter().map(row_to_config).collect())
 }
 
 pub async fn get_project(pool: &PgPool, id: &str) -> Result<Option<ProjectConfig>, sqlx::Error> {
-    let row: Option<ProjectRow> =
-        sqlx::query_as(&format!("SELECT {} FROM projects WHERE id = $1", PROJECT_COLS))
-        .bind(id)
-        .fetch_optional(pool)
-        .await?;
+    let row: Option<ProjectRow> = sqlx::query_as(&format!(
+        "SELECT {} FROM projects WHERE id = $1",
+        PROJECT_COLS
+    ))
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
     Ok(row.map(row_to_config))
 }
 
-pub async fn update_project_active(pool: &PgPool, id: &str, active: bool) -> Result<bool, sqlx::Error> {
-    let result = sqlx::query(
-        "UPDATE projects SET active = $2, updated_at = NOW() WHERE id = $1"
-    )
-    .bind(id)
-    .bind(active)
-    .execute(pool)
-    .await?;
+pub async fn update_project_active(
+    pool: &PgPool,
+    id: &str,
+    active: bool,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query("UPDATE projects SET active = $2, updated_at = NOW() WHERE id = $1")
+        .bind(id)
+        .bind(active)
+        .execute(pool)
+        .await?;
     Ok(result.rows_affected() > 0)
 }
 
-pub async fn update_project_slots(pool: &PgPool, id: &str, slots: &[String]) -> Result<bool, sqlx::Error> {
-    let result = sqlx::query(
-        "UPDATE projects SET slots = $2::text[], updated_at = NOW() WHERE id = $1"
-    )
-    .bind(id)
-    .bind(slots)
-    .execute(pool)
-    .await?;
+pub async fn update_project_slots(
+    pool: &PgPool,
+    id: &str,
+    slots: &[String],
+) -> Result<bool, sqlx::Error> {
+    let result =
+        sqlx::query("UPDATE projects SET slots = $2::text[], updated_at = NOW() WHERE id = $1")
+            .bind(id)
+            .bind(slots)
+            .execute(pool)
+            .await?;
     Ok(result.rows_affected() > 0)
 }
 
-pub async fn backfill_project_id(pool: &PgPool, project_id: &str, path_pattern: &str) -> Result<u64, sqlx::Error> {
+pub async fn backfill_project_id(
+    pool: &PgPool,
+    project_id: &str,
+    path_pattern: &str,
+) -> Result<u64, sqlx::Error> {
     let result = sqlx::query(
-        "UPDATE conversations SET project_id = $1 WHERE project_id IS NULL AND project LIKE $2"
+        "UPDATE conversations SET project_id = $1 WHERE project_id IS NULL AND project LIKE $2",
     )
     .bind(project_id)
     .bind(path_pattern)
@@ -107,13 +134,16 @@ pub async fn delete_project(pool: &PgPool, id: &str) -> Result<bool, sqlx::Error
     Ok(result.rows_affected() > 0)
 }
 
-pub async fn conversation_stats_by_project(pool: &PgPool, project_id: &str) -> Result<serde_json::Value, sqlx::Error> {
+pub async fn conversation_stats_by_project(
+    pool: &PgPool,
+    project_id: &str,
+) -> Result<serde_json::Value, sqlx::Error> {
     let row: (i64, i64, i64, Option<chrono::DateTime<chrono::Utc>>) = sqlx::query_as(
         "SELECT COUNT(*) as total,
                 COUNT(CASE WHEN status = 'active' THEN 1 END) as active,
                 COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed,
                 MAX(updated_at) as last_activity
-         FROM conversations WHERE project_id = $1"
+         FROM conversations WHERE project_id = $1",
     )
     .bind(project_id)
     .fetch_one(pool)
@@ -126,38 +156,58 @@ pub async fn conversation_stats_by_project(pool: &PgPool, project_id: &str) -> R
     }))
 }
 
-pub async fn recent_conversations_by_project(pool: &PgPool, project_id: &str, limit: i64) -> Result<Vec<serde_json::Value>, sqlx::Error> {
-    let rows: Vec<(String, Option<String>, String, Option<String>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+pub async fn recent_conversations_by_project(
+    pool: &PgPool,
+    project_id: &str,
+    limit: i64,
+) -> Result<Vec<serde_json::Value>, sqlx::Error> {
+    let rows: Vec<(
+        String,
+        Option<String>,
+        String,
+        Option<String>,
+        chrono::DateTime<chrono::Utc>,
+        chrono::DateTime<chrono::Utc>,
+    )> = sqlx::query_as(
         "SELECT id, slot_name, status, summary, created_at, updated_at
          FROM conversations WHERE project_id = $1
-         ORDER BY updated_at DESC LIMIT $2"
+         ORDER BY updated_at DESC LIMIT $2",
     )
     .bind(project_id)
     .bind(limit)
     .fetch_all(pool)
     .await?;
-    Ok(rows.into_iter().map(|r| json!({
-        "id": r.0,
-        "slot_name": r.1,
-        "status": r.2,
-        "summary": r.3,
-        "created_at": r.4,
-        "updated_at": r.5,
-    })).collect())
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            json!({
+                "id": r.0,
+                "slot_name": r.1,
+                "status": r.2,
+                "summary": r.3,
+                "created_at": r.4,
+                "updated_at": r.5,
+            })
+        })
+        .collect())
 }
 
-pub async fn kb_stats_by_project(pool: &PgPool, project_id: &str) -> Result<serde_json::Value, sqlx::Error> {
+pub async fn kb_stats_by_project(
+    pool: &PgPool,
+    project_id: &str,
+) -> Result<serde_json::Value, sqlx::Error> {
     let rows: Vec<(String, i64)> = sqlx::query_as(
         "SELECT category, COUNT(*) as cnt
          FROM knowledge
          WHERE project_id = $1 OR project_id IS NULL
-         GROUP BY category ORDER BY cnt DESC"
+         GROUP BY category ORDER BY cnt DESC",
     )
     .bind(project_id)
     .fetch_all(pool)
     .await?;
     let total: i64 = rows.iter().map(|r| r.1).sum();
-    let by_category: serde_json::Map<String, serde_json::Value> = rows.into_iter()
+    let by_category: serde_json::Map<String, serde_json::Value> = rows
+        .into_iter()
         .map(|(cat, cnt)| (cat, serde_json::Value::from(cnt)))
         .collect();
     Ok(json!({

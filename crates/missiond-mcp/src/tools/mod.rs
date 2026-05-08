@@ -325,7 +325,14 @@ mod tests {
             .and_then(|v| v.get("enum"))
             .and_then(|v| v.as_array())
             .expect("mission_kb_ops.action must be an enum");
-        for verb in ["gc", "analyze", "discover", "queue_status", "execute_plan", "compact"] {
+        for verb in [
+            "gc",
+            "analyze",
+            "discover",
+            "queue_status",
+            "execute_plan",
+            "compact",
+        ] {
             assert!(
                 action_enum.iter().any(|v| v.as_str() == Some(verb)),
                 "mission_kb_ops.action enum must include {verb}"
@@ -378,7 +385,8 @@ mod tests {
             .and_then(|v| v.as_object())
             .expect("mission_kb_query schema must declare properties");
         assert!(
-            query_props.contains_key("include_archived") && query_props.contains_key("state_filter"),
+            query_props.contains_key("include_archived")
+                && query_props.contains_key("state_filter"),
             "mission_kb_query must expose archived-query controls"
         );
     }

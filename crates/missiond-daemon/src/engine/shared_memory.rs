@@ -225,10 +225,7 @@ impl SharedMemoryService {
             .or_else(|| string_arg(args, "eventKind"))
             .unwrap_or("shared_memory_event");
         let id = Uuid::new_v4().to_string();
-        let payload = args
-            .get("payload")
-            .cloned()
-            .unwrap_or_else(|| json!({}));
+        let payload = args.get("payload").cloned().unwrap_or_else(|| json!({}));
         let idempotency_key =
             string_arg(args, "idempotency_key").or_else(|| string_arg(args, "idempotencyKey"));
         let correlation_id =
@@ -346,10 +343,7 @@ impl SharedMemoryService {
         } else {
             serde_json::to_vec(args.get("json").unwrap_or(&Value::Null))?
         };
-        let metadata = args
-            .get("metadata")
-            .cloned()
-            .unwrap_or_else(|| json!({}));
+        let metadata = args.get("metadata").cloned().unwrap_or_else(|| json!({}));
         let hash = sha256_hex(&content);
         let size_bytes = i64::try_from(content.len()).unwrap_or(i64::MAX);
 
@@ -391,7 +385,9 @@ impl SharedMemoryService {
         .await?;
         match row {
             Some(row) => Ok(artifact_row_json(row, true)),
-            None => Ok(json!({"schema": "missiond.shared-artifact.v1", "found": false, "hash": hash})),
+            None => {
+                Ok(json!({"schema": "missiond.shared-artifact.v1", "found": false, "hash": hash}))
+            }
         }
     }
 
@@ -420,10 +416,7 @@ impl SharedMemoryService {
                 .or_else(|| args.get("leaseSecs"))
                 .and_then(Value::as_i64)
                 .unwrap_or(DEFAULT_LEASE_SECS),
-            metadata: args
-                .get("metadata")
-                .cloned()
-                .unwrap_or_else(|| json!({})),
+            metadata: args.get("metadata").cloned().unwrap_or_else(|| json!({})),
         };
         self.claim(req).await
     }
@@ -636,7 +629,10 @@ impl SharedMemoryService {
 }
 
 fn string_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
-    args.get(key).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())
+    args.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
 }
 
 fn bounded_limit(args: &Value) -> i64 {

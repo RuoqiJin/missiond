@@ -80,7 +80,8 @@ impl WriterTask {
         // durable seqs even when not persisted, so observability replay
         // can at least see the gap.
         if ephemeral {
-            self.metrics.record_append(row.domain, true, payload_bytes(&row));
+            self.metrics
+                .record_append(row.domain, true, payload_bytes(&row));
             let _ = ack.send(Ok(AppendAck::Volatile { seq }));
             return;
         }

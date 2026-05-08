@@ -23,8 +23,8 @@
 //! claim-check, ack fan-out. The other modules let readers navigate the
 //! seven-concern lisp §4.2 step-3 layout 1:1.
 
-use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
+use std::sync::Arc;
 
 use tokio::sync::mpsc;
 use tokio::time::timeout;
@@ -93,10 +93,7 @@ pub fn new_log_writer(
 /// Convenience: spawn the writer task on the current runtime and return the
 /// producer-side handle.
 #[cfg(feature = "postgres")]
-pub fn spawn_log_writer(
-    pool: sqlx::PgPool,
-    blob_store: Arc<dyn BlobStore>,
-) -> LogWriterHandle {
+pub fn spawn_log_writer(pool: sqlx::PgPool, blob_store: Arc<dyn BlobStore>) -> LogWriterHandle {
     let (writer, handle) = new_log_writer(pool, blob_store);
     tokio::spawn(writer.run());
     handle
@@ -253,10 +250,7 @@ impl LogWriter {
             Ok(seqs) if blob_error_set.is_empty() => {
                 // Happy path: seqs align 1:1 with the original batch.
                 for (p, seq) in batch.drain(..).zip(seqs.into_iter()) {
-                    let _ = p.ack.send(Ok(AppendAck::Committed {
-                        seq,
-                        durable: true,
-                    }));
+                    let _ = p.ack.send(Ok(AppendAck::Committed { seq, durable: true }));
                 }
             }
             Ok(seqs) => {
@@ -270,10 +264,7 @@ impl LogWriter {
                             "blob upload failed; row not inserted".into(),
                         )));
                     } else if let Some(seq) = seq_iter.next() {
-                        let _ = p.ack.send(Ok(AppendAck::Committed {
-                            seq,
-                            durable: true,
-                        }));
+                        let _ = p.ack.send(Ok(AppendAck::Committed { seq, durable: true }));
                     } else {
                         let _ = p.ack.send(Err(AppendError::Other(
                             "seq vector shorter than row set".into(),
@@ -286,19 +277,17 @@ impl LogWriter {
                 // for an existing seq when dedupe_key is present.
                 for p in batch.drain(..) {
                     let result = match p.dedupe_key {
-                        Some(key) => match self
-                            .backend
-                            .find_existing_seq(&p.producer_id, key)
-                            .await
-                        {
-                            Ok(Some(seq)) => Ok(AppendAck::AlreadyExists { seq }),
-                            Ok(None) => Err(AppendError::Other(
-                                "dedup collision but no existing seq found".into(),
-                            )),
-                            Err(e) => Err(AppendError::Other(format!(
-                                "dedup lookup failed: {e}"
-                            ))),
-                        },
+                        Some(key) => {
+                            match self.backend.find_existing_seq(&p.producer_id, key).await {
+                                Ok(Some(seq)) => Ok(AppendAck::AlreadyExists { seq }),
+                                Ok(None) => Err(AppendError::Other(
+                                    "dedup collision but no existing seq found".into(),
+                                )),
+                                Err(e) => {
+                                    Err(AppendError::Other(format!("dedup lookup failed: {e}")))
+                                }
+                            }
+                        }
                         None => Err(AppendError::Other(
                             "dedup collision reported but row has no key".into(),
                         )),
@@ -326,8 +315,8 @@ mod tests {
     use crate::event::events::board::BoardEvent;
     use crate::event::log::{AppendOpts, Log};
     use async_trait::async_trait;
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Mutex;
     use std::time::Duration;
     use uuid::Uuid;
 
@@ -503,7 +492,10 @@ mod tests {
             ..Default::default()
         };
 
-        let first = handle.append(small_event("t-1"), opts.clone()).await.unwrap();
+        let first = handle
+            .append(small_event("t-1"), opts.clone())
+            .await
+            .unwrap();
         let first_seq = first.seq();
 
         let second = handle.append(small_event("t-1"), opts).await.unwrap();
@@ -570,7 +562,8 @@ mod tests {
     async fn fatal_then_failed_state_rejects_new_appends() {
         let mock = Arc::new(MockBackend::new());
         // Enough transient errors to exceed the retry cap.
-        mock.transient_left.store(FAILED_STATE_RETRY_CAP + 2, Ordering::SeqCst);
+        mock.transient_left
+            .store(FAILED_STATE_RETRY_CAP + 2, Ordering::SeqCst);
         let backend: Box<dyn WriterBackend> = Box::new(MockBackendArc(mock.clone()));
         let (writer, handle) = new_with_backend(backend, make_blob_store());
         tokio::spawn(writer.run());

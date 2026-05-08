@@ -35,9 +35,7 @@ impl PgMissionStore {
         // Keep this call in missiond-core so release builds package the latest
         // canonical-source and slot-session cleanup migrations with the store.
         // Does NOT need a compile-time DB connection — only reads files.
-        sqlx::migrate!("./migrations")
-            .run(&pool)
-            .await?;
+        sqlx::migrate!("./migrations").run(&pool).await?;
 
         Ok(Self { pool })
     }
@@ -58,7 +56,11 @@ impl PgMissionStore {
         use tracing::{info, warn};
 
         let checks: &[(&str, &str, &str)] = &[
-            ("conversation_messages", "id", "conversation_messages_id_seq"),
+            (
+                "conversation_messages",
+                "id",
+                "conversation_messages_id_seq",
+            ),
             ("conversation_events", "id", "conversation_events_id_seq"),
             ("token_usage_ledger", "id", "token_usage_ledger_id_seq"),
             // system_timeline dropped in v1.3.0 SSOT cutover (event_log SSOT).
@@ -100,24 +102,24 @@ pub mod migrate_from_sqlite;
 // Note: tool_call/event/retrospective merged into conversation (v0.4.23).
 // Note: vision merged into observability (v0.4.23 — Stage 2C.5).
 #[cfg(feature = "postgres")]
-mod skill;
-#[cfg(feature = "postgres")]
-mod observability;
-#[cfg(feature = "postgres")]
-mod timeline;
-#[cfg(feature = "postgres")]
-mod slot;
-#[cfg(feature = "postgres")]
 mod board;
 #[cfg(feature = "postgres")]
 mod conversation;
 #[cfg(feature = "postgres")]
-mod message;
-#[cfg(feature = "postgres")]
-mod knowledge;
-#[cfg(feature = "postgres")]
-pub mod project;
+mod directive;
 #[cfg(feature = "postgres")]
 mod infra;
 #[cfg(feature = "postgres")]
-mod directive;
+mod knowledge;
+#[cfg(feature = "postgres")]
+mod message;
+#[cfg(feature = "postgres")]
+mod observability;
+#[cfg(feature = "postgres")]
+pub mod project;
+#[cfg(feature = "postgres")]
+mod skill;
+#[cfg(feature = "postgres")]
+mod slot;
+#[cfg(feature = "postgres")]
+mod timeline;

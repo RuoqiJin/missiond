@@ -43,12 +43,13 @@ impl WriterBackend for PgWriterBackend {
         let mut tx = self.pool.begin().await.map_err(map_sqlx)?;
         let mut out = Vec::with_capacity(rows.len());
         for r in rows {
-            let inline_json: Option<serde_json::Value> = match r.payload_inline {
-                Some(bytes) => Some(serde_json::from_slice(bytes).map_err(|e| {
-                    BackendError::Fatal(format!("payload_inline not JSON: {e}"))
-                })?),
-                None => None,
-            };
+            let inline_json: Option<serde_json::Value> =
+                match r.payload_inline {
+                    Some(bytes) => Some(serde_json::from_slice(bytes).map_err(|e| {
+                        BackendError::Fatal(format!("payload_inline not JSON: {e}"))
+                    })?),
+                    None => None,
+                };
 
             let (seq,): (i64,) = sqlx::query_as(
                 r#"

@@ -169,10 +169,16 @@ fn tokenize_for_similarity(text: &str) -> HashSet<String> {
 pub fn token_jaccard_similarity(a: &str, b: &str) -> f64 {
     let ta = tokenize_for_similarity(a);
     let tb = tokenize_for_similarity(b);
-    if ta.is_empty() && tb.is_empty() { return 0.0; }
+    if ta.is_empty() && tb.is_empty() {
+        return 0.0;
+    }
     let intersection = ta.intersection(&tb).count();
     let union = ta.union(&tb).count();
-    if union == 0 { 0.0 } else { intersection as f64 / union as f64 }
+    if union == 0 {
+        0.0
+    } else {
+        intersection as f64 / union as f64
+    }
 }
 
 /// Check if text contains sensitive data patterns.
@@ -184,7 +190,10 @@ pub fn contains_sensitive_data(text: &str) -> bool {
             r"(?i)sshpass\s+-p\s+",
             r#"(?i)(api[_-]?key|token|secret)\s*[:=]\s*['"]?[A-Za-z0-9_\-]{20,}"#,
             r"(?i)ssh\s+\S+@\S+.*-p\s+'\S+'",
-        ].iter().filter_map(|p| regex::Regex::new(p).ok()).collect()
+        ]
+        .iter()
+        .filter_map(|p| regex::Regex::new(p).ok())
+        .collect()
     });
     PATTERNS.iter().any(|re| re.is_match(text))
 }
@@ -195,7 +204,13 @@ pub fn infer_kb_type(category: &str) -> &'static str {
     match prefix {
         "policy" | "preference" | "system_rule" | "decision" => "rule",
         "feature" | "feature_request" | "project" | "project-requirement" | "design_spec" => "goal",
-        "memory" if category.contains("ops") || category.contains("debug") || category.contains("bugfix") => "state",
+        "memory"
+            if category.contains("ops")
+                || category.contains("debug")
+                || category.contains("bugfix") =>
+        {
+            "state"
+        }
         "ops" => "state",
         _ => "fact",
     }
@@ -206,9 +221,18 @@ pub fn redact_sensitive(text: &str) -> String {
     use once_cell::sync::Lazy;
     static REDACTIONS: Lazy<Vec<(regex::Regex, &'static str)>> = Lazy::new(|| {
         vec![
-            (regex::Regex::new(r"(?i)sshpass\s+-p\s+'[^']*'").unwrap(), "sshpass -p '[REDACTED]'"),
-            (regex::Regex::new(r"(?i)(password|passwd|pwd|secret_key)\s*[:=]\s*\S+").unwrap(), "$1=[REDACTED]"),
-            (regex::Regex::new(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?\b").unwrap(), "[IP_REDACTED]"),
+            (
+                regex::Regex::new(r"(?i)sshpass\s+-p\s+'[^']*'").unwrap(),
+                "sshpass -p '[REDACTED]'",
+            ),
+            (
+                regex::Regex::new(r"(?i)(password|passwd|pwd|secret_key)\s*[:=]\s*\S+").unwrap(),
+                "$1=[REDACTED]",
+            ),
+            (
+                regex::Regex::new(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?\b").unwrap(),
+                "[IP_REDACTED]",
+            ),
         ]
     });
     let mut result = text.to_string();
@@ -222,13 +246,22 @@ pub fn redact_sensitive(text: &str) -> String {
 pub fn parse_relative_time(s: &str) -> String {
     let s = s.trim();
     if let Some(mins) = s.strip_suffix("min").and_then(|v| v.parse::<i64>().ok()) {
-        return format!("{}", (chrono::Utc::now() - chrono::Duration::minutes(mins)).format("%Y-%m-%d %H:%M:%S"));
+        return format!(
+            "{}",
+            (chrono::Utc::now() - chrono::Duration::minutes(mins)).format("%Y-%m-%d %H:%M:%S")
+        );
     }
     if let Some(hours) = s.strip_suffix('h').and_then(|v| v.parse::<i64>().ok()) {
-        return format!("{}", (chrono::Utc::now() - chrono::Duration::hours(hours)).format("%Y-%m-%d %H:%M:%S"));
+        return format!(
+            "{}",
+            (chrono::Utc::now() - chrono::Duration::hours(hours)).format("%Y-%m-%d %H:%M:%S")
+        );
     }
     if let Some(days) = s.strip_suffix('d').and_then(|v| v.parse::<i64>().ok()) {
-        return format!("{}", (chrono::Utc::now() - chrono::Duration::days(days)).format("%Y-%m-%d %H:%M:%S"));
+        return format!(
+            "{}",
+            (chrono::Utc::now() - chrono::Duration::days(days)).format("%Y-%m-%d %H:%M:%S")
+        );
     }
     if s.contains('T') {
         return s.replace('T', " ").chars().take(19).collect();
@@ -239,11 +272,19 @@ pub fn parse_relative_time(s: &str) -> String {
 /// Parse time for "since" context: pure date → start of day
 pub fn parse_since(s: &str) -> String {
     let ts = parse_relative_time(s);
-    if ts.len() == 10 { format!("{} 00:00:00", ts) } else { ts }
+    if ts.len() == 10 {
+        format!("{} 00:00:00", ts)
+    } else {
+        ts
+    }
 }
 
 /// Parse time for "until" context: pure date → end of day
 pub fn parse_until(s: &str) -> String {
     let ts = parse_relative_time(s);
-    if ts.len() == 10 { format!("{} 23:59:59", ts) } else { ts }
+    if ts.len() == 10 {
+        format!("{} 23:59:59", ts)
+    } else {
+        ts
+    }
 }

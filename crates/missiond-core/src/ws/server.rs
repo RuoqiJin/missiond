@@ -1,5 +1,4 @@
 //! WebSocket Server implementation
-// missiond-rustfmt-exempt: legacy PTY/webhook server; keep surgical edits until split.
 //!
 //! Compatible with the Node implementation:
 //! - PTY attach: `ws://host:port/pty/<slotId>`
