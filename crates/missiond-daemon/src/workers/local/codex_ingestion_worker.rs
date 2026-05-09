@@ -82,6 +82,7 @@ struct CodexThread {
     rollout_path: String,
     created_at: i64,
     updated_at: i64,
+    archived: bool,
     cwd: String,
     model: Option<String>,
     title: String,
@@ -199,6 +200,11 @@ async fn poll_and_ingest(
             None => continue, // file missing or unreadable — skip silently
         };
 
+        // Codex thread metadata (archive state, model, cwd, branch) lives in
+        // SQLite and can change even when the rollout JSONL is unchanged. Keep
+        // that source-state synced before any watermark shortcut skips parsing.
+        sync_codex_thread_metadata_if_needed(state, thread).await;
+
         // Skip if file hasn't grown or been touched since last poll.
         if let Some(prev) = watermarks.get(&thread.id).copied() {
             if same_file_watermark(current_wm, prev) {
@@ -305,13 +311,7 @@ fn read_codex_threads(db_path: &Path) -> Result<Vec<CodexThread>> {
     )
     .context("open codex sqlite")?;
 
-    let mut stmt = conn.prepare(
-        "SELECT id, rollout_path, created_at, updated_at, cwd, model, title, git_branch
-         FROM threads
-         WHERE archived = 0
-         ORDER BY updated_at DESC
-         LIMIT 200",
-    )?;
+    let mut stmt = conn.prepare(CODEX_THREADS_QUERY)?;
 
     let rows = stmt.query_map([], |row| {
         Ok(CodexThread {
@@ -319,10 +319,11 @@ fn read_codex_threads(db_path: &Path) -> Result<Vec<CodexThread>> {
             rollout_path: row.get(1)?,
             created_at: row.get(2)?,
             updated_at: row.get(3)?,
-            cwd: row.get(4)?,
-            model: row.get(5)?,
-            title: row.get(6)?,
-            git_branch: row.get(7)?,
+            archived: row.get::<_, i64>(4)? != 0,
+            cwd: row.get(5)?,
+            model: row.get(6)?,
+            title: row.get(7)?,
+            git_branch: row.get(8)?,
         })
     })?;
 
@@ -332,6 +333,11 @@ fn read_codex_threads(db_path: &Path) -> Result<Vec<CodexThread>> {
     }
     Ok(threads)
 }
+
+const CODEX_THREADS_QUERY: &str = "\
+SELECT id, rollout_path, created_at, updated_at, archived, cwd, model, title, git_branch
+FROM threads
+ORDER BY updated_at DESC";
 
 /// Process a single Codex thread: ensure conversation exists, parse JSONL, write tool calls.
 struct ProcessedThread {
@@ -357,77 +363,8 @@ async fn process_thread(
         });
     }
 
-    // BoardTask e1a5ac1f :: provider-aware classification.
-    //
-    // Resolve any slot binding for this Codex thread BEFORE building the
-    // Conversation row so the provider-aware classifier has a real
-    // signal. Background-ingested Codex threads with no MissionD slot
-    // get `conversation_type=codex_chat` (parallel to gemini_chat) and
-    // a Codex thread riding a slot gets `conversation_type=worker` with
-    // durable slot/task linkage.
-    //
-    // The legacy hardcoded `conversation_type: "user"` was the original
-    // misclassification that landed Codex traffic in the human Logs
-    // tab; the dry-run audit in
-    // `db::conversation_query::audit_classification` flags any
-    // historical row that still matches that pattern so we can clean
-    // them up via the existing reconcile path rather than bulk DB
-    // mutation.
-    let slot_id = state
-        .store
-        .get_slot_for_session(&thread.id)
-        .await
-        .unwrap_or(None);
-    let slot_category = slot_id
-        .as_deref()
-        .and_then(|id| state.mission.get_slot_category(id));
-    let conversation_type = missiond_core::db::conversation_query::classify_conversation_type(
-        slot_category.as_deref(),
-        slot_id.as_deref(),
-        &thread.id,
-        "codex_cli",
-    );
-    // Durable task linkage: when the slot has a running task, persist
-    // its id on the conversation row so worker chains stay queryable
-    // by `task_id` without relying on the in-memory
-    // `session_task_bindings` map.
-    let task_id = match slot_id.as_deref() {
-        Some(sid) => state.store.get_running_slot_task(sid).await.ok().flatten(),
-        None => None,
-    };
-
     // Ensure conversation record exists (idempotent via upsert).
-    let started_at = epoch_to_iso(thread.created_at);
-    let conv = missiond_core::types::Conversation {
-        id: thread.id.clone(),
-        project: Some(thread.cwd.clone()),
-        project_id: {
-            let registry = state.project_registry.read().await;
-            registry.resolve(&thread.cwd).map(|s| s.to_string())
-        },
-        slot_id: slot_id.clone(),
-        source: "codex_cli".to_string(),
-        model: thread.model.clone(),
-        git_branch: thread.git_branch.clone(),
-        jsonl_path: Some(thread.rollout_path.clone()),
-        parent_session_id: None,
-        task_id,
-        message_count: 0,
-        started_at,
-        ended_at: None,
-        status: "active".to_string(),
-        analyzed_at: None,
-        analysis_version: 0,
-        analysis_retries: 0,
-        deep_analyzed_message_id: 0,
-        chat_type: Some("codex_cli".to_string()),
-        conversation_type,
-        updated_at: Some(epoch_to_iso(thread.updated_at)),
-        llm_summary: None,
-        embedding_provider: None,
-        session_timeline: None,
-        timeline_built_at: None,
-    };
+    let conv = build_codex_conversation(state, thread, 0, None).await;
     if let Err(e) = state.store.upsert_conversation(&conv).await {
         warn!(
             thread_id = %&thread.id[..8.min(thread.id.len())],
@@ -571,6 +508,119 @@ async fn process_thread(
         ingested: total,
         total_lines: parsed.total_lines,
     })
+}
+
+async fn sync_codex_thread_metadata_if_needed(state: &AppState, thread: &CodexThread) {
+    let desired_status = codex_thread_status(thread.archived);
+    let existing = match state.store.get_conversation(&thread.id).await {
+        Ok(Some(conv)) => conv,
+        _ => return,
+    };
+
+    if existing.status == desired_status {
+        return;
+    }
+
+    let conv = build_codex_conversation(
+        state,
+        thread,
+        existing.message_count,
+        existing.ended_at.clone(),
+    )
+    .await;
+    if let Err(e) = state.store.upsert_conversation(&conv).await {
+        warn!(
+            thread_id = %&thread.id[..8.min(thread.id.len())],
+            error = %e,
+            status = desired_status,
+            "Codex ingestion: failed to sync thread metadata"
+        );
+    }
+}
+
+async fn build_codex_conversation(
+    state: &AppState,
+    thread: &CodexThread,
+    message_count: i64,
+    ended_at: Option<String>,
+) -> missiond_core::types::Conversation {
+    // BoardTask e1a5ac1f :: provider-aware classification.
+    //
+    // Resolve any slot binding for this Codex thread BEFORE building the
+    // Conversation row so the provider-aware classifier has a real
+    // signal. Background-ingested Codex threads with no MissionD slot
+    // get `conversation_type=codex_chat` (parallel to gemini_chat) and
+    // a Codex thread riding a slot gets `conversation_type=worker` with
+    // durable slot/task linkage.
+    //
+    // The legacy hardcoded `conversation_type: "user"` was the original
+    // misclassification that landed Codex traffic in the human Logs
+    // tab; the dry-run audit in
+    // `db::conversation_query::audit_classification` flags any
+    // historical row that still matches that pattern so we can clean
+    // them up via the existing reconcile path rather than bulk DB
+    // mutation.
+    let slot_id = state
+        .store
+        .get_slot_for_session(&thread.id)
+        .await
+        .unwrap_or(None);
+    let slot_category = slot_id
+        .as_deref()
+        .and_then(|id| state.mission.get_slot_category(id));
+    let conversation_type = missiond_core::db::conversation_query::classify_conversation_type(
+        slot_category.as_deref(),
+        slot_id.as_deref(),
+        &thread.id,
+        "codex_cli",
+    );
+    // Durable task linkage: when the slot has a running task, persist
+    // its id on the conversation row so worker chains stay queryable
+    // by `task_id` without relying on the in-memory
+    // `session_task_bindings` map.
+    let task_id = match slot_id.as_deref() {
+        Some(sid) => state.store.get_running_slot_task(sid).await.ok().flatten(),
+        None => None,
+    };
+
+    missiond_core::types::Conversation {
+        id: thread.id.clone(),
+        project: Some(thread.cwd.clone()),
+        project_id: {
+            let registry = state.project_registry.read().await;
+            registry.resolve(&thread.cwd).map(|s| s.to_string())
+        },
+        slot_id: slot_id.clone(),
+        source: "codex_cli".to_string(),
+        model: thread.model.clone(),
+        git_branch: thread.git_branch.clone(),
+        jsonl_path: Some(thread.rollout_path.clone()),
+        parent_session_id: None,
+        task_id,
+        message_count,
+        started_at: epoch_to_iso(thread.created_at),
+        ended_at,
+        status: codex_thread_status(thread.archived).to_string(),
+        analyzed_at: None,
+        analysis_version: 0,
+        analysis_retries: 0,
+        deep_analyzed_message_id: 0,
+        chat_type: Some("codex_cli".to_string()),
+        conversation_type,
+        updated_at: Some(epoch_to_iso(thread.updated_at)),
+        llm_summary: None,
+        embedding_provider: None,
+        session_timeline: None,
+        timeline_built_at: None,
+    }
+}
+
+fn codex_thread_status(archived: bool) -> &'static str {
+    if archived {
+        "archived"
+    } else {
+        "active"
+    }
 }
 
 /// Parse result: tool calls + text messages.
@@ -853,6 +903,19 @@ mod tests {
             "background-ingested Codex threads must surface under the Codex tab, \
              not the human user Logs view"
         );
+    }
+
+    #[test]
+    fn codex_thread_query_imports_full_history_including_archived() {
+        assert!(
+            !CODEX_THREADS_QUERY.contains("LIMIT 200"),
+            "Codex ingestion must not stop at recent unarchived threads"
+        );
+        assert!(
+            !CODEX_THREADS_QUERY.contains("archived = 0"),
+            "archived Codex threads are historical source state and must still be imported"
+        );
+        assert!(CODEX_THREADS_QUERY.contains("archived"));
     }
 
     #[test]

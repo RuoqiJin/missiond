@@ -1050,15 +1050,17 @@
                :watch-env MISSIOND_LISP_CODE_SYNC_WATCH
                :default-watch-enabled true
                :dedupe-key "lisp-code-sync:<project>:<path-hash>"
-               :rule "Lisp/checker edits under .missiond are observed through EventBus, compiled/checked immediately, and only failing gates create visible BoardTasks.")
+               :rule "Lisp/checker edits under .missiond are observed through EventBus, compiled/checked immediately, runtime report paths are ignored, debounce repeated path events, retention/GC bounds report volume, and only failing gates create visible BoardTasks.")
       :core
         ((step s1 :logic "watch active ProjectRegistry .missiond directories recursively for .lisp and .mjs changes")
          (step s2 :logic "publish each relevant filesystem change as SystemEvent::ConfigChanged; sync processing subscribes to EventBus and does not bypass it")
          (step s3 :logic "resolve project by longest-prefix ProjectRegistry match")
          (step s4 :logic "for missiond run compile-v3-runtime then check-v3-code-isomorphism-complete; for external projects run .missiond/check.sh when present")
          (step s5 :logic "write .missiond/v3/runtime/lisp-code-sync/<timestamp>-<path-hash>.report.lisp with synced/needs-sync/observed-only status")
-         (step s6 :logic "on failed code-isomorphism create or reuse one visible BoardTask lisp-code-sync:<project>:<path-hash> that requires evidence-plan and exact accepted shard before code mutation")
-         (step s7 :logic "expose lispCodeSync status in mission_master_status so the resident master and frontend can see the live Lisp->code loop"))
+         (step s6 :logic "ignore .missiond/v3/runtime/** and .missiond/runtime-state/** before EventBus publication so self-generated reports cannot recurse")
+         (step s7 :logic "debounce repeated path events and apply report retention/GC to keep the sync loop bounded")
+         (step s8 :logic "on failed code-isomorphism create or reuse one visible BoardTask lisp-code-sync:<project>:<path-hash> that requires evidence-plan and exact accepted shard before code mutation")
+         (step s9 :logic "expose lispCodeSync status in mission_master_status so the resident master and frontend can see the live Lisp->code loop"))
       :egress [lisp-code-sync-report sync-boardtask mission_master_status.lispCodeSync])
     (nightly-evolution-loop
       :entry [night-scheduler mission_nightly_evolution final-convergence-snapshot]
@@ -1759,6 +1761,7 @@
        "mission_pty_status and mission_slots observability MUST be joinable with the latest conversation row by slot/session id and source."
        "mission_slots MUST reject or flag slot_sessions whose conversation source disagrees with the slot engine; stale provider drift must never masquerade as current state."
        "Codex CLI slot_sessions may contain a PTY placeholder id; mission_slots MUST fall back to the latest real codex_cli conversation for the slot project instead of surfacing a messageCount=0 placeholder as the latest durable conversation."
+       "Codex CLI ingestion MUST scan the full state_5.sqlite thread set, including archived threads, and mark archived threads as historical status instead of dropping them from MissionD history."
        "Codex CLI message ingestion MUST generate deterministic non-null message_uuid values from thread id, JSONL line number, role, and source event hash so reconcile/backfill cannot repeatedly insert duplicate NULL-uuid rows."
        "Codex CLI background ingestion MUST persist rollout size/mtime/line watermarks and parse only a bounded overlap after the last durable cursor so daemon restarts do not re-hash historical JSONL."
        "When deterministic UUID ingestion meets an older NULL-uuid row with the same session, role, timestamp, and content, the DB layer MUST adopt that existing row by setting message_uuid instead of inserting a new duplicate row."
@@ -2443,9 +2446,10 @@
         :entry [SystemEvent::ConfigChanged file-watch project-registry]
         :core ((step s1 :logic "watch active project .missiond directories and publish SystemEvent::ConfigChanged for .lisp/.mjs changes")
                (step s2 :logic "compile typed runtime projection and run the project code-isomorphism checker")
-               (step s3 :logic "write a lisp-code-sync report for every accepted event")
-               (step s4 :logic "create exactly one visible deduped sync BoardTask for failing gates")
-               (step s5 :logic "require master evidence-plan and exact accepted shard before downstream code worker mutation"))
+               (step s3 :logic "ignore runtime report paths and debounce repeated path events before they can publish another ConfigChanged")
+               (step s4 :logic "write a lisp-code-sync report for every accepted event and bound report volume with retention/GC")
+               (step s5 :logic "create exactly one visible deduped sync BoardTask for failing gates")
+               (step s6 :logic "require master evidence-plan and exact accepted shard before downstream code worker mutation"))
         :egress [lisp_code_sync_report sync_boardtask mission_master_status.lispCodeSync]))
 
     (pillar coordination
@@ -3116,7 +3120,7 @@
              "crates/missiond-daemon/src/engine/master_control.rs"
              "scripts/check-v3-lisp-code-sync-isomorphism.mjs"
              "scripts/check-v3-code-isomorphism-complete.mjs"]
-      :note "lisp-code-sync-loop is the event-driven Lisp->code isomorphism muscle. LispCodeSyncService watches active ProjectRegistry .missiond directories, emits SystemEvent::ConfigChanged for .lisp/.mjs changes, consumes those events through EventBus, resolves the project, runs typed compile plus code-isomorphism gates, writes .missiond/v3/runtime/lisp-code-sync reports, and creates one visible deduped BoardTask lisp-code-sync:<project>:<path-hash> when the checker fails. It never edits code directly; downstream code mutation still requires master evidence-plan, accepted exact shard, write_scope, acceptance, and durable green gates.")
+      :note "lisp-code-sync-loop is the event-driven Lisp->code isomorphism muscle. LispCodeSyncService watches active ProjectRegistry .missiond directories, emits SystemEvent::ConfigChanged for .lisp/.mjs changes, ignores runtime report paths before publication, debounces repeated path events, consumes accepted events through EventBus, resolves the project, runs typed compile plus code-isomorphism gates, writes .missiond/v3/runtime/lisp-code-sync reports under retention/GC, and creates one visible deduped BoardTask lisp-code-sync:<project>:<path-hash> when the checker fails. It never edits code directly; downstream code mutation still requires master evidence-plan, accepted exact shard, write_scope, acceptance, and durable green gates.")
 
     (surface nightly-evolution-loop
       :status "code-aligned"
@@ -3369,6 +3373,7 @@
              "crates/missiond-core/src/gemini_cli/watcher.rs"
              "crates/missiond-daemon/src/workers/local/gemini_reconcile_worker.rs"
              "crates/missiond-daemon/src/workers/local/codex_ingestion_worker.rs"
+             "scripts/audit-codex-history-ingestion.mjs"
              "scripts/check-v3-conversation-ingestion-isomorphism.mjs"
              "scripts/check-v3-cli-conversation-ingestion-isomorphism.mjs"]
       :note "Runtime-projected V3 destination for conversation/session/timeline/retrospective/embedding public tools. context/v3_blueprint_runtime.rs projects conversation-ingestion-policy read-model default and max limits into conversation/query.rs, conversation/events.rs, and timeline.rs, projects context prefetch intent-router model/timeout into context/context_pipeline.rs, and projects Codex vision worker binary/model/idle/absolute timeout into workers/codex/vision_worker.rs plus llm/codex_cli.rs; conversation.rs is the thin conversation-ingestion facade; conversation/router.rs owns mission_conversation_query, mission_conversation_analyze, and mission_retrospective_manage consolidated routing; conversation/query.rs owns read-model query actions including list/get/search/message_search/user_index/labels/context; conversation/events.rs owns analysis/event egress including conver... [details: .missiond/v3/evidence/blueprint-notes.lisp#note-017]")

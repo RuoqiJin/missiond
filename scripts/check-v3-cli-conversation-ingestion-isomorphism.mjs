@@ -44,6 +44,7 @@ const DEFAULT_FILES = {
   pgMessage: 'crates/missiond-core/src/db/pg/message.rs',
   pgConversation: 'crates/missiond-core/src/db/pg/conversation.rs',
   duplicateReport: 'scripts/report-codex-conversation-duplicates.mjs',
+  codexHistoryAudit: 'scripts/audit-codex-history-ingestion.mjs',
   claudeRoleAudit: 'scripts/report-claude-role-attribution.mjs',
   claudeHistoryImport: 'scripts/import-claude-history-jsonl.mjs',
   claudeConversationAudit: 'scripts/audit-claudecode-conversations.mjs',
@@ -390,6 +391,11 @@ function checkFiles(root, files) {
     'persist_codex_file_watermarks',
     'skip_before_line',
     'codex_message_uuid_is_non_null_and_stable',
+    'CODEX_THREADS_QUERY',
+    'archived: row.get::<_, i64>(4)? != 0',
+    'sync_codex_thread_metadata_if_needed(state, thread).await',
+    'fn codex_thread_status(archived: bool)',
+    'codex_thread_query_imports_full_history_including_archived',
     // BoardTask e1a5ac1f :: provider-aware classification + raw_role
     // preservation. Codex ingestion must call the new classifier
     // (no more hardcoded `conversation_type: "user"`) and forward the
@@ -409,6 +415,14 @@ function checkFiles(root, files) {
     // the human Logs tab and silently drops provider metadata.
     'conversation_type: "user".to_string()',
     'raw_role: None,',
+  ]);
+
+  requireAll(diagnostics, files.codexHistoryAudit, sources.codexHistoryAudit, [
+    'raw sqlite threads',
+    'archivedStateDrift',
+    'missingInMissionD',
+    'duplicateUuidGroups',
+    'nullUuidMessages',
   ]);
 
   requireAll(

@@ -28,7 +28,10 @@
        :logic "Create or reuse one visible BoardTask with dedupe key lisp-code-sync:<project>:<path-hash>, auto_execute=true, and a request for evidence-plan plus exact accepted shard creation before implementation.")
      (step s4 :name report
        :entry [checker-result task-result]
-       :logic "Write .missiond/v3/runtime/lisp-code-sync/<timestamp>-<path-hash>.report.lisp, expose lispCodeSync counters through mission_master_status, and leave downstream completion authority to durable final evidence plus green gates."))
+       :logic "Write .missiond/v3/runtime/lisp-code-sync/<timestamp>-<path-hash>.report.lisp, expose lispCodeSync counters through mission_master_status, and leave downstream completion authority to durable final evidence plus green gates.")
+     (step s5 :name self-loop-guard
+       :entry [file-watcher report-dir]
+       :logic "Watcher must ignore runtime report paths, debounce repeated path events, and apply report retention/GC so lisp-code-sync reports never trigger another lisp-code-sync run."))
   :egress [lisp-code-sync-report BoardTaskCreated master-wakeup mission_master_status]
   :runtime-surfaces
     [crates/missiond-daemon/src/engine/lisp_code_sync.rs
@@ -39,17 +42,20 @@
      (criterion c2 :rule "ConfigChanged is consumed by lisp-code-sync before worker delegation.")
      (criterion c3 :rule "Green code-isomorphism writes a synced report and creates no BoardTask.")
      (criterion c4 :rule "Failing code-isomorphism creates one visible deduped BoardTask.")
-     (criterion c5 :rule "Implementation must still pass through exact accepted shard workflow before code mutation."))
+     (criterion c5 :rule "Implementation must still pass through exact accepted shard workflow before code mutation.")
+     (criterion c6 :rule "Runtime reports under .missiond/v3/runtime/** are ignored by the watcher and pruned by retention/GC."))
   :risk-gates
     ((gate g1 :rule "lisp-code-sync never edits code directly; it compiles/checks and delegates through BoardTask/EventBus.")
      (gate g2 :rule "A failed sync task asks master for evidence-plan and exact accepted shard before any code worker.")
      (gate g3 :rule "File watcher publishes SystemEvent.ConfigChanged; sync processing subscribes to EventBus rather than bypassing it.")
-     (gate g4 :rule "PTY-only completion is diagnostic; downstream completion requires durable final evidence."))
+     (gate g4 :rule "PTY-only completion is diagnostic; downstream completion requires durable final evidence.")
+     (gate g5 :rule "Runtime report paths are ignored before EventBus publication; debounce repeated path events before they can become sync tasks."))
   :completion
     ((criterion c1 :rule "A matching Lisp/checker edit is classified as synced, failed-sync-task-created, or unknown-project.")
      (criterion c2 :rule "Green code-isomorphism writes a synced report and creates no BoardTask.")
      (criterion c3 :rule "Failing code-isomorphism creates exactly one visible deduped BoardTask.")
-     (criterion c4 :rule "mission_master_status exposes lispCodeSync runtime counters."))
+     (criterion c4 :rule "mission_master_status exposes lispCodeSync runtime counters.")
+     (criterion c5 :rule "lisp-code-sync self-generated reports do not create ConfigChanged loops."))
   :safety
     ((rule :id no-direct-codegen :text "lisp-code-sync never edits code directly; it compiles/checks and delegates through BoardTask/EventBus.")
      (rule :id no-broad-implementation :text "A failed sync task asks master for evidence-plan and exact shard before any code worker.")

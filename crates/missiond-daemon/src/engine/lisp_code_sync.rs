@@ -1,7 +1,8 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use missiond_core::event::events::{BoardEvent, SystemEvent};
@@ -20,6 +21,9 @@ use crate::state::AppState;
 const LISP_CODE_SYNC_SUBSCRIPTION: &str = "lisp_code_sync_config_changed_v1_live";
 const LISP_CODE_SYNC_REPORT_DIR: &str = ".missiond/v3/runtime/lisp-code-sync";
 const LISP_CODE_SYNC_WATCH_ENV: &str = "MISSIOND_LISP_CODE_SYNC_WATCH";
+const LISP_CODE_SYNC_DEBOUNCE_WINDOW: Duration = Duration::from_secs(5);
+const LISP_CODE_SYNC_MAX_REPORTS: usize = 200;
+const LISP_CODE_SYNC_MAX_REPORT_AGE_SECS: u64 = 7 * 24 * 60 * 60;
 
 static LISP_CODE_SYNC_RUNTIME: OnceLock<Arc<LispCodeSyncRuntime>> = OnceLock::new();
 
@@ -230,6 +234,8 @@ impl LispCodeSyncService {
             "lisp-code-sync watching project .missiond directories"
         );
 
+        let mut debounced_paths: HashMap<String, Instant> = HashMap::new();
+
         loop {
             tokio::select! {
                 biased;
@@ -244,6 +250,13 @@ impl LispCodeSyncService {
                             continue;
                         }
                         let display = path.display().to_string();
+                        let now = Instant::now();
+                        if let Some(last_seen) = debounced_paths.get(&display) {
+                            if now.duration_since(*last_seen) < LISP_CODE_SYNC_DEBOUNCE_WINDOW {
+                                continue;
+                            }
+                        }
+                        debounced_paths.insert(display.clone(), now);
                         let _ = self.bus.publish_system(SystemEvent::ConfigChanged {
                             path: display,
                             kind: kind.clone(),
@@ -284,14 +297,24 @@ fn notify_kind(kind: &notify::EventKind) -> &'static str {
 }
 
 pub(crate) fn is_lisp_sync_path(path: &Path) -> bool {
-    let text = path.to_string_lossy();
+    let text = path.to_string_lossy().replace('\\', "/");
     if !text.contains("/.missiond/") && !text.starts_with(".missiond/") {
+        return false;
+    }
+    if is_ignored_lisp_sync_runtime_path(&text) {
         return false;
     }
     matches!(
         path.extension().and_then(|ext| ext.to_str()),
         Some("lisp" | "mjs")
     )
+}
+
+fn is_ignored_lisp_sync_runtime_path(path: &str) -> bool {
+    path.contains("/.missiond/v3/runtime/")
+        || path.starts_with(".missiond/v3/runtime/")
+        || path.contains("/.missiond/runtime-state/")
+        || path.starts_with(".missiond/runtime-state/")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -590,7 +613,51 @@ async fn write_report(root: &Path, report: &LispCodeSyncReport) -> std::io::Resu
     );
     let path = dir.join(filename);
     tokio::fs::write(&path, render_report(report)).await?;
+    if let Err(err) = prune_report_dir(&dir).await {
+        warn!(error = %err, path = %dir.display(), "lisp-code-sync report retention failed");
+    }
     Ok(path)
+}
+
+async fn prune_report_dir(dir: &Path) -> std::io::Result<()> {
+    let mut entries = Vec::new();
+    let mut read_dir = tokio::fs::read_dir(dir).await?;
+    while let Some(entry) = read_dir.next_entry().await? {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("lisp") {
+            continue;
+        }
+        if !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.ends_with(".report.lisp"))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let metadata = match entry.metadata().await {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        let modified = metadata.modified().ok();
+        entries.push((path, modified));
+    }
+
+    let now = std::time::SystemTime::now();
+    entries.sort_by_key(|(_, modified)| *modified);
+    let keep_from_index = entries.len().saturating_sub(LISP_CODE_SYNC_MAX_REPORTS);
+
+    for (idx, (path, modified)) in entries.into_iter().enumerate() {
+        let too_many = idx < keep_from_index;
+        let too_old = modified
+            .and_then(|mtime| now.duration_since(mtime).ok())
+            .map(|age| age.as_secs() > LISP_CODE_SYNC_MAX_REPORT_AGE_SECS)
+            .unwrap_or(false);
+        if too_many || too_old {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+    }
+    Ok(())
 }
 
 fn render_report(report: &LispCodeSyncReport) -> String {
@@ -655,6 +722,12 @@ mod tests {
         assert!(!is_lisp_sync_path(Path::new("/repo/src/lib.rs")));
         assert!(!is_lisp_sync_path(Path::new(
             "/repo/.missiond/evidence/readme.md"
+        )));
+        assert!(!is_lisp_sync_path(Path::new(
+            "/repo/.missiond/v3/runtime/lisp-code-sync/20260509.report.lisp"
+        )));
+        assert!(!is_lisp_sync_path(Path::new(
+            "/repo/.missiond/v3/runtime/compiled/compiled-v3-blueprint.json"
         )));
     }
 
