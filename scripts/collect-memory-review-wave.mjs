@@ -25,6 +25,8 @@ const outPath = path.resolve(
   repoRoot,
   args.get('out') ?? `.missiond/research/memory-review/collected-${parentId.slice(0, 8)}.md`,
 );
+const maxFieldChars = Number(args.get('max-field-chars') ?? 20000);
+const maxBodyChars = Number(args.get('max-body-chars') ?? 24000);
 
 function sqlString(value) {
   return `'${String(value).replaceAll("'", "''")}'`;
@@ -46,7 +48,7 @@ const query = `
 with latest_summary as (
   select distinct on (task_id)
     task_id,
-    content,
+    left(content, ${maxFieldChars}) as content,
     created_at
   from board_task_notes
   where note_type = 'summary'
@@ -55,7 +57,7 @@ with latest_summary as (
 latest_note as (
   select distinct on (task_id)
     task_id,
-    content,
+    left(content, ${maxFieldChars}) as content,
     created_at
   from board_task_notes
   where note_type <> 'summary'
@@ -91,7 +93,7 @@ from (
       msg.timestamp as final_at
     from conversations c
     left join lateral (
-      select cm.content, cm.timestamp
+      select left(cm.content, ${maxFieldChars}) as content, cm.timestamp
       from conversation_messages cm
       where cm.session_id = c.id
         and cm.role in ('assistant', 'agent_assistant')
@@ -110,6 +112,7 @@ from (
 
 const result = spawnSync('psql', ['-d', 'missiond', '-t', '-A', '-c', query], {
   encoding: 'utf8',
+  maxBuffer: 256 * 1024 * 1024,
 });
 if (result.status !== 0) {
   throw new Error(result.stderr || result.stdout || `psql failed with ${result.status}`);
@@ -120,6 +123,8 @@ let md = `# Memory Review Wave Collection\n\n`;
 md += `- parent_task_id: ${parentId}\n`;
 md += `- generated_at: ${new Date().toISOString()}\n`;
 md += `- task_count: ${rows.length}\n`;
+md += `- max_field_chars: ${maxFieldChars}\n`;
+md += `- max_body_chars: ${maxBodyChars}\n`;
 md += `- note: secrets are best-effort redacted; verify before sharing outside local machine.\n\n`;
 
 for (const row of rows) {
@@ -136,7 +141,8 @@ for (const row of rows) {
   }
   const bodyCandidates = [row.summary, row.latest_note, row.conversation_final].filter(Boolean);
   const body = bodyCandidates.sort((a, b) => String(b).length - String(a).length)[0] || '';
-  md += redactSecrets(body || 'No summary/note captured yet.');
+  const redacted = redactSecrets(body || 'No summary/note captured yet.');
+  md += redacted.length > maxBodyChars ? `${redacted.slice(0, maxBodyChars)}\n\n[TRUNCATED]` : redacted;
   md += '\n\n---\n\n';
 }
 
