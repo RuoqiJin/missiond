@@ -22,6 +22,7 @@ const DEFAULT_FILES = {
   ptyHandler: 'crates/missiond-daemon/src/handlers/compute/pty.rs',
   ptyEventWorker: 'crates/missiond-daemon/src/workers/local/pty_event_worker.rs',
   masterControl: 'crates/missiond-daemon/src/engine/master_control.rs',
+  ptyCleanup: 'scripts/cleanup-pty-diagnostics.mjs',
 };
 
 function main() {
@@ -102,6 +103,9 @@ function checkFiles(root, files) {
     ':reconnect-failed-incident-kind "claude_code_mcp_reconnect_failed"',
     ':reconnect-budget-attempts 1',
     ':wake-resident-master true',
+    ':pty-retention',
+    ':ttl-days 1',
+    'PTY content is transient diagnostic evidence only',
     'crates/missiond-pty/src/session.rs::Session::mcp_reconnect_sequence',
     'crates/missiond-pty/src/session.rs::PTYSession::mcp_reconnect',
     'crates/missiond-pty/src/manager.rs::PTYManager::mcp_reconnect',
@@ -234,6 +238,23 @@ function checkFiles(root, files) {
     'should_wake_for_incident_event',
     'CLAUDE_CODE_MCP_MISSING_INCIDENT_KIND',
     'CLAUDE_CODE_MCP_RECONNECT_FAILED_INCIDENT_KIND',
+  ]);
+
+  requireAll(diagnostics, files.ptyCleanup, sources.ptyCleanup, [
+    'cleanup-pty-diagnostics',
+    'retention_days',
+    'pty-.*\\.log',
+    'screenshots',
+    'conversation_messages',
+    'expired_pty_sessions',
+    'chat_type',
+    'VACUUM (FULL, ANALYZE)',
+    '--days',
+    '--db',
+    '--skip-files',
+    '--skip-db',
+    '--apply',
+    'isPtyDiagnosticFile',
   ]);
 
   return diagnostics;

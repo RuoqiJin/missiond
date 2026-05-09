@@ -17,6 +17,7 @@
 //   - scripts/check-v3-code-isomorphism-complete.mjs (aggregate registration)
 // Pinned implementation:
 //   - crates/missiond-core/migrations/20260508000000_shared_memory.sql
+//   - crates/missiond-core/migrations/20260509000000_execution_control_plane.sql
 //   - crates/missiond-daemon/src/engine/shared_memory.rs
 //   - crates/missiond-daemon/src/engine/mod.rs
 //   - crates/missiond-daemon/src/engine/master_control.rs
@@ -50,6 +51,7 @@ const FILES = [
   'scripts/check-task-memory.mjs',
   'scripts/check-v3-code-isomorphism-complete.mjs',
   'crates/missiond-core/migrations/20260508000000_shared_memory.sql',
+  'crates/missiond-core/migrations/20260509000000_execution_control_plane.sql',
   'crates/missiond-daemon/src/engine/shared_memory.rs',
   'crates/missiond-daemon/src/engine/mod.rs',
   'crates/missiond-daemon/src/engine/master_control.rs',
@@ -110,13 +112,18 @@ const NEEDLES = [
   ['aggregate expected surface', 'scripts/check-v3-code-isomorphism-complete.mjs', "'mission-shared-memory'"],
   ['aggregate per-surface checker', 'scripts/check-v3-code-isomorphism-complete.mjs', 'scripts/check-v3-shared-memory-isomorphism.mjs'],
 
-  // PG schema: four durable tables.
+  // PG schema: durable shared-memory tables plus execution-control tables.
   ['migration shared_events', 'crates/missiond-core/migrations/20260508000000_shared_memory.sql', 'CREATE TABLE IF NOT EXISTS shared_events'],
   ['migration shared_artifacts', 'crates/missiond-core/migrations/20260508000000_shared_memory.sql', 'CREATE TABLE IF NOT EXISTS shared_artifacts'],
   ['migration shared_claims', 'crates/missiond-core/migrations/20260508000000_shared_memory.sql', 'CREATE TABLE IF NOT EXISTS shared_claims'],
   ['migration agent_cursors', 'crates/missiond-core/migrations/20260508000000_shared_memory.sql', 'CREATE TABLE IF NOT EXISTS agent_cursors'],
   ['migration shared_events idempotency index', 'crates/missiond-core/migrations/20260508000000_shared_memory.sql', 'idx_shared_events_idempotency'],
   ['migration shared_claims active scope index', 'crates/missiond-core/migrations/20260508000000_shared_memory.sql', 'idx_shared_claims_active_scope'],
+  ['execution migration workflow_runs', 'crates/missiond-core/migrations/20260509000000_execution_control_plane.sql', 'CREATE TABLE IF NOT EXISTS workflow_runs'],
+  ['execution migration task_result_artifacts', 'crates/missiond-core/migrations/20260509000000_execution_control_plane.sql', 'CREATE TABLE IF NOT EXISTS task_result_artifacts'],
+  ['execution migration task result artifact FK', 'crates/missiond-core/migrations/20260509000000_execution_control_plane.sql', 'REFERENCES shared_artifacts(hash)'],
+  ['execution migration workflow project status index', 'crates/missiond-core/migrations/20260509000000_execution_control_plane.sql', 'idx_workflow_runs_project_status'],
+  ['execution migration task artifact index', 'crates/missiond-core/migrations/20260509000000_execution_control_plane.sql', 'idx_task_result_artifacts_task'],
 
   // Daemon engine: SharedMemoryService surface.
   ['service struct', 'crates/missiond-daemon/src/engine/shared_memory.rs', 'pub(crate) struct SharedMemoryService'],
@@ -140,6 +147,19 @@ const NEEDLES = [
   ['service claim-release schema', 'crates/missiond-daemon/src/engine/shared_memory.rs', 'missiond.shared-claim-release.v1'],
   ['service claim-heartbeat schema', 'crates/missiond-daemon/src/engine/shared_memory.rs', 'missiond.shared-claim-heartbeat.v1'],
   ['service cursor schema', 'crates/missiond-daemon/src/engine/shared_memory.rs', 'missiond.agent-cursor.v1'],
+  ['service task result action', 'crates/missiond-daemon/src/engine/shared_memory.rs', 'task_result_put'],
+  ['service task result get action', 'crates/missiond-daemon/src/engine/shared_memory.rs', 'task_result_get'],
+  ['service workflow start action', 'crates/missiond-daemon/src/engine/shared_memory.rs', 'workflow_start'],
+  ['service workflow checkpoint action', 'crates/missiond-daemon/src/engine/shared_memory.rs', 'workflow_checkpoint'],
+  ['service workflow status action', 'crates/missiond-daemon/src/engine/shared_memory.rs', 'workflow_status'],
+  ['service worker settle action', 'crates/missiond-daemon/src/engine/shared_memory.rs', 'worker_settle'],
+  ['service task result schema', 'crates/missiond-daemon/src/engine/shared_memory.rs', 'missiond.task-result-artifact.v1'],
+  ['service workflow schema', 'crates/missiond-daemon/src/engine/shared_memory.rs', 'missiond.workflow-run.v1'],
+  ['service worker settle schema', 'crates/missiond-daemon/src/engine/shared_memory.rs', 'missiond.worker-completion-settle.v1'],
+  ['service task result artifact event', 'crates/missiond-daemon/src/engine/shared_memory.rs', 'task_result_artifact.created'],
+  ['service workflow start event', 'crates/missiond-daemon/src/engine/shared_memory.rs', 'workflow_run.started'],
+  ['service worker settle event', 'crates/missiond-daemon/src/engine/shared_memory.rs', 'worker_completion.settled'],
+  ['service worker settle status guard', 'crates/missiond-daemon/src/engine/shared_memory.rs', 'normalize_worker_settle_status'],
 
   // Engine module registration.
   ['engine module registration', 'crates/missiond-daemon/src/engine/mod.rs', 'pub mod shared_memory;'],
@@ -182,6 +202,12 @@ const NEEDLES = [
   ['mcp shell release action', 'crates/missiond-mcp/src/tools/knowledge/shared_memory.rs', '"release"'],
   ['mcp shell heartbeat action', 'crates/missiond-mcp/src/tools/knowledge/shared_memory.rs', '"heartbeat"'],
   ['mcp shell cursor action', 'crates/missiond-mcp/src/tools/knowledge/shared_memory.rs', '"cursor"'],
+  ['mcp shell task_result_put action', 'crates/missiond-mcp/src/tools/knowledge/shared_memory.rs', '"task_result_put"'],
+  ['mcp shell task_result_get action', 'crates/missiond-mcp/src/tools/knowledge/shared_memory.rs', '"task_result_get"'],
+  ['mcp shell workflow_start action', 'crates/missiond-mcp/src/tools/knowledge/shared_memory.rs', '"workflow_start"'],
+  ['mcp shell workflow_checkpoint action', 'crates/missiond-mcp/src/tools/knowledge/shared_memory.rs', '"workflow_checkpoint"'],
+  ['mcp shell workflow_status action', 'crates/missiond-mcp/src/tools/knowledge/shared_memory.rs', '"workflow_status"'],
+  ['mcp shell worker_settle action', 'crates/missiond-mcp/src/tools/knowledge/shared_memory.rs', '"worker_settle"'],
   ['mcp tools registration', 'crates/missiond-mcp/src/tools/mod.rs', 'tools.extend(shared_memory::definitions());'],
   ['mcp knowledge mod registration', 'crates/missiond-mcp/src/tools/knowledge/mod.rs', 'pub(crate) mod shared_memory;'],
 ];

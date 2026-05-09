@@ -45,6 +45,11 @@ dist/
 .missiond/v3/runtime/convergence-status-cache.json
 .missiond/v3/runtime/compiled/*.json
 .missiond/research/resident-codex-master-gpt-pro*.md
+.missiond/research/memory-review/
+.missiond/research/memory-review-v2/
+.missiond/research/true-user-utterances-*.md
+.missiond/research/claudecode-conversation-audit-*.md
+.missiond/research/claudecode-conversation-normalization-plan-*.md
 
 # Claude Code (contains credentials and private config)
 .claude/

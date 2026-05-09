@@ -9,7 +9,8 @@ const usage = `Usage:
 
 Checks that public/runtime-facing documentation names V3 runtime artifact paths
 first, while V2 paths appear only as explicit legacy fallbacks or historical
-design sources.
+design sources. It also pins the SSOT retrieval scope that keeps generated
+runtime artifacts out of default blueprint review/search.
 `;
 
 const FILES = {
@@ -24,6 +25,13 @@ const FILES = {
 
 const REQUIRED = {
   blueprint: [
+    'ssot-retrieval-scope',
+    'active-authoring',
+    'warm-evidence',
+    'cold-runtime',
+    '.missiond/v3/runtime/**',
+    '.missiond/v3/runtime/lisp-code-sync/*.report.lisp',
+    'include_runtime=true',
     '.missiond/v3/runtime/capability-usage-review.json',
     'node scripts/check-v3-runtime-path-hygiene.mjs',
     'New runtime work should cite v3 first',
@@ -32,6 +40,8 @@ const REQUIRED = {
     '.missiond/v3/runtime/executions/*.lisp',
     '.missiond/v3/runtime/plans/*.evidence.json',
     '.missiond/v3/runtime/capability-usage-review.json',
+    '.missiond/v3/runtime/nightly-evolution/*.report.lisp',
+    '.missiond/v3/runtime/lisp-code-sync/*.report.lisp',
   ],
   coreExecution: [
     '.missiond/v3/runtime/executions/<id>.lisp',
@@ -140,6 +150,13 @@ function buildFixture() {
   }
   write(root, 'blueprint', `
 (missiond-blueprint
+  (ssot-retrieval-scope
+    (tier active-authoring :paths [".missiond/v3/missiond-blueprint.lisp"])
+    (tier warm-evidence :paths [".missiond/v3/evidence/*.lisp"])
+    (tier cold-runtime
+      :paths [".missiond/v3/runtime/**"]
+      :examples [".missiond/v3/runtime/lisp-code-sync/*.report.lisp"]
+      :rule "Cold runtime artifacts are excluded unless include_runtime=true is explicit."))
   (capability-governance-policy
     :review-sidecar ".missiond/v3/runtime/capability-usage-review.json")
   (compression-contract
@@ -148,7 +165,9 @@ function buildFixture() {
   write(root, 'gitignore', `
 .missiond/v3/runtime/executions/*.lisp
 .missiond/v3/runtime/plans/*.evidence.json
-.missiond/v3/runtime/capability-usage-review.json`);
+.missiond/v3/runtime/capability-usage-review.json
+.missiond/v3/runtime/nightly-evolution/*.report.lisp
+.missiond/v3/runtime/lisp-code-sync/*.report.lisp`);
   write(root, 'coreExecution', `
 //! Durable evidence remains the on-disk <project_root>/.missiond/v3/runtime/executions/<id>.lisp companion file.
 /// lives in <project_root>/.missiond/v3/runtime/plans/<plan_id>.evidence.json`);

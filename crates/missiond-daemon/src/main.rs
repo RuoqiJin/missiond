@@ -681,6 +681,7 @@ async fn main() -> Result<()> {
         let missiond_root = std::env::current_dir().unwrap_or_else(|_| home.clone());
         Arc::new(engine::shared_memory::SharedMemoryService::new(
             pool,
+            store.clone(),
             Arc::clone(&bus_services),
             missiond_root,
         ))

@@ -12,7 +12,7 @@ const checks = [
     [
       '(control-plane-m6-split',
       ':schema "missiond.control-plane-m6-split.v1"',
-      ':domains [workstation-control-plane master-control-plane eventbridge-deployment-plane project-universe-plane knowledge-skill-plane]',
+      ':domains [workstation-control-plane master-control-plane eventbridge-deployment-plane project-universe-plane knowledge-skill-plane execution-control-plane]',
       '(domain workstation-control-plane',
       ':functions [model-profile-policy slot-template-registry startup-slot-registry timeout-capacity-ttl-policy dispatch-routing-policy prompt-context-policy exact-shard-contract provider-interaction-policy]',
       '(domain master-control-plane',
@@ -23,6 +23,12 @@ const checks = [
       ':functions [project-identity-root-resolution registry-authority-map maturity-contract service-runtime-summary deploy-fact-reference forge-catalog-reference registry-reconciliation]',
       '(domain knowledge-skill-plane',
       ':functions [skill-registry skill-search skill-project-links skill-to-workflow-promotion memory-quarantine memory-distillation memory-search-v2]',
+      '(domain execution-control-plane',
+      ':functions [workflow-runner task-result-artifact worker-completion-settle slot-lifecycle-manager memory-review-batch-runner]',
+      'task_result_artifacts',
+      'workflow_runs',
+      'workflow_run',
+      'worker-completion-settle',
       ':workflow ".missiond/workflows/missiond-control-plane-m6-split.lisp"',
       ':checker "node scripts/check-v3-control-plane-m6-split.mjs"',
       '"node scripts/check-v3-control-plane-m6-split.mjs"',
@@ -41,6 +47,7 @@ const checks = [
       ':id add-checker-pins',
       ':id compile-projection',
       ':id report-residual-gaps',
+      'six named domains',
       'check-v3-control-plane-m6-split',
     ],
   ],
@@ -51,6 +58,42 @@ const checks = [
   [
     'scripts/check-v3-final-convergence.mjs',
     ['control-plane-m6-split', 'check-v3-control-plane-m6-split.mjs'],
+  ],
+  [
+    'crates/missiond-core/migrations/20260509000000_execution_control_plane.sql',
+    [
+      'CREATE TABLE IF NOT EXISTS workflow_runs',
+      'CREATE TABLE IF NOT EXISTS task_result_artifacts',
+      'idx_workflow_runs_project_status',
+      'idx_task_result_artifacts_task',
+    ],
+  ],
+  [
+    'crates/missiond-daemon/src/engine/shared_memory.rs',
+    [
+      'missiond.task-result-artifact.v1',
+      'missiond.workflow-run.v1',
+      'missiond.worker-completion-settle.v1',
+      'task_result_put',
+      'workflow_start',
+      'workflow_checkpoint',
+      'worker_settle',
+      'task_result_artifact.created',
+      'workflow_run.started',
+      'worker_completion.settled',
+      'normalize_worker_settle_status',
+    ],
+  ],
+  [
+    'crates/missiond-mcp/src/tools/knowledge/shared_memory.rs',
+    [
+      '"task_result_put"',
+      '"task_result_get"',
+      '"workflow_start"',
+      '"workflow_checkpoint"',
+      '"workflow_status"',
+      '"worker_settle"',
+    ],
   ],
 ];
 
@@ -79,6 +122,7 @@ if (fs.existsSync(blueprint)) {
     'eventbridge-deployment-plane',
     'project-universe-plane',
     'knowledge-skill-plane',
+    'execution-control-plane',
   ];
   for (const domain of required) {
     if (!domainMatches.includes(domain)) {

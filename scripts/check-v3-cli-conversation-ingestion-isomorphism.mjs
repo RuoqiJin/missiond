@@ -45,6 +45,10 @@ const DEFAULT_FILES = {
   pgConversation: 'crates/missiond-core/src/db/pg/conversation.rs',
   duplicateReport: 'scripts/report-codex-conversation-duplicates.mjs',
   claudeRoleAudit: 'scripts/report-claude-role-attribution.mjs',
+  claudeHistoryImport: 'scripts/import-claude-history-jsonl.mjs',
+  claudeConversationAudit: 'scripts/audit-claudecode-conversations.mjs',
+  claudeConversationNormalize: 'scripts/normalize-claudecode-conversations.mjs',
+  userUtteranceExport: 'scripts/export-human-user-utterances.mjs',
   sourceMigration: 'crates/missiond-core/migrations/20260501000000_canonical_cli_sources.sql',
   sourceCleanupMigration: 'crates/missiond-core/migrations/20260501001000_clean_stale_cli_slot_sessions.sql',
   conversationTypes: 'crates/missiond-core/src/types/conversation.rs',
@@ -97,6 +101,11 @@ function checkFiles(root, files) {
     '(cli-conversation-ingestion',
     '(source claude-code',
     ':canonical "claude_code"',
+    '"~/.claude/projects/**/*.jsonl"',
+    '"~/.claude/history.jsonl"',
+    ':history-import "scripts/import-claude-history-jsonl.mjs"',
+    ':normalizer "scripts/normalize-claudecode-conversations.mjs"',
+    ':audit "scripts/audit-claudecode-conversations.mjs"',
     '(source gemini-cli',
     ':canonical "gemini_cli"',
     '"~/.gemini/tmp/*/chats/*.jsonl"',
@@ -114,6 +123,16 @@ function checkFiles(root, files) {
     'Codex CLI background ingestion MUST refresh conversation message_count from actual inserted rows',
     'Historical duplicate cleanup is dry-run/report-first',
     'Gemini background reconcile MUST use size/mtime companion watermarks',
+    'ClaudeCode ~/.claude/history.jsonl is a prompt-only historical source',
+    'conversation_type=history_prompt',
+    'chat_type=history_jsonl',
+    'message_uuid=claude-history:<sha>',
+    'refresh conversations.message_count from actual inserted conversation_messages',
+    'conversation_source_state records current/missing-stale/path-mismatch/raw-only-local-command/raw-only-provider-prompt/raw-only-uningested source evidence',
+    'canonical_state marks exact role/timestamp/content duplicates as equivalent-duplicate',
+    'raw_role_state distinguishes native/reconstructed/provider-derived/ambiguous',
+    'True-user utterance export MUST include ClaudeCode history_prompt rows',
+    'exclude equivalent-duplicate',
     'top-level raw_role=user inside automated slot sessions normalizes to worker_user',
     'raw_role is preserved for audit',
     'scripts/report-claude-role-attribution.mjs',
@@ -236,6 +255,44 @@ function checkFiles(root, files) {
     '"rawRole": m.raw_role',
     'm.role == "worker_user"',
     'slot_id_for_display.clone()',
+  ]);
+
+  requireAll(diagnostics, files.claudeHistoryImport, sources.claudeHistoryImport, [
+    "DEFAULT_HISTORY = path.join(os.homedir(), '.claude', 'history.jsonl')",
+    "conversation_type='history_prompt'",
+    "'history_jsonl'",
+    'claude-history:',
+    "'claude_history_prompt'",
+    'message_count = counts.n',
+  ]);
+
+  requireAll(diagnostics, files.claudeConversationNormalize, sources.claudeConversationNormalize, [
+    'conversation_source_state',
+    "'missing-stale'",
+    "'path-mismatch'",
+    "'raw-only-local-command'",
+    "'raw-only-provider-prompt'",
+    "'raw-only-uningested'",
+    "'canonical_state'",
+    "'equivalent-duplicate'",
+    "'raw_role_state'",
+    'm.session_id,',
+    'md5(m.content)',
+  ]);
+
+  requireAll(diagnostics, files.claudeConversationAudit, sources.claudeConversationAudit, [
+    'history_prompt_summary',
+    "conversation_type <> 'history_prompt'",
+    'raw_sessions_missing_in_db',
+    'db_sessions_missing_raw_file',
+  ]);
+
+  requireAll(diagnostics, files.userUtteranceExport, sources.userUtteranceExport, [
+    "c.conversation_type = 'history_prompt'",
+    "c.chat_type = 'history_jsonl'",
+    "ml.label = 'canonical_state'",
+    "ml.value = 'equivalent-duplicate'",
+    'verification.ok',
   ]);
 
   requireAll(diagnostics, files.conversationRouter, sources.conversationRouter, [

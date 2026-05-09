@@ -105,6 +105,39 @@
       :writer verifier
       :required [:receipt_id :valid_for_files :commit_hash :tier :exit_code :commands]))
 
+  (ssot-retrieval-scope
+    :schema "missiond.ssot-retrieval-scope.v1"
+    :purpose "Keep SSOT review and worker context small by separating authoring truth from generated runtime evidence."
+    (tier active-authoring
+      :default true
+      :paths [".missiond/v3/missiond-blueprint.lisp"
+              ".missiond/workflows/*.lisp"
+              ".missiond/frontend/board-blueprint.lisp"
+              ".missiond/**/intent.lisp"
+              ".missiond/**/*blueprint.lisp"]
+      :rule "Default SSOT review, M6 review, nightly evolution, and worker context-pack generation read active-authoring paths first.")
+    (tier warm-evidence
+      :default "explicit-reference-only"
+      :paths [".missiond/v3/evidence/*.lisp"
+              ".missiond/frontend/evidence/*"
+              ".missiond/research/*.md"]
+      :rule "Warm evidence is used when an active blueprint cites it, or when a task asks for architecture history.")
+    (tier cold-runtime
+      :default false
+      :paths [".missiond/v3/runtime/**"
+              ".missiond/tasks/**"
+              ".missiond/research/memory-review*/**"]
+      :examples [".missiond/v3/runtime/lisp-code-sync/*.report.lisp"
+                 ".missiond/v3/runtime/nightly-evolution/*.report.lisp"
+                 ".missiond/v3/runtime/master-control/context-packs/*.lisp"
+                 ".missiond/v3/runtime/compiled/*.json"]
+      :rule "Cold runtime artifacts are diagnostic/query targets, not authoring SSOT. They are excluded from broad rg/review/search unless include_runtime=true or a concrete trace/report path is requested.")
+    :invariants
+      ["Tools that answer 'what does the SSOT say?' MUST search active-authoring first and exclude cold-runtime by default."
+       "Generated compiled JSON and runtime reports are projections/evidence; they must not be treated as editable blueprint source."
+       "MissionD may query cold-runtime for trace/debug/report lookup, but that query must be explicit and visible in the context-pack."]
+    :checker "node scripts/check-v3-runtime-path-hygiene.mjs")
+
   (unified-entry
     :desc "request -> intent alignment -> plan -> execution -> evidence -> workflow"
     :modes
@@ -829,7 +862,7 @@
   (control-plane-m6-split
     :schema "missiond.control-plane-m6-split.v1"
     :purpose "Keep MissionD's fast-growing orchestration/control plane readable by splitting overloaded policy blocks into stable subplanes while preserving existing runtime projections."
-    :domains [workstation-control-plane master-control-plane eventbridge-deployment-plane project-universe-plane knowledge-skill-plane]
+    :domains [workstation-control-plane master-control-plane eventbridge-deployment-plane project-universe-plane knowledge-skill-plane execution-control-plane]
     (domain workstation-control-plane
       :owner workstation-config
       :source [workstation-config workstation-pool agent-interaction-policy]
@@ -860,11 +893,18 @@
       :refactor-rule "MissionD owns identity/SSOT/maturity; deploy-center owns runtime release facts; Forge owns component/pattern catalog. New project metadata must declare which authority owns it.")
 	    (domain knowledge-skill-plane
 	      :owner memory-kb
-	      :source [memory-kb-policy learning-engine-policy conversation-memory-distillation skill-runtime]
+	      :source [memory-kb-policy learning-engine-policy conversation-memory-distillation skill-runtime ssot-retrieval-scope]
 	      :functions [skill-registry skill-search skill-project-links skill-to-workflow-promotion memory-quarantine memory-distillation memory-search-v2]
 	      :runtime-projection [mission_skill mission_kb_query mission_kb_remember conversation-memory-distillation]
 	      :checker ["node scripts/check-v3-memory-kb-isomorphism.mjs" "node scripts/check-v3-skill-runtime-isomorphism.mjs" "node scripts/check-v3-control-plane-m6-split.mjs"]
-	      :refactor-rule "KB and Skill context remain opt-in until memory is cleaned; project constants should move to SSOT/Universe rather than worker prompt preloads.")
+	      :refactor-rule "KB and Skill context remain opt-in until memory is cleaned; project constants should move to SSOT/Universe rather than worker prompt preloads; broad SSOT review must exclude cold runtime artifacts unless include_runtime=true is explicit.")
+    (domain execution-control-plane
+      :owner workflow-runner
+      :source [autopilot-runtime workstation-config conversation-memory-distillation semantic-ir-shared-memory-convergence]
+      :functions [workflow-runner task-result-artifact worker-completion-settle slot-lifecycle-manager memory-review-batch-runner]
+      :runtime-projection [BoardTask EventBus task_result_artifacts conversation ended_at SlotReleased workflow_runs workflow_run memory_review_batch_runner]
+      :checker ["node scripts/check-v3-control-plane-m6-split.mjs" "node scripts/check-v3-pty-recognition-isomorphism.mjs" "node scripts/check-v3-workflow-isomorphism.mjs"]
+      :refactor-rule "Long-running batch work must use checkpointed workflow_run state, canonical task-result artifacts, EventBus-driven completion settle, and slot lifecycle release; Board notes and PTY finals are projections, not the canonical result.")
 	    :workflow ".missiond/workflows/missiond-control-plane-m6-split.lisp"
 	    :egress [control-plane-split-report checker-pins compiled-runtime-projection-gaps]
 	    :checker "node scripts/check-v3-control-plane-m6-split.mjs")
@@ -895,12 +935,16 @@
        (step s3 :logic "for non-exact work, materialize context-pack questions, hypotheses, and evidence_needed before delegation; skip directly to implementation only when exact-shard-ready=true is explicit")
        (step s4 :logic "delegate Claude/Gemini/Codex workers through BoardTask/Autopilot only; never bypass durable event/Board state")
        (step s5 :logic "return decision, reasoning_summary, evidence_needed, delegation_plan?, and next_question_or_action, then write checkpoint + Board note + execution companion log after every decision boundary"))
-    :evidence-authority
-      ((tier t1 :source [provider-jsonl codex-sqlite claude-jsonl gemini-chat-file] :use "durable final/progress facts")
-       (tier t2 :source [missiond-event-bus BoardTask-lifecycle mission_execution] :use "causal workflow state")
-       (tier t3 :source [provider-aware-pty-recognition screen-buffer] :use "diagnostic state only; never sole completion authority"))
-    :settle-policy
-      "A worker can be closed only after durable final event or high-confidence final summary plus settle window; idle PTY alone is insufficient because provider SSE/final JSONL can lag the prompt returning."
+	    :evidence-authority
+	      ((tier t1 :source [provider-jsonl codex-sqlite claude-jsonl gemini-chat-file] :use "durable final/progress facts")
+	       (tier t2 :source [missiond-event-bus BoardTask-lifecycle mission_execution] :use "causal workflow state")
+	       (tier t3 :source [provider-aware-pty-recognition screen-buffer] :use "diagnostic state only; never sole completion authority"))
+	    :pty-retention
+	      (:ttl-days 1
+	       :scope [screen-buffer screenshots pty-log-files slot-last-responses]
+	       :rule "PTY content is transient diagnostic evidence only. MissionD keeps provider JSONL/Codex sqlite/Gemini chat files as durable logs, but PTY screen buffers, screenshots, pty-*.log files, and slot_last_responses MUST be treated as short-lived cache with a one-day retention window.")
+	    :settle-policy
+	      "A worker can be closed only after durable final event or high-confidence final summary plus settle window; idle PTY alone is insufficient because provider SSE/final JSONL can lag the prompt returning."
     (master-checkpoint
       :entry [daemon-startup event-wakeup periodic-heartbeat daemon-restart-before-exit]
       :core
@@ -984,7 +1028,7 @@
                :risk-gate "apply=true selects only findings whose class matches the requested mode; safe-backfill requires low risk, needs-investigation creates read-only context work, and proposal/user-decision modes create proposal tasks only.")
       :core
         ((step s0 :logic "scheduled nightly evolution is disabled by default during active supervision; operators use manual mission_nightly_evolution or explicitly set MISSIOND_NIGHTLY_EVOLUTION_SCHEDULE=true before periodic runs")
-         (step s1 :logic "NightlyEvolutionService reads only MissionD V3 blueprint, V3 checker output, final convergence static snapshot, and recent commits touching .missiond/v3/**; default nightly mode excludes KB, historical conversations, provider durable logs, worker telemetry, and Board open tasks")
+         (step s1 :logic "NightlyEvolutionService reads only ssot-retrieval-scope active-authoring MissionD V3 paths, V3 checker output, final convergence static snapshot, and recent commits touching active .missiond/v3 authoring files; Default nightly mode does not read KB, historical conversations, provider logs, worker telemetry, or Board open tasks, and also excludes cold-runtime reports")
          (step s2 :logic "write observe-first .missiond/v3/runtime/nightly-evolution/<date>.report.lisp")
          (step s3 :logic "materialize visible proposal/backfill BoardTasks only when apply=true, requested mode matches finding class, and risk gate allows it")
          (step s4 :logic "prefer read-only MissionD V3 SSOT investigation and context-pack generation")
@@ -1019,7 +1063,7 @@
     (nightly-evolution-loop
       :entry [night-scheduler mission_nightly_evolution final-convergence-snapshot]
       :core
-        ((step s1 :logic "collect evidence only from MissionD V3 blueprint, V3 checker output, final convergence static snapshot, and recent commits touching .missiond/v3/**")
+        ((step s1 :logic "collect evidence only from ssot-retrieval-scope active-authoring MissionD V3 files, V3 checker output, final convergence static snapshot, and recent commits touching active .missiond/v3 authoring files")
          (step s2 :logic "detect MissionD V3 SSOT issues: contradictory loops, structure repetition, surface/checker gaps, runtime projection gaps, missing entry/core/egress steps, and repeated Lisp prose")
          (step s3 :logic "classify findings as observe-only, safe-backfill, needs-investigation, architecture-proposal, or requires-user-decision")
          (step s4 :logic "default observe-only writes report; apply=true selects a finding by requested mode and may create one visible follow-up BoardTask")
@@ -1694,9 +1738,12 @@
     :legacy-aliases ["claude_cli" "pty_jsonl"]
     (source claude-code
       :canonical "claude_code"
-      :paths ["~/.claude/projects/**/sessions/*.jsonl"]
+      :paths ["~/.claude/projects/**/*.jsonl" "~/.claude/history.jsonl"]
       :watcher "crates/missiond-core/src/cc_tasks/watcher.rs"
-      :route "crates/missiond-daemon/src/infra/ingestion_router.rs")
+      :route "crates/missiond-daemon/src/infra/ingestion_router.rs"
+      :history-import "scripts/import-claude-history-jsonl.mjs"
+      :normalizer "scripts/normalize-claudecode-conversations.mjs"
+      :audit "scripts/audit-claudecode-conversations.mjs")
     (source gemini-cli
       :canonical "gemini_cli"
       :paths ["~/.gemini/tmp/*/chats/*.json" "~/.gemini/tmp/*/chats/*.jsonl"]
@@ -1720,6 +1767,10 @@
        "Historical duplicate cleanup is dry-run/report-first; destructive DB cleanup must keep the earliest row in each duplicate group and require an explicit reviewed apply path."
        "Gemini background reconcile MUST use size/mtime companion watermarks to skip already-reconciled old chat files without reparsing full historical transcripts; manual reconcile may force a full scan."
        "Cursor/watermark advancement MUST happen after durable DB write acknowledgement, never before."
+       "ClaudeCode ~/.claude/history.jsonl is a prompt-only historical source: import it as conversation_type=history_prompt, chat_type=history_jsonl, source=claude_code, speaker=human_user, authority=claude_history_prompt, and deterministic message_uuid=claude-history:<sha>; it MUST NOT be mistaken for assistant/tool transcript coverage."
+       "ClaudeCode historical import MUST refresh conversations.message_count from actual inserted conversation_messages after import because database triggers/upserts can otherwise leave placeholder counts that make Logs and exports report double messages."
+       "ClaudeCode conversation normalization MUST maintain a non-destructive overlay: conversation_source_state records current/missing-stale/path-mismatch/raw-only-local-command/raw-only-provider-prompt/raw-only-uningested source evidence, message_labels canonical_state marks exact role/timestamp/content duplicates as equivalent-duplicate, raw_role_state distinguishes native/reconstructed/provider-derived/ambiguous, and no provider JSONL row is physically deleted by normalization."
+       "True-user utterance export MUST include ClaudeCode history_prompt rows and exclude equivalent-duplicate, worker/subagent/compaction, task-bound sessions, MissionD runtime prompts, provider context, terminal artifacts, and local-command artifacts; verification must fail if BoardTask/Swarm prompt signatures leak into the export."
        "ClaudeCode provider role normalization MUST be shared by realtime watcher, per-session reconcile, and daily reconcile paths: top-level raw_role=user inside automated slot sessions normalizes to worker_user, interactive Jarvis/user conversations remain user, sidechain progress remains agent_user/agent_assistant, and raw_role is preserved for audit."
        "Historical ClaudeCode role repair is dry-run/report-first through scripts/report-claude-role-attribution.mjs; first pass reports suspected system/user/agent_user drift and never mutates DB."
        "Provider-aware conversation_type classification MUST live behind crates/missiond-core/src/db/conversation_query.rs::classify_conversation_type so ClaudeCode, Codex CLI, and Gemini CLI workers share one rule set: slot-bound sessions (any provider) classify as worker with durable slotId/taskId linkage; background-ingested Codex threads classify as codex_chat (parallel to gemini_chat), never as the human user fallthrough; real human Jarvis user sessions remain user."
@@ -2363,11 +2414,12 @@
     (pillar source-control
       (function source-hygiene
         :surface source-hygiene
-        :entry [check-staged-source-hygiene task-scope-guard pre-commit-hook]
+        :entry [check-staged-source-hygiene task-scope-guard pre-commit-hook ssot-retrieval-scope]
         :core ((step s1 :logic "inspect staged or supplied files without mutating git")
                (step s2 :logic "reject raw NUL bytes and git diff whitespace errors")
-               (step s3 :logic "enforce task contract write-scope and must-not-touch patterns"))
-        :egress [source_hygiene_result scope_guard_diagnostics hook_doctor_status])
+               (step s3 :logic "enforce task contract write-scope and must-not-touch patterns")
+               (step s4 :logic "separate active SSOT authoring paths from warm evidence and cold runtime artifacts for broad search/review"))
+        :egress [source_hygiene_result scope_guard_diagnostics hook_doctor_status ssot_retrieval_scope_diagnostics])
       (function lisp-code-drift
         :surface lisp-code-drift-policy
         :entry [git-diff task-contract blueprint-registry emergency-waiver board-task-close]
@@ -3019,15 +3071,16 @@
 
     (surface source-hygiene
       :status "code-aligned"
-      :implements [source-hygiene scoped-write-gate]
+      :implements [source-hygiene scoped-write-gate ssot-retrieval-scope]
       :code ["scripts/check-staged-source-hygiene.mjs"
              "scripts/task-scope-guard.mjs"
              "scripts/check-missiond-hooks.mjs"
              "scripts/install-missiond-hooks.mjs"
              ".githooks/pre-commit"
              "scripts/verify-task-runner-batch.mjs"
-             "scripts/check-v3-source-hygiene-isomorphism.mjs"]
-      :note "check-staged-source-hygiene.mjs is the read-only staged/source preflight: default mode reads staged ACMR files, rejects raw NUL bytes from staged blobs, runs git diff --cached --check, and delegates to task-scope-guard.mjs when --task or MISSIOND_TASK_CONTRACT is set; --files mode checks supplied files without reading git blobs. task-scope-guard.mjs owns task contract write-scope/must-not-touch enforcement for staged and commit modes. .githooks/pre-commit is opt-in per task via MISSIOND_TASK_CONTRACT; check-missiond-hooks.mjs is a read-only doctor and install-missiond-hooks.mjs is the only mutating hook installer. verify-task-runner-batch imports checkSuppliedFiles for source-hygiene fixture coverage without mutating git.")
+             "scripts/check-v3-source-hygiene-isomorphism.mjs"
+             "scripts/check-v3-runtime-path-hygiene.mjs"]
+      :note "check-staged-source-hygiene.mjs is the read-only staged/source preflight: default mode reads staged ACMR files, rejects raw NUL bytes from staged blobs, runs git diff --cached --check, and delegates to task-scope-guard.mjs when --task or MISSIOND_TASK_CONTRACT is set; --files mode checks supplied files without reading git blobs. task-scope-guard.mjs owns task contract write-scope/must-not-touch enforcement for staged and commit modes. .githooks/pre-commit is opt-in per task via MISSIOND_TASK_CONTRACT; check-missiond-hooks.mjs is a read-only doctor and install-missiond-hooks.mjs is the only mutating hook installer. verify-task-runner-batch imports checkSuppliedFiles for source-hygiene fixture coverage without mutating git. ssot-retrieval-scope keeps broad review/search on active authoring Lisp and treats .missiond/v3/runtime/** reports as cold diagnostic evidence unless include_runtime=true or a concrete trace path is requested.")
 
     (surface lisp-code-drift-policy
       :status "code-aligned"
