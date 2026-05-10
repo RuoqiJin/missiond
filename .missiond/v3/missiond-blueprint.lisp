@@ -3408,9 +3408,14 @@
              "crates/missiond-core/src/types/board.rs"
              "crates/missiond-core/src/db/traits.rs"
              "crates/missiond-core/src/db/pg/board.rs"
+             "crates/missiond-daemon/src/engine/intent_engine/flow_engine.rs"
+             "crates/missiond-daemon/src/handlers/sysinfra/misc.rs"
              "crates/missiond-daemon/src/infra/aiops.rs"
              "crates/missiond-mcp/src/tools/knowledge/board.rs"
              "scripts/check-v3-board-isomorphism.mjs"]
+      :engineering-flow-gate ["mission_submit_phase_result rejects obviously short execution_plan artifacts before ConsultGemini2."
+                              "ConsultGemini2 stores review evidence but advances to Execute only after an explicit approval signal; rejected or ambiguous reviews return to Plan and create a review-gate question."
+                              "ConsultGemini1 remains advisory."]
       :note "mission_board is the durable BoardTask coordination surface underneath delegated ClaudeCode work: MCP exposes query/create/update/delete/claim/decompose/retry/note_add with a generated schema from .missiond/intent-tools.lisp. Board handlers normalize common snake_case/camelCase aliases before schema projection, reject invalid status/noteType with structured ToolError codes, validate parentId/dependsOn before persistence, cap descriptions, reject oversized note payloads with artifact-path guidance, return compact note receipts for large stored content, and aggregate self-heal incident tasks by dedupe_key instead of auto-executing a worker per tool outage so agents recover instead of flailing on unknown errors. [details: .missiond/v3/evidence/blueprint-notes.lisp#note-014]")
 
     (surface board-search-noise-governance

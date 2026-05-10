@@ -188,6 +188,18 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 )));
             }
 
+            if phase == missiond_core::types::EngineeringPhase::Plan {
+                if let Err(reason) =
+                    crate::engine::intent_engine::flow_engine::validate_execution_plan_artifact(
+                        &args.content,
+                    )
+                {
+                    return Ok(ToolResult::text(format!(
+                        "Error: execution_plan rejected before ConsultGemini2 review. {reason}"
+                    )));
+                }
+            }
+
             // Load existing flow context
             let mut ctx: missiond_core::types::FlowContext = task
                 .flow_context

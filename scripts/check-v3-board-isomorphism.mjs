@@ -31,6 +31,8 @@ const DEFAULT_FILES = {
   types: 'crates/missiond-core/src/types/board.rs',
   traits: 'crates/missiond-core/src/db/traits.rs',
   pgStore: 'crates/missiond-core/src/db/pg/board.rs',
+  flowEngine: 'crates/missiond-daemon/src/engine/intent_engine/flow_engine.rs',
+  sysinfraMisc: 'crates/missiond-daemon/src/handlers/sysinfra/misc.rs',
   aiops: 'crates/missiond-daemon/src/infra/aiops.rs',
   mcp: 'crates/missiond-mcp/src/tools/knowledge/board.rs',
 };
@@ -105,6 +107,8 @@ function checkFiles(root, files) {
     'crates/missiond-core/src/types/board.rs',
     'crates/missiond-core/src/db/traits.rs',
     'crates/missiond-core/src/db/pg/board.rs',
+    'crates/missiond-daemon/src/engine/intent_engine/flow_engine.rs',
+    'crates/missiond-daemon/src/handlers/sysinfra/misc.rs',
     'crates/missiond-daemon/src/infra/aiops.rs',
     'crates/missiond-mcp/src/tools/knowledge/board.rs',
     'BoardTaskStatus',
@@ -119,6 +123,9 @@ function checkFiles(root, files) {
     'cap descriptions',
     'reject oversized note payloads',
     'aggregate self-heal incident tasks by dedupe_key',
+    'mission_submit_phase_result rejects obviously short execution_plan artifacts before ConsultGemini2',
+    'ConsultGemini2 stores review evidence but advances to Execute only after an explicit approval signal',
+    'ConsultGemini1 remains advisory',
   ]);
 
   requireAll(diagnostics, files.handler, sources.handler, [
@@ -317,6 +324,29 @@ function checkFiles(root, files) {
     'async fn retry_board_task',
   ]);
 
+  requireAll(diagnostics, files.flowEngine, sources.flowEngine, [
+    'pub(crate) enum PlanReviewGateDecision',
+    'validate_execution_plan_artifact',
+    'MIN_PLAN_CHARS',
+    'MIN_PLAN_LINES',
+    'plan_review_gate_decision',
+    'PlanReviewGateDecision::Approved',
+    'PlanReviewGateDecision::NeedsChanges',
+    'PlanReviewGateDecision::Ambiguous',
+    'EngineeringPhase::ConsultGemini2',
+    'Gemini review did not include an explicit APPROVED/LGTM/批准 signal',
+    'Flow returned to Plan for revision',
+    'decision_type: Some("review_gate".to_string())',
+    'execution_plan_artifact_rejects_obviously_short_plans',
+    'consult_gemini2_review_requires_explicit_approval',
+  ]);
+
+  requireAll(diagnostics, files.sysinfraMisc, sources.sysinfraMisc, [
+    '"mission_submit_phase_result"',
+    'validate_execution_plan_artifact',
+    'execution_plan rejected before ConsultGemini2 review',
+  ]);
+
   requireAll(diagnostics, files.aiops, sources.aiops, [
     'create_pty_remediation_task',
     'find_open_task_by_dedupe_key',
@@ -380,8 +410,13 @@ function buildFixture() {
              "crates/missiond-core/src/types/board.rs"
              "crates/missiond-core/src/db/traits.rs"
              "crates/missiond-core/src/db/pg/board.rs"
+             "crates/missiond-daemon/src/engine/intent_engine/flow_engine.rs"
+             "crates/missiond-daemon/src/handlers/sysinfra/misc.rs"
              "crates/missiond-daemon/src/infra/aiops.rs"
              "crates/missiond-mcp/src/tools/knowledge/board.rs"]
+      :engineering-flow-gate ["mission_submit_phase_result rejects obviously short execution_plan artifacts before ConsultGemini2."
+                              "ConsultGemini2 stores review evidence but advances to Execute only after an explicit approval signal."
+                              "ConsultGemini1 remains advisory."]
       :note "BoardTaskStatus claim_board_task clear_dangling_dynamic_slot_assignees list_autopilot_tasks normalize common MCP argument aliases structured ToolError codes compact note receipts validate parentId and dependsOn cap descriptions reject oversized note payloads aggregate self-heal incident tasks by dedupe_key"))
   (compression-contract
     :checks ["node scripts/check-v3-board-isomorphism.mjs"]))`);
@@ -580,6 +615,29 @@ async fn list_autopilot_tasks
 CASE WHEN assignee IS NOT NULL THEN 0 ELSE 1 END
 async fn check_dependencies
 async fn retry_board_task
+`);
+
+  writeFixture(root, DEFAULT_FILES.flowEngine, `
+pub(crate) enum PlanReviewGateDecision
+validate_execution_plan_artifact
+MIN_PLAN_CHARS
+MIN_PLAN_LINES
+plan_review_gate_decision
+PlanReviewGateDecision::Approved
+PlanReviewGateDecision::NeedsChanges
+PlanReviewGateDecision::Ambiguous
+EngineeringPhase::ConsultGemini2
+Gemini review did not include an explicit APPROVED/LGTM/批准 signal
+Flow returned to Plan for revision
+decision_type: Some("review_gate".to_string())
+execution_plan_artifact_rejects_obviously_short_plans
+consult_gemini2_review_requires_explicit_approval
+`);
+
+  writeFixture(root, DEFAULT_FILES.sysinfraMisc, `
+"mission_submit_phase_result"
+validate_execution_plan_artifact
+execution_plan rejected before ConsultGemini2 review
 `);
 
   writeFixture(root, DEFAULT_FILES.aiops, `

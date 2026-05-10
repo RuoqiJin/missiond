@@ -86,6 +86,82 @@ pub(crate) fn conversation_task_binding_update_allowed(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlanReviewGateDecision {
+    Approved,
+    NeedsChanges,
+    Ambiguous,
+}
+
+pub(crate) fn validate_execution_plan_artifact(content: &str) -> Result<(), String> {
+    const MIN_PLAN_CHARS: usize = 240;
+    const MIN_PLAN_LINES: usize = 4;
+
+    let trimmed = content.trim();
+    let chars = trimmed.chars().count();
+    let lines = trimmed
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
+
+    if chars < MIN_PLAN_CHARS || lines < MIN_PLAN_LINES {
+        return Err(format!(
+            "execution_plan is too short for ConsultGemini2 review: got {chars} chars across {lines} non-empty line(s); need at least {MIN_PLAN_CHARS} chars and {MIN_PLAN_LINES} lines"
+        ));
+    }
+
+    Ok(())
+}
+
+pub(crate) fn plan_review_gate_decision(review: &str) -> PlanReviewGateDecision {
+    let normalized = review.to_lowercase();
+    if contains_any(
+        &normalized,
+        &[
+            "rejected",
+            "reject",
+            "needs changes",
+            "needs_changes",
+            "not approved",
+            "do not approve",
+            "do not execute",
+            "blocker",
+            "blocked",
+            "需要修改",
+            "不批准",
+            "不通过",
+            "不要执行",
+            "不能执行",
+            "有阻塞",
+        ],
+    ) {
+        return PlanReviewGateDecision::NeedsChanges;
+    }
+
+    if contains_any(
+        &normalized,
+        &[
+            "approved",
+            "approve",
+            "lgtm",
+            "looks good to me",
+            "ship it",
+            "批准",
+            "同意执行",
+            "可以执行",
+            "通过",
+        ],
+    ) {
+        return PlanReviewGateDecision::Approved;
+    }
+
+    PlanReviewGateDecision::Ambiguous
+}
+
+fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
+}
+
 // @beacon: orchestration
 /// Execute a flow-enabled Board task through the Engineering Flow Engine.
 /// Handles all phase types: slot phases (send to PTY), daemon phases (call Gemini), and Done.
@@ -224,10 +300,23 @@ pub(crate) async fn execute_flow_task(
                         _ => {}
                     }
 
+                    let review_decision =
+                        if p == missiond_core::types::EngineeringPhase::ConsultGemini2 {
+                            Some(plan_review_gate_decision(&response))
+                        } else {
+                            None
+                        };
+
                     // Advance phase — unclaim so next tick can re-claim for next phase
-                    let next_phase = p
-                        .next()
-                        .unwrap_or(missiond_core::types::EngineeringPhase::Done);
+                    let next_phase = match review_decision {
+                        Some(PlanReviewGateDecision::Approved) | None => p
+                            .next()
+                            .unwrap_or(missiond_core::types::EngineeringPhase::Done),
+                        Some(PlanReviewGateDecision::NeedsChanges)
+                        | Some(PlanReviewGateDecision::Ambiguous) => {
+                            missiond_core::types::EngineeringPhase::Plan
+                        }
+                    };
                     let _ = state
                         .store
                         .update_board_task(
@@ -240,6 +329,58 @@ pub(crate) async fn execute_flow_task(
                         )
                         .await;
                     let _ = state.store.unclaim_board_task(task.id.as_str()).await;
+
+                    if let Some(decision) = review_decision {
+                        match decision {
+                            PlanReviewGateDecision::Approved => {}
+                            PlanReviewGateDecision::NeedsChanges
+                            | PlanReviewGateDecision::Ambiguous => {
+                                let reason = match decision {
+                                    PlanReviewGateDecision::NeedsChanges => {
+                                        "Gemini review requested changes or rejected the plan"
+                                    }
+                                    PlanReviewGateDecision::Ambiguous => {
+                                        "Gemini review did not include an explicit APPROVED/LGTM/批准 signal"
+                                    }
+                                    PlanReviewGateDecision::Approved => unreachable!(),
+                                };
+                                let q_input = missiond_core::types::CreateAgentQuestionInput {
+                                    question: format!(
+                                        "[Engineering Flow] ConsultGemini2 review did not approve: {}",
+                                        task.title
+                                    ),
+                                    context: Some(format!(
+                                        "{}. Flow returned to Plan for revision.\n\nReview excerpt:\n{}",
+                                        reason,
+                                        truncate_safe(&response, 1500)
+                                    )),
+                                    task_id: Some(task.id.to_string()),
+                                    slot_id: None,
+                                    session_id: None,
+                                    target: Some("master".to_string()),
+                                    options: None,
+                                    decision_type: Some("review_gate".to_string()),
+                                };
+                                match state.store.create_agent_question(&q_input).await {
+                                    Ok(q) => {
+                                        let _ = state
+                                            .bus
+                                            .publish_question(
+                                                missiond_core::event::events::QuestionEvent::Created {
+                                                    question_id: q.id.clone(),
+                                                },
+                                            )
+                                            .await;
+                                    }
+                                    Err(err) => warn!(
+                                        task_id = %task.id,
+                                        error = %err,
+                                        "Flow engine: failed to create ConsultGemini2 review-gate question"
+                                    ),
+                                }
+                            }
+                        }
+                    }
 
                     let _ = state
                         .store
@@ -1145,6 +1286,9 @@ content: "<commit hash 或提交摘要>"
 #[cfg(test)]
 mod tests {
     use super::{conversation_task_binding_update_allowed, is_pty_already_running_error};
+    use super::{
+        plan_review_gate_decision, validate_execution_plan_artifact, PlanReviewGateDecision,
+    };
     use anyhow::anyhow;
 
     #[test]
@@ -1172,5 +1316,33 @@ mod tests {
         assert!(!is_pty_already_running_error(&anyhow!(
             "spawn_tracked_slot rejected: cwd is outside project"
         )));
+    }
+
+    #[test]
+    fn execution_plan_artifact_rejects_obviously_short_plans() {
+        assert!(validate_execution_plan_artifact("do it").is_err());
+        assert!(validate_execution_plan_artifact(
+            "1. Inspect the current flow code and existing task context.\n\
+             2. Update the V3 Lisp contract before changing runtime behavior.\n\
+             3. Add narrow validation in mission_submit_phase_result and ConsultGemini2.\n\
+             4. Run focused checker and Rust tests before closing the BoardTask."
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn consult_gemini2_review_requires_explicit_approval() {
+        assert_eq!(
+            plan_review_gate_decision("APPROVED: the execution plan is coherent."),
+            PlanReviewGateDecision::Approved
+        );
+        assert_eq!(
+            plan_review_gate_decision("Needs changes: the rollout path is missing."),
+            PlanReviewGateDecision::NeedsChanges
+        );
+        assert_eq!(
+            plan_review_gate_decision("The plan has several observations and possible risks."),
+            PlanReviewGateDecision::Ambiguous
+        );
     }
 }
