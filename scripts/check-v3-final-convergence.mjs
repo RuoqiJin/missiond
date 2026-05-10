@@ -75,6 +75,12 @@ const LIVE_CHECKS = [
     timeoutMs: 60_000,
   },
   {
+    id: 'infrastructure-universe',
+    argv: ['scripts/check-v3-infrastructure-universe-isomorphism.mjs', '--json'],
+    json: true,
+    timeoutMs: 60_000,
+  },
+  {
     id: 'project-maturity',
     argv: ['scripts/check-project-maturity.mjs', '--min-level', 'M5'],
     timeoutMs: 60_000,

@@ -9,13 +9,16 @@ pub fn definitions() -> Vec<ToolDefinition> {
         // ===== mission_infra_query =====
         ToolDefinition::new(
             "mission_infra_query",
-            "基础设施查询。list: 列出服务器; get: 单个详情",
+            "基础设施查询。list/get/health/reconcile/skill_evidence/credential_refs。skills 只是 evidence；凭据只返回 secret_ref，不返回明文值。",
             json!({
                 "type": "object",
                 "required": ["action"],
                 "properties": {
-                    "action": {"type": "string", "enum": ["list", "get"]},
+                    "action": {"type": "string", "enum": ["list", "get", "health", "reconcile", "skill_evidence", "credential_refs"]},
                     "id": {"type": "string", "description": "[get] 服务器 ID"},
+                    "target_id": {"type": "string", "description": "[skill_evidence/credential_refs] runtime target ID"},
+                    "skill": {"type": "string", "description": "[skill_evidence] 限定 skill 名称"},
+                    "limit": {"type": "integer", "description": "[skill_evidence] 最大返回条数"},
                     "role": {"type": "string", "description": "[list] 角色: build/deploy/gpu/vpn/production"},
                     "provider": {"type": "string", "description": "[list] 云厂商: gcp/aliyun/self-hosted"}
                 }

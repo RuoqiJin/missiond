@@ -1360,6 +1360,93 @@
     :workflow project-registry-reconciliation
     :rule "Registry reconciliation reads MissionD, deploy-center, and Forge facts, reports missing_in_*, alias_conflict, root_mismatch, and deploy_fact_missing, and never silently overwrites identities.")
 
+  (infrastructure-universe
+    :schema "missiond.infrastructure-universe.v1"
+    :rule "Servers, runtime targets, deployment locations, agent/executor facts, and skill-derived ops knowledge are first-class governance objects. MissionD owns the Universe summary and dispatch policy; deploy-center owns verified runtime/deployment facts; secret-store owns credential values; skills are evidence only."
+    (runtime-target-contract
+      :fields [target_id aliases kind environment owner_authority capabilities deploy_center_executor agent_url service_ids evidence_refs freshness]
+      :invariants ["Runtime targets promoted from skills MUST be marked unverified until deploy-center or an approved probe confirms them."
+                   "MissionD workers encountering an unknown server MUST query mission_infra_query(action=skill_evidence|reconcile) before guessing login paths or deployment authority."
+                   "Runtime facts from deploy-center provenance override local skill notes; MissionD never silently overwrites conflicts."])
+    (credential-ref-contract
+      :fields [secret_ref namespace key_name purpose required_capability]
+      :invariants ["Lisp, Board notes, context packs, and skills MUST NOT become active stores for login passwords, API keys, Cloudflare tokens, or SSH secrets."
+                   "mission_infra_query(action=credential_refs) returns secret refs and availability only; it never returns credential values."
+                   "Credential-like skill lines are migration evidence and must be redacted before entering worker context."])
+    (skill-evidence-contract
+      :fields [source_skill source_path source_line confidence last_verified_at promote_to credential_inline_risk excerpt]
+      :rule "Skills are operational guidance and discovery evidence. A skill fact becomes active runtime truth only after reconcile promotes it into deploy-center runtime inventory or MissionD Universe with a source reference.")
+    (runtime-authority-map
+      :authorities ((missiond :owns [project-identity universe-summary dispatch-policy eventbridge])
+                    (deploy-center :owns [runtime-target-inventory executor-inventory service-deploy-location agent-heartbeat-provenance release-provenance])
+                    (secret-store :owns [credential-values credential-rotation credential-availability])
+                    (skills :owns [operational-guidance evidence-source workflow-procedure])
+                    (forge :owns [component-catalog pattern-catalog code-reality-mirror])))
+    (runtime-target :target_id gcp-runtime
+      :aliases [gcp-production]
+      :kind cloud-runtime
+      :environment production
+      :owner_authority deploy-center
+      :capabilities [auth router deploy-center production-runtime]
+      :service_ids [auth router deploy-center]
+      :freshness unverified
+      :evidence_refs [service-runtime-universe deploy-center-provenance])
+    (runtime-target :target_id ecs-pcea
+      :aliases [pcea-ecs]
+      :kind cloud-vm
+      :environment production
+      :owner_authority deploy-center
+      :capabilities [pcea deploy-agent runtime]
+      :service_ids [pcea]
+      :freshness unverified
+      :evidence_refs [skill:pcea])
+    (runtime-target :target_id privatecloud-hostvds
+      :aliases [hostvds privatecloud]
+      :kind vps-runtime
+      :environment privatecloud
+      :owner_authority deploy-center
+      :capabilities [deploy tunnel runtime]
+      :service_ids []
+      :freshness unverified
+      :evidence_refs [skill:missiond-memory skill:xjp-deploy-center])
+    (runtime-target :target_id windows-12900kf
+      :aliases [12900kf windows-runner]
+      :kind windows-workstation
+      :environment local-lan
+      :owner_authority deploy-center
+      :deploy_center_executor windows
+      :agent_url windows
+      :capabilities [gpu github-runner embedding rerank deploy-agent]
+      :service_ids [router]
+      :freshness skill-derived-unverified
+      :credential_refs [secret-store://deploy-agent/windows-12900kf/agent-token]
+      :evidence_refs [skill:windows-runner skill:missiond-model-routing])
+    (runtime-target :target_id bwg-vps
+      :aliases [bwg model-tunnel]
+      :kind vps-tunnel
+      :environment relay
+      :owner_authority deploy-center
+      :capabilities [tunnel router-relay model-relay]
+      :service_ids [router]
+      :freshness skill-derived-unverified
+      :credential_refs [secret-store://infra/bwg-vps/tunnel-ssh]
+      :evidence_refs [skill:missiond-model-routing])
+    (runtime-target :target_id privatecloud-lan-192-168-1-20
+      :aliases [lan-infra harbor-cache]
+      :kind local-lan-node
+      :environment local-lan
+      :owner_authority deploy-center
+      :capabilities [cache harbor dns registry]
+      :service_ids []
+      :freshness skill-derived-unverified
+      :evidence_refs [skill:xjp-deploy-center])
+    :surfaces ["crates/missiond-daemon/src/handlers/sysinfra/infra.rs"
+               "crates/missiond-daemon/src/handlers/knowledge/project/reconcile.rs"
+               "crates/missiond-mcp/src/tools/sysinfra/infra.rs"
+               "packages/board/src/app/api/infra/route.ts"
+               "packages/board/src/components/SystemDashboard.tsx"
+               "scripts/check-v3-infrastructure-universe-isomorphism.mjs"])
+
   (deploy-agent-self-update-governance
     :schema "missiond.deploy-agent-self-update-governance.v1"
     :owner deploy-center
@@ -3702,8 +3789,9 @@
              "crates/missiond-mcp/src/tools/sysinfra/power.rs"
              "crates/missiond-mcp/src/tools/sysinfra/system.rs"
              "crates/missiond-mcp/src/tools/sysinfra/global_instruction.rs"
-             "scripts/check-v3-sysinfra-control-isomorphism.mjs"]
-      :note "Code-aligned V3 destination for sysinfra MCP behavior not covered by ops-infra scripts. infra.rs owns mission_infra_query/ops list/get/health/reachability/diagnose and merges configured servers.yaml with skill-derived infra facts such as windows-runner/12900kf, agent_url=windows, Ollama embedding, and BWG tunnel anchors; deploy-center/secret-store remain the eventual authority. permission.rs owns mission_permission_query/mutate; power.rs owns mission_power_control; system.rs owns mission_sys_logs, mission_sys_config, mission_daemon_update, and missiond-blue-green-self-update. mission_daemon_update requires explicit confirm=true; mission_daemon_update full build MUST start scripts/deploy-daemon.sh as a detached async logged job to stay below MCP timeout and survive daemon kickstart; deploy-daemon.sh MUST co-build missiond and mission-mcp into one blue-green release. skip_build remains the synchronous already-built artifact restart path. global_instruction.rs owns mission_global_instruction.")
+             "scripts/check-v3-sysinfra-control-isomorphism.mjs"
+             "scripts/check-v3-infrastructure-universe-isomorphism.mjs"]
+      :note "Code-aligned V3 sysinfra surface. infra.rs owns infra query/ops, skill evidence, credential refs, and runtime target projection; project/reconcile reports runtime and credential drift. permission, power, system, and global-instruction handlers own their MCP tools. Long blue-green/self-update and infra-evidence anchors live in blueprint-notes#note-021.")
 
     (surface runtime-load-explanation
       :status "code-aligned"

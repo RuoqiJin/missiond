@@ -71,6 +71,12 @@
               "packages/board/src/components/SystemDashboard.tsx"]
       :fields [serviceId project root environment publicBaseUrl issuer domains dnsProvider dnsCapability deployment proxy ports health dependencies opsCapability sourceEvidence risks]
       :rule "SystemDashboard must show production service domain/deployment/DNS capability from MissionD Universe, not from local hardcoded cards.")
+    (projection infrastructure-universe
+      :source [mission_infra_query.infrastructure-universe mission_infra_query.skill_evidence mission_infra_query.credential_refs mission_infra_query.reconcile]
+      :entry ["packages/board/src/app/api/infra/route.ts"
+              "packages/board/src/components/SystemDashboard.tsx"]
+      :fields [runtimeTargets credentialRefs skillEvidence reconcileDrift freshness credentialInlineRisk]
+      :rule "SystemDashboard must show runtime targets, skill-derived evidence, secret refs, and reconcile drift as read-only governance data; it must never display credential values.")
     (projection decision-inbox
       :source [mission_question DecisionDashboard JarvisChat]
       :entry ["packages/board/src/components/DecisionDashboard.tsx"
@@ -320,12 +326,12 @@
     (pillar knowledge-system-ui
       (function knowledge-system-dashboards
         :surface knowledge-system-ui
-        :entry [KnowledgeConsolidated SystemDashboard DecisionDashboard ArchitectureView api-routes]
-        :core ((step s1 :logic "fetch KB, memory, architecture, system health, deploy, and model-trace projections")
+        :entry [KnowledgeConsolidated SystemDashboard DecisionDashboard ArchitectureView api-routes mission_infra_query]
+        :core ((step s1 :logic "fetch KB, memory, architecture, system health, deploy, infrastructure-universe, and model-trace projections")
                (step s2 :logic "normalize read-only dashboard state for dense operator scanning")
-               (step s3 :logic "render SSOT Universe, service runtime deployment/domain/DNS capability, Decision Inbox, memory review, runtime health, architecture graph, status badges, and diagnostics")
+               (step s3 :logic "render SSOT Universe, service runtime deployment/domain/DNS capability, runtime targets, credential refs, skill evidence drift, Decision Inbox, memory review, runtime health, architecture graph, status badges, and diagnostics")
                (step s4 :logic "keep operational actions behind explicit buttons and existing route policies")
-               (step s5 :logic "project constants promoted from repeated KB lookup, such as auth service path/ports, into the Universe surface instead of leaving them as loose memory")
+               (step s5 :logic "project constants promoted from repeated KB lookup, such as auth service path/ports and 12900kf/router target anchors, into the Universe/Infra surface instead of leaving them as loose memory")
                (step s6 :logic "JarvisChat sends user text/images through master-chat-api to create a visible resident-master-control BoardTask; it polls mission_master_status and never writes directly to a PTY"))
         :egress [knowledge-dashboard system-dashboard architecture-dashboard operational-action]))
 
@@ -419,6 +425,7 @@
              "packages/board/src/components/architecture/ArchitectureView.tsx"
              "packages/board/src/components/JarvisChat.tsx"
              "packages/board/src/app/api/kb/route.ts"
+             "packages/board/src/app/api/infra/route.ts"
              "packages/board/src/app/api/questions/route.ts"
              "packages/board/src/app/api/system/health/route.ts"
              "packages/board/src/app/api/jarvis/conversations/route.ts"

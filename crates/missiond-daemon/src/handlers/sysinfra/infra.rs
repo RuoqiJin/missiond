@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::state::AppState;
 
@@ -19,6 +19,16 @@ struct InfraListArgs {
 #[derive(Deserialize)]
 struct InfraGetArgs {
     id: String,
+}
+
+#[derive(Deserialize)]
+struct InfraEvidenceArgs {
+    #[serde(default)]
+    target_id: Option<String>,
+    #[serde(default)]
+    skill: Option<String>,
+    #[serde(default = "default_evidence_limit")]
+    limit: usize,
 }
 
 #[derive(Deserialize)]
@@ -45,6 +55,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         return match action {
             "list" => handle_inner(state, "mission_infra_list", args).await,
             "get" => handle_inner(state, "mission_infra_get", args).await,
+            "health" => handle_inner(state, "mission_infra_health", args).await,
+            "reconcile" => handle_inner(state, "mission_infra_reconcile", args).await,
+            "skill_evidence" => handle_inner(state, "mission_infra_skill_evidence", args).await,
+            "credential_refs" => handle_inner(state, "mission_infra_credential_refs", args).await,
             _ => Ok(ToolResult::error(format!("Unknown action: {}", action))),
         };
     }
@@ -81,6 +95,124 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 Some(server) => Ok(ToolResult::json_pretty(&server)),
                 None => Ok(ToolResult::error(format!("Server not found: {}", id))),
             }
+        }
+        "mission_infra_health" => {
+            let servers = list_infra_servers(state, None, None);
+            let skill_evidence = collect_skill_evidence(
+                state,
+                InfraEvidenceFilter {
+                    target_id: None,
+                    skill: None,
+                    limit: 200,
+                },
+            );
+            let credential_risks = skill_evidence
+                .iter()
+                .filter(|item| {
+                    item.get("credentialInlineRisk")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                })
+                .count();
+            Ok(ToolResult::json_pretty(&json!({
+                "schema": "missiond.infrastructure-health.v1",
+                "runtimeTargets": servers.len(),
+                "skillEvidenceItems": skill_evidence.len(),
+                "credentialInlineRisks": credential_risks,
+                "authority": {
+                    "missiond": "project identity, Universe summary, dispatch, EventBridge",
+                    "deployCenter": "deployment runtime facts, executors, release provenance",
+                    "secretStore": "credential values",
+                    "skills": "operational evidence and procedures"
+                }
+            })))
+        }
+        "mission_infra_skill_evidence" => {
+            let args: InfraEvidenceArgs =
+                serde_json::from_value(args).unwrap_or(InfraEvidenceArgs {
+                    target_id: None,
+                    skill: None,
+                    limit: default_evidence_limit(),
+                });
+            let evidence = collect_skill_evidence(
+                state,
+                InfraEvidenceFilter {
+                    target_id: args.target_id,
+                    skill: args.skill,
+                    limit: args.limit.min(500),
+                },
+            );
+            Ok(ToolResult::json_pretty(&json!({
+                "schema": "missiond.skill-infra-evidence.v1",
+                "authority": "skills are evidence, not runtime truth",
+                "redaction": "credential-like substrings are redacted; values must live in secret-store",
+                "items": evidence
+            })))
+        }
+        "mission_infra_credential_refs" => {
+            let args: InfraEvidenceArgs =
+                serde_json::from_value(args).unwrap_or(InfraEvidenceArgs {
+                    target_id: None,
+                    skill: None,
+                    limit: default_evidence_limit(),
+                });
+            let refs = credential_refs(args.target_id.as_deref());
+            Ok(ToolResult::json_pretty(&json!({
+                "schema": "missiond.credential-ref-inventory.v1",
+                "rule": "Only secret refs are returned. MissionD never returns credential values from Lisp, Board, or skills.",
+                "credentialRefs": refs
+            })))
+        }
+        "mission_infra_reconcile" => {
+            let servers = list_infra_servers(state, None, None);
+            let skill_evidence = collect_skill_evidence(
+                state,
+                InfraEvidenceFilter {
+                    target_id: None,
+                    skill: None,
+                    limit: 500,
+                },
+            );
+            let credential_inline_risks: Vec<_> = skill_evidence
+                .iter()
+                .filter(|item| {
+                    item.get("credentialInlineRisk")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                })
+                .cloned()
+                .collect();
+            let runtime_fact_missing: Vec<_> = servers
+                .iter()
+                .filter(|server| {
+                    server.provider == "skill-derived"
+                        || server.tags.iter().any(|tag| tag == "unverified")
+                })
+                .map(|server| {
+                    json!({
+                        "targetId": server.id,
+                        "kind": "runtime_fact_missing",
+                        "message": "target is present as skill evidence or unverified runtime fact; deploy-center should own the verified runtime record",
+                        "promoteTo": "deploy-center.runtime-target-inventory"
+                    })
+                })
+                .collect();
+            Ok(ToolResult::json_pretty(&json!({
+                "schema": "missiond.infrastructure-reconcile.v1",
+                "consistent": credential_inline_risks.is_empty() && runtime_fact_missing.is_empty(),
+                "sources": {
+                    "missiond": "Universe summary and worker dispatch",
+                    "deployCenter": "runtime targets, executors, service deploy locations",
+                    "secretStore": "credential values and rotations",
+                    "skills": "evidence only"
+                },
+                "runtimeTargets": servers.len(),
+                "skillEvidenceItems": skill_evidence.len(),
+                "drift": {
+                    "runtime_fact_missing": runtime_fact_missing,
+                    "credential_inline_risk": credential_inline_risks
+                }
+            })))
         }
 
         "mission_reachability" => {
@@ -728,6 +860,188 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
     }
 }
 
+fn default_evidence_limit() -> usize {
+    100
+}
+
+struct InfraEvidenceFilter {
+    target_id: Option<String>,
+    skill: Option<String>,
+    limit: usize,
+}
+
+fn collect_skill_evidence(state: &AppState, filter: InfraEvidenceFilter) -> Vec<Value> {
+    let target = filter.target_id.as_deref().map(str::to_ascii_lowercase);
+    let mut items = Vec::new();
+    for skill in state.skills.list() {
+        let skill_name = skill.name.as_str();
+        if filter
+            .skill
+            .as_deref()
+            .map_or(false, |name| name != skill_name)
+        {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&skill.path) else {
+            continue;
+        };
+        for (idx, line) in content.lines().enumerate() {
+            if items.len() >= filter.limit {
+                return items;
+            }
+            if !is_infra_evidence_line(line) {
+                continue;
+            }
+            if let Some(target) = target.as_deref() {
+                let lower = line.to_ascii_lowercase();
+                if !lower.contains(target) && !skill_name.to_ascii_lowercase().contains(target) {
+                    continue;
+                }
+            }
+            let (excerpt, credential_risk) = redact_skill_evidence_line(line);
+            items.push(json!({
+                "sourceSkill": skill_name,
+                "sourcePath": skill.path.display().to_string(),
+                "sourceLine": idx + 1,
+                "confidence": evidence_confidence(line),
+                "promoteTo": evidence_promotion_target(line),
+                "credentialInlineRisk": credential_risk,
+                "excerpt": excerpt
+            }));
+        }
+    }
+    items
+}
+
+fn is_infra_evidence_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    [
+        "12900kf",
+        "hostvds",
+        "deploy-agent",
+        "agent_url",
+        "router",
+        "embedding",
+        "rerank",
+        "pcea",
+        "ecs",
+        "gcp",
+        "bwg",
+        "vps",
+        "192.168.1.20",
+        "192.168.1.19",
+        "104.194.81.38",
+        "45.156.24.163",
+        "106.15.2.17",
+        "tailscale",
+        "harbor",
+        "secret-store",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn evidence_confidence(line: &str) -> &'static str {
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("verified") || lower.contains("已验证") || lower.contains("smoke") {
+        "medium"
+    } else if lower.contains("todo") || lower.contains("maybe") || lower.contains("候选") {
+        "low"
+    } else {
+        "evidence-only"
+    }
+}
+
+fn evidence_promotion_target(line: &str) -> &'static str {
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("secret") || lower.contains("password") || lower.contains("密码") {
+        "secret-store.credential-ref"
+    } else if lower.contains("deploy") || lower.contains("agent") || lower.contains("ecs") {
+        "deploy-center.runtime-target-inventory"
+    } else {
+        "missiond.infrastructure-universe.evidence"
+    }
+}
+
+fn redact_skill_evidence_line(line: &str) -> (String, bool) {
+    let lower = line.to_ascii_lowercase();
+    let risk = lower.contains("sshpass")
+        || lower.contains("password")
+        || lower.contains("密码")
+        || lower.contains("token")
+        || lower.contains("api_key")
+        || lower.contains("api key")
+        || lower.contains("secret");
+    if !risk {
+        return (line.trim().to_string(), false);
+    }
+
+    let mut redacted = line.trim().to_string();
+    for marker in [
+        "sshpass -p",
+        "password",
+        "Password",
+        "密码",
+        "token",
+        "TOKEN",
+        "api_key",
+        "API_KEY",
+    ] {
+        if let Some(idx) = redacted.find(marker) {
+            redacted.truncate(idx + marker.len());
+            redacted.push_str(" <redacted>");
+            break;
+        }
+    }
+    (redacted, true)
+}
+
+fn credential_refs(target_id: Option<&str>) -> Vec<Value> {
+    let refs = vec![
+        json!({
+            "targetId": "windows-12900kf",
+            "namespace": "deploy-agent",
+            "keyName": "windows-agent-token",
+            "secretRef": "secret-store://deploy-agent/windows-12900kf/agent-token",
+            "purpose": "Windows deploy-agent / model runner operations",
+            "requiredCapability": "deploy-ops",
+            "availability": "unknown"
+        }),
+        json!({
+            "targetId": "privatecloud-hostvds",
+            "namespace": "ssh",
+            "keyName": "hostvds-ssh",
+            "secretRef": "secret-store://infra/privatecloud-hostvds/ssh",
+            "purpose": "privatecloud/HostVDS operations",
+            "requiredCapability": "deploy-ops",
+            "availability": "unknown"
+        }),
+        json!({
+            "targetId": "bwg-vps",
+            "namespace": "tunnel",
+            "keyName": "bwg-tunnel-ssh",
+            "secretRef": "secret-store://infra/bwg-vps/tunnel-ssh",
+            "purpose": "BWG tunnel and router/model relay operations",
+            "requiredCapability": "deploy-ops",
+            "availability": "unknown"
+        }),
+        json!({
+            "targetId": "gcp-runtime",
+            "namespace": "cloud",
+            "keyName": "gcp-deploy-center-runtime",
+            "secretRef": "secret-store://cloud/gcp/deploy-center-runtime",
+            "purpose": "GCP production runtime and deploy-center agent access",
+            "requiredCapability": "deploy-ops",
+            "availability": "unknown"
+        }),
+    ];
+    target_id.map_or(refs.clone(), |target| {
+        refs.into_iter()
+            .filter(|item| item.get("targetId").and_then(|v| v.as_str()) == Some(target))
+            .collect()
+    })
+}
+
 fn list_infra_servers(
     state: &AppState,
     role: Option<&str>,
@@ -737,7 +1051,7 @@ fn list_infra_servers(
         let infra = state.infra.read().unwrap();
         infra.servers.clone()
     };
-    append_skill_derived_infra_servers(state, &mut servers);
+    append_skill_derived_infra_servers(&mut servers);
     servers
         .into_iter()
         .filter(|server| {
@@ -763,55 +1077,153 @@ fn infra_id_matches(server: &missiond_core::InfraServer, id: &str) -> bool {
             .any(|tag| tag.eq_ignore_ascii_case(id) || tag.to_ascii_lowercase().contains(&needle))
 }
 
-fn append_skill_derived_infra_servers(
-    state: &AppState,
+fn append_skill_derived_infra_servers(servers: &mut Vec<missiond_core::InfraServer>) {
+    maybe_push_skill_target(
+        servers,
+        WINDOWS_12900KF_INFRA_ID,
+        missiond_core::InfraServer {
+            id: WINDOWS_12900KF_INFRA_ID.to_string(),
+            name: "Windows 12900KF / RTX 3090 Ti".to_string(),
+            provider: "skill-derived".to_string(),
+            host: Some("100.73.97.46".to_string()),
+            lan: Some("192.168.1.19".to_string()),
+            location: Some("local-lan/tailscale".to_string()),
+            roles: vec![
+                "windows-runner".to_string(),
+                "github-runner".to_string(),
+                "gpu".to_string(),
+                "embedding".to_string(),
+                "rerank-candidate".to_string(),
+                "deploy-agent".to_string(),
+            ],
+            tags: vec![
+                "12900kf".to_string(),
+                "3090ti".to_string(),
+                "windows".to_string(),
+                "qwen3-embedding".to_string(),
+                "ollama".to_string(),
+                "agent_url=windows".to_string(),
+                "unverified".to_string(),
+                format!("skill:{}", WINDOWS_12900KF_SKILL),
+            ],
+            description: Some(
+                "Skill evidence: deploy-agent `xjp_agent_exec(agent_url=\"windows\")`; host ssh target via Tailscale or LAN; Ollama/Qwen embedding/rerank candidate via BWG tunnel. Promote to deploy-center/secret-store before treating as verified runtime truth."
+                    .to_string(),
+            ),
+            health_endpoint: Some("http://104.194.81.38:19434/api/tags".to_string()),
+        },
+    );
+    maybe_push_skill_target(
+        servers,
+        "privatecloud-hostvds",
+        missiond_core::InfraServer {
+            id: "privatecloud-hostvds".to_string(),
+            name: "privatecloud / HostVDS runtime".to_string(),
+            provider: "skill-derived".to_string(),
+            host: Some("45.156.24.163".to_string()),
+            lan: None,
+            location: Some("HostVDS/privatecloud".to_string()),
+            roles: vec!["deploy".to_string(), "tunnel".to_string(), "runtime".to_string()],
+            tags: vec![
+                "privatecloud".to_string(),
+                "hostvds".to_string(),
+                "deploy-center-evidence".to_string(),
+                "unverified".to_string(),
+            ],
+            description: Some(
+                "Skill/evidence-derived HostVDS/privatecloud runtime target. Login details must be resolved through secret-store refs and deploy-center provenance, not copied from skills."
+                    .to_string(),
+            ),
+            health_endpoint: None,
+        },
+    );
+    maybe_push_skill_target(
+        servers,
+        "ecs-pcea",
+        missiond_core::InfraServer {
+            id: "ecs-pcea".to_string(),
+            name: "PCEA ECS runtime".to_string(),
+            provider: "skill-derived".to_string(),
+            host: Some("106.15.2.17".to_string()),
+            lan: None,
+            location: Some("Aliyun ECS/PCEA".to_string()),
+            roles: vec!["pcea".to_string(), "runtime".to_string(), "deploy-agent".to_string()],
+            tags: vec!["pcea".to_string(), "ecs".to_string(), "unverified".to_string()],
+            description: Some(
+                "Skill-derived PCEA ECS runtime target; deploy-center should own current service deploy location and rollback artifacts."
+                    .to_string(),
+            ),
+            health_endpoint: None,
+        },
+    );
+    maybe_push_skill_target(
+        servers,
+        "bwg-vps",
+        missiond_core::InfraServer {
+            id: "bwg-vps".to_string(),
+            name: "BWG/VPS tunnel runtime".to_string(),
+            provider: "skill-derived".to_string(),
+            host: Some("104.194.81.38".to_string()),
+            lan: None,
+            location: Some("BWG/VPS".to_string()),
+            roles: vec!["tunnel".to_string(), "router-relay".to_string(), "model-relay".to_string()],
+            tags: vec!["bwg".to_string(), "vps".to_string(), "unverified".to_string()],
+            description: Some(
+                "Skill-derived BWG tunnel target used as model/router relay evidence. Secrets and tunnel lifecycle belong in secret-store and deploy-center."
+                    .to_string(),
+            ),
+            health_endpoint: None,
+        },
+    );
+    maybe_push_skill_target(
+        servers,
+        "privatecloud-lan-192-168-1-20",
+        missiond_core::InfraServer {
+            id: "privatecloud-lan-192-168-1-20".to_string(),
+            name: "Private LAN infra node".to_string(),
+            provider: "skill-derived".to_string(),
+            host: None,
+            lan: Some("192.168.1.20".to_string()),
+            location: Some("local-lan/private-infra".to_string()),
+            roles: vec!["infra".to_string(), "cache".to_string(), "harbor".to_string(), "dns".to_string()],
+            tags: vec!["private-lan".to_string(), "192.168.1.20".to_string(), "unverified".to_string()],
+            description: Some(
+                "Skill-derived private LAN infra target. Treat as unverified until deploy-center inventory or an operator-approved probe confirms the runtime facts."
+                    .to_string(),
+            ),
+            health_endpoint: None,
+        },
+    );
+    maybe_push_skill_target(
+        servers,
+        "gcp-runtime",
+        missiond_core::InfraServer {
+            id: "gcp-runtime".to_string(),
+            name: "GCP production runtime".to_string(),
+            provider: "skill-derived".to_string(),
+            host: None,
+            lan: None,
+            location: Some("GCP production".to_string()),
+            roles: vec!["production".to_string(), "auth".to_string(), "router".to_string(), "deploy-center".to_string()],
+            tags: vec!["gcp".to_string(), "production".to_string(), "unverified".to_string()],
+            description: Some(
+                "Universe summary for GCP-hosted production services. deploy-center provenance is the runtime authority; MissionD keeps only the identity summary."
+                    .to_string(),
+            ),
+            health_endpoint: None,
+        },
+    );
+}
+
+fn maybe_push_skill_target(
     servers: &mut Vec<missiond_core::InfraServer>,
+    id: &str,
+    server: missiond_core::InfraServer,
 ) {
-    if servers
+    if !servers
         .iter()
-        .any(|server| infra_id_matches(server, WINDOWS_12900KF_INFRA_ID))
+        .any(|existing| infra_id_matches(existing, id))
     {
-        return;
+        servers.push(server);
     }
-
-    let Some(skill) = state.skills.get(WINDOWS_12900KF_SKILL) else {
-        return;
-    };
-    let Ok(content) = std::fs::read_to_string(&skill.path) else {
-        return;
-    };
-    if !content.contains("12900KF") || !content.contains("xjp_agent_exec(agent_url=\"windows\")") {
-        return;
-    }
-
-    servers.push(missiond_core::InfraServer {
-        id: WINDOWS_12900KF_INFRA_ID.to_string(),
-        name: "Windows 12900KF / RTX 3090 Ti".to_string(),
-        provider: "skill-derived".to_string(),
-        host: Some("100.73.97.46".to_string()),
-        lan: Some("192.168.1.19".to_string()),
-        location: Some("local-lan/tailscale".to_string()),
-        roles: vec![
-            "windows-runner".to_string(),
-            "github-runner".to_string(),
-            "gpu".to_string(),
-            "embedding".to_string(),
-            "rerank-candidate".to_string(),
-            "deploy-agent".to_string(),
-        ],
-        tags: vec![
-            "12900kf".to_string(),
-            "3090ti".to_string(),
-            "windows".to_string(),
-            "qwen3-embedding".to_string(),
-            "ollama".to_string(),
-            "agent_url=windows".to_string(),
-            format!("skill:{}", WINDOWS_12900KF_SKILL),
-        ],
-        description: Some(
-            "Derived from ~/.claude/skills/windows-runner/SKILL.md: deploy-agent `xjp_agent_exec(agent_url=\"windows\")`; host ssh jin@100.73.97.46 or LAN 192.168.1.19; Ollama qwen3-embedding on 11434; BWG tunnel 104.194.81.38:19434 -> Win:11434. Promote to deploy-center/secret-store when authoritative runtime facts are available."
-                .to_string(),
-        ),
-        health_endpoint: Some("http://104.194.81.38:19434/api/tags".to_string()),
-    });
 }

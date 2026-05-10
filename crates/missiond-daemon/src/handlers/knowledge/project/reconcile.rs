@@ -24,6 +24,9 @@ pub(super) async fn handle_reconcile(state: &AppState, args: Value) -> Result<To
         .map_err(|e| anyhow!("DB error: {}", e))?;
 
     let mut drift = Vec::new();
+    let infra_server_count = state.infra.read().map(|i| i.servers.len()).unwrap_or(0);
+    let skill_infra_evidence = count_skill_infra_evidence(state);
+    let skill_credential_risks = count_skill_credential_risks(state);
 
     let deploy_center = project_match(&projects, "deploy-center", deploy_center_root);
     if !deploy_center.path_exists {
@@ -90,6 +93,22 @@ pub(super) async fn handle_reconcile(state: &AppState, args: Value) -> Result<To
             "aliases": stale_aliases,
         }));
     }
+    if skill_infra_evidence > 0 && infra_server_count == 0 {
+        drift.push(json!({
+            "kind": "runtime_fact_missing",
+            "source": "skill-evidence",
+            "message": "skills contain infra/runtime evidence but MissionD/deploy-center runtime inventory has no configured server rows",
+            "skillEvidenceItems": skill_infra_evidence,
+        }));
+    }
+    if skill_credential_risks > 0 {
+        drift.push(json!({
+            "kind": "credential_inline_risk",
+            "source": "skill-evidence",
+            "message": "skills contain credential-like operational lines; promote only redacted secret_ref facts and migrate values to secret-store",
+            "riskCount": skill_credential_risks,
+        }));
+    }
 
     Ok(ToolResult::json_pretty(&json!({
         "schema": "missiond.project-registry-reconcile.v1",
@@ -116,10 +135,68 @@ pub(super) async fn handle_reconcile(state: &AppState, args: Value) -> Result<To
                 "ssotPath": format!("{forge_root}/.missiond/intent.lisp"),
                 "ssotExists": Path::new(forge_root).join(".missiond/intent.lisp").exists(),
                 "runtimeAuthority": false,
+            },
+            "infra": {
+                "authority": "MissionD summarizes runtime targets; deploy-center owns verified runtime facts; skills are evidence only",
+                "configuredServers": infra_server_count,
+                "skillEvidenceItems": skill_infra_evidence,
+                "skillCredentialInlineRisks": skill_credential_risks,
             }
         },
         "drift": drift,
     })))
+}
+
+fn count_skill_infra_evidence(state: &AppState) -> usize {
+    state
+        .skills
+        .list()
+        .iter()
+        .filter_map(|skill| std::fs::read_to_string(&skill.path).ok())
+        .flat_map(|content| content.lines().map(str::to_string).collect::<Vec<_>>())
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            [
+                "12900kf",
+                "hostvds",
+                "deploy-agent",
+                "agent_url",
+                "router",
+                "embedding",
+                "rerank",
+                "pcea",
+                "ecs",
+                "gcp",
+                "bwg",
+                "192.168.1.20",
+                "104.194.81.38",
+                "45.156.24.163",
+                "106.15.2.17",
+            ]
+            .iter()
+            .any(|needle| lower.contains(needle))
+        })
+        .count()
+}
+
+fn count_skill_credential_risks(state: &AppState) -> usize {
+    state
+        .skills
+        .list()
+        .iter()
+        .filter_map(|skill| std::fs::read_to_string(&skill.path).ok())
+        .flat_map(|content| content.lines().map(str::to_string).collect::<Vec<_>>())
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower.contains("sshpass")
+                || lower.contains("password")
+                || lower.contains("密码")
+                || lower.contains("token")
+                || lower.contains("api_key")
+                || lower.contains("api key")
+                || lower.contains("secret")
+        })
+        .count()
 }
 
 #[derive(Debug)]

@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { ChevronDown, ChevronRight, Activity, Gauge, Network, ServerCog } from 'lucide-react';
+import { ChevronDown, ChevronRight, Activity, Gauge, Network, ServerCog, ShieldCheck } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { MemoryDashboard } from './MemoryDashboard';
 import { EngineDashboard } from './EngineDashboard';
@@ -86,6 +86,53 @@ interface RuntimeService {
   health?: string[];
   dependencies?: string[];
   risks?: string[];
+}
+
+interface InfraTarget {
+  id: string;
+  name: string;
+  provider: string;
+  host?: string;
+  lan?: string;
+  location?: string;
+  roles?: string[];
+  tags?: string[];
+  healthEndpoint?: string;
+}
+
+interface CredentialRef {
+  targetId?: string;
+  namespace?: string;
+  keyName?: string;
+  secretRef?: string;
+  purpose?: string;
+  requiredCapability?: string;
+  availability?: string;
+}
+
+interface SkillEvidence {
+  sourceSkill?: string;
+  sourcePath?: string;
+  sourceLine?: number;
+  confidence?: string;
+  promoteTo?: string;
+  credentialInlineRisk?: boolean;
+  excerpt?: string;
+}
+
+interface InfraPayload {
+  targets: InfraTarget[];
+  health?: {
+    runtimeTargets?: number;
+    skillEvidenceItems?: number;
+    credentialInlineRisks?: number;
+  };
+  credentialRefs?: { credentialRefs?: CredentialRef[] };
+  skillEvidence?: { items?: SkillEvidence[] };
+  reconcile?: {
+    consistent?: boolean;
+    drift?: Record<string, unknown>;
+  };
 }
 
 function ProjectsPanel() {
@@ -198,9 +245,107 @@ function ProjectsPanel() {
   );
 }
 
+function InfraPanel() {
+  const [infra, setInfra] = useState<InfraPayload | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const fetchInfra = useCallback(async () => {
+    try {
+      const res = await fetch('/api/infra');
+      const data = await res.json();
+      setInfra(data);
+    } catch {
+      setInfra(null);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { fetchInfra(); }, [fetchInfra]);
+
+  if (loading) {
+    return <div className="px-6 py-4 text-xs text-neutral-500">加载中...</div>;
+  }
+
+  const targets = infra?.targets ?? [];
+  const refs = infra?.credentialRefs?.credentialRefs ?? [];
+  const evidence = infra?.skillEvidence?.items ?? [];
+  const risks = evidence.filter((item) => item.credentialInlineRisk);
+
+  return (
+    <div className="px-4 sm:px-8 py-4 space-y-4">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <MetricCard label="runtime targets" value={String(targets.length)} />
+        <MetricCard label="skill evidence" value={String(infra?.health?.skillEvidenceItems ?? evidence.length)} />
+        <MetricCard label="credential risks" value={String(infra?.health?.credentialInlineRisks ?? risks.length)} tone={risks.length ? 'warn' : 'ok'} />
+        <MetricCard label="reconcile" value={infra?.reconcile?.consistent ? 'clean' : 'drift'} tone={infra?.reconcile?.consistent ? 'ok' : 'warn'} />
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+        <div className="rounded-lg border border-neutral-800 bg-neutral-950/50 p-3">
+          <div className="mb-2 text-xs font-medium text-neutral-300">Runtime Targets</div>
+          <div className="space-y-2">
+            {targets.map((target) => (
+              <div key={target.id} className="rounded-md border border-neutral-800 bg-neutral-900/50 p-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-medium text-neutral-200">{target.id}</span>
+                  <span className={cn(
+                    'rounded border px-1.5 py-0.5 text-[9px]',
+                    target.provider === 'skill-derived'
+                      ? 'border-amber-500/20 bg-amber-500/5 text-amber-300'
+                      : 'border-emerald-500/20 bg-emerald-500/5 text-emerald-300',
+                  )}>
+                    {target.provider}
+                  </span>
+                </div>
+                <div className="mt-1 text-[11px] text-neutral-500">{target.name}</div>
+                <div className="mt-2 grid grid-cols-2 gap-x-2 gap-y-1 text-[10px] text-neutral-500">
+                  <RuntimeKV label="host" value={target.host || target.lan} />
+                  <RuntimeKV label="location" value={target.location} />
+                  <RuntimeKV label="health" value={target.healthEndpoint} />
+                  <RuntimeKV label="roles" value={(target.roles ?? []).slice(0, 3).join(', ')} />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="rounded-lg border border-neutral-800 bg-neutral-950/50 p-3">
+          <div className="mb-2 text-xs font-medium text-neutral-300">Credential Refs</div>
+          <div className="space-y-2">
+            {refs.map((ref) => (
+              <div key={`${ref.targetId}-${ref.secretRef}`} className="rounded-md border border-neutral-800 bg-neutral-900/50 p-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs text-neutral-300">{ref.targetId}</span>
+                  <span className="text-[9px] text-neutral-500">{ref.availability || 'unknown'}</span>
+                </div>
+                <div className="mt-1 truncate text-[11px] text-cyan-300" title={ref.secretRef}>{ref.secretRef}</div>
+                <div className="mt-1 text-[10px] text-neutral-500">{ref.purpose}</div>
+              </div>
+            ))}
+          </div>
+          {risks.length ? (
+            <div className="mt-4 rounded-md border border-amber-500/20 bg-amber-500/5 p-2">
+              <div className="text-xs font-medium text-amber-300">Skill credential-like evidence</div>
+              <div className="mt-2 space-y-1">
+                {risks.slice(0, 5).map((item) => (
+                  <div key={`${item.sourceSkill}-${item.sourceLine}`} className="text-[10px] text-amber-200/70">
+                    {item.sourceSkill}:{item.sourceLine} → {item.promoteTo}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function SystemDashboard() {
   const [projectsExpanded, setProjectsExpanded] = useState(true);
   const [decisionsExpanded, setDecisionsExpanded] = useState(true);
+  const [infraExpanded, setInfraExpanded] = useState(true);
   const [memoryExpanded, setMemoryExpanded] = useState(true);
   const [engineExpanded, setEngineExpanded] = useState(true);
 
@@ -214,6 +359,16 @@ export function SystemDashboard() {
         onToggle={() => setProjectsExpanded((v) => !v)}
       >
         <ProjectsPanel />
+      </CollapsibleSection>
+
+      <CollapsibleSection
+        title="Infrastructure Universe"
+        icon={ShieldCheck}
+        iconColor="text-emerald-400"
+        expanded={infraExpanded}
+        onToggle={() => setInfraExpanded((v) => !v)}
+      >
+        <InfraPanel />
       </CollapsibleSection>
 
       <CollapsibleSection
@@ -247,6 +402,22 @@ export function SystemDashboard() {
       >
         <EngineDashboard />
       </CollapsibleSection>
+    </div>
+  );
+}
+
+function MetricCard({ label, value, tone = 'neutral' }: { label: string; value: string; tone?: 'neutral' | 'ok' | 'warn' }) {
+  return (
+    <div className="rounded-lg border border-neutral-800 bg-neutral-950/50 p-3">
+      <div className="text-[10px] uppercase tracking-wide text-neutral-600">{label}</div>
+      <div className={cn(
+        'mt-1 text-lg font-semibold',
+        tone === 'ok' && 'text-emerald-300',
+        tone === 'warn' && 'text-amber-300',
+        tone === 'neutral' && 'text-neutral-200',
+      )}>
+        {value}
+      </div>
     </div>
   );
 }

@@ -123,6 +123,10 @@ function checkFiles(root, files) {
     'require explicit confirm=true',
     'deploy-daemon.sh MUST co-build missiond and mission-mcp into one blue-green release',
     'missiond-blue-green-self-update',
+    'infrastructure-universe',
+    'runtime-target-contract',
+    'skill-evidence-contract',
+    'credential-ref-contract',
     'survive daemon kickstart',
     'skip_build remains the synchronous already-built artifact restart path',
     'global_instruction.rs owns mission_global_instruction',
@@ -154,6 +158,9 @@ function checkFiles(root, files) {
     'mission_infra_ops',
     '"list"',
     '"get"',
+    '"reconcile"',
+    '"skill_evidence"',
+    '"credential_refs"',
     '"health"',
     '"reachability"',
     '"diagnose"',
@@ -162,6 +169,10 @@ function checkFiles(root, files) {
     'mission_reachability',
     'mission_os_diagnose',
     'skill_derived',
+    'collect_skill_evidence',
+    'redact_skill_evidence_line',
+    'credentialInlineRisk',
+    'privatecloud-hostvds',
     'WINDOWS_12900KF_SKILL',
     'WINDOWS_12900KF_INFRA_ID',
     'windows-runner',
@@ -170,6 +181,13 @@ function checkFiles(root, files) {
     'parse_ssh_targets',
     'tailscale',
     'deploy_agent',
+  ]);
+
+  requireAll(diagnostics, files.mcpInfra, sources.mcpInfra, [
+    '"reconcile"',
+    '"skill_evidence"',
+    '"credential_refs"',
+    'secret_ref',
   ]);
 
   requireAll(diagnostics, files.permission, sources.permission, [
