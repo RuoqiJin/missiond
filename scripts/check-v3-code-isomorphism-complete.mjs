@@ -79,6 +79,7 @@ export const EXPECTED_SURFACES = [
   'eventbridge',
   'typed-lisp-compiler',
   'mission-shared-memory',
+  'evidence-governance-view',
 ];
 
 export const PER_SURFACE_CHECKERS = [

@@ -902,9 +902,9 @@
 		      :refactor-rule "KB remains opt-in until memory is cleaned; operational skill facts are not noisy KB and must be explicitly retrievable for remote-host, deploy-agent, router embedding/rerank, CI runner, and model-host questions. Project constants should still move to SSOT/Universe rather than worker prompt preloads; broad SSOT review must exclude cold runtime artifacts unless include_runtime=true is explicit.")
     (domain execution-control-plane
       :owner workflow-runner
-      :source [autopilot-runtime workstation-config conversation-memory-distillation semantic-ir-shared-memory-convergence]
-      :functions [workflow-runner task-result-artifact worker-completion-settle slot-lifecycle-manager memory-review-batch-runner board-cleanup-batch-runner board-search-noise-governance]
-      :runtime-projection [BoardTask EventBus task_result_artifacts conversation ended_at SlotReleased workflow_runs workflow_run memory_review_batch_runner board_cleanup_batch_runner board_search_scope]
+      :source [autopilot-runtime workstation-config conversation-memory-distillation semantic-ir-shared-memory-convergence evidence-governance-policy]
+      :functions [workflow-runner task-result-artifact worker-completion-settle slot-lifecycle-manager memory-review-batch-runner board-cleanup-batch-runner board-search-noise-governance evidence-governance-view]
+      :runtime-projection [BoardTask EventBus task_result_artifacts evidence_governance_view conversation ended_at SlotReleased workflow_runs workflow_run memory_review_batch_runner board_cleanup_batch_runner board_search_scope]
       :checker ["node scripts/check-v3-control-plane-m6-split.mjs" "node scripts/check-v3-pty-recognition-isomorphism.mjs" "node scripts/check-v3-workflow-isomorphism.mjs"]
       :refactor-rule "Long-running batch work must use checkpointed workflow_run state, canonical task-result artifacts, EventBus-driven completion settle, and slot lifecycle release; Board notes and PTY finals are projections, not the canonical result. Board cleanup is advisory by default: workers write task-result-artifacts and batch reports, generated review tasks may close after settle, and historical BoardTasks remain untouched until an approved maintenance workflow applies recommendations. Board keyword search defaults to active task scope so historical done/skipped tasks do not pollute current governance decisions; historical search requires includeHistorical=true, scope=all, or an explicit historical status.")
 	    :workflow ".missiond/workflows/missiond-control-plane-m6-split.lisp"
@@ -1750,6 +1750,21 @@
        "llm_summary/topic embedding generation MUST default to human/Jarvis/direct CLI chat read models only; worker/meta/memory-slot conversations project their canonical result through task-result-artifact so skill-injection prompts, quota diagnostics, and worker instructions do not pollute user-facing conversation summaries."
        "A real MissionD project with .missiond but no conversation-ingestion-policy MUST return V3_BLUEPRINT_CONFIG_ERROR rather than silently using embedded defaults."])
 
+  (evidence-governance-policy
+    :desc "Unified evidence model for Memory/KB, Logs, Timeline, Conversation, and worker outputs."
+    :authority-order [task_result_artifacts provider_durable_conversation event_log knowledge_review_state board_projection]
+    :roles
+      ((task-result-artifact :role canonical-worker-output :rule "Worker and workflow finals land here first; Board notes are projections.")
+       (conversation :role provider-user-turn-read-model :rule "Conversation rows/messages preserve provider/user turns for audit and retrieval, not completion authority.")
+       (timeline :role event-causality-view :rule "event_log / EventBus projections explain when and why something happened.")
+       (kb-memory :role reviewed-long-term-knowledge :rule "KB is curated active memory after review overlay; raw historical logs are not active knowledge.")
+       (board :role coordination-projection :rule "BoardTask state coordinates work and operator decisions; it is not the canonical worker result body."))
+    :runtime-projection [mission_shared_memory.evidence_view task_result_artifacts conversations event_log knowledge_review_state board_tasks]
+    :invariants
+      ["mission_shared_memory(action=evidence_view) MUST return the unified evidence governance view for a task/project, grouping task_result_artifacts, conversations, event_log/shared_events, KB review overlay, and Board projection into named evidence lanes."
+       "Memory/KB, Logs, Timeline, and Conversation MUST NOT each invent their own final-result authority; worker outputs use task-result-artifact, conversations are read models, timeline is causality, KB is reviewed long-term knowledge, and Board is coordination projection."
+       "Default agent context may cite the evidence view lanes, but must not treat raw PTY, raw provider transcript, or unreviewed KB as higher authority than task-result-artifacts and durable events."])
+
   (cli-conversation-ingestion
     :desc "Canonical CLI conversation-log ingestion contract for ClaudeCode, Gemini CLI, and Codex CLI."
     :legacy-aliases ["claude_cli" "pty_jsonl"]
@@ -2090,6 +2105,13 @@
       :v3-function mission-shared-memory
       :surface mission-shared-memory
       :note "Durable concurrent-agent coordination substrate: Rust SharedMemoryService + Postgres shared_events / shared_artifacts / shared_claims / agent_cursors, surfaced as mission_shared_memory / mission_context_slice / mission_claim_status. The legacy v1 ledger remains as a file-level compatibility projection only; the durable runtime owns concurrent write authority.")
+    (v2-item evidence-governance-view
+      :status code-aligned
+      :v2-source ".missiond/v2/intent-worker.lisp :: memory/timeline/conversation/board read models (evidence governance unification)"
+      :v3-pillar memory
+      :v3-function evidence-governance-view
+      :surface evidence-governance-view
+      :note "Unified evidence read surface served via mission_shared_memory(action=evidence_view); enforces a single authority order across task_result_artifacts (canonical worker output), conversations (provider/user read model), event_log/shared_events (causality), KB with knowledge_review_state (reviewed long-term knowledge), and BoardTask state (coordination projection).")
     (v2-item project-registry
       :status runtime-projected
       :v2-source ".missiond/v2/intent-worker.lisp :: project-root-spawn-cwd / ProjectRegistry"
@@ -2613,8 +2635,19 @@
                (step s3 :logic "grant shared_claims leases for file/region/surface/test/db-migration write scopes with TTL, heartbeat, conflict, release, and expiry semantics")
                (step s4 :logic "track agent_cursors per stream so resident master and workers resume after restart without rereading whole ledgers")
                (step s5 :logic "serve mission_context_slice from compiled semantic IR plus task/shard artifacts so agents read compact facts before full Lisp")
-               (step s6 :logic "treat .missiond/tasks/**/shared-memory.lisp as compatibility projection only; concurrent truth lives in Rust/Postgres shared memory"))
-        :egress [shared-event shared-artifact shared-claim agent-cursor context-slice EventBus-signal]))
+               (step s6 :logic "treat .missiond/tasks/**/shared-memory.lisp as compatibility projection only; concurrent truth lives in Rust/Postgres shared memory")
+               (step s7 :logic "project mission_shared_memory action=evidence_view per evidence-governance-policy: task_result_artifacts as canonical worker output, conversations as provider/user read model, event_log/shared_events as causality, KB entries with knowledge_review_state as reviewed long-term knowledge, and BoardTask state as coordination projection, returned as named evidence lanes with authority order"))
+        :egress [shared-event shared-artifact shared-claim agent-cursor context-slice EventBus-signal evidence_governance_view evidence_lane_summary authority_order])
+      (function evidence-governance-view
+        :surface evidence-governance-view
+        :entry [mission_shared_memory.evidence_view task_result_artifacts conversations event_log shared_events knowledge_review_state board_tasks]
+        :core ((step s1 :logic "load evidence-governance-policy to fix the authority order across worker output, conversation read model, event causality, reviewed KB, and Board coordination")
+               (step s2 :logic "query task_result_artifacts as canonical worker and workflow outputs for the task or project")
+               (step s3 :logic "query conversations as provider/user turn read models, preserving durable transcript metadata without treating it as completion authority")
+               (step s4 :logic "query event_log and shared_events as the causal timeline for Board, runtime, external service, and worker events")
+               (step s5 :logic "query knowledge with knowledge_review_state so only reviewed long-term knowledge is presented as memory evidence")
+               (step s6 :logic "return named evidence lanes with role labels so Memory/KB, Logs, Timeline, Conversation, and Board do not invent competing final-result authorities"))
+        :egress [evidence_governance_view evidence_lane_summary authority_order]))
 
     (pillar communication
       (function conversation-ingestion
@@ -3068,7 +3101,7 @@
 
     (surface mission-shared-memory
       :status "code-aligned"
-      :implements [shared-events shared-artifacts shared-claims agent-cursors context-slices task-delegate-write-lease swarm-write-lease]
+      :implements [shared-events shared-artifacts shared-claims agent-cursors context-slices evidence-governance-view task-delegate-write-lease swarm-write-lease]
       :code ["crates/missiond-core/migrations/20260508000000_shared_memory.sql"
              "crates/missiond-daemon/src/engine/shared_memory.rs"
              "crates/missiond-daemon/src/state.rs"
@@ -3081,7 +3114,18 @@
              "crates/missiond-mcp/src/tools/mod.rs"
              "scripts/check-v3-shared-memory-isomorphism.mjs"
              ".missiond/workflows/semantic-ir-shared-memory-convergence.lisp"]
-      :note "MissionD shared memory is the Rust/Postgres durable coordination substrate for concurrent agents. EventBus wakes and observes; shared_events/shared_artifacts/shared_claims/agent_cursors hold the coordination truth. Investigation workers write artifacts without claims; implementation workers must have an accepted shard and write-scope lease. Legacy shared-memory.lisp ledgers remain compatibility projections, not concurrent write authority.")
+      :note "MissionD shared memory is the Rust/Postgres durable coordination substrate for concurrent agents. EventBus wakes and observes; shared_events/shared_artifacts/shared_claims/agent_cursors hold the coordination truth. Investigation workers write artifacts without claims; implementation workers must have an accepted shard and write-scope lease. mission_shared_memory(action=evidence_view) projects the unified Memory/KB + Logs/Timeline/Conversation model: task_result_artifacts are canonical worker outputs, conversations are provider/user turn read models, event_log/shared_events are causality, KB is reviewed long-term knowledge, and BoardTask state is coordination projection. Legacy shared-memory.lisp ledgers remain compatibility projections, not concurrent write authority.")
+
+    (surface evidence-governance-view
+      :status "code-aligned"
+      :implements [evidence-governance-view task-result-artifact-authority conversation-read-model timeline-causality-view reviewed-kb-memory board-coordination-projection]
+      :code ["crates/missiond-daemon/src/engine/shared_memory.rs"
+             "crates/missiond-mcp/src/tools/knowledge/shared_memory.rs"
+             "scripts/check-v3-shared-memory-isomorphism.mjs"
+             ".missiond/v3/missiond-blueprint.lisp"]
+      :acceptance ["node scripts/check-v3-shared-memory-isomorphism.mjs --json"
+                   "node scripts/check-v3-pillar-flow-schema.mjs --engine=ocaml --json"]
+      :note "evidence-governance-view is the unified read surface that prevents Memory/KB, Logs, Timeline, Conversation, and Board from competing as result authorities. It is served through mission_shared_memory(action=evidence_view), but it remains a distinct SSOT surface so pillar-flow keeps a single function-to-surface mapping.")
 
     (surface review-gate
       :status "code-aligned"

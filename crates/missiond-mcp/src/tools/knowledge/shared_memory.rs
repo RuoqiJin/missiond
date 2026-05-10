@@ -15,6 +15,7 @@ fn shared_memory_properties() -> Value {
                 "workflow_start",
                 "workflow_checkpoint",
                 "workflow_status",
+                "evidence_view",
                 "worker_settle",
                 "claim",
                 "release",
@@ -120,7 +121,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition::new(
             "mission_shared_memory",
-            "MissionD durable shared memory and execution control plane: append/query events, put/get artifacts, create task-result artifacts, start/checkpoint workflow runs, settle worker completion, claim/release/heartbeat write leases, and manage agent cursors.",
+            "MissionD durable shared memory and execution control plane: append/query events, put/get artifacts, create task-result artifacts, start/checkpoint workflow runs, query the unified evidence-governance view, settle worker completion, claim/release/heartbeat write leases, and manage agent cursors.",
             shared_memory_schema(),
         ),
         ToolDefinition::new(

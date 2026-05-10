@@ -64,6 +64,9 @@ impl SharedMemoryService {
             "workflow_start" | "start_workflow" => self.workflow_start(args).await,
             "workflow_checkpoint" | "checkpoint_workflow" => self.workflow_checkpoint(args).await,
             "workflow_status" | "get_workflow_status" => self.workflow_status(args).await,
+            "evidence_view" | "evidence_governance_view" | "get_evidence_view" => {
+                self.evidence_view(args).await
+            }
             "worker_settle" | "completion_settle" | "settle_worker" => {
                 self.worker_settle(args).await
             }
@@ -734,6 +737,152 @@ impl SharedMemoryService {
         }))
     }
 
+    async fn evidence_view(&self, args: &Value) -> Result<Value> {
+        let task_id = string_arg(args, "task_id").or_else(|| string_arg(args, "taskId"));
+        let project_id = string_arg(args, "project_id")
+            .or_else(|| string_arg(args, "projectId"))
+            .or_else(|| string_arg(args, "project"));
+        if task_id.is_none() && project_id.is_none() {
+            return Err(anyhow!("task_id or project_id is required"));
+        }
+        let limit = bounded_limit(args).min(100);
+
+        let board_task = match task_id {
+            Some(id) => {
+                let row = sqlx::query(
+                    r#"
+                    SELECT id, title, status, category, project, project_id, assignee,
+                           updated_at, dedupe_key
+                    FROM board_tasks
+                    WHERE id = $1
+                    "#,
+                )
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
+                row.map(board_task_evidence_row_json)
+            }
+            None => None,
+        };
+
+        let task_results = sqlx::query(
+            r#"
+            SELECT id, artifact_hash, project_id, task_id, slot_id, conversation_id,
+                   provider, result_status, summary, created_at
+            FROM task_result_artifacts
+            WHERE ($1::text IS NULL OR task_id = $1)
+              AND ($2::text IS NULL OR project_id = $2)
+            ORDER BY created_at DESC
+            LIMIT $3
+            "#,
+        )
+        .bind(task_id)
+        .bind(project_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let conversations = sqlx::query(
+            r#"
+            SELECT id, project, project_id, slot_id, source, model, status,
+                   conversation_type, task_id, message_count, started_at, ended_at,
+                   updated_at, llm_summary
+            FROM conversations
+            WHERE ($1::text IS NULL OR task_id = $1)
+              AND ($2::text IS NULL OR project_id = $2 OR project = $2)
+            ORDER BY COALESCE(updated_at, ended_at, started_at) DESC
+            LIMIT $3
+            "#,
+        )
+        .bind(task_id)
+        .bind(project_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let shared_events = sqlx::query(
+            r#"
+            SELECT id, stream_id, seq, project_id, task_id, agent_id, event_kind,
+                   payload, idempotency_key, correlation_id, parent_event_ids, created_at
+            FROM shared_events
+            WHERE ($1::text IS NULL OR task_id = $1)
+              AND ($2::text IS NULL OR project_id = $2)
+            ORDER BY seq DESC
+            LIMIT $3
+            "#,
+        )
+        .bind(task_id)
+        .bind(project_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let timeline_events = sqlx::query(
+            r#"
+            SELECT seq, domain, kind, payload_inline, payload_ref, producer_id,
+                   trace_id::text AS trace_id, ts, ephemeral
+            FROM event_log
+            WHERE ($1::text IS NULL OR payload_inline::text ILIKE ('%' || $1 || '%'))
+              AND ($2::text IS NULL OR payload_inline::text ILIKE ('%' || $2 || '%') OR domain = $2)
+            ORDER BY seq DESC
+            LIMIT $3
+            "#,
+        )
+        .bind(task_id)
+        .bind(project_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let kb_entries = sqlx::query(
+            r#"
+            SELECT k.id, k.category, k.key, k.summary, k.source, k.project_id,
+                   k.linked_task_id, k.scope_task_id, k.updated_at,
+                   rs.state AS review_state
+            FROM knowledge k
+            LEFT JOIN knowledge_review_state rs
+              ON rs.knowledge_id = k.id AND rs.is_current = true
+            WHERE ($1::text IS NULL OR k.linked_task_id = $1 OR k.scope_task_id = $1)
+              AND ($2::text IS NULL OR k.project_id = $2 OR k.project_id IS NULL)
+            ORDER BY k.updated_at DESC
+            LIMIT $3
+            "#,
+        )
+        .bind(task_id)
+        .bind(project_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(json!({
+            "schema": "missiond.evidence-governance-view.v1",
+            "taskId": task_id,
+            "projectId": project_id,
+            "model": {
+                "taskResultArtifacts": "canonical worker outputs and workflow batch results",
+                "conversations": "provider/user turn read model; useful for audit and retrieval, not worker completion authority",
+                "timelineEvents": "event causality and external/system event projection",
+                "kbMemory": "curated reviewed long-term knowledge; active retrieval is controlled by knowledge_review_state",
+                "board": "coordination projection and operator-facing task state"
+            },
+            "authorityOrder": [
+                "task_result_artifacts",
+                "provider_durable_conversation",
+                "event_log",
+                "knowledge_review_state",
+                "board_projection"
+            ],
+            "lanes": {
+                "board": board_task,
+                "taskResults": task_results.into_iter().map(task_result_row_json).collect::<Vec<_>>(),
+                "conversations": conversations.into_iter().map(conversation_evidence_row_json).collect::<Vec<_>>(),
+                "sharedEvents": shared_events.into_iter().map(event_row_json).collect::<Vec<_>>(),
+                "timelineEvents": timeline_events.into_iter().map(timeline_event_row_json).collect::<Vec<_>>(),
+                "kbMemory": kb_entries.into_iter().map(kb_evidence_row_json).collect::<Vec<_>>()
+            }
+        }))
+    }
+
     async fn worker_settle(&self, args: &Value) -> Result<Value> {
         let task_id = string_arg(args, "task_id")
             .or_else(|| string_arg(args, "taskId"))
@@ -1326,6 +1475,73 @@ fn task_result_row_json(row: sqlx::postgres::PgRow) -> Value {
         "result_status": row.get::<String, _>("result_status"),
         "summary": row.get::<String, _>("summary"),
         "created_at": created_at.to_rfc3339()
+    })
+}
+
+fn board_task_evidence_row_json(row: sqlx::postgres::PgRow) -> Value {
+    json!({
+        "id": row.get::<String, _>("id"),
+        "title": row.get::<String, _>("title"),
+        "status": row.get::<String, _>("status"),
+        "category": row.get::<String, _>("category"),
+        "project": row.try_get::<Option<String>, _>("project").ok().flatten(),
+        "project_id": row.try_get::<Option<String>, _>("project_id").ok().flatten(),
+        "assignee": row.try_get::<Option<String>, _>("assignee").ok().flatten(),
+        "updated_at": row.get::<String, _>("updated_at"),
+        "dedupe_key": row.try_get::<Option<String>, _>("dedupe_key").ok().flatten(),
+        "role": "coordination_projection"
+    })
+}
+
+fn conversation_evidence_row_json(row: sqlx::postgres::PgRow) -> Value {
+    json!({
+        "id": row.get::<String, _>("id"),
+        "project": row.try_get::<Option<String>, _>("project").ok().flatten(),
+        "project_id": row.try_get::<Option<String>, _>("project_id").ok().flatten(),
+        "slot_id": row.try_get::<Option<String>, _>("slot_id").ok().flatten(),
+        "source": row.get::<String, _>("source"),
+        "model": row.try_get::<Option<String>, _>("model").ok().flatten(),
+        "status": row.try_get::<Option<String>, _>("status").ok().flatten(),
+        "conversation_type": row.get::<String, _>("conversation_type"),
+        "task_id": row.try_get::<Option<String>, _>("task_id").ok().flatten(),
+        "message_count": row.try_get::<Option<i32>, _>("message_count").ok().flatten(),
+        "started_at": row.get::<String, _>("started_at"),
+        "ended_at": row.try_get::<Option<String>, _>("ended_at").ok().flatten(),
+        "updated_at": row.try_get::<Option<String>, _>("updated_at").ok().flatten(),
+        "llm_summary": row.try_get::<Option<String>, _>("llm_summary").ok().flatten(),
+        "role": "provider_turn_read_model"
+    })
+}
+
+fn timeline_event_row_json(row: sqlx::postgres::PgRow) -> Value {
+    let ts: DateTime<Utc> = row.get("ts");
+    json!({
+        "seq": row.get::<i64, _>("seq"),
+        "domain": row.get::<String, _>("domain"),
+        "kind": row.get::<String, _>("kind"),
+        "payload_inline": row.try_get::<Option<Value>, _>("payload_inline").ok().flatten(),
+        "payload_ref": row.try_get::<Option<String>, _>("payload_ref").ok().flatten(),
+        "producer_id": row.get::<String, _>("producer_id"),
+        "trace_id": row.try_get::<Option<String>, _>("trace_id").ok().flatten(),
+        "ts": ts.to_rfc3339(),
+        "ephemeral": row.get::<bool, _>("ephemeral"),
+        "role": "event_causality_projection"
+    })
+}
+
+fn kb_evidence_row_json(row: sqlx::postgres::PgRow) -> Value {
+    json!({
+        "id": row.get::<String, _>("id"),
+        "category": row.get::<String, _>("category"),
+        "key": row.get::<String, _>("key"),
+        "summary": row.get::<String, _>("summary"),
+        "source": row.try_get::<Option<String>, _>("source").ok().flatten(),
+        "project_id": row.try_get::<Option<String>, _>("project_id").ok().flatten(),
+        "linked_task_id": row.try_get::<Option<String>, _>("linked_task_id").ok().flatten(),
+        "scope_task_id": row.try_get::<Option<String>, _>("scope_task_id").ok().flatten(),
+        "review_state": row.try_get::<Option<String>, _>("review_state").ok().flatten().unwrap_or_else(|| "unreviewed".to_string()),
+        "updated_at": row.get::<String, _>("updated_at"),
+        "role": "curated_long_term_knowledge"
     })
 }
 
