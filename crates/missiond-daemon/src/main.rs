@@ -700,6 +700,8 @@ async fn main() -> Result<()> {
             is_checkpoint: false,
             checkpoint_message_id: None,
             pending_served: false,
+            empty_probe_count: 0,
+            next_probe_after: 0,
         })),
         slow_extraction_state: Arc::new(tokio::sync::RwLock::new(ExtractionState {
             phase: ExtractionPhase::Idle,
@@ -712,6 +714,8 @@ async fn main() -> Result<()> {
             is_checkpoint: false,
             checkpoint_message_id: None,
             pending_served: false,
+            empty_probe_count: 0,
+            next_probe_after: 0,
         })),
         memory_slot_busy_since: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         slow_slot_busy_since: Arc::new(std::sync::atomic::AtomicI64::new(0)),

@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use missiond_mcp::tools::ToolResult;
+use missiond_mcp::tools::{ToolError, ToolResult};
 use serde::Deserialize;
 use serde_json::Value;
 use tracing::info;
@@ -55,9 +55,14 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                             | crate::state::ExtractionPhase::WaitingForSlotIdle
                     )
                 {
-                    return Ok(ToolResult::text(
-                        "本批次内容已获取。请分析已获取的消息后输出总结即可。\n\
-                         ⚠️ 水位线由系统自动管理，重复调用不会返回新消息。下一批将在本次处理完成后自动调度。"
+                    return Ok(ToolResult::structured_error(
+                        ToolError::new(
+                            "MEMORY_PENDING_ALREADY_SERVED",
+                            "当前 realtime extraction 批次已经由 mission_memory_pending 返回过；重复调用不会获得新消息。",
+                        )
+                        .with_suggestion(
+                            "请基于上一轮已经返回的消息直接输出总结；水位线由系统在本轮完成后推进，下一批会自动调度。",
+                        ),
                     ));
                 }
             }

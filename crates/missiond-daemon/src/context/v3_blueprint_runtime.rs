@@ -113,6 +113,8 @@ pub(crate) const DEFAULT_AUTOPILOT_RECENT_INTENTS_WINDOW_SECS: i64 = 1800;
 pub(crate) const DEFAULT_AUTOPILOT_USER_STUCK_COOLDOWN_SECS: i64 = 1800;
 pub(crate) const DEFAULT_AUTOPILOT_DIRECTION_SHIFT_COOLDOWN_SECS: i64 = 3600;
 pub(crate) const DEFAULT_LEARNING_REALTIME_EXTRACTION_TIMEOUT_SECS: u64 = 300;
+pub(crate) const DEFAULT_LEARNING_REALTIME_EMPTY_BACKOFF_BASE_SECS: i64 = 30;
+pub(crate) const DEFAULT_LEARNING_REALTIME_EMPTY_BACKOFF_MAX_SECS: i64 = 900;
 pub(crate) const DEFAULT_LEARNING_DECISION_TIER3_TIMEOUT_SECS: u64 = 300;
 pub(crate) const DEFAULT_LEARNING_HABIT_SCAN_TIMEOUT_SECS: u64 = 600;
 pub(crate) const DEFAULT_LEARNING_TIMELINE_ANALYSIS_INTERVAL_SECS: i64 = 12 * 3600;
@@ -375,6 +377,8 @@ pub(crate) struct RouterRuntimeConfig {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct LearningEngineRuntimeConfig {
     pub realtime_extraction_timeout_secs: u64,
+    pub realtime_empty_backoff_base_secs: i64,
+    pub realtime_empty_backoff_max_secs: i64,
     pub decision_tier3_timeout_secs: u64,
     pub habit_scan_timeout_secs: u64,
     pub timeline_analysis_interval_secs: i64,
@@ -1067,6 +1071,8 @@ impl Default for LearningEngineRuntimeConfig {
     fn default() -> Self {
         Self {
             realtime_extraction_timeout_secs: DEFAULT_LEARNING_REALTIME_EXTRACTION_TIMEOUT_SECS,
+            realtime_empty_backoff_base_secs: DEFAULT_LEARNING_REALTIME_EMPTY_BACKOFF_BASE_SECS,
+            realtime_empty_backoff_max_secs: DEFAULT_LEARNING_REALTIME_EMPTY_BACKOFF_MAX_SECS,
             decision_tier3_timeout_secs: DEFAULT_LEARNING_DECISION_TIER3_TIMEOUT_SECS,
             habit_scan_timeout_secs: DEFAULT_LEARNING_HABIT_SCAN_TIMEOUT_SECS,
             timeline_analysis_interval_secs: DEFAULT_LEARNING_TIMELINE_ANALYSIS_INTERVAL_SECS,
@@ -2441,6 +2447,11 @@ pub(crate) fn parse_learning_engine_policy(
             &tokens,
             ":realtime-extraction-timeout-secs",
         )?,
+        realtime_empty_backoff_base_secs: int_keyword(
+            &tokens,
+            ":realtime-empty-backoff-base-secs",
+        )?,
+        realtime_empty_backoff_max_secs: int_keyword(&tokens, ":realtime-empty-backoff-max-secs")?,
         decision_tier3_timeout_secs: u64_keyword(&tokens, ":decision-tier3-timeout-secs")?,
         habit_scan_timeout_secs: u64_keyword(&tokens, ":habit-scan-timeout-secs")?,
         timeline_analysis_interval_secs: int_keyword(&tokens, ":timeline-analysis-interval-secs")?,
@@ -2467,6 +2478,8 @@ pub(crate) fn parse_learning_engine_policy(
     };
     if [
         cfg.timeline_analysis_interval_secs,
+        cfg.realtime_empty_backoff_base_secs,
+        cfg.realtime_empty_backoff_max_secs,
         cfg.timeline_analysis_window_hours,
         cfg.timeline_error_limit,
         cfg.timeline_llm_sample_limit,
@@ -2485,6 +2498,11 @@ pub(crate) fn parse_learning_engine_policy(
     {
         return Err(BlueprintConfigError::Parse(
             "learning-engine-policy numeric windows must be positive".into(),
+        ));
+    }
+    if cfg.realtime_empty_backoff_max_secs < cfg.realtime_empty_backoff_base_secs {
+        return Err(BlueprintConfigError::Parse(
+            ":realtime-empty-backoff-max-secs must be >= :realtime-empty-backoff-base-secs".into(),
         ));
     }
     if cfg.timeline_slow_event_limit == 0 || cfg.habit_scan_batch_size == 0 {
@@ -3442,6 +3460,8 @@ mod tests {
 	    :assistant-preview-chars 500)
 	  (learning-engine-policy
 	    :realtime-extraction-timeout-secs 300
+	    :realtime-empty-backoff-base-secs 30
+	    :realtime-empty-backoff-max-secs 900
 	    :decision-tier3-timeout-secs 300
 	    :habit-scan-timeout-secs 600
 	    :timeline-analysis-interval-secs 43200
@@ -4005,6 +4025,14 @@ mod tests {
         assert_eq!(
             cfg.realtime_extraction_timeout_secs,
             DEFAULT_LEARNING_REALTIME_EXTRACTION_TIMEOUT_SECS
+        );
+        assert_eq!(
+            cfg.realtime_empty_backoff_base_secs,
+            DEFAULT_LEARNING_REALTIME_EMPTY_BACKOFF_BASE_SECS
+        );
+        assert_eq!(
+            cfg.realtime_empty_backoff_max_secs,
+            DEFAULT_LEARNING_REALTIME_EMPTY_BACKOFF_MAX_SECS
         );
         assert_eq!(cfg.realtime_extraction_timeout_ms(), 300_000);
         assert_eq!(cfg.decision_tier3_timeout_ms(), 300_000);

@@ -62,6 +62,11 @@ pub(crate) struct ExtractionState {
     /// Latch: mission_memory_pending already returned data in this extraction cycle.
     /// Prevents the agent from polling the same messages repeatedly (watermark advances only on completion).
     pub(crate) pending_served: bool,
+    /// Consecutive realtime scheduler probes that found no useful user-bearing work.
+    /// Used for exponential idle backoff so empty queues do not keep waking workers.
+    pub(crate) empty_probe_count: u32,
+    /// Epoch secs before which realtime extraction should skip empty-queue probes.
+    pub(crate) next_probe_after: i64,
 }
 
 /// Deep analysis schema version. Bump this when the analysis prompt changes

@@ -354,10 +354,19 @@ pub(crate) async fn init_embedding_provider(
 /// 5. Generate embedding for EACH topic independently
 /// 6. Store topic vectors to DB + update TopicCache
 pub(crate) async fn generate_and_store_conv_embedding(state: &AppState, session_id: &str) {
-    // 0. Skip memory/agent slot conversations (content is AI thinking/tool_call, not user topics)
+    // 0. Skip worker/meta conversations: their canonical outcome is a
+    // task-result artifact, not an llm_summary/topic embedding.
     if let Ok(Some(conv)) = state.store.get_conversation(session_id).await {
-        if conv.conversation_type == "memory" || conv.slot_id.as_deref() == Some("slot-memory") {
-            debug!(session = %session_id, "Skipping memory slot conversation for embedding");
+        if !should_generate_conversation_topic_summary(
+            conv.conversation_type.as_str(),
+            conv.slot_id.as_deref(),
+        ) {
+            debug!(
+                session = %session_id,
+                conversation_type = %conv.conversation_type,
+                slot_id = ?conv.slot_id,
+                "Skipping non-user conversation for llm_summary/topic embedding"
+            );
             return;
         }
     }
@@ -542,6 +551,19 @@ pub(crate) async fn generate_and_store_conv_embedding(state: &AppState, session_
 
     // TopicCache removed in P3 — pgvector HNSW replaces in-memory search
     info!(session = %session_id, topic_count = topics.len(), "Multi-topic embeddings generated");
+}
+
+fn should_generate_conversation_topic_summary(
+    conversation_type: &str,
+    slot_id: Option<&str>,
+) -> bool {
+    if slot_id == Some("slot-memory") {
+        return false;
+    }
+    matches!(
+        conversation_type,
+        "user" | "jarvis" | "codex_chat" | "gemini_chat"
+    )
 }
 
 // ── Per-turn embedding (Phase 5 S4) ────────────────────────────────────
@@ -2031,5 +2053,20 @@ mod tests {
         };
 
         assert_eq!(explicit.resolved_model(&router_config), "explicit-gemini");
+    }
+
+    #[test]
+    fn topic_summary_skips_worker_and_memory_conversations() {
+        assert!(should_generate_conversation_topic_summary("user", None));
+        assert!(should_generate_conversation_topic_summary(
+            "codex_chat",
+            None
+        ));
+        assert!(!should_generate_conversation_topic_summary("worker", None));
+        assert!(!should_generate_conversation_topic_summary("meta", None));
+        assert!(!should_generate_conversation_topic_summary(
+            "user",
+            Some("slot-memory")
+        ));
     }
 }

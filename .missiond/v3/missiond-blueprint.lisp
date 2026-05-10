@@ -1672,10 +1672,13 @@
     :tool-result-preview-chars 1000
     :assistant-preview-chars 500
     :active-memory-target-ratio 0.10
+    :sensitive-query-suppression [architecture:module]
     :review-states [active superseded-by-lisp superseded-by-code historical-evidence duplicate wrong-or-stale delete-candidate needs-human]
     :default-query-policy "exclude current review states superseded-by-lisp/superseded-by-code/historical-evidence/duplicate/wrong-or-stale/delete-candidate/needs-human unless include_archived or state_filter is explicit"
     :invariants
       ["mission_memory_pending MUST project batch size and preview truncation lengths from memory-kb-policy."
+       "mission_memory_pending MUST return a structured MEMORY_PENDING_ALREADY_SERVED error when the active realtime extraction batch was already served; repeated polling is caller misuse and must not be treated as a successful empty result."
+       "mission_kb_query MUST suppress architecture:module details for sensitive credential/secret/SSH/token queries unless the caller explicitly scopes category/project to that architecture surface."
        "mission_kb_review MUST write a non-destructive knowledge_review_state overlay; it MUST NOT mutate or delete the original knowledge row."
        "Large KB cleanup MUST calibrate with at least five manual batches before batch overlay application; target active memory is about 10%, with needs-human hidden from default retrieval."
        "mission_kb_query default retrieval MUST honor the review overlay while include_archived=true and state_filter preserve audit access to historical evidence."
@@ -1684,6 +1687,8 @@
   (learning-engine-policy
     :desc "Lisp-owned autonomous learning engine cadence, pty budget, and low-utility reflection policy."
     :realtime-extraction-timeout-secs 300
+    :realtime-empty-backoff-base-secs 30
+    :realtime-empty-backoff-max-secs 900
     :decision-tier3-timeout-secs 300
     :habit-scan-timeout-secs 600
     :timeline-analysis-interval-secs 43200
@@ -1707,6 +1712,7 @@
     :invariants
       ["LearningEngineRuntimeConfig MUST load learning-engine-policy from .missiond/v3/missiond-blueprint.lisp and fail with V3_BLUEPRINT_CONFIG_ERROR for real MissionD projects whose V3 blueprint or policy block is missing."
        "Realtime extraction, Tier3 decision escalation, and historical habit scan pty.send budgets MUST project from learning-engine-policy."
+       "Realtime extraction MUST apply exponential empty-queue backoff from learning-engine-policy after consecutive no-user-work probes, and reset the backoff as soon as a real batch is dispatched."
        "Realtime extraction MUST claim the extraction lane before running pending-message DB probes; pending realtime SQL MUST use EXISTS/LATERAL LIMIT or bounded materialized-candidate shapes instead of global COUNT(DISTINCT)/ROW_NUMBER scans; deep-analysis active-conversation probes MUST use bounded EXISTS/OFFSET checks instead of full message COUNT scans so repeated ticks or status refreshes cannot exhaust the Postgres pool."
        "Learning maintenance cadences (timeline analysis, idle exploration, habit scan, KB auto-GC, KB consolidation, KB reflection, decision harvest, co-occurrence refresh) MUST project from learning-engine-policy."
        "Timeline analysis read windows, event limits, and slow-request threshold MUST project from learning-engine-policy."
@@ -1741,6 +1747,7 @@
        "Explicit opt-in UserPromptSubmit context prefetch intent router model and timeout MUST project from conversation-ingestion-policy instead of local claude-opus/10000ms literals; default workstation hook sync removes UserPromptSubmit prefetch until a memory-audit workflow enables it."
        "Codex vision worker binary/model/idle timeout and CodexCli absolute timeout MUST project from conversation-ingestion-policy instead of local gpt-5.4/120s/300s literals."
        "Historical conversation event/tool-call backfills MUST NOT run unconditionally on daemon startup; they are opt-in maintenance/workflow operations gated by llm.yaml backfill_enabled or MISSIOND_CONVERSATION_BACKFILL_ON_STARTUP=1 so daemon restarts do not replay large provider histories as foreground CPU load."
+       "llm_summary/topic embedding generation MUST default to human/Jarvis/direct CLI chat read models only; worker/meta/memory-slot conversations project their canonical result through task-result-artifact so skill-injection prompts, quota diagnostics, and worker instructions do not pollute user-facing conversation summaries."
        "A real MissionD project with .missiond but no conversation-ingestion-policy MUST return V3_BLUEPRINT_CONFIG_ERROR rather than silently using embedded defaults."])
 
   (cli-conversation-ingestion
@@ -2579,8 +2586,9 @@
                (step s3 :logic "read or mutate durable knowledge rows through one Lisp-described memory contract")
                (step s4 :logic "apply knowledge_review_state overlay before default retrieval so superseded/historical/duplicate/stale/delete-candidate memories leave the active reasoning path without deletion")
                (step s5 :logic "keep needs-human out of default retrieval until adjudicated, because uncertain memory is evidence rather than active guidance")
-               (step s6 :logic "project search, beacon, insight, and memory responses into reviewable evidence")
-               (step s7 :logic "accept intent_memory_candidate from master/workflow context and persist stable high-confidence user intent as memory:decision while keeping uncertain intent in review overlay or candidate artifacts"))
+               (step s6 :logic "suppress architecture-module noise for sensitive credential/secret/SSH/token retrieval intents unless explicitly scoped")
+               (step s7 :logic "project search, beacon, insight, and memory responses into reviewable evidence")
+               (step s8 :logic "accept intent_memory_candidate from master/workflow context and persist stable high-confidence user intent as memory:decision while keeping uncertain intent in review overlay or candidate artifacts"))
         :egress [kb_result memory_projection search_hits insight_summary intent_memory_record])
       (function project-registry
         :surface project-registry

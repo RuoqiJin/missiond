@@ -112,6 +112,71 @@ async fn release_extraction_probe(
     }
 }
 
+async fn should_skip_realtime_empty_backoff(
+    extraction_state: &tokio::sync::RwLock<ExtractionState>,
+) -> bool {
+    let es = extraction_state.read().await;
+    let now = chrono::Utc::now().timestamp();
+    es.phase == ExtractionPhase::Idle && es.next_probe_after > now
+}
+
+fn empty_backoff_secs(config: &LearningEngineRuntimeConfig, empty_count: u32) -> i64 {
+    let count = empty_count.max(1).min(16);
+    let multiplier = 1_i64
+        .checked_shl(count.saturating_sub(1))
+        .unwrap_or(i64::MAX);
+    config
+        .realtime_empty_backoff_base_secs
+        .saturating_mul(multiplier)
+        .min(config.realtime_empty_backoff_max_secs)
+        .max(config.realtime_empty_backoff_base_secs)
+}
+
+async fn record_realtime_empty_probe(
+    extraction_state: &tokio::sync::RwLock<ExtractionState>,
+    config: &LearningEngineRuntimeConfig,
+    reason: &str,
+) {
+    let mut es = extraction_state.write().await;
+    let next_count = es.empty_probe_count.saturating_add(1);
+    let delay = empty_backoff_secs(config, next_count);
+    es.empty_probe_count = next_count;
+    es.next_probe_after = chrono::Utc::now().timestamp().saturating_add(delay);
+    debug!(
+        reason,
+        consecutive_empty = es.empty_probe_count,
+        delay_secs = delay,
+        next_probe_after = es.next_probe_after,
+        "realtime: applying empty-queue backoff"
+    );
+}
+
+async fn reset_realtime_empty_backoff(extraction_state: &tokio::sync::RwLock<ExtractionState>) {
+    let mut es = extraction_state.write().await;
+    es.empty_probe_count = 0;
+    es.next_probe_after = 0;
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::context::v3_blueprint_runtime::LearningEngineRuntimeConfig;
+
+    use super::empty_backoff_secs;
+
+    #[test]
+    fn realtime_empty_backoff_is_exponential_and_capped() {
+        let cfg = LearningEngineRuntimeConfig {
+            realtime_empty_backoff_base_secs: 10,
+            realtime_empty_backoff_max_secs: 40,
+            ..LearningEngineRuntimeConfig::default()
+        };
+        assert_eq!(empty_backoff_secs(&cfg, 1), 10);
+        assert_eq!(empty_backoff_secs(&cfg, 2), 20);
+        assert_eq!(empty_backoff_secs(&cfg, 3), 40);
+        assert_eq!(empty_backoff_secs(&cfg, 10), 40);
+    }
+}
+
 // @beacon: memory
 pub(crate) async fn check_realtime_extraction(state: &AppState) {
     if !check_extraction_gate(&state.extraction_state, state, "realtime").await {
@@ -120,6 +185,10 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
     let Some(config) = load_learning_engine_config() else {
         return;
     };
+    if should_skip_realtime_empty_backoff(&state.extraction_state).await {
+        debug!("realtime: skipping empty-queue probe due to learning-engine backoff");
+        return;
+    }
 
     // Priority enforcement: unified scheduler guarantees submit tasks run before this.
     // Skip if slot-memory is occupied by a running submit task (spawn_blocking: batch scan).
@@ -154,6 +223,8 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
         Ok(p) if !p.is_empty() => p,
         Ok(_) => {
             debug!("realtime: no pending messages (watermark)");
+            record_realtime_empty_probe(&state.extraction_state, &config, "no_pending_watermark")
+                .await;
             release_extraction_probe(
                 &state.extraction_state,
                 &state.bus,
@@ -204,6 +275,7 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
     }
     if pending.is_empty() {
         debug!("realtime: all sessions filtered (no user messages)");
+        record_realtime_empty_probe(&state.extraction_state, &config, "no_user_messages").await;
         release_extraction_probe(
             &state.extraction_state,
             &state.bus,
@@ -225,6 +297,7 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
 
     let session_count = pending.len();
     let msg_count: usize = pending.iter().map(|(_, _, msgs)| msgs.len()).sum();
+    reset_realtime_empty_backoff(&state.extraction_state).await;
 
     // Ensure memory slot is spawned, then check it's idle
     if !request_default_slot(state).await {

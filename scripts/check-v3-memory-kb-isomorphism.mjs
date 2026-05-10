@@ -111,7 +111,10 @@ function checkFiles(root, files) {
 	    ':pending-message-limit 60',
 	    ':tool-result-preview-chars 1000',
 	    ':assistant-preview-chars 500',
+	    ':sensitive-query-suppression [architecture:module]',
 	    ':realtime-extraction-timeout-secs 300',
+	    ':realtime-empty-backoff-base-secs 30',
+	    ':realtime-empty-backoff-max-secs 900',
 	    ':decision-tier3-timeout-secs 300',
 	    ':timeline-analysis-interval-secs 43200',
 	    ':habit-scan-timeout-secs 600',
@@ -142,6 +145,9 @@ function checkFiles(root, files) {
 	    'crates/missiond-core/src/db/pg/conversation.rs',
 	    'scripts/check-v3-memory-kb-isomorphism.mjs',
 	    'memory-kb-policy realtime extraction batch size and preview truncation budgets',
+	    'mission_memory_pending MUST return a structured MEMORY_PENDING_ALREADY_SERVED error',
+	    'mission_kb_query MUST suppress architecture:module details for sensitive credential/secret/SSH/token queries',
+	    'Realtime extraction MUST apply exponential empty-queue backoff from learning-engine-policy',
 	    'knowledge_review_state overlay',
     'projects learning-engine-policy into learning_engine pty send budgets, maintenance cadences, timeline read windows, and KB reflection policy',
     'Realtime extraction MUST claim the extraction lane before running pending-message DB probes',
@@ -189,10 +195,14 @@ function checkFiles(root, files) {
     ':tool-result-preview-chars',
     ':assistant-preview-chars',
     'DEFAULT_LEARNING_REALTIME_EXTRACTION_TIMEOUT_SECS',
+    'DEFAULT_LEARNING_REALTIME_EMPTY_BACKOFF_BASE_SECS',
+    'DEFAULT_LEARNING_REALTIME_EMPTY_BACKOFF_MAX_SECS',
     'DEFAULT_LEARNING_TIMELINE_ANALYSIS_INTERVAL_SECS',
     'DEFAULT_LEARNING_KB_REFLECTION_UTILITY_THRESHOLD',
     'learning-engine-policy',
     ':realtime-extraction-timeout-secs',
+    ':realtime-empty-backoff-base-secs',
+    ':realtime-empty-backoff-max-secs',
     ':cooccurrence-refresh-interval-secs',
   ]);
 
@@ -246,6 +256,8 @@ function checkFiles(root, files) {
     'tool_result_preview_chars',
     'assistant_preview_chars',
     'get_pending_realtime_messages_with_limit(pending_msg_limit)',
+    'MEMORY_PENDING_ALREADY_SERVED',
+    'ToolResult::structured_error',
   ]);
 
   requireAll(diagnostics, files.learningMod, sources.learningMod, [
@@ -261,6 +273,9 @@ function checkFiles(root, files) {
     'realtime_extraction_timeout_ms',
     'try_claim_extraction_probe',
     'release_extraction_probe',
+    'should_skip_realtime_empty_backoff',
+    'record_realtime_empty_probe',
+    'reset_realtime_empty_backoff',
     'another extraction probe already claimed the lane',
     'kb_consolidation_interval_secs',
     'kb_auto_gc_interval_secs',
@@ -419,6 +434,9 @@ function checkFiles(root, files) {
     'include_archived',
     'state_filter',
     '"unreviewed"',
+    'is_sensitive_retrieval_intent',
+    'suppress_for_sensitive_retrieval',
+    'architecture:module',
     'Key is archived by KB review overlay',
   ]);
 
@@ -648,20 +666,27 @@ function buildFixture() {
 	    :pending-message-limit 60
 	    :tool-result-preview-chars 1000
 	    :assistant-preview-chars 500
+	    :sensitive-query-suppression [architecture:module]
 	    :review-states [active superseded-by-lisp superseded-by-code historical-evidence duplicate wrong-or-stale delete-candidate needs-human]
-	    :invariants ["mission_kb_review MUST write a non-destructive knowledge_review_state overlay; it MUST NOT mutate or delete the original knowledge row."
+	    :invariants ["mission_memory_pending MUST return a structured MEMORY_PENDING_ALREADY_SERVED error"
+	                 "mission_kb_query MUST suppress architecture:module details for sensitive credential/secret/SSH/token queries"
+	                 "mission_kb_review MUST write a non-destructive knowledge_review_state overlay; it MUST NOT mutate or delete the original knowledge row."
 	                 "mission_kb_query default retrieval MUST honor the review overlay while include_archived=true and state_filter preserve audit access to historical evidence."])
 	  (function knowledge-memory
 	    :surface memory-kb
 	    :core ((step s4 :logic "apply knowledge_review_state overlay before default retrieval so superseded/historical/duplicate/stale/delete-candidate memories leave the active reasoning path without deletion")))
 	  (learning-engine-policy
 	    :realtime-extraction-timeout-secs 300
+	    :realtime-empty-backoff-base-secs 30
+	    :realtime-empty-backoff-max-secs 900
 	    :decision-tier3-timeout-secs 300
 	    :habit-scan-timeout-secs 600
 	    :timeline-analysis-interval-secs 43200
 	    :cooccurrence-refresh-interval-secs 21600
 	    :invariants ["LearningEngineRuntimeConfig MUST load learning-engine-policy"
-	                 "Timeline projection SQL MUST cast string-bound since/until parameters as ::timestamptz when comparing against event_log.ts"])
+	                 "Realtime extraction MUST apply exponential empty-queue backoff from learning-engine-policy"
+	                 "Timeline projection SQL MUST cast string-bound since/until parameters as ::timestamptz when comparing against event_log.ts"
+	                 "Timeline Analyst MUST check the Gemini provider gate before collecting timeline evidence or calling Gemini"])
 	  (implementation-map
     (surface memory-kb
       :status "code-aligned"
@@ -731,7 +756,7 @@ pub(crate) async fn handle() {
   "mission_kb_query"; "mission_kb_mutate"; "mission_kb_ops"; "mission_kb_review"; "mission_beacon"; "mission_kb_remember";
 }`);
 	  writeFixture(root, DEFAULT_FILES.v3Runtime, `
-	MemoryKbRuntimeConfig; LearningEngineRuntimeConfig; parse_memory_kb_policy; parse_learning_engine_policy; DEFAULT_MEMORY_PENDING_MESSAGE_LIMIT; DEFAULT_MEMORY_TOOL_RESULT_PREVIEW_CHARS; DEFAULT_MEMORY_ASSISTANT_PREVIEW_CHARS; memory-kb-policy; :pending-message-limit; :tool-result-preview-chars; :assistant-preview-chars; DEFAULT_LEARNING_REALTIME_EXTRACTION_TIMEOUT_SECS; DEFAULT_LEARNING_TIMELINE_ANALYSIS_INTERVAL_SECS; DEFAULT_LEARNING_KB_REFLECTION_UTILITY_THRESHOLD; learning-engine-policy; :realtime-extraction-timeout-secs; :cooccurrence-refresh-interval-secs;
+	MemoryKbRuntimeConfig; LearningEngineRuntimeConfig; parse_memory_kb_policy; parse_learning_engine_policy; DEFAULT_MEMORY_PENDING_MESSAGE_LIMIT; DEFAULT_MEMORY_TOOL_RESULT_PREVIEW_CHARS; DEFAULT_MEMORY_ASSISTANT_PREVIEW_CHARS; memory-kb-policy; :pending-message-limit; :tool-result-preview-chars; :assistant-preview-chars; DEFAULT_LEARNING_REALTIME_EXTRACTION_TIMEOUT_SECS; DEFAULT_LEARNING_REALTIME_EMPTY_BACKOFF_BASE_SECS; DEFAULT_LEARNING_REALTIME_EMPTY_BACKOFF_MAX_SECS; DEFAULT_LEARNING_TIMELINE_ANALYSIS_INTERVAL_SECS; DEFAULT_LEARNING_KB_REFLECTION_UTILITY_THRESHOLD; learning-engine-policy; :realtime-extraction-timeout-secs; :realtime-empty-backoff-base-secs; :realtime-empty-backoff-max-secs; :cooccurrence-refresh-interval-secs;
 	`);
   writeFixture(root, DEFAULT_FILES.kbArgs, `
 pub(super) struct KBRememberArgs;
@@ -779,6 +804,10 @@ pub(super) async fn handle_kb_list() {
 fn review_state_hidden() {}
 async fn filter_entries_by_review() {
   kb_review_current_for_ids; kb_review_get_by_key; include_archived; state_filter; "unreviewed";
+}
+fn is_sensitive_retrieval_intent() {}
+fn suppress_for_sensitive_retrieval() {
+  "architecture:module";
 }`);
   writeFixture(root, DEFAULT_FILES.kbDiscovery, `
 pub(super) async fn handle_kb_discover() {
@@ -892,13 +921,13 @@ async fn kb_review_stats() {
 }
 `);
 	  writeFixture(root, DEFAULT_FILES.memory, `
-	MemoryKbRuntimeConfig; load_memory_kb_config; V3_BLUEPRINT_CONFIG_ERROR; pending_message_limit; tool_result_preview_chars; assistant_preview_chars; get_pending_realtime_messages_with_limit(pending_msg_limit);
+	MemoryKbRuntimeConfig; load_memory_kb_config; V3_BLUEPRINT_CONFIG_ERROR; pending_message_limit; tool_result_preview_chars; assistant_preview_chars; get_pending_realtime_messages_with_limit(pending_msg_limit); MEMORY_PENDING_ALREADY_SERVED; ToolResult::structured_error;
 	`);
 	  writeFixture(root, DEFAULT_FILES.learningMod, `
 	LearningEngineRuntimeConfig; decision_harvest_interval_secs; cooccurrence_refresh_interval_secs; V3 learning-engine-policy unavailable;
 	`);
 	  writeFixture(root, DEFAULT_FILES.learningExtraction, `
-	LearningEngineRuntimeConfig; load_learning_engine_config; realtime_extraction_timeout_ms; try_claim_extraction_probe; release_extraction_probe; another extraction probe already claimed the lane; kb_consolidation_interval_secs; kb_auto_gc_interval_secs; kb_reflection_interval_secs; kb_reflection_utility_threshold; kb_reflection_max_tokens;
+	LearningEngineRuntimeConfig; load_learning_engine_config; realtime_extraction_timeout_ms; try_claim_extraction_probe; release_extraction_probe; should_skip_realtime_empty_backoff; record_realtime_empty_probe; reset_realtime_empty_backoff; another extraction probe already claimed the lane; kb_consolidation_interval_secs; kb_auto_gc_interval_secs; kb_reflection_interval_secs; kb_reflection_utility_threshold; kb_reflection_max_tokens;
 	`);
 	  writeFixture(root, DEFAULT_FILES.pgConversation, `
 	SELECT COUNT(*) FROM conversations c WHERE EXISTS (SELECT 1 FROM conversation_messages m LIMIT 1);

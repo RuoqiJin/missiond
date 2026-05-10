@@ -28,6 +28,7 @@ const DEFAULT_FILES = {
   contextPipeline: 'crates/missiond-daemon/src/context/context_pipeline.rs',
   visionWorker: 'crates/missiond-daemon/src/workers/codex/vision_worker.rs',
   codexCli: 'crates/missiond-daemon/src/llm/codex_cli.rs',
+  embeddingWorker: 'crates/missiond-daemon/src/workers/sonnet/embedding_worker.rs',
   pgConversation: 'crates/missiond-core/src/db/pg/conversation.rs',
   mcpConversation: 'crates/missiond-mcp/src/tools/comm/conversation.rs',
   mcpTimeline: 'crates/missiond-mcp/src/tools/comm/timeline.rs',
@@ -132,6 +133,8 @@ function checkFiles(root, files) {
     'Codex vision worker binary/model/idle timeout and CodexCli absolute timeout MUST project from conversation-ingestion-policy',
     'Historical conversation event/tool-call backfills MUST NOT run unconditionally on daemon startup',
     'MISSIOND_CONVERSATION_BACKFILL_ON_STARTUP=1',
+    'llm_summary/topic embedding generation MUST default to human/Jarvis/direct CLI chat read models only',
+    'task-result-artifact',
     'conversation.rs is the thin conversation-ingestion facade',
     'conversation/router.rs owns mission_conversation_query',
     'conversation/query.rs owns read-model query actions',
@@ -345,6 +348,13 @@ function checkFiles(root, files) {
     'Duration::from_secs(300)',
   ]);
 
+  requireAll(diagnostics, files.embeddingWorker, sources.embeddingWorker, [
+    'should_generate_conversation_topic_summary',
+    '"user" | "jarvis" | "codex_chat" | "gemini_chat"',
+    'Skipping non-user conversation for llm_summary/topic embedding',
+    'topic_summary_skips_worker_and_memory_conversations',
+  ]);
+
   requireAll(diagnostics, files.pgConversation, sources.pgConversation, [
     'task_scoped_type_clause',
     'None | Some("all") => String::new()',
@@ -440,11 +450,12 @@ function buildFixture() {
              "crates/missiond-daemon/src/context/context_pipeline.rs"
              "crates/missiond-daemon/src/workers/codex/vision_worker.rs"
              "crates/missiond-daemon/src/llm/codex_cli.rs"
+             "crates/missiond-daemon/src/workers/sonnet/embedding_worker.rs"
              "crates/missiond-core/src/db/pg/conversation.rs"
              "crates/missiond-mcp/src/tools/comm/conversation.rs"
              "crates/missiond-mcp/src/tools/comm/timeline.rs"
              "scripts/check-v3-conversation-ingestion-isomorphism.mjs"]
-      :note "conversation-ingestion-policy read-model default and max limits; UserPromptSubmit context prefetch intent router model and timeout MUST project from conversation-ingestion-policy; Codex vision worker binary/model/idle timeout and CodexCli absolute timeout MUST project from conversation-ingestion-policy; Historical conversation event/tool-call backfills MUST NOT run unconditionally on daemon startup and require MISSIOND_CONVERSATION_BACKFILL_ON_STARTUP=1 or backfill_enabled; conversation.rs is the thin conversation-ingestion facade; conversation/router.rs owns mission_conversation_query; conversation/query.rs owns read-model query actions; when mission_conversation_query list is scoped by taskId and conversationType is omitted, query all provider conversation rows; message-anchored BoardTask id fallback; compaction timeline reconstruction tolerates legacy NULL started_at/message_count rows; conversation/events.rs owns analysis/event egress; conversation/maintenance.rs owns embedding/reconcile work items; timeline.rs owns mission_timeline; retrospective.rs owns retrospective analysis, list, and backfill; vision_worker.rs owns unprocessed image-message extraction through CodexCli."))
+      :note "conversation-ingestion-policy read-model default and max limits; UserPromptSubmit context prefetch intent router model and timeout MUST project from conversation-ingestion-policy; Codex vision worker binary/model/idle timeout and CodexCli absolute timeout MUST project from conversation-ingestion-policy; Historical conversation event/tool-call backfills MUST NOT run unconditionally on daemon startup and require MISSIOND_CONVERSATION_BACKFILL_ON_STARTUP=1 or backfill_enabled; llm_summary/topic embedding generation MUST default to human/Jarvis/direct CLI chat read models only; task-result-artifact owns worker/meta final results; conversation.rs is the thin conversation-ingestion facade; conversation/router.rs owns mission_conversation_query; conversation/query.rs owns read-model query actions; when mission_conversation_query list is scoped by taskId and conversationType is omitted, query all provider conversation rows; message-anchored BoardTask id fallback; compaction timeline reconstruction tolerates legacy NULL started_at/message_count rows; conversation/events.rs owns analysis/event egress; conversation/maintenance.rs owns embedding/reconcile work items; timeline.rs owns mission_timeline; retrospective.rs owns retrospective analysis, list, and backfill; vision_worker.rs owns unprocessed image-message extraction through CodexCli."))
   (compression-contract
     :checks ["node scripts/check-v3-conversation-ingestion-isomorphism.mjs"]))`,
   );
@@ -495,6 +506,10 @@ function buildFixture() {
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.codexCli),
     'ConversationIngestionRuntimeConfig absolute_timeout with_conversation_ingestion_config config.vision_codex_absolute_timeout() absolute timeout ({}s)',
+  );
+  fs.writeFileSync(
+    path.join(root, DEFAULT_FILES.embeddingWorker),
+    'should_generate_conversation_topic_summary "user" | "jarvis" | "codex_chat" | "gemini_chat" Skipping non-user conversation for llm_summary/topic embedding topic_summary_skips_worker_and_memory_conversations',
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.pgConversation),

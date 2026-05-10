@@ -50,6 +50,49 @@ async fn filter_entries_by_review(
         .collect()
 }
 
+fn is_sensitive_retrieval_intent(query: &str, category: Option<&str>) -> bool {
+    let scoped_category = category.unwrap_or_default().to_ascii_lowercase();
+    if scoped_category.starts_with("credential")
+        || scoped_category.contains("secret")
+        || scoped_category.contains("token")
+    {
+        return true;
+    }
+    let q = query.to_ascii_lowercase();
+    [
+        "password",
+        "passwd",
+        "credential",
+        "secret",
+        "token",
+        "api key",
+        "apikey",
+        "ssh",
+        "private key",
+        "密钥",
+        "密码",
+        "凭据",
+        "令牌",
+    ]
+    .iter()
+    .any(|needle| q.contains(needle))
+}
+
+fn suppress_for_sensitive_retrieval(
+    entry: &missiond_core::types::KnowledgeEntry,
+    sensitive: bool,
+    explicit_category: Option<&str>,
+) -> bool {
+    if !sensitive {
+        return false;
+    }
+    let category = entry.category.as_str();
+    let explicitly_scoped_to_architecture = explicit_category
+        .map(|cat| cat.starts_with("architecture:module"))
+        .unwrap_or(false);
+    !explicitly_scoped_to_architecture && category.starts_with("architecture:module")
+}
+
 pub(super) async fn handle_kb_search(state: &AppState, args: Value) -> Result<ToolResult> {
     let KBSearchArgs {
         query,
@@ -86,6 +129,7 @@ pub(super) async fn handle_kb_search(state: &AppState, args: Value) -> Result<To
     let top_k = limit.unwrap_or(10).clamp(1, 50);
     let offset = offset.unwrap_or(0).min(100);
     let exact_mode = search_mode.as_deref() == Some("exact");
+    let sensitive_retrieval = is_sensitive_retrieval_intent(&query, category.as_deref());
 
     let fts_ranked: Vec<(String, usize, Option<String>)> = {
         let ranked = state
@@ -224,6 +268,9 @@ pub(super) async fn handle_kb_search(state: &AppState, args: Value) -> Result<To
     };
     results =
         filter_entries_by_review(state, results, include_archived, state_filter.as_deref()).await;
+    results.retain(|entry| {
+        !suppress_for_sensitive_retrieval(entry, sensitive_retrieval, category.as_deref())
+    });
     results.truncate(top_k);
 
     for entry in &mut results {
@@ -371,5 +418,63 @@ pub(super) async fn handle_kb_list(state: &AppState, args: Value) -> Result<Tool
         })))
     } else {
         Ok(ToolResult::json_pretty(&entries))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use missiond_core::types::KnowledgeEntry;
+    use serde_json::json;
+
+    use super::{is_sensitive_retrieval_intent, suppress_for_sensitive_retrieval};
+
+    fn entry(category: &str) -> KnowledgeEntry {
+        KnowledgeEntry {
+            id: "k1".to_string(),
+            category: category.to_string(),
+            key: "key".to_string(),
+            summary: "summary".to_string(),
+            detail: Some(json!("detail")),
+            source: "test".to_string(),
+            confidence: 1.0,
+            access_count: 0,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            last_accessed_at: None,
+            linked_task_id: None,
+            kb_type: "fact".to_string(),
+            project_id: None,
+            scope_task_id: None,
+            utility_score: 0.5,
+            context_snippet: None,
+        }
+    }
+
+    #[test]
+    fn sensitive_queries_suppress_architecture_module_noise() {
+        assert!(is_sensitive_retrieval_intent(
+            "ssh private key for prod",
+            None
+        ));
+        assert!(suppress_for_sensitive_retrieval(
+            &entry("architecture:module"),
+            true,
+            None
+        ));
+        assert!(!suppress_for_sensitive_retrieval(
+            &entry("credential"),
+            true,
+            None
+        ));
+        assert!(!suppress_for_sensitive_retrieval(
+            &entry("architecture:module"),
+            true,
+            Some("architecture:module")
+        ));
+        assert!(!suppress_for_sensitive_retrieval(
+            &entry("architecture:module"),
+            false,
+            None
+        ));
     }
 }
