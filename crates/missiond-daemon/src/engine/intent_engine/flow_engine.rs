@@ -10,7 +10,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use tracing::{debug, info, warn};
 
-use crate::context::v3_blueprint_runtime::RouterRuntimeConfig;
+use crate::context::v3_blueprint_runtime::{RouterRuntimeConfig, WorkstationRuntimeConfig};
 use crate::decision_harvest::harvest_decisions_for_task;
 use crate::llm_gateway::{call_gemini_for_flow, determine_llm_env};
 use crate::state::AppState;
@@ -724,6 +724,35 @@ pub(crate) async fn ensure_autopilot_pty(
         slot.config.tool_policy_path.as_deref(),
         config_path_base.as_ref(),
     );
+    let config_root_string = config_path_base
+        .as_ref()
+        .map(|path| path.to_string_lossy().to_string());
+    let workstation_config =
+        match WorkstationRuntimeConfig::load_for_project_root(config_root_string.as_deref()) {
+            Ok(config) => config,
+            Err(err) => {
+                warn!(
+                    task_id = %task.id,
+                    slot_id,
+                    error = %err,
+                    "Autopilot: failed to load V3 workstation runtime config for PTY spawn"
+                );
+                let _ = state
+                    .store
+                    .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+                        task_id: task.id.to_string(),
+                        content: format!(
+                            "❌ V3 workstation runtime config 加载失败，无法安全启动 PTY。\n\n{}",
+                            err
+                        ),
+                        note_type: Some("note".to_string()),
+                        author: Some("autopilot".to_string()),
+                    })
+                    .await;
+                return false;
+            }
+        };
+    let spawn_timeout_secs = workstation_config.dynamic_slot_spawn_timeout_secs();
     let mut final_slot_env = slot.config.env.clone().unwrap_or_default();
     for (k, v) in &task_env {
         info!(task_id = %task.id, slot_id, key = %k, value = %v, "Autopilot: LLM route override");
@@ -740,7 +769,7 @@ pub(crate) async fn ensure_autopilot_pty(
         PTYSpawnOptions {
             auto_restart: false,
             wait_for_idle: true,
-            timeout_secs: Some(120),
+            timeout_secs: Some(spawn_timeout_secs),
             mcp_config,
             dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
             model: slot.config.model.clone(),
@@ -804,7 +833,10 @@ pub(crate) async fn ensure_autopilot_pty(
                 .store
                 .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
                     task_id: task.id.to_string(),
-                    content: format!("⏳ PTY spawn 失败（120s 超时）。\n\n{}", e),
+                    content: format!(
+                        "⏳ PTY spawn 失败（{}s 超时）。\n\n{}",
+                        spawn_timeout_secs, e
+                    ),
                     note_type: Some("note".to_string()),
                     author: Some("autopilot".to_string()),
                 })

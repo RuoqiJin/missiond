@@ -34,6 +34,8 @@ const DEFAULT_FILES = {
   spawner: 'crates/missiond-daemon/src/slot_orchestrator/spawner.rs',
   ccController: 'crates/missiond-daemon/src/slot_orchestrator/cc_controller.rs',
   geminiDriver: 'crates/missiond-daemon/src/llm/gemini_driver.rs',
+  flowEngine: 'crates/missiond-daemon/src/engine/intent_engine/flow_engine.rs',
+  memoryScheduler: 'crates/missiond-daemon/src/engine/intent_engine/memory_scheduler.rs',
   autopilot: 'crates/missiond-daemon/src/engine/intent_engine/autopilot.rs',
   ccTasks: 'crates/missiond-daemon/src/handlers/compute/cc_tasks.rs',
   mcpComputeSlot: 'crates/missiond-mcp/src/tools/compute/compute_slot.rs',
@@ -422,6 +424,26 @@ function checkFiles(root, files) {
     'timeout_secs: Some(120)',
   ]);
 
+  requireAll(diagnostics, files.flowEngine, sources.flowEngine, [
+    'WorkstationRuntimeConfig::load_for_project_root',
+    'dynamic_slot_spawn_timeout_secs',
+    'timeout_secs: Some(spawn_timeout_secs)',
+    'PTY spawn 失败（{}s 超时）',
+  ]);
+  forbidAll(diagnostics, files.flowEngine, sources.flowEngine, [
+    'timeout_secs: Some(120)',
+    'PTY spawn 失败（120s 超时）',
+  ]);
+
+  requireAll(diagnostics, files.memoryScheduler, sources.memoryScheduler, [
+    'WorkstationRuntimeConfig::load_for_project_root',
+    'dynamic_slot_spawn_timeout_secs',
+    'timeout_secs: Some(spawn_timeout_secs)',
+  ]);
+  forbidAll(diagnostics, files.memoryScheduler, sources.memoryScheduler, [
+    'timeout_secs: Some(120)',
+  ]);
+
 	  requireAll(diagnostics, files.autopilot, sources.autopilot, [
 	    'AutopilotRuntimeConfig::load_for_current_dir',
 	    'dispatch_board_tasks_with_config',
@@ -735,6 +757,15 @@ model.unwrap_or(default_model);
 WorkstationRuntimeConfig::load_for_project_root();
 V3_BLUEPRINT_CONFIG_ERROR;
 let spawn_timeout_secs = runtime_config.dynamic_slot_spawn_timeout_secs();
+timeout_secs: Some(spawn_timeout_secs);`);
+  writeFixture(root, DEFAULT_FILES.flowEngine, `
+WorkstationRuntimeConfig::load_for_project_root();
+let spawn_timeout_secs = workstation_config.dynamic_slot_spawn_timeout_secs();
+timeout_secs: Some(spawn_timeout_secs);
+format!("PTY spawn 失败（{}s 超时）", spawn_timeout_secs);`);
+  writeFixture(root, DEFAULT_FILES.memoryScheduler, `
+WorkstationRuntimeConfig::load_for_project_root();
+let spawn_timeout_secs = workstation_config.dynamic_slot_spawn_timeout_secs();
 timeout_secs: Some(spawn_timeout_secs);`);
 	  writeFixture(root, DEFAULT_FILES.autopilot, `
 	AutopilotRuntimeConfig::load_for_current_dir();

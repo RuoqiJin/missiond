@@ -1,8 +1,7 @@
 use tracing::{debug, info, warn};
 
+use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
 use crate::extraction::{check_deep_analysis, check_kb_consolidation, check_realtime_extraction};
-use crate::slot_env::build_slot_tracking_env;
-use crate::slot_env::capture_slot_session_uuid;
 use crate::state::AppState;
 use crate::state::MEMORY_SLOT_ID;
 use missiond_core::PTYSpawnOptions;
@@ -41,6 +40,23 @@ pub(crate) async fn ensure_memory_slot_by_id(state: &AppState, slot_id: &str) ->
         cwd: slot.config.cwd.as_deref().map(PathBuf::from),
         engine: slot.config.engine,
     };
+    let config_root = slot
+        .config
+        .project_root
+        .as_deref()
+        .or(slot.config.cwd.as_deref());
+    let runtime_config = match WorkstationRuntimeConfig::load_for_project_root(config_root) {
+        Ok(config) => config,
+        Err(err) => {
+            warn!(
+                slot_id,
+                error = %err,
+                "Failed to load V3 workstation runtime config for memory slot spawn"
+            );
+            return false;
+        }
+    };
+    let spawn_timeout_secs = runtime_config.dynamic_slot_spawn_timeout_secs();
     let slot_env = slot.config.env.as_ref();
     let mcp_config = slot.config.mcp_config.map(PathBuf::from);
     match crate::slot_orchestrator::spawner::spawn_tracked_slot(
@@ -53,7 +69,7 @@ pub(crate) async fn ensure_memory_slot_by_id(state: &AppState, slot_id: &str) ->
         PTYSpawnOptions {
             auto_restart: true,
             wait_for_idle: true,
-            timeout_secs: Some(120),
+            timeout_secs: Some(spawn_timeout_secs),
             mcp_config,
             dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
             model: slot.config.model.clone(),
