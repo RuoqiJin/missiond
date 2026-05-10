@@ -140,6 +140,7 @@ pub(crate) const DEFAULT_QUICK_HAIKU_PROFILE: &str = "quick-haiku";
 pub(crate) const DEFAULT_RESEARCH_PROFILE: &str = "research-default";
 pub(crate) const DEFAULT_CODEX_MASTER_PROFILE: &str = "codex-master-gpt-5-5-xhigh";
 pub(crate) const DEFAULT_GEMINI_ULTRA_PRO_PROFILE: &str = "gemini-ultra-pro-preview";
+pub(crate) const DEFAULT_CHAT_COMPLETIONS_DEFAULT_SLOT: &str = "slot-claude-code-default";
 pub(crate) const DEFAULT_ROUTER_CHAT_MODEL: &str = "gemini-3.1-pro";
 pub(crate) const DEFAULT_ROUTER_CHAT_MAX_TOKENS: u32 = 16384;
 pub(crate) const DEFAULT_ROUTER_FILE_CHAT_MAX_TOKENS: u32 = 65536;
@@ -172,6 +173,7 @@ pub(crate) struct WorkstationRuntimeConfig {
     startup_slots: Vec<StartupSlotRuntimeConfig>,
     workstation_pool: Vec<WorkstationPoolRuntimeConfig>,
     allowed_cwd_prefixes: Vec<PathBuf>,
+    chat_completions_default_slot: String,
     pub timeout_policy: TimeoutPolicy,
     pub cc_swarm_timeout_policy: SimpleTimeoutPolicy,
     pub pty_send_timeout_policy: SimpleTimeoutPolicy,
@@ -932,6 +934,7 @@ impl Default for WorkstationRuntimeConfig {
                 .iter()
                 .map(PathBuf::from)
                 .collect(),
+            chat_completions_default_slot: DEFAULT_CHAT_COMPLETIONS_DEFAULT_SLOT.to_string(),
             timeout_policy: TimeoutPolicy::default(),
             cc_swarm_timeout_policy: SimpleTimeoutPolicy::default(),
             pty_send_timeout_policy: SimpleTimeoutPolicy::pty_send_default(),
@@ -1161,6 +1164,10 @@ impl WorkstationRuntimeConfig {
 
     pub(crate) fn allowed_cwd_prefixes(&self) -> &[PathBuf] {
         &self.allowed_cwd_prefixes
+    }
+
+    pub(crate) fn chat_completions_default_slot(&self) -> &str {
+        &self.chat_completions_default_slot
     }
 
     pub(crate) fn available_slot_template_names(&self) -> Vec<&str> {
@@ -1759,6 +1766,27 @@ pub(crate) fn parse_workstation_config(
         ));
     }
     config.allowed_cwd_prefixes = allowed_prefixes.into_iter().map(PathBuf::from).collect();
+    let chat_policy_form = find_forms(&block, "chat-completions-policy")
+        .into_iter()
+        .find(|form| {
+            let tokens = tokenize_lisp(form);
+            tokens.get(2).is_some_and(|name| name == "jarvis-api")
+        })
+        .ok_or_else(|| {
+            BlueprintConfigError::Parse(
+                "missing (chat-completions-policy jarvis-api ...) in workstation-config".into(),
+            )
+        })?;
+    let chat_policy_tokens = tokenize_lisp(&chat_policy_form);
+    let default_chat_slot = non_empty_keyword(&chat_policy_tokens, ":default_slot")
+        .or_else(|_| non_empty_keyword(&chat_policy_tokens, ":default-slot"))?;
+    if default_chat_slot.chars().any(|ch| ch.is_whitespace()) {
+        return Err(BlueprintConfigError::Parse(
+            "chat-completions-policy jarvis-api :default_slot must be a single slot id token"
+                .into(),
+        ));
+    }
+    config.chat_completions_default_slot = default_chat_slot;
     let startup_slot_forms = find_forms(&block, "startup-slot");
     if !startup_slot_forms.is_empty() {
         config.startup_slots.clear();
@@ -3329,6 +3357,9 @@ mod tests {
     (slot-template ops :role operator :description "Dynamic ops slot (ephemeral)" :default-model-profile daily-sonnet :mcp-config "/Users/jinchen/.xjp-mission/xjp-mcp-config.json" :default-cwd "/Users/jinchen/Projects")
     (cwd-policy dynamic-slot
       :allowed-prefixes ["/Users/jinchen/Projects" "/Users/jinchen/Downloads" "/Users/jinchen/Documents" "/tmp"])
+    (chat-completions-policy jarvis-api
+      :default_slot "slot-claude-code-default"
+      :header_override "X-Slot-Id")
     (startup-slot arch_maintenance :engine claude-code :lifecycle persistent :slot_id "slot-arch-maint" :role arch-maint :model_profile coding-default-opus-4-7 :timeout_secs 600 :skip_permissions true)
     (startup-slot strategy_analyst :engine gemini :lifecycle persistent :slot_id "slot-gemini-strategy" :role strategy :model_profile nil :timeout_secs 600 :skip_permissions true)
     (startup-slot gemini_router :engine gemini :lifecycle persistent :slot_id "slot-gemini-router" :role gemini-router :model_profile nil :timeout_secs 120 :skip_permissions true)
@@ -3632,6 +3663,10 @@ mod tests {
         assert_eq!(cfg.startup_slots().len(), 4);
         assert_eq!(cfg.workstation_pool().len(), 6);
         assert_eq!(
+            cfg.chat_completions_default_slot(),
+            DEFAULT_CHAT_COMPLETIONS_DEFAULT_SLOT
+        );
+        assert_eq!(
             cfg.boardtask_pool_candidates("research")
                 .first()
                 .map(|worker| worker.id.as_str()),
@@ -3914,7 +3949,8 @@ mod tests {
             r#"(missiond-blueprint
   (workstation-config
     (slot-template coder :role coder :description "Dynamic coder slot (ephemeral)" :default-model-profile coding-default-opus-4-7 :default-cwd "/Users/jinchen/Projects")
-    (cwd-policy dynamic-slot :allowed-prefixes ["/Users/jinchen/Projects"]))
+    (cwd-policy dynamic-slot :allowed-prefixes ["/Users/jinchen/Projects"])
+    (chat-completions-policy jarvis-api :default_slot "slot-claude-code-default" :header_override "X-Slot-Id"))
   (workstation-pool
     (worker claude-code-default :engine claude-code :role coder :slot-id "slot-claude-code-default" :task-type claude_code_default :model-profile coding-default-opus-4-7 :model nil :task-classes [code] :capabilities [code-write] :max-concurrency 1 :timeout-secs 1800 :default-use code-implementation :accepts-boardtask true :write-allowed true)
     (worker gemini-ultra-pro :engine gemini :role researcher :slot-id "slot-gemini-ultra" :task-type gemini_ultra :model-profile gemini-ultra-pro-preview :model nil :approval-policy plan :tool-policy-path ".missiond/v3/policies/gemini-readonly-policy.toml" :task-classes [research] :capabilities [read-only] :max-concurrency 1 :timeout-secs 900 :default-use research-review :accepts-boardtask true :write-allowed false)
@@ -3943,6 +3979,7 @@ mod tests {
   (workstation-config
     (slot-template coder :role coder :description "Dynamic coder slot (ephemeral)" :default-model-profile coding-default-opus-4-7 :default-cwd "/Users/jinchen/Projects")
     (cwd-policy dynamic-slot :allowed-prefixes ["/Users/jinchen/Projects"])
+    (chat-completions-policy jarvis-api :default_slot "slot-claude-code-default" :header_override "X-Slot-Id")
     (timeout-policy boardtask-dispatch
       :default_secs 1800
       :min_secs 60

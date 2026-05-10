@@ -567,6 +567,10 @@
       :default-cwd "/Users/jinchen/Projects")
     (cwd-policy dynamic-slot
       :allowed-prefixes ["/Users/jinchen/Projects" "/Users/jinchen/Downloads" "/Users/jinchen/Documents" "/tmp"])
+    (chat-completions-policy jarvis-api
+      :default_slot "slot-claude-code-default"
+      :header_override "X-Slot-Id"
+      :rule "OpenAI-compatible /v1/chat/completions routes to the explicit X-Slot-Id header when present; otherwise it uses this V3-projected default slot. Rust must not hardcode slot-jarvis.")
     (startup-slot arch_maintenance
       :engine claude-code
       :lifecycle persistent
@@ -639,6 +643,7 @@
        "daemon startup SlotManager ClaudeCode task configs MUST project coder/researcher model profiles from workstation-config and omit --model for coding-default-opus-4-7"
        "daemon startup SlotManager task configs MUST be generated from workstation-config startup-slot entries, including engine/lifecycle/slot_id/role/timeout_secs/skip_permissions"
        "mission_compute_slot dynamic template role/description/mcp_config/default_cwd and allowed cwd prefixes MUST project from workstation-config slot-template + cwd-policy dynamic-slot, not a Rust-local template table"
+       "Jarvis/OpenAI-compatible chat completions default slot MUST project from workstation-config chat-completions-policy jarvis-api; X-Slot-Id remains the explicit request override and Rust MUST NOT hardcode slot-jarvis."
        "model=\"default\" and model_profile=coding-default-opus-4-7 both mean no CLI --model override"
 	       "mission_compute_slot model_profile resolution MUST use workstation-config model-profile spawn-model-arg, not a Rust-local profile table"
 	       "caller-supplied model wins over model_profile, but must be a single shell token"

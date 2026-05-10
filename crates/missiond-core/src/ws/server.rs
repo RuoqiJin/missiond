@@ -77,6 +77,8 @@ pub struct WSServerOptions {
     pub context_enricher: ContextEnricherSlot,
     /// Number of native MCP tools (injected into Jarvis system prompt)
     pub tool_count: usize,
+    /// V3-projected default slot for OpenAI-compatible chat completions.
+    pub default_chat_slot: String,
 }
 
 /// PTY WebSocket Server
@@ -93,6 +95,7 @@ pub struct PTYWebSocketServer {
     db: Option<Arc<dyn crate::db::traits::MissionStore>>,
     context_enricher: ContextEnricherSlot,
     tool_count: usize,
+    default_chat_slot: String,
 }
 
 /// Jarvis system prompt — injected before context enrichment so Claude Code
@@ -496,6 +499,7 @@ impl PTYWebSocketServer {
             db: options.db,
             context_enricher: Arc::clone(&options.context_enricher),
             tool_count: options.tool_count,
+            default_chat_slot: options.default_chat_slot,
         }
     }
 
@@ -557,6 +561,7 @@ impl PTYWebSocketServer {
         let db = self.db.clone();
         let context_enricher = self.context_enricher.clone();
         let tool_count = self.tool_count;
+        let default_chat_slot = self.default_chat_slot.clone();
 
         tokio::spawn(async move {
             let mut shutdown_rx = shutdown_tx.subscribe();
@@ -575,8 +580,9 @@ impl PTYWebSocketServer {
                                 let db = db.clone();
                                 let context_enricher = context_enricher.clone();
                                 let tool_count = tool_count;
+                                let default_chat_slot = default_chat_slot.clone();
                                 tokio::spawn(async move {
-                                    if let Err(e) = Self::handle_connection(stream, addr, pty_manager, cc_tasks_watcher, screenshot_broker, jarvis_trace, incident_tx, system_event_tx, frontend_events_tx, db, context_enricher, tool_count).await {
+                                    if let Err(e) = Self::handle_connection(stream, addr, pty_manager, cc_tasks_watcher, screenshot_broker, jarvis_trace, incident_tx, system_event_tx, frontend_events_tx, db, context_enricher, tool_count, default_chat_slot).await {
                                         error!(?e, ?addr, "WebSocket connection error");
                                     }
                                 });
@@ -985,6 +991,7 @@ impl PTYWebSocketServer {
         db: Option<Arc<dyn crate::db::traits::MissionStore>>,
         cc_tasks_watcher: Option<Arc<Mutex<CCTasksWatcher>>>,
         tool_count: usize,
+        default_chat_slot: String,
     ) -> anyhow::Result<()> {
         // Disable Nagle — SSE needs every chunk sent immediately
         stream.set_nodelay(true)?;
@@ -1144,7 +1151,7 @@ impl PTYWebSocketServer {
             return Ok(());
         }
 
-        // Slot selection: X-Slot-Id header > default "slot-jarvis"
+        // Slot selection: X-Slot-Id header > V3-projected default slot.
         let slot_id = headers
             .lines()
             .find_map(|line| {
@@ -1155,7 +1162,7 @@ impl PTYWebSocketServer {
                     None
                 }
             })
-            .unwrap_or_else(|| "slot-jarvis".to_string());
+            .unwrap_or(default_chat_slot);
         let chat_id = format!(
             "chatcmpl-{}-{}",
             &slot_id,
@@ -2185,6 +2192,7 @@ impl PTYWebSocketServer {
         db: Option<Arc<dyn crate::db::traits::MissionStore>>,
         context_enricher: ContextEnricherSlot,
         tool_count: usize,
+        default_chat_slot: String,
     ) -> anyhow::Result<()> {
         // Peek at first bytes to detect non-WebSocket HTTP requests
         let mut peek_buf = [0u8; 512];
@@ -2213,6 +2221,7 @@ impl PTYWebSocketServer {
                             db,
                             cc_tasks_watcher,
                             tool_count,
+                            default_chat_slot,
                         )
                         .await
                     }

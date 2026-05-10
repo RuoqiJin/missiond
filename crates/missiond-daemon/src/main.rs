@@ -528,6 +528,21 @@ async fn main() -> Result<()> {
     let ws_port = ws_port();
     let context_enricher_slot: missiond_core::ContextEnricherSlot =
         Arc::new(tokio::sync::RwLock::new(None));
+    let missiond_project_root_for_ws = std::path::PathBuf::from("/Users/jinchen/Projects/missiond");
+    let workstation_config_for_ws =
+        context::v3_blueprint_runtime::WorkstationRuntimeConfig::load_for_project_root(Some(
+            missiond_project_root_for_ws.to_string_lossy().as_ref(),
+        ))
+        .map_err(|e| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", e))?;
+    let default_chat_slot = std::env::var("MISSIOND_CHAT_COMPLETIONS_DEFAULT_SLOT")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| {
+            workstation_config_for_ws
+                .chat_completions_default_slot()
+                .to_string()
+        });
     let mut ws_server = PTYWebSocketServer::new(WSServerOptions {
         port: ws_port,
         pty_manager: Some(Arc::clone(&pty)),
@@ -539,6 +554,7 @@ async fn main() -> Result<()> {
         db: Some(Arc::clone(&store)),
         context_enricher: Arc::clone(&context_enricher_slot),
         tool_count: all_tools().len(),
+        default_chat_slot,
     });
     if let Err(e) = ws_server.start().await {
         // WS is required for Board UI — fail startup rather than running headless.

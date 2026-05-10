@@ -31,6 +31,7 @@ const DEFAULT_FILES = {
   taskDelegate: 'crates/missiond-daemon/src/handlers/compute/task_delegate.rs',
   slotEnv: 'crates/missiond-daemon/src/context/slot_env.rs',
   v3Runtime: 'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
+  server: 'crates/missiond-core/src/ws/server.rs',
   spawner: 'crates/missiond-daemon/src/slot_orchestrator/spawner.rs',
   ccController: 'crates/missiond-daemon/src/slot_orchestrator/cc_controller.rs',
   geminiDriver: 'crates/missiond-daemon/src/llm/gemini_driver.rs',
@@ -120,9 +121,13 @@ function checkFiles(root, files) {
     'daemon startup SlotManager ClaudeCode task configs MUST project coder/researcher model profiles from workstation-config',
     'daemon startup SlotManager task configs MUST be generated from workstation-config startup-slot entries',
     'mission_compute_slot dynamic template role/description/mcp_config/default_cwd and allowed cwd prefixes MUST project from workstation-config slot-template + cwd-policy dynamic-slot',
+    'Jarvis/OpenAI-compatible chat completions default slot MUST project from workstation-config chat-completions-policy jarvis-api',
     '(startup-slot arch_maintenance',
     '(startup-slot lisp_survey',
     '(cwd-policy dynamic-slot',
+    '(chat-completions-policy jarvis-api',
+    ':default_slot "slot-claude-code-default"',
+    ':header_override "X-Slot-Id"',
     ':allowed-prefixes ["/Users/jinchen/Projects" "/Users/jinchen/Downloads" "/Users/jinchen/Documents" "/tmp"]',
     ':description "Dynamic coder slot (ephemeral)"',
     ':default-cwd "/Users/jinchen/Projects"',
@@ -234,6 +239,8 @@ function checkFiles(root, files) {
     'slot_orchestrator::SlotTaskConfig',
     'std::time::Duration::from_secs(startup_slot.timeout_secs)',
     'skip_permissions: startup_slot.skip_permissions',
+    'chat_completions_default_slot()',
+    'default_chat_slot',
   ]);
   forbidAll(diagnostics, files.main, sources.main, [
     'claude-sonnet-4-6',
@@ -306,7 +313,7 @@ function checkFiles(root, files) {
     '"acceptance"',
   ]);
 
-  requireAll(diagnostics, files.v3Runtime, sources.v3Runtime, [
+	  requireAll(diagnostics, files.v3Runtime, sources.v3Runtime, [
     'pub(crate) struct WorkstationRuntimeConfig',
     'pub(crate) struct SlotTemplateRuntimeConfig',
     'pub(crate) struct StartupSlotRuntimeConfig',
@@ -314,6 +321,7 @@ function checkFiles(root, files) {
     'startup_slots',
     'slot_templates',
     'allowed_cwd_prefixes',
+    'chat_completions_default_slot',
     'model_profile_spawn_args',
     'optional_non_nil_keyword',
     'default_spawn_model_for_template',
@@ -336,9 +344,11 @@ function checkFiles(root, files) {
     'timeout-policy dynamic-slot-spawn',
     'ttl-policy dynamic-slot',
     'cwd-policy dynamic-slot',
+    'chat-completions-policy',
     'string_list_keyword',
     'slot-template',
     'DEFAULT_MODEL_PROFILE',
+    'DEFAULT_CHAT_COMPLETIONS_DEFAULT_SLOT',
     'DEFAULT_TIMEOUT_SECS',
     'MIN_TIMEOUT_SECS',
     'MAX_TIMEOUT_SECS',
@@ -372,6 +382,17 @@ function checkFiles(root, files) {
 	    'locate_orchestrator_blueprint',
 	    'orchestrator blueprint',
 	  ]);
+
+  requireAll(diagnostics, files.server, sources.server, [
+    'default_chat_slot',
+    'V3-projected default slot',
+    'x-slot-id',
+    'unwrap_or(default_chat_slot)',
+  ]);
+  forbidAll(diagnostics, files.server, sources.server, [
+    'unwrap_or_else(|| "slot-jarvis".to_string())',
+    'default "slot-jarvis"',
+  ]);
 
   requireAll(diagnostics, files.slotEnv, sources.slotEnv, [
     'MISSION_IPC_ENDPOINT',
@@ -560,6 +581,9 @@ function buildFixture() {
       :default-cwd "/Users/jinchen/Projects")
     (cwd-policy dynamic-slot
       :allowed-prefixes ["/Users/jinchen/Projects" "/Users/jinchen/Downloads" "/Users/jinchen/Documents" "/tmp"])
+    (chat-completions-policy jarvis-api
+      :default_slot "slot-claude-code-default"
+      :header_override "X-Slot-Id")
     (startup-slot arch_maintenance
       :engine claude-code
       :lifecycle persistent
@@ -605,6 +629,7 @@ function buildFixture() {
        "daemon startup SlotManager ClaudeCode task configs MUST project coder/researcher model profiles from workstation-config"
        "daemon startup SlotManager task configs MUST be generated from workstation-config startup-slot entries"
        "mission_compute_slot dynamic template role/description/mcp_config/default_cwd and allowed cwd prefixes MUST project from workstation-config slot-template + cwd-policy dynamic-slot"
+       "Jarvis/OpenAI-compatible chat completions default slot MUST project from workstation-config chat-completions-policy jarvis-api"
 	       "model=\\"default\\" and model_profile=coding-default-opus-4-7 both mean no CLI --model override"
 	       "mission_compute_slot model_profile resolution MUST use workstation-config model-profile spawn-model-arg"
 	       "task_delegate must pass model/model_profile through to compute_slot"
@@ -660,7 +685,14 @@ for startup_slot in workstation_config.startup_slots() {}
 spawn_model_for_profile(profile);
 slot_orchestrator::SlotTaskConfig;
 std::time::Duration::from_secs(startup_slot.timeout_secs);
-skip_permissions: startup_slot.skip_permissions;`);
+skip_permissions: startup_slot.skip_permissions;
+chat_completions_default_slot();
+let default_chat_slot = String::new();`);
+  writeFixture(root, DEFAULT_FILES.server, `
+let default_chat_slot = String::new();
+// V3-projected default slot
+headers.lines().find(|line| line.to_lowercase().starts_with("x-slot-id:"));
+slot_id = maybe_slot.unwrap_or(default_chat_slot);`);
   writeFixture(root, DEFAULT_FILES.computeSlot, `
 const CODING_DEFAULT_PROFILE: &str = "coding-default-opus-4-7";
 WorkstationRuntimeConfig::load_for_current_dir();
