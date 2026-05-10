@@ -281,6 +281,17 @@ fn generate_output_summary(content: &Value) -> String {
         if let Some(err) = obj.get("error").and_then(|e| e.as_str()) {
             return format!("Error: {}", &err[..floor_char_boundary(err, 100)]);
         }
+        if let Some(output) = obj
+            .get("output")
+            .or_else(|| obj.get("result"))
+            .or_else(|| obj.get("resultDisplay"))
+            .and_then(|v| v.as_str())
+        {
+            if output.len() > 100 {
+                return format!("{}...", &output[..floor_char_boundary(output, 97)]);
+            }
+            return output.to_string();
+        }
         if obj.get("deleted").and_then(|d| d.as_bool()) == Some(true) {
             return "Deleted".to_string();
         }
@@ -1083,7 +1094,8 @@ pub async fn reconcile_conversation_messages(
 
 #[cfg(test)]
 mod role_normalization_tests {
-    use super::normalize_claude_message_role;
+    use super::{extract_tool_results_from_user, normalize_claude_message_role};
+    use serde_json::json;
 
     fn call(
         raw_role: &str,
@@ -1204,5 +1216,21 @@ mod role_normalization_tests {
             call("system", &["text"], false, false, false, false),
             "system"
         );
+    }
+
+    #[test]
+    fn gemini_tool_result_block_extracts_output_for_call_closure() {
+        let content = json!([{
+            "type": "tool_result",
+            "tool_use_id": "read_file_1",
+            "content": {"output": "hello from tool"}
+        }]);
+
+        let results = extract_tool_results_from_user(&content);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "read_file_1");
+        assert_eq!(results[0].1, "hello from tool");
+        assert!(results[0].2.contains("hello from tool"));
+        assert_eq!(results[0].3, "success");
     }
 }

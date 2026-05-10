@@ -113,6 +113,7 @@ function checkFiles(root, files) {
     '(source gemini-cli',
     ':canonical "gemini_cli"',
     '"~/.gemini/tmp/*/chats/*.jsonl"',
+    ':audit "scripts/audit-gemini-conversations.mjs"',
     '(source codex-cli',
     ':canonical "codex_cli"',
     '"~/.codex/sessions/**/*.jsonl"',
@@ -136,6 +137,9 @@ function checkFiles(root, files) {
     'Codex CLI background ingestion MUST refresh conversation message_count from actual inserted rows',
     'Historical duplicate cleanup is dry-run/report-first',
     'Gemini background reconcile MUST use size/mtime companion watermarks',
+    'Gemini manual/full reconcile MUST ignore count watermarks',
+    'Gemini CLI tool lifecycle MUST close conversation_tool_calls',
+    'scripts/audit-gemini-conversations.mjs',
     'ClaudeCode ~/.claude/history.jsonl is a prompt-only historical source',
     'conversation_type=history_prompt',
     'chat_type=history_jsonl',
@@ -160,6 +164,7 @@ function checkFiles(root, files) {
     'mission_conversation_query(action=audit_message_roles)',
     'mission_conversation_query(action=backfill_message_roles, apply=true)',
     'mission_conversation_query(action=turn_backfill, sessionId=...)',
+    'mission_conversation_query(action=gemini_reconcile)',
     'codex_user_without_slot',
     'codex_raw_role_missing',
     'backfill_missing_raw_roles_for_session',
@@ -226,6 +231,7 @@ function checkFiles(root, files) {
     'updated.source = source.clone();',
     'normalize_claude_message_role(',
     'worker_user',
+    'role == "user" || role == "tool_result"',
   ]);
   rejectAll(diagnostics, files.messageHandler, sources.messageHandler, [
     'source: "pty".to_string()',
@@ -314,6 +320,7 @@ function checkFiles(root, files) {
     '"audit_message_roles" => "mission_conversation_message_role_audit"',
     '"backfill_message_roles" => "mission_conversation_message_role_backfill"',
     '"turn_backfill" => "mission_conversation_turn_backfill"',
+    '"gemini_reconcile" => "mission_conversation_gemini_reconcile"',
   ]);
 
   requireAll(diagnostics, files.conversationFacade, sources.conversationFacade, [
@@ -334,6 +341,7 @@ function checkFiles(root, files) {
     'mission_conversation_message_role_audit',
     'mission_conversation_message_role_backfill',
     'mission_conversation_turn_backfill',
+    'mission_conversation_gemini_reconcile',
   ]);
 
   requireAll(diagnostics, files.mcpConversation, sources.mcpConversation, [
@@ -342,6 +350,7 @@ function checkFiles(root, files) {
     '"audit_message_roles"',
     '"backfill_message_roles"',
     '"turn_backfill"',
+    '"gemini_reconcile"',
     '"minConfidence"',
     '"rebuildTurns"',
   ]);
@@ -352,6 +361,7 @@ function checkFiles(root, files) {
     'audit_message_roles',
     'backfill_message_roles',
     'turn_backfill',
+    'gemini_reconcile',
     'minConfidence',
     'rebuildTurns',
   ]);
@@ -384,8 +394,14 @@ function checkFiles(root, files) {
     'MTIME_WATERMARK_PREFIX',
     'can_skip_without_parse',
     'force_full_scan',
+    'let last_count = if force_full_scan',
     'run_gemini_reconciliation(&state, false)',
     'run_gemini_reconciliation(state, true)',
+    'has_tool_use',
+    'has_tool_result_flag',
+    'content_types_json',
+    'pending_tool_calls',
+    'pending_tool_results',
   ]);
 
   requireAll(diagnostics, files.geminiLogger, sources.geminiLogger, [

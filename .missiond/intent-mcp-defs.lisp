@@ -638,9 +638,9 @@
   :target "crates/missiond-mcp/src/tools/comm/conversation.rs"
 
   (tool mission_conversation_query
-    :description "对话统一查询。list/get/search/message_search/context/events/audit_classification/backfill_classification/audit_message_roles/backfill_message_roles/turn_backfill"
+    :description "对话统一查询。list/get/search/message_search/context/events/audit_classification/backfill_classification/audit_message_roles/backfill_message_roles/turn_backfill/gemini_reconcile"
     (input
-      (action   string :enum (list get search message_search context events audit_classification backfill_classification audit_message_roles backfill_message_roles turn_backfill) :default "list")
+      (action   string :enum (list get search message_search context events audit_classification backfill_classification audit_message_roles backfill_message_roles turn_backfill gemini_reconcile) :default "list")
       (status   string :description "[list] active/completed")
       (conversationType string :description "[list] user/worker/meta/system/all")
       (taskId   string :description "[list] 按 Board 任务 ID 过滤")

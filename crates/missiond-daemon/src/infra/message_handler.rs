@@ -319,7 +319,7 @@ async fn classify(
                 &msg.timestamp,
                 content,
             ));
-        } else if role == "user" {
+        } else if role == "user" || role == "tool_result" {
             tool_results.extend(events_sync::extract_tool_results_from_user(content));
         }
     }
@@ -604,7 +604,7 @@ async fn emit_tool_completions(
     const HIGH_VALUE_TOOLS: &[&str] = &["Bash", "Write", "Edit"];
     let mut tool_results = Vec::new();
     for msg in messages {
-        if msg.message.role == "user" {
+        if msg.message.role == "user" || msg.message.role == "tool_result" {
             tool_results.extend(events_sync::extract_tool_results_from_user(
                 &msg.message.content,
             ));

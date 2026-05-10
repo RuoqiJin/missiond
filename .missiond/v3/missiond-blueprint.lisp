@@ -1758,7 +1758,8 @@
       :canonical "gemini_cli"
       :paths ["~/.gemini/tmp/*/chats/*.json" "~/.gemini/tmp/*/chats/*.jsonl"]
       :watcher "crates/missiond-core/src/gemini_cli/watcher.rs"
-      :route "crates/missiond-daemon/src/workers/local/gemini_reconcile_worker.rs")
+      :route "crates/missiond-daemon/src/workers/local/gemini_reconcile_worker.rs"
+      :audit "scripts/audit-gemini-conversations.mjs")
     (source codex-cli
       :canonical "codex_cli"
       :paths ["~/.codex/state_5.sqlite" "~/.codex/sessions/**/*.jsonl" "~/.codex/archived_sessions/*.jsonl" "~/.codex/session_index.jsonl" "~/.codex/history.jsonl"]
@@ -1781,6 +1782,10 @@
        "mission_conversation_get MUST retrieve tail messages with the indexed (session_id,id) path and assign display seq after duplicate coalescing; it MUST NOT use a ROW_NUMBER window over an entire large Codex/Gemini session."
        "Historical duplicate cleanup is dry-run/report-first; destructive DB cleanup must keep the earliest row in each duplicate group and require an explicit reviewed apply path."
        "Gemini background reconcile MUST use size/mtime companion watermarks to skip already-reconciled old chat files without reparsing full historical transcripts; manual reconcile may force a full scan."
+       "Gemini manual/full reconcile MUST ignore count watermarks and replay raw ~/.gemini/tmp/*/chats/session-* files from message index 0 through deterministic message_uuid upserts, so historical sessions anchored before MissionD watcher startup can still be imported without duplicates."
+       "Gemini manual/full reconcile MUST be reachable through mission_conversation_query(action=gemini_reconcile) / mission_conversation_gemini_reconcile, and that action MUST call gemini_reconcile_worker::run_gemini_reconciliation_now instead of relying on daemon restart or ad hoc SQL repair."
+       "Gemini CLI tool lifecycle MUST close conversation_tool_calls with tool_result messages: parser emits tool_use/tool_result blocks, realtime ingestion and gemini_reconcile both persist has_tool_use/has_tool_result/content_types, and role=tool_result updates output_summary/raw_output/status rather than leaving tool calls pending."
+       "Gemini CLI raw-vs-DB coverage MUST be auditable through scripts/audit-gemini-conversations.mjs: raw sessions missing in DB, DB conversations missing raw file, pending tool calls, and raw-vs-DB tool counts are reported before memory distillation trusts Gemini history."
        "Cursor/watermark advancement MUST happen after durable DB write acknowledgement, never before."
        "ClaudeCode ~/.claude/history.jsonl is a prompt-only historical source: import it as conversation_type=history_prompt, chat_type=history_jsonl, source=claude_code, speaker=human_user, authority=claude_history_prompt, and deterministic message_uuid=claude-history:<sha>; it MUST NOT be mistaken for assistant/tool transcript coverage."
        "ClaudeCode historical import MUST refresh conversations.message_count from actual inserted conversation_messages after import because database triggers/upserts can otherwise leave placeholder counts that make Logs and exports report double messages."

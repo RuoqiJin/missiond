@@ -9,11 +9,11 @@ pub fn definitions() -> Vec<ToolDefinition> {
         // ===== mission_conversation_query =====
         ToolDefinition::new(
             "mission_conversation_query",
-            "对话统一查询。list/get/search/message_search/context/events/audit_classification/backfill_classification/audit_message_roles/backfill_message_roles/turn_backfill",
+            "对话统一查询。list/get/search/message_search/context/events/audit_classification/backfill_classification/audit_message_roles/backfill_message_roles/turn_backfill/gemini_reconcile",
             json!({
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["list", "get", "search", "message_search", "context", "events", "audit_classification", "backfill_classification", "audit_message_roles", "backfill_message_roles", "turn_backfill"], "default": "list"},
+                    "action": {"type": "string", "enum": ["list", "get", "search", "message_search", "context", "events", "audit_classification", "backfill_classification", "audit_message_roles", "backfill_message_roles", "turn_backfill", "gemini_reconcile"], "default": "list"},
                     "status": {"type": "string", "description": "[list] active/completed"},
                     "conversationType": {"type": "string", "description": "[list] user/worker/meta/system/all"},
                     "taskId": {"type": "string", "description": "[list] 按 Board 任务 ID 过滤"},

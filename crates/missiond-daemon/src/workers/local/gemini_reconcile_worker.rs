@@ -170,7 +170,11 @@ async fn run_gemini_reconciliation(state: &AppState, force_full_scan: bool) {
             };
 
             let current_count = session.messages.len() as i64;
-            let last_count = all_watermarks.get(&watermark_key).copied().unwrap_or(0);
+            let last_count = if force_full_scan {
+                0
+            } else {
+                all_watermarks.get(&watermark_key).copied().unwrap_or(0)
+            };
 
             if current_count <= last_count {
                 files_skipped += 1;
@@ -225,6 +229,8 @@ async fn run_gemini_reconciliation(state: &AppState, force_full_scan: bool) {
 
             // Build message batch (reuses the same pipeline as message_handler)
             let mut batch: Vec<missiond_core::types::ConversationMessage> = Vec::new();
+            let mut pending_tool_calls = Vec::new();
+            let mut pending_tool_results = Vec::new();
             for msg in &cc_lines {
                 let text_content = events_sync::extract_text_content(&msg.message.content);
                 let content_types: Vec<&str> = msg
@@ -262,6 +268,13 @@ async fn run_gemini_reconciliation(state: &AppState, force_full_scan: bool) {
 
                 let raw_content = events_sync::sanitize_raw_content(&msg.message.content);
                 let tool_name = events_sync::extract_tool_names_csv(&msg.message.content);
+                let has_tool_use = content_types.iter().any(|t| *t == "tool_use");
+                let has_tool_result_flag = content_types.iter().any(|t| *t == "tool_result");
+                let content_types_json = if content_types.is_empty() {
+                    None
+                } else {
+                    Some(serde_json::to_string(&content_types).unwrap_or_default())
+                };
 
                 batch.push(missiond_core::types::ConversationMessage {
                     id: 0,
@@ -276,14 +289,26 @@ async fn run_gemini_reconciliation(state: &AppState, force_full_scan: bool) {
                     timestamp: msg.timestamp.clone(),
                     metadata: None,
                     tool_name,
-                    content_types: None,
+                    content_types: content_types_json,
                     has_image: false,
-                    has_tool_use: false,
-                    has_tool_result: false,
+                    has_tool_use,
+                    has_tool_result: has_tool_result_flag,
                     token_count: None,
                     seq: None,
                     role_display: None,
                 });
+
+                if msg.message.role == "assistant" {
+                    pending_tool_calls.extend(events_sync::extract_tool_calls_from_assistant(
+                        &session.session_id,
+                        &msg.timestamp,
+                        &msg.message.content,
+                    ));
+                } else if msg.message.role == "user" || msg.message.role == "tool_result" {
+                    pending_tool_results.extend(events_sync::extract_tool_results_from_user(
+                        &msg.message.content,
+                    ));
+                }
 
                 // Batch flush
                 if batch.len() >= BATCH_FLUSH_SIZE {
@@ -302,6 +327,19 @@ async fn run_gemini_reconciliation(state: &AppState, force_full_scan: bool) {
                 if let Ok(ids) = state.store.insert_conversation_messages_batch(&batch).await {
                     messages_recovered += ids.len();
                 }
+            }
+
+            if !pending_tool_calls.is_empty() {
+                let _ = state
+                    .store
+                    .insert_tool_calls_batch(&pending_tool_calls)
+                    .await;
+            }
+            for (tool_use_id, summary, raw, status) in &pending_tool_results {
+                let _ = state
+                    .store
+                    .update_tool_call_output(tool_use_id, summary, raw, status)
+                    .await;
             }
 
             // Update watermark

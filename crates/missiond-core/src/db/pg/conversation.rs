@@ -2223,7 +2223,7 @@ impl ConversationStore for PgMissionStore {
         let rows: Vec<(String, String, String)> = sqlx::query_as(
             "SELECT role, raw_content, timestamp FROM conversation_messages
              WHERE session_id = $1 AND raw_content IS NOT NULL AND raw_content != ''
-             AND role IN ('assistant', 'user', 'thinking', 'system', 'tool_result')
+             AND role IN ('assistant', 'user', 'worker_user', 'thinking', 'system', 'tool_result')
              ORDER BY id ASC",
         )
         .bind(session_id)

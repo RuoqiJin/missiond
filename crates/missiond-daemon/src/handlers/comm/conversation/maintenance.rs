@@ -627,6 +627,16 @@ pub(super) async fn handle_maintenance(
                 "insertedTurns": inserted,
             })))
         }
+        "mission_conversation_gemini_reconcile" => {
+            crate::workers::local::gemini_reconcile_worker::run_gemini_reconciliation_now(state)
+                .await;
+            Ok(ToolResult::json_pretty(&serde_json::json!({
+                "source": "gemini_cli",
+                "mode": "full-scan",
+                "started": true,
+                "note": "Gemini reconcile replays raw ~/.gemini/tmp/*/chats/session-* files from message index 0 with deterministic upserts."
+            })))
+        }
         _ => Err(anyhow!("Unknown conversation maintenance tool: {name}")),
     }
 }

@@ -24,6 +24,7 @@ pub(super) async fn handle_conversation_query(state: &AppState, args: Value) -> 
         "audit_message_roles" => "mission_conversation_message_role_audit",
         "backfill_message_roles" => "mission_conversation_message_role_backfill",
         "turn_backfill" => "mission_conversation_turn_backfill",
+        "gemini_reconcile" => "mission_conversation_gemini_reconcile",
         other => return Err(anyhow!("Unknown conversation action: {other}")),
     };
     // Forward with the same args; action is ignored by leaf handlers.
