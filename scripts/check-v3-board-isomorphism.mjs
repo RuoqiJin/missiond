@@ -165,6 +165,7 @@ function checkFiles(root, files) {
     'get_board_task_with_notes',
     'list_board_tasks',
     'search_board_tasks',
+    'BoardSearchInput',
     'board_summary',
     'clear_done_board_tasks',
   ]);
@@ -257,6 +258,11 @@ function checkFiles(root, files) {
     'pub lease_expires_at: Option<String>',
     'pub timeout_secs: Option<i64>',
     'pub notes_count: i64',
+    'ACTIVE_BOARD_SEARCH_STATUSES',
+    'include_historical_results',
+    'apply_active_status_filter',
+    'activeFilterApplied',
+    'historicalIncluded',
   ]);
 
   requireAll(diagnostics, files.traits, sources.traits, [
@@ -277,6 +283,10 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.pgStore, sources.pgStore, [
     'impl BoardStore for PgMissionStore',
+    'ACTIVE_BOARD_SEARCH_STATUSES',
+    'active_filter_applied',
+    'historical_included',
+    'Default search scope excludes done/skipped historical tasks',
     "WHERE id = $4 AND status = 'open' AND claim_executor_id IS NULL",
     "WHERE id = $2 AND status = 'open' AND assignee = $3",
     "WHERE claim_executor_id = $2 AND status = 'running'",
@@ -308,6 +318,8 @@ function checkFiles(root, files) {
     '"done"',
     '"failed"',
     '"blocked"',
+    '"includeHistorical"',
+    '"scope"',
     '"taskId"',
     '"executorType"',
     '"dependsOn"',
@@ -401,6 +413,7 @@ get_board_tasks_with_context
 get_board_task_with_notes
 list_board_tasks
 search_board_tasks
+BoardSearchInput
 board_summary
 clear_done_board_tasks
 `);
@@ -493,6 +506,11 @@ pub depends_on: Vec<TaskId>
 pub lease_expires_at: Option<String>
 pub timeout_secs: Option<i64>
 pub notes_count: i64
+ACTIVE_BOARD_SEARCH_STATUSES
+include_historical_results
+apply_active_status_filter
+activeFilterApplied
+historicalIncluded
 `);
 
   writeFixture(root, DEFAULT_FILES.traits, `
@@ -513,6 +531,10 @@ async fn add_board_task_note
 
   writeFixture(root, DEFAULT_FILES.pgStore, `
 impl BoardStore for PgMissionStore
+ACTIVE_BOARD_SEARCH_STATUSES
+active_filter_applied
+historical_included
+Default search scope excludes done/skipped historical tasks
 WHERE id = $4 AND status = 'open' AND claim_executor_id IS NULL
 WHERE id = $2 AND status = 'open' AND assignee = $3
 WHERE claim_executor_id = $2 AND status = 'running'
@@ -544,6 +566,8 @@ Source: .missiond/intent-tools.lisp (module board)
 "done"
 "failed"
 "blocked"
+"includeHistorical"
+"scope"
 "taskId"
 "executorType"
 "dependsOn"

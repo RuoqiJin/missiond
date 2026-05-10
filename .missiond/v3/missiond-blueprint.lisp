@@ -903,10 +903,10 @@
     (domain execution-control-plane
       :owner workflow-runner
       :source [autopilot-runtime workstation-config conversation-memory-distillation semantic-ir-shared-memory-convergence]
-      :functions [workflow-runner task-result-artifact worker-completion-settle slot-lifecycle-manager memory-review-batch-runner]
-      :runtime-projection [BoardTask EventBus task_result_artifacts conversation ended_at SlotReleased workflow_runs workflow_run memory_review_batch_runner]
+      :functions [workflow-runner task-result-artifact worker-completion-settle slot-lifecycle-manager memory-review-batch-runner board-cleanup-batch-runner board-search-noise-governance]
+      :runtime-projection [BoardTask EventBus task_result_artifacts conversation ended_at SlotReleased workflow_runs workflow_run memory_review_batch_runner board_cleanup_batch_runner board_search_scope]
       :checker ["node scripts/check-v3-control-plane-m6-split.mjs" "node scripts/check-v3-pty-recognition-isomorphism.mjs" "node scripts/check-v3-workflow-isomorphism.mjs"]
-      :refactor-rule "Long-running batch work must use checkpointed workflow_run state, canonical task-result artifacts, EventBus-driven completion settle, and slot lifecycle release; Board notes and PTY finals are projections, not the canonical result.")
+      :refactor-rule "Long-running batch work must use checkpointed workflow_run state, canonical task-result artifacts, EventBus-driven completion settle, and slot lifecycle release; Board notes and PTY finals are projections, not the canonical result. Board cleanup is advisory by default: workers write task-result-artifacts and batch reports, generated review tasks may close after settle, and historical BoardTasks remain untouched until an approved maintenance workflow applies recommendations. Board keyword search defaults to active task scope so historical done/skipped tasks do not pollute current governance decisions; historical search requires includeHistorical=true, scope=all, or an explicit historical status.")
 	    :workflow ".missiond/workflows/missiond-control-plane-m6-split.lisp"
 	    :egress [control-plane-split-report checker-pins compiled-runtime-projection-gaps]
 	    :checker "node scripts/check-v3-control-plane-m6-split.mjs")
@@ -2500,7 +2500,16 @@
                (step s3 :logic "return structured ToolError codes for invalid params, missing/not-found tasks, and store failures so agents can recover without flailing")
                (step s4 :logic "claim only open unclaimed rows and recover stale running rows")
                (step s5 :logic "publish BoardEvent projections for dashboards and autopilot; large BoardTask notes return compact receipts after durable storage instead of echoing full content through MCP"))
-        :egress [board_task board_event board_note autopilot_task_list]))
+        :egress [board_task board_event board_note autopilot_task_list])
+      (function board-search-noise-governance
+        :surface board-search-noise-governance
+        :entry [mission_board.query.search mission_board_query]
+        :core ((step s1 :logic "parse keyword search scope from status, scope, and includeHistorical")
+               (step s2 :logic "when no explicit status/history scope is supplied, constrain search to active statuses open/running/verifying/blocked/failed")
+               (step s3 :logic "allow historical done/skipped review only through includeHistorical=true, scope=all/historical, or status=done/skipped")
+               (step s4 :logic "return meta.activeFilterApplied and meta.historicalIncluded so frontends and agents can tell whether history was excluded")
+               (step s5 :logic "steer Board cleanup workflows through explicit historical scope and batch reports instead of broad keyword search defaults"))
+        :egress [board_search_result board_search_scope cleanup_candidate_query]))
 
     (pillar workstation
       (function workstation-config
@@ -3317,6 +3326,17 @@
              "crates/missiond-mcp/src/tools/knowledge/board.rs"
              "scripts/check-v3-board-isomorphism.mjs"]
       :note "mission_board is the durable BoardTask coordination surface underneath delegated ClaudeCode work: MCP exposes query/create/update/delete/claim/decompose/retry/note_add with a generated schema from .missiond/intent-tools.lisp. Board handlers normalize common snake_case/camelCase aliases before schema projection, reject invalid status/noteType with structured ToolError codes, and return compact note receipts for large stored content so agents recover instead of flailing on unknown errors. [details: .missiond/v3/evidence/blueprint-notes.lisp#note-014]")
+
+    (surface board-search-noise-governance
+      :status "code-aligned"
+      :implements [board-search-noise-governance board-search-active-default historical-board-search-opt-in]
+      :code ["crates/missiond-core/src/types/board.rs"
+             "crates/missiond-core/src/db/pg/board.rs"
+             "crates/missiond-mcp/src/tools/knowledge/board.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/board/query.rs"
+             "scripts/check-v3-board-isomorphism.mjs"
+             "scripts/check-v3-control-plane-m6-split.mjs"]
+      :note "board-search-noise-governance keeps broad Board keyword searches from polluting current operational decisions with historical done/skipped tasks. mission_board_query(action=search) defaults to active statuses only; historical Board cleanup must opt in with includeHistorical=true, scope=all/historical, or an explicit done/skipped status. Responses expose meta.activeFilterApplied and meta.historicalIncluded so agents, Board UI, and cleanup workflows can explain whether historical tasks were excluded.")
 
     (surface memory-kb
       :status "code-aligned"

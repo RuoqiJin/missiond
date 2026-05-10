@@ -55,6 +55,7 @@ const DEFAULT_FILES = {
   multiProjectM6Wave: '.missiond/workflows/multi-project-m6-wave.lisp',
   m6DeploymentRollout: '.missiond/workflows/m6-deployment-rollout.lisp',
   pceaDeploymentRollout: '.missiond/workflows/pcea-deployment-rollout.lisp',
+  boardCleanupBatchRunner: '.missiond/workflows/board-cleanup-batch-runner.lisp',
 };
 
 function main() {
@@ -329,6 +330,28 @@ function checkFiles(root, files) {
     'Wait through EventBridge for deploy_started, deploy_succeeded, smoke_succeeded, deploy_failed, or smoke_failed',
     'No Cloudflare, DNS, secret, or production env mutation',
     'The rollout report captures any skill drift, manifest gap, migration/manual step gap, or deploy-agent evidence gap',
+  ]);
+
+  requireAll(diagnostics, files.boardCleanupBatchRunner, sources.boardCleanupBatchRunner, [
+    ':workflow_id board-cleanup-batch-runner',
+    ':status active',
+    ':id review-question',
+    ':id validate-candidate-ids',
+    ':id materialize-batch-context',
+    ':id dispatch-fact-check-workers',
+    ':id collect-task-result-artifacts',
+    ':id classify-each-task',
+    ':id synthesize-batch-report',
+    ':id close-generated-review-task',
+    ':id update-cursors',
+    'task-result-artifact',
+    'missiond.board-cleanup-result.v1',
+    'allowed-classifications [covered-by-ssot covered-by-code duplicate obsolete needs-new-task needs-human keep-open]',
+    'Historical BoardTasks are read-only by default',
+    'generated review BoardTask may be closed',
+    'reused provider session is not completion authority',
+    'Findings Evidence Recommendations Verification',
+    'Board note and PTY are only projections',
   ]);
 
   const workflowSurface = `${sources.workflowHandler}\n${sources.workflowArtifacts}\n${sources.workflowAutoChain}\n${sources.workflowAutoChainRecorder}\n${sources.workflowAutoChainRules}\n${sources.workflowAutoSonnet}\n${sources.workflowAutoSonnetPolicy}\n${sources.workflowCompileMethodology}\n${sources.workflowDistill}\n${sources.workflowMethodology}\n${sources.workflowMethodologyExtract}\n${sources.workflowMethodologyIo}\n${sources.workflowMethodologySource}\n${sources.workflowMethodologyTypes}\n${sources.workflowMethodologyYaml}\n${sources.workflowProjectRoot}\n${sources.workflowReviewResolution}\n${sources.workflowRunMethodology}\n${sources.workflowStoreActions}\n${sources.workflowTests}`;

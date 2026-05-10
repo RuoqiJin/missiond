@@ -555,9 +555,19 @@ impl BoardStore for PgMissionStore {
         let limit = input.limit.unwrap_or(50);
         let mut conditions: Vec<String> = Vec::new();
         let mut param_values: Vec<String> = Vec::new();
+        let active_filter_applied = input.apply_active_status_filter();
+        let historical_included = input.include_historical_results();
 
         if !input.include_hidden {
             conditions.push("hidden = 0".to_string());
+        }
+        if active_filter_applied {
+            let quoted_statuses = ACTIVE_BOARD_SEARCH_STATUSES
+                .iter()
+                .map(|s| format!("'{}'", s))
+                .collect::<Vec<_>>()
+                .join(", ");
+            conditions.push(format!("status IN ({})", quoted_statuses));
         }
 
         if let Some(ref q) = input.query {
@@ -640,19 +650,31 @@ impl BoardStore for PgMissionStore {
             .collect();
 
         let returned = data.len();
-        let message = if returned < total {
-            Some(format!(
+        let mut message_parts = Vec::new();
+        if returned < total {
+            message_parts.push(format!(
                 "Showing {} of {} results. Refine query for more.",
                 returned, total
-            ))
-        } else {
+            ));
+        }
+        if active_filter_applied {
+            message_parts.push(
+                "Default search scope excludes done/skipped historical tasks; pass includeHistorical=true, scope=all, or status=done/skipped to review history."
+                    .to_string(),
+            );
+        }
+        let message = if message_parts.is_empty() {
             None
+        } else {
+            Some(message_parts.join(" "))
         };
 
         Ok(BoardSearchResult {
             meta: BoardSearchMeta {
                 total,
                 returned,
+                active_filter_applied,
+                historical_included,
                 message,
             },
             data,

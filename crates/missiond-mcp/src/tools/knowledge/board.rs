@@ -22,6 +22,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "query": {"type": "string", "description": "[search] 全文搜索 title+description"},
                     "project": {"type": "string", "description": "[search] 项目过滤"},
                     "category": {"type": "string", "description": "[search] 分类: deploy/dev/infra/test/other"},
+                    "scope": {"type": "string", "description": "[search] 搜索范围: active(默认，仅 open/running/verifying/blocked/failed), all/historical(包含 done/skipped)", "enum": ["active", "all", "historical", "history"]},
+                    "includeHistorical": {"type": "boolean", "description": "[search] 包含 done/skipped 历史任务，默认 false；历史整理时显式打开"},
                     "parentId": {"type": "string", "description": "[search] 父任务 ID"},
                     "limit": {"type": "integer", "description": "[search] 最大返回条数", "default": 50},
                     "since": {"type": "string", "description": "[summary] 起始时间 ISO 8601"}

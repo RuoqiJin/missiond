@@ -323,6 +323,10 @@ pub struct BoardSearchResult {
 pub struct BoardSearchMeta {
     pub total: usize,
     pub returned: usize,
+    #[serde(rename = "activeFilterApplied")]
+    pub active_filter_applied: bool,
+    #[serde(rename = "historicalIncluded")]
+    pub historical_included: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }
@@ -335,10 +339,37 @@ pub struct BoardSearchInput {
     pub project: Option<String>,
     pub category: Option<String>,
     pub status: Option<String>,
+    /// Search scope. Default is active so broad keyword queries do not pull in
+    /// completed historical tasks. Use `all` or `historical` for archival review.
+    pub scope: Option<String>,
     pub parent_id: Option<String>,
     pub limit: Option<usize>,
     #[serde(default)]
     pub include_hidden: bool,
+    #[serde(default)]
+    pub include_historical: bool,
+}
+
+pub const ACTIVE_BOARD_SEARCH_STATUSES: &[&str] =
+    &["open", "running", "verifying", "blocked", "failed"];
+
+impl BoardSearchInput {
+    pub fn include_historical_results(&self) -> bool {
+        if self.include_historical {
+            return true;
+        }
+        if matches!(
+            self.scope.as_deref(),
+            Some("all" | "history" | "historical")
+        ) {
+            return true;
+        }
+        matches!(self.status.as_deref(), Some("done" | "skipped"))
+    }
+
+    pub fn apply_active_status_filter(&self) -> bool {
+        self.status.as_deref().unwrap_or_default().is_empty() && !self.include_historical_results()
+    }
 }
 
 /// Result of checking whether a task's DAG dependencies are satisfied
@@ -510,4 +541,56 @@ pub struct BoardTaskWithNotes {
     #[serde(flatten)]
     pub task: BoardTask,
     pub notes: Vec<BoardTaskNote>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn board_search_defaults_to_active_scope() {
+        let input = BoardSearchInput {
+            query: Some("PTY".to_string()),
+            ..Default::default()
+        };
+
+        assert!(input.apply_active_status_filter());
+        assert!(!input.include_historical_results());
+    }
+
+    #[test]
+    fn board_search_can_explicitly_include_history() {
+        let input = BoardSearchInput {
+            query: Some("PTY".to_string()),
+            include_historical: true,
+            ..Default::default()
+        };
+
+        assert!(!input.apply_active_status_filter());
+        assert!(input.include_historical_results());
+    }
+
+    #[test]
+    fn board_search_done_status_is_historical_opt_in() {
+        let input = BoardSearchInput {
+            query: Some("PTY".to_string()),
+            status: Some("done".to_string()),
+            ..Default::default()
+        };
+
+        assert!(!input.apply_active_status_filter());
+        assert!(input.include_historical_results());
+    }
+
+    #[test]
+    fn board_search_scope_all_is_historical_opt_in() {
+        let input = BoardSearchInput {
+            query: Some("PTY".to_string()),
+            scope: Some("all".to_string()),
+            ..Default::default()
+        };
+
+        assert!(!input.apply_active_status_filter());
+        assert!(input.include_historical_results());
+    }
 }
