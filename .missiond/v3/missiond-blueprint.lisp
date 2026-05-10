@@ -662,7 +662,7 @@
 	       "Autopilot ensure_pty MUST treat `PTY session already running` from spawn_tracked_slot as a pre-provisioned dynamic-slot race: wait briefly for Idle and reuse the PTY instead of recording a spawn failure note or incrementing BoardTask retry. If the session remains non-idle, it is a retryable busy condition and the task must be unclaimed for a later tick."
 	       "Autopilot/flow-engine BoardTask dispatch MUST bind conversations.task_id to the active BoardTask via a bounded retry helper at dispatch time (5 attempts at 200 ms) and MUST re-bind after the worker final settle window to cover provider JSONL/session-discovery races; completion-time durable_provider_completion_for_slot_task remains a fallback. The dispatch site is the single rebind authority: when a new BoardTask claims a slot whose conversation row carries a different earlier task_id, Autopilot MUST authoritatively overwrite conversations.task_id to the incoming task. The conservative `conversation_task_binding_update_allowed` predicate is reserved for the post-completion durable backfill path (set only when unbound or already matching); the pre-dispatch path uses a force-rebind helper that logs the displaced task id for audit. Historical attribution lives in durable messages (mission_conversation_query(taskId=...) MUST also recover provider conversations whose durable messages contain the BoardTask id), so a stale conversations.task_id pointer is unnecessary and previously caused mission_conversation_query(taskId=<new>) to return the prior task's conversation (BoardTask 31e5449c-e315-4003-ad59-c3eebd5eb837 evidence: slot-claude-code-default returned the 5599b07a conversation when queried by 738c96f5)."
        "Autopilot dispatch MUST enforce a single-running-BoardTask-per-slot invariant: before claim_board_task, scan running tasks for any other BoardTask whose claim_executor_type=pty_slot and claim_executor_id matches the incoming slot id, and unclaim each one with a durable note. A queued task with assignee=slot but no claim_executor_id is NOT considered running on the slot and MUST NOT be unclaimed by this guard. The display layer (handlers/compute/slot.rs `active_board_task_for_slot`) projects the slot's running task from this single-claim invariant, so two tasks can never appear running on the same slot for the same dispatch tick."
-       "Autopilot close path MUST gate PTY-only completion (durable provider final unavailable after settle) for delegated worker BoardTasks (description carries `## Swarm metadata` or `## Dispatch metadata`). pty_only_close_blocker requires the PTY summary to contain a structured artifact marker (Findings / Evidence / Recommendations / Verification / Summary heading / acceptance evidence) before close; otherwise the BoardTask stays running so the watchdog/next tick can re-extract once the provider log lands. If the worker description declares output_contract Findings / Evidence / Recommendations / Verification, output_contract_close_blocker applies even when a durable provider summary exists, because a reused provider session may expose an older task's accepted summary before the current task's final artifact lands. Repro evidence: BoardTask 31e5449c-e315-4003-ad59-c3eebd5eb837 child tasks a5ebf6c4..., 5599b07a..., b5be6eed... had Board summary notes that captured an intermediate assistant sentence while the structured artifact landed only in Claude JSONL after settle; BoardTask 7b5f3174... briefly picked a prior M10 overlay summary before the current context-pack's Findings/Evidence/Recommendations/Verification report arrived."
+       "Autopilot close path MUST gate PTY-only completion (durable provider final unavailable after settle) for delegated worker BoardTasks (description carries `## Swarm metadata` or `## Dispatch metadata`). pty_only_close_blocker requires the PTY summary to contain a structured artifact marker (Findings / Evidence / Recommendations / Verification / Summary heading / acceptance evidence) before close; otherwise the BoardTask stays running so the watchdog/next tick can re-extract once the provider log lands. If the worker description declares output_contract Findings / Evidence / Recommendations / Verification, output_contract_close_blocker applies even when a durable provider summary exists, because a reused provider session may expose an older task's accepted summary before the current task's final artifact lands. Workflow-specific structured artifacts may satisfy the same contract when they carry Findings + Verification plus explicit candidate/rationale sections; memory-review-batch-runner accepts Active Memory Candidates / SSOT-Workflow Backfill Candidates / Needs Human / Discard Rationale as the Evidence/Recommendations equivalent. Repro evidence: BoardTask 31e5449c-e315-4003-ad59-c3eebd5eb837 child tasks a5ebf6c4..., 5599b07a..., b5be6eed... had Board summary notes that captured an intermediate assistant sentence while the structured artifact landed only in Claude JSONL after settle; BoardTask 7b5f3174... briefly picked a prior M10 overlay summary before the current context-pack's Findings/Evidence/Recommendations/Verification report arrived; memory review child e1ea8d06... produced valid memory-review sections but was repeatedly blocked as missing-output-contract-sections until the contract admitted workflow-specific artifact headings."
        "Autopilot durable final acceptance evidence MUST recognize provider final summaries that say gates green/pass, checks pass, checker passed, check.sh passed, acceptance commands passed, or final M10 evidence-only gate confirmation, not just legacy words like verified/passed/changed files. Repro evidence: M10 child tasks 5ecb01cd..., d699c9c7..., 66aed32d..., ae72b0ec..., and f6c5475d... produced durable ClaudeCode finals with gate/checker completion language but were incorrectly blocked as missing-acceptance-evidence."
        "mission_swarm_run callers (resident master, autopilot, ad-hoc operators) MUST pass multi-project objectives via target_project_ids/targetProjectIds/target_projects/targetProjects structurally; project lists embedded only in the objective prose are ignored by the tool because the schema does not parse natural language. The MCP schema MUST expose target_project_ids and aliases as an array property of mission_swarm_run so MCP clients can pass it without guessing naming conventions. Failure mode (BoardTask 31e5449c regression): when only project_id was supplied and the objective text named multiple registered projects in prose, target_projects collapsed to project_id only and the swarm could not fan out across the universe."
 	       "Autopilot MUST treat explicit engine_hint/pool_hint as hard constraints when the V3 workstation-pool declares at least one matching worker: resolve matching workers against the full workstation-pool before task_class fallback can narrow candidates away; if that worker is busy or stopped, the task waits instead of silently spending a different provider. Fallback to a non-matching worker is allowed only when no declared worker satisfies the hint at all, and that fallback MUST record a durable reroute_reason as a BoardTask note before dispatching so the operator can see why the requested engine/pool was not used. Autopilot close-owner MUST block task close when a worker final says it could not write the requested deliverable because of plan/read-only mode."
@@ -832,11 +832,13 @@
     :desc "Prompt style is an interaction aid, not the safety boundary. Agents receive heuristic questions and prepared context; hard constraints live in BoardTask metadata, workflow Lisp, checker gates, and Rust runtime guards."
     (role resident-master
       :style heuristic-review
+      :intake-question "关于用户提出的这个问题或需求，我还有哪些不知道的信息？这些未知信息分别应该从 SSOT、skill operational facts、项目代码、部署事实、事件总线、还是用户决策入口取得？"
+      :intent-question "基于已补齐的证据，请判断用户此刻的真实意图、长期偏好或治理原则是什么；若判断成立，产出带 evidence_refs/confidence/supersession_scope 的 intent_memory_candidate；高置信意图必须写入 memory:decision，低置信只进入 needs-review/candidate。"
       :prompt-question "请审视当前目标和 SSOT Lisp：颗粒度是否足够细？哪些架构可以更优雅？你还需要哪些证据、调查工位或 exact shard？"
-      :required-output-fields [decision reasoning_summary evidence_needed delegation_plan? next_question_or_action]
+      :required-output-fields [decision reasoning_summary unknowns inferred_user_intent intent_memory_candidate evidence_needed delegation_plan? next_question_or_action]
       :default-inputs [active-boardtask context-pack-path current-phase event-summary]
       :forbidden-default-inputs [kb board-backlog historical-conversation provider-durable-logs]
-      :rule "resident-master must complete review-question and evidence-plan before investigation/implementation unless the active BoardTask explicitly declares exact-shard-ready=true.")
+      :rule "resident-master must complete unknowns-first-intake, intent-inference, intent-memory-capture, review-question, and evidence-plan before investigation/implementation unless the active BoardTask explicitly declares exact-shard-ready=true. Intent memory capture records the judged intent with evidence and confidence: high-confidence stable intent is written through mission_kb_remember(category=memory:decision), while uncertain intent stays as needs-review/candidate artifact. This does not re-enable broad KB prompt preloading.")
     (role investigator-worker
       :style context-prepared-question
       :prompt-opening "请审视、比较、找缺口并给出建议；只使用给定 read_scope/context_pack_path 的证据。"
@@ -891,13 +893,13 @@
       :runtime-projection [mission_project.universe compiled-project-universe project_registry_reconcile Board-System-Universe]
       :checker ["node scripts/check-project-ssot-universe.mjs" "node scripts/check-project-maturity.mjs --min-level M5" "node scripts/check-v3-control-plane-m6-split.mjs"]
       :refactor-rule "MissionD owns identity/SSOT/maturity; deploy-center owns runtime release facts; Forge owns component/pattern catalog. New project metadata must declare which authority owns it.")
-	    (domain knowledge-skill-plane
-	      :owner memory-kb
-	      :source [memory-kb-policy learning-engine-policy conversation-memory-distillation skill-runtime ssot-retrieval-scope]
-	      :functions [skill-registry skill-search skill-project-links skill-to-workflow-promotion memory-quarantine memory-distillation memory-search-v2]
-	      :runtime-projection [mission_skill mission_kb_query mission_kb_remember conversation-memory-distillation]
-	      :checker ["node scripts/check-v3-memory-kb-isomorphism.mjs" "node scripts/check-v3-skill-runtime-isomorphism.mjs" "node scripts/check-v3-control-plane-m6-split.mjs"]
-	      :refactor-rule "KB and Skill context remain opt-in until memory is cleaned; project constants should move to SSOT/Universe rather than worker prompt preloads; broad SSOT review must exclude cold runtime artifacts unless include_runtime=true is explicit.")
+		    (domain knowledge-skill-plane
+		      :owner memory-kb
+		      :source [memory-kb-policy learning-engine-policy conversation-memory-distillation skill-runtime skill-operational-fact-authority ssot-retrieval-scope]
+		      :functions [skill-registry skill-search skill-project-links skill-operational-facts skill-to-workflow-promotion memory-quarantine memory-distillation memory-search-v2]
+		      :runtime-projection [mission_skill mission_skill_context.operational_facts mission_kb_query mission_kb_remember conversation-memory-distillation]
+		      :checker ["node scripts/check-v3-memory-kb-isomorphism.mjs" "node scripts/check-v3-skill-runtime-isomorphism.mjs" "node scripts/check-v3-control-plane-m6-split.mjs"]
+		      :refactor-rule "KB remains opt-in until memory is cleaned; operational skill facts are not noisy KB and must be explicitly retrievable for remote-host, deploy-agent, router embedding/rerank, CI runner, and model-host questions. Project constants should still move to SSOT/Universe rather than worker prompt preloads; broad SSOT review must exclude cold runtime artifacts unless include_runtime=true is explicit.")
     (domain execution-control-plane
       :owner workflow-runner
       :source [autopilot-runtime workstation-config conversation-memory-distillation semantic-ir-shared-memory-convergence]
@@ -931,10 +933,13 @@
       [BoardTaskCreated BoardTaskStatusChanged SlotEvent QuestionEvent SystemEvent::ContextualCommitDetected DaemonRestart StaleTask NightSchedule ProjectRegistryChanged]
     :loop
       ((step s1 :logic "load latest checkpoint, active Board objective, explicit context_pack_path, V3/project Lisp registries, and current event summary")
-       (step s2 :logic "ask the heuristic review question and classify whether the objective needs evidence-plan, investigation, design-proposal, exact-shards, implementation, verification, blocked, or no-op")
-       (step s3 :logic "for non-exact work, materialize context-pack questions, hypotheses, and evidence_needed before delegation; skip directly to implementation only when exact-shard-ready=true is explicit")
-       (step s4 :logic "delegate Claude/Gemini/Codex workers through BoardTask/Autopilot only; never bypass durable event/Board state")
-       (step s5 :logic "return decision, reasoning_summary, evidence_needed, delegation_plan?, and next_question_or_action, then write checkpoint + Board note + execution companion log after every decision boundary"))
+       (step s2 :logic "perform unknowns-first-intake: ask what information is still missing for this user request, map each unknown to its authority source, and collect bounded evidence before judging intent")
+       (step s3 :logic "perform intent-inference: infer the user's immediate objective, durable preference, and governance principle from the active request plus collected evidence")
+       (step s4 :logic "perform intent-memory-capture: write or propose a bounded intent memory candidate with evidence_refs, confidence, supersession_scope, and active/needs-review state for future MissionD consciousness evolution")
+       (step s5 :logic "ask the heuristic review question and classify whether the objective needs evidence-plan, investigation, design-proposal, exact-shards, implementation, verification, blocked, or no-op")
+       (step s6 :logic "for non-exact work, materialize context-pack questions, hypotheses, unknowns, inferred_user_intent, and evidence_needed before delegation; skip directly to implementation only when exact-shard-ready=true is explicit")
+       (step s7 :logic "delegate Claude/Gemini/Codex workers through BoardTask/Autopilot only; never bypass durable event/Board state")
+       (step s8 :logic "return decision, reasoning_summary, unknowns, inferred_user_intent, intent_memory_candidate, evidence_needed, delegation_plan?, and next_question_or_action, then write checkpoint + Board note + execution companion log after every decision boundary"))
 	    :evidence-authority
 	      ((tier t1 :source [provider-jsonl codex-sqlite claude-jsonl gemini-chat-file] :use "durable final/progress facts")
 	       (tier t2 :source [missiond-event-bus BoardTask-lifecycle mission_execution] :use "causal workflow state")
@@ -1050,17 +1055,18 @@
                :watch-env MISSIOND_LISP_CODE_SYNC_WATCH
                :default-watch-enabled true
                :dedupe-key "lisp-code-sync:<project>:<path-hash>"
-               :rule "Lisp/checker edits under .missiond are observed through EventBus, compiled/checked immediately, runtime report paths are ignored, debounce repeated path events, retention/GC bounds report volume, and only failing gates create visible BoardTasks.")
+               :rule "Lisp/checker edits under .missiond are observed through EventBus, compiled/checked immediately, runtime report paths are ignored, unchanged content fingerprints are suppressed, debounce repeated path events, retention/GC bounds report volume, and only failing gates create visible BoardTasks.")
       :core
         ((step s1 :logic "watch active ProjectRegistry .missiond directories recursively for .lisp and .mjs changes")
-         (step s2 :logic "publish each relevant filesystem change as SystemEvent::ConfigChanged; sync processing subscribes to EventBus and does not bypass it")
+         (step s2 :logic "publish each relevant filesystem change as SystemEvent::ConfigChanged; sync processing subscribes to EventBus, rechecks path/content fingerprint before expensive gates, and does not bypass EventBus")
          (step s3 :logic "resolve project by longest-prefix ProjectRegistry match")
          (step s4 :logic "for missiond run compile-v3-runtime then check-v3-code-isomorphism-complete; for external projects run .missiond/check.sh when present")
          (step s5 :logic "write .missiond/v3/runtime/lisp-code-sync/<timestamp>-<path-hash>.report.lisp with synced/needs-sync/observed-only status")
          (step s6 :logic "ignore .missiond/v3/runtime/** and .missiond/runtime-state/** before EventBus publication so self-generated reports cannot recurse")
-         (step s7 :logic "debounce repeated path events and apply report retention/GC to keep the sync loop bounded")
+         (step s7 :logic "suppress unchanged content fingerprints at both watcher publication and subscription consumption, debounce repeated path events, and apply report retention/GC to keep the sync loop bounded")
          (step s8 :logic "on failed code-isomorphism create or reuse one visible BoardTask lisp-code-sync:<project>:<path-hash> that requires evidence-plan and exact accepted shard before code mutation")
-         (step s9 :logic "expose lispCodeSync status in mission_master_status so the resident master and frontend can see the live Lisp->code loop"))
+         (step s9 :logic "Autopilot revalidates lisp-code-sync runtime report BoardTasks before slot selection; tasks that point at .missiond/v3/runtime/lisp-code-sync/** are closed as resolved_by_runtime_fix/stale_evidence and never sent to PTY")
+         (step s10 :logic "expose lispCodeSync status in mission_master_status so the resident master and frontend can see the live Lisp->code loop"))
       :egress [lisp-code-sync-report sync-boardtask mission_master_status.lispCodeSync])
     (nightly-evolution-loop
       :entry [night-scheduler mission_nightly_evolution final-convergence-snapshot]
@@ -1370,7 +1376,7 @@
     (maturity :id deploy-center :current M6 :target M6 :gap [])
     (maturity :id xjp-mcp :current M5 :target M6 :gap [tool-policy-ledger mcp-permission-regressions final-m6-report])
     (maturity :id xjp-cli :current M5 :target M6 :gap [command-policy-ledger mcp-parity-regressions final-m6-report])
-    (maturity :id deploy-agent :current M5 :target M6 :gap [agent-execution-boundary server-fact-ledger final-m6-report])
+    (maturity :id deploy-agent :current M6 :target M6 :gap [])
     (maturity :id auth :current M6 :target M6 :gap [])
     (maturity :id router :current M6 :target M6 :gap [])
     (maturity :id payments :current M5 :target M6 :gap [payment-domain-ledger webhook-regressions final-m6-report])
@@ -1705,7 +1711,8 @@
        "Learning maintenance cadences (timeline analysis, idle exploration, habit scan, KB auto-GC, KB consolidation, KB reflection, decision harvest, co-occurrence refresh) MUST project from learning-engine-policy."
        "Timeline analysis read windows, event limits, and slow-request threshold MUST project from learning-engine-policy."
        "KB reflection low-utility threshold, minimum access count, max entries, and max_tokens MUST project from learning-engine-policy."
-       "Timeline projection SQL MUST cast string-bound since/until parameters as ::timestamptz when comparing against event_log.ts so PG never raises 'operator does not exist: timestamp with time zone >= text' from Timeline Analyst, mission_timeline, or stratified queries."])
+       "Timeline projection SQL MUST cast string-bound since/until parameters as ::timestamptz when comparing against event_log.ts so PG never raises 'operator does not exist: timestamp with time zone >= text' from Timeline Analyst, mission_timeline, or stratified queries."
+       "Timeline Analyst MUST check the Gemini provider gate before collecting timeline evidence or calling Gemini; when the gate is closed it MUST advance the cadence marker and skip without warning spam or repeated LLM attempts."])
 
   (conversation-ingestion-policy
     :desc "Lisp-owned read-model window and limit defaults for conversation, event, and timeline query surfaces."
@@ -1733,6 +1740,7 @@
        "mission_timeline(action=wait) MUST expose bounded EventBus waits for board/slot/task/system predicates; timeout/lag returns diagnostic JSON so polling remains only an explicit fallback."
        "Explicit opt-in UserPromptSubmit context prefetch intent router model and timeout MUST project from conversation-ingestion-policy instead of local claude-opus/10000ms literals; default workstation hook sync removes UserPromptSubmit prefetch until a memory-audit workflow enables it."
        "Codex vision worker binary/model/idle timeout and CodexCli absolute timeout MUST project from conversation-ingestion-policy instead of local gpt-5.4/120s/300s literals."
+       "Historical conversation event/tool-call backfills MUST NOT run unconditionally on daemon startup; they are opt-in maintenance/workflow operations gated by llm.yaml backfill_enabled or MISSIOND_CONVERSATION_BACKFILL_ON_STARTUP=1 so daemon restarts do not replay large provider histories as foreground CPU load."
        "A real MissionD project with .missiond but no conversation-ingestion-policy MUST return V3_BLUEPRINT_CONFIG_ERROR rather than silently using embedded defaults."])
 
   (cli-conversation-ingestion
@@ -1753,7 +1761,7 @@
       :route "crates/missiond-daemon/src/workers/local/gemini_reconcile_worker.rs")
     (source codex-cli
       :canonical "codex_cli"
-      :paths ["~/.codex/state_5.sqlite" "~/.codex/session_index.jsonl" "~/.codex/history.jsonl"]
+      :paths ["~/.codex/state_5.sqlite" "~/.codex/sessions/**/*.jsonl" "~/.codex/archived_sessions/*.jsonl" "~/.codex/session_index.jsonl" "~/.codex/history.jsonl"]
       :worker "crates/missiond-daemon/src/workers/local/codex_ingestion_worker.rs")
     :invariants
       ["Conversation sources MUST be canonicalized before DB write: claude_code, gemini_cli, or codex_cli."
@@ -1762,8 +1770,12 @@
        "mission_slots MUST reject or flag slot_sessions whose conversation source disagrees with the slot engine; stale provider drift must never masquerade as current state."
        "Codex CLI slot_sessions may contain a PTY placeholder id; mission_slots MUST fall back to the latest real codex_cli conversation for the slot project instead of surfacing a messageCount=0 placeholder as the latest durable conversation."
        "Codex CLI ingestion MUST scan the full state_5.sqlite thread set, including archived threads, and mark archived threads as historical status instead of dropping them from MissionD history."
+       "Codex CLI ingestion MUST also discover raw rollout JSONL under ~/.codex/sessions/**/*.jsonl and ~/.codex/archived_sessions/*.jsonl even when state_5.sqlite has no thread row; session_meta.payload.id is the canonical conversation id, and raw-only imported rows MUST be recorded in conversation_source_state as sqlite-missing instead of being silently ignored."
+       "Codex CLI conversation_source_state MUST distinguish current, sqlite-missing, missing-stale, path-mismatch, archived, and pty-placeholder evidence so audits can explain whether MissionD is missing provider history, whether Codex sqlite lost a rollout row, or whether a visible PTY is only a diagnostic placeholder."
+       "Codex CLI runtime status MUST NOT treat archived=false in state_5.sqlite as proof that a conversation is actively running; provider source archive state, slot binding, durable final, and PTY state are separate evidence lanes."
+       "Gemini request-log persistence MUST only consume Gemini provider LlmEvent variants; Codex CLI durable history belongs to codex_cli conversations/source-state, and non-Gemini LlmEvent replay MUST NOT pollute gemini_requests or generate duplicate insert warnings."
        "Codex CLI message ingestion MUST generate deterministic non-null message_uuid values from thread id, JSONL line number, role, and source event hash so reconcile/backfill cannot repeatedly insert duplicate NULL-uuid rows."
-       "Codex CLI background ingestion MUST persist rollout size/mtime/line watermarks and parse only a bounded overlap after the last durable cursor so daemon restarts do not re-hash historical JSONL."
+       "Codex CLI background ingestion MUST persist rollout size/mtime/line/complete watermarks and parse large rollout files in bounded pages after the last durable cursor; a 50k safety limit is per poll page, never a permanent history truncation."
        "When deterministic UUID ingestion meets an older NULL-uuid row with the same session, role, timestamp, and content, the DB layer MUST adopt that existing row by setting message_uuid instead of inserting a new duplicate row."
        "mission_conversation_get MUST defensively coalesce duplicate rows by message_uuid or role/timestamp/content fallback so frontend logs stay readable until historical cleanup is reviewed."
        "mission_conversation_get MUST retrieve tail messages with the indexed (session_id,id) path and assign display seq after duplicate coalescing; it MUST NOT use a ROW_NUMBER window over an entire large Codex/Gemini session."
@@ -1844,10 +1856,13 @@
        "AST repository-wide startup full sync MUST be opt-in through MISSIOND_AST_FULL_SYNC_ON_STARTUP; routine blue-green restarts stay event-driven and must not rewrite topology KB when no stale code files were synced."
        "Deploy scripts MUST NOT write git state or delete the launchd-owned socket; rollback may restore only the installed binary and restart the launchd job."
        "M6 MissionD formatting MUST be converged: scripts/rustfmt-missiond.sh --check is the repository-owned Rust formatter gate for crates/**."
+       "Rust formatter edition MUST be derived from workspace Cargo.toml; ad-hoc rustfmt --edition overrides are forbidden because Rust edition migration is an explicit codebase migration, not a formatter flag choice."
        "No MissionD Rust source may carry formatter exemption markers; legacy rustfmt exemptions are incompatible with MissionD M6."
        "rustfmt MUST run with skip_children=true so formatting a crate root cannot recursively churn child modules outside the intended formatter scope."
        "Rust formatting for external or non-M6 projects MAY remain scoped through scripts/cargo-fmt-touched.sh, including staged, unstaged, and branch-diff modes."
-       "The no-Rust-files path MUST exit 0 under set -euo pipefail; filters must not turn an empty grep match into a script failure."]
+       "The no-Rust-files path MUST exit 0 under set -euo pipefail; filters must not turn an empty grep match into a script failure."
+       "MissionD primary runtime database MUST be PostgreSQL-only; the old MissionD SQLite backend, SQLite-to-Postgres migration module, and sqlite feature cfg MUST be absent from active code/build paths."
+       "SQLite references are allowed only for external provider durable sources such as Codex CLI state_5.sqlite, or for independent non-MissionD storage crates such as skill-store; they MUST NOT reintroduce a MissionD runtime database backend."]
     :checks ["bash -n scripts/deploy-daemon.sh"
              "bash -n scripts/rustfmt-missiond.sh"
              "scripts/rustfmt-missiond.sh --check"
@@ -2446,11 +2461,21 @@
         :entry [SystemEvent::ConfigChanged file-watch project-registry]
         :core ((step s1 :logic "watch active project .missiond directories and publish SystemEvent::ConfigChanged for .lisp/.mjs changes")
                (step s2 :logic "compile typed runtime projection and run the project code-isomorphism checker")
-               (step s3 :logic "ignore runtime report paths and debounce repeated path events before they can publish another ConfigChanged")
-               (step s4 :logic "write a lisp-code-sync report for every accepted event and bound report volume with retention/GC")
-               (step s5 :logic "create exactly one visible deduped sync BoardTask for failing gates")
-               (step s6 :logic "require master evidence-plan and exact accepted shard before downstream code worker mutation"))
-        :egress [lisp_code_sync_report sync_boardtask mission_master_status.lispCodeSync]))
+               (step s3 :logic "treat .missiond/v3/runtime/**, runtime-state, compiled projection, reports, checkpoints, and cold runtime evidence as non-authoring paths; ignore them before EventBus publication and before sync-task creation")
+               (step s4 :logic "write a lisp-code-sync report for every accepted authoring event and bound report volume with retention/GC plus reportDir live counters")
+               (step s5 :logic "create exactly one visible deduped sync BoardTask for failing gates; use root_cause_key lisp-code-sync:<project>:storm-circuit when same-source failures exceed the storm threshold")
+               (step s6 :logic "require master evidence-plan and exact accepted shard before downstream code worker mutation")
+               (step s7 :logic "Autopilot closes stale runtime-report sync BoardTasks as resolved_by_runtime_fix/stale_evidence before slot selection so historical self-loop tasks cannot consume worker slots")
+               (step s8 :logic "expose stormCircuitHits/recentSyncTaskCreations/reportDirs in mission_master_status so stale decisions can be revalidated without shell archaeology"))
+        :egress [lisp_code_sync_report sync_boardtask mission_master_status.lispCodeSync])
+      (function same-source-storm-circuit-breaker
+        :surface lisp-code-sync-storm-circuit
+        :entry [failed-sync-check recent-sync-task-creations dedupe-key]
+        :core ((step s1 :logic "count sync BoardTasks created within the storm window")
+               (step s2 :logic "when the pre-create threshold is reached, switch from path-hash dedupe to lisp-code-sync:<project>:storm-circuit root-cause dedupe")
+               (step s3 :logic "reuse the existing storm circuit task while it is open and append diagnostics through reports/status rather than creating more worker tasks")
+               (step s4 :logic "surface storm hits, last circuit timestamp, and recent creation count in mission_master_status"))
+        :egress [storm_circuit_task dedupe_hit storm_diagnostic mission_master_status.lispCodeSync]))
 
     (pillar coordination
       (function context-pack
@@ -2492,10 +2517,12 @@
         :surface resident-master-control
         :entry [resident-master-control BoardTaskCreated SlotEvent QuestionEvent mission_master_status]
         :core ((step s1 :logic "restore checkpoint from Board/execution log and load recent event tail")
-               (step s2 :logic "make top-level decisions and record them before delegation")
-               (step s3 :logic "dispatch investigation/context-pack workers before code shards")
-               (step s4 :logic "delegate ordinary implementation to Claude/Gemini/Codex pool workers through BoardTask/Autopilot")
-               (step s5 :logic "write checkpoint and durable final note after each decision boundary"))
+               (step s2 :logic "run unknowns-first-intake: enumerate missing information and authority sources before judging user intent or deciding whether to delegate")
+               (step s3 :logic "infer user intent and create an intent_memory_candidate with evidence_refs/confidence/supersession_scope; write high-confidence stable intent to memory:decision through mission_kb_remember, otherwise keep it as a needs-review candidate artifact")
+               (step s4 :logic "make top-level decisions and record them before delegation")
+               (step s5 :logic "dispatch investigation/context-pack workers before code shards")
+               (step s6 :logic "delegate ordinary implementation to Claude/Gemini/Codex pool workers through BoardTask/Autopilot")
+               (step s7 :logic "write checkpoint and durable final note after each decision boundary"))
         :egress [master_checkpoint delegated_boardtasks governance_notes mission_master_status])
       (function nightly-evolution
         :surface nightly-evolution-loop
@@ -2532,8 +2559,9 @@
                (step s3 :logic "read or mutate durable knowledge rows through one Lisp-described memory contract")
                (step s4 :logic "apply knowledge_review_state overlay before default retrieval so superseded/historical/duplicate/stale/delete-candidate memories leave the active reasoning path without deletion")
                (step s5 :logic "keep needs-human out of default retrieval until adjudicated, because uncertain memory is evidence rather than active guidance")
-               (step s6 :logic "project search, beacon, insight, and memory responses into reviewable evidence"))
-        :egress [kb_result memory_projection search_hits insight_summary])
+               (step s6 :logic "project search, beacon, insight, and memory responses into reviewable evidence")
+               (step s7 :logic "accept intent_memory_candidate from master/workflow context and persist stable high-confidence user intent as memory:decision while keeping uncertain intent in review overlay or candidate artifacts"))
+        :egress [kb_result memory_projection search_hits insight_summary intent_memory_record])
       (function project-registry
         :surface project-registry
         :entry [mission_project ProjectRegistry.resolve]
@@ -2591,9 +2619,18 @@
         :surface incident-governance
         :entry [mission_question mission_llm_trace mission_decision_stats mission_gemini_auth mission_incident]
         :core ((step s1 :logic "record question, trace, decision, auth, or incident facts with deterministic ids")
-               (step s2 :logic "route blocked work to the human/orchestrator without mutating the primary artifact")
-               (step s3 :logic "return status and unblock hints to Autopilot or request-flow callers"))
-        :egress [question_id incident_record decision_stats unblock_hint])
+               (step s2 :logic "revalidate operational questions before display/listing; if runtime evidence proves the issue stale or already fixed, answer with stale_evidence/resolved_by_runtime_fix and emit QuestionEvent::Resolved")
+               (step s3 :logic "route still-valid blocked work to the human/orchestrator without mutating the primary artifact")
+               (step s4 :logic "return status, revalidation hints, and unblock hints to Autopilot or request-flow callers"))
+        :egress [question_id incident_record decision_stats question_revalidation_status unblock_hint])
+      (function decision-inbox-revalidation
+        :surface decision-inbox-revalidation
+        :entry [mission_question_list mission_question_get mission_master_status runtime-status-evidence]
+        :core ((step s1 :logic "classify pending questions by revalidator kind such as lisp-code-sync self-loop, MCP reconnect, deploy event, or generic user decision")
+               (step s2 :logic "for operational revalidators, read authoritative runtime status before showing the item to the user")
+               (step s3 :logic "mark stale evidence as answered with stale_evidence/resolved_by_runtime_fix, emit QuestionEvent::Resolved, and unblock linked BoardTask when no pending sibling questions remain")
+               (step s4 :logic "show still-valid questions with revalidationStatus/evidenceFreshAt so the frontend can distinguish fresh decisions from stale accidents"))
+        :egress [question_revalidation_status stale_evidence_answer QuestionEvent::Resolved])
       (function capability-governance
         :surface capability-governance
         :entry [mission_capability_usage mission_audit mission_codex_ops]
@@ -2617,9 +2654,10 @@
         :surface skill-runtime
         :entry [mission_skill_query mission_skill_context mission_skill_mutate mission_skill_exec]
         :core ((step s1 :logic "resolve skill metadata and context through the skill registry")
-               (step s2 :logic "validate mutation or execution request against project and permission policy")
-               (step s3 :logic "return skill execution result or context bundle as a runtime receipt"))
-        :egress [skill_context skill_mutation skill_execution_receipt])
+               (step s2 :logic "for operational questions such as remote hosts, deploy-agent, router embedding/rerank, 12900kf, Windows runner, CI runner, Ollama, or model host, extract bounded skill-derived operational_facts with source_path/source_line before ad-hoc probing")
+               (step s3 :logic "validate mutation or execution request against project and permission policy")
+               (step s4 :logic "return skill execution result, operational fact bundle, or context bundle as a runtime receipt"))
+        :egress [skill_context skill_operational_facts skill_mutation skill_execution_receipt])
       (function cascade-governance
         :surface cascade-governance
         :entry [mission_universe_graph mission_cascade_plan mission_cascade_trigger mission_cascade_lint]
@@ -2635,8 +2673,17 @@
         :core ((step s1 :logic "normalize sysinfra, permission, power, daemon, and global instruction operations")
                (step s2 :logic "for mission_daemon_update, require explicit confirm=true, return an async logged deploy job for full builds, and reserve synchronous restart for skip_build")
                (step s3 :logic "enforce explicit side-effect policy and keep operational state separate from request artifacts")
-               (step s4 :logic "return bounded operational status or mutation receipt"))
+               (step s4 :logic "merge configured servers with skill-derived operational host facts, including windows-runner/12900kf deploy-agent and embedding anchors, until deploy-center owns the authoritative runtime record")
+               (step s5 :logic "return bounded operational status or mutation receipt"))
         :egress [infra_result permission_receipt daemon_update_status global_instruction_state])
+      (function runtime-load-explanation
+        :surface runtime-load-explanation
+        :entry [mission_master_status mission_health daemon_stats lispCodeSync sharedMemory nightlyEvolution]
+        :core ((step s1 :logic "collect daemon counter snapshots for EventBus backlog, DB latency, Autopilot latency, context prefetch, lisp-code-sync reports, shared-memory workflow runs, stale claims, and nightly evolution")
+               (step s2 :logic "classify likely internal load sources into lisp-code-sync, eventbus, shared-memory/workflow-runner, autopilot/db, context-prefetch, or nightly-evolution instead of asking the operator to infer from raw CPU")
+               (step s3 :logic "state the limitation that this is internal daemon attribution and OS top/Activity Monitor is still needed for process-level CPU confirmation")
+               (step s4 :logic "return runtimeLoadExplanation alongside mission_master_status so stale decisions and frontend diagnostics can cite one authoritative explanation"))
+        :egress [runtimeLoadExplanation load_suspects diagnostic_limits])
       (function ops-infra
         :surface ops-infra
         :entry [scripts/deploy-daemon.sh scripts/rustfmt-missiond.sh scripts/cargo-fmt-touched.sh]
@@ -3115,12 +3162,23 @@
       :code [".missiond/v3/missiond-blueprint.lisp"
              ".missiond/workflows/lisp-code-sync.lisp"
              "crates/missiond-daemon/src/engine/lisp_code_sync.rs"
+             "crates/missiond-daemon/src/engine/intent_engine/autopilot.rs"
              "crates/missiond-daemon/src/engine/mod.rs"
              "crates/missiond-daemon/src/main.rs"
              "crates/missiond-daemon/src/engine/master_control.rs"
              "scripts/check-v3-lisp-code-sync-isomorphism.mjs"
              "scripts/check-v3-code-isomorphism-complete.mjs"]
-      :note "lisp-code-sync-loop is the event-driven Lisp->code isomorphism muscle. LispCodeSyncService watches active ProjectRegistry .missiond directories, emits SystemEvent::ConfigChanged for .lisp/.mjs changes, ignores runtime report paths before publication, debounces repeated path events, consumes accepted events through EventBus, resolves the project, runs typed compile plus code-isomorphism gates, writes .missiond/v3/runtime/lisp-code-sync reports under retention/GC, and creates one visible deduped BoardTask lisp-code-sync:<project>:<path-hash> when the checker fails. It never edits code directly; downstream code mutation still requires master evidence-plan, accepted exact shard, write_scope, acceptance, and durable green gates.")
+      :note "lisp-code-sync-loop is the event-driven Lisp->code isomorphism muscle. It watches active ProjectRegistry .missiond authoring paths, emits SystemEvent::ConfigChanged, ignores .missiond/v3/runtime/** and cold evidence, suppresses unchanged content fingerprints before EventBus publication and again when consuming queued ConfigChanged events, debounces, runs typed compile plus code-isomorphism gates, writes bounded reports, exposes reportDirs/stormCircuitHits/recentSyncTaskCreations, creates one deduped BoardTask for failing gates, switches to lisp-code-sync:<project>:storm-circuit on same-source storms, and lets Autopilot close stale runtime-report BoardTasks as resolved_by_runtime_fix/stale_evidence before slot selection. It never edits code directly; mutation still requires evidence-plan, accepted exact shard, write_scope, acceptance, and durable green gates.")
+
+    (surface lisp-code-sync-storm-circuit
+      :status "code-aligned"
+      :implements [same-source-storm-circuit-breaker lisp-code-sync-storm-circuit]
+      :code [".missiond/v3/missiond-blueprint.lisp"
+             ".missiond/workflows/lisp-code-sync.lisp"
+             "crates/missiond-daemon/src/engine/lisp_code_sync.rs"
+             "crates/missiond-daemon/src/engine/master_control.rs"
+             "scripts/check-v3-lisp-code-sync-isomorphism.mjs"]
+      :note "lisp-code-sync-storm-circuit is the runtime governance surface for same-source sync storms. It counts recent sync BoardTask creations, switches from timestamp/path-hash task identity to semantic root_cause_key lisp-code-sync:<project>:storm-circuit, reuses one visible root-cause task while the circuit is active, appends further evidence through reports/status, and exposes stormCircuitHits/recentSyncTaskCreations/reportDirs through mission_master_status. This prevents one runtime self-output loop from spawning one worker per report path.")
 
     (surface nightly-evolution-loop
       :status "code-aligned"
@@ -3422,6 +3480,18 @@
              "scripts/check-v3-incident-governance-isomorphism.mjs"]
       :note "Code-aligned V3 destination for question, incident, LLM trace, Gemini auth, and decision stats behavior. question.rs is the thin incident-governance facade; question/question_flow.rs owns mission_question create/list/get/answer/dismiss, running-autopilot task inference, QuestionEvent::Created/Resolved, and TaskEvent::Completed scheduler wakeup; question/decision.rs owns mission_decision_stats; question/llm_trace.rs owns mission_llm_trace plus legacy Gemini/Jarvis trace aliases, Gemini request log/stat/content reads, and Gemini watch lifecycle, with the watch probe model projected from router-runtime-policy flow-gemini-model through RouterRuntimeConfig; question/auth.rs owns mission_gemini_auth llm.yaml/settings.json projection; question/incident.rs owns mission_incident routing plus legacy mission_incident_* execution, incident injection/list/get/remediate/status/close, triage remediations, and safe close audit; handlers/mod.rs sends consolidated and legacy question/incident/LLM trace public tools through this facade.")
 
+    (surface decision-inbox-revalidation
+      :status "code-aligned"
+      :implements [decision-inbox-revalidation stale-decision-revalidation]
+      :code [".missiond/v3/missiond-blueprint.lisp"
+             ".missiond/frontend/board-blueprint.lisp"
+             "crates/missiond-daemon/src/handlers/comm/question/question_flow.rs"
+             "crates/missiond-daemon/src/engine/lisp_code_sync.rs"
+             "packages/board/src/components/PendingQuestions.tsx"
+             "packages/board/src/types.ts"
+             "scripts/check-v3-lisp-code-sync-isomorphism.mjs"]
+      :note "decision-inbox-revalidation makes operational questions revalidate their facts before reaching the user. mission_question list/get can classify stale lisp-code-sync self-loop questions, read authoritative runtime status such as reportDirs and recentReports5m, answer obsolete items as stale_evidence/resolved_by_runtime_fix, emit QuestionEvent::Resolved, and return revalidationStatus/evidenceFreshAt fields for still-valid questions. The Board frontend displays this status instead of treating old incident text as fresh truth.")
+
     (surface capability-governance
       :status "code-aligned"
       :implements [capability-usage audit codex-ops]
@@ -3476,7 +3546,7 @@
 
     (surface skill-runtime
       :status "code-aligned"
-      :implements [skill-query skill-context skill-mutate skill-exec]
+      :implements [skill-query skill-context skill-operational-facts skill-mutate skill-exec]
       :code ["crates/missiond-daemon/src/handlers/knowledge/skill.rs"
              "crates/missiond-daemon/src/handlers/knowledge/skill/query.rs"
              "crates/missiond-daemon/src/handlers/knowledge/skill/context.rs"
@@ -3484,7 +3554,7 @@
              "crates/missiond-daemon/src/handlers/knowledge/skill/exec.rs"
              "crates/missiond-mcp/src/tools/knowledge/skill.rs"
              "scripts/check-v3-skill-runtime-isomorphism.mjs"]
-      :note "skill.rs is the thin mission_skill facade for mission_skill_query, mission_skill_context, mission_skill_mutate, mission_skill_exec, and direct legacy skill tools; skill/query.rs owns list/search/topics/actions/stats/project_links, FTS/vector ranking, topic hit recording, workflow action projection, composite registry/topic/action/embedding/execution statistics, and derived project-skill links; skill/context.rs owns context build/resolve, project-aware context resolution, optional-query resolve by project_id or skill, project_skill_links evidence, skill dependency expansion, infra aggregation, explicit opt-in KB dependency aggregation, and optional BoardTask context projection; skill/mutate.rs owns upsert/record/render/rollback, topic auto-create, block writes, materialization, skill version rollback, and embedding refresh through ProcessSkillTopic; skill/exec.rs owns mission_skill_exec and execute_workflow result/error egress.")
+      :note "skill.rs is the thin mission_skill facade for mission_skill_query, mission_skill_context, mission_skill_mutate, mission_skill_exec, and direct legacy skill tools; skill/query.rs owns list/search/topics/actions/stats/project_links, FTS/vector ranking, topic hit recording, workflow action projection, composite registry/topic/action/embedding/execution statistics, and derived project-skill links; skill/context.rs owns context build/resolve, project-aware context resolution, optional-query resolve by project_id or skill, project_skill_links evidence, skill dependency expansion, infra aggregation, explicit opt-in KB dependency aggregation, skill-derived operational_facts with source_path/source_line for remote-host/deploy-agent/router embedding/rerank/12900kf lookups, and optional BoardTask context projection; skill/mutate.rs owns upsert/record/render/rollback, topic auto-create, block writes, materialization, skill version rollback, and embedding refresh through ProcessSkillTopic; skill/exec.rs owns mission_skill_exec and execute_workflow result/error egress.")
 
     (surface cascade-governance
       :status "code-aligned"
@@ -3516,7 +3586,18 @@
              "crates/missiond-mcp/src/tools/sysinfra/system.rs"
              "crates/missiond-mcp/src/tools/sysinfra/global_instruction.rs"
              "scripts/check-v3-sysinfra-control-isomorphism.mjs"]
-      :note "Code-aligned V3 destination for sysinfra MCP behavior not covered by ops-infra scripts. infra.rs owns mission_infra_query/ops list/get/health/reachability/diagnose and reachability probes; permission.rs owns mission_permission_query/mutate including get, learned_list, merged_for_slot, set_role, set_slot, auto_allow, reload, and revoke; power.rs owns mission_power_control status/wake/suspend and removes power from the legacy misc hot path; system.rs owns mission_sys_logs, mission_sys_config, mission_daemon_update, and missiond-blue-green-self-update. mission_daemon_update requires explicit confirm=true; mission_daemon_update full build MUST start scripts/deploy-daemon.sh as a detached async logged job to stay below MCP tools/call timeout and survive daemon kickstart; deploy-daemon.sh MUST co-build missiond and mission-mcp into one blue-green release so newly declared MCP tools are not left behind the daemon release. skip_build remains the synchronous already-built artifact restart path. global_instruction.rs owns mission_global_instruction read/edit/manual-reload.")
+      :note "Code-aligned V3 destination for sysinfra MCP behavior not covered by ops-infra scripts. infra.rs owns mission_infra_query/ops list/get/health/reachability/diagnose and merges configured servers.yaml with skill-derived infra facts such as windows-runner/12900kf, agent_url=windows, Ollama embedding, and BWG tunnel anchors; deploy-center/secret-store remain the eventual authority. permission.rs owns mission_permission_query/mutate; power.rs owns mission_power_control; system.rs owns mission_sys_logs, mission_sys_config, mission_daemon_update, and missiond-blue-green-self-update. mission_daemon_update requires explicit confirm=true; mission_daemon_update full build MUST start scripts/deploy-daemon.sh as a detached async logged job to stay below MCP timeout and survive daemon kickstart; deploy-daemon.sh MUST co-build missiond and mission-mcp into one blue-green release. skip_build remains the synchronous already-built artifact restart path. global_instruction.rs owns mission_global_instruction.")
+
+    (surface runtime-load-explanation
+      :status "code-aligned"
+      :implements [runtime-load-explanation runtimeLoadExplanation]
+      :code ["crates/missiond-daemon/src/engine/master_control.rs"
+             "crates/missiond-daemon/src/infra/daemon_stats.rs"
+             "crates/missiond-daemon/src/engine/lisp_code_sync.rs"
+             "crates/missiond-daemon/src/engine/shared_memory.rs"
+             ".missiond/v3/missiond-blueprint.lisp"
+             "scripts/check-v3-lisp-code-sync-isomorphism.mjs"]
+      :note "runtime-load-explanation is the operator-facing explanation layer for MissionD internal load. It does not pretend to replace OS CPU sampling; it combines daemon stats, lisp-code-sync report counters, shared-memory workflow/cursor/claim counters, and nightly-evolution counters into runtimeLoadExplanation suspects so the Board and master can distinguish lisp-code-sync, EventBus backlog, workflow runner/shared-memory, context-prefetch, Autopilot/DB, or nightly-evolution activity before asking the user to decide.")
 
     (surface ops-infra
       :status "code-aligned"

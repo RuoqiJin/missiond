@@ -98,6 +98,9 @@ function checkFiles(root, files) {
     'project-aware context resolution',
     'optional-query resolve by project_id or skill',
     'project_skill_links evidence',
+    'skill-derived operational_facts',
+    'remote-host/deploy-agent/router embedding/rerank/12900kf lookups',
+    'mission_skill_context.operational_facts',
     'explicit opt-in KB dependency aggregation',
     'skill/context.rs owns context build/resolve',
     'skill/mutate.rs owns upsert/record/render/rollback',
@@ -158,6 +161,9 @@ function checkFiles(root, files) {
     'project_registry',
     'derive_project_skill_links',
     '"project_skill_links": project_skill_links',
+    'extract_operational_facts_for_skills',
+    '"operational_facts": operational_facts',
+    'redact_operational_secret',
     '"project": project_config',
     'list_board_tasks',
     'state.infra.read',
@@ -238,7 +244,8 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/skill/exec.rs"
              "crates/missiond-mcp/src/tools/knowledge/skill.rs"
              "scripts/check-v3-skill-runtime-isomorphism.mjs"]
-      :note "skill.rs is the thin mission_skill facade; skill/query.rs owns list/search/topics/actions/stats/project_links, composite registry/topic/action/embedding/execution statistics, and derived project-skill links; skill/context.rs owns context build/resolve plus project-aware context resolution, optional-query resolve by project_id or skill, project_skill_links evidence, and explicit opt-in KB dependency aggregation; skill/mutate.rs owns upsert/record/render/rollback; skill/exec.rs owns mission_skill_exec."))
+      :note "skill.rs is the thin mission_skill facade; skill/query.rs owns list/search/topics/actions/stats/project_links, composite registry/topic/action/embedding/execution statistics, and derived project-skill links; skill/context.rs owns context build/resolve plus project-aware context resolution, optional-query resolve by project_id or skill, project_skill_links evidence, skill-derived operational_facts for remote-host/deploy-agent/router embedding/rerank/12900kf lookups, and explicit opt-in KB dependency aggregation; skill/mutate.rs owns upsert/record/render/rollback; skill/exec.rs owns mission_skill_exec."))
+  (runtime-projection [mission_skill_context.operational_facts])
   (compression-contract
     :checks ["node scripts/check-v3-skill-runtime-isomorphism.mjs"]))`);
 
@@ -265,6 +272,9 @@ missiond.skill-stats.v1 missiond.project-skill-links.v1 loadedSkills skill_topic
   writeFixture(root, DEFAULT_FILES.context, `
 handle_build handle_resolve resolve_context_query build_context kb_search SkillRequires include_board include_kb project_id project_registry derive_project_skill_links
 "project_skill_links": project_skill_links
+extract_operational_facts_for_skills
+"operational_facts": operational_facts
+redact_operational_secret
 "project": project_config
 list_board_tasks state.infra.read
 "skills": skill_results

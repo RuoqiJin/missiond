@@ -1,7 +1,7 @@
 //! Gemini File API client for multimodal uploads (video, image, PDF).
 //!
 //! Uploads files to Google's Gemini File API, polls until ACTIVE,
-//! caches results in SQLite to avoid re-uploading unchanged files.
+//! returns uploaded-file handles for callers to cache in MissionD's PostgreSQL store.
 //!
 //! Requires a Gemini API key (set `gemini_api_key` in llm.yaml).
 //! Get one from: https://aistudio.google.com/app/apikey

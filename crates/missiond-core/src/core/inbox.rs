@@ -13,7 +13,7 @@ use crate::types::InboxMessage;
 pub struct Inbox {}
 
 impl Inbox {
-    /// Create a new Inbox (PG mode — no SQLite DB).
+    /// Create a new in-memory inbox facade.
     pub fn new() -> Self {
         Self {}
     }

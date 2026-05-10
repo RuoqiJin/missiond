@@ -40,7 +40,9 @@ const DEFAULT_FILES = {
   geminiWatcher: 'crates/missiond-core/src/gemini_cli/watcher.rs',
   geminiParser: 'crates/missiond-core/src/gemini_cli/parser.rs',
   geminiReconcile: 'crates/missiond-daemon/src/workers/local/gemini_reconcile_worker.rs',
+  geminiLogger: 'crates/missiond-daemon/src/workers/local/gemini_logger.rs',
   codexIngestion: 'crates/missiond-daemon/src/workers/local/codex_ingestion_worker.rs',
+  pgObservability: 'crates/missiond-core/src/db/pg/observability.rs',
   pgMessage: 'crates/missiond-core/src/db/pg/message.rs',
   pgConversation: 'crates/missiond-core/src/db/pg/conversation.rs',
   duplicateReport: 'scripts/report-codex-conversation-duplicates.mjs',
@@ -52,6 +54,7 @@ const DEFAULT_FILES = {
   userUtteranceExport: 'scripts/export-human-user-utterances.mjs',
   sourceMigration: 'crates/missiond-core/migrations/20260501000000_canonical_cli_sources.sql',
   sourceCleanupMigration: 'crates/missiond-core/migrations/20260501001000_clean_stale_cli_slot_sessions.sql',
+  sourceStateMigration: 'crates/missiond-core/migrations/20260510000000_conversation_source_state.sql',
   conversationTypes: 'crates/missiond-core/src/types/conversation.rs',
 };
 
@@ -112,12 +115,21 @@ function checkFiles(root, files) {
     '"~/.gemini/tmp/*/chats/*.jsonl"',
     '(source codex-cli',
     ':canonical "codex_cli"',
+    '"~/.codex/sessions/**/*.jsonl"',
+    '"~/.codex/archived_sessions/*.jsonl"',
     ':legacy-aliases ["claude_cli" "pty_jsonl"]',
     'Conversation sources MUST be canonicalized before DB write',
     'mission_slots MUST reject or flag slot_sessions whose conversation source disagrees with the slot engine',
     'mission_slots MUST fall back to the latest real codex_cli conversation',
     'Codex CLI message ingestion MUST generate deterministic non-null message_uuid values',
-    'Codex CLI background ingestion MUST persist rollout size/mtime/line watermarks',
+    'Codex CLI background ingestion MUST persist rollout size/mtime/line/complete watermarks',
+    'Codex CLI ingestion MUST also discover raw rollout JSONL',
+    'session_meta.payload.id is the canonical conversation id',
+    'raw-only imported rows MUST be recorded in conversation_source_state as sqlite-missing',
+    'Codex CLI conversation_source_state MUST distinguish current, sqlite-missing, missing-stale, path-mismatch, archived, and pty-placeholder evidence',
+    'Gemini request-log persistence MUST only consume Gemini provider LlmEvent variants',
+    'non-Gemini LlmEvent replay MUST NOT pollute gemini_requests',
+    'a 50k safety limit is per poll page, never a permanent history truncation',
     'the DB layer MUST adopt that existing row by setting message_uuid instead of inserting a new duplicate row',
     'mission_conversation_get MUST defensively coalesce duplicate rows',
     'mission_conversation_get MUST retrieve tail messages with the indexed (session_id,id) path',
@@ -376,6 +388,17 @@ function checkFiles(root, files) {
     'run_gemini_reconciliation(state, true)',
   ]);
 
+  requireAll(diagnostics, files.geminiLogger, sources.geminiLogger, [
+    'Provider::Gemini',
+    'if *provider != Provider::Gemini',
+    'LegacyCodexRequestStarted { .. }',
+    'LegacyCodexRequestCompleted { .. }',
+  ]);
+
+  requireAll(diagnostics, files.pgObservability, sources.pgObservability, [
+    'ON CONFLICT (id) DO NOTHING',
+  ]);
+
   requireAll(diagnostics, files.codexIngestion, sources.codexIngestion, [
     'source: "codex_cli".to_string()',
     'chat_type: Some("codex_cli".to_string())',
@@ -386,15 +409,29 @@ function checkFiles(root, files) {
     'CODEX_SIZE_WATERMARK_PREFIX',
     'CODEX_MTIME_WATERMARK_PREFIX',
     'CODEX_LINE_WATERMARK_PREFIX',
+    'CODEX_COMPLETE_WATERMARK_PREFIX',
+    'CODEX_SESSIONS_RELATIVE',
+    'CODEX_ARCHIVED_SESSIONS_RELATIVE',
+    'read_codex_threads_with_raw_rollouts',
+    'discover_raw_codex_threads',
+    'read_raw_codex_thread_meta',
+    'session_meta',
+    'provider_indexed: false',
     'REPARSE_OVERLAP_LINES',
     'persisted_codex_watermark_matches',
     'persist_codex_file_watermarks',
+    'reached_line_limit',
+    'record_codex_source_state',
+    'sqlite-missing',
+    'upsert_conversation_source_state',
     'skip_before_line',
     'codex_message_uuid_is_non_null_and_stable',
     'CODEX_THREADS_QUERY',
     'archived: row.get::<_, i64>(4)? != 0',
     'sync_codex_thread_metadata_if_needed(state, thread).await',
-    'fn codex_thread_status(archived: bool)',
+    'fn codex_thread_status(',
+    'slot_bound: bool',
+    'rollout_age_secs: Option<u64>',
     'codex_thread_query_imports_full_history_including_archived',
     // BoardTask e1a5ac1f :: provider-aware classification + raw_role
     // preservation. Codex ingestion must call the new classifier
@@ -419,10 +456,22 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.codexHistoryAudit, sources.codexHistoryAudit, [
     'raw sqlite threads',
+    'rolloutSessionsWithMeta',
+    'rawOnlyNotInSqlite',
+    'rawRolloutsMissingInMissionD',
+    'readSessionMeta',
+    '.codex/archived_sessions',
     'archivedStateDrift',
     'missingInMissionD',
     'duplicateUuidGroups',
     'nullUuidMessages',
+  ]);
+
+  requireAll(diagnostics, files.sourceStateMigration, sources.sourceStateMigration, [
+    'CREATE TABLE IF NOT EXISTS conversation_source_state',
+    'raw_state TEXT NOT NULL',
+    'raw_line_count BIGINT',
+    'raw_message_line_count BIGINT',
   ]);
 
   requireAll(

@@ -14,8 +14,8 @@
 //! already `Arc` so clone is a handful of atomic increments.
 //!
 //! Wiring decisions:
-//!   * Postgres is the only backend wired today. SQLite is deprecated (see
-//!     user memory `feedback_drop_sqlite`) and never gets an event_log table.
+//!   * PostgreSQL is the only MissionD runtime database backend and owns the
+//!     event_log table.
 //!   * The control gate is adapted from `watch::Receiver<ControlTree>` via
 //!     [`crate::bus::control_gate_adapter::ControlTreeGate`].
 //!   * Metrics use the shared `AtomicBusMetrics`; Phase 8 can swap a

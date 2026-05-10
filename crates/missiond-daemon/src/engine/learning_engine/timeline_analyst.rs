@@ -12,6 +12,7 @@ use std::sync::atomic::Ordering;
 use tracing::{debug, info, warn};
 
 use crate::context::v3_blueprint_runtime::LearningEngineRuntimeConfig;
+use crate::llm_gate::{self, LlmProvider};
 use crate::llm_gateway::call_gemini_for_flow;
 use crate::state::AppState;
 use missiond_core::db::TimelineRow;
@@ -37,7 +38,18 @@ pub(crate) async fn check_timeline_analysis(state: &AppState) {
     if now - last < config.timeline_analysis_interval_secs {
         return;
     }
-    // Do NOT update timestamp here — only after success (Gemini review requirement)
+
+    // A closed provider gate is a control-plane decision, not an analysis
+    // failure. Advance the cadence marker so background maintenance does not
+    // retry every tick while Gemini is intentionally disabled.
+    if llm_gate::is_disabled(LlmProvider::Gemini) {
+        debug!("Timeline Analyst: skipped because Gemini gate is closed");
+        let _ = state
+            .store
+            .daemon_state_set("last_timeline_analysis_at", now)
+            .await;
+        return;
+    }
 
     info!("Timeline Analyst: starting periodic analysis");
     match run_analysis(state, &config).await {

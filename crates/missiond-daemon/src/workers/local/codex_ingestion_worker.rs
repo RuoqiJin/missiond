@@ -15,12 +15,13 @@
 //!   The rollout JSONL file's mtime+size is the only reliable "this thread changed" check.
 //! - WorkerKind::Local (no LLM dependency — pure I/O + parsing).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use chrono::DateTime;
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -39,6 +40,10 @@ const STARTUP_DELAY_SECS: u64 = 15;
 /// Codex SQLite database path relative to home.
 const CODEX_DB_RELATIVE: &str = ".codex/state_5.sqlite";
 
+/// Codex rollout corpus roots relative to home.
+const CODEX_SESSIONS_RELATIVE: &str = ".codex/sessions";
+const CODEX_ARCHIVED_SESSIONS_RELATIVE: &str = ".codex/archived_sessions";
+
 /// Max JSONL lines to read per thread per poll cycle (safety valve).
 const MAX_LINES_PER_THREAD: usize = 50_000;
 
@@ -46,16 +51,13 @@ const MAX_LINES_PER_THREAD: usize = 50_000;
 /// straddle the previous cursor, and DB UUID dedup keeps this overlap safe.
 const REPARSE_OVERLAP_LINES: i64 = 200;
 
-/// Old unchanged files with an existing MissionD conversation are considered
-/// already imported and can be bootstrapped into persistent watermarks.
-const QUIET_FILE_THRESHOLD_SECS: u64 = 3600;
-
 /// Batch size for tool call inserts.
 const TOOL_CALL_BATCH_SIZE: usize = 100;
 
 const CODEX_SIZE_WATERMARK_PREFIX: &str = "codex-size:";
 const CODEX_MTIME_WATERMARK_PREFIX: &str = "codex-mtime:";
 const CODEX_LINE_WATERMARK_PREFIX: &str = "codex-lines:";
+const CODEX_COMPLETE_WATERMARK_PREFIX: &str = "codex-complete:";
 
 // ── JSONL event types ──
 
@@ -83,6 +85,7 @@ struct CodexThread {
     created_at: i64,
     updated_at: i64,
     archived: bool,
+    provider_indexed: bool,
     cwd: String,
     model: Option<String>,
     title: String,
@@ -181,9 +184,10 @@ async fn poll_and_ingest(
 ) -> Result<usize> {
     // Open Codex's SQLite in read-only mode (non-blocking for Codex).
     let db_path_owned = db_path.to_path_buf();
-    let threads = tokio::task::spawn_blocking(move || read_codex_threads(&db_path_owned))
-        .await
-        .context("spawn_blocking join")??;
+    let threads =
+        tokio::task::spawn_blocking(move || read_codex_threads_with_raw_rollouts(&db_path_owned))
+            .await
+            .context("spawn_blocking join")??;
 
     let mut total_ingested = 0usize;
     let persisted_watermarks = state
@@ -197,7 +201,10 @@ async fn poll_and_ingest(
         let rollout_path = PathBuf::from(&thread.rollout_path);
         let current_wm = match read_file_watermark(&rollout_path) {
             Some(wm) => wm,
-            None => continue, // file missing or unreadable — skip silently
+            None => {
+                record_codex_source_state(state, thread, "missing-stale", None, None).await;
+                continue;
+            }
         };
 
         // Codex thread metadata (archive state, model, cwd, branch) lives in
@@ -208,6 +215,14 @@ async fn poll_and_ingest(
         // Skip if file hasn't grown or been touched since last poll.
         if let Some(prev) = watermarks.get(&thread.id).copied() {
             if same_file_watermark(current_wm, prev) {
+                record_codex_source_state(
+                    state,
+                    thread,
+                    codex_source_state(thread),
+                    Some(current_wm),
+                    None,
+                )
+                .await;
                 continue;
             }
         }
@@ -217,29 +232,14 @@ async fn poll_and_ingest(
             current_wm,
         ) {
             watermarks.insert(thread.id.clone(), current_wm);
-            continue;
-        }
-
-        if current_wm.age_secs > QUIET_FILE_THRESHOLD_SECS
-            && state
-                .store
-                .get_conversation(&thread.id)
-                .await
-                .ok()
-                .flatten()
-                .is_some()
-            && !persisted_watermarks.contains_key(&codex_size_watermark_key(&thread.rollout_path))
-        {
-            persist_codex_file_watermarks(
+            record_codex_source_state(
                 state,
-                &thread.rollout_path,
-                current_wm,
-                persisted_watermarks
-                    .get(&codex_line_watermark_key(&thread.rollout_path))
-                    .copied(),
+                thread,
+                codex_source_state(thread),
+                Some(current_wm),
+                None,
             )
             .await;
-            watermarks.insert(thread.id.clone(), current_wm);
             continue;
         }
 
@@ -253,12 +253,23 @@ async fn poll_and_ingest(
         match process_thread(state, thread, skip_before_line).await {
             Ok(outcome) => {
                 total_ingested += outcome.ingested;
-                watermarks.insert(thread.id.clone(), current_wm);
                 persist_codex_file_watermarks(
                     state,
                     &thread.rollout_path,
                     current_wm,
                     Some(outcome.total_lines as i64),
+                    !outcome.reached_line_limit,
+                )
+                .await;
+                if !outcome.reached_line_limit {
+                    watermarks.insert(thread.id.clone(), current_wm);
+                }
+                record_codex_source_state(
+                    state,
+                    thread,
+                    codex_source_state(thread),
+                    Some(current_wm),
+                    Some(&outcome),
                 )
                 .await;
                 if outcome.ingested > 0 {
@@ -266,6 +277,7 @@ async fn poll_and_ingest(
                         thread_id = %&thread.id[..8.min(thread.id.len())],
                         tool_calls = outcome.ingested,
                         size = current_wm.size,
+                        reached_line_limit = outcome.reached_line_limit,
                         "Codex ingestion: thread processed"
                     );
                 }
@@ -303,6 +315,17 @@ fn read_file_watermark(path: &Path) -> Option<FileWatermark> {
     })
 }
 
+/// Read all Codex sqlite threads plus durable rollout JSONL files that Codex
+/// sqlite no longer references. The raw rollout file's `session_meta.payload.id`
+/// remains the canonical conversation id.
+fn read_codex_threads_with_raw_rollouts(db_path: &Path) -> Result<Vec<CodexThread>> {
+    let mut threads = read_codex_threads(db_path)?;
+    let indexed_paths: HashSet<String> = threads.iter().map(|t| t.rollout_path.clone()).collect();
+    let raw_threads = discover_raw_codex_threads(&indexed_paths)?;
+    threads.extend(raw_threads);
+    Ok(threads)
+}
+
 /// Read all threads from Codex SQLite (blocking — runs on spawn_blocking).
 fn read_codex_threads(db_path: &Path) -> Result<Vec<CodexThread>> {
     let conn = rusqlite::Connection::open_with_flags(
@@ -320,6 +343,7 @@ fn read_codex_threads(db_path: &Path) -> Result<Vec<CodexThread>> {
             created_at: row.get(2)?,
             updated_at: row.get(3)?,
             archived: row.get::<_, i64>(4)? != 0,
+            provider_indexed: true,
             cwd: row.get(5)?,
             model: row.get(6)?,
             title: row.get(7)?,
@@ -334,6 +358,127 @@ fn read_codex_threads(db_path: &Path) -> Result<Vec<CodexThread>> {
     Ok(threads)
 }
 
+fn discover_raw_codex_threads(indexed_paths: &HashSet<String>) -> Result<Vec<CodexThread>> {
+    let mut files = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        collect_jsonl_files(&home.join(CODEX_SESSIONS_RELATIVE), &mut files);
+        collect_jsonl_files(&home.join(CODEX_ARCHIVED_SESSIONS_RELATIVE), &mut files);
+    }
+
+    let mut threads = Vec::new();
+    let mut seen_ids = HashSet::new();
+    for path in files {
+        let path_string = path.to_string_lossy().to_string();
+        if indexed_paths.contains(&path_string) {
+            continue;
+        }
+        let archived = path_string.contains("/.codex/archived_sessions/");
+        match read_raw_codex_thread_meta(&path, archived) {
+            Ok(Some(thread)) => {
+                if seen_ids.insert(thread.id.clone()) {
+                    threads.push(thread);
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                debug!(path = %path.display(), error = %e, "Codex ingestion: raw rollout meta skipped");
+            }
+        }
+    }
+    Ok(threads)
+}
+
+fn collect_jsonl_files(root: &Path, out: &mut Vec<PathBuf>) {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_jsonl_files(&path, out);
+        } else if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
+            out.push(path);
+        }
+    }
+}
+
+fn read_raw_codex_thread_meta(path: &Path, archived: bool) -> Result<Option<CodexThread>> {
+    use std::io::{BufRead, BufReader};
+
+    let file = std::fs::File::open(path).context("open raw Codex rollout")?;
+    let reader = BufReader::new(file);
+
+    for line in reader.lines().take(25) {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let event: CodexJsonlEvent = match serde_json::from_str(&line) {
+            Ok(event) => event,
+            Err(_) => continue,
+        };
+        if event.event_type != "session_meta" {
+            continue;
+        }
+
+        let id = event
+            .payload
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if id.is_empty() {
+            return Ok(None);
+        }
+
+        let meta = std::fs::metadata(path).ok();
+        let updated_at = meta
+            .and_then(|m| m.modified().ok())
+            .and_then(|mtime| mtime.duration_since(UNIX_EPOCH).ok())
+            .and_then(|d| i64::try_from(d.as_secs()).ok())
+            .unwrap_or_else(|| parse_rfc3339_epoch(&event.timestamp).unwrap_or(0));
+        let created_at = event
+            .payload
+            .get("timestamp")
+            .and_then(|v| v.as_str())
+            .and_then(parse_rfc3339_epoch)
+            .or_else(|| parse_rfc3339_epoch(&event.timestamp))
+            .unwrap_or(updated_at);
+        let cwd = event
+            .payload
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let model = event
+            .payload
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let title = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(&id)
+            .to_string();
+
+        return Ok(Some(CodexThread {
+            id,
+            rollout_path: path.to_string_lossy().to_string(),
+            created_at,
+            updated_at,
+            archived,
+            provider_indexed: false,
+            cwd,
+            model,
+            title,
+            git_branch: None,
+        }));
+    }
+
+    Ok(None)
+}
+
 const CODEX_THREADS_QUERY: &str = "\
 SELECT id, rollout_path, created_at, updated_at, archived, cwd, model, title, git_branch
 FROM threads
@@ -343,6 +488,10 @@ ORDER BY updated_at DESC";
 struct ProcessedThread {
     ingested: usize,
     total_lines: usize,
+    message_line_count: usize,
+    first_timestamp: Option<String>,
+    last_timestamp: Option<String>,
+    reached_line_limit: bool,
 }
 
 async fn process_thread(
@@ -360,6 +509,10 @@ async fn process_thread(
         return Ok(ProcessedThread {
             ingested: 0,
             total_lines: 0,
+            message_line_count: 0,
+            first_timestamp: None,
+            last_timestamp: None,
+            reached_line_limit: false,
         });
     }
 
@@ -507,19 +660,69 @@ async fn process_thread(
     Ok(ProcessedThread {
         ingested: total,
         total_lines: parsed.total_lines,
+        message_line_count: parsed.message_line_count,
+        first_timestamp: parsed.first_timestamp,
+        last_timestamp: parsed.last_timestamp,
+        reached_line_limit: parsed.reached_line_limit,
     })
 }
 
+async fn record_codex_source_state(
+    state: &AppState,
+    thread: &CodexThread,
+    raw_state: &str,
+    current_wm: Option<FileWatermark>,
+    outcome: Option<&ProcessedThread>,
+) {
+    let input = missiond_core::types::ConversationSourceStateInput {
+        conversation_id: thread.id.clone(),
+        source: "codex_cli".to_string(),
+        raw_path: Some(thread.rollout_path.clone()),
+        raw_state: raw_state.to_string(),
+        raw_first_seen_at: outcome.and_then(|o| o.first_timestamp.clone()),
+        raw_last_seen_at: outcome.and_then(|o| o.last_timestamp.clone()),
+        raw_line_count: outcome.map(|o| o.total_lines as i64),
+        raw_message_line_count: outcome.map(|o| o.message_line_count as i64),
+        raw_hash: current_wm.map(|wm| codex_file_fingerprint(wm)),
+        reason: Some(codex_source_state_reason(thread, raw_state).to_string()),
+    };
+    if let Err(e) = state.store.upsert_conversation_source_state(&input).await {
+        debug!(
+            thread_id = %&thread.id[..8.min(thread.id.len())],
+            raw_state,
+            error = %e,
+            "Codex ingestion: failed to upsert conversation_source_state"
+        );
+    }
+}
+
+fn codex_source_state(thread: &CodexThread) -> &'static str {
+    if !thread.provider_indexed {
+        "sqlite-missing"
+    } else if thread.archived {
+        "archived"
+    } else {
+        "current"
+    }
+}
+
+fn codex_source_state_reason(thread: &CodexThread, raw_state: &str) -> &'static str {
+    match raw_state {
+        "sqlite-missing" => {
+            "rollout JSONL has session_meta but Codex state_5.sqlite has no matching thread row"
+        }
+        "missing-stale" => "Codex state_5.sqlite references a rollout path that is missing on disk",
+        "archived" => "Codex sqlite marks this thread archived; keep as historical source state",
+        _ if thread.provider_indexed => "Codex sqlite thread and rollout JSONL are both visible",
+        _ => "Codex rollout source state recorded by background ingestion",
+    }
+}
+
 async fn sync_codex_thread_metadata_if_needed(state: &AppState, thread: &CodexThread) {
-    let desired_status = codex_thread_status(thread.archived);
     let existing = match state.store.get_conversation(&thread.id).await {
         Ok(Some(conv)) => conv,
         _ => return,
     };
-
-    if existing.status == desired_status {
-        return;
-    }
 
     let conv = build_codex_conversation(
         state,
@@ -528,11 +731,14 @@ async fn sync_codex_thread_metadata_if_needed(state: &AppState, thread: &CodexTh
         existing.ended_at.clone(),
     )
     .await;
+    if existing.status == conv.status {
+        return;
+    }
     if let Err(e) = state.store.upsert_conversation(&conv).await {
         warn!(
             thread_id = %&thread.id[..8.min(thread.id.len())],
             error = %e,
-            status = desired_status,
+            status = %conv.status,
             "Codex ingestion: failed to sync thread metadata"
         );
     }
@@ -582,6 +788,9 @@ async fn build_codex_conversation(
         Some(sid) => state.store.get_running_slot_task(sid).await.ok().flatten(),
         None => None,
     };
+    let rollout_age_secs =
+        read_file_watermark(Path::new(&thread.rollout_path)).map(|wm| wm.age_secs);
+    let status = codex_thread_status(thread.archived, slot_id.is_some(), rollout_age_secs);
 
     missiond_core::types::Conversation {
         id: thread.id.clone(),
@@ -600,7 +809,7 @@ async fn build_codex_conversation(
         message_count,
         started_at: epoch_to_iso(thread.created_at),
         ended_at,
-        status: codex_thread_status(thread.archived).to_string(),
+        status: status.to_string(),
         analyzed_at: None,
         analysis_version: 0,
         analysis_retries: 0,
@@ -615,9 +824,17 @@ async fn build_codex_conversation(
     }
 }
 
-fn codex_thread_status(archived: bool) -> &'static str {
+fn codex_thread_status(
+    archived: bool,
+    slot_bound: bool,
+    rollout_age_secs: Option<u64>,
+) -> &'static str {
     if archived {
         "archived"
+    } else if slot_bound {
+        "active"
+    } else if rollout_age_secs.unwrap_or(u64::MAX) > 3600 {
+        "completed"
     } else {
         "active"
     }
@@ -628,6 +845,10 @@ struct ParsedThread {
     tool_calls: Vec<ParsedToolCall>,
     messages: Vec<ParsedMessage>,
     total_lines: usize,
+    message_line_count: usize,
+    first_timestamp: Option<String>,
+    last_timestamp: Option<String>,
+    reached_line_limit: bool,
 }
 
 /// Parse JSONL file, extract tool calls + agent/user messages.
@@ -640,13 +861,25 @@ fn parse_jsonl(path: &Path, _thread_id: &str, skip_before_line: usize) -> Result
     let mut calls: Vec<ParsedToolCall> = Vec::new();
     let mut messages: Vec<ParsedMessage> = Vec::new();
     let mut call_id_to_idx: HashMap<String, usize> = HashMap::new();
-    let mut line_count = 0usize;
+    let mut physical_line_no = 0usize;
+    let mut processed_lines = 0usize;
+    let mut cursor_line = skip_before_line;
+    let mut message_line_count = 0usize;
+    let mut first_timestamp: Option<String> = None;
+    let mut last_timestamp: Option<String> = None;
+    let mut reached_line_limit = false;
 
     for line in reader.lines() {
-        if line_count >= MAX_LINES_PER_THREAD {
+        physical_line_no += 1;
+        if physical_line_no <= skip_before_line {
+            continue;
+        }
+        if processed_lines >= MAX_LINES_PER_THREAD {
+            reached_line_limit = true;
             break;
         }
-        line_count += 1;
+        processed_lines += 1;
+        cursor_line = physical_line_no;
 
         let line = match line {
             Ok(l) => l,
@@ -656,15 +889,16 @@ fn parse_jsonl(path: &Path, _thread_id: &str, skip_before_line: usize) -> Result
         if line.is_empty() {
             continue;
         }
-        if line_count <= skip_before_line {
-            continue;
-        }
         let source_event_hash = short_sha256(&line, 16);
 
         let event: CodexJsonlEvent = match serde_json::from_str(&line) {
             Ok(e) => e,
             Err(_) => continue,
         };
+        if first_timestamp.is_none() {
+            first_timestamp = Some(event.timestamp.clone());
+        }
+        last_timestamp = Some(event.timestamp.clone());
 
         match event.event_type.as_str() {
             "response_item" => {
@@ -738,9 +972,10 @@ fn parse_jsonl(path: &Path, _thread_id: &str, skip_before_line: usize) -> Result
                                 role: "assistant".to_string(),
                                 content: text,
                                 timestamp: event.timestamp,
-                                line_no: line_count,
+                                line_no: physical_line_no,
                                 source_event_hash: source_event_hash.clone(),
                             });
+                            message_line_count += 1;
                         }
                     }
                     _ => {}
@@ -755,20 +990,16 @@ fn parse_jsonl(path: &Path, _thread_id: &str, skip_before_line: usize) -> Result
 
                 match msg_type {
                     "user_message" => {
-                        let text = event
-                            .payload
-                            .get("message")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
+                        let text = extract_event_msg_user_text(&event.payload);
                         if !text.is_empty() {
                             messages.push(ParsedMessage {
                                 role: "user".to_string(),
                                 content: text,
                                 timestamp: event.timestamp,
-                                line_no: line_count,
+                                line_no: physical_line_no,
                                 source_event_hash: source_event_hash.clone(),
                             });
+                            message_line_count += 1;
                         }
                     }
                     "agent_message" => {
@@ -783,9 +1014,10 @@ fn parse_jsonl(path: &Path, _thread_id: &str, skip_before_line: usize) -> Result
                                 role: "assistant".to_string(),
                                 content: text,
                                 timestamp: event.timestamp,
-                                line_no: line_count,
+                                line_no: physical_line_no,
                                 source_event_hash: source_event_hash.clone(),
                             });
+                            message_line_count += 1;
                         }
                     }
                     _ => {}
@@ -798,7 +1030,11 @@ fn parse_jsonl(path: &Path, _thread_id: &str, skip_before_line: usize) -> Result
     Ok(ParsedThread {
         tool_calls: calls,
         messages,
-        total_lines: line_count,
+        total_lines: cursor_line,
+        message_line_count,
+        first_timestamp,
+        last_timestamp,
+        reached_line_limit,
     })
 }
 
@@ -818,6 +1054,10 @@ fn codex_line_watermark_key(path: &str) -> String {
     format!("{CODEX_LINE_WATERMARK_PREFIX}{path}")
 }
 
+fn codex_complete_watermark_key(path: &str) -> String {
+    format!("{CODEX_COMPLETE_WATERMARK_PREFIX}{path}")
+}
+
 fn persisted_codex_watermark_matches(
     watermarks: &HashMap<String, i64>,
     path: &str,
@@ -825,6 +1065,7 @@ fn persisted_codex_watermark_matches(
 ) -> bool {
     watermarks.get(&codex_size_watermark_key(path)).copied() == i64::try_from(current.size).ok()
         && watermarks.get(&codex_mtime_watermark_key(path)).copied() == Some(current.mtime_secs)
+        && watermarks.get(&codex_complete_watermark_key(path)).copied() == Some(1)
 }
 
 async fn persist_codex_file_watermarks(
@@ -832,6 +1073,7 @@ async fn persist_codex_file_watermarks(
     path: &str,
     current: FileWatermark,
     total_lines: Option<i64>,
+    complete: bool,
 ) {
     if let Ok(size) = i64::try_from(current.size) {
         let _ = state
@@ -849,6 +1091,23 @@ async fn persist_codex_file_watermarks(
             .upsert_reconcile_watermark(&codex_line_watermark_key(path), total_lines)
             .await;
     }
+    let _ = state
+        .store
+        .upsert_reconcile_watermark(
+            &codex_complete_watermark_key(path),
+            if complete { 1 } else { 0 },
+        )
+        .await;
+}
+
+fn codex_file_fingerprint(wm: FileWatermark) -> String {
+    format!("size:{}:mtime:{}", wm.size, wm.mtime_secs)
+}
+
+fn parse_rfc3339_epoch(value: &str) -> Option<i64> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|dt| dt.timestamp())
 }
 
 fn short_sha256(input: &str, chars: usize) -> String {
@@ -916,6 +1175,59 @@ mod tests {
             "archived Codex threads are historical source state and must still be imported"
         );
         assert!(CODEX_THREADS_QUERY.contains("archived"));
+    }
+
+    #[test]
+    fn raw_rollout_meta_imports_session_missing_from_sqlite() {
+        let path = std::env::temp_dir().join(format!(
+            "missiond-codex-rollout-test-{}-{}.jsonl",
+            std::process::id(),
+            short_sha256("raw-rollout-meta", 8)
+        ));
+        let jsonl = r#"{"timestamp":"2026-05-10T00:00:00Z","type":"session_meta","payload":{"id":"raw-thread-123","timestamp":"2026-05-10T00:00:00Z","cwd":"/tmp/project","model":"gpt-5.5"}}"#;
+        std::fs::write(&path, format!("{jsonl}\n")).expect("write raw rollout fixture");
+
+        let thread = read_raw_codex_thread_meta(&path, false)
+            .expect("read raw rollout meta")
+            .expect("session_meta should produce a thread");
+        assert_eq!(thread.id, "raw-thread-123");
+        assert_eq!(thread.cwd, "/tmp/project");
+        assert_eq!(thread.model.as_deref(), Some("gpt-5.5"));
+        assert!(!thread.provider_indexed);
+        assert_eq!(codex_source_state(&thread), "sqlite-missing");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn codex_status_distinguishes_archived_slot_and_historical_threads() {
+        assert_eq!(codex_thread_status(true, false, Some(1)), "archived");
+        assert_eq!(codex_thread_status(false, true, Some(86_400)), "active");
+        assert_eq!(codex_thread_status(false, false, Some(30)), "active");
+        assert_eq!(codex_thread_status(false, false, Some(3_601)), "completed");
+        assert_eq!(codex_thread_status(false, false, None), "completed");
+    }
+
+    #[test]
+    fn persisted_codex_watermark_requires_complete_marker() {
+        let path = "/tmp/codex-rollout.jsonl";
+        let wm = FileWatermark {
+            mtime_secs: 42,
+            size: 100,
+            age_secs: 0,
+        };
+        let mut watermarks = HashMap::from([
+            (codex_size_watermark_key(path), 100),
+            (codex_mtime_watermark_key(path), 42),
+        ]);
+        assert!(
+            !persisted_codex_watermark_matches(&watermarks, path, wm),
+            "partial paged parses must not be skipped after daemon restart"
+        );
+        watermarks.insert(codex_complete_watermark_key(path), 0);
+        assert!(!persisted_codex_watermark_matches(&watermarks, path, wm));
+        watermarks.insert(codex_complete_watermark_key(path), 1);
+        assert!(persisted_codex_watermark_matches(&watermarks, path, wm));
     }
 
     #[test]
@@ -1018,6 +1330,19 @@ fn extract_message_text(payload: &Value) -> String {
     }
 
     String::new()
+}
+
+fn extract_event_msg_user_text(payload: &Value) -> String {
+    match payload.get("message") {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Object(_)) => payload
+            .get("message")
+            .and_then(|v| v.get("message"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        _ => String::new(),
+    }
 }
 
 // ── Helpers ──

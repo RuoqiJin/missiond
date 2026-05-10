@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::state::AppState;
-use missiond_core::event::events::LlmEvent;
+use missiond_core::event::events::{LlmEvent, Provider};
 use missiond_core::event::subscription::SubscriptionOpts;
 
 pub(crate) struct GeminiLoggerWorker;
@@ -65,6 +65,9 @@ async fn handle_event(state: &AppState, event: &LlmEvent) {
             prompt_text,
             ..
         } => {
+            if *provider != Provider::Gemini {
+                return;
+            }
             if let Err(e) = store
                 .gemini_log_insert_started(
                     request_id,
@@ -90,6 +93,9 @@ async fn handle_event(state: &AppState, event: &LlmEvent) {
             extra,
             ..
         } => {
+            if *provider != Provider::Gemini {
+                return;
+            }
             let api_mode_default = format!("{:?}-cli", provider);
             let api_mode = extra
                 .get("api_mode")
@@ -172,54 +178,8 @@ async fn handle_event(state: &AppState, event: &LlmEvent) {
                 warn!(error = %e, "Gemini log: failed to update completed");
             }
         }
-        LlmEvent::LegacyCodexRequestStarted {
-            request_id,
-            caller,
-            model,
-            prompt_chars,
-            prompt_text,
-            ..
-        } => {
-            if let Err(e) = store
-                .gemini_log_insert_started(
-                    request_id,
-                    caller,
-                    None,
-                    model,
-                    *prompt_chars as i64,
-                    prompt_text.as_deref(),
-                )
-                .await
-            {
-                warn!(error = %e, "Codex log: failed to insert started");
-            }
-        }
-        LlmEvent::LegacyCodexRequestCompleted {
-            request_id,
-            response_chars,
-            duration_ms,
-            status,
-            error_msg,
-            response_text,
-            ..
-        } => {
-            if let Err(e) = store
-                .gemini_log_update_completed(
-                    request_id,
-                    "codex-cli",
-                    *response_chars as i64,
-                    0,
-                    *duration_ms as i64,
-                    0,
-                    status,
-                    error_msg.as_deref(),
-                    response_text.as_deref(),
-                )
-                .await
-            {
-                warn!(error = %e, "Codex log: failed to update completed");
-            }
-        }
+        LlmEvent::LegacyCodexRequestStarted { .. }
+        | LlmEvent::LegacyCodexRequestCompleted { .. } => {}
         _ => {}
     }
 }

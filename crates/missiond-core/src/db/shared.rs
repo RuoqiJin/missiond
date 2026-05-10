@@ -1,4 +1,4 @@
-//! Shared types and utilities used by both SQLite and PostgreSQL backends.
+//! Shared row types and utilities used by MissionD's PostgreSQL store modules.
 //! This module is always compiled regardless of feature flags.
 
 use std::collections::HashSet;

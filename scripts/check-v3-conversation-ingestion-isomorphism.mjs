@@ -31,6 +31,8 @@ const DEFAULT_FILES = {
   pgConversation: 'crates/missiond-core/src/db/pg/conversation.rs',
   mcpConversation: 'crates/missiond-mcp/src/tools/comm/conversation.rs',
   mcpTimeline: 'crates/missiond-mcp/src/tools/comm/timeline.rs',
+  daemonMain: 'crates/missiond-daemon/src/main.rs',
+  eventsSync: 'crates/missiond-daemon/src/events_sync.rs',
 };
 
 function main() {
@@ -128,6 +130,8 @@ function checkFiles(root, files) {
     'conversation-ingestion-policy read-model default and max limits',
     'UserPromptSubmit context prefetch intent router model and timeout MUST project from conversation-ingestion-policy',
     'Codex vision worker binary/model/idle timeout and CodexCli absolute timeout MUST project from conversation-ingestion-policy',
+    'Historical conversation event/tool-call backfills MUST NOT run unconditionally on daemon startup',
+    'MISSIOND_CONVERSATION_BACKFILL_ON_STARTUP=1',
     'conversation.rs is the thin conversation-ingestion facade',
     'conversation/router.rs owns mission_conversation_query',
     'conversation/query.rs owns read-model query actions',
@@ -171,6 +175,22 @@ function checkFiles(root, files) {
     ':vision-codex-binary',
     ':vision-codex-absolute-timeout-secs',
     'conversation-ingestion-policy',
+  ]);
+
+  requireAll(diagnostics, files.daemonMain, sources.daemonMain, [
+    'conversation_backfill_on_startup',
+    'MISSIOND_CONVERSATION_BACKFILL_ON_STARTUP',
+    'backfill_enabled',
+    'Conversation event backfill skipped on startup',
+    'Conversation tool-call backfill skipped on startup',
+    'events_sync::backfill_conversation_events',
+    'events_sync::backfill_tool_calls',
+  ]);
+
+  requireAll(diagnostics, files.eventsSync, sources.eventsSync, [
+    'backfill_conversation_events',
+    'backfill_tool_calls',
+    'Yield periodically to avoid blocking the runtime',
   ]);
 
   requireAll(diagnostics, files.dispatcher, sources.dispatcher, [
@@ -424,7 +444,7 @@ function buildFixture() {
              "crates/missiond-mcp/src/tools/comm/conversation.rs"
              "crates/missiond-mcp/src/tools/comm/timeline.rs"
              "scripts/check-v3-conversation-ingestion-isomorphism.mjs"]
-      :note "conversation-ingestion-policy read-model default and max limits; UserPromptSubmit context prefetch intent router model and timeout MUST project from conversation-ingestion-policy; Codex vision worker binary/model/idle timeout and CodexCli absolute timeout MUST project from conversation-ingestion-policy; conversation.rs is the thin conversation-ingestion facade; conversation/router.rs owns mission_conversation_query; conversation/query.rs owns read-model query actions; when mission_conversation_query list is scoped by taskId and conversationType is omitted, query all provider conversation rows; conversation/events.rs owns analysis/event egress; conversation/maintenance.rs owns embedding/reconcile work items; timeline.rs owns mission_timeline; retrospective.rs owns retrospective analysis, list, and backfill; vision_worker.rs owns unprocessed image-message extraction through CodexCli."))
+      :note "conversation-ingestion-policy read-model default and max limits; UserPromptSubmit context prefetch intent router model and timeout MUST project from conversation-ingestion-policy; Codex vision worker binary/model/idle timeout and CodexCli absolute timeout MUST project from conversation-ingestion-policy; Historical conversation event/tool-call backfills MUST NOT run unconditionally on daemon startup and require MISSIOND_CONVERSATION_BACKFILL_ON_STARTUP=1 or backfill_enabled; conversation.rs is the thin conversation-ingestion facade; conversation/router.rs owns mission_conversation_query; conversation/query.rs owns read-model query actions; when mission_conversation_query list is scoped by taskId and conversationType is omitted, query all provider conversation rows; message-anchored BoardTask id fallback; compaction timeline reconstruction tolerates legacy NULL started_at/message_count rows; conversation/events.rs owns analysis/event egress; conversation/maintenance.rs owns embedding/reconcile work items; timeline.rs owns mission_timeline; retrospective.rs owns retrospective analysis, list, and backfill; vision_worker.rs owns unprocessed image-message extraction through CodexCli."))
   (compression-contract
     :checks ["node scripts/check-v3-conversation-ingestion-isomorphism.mjs"]))`,
   );
@@ -478,7 +498,7 @@ function buildFixture() {
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.pgConversation),
-    'task_scoped_type_clause None | Some("all") => String::new() task_scoped_query_without_type_includes_provider_conversations task_scoped_query_keeps_explicit_type_filters',
+    "task_scoped_type_clause None | Some(\"all\") => String::new() task_scoped_query_without_type_includes_provider_conversations task_scoped_query_keeps_explicit_type_filters m.content ILIKE ('%' || $1 || '%') COALESCE(started_at, '') AS started_at COALESCE(message_count, 0) AS message_count",
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.mcpConversation),
@@ -487,6 +507,14 @@ function buildFixture() {
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.mcpTimeline),
     'ToolDefinition::new "mission_timeline" "query" "trace" "stats" "search"',
+  );
+  fs.writeFileSync(
+    path.join(root, DEFAULT_FILES.daemonMain),
+    'conversation_backfill_on_startup MISSIOND_CONVERSATION_BACKFILL_ON_STARTUP backfill_enabled Conversation event backfill skipped on startup Conversation tool-call backfill skipped on startup events_sync::backfill_conversation_events events_sync::backfill_tool_calls',
+  );
+  fs.writeFileSync(
+    path.join(root, DEFAULT_FILES.eventsSync),
+    'backfill_conversation_events backfill_tool_calls Yield periodically to avoid blocking the runtime',
   );
   return root;
 }

@@ -12,7 +12,7 @@ use crate::db::error::DbResult;
 use crate::db::traits::ObservabilityStore;
 use crate::types::*;
 use async_trait::async_trait;
-use sqlx::{Column, Row};
+use sqlx::Column;
 use std::collections::HashMap;
 
 #[cfg(feature = "postgres")]
@@ -31,7 +31,8 @@ impl ObservabilityStore for PgMissionStore {
     ) -> DbResult<()> {
         sqlx::query(
             "INSERT INTO gemini_requests (id, caller, session_id, api_mode, model, prompt_chars, response_chars, queue_wait_ms, duration_ms, retry_count, status, prompt_text)
-             VALUES ($1, $2, $3, 'pending', $4, $5, 0, 0, 0, 0, 'pending', $6)"
+             VALUES ($1, $2, $3, 'pending', $4, $5, 0, 0, 0, 0, 'pending', $6)
+             ON CONFLICT (id) DO NOTHING"
         )
         .bind(id)
         .bind(caller)
@@ -814,7 +815,7 @@ impl ObservabilityStore for PgMissionStore {
         limit: i64,
     ) -> DbResult<Vec<(i64, String)>> {
         // PG: conversations.id is TEXT. Use ROW_NUMBER() as a stable cursor surrogate
-        // mirroring SQLite's implicit rowid pagination.
+        // mirroring stable insertion-order pagination.
         let rows: Vec<(i64, String)> = sqlx::query_as(
             "SELECT rn, cid FROM (
                 SELECT ROW_NUMBER() OVER (ORDER BY started_at, id) AS rn, id AS cid

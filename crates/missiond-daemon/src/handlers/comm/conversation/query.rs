@@ -635,7 +635,7 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
 
                 // Build matchReason: FTS snippet if keyword-matched, llmSummary if vector-only
                 let match_reason = if fts_r.is_some() {
-                    // FTS hit — get native snippet() from SQLite
+                    // FTS hit: get native snippet text from the store.
                     let snippets = state
                         .store
                         .get_session_fts_snippets(sid, &query, 3)

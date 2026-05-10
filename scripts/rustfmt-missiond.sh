@@ -30,6 +30,16 @@ if ! command -v rustfmt >/dev/null 2>&1; then
   exit 2
 fi
 
+EDITION="$(
+  grep -E '^[[:space:]]*edition[[:space:]]*=' Cargo.toml \
+    | head -1 \
+    | sed -E 's/.*"([^"]+)".*/\1/'
+)"
+if [ -z "$EDITION" ]; then
+  echo "[rustfmt-missiond] FAIL: root Cargo.toml has no package edition" >&2
+  exit 2
+fi
+
 if rg -n 'missiond-rustfmt-exempt' crates --glob '*.rs' >/tmp/missiond-rustfmt-exempt.$$ 2>/dev/null; then
   echo "[rustfmt-missiond] FAIL: rustfmt exemption marker remains in MissionD source:" >&2
   cat /tmp/missiond-rustfmt-exempt.$$ >&2
@@ -46,11 +56,12 @@ fi
 
 COUNT=$(printf '%s\n' "$RUST_FILES" | wc -l | tr -d ' ')
 echo "[rustfmt-missiond] $COUNT MissionD Rust file(s)."
+echo "[rustfmt-missiond] edition=$EDITION (from Cargo.toml)."
 
 if [ "$CHECK_ONLY" -eq 1 ]; then
-  printf '%s\n' "$RUST_FILES" | xargs rustfmt --edition 2021 --config skip_children=true --check
+  printf '%s\n' "$RUST_FILES" | xargs rustfmt --edition "$EDITION" --config skip_children=true --check
   echo "[rustfmt-missiond] all MissionD Rust files are formatted."
 else
-  printf '%s\n' "$RUST_FILES" | xargs rustfmt --edition 2021 --config skip_children=true
+  printf '%s\n' "$RUST_FILES" | xargs rustfmt --edition "$EDITION" --config skip_children=true
   echo "[rustfmt-missiond] formatted MissionD Rust files."
 fi

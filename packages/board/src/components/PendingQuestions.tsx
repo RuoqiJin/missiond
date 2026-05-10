@@ -69,6 +69,12 @@ export function PendingQuestions() {
               {q.context && (
                 <p className="mt-1.5 text-xs text-neutral-500 whitespace-pre-wrap">{q.context}</p>
               )}
+              {q.revalidationStatus && (
+                <p className="mt-1.5 text-[10px] text-amber-300">
+                  revalidation: {q.revalidationStatus}
+                  {q.staleReason ? ` · ${q.staleReason}` : ''}
+                </p>
+              )}
               <div className="mt-2 flex gap-1.5">
                 <input
                   className="flex-1 px-2 py-1 text-xs bg-neutral-800 border border-neutral-700 rounded text-neutral-200 placeholder:text-neutral-600 outline-none focus:border-amber-500/50"

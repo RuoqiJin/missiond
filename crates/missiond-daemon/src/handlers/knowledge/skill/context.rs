@@ -250,6 +250,8 @@ pub(super) async fn handle_resolve(state: &AppState, args: Value) -> Result<Tool
         }
     }
 
+    let operational_facts = extract_operational_facts_for_skills(&skill_results);
+
     let project_skill_links = if args.project_id.is_some() {
         let projects = {
             let registry = state.project_registry.read().await;
@@ -289,6 +291,7 @@ pub(super) async fn handle_resolve(state: &AppState, args: Value) -> Result<Tool
         })),
         "skills": skill_results,
         "project_skill_links": project_skill_links,
+        "operational_facts": operational_facts,
         "infra": infra_results,
         "kb": kb_results,
         "board": board_results,
@@ -311,9 +314,121 @@ fn resolve_context_query(
         .to_string()
 }
 
+fn extract_operational_facts_for_skills(skills: &[Value]) -> Vec<Value> {
+    let mut facts = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for skill in skills {
+        let name = skill.get("name").and_then(Value::as_str).unwrap_or("");
+        let Some(path) = skill.get("path").and_then(Value::as_str) else {
+            continue;
+        };
+        if let Ok(content) = std::fs::read_to_string(path) {
+            for (line_no, key, value) in extract_markdown_table_facts(&content) {
+                if !looks_like_operational_fact(&key, &value) {
+                    continue;
+                }
+                let safe_value = redact_operational_secret(&value);
+                let dedupe_key = format!("{name}|{key}|{safe_value}");
+                if !seen.insert(dedupe_key) {
+                    continue;
+                }
+                facts.push(json!({
+                    "skill": name,
+                    "source_path": path,
+                    "source_line": line_no,
+                    "key": key,
+                    "value": safe_value,
+                }));
+                if facts.len() >= 80 {
+                    return facts;
+                }
+            }
+        }
+    }
+    facts
+}
+
+fn extract_markdown_table_facts(content: &str) -> Vec<(usize, String, String)> {
+    let mut facts = Vec::new();
+    for (idx, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with('|') || !trimmed.ends_with('|') {
+            continue;
+        }
+        if trimmed.contains("---") {
+            continue;
+        }
+        let cells: Vec<String> = trimmed
+            .trim_matches('|')
+            .split('|')
+            .map(|cell| cell.trim().trim_matches('`').trim().to_string())
+            .collect();
+        if cells.len() < 2 {
+            continue;
+        }
+        let key = cells[0].clone();
+        let value = cells[1..].join(" | ");
+        if key.is_empty()
+            || value.is_empty()
+            || matches!(key.as_str(), "项" | "键" | "技能" | "方式" | "症状")
+            || matches!(value.as_str(), "值" | "义" | "命令" | "根因")
+        {
+            continue;
+        }
+        facts.push((idx + 1, key, value));
+    }
+    facts
+}
+
+fn looks_like_operational_fact(key: &str, value: &str) -> bool {
+    let text = format!("{key} {value}").to_ascii_lowercase();
+    [
+        "host",
+        "ip",
+        "port",
+        "ssh",
+        "tailscale",
+        "deploy-agent",
+        "agent_url",
+        "ollama",
+        "embedding",
+        "rerank",
+        "runner",
+        "service",
+        "systemd",
+        "docker",
+        "endpoint",
+        "url",
+        "tunnel",
+        "model",
+        "路径",
+        "端口",
+        "隧道",
+        "宿主",
+        "服务",
+        "模型",
+        "网关",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+}
+
+fn redact_operational_secret(value: &str) -> String {
+    let mut out = value.to_string();
+    out = out.replace("sshpass -p '1234'", "sshpass -p '<redacted>'");
+    out = out.replace("sshpass -p \"1234\"", "sshpass -p \"<redacted>\"");
+    out = out.replace("密码: 1234", "密码: <redacted>");
+    out = out.replace("password: 1234", "password: <redacted>");
+    out = out.replace("Password: 1234", "Password: <redacted>");
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::resolve_context_query;
+    use super::{
+        extract_markdown_table_facts, looks_like_operational_fact, redact_operational_secret,
+        resolve_context_query,
+    };
 
     #[test]
     fn resolve_context_query_prefers_explicit_query() {
@@ -334,5 +449,23 @@ mod tests {
             resolve_context_query(Some("  "), None, Some("deploy-ops")),
             "deploy-ops"
         );
+    }
+
+    #[test]
+    fn operational_fact_extraction_keeps_runtime_rows_and_redacts_secrets() {
+        let content = r#"
+| 项 | 值 |
+|----|-----|
+| 宿主机 IP | 192.168.1.19 / 100.73.97.46 |
+| SSH 到宿主机 | LAN: `sshpass -p '1234' ssh jin@192.168.1.19` |
+| 普通备注 | no runtime anchor |
+"#;
+        let facts = extract_markdown_table_facts(content);
+        assert!(facts
+            .iter()
+            .any(|(_, key, value)| key == "宿主机 IP" && looks_like_operational_fact(key, value)));
+        let redacted = redact_operational_secret(&facts[1].2);
+        assert!(redacted.contains("<redacted>"));
+        assert!(!redacted.contains("'1234'"));
     }
 }

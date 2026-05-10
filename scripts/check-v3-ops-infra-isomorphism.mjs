@@ -14,6 +14,8 @@ Checks the V3 ops-infra Lisp/code isomorphism contract:
     kickstart, socket wait, bounded IPC smoke, rollback, and cleanup together.
   - rustfmt-missiond proves MissionD-owned Rust crates are formatter-converged.
   - cargo-fmt-touched remains the scoped fallback for non-M6/external projects.
+  - MissionD's runtime database is PostgreSQL-only; SQLite may appear only as
+    an external provider source such as Codex CLI state_5.sqlite.
 `;
 
 const DEFAULT_FILES = {
@@ -23,6 +25,11 @@ const DEFAULT_FILES = {
   cargoFmtTouched: 'scripts/cargo-fmt-touched.sh',
   daemonMain: 'crates/missiond-daemon/src/main.rs',
   astSyncWorker: 'crates/missiond-daemon/src/workers/local/ast_sync_worker.rs',
+  workspaceCargo: 'Cargo.toml',
+  daemonCargo: 'crates/missiond-daemon/Cargo.toml',
+  corePgMod: 'crates/missiond-core/src/db/pg/mod.rs',
+  coreDbTraits: 'crates/missiond-core/src/db/traits.rs',
+  codexIngestionWorker: 'crates/missiond-daemon/src/workers/local/codex_ingestion_worker.rs',
 };
 
 function main() {
@@ -98,10 +105,14 @@ function checkFiles(root, files) {
     'Dev-only fast deploy may select debug profile and sccache',
     'AST repository-wide startup full sync MUST be opt-in through MISSIOND_AST_FULL_SYNC_ON_STARTUP',
     'M6 MissionD formatting MUST be converged',
+    'Rust formatter edition MUST be derived from workspace Cargo.toml',
     'scripts/rustfmt-missiond.sh --check',
     'No MissionD Rust source may carry formatter exemption markers',
     'Rust formatting for external or non-M6 projects MAY remain scoped',
     'rustfmt MUST run with skip_children=true',
+    'MissionD primary runtime database MUST be PostgreSQL-only',
+    'old MissionD SQLite backend, SQLite-to-Postgres migration module, and sqlite feature cfg MUST be absent',
+    'SQLite references are allowed only for external provider durable sources such as Codex CLI state_5.sqlite',
     'node scripts/check-v3-ops-infra-isomorphism.mjs',
   ]);
 
@@ -177,8 +188,11 @@ function checkFiles(root, files) {
     'scripts/rustfmt-missiond.sh --check',
     'find crates -name',
     'missiond-rustfmt-exempt',
-    'rustfmt --edition 2021 --config skip_children=true --check',
-    'rustfmt --edition 2021 --config skip_children=true',
+    "grep -E '^[[:space:]]*edition[[:space:]]*=' Cargo.toml",
+    'root Cargo.toml has no package edition',
+    'edition=$EDITION (from Cargo.toml)',
+    'rustfmt --edition "$EDITION" --config skip_children=true --check',
+    'rustfmt --edition "$EDITION" --config skip_children=true',
   ]);
 
   requireAll(diagnostics, files.daemonMain, sources.daemonMain, [
@@ -192,6 +206,61 @@ function checkFiles(root, files) {
     'crate::topology_map::update_module_summaries(store, repo_name).await',
   ]);
 
+  requireAll(diagnostics, files.workspaceCargo, sources.workspaceCargo, [
+    "MissionD's runtime database is PostgreSQL-only",
+    'provider-local readers (Codex CLI state_5.sqlite)',
+    'skill-store',
+    'rusqlite = { version = "0.31", features = ["bundled"] }',
+    'sqlx = { version = "0.8"',
+  ]);
+
+  requireAll(diagnostics, files.daemonCargo, sources.daemonCargo, [
+    'Read-only Codex CLI provider state (~/.codex/state_5.sqlite), not MissionD DB.',
+    'rusqlite = { workspace = true }',
+  ]);
+
+  requireAll(diagnostics, files.corePgMod, sources.corePgMod, [
+    'PostgreSQL backend for MissionD',
+    'PostgreSQL is the only MissionD runtime store',
+    'provider-local SQLite',
+    'PgMissionStore',
+  ]);
+
+  requireAll(diagnostics, files.coreDbTraits, sources.coreDbTraits, [
+    'Domain-specific async traits for MissionD',
+    'Provider-local SQLite sources',
+    'do not constitute a MissionD database backend',
+  ]);
+
+  requireAll(diagnostics, files.codexIngestionWorker, sources.codexIngestionWorker, [
+    'Codex Ingestion Worker',
+    'state_5.sqlite',
+    'SQLITE_OPEN_READ_ONLY',
+  ]);
+
+  forbidAll(diagnostics, files.corePgMod, sources.corePgMod, [
+    'feature = "sqlite"',
+    'migrate_from_sqlite',
+  ]);
+
+  forbidAll(diagnostics, files.daemonMain, sources.daemonMain, [
+    '--migrate-sqlite-to-pg',
+    'migrate_from_sqlite.rs',
+  ]);
+
+  forbidAll(diagnostics, files.coreDbTraits, sources.coreDbTraits, [
+    'SQLite backend:',
+    'SqliteMissionStore',
+  ]);
+
+  const legacyMigration = path.join(root, 'crates/missiond-core/src/db/pg/migrate_from_sqlite.rs');
+  if (fs.existsSync(legacyMigration)) {
+    diagnostics.push({
+      file: 'crates/missiond-core/src/db/pg/migrate_from_sqlite.rs',
+      message: 'legacy MissionD SQLite migration module must be removed from active code',
+    });
+  }
+
   return diagnostics;
 }
 
@@ -199,6 +268,14 @@ function requireAll(diagnostics, file, source, needles) {
   for (const needle of needles) {
     if (!source.includes(needle)) {
       diagnostics.push({ file, message: `missing required contract text: ${needle}` });
+    }
+  }
+}
+
+function forbidAll(diagnostics, file, source, needles) {
+  for (const needle of needles) {
+    if (source.includes(needle)) {
+      diagnostics.push({ file, message: `forbidden legacy SQLite contract text still present: ${needle}` });
     }
   }
 }
@@ -219,10 +296,13 @@ function buildFixture() {
        "Dev-only fast deploy may select debug profile and sccache."
        "AST repository-wide startup full sync MUST be opt-in through MISSIOND_AST_FULL_SYNC_ON_STARTUP."
        "M6 MissionD formatting MUST be converged."
+       "Rust formatter edition MUST be derived from workspace Cargo.toml."
        "scripts/rustfmt-missiond.sh --check MUST be the MissionD-owned Rust formatter gate."
        "No MissionD Rust source may carry formatter exemption markers."
        "Rust formatting for external or non-M6 projects MAY remain scoped through cargo-fmt-touched."
-       "rustfmt MUST run with skip_children=true."])
+       "rustfmt MUST run with skip_children=true."
+       "MissionD primary runtime database MUST be PostgreSQL-only; the old MissionD SQLite backend, SQLite-to-Postgres migration module, and sqlite feature cfg MUST be absent from active code/build paths."
+       "SQLite references are allowed only for external provider durable sources such as Codex CLI state_5.sqlite, or for independent non-MissionD storage crates such as skill-store; they MUST NOT reintroduce a MissionD runtime database backend."])
   (implementation-map
     (surface ops-infra
       :status "code-aligned"
@@ -231,6 +311,9 @@ function buildFixture() {
              "scripts/cargo-fmt-touched.sh"
              "crates/missiond-daemon/src/main.rs"
              "crates/missiond-daemon/src/workers/local/ast_sync_worker.rs"
+             "crates/missiond-core/src/db/pg/mod.rs"
+             "crates/missiond-core/src/db/traits.rs"
+             "crates/missiond-daemon/src/workers/local/codex_ingestion_worker.rs"
              "scripts/check-v3-ops-infra-isomorphism.mjs"]
       :note "fixture"))
   (compression-contract
@@ -294,8 +377,11 @@ Format/check every Rust file owned by this MissionD repository
 scripts/rustfmt-missiond.sh --check
 find crates -name
 missiond-rustfmt-exempt
-rustfmt --edition 2021 --config skip_children=true --check
-rustfmt --edition 2021 --config skip_children=true
+grep -E '^[[:space:]]*edition[[:space:]]*=' Cargo.toml
+root Cargo.toml has no package edition
+edition=$EDITION (from Cargo.toml)
+rustfmt --edition "$EDITION" --config skip_children=true --check
+rustfmt --edition "$EDITION" --config skip_children=true
 `);
 
   writeFixture(root, DEFAULT_FILES.daemonMain, `
@@ -307,6 +393,37 @@ set MISSIOND_AST_FULL_SYNC_ON_STARTUP=1
   writeFixture(root, DEFAULT_FILES.astSyncWorker, `
 topology summary refresh skipped
 crate::topology_map::update_module_summaries(store, repo_name).await
+`);
+
+  writeFixture(root, DEFAULT_FILES.workspaceCargo, `
+# MissionD's runtime database is PostgreSQL-only.
+# provider-local readers (Codex CLI state_5.sqlite)
+# skill-store
+rusqlite = { version = "0.31", features = ["bundled"] }
+sqlx = { version = "0.8", features = ["postgres"] }
+`);
+
+  writeFixture(root, DEFAULT_FILES.daemonCargo, `
+# Read-only Codex CLI provider state (~/.codex/state_5.sqlite), not MissionD DB.
+rusqlite = { workspace = true }
+`);
+
+  writeFixture(root, DEFAULT_FILES.corePgMod, `
+//! PostgreSQL backend for MissionD.
+//! PostgreSQL is the only MissionD runtime store.
+//! provider-local SQLite sources are ingested by workers.
+pub struct PgMissionStore;
+`);
+
+  writeFixture(root, DEFAULT_FILES.coreDbTraits, `
+//! Domain-specific async traits for MissionD's PostgreSQL-backed store.
+//! Provider-local SQLite sources do not constitute a MissionD database backend.
+`);
+
+  writeFixture(root, DEFAULT_FILES.codexIngestionWorker, `
+//! Codex Ingestion Worker
+const CODEX_DB_RELATIVE: &str = ".codex/state_5.sqlite";
+rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
 `);
 
   return root;

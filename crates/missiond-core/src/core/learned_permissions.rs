@@ -54,11 +54,10 @@ pub struct LearnedPermissions {
 
 impl LearnedPermissions {
     /// Load from YAML file (or create empty if not found).
-    /// Also migrates from legacy SQLite if YAML doesn't exist but .db does.
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let db_path = path.as_ref();
+        let source_path = path.as_ref();
         // YAML path: same location, .yaml extension
-        let yaml_path = db_path.with_extension("yaml");
+        let yaml_path = source_path.with_extension("yaml");
 
         let mut entries = HashMap::new();
         let mut max_id = 0i64;
@@ -79,31 +78,6 @@ impl LearnedPermissions {
                 entries.insert(key, p);
             }
             info!(count = entries.len(), path = %yaml_path.display(), "Learned permissions loaded from YAML");
-        } else if db_path.exists() && db_path.extension().map(|e| e == "db").unwrap_or(false) {
-            // Migrate from legacy SQLite
-            match Self::migrate_from_sqlite(db_path) {
-                Ok(perms) => {
-                    for p in &perms {
-                        if p.id > max_id {
-                            max_id = p.id;
-                        }
-                        let key = PermKey {
-                            scope_type: p.scope_type.clone(),
-                            scope_id: p.scope_id.clone(),
-                            tool_pattern: p.tool_pattern.clone(),
-                            param_pattern: p.param_pattern.clone().unwrap_or_default(),
-                        };
-                        entries.insert(key, p.clone());
-                    }
-                    info!(
-                        count = entries.len(),
-                        "Migrated learned permissions from SQLite → YAML"
-                    );
-                }
-                Err(e) => {
-                    warn!(error = %e, "Failed to migrate learned permissions from SQLite");
-                }
-            }
         }
 
         let store = Self {
@@ -113,18 +87,11 @@ impl LearnedPermissions {
             file_lock: std::sync::Mutex::new(()),
         };
 
-        // Persist initial state (especially after SQLite migration)
+        // Persist initial state so a missing YAML file becomes explicit on disk.
         store.persist();
 
         info!("Learned permissions schema initialized");
         Ok(store)
-    }
-
-    /// Legacy SQLite migration hook — kept for YAML bootstrap compatibility,
-    /// but the SQLite backend was removed in v0.4.23 Stage 2E. Always returns
-    /// an empty vector; existing YAML on disk is still loaded by `new()`.
-    fn migrate_from_sqlite(_db_path: &Path) -> Result<Vec<LearnedPermission>> {
-        Ok(Vec::new())
     }
 
     /// Persist to YAML atomically (tempfile + rename).

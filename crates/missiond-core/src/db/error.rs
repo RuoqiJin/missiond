@@ -1,7 +1,6 @@
 //! Database error types — anti-corruption layer between sqlx and business logic.
 //!
 //! PostgreSQL (sqlx) errors convert to `DbError`, so callers only ever see `DbResult<T>`.
-//! (SQLite backend removed in v0.4.23 Stage 2E.)
 
 /// Database-specific error type that hides the underlying driver.
 #[derive(Debug, thiserror::Error)]

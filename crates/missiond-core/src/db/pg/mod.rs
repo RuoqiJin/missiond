@@ -1,14 +1,16 @@
-//! PostgreSQL backend for MissionD (M2).
+//! PostgreSQL backend for MissionD.
 //!
 //! Implements all 12 domain traits via sqlx + PgPool.
 //! No spawn_blocking needed — sqlx is natively async.
+//! PostgreSQL is the only MissionD runtime store; provider-local SQLite
+//! sources such as Codex CLI state_5.sqlite are ingested by workers, not used
+//! as a MissionD database backend.
 
 #[cfg(feature = "postgres")]
 use sqlx::PgPool;
 
 /// PostgreSQL-backed MissionStore implementation.
 ///
-/// Unlike SqliteMissionStore, this does NOT use DbExecutor/spawn_blocking.
 /// All queries go through sqlx's async connection pool directly.
 #[cfg(feature = "postgres")]
 #[derive(Clone)]
@@ -91,12 +93,6 @@ impl crate::db::traits::MissionStore for PgMissionStore {
         Ok(())
     }
 }
-
-// M2-6: SQLite → PostgreSQL data migration — DEPRECATED in v0.4.23 Stage 2E.
-// Retained as reference only; never compiled under current feature set because
-// the `sqlite` feature was removed. See the module's doc comment for details.
-#[cfg(all(feature = "sqlite", feature = "postgres"))]
-pub mod migrate_from_sqlite;
 
 // Domain trait implementations — one file per trait:
 // Note: tool_call/event/retrospective merged into conversation (v0.4.23).

@@ -76,8 +76,8 @@
       :entry ["packages/board/src/components/DecisionDashboard.tsx"
               "packages/board/src/components/SystemDashboard.tsx"
               "packages/board/src/app/api/questions/route.ts"]
-      :fields [id question context status target options decisionType answer taskId createdAt updatedAt]
-      :rule "User-facing decisions live as durable mission_question records; frontend Decision Inbox is canonical, while master/Jarvis messages are reminders and explanation channels."))
+      :fields [id question context status target options decisionType answer taskId createdAt updatedAt revalidationStatus staleReason evidenceFreshAt]
+      :rule "User-facing decisions live as durable mission_question records; frontend Decision Inbox is canonical, while master/Jarvis messages are reminders and explanation channels. Operational decisions must be revalidated by MissionD before display; stale/resolved runtime evidence should be shown as answered diagnostics or removed from pending, not presented as a fresh user choice."))
 
   (frontend-runtime-config
     :schema "missiond.frontend-runtime-config.v1"

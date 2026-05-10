@@ -31,7 +31,7 @@ pub(crate) fn slots_config_path() -> PathBuf {
 }
 
 /// PostgreSQL connection URL (e.g. `postgres://user:pass@host:5432/missiond`).
-/// When set, daemon uses PgMissionStore instead of SqliteMissionStore.
+/// Required: PgMissionStore is the only MissionD runtime database backend.
 pub(crate) fn pg_url() -> Option<String> {
     std::env::var("MISSION_PG_URL")
         .ok()

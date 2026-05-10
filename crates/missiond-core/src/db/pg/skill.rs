@@ -1401,7 +1401,7 @@ impl ProjectStore for PgMissionStore {
             })
             .collect();
 
-        // Group by crate key — reuse the same logic as SQLite
+        // Group by crate key using the same crate/module bucketing semantics.
         use std::collections::HashMap;
 
         let mut crate_indices: HashMap<String, Vec<usize>> = HashMap::new();

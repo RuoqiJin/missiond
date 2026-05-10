@@ -1214,7 +1214,7 @@ pub(crate) fn build_master_tick_prompt(
 ) -> String {
     let active_boardtask = render_active_objective_prompt_block(active_objective);
     format!(
-        "MissionD resident master tick.\nreason: {reason}\nphase: {}\nactive_objective_id: {}\ncontext_pack_path: {}\nevent_cursor: {}\nevent_summary: {}\nqueued_events: {}\nmcp_ready: {}\nactive_boardtask:\n{}\n\nHeuristic review question:\n请先审视 active objective 和相关 SSOT Lisp：颗粒度是否足够细？哪些架构可以更优雅？你还需要哪些证据、调查工位或 exact shard？\n\nDecision context:\n- If active_objective_id is none, return decision=no-op.\n- The active BoardTask above is the only load-bearing objective; if you need more detail, query that task by id, then follow its description.\n- For non-exact work, produce evidence_needed and a context-pack/evidence plan before delegation.\n- Delegate only after an evidence-plan exists, or when exact-shard-ready=true is explicit.\n- If creating child BoardTasks while active_boardtask is present, set parentId to the active BoardTask id.\n\nAllowed action summary:\n- no-op\n- create/update BoardTask after performing the matching MissionD MCP mutation\n- delegate worker through mission_swarm_run or mission_task_delegate when the next shard is concrete\n- blocked\n- close_or_backfill\n\nHard safety/tool rules are enforced by MissionD runtime metadata, workflow.lisp, and checkers; do not restate them as long prompt prose. PTY recognition is diagnostic only.\n\nReturn compact fields:\ndecision:\nreasoning_summary:\nevidence_needed:\ndelegation_plan?:\nnext_question_or_action:",
+        "MissionD resident master tick.\nreason: {reason}\nphase: {}\nactive_objective_id: {}\ncontext_pack_path: {}\nevent_cursor: {}\nevent_summary: {}\nqueued_events: {}\nmcp_ready: {}\nactive_boardtask:\n{}\n\nUnknowns-first intake:\n关于用户提出的这个问题或需求，我还有哪些不知道的信息？这些未知信息分别应该从 SSOT、skill operational facts、项目代码、部署事实、事件总线、checker、还是用户决策入口取得？先补证据，再判断意图。\n\nIntent inference:\n基于已补齐的证据，请判断用户此刻的真实意图、长期偏好或治理原则是什么；若判断成立，产出带 evidence_refs/confidence/supersession_scope 的 intent_memory_candidate，供 MissionD 意识层自我进化使用。高置信稳定意图请通过 mission_kb_remember 写入 category=memory:decision；低置信意图只保留为 needs-review/candidate artifact。\n\nHeuristic review question:\n请先审视 active objective 和相关 SSOT Lisp：颗粒度是否足够细？哪些架构可以更优雅？你还需要哪些证据、调查工位或 exact shard？\n\nDecision context:\n- If active_objective_id is none, return decision=no-op.\n- The active BoardTask above is the only load-bearing objective; if you need more detail, query that task by id, then follow its description.\n- For non-exact work, produce unknowns, inferred_user_intent, evidence_needed, and a context-pack/evidence plan before delegation.\n- Delegate only after an evidence-plan exists, or when exact-shard-ready=true is explicit.\n- If creating child BoardTasks while active_boardtask is present, set parentId to the active BoardTask id.\n\nAllowed action summary:\n- no-op\n- create/update BoardTask after performing the matching MissionD MCP mutation\n- write high-confidence intent memory through mission_kb_remember(category=memory:decision)\n- delegate worker through mission_swarm_run or mission_task_delegate when the next shard is concrete\n- blocked\n- close_or_backfill\n\nHard safety/tool rules are enforced by MissionD runtime metadata, workflow.lisp, and checkers; do not restate them as long prompt prose. PTY recognition is diagnostic only.\n\nReturn compact fields:\ndecision:\nreasoning_summary:\nunknowns:\ninferred_user_intent:\nintent_memory_candidate:\nevidence_needed:\ndelegation_plan?:\nnext_question_or_action:",
         snapshot.phase,
         snapshot.active_objective_id.as_deref().unwrap_or("none"),
         snapshot.context_pack_path.as_deref().unwrap_or("none"),
@@ -1260,7 +1260,7 @@ struct MasterContextPackRender<'a> {
 
 fn render_master_context_pack(input: &MasterContextPackRender<'_>) -> String {
     format!(
-        "(master-control-context-pack\n  :schema \"missiond.master-control-context-pack.v1\"\n  :tick-id {}\n  :reason {}\n  :active-objective-id {}\n  :phase {}\n  :event-cursor {}\n  :event-summary {}\n  :resume-instruction {}\n  :prompt-style missiond-v3-ssot-review\n  :authority [missiond-v3-ssot-lisp checker-result final-convergence-static recent-v3-commit active-boardtask-description]\n  :active-objective-contract [boardtask-description-overrides-default-self-review read-only-declared-project-roots mutation-before-decision-return]\n  :excluded-default-inputs [kb board-backlog event-history provider-durable-log historical-conversation]\n  :decision-options [no-op create-update-boardtask delegate-worker blocked close-or-backfill]\n  :runtime-rules [narrow-mcp-first pty-diagnostic-only no-direct-code-edit no-recursive-worker-delegation board-mcp-mutation-before-final]\n  :updated-at {}\n)\n",
+        "(master-control-context-pack\n  :schema \"missiond.master-control-context-pack.v1\"\n  :tick-id {}\n  :reason {}\n  :active-objective-id {}\n  :phase {}\n  :event-cursor {}\n  :event-summary {}\n  :resume-instruction {}\n  :prompt-style missiond-v3-ssot-review\n  :authority [missiond-v3-ssot-lisp skill-operational-facts checker-result final-convergence-static recent-v3-commit active-boardtask-description]\n  :active-objective-contract [unknowns-first-intake intent-inference intent-memory-capture boardtask-description-overrides-default-self-review read-only-declared-project-roots mutation-before-decision-return]\n  :excluded-default-inputs [kb board-backlog event-history provider-durable-log historical-conversation]\n  :decision-options [no-op create-update-boardtask write-intent-memory delegate-worker blocked close-or-backfill]\n  :runtime-rules [narrow-mcp-first pty-diagnostic-only no-direct-code-edit no-recursive-worker-delegation board-mcp-mutation-before-final no-broad-kb-preload]\n  :updated-at {}\n)\n",
         lisp_string(input.tick_id),
         lisp_string(input.reason),
         lisp_option_string(input.snapshot.active_objective_id.as_deref()),
@@ -1567,9 +1567,16 @@ pub(crate) async fn mission_master_status(state: &AppState) -> Value {
     let checkpoint_text = std::fs::read_to_string(&checkpoint_path).ok();
     let runtime_snapshot = runtime().snapshot().await;
     let commit_convergence = crate::engine::commit_convergence::status_snapshot().await;
-    let lisp_code_sync = crate::engine::lisp_code_sync::status_snapshot().await;
+    let lisp_code_sync = crate::engine::lisp_code_sync::status_snapshot_for_state(state).await;
     let nightly_evolution = crate::engine::nightly_evolution::status_snapshot().await;
     let shared_memory = state.shared_memory.status_snapshot().await;
+    let daemon_stats = state.stats.snapshot();
+    let runtime_load_explanation = runtime_load_explanation(
+        &daemon_stats,
+        &lisp_code_sync,
+        &shared_memory,
+        &nightly_evolution,
+    );
     let mcp_enabled = probe_codex_mcp_ready().await;
     let approval = probe_codex_mcp_approval_ready();
     let mcp_ready = mcp_enabled && approval.ready;
@@ -1653,9 +1660,125 @@ pub(crate) async fn mission_master_status(state: &AppState) -> Value {
     status["service"]["lispCodeSync"] = lisp_code_sync;
     status["service"]["nightlyEvolution"] = nightly_evolution;
     status["service"]["sharedMemory"] = shared_memory;
+    status["service"]["runtimeLoadExplanation"] = runtime_load_explanation;
     status["service"]["compiledRuntime"] = compiled_runtime_projection_status(&checkpoint_root);
     status["service"]["lastControlObjectiveId"] = json!(runtime_snapshot.last_control_objective_id);
     status
+}
+
+fn runtime_load_explanation(
+    daemon_stats: &Value,
+    lisp_code_sync: &Value,
+    shared_memory: &Value,
+    nightly_evolution: &Value,
+) -> Value {
+    fn u64_at(value: &Value, pointer: &str) -> u64 {
+        value.pointer(pointer).and_then(Value::as_u64).unwrap_or(0)
+    }
+    fn i64_at(value: &Value, pointer: &str) -> i64 {
+        value.pointer(pointer).and_then(Value::as_i64).unwrap_or(0)
+    }
+
+    let event_backlog = u64_at(daemon_stats, "/events/estimated_backlog");
+    let autopilot_avg_ms = u64_at(daemon_stats, "/autopilot/avg_ms");
+    let db_p95_us = u64_at(daemon_stats, "/db_exec/p95_us");
+    let prefetch_total = u64_at(daemon_stats, "/prefetch/total");
+    let prefetch_router_errors = u64_at(daemon_stats, "/prefetch/router/errors");
+    let lisp_recent_reports = u64_at(lisp_code_sync, "/reportDirs/totalRecentReports5m");
+    let lisp_over_limit = u64_at(lisp_code_sync, "/reportDirs/overLimitProjects");
+    let storm_hits = u64_at(lisp_code_sync, "/stormCircuitHits");
+    let recent_sync_tasks = u64_at(lisp_code_sync, "/recentSyncTaskCreations");
+    let active_workflows = u64_at(shared_memory, "/activeWorkflowRuns");
+    let stale_claims = u64_at(shared_memory, "/staleClaims");
+    let cursor_lag_max = shared_memory
+        .get("cursorLag")
+        .and_then(Value::as_array)
+        .and_then(|rows| {
+            rows.iter()
+                .filter_map(|row| row.get("lag").and_then(Value::as_u64))
+                .max()
+        })
+        .unwrap_or(0);
+    let nightly_last_run = i64_at(nightly_evolution, "/lastRunAtEpoch");
+    let nightly_findings = u64_at(nightly_evolution, "/lastFindingsCount");
+
+    let mut suspects = Vec::new();
+    if lisp_recent_reports > 0 || lisp_over_limit > 0 || recent_sync_tasks > 0 {
+        suspects.push(json!({
+            "component": "lisp-code-sync",
+            "reason": "recent reports, over-retention projects, or sync task creations are non-zero",
+            "signals": {
+                "recentReports5m": lisp_recent_reports,
+                "overLimitProjects": lisp_over_limit,
+                "recentSyncTaskCreations": recent_sync_tasks,
+                "stormCircuitHits": storm_hits
+            }
+        }));
+    }
+    if event_backlog > 0 {
+        suspects.push(json!({
+            "component": "eventbus",
+            "reason": "published events exceed observed consumer counters",
+            "signals": { "estimatedBacklog": event_backlog }
+        }));
+    }
+    if active_workflows > 0 || stale_claims > 0 || cursor_lag_max > 0 {
+        suspects.push(json!({
+            "component": "shared-memory/workflow-runner",
+            "reason": "active workflow runs, stale claims, or cursor lag are present",
+            "signals": {
+                "activeWorkflowRuns": active_workflows,
+                "staleClaims": stale_claims,
+                "maxCursorLag": cursor_lag_max
+            }
+        }));
+    }
+    if autopilot_avg_ms > 500 || db_p95_us > 500_000 {
+        suspects.push(json!({
+            "component": "autopilot/db",
+            "reason": "autopilot or DB latency counters are elevated",
+            "signals": {
+                "autopilotAvgMs": autopilot_avg_ms,
+                "dbP95Us": db_p95_us
+            }
+        }));
+    }
+    if prefetch_total > 0 || prefetch_router_errors > 0 {
+        suspects.push(json!({
+            "component": "context-prefetch",
+            "reason": "prefetch counters are active; router errors may force fallback work",
+            "signals": {
+                "prefetchTotal": prefetch_total,
+                "prefetchRouterErrors": prefetch_router_errors
+            }
+        }));
+    }
+    if nightly_last_run > 0 && nightly_findings > 0 {
+        suspects.push(json!({
+            "component": "nightly-evolution",
+            "reason": "nightly evolution has recent findings; scheduled runs should stay disabled unless explicitly enabled",
+            "signals": {
+                "lastRunAtEpoch": nightly_last_run,
+                "lastFindingsCount": nightly_findings
+            }
+        }));
+    }
+
+    let status = if suspects.is_empty() {
+        "no_internal_hot_loop_indicated"
+    } else {
+        "diagnostic_required"
+    };
+
+    json!({
+        "schema": "missiond.runtime-load-explanation.v1",
+        "status": status,
+        "suspects": suspects,
+        "limits": [
+            "This is daemon-internal attribution from counters, not OS process sampling.",
+            "Use mission_infra_query(top_cpu) or Activity Monitor for process-level CPU confirmation."
+        ]
+    })
 }
 
 pub(crate) async fn probe_codex_mcp_ready() -> bool {
@@ -2558,13 +2681,20 @@ mod tests {
         assert!(prompt.contains("event_summary: BoardEvent.task_created: task_id=abc"));
         assert!(prompt.contains("phase: classify_objective"));
         assert!(prompt.contains("active_objective_id: abc"));
+        assert!(prompt.contains("Unknowns-first intake"));
+        assert!(prompt.contains("我还有哪些不知道的信息"));
+        assert!(prompt.contains("Intent inference"));
+        assert!(prompt.contains("真实意图"));
+        assert!(prompt.contains("intent_memory_candidate"));
+        assert!(prompt.contains("mission_kb_remember"));
+        assert!(prompt.contains("category=memory:decision"));
         assert!(prompt.contains("Heuristic review question"));
         assert!(prompt.contains("颗粒度是否足够细"));
         assert!(prompt.contains("哪些架构可以更优雅"));
         assert!(prompt.contains("If active_objective_id is none, return decision=no-op"));
         assert!(prompt.contains("The active BoardTask above is the only load-bearing objective"));
         assert!(prompt.contains("query that task by id"));
-        assert!(prompt.contains("produce evidence_needed and a context-pack/evidence plan"));
+        assert!(prompt.contains("produce unknowns, inferred_user_intent, evidence_needed"));
         assert!(prompt.contains("exact-shard-ready=true"));
         assert!(prompt.contains("Hard safety/tool rules are enforced by MissionD runtime metadata"));
         assert!(prompt.contains("workflow.lisp"));
@@ -2573,6 +2703,9 @@ mod tests {
         assert!(prompt.contains("mission_task_delegate"));
         assert!(prompt.contains("decision:"));
         assert!(prompt.contains("reasoning_summary:"));
+        assert!(prompt.contains("unknowns:"));
+        assert!(prompt.contains("inferred_user_intent:"));
+        assert!(prompt.contains("intent_memory_candidate:"));
         assert!(prompt.contains("evidence_needed:"));
         assert!(prompt.contains("delegation_plan?:"));
         assert!(prompt.contains("next_question_or_action:"));
@@ -2665,9 +2798,11 @@ mod tests {
         });
         assert!(rendered.contains("missiond.master-control-context-pack.v1"));
         assert!(rendered.contains(":prompt-style missiond-v3-ssot-review"));
-        assert!(rendered.contains(":authority [missiond-v3-ssot-lisp checker-result final-convergence-static recent-v3-commit active-boardtask-description]"));
-        assert!(rendered.contains(":active-objective-contract [boardtask-description-overrides-default-self-review read-only-declared-project-roots mutation-before-decision-return]"));
+        assert!(rendered.contains(":authority [missiond-v3-ssot-lisp skill-operational-facts checker-result final-convergence-static recent-v3-commit active-boardtask-description]"));
+        assert!(rendered.contains(":active-objective-contract [unknowns-first-intake intent-inference intent-memory-capture boardtask-description-overrides-default-self-review read-only-declared-project-roots mutation-before-decision-return]"));
         assert!(rendered.contains(":excluded-default-inputs [kb board-backlog event-history provider-durable-log historical-conversation]"));
+        assert!(rendered.contains("write-intent-memory"));
+        assert!(rendered.contains("no-broad-kb-preload"));
         assert!(rendered.contains("board-mcp-mutation-before-final"));
         assert!(rendered.contains("pty-diagnostic-only"));
         assert!(rendered.contains("no-direct-code-edit"));
@@ -2805,5 +2940,35 @@ mod tests {
         ];
         assert!(has_code_surface_delta(&covered));
         assert!(has_lisp_or_evidence_delta(&covered));
+    }
+
+    #[test]
+    fn runtime_load_explanation_points_to_internal_hot_loop_signals() {
+        let stats = json!({
+            "events": { "estimated_backlog": 3 },
+            "autopilot": { "avg_ms": 0 },
+            "db_exec": { "p95_us": 0 },
+            "prefetch": { "total": 0, "router": { "errors": 0 } }
+        });
+        let lisp = json!({
+            "reportDirs": { "totalRecentReports5m": 4, "overLimitProjects": 0 },
+            "stormCircuitHits": 1,
+            "recentSyncTaskCreations": 5
+        });
+        let shared = json!({
+            "activeWorkflowRuns": 0,
+            "staleClaims": 0,
+            "cursorLag": []
+        });
+        let nightly = json!({
+            "lastRunAtEpoch": 0,
+            "lastFindingsCount": 0
+        });
+
+        let explanation = runtime_load_explanation(&stats, &lisp, &shared, &nightly);
+        assert_eq!(explanation["status"], "diagnostic_required");
+        let suspects = explanation["suspects"].as_array().unwrap();
+        assert!(suspects.iter().any(|s| s["component"] == "lisp-code-sync"));
+        assert!(suspects.iter().any(|s| s["component"] == "eventbus"));
     }
 }

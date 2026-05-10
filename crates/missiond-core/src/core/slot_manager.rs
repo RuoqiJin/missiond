@@ -17,7 +17,7 @@ pub struct SlotManager {
 }
 
 impl SlotManager {
-    /// Create a new SlotManager (PG mode — no SQLite DB).
+    /// Create a new SlotManager.
     pub fn new() -> Self {
         Self {
             slots: Arc::new(RwLock::new(HashMap::new())),

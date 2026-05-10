@@ -219,9 +219,14 @@ function checkFiles(root, files) {
     '(role investigator-worker',
     '(role implementer-worker',
     '(role deterministic-llm-tool',
-    ':required-output-fields [decision reasoning_summary evidence_needed delegation_plan? next_question_or_action]',
+    ':intake-question "关于用户提出的这个问题或需求，我还有哪些不知道的信息？',
+    ':intent-question "基于已补齐的证据，请判断用户此刻的真实意图',
+    ':required-output-fields [decision reasoning_summary unknowns inferred_user_intent intent_memory_candidate evidence_needed delegation_plan? next_question_or_action]',
     ':forbidden-default-inputs [kb board-backlog historical-conversation provider-durable-logs]',
     'exact-shard-ready=true',
+    'unknowns-first-intake',
+    'intent-inference',
+    'intent-memory-capture',
     'questions, hypotheses, evidence_needed, findings, design_options, and accepted_shards',
   ]);
 
@@ -246,6 +251,9 @@ function checkFiles(root, files) {
     ':workflow_id project-m6-depth',
     ':status active',
     ':source_plans [auth-m6-depth project-ssot-convergence v3-runtime-ssot]',
+    ':id unknowns-first-intake',
+    ':id intent-inference',
+    ':id intent-memory-capture',
     ':id review-question',
     ':id evidence-plan',
     ':id investigation',
@@ -262,7 +270,7 @@ function checkFiles(root, files) {
     ':id exact-shards',
     ':id implementation',
     ':id verification',
-    ':context-pack-artifacts [questions hypotheses evidence_needed findings design_options accepted_shards]',
+    ':context-pack-artifacts [unknowns inferred_user_intent intent_memory_candidate questions hypotheses evidence_needed findings design_options accepted_shards]',
     'exact-shard-ready=true',
     'tenant -> application -> product -> product_user -> product_user_group',
     'Critical contracts must be hot-path wired',
@@ -275,6 +283,9 @@ function checkFiles(root, files) {
     ':workflow_id multi-project-m6-wave',
     ':status active',
     ':id select-wave',
+    ':id unknowns-first-intake',
+    ':id intent-inference',
+    ':id intent-memory-capture',
     ':id review-question',
     ':id evidence-plan',
     ':id investigation',
@@ -283,7 +294,7 @@ function checkFiles(root, files) {
     ':id exact-shards',
     ':id implementation',
     ':id verification',
-    ':context-pack-artifacts [questions hypotheses evidence_needed findings design_options accepted_shards]',
+    ':context-pack-artifacts [unknowns inferred_user_intent intent_memory_candidate questions hypotheses evidence_needed findings design_options accepted_shards]',
     'Findings / Evidence / Recommendations / Verification',
     'exact-shard-ready=true',
     'check-project-maturity --min-level M6',
@@ -675,13 +686,15 @@ function buildFixture() {
   (agent-interaction-policy
     :schema "missiond.agent-interaction-policy.v1"
     (role resident-master
-      :required-output-fields [decision reasoning_summary evidence_needed delegation_plan? next_question_or_action]
+      :intake-question "关于用户提出的这个问题或需求，我还有哪些不知道的信息？"
+      :intent-question "基于已补齐的证据，请判断用户此刻的真实意图"
+      :required-output-fields [decision reasoning_summary unknowns inferred_user_intent intent_memory_candidate evidence_needed delegation_plan? next_question_or_action]
       :forbidden-default-inputs [kb board-backlog historical-conversation provider-durable-logs]
       :rule "exact-shard-ready=true")
     (role investigator-worker :rule "Findings / Evidence / Recommendations / Verification")
     (role implementer-worker :rule "accepted shard")
     (role deterministic-llm-tool :rule "precise prompts")
-    :runtime-invariants ["questions, hypotheses, evidence_needed, findings, design_options, and accepted_shards"])
+    :runtime-invariants ["unknowns-first-intake" "intent-inference" "intent-memory-capture" "questions, hypotheses, evidence_needed, findings, design_options, and accepted_shards"])
   (compression-contract
     :checks ["node scripts/check-v3-workflow-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.workflowHandler, `
@@ -974,23 +987,26 @@ Lisp 源: intent-flow.lisp`);
   :status active
   :source_plans [auth-m6-depth project-ssot-convergence v3-runtime-ssot]
   :steps
-    ((step s1 :id review-question :logic "ask architecture review")
-     (step s2 :id evidence-plan :logic "questions hypotheses evidence_needed")
-     (step s3 :id investigation :logic "Findings / Evidence / Recommendations / Verification")
-     (step s4 :id synthesis :logic "findings")
-     (step s5 :id design-proposal :logic "design_options")
-     (step s6 :id domain-model-audit :logic "read model")
-     (step s7 :id target-architecture-draft :logic "write lisp")
-     (step s8 :id authority-chain-check :logic "tenant -> application -> product -> product_user -> product_user_group")
-     (step s9 :id compatibility-ledger :logic "legacy bridge")
-     (step s10 :id runtime-registration-check :logic "Runtime registration of new business objects does not require rebuild or redeploy")
-     (step s11 :id event-contract-check :logic "producer outbox adapter sink retry ack")
-     (step s12 :id hot-path-wiring-check :logic "Critical contracts must be hot-path wired")
-     (step s13 :id regression-matrix :logic "old and new behavior")
-     (step s14 :id exact-shards :logic "accepted_shards")
-     (step s15 :id implementation :logic "worker shards")
-     (step s16 :id verification :logic "report"))
-  :context-pack-artifacts [questions hypotheses evidence_needed findings design_options accepted_shards]
+    ((step s1 :id unknowns-first-intake :logic "unknowns")
+     (step s2 :id intent-inference :logic "inferred_user_intent")
+     (step s3 :id intent-memory-capture :logic "intent_memory_candidate")
+     (step s4 :id review-question :logic "ask architecture review")
+     (step s5 :id evidence-plan :logic "questions hypotheses evidence_needed")
+     (step s6 :id investigation :logic "Findings / Evidence / Recommendations / Verification")
+     (step s7 :id synthesis :logic "findings")
+     (step s8 :id design-proposal :logic "design_options")
+     (step s9 :id domain-model-audit :logic "read model")
+     (step s10 :id target-architecture-draft :logic "write lisp")
+     (step s11 :id authority-chain-check :logic "tenant -> application -> product -> product_user -> product_user_group")
+     (step s12 :id compatibility-ledger :logic "legacy bridge")
+     (step s13 :id runtime-registration-check :logic "Runtime registration of new business objects does not require rebuild or redeploy")
+     (step s14 :id event-contract-check :logic "producer outbox adapter sink retry ack")
+     (step s15 :id hot-path-wiring-check :logic "Critical contracts must be hot-path wired")
+     (step s16 :id regression-matrix :logic "old and new behavior")
+     (step s17 :id exact-shards :logic "accepted_shards")
+     (step s18 :id implementation :logic "worker shards")
+     (step s19 :id verification :logic "report"))
+  :context-pack-artifacts [unknowns inferred_user_intent intent_memory_candidate questions hypotheses evidence_needed findings design_options accepted_shards]
   :risk-gates
     ((gate g1 :rule "No destructive DB migration")
      (gate g2 :rule "No production deploy, DNS mutation, or secret mutation")
@@ -1004,15 +1020,18 @@ Lisp 源: intent-flow.lisp`);
   :source_plans [fixture]
   :steps
     ((step s1 :id select-wave :logic "select")
-     (step s2 :id review-question :logic "ask")
-     (step s3 :id evidence-plan :logic "questions hypotheses evidence_needed")
-     (step s4 :id investigation :logic "Findings / Evidence / Recommendations / Verification")
-     (step s5 :id synthesis :logic "findings")
-     (step s6 :id design-proposal :logic "design_options")
-     (step s7 :id exact-shards :logic "accepted_shards")
-     (step s8 :id implementation :logic "implement")
-     (step s9 :id verification :logic "check-project-maturity --min-level M6"))
-  :context-pack-artifacts [questions hypotheses evidence_needed findings design_options accepted_shards]
+     (step s2 :id unknowns-first-intake :logic "unknowns")
+     (step s3 :id intent-inference :logic "inferred_user_intent")
+     (step s4 :id intent-memory-capture :logic "intent_memory_candidate")
+     (step s5 :id review-question :logic "ask")
+     (step s6 :id evidence-plan :logic "questions hypotheses evidence_needed")
+     (step s7 :id investigation :logic "Findings / Evidence / Recommendations / Verification")
+     (step s8 :id synthesis :logic "findings")
+     (step s9 :id design-proposal :logic "design_options")
+     (step s10 :id exact-shards :logic "accepted_shards")
+     (step s11 :id implementation :logic "implement")
+     (step s12 :id verification :logic "check-project-maturity --min-level M6"))
+  :context-pack-artifacts [unknowns inferred_user_intent intent_memory_candidate questions hypotheses evidence_needed findings design_options accepted_shards]
   :risk-gates ((gate g1 :rule "exact-shard-ready=true"))
   :completion ((criterion c1 :rule "project wave verified")))`);
   writeFixture(root, DEFAULT_FILES.m6DeploymentRollout, `

@@ -1,6 +1,6 @@
 //! DirectiveLayerStore shared helpers (backend-agnostic).
 //!
-//! Column lists and tiny helpers reused by the PG / SQLite backends so SELECT
+//! Column lists and tiny helpers reused by the PostgreSQL backend so SELECT
 //! statements stay in sync with `crates/missiond-core/migrations/20260420000000_directive_plan_workflow.sql`.
 //! Heavy lifting lives in `db/pg/directive.rs` — this file is intentionally thin.
 

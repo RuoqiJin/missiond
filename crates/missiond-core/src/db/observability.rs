@@ -12,7 +12,6 @@
 //! References:
 //!   - Trait: `crate::db::traits::ObservabilityStore`
 //!   - PG impl: `crate::db::pg::observability`
-//!   - SQLite impl: `crate::db::sqlite::observability`
 //!   - Shared row types: `crate::db::shared::{BackfillPhaseStatus, ...}`
 
 #[allow(unused_imports)]

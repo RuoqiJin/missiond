@@ -22,7 +22,7 @@ const checks = [
       '(domain project-universe-plane',
       ':functions [project-identity-root-resolution registry-authority-map maturity-contract service-runtime-summary deploy-fact-reference forge-catalog-reference registry-reconciliation]',
       '(domain knowledge-skill-plane',
-      ':functions [skill-registry skill-search skill-project-links skill-to-workflow-promotion memory-quarantine memory-distillation memory-search-v2]',
+      ':functions [skill-registry skill-search skill-project-links skill-operational-facts skill-to-workflow-promotion memory-quarantine memory-distillation memory-search-v2]',
       '(domain execution-control-plane',
       ':functions [workflow-runner task-result-artifact worker-completion-settle slot-lifecycle-manager memory-review-batch-runner]',
       'task_result_artifacts',

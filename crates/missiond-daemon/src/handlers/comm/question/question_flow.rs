@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use missiond_core::event::events::{QuestionEvent, TaskEvent};
+use missiond_core::types::{AgentQuestion, AgentQuestionStatus};
 use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
 use serde_json::Value;
@@ -130,11 +131,18 @@ async fn handle_list(state: &AppState, args: Value) -> Result<ToolResult> {
         target: None,
         limit: None,
     });
-    let questions = state
+    let mut questions = state
         .store
         .list_agent_questions(status.as_deref(), target.as_deref(), limit)
         .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
+    if revalidate_questions_before_display(state, &questions).await? {
+        questions = state
+            .store
+            .list_agent_questions(status.as_deref(), target.as_deref(), limit)
+            .await
+            .map_err(|e| anyhow!("DB error: {}", e))?;
+    }
     Ok(ToolResult::json_pretty(&questions))
 }
 
@@ -198,5 +206,174 @@ async fn handle_dismiss(state: &AppState, args: Value) -> Result<ToolResult> {
             Ok(ToolResult::json_pretty(&q))
         }
         None => Ok(ToolResult::error("Question not found")),
+    }
+}
+
+async fn revalidate_questions_before_display(
+    state: &AppState,
+    questions: &[AgentQuestion],
+) -> Result<bool> {
+    let mut changed = false;
+    let mut lisp_code_sync_snapshot: Option<Value> = None;
+
+    for question in questions {
+        if !is_lisp_code_sync_stale_decision_candidate(question) {
+            continue;
+        }
+        let snapshot = match &lisp_code_sync_snapshot {
+            Some(snapshot) => snapshot.clone(),
+            None => {
+                let snapshot =
+                    crate::engine::lisp_code_sync::status_snapshot_for_state(state).await;
+                lisp_code_sync_snapshot = Some(snapshot.clone());
+                snapshot
+            }
+        };
+        if !lisp_code_sync_evidence_is_resolved(&snapshot) {
+            continue;
+        }
+        let answer = lisp_code_sync_stale_answer(&snapshot);
+        if state
+            .store
+            .answer_agent_question(&question.id, &answer)
+            .await
+            .map_err(|e| anyhow!("DB error: {}", e))?
+            .is_some()
+        {
+            let _ = state
+                .bus
+                .publish_question(QuestionEvent::Resolved {
+                    question_id: question.id.clone(),
+                    resolution: "stale_evidence".to_string(),
+                })
+                .await;
+            changed = true;
+        }
+    }
+
+    Ok(changed)
+}
+
+fn is_lisp_code_sync_stale_decision_candidate(question: &AgentQuestion) -> bool {
+    if question.status != AgentQuestionStatus::Pending {
+        return false;
+    }
+    if !question
+        .question
+        .to_ascii_lowercase()
+        .contains("lisp-code-sync")
+    {
+        return false;
+    }
+    let haystack = format!(
+        "{}\n{}\n{}",
+        question.question, question.context, question.decision_type
+    )
+    .to_ascii_lowercase();
+    haystack.contains("lisp-code-sync")
+        && (haystack.contains("自循环")
+            || haystack.contains("runtime/lisp-code-sync")
+            || haystack.contains("report 风暴")
+            || haystack.contains("report storm")
+            || haystack.contains("storm"))
+}
+
+fn lisp_code_sync_evidence_is_resolved(snapshot: &Value) -> bool {
+    let report_dirs = &snapshot["reportDirs"];
+    let over_limit_empty = report_dirs["overLimitProjects"]
+        .as_array()
+        .map(|items| items.is_empty())
+        .unwrap_or(false);
+    let recent_sync_task_creations = snapshot["recentSyncTaskCreations"].as_u64().unwrap_or(0);
+    let storm_circuit_hits = snapshot["stormCircuitHits"].as_u64().unwrap_or(0);
+
+    // A deploy/restart can legitimately write fresh sync reports. The stale
+    // decision is about a self-amplifying BoardTask storm, so require the task
+    // creation and storm-circuit counters to be quiet rather than requiring
+    // zero recent report files.
+    over_limit_empty && recent_sync_task_creations == 0 && storm_circuit_hits == 0
+}
+
+fn lisp_code_sync_stale_answer(snapshot: &Value) -> String {
+    let report_dirs = &snapshot["reportDirs"];
+    let total = report_dirs["totalReports"].as_u64().unwrap_or(0);
+    let recent = report_dirs["recentReports5m"].as_u64().unwrap_or(0);
+    let max = report_dirs["maxReportsPerProject"].as_u64().unwrap_or(0);
+    let recent_tasks = snapshot["recentSyncTaskCreations"].as_u64().unwrap_or(0);
+    let storm_hits = snapshot["stormCircuitHits"].as_u64().unwrap_or(0);
+    format!(
+        "stale_evidence/resolved_by_runtime_fix: lisp-code-sync self-loop evidence is no longer current. runtime report dirs are within retention (totalReports={total}, recentReports5m={recent}, maxReportsPerProject={max}); recentSyncTaskCreations={recent_tasks}, stormCircuitHits={storm_hits}; pending operator decision was auto-resolved before display."
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn q(text: &str, context: &str) -> AgentQuestion {
+        AgentQuestion {
+            id: "q-1".to_string(),
+            task_id: None,
+            slot_id: None,
+            session_id: None,
+            question: text.to_string(),
+            context: context.to_string(),
+            status: AgentQuestionStatus::Pending,
+            answer: None,
+            target: "user".to_string(),
+            options: None,
+            decision_type: "debug".to_string(),
+            retry_count: 0,
+            routing_trace: None,
+            created_at: "2026-05-09T00:00:00Z".to_string(),
+            updated_at: "2026-05-09T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn stale_candidate_matches_lisp_code_sync_storm_question() {
+        assert!(is_lisp_code_sync_stale_decision_candidate(&q(
+            "lisp-code-sync 已进入自循环",
+            "runtime/lisp-code-sync reports growing"
+        )));
+        assert!(!is_lisp_code_sync_stale_decision_candidate(&q(
+            "unrelated deploy question",
+            "runtime/lisp-code-sync reports growing"
+        )));
+    }
+
+    #[test]
+    fn resolved_lisp_code_sync_evidence_requires_no_task_storm_or_over_limit_reports() {
+        let resolved = serde_json::json!({
+            "recentSyncTaskCreations": 0,
+            "stormCircuitHits": 0,
+            "reportDirs": {
+                "recentReports5m": 3,
+                "overLimitProjects": [],
+                "totalReports": 200,
+                "maxReportsPerProject": 200
+            }
+        });
+        assert!(lisp_code_sync_evidence_is_resolved(&resolved));
+
+        let active = serde_json::json!({
+            "recentSyncTaskCreations": 1,
+            "stormCircuitHits": 0,
+            "reportDirs": {
+                "recentReports5m": 3,
+                "overLimitProjects": [],
+            }
+        });
+        assert!(!lisp_code_sync_evidence_is_resolved(&active));
+
+        let over_limit = serde_json::json!({
+            "recentSyncTaskCreations": 0,
+            "stormCircuitHits": 0,
+            "reportDirs": {
+                "recentReports5m": 0,
+                "overLimitProjects": ["missiond"],
+            }
+        });
+        assert!(!lisp_code_sync_evidence_is_resolved(&over_limit));
     }
 }

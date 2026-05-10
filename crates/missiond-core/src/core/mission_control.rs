@@ -29,7 +29,7 @@ impl ExecutionMode {
 
 /// Options for creating MissionControl
 pub struct MissionControlOptions {
-    /// Database path. None = PG mode (skip SQLite entirely).
+    /// Legacy path used only to derive local logs/config defaults when supplied.
     pub db_path: Option<PathBuf>,
     /// Slots configuration file path
     pub slots_config_path: PathBuf,
@@ -56,7 +56,7 @@ pub struct MissionControl {
 }
 
 impl MissionControl {
-    /// Create a new MissionControl (PG mode — no SQLite DB).
+    /// Create a new MissionControl coordinator.
     pub fn new(options: MissionControlOptions) -> Result<Self> {
         // Logs directory
         let logs_dir = options.logs_dir.unwrap_or_else(|| {

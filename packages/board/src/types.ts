@@ -125,6 +125,9 @@ export interface AgentQuestion {
   decisionType: string;     // architecture/implementation/debug/investigation/risk/preference
   retryCount: number;
   routingTrace?: string;    // JSON: { resolvedTier, path[], latencyMs }
+  revalidationStatus?: string;
+  staleReason?: string;
+  evidenceFreshAt?: string;
   createdAt: string;
   updatedAt: string;
 }

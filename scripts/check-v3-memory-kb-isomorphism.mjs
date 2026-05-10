@@ -148,6 +148,7 @@ function checkFiles(root, files) {
     'pending realtime SQL MUST use EXISTS/LATERAL LIMIT or bounded materialized-candidate shapes instead of global COUNT(DISTINCT)/ROW_NUMBER scans',
     'deep-analysis active-conversation probes MUST use bounded EXISTS/OFFSET checks instead of full message COUNT scans',
     'Timeline projection SQL MUST cast string-bound since/until parameters as ::timestamptz when comparing against event_log.ts',
+    'Timeline Analyst MUST check the Gemini provider gate before collecting timeline evidence or calling Gemini',
     'kb.rs remains the memory-kb facade',
     'kb/args.rs owns unified KB argument ingress',
     'kb/remember.rs owns remember ingestion, graph edge side effects, embedding trigger, mutation event, and conflict downweighting',
@@ -290,6 +291,10 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.learningTimeline, sources.learningTimeline, [
     'LearningEngineRuntimeConfig',
+    'llm_gate::is_disabled',
+    'LlmProvider::Gemini',
+    'Timeline Analyst: skipped because Gemini gate is closed',
+    'last_timeline_analysis_at',
     'timeline_analysis_interval_secs',
     'timeline_window_arg',
     'timeline_error_limit',
@@ -905,7 +910,7 @@ async fn kb_review_stats() {
 	LearningEngineRuntimeConfig; decision_tier3_timeout_ms;
 	`);
 	  writeFixture(root, DEFAULT_FILES.learningTimeline, `
-	LearningEngineRuntimeConfig; timeline_analysis_interval_secs; timeline_window_arg; timeline_error_limit; timeline_llm_sample_limit; timeline_slow_threshold_ms;
+	LearningEngineRuntimeConfig; llm_gate::is_disabled; LlmProvider::Gemini; Timeline Analyst: skipped because Gemini gate is closed; last_timeline_analysis_at; timeline_analysis_interval_secs; timeline_window_arg; timeline_error_limit; timeline_llm_sample_limit; timeline_slow_threshold_ms;
 	`);
 	  writeFixture(root, DEFAULT_FILES.eventProjection, `
 	conditions.push(format!("ts >= \${}::timestamptz", idx));

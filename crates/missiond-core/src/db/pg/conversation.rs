@@ -254,6 +254,44 @@ impl ConversationStore for PgMissionStore {
         Ok(())
     }
 
+    async fn upsert_conversation_source_state(
+        &self,
+        state: &ConversationSourceStateInput,
+    ) -> DbResult<()> {
+        sqlx::query(
+            "INSERT INTO conversation_source_state (
+                conversation_id, source, raw_path, raw_state, raw_first_seen_at,
+                raw_last_seen_at, raw_line_count, raw_message_line_count,
+                raw_hash, reason, updated_at
+             )
+             VALUES ($1, $2, $3, $4, $5::timestamptz, $6::timestamptz, $7, $8, $9, $10, NOW())
+             ON CONFLICT (conversation_id) DO UPDATE SET
+                source = EXCLUDED.source,
+                raw_path = EXCLUDED.raw_path,
+                raw_state = EXCLUDED.raw_state,
+                raw_first_seen_at = COALESCE(EXCLUDED.raw_first_seen_at, conversation_source_state.raw_first_seen_at),
+                raw_last_seen_at = COALESCE(EXCLUDED.raw_last_seen_at, conversation_source_state.raw_last_seen_at),
+                raw_line_count = COALESCE(EXCLUDED.raw_line_count, conversation_source_state.raw_line_count),
+                raw_message_line_count = COALESCE(EXCLUDED.raw_message_line_count, conversation_source_state.raw_message_line_count),
+                raw_hash = COALESCE(EXCLUDED.raw_hash, conversation_source_state.raw_hash),
+                reason = EXCLUDED.reason,
+                updated_at = NOW()",
+        )
+        .bind(&state.conversation_id)
+        .bind(&state.source)
+        .bind(&state.raw_path)
+        .bind(&state.raw_state)
+        .bind(&state.raw_first_seen_at)
+        .bind(&state.raw_last_seen_at)
+        .bind(state.raw_line_count)
+        .bind(state.raw_message_line_count)
+        .bind(&state.raw_hash)
+        .bind(&state.reason)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     async fn get_conversation(&self, id: &str) -> DbResult<Option<Conversation>> {
         let row = sqlx::query("SELECT * FROM conversations WHERE id = $1")
             .bind(id)
@@ -795,7 +833,7 @@ impl ConversationStore for PgMissionStore {
     ) -> DbResult<()> {
         let bytes = crate::embedding::f32_vec_to_bytes(embedding);
         // Note: conversations table doesn't have embedding_vec column (no ANN search needed),
-        // only BYTEA blob for in-memory cosine similarity. This is consistent with SQLite.
+        // only BYTEA blob for in-memory cosine similarity.
         sqlx::query(
             "UPDATE conversations SET embedding = $1, embedding_provider = $2 WHERE id = $3",
         )

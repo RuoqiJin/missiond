@@ -5,6 +5,9 @@ use serde_json::Value;
 
 use crate::state::AppState;
 
+const WINDOWS_12900KF_SKILL: &str = "windows-runner";
+const WINDOWS_12900KF_INFRA_ID: &str = "windows-12900kf";
+
 #[derive(Deserialize)]
 struct InfraListArgs {
     #[serde(default)]
@@ -69,21 +72,12 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                     role: None,
                     provider: None,
                 });
-            let infra = state.infra.read().unwrap();
-            let servers: Vec<missiond_core::InfraServer> = if let Some(role) = role {
-                infra.by_role(&role).into_iter().cloned().collect()
-            } else if let Some(provider) = provider {
-                infra.by_provider(&provider).into_iter().cloned().collect()
-            } else {
-                infra.servers.clone()
-            };
-            drop(infra);
+            let servers = list_infra_servers(state, role.as_deref(), provider.as_deref());
             Ok(ToolResult::json_pretty(&servers))
         }
         "mission_infra_get" => {
             let InfraGetArgs { id } = serde_json::from_value(args)?;
-            let server = state.infra.read().unwrap().get(&id).cloned();
-            match server {
+            match get_infra_server(state, &id) {
                 Some(server) => Ok(ToolResult::json_pretty(&server)),
                 None => Ok(ToolResult::error(format!("Server not found: {}", id))),
             }
@@ -92,8 +86,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
         "mission_reachability" => {
             let ReachabilityArgs { target, channels } = serde_json::from_value(args)?;
 
-            let server: Option<missiond_core::InfraServer> =
-                state.infra.read().unwrap().get(&target).cloned();
+            let server: Option<missiond_core::InfraServer> = get_infra_server(state, &target);
             let public_ip = server.as_ref().and_then(|s| s.host.clone());
             let lan_ip = server.as_ref().and_then(|s| s.lan.clone());
             let server_name = server
@@ -258,13 +251,13 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                         Ok(Ok(_)) => {
                             return Some(serde_json::json!({
                                 "reachable": true, "ip": host, "port": port, "via": via,
-                            }))
+                            }));
                         }
                         Ok(Err(e)) => {
                             return Some(serde_json::json!({
                                 "reachable": false, "ip": host, "port": port, "via": via,
                                 "error": e.to_string(),
-                            }))
+                            }));
                         }
                         Err(_) => continue, // timeout, try next
                     }
@@ -359,8 +352,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
         "mission_os_diagnose" => {
             let OsDiagnoseArgs { target, checks } = serde_json::from_value(args)?;
 
-            let server: Option<missiond_core::InfraServer> =
-                state.infra.read().unwrap().get(&target).cloned();
+            let server: Option<missiond_core::InfraServer> = get_infra_server(state, &target);
             if server.is_none() && !target.contains('@') && !target.contains('.') {
                 return Ok(ToolResult::error(format!(
                     "Server not found in infra registry: {}",
@@ -734,4 +726,92 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
 
         _ => Err(anyhow!("Unknown infra tool: {name}")),
     }
+}
+
+fn list_infra_servers(
+    state: &AppState,
+    role: Option<&str>,
+    provider: Option<&str>,
+) -> Vec<missiond_core::InfraServer> {
+    let mut servers = {
+        let infra = state.infra.read().unwrap();
+        infra.servers.clone()
+    };
+    append_skill_derived_infra_servers(state, &mut servers);
+    servers
+        .into_iter()
+        .filter(|server| {
+            role.map_or(true, |role| server.roles.iter().any(|r| r == role))
+                && provider.map_or(true, |provider| server.provider == provider)
+        })
+        .collect()
+}
+
+fn get_infra_server(state: &AppState, id: &str) -> Option<missiond_core::InfraServer> {
+    list_infra_servers(state, None, None)
+        .into_iter()
+        .find(|server| infra_id_matches(server, id))
+}
+
+fn infra_id_matches(server: &missiond_core::InfraServer, id: &str) -> bool {
+    let needle = id.to_ascii_lowercase();
+    server.id.eq_ignore_ascii_case(id)
+        || server.name.to_ascii_lowercase().contains(&needle)
+        || server
+            .tags
+            .iter()
+            .any(|tag| tag.eq_ignore_ascii_case(id) || tag.to_ascii_lowercase().contains(&needle))
+}
+
+fn append_skill_derived_infra_servers(
+    state: &AppState,
+    servers: &mut Vec<missiond_core::InfraServer>,
+) {
+    if servers
+        .iter()
+        .any(|server| infra_id_matches(server, WINDOWS_12900KF_INFRA_ID))
+    {
+        return;
+    }
+
+    let Some(skill) = state.skills.get(WINDOWS_12900KF_SKILL) else {
+        return;
+    };
+    let Ok(content) = std::fs::read_to_string(&skill.path) else {
+        return;
+    };
+    if !content.contains("12900KF") || !content.contains("xjp_agent_exec(agent_url=\"windows\")") {
+        return;
+    }
+
+    servers.push(missiond_core::InfraServer {
+        id: WINDOWS_12900KF_INFRA_ID.to_string(),
+        name: "Windows 12900KF / RTX 3090 Ti".to_string(),
+        provider: "skill-derived".to_string(),
+        host: Some("100.73.97.46".to_string()),
+        lan: Some("192.168.1.19".to_string()),
+        location: Some("local-lan/tailscale".to_string()),
+        roles: vec![
+            "windows-runner".to_string(),
+            "github-runner".to_string(),
+            "gpu".to_string(),
+            "embedding".to_string(),
+            "rerank-candidate".to_string(),
+            "deploy-agent".to_string(),
+        ],
+        tags: vec![
+            "12900kf".to_string(),
+            "3090ti".to_string(),
+            "windows".to_string(),
+            "qwen3-embedding".to_string(),
+            "ollama".to_string(),
+            "agent_url=windows".to_string(),
+            format!("skill:{}", WINDOWS_12900KF_SKILL),
+        ],
+        description: Some(
+            "Derived from ~/.claude/skills/windows-runner/SKILL.md: deploy-agent `xjp_agent_exec(agent_url=\"windows\")`; host ssh jin@100.73.97.46 or LAN 192.168.1.19; Ollama qwen3-embedding on 11434; BWG tunnel 104.194.81.38:19434 -> Win:11434. Promote to deploy-center/secret-store when authoritative runtime facts are available."
+                .to_string(),
+        ),
+        health_endpoint: Some("http://104.194.81.38:19434/api/tags".to_string()),
+    });
 }

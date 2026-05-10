@@ -32,6 +32,14 @@ function psqlJson(sql) {
   return out ? JSON.parse(out) : [];
 }
 
+function psqlJsonOptional(sql, fallback) {
+  try {
+    return psqlJson(sql);
+  } catch {
+    return fallback;
+  }
+}
+
 function valueArg(name, fallback) {
   const idx = args.indexOf(name);
   if (idx === -1 || idx + 1 >= args.length) return fallback;
@@ -43,6 +51,7 @@ SELECT id, archived, rollout_path, created_at, updated_at, cwd, model, title
 FROM threads
 ORDER BY updated_at DESC;
 `);
+const rolloutMetas = listRolloutMetas();
 
 const conversations = psqlJson(`
 SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json)
@@ -52,6 +61,15 @@ FROM (
   WHERE source = 'codex_cli'
 ) t;
 `);
+
+const sourceStates = psqlJsonOptional(`
+SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json)
+FROM (
+  SELECT conversation_id, source, raw_path, raw_state, raw_line_count, raw_message_line_count, updated_at
+  FROM conversation_source_state
+  WHERE source = 'codex_cli'
+) t;
+`, []);
 
 const messageDuplicateGroups = psqlJson(`
 SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json)
@@ -81,9 +99,28 @@ FROM (
 
 const rawById = new Map(rawThreads.map((t) => [t.id, t]));
 const dbById = new Map(conversations.map((c) => [c.id, c]));
+const sourceStateById = new Map(sourceStates.map((s) => [s.conversation_id, s]));
 const missingInMissionD = rawThreads
   .filter((t) => !dbById.has(t.id))
   .map((t) => pickThread(t));
+const rawRolloutsMissingInMissionD = rolloutMetas
+  .filter((m) => !dbById.has(m.id))
+  .map((m) => ({
+    id: m.id,
+    path: m.path,
+    archived_path: m.archived_path,
+    cwd: m.cwd,
+    source_state: sourceStateById.get(m.id)?.raw_state || null,
+  }));
+const rawOnlyNotInSqlite = rolloutMetas
+  .filter((m) => !rawById.has(m.id))
+  .map((m) => ({
+    id: m.id,
+    path: m.path,
+    archived_path: m.archived_path,
+    imported: dbById.has(m.id),
+    source_state: sourceStateById.get(m.id)?.raw_state || null,
+  }));
 const extraInMissionD = conversations
   .filter((c) => !rawById.has(c.id) && !String(c.id).startsWith('pty-slot-'))
   .map((c) => ({ id: c.id, status: c.status, conversation_type: c.conversation_type }));
@@ -104,6 +141,7 @@ const rolloutJsonlFiles = countRolloutFiles();
 
 const result = {
   ok: missingInMissionD.length === 0
+    && rawRolloutsMissingInMissionD.length === 0
     && archivedStateDrift.length === 0
     && messageDuplicateGroups.length === 0
     && nullUuidMessages === 0,
@@ -113,15 +151,21 @@ const result = {
     threads: rawThreads.length,
     archivedThreads: rawThreads.filter((t) => Number(t.archived) === 1).length,
     rolloutJsonlFiles,
+    rolloutSessionsWithMeta: rolloutMetas.length,
+    rawOnlyNotInSqlite: rawOnlyNotInSqlite.length,
+    rawRolloutsMissingInMissionD: rawRolloutsMissingInMissionD.length,
     missingRolloutFiles: missingRolloutFiles.length,
   },
   missiond: {
     conversations: conversations.length,
     placeholderConversations: conversations.filter((c) => String(c.id).startsWith('pty-slot-')).length,
+    sourceStateRows: sourceStates.length,
     nullUuidMessages,
     duplicateUuidGroups: messageDuplicateGroups.length,
   },
   missingInMissionD,
+  rawRolloutsMissingInMissionD: rawRolloutsMissingInMissionD.slice(0, 50),
+  rawOnlyNotInSqlite: rawOnlyNotInSqlite.slice(0, 50),
   extraInMissionD,
   archivedStateDrift,
   duplicateUuidGroups: messageDuplicateGroups,
@@ -133,9 +177,12 @@ if (json) {
 } else {
   console.log(`Codex history ingestion audit: ${result.ok ? 'OK' : 'NEEDS ATTENTION'}`);
   console.log(`- raw sqlite threads: ${result.raw.threads} (${result.raw.archivedThreads} archived)`);
-  console.log(`- rollout JSONL files: ${result.raw.rolloutJsonlFiles}; missing rollout files referenced by sqlite: ${result.raw.missingRolloutFiles}`);
+  console.log(`- rollout JSONL files: ${result.raw.rolloutJsonlFiles}; session_meta ids: ${result.raw.rolloutSessionsWithMeta}; raw-only not in sqlite: ${result.raw.rawOnlyNotInSqlite}`);
+  console.log(`- missing rollout files referenced by sqlite: ${result.raw.missingRolloutFiles}`);
   console.log(`- MissionD codex conversations: ${result.missiond.conversations} (${result.missiond.placeholderConversations} PTY placeholders)`);
+  console.log(`- MissionD codex source-state rows: ${result.missiond.sourceStateRows}`);
   console.log(`- missing in MissionD: ${result.missingInMissionD.length}`);
+  console.log(`- raw rollout sessions missing in MissionD: ${result.raw.rawRolloutsMissingInMissionD}`);
   console.log(`- archived state drift: ${result.archivedStateDrift.length}`);
   console.log(`- null UUID messages: ${result.missiond.nullUuidMessages}`);
   console.log(`- duplicate UUID groups: ${result.missiond.duplicateUuidGroups}`);
@@ -153,8 +200,64 @@ function pickThread(t) {
 }
 
 function countRolloutFiles() {
-  const root = path.join(os.homedir(), '.codex/sessions');
-  if (!fs.existsSync(root)) return 0;
-  const output = run('find', [root, '-name', '*.jsonl', '-type', 'f']);
-  return output.trim() ? output.trim().split('\n').length : 0;
+  return listRolloutFiles().length;
+}
+
+function listRolloutFiles() {
+  const roots = [
+    path.join(os.homedir(), '.codex/sessions'),
+    path.join(os.homedir(), '.codex/archived_sessions'),
+  ];
+  const files = [];
+  for (const root of roots) {
+    if (!fs.existsSync(root)) continue;
+    const output = run('find', [root, '-name', '*.jsonl', '-type', 'f']);
+    if (output.trim()) files.push(...output.trim().split('\n'));
+  }
+  return files;
+}
+
+function listRolloutMetas() {
+  const metas = [];
+  const seen = new Set();
+  for (const file of listRolloutFiles()) {
+    const meta = readSessionMeta(file);
+    if (!meta?.id || seen.has(meta.id)) continue;
+    seen.add(meta.id);
+    metas.push(meta);
+  }
+  return metas;
+}
+
+function readSessionMeta(file) {
+  let fd;
+  try {
+    fd = fs.openSync(file, 'r');
+    const buffer = Buffer.alloc(256 * 1024);
+    const n = fs.readSync(fd, buffer, 0, buffer.length, 0);
+    const text = buffer.subarray(0, n).toString('utf8');
+    for (const line of text.split(/\r?\n/).slice(0, 25)) {
+      if (!line.trim()) continue;
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (event.type !== 'session_meta') continue;
+      return {
+        id: event.payload?.id || null,
+        path: file,
+        archived_path: file.includes('/.codex/archived_sessions/'),
+        timestamp: event.payload?.timestamp || event.timestamp || null,
+        cwd: event.payload?.cwd || null,
+        model: event.payload?.model || null,
+      };
+    }
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+  return null;
 }

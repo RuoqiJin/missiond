@@ -185,6 +185,73 @@ fn decide_close_action(
     }
 }
 
+/// V3 lisp-code-sync :: stale runtime-evidence dispatch revalidation.
+///
+/// `.missiond/v3/runtime/lisp-code-sync/**` reports are cold runtime evidence,
+/// not active authoring source. A past bug created auto-executable BoardTasks
+/// from those self-written report paths; even after the watcher/report GC fix,
+/// old open tasks can remain in the Board and would otherwise keep consuming
+/// worker slots. Revalidate this class at the Autopilot dispatch boundary and
+/// close it as stale evidence before any slot selection/PTY send happens.
+fn is_stale_lisp_code_sync_runtime_report_task(task: &missiond_core::types::BoardTask) -> bool {
+    let text = format!(
+        "{}\n{}\n{}",
+        task.title,
+        task.description,
+        task.dedupe_key.as_deref().unwrap_or("")
+    )
+    .to_ascii_lowercase();
+    let references_lisp_sync_runtime = text.contains("runtime/lisp-code-sync/")
+        || text.contains(".missiond/v3/runtime/lisp-code-sync/")
+        || text.contains(".missiond/v3/runtime/lisp-code-sync");
+    if !references_lisp_sync_runtime {
+        return false;
+    }
+    text.contains("sync code for lisp change")
+        || text.contains("lisp-code-sync")
+        || text.contains("lisp code sync")
+}
+
+async fn resolve_stale_lisp_code_sync_runtime_report_task(
+    state: &AppState,
+    task: &missiond_core::types::BoardTask,
+) {
+    let note = "✅ resolved_by_runtime_fix / stale_evidence — this BoardTask points at a lisp-code-sync runtime report under `.missiond/v3/runtime/lisp-code-sync/**`. Runtime reports are cold evidence, not editable SSOT source; the watcher now ignores runtime output and report GC bounds the directory. Autopilot therefore closed this stale self-loop task before dispatch instead of spending another worker slot.";
+    let _ = state
+        .store
+        .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+            task_id: task.id.to_string(),
+            content: note.to_string(),
+            note_type: Some("summary".to_string()),
+            author: Some("autopilot".to_string()),
+        })
+        .await;
+    let _ = state
+        .store
+        .update_board_task(
+            task.id.as_str(),
+            &missiond_core::types::UpdateBoardTaskInput {
+                status: Some("done".to_string()),
+                auto_execute: Some(false),
+                ..Default::default()
+            },
+        )
+        .await;
+    let _ = state
+        .bus
+        .publish_board(BoardEvent::StatusChanged {
+            task_id: task.id.to_string(),
+            old_status: format!("{:?}", task.status),
+            new_status: "done".to_string(),
+        })
+        .await;
+    info!(
+        task_id = %task.id,
+        title = %task.title,
+        "Autopilot: closed stale lisp-code-sync runtime report task before dispatch"
+    );
+}
+
 /// V3 slot-attribution :: stale-running-claim detector.
 ///
 /// Walk the running BoardTask list and collect every task other than
@@ -1165,7 +1232,24 @@ fn output_contract_close_blocker(task_description: &str, summary: &str) -> Optio
     {
         return None;
     }
+    if memory_review_summary_satisfies_output_contract(summary) {
+        return None;
+    }
     Some("missing-output-contract-sections")
+}
+
+fn memory_review_summary_satisfies_output_contract(summary: &str) -> bool {
+    if !summary_has_report_heading(summary, "findings")
+        || !summary_has_report_heading(summary, "verification")
+    {
+        return false;
+    }
+    let has_candidate_block = summary_has_report_heading(summary, "active memory candidates")
+        || summary_has_report_heading(summary, "ssot-workflow backfill candidates")
+        || summary_has_report_heading(summary, "needs human");
+    let has_rationale = summary_has_report_heading(summary, "discard rationale")
+        || summary_has_report_heading(summary, "recommendations");
+    has_candidate_block && has_rationale
 }
 
 fn summary_has_report_heading(summary: &str, expected: &str) -> bool {
@@ -2217,6 +2301,11 @@ async fn dispatch_board_tasks_with_config(
     ];
 
     for task in tasks {
+        if is_stale_lisp_code_sync_runtime_report_task(&task) {
+            resolve_stale_lisp_code_sync_runtime_report_task(state, &task).await;
+            continue;
+        }
+
         // Dynamic slot assignment: if assignee is None, find an idle coder slot
         let slot_id = match &task.assignee {
             Some(id) => {
@@ -6430,6 +6519,34 @@ Review only.
         }
     }
 
+    #[test]
+    fn lisp_code_sync_runtime_report_task_is_stale_before_dispatch() {
+        let task = make_board_task(
+            "Sync code for Lisp change: runtime/lisp-code-sync/20260508T053538Z-f84cd729.report.lisp",
+            "The changed path is .missiond/v3/runtime/lisp-code-sync/20260508T053538Z-f84cd729.report.lisp",
+            "dev",
+            Some("code"),
+        );
+        assert!(
+            is_stale_lisp_code_sync_runtime_report_task(&task),
+            "runtime lisp-code-sync report tasks must be resolved before slot dispatch"
+        );
+    }
+
+    #[test]
+    fn lisp_code_sync_real_authoring_task_is_not_stale() {
+        let task = make_board_task(
+            "Sync code for Lisp change: .missiond/v3/missiond-blueprint.lisp",
+            "A real authoring SSOT file changed and may require code-isomorphism work.",
+            "dev",
+            Some("code"),
+        );
+        assert!(
+            !is_stale_lisp_code_sync_runtime_report_task(&task),
+            "active SSOT authoring changes must still be eligible for dispatch"
+        );
+    }
+
     /// Pins BoardTask 2b685fcf finding (1): externally-created BoardTasks
     /// that ship a `## Dispatch metadata` block with `task_class: review`
     /// must route to the `review` workstation pool — not silently fall back
@@ -6883,6 +7000,15 @@ Review only.
     #[test]
     fn output_contract_close_blocker_accepts_declared_sections() {
         let report = "# Context-Pack\n\n## Findings\n- one\n\n## Evidence\n- two\n\n## Recommendations\n- three\n\n## Verification\n- no edits";
+        assert_eq!(
+            output_contract_close_blocker(delegated_context_pack_with_output_contract(), report),
+            None
+        );
+    }
+
+    #[test]
+    fn output_contract_close_blocker_accepts_memory_review_artifact_sections() {
+        let report = "## Findings\n- Count reviewed: 7\n- Count selected for active memory: 0\n\nActive Memory Candidates\nNone\n\nSSOT-Workflow Backfill Candidates\nNone\n\nNeeds Human\nNone\n\nDiscard Rationale\nThe batch is procedural noise.\n\nVerification\nI only read the assigned batch files.";
         assert_eq!(
             output_contract_close_blocker(delegated_context_pack_with_output_contract(), report),
             None

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Result;
 use missiond_core::event::events::{BoardEvent, SystemEvent};
@@ -24,6 +24,9 @@ const LISP_CODE_SYNC_WATCH_ENV: &str = "MISSIOND_LISP_CODE_SYNC_WATCH";
 const LISP_CODE_SYNC_DEBOUNCE_WINDOW: Duration = Duration::from_secs(5);
 const LISP_CODE_SYNC_MAX_REPORTS: usize = 200;
 const LISP_CODE_SYNC_MAX_REPORT_AGE_SECS: u64 = 7 * 24 * 60 * 60;
+const LISP_CODE_SYNC_RECENT_REPORT_WINDOW_SECS: u64 = 5 * 60;
+const LISP_CODE_SYNC_STORM_WINDOW_SECS: i64 = 60;
+const LISP_CODE_SYNC_STORM_PRECREATE_THRESHOLD: usize = 4;
 
 static LISP_CODE_SYNC_RUNTIME: OnceLock<Arc<LispCodeSyncRuntime>> = OnceLock::new();
 
@@ -41,6 +44,10 @@ struct LispCodeSyncRuntime {
     last_task_id: RwLock<Option<String>>,
     last_report_path: RwLock<Option<String>>,
     last_error: RwLock<Option<String>>,
+    recent_sync_task_creations: RwLock<Vec<i64>>,
+    last_processed_content_fingerprints: RwLock<HashMap<String, String>>,
+    storm_circuit_hits: AtomicU64,
+    last_storm_circuit_at_epoch: AtomicI64,
 }
 
 impl Default for LispCodeSyncRuntime {
@@ -58,6 +65,10 @@ impl Default for LispCodeSyncRuntime {
             last_task_id: RwLock::new(None),
             last_report_path: RwLock::new(None),
             last_error: RwLock::new(None),
+            recent_sync_task_creations: RwLock::new(Vec::new()),
+            last_processed_content_fingerprints: RwLock::new(HashMap::new()),
+            storm_circuit_hits: AtomicU64::new(0),
+            last_storm_circuit_at_epoch: AtomicI64::new(0),
         }
     }
 }
@@ -80,13 +91,54 @@ impl LispCodeSyncRuntime {
         self.reports_written.fetch_add(1, Ordering::Relaxed);
         if result.created_task {
             self.sync_tasks_created.fetch_add(1, Ordering::Relaxed);
+            self.record_sync_task_creation().await;
         } else if result.dedupe_hit {
             self.dedupe_hits.fetch_add(1, Ordering::Relaxed);
+        }
+        if result.storm_circuit {
+            self.record_storm_circuit_hit().await;
         }
     }
 
     async fn record_error(&self, err: impl Into<String>) {
         *self.last_error.write().await = Some(err.into());
+    }
+
+    async fn record_sync_task_creation(&self) {
+        let now = chrono::Utc::now().timestamp();
+        let mut recent = self.recent_sync_task_creations.write().await;
+        recent.push(now);
+        recent.retain(|ts| now.saturating_sub(*ts) <= LISP_CODE_SYNC_STORM_WINDOW_SECS);
+    }
+
+    async fn recent_sync_task_creation_count(&self) -> usize {
+        let now = chrono::Utc::now().timestamp();
+        let mut recent = self.recent_sync_task_creations.write().await;
+        recent.retain(|ts| now.saturating_sub(*ts) <= LISP_CODE_SYNC_STORM_WINDOW_SECS);
+        recent.len()
+    }
+
+    async fn should_use_storm_circuit_key(&self) -> bool {
+        self.recent_sync_task_creation_count().await >= LISP_CODE_SYNC_STORM_PRECREATE_THRESHOLD
+    }
+
+    async fn record_storm_circuit_hit(&self) {
+        self.storm_circuit_hits.fetch_add(1, Ordering::Relaxed);
+        self.last_storm_circuit_at_epoch
+            .store(chrono::Utc::now().timestamp(), Ordering::Relaxed);
+    }
+
+    async fn should_process_content_fingerprint(&self, path: &str, kind: &str) -> bool {
+        let fingerprint = lisp_sync_content_fingerprint(Path::new(path), kind).await;
+        let mut fingerprints = self.last_processed_content_fingerprints.write().await;
+        if fingerprints
+            .get(path)
+            .is_some_and(|last| last == &fingerprint)
+        {
+            return false;
+        }
+        fingerprints.insert(path.to_string(), fingerprint);
+        true
     }
 
     async fn snapshot(&self) -> Value {
@@ -98,6 +150,11 @@ impl LispCodeSyncRuntime {
             "reportsWritten": self.reports_written.load(Ordering::Relaxed),
             "syncTasksCreated": self.sync_tasks_created.load(Ordering::Relaxed),
             "dedupeHits": self.dedupe_hits.load(Ordering::Relaxed),
+            "stormCircuitHits": self.storm_circuit_hits.load(Ordering::Relaxed),
+            "recentSyncTaskCreations": self.recent_sync_task_creation_count().await,
+            "stormPrecreateThreshold": LISP_CODE_SYNC_STORM_PRECREATE_THRESHOLD,
+            "stormWindowSecs": LISP_CODE_SYNC_STORM_WINDOW_SECS,
+            "lastStormCircuitAtEpoch": self.last_storm_circuit_at_epoch.load(Ordering::Relaxed),
             "lastEventSeq": self.last_event_seq.load(Ordering::Relaxed),
             "lastEventAtEpoch": self.last_event_at_epoch.load(Ordering::Relaxed),
             "lastProjectId": self.last_project_id.read().await.clone(),
@@ -116,8 +173,20 @@ fn runtime() -> Arc<LispCodeSyncRuntime> {
         .clone()
 }
 
+#[allow(dead_code)]
 pub(crate) async fn status_snapshot() -> Value {
     runtime().snapshot().await
+}
+
+pub(crate) async fn status_snapshot_for_state(state: &AppState) -> Value {
+    let mut snapshot = runtime().snapshot().await;
+    if let Some(obj) = snapshot.as_object_mut() {
+        obj.insert(
+            "reportDirs".to_string(),
+            collect_report_dir_status_for_state(state).await,
+        );
+    }
+    snapshot
 }
 
 #[derive(Clone)]
@@ -186,8 +255,12 @@ impl LispCodeSyncService {
                     let Some(ack) = ack else { break; };
                     let seq = ack.seq().0;
                     let event = ack.event().clone();
-                    if let SystemEvent::ConfigChanged { path, .. } = &event {
+                    if let SystemEvent::ConfigChanged { path, kind } = &event {
                         if is_lisp_sync_path(Path::new(path)) {
+                            if !self.runtime.should_process_content_fingerprint(path, kind).await {
+                                ack.ack().await;
+                                continue;
+                            }
                             self.runtime.record_event(seq, path).await;
                             match process_lisp_change(&self.state, path).await {
                                 Ok(result) => self.runtime.record_result(&result).await,
@@ -234,7 +307,8 @@ impl LispCodeSyncService {
             "lisp-code-sync watching project .missiond directories"
         );
 
-        let mut debounced_paths: HashMap<String, Instant> = HashMap::new();
+        let mut debounced_events: HashMap<String, Instant> = HashMap::new();
+        let mut last_content_fingerprints: HashMap<String, String> = HashMap::new();
 
         loop {
             tokio::select! {
@@ -250,13 +324,22 @@ impl LispCodeSyncService {
                             continue;
                         }
                         let display = path.display().to_string();
+                        let fingerprint = lisp_sync_content_fingerprint(&path, &kind).await;
+                        if last_content_fingerprints
+                            .get(&display)
+                            .is_some_and(|last| last == &fingerprint)
+                        {
+                            continue;
+                        }
                         let now = Instant::now();
-                        if let Some(last_seen) = debounced_paths.get(&display) {
+                        let debounce_key = format!("{display}\0{fingerprint}");
+                        if let Some(last_seen) = debounced_events.get(&debounce_key) {
                             if now.duration_since(*last_seen) < LISP_CODE_SYNC_DEBOUNCE_WINDOW {
                                 continue;
                             }
                         }
-                        debounced_paths.insert(display.clone(), now);
+                        debounced_events.insert(debounce_key, now);
+                        last_content_fingerprints.insert(display.clone(), fingerprint);
                         let _ = self.bus.publish_system(SystemEvent::ConfigChanged {
                             path: display,
                             kind: kind.clone(),
@@ -317,6 +400,13 @@ fn is_ignored_lisp_sync_runtime_path(path: &str) -> bool {
         || path.starts_with(".missiond/runtime-state/")
 }
 
+async fn lisp_sync_content_fingerprint(path: &Path, kind: &str) -> String {
+    match tokio::fs::read(path).await {
+        Ok(bytes) => format!("sha256:{}", stable_hash_bytes_hex(&bytes)),
+        Err(_) => format!("{kind}:missing"),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LispCodeSyncStatus {
     Synced,
@@ -349,6 +439,7 @@ struct LispCodeSyncResult {
     sync_task_id: Option<String>,
     created_task: bool,
     dedupe_hit: bool,
+    storm_circuit: bool,
     report_path: PathBuf,
 }
 
@@ -366,6 +457,7 @@ async fn process_lisp_change(state: &AppState, changed_path: &str) -> Result<Lis
                 checker_tail: None,
                 sync_task_id: None,
                 dedupe_key: None,
+                storm_circuit: false,
             };
             let report_path = write_report(&root, &report).await?;
             return Ok(LispCodeSyncResult {
@@ -374,6 +466,7 @@ async fn process_lisp_change(state: &AppState, changed_path: &str) -> Result<Lis
                 sync_task_id: None,
                 created_task: false,
                 dedupe_hit: false,
+                storm_circuit: false,
                 report_path,
             });
         }
@@ -385,8 +478,21 @@ async fn process_lisp_change(state: &AppState, changed_path: &str) -> Result<Lis
         Some(_) => LispCodeSyncStatus::NeedsSync,
         None => LispCodeSyncStatus::ObservedOnly,
     };
-    let dedupe_key = (status == LispCodeSyncStatus::NeedsSync)
-        .then(|| dedupe_key_for_lisp_sync(&resolution.project_id, changed_path));
+    let mut storm_circuit = false;
+    let dedupe_key = if status == LispCodeSyncStatus::NeedsSync {
+        let runtime = runtime();
+        if runtime.should_use_storm_circuit_key().await {
+            storm_circuit = true;
+            Some(storm_dedupe_key_for_lisp_sync(&resolution.project_id))
+        } else {
+            Some(dedupe_key_for_lisp_sync(
+                &resolution.project_id,
+                changed_path,
+            ))
+        }
+    } else {
+        None
+    };
     let mut sync_task_id = None;
     let mut created_task = false;
     let mut dedupe_hit = false;
@@ -396,8 +502,15 @@ async fn process_lisp_change(state: &AppState, changed_path: &str) -> Result<Lis
             sync_task_id = Some(existing.id.to_string());
             dedupe_hit = true;
         } else {
-            let task_id =
-                create_sync_task(state, &resolution, changed_path, &check, dedupe_key).await?;
+            let task_id = create_sync_task(
+                state,
+                &resolution,
+                changed_path,
+                &check,
+                dedupe_key,
+                storm_circuit,
+            )
+            .await?;
             sync_task_id = Some(task_id);
             created_task = true;
         }
@@ -412,6 +525,7 @@ async fn process_lisp_change(state: &AppState, changed_path: &str) -> Result<Lis
         checker_tail: check.as_ref().map(|result| result.tail.clone()),
         sync_task_id: sync_task_id.clone(),
         dedupe_key,
+        storm_circuit,
     };
     let report_path = write_report(&resolution.root, &report).await?;
 
@@ -421,7 +535,123 @@ async fn process_lisp_change(state: &AppState, changed_path: &str) -> Result<Lis
         sync_task_id,
         created_task,
         dedupe_hit,
+        storm_circuit,
         report_path,
+    })
+}
+
+async fn collect_report_dir_status_for_state(state: &AppState) -> Value {
+    let registry = state.project_registry.read().await;
+    let mut projects = Vec::new();
+    let mut total_reports = 0usize;
+    let mut recent_reports_5m = 0usize;
+    let mut over_limit_projects = Vec::new();
+
+    for project in registry.active_projects() {
+        let root = PathBuf::from(&project.path);
+        let status = collect_report_dir_status_for_root(&project.id, &root).await;
+        let count = status
+            .get("reportCount")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+        let recent = status
+            .get("recentReports5m")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+        if count > LISP_CODE_SYNC_MAX_REPORTS {
+            over_limit_projects.push(project.id.clone());
+        }
+        total_reports += count;
+        recent_reports_5m += recent;
+        projects.push(status);
+    }
+
+    json!({
+        "maxReportsPerProject": LISP_CODE_SYNC_MAX_REPORTS,
+        "recentWindowSecs": LISP_CODE_SYNC_RECENT_REPORT_WINDOW_SECS,
+        "totalReports": total_reports,
+        "recentReports5m": recent_reports_5m,
+        "overLimitProjects": over_limit_projects,
+        "projects": projects,
+    })
+}
+
+async fn collect_report_dir_status_for_root(project_id: &str, root: &Path) -> Value {
+    let dir = root.join(LISP_CODE_SYNC_REPORT_DIR);
+    let mut report_count = 0usize;
+    let mut recent_reports_5m = 0usize;
+    let mut latest_report_at: Option<String> = None;
+    let mut latest_report_epoch: Option<i64> = None;
+
+    let mut read_dir = match tokio::fs::read_dir(&dir).await {
+        Ok(read_dir) => read_dir,
+        Err(_) => {
+            return json!({
+                "projectId": project_id,
+                "path": dir.display().to_string(),
+                "exists": false,
+                "reportCount": 0,
+                "recentReports5m": 0,
+                "overLimit": false,
+                "latestReportAt": null,
+            });
+        }
+    };
+
+    let now = SystemTime::now();
+    while let Ok(Some(entry)) = read_dir.next_entry().await {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("lisp") {
+            continue;
+        }
+        if !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.ends_with(".report.lisp"))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        report_count += 1;
+        let modified = entry
+            .metadata()
+            .await
+            .ok()
+            .and_then(|meta| meta.modified().ok());
+        if let Some(modified) = modified {
+            if now
+                .duration_since(modified)
+                .ok()
+                .map(|age| age.as_secs() <= LISP_CODE_SYNC_RECENT_REPORT_WINDOW_SECS)
+                .unwrap_or(false)
+            {
+                recent_reports_5m += 1;
+            }
+            let epoch = modified
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .ok()
+                .map(|duration| duration.as_secs() as i64);
+            if let Some(epoch) = epoch {
+                if latest_report_epoch
+                    .map(|latest| epoch > latest)
+                    .unwrap_or(true)
+                {
+                    latest_report_epoch = Some(epoch);
+                    let dt: chrono::DateTime<chrono::Utc> = modified.into();
+                    latest_report_at = Some(dt.to_rfc3339());
+                }
+            }
+        }
+    }
+
+    json!({
+        "projectId": project_id,
+        "path": dir.display().to_string(),
+        "exists": true,
+        "reportCount": report_count,
+        "recentReports5m": recent_reports_5m,
+        "overLimit": report_count > LISP_CODE_SYNC_MAX_REPORTS,
+        "latestReportAt": latest_report_at,
     })
 }
 
@@ -528,19 +758,31 @@ async fn create_sync_task(
     changed_path: &str,
     check: &Option<SyncCheckResult>,
     dedupe_key: &str,
+    storm_circuit: bool,
 ) -> Result<String> {
     let checker = check
         .as_ref()
         .map(|result| format!("{}\n{}", result.command, result.tail))
         .unwrap_or_else(|| "no checker available".to_string());
-    let description = format!(
+    let description = if storm_circuit {
+        format!(
+            "Lisp-code real-time sync detected repeated failing SSOT/code gates in a short window and opened the same-source storm circuit.\n\nProject: {}\nRoot changed path: {}\n\nChecker evidence:\n{}\n\nWorkflow:\n1. Treat this as the single root-cause task for the storm window.\n2. Read the changed Lisp/checker file and the failing gate output.\n3. Decide whether the intended change needs code, checker, or Lisp correction.\n4. Create/attach an exact accepted shard before any code implementation.\n5. Delegate implementation only with explicit write_scope, acceptance, and context_pack_path.\n6. Close this task only after the code-isomorphism gate is green.\n\nDo not spawn per-report or per-path tasks while this circuit task is open.",
+            resolution.project_id, changed_path, checker
+        )
+    } else {
+        format!(
         "Lisp-code real-time sync detected a failing SSOT/code gate.\n\nProject: {}\nChanged Lisp/checker path: {}\n\nChecker evidence:\n{}\n\nWorkflow:\n1. Read the changed Lisp/checker file and the failing gate output.\n2. Decide whether the intended change needs code, checker, or Lisp correction.\n3. Create/attach an exact accepted shard before any code implementation.\n4. Delegate implementation only with explicit write_scope, acceptance, and context_pack_path.\n5. Close this task only after the code-isomorphism gate is green.\n\nThis task exists because Lisp changed first; do not mark done by editing only the report.",
         resolution.project_id,
         changed_path,
         checker
-    );
+        )
+    };
     let input = CreateBoardTaskInput {
-        title: format!("Sync code for Lisp change: {}", short_path(changed_path)),
+        title: if storm_circuit {
+            "Sync code for Lisp changes: storm circuit".to_string()
+        } else {
+            format!("Sync code for Lisp change: {}", short_path(changed_path))
+        },
         description: Some(description),
         priority: Some("high".to_string()),
         category: Some("dev".to_string()),
@@ -570,9 +812,17 @@ fn dedupe_key_for_lisp_sync(project_id: &str, changed_path: &str) -> String {
     )
 }
 
+fn storm_dedupe_key_for_lisp_sync(project_id: &str) -> String {
+    format!("lisp-code-sync:{project_id}:storm-circuit")
+}
+
 fn stable_hash_hex(value: &str) -> String {
+    stable_hash_bytes_hex(value.as_bytes())
+}
+
+fn stable_hash_bytes_hex(value: &[u8]) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(value.as_bytes());
+    hasher.update(value);
     let digest = hasher.finalize();
     let mut out = String::with_capacity(16);
     for byte in &digest[..8] {
@@ -601,6 +851,7 @@ struct LispCodeSyncReport {
     checker_tail: Option<String>,
     sync_task_id: Option<String>,
     dedupe_key: Option<String>,
+    storm_circuit: bool,
 }
 
 async fn write_report(root: &Path, report: &LispCodeSyncReport) -> std::io::Result<PathBuf> {
@@ -662,7 +913,7 @@ async fn prune_report_dir(dir: &Path) -> std::io::Result<()> {
 
 fn render_report(report: &LispCodeSyncReport) -> String {
     format!(
-        "(lisp-code-sync-report\n  :schema \"missiond.lisp-code-sync-report.v1\"\n  :updated-at {}\n  :project {}\n  :changed-path {}\n  :status {}\n  :checker-ok {}\n  :checker-command {}\n  :checker-tail {}\n  :sync-task-id {}\n  :dedupe-key {}\n)\n",
+        "(lisp-code-sync-report\n  :schema \"missiond.lisp-code-sync-report.v1\"\n  :updated-at {}\n  :project {}\n  :changed-path {}\n  :status {}\n  :checker-ok {}\n  :checker-command {}\n  :checker-tail {}\n  :sync-task-id {}\n  :dedupe-key {}\n  :storm-circuit {}\n)\n",
         lisp_string(&chrono::Utc::now().to_rfc3339()),
         lisp_string(&report.project_id),
         lisp_string(&report.changed_path),
@@ -675,6 +926,7 @@ fn render_report(report: &LispCodeSyncReport) -> String {
         lisp_option_string(report.checker_tail.as_deref()),
         lisp_option_string(report.sync_task_id.as_deref()),
         lisp_option_string(report.dedupe_key.as_deref()),
+        if report.storm_circuit { "true" } else { "false" },
     )
 }
 
@@ -754,10 +1006,12 @@ mod tests {
             checker_tail: Some("missing checker".to_string()),
             sync_task_id: Some("task-1".to_string()),
             dedupe_key: Some("lisp-code-sync:missiond:abc".to_string()),
+            storm_circuit: false,
         };
         let rendered = render_report(&report);
         assert!(rendered.contains("lisp-code-sync-report"));
         assert!(rendered.contains(":status needs-sync"));
+        assert!(rendered.contains(":storm-circuit false"));
         assert!(rendered.contains(".missiond/v3/missiond-blueprint.lisp"));
     }
 }

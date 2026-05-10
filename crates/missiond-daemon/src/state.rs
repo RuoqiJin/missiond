@@ -108,8 +108,7 @@ pub(crate) struct SessionTaskBinding {
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) mission: Arc<MissionControl>,
-    /// Trait-based DB access — all new code should use this instead of mission.db().
-    /// Backed by SqliteMissionStore (M1), will be swapped to PgMissionStore in M2.
+    /// Trait-based PostgreSQL DB access.
     pub(crate) store: Arc<dyn MissionStore>,
     pub(crate) permission: Arc<PermissionPolicy>,
     pub(crate) pty: Arc<PTYManager>,

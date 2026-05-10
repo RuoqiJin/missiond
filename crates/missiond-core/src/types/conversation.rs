@@ -70,6 +70,35 @@ fn default_conversation_type() -> String {
     "user".to_string()
 }
 
+/// Non-destructive source coverage overlay for provider conversation logs.
+///
+/// This table intentionally records what MissionD knows about the raw provider
+/// source without mutating or deleting the original conversation rows. Codex and
+/// ClaudeCode audits use it to distinguish "imported from a durable provider
+/// source" from "PTY placeholder", "raw file missing", or "provider index lost
+/// the rollout row".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationSourceStateInput {
+    pub conversation_id: String,
+    pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_path: Option<String>,
+    pub raw_state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_first_seen_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_last_seen_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_line_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_message_line_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 /// A message within a conversation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

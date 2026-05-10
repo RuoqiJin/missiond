@@ -1,10 +1,9 @@
 //! Database trait abstraction layer for MissionD.
 //!
-//! 12 domain-specific async traits mapping 1:1 to MissionDB sync methods.
-//! All signatures extracted from source files as ground truth.
+//! Domain-specific async traits for MissionD's PostgreSQL-backed store.
 //!
-//! SQLite backend: `sqlite/mod.rs` (SqliteMissionStore via DbExecutor)
-//! PostgreSQL backend: `pg/mod.rs` (PgMissionStore via sqlx, M2)
+//! Provider-local SQLite sources, such as Codex CLI's state_5.sqlite, are read
+//! by ingestion workers and do not constitute a MissionD database backend.
 
 use super::error::DbResult;
 use crate::types::*;
@@ -43,6 +42,11 @@ pub trait ConversationStore: Send + Sync {
     ) -> DbResult<()>;
     /// Refresh message_count from actual rows in conversation_messages.
     async fn refresh_conversation_message_count(&self, session_id: &str) -> DbResult<()>;
+    /// Upsert non-destructive provider source-state coverage for a conversation.
+    async fn upsert_conversation_source_state(
+        &self,
+        state: &ConversationSourceStateInput,
+    ) -> DbResult<()>;
     async fn get_conversation(&self, id: &str) -> DbResult<Option<Conversation>>;
     async fn list_conversations(
         &self,
@@ -530,9 +534,8 @@ pub trait MessageStore: Send + Sync {
 
     // -- pgvector hybrid search (P3: message-level embedding) --
 
-    /// Hybrid message search: HNSW Top-N + FTS → RRF merge (two-step CTE).
+    /// Hybrid message search: HNSW Top-N + FTS -> RRF merge (two-step CTE).
     /// Returns (message_id, session_id, role, content, timestamp, rrf_score).
-    /// Falls back to empty on SQLite (no pgvector).
     async fn hybrid_message_search(
         &self,
         query_vec: &[f32],
@@ -1678,6 +1681,6 @@ pub trait MissionStore:
     + Sync
 {
     /// Schema initialization (called once at startup).
-    /// SQLite: runs migration.rs init(). PG: runs sqlx migrations.
+    /// PostgreSQL runs sqlx migrations.
     async fn init(&self) -> DbResult<()>;
 }

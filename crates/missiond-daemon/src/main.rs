@@ -312,15 +312,6 @@ async fn main() -> Result<()> {
     #[cfg(unix)]
     ensure_config_permissions(&home);
 
-    // M3: SQLite → PostgreSQL migration CLI removed in v0.4.23 Stage 2E.
-    // The old CLI flag is now a hard error so stale scripts fail loudly.
-    if std::env::args().any(|a| a == "--migrate-sqlite-to-pg") {
-        return Err(anyhow!(
-            "--migrate-sqlite-to-pg is no longer supported (SQLite backend removed in v0.4.23 Stage 2E). \
-             See crates/missiond-core/src/db/pg/migrate_from_sqlite.rs for the legacy tool."
-        ));
-    }
-
     let db_path = db_path();
     let slots_path = slots_config_path();
     if !slots_path.exists() {
@@ -336,17 +327,17 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| Path::new("."))
         .join("config")
         .join("permissions.yaml");
-    let learned_db_path = db_path
+    let learned_permissions_path = db_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join("learned_permissions.db");
-    let learned = match LearnedPermissions::new(&learned_db_path) {
+    let learned = match LearnedPermissions::new(&learned_permissions_path) {
         Ok(lp) => {
-            info!(path = %learned_db_path.display(), "Learned permissions DB ready");
+            info!(path = %learned_permissions_path.with_extension("yaml").display(), "Learned permissions YAML ready");
             Some(Arc::new(lp))
         }
         Err(e) => {
-            warn!(error = %e, "Failed to init learned permissions DB, learning disabled");
+            warn!(error = %e, "Failed to init learned permissions YAML, learning disabled");
             None
         }
     };
@@ -355,14 +346,8 @@ async fn main() -> Result<()> {
         learned.clone(),
     ));
 
-    // In PG mode (MISSION_PG_URL set), skip SQLite entirely
-    let mc_db_path = if pg_url().is_some() {
-        None
-    } else {
-        Some(db_path.clone())
-    };
     let mission = Arc::new(MissionControl::new(MissionControlOptions {
-        db_path: mc_db_path,
+        db_path: None,
         slots_config_path: slots_path.clone(),
         permission_config_path: None,
         logs_dir: Some(logs_dir.clone()),
@@ -381,7 +366,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    // M4: Create store early (before startup cleanup) — conditional PG/SQLite
+    // Create the PostgreSQL store early before startup cleanup.
     let daemon_stats = Arc::new(daemon_stats::DaemonStats::new());
     let db_stats_callback: std::sync::Arc<dyn Fn(u64) + Send + Sync> = {
         let stats = Arc::clone(&daemon_stats);
@@ -1110,20 +1095,35 @@ async fn main() -> Result<()> {
         }
     }
 
-    // One-time backfill: populate conversation_events from historical JSONL files
-    {
+    let conversation_backfill_on_startup = backfill_enabled
+        || std::env::var("MISSIOND_CONVERSATION_BACKFILL_ON_STARTUP")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+    // Historical conversation repair is intentionally opt-in. Large provider
+    // stores can contain hundreds of thousands of rows; running this on every
+    // daemon restart turns maintenance into foreground CPU load.
+    if conversation_backfill_on_startup {
         let backfill_state = state.clone();
         tokio::spawn(async move {
             events_sync::backfill_conversation_events(&backfill_state).await;
         });
+    } else {
+        info!(
+            "Conversation event backfill skipped on startup; enable llm.yaml backfill_enabled or MISSIOND_CONVERSATION_BACKFILL_ON_STARTUP=1"
+        );
     }
 
     // One-time backfill: populate conversation_tool_calls from existing conversation_messages
-    {
+    if conversation_backfill_on_startup {
         let backfill_state = state.clone();
         tokio::spawn(async move {
             events_sync::backfill_tool_calls(&backfill_state).await;
         });
+    } else {
+        info!(
+            "Conversation tool-call backfill skipped on startup; enable llm.yaml backfill_enabled or MISSIOND_CONVERSATION_BACKFILL_ON_STARTUP=1"
+        );
     }
 
     // One-time backfill: generate embeddings for policy:decision KB entries + warm cache
