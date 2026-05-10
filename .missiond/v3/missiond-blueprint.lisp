@@ -1257,6 +1257,7 @@
     :compress-max-tokens 2048
     :compress-char-budget-chars 100000
     :direct-http-timeout-secs 60
+    :router-chat-idle-timeout-secs 600
     :gemini-pty-queue-timeout-secs 30
     :gemini-http-queue-timeout-secs 300
     :gemini-file-upload-timeout-secs 600
@@ -1268,6 +1269,7 @@
     :invariants
       ["RouterRuntimeConfig MUST load router-runtime-policy from .missiond/v3/missiond-blueprint.lisp and fail with V3_BLUEPRINT_CONFIG_ERROR for real MissionD projects whose V3 blueprint or policy block is missing."
        "mission_router_chat default model and max_tokens MUST project from router-runtime-policy; explicit caller model/max_tokens still wins."
+       "mission_router_chat default idle_timeout MUST project from router-runtime-policy router-chat-idle-timeout-secs; explicit caller idle_timeout still wins."
        "mission_router_chat_manage history lookup and compression model/channel/token/char budgets MUST project from router-runtime-policy."
        "Flow daemon Gemini calls, stateless Sonnet calls, and queued SonnetGateway calls MUST project their model and direct HTTP timeout from router-runtime-policy."
        "GeminiPtyDriver default slot model MUST project from router-runtime-policy flow-gemini-model; explicit caller model still wins."

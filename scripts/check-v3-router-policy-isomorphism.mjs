@@ -134,6 +134,7 @@ function checkFiles(root, files) {
     'router_chat/manage.rs owns mission_router_chat_manage',
     'RouterRuntimeConfig',
     'mission_router_chat default model and max_tokens MUST project from router-runtime-policy',
+    'mission_router_chat default idle_timeout MUST project from router-runtime-policy',
     'Flow daemon Gemini calls, stateless Sonnet calls, and queued SonnetGateway calls MUST project their model',
     'GeminiPtyDriver default slot model MUST project from router-runtime-policy flow-gemini-model',
     'Gemini CLI transport missing llm.yaml model MUST project from router-runtime-policy flow-gemini-model',
@@ -186,6 +187,7 @@ function checkFiles(root, files) {
     'router_config.default_chat_model',
     'router_config.chat_default_max_tokens',
     'router_config.file_chat_default_max_tokens',
+    'router_config.router_chat_idle_timeout()',
     'router_chat_get_or_create',
     'router_chat_get_summary',
     'router_chat_load_active_history',
@@ -244,6 +246,7 @@ function checkFiles(root, files) {
     'DEFAULT_ROUTER_FLOW_GEMINI_MODEL',
     'DEFAULT_ROUTER_STATELESS_SONNET_MODEL',
     'DEFAULT_ROUTER_QUEUED_SONNET_MODEL',
+    'DEFAULT_ROUTER_CHAT_IDLE_TIMEOUT_SECS',
     'DEFAULT_ROUTER_GEMINI_PTY_QUEUE_TIMEOUT_SECS',
     'DEFAULT_ROUTER_GEMINI_HTTP_QUEUE_TIMEOUT_SECS',
     'DEFAULT_ROUTER_GEMINI_FILE_UPLOAD_TIMEOUT_SECS',
@@ -268,6 +271,8 @@ function checkFiles(root, files) {
     'parse_router_runtime_policy',
     'find_form(source, "router-runtime-policy")',
     'direct_http_timeout',
+    'router_chat_idle_timeout',
+    ':router-chat-idle-timeout-secs',
     ':gemini-pty-queue-timeout-secs',
     ':gemini-http-queue-timeout-secs',
     ':gemini-file-upload-timeout-secs',
@@ -416,6 +421,7 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.mcp, sources.mcp, [
     'ToolDefinition::new',
     '"mission_router_chat"',
+    '"idle_timeout": {"type": "integer", "description": "CLI 模式空闲超时秒数", "default": 600}',
     '"mission_router_chat_manage"',
     '"history"',
     '"list"',
@@ -540,7 +546,7 @@ function buildFixture() {
 	             "scripts/check-router-backend-registry.mjs"
 	             "scripts/check-router-dispatch-descriptor.mjs"
 	             "scripts/check-v3-router-policy-isomorphism.mjs"]
-	      :note "router_chat.rs is the thin router-policy facade; router_chat/chat.rs owns mission_router_chat; router_chat/files.rs owns attachment denylist and Gemini File API policy; router_chat/manage.rs owns mission_router_chat_manage; RouterRuntimeConfig projects router-runtime-policy; mission_router_chat default model and max_tokens MUST project from router-runtime-policy; Flow daemon Gemini calls, stateless Sonnet calls, and queued SonnetGateway calls MUST project their model; GeminiPtyDriver default slot model MUST project from router-runtime-policy flow-gemini-model; Gemini CLI transport missing llm.yaml model MUST project from router-runtime-policy flow-gemini-model; GeminiClient CLI mode MUST forward non-empty caller model to GeminiCli; GeminiClient PTY/HTTP request queue timeouts MUST project from router-runtime-policy; Gemini File API upload and poll timeouts MUST project from router-runtime-policy; Gemini CLI absolute and tool-exec timeouts MUST project from router-runtime-policy; Queued SonnetGateway quota throttle sleep MUST project from router-runtime-policy; Translation worker message_translations.model MUST record the queued SonnetGateway model projected from router-runtime-policy; GeminiClient request queue timeouts; Gemini CLI absolute/tool-exec timeouts; Gemini File API upload/poll timeouts; queued Sonnet quota throttle; xjp-router embedding client MUST project its missing timeout default from router-runtime-policy direct HTTP timeout; xjp-router embedding timeout default; BoardTask urgent/ops/docs-test-chore ANTHROPIC_MODEL overrides MUST project from router-runtime-policy; plan/router_policy_dry_run.rs owns the advisory dry-run adapter and dry_run_only/runtime_replacement/no_execution invariants."))
+	      :note "router_chat.rs is the thin router-policy facade; router_chat/chat.rs owns mission_router_chat; router_chat/files.rs owns attachment denylist and Gemini File API policy; router_chat/manage.rs owns mission_router_chat_manage; RouterRuntimeConfig projects router-runtime-policy; mission_router_chat default model and max_tokens MUST project from router-runtime-policy; mission_router_chat default idle_timeout MUST project from router-runtime-policy; Flow daemon Gemini calls, stateless Sonnet calls, and queued SonnetGateway calls MUST project their model; GeminiPtyDriver default slot model MUST project from router-runtime-policy flow-gemini-model; Gemini CLI transport missing llm.yaml model MUST project from router-runtime-policy flow-gemini-model; GeminiClient CLI mode MUST forward non-empty caller model to GeminiCli; GeminiClient PTY/HTTP request queue timeouts MUST project from router-runtime-policy; Gemini File API upload and poll timeouts MUST project from router-runtime-policy; Gemini CLI absolute and tool-exec timeouts MUST project from router-runtime-policy; Queued SonnetGateway quota throttle sleep MUST project from router-runtime-policy; Translation worker message_translations.model MUST record the queued SonnetGateway model projected from router-runtime-policy; GeminiClient request queue timeouts; Gemini CLI absolute/tool-exec timeouts; Gemini File API upload/poll timeouts; queued Sonnet quota throttle; xjp-router embedding client MUST project its missing timeout default from router-runtime-policy direct HTTP timeout; xjp-router embedding timeout default; BoardTask urgent/ops/docs-test-chore ANTHROPIC_MODEL overrides MUST project from router-runtime-policy; plan/router_policy_dry_run.rs owns the advisory dry-run adapter and dry_run_only/runtime_replacement/no_execution invariants."))
 	  (router-runtime-policy
 	    :default-chat-model "gemini-3.1-pro"
 	    :chat-default-max-tokens 16384
@@ -556,6 +562,7 @@ function buildFixture() {
 	    :compress-max-tokens 2048
 	    :compress-char-budget-chars 100000
 	    :direct-http-timeout-secs 60
+	    :router-chat-idle-timeout-secs 600
 	    :gemini-pty-queue-timeout-secs 30
 	    :gemini-http-queue-timeout-secs 300
 	    :gemini-file-upload-timeout-secs 600

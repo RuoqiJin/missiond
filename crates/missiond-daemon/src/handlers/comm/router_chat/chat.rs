@@ -61,10 +61,13 @@ pub(super) async fn handle_chat(state: &AppState, args: Value) -> Result<ToolRes
         .get("search")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let idle_timeout = params
-        .get("idle_timeout")
-        .and_then(|v| v.as_u64())
-        .map(|secs| Duration::from_secs(secs));
+    let idle_timeout = Some(
+        params
+            .get("idle_timeout")
+            .and_then(|v| v.as_u64())
+            .map(Duration::from_secs)
+            .unwrap_or_else(|| router_config.router_chat_idle_timeout()),
+    );
     let channel = params
         .get("channel")
         .and_then(|v| v.as_str())

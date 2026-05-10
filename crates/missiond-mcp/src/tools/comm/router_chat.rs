@@ -21,7 +21,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "max_tokens": {"type": "integer", "default": 16384},
                     "search": {"type": "boolean", "description": "启用 Google 搜索增强", "default": false},
                     "files": {"type": "array", "description": "本地文件路径列表(≤1MB 文本, ≤10MB 二进制)"},
-                    "idle_timeout": {"type": "integer", "description": "CLI 模式空闲超时秒数", "default": 120},
+                    "idle_timeout": {"type": "integer", "description": "CLI 模式空闲超时秒数", "default": 600},
                     "channel": {"type": "string", "description": "Gemini 认证渠道", "enum": ["apikey", "google"]},
                     "api_key_alias": {"type": "string", "description": "指定 API key 别名"}
                 }

@@ -551,7 +551,7 @@
       (max_tokens integer :default 16384)
       (search    boolean :default false :description "启用 Google 搜索增强")
       (files     array  :description "本地文件路径列表(≤1MB 文本, ≤10MB 二进制)")
-      (idle_timeout integer :default 120 :description "CLI 模式空闲超时秒数")
+      (idle_timeout integer :default 600 :description "CLI 模式空闲超时秒数")
       (channel   string :enum (apikey google) :description "Gemini 认证渠道")
       (api_key_alias string :description "指定 API key 别名"))
     :returns "Value")

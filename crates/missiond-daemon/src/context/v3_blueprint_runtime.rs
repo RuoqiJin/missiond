@@ -154,6 +154,7 @@ pub(crate) const DEFAULT_ROUTER_COMPRESS_CHANNEL: &str = "google";
 pub(crate) const DEFAULT_ROUTER_COMPRESS_MAX_TOKENS: u32 = 2048;
 pub(crate) const DEFAULT_ROUTER_COMPRESS_CHAR_BUDGET_CHARS: usize = 100_000;
 pub(crate) const DEFAULT_ROUTER_DIRECT_HTTP_TIMEOUT_SECS: u64 = 60;
+pub(crate) const DEFAULT_ROUTER_CHAT_IDLE_TIMEOUT_SECS: u64 = 600;
 pub(crate) const DEFAULT_ROUTER_GEMINI_PTY_QUEUE_TIMEOUT_SECS: u64 = 30;
 pub(crate) const DEFAULT_ROUTER_GEMINI_HTTP_QUEUE_TIMEOUT_SECS: u64 = 300;
 pub(crate) const DEFAULT_ROUTER_GEMINI_FILE_UPLOAD_TIMEOUT_SECS: u64 = 600;
@@ -364,6 +365,7 @@ pub(crate) struct RouterRuntimeConfig {
     pub compress_max_tokens: u32,
     pub compress_char_budget_chars: usize,
     pub direct_http_timeout_secs: u64,
+    pub router_chat_idle_timeout_secs: u64,
     pub gemini_pty_queue_timeout_secs: u64,
     pub gemini_http_queue_timeout_secs: u64,
     pub gemini_file_upload_timeout_secs: u64,
@@ -993,6 +995,7 @@ impl Default for RouterRuntimeConfig {
             compress_max_tokens: DEFAULT_ROUTER_COMPRESS_MAX_TOKENS,
             compress_char_budget_chars: DEFAULT_ROUTER_COMPRESS_CHAR_BUDGET_CHARS,
             direct_http_timeout_secs: DEFAULT_ROUTER_DIRECT_HTTP_TIMEOUT_SECS,
+            router_chat_idle_timeout_secs: DEFAULT_ROUTER_CHAT_IDLE_TIMEOUT_SECS,
             gemini_pty_queue_timeout_secs: DEFAULT_ROUTER_GEMINI_PTY_QUEUE_TIMEOUT_SECS,
             gemini_http_queue_timeout_secs: DEFAULT_ROUTER_GEMINI_HTTP_QUEUE_TIMEOUT_SECS,
             gemini_file_upload_timeout_secs: DEFAULT_ROUTER_GEMINI_FILE_UPLOAD_TIMEOUT_SECS,
@@ -1427,6 +1430,10 @@ impl RouterRuntimeConfig {
 
     pub(crate) fn direct_http_timeout(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.direct_http_timeout_secs.max(1))
+    }
+
+    pub(crate) fn router_chat_idle_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.router_chat_idle_timeout_secs.max(1))
     }
 
     pub(crate) fn gemini_pty_queue_timeout(&self) -> std::time::Duration {
@@ -2192,6 +2199,7 @@ pub(crate) fn parse_router_runtime_policy(
         compress_max_tokens: u32_keyword(&tokens, ":compress-max-tokens")?,
         compress_char_budget_chars: usize_keyword(&tokens, ":compress-char-budget-chars")?,
         direct_http_timeout_secs: u64_keyword(&tokens, ":direct-http-timeout-secs")?,
+        router_chat_idle_timeout_secs: u64_keyword(&tokens, ":router-chat-idle-timeout-secs")?,
         gemini_pty_queue_timeout_secs: u64_keyword(&tokens, ":gemini-pty-queue-timeout-secs")?,
         gemini_http_queue_timeout_secs: u64_keyword(&tokens, ":gemini-http-queue-timeout-secs")?,
         gemini_file_upload_timeout_secs: u64_keyword(&tokens, ":gemini-file-upload-timeout-secs")?,
@@ -2218,6 +2226,7 @@ pub(crate) fn parse_router_runtime_policy(
         || cfg.compress_max_tokens == 0
         || cfg.compress_char_budget_chars == 0
         || cfg.direct_http_timeout_secs == 0
+        || cfg.router_chat_idle_timeout_secs == 0
         || cfg.gemini_pty_queue_timeout_secs == 0
         || cfg.gemini_http_queue_timeout_secs == 0
         || cfg.gemini_file_upload_timeout_secs == 0
@@ -3479,6 +3488,7 @@ mod tests {
     :compress-max-tokens 2048
     :compress-char-budget-chars 100000
     :direct-http-timeout-secs 60
+    :router-chat-idle-timeout-secs 600
     :gemini-pty-queue-timeout-secs 30
     :gemini-http-queue-timeout-secs 300
     :gemini-file-upload-timeout-secs 600
@@ -3793,6 +3803,11 @@ mod tests {
         assert_eq!(
             cfg.direct_http_timeout(),
             std::time::Duration::from_secs(60)
+        );
+        assert_eq!(cfg.router_chat_idle_timeout_secs, 600);
+        assert_eq!(
+            cfg.router_chat_idle_timeout(),
+            std::time::Duration::from_secs(600)
         );
         assert_eq!(cfg.gemini_pty_queue_timeout_secs, 30);
         assert_eq!(
