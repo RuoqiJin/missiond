@@ -1289,6 +1289,7 @@
        "Gemini CLI absolute and tool-exec timeouts MUST project from router-runtime-policy instead of local 900s/300s literals."
        "Queued SonnetGateway quota throttle sleep MUST project from router-runtime-policy instead of a local 30s literal."
        "Translation worker message_translations.model MUST record the queued SonnetGateway model projected from router-runtime-policy instead of a local MiniMax literal."
+       "Translation worker MUST treat queued Sonnet provider auth failures (401/403/auth error) as a non-retryable provider-auth circuit breaker, pause backlog draining for a long cooldown, and avoid emitting one TranslationFailed event per pending message while credentials/router policy are broken."
        "xjp-router embedding client MUST project its missing timeout default from router-runtime-policy direct HTTP timeout; explicit llm.yaml timeout_secs still wins."
        "BoardTask urgent/ops/docs-test-chore ANTHROPIC_MODEL overrides MUST project from router-runtime-policy, not Rust literals."])
 

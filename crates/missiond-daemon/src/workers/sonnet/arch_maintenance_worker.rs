@@ -29,6 +29,8 @@ const ARCH_COMMIT_PREFIX: &str = "chore(arch):";
 const MAX_DIFF_SIZE: usize = 4_000_000;
 /// Debounce window — ignore commits for the same branch within this period.
 const DEBOUNCE_SECS: u64 = 30;
+/// Hard cap for the architecture-maintenance LLM turn.
+const LLM_TIMEOUT_SECS: u64 = 600;
 
 pub(crate) struct ArchMaintenanceWorker;
 
@@ -117,7 +119,17 @@ impl BackgroundWorker for ArchMaintenanceWorker {
             debounce.insert(branch.clone(), now);
             processing.insert(branch.clone());
 
-            match process_commit(&state, &repo_path, &commit_hash).await {
+            let Some(repo_name) = repo_name_from_path(&repo_path) else {
+                warn!(
+                    repo_path = %repo_path,
+                    "arch_maintenance: could not derive repo name from slot cwd"
+                );
+                processing.remove(&branch);
+                ack.ack().await;
+                continue;
+            };
+
+            match process_commit(&state, &repo_name, &commit_hash).await {
                 Ok(true) => {
                     info!(branch = %branch, commit = %commit_hash, "arch_maintenance: YAML updated");
                     ctx.record_success();
@@ -145,6 +157,13 @@ fn yaml_for_repo(repo_name: &str) -> Option<&'static str> {
         "xiaojinpro-backend" => Some("docs/architectures/xjp-backend.yaml"),
         _ => None,
     }
+}
+
+fn repo_name_from_path(repo_path: &str) -> Option<String> {
+    Path::new(repo_path)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .filter(|name| !name.is_empty())
 }
 
 /// Resolve the repo root path from the repo name.
@@ -392,10 +411,12 @@ async fn process_commit(state: &AppState, repo: &str, hash: &str) -> Result<bool
     );
 
     // Route through SlotManager → persistent Claude Code (Sonnet) slot
-    let content = state
-        .slot_manager
-        .execute("arch_maintenance", &prompt)
-        .await?;
+    let content = tokio::time::timeout(
+        Duration::from_secs(LLM_TIMEOUT_SECS),
+        state.slot_manager.execute("arch_maintenance", &prompt),
+    )
+    .await
+    .map_err(|_| anyhow!("arch_maintenance LLM timed out after {}s", LLM_TIMEOUT_SECS))??;
 
     // 7. Parse response
     let content = strip_markdown_code_block(&content);
@@ -435,4 +456,22 @@ async fn process_commit(state: &AppState, repo: &str, hash: &str) -> Result<bool
     .map_err(|e| anyhow!("spawn_blocking failed: {}", e))??;
 
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derives_repo_name_from_slot_cwd() {
+        assert_eq!(
+            repo_name_from_path("/Users/jinchen/Projects/missiond").as_deref(),
+            Some("missiond")
+        );
+        assert_eq!(
+            repo_name_from_path("/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend")
+                .as_deref(),
+            Some("xiaojinpro-backend")
+        );
+    }
 }

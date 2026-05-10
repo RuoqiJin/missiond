@@ -145,6 +145,7 @@ function checkFiles(root, files) {
     'Gemini CLI absolute and tool-exec timeouts MUST project from router-runtime-policy',
     'Queued SonnetGateway quota throttle sleep MUST project from router-runtime-policy',
     'Translation worker message_translations.model MUST record the queued SonnetGateway model projected from router-runtime-policy',
+    'Translation worker MUST treat queued Sonnet provider auth failures',
     'GeminiClient request queue timeouts',
     'Gemini CLI absolute/tool-exec timeouts',
     'Gemini File API upload/poll timeouts',
@@ -412,6 +413,9 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.translationWorker, sources.translationWorker, [
     'sonnet.model().to_string()',
+    'PROVIDER_AUTH_COOLDOWN_SECS',
+    'ProviderAuthBlocked',
+    'is_provider_auth_error_text',
     'insert_translation(ctx.message_id, &translation, &model, duration_ms)',
   ]);
   forbidAll(diagnostics, files.translationWorker, sources.translationWorker, [
@@ -561,7 +565,7 @@ function buildFixture() {
 	             "scripts/check-router-backend-registry.mjs"
 	             "scripts/check-router-dispatch-descriptor.mjs"
 	             "scripts/check-v3-router-policy-isomorphism.mjs"]
-	      :note "router_chat.rs is the thin router-policy facade; router_chat/chat.rs owns mission_router_chat; router_chat/files.rs owns attachment denylist and Gemini File API policy; router_chat/manage.rs owns mission_router_chat_manage; RouterRuntimeConfig projects router-runtime-policy; mission_router_chat default model and max_tokens MUST project from router-runtime-policy; mission_router_chat default idle_timeout MUST project from router-runtime-policy; mission_router_chat transient retry max attempts and bounded exponential backoff MUST project from router-runtime-policy; Flow daemon Gemini calls, stateless Sonnet calls, and queued SonnetGateway calls MUST project their model; GeminiPtyDriver default slot model MUST project from router-runtime-policy flow-gemini-model; Gemini CLI transport missing llm.yaml model MUST project from router-runtime-policy flow-gemini-model; GeminiClient CLI mode MUST forward non-empty caller model to GeminiCli; GeminiClient PTY/HTTP request queue timeouts MUST project from router-runtime-policy; Gemini File API upload and poll timeouts MUST project from router-runtime-policy; Gemini CLI absolute and tool-exec timeouts MUST project from router-runtime-policy; Queued SonnetGateway quota throttle sleep MUST project from router-runtime-policy; Translation worker message_translations.model MUST record the queued SonnetGateway model projected from router-runtime-policy; GeminiClient request queue timeouts; Gemini CLI absolute/tool-exec timeouts; Gemini File API upload/poll timeouts; queued Sonnet quota throttle; xjp-router embedding client MUST project its missing timeout default from router-runtime-policy direct HTTP timeout; xjp-router embedding timeout default; BoardTask urgent/ops/docs-test-chore ANTHROPIC_MODEL overrides MUST project from router-runtime-policy; plan/router_policy_dry_run.rs owns the advisory dry-run adapter and dry_run_only/runtime_replacement/no_execution invariants."))
+	      :note "router_chat.rs is the thin router-policy facade; router_chat/chat.rs owns mission_router_chat; router_chat/files.rs owns attachment denylist and Gemini File API policy; router_chat/manage.rs owns mission_router_chat_manage; RouterRuntimeConfig projects router-runtime-policy; mission_router_chat default model and max_tokens MUST project from router-runtime-policy; mission_router_chat default idle_timeout MUST project from router-runtime-policy; mission_router_chat transient retry max attempts and bounded exponential backoff MUST project from router-runtime-policy; Flow daemon Gemini calls, stateless Sonnet calls, and queued SonnetGateway calls MUST project their model; GeminiPtyDriver default slot model MUST project from router-runtime-policy flow-gemini-model; Gemini CLI transport missing llm.yaml model MUST project from router-runtime-policy flow-gemini-model; GeminiClient CLI mode MUST forward non-empty caller model to GeminiCli; GeminiClient PTY/HTTP request queue timeouts MUST project from router-runtime-policy; Gemini File API upload and poll timeouts MUST project from router-runtime-policy; Gemini CLI absolute and tool-exec timeouts MUST project from router-runtime-policy; Queued SonnetGateway quota throttle sleep MUST project from router-runtime-policy; Translation worker message_translations.model MUST record the queued SonnetGateway model projected from router-runtime-policy; Translation worker MUST treat queued Sonnet provider auth failures as provider-auth circuit breaker; GeminiClient request queue timeouts; Gemini CLI absolute/tool-exec timeouts; Gemini File API upload/poll timeouts; queued Sonnet quota throttle; xjp-router embedding client MUST project its missing timeout default from router-runtime-policy direct HTTP timeout; xjp-router embedding timeout default; BoardTask urgent/ops/docs-test-chore ANTHROPIC_MODEL overrides MUST project from router-runtime-policy; plan/router_policy_dry_run.rs owns the advisory dry-run adapter and dry_run_only/runtime_replacement/no_execution invariants."))
 	  (router-runtime-policy
 	    :default-chat-model "gemini-3.1-pro"
 	    :chat-default-max-tokens 16384
@@ -687,6 +691,9 @@ quota_throttle_sleep config.direct_http_timeout() V3_BLUEPRINT_CONFIG_ERROR
 
   writeFixture(root, DEFAULT_FILES.translationWorker, `
 sonnet.model().to_string()
+PROVIDER_AUTH_COOLDOWN_SECS
+ProviderAuthBlocked
+is_provider_auth_error_text
 insert_translation(ctx.message_id, &translation, &model, duration_ms)
 `);
 
