@@ -2023,6 +2023,8 @@ const KNOWN_TASK_CLASSES: &[&str] = &[
     "research",
     "general",
     "ops",
+    "deploy-ops",
+    "deployment",
     "code",
     "review",
     "context-pack",
@@ -2039,6 +2041,17 @@ fn class_from_str(value: &str) -> Option<&'static str> {
 
 fn board_task_workstation_class(task: &missiond_core::types::BoardTask) -> &'static str {
     if task.category == "ops" {
+        if matches!(
+            task.context_intent.as_deref().map(str::trim),
+            Some("deploy-ops")
+        ) {
+            return "deploy-ops";
+        }
+        if let Some(value) = extract_dispatch_metadata_field(&task.description, "task_class") {
+            if matches!(class_from_str(&value), Some("deploy-ops" | "deployment")) {
+                return "deploy-ops";
+            }
+        }
         return "ops";
     }
     match task.context_intent.as_deref().map(str::trim) {
@@ -2070,6 +2083,7 @@ fn board_task_workstation_class(task: &missiond_core::types::BoardTask) -> &'sta
             }
         }
         Some("ops") => "ops",
+        Some("deploy-ops") => "deploy-ops",
         Some("code") => "code",
         Some("review") => "review",
         Some("context-pack") => "context-pack",
@@ -6561,6 +6575,22 @@ Review only.
              - acceptance: read SSOT | git status proves no edits";
         let task = make_board_task("Auth KB cleanup eval", description, "dev", Some("general"));
         assert_eq!(board_task_workstation_class(&task), "review");
+    }
+
+    #[test]
+    fn workstation_class_routes_deploy_ops_context_intent_to_deploy_lane() {
+        let description = "Deployment response\n\n\
+             ## Dispatch metadata\n\
+             - task_class: deploy-ops\n\
+             - pool_hint: claude-code-deploy-ops\n\
+             - engine_hint: claude-code";
+        let task = make_board_task(
+            "Deploy event response",
+            description,
+            "ops",
+            Some("deploy-ops"),
+        );
+        assert_eq!(board_task_workstation_class(&task), "deploy-ops");
     }
 
     /// Same projection works when `context_intent` is missing entirely

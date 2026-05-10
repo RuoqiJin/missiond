@@ -426,7 +426,7 @@ fn deployment_event_board_task_input(
         .map(|id| id.to_string())
         .unwrap_or_else(|| event_id.to_string());
     let description = format!(
-        "Deployment EventBridge created this task from a durable deploy-center event.\n\nService: {service_id}\nEvent: {event_kind}\nEvent ID: {event_id}\nDeploy event row: {deploy_event_id}\nProject: {project_id}\nSubject: {subject}\nCorrelation: {}\nTrace: {}\n\nSummary:\n{summary}\n\nNext checks:\n1. Query deploy-center provenance for the project/service before using curl/git as fallback.\n2. Inspect deploy_events/deploy_logs around the event id and correlation id.\n3. Propose rollback or redeploy only through deploy-center policy or explicit Board approval.\n4. Do not mutate DNS, Cloudflare, secrets, or production state from this task without approval.",
+        "Deployment EventBridge created this task from a durable deploy-center event.\n\nService: {service_id}\nEvent: {event_kind}\nEvent ID: {event_id}\nDeploy event row: {deploy_event_id}\nProject: {project_id}\nSubject: {subject}\nCorrelation: {}\nTrace: {}\n\nSummary:\n{summary}\n\n## Dispatch metadata\n- task_class: deploy-ops\n- pool_hint: claude-code-deploy-ops\n- engine_hint: claude-code\n- read_scope: deploy-center provenance, deploy_events, deploy_logs, MissionD EventBridge envelope\n- write_scope: \n- must_not_touch: production DNS, Cloudflare, secrets, direct production mutation\n- acceptance: deploy-center provenance queried | deploy event row inspected | rollback/redeploy proposal uses deploy-center policy or explicit Board approval\n- output_contract: return Findings / Evidence / Recommendations / Verification with structured smoke/provenance evidence\n\nNext checks:\n1. Query deploy-center provenance for the project/service before using curl/git as fallback.\n2. Inspect deploy_events/deploy_logs around the event id and correlation id.\n3. Propose rollback or redeploy only through deploy-center policy or explicit Board approval.\n4. Do not mutate DNS, Cloudflare, secrets, or production state from this task without approval.",
         correlation_id.as_deref().unwrap_or(""),
         trace_id.unwrap_or(""),
     );
@@ -1168,6 +1168,41 @@ mod tests {
                 cited_kb_ids: Vec::new(),
             }
         ));
+    }
+
+    #[test]
+    fn deployment_event_response_task_declares_deploy_ops_lane() {
+        let payload = serde_json::json!({
+            "project_id": "auth",
+            "subject": "xjp-auth-center",
+            "correlation_id": "deploy-123",
+            "deploy_event_id": 42
+        })
+        .to_string();
+        let input = deployment_event_board_task_input(
+            "deploy-center",
+            "evt-1",
+            "deploy_failed",
+            "deploy failed during smoke",
+            Some("trace-1"),
+            &payload,
+        )
+        .expect("actionable deploy event should create task input");
+        assert_eq!(input.context_intent.as_deref(), Some("deploy-ops"));
+        assert_eq!(input.category.as_deref(), Some("ops"));
+        let description = input.description.expect("description");
+        for expected in [
+            "## Dispatch metadata",
+            "- task_class: deploy-ops",
+            "- pool_hint: claude-code-deploy-ops",
+            "- engine_hint: claude-code",
+            "deploy-center provenance queried",
+        ] {
+            assert!(
+                description.contains(expected),
+                "missing {expected}: {description}"
+            );
+        }
     }
 
     #[test]

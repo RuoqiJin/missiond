@@ -95,6 +95,7 @@ function checkFiles(root) {
     'workstation-pool-evidence',
     'single-login-phase',
     'claude-code-default',
+    'claude-code-deploy-ops',
     'claude-code-fast-patch',
     'gemini-ultra-pro',
     'gemini-fast-survey',
@@ -124,6 +125,7 @@ function checkFiles(root) {
     'workstation-pool must include a read-only Gemini BoardTask worker',
     'workstation-pool must include a non-shard Codex master-control worker',
     '"claude-code-default"',
+    '"claude-code-deploy-ops"',
     '"gemini-ultra-pro"',
     '"codex-master-control"',
     'reasoning_effort',
@@ -165,6 +167,7 @@ function checkFiles(root) {
 
   requireAll(diagnostics, FILES.autopilot, sources.autopilot, [
     'fn board_task_workstation_class',
+    'deploy-ops',
     'async fn select_workstation_pool_slot',
     '.boardtask_pool_candidates(task_class)',
     'extract_dispatch_metadata_field(&task.description, "engine_hint")',
@@ -281,6 +284,7 @@ function validateBlueprint(file, source, diagnostics) {
   const workers = pool.children.filter((child) => isList(child) && head(child) === 'worker');
   const byId = new Map(workers.map((worker) => [nodeText(worker.children[1]), worker]));
   validateClaudeWorker(file, byId.get('claude-code-default'), diagnostics);
+  validateDeployOpsWorker(file, byId.get('claude-code-deploy-ops'), diagnostics);
   validateFastPatchWorker(file, byId.get('claude-code-fast-patch'), diagnostics);
   validateGeminiWorker(file, byId.get('gemini-ultra-pro'), diagnostics);
   validateGeminiFastWorker(file, byId.get('gemini-fast-survey'), diagnostics);
@@ -330,6 +334,24 @@ function validateClaudeWorker(file, worker, diagnostics) {
   requirePropBool(diagnostics, file, props, ':write-allowed', true);
   requireListItems(diagnostics, file, props, ':task-classes', ['code', 'implementation', 'ops']);
   requireListItems(diagnostics, file, props, ':capabilities', ['code-read', 'code-write', 'mcp']);
+}
+
+function validateDeployOpsWorker(file, worker, diagnostics) {
+  if (!worker) {
+    diagnostics.push({ file, message: 'workstation-pool missing claude-code-deploy-ops worker' });
+    return;
+  }
+  const props = readKeywordProps(worker, { start: 2 });
+  requirePropText(diagnostics, file, props, ':engine', 'claude-code');
+  requirePropText(diagnostics, file, props, ':role', 'deploy-ops');
+  requirePropText(diagnostics, file, props, ':slot-id', 'slot-claude-code-deploy-ops');
+  requirePropText(diagnostics, file, props, ':task-type', 'claude_code_deploy_ops');
+  requirePropText(diagnostics, file, props, ':model-profile', 'coding-default-opus-4-7');
+  requirePropText(diagnostics, file, props, ':model', 'nil');
+  requirePropBool(diagnostics, file, props, ':accepts-boardtask', true);
+  requirePropBool(diagnostics, file, props, ':write-allowed', false);
+  requireListItems(diagnostics, file, props, ':task-classes', ['deploy-ops', 'deployment', 'ops']);
+  requireListItems(diagnostics, file, props, ':capabilities', ['deploy-read', 'deploy-center-query', 'mcp']);
 }
 
 function validateGeminiWorker(file, worker, diagnostics) {
@@ -480,6 +502,20 @@ function buildFixture() {
       :default-use code-implementation
       :accepts-boardtask true
       :write-allowed true)
+    (worker claude-code-deploy-ops
+      :engine claude-code
+      :role deploy-ops
+      :slot-id "slot-claude-code-deploy-ops"
+      :task-type claude_code_deploy_ops
+      :model-profile coding-default-opus-4-7
+      :model nil
+      :task-classes [deploy-ops deployment ops incident-response]
+      :capabilities [deploy-read deploy-observe deploy-center-query rollback-plan mcp]
+      :max-concurrency 1
+      :timeout-secs 2400
+      :default-use deployment-operations
+      :accepts-boardtask true
+      :write-allowed false)
     (worker claude-code-fast-patch
       :engine claude-code
       :role patcher
@@ -559,7 +595,7 @@ function buildFixture() {
       :note "n")))`);
   write(root, 'evidence', `
 (workstation-pool-evidence
-  :single-login-phase ((claude-code-default :runtime-rule "x") (claude-code-fast-patch :runtime-rule "x") (gemini-ultra-pro :write-policy read-only :approval-mode plan :tool-policy-path ".missiond/v3/policies/gemini-readonly-policy.toml") (gemini-fast-survey :write-policy read-only :approval-mode plan :tool-policy-path ".missiond/v3/policies/gemini-readonly-policy.toml") (codex-master-control :runtime-rule "x"))
+  :single-login-phase ((claude-code-default :runtime-rule "x") (claude-code-deploy-ops :runtime-rule "x") (claude-code-fast-patch :runtime-rule "x") (gemini-ultra-pro :write-policy read-only :approval-mode plan :tool-policy-path ".missiond/v3/policies/gemini-readonly-policy.toml") (gemini-fast-survey :write-policy read-only :approval-mode plan :tool-policy-path ".missiond/v3/policies/gemini-readonly-policy.toml") (codex-master-control :runtime-rule "x"))
   :observability ["mission_compute_slot action=list exposes workstation_pool"])`);
   write(root, 'geminiPolicy', `
 toolName = ["generalist", "codebase_investigator", "invoke_agent", "invoke_subagent"]
@@ -580,7 +616,7 @@ find_form(source, "workstation-pool");
 "workstation-pool must include a Claude Code default BoardTask worker";
 "workstation-pool must include a read-only Gemini BoardTask worker";
 "workstation-pool must include a non-shard Codex master-control worker";
-"claude-code-default"; "gemini-ultra-pro"; "codex-master-control";
+"claude-code-default"; "claude-code-deploy-ops"; "gemini-ultra-pro"; "codex-master-control";
 reasoning_effort; search_enabled; approval_policy; tool_policy_path;
 "read-only Gemini workstation-pool workers must declare :tool-policy-path";`);
   write(root, 'main', `

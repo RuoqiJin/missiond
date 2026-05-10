@@ -309,7 +309,10 @@ function checkFiles(root, files) {
     'deploy-center provenance endpoint',
     'deployed-current, deployed-stale, not-confirmed, or deployed-unknown',
     'deploy-center first, then router, then pcea',
+    'context_intent=deploy-ops, task_class=deploy-ops, pool_hint=claude-code-deploy-ops, engine_hint=claude-code',
     'deploy_succeeded and smoke_succeeded',
+    'structured smoke commands',
+    'Shell sleep loops are forbidden',
     'GitHub workflow success and deploy-center notify HTTP 200 only move the task into wait-for-provenance',
     'digest_resolution_failed, reported_digest_missing, runner_queued, build_cache_unavailable, and provenance_partial',
     'sccache/cache acceleration failure is diagnostic',
@@ -1066,7 +1069,8 @@ Lisp 源: intent-flow.lisp`);
   :steps
     ((step s1 :logic "classify deployed-current, deployed-stale, not-confirmed, or deployed-unknown")
      (step s2 :logic "deploy-center first, then router, then pcea")
-     (step s3 :logic "wait for deploy_succeeded and smoke_succeeded"))
+     (step s3 :logic "context_intent=deploy-ops, task_class=deploy-ops, pool_hint=claude-code-deploy-ops, engine_hint=claude-code")
+     (step s4 :logic "wait for deploy_succeeded and smoke_succeeded with structured smoke commands; Shell sleep loops are forbidden"))
   :risk-gates
     ((gate g1 :rule "M6 maturity is not deployment evidence"))
   :completion ((criterion c1 :rule "deployment status verified")))`);

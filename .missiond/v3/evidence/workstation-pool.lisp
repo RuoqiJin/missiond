@@ -31,6 +31,11 @@
        :model "Sonnet only when explicitly selected"
        :write-policy narrow-scoped
        :runtime-rule "Consumes pre-atomized exact file/region patch tasks, not open-ended coding.")
+     (claude-code-deploy-ops
+       :account current-claude-code-default
+       :model "Claude Code Default (user-selected Opus 4.7/1M)"
+       :write-policy observe-and-plan
+       :runtime-rule "Consumes context_intent=deploy-ops / task_class=deploy-ops BoardTasks. Query deploy-center/provenance/events first, produce rollback/redeploy plans and smoke evidence, and never mutate production/DNS/secrets unless deploy-center policy or explicit Board approval is present.")
      (codex-master-control
        :account current-codex-cli-login
        :model "gpt-5.5"

@@ -15,7 +15,7 @@ use crate::state::AppState;
 const EXCLUDED_ROLES: &[&str] = &["jarvis", "memory", "supervisor", "decision"];
 
 /// Phase 6.2: Valid intent whitelist — reject unknown intents instead of silent fallback.
-const VALID_INTENTS: &[&str] = &["code", "ops", "research", "general"];
+const VALID_INTENTS: &[&str] = &["code", "ops", "deploy-ops", "research", "general"];
 
 /// Phase 6.3: Context injection size limits.
 const MAX_ENTRY_CHARS: usize = 500; // Per KB/Skill entry
@@ -128,6 +128,17 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         shared_claim_ids: Vec::new(),
         source_id: source_id.clone(),
     };
+    if intent == "deploy-ops" {
+        delegation_metadata
+            .task_class
+            .get_or_insert_with(|| "deploy-ops".to_string());
+        delegation_metadata
+            .pool_hint
+            .get_or_insert_with(|| "claude-code-deploy-ops".to_string());
+        delegation_metadata
+            .engine_hint
+            .get_or_insert_with(|| "claude-code".to_string());
+    }
 
     if let Some(error) = exact_shard_contract_error(intent, &delegation_metadata) {
         return Ok(error);
@@ -187,7 +198,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     // Intent → template mapping
     let template = match intent {
         "code" => "coder",
-        "ops" => "ops",
+        "ops" | "deploy-ops" => "ops",
         "research" => "researcher",
         _ => "coder",
     };
@@ -413,11 +424,16 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     }
 
     // 4. Create BoardTask
+    let category = if matches!(intent, "ops" | "deploy-ops") {
+        "ops"
+    } else {
+        "dev"
+    };
     let input = CreateBoardTaskInput {
         title: truncate_title(objective),
         description: Some(description),
         priority: Some(priority.to_string()),
-        category: Some("dev".to_string()),
+        category: Some(category.to_string()),
         project: target_project_resolution
             .as_ref()
             .map(|r| r.project_id.clone()),
@@ -2085,6 +2101,12 @@ fn render_delegation_metadata_block(metadata: &DelegationMetadata) -> String {
                 .to_string(),
         );
     }
+    if matches!(metadata.task_class.as_deref(), Some("deploy-ops")) {
+        lines.push(
+            "- deployment_contract: query deploy-center/provenance first; structured smoke evidence is required; do not mutate production, DNS, Cloudflare, or secrets without explicit approval"
+                .to_string(),
+        );
+    }
     lines.join("\n")
 }
 
@@ -2334,6 +2356,30 @@ mod tests {
         assert!(block.contains("- must_not_touch: **/*"));
         assert!(block.contains("must_not_touch forbids write/stage/commit"));
         assert!(block.contains("Findings / Evidence / Recommendations / Verification"));
+    }
+
+    #[test]
+    fn deploy_ops_intent_and_metadata_are_first_class() {
+        assert!(VALID_INTENTS.contains(&"deploy-ops"));
+        let metadata = DelegationMetadata {
+            task_class: Some("deploy-ops".to_string()),
+            engine_hint: Some("claude-code".to_string()),
+            pool_hint: Some("claude-code-deploy-ops".to_string()),
+            read_scope: vec!["deploy-center provenance".to_string()],
+            write_scope: Vec::new(),
+            must_not_touch: vec!["production DNS".to_string(), "secrets".to_string()],
+            acceptance: vec!["deploy-center provenance queried".to_string()],
+            ..DelegationMetadata::default()
+        };
+        let block = render_delegation_metadata_block(&metadata);
+        for expected in [
+            "- task_class: deploy-ops",
+            "- pool_hint: claude-code-deploy-ops",
+            "- engine_hint: claude-code",
+            "- deployment_contract: query deploy-center/provenance first",
+        ] {
+            assert!(block.contains(expected), "missing {expected}: {block}");
+        }
     }
 
     #[test]

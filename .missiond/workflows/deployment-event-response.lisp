@@ -19,7 +19,7 @@
      (step s3 :name attach-authority
        :logic "Attach deploy-center provenance URL, deploy_event_id, session_id, project_id, correlation_id, and service_id to the context pack.")
      (step s4 :name create-deploy-ops-task
-       :logic "For actionable events create a visible deploy-ops BoardTask with evidence and suggested next checks; do not auto deploy, rollback, mutate DNS, or change secrets.")
+       :logic "For actionable events create a visible deploy-ops BoardTask with Dispatch metadata task_class=deploy-ops, pool_hint=claude-code-deploy-ops, engine_hint=claude-code, evidence refs, structured smoke/diagnostic checks, and suggested next checks; do not auto deploy, rollback, mutate DNS, or change secrets.")
      (step s5 :name wait-or-close
        :logic "If the event completes a waiting deploy task, close only after durable event evidence, deploy-center provenance, and smoke evidence agree; otherwise leave a diagnostic note. Deploy-center notify HTTP 200 and GitHub Actions success are progress evidence, not closure evidence."))
   :risk-gates

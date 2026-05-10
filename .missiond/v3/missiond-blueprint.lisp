@@ -748,6 +748,20 @@
       :default-use code-implementation
       :accepts-boardtask true
       :write-allowed true)
+    (worker claude-code-deploy-ops
+      :engine claude-code
+      :role deploy-ops
+      :slot-id "slot-claude-code-deploy-ops"
+      :task-type claude_code_deploy_ops
+      :model-profile coding-default-opus-4-7
+      :model nil
+      :task-classes [deploy-ops deployment ops incident-response]
+      :capabilities [deploy-read deploy-observe deploy-center-query rollback-plan mcp]
+      :max-concurrency 1
+      :timeout-secs 2400
+      :default-use deployment-operations
+      :accepts-boardtask true
+      :write-allowed false)
     (worker claude-code-fast-patch
       :engine claude-code
       :role patcher
@@ -815,6 +829,7 @@
     :invariants
       ["Claude coding workers use coding-default-opus-4-7, which means no Claude Code --model override; Sonnet cannot be the coding default."
        "Codex master-control is a resident orchestrator lane with full local sandbox access, not a normal BoardTask code shard candidate; it may directly repair MissionD control-plane issues when necessary, but every direct mutation must leave Board/KB/checkpoint evidence and ordinary implementation still prefers delegated workers."
+       "Deployment/Ops work MUST route to the explicit claude-code-deploy-ops lane when context_intent=deploy-ops or task_class=deploy-ops is present; generic claude-code-default is not the default deployment lane. Deploy-ops is observation/planning first: it may query deploy-center, provenance, skills, and logs, but production mutation requires deploy-center policy or explicit Board approval."
        "Claude fast-patch may use Sonnet only for narrow atomic tasks whose context-pack already identifies exact files/regions; it is not a default coding lane."
        "Autopilot must resolve workstation-pool dispatch by task class before hints: `pool_hint` may select a concrete worker across the full pool, but `engine_hint` alone only filters/ranks the current task-class candidates and MUST NOT widen a complex `task_class=code` shard into the `claude-code-fast-patch` Sonnet lane."
        "Gemini Ultra Pro is the high-language read-only investigation lane using gemini-3.1-pro-preview; Gemini fast survey is explicitly low-authority mechanical scan/summary work."

@@ -23,9 +23,9 @@
      (step s5 :name order-rollout
        :logic "Deploy deployment infrastructure before dependents: deploy-center first, then router, then pcea; auth is skipped unless auth-relevant files changed after its successful deploy.")
      (step s6 :name deploy-through-deploy-center
-       :logic "Create deploy-ops BoardTask shards that use deploy-center / deploy-ops capability; MissionD supervises and waits for deploy-center events rather than running ad-hoc deploy commands. GitHub workflow success and deploy-center notify HTTP 200 only move the task into wait-for-provenance; they are not completion evidence.")
+       :logic "Create deploy-ops BoardTask shards with context_intent=deploy-ops, task_class=deploy-ops, pool_hint=claude-code-deploy-ops, engine_hint=claude-code, and structured smoke commands. MissionD supervises and waits for deploy-center events rather than running ad-hoc deploy commands. GitHub workflow success and deploy-center notify HTTP 200 only move the task into wait-for-provenance; they are not completion evidence.")
      (step s7 :name smoke-and-observe
-       :logic "After each deploy wait for deploy_succeeded and smoke_succeeded events, then run service-specific compatibility smoke and record evidence.")
+       :logic "After each deploy wait through EventBus for deploy_succeeded and smoke_succeeded events, then run service-specific structured smoke commands and record command/status/output evidence. Shell sleep loops are forbidden; scheduled monitor/wakeup or deploy-center polling surfaces own waiting.")
      (step s8 :name classify-provenance-diagnostics
        :logic "Classify digest_resolution_failed, reported_digest_missing, runner_queued, build_cache_unavailable, and provenance_partial separately from deploy_failed. A deployed-current service with reported_digest_missing remains operationally current but carries a deploy-agent provenance gap.")
      (step s9 :name write-rollout-report

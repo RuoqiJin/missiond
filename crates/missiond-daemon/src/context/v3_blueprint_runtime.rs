@@ -759,6 +759,38 @@ impl Default for WorkstationRuntimeConfig {
                 tool_policy_path: None,
             },
             WorkstationPoolRuntimeConfig {
+                id: "claude-code-deploy-ops".to_string(),
+                engine: "claude-code".to_string(),
+                role: "deploy-ops".to_string(),
+                slot_id: "slot-claude-code-deploy-ops".to_string(),
+                task_type: "claude_code_deploy_ops".to_string(),
+                model_profile: Some(DEFAULT_MODEL_PROFILE.to_string()),
+                model: None,
+                task_classes: vec![
+                    "deploy-ops".to_string(),
+                    "deployment".to_string(),
+                    "ops".to_string(),
+                    "incident-response".to_string(),
+                ],
+                capabilities: vec![
+                    "deploy-read".to_string(),
+                    "deploy-observe".to_string(),
+                    "deploy-center-query".to_string(),
+                    "rollback-plan".to_string(),
+                    "mcp".to_string(),
+                ],
+                max_concurrency: 1,
+                timeout_secs: 2400,
+                default_use: "deployment-operations".to_string(),
+                accepts_boardtask: true,
+                write_allowed: false,
+                reasoning_effort: None,
+                search_enabled: false,
+                sandbox: None,
+                approval_policy: None,
+                tool_policy_path: None,
+            },
+            WorkstationPoolRuntimeConfig {
                 id: "gemini-ultra-pro".to_string(),
                 engine: "gemini".to_string(),
                 role: "researcher".to_string(),
@@ -3338,6 +3370,20 @@ mod tests {
       :default-use code-implementation
       :accepts-boardtask true
       :write-allowed true)
+    (worker claude-code-deploy-ops
+      :engine claude-code
+      :role deploy-ops
+      :slot-id "slot-claude-code-deploy-ops"
+      :task-type claude_code_deploy_ops
+      :model-profile coding-default-opus-4-7
+      :model nil
+      :task-classes [deploy-ops deployment ops incident-response]
+      :capabilities [deploy-read deploy-observe deploy-center-query rollback-plan mcp]
+      :max-concurrency 1
+      :timeout-secs 2400
+      :default-use deployment-operations
+      :accepts-boardtask true
+      :write-allowed false)
     (worker claude-code-fast-patch
       :engine claude-code
       :role patcher
@@ -3574,7 +3620,7 @@ mod tests {
             Some("gpt-5.5".to_string())
         );
         assert_eq!(cfg.startup_slots().len(), 4);
-        assert_eq!(cfg.workstation_pool().len(), 5);
+        assert_eq!(cfg.workstation_pool().len(), 6);
         assert_eq!(
             cfg.boardtask_pool_candidates("research")
                 .first()
@@ -3597,6 +3643,12 @@ mod tests {
                 .first()
                 .map(|worker| worker.id.as_str()),
             Some("claude-code-default")
+        );
+        assert_eq!(
+            cfg.boardtask_pool_candidates("deploy-ops")
+                .first()
+                .map(|worker| worker.id.as_str()),
+            Some("claude-code-deploy-ops")
         );
         let master = cfg
             .workstation_pool()
