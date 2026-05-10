@@ -379,6 +379,7 @@ pub(super) async fn handle_chat(state: &AppState, args: Value) -> Result<ToolRes
 
     // --- Send to LLM: multimodal direct API or normal Router/CLI ---
     let (content, finish_reason_owned, usage, resp_model_owned, tool_calls_owned);
+    let mut retry_diagnostics = Vec::new();
 
     if multimodal_use_direct_api && !multimodal_files.is_empty() {
         // Multimodal path: call Gemini generateContent API directly with file parts.
@@ -459,14 +460,49 @@ pub(super) async fn handle_chat(state: &AppState, args: Value) -> Result<ToolRes
             url
         );
 
-        let result = REQUEST_CALLER
-            .scope("router_chat".to_string(), async {
-                state
-                    .gemini
-                    .send_with_timeout(&state.http_client, &url, &jwt, &body, idle_timeout)
-                    .await
-            })
-            .await?;
+        let max_attempts = router_config.router_chat_retry_max_attempts.max(1);
+        let mut attempt = 1_u32;
+        let mut retry_delay = router_config.router_chat_retry_initial_backoff();
+        let max_retry_delay = router_config.router_chat_retry_max_backoff();
+        let result = loop {
+            let attempt_result = REQUEST_CALLER
+                .scope("router_chat".to_string(), async {
+                    state
+                        .gemini
+                        .send_with_timeout(&state.http_client, &url, &jwt, &body, idle_timeout)
+                        .await
+                })
+                .await;
+            match attempt_result {
+                Ok(result) => break result,
+                Err(err) => {
+                    let error = format!("{:#}", err);
+                    if attempt >= max_attempts || !is_router_chat_transient_error(&error) {
+                        return Err(anyhow!(
+                            "mission_router_chat failed after {} attempt(s): {}",
+                            attempt,
+                            error
+                        ));
+                    }
+                    let delay_ms = retry_delay.as_millis() as u64;
+                    warn!(
+                        attempt,
+                        max_attempts,
+                        delay_ms,
+                        error = %error,
+                        "mission_router_chat transient failure, retrying"
+                    );
+                    retry_diagnostics.push(serde_json::json!({
+                        "attempt": attempt,
+                        "delay_ms": delay_ms,
+                        "error": missiond_core::util::safe_byte_truncate(&error, 500),
+                    }));
+                    tokio::time::sleep(retry_delay).await;
+                    retry_delay = next_router_chat_retry_delay(retry_delay, max_retry_delay);
+                    attempt += 1;
+                }
+            }
+        };
 
         content = result
             .pointer("/choices/0/message/content")
@@ -516,6 +552,13 @@ pub(super) async fn handle_chat(state: &AppState, args: Value) -> Result<ToolRes
     if let Some(note) = budget_result.note {
         resp["context_budget"] = serde_json::json!(note);
     }
+    if !retry_diagnostics.is_empty() {
+        resp["retry_diagnostics"] = serde_json::json!({
+            "attempts": retry_diagnostics.len() + 1,
+            "max_attempts": router_config.router_chat_retry_max_attempts,
+            "retries": retry_diagnostics,
+        });
+    }
 
     // Save only NEW messages + assistant response (new_messages is pre-separated from context)
     if let Some(ref cid) = conv_id {
@@ -543,4 +586,91 @@ pub(super) async fn handle_chat(state: &AppState, args: Value) -> Result<ToolRes
     }
 
     Ok(ToolResult::json_pretty(&resp))
+}
+
+fn is_router_chat_transient_error(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    if lower.contains("v3_blueprint_config_error")
+        || lower.contains("invalid params")
+        || lower.contains("missing")
+        || lower.contains("permission")
+        || lower.contains("denied")
+        || lower.contains("auth token")
+        || lower.contains("unauthorized")
+        || lower.contains("forbidden")
+        || lower.contains("terminalquotaerror")
+        || lower.contains("daily quota")
+        || lower.contains("failed to parse gemini response")
+    {
+        return false;
+    }
+
+    lower.contains("timeout")
+        || lower.contains("timed out")
+        || lower.contains("deadline")
+        || lower.contains("connection")
+        || lower.contains("transport")
+        || lower.contains("network")
+        || lower.contains("temporarily unavailable")
+        || lower.contains("too many requests")
+        || lower.contains("router returned 408")
+        || lower.contains("router returned 429")
+        || lower.contains("router returned 500")
+        || lower.contains("router returned 502")
+        || lower.contains("router returned 503")
+        || lower.contains("router returned 504")
+        || lower.contains("gemini request failed")
+        || lower.contains("gemini request queue timeout")
+}
+
+fn next_router_chat_retry_delay(current: Duration, max: Duration) -> Duration {
+    std::cmp::min(current.checked_mul(2).unwrap_or(max), max)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_router_chat_transient_error, next_router_chat_retry_delay};
+    use std::time::Duration;
+
+    #[test]
+    fn router_chat_retry_classifier_accepts_transient_errors() {
+        assert!(is_router_chat_transient_error(
+            "Router returned 503: upstream"
+        ));
+        assert!(is_router_chat_transient_error(
+            "Gemini request queue timeout (30s)"
+        ));
+        assert!(is_router_chat_transient_error(
+            "Gemini request failed: connection reset"
+        ));
+    }
+
+    #[test]
+    fn router_chat_retry_classifier_rejects_hard_errors() {
+        assert!(!is_router_chat_transient_error(
+            "V3_BLUEPRINT_CONFIG_ERROR: missing router-runtime-policy"
+        ));
+        assert!(!is_router_chat_transient_error(
+            "xjp-router auth token not configured"
+        ));
+        assert!(!is_router_chat_transient_error(
+            "Failed to parse Gemini response: eof"
+        ));
+        assert!(!is_router_chat_transient_error(
+            "TerminalQuotaError: exhausted your daily quota"
+        ));
+    }
+
+    #[test]
+    fn router_chat_retry_delay_is_bounded() {
+        let max = Duration::from_millis(1000);
+        assert_eq!(
+            next_router_chat_retry_delay(Duration::from_millis(250), max),
+            Duration::from_millis(500)
+        );
+        assert_eq!(
+            next_router_chat_retry_delay(Duration::from_millis(750), max),
+            max
+        );
+    }
 }
