@@ -299,7 +299,7 @@ async fn handle_memory_lane_state(
                 es.current_slot_task_id = None;
                 es.is_checkpoint = false;
                 es.checkpoint_message_id = None;
-                es.pending_served = false;
+                es.clear_pending_batch_replay();
                 let _ = s
                     .bus
                     .publish_slot(SlotEvent::BecameIdle {

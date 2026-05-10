@@ -12,6 +12,8 @@ use crate::state::AppState;
 use crate::state::{CURRENT_ANALYSIS_VERSION, MAX_ANALYSIS_RETRIES};
 use crate::state::{MEMORY_SLOT_ID, MEMORY_SLOW_SLOT_ID};
 
+const MAX_PENDING_BATCH_REPLAYS: u32 = 3;
+
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     // Consolidated tool: mission_memory
     if name == "mission_memory" {
@@ -44,10 +46,11 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
         // State auto-committed by Daemon on extraction completion — no manual done() needed.
         "mission_memory_pending" | "mission_memory_pending_user" => {
             // De-bounce guard: if realtime extraction is in-flight and we already served
-            // pending messages in this cycle, return early to prevent the agent from
-            // polling the same messages repeatedly (watermark advances only on completion).
+            // pending messages in this cycle, replay the cached batch a few times. This
+            // keeps provider context compaction recoverable while still preventing a
+            // tight polling loop from being mistaken for new work.
             {
-                let es = state.extraction_state.read().await;
+                let mut es = state.extraction_state.write().await;
                 if es.pending_served
                     && matches!(
                         es.phase,
@@ -55,13 +58,28 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                             | crate::state::ExtractionPhase::WaitingForSlotIdle
                     )
                 {
+                    if let Some(payload) = es.pending_payload.clone() {
+                        if es.pending_replay_count < MAX_PENDING_BATCH_REPLAYS {
+                            es.pending_replay_count += 1;
+                            let batch_id = es
+                                .pending_batch_id
+                                .clone()
+                                .unwrap_or_else(|| "unknown-batch".to_string());
+                            let replay_count = es.pending_replay_count;
+                            return Ok(ToolResult::text(&format!(
+                                "[realtime-extract replay] batch={} replay={}/{}\n\
+                                 这是一份已返回批次的缓存重放，用于恢复 provider context compaction 后丢失的上下文；请基于本批内容输出总结，不要继续轮询。\n\n{}",
+                                batch_id, replay_count, MAX_PENDING_BATCH_REPLAYS, payload
+                            )));
+                        }
+                    }
                     return Ok(ToolResult::structured_error(
                         ToolError::new(
                             "MEMORY_PENDING_ALREADY_SERVED",
-                            "当前 realtime extraction 批次已经由 mission_memory_pending 返回过；重复调用不会获得新消息。",
+                            "当前 realtime extraction 批次已经由 mission_memory_pending 返回过，且可重放缓存缺失或已达到重放上限。",
                         )
                         .with_suggestion(
-                            "请基于上一轮已经返回的消息直接输出总结；水位线由系统在本轮完成后推进，下一批会自动调度。",
+                            "请基于上一轮已经返回或已重放的消息直接输出总结；水位线由系统在本轮完成后推进，下一批会自动调度。",
                         ),
                     ));
                 }
@@ -147,6 +165,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                  - 存入前用 mission_kb_search 检查去重\n\n",
                 batch_id, session_count, msg_count, user_count, truncated_note,
             );
+            let rendered_payload = format!("{}{}", header, output);
 
             // Set latch: mark pending as served for this extraction cycle
             {
@@ -156,11 +175,11 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                     crate::state::ExtractionPhase::Sending
                         | crate::state::ExtractionPhase::WaitingForSlotIdle
                 ) {
-                    es.pending_served = true;
+                    es.mark_pending_batch_served(batch_id, rendered_payload.clone());
                 }
             }
 
-            Ok(ToolResult::text(&format!("{}{}", header, output)))
+            Ok(ToolResult::text(&rendered_payload))
         }
 
         "mission_memory_pause" => {
@@ -216,6 +235,9 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 "currentTargets": fast_es.watermark_targets.iter()
                     .map(|(sid, _)| sid.clone()).collect::<Vec<_>>(),
                 "currentTaskId": fast_es.current_task_id,
+                "pendingServed": fast_es.pending_served,
+                "pendingBatchId": fast_es.pending_batch_id,
+                "pendingReplayCount": fast_es.pending_replay_count,
             });
             drop(fast_es);
 

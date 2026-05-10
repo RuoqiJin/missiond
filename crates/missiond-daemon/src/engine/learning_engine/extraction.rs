@@ -91,7 +91,7 @@ async fn try_claim_extraction_probe(
     es.watermark_targets.clear();
     es.current_task_id = None;
     es.current_slot_task_id = None;
-    es.pending_served = false;
+    es.clear_pending_batch_replay();
     true
 }
 
@@ -108,7 +108,7 @@ async fn release_extraction_probe(
         es.watermark_targets.clear();
         es.current_task_id = None;
         es.current_slot_task_id = None;
-        es.pending_served = false;
+        es.clear_pending_batch_replay();
     }
 }
 
@@ -426,7 +426,7 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
                     es.current_slot_task_id = None;
                     es.is_checkpoint = false;
                     es.checkpoint_message_id = None;
-                    es.pending_served = false;
+                    es.clear_pending_batch_replay();
                     return;
                 }
                 info!(
@@ -466,7 +466,7 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
                     es.current_slot_task_id = None;
                     es.is_checkpoint = false;
                     es.checkpoint_message_id = None;
-                    es.pending_served = false;
+                    es.clear_pending_batch_replay();
                 }
             }
             Err(e) => {
@@ -498,7 +498,7 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
                 es.current_slot_task_id = None;
                 es.is_checkpoint = false;
                 es.checkpoint_message_id = None;
-                es.pending_served = false;
+                es.clear_pending_batch_replay();
             }
         }
     });

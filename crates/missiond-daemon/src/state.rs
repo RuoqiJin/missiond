@@ -62,11 +62,34 @@ pub(crate) struct ExtractionState {
     /// Latch: mission_memory_pending already returned data in this extraction cycle.
     /// Prevents the agent from polling the same messages repeatedly (watermark advances only on completion).
     pub(crate) pending_served: bool,
+    /// Cached batch id and rendered payload for bounded replay after provider context compaction.
+    pub(crate) pending_batch_id: Option<String>,
+    pub(crate) pending_payload: Option<String>,
+    pub(crate) pending_served_at: i64,
+    pub(crate) pending_replay_count: u32,
     /// Consecutive realtime scheduler probes that found no useful user-bearing work.
     /// Used for exponential idle backoff so empty queues do not keep waking workers.
     pub(crate) empty_probe_count: u32,
     /// Epoch secs before which realtime extraction should skip empty-queue probes.
     pub(crate) next_probe_after: i64,
+}
+
+impl ExtractionState {
+    pub(crate) fn clear_pending_batch_replay(&mut self) {
+        self.pending_served = false;
+        self.pending_batch_id = None;
+        self.pending_payload = None;
+        self.pending_served_at = 0;
+        self.pending_replay_count = 0;
+    }
+
+    pub(crate) fn mark_pending_batch_served(&mut self, batch_id: String, payload: String) {
+        self.pending_served = true;
+        self.pending_batch_id = Some(batch_id);
+        self.pending_payload = Some(payload);
+        self.pending_served_at = chrono::Utc::now().timestamp();
+        self.pending_replay_count = 0;
+    }
 }
 
 /// Deep analysis schema version. Bump this when the analysis prompt changes
@@ -77,6 +100,51 @@ pub(crate) const MAX_ANALYSIS_RETRIES: i32 = 2;
 
 /// Safety valve: max time to wait for slot to return to Idle after send() returns.
 pub(crate) const MAX_WAIT_FOR_IDLE_SECS: i64 = 900;
+
+#[cfg(test)]
+mod extraction_state_tests {
+    use super::{ExtractionPhase, ExtractionState};
+
+    fn state() -> ExtractionState {
+        ExtractionState {
+            phase: ExtractionPhase::Sending,
+            active_type: Some("realtime"),
+            phase_started_at: 1,
+            current_deep_conv_id: None,
+            watermark_targets: Vec::new(),
+            current_task_id: Some("task-1".to_string()),
+            current_slot_task_id: Some("slot-task-1".to_string()),
+            is_checkpoint: false,
+            checkpoint_message_id: None,
+            pending_served: false,
+            pending_batch_id: None,
+            pending_payload: None,
+            pending_served_at: 0,
+            pending_replay_count: 0,
+            empty_probe_count: 0,
+            next_probe_after: 0,
+        }
+    }
+
+    #[test]
+    fn pending_batch_replay_state_is_cached_and_clearable() {
+        let mut es = state();
+        es.mark_pending_batch_served("batch-1".to_string(), "payload".to_string());
+        assert!(es.pending_served);
+        assert_eq!(es.pending_batch_id.as_deref(), Some("batch-1"));
+        assert_eq!(es.pending_payload.as_deref(), Some("payload"));
+        assert_eq!(es.pending_replay_count, 0);
+        assert!(es.pending_served_at > 0);
+
+        es.pending_replay_count = 2;
+        es.clear_pending_batch_replay();
+        assert!(!es.pending_served);
+        assert!(es.pending_batch_id.is_none());
+        assert!(es.pending_payload.is_none());
+        assert_eq!(es.pending_served_at, 0);
+        assert_eq!(es.pending_replay_count, 0);
+    }
+}
 
 /// Per-slot JSONL progress tracking: tool call counts, current tool, etc.
 /// Populated from tool_use/tool_result events, queried by mission_pty_status.

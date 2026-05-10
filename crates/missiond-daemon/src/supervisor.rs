@@ -537,7 +537,7 @@ pub(crate) async fn check_slot_stuck(
         es.current_slot_task_id = None;
         es.is_checkpoint = false;
         es.checkpoint_message_id = None;
-        es.pending_served = false;
+        es.clear_pending_batch_replay();
     }
     // Don't reset to 0 — set to now so we can detect if respawn also gets stuck
     busy_since_atomic.store(now, std::sync::atomic::Ordering::SeqCst);
@@ -600,7 +600,7 @@ pub(crate) async fn check_extraction_gate(
             es.current_slot_task_id = None;
             es.is_checkpoint = false;
             es.checkpoint_message_id = None;
-            es.pending_served = false;
+            es.clear_pending_batch_replay();
             return true;
         }
     } else {

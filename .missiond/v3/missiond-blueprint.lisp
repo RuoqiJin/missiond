@@ -1695,7 +1695,7 @@
     :default-query-policy "exclude current review states superseded-by-lisp/superseded-by-code/historical-evidence/duplicate/wrong-or-stale/delete-candidate/needs-human unless include_archived or state_filter is explicit"
     :invariants
       ["mission_memory_pending MUST project batch size and preview truncation lengths from memory-kb-policy."
-       "mission_memory_pending MUST return a structured MEMORY_PENDING_ALREADY_SERVED error when the active realtime extraction batch was already served; repeated polling is caller misuse and must not be treated as a successful empty result."
+       "mission_memory_pending MUST cache the served realtime extraction batch for the active extraction cycle and allow bounded replay after context compaction; if replay cache is missing or exhausted it MUST return structured MEMORY_PENDING_ALREADY_SERVED rather than a successful empty result."
        "mission_kb_query MUST suppress architecture:module details for sensitive credential/secret/SSH/token queries unless the caller explicitly scopes category/project to that architecture surface."
        "mission_kb_review MUST write a non-destructive knowledge_review_state overlay; it MUST NOT mutate or delete the original knowledge row."
        "Large KB cleanup MUST calibrate with at least five manual batches before batch overlay application; target active memory is about 10%, with needs-human hidden from default retrieval."

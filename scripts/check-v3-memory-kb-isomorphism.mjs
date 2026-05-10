@@ -145,7 +145,7 @@ function checkFiles(root, files) {
 	    'crates/missiond-core/src/db/pg/conversation.rs',
 	    'scripts/check-v3-memory-kb-isomorphism.mjs',
 	    'memory-kb-policy realtime extraction batch size and preview truncation budgets',
-	    'mission_memory_pending MUST return a structured MEMORY_PENDING_ALREADY_SERVED error',
+	    'mission_memory_pending MUST cache the served realtime extraction batch',
 	    'mission_kb_query MUST suppress architecture:module details for sensitive credential/secret/SSH/token queries',
 	    'Realtime extraction MUST apply exponential empty-queue backoff from learning-engine-policy',
 	    'knowledge_review_state overlay',
@@ -256,6 +256,9 @@ function checkFiles(root, files) {
     'tool_result_preview_chars',
     'assistant_preview_chars',
     'get_pending_realtime_messages_with_limit(pending_msg_limit)',
+    'MAX_PENDING_BATCH_REPLAYS',
+    'mark_pending_batch_served',
+    'pending_payload',
     'MEMORY_PENDING_ALREADY_SERVED',
     'ToolResult::structured_error',
   ]);
@@ -668,7 +671,7 @@ function buildFixture() {
 	    :assistant-preview-chars 500
 	    :sensitive-query-suppression [architecture:module]
 	    :review-states [active superseded-by-lisp superseded-by-code historical-evidence duplicate wrong-or-stale delete-candidate needs-human]
-	    :invariants ["mission_memory_pending MUST return a structured MEMORY_PENDING_ALREADY_SERVED error"
+	    :invariants ["mission_memory_pending MUST cache the served realtime extraction batch"
 	                 "mission_kb_query MUST suppress architecture:module details for sensitive credential/secret/SSH/token queries"
 	                 "mission_kb_review MUST write a non-destructive knowledge_review_state overlay; it MUST NOT mutate or delete the original knowledge row."
 	                 "mission_kb_query default retrieval MUST honor the review overlay while include_archived=true and state_filter preserve audit access to historical evidence."])
@@ -921,7 +924,7 @@ async fn kb_review_stats() {
 }
 `);
 	  writeFixture(root, DEFAULT_FILES.memory, `
-	MemoryKbRuntimeConfig; load_memory_kb_config; V3_BLUEPRINT_CONFIG_ERROR; pending_message_limit; tool_result_preview_chars; assistant_preview_chars; get_pending_realtime_messages_with_limit(pending_msg_limit); MEMORY_PENDING_ALREADY_SERVED; ToolResult::structured_error;
+	MemoryKbRuntimeConfig; load_memory_kb_config; V3_BLUEPRINT_CONFIG_ERROR; pending_message_limit; tool_result_preview_chars; assistant_preview_chars; get_pending_realtime_messages_with_limit(pending_msg_limit); MAX_PENDING_BATCH_REPLAYS; mark_pending_batch_served; pending_payload; MEMORY_PENDING_ALREADY_SERVED; ToolResult::structured_error;
 	`);
 	  writeFixture(root, DEFAULT_FILES.learningMod, `
 	LearningEngineRuntimeConfig; decision_harvest_interval_secs; cooccurrence_refresh_interval_secs; V3 learning-engine-policy unavailable;
