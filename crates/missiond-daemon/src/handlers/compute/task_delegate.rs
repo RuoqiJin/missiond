@@ -2103,7 +2103,7 @@ fn render_delegation_metadata_block(metadata: &DelegationMetadata) -> String {
     }
     if matches!(metadata.task_class.as_deref(), Some("deploy-ops")) {
         lines.push(
-            "- deployment_contract: query deploy-center/provenance first; structured smoke evidence is required; do not mutate production, DNS, Cloudflare, or secrets without explicit approval"
+            "- deployment_contract: query deploy-center/provenance first; structured smoke evidence is required; use xjp_build_wait/xjp_deploy_watch or deploy-center events for CI/build waiting; raw gh api polling loops are forbidden; do not mutate production, DNS, Cloudflare, or secrets without explicit approval"
                 .to_string(),
         );
     }
