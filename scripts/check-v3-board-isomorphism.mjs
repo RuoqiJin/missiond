@@ -31,6 +31,7 @@ const DEFAULT_FILES = {
   types: 'crates/missiond-core/src/types/board.rs',
   traits: 'crates/missiond-core/src/db/traits.rs',
   pgStore: 'crates/missiond-core/src/db/pg/board.rs',
+  aiops: 'crates/missiond-daemon/src/infra/aiops.rs',
   mcp: 'crates/missiond-mcp/src/tools/knowledge/board.rs',
 };
 
@@ -104,6 +105,7 @@ function checkFiles(root, files) {
     'crates/missiond-core/src/types/board.rs',
     'crates/missiond-core/src/db/traits.rs',
     'crates/missiond-core/src/db/pg/board.rs',
+    'crates/missiond-daemon/src/infra/aiops.rs',
     'crates/missiond-mcp/src/tools/knowledge/board.rs',
     'BoardTaskStatus',
     'claim_board_task',
@@ -113,6 +115,10 @@ function checkFiles(root, files) {
     'normalize common MCP argument aliases',
     'structured ToolError codes',
     'compact note receipts',
+    'validate parentId and dependsOn',
+    'cap descriptions',
+    'reject oversized note payloads',
+    'aggregate self-heal incident tasks by dedupe_key',
   ]);
 
   requireAll(diagnostics, files.handler, sources.handler, [
@@ -215,7 +221,9 @@ function checkFiles(root, files) {
     'handle_note_add',
     'BoardNoteAddArgs',
     'COMPACT_NOTE_RESPONSE_THRESHOLD_BYTES',
+    'MAX_NOTE_CONTENT_BYTES',
     'note_add_response',
+    'note_content_too_large_result',
     'invalid_board_args',
     'board_store_error',
     'add_board_task_note',
@@ -283,6 +291,12 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.pgStore, sources.pgStore, [
     'impl BoardStore for PgMissionStore',
+    'MAX_BOARD_TASK_DESCRIPTION_BYTES',
+    'compact_board_task_description',
+    'resolve_existing_board_task_id',
+    'references unknown BoardTask id',
+    'parentId cannot reference the task itself',
+    'dependsOn cannot reference the task itself',
     'ACTIVE_BOARD_SEARCH_STATUSES',
     'active_filter_applied',
     'historical_included',
@@ -301,6 +315,14 @@ function checkFiles(root, files) {
     'CASE WHEN assignee IS NOT NULL THEN 0 ELSE 1 END',
     'async fn check_dependencies',
     'async fn retry_board_task',
+  ]);
+
+  requireAll(diagnostics, files.aiops, sources.aiops, [
+    'create_pty_remediation_task',
+    'find_open_task_by_dedupe_key',
+    'PTY remediation: duplicate incident aggregated into existing task',
+    'auto_execute: Some(false)',
+    'assignee: None',
   ]);
 
   requireAll(diagnostics, files.mcp, sources.mcp, [
@@ -358,8 +380,9 @@ function buildFixture() {
              "crates/missiond-core/src/types/board.rs"
              "crates/missiond-core/src/db/traits.rs"
              "crates/missiond-core/src/db/pg/board.rs"
+             "crates/missiond-daemon/src/infra/aiops.rs"
              "crates/missiond-mcp/src/tools/knowledge/board.rs"]
-      :note "BoardTaskStatus claim_board_task clear_dangling_dynamic_slot_assignees list_autopilot_tasks normalize common MCP argument aliases structured ToolError codes compact note receipts"))
+      :note "BoardTaskStatus claim_board_task clear_dangling_dynamic_slot_assignees list_autopilot_tasks normalize common MCP argument aliases structured ToolError codes compact note receipts validate parentId and dependsOn cap descriptions reject oversized note payloads aggregate self-heal incident tasks by dedupe_key"))
   (compression-contract
     :checks ["node scripts/check-v3-board-isomorphism.mjs"]))`);
 
@@ -463,7 +486,9 @@ record_session_task_binding
 handle_note_add
 BoardNoteAddArgs
 COMPACT_NOTE_RESPONSE_THRESHOLD_BYTES
+MAX_NOTE_CONTENT_BYTES
 note_add_response
+note_content_too_large_result
 invalid_board_args
 board_store_error
 add_board_task_note
@@ -531,6 +556,12 @@ async fn add_board_task_note
 
   writeFixture(root, DEFAULT_FILES.pgStore, `
 impl BoardStore for PgMissionStore
+MAX_BOARD_TASK_DESCRIPTION_BYTES
+compact_board_task_description
+resolve_existing_board_task_id
+references unknown BoardTask id
+parentId cannot reference the task itself
+dependsOn cannot reference the task itself
 ACTIVE_BOARD_SEARCH_STATUSES
 active_filter_applied
 historical_included
@@ -549,6 +580,14 @@ async fn list_autopilot_tasks
 CASE WHEN assignee IS NOT NULL THEN 0 ELSE 1 END
 async fn check_dependencies
 async fn retry_board_task
+`);
+
+  writeFixture(root, DEFAULT_FILES.aiops, `
+create_pty_remediation_task
+find_open_task_by_dedupe_key
+PTY remediation: duplicate incident aggregated into existing task
+auto_execute: Some(false)
+assignee: None
 `);
 
   writeFixture(root, DEFAULT_FILES.mcp, `

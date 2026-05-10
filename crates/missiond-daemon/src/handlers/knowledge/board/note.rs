@@ -1,6 +1,7 @@
 use super::*;
 
 const COMPACT_NOTE_RESPONSE_THRESHOLD_BYTES: usize = 16_000;
+const MAX_NOTE_CONTENT_BYTES: usize = 256_000;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -37,6 +38,9 @@ pub(super) async fn handle_note_add(state: &AppState, args: Value) -> Result<Too
             )
             .with_suggestion("write a concise summary note; large content is accepted and returns a compact receipt"),
         ));
+    }
+    if args.content.len() > MAX_NOTE_CONTENT_BYTES {
+        return Ok(note_content_too_large_result(args.content.len()));
     }
     if let Some(note_type) = args.note_type.as_deref() {
         if missiond_core::types::BoardNoteType::from_str(note_type).is_none() {
@@ -79,6 +83,20 @@ pub(super) async fn handle_note_add(state: &AppState, args: Value) -> Result<Too
     Ok(note_add_response(&note))
 }
 
+fn note_content_too_large_result(content_len: usize) -> ToolResult {
+    ToolResult::structured_error(
+        missiond_mcp::tools::ToolError::new(
+            missiond_mcp::tools::error_codes::INVALID_PARAM,
+            format!(
+                "mission_board_note_add content too large: {content_len} bytes (max {MAX_NOTE_CONTENT_BYTES})"
+            ),
+        )
+        .with_suggestion(
+            "store the full artifact under .missiond/research or shared-memory artifact storage, then add a concise Board summary note with the artifact path",
+        ),
+    )
+}
+
 fn note_add_response(note: &missiond_core::types::BoardTaskNote) -> ToolResult {
     if note.content.len() <= COMPACT_NOTE_RESPONSE_THRESHOLD_BYTES {
         return ToolResult::json_pretty(note);
@@ -118,5 +136,13 @@ mod tests {
         assert!(text.contains("\"contentOmitted\": true"));
         assert!(text.contains("\"contentLength\""));
         assert!(!text.contains(&"x".repeat(1000)));
+    }
+
+    #[test]
+    fn oversized_note_returns_structured_error() {
+        let response = note_content_too_large_result(MAX_NOTE_CONTENT_BYTES + 1);
+        let ToolContent::Text { text } = &response.content[0];
+        assert!(text.contains("content too large"));
+        assert!(text.contains("shared-memory artifact storage"));
     }
 }

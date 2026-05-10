@@ -432,6 +432,41 @@ pub(crate) async fn create_pty_remediation_task(
     incident_description: &str,
     dedupe_key: &str,
 ) -> Option<String> {
+    if let Ok(Some(task)) = state.store.find_open_task_by_dedupe_key(dedupe_key).await {
+        let note_content = format!(
+            "PTY/MCP 自愈事件重复触发 ({})，已聚合到同一根因任务；target_slot={target_slot_id}; title={incident_title}",
+            chrono::Utc::now().format("%m-%d %H:%M UTC"),
+        );
+        if let Err(e) = state
+            .store
+            .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+                task_id: task.id.to_string(),
+                content: note_content,
+                note_type: Some("progress".to_string()),
+                author: Some("aiops".to_string()),
+            })
+            .await
+        {
+            warn!(error = %e, "PTY remediation: failed to append duplicate note");
+        }
+        let _ = state
+            .store
+            .update_board_task(
+                task.id.as_str(),
+                &missiond_core::types::UpdateBoardTaskInput {
+                    ..Default::default()
+                },
+            )
+            .await;
+        info!(
+            task_id = %task.id,
+            target_slot = %target_slot_id,
+            dedupe_key = %dedupe_key,
+            "PTY remediation: duplicate incident aggregated into existing task"
+        );
+        return Some(task.id.to_string());
+    }
+
     let description = format!(
         "## PTY 工位自愈任务\n\n\
          **目标工位**: `{target_slot}`\n\
@@ -457,8 +492,8 @@ pub(crate) async fn create_pty_remediation_task(
         description: Some(description),
         priority: Some("high".to_string()),
         category: Some("ops".to_string()),
-        assignee: Some("slot-coder-1".to_string()),
-        auto_execute: Some(true),
+        assignee: None,
+        auto_execute: Some(false),
         server: None,
         project: None,
         due_date: None,
@@ -478,15 +513,8 @@ pub(crate) async fn create_pty_remediation_task(
             info!(
                 task_id = %id,
                 target_slot = %target_slot_id,
-                "PTY remediation: Board task created for Opus slot"
+                "PTY remediation: Board incident task created for operator review"
             );
-            // Notify autopilot to pick up immediately
-            let _ = state
-                .bus
-                .publish_task(missiond_core::event::events::TaskEvent::Created {
-                    task_id: String::new(),
-                })
-                .await;
             Some(id)
         }
         Err(e) => {

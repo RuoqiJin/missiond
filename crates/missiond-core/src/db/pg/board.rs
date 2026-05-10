@@ -7,6 +7,39 @@ use crate::db::traits::BoardStore;
 use crate::types::*;
 use async_trait::async_trait;
 
+const MAX_BOARD_TASK_DESCRIPTION_BYTES: usize = 50_000;
+
+fn compact_board_task_description(raw: &str) -> String {
+    if raw.len() <= MAX_BOARD_TASK_DESCRIPTION_BYTES {
+        return raw.to_string();
+    }
+    tracing::warn!(
+        len = raw.len(),
+        max = MAX_BOARD_TASK_DESCRIPTION_BYTES,
+        "Board task description exceeds limit, truncating"
+    );
+    let end = crate::embedding::char_boundary_at(raw, MAX_BOARD_TASK_DESCRIPTION_BYTES);
+    format!("{}...(truncated from {} bytes)", &raw[..end], raw.len())
+}
+
+#[cfg(feature = "postgres")]
+async fn resolve_existing_board_task_id(
+    store: &PgMissionStore,
+    field: &'static str,
+    raw: &str,
+) -> DbResult<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(DbError::Constraint(format!("{field} must be non-empty")));
+    }
+    match BoardStore::resolve_board_task_id(store, trimmed).await? {
+        Some(id) => Ok(id),
+        None => Err(DbError::Constraint(format!(
+            "{field} references unknown BoardTask id `{trimmed}`"
+        ))),
+    }
+}
+
 #[cfg(feature = "postgres")]
 #[async_trait]
 impl BoardStore for PgMissionStore {
@@ -52,27 +85,27 @@ impl BoardStore for PgMissionStore {
         let now = chrono::Utc::now().to_rfc3339();
         let id = TaskId::new();
 
-        // Enforce description size limit (50KB)
-        const MAX_DESC_LEN: usize = 50_000;
         let description = match &input.description {
-            Some(d) if d.len() > MAX_DESC_LEN => {
-                tracing::warn!(
-                    len = d.len(),
-                    "Board task description exceeds 50KB, truncating"
-                );
-                let end = crate::embedding::char_boundary_at(d, MAX_DESC_LEN);
-                format!("{}...(truncated from {} bytes)", &d[..end], d.len())
-            }
-            Some(d) => d.clone(),
+            Some(d) => compact_board_task_description(d),
             None => String::new(),
         };
 
+        // Resolve parent_id before sibling ordering so short IDs and aliases
+        // cannot leak raw strings into Board hierarchy state.
+        let resolved_parent_id = if let Some(ref raw) = input.parent_id {
+            Some(TaskId::from_trusted(
+                resolve_existing_board_task_id(self, "parentId", raw).await?,
+            ))
+        } else {
+            None
+        };
+
         // Get max order for siblings
-        let max_order: i64 = if let Some(ref pid) = input.parent_id {
+        let max_order: i64 = if let Some(ref pid) = resolved_parent_id {
             let row: Option<(i64,)> = sqlx::query_as(
                 "SELECT COALESCE(MAX(order_idx), -1) FROM board_tasks WHERE parent_id = $1",
             )
-            .bind(pid)
+            .bind(pid.as_str())
             .fetch_optional(&self.pool)
             .await?;
             row.map(|r| r.0).unwrap_or(-1)
@@ -85,23 +118,14 @@ impl BoardStore for PgMissionStore {
             row.map(|r| r.0).unwrap_or(-1)
         };
 
-        // Resolve parent_id
-        let resolved_parent_id = if let Some(ref raw) = input.parent_id {
-            let full = self.resolve_board_task_id(raw).await?;
-            Some(TaskId::from_trusted(full.unwrap_or_else(|| raw.clone())))
-        } else {
-            None
-        };
-
         // Resolve depends_on
-        let mut resolved_depends_on = Vec::new();
+        let mut resolved_depends_on: Vec<TaskId> = Vec::new();
         if let Some(ref deps) = input.depends_on {
             for raw in deps {
-                let full = self
-                    .resolve_board_task_id(raw)
-                    .await?
-                    .unwrap_or_else(|| raw.clone());
-                resolved_depends_on.push(TaskId::from_trusted(full));
+                let full = resolve_existing_board_task_id(self, "dependsOn", raw).await?;
+                if !resolved_depends_on.iter().any(|d| d.as_str() == full) {
+                    resolved_depends_on.push(TaskId::from_trusted(full));
+                }
             }
         }
 
@@ -261,7 +285,7 @@ impl BoardStore for PgMissionStore {
         if let Some(ref v) = update.description {
             fields.push(UpdateField {
                 column: "description",
-                value: v.clone(),
+                value: compact_board_task_description(v),
             });
         }
         if let Some(ref v) = update.status {
@@ -301,10 +325,12 @@ impl BoardStore for PgMissionStore {
             });
         }
         if let Some(ref raw_pid) = update.parent_id {
-            let resolved = self
-                .resolve_board_task_id(raw_pid)
-                .await?
-                .unwrap_or_else(|| raw_pid.clone());
+            let resolved = resolve_existing_board_task_id(self, "parentId", raw_pid).await?;
+            if resolved == full_id {
+                return Err(DbError::Constraint(
+                    "parentId cannot reference the task itself".to_string(),
+                ));
+            }
             fields.push(UpdateField {
                 column: "parent_id",
                 value: resolved,
@@ -358,11 +384,15 @@ impl BoardStore for PgMissionStore {
         if let Some(ref deps) = update.depends_on {
             let mut resolved = Vec::new();
             for raw in deps {
-                let full = self
-                    .resolve_board_task_id(raw)
-                    .await?
-                    .unwrap_or_else(|| raw.clone());
-                resolved.push(full);
+                let full = resolve_existing_board_task_id(self, "dependsOn", raw).await?;
+                if full == full_id {
+                    return Err(DbError::Constraint(
+                        "dependsOn cannot reference the task itself".to_string(),
+                    ));
+                }
+                if !resolved.iter().any(|id| id == &full) {
+                    resolved.push(full);
+                }
             }
             let json = serde_json::to_string(&resolved).unwrap_or_else(|_| "[]".to_string());
             fields.push(UpdateField {
@@ -1105,7 +1135,7 @@ impl BoardStore for PgMissionStore {
             query = query.bind(id);
         }
         let main_rows = query.fetch_all(&self.pool).await?;
-        let mut main_tasks: Vec<BoardTask> =
+        let main_tasks: Vec<BoardTask> =
             main_rows.into_iter().map(|r| r.into_board_task()).collect();
 
         // Query 2: Fetch children (if requested)
@@ -1675,6 +1705,25 @@ impl BoardStore for PgMissionStore {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod board_store_unit_tests {
+    use super::*;
+
+    #[test]
+    fn compact_board_task_description_preserves_short_text() {
+        assert_eq!(compact_board_task_description("short"), "short");
+    }
+
+    #[test]
+    fn compact_board_task_description_truncates_on_char_boundary() {
+        let raw = format!("{}{}", "好".repeat(20_000), "tail");
+        let compact = compact_board_task_description(&raw);
+        assert!(compact.len() <= MAX_BOARD_TASK_DESCRIPTION_BYTES + 64);
+        assert!(compact.contains("truncated from"));
+        assert!(std::str::from_utf8(compact.as_bytes()).is_ok());
     }
 }
 

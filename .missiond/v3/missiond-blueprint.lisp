@@ -2494,13 +2494,19 @@
         :egress [context-pack.lisp dispatchable_groups accepted_shards task-runner-manifest task-contracts dispatch_descriptor])
       (function mission-board
         :surface mission_board
-        :entry [mission_board.create mission_board.claim mission_board.update mission_board.note_add]
+        :entry [mission_board.create mission_board.claim mission_board.update mission_board.note_add IncidentEvent::Reported create_pty_remediation_task mission_incident.remediate]
         :core ((step s1 :logic "persist BoardTask status, assignee, dependency, lease, and note state")
                (step s2 :logic "normalize common MCP argument aliases such as task_id/taskId, note_type/noteType, parent_id/parentId, and timeout_secs/timeoutSecs before schema projection")
                (step s3 :logic "return structured ToolError codes for invalid params, missing/not-found tasks, and store failures so agents can recover without flailing")
                (step s4 :logic "claim only open unclaimed rows and recover stale running rows")
-               (step s5 :logic "publish BoardEvent projections for dashboards and autopilot; large BoardTask notes return compact receipts after durable storage instead of echoing full content through MCP"))
-        :egress [board_task board_event board_note autopilot_task_list])
+               (step s5 :logic "publish BoardEvent projections for dashboards and autopilot; large BoardTask notes return compact receipts after durable storage instead of echoing full content through MCP")
+               (step s6 :logic "validate parentId and dependsOn as existing BoardTask IDs or uniquely-resolved short IDs before write; unresolved dependency strings and self-references are structured invalid-param errors, never persisted as latent Autopilot blockers")
+               (step s7 :logic "apply Board text-size policy at runtime: create/update descriptions are capped with char-boundary-safe truncation; note_add rejects oversized payloads with a structured artifact-path suggestion instead of unknown MCP errors")
+               (step s8 :logic "classify self-heal incidents by semantic dedupe_key, not generated BoardTask id or volatile PTY screen text")
+               (step s9 :logic "if an open task with the same dedupe_key exists, append progress evidence and touch it instead of creating another BoardTask")
+               (step s10 :logic "runtime-safe recovery may be performed by PTY/slot runtime directly; uncertain MCP/tool failures become visible operator-review incident tasks")
+               (step s11 :logic "self-heal incident BoardTasks are not auto-executed by default because automatic worker fanout can amplify a tool outage into a Board storm"))
+        :egress [board_task board_event board_note autopilot_task_list incident_boardtask aggregate_note operator_review])
       (function board-search-noise-governance
         :surface board-search-noise-governance
         :entry [mission_board.query.search mission_board_query]
@@ -3323,9 +3329,10 @@
              "crates/missiond-core/src/types/board.rs"
              "crates/missiond-core/src/db/traits.rs"
              "crates/missiond-core/src/db/pg/board.rs"
+             "crates/missiond-daemon/src/infra/aiops.rs"
              "crates/missiond-mcp/src/tools/knowledge/board.rs"
              "scripts/check-v3-board-isomorphism.mjs"]
-      :note "mission_board is the durable BoardTask coordination surface underneath delegated ClaudeCode work: MCP exposes query/create/update/delete/claim/decompose/retry/note_add with a generated schema from .missiond/intent-tools.lisp. Board handlers normalize common snake_case/camelCase aliases before schema projection, reject invalid status/noteType with structured ToolError codes, and return compact note receipts for large stored content so agents recover instead of flailing on unknown errors. [details: .missiond/v3/evidence/blueprint-notes.lisp#note-014]")
+      :note "mission_board is the durable BoardTask coordination surface underneath delegated ClaudeCode work: MCP exposes query/create/update/delete/claim/decompose/retry/note_add with a generated schema from .missiond/intent-tools.lisp. Board handlers normalize common snake_case/camelCase aliases before schema projection, reject invalid status/noteType with structured ToolError codes, validate parentId/dependsOn before persistence, cap descriptions, reject oversized note payloads with artifact-path guidance, return compact note receipts for large stored content, and aggregate self-heal incident tasks by dedupe_key instead of auto-executing a worker per tool outage so agents recover instead of flailing on unknown errors. [details: .missiond/v3/evidence/blueprint-notes.lisp#note-014]")
 
     (surface board-search-noise-governance
       :status "code-aligned"
