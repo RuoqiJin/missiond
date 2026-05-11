@@ -38,7 +38,7 @@
      (step s2 :name resolve-skill-context
        :logic "Call skill-runtime context for pcea with include_kb=false; include required deployment/deploy-ops/deployment-troubleshoot skill dependencies as evidence refs, not prompt preloads.")
      (step s3 :name reconcile-deployment-evidence
-       :logic "Reconcile PCEA deployment SSOT, pcea skill evidence, deploy-center project/provenance, ECS runtime target facts, and Secret Store health for ecs-agent claim auth before running any deploy; if ECS/agent/script/secret-store facts disagree, block with a drift report.")
+       :logic "Reconcile PCEA deployment SSOT, pcea skill evidence, deploy-center project/provenance, ECS runtime target facts, and current GCP-hosted Secret Store health for ecs-agent claim auth before running any deploy; if ECS/agent/script/secret-store facts disagree, block with a drift report.")
      (step s4 :name build-evidence-plan
        :logic "Collect component repo HEAD, default branch, deploy slug, deploy-center provenance, previous release, rollback evidence, and expected smoke endpoints.")
      (step s5 :name classify-component-order
@@ -58,7 +58,7 @@
      (gate g4 :rule "pcea-api image delivery is OSS bundle/local image tag; do not assume GHCR fallback exists for the backend.")
      (gate g5 :rule "pcea-video-vault owns shared compose and deploy scripts; backend deploy must not overwrite those shared files.")
      (gate g6 :rule "PCEA deploy workers must read PCEA skill evidence and deployment SSOT before acting, because ECS path, OSS bundle, jump-host, and deploy-agent details are not safely inferable from repo names.")
-     (gate g7 :rule "If ecs-agent is calling claim-next but Secret Store cannot resolve ecs-agent/DEPLOY_AGENT_API_KEY, classify PCEA deployment as deploy-blocked-by-secret-store; do not misclassify it as PCEA code, GitHub Actions, or ECS script failure."))
+     (gate g7 :rule "If ecs-agent is calling claim-next but Secret Store cannot resolve ecs-agent/DEPLOY_AGENT_API_KEY from the GCP xjp-backend VM Secret Store runtime, classify PCEA deployment as deploy-blocked-by-secret-store; do not misclassify it as PCEA code, GitHub Actions, ECS script failure, or historical ClawCloud outage."))
   :completion
     ((criterion c1 :rule "Each targeted component has deploy-center provenance for the requested commit or an explicit blocked reason.")
      (criterion c2 :rule "Each targeted component has durable deploy-center event evidence and smoke evidence.")

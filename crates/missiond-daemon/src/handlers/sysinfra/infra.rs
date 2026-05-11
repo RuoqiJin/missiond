@@ -1034,6 +1034,15 @@ fn credential_refs(target_id: Option<&str>) -> Vec<Value> {
             "requiredCapability": "deploy-ops",
             "availability": "unknown"
         }),
+        json!({
+            "targetId": "gcp-runtime",
+            "namespace": "secret-store",
+            "keyName": "cloudflare/CLOUDFLARE_DNS_TOKEN",
+            "secretRef": "secret-store://secret-store/cloudflare/CLOUDFLARE_DNS_TOKEN",
+            "purpose": "Secret Store DNS migration / certificate recovery bootstrap reference",
+            "requiredCapability": "dns-ops",
+            "availability": "unknown"
+        }),
     ];
     target_id.map_or(refs.clone(), |target| {
         refs.into_iter()
@@ -1201,16 +1210,28 @@ fn append_skill_derived_infra_servers(servers: &mut Vec<missiond_core::InfraServ
             id: "gcp-runtime".to_string(),
             name: "GCP production runtime".to_string(),
             provider: "skill-derived".to_string(),
-            host: None,
+            host: Some("34.104.147.118".to_string()),
             lan: None,
-            location: Some("GCP production".to_string()),
-            roles: vec!["production".to_string(), "auth".to_string(), "router".to_string(), "deploy-center".to_string()],
-            tags: vec!["gcp".to_string(), "production".to_string(), "unverified".to_string()],
+            location: Some("GCP production / xjp-backend VM".to_string()),
+            roles: vec![
+                "production".to_string(),
+                "auth".to_string(),
+                "router".to_string(),
+                "deploy-center".to_string(),
+                "secret-store".to_string(),
+                "credential-vault".to_string(),
+            ],
+            tags: vec![
+                "gcp".to_string(),
+                "production".to_string(),
+                "verified-2026-05-11".to_string(),
+                "ss.xiaojinpro.top".to_string(),
+            ],
             description: Some(
-                "Universe summary for GCP-hosted production services. deploy-center provenance is the runtime authority; MissionD keeps only the identity summary."
+                "Universe summary for GCP-hosted production services. Secret Store moved here on 2026-05-11 (ss.xiaojinpro.top -> 34.104.147.118, Caddy to local secret-store container, DB in xjp-postgres/secret_store). deploy-center provenance remains the runtime authority; MissionD keeps only the identity summary."
                     .to_string(),
             ),
-            health_endpoint: None,
+            health_endpoint: Some("https://ss.xiaojinpro.top/livez".to_string()),
         },
     );
 }

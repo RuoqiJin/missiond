@@ -1404,13 +1404,13 @@
     :core ((step s1 :logic "resolve project_id to MissionD Universe identity, project deployment SSOT, and deploy-center slug(s)")
            (step s2 :logic "collect skill-derived deployment evidence with include_kb=false, preserving source_skill/source_path/source_line and redacting credential-like values")
            (step s3 :logic "query deploy-center runtime/provenance and compare with skill evidence for host, agent, script, artifact, health, and rollback facts")
-           (step s4 :logic "verify deploy-center pull-mode executor claim dependencies: deploy_executors.api_key_ref must resolve DEPLOY_AGENT_API_KEY from Secret Store before agent-offline or script-failure conclusions are trusted")
+           (step s4 :logic "verify deploy-center pull-mode executor claim dependencies: deploy_executors.api_key_ref must resolve DEPLOY_AGENT_API_KEY from Secret Store on gcp-runtime before agent-offline or script-failure conclusions are trusted")
            (step s5 :logic "if skill evidence, deploy-center facts, Secret Store dependency health, and project SSOT disagree, create a drift diagnostic/Decision item and do not let deploy workers guess host, login path, script path, or agent project")
            (step s6 :logic "materialize a deploy context-pack for deploy-ops workers containing only reconciled facts, remaining unknowns, smoke commands, dependency-health evidence, and approval boundaries"))
     :egress [deploy-context-pack runtime-fact-drift deploy-ops-BoardTask]
     :surfaces [".missiond/workflows/m6-deployment-rollout.lisp" ".missiond/workflows/pcea-deployment-rollout.lisp" "crates/missiond-daemon/src/bus/v2_subscribers.rs" "scripts/check-v3-workflow-isomorphism.mjs"]
     :rule "Every deployment task must perform deployment-evidence-preflight before action. Skills are evidence and operational guidance; deploy-center provenance is deployment authority; MissionD orchestrates and records the decision path."
-    :dependency-rule "Secret Store is the credential authority for deploy-center executor claim auth. If Secret Store is unreachable, classify deploy-blocked-by-secret-store and surface namespace/key refs only; never expose credential values.")
+    :dependency-rule "Secret Store is the credential authority for deploy-center executor claim auth. Since 2026-05-11 its production runtime is ss.xiaojinpro.top on the GCP xjp-backend VM, not ClawCloud. If Secret Store is unreachable, classify deploy-blocked-by-secret-store against gcp-runtime/Caddy/docker/xjp-postgres health and surface namespace/key refs only; never expose credential values.")
 
   (project-identity-contract
     :schema "missiond.project-identity-contract.v1"
@@ -1458,10 +1458,13 @@
       :kind cloud-runtime
       :environment production
       :owner_authority deploy-center
-      :capabilities [auth router deploy-center production-runtime]
-      :service_ids [auth router deploy-center]
-      :freshness unverified
-      :evidence_refs [service-runtime-universe deploy-center-provenance])
+      :capabilities [auth router deploy-center secret-store credential-vault caddy-reverse-proxy production-runtime]
+      :service_ids [auth router deploy-center secret-store]
+      :public_domain "ss.xiaojinpro.top"
+      :public_ip "34.104.147.118"
+      :credential_refs [secret-store://cloud/gcp/deploy-center-runtime secret-store://secret-store/cloudflare/CLOUDFLARE_DNS_TOKEN]
+      :freshness verified-2026-05-11
+      :evidence_refs [service-runtime-universe deploy-center-provenance secret-store-gcp-migration-20260511])
     (runtime-target :target_id ecs-pcea
       :aliases [pcea-ecs]
       :kind cloud-vm
@@ -1742,7 +1745,7 @@
       :status project-ssot-owned
       :lifecycle external-infra-runtime
       :checks ["bash .missiond/check.sh"]
-      :missiond-role "registered external infra runtime; AES-256-GCM credential vault (frozen LTS) consumed by auth/deploy-center/* via xjp-config HybridSecretProvider"
+      :missiond-role "registered external infra runtime; AES-256-GCM credential vault (frozen LTS) consumed by auth/deploy-center/* via xjp-config HybridSecretProvider; production endpoint ss.xiaojinpro.top is now on the GCP xjp-backend VM with Caddy proxy to the local secret-store container"
       :surface project-registry)
     (project :id xiaojin-blog
       :kind nextjs-app
