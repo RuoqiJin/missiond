@@ -1353,7 +1353,7 @@
     :schema "missiond.eventbridge-policy.v1"
     :envelope missiond.event-envelope.v1
     :fields [event_id source project_id service_id event_kind subject correlation_id trace_id occurred_at observed_at authority schema_version payload privacy_class]
-    :taxonomy [deploy_created build_started build_succeeded build_failed deploy_started deploy_succeeded deploy_failed smoke_succeeded smoke_failed rollback_started rollback_succeeded rollback_failed agent_heartbeat agent_update_started agent_update_succeeded agent_update_failed provenance_changed usage_burst provider_error_burst provider_auth_failure_burst quota_exhaustion]
+    :taxonomy [deploy_created build_started build_succeeded build_failed deploy_started deploy_succeeded deploy_failed smoke_succeeded smoke_failed rollback_started rollback_succeeded rollback_failed agent_heartbeat agent_offline agent_update_started agent_update_succeeded agent_update_failed provenance_changed usage_burst provider_error_burst provider_auth_failure_burst quota_exhaustion]
     :rule "MissionD remains the local orchestrator and EventBridge. Cloud services send durable provider events through typed webhooks; MissionD stores them as SystemEvent::ExternalServiceEvent with idempotent event_id dedupe. PTY remains diagnostic only."
     :invariants
       ["External deploy events MUST enter through /webhooks/deploy-center-event or /webhooks/service-event with X-MissionD-Webhook-Token when MISSIOND_EXTERNAL_WEBHOOK_TOKEN is configured."
@@ -1368,7 +1368,7 @@
            (step s2 :logic "preserve event identity and project/correlation fields under payload._envelope")
            (step s3 :logic "publish SystemEvent::ExternalServiceEvent through EventBus with service/event dedupe")
            (step s4 :logic "allow master, Autopilot, and deploy-ops workflows to wait by service_id, event_kind, project_id, and correlation_id")
-           (step s5 :logic "create BoardTask suggestions for deploy/smoke/agent-update failures; never auto rollback without deploy-center policy or user approval"))
+           (step s5 :logic "create BoardTask suggestions for deploy/smoke/agent-offline/agent-update failures; attach break-glass runbook refs when the deploy agent is unreachable, but never auto rollback, SSH, DNS mutate, secret mutate, or production-deploy without deploy-center policy or user approval"))
     :egress [ExternalServiceEvent mission_timeline.wait deployment-ops-BoardTask]
     :surfaces [eventbridge project-registry])
 
@@ -1447,6 +1447,17 @@
     (skill-evidence-contract
       :fields [source_skill source_path source_line confidence last_verified_at promote_to credential_inline_risk excerpt]
       :rule "Skills are operational guidance and discovery evidence. A skill fact becomes active runtime truth only after reconcile promotes it into deploy-center runtime inventory or MissionD Universe with a source reference.")
+    (break-glass-runbook-contract
+      :fields [runbook_id target_id service_id source_skill evidence_refs allowed_actions forbidden_actions credential_refs approval_required freshness]
+      :rule "Manual ECS/SSH/operator fallback is a break-glass runbook, not the primary deploy path. It is attached to deploy-ops tasks only when deploy-center reports agent_offline/agent_update_failed or provenance cannot be obtained, and it must reference secret-store credential refs instead of inline secrets.")
+    (agent-offline-response-policy
+      :entry [deploy-center.agent_heartbeat deploy-center.agent_update_failed deployment-event-response mission_infra_query.skill_evidence]
+      :core ((step s1 :logic "when deploy-center emits agent_offline or repeated heartbeat/update failure, MissionD creates or updates one deploy-ops incident keyed by target_id/service_id/root_cause_key")
+             (step s2 :logic "MissionD queries runtime target inventory and skill evidence for break-glass runbook refs such as PCEA ECS jump-host/OSS/deploy.sh facts, redacting any credential-like line")
+             (step s3 :logic "resident master presents options: wait for agent recovery, trigger deploy-center self-update, or use approved manual runbook; manual actions require explicit approval and deploy-ops worker context")
+             (step s4 :logic "if manual runbook is used, write evidence back to deploy-center/MissionD as provenance gap remediation instead of leaving an untracked shell operation"))
+      :egress [deploy-ops-BoardTask break-glass-context-pack Decision-Inbox deploy-center-provenance-gap]
+      :surfaces [".missiond/workflows/deployment-event-response.lisp" ".missiond/workflows/m6-deployment-rollout.lisp" "mission_infra_query(action=skill_evidence|credential_refs)"])
     (runtime-authority-map
       :authorities ((missiond :owns [project-identity universe-summary dispatch-policy eventbridge])
                     (deploy-center :owns [runtime-target-inventory executor-inventory service-deploy-location agent-heartbeat-provenance release-provenance])
@@ -1473,7 +1484,9 @@
       :capabilities [pcea deploy-agent runtime]
       :service_ids [pcea]
       :freshness unverified
-      :evidence_refs [skill:pcea])
+      :break_glass_runbook_refs [skill:pcea#ssh skill:pcea#deploy skill:aliyun#ECS skill:deploy-ops#deploy-agent]
+      :credential_refs [secret-store://deploy-agent/ecs/DEPLOY_AGENT_API_KEY secret-store://infra/aliyun-ecs/ssh]
+      :evidence_refs [skill:pcea skill:aliyun skill:deploy-ops])
     (runtime-target :target_id privatecloud-hostvds
       :aliases [hostvds privatecloud]
       :kind vps-runtime
@@ -1526,8 +1539,8 @@
     :owner deploy-center
     :authority-table deploy_agent_update_provenance
     :facts [agent_id current_version desired_version s3_latest update_status canary_status rollback_marker last_error]
-    :events [agent_update_started agent_update_succeeded agent_update_failed rollback_started rollback_succeeded rollback_failed agent_heartbeat]
-    :rule "deploy-agent self-update status is a deploy-center runtime fact stored in deploy_agent_update_provenance; deploy-center relays update events into MissionD EventBridge so deploy-ops BoardTasks can be triggered from durable events.")
+    :events [agent_update_started agent_update_succeeded agent_update_failed rollback_started rollback_succeeded rollback_failed agent_heartbeat agent_offline]
+    :rule "deploy-agent self-update and reachability status are deploy-center runtime facts stored in deploy_agent_update_provenance and heartbeat/provenance tables; deploy-center relays update/offline events into MissionD EventBridge so deploy-ops BoardTasks can be triggered from durable events. A failed best-effort notify must not be hidden inside a globally successful release summary: per-agent failure remains actionable until the target reports the desired version or an approved break-glass runbook closes the incident.")
 
   (project-maturity-model
     :schema "missiond.project-maturity-model.v2"

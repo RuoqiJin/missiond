@@ -24,6 +24,8 @@
       :logic "Before attempting deploy or choosing host/script/agent paths, read the project's deployment SSOT, deploy-center runtime facts, Secret Store dependency health for executor claim auth, and skill-derived operational evidence through mission_infra_query; if the facts disagree, create a drift diagnostic instead of guessing.")
     (step s5b :name verify-executor-claim-dependencies
       :logic "For deploy-center pull-mode executors, verify that deploy_executors.api_key_ref -> Secret Store DEPLOY_AGENT_API_KEY is reachable from the current GCP xjp-backend VM runtime before concluding an agent is offline. If Secret Store is unavailable, classify deploy-blocked-by-secret-store against gcp-runtime/Caddy/docker/xjp-postgres health and do not keep re-dispatching deploy workers.")
+     (step s5c :name resolve-break-glass-runbook
+       :logic "If deploy-center reports agent_offline, repeated agent_update_failed, or unreachable provenance for an otherwise known runtime target, query mission_infra_query(action=skill_evidence|credential_refs) for break_glass_runbook_refs and produce an approval-gated manual-ops option. Manual ECS/SSH/OSS/deploy.sh guidance from skills may enter the context pack as redacted evidence, but deploy-center remains the authority to reconcile the final deployment fact.")
      (step s6 :name order-rollout
        :logic "Deploy deployment infrastructure before dependents: deploy-center first, then router, then pcea; auth is skipped unless auth-relevant files changed after its successful deploy.")
      (step s7 :name deploy-through-deploy-center
@@ -42,10 +44,12 @@
      (gate g5 :rule "CI/build/push success, GitHub Actions green, and deploy-center notify HTTP 200 are insufficient to close a deployment BoardTask without deploy-center provenance plus smoke evidence.")
      (gate g6 :rule "Build cache accelerators such as sccache/kellnr are performance aids; unavailable cache infrastructure must either fall back cleanly or produce a diagnostic gap, not become an implicit release blocker.")
      (gate g7 :rule "Deployment workers must consult project deployment SSOT plus mission_infra_query skill evidence before acting on any host/script/agent path; skill facts are evidence, deploy-center provenance is authority.")
-     (gate g8 :rule "Pull-mode executor status must distinguish agent-offline from claim-auth-dependency-failed. Secret Store lookup failure for deploy_executors.api_key_ref / DEPLOY_AGENT_API_KEY blocks deployment and must surface as deploy-blocked-by-secret-store on gcp-runtime, not as a PCEA, deploy-agent, or historical ClawCloud bug."))
+     (gate g8 :rule "Pull-mode executor status must distinguish agent-offline from claim-auth-dependency-failed. Secret Store lookup failure for deploy_executors.api_key_ref / DEPLOY_AGENT_API_KEY blocks deployment and must surface as deploy-blocked-by-secret-store on gcp-runtime, not as a PCEA, deploy-agent, or historical ClawCloud bug.")
+     (gate g9 :rule "Agent-offline manual fallback is break-glass only: the context pack may include redacted skill runbook refs and credential refs, but manual SSH/ECS/deploy actions need explicit approval and must write post-action provenance evidence."))
   :completion
     ((criterion c1 :rule "scripts/check-m6-deployment-status.mjs reports every M6 project as deployed-current or explicitly no-deploy-target.")
      (criterion c2 :rule "deploy-center status/provenance is available for every deployed M6 service slug.")
      (criterion c3 :rule "Each deployment task closes only after durable deploy-center event evidence and smoke evidence.")
      (criterion c4 :rule "Partial provenance such as reported_digest_missing is recorded as a follow-up deploy-agent/deploy-center evidence gap instead of being lost in the deployment summary.")
-     (criterion c5 :rule "If deployment is blocked by Secret Store, rollout report names Secret Store as the failed dependency and records the executor namespace/key reference without exposing credential values.")))
+     (criterion c5 :rule "If deployment is blocked by Secret Store, rollout report names Secret Store as the failed dependency and records the executor namespace/key reference without exposing credential values.")
+     (criterion c6 :rule "If deployment is blocked by agent_offline, rollout report names the runtime target, last heartbeat/update evidence, break-glass runbook refs, and approval boundary.")))
