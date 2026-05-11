@@ -38,7 +38,9 @@ pub(crate) enum XjpRouterError {
         "xjp-router endpoint not configured (set {ENDPOINT_ENV} or llm.yaml `xjp_router.endpoint`)"
     )]
     MissingEndpoint,
-    #[error("xjp-router auth token not configured (set {TOKEN_ENV} or llm.yaml `xjp_router.auth_token`)")]
+    #[error(
+        "xjp-router auth token not configured (set {TOKEN_ENV} or llm.yaml `xjp_router.auth_token`)"
+    )]
     MissingToken,
     #[error("xjp-router HTTP transport error: {0}")]
     Http(String),

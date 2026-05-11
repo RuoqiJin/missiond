@@ -1227,25 +1227,14 @@ impl PTYWebSocketServer {
             _ => {} // Idle — good to go
         }
 
-        // Proxy mode: /clear Claude Code context before each request for stateless operation
+        // Proxy mode carries the full transcript in the request body. Do not send
+        // `/clear` to the shared PTY: it mutates a user-visible interactive
+        // session and creates races with durable conversation capture.
         if proxy_mode {
             debug!(
                 slot_id,
-                "Proxy mode: clearing Claude Code context before request"
+                "Proxy mode: using direct transcript prompt without clearing PTY"
             );
-            if let Err(e) = pty_manager.send_fire_and_forget(&slot_id, "/clear").await {
-                warn!(slot_id, error = %e, "Failed to send /clear");
-            } else {
-                // Wait for Claude Code to process /clear and return to Idle
-                for _ in 0..20 {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
-                    if let Some(s) = pty_manager.get_status(&slot_id).await {
-                        if s.state == SessionState::Idle {
-                            break;
-                        }
-                    }
-                }
-            }
         }
 
         // Start trace

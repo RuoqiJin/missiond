@@ -20,6 +20,7 @@ const DEFAULT_FILES = {
   sysinfraMod: 'crates/missiond-daemon/src/handlers/sysinfra/mod.rs',
   infra: 'crates/missiond-daemon/src/handlers/sysinfra/infra.rs',
   permission: 'crates/missiond-daemon/src/handlers/sysinfra/permission.rs',
+  learnedPermissions: 'crates/missiond-core/src/core/learned_permissions.rs',
   power: 'crates/missiond-daemon/src/handlers/sysinfra/power.rs',
   system: 'crates/missiond-daemon/src/handlers/sysinfra/system.rs',
   globalInstruction: 'crates/missiond-daemon/src/handlers/sysinfra/global_instruction.rs',
@@ -206,6 +207,16 @@ function checkFiles(root, files) {
     'get_role_rule',
     'get_slot_rule',
   ]);
+  requireAll(diagnostics, files.learnedPermissions, sources.learnedPermissions, [
+    'expires_at',
+    'source_evidence',
+    'renew_policy',
+    'audit_trail',
+    'DEFAULT_PERMISSION_TTL_DAYS',
+    'is_expired_permission',
+    'use-renews',
+    'provider-confirmation',
+  ]);
 
   requireAll(diagnostics, files.power, sources.power, [
     'mission_power_control',
@@ -389,6 +400,10 @@ function buildFixture() {
   fs.appendFileSync(
     path.join(root, DEFAULT_FILES.permission),
     ' mission_permission_merged_for_slot learned.get_for_spawn get_role_rule get_slot_rule',
+  );
+  fs.appendFileSync(
+    path.join(root, DEFAULT_FILES.learnedPermissions),
+    ' expires_at source_evidence renew_policy audit_trail DEFAULT_PERMISSION_TTL_DAYS is_expired_permission use-renews provider-confirmation',
   );
   fs.appendFileSync(
     path.join(root, DEFAULT_FILES.power),

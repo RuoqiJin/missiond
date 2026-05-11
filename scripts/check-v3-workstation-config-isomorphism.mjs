@@ -102,6 +102,13 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.blueprint, sources.blueprint, [
     'workstation-config',
+    'workstation-policy-shards',
+    'slot-lifecycle-policy',
+    'delegation-contract-policy',
+    'completion-authority-policy',
+    'cross-project-dispatch-policy',
+    'context-prefetch-policy',
+    'mcp-recovery-policy',
     '(v2-item claudecode-workstation-config',
     ':status runtime-projected',
     '(tool-group workstation-entry',
@@ -666,6 +673,13 @@ function buildFixture() {
 	      :dispatch-guard "The per-slot dispatch guard MUST be held across the entire state.pty.send call"
 	      :execution-log-synthesis "Autopilot MUST synthesize mission_execution(action=complete, commit_status=\"not-required\", enforce_scoped_commit=true)"
       :concurrent-slot-dispatch "Autopilot dispatch_board_tasks MUST start state.pty.send work concurrently across different slots and MUST NOT wait for worker turn completion inside the dispatch tick. The implementation MUST hand each ready BoardTask's send + post-send tail to a detached tokio task with an OwnedSlotDispatchGuard moved in."))
+  (workstation-policy-shards
+    (policy slot-lifecycle-policy)
+    (policy delegation-contract-policy)
+    (policy completion-authority-policy)
+    (policy cross-project-dispatch-policy)
+    (policy context-prefetch-policy)
+    (policy mcp-recovery-policy))
   (implementation-map
     (surface workstation-config
       :status "code-aligned"

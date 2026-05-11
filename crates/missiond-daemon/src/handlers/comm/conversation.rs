@@ -18,6 +18,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         | "mission_conversation_list"
         | "mission_conversation_get"
         | "mission_conversation_search"
+        | "mission_conversation_analysis_context"
         | "mission_message_search"
         | "mission_user_message_index"
         | "mission_conversation_set_label"

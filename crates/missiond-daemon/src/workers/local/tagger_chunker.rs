@@ -1117,8 +1117,7 @@ mod tests {
 
     #[test]
     fn test_user_preview_respects_cjk_byte_boundary() {
-        let content =
-            "wave27-00 archive agent slot这个 wave27 之前还有很多个 wave,在同一个会话里,看看能找到吗";
+        let content = "wave27-00 archive agent slot这个 wave27 之前还有很多个 wave,在同一个会话里,看看能找到吗";
 
         let preview = user_preview(content);
 
@@ -1224,10 +1223,22 @@ mod tests {
         let msgs = vec![
             make_msg(1, "user", "Do something"),
             make_msg(2, "assistant", "Done"),
-            make_msg(3, "user", "<local-command-caveat>Caveat: messages below...</local-command-caveat>"),
-            make_msg(4, "user", "<command-name>/compact</command-name>\n            <command-message>compact</command-message>"),
+            make_msg(
+                3,
+                "user",
+                "<local-command-caveat>Caveat: messages below...</local-command-caveat>",
+            ),
+            make_msg(
+                4,
+                "user",
+                "<command-name>/compact</command-name>\n            <command-message>compact</command-message>",
+            ),
             make_msg(5, "user", ""),
-            make_msg(6, "user", "<local-command-stdout>Compacted</local-command-stdout>"),
+            make_msg(
+                6,
+                "user",
+                "<local-command-stdout>Compacted</local-command-stdout>",
+            ),
             make_msg(7, "user", "Next question"),
             make_msg(8, "assistant", "Next answer"),
         ];
@@ -1261,8 +1272,16 @@ mod tests {
         // These should NOT become the outcome — the real answer should.
         let msgs = vec![
             make_msg(1, "user", "审计最新 commit"),
-            make_msg(2, "assistant", "**Reviewing Instructions** \\n\\nI am recalling Critical Instructions 1 and 2.\nCRITICAL INSTRUCTION 1: ..."),
-            make_msg(3, "assistant", "**Recalling Critical Instructions and Executing Search**\nCRITICAL INSTRUCTION 1: ..."),
+            make_msg(
+                2,
+                "assistant",
+                "**Reviewing Instructions** \\n\\nI am recalling Critical Instructions 1 and 2.\nCRITICAL INSTRUCTION 1: ...",
+            ),
+            make_msg(
+                3,
+                "assistant",
+                "**Recalling Critical Instructions and Executing Search**\nCRITICAL INSTRUCTION 1: ...",
+            ),
             make_msg(4, "assistant", "审计结果：这个 commit 质量很高，架构优雅。"),
         ];
         let turns = extract_turns(&msgs);

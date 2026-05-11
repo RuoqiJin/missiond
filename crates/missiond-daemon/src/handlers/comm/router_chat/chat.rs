@@ -357,10 +357,10 @@ pub(super) async fn handle_chat(state: &AppState, args: Value) -> Result<ToolRes
             .sum();
         if total_bytes > MAX_ROUTER_PAYLOAD_BYTES {
             return Err(anyhow!(
-                            "附件消息总大小 ({:.1}MB) 超出上游限制 ({:.1}MB)，拒绝截断。请减少文件大小或拆分请求。",
-                            total_bytes as f64 / 1_048_576.0,
-                            MAX_ROUTER_PAYLOAD_BYTES as f64 / 1_048_576.0
-                        ));
+                "附件消息总大小 ({:.1}MB) 超出上游限制 ({:.1}MB)，拒绝截断。请减少文件大小或拆分请求。",
+                total_bytes as f64 / 1_048_576.0,
+                MAX_ROUTER_PAYLOAD_BYTES as f64 / 1_048_576.0
+            ));
         }
         crate::context_budget::ContextBudgetResult {
             trimmed: false,
@@ -530,9 +530,11 @@ pub(super) async fn handle_chat(state: &AppState, args: Value) -> Result<ToolRes
     // When files are attached, output truncation is unacceptable — return error with partial content
     if has_files && (finish_reason == "length" || finish_reason == "max_tokens") {
         return Err(anyhow!(
-                        "输出被截断（finish_reason={}，max_tokens={}）。附件模式下不允许截断。\n请增大 max_tokens 或简化 prompt 后重试。\n\n--- 部分响应 ---\n{}",
-                        finish_reason, max_tokens, missiond_core::util::safe_byte_truncate(&content, 500)
-                    ));
+            "输出被截断（finish_reason={}，max_tokens={}）。附件模式下不允许截断。\n请增大 max_tokens 或简化 prompt 后重试。\n\n--- 部分响应 ---\n{}",
+            finish_reason,
+            max_tokens,
+            missiond_core::util::safe_byte_truncate(&content, 500)
+        ));
     }
 
     let mut resp = serde_json::json!({

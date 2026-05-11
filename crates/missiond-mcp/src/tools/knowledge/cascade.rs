@@ -23,7 +23,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
         // ===== mission_cascade_plan =====
         ToolDefinition::new(
             "mission_cascade_plan",
@@ -48,7 +47,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
         // ===== mission_cascade_trigger =====
         ToolDefinition::new(
             "mission_cascade_trigger",
@@ -78,7 +76,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
         // ===== mission_cascade_lint =====
         ToolDefinition::new(
             "mission_cascade_lint",

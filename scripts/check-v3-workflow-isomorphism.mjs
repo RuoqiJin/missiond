@@ -305,9 +305,16 @@ function checkFiles(root, files) {
     ':workflow_id m6-deployment-rollout',
     ':status active',
     'scripts/check-m6-deployment-status.mjs --json',
+    'mission_infra_query(action=skill_evidence|reconcile)',
     'deploy-center /api/deploy/status',
     'deploy-center provenance endpoint',
     'deployed-current, deployed-stale, not-confirmed, or deployed-unknown',
+    'resolve-project-deployment-evidence',
+    'verify-executor-claim-dependencies',
+    'project deployment SSOT',
+    'deploy_executors.api_key_ref -> Secret Store DEPLOY_AGENT_API_KEY',
+    'deploy-blocked-by-secret-store',
+    'skill facts are evidence, deploy-center provenance is authority',
     'deploy-center first, then router, then pcea',
     'context_intent=deploy-ops, task_class=deploy-ops, pool_hint=claude-code-deploy-ops, engine_hint=claude-code',
     'deploy_succeeded and smoke_succeeded',
@@ -325,16 +332,22 @@ function checkFiles(root, files) {
     ':workflow_id pcea-deployment-rollout',
     ':status active',
     'mission_skill_context(resolve,skill=pcea,include_kb=false)',
+    'mission_infra_query(action=skill_evidence,target=pcea)',
     'pcea-video-vault',
     'pcea-api',
     '/Users/jinchen/Downloads/PCEA develop/pcea-video-vault',
     '/Users/jinchen/Downloads/PCEA develop/pcea-api',
     'deploy pcea-video-vault before pcea-api',
+    'reconcile-deployment-evidence',
+    'Secret Store health for ecs-agent claim auth',
+    'deploy-blocked-by-secret-store',
+    'PCEA deploy workers must read PCEA skill evidence and deployment SSOT before acting',
     'video-vault owns shared docker-compose.yml, deploy.sh, deploy-api.sh, and sql/ bundle files',
     'pcea-api image delivery is OSS bundle/local image tag',
     'Wait through EventBridge for deploy_started, deploy_succeeded, smoke_succeeded, deploy_failed, or smoke_failed',
     'No Cloudflare, DNS, secret, or production env mutation',
-    'The rollout report captures any skill drift, manifest gap, migration/manual step gap, or deploy-agent evidence gap',
+    'classify PCEA deployment as deploy-blocked-by-secret-store',
+    'The rollout report captures any skill drift, manifest gap, migration/manual step gap, Secret Store claim-auth dependency failure, or deploy-agent evidence gap',
   ]);
 
   requireAll(diagnostics, files.boardCleanupBatchRunner, sources.boardCleanupBatchRunner, [
@@ -1067,12 +1080,13 @@ Lisp 源: intent-flow.lisp`);
   :workflow_id m6-deployment-rollout
   :status active
   :source_plans [fixture]
-  :entry ["scripts/check-m6-deployment-status.mjs --json" "deploy-center /api/deploy/status" "deploy-center provenance endpoint"]
+  :entry ["scripts/check-m6-deployment-status.mjs --json" "mission_infra_query(action=skill_evidence|reconcile)" "deploy-center /api/deploy/status" "deploy-center provenance endpoint"]
   :steps
     ((step s1 :logic "classify deployed-current, deployed-stale, not-confirmed, or deployed-unknown")
-     (step s2 :logic "deploy-center first, then router, then pcea")
-     (step s3 :logic "context_intent=deploy-ops, task_class=deploy-ops, pool_hint=claude-code-deploy-ops, engine_hint=claude-code")
-     (step s4 :logic "wait for deploy_succeeded and smoke_succeeded with structured smoke commands; Shell sleep loops are forbidden; naked gh api polling loops are forbidden; xjp_build_wait/xjp_deploy_watch"))
+     (step s2 :logic "resolve-project-deployment-evidence and verify-executor-claim-dependencies from project deployment SSOT; deploy_executors.api_key_ref -> Secret Store DEPLOY_AGENT_API_KEY; deploy-blocked-by-secret-store; skill facts are evidence, deploy-center provenance is authority")
+     (step s3 :logic "deploy-center first, then router, then pcea")
+     (step s4 :logic "context_intent=deploy-ops, task_class=deploy-ops, pool_hint=claude-code-deploy-ops, engine_hint=claude-code")
+     (step s5 :logic "wait for deploy_succeeded and smoke_succeeded with structured smoke commands; Shell sleep loops are forbidden; naked gh api polling loops are forbidden; xjp_build_wait/xjp_deploy_watch"))
   :risk-gates
     ((gate g1 :rule "M6 maturity is not deployment evidence"))
   :completion ((criterion c1 :rule "deployment status verified")))`);
@@ -1081,7 +1095,7 @@ Lisp 源: intent-flow.lisp`);
   :workflow_id pcea-deployment-rollout
   :status active
   :source_plans [fixture]
-  :entry ["mission_skill_context(resolve,skill=pcea,include_kb=false)" "deploy-center provenance endpoint"]
+  :entry ["mission_skill_context(resolve,skill=pcea,include_kb=false)" "mission_infra_query(action=skill_evidence,target=pcea)" "deploy-center provenance endpoint"]
   :components
     ((component pcea-video-vault
        :repo "/Users/jinchen/Downloads/PCEA develop/pcea-video-vault"
@@ -1090,8 +1104,9 @@ Lisp 源: intent-flow.lisp`);
        :repo "/Users/jinchen/Downloads/PCEA develop/pcea-api"
        :deploy_slug pcea-api))
   :steps
-    ((step s1 :logic "deploy pcea-video-vault before pcea-api because video-vault owns shared docker-compose.yml, deploy.sh, deploy-api.sh, and sql/ bundle files")
-     (step s2 :logic "Wait through EventBridge for deploy_started, deploy_succeeded, smoke_succeeded, deploy_failed, or smoke_failed"))
+    ((step s1 :logic "reconcile-deployment-evidence before deployment; Secret Store health for ecs-agent claim auth; deploy-blocked-by-secret-store; PCEA deploy workers must read PCEA skill evidence and deployment SSOT before acting")
+     (step s2 :logic "deploy pcea-video-vault before pcea-api because video-vault owns shared docker-compose.yml, deploy.sh, deploy-api.sh, and sql/ bundle files")
+     (step s3 :logic "Wait through EventBridge for deploy_started, deploy_succeeded, smoke_succeeded, deploy_failed, or smoke_failed"))
   :risk-gates
     ((gate g1 :rule "No Cloudflare, DNS, secret, or production env mutation")
      (gate g2 :rule "pcea-api image delivery is OSS bundle/local image tag"))

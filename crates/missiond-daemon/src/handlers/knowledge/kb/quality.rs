@@ -15,7 +15,8 @@ pub(super) fn check_content_quality(
     if summary.chars().count() > max_chars {
         return Some(format!(
             "REJECTED: summary 过长（{}字）。summary 必须 ≤ {} 字，是结论性摘要。高密度技术细节（配置/命令/代码）请存入 detail 字段（JSON）。",
-            summary.chars().count(), max_chars
+            summary.chars().count(),
+            max_chars
         ));
     }
 

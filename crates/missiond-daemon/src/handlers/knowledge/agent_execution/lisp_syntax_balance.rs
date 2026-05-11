@@ -39,14 +39,14 @@ pub fn check_balance(src: &str) -> Result<()> {
                                 c as char,
                                 open as char,
                                 pos
-                            ))
+                            ));
                         }
                         None => {
                             return Err(anyhow!(
                                 "stray closing delimiter '{}' at byte {}",
                                 c as char,
                                 i
-                            ))
+                            ));
                         }
                     }
                 }

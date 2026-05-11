@@ -18,6 +18,7 @@ impl AppState {
         skill_name: &'a str,
         action_id: &'a str,
         dry_run: bool,
+        approve: bool,
         param_overrides: Option<Value>,
         depth: u32,
     ) -> std::pin::Pin<
@@ -87,10 +88,21 @@ impl AppState {
             let action_meta = actions.iter().find(|a| a.id == action_id);
             let requires_approval = action_meta.map(|a| a.requires_approval).unwrap_or(false);
 
-            if requires_approval && !dry_run {
+            if requires_approval && !dry_run && !approve {
+                let steps: Vec<WorkflowStepPreview> = workflow
+                    .steps
+                    .iter()
+                    .map(|s| WorkflowStepPreview {
+                        name: s.name.clone(),
+                        tool: s.tool.clone(),
+                        params: s.params.clone(),
+                    })
+                    .collect();
                 return Ok(WorkflowResult::PendingApproval {
                     action_id: action_id.to_string(),
                     skill: skill_name.to_string(),
+                    steps,
+                    next_step: "Show this preview to the user; rerun mission_skill_exec with approve=true only after explicit human approval.".to_string(),
                 });
             }
 

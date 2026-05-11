@@ -17,6 +17,7 @@ function parseArgs(argv) {
     vacuum: false,
     vacuumFull: false,
     json: false,
+    manifest: null,
     missionHome: process.env.MISSION_HOME || path.join(os.homedir(), '.xjp-mission'),
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -30,8 +31,9 @@ function parseArgs(argv) {
     else if (arg === '--vacuum-full') opts.vacuumFull = true;
     else if (arg === '--apply') opts.apply = true;
     else if (arg === '--json') opts.json = true;
+    else if (arg === '--manifest') opts.manifest = argv[++i];
     else if (arg === '--help' || arg === '-h') {
-      console.log('Usage: node scripts/cleanup-pty-diagnostics.mjs [--days 1] [--db missiond] [--mission-home ~/.xjp-mission] [--skip-files] [--skip-db] [--vacuum] [--vacuum-full] [--apply] [--json]');
+      console.log('Usage: node scripts/cleanup-pty-diagnostics.mjs [--days 1] [--db missiond] [--mission-home ~/.xjp-mission] [--skip-files] [--skip-db] [--vacuum] [--vacuum-full] [--apply] [--manifest path] [--json]');
       process.exit(0);
     } else {
       throw new Error(`unknown argument: ${arg}`);
@@ -41,6 +43,7 @@ function parseArgs(argv) {
     throw new Error(`--days must be a non-negative number, got ${opts.days}`);
   }
   opts.missionHome = path.resolve(opts.missionHome.replace(/^~(?=$|\/)/, os.homedir()));
+  if (opts.manifest) opts.manifest = path.resolve(opts.manifest.replace(/^~(?=$|\/)/, os.homedir()));
   return opts;
 }
 
@@ -290,6 +293,7 @@ function main() {
     if (opts.vacuum || opts.vacuumFull) vacuumDb(opts);
   }
   const dbAfter = opts.skipDb ? null : collectDb(opts);
+  const manifestPath = opts.manifest;
   const summary = {
     ok: true,
     mode: opts.apply ? 'apply' : 'dry-run',
@@ -297,6 +301,7 @@ function main() {
     db: opts.db,
     retention_days: opts.days,
     cutoff: result.cutoff,
+    manifest_path: manifestPath,
     files: {
       skipped: opts.skipFiles,
       candidates: result.candidates.length,
@@ -314,6 +319,10 @@ function main() {
       vacuum: opts.apply && (opts.vacuum || opts.vacuumFull) ? (opts.vacuumFull ? 'full' : 'analyze') : 'not-run',
     },
   };
+  if (manifestPath) {
+    fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
+    fs.writeFileSync(manifestPath, `${JSON.stringify(summary, null, 2)}\n`);
+  }
   if (opts.json) {
     console.log(JSON.stringify(summary, null, 2));
   } else {

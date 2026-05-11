@@ -75,7 +75,7 @@ pub(super) async fn action_execute(state: &AppState, args: &Value) -> Result<Too
             return Ok(ToolResult::structured_error(ToolError::new(
                 error_codes::INVALID_PARAM,
                 msg,
-            )))
+            )));
         }
     };
 
@@ -104,7 +104,7 @@ pub(super) async fn action_execute(state: &AppState, args: &Value) -> Result<Too
             return Ok(ToolResult::structured_error(ToolError::new(
                 error_codes::INVALID_PARAM,
                 msg,
-            )))
+            )));
         }
     };
     // DAG mode rejects sonnet_suggest at preflight (single-node-only in
@@ -125,7 +125,7 @@ pub(super) async fn action_execute(state: &AppState, args: &Value) -> Result<Too
             return Ok(ToolResult::structured_error(ToolError::new(
                 error_codes::NOT_FOUND,
                 format!("plan `{}` not found", id),
-            )))
+            )));
         }
     };
     if !matches!(plan.status, PlanStatus::Approved | PlanStatus::Executing) {
@@ -369,7 +369,7 @@ pub(super) async fn action_execute(state: &AppState, args: &Value) -> Result<Too
             return Ok(ToolResult::structured_error(ToolError::new(
                 e.code(),
                 e.message(),
-            )))
+            )));
         }
     };
     if let Some(input) = resume_input {

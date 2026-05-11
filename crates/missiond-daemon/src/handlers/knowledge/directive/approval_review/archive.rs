@@ -136,7 +136,7 @@ async fn action_archive_with_resolution(
             return Ok(ToolResult::structured_error(ToolError::new(
                 "REVIEW_ID_MALFORMED",
                 e.message(),
-            )))
+            )));
         }
     };
     let chain = state
@@ -150,7 +150,7 @@ async fn action_archive_with_resolution(
             return Ok(ToolResult::structured_error(ToolError::new(
                 error_codes::NOT_FOUND,
                 format!("directive `{}` not found for resolution", id),
-            )))
+            )));
         }
     };
     let current_version = head_directive.version;
@@ -284,7 +284,7 @@ async fn action_archive_with_policy_only(
             return Ok(ToolResult::structured_error(ToolError::new(
                 "REVIEW_ID_MALFORMED",
                 e.message(),
-            )))
+            )));
         }
     };
     let chain = state
@@ -298,7 +298,7 @@ async fn action_archive_with_policy_only(
             return Ok(ToolResult::structured_error(ToolError::new(
                 error_codes::NOT_FOUND,
                 format!("directive `{}` not found for resolution", id),
-            )))
+            )));
         }
     };
     let current_version = head_directive.version;

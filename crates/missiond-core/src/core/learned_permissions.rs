@@ -27,6 +27,14 @@ pub struct LearnedPermission {
     pub last_used_at: Option<String>,
     #[serde(default)]
     pub use_count: i64,
+    #[serde(default)]
+    pub source_evidence: Option<String>,
+    #[serde(default)]
+    pub expires_at: Option<String>,
+    #[serde(default)]
+    pub renew_policy: Option<String>,
+    #[serde(default)]
+    pub audit_trail: Vec<String>,
 }
 
 /// Composite key for HashMap lookup
@@ -42,6 +50,7 @@ struct PermKey {
 /// Bash is here because "allow ALL Bash" is too dangerous, but specific subcommand patterns
 /// (e.g. `python3:*`, `npm test:*`) are exactly what users want to persist.
 const REQUIRES_PARAM_PATTERN: &[&str] = &["Bash"];
+const DEFAULT_PERMISSION_TTL_DAYS: i64 = 30;
 
 /// Learned Permissions — in-memory store with YAML persistence.
 pub struct LearnedPermissions {
@@ -53,6 +62,27 @@ pub struct LearnedPermissions {
 }
 
 impl LearnedPermissions {
+    fn now_string() -> String {
+        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()
+    }
+
+    fn default_expiry_string() -> String {
+        (chrono::Utc::now() + chrono::Duration::days(DEFAULT_PERMISSION_TTL_DAYS))
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string()
+    }
+
+    fn is_expired_permission(permission: &LearnedPermission) -> bool {
+        let Some(expires_at) = permission.expires_at.as_deref() else {
+            // Legacy permissions did not carry an expiry. Keep them readable until
+            // they are touched, then refresh into the TTL regime.
+            return false;
+        };
+        chrono::NaiveDateTime::parse_from_str(expires_at, "%Y-%m-%d %H:%M:%S")
+            .map(|dt| dt.and_utc() < chrono::Utc::now())
+            .unwrap_or(false)
+    }
+
     /// Load from YAML file (or create empty if not found).
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
         let source_path = path.as_ref();
@@ -148,13 +178,23 @@ impl LearnedPermissions {
             param_pattern: param.clone(),
         };
 
-        let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let now = Self::now_string();
+        let expires_at = Self::default_expiry_string();
 
         {
             let mut entries = self.entries.write().unwrap();
             if let Some(existing) = entries.get_mut(&key) {
                 existing.decision = decision.to_string();
-                existing.learned_at = now;
+                existing.learned_at = now.clone();
+                existing.expires_at = Some(expires_at.clone());
+                existing.renew_policy = Some("use-renews".to_string());
+                existing
+                    .source_evidence
+                    .get_or_insert_with(|| "provider-confirmation".to_string());
+                existing.audit_trail.push(format!(
+                    "{} renewed decision={} source=provider-confirmation",
+                    now, decision
+                ));
                 existing.use_count += 1;
             } else {
                 let mut next_id = self.next_id.write().unwrap();
@@ -169,9 +209,16 @@ impl LearnedPermissions {
                         tool_pattern: tool_pattern.to_string(),
                         decision: decision.to_string(),
                         param_pattern: Some(param),
-                        learned_at: now,
+                        learned_at: now.clone(),
                         last_used_at: None,
                         use_count: 1,
+                        source_evidence: Some("provider-confirmation".to_string()),
+                        expires_at: Some(expires_at),
+                        renew_policy: Some("use-renews".to_string()),
+                        audit_trail: vec![format!(
+                            "{} learned decision={} source=provider-confirmation",
+                            now, decision
+                        )],
                     },
                 );
             }
@@ -193,7 +240,11 @@ impl LearnedPermissions {
         let entries = self.entries.read().unwrap();
         let mut result: Vec<LearnedPermission> = entries
             .values()
-            .filter(|p| p.scope_type == scope_type && p.scope_id == scope_id)
+            .filter(|p| {
+                p.scope_type == scope_type
+                    && p.scope_id == scope_id
+                    && !Self::is_expired_permission(p)
+            })
             .cloned()
             .collect();
         result.sort_by(|a, b| b.use_count.cmp(&a.use_count));
@@ -277,7 +328,11 @@ impl LearnedPermissions {
                     && k.scope_id == scope_id
                     && k.tool_pattern == tool_name
                 {
-                    Some((k.clone(), v.decision.clone()))
+                    if Self::is_expired_permission(v) {
+                        None
+                    } else {
+                        Some((k.clone(), v.decision.clone()))
+                    }
                 } else {
                     None
                 }
@@ -288,8 +343,13 @@ impl LearnedPermissions {
             // Slow path: write lock to update usage stats (only on match)
             if let Ok(mut entries) = self.entries.write() {
                 if let Some(entry) = entries.get_mut(&key) {
-                    let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-                    entry.last_used_at = Some(now);
+                    let now = Self::now_string();
+                    entry.last_used_at = Some(now.clone());
+                    entry.expires_at = Some(Self::default_expiry_string());
+                    entry.renew_policy = Some("use-renews".to_string());
+                    entry
+                        .audit_trail
+                        .push(format!("{} matched; ttl renewed", now));
                     entry.use_count += 1;
                 }
             }
@@ -329,7 +389,11 @@ impl LearnedPermissions {
 
     pub fn get_all(&self) -> Result<Vec<LearnedPermission>> {
         let entries = self.entries.read().unwrap();
-        let mut result: Vec<LearnedPermission> = entries.values().cloned().collect();
+        let mut result: Vec<LearnedPermission> = entries
+            .values()
+            .filter(|p| !Self::is_expired_permission(p))
+            .cloned()
+            .collect();
         result.sort_by(|a, b| b.use_count.cmp(&a.use_count));
         Ok(result)
     }

@@ -77,6 +77,117 @@ fn kb_row_to_entry(r: KBRow) -> KnowledgeEntry {
 
 /// Utility hit boost constant (same as MissionDB::UTILITY_HIT_BOOST).
 const UTILITY_HIT_BOOST: f64 = 0.15;
+const FUZZY_MERGE_THRESHOLD: f64 = 0.5;
+const SAME_SESSION_FUZZY_MERGE_THRESHOLD: f64 = 0.35;
+
+fn json_array_values(value: Option<&serde_json::Value>) -> Vec<serde_json::Value> {
+    match value {
+        Some(serde_json::Value::Array(values)) => values.clone(),
+        Some(value) if !value.is_null() => vec![value.clone()],
+        _ => Vec::new(),
+    }
+}
+
+fn push_unique_json(values: &mut Vec<serde_json::Value>, value: serde_json::Value) {
+    if !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
+}
+
+fn source_session_from_detail(detail: Option<&serde_json::Value>) -> Option<String> {
+    let obj = detail?.as_object()?;
+    [
+        "source_session",
+        "sourceSession",
+        "source_sessions",
+        "sourceSessions",
+    ]
+    .iter()
+    .find_map(|key| {
+        obj.get(*key).and_then(|value| match value {
+            serde_json::Value::String(s) if !s.trim().is_empty() => Some(s.clone()),
+            serde_json::Value::Array(values) => values.iter().find_map(|item| {
+                item.as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(ToOwned::to_owned)
+            }),
+            _ => None,
+        })
+    })
+}
+
+fn same_source_session(
+    left: Option<&serde_json::Value>,
+    right: Option<&serde_json::Value>,
+) -> bool {
+    match (
+        source_session_from_detail(left),
+        source_session_from_detail(right),
+    ) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
+fn merge_detail_for_dedupe(
+    existing: Option<serde_json::Value>,
+    incoming: Option<serde_json::Value>,
+    incoming_key: &str,
+    incoming_source: &str,
+    merged_at: &str,
+    similarity: f64,
+) -> Option<serde_json::Value> {
+    let mut base = match existing {
+        Some(serde_json::Value::Object(obj)) => obj,
+        Some(other) => {
+            let mut obj = serde_json::Map::new();
+            obj.insert("previous_detail".to_string(), other);
+            obj
+        }
+        None => serde_json::Map::new(),
+    };
+
+    if let Some(serde_json::Value::Object(incoming_obj)) = incoming {
+        for (key, value) in incoming_obj {
+            if matches!(
+                key.as_str(),
+                "evidence_refs"
+                    | "source_sessions"
+                    | "sourceSessions"
+                    | "consolidated_from"
+                    | "superseded_by"
+                    | "supersededBy"
+            ) {
+                let mut merged = json_array_values(base.get(&key));
+                for item in json_array_values(Some(&value)) {
+                    push_unique_json(&mut merged, item);
+                }
+                base.insert(key, serde_json::Value::Array(merged));
+            } else {
+                base.entry(key).or_insert(value);
+            }
+        }
+    }
+
+    let mut merge_events = json_array_values(base.get("_dedupe_merge_events"));
+    push_unique_json(
+        &mut merge_events,
+        serde_json::json!({
+            "incoming_key": incoming_key,
+            "incoming_source": incoming_source,
+            "merged_at": merged_at,
+            "similarity": similarity,
+            "gate": "kb_remember.shared_dedupe_gate"
+        }),
+    );
+    base.insert(
+        "_dedupe_merge_events".to_string(),
+        serde_json::Value::Array(merge_events),
+    );
+
+    Some(serde_json::Value::Object(base))
+}
 
 /// The common SELECT column list for knowledge entries.
 const KB_COLS: &str = "id, category, key, summary, detail, source, confidence, access_count, created_at, updated_at, last_accessed_at, linked_task_id, kb_type, scope_task_id, utility_score, project_id";
@@ -229,15 +340,23 @@ impl KbStore for PgMissionStore {
             });
         }
 
-        // 2. Fuzzy dedup: check for similar entries in same category
-        const SIMILARITY_THRESHOLD: f64 = 0.5;
+        // 2. Shared dedupe gate: check for similar entries in same category.
+        // The gate is intentionally in the core store so realtime extraction,
+        // deep-analysis, manual MCP writes, and internal learning workers share
+        // one merge path instead of racing two active KB keys for one topic.
         let candidates = self.pg_list_by_category(&input.category).await?;
         let new_text = format!("{} {}", input.key, input.summary);
         let mut best: Option<(f64, KnowledgeEntry)> = None;
         for entry in candidates {
             let existing_text = format!("{} {}", entry.key, entry.summary);
             let sim = token_jaccard_similarity(&new_text, &existing_text);
-            if sim >= SIMILARITY_THRESHOLD {
+            let same_session = same_source_session(input.detail.as_ref(), entry.detail.as_ref());
+            let threshold = if same_session {
+                SAME_SESSION_FUZZY_MERGE_THRESHOLD
+            } else {
+                FUZZY_MERGE_THRESHOLD
+            };
+            if sim >= threshold {
                 match &best {
                     None => best = Some((sim, entry)),
                     Some((best_sim, _)) if sim > *best_sim => best = Some((sim, entry)),
@@ -247,15 +366,27 @@ impl KbStore for PgMissionStore {
         }
 
         if let Some((sim, existing)) = best {
+            let merged_detail = merge_detail_for_dedupe(
+                existing.detail.clone(),
+                input.detail.clone(),
+                &input.key,
+                source,
+                &now,
+                sim,
+            );
+            let merged_detail_str = merged_detail
+                .as_ref()
+                .map(|d| serde_json::to_string(d).unwrap_or_default());
+            let merged_confidence = existing.confidence.max(confidence);
             sqlx::query(
                 "UPDATE knowledge SET summary = $1, detail = $2, source = $3, confidence = $4, updated_at = $5,
                  utility_score = GREATEST(utility_score, 0.8)
                  WHERE id = $6"
             )
             .bind(&input.summary)
-            .bind(&detail_str)
+            .bind(&merged_detail_str)
             .bind(source)
-            .bind(confidence)
+            .bind(merged_confidence)
             .bind(&now)
             .bind(&existing.id)
             .execute(&self.pool)
@@ -2128,5 +2259,72 @@ impl PgMissionStore {
         }
         let rows = q.fetch_all(&self.pool).await?;
         Ok(rows.into_iter().map(kb_row_to_entry).collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn same_source_session_accepts_camel_and_snake_case_details() {
+        let a = serde_json::json!({"source_session": "session-a"});
+        let b = serde_json::json!({"sourceSessions": ["session-a", "session-b"]});
+        let c = serde_json::json!({"sourceSession": "session-c"});
+
+        assert!(same_source_session(Some(&a), Some(&b)));
+        assert!(!same_source_session(Some(&a), Some(&c)));
+    }
+
+    #[test]
+    fn merge_detail_for_dedupe_preserves_evidence_and_supersession_arrays() {
+        let existing = serde_json::json!({
+            "evidence_refs": ["lisp://old"],
+            "superseded_by": ["kb-old"],
+            "source_sessions": ["session-a"],
+            "stable": true
+        });
+        let incoming = serde_json::json!({
+            "evidence_refs": ["lisp://old", "code://new"],
+            "superseded_by": "kb-new",
+            "source_sessions": ["session-b"],
+            "stable": false,
+            "incoming_only": true
+        });
+
+        let merged = merge_detail_for_dedupe(
+            Some(existing),
+            Some(incoming),
+            "memory:new",
+            "deep-analysis",
+            "2026-05-11T00:00:00Z",
+            0.77,
+        )
+        .expect("merged detail");
+
+        let obj = merged.as_object().expect("object");
+        assert_eq!(obj.get("stable").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            obj.get("incoming_only").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            obj.get("evidence_refs")
+                .and_then(|v| v.as_array())
+                .map(Vec::len),
+            Some(2)
+        );
+        assert_eq!(
+            obj.get("superseded_by")
+                .and_then(|v| v.as_array())
+                .map(Vec::len),
+            Some(2)
+        );
+        assert_eq!(
+            obj.get("_dedupe_merge_events")
+                .and_then(|v| v.as_array())
+                .map(Vec::len),
+            Some(1)
+        );
     }
 }

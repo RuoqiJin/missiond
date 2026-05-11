@@ -28,7 +28,7 @@ pub(super) async fn action_compile(state: &AppState, args: &Value) -> Result<Too
             return Ok(ToolResult::structured_error(
                 ToolError::new(error_codes::MISSING_PARAM, "compile requires `utterance`")
                     .with_suggestion("provide the user utterance to compile into a lisp directive"),
-            ))
+            ));
         }
     };
     let source = args
@@ -380,7 +380,7 @@ async fn action_compile_sonnet(
         Err(SexpValidationError { code, reason, hint }) => {
             return Ok(ToolResult::structured_error(
                 ToolError::new(code, reason).with_suggestion(hint),
-            ))
+            ));
         }
     };
     let compiler_model = load_sonnet_compiler_model()?;

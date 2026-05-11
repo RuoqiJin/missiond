@@ -86,7 +86,7 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
                     "mission_request requires `action`",
                 )
                 .with_suggestion("actions: start|advance|status|respond"),
-            ))
+            ));
         }
     };
 
@@ -112,7 +112,7 @@ async fn action_start(state: &AppState, args: &Value) -> Result<ToolResult> {
             return Ok(ToolResult::structured_error(
                 ToolError::new(error_codes::MISSING_PARAM, "start requires `message`")
                     .with_suggestion("pass the user need / external request body as message"),
-            ))
+            ));
         }
     };
 
@@ -280,7 +280,7 @@ async fn action_status(state: &AppState, args: &Value) -> Result<ToolResult> {
                     .with_suggestion(
                         "pass the request_id returned by mission_request(action=start)",
                     ),
-            ))
+            ));
         }
     };
     let root = match resolve_request_project_root(state, args).await {
@@ -289,7 +289,7 @@ async fn action_status(state: &AppState, args: &Value) -> Result<ToolResult> {
             return Ok(ToolResult::structured_error(
                 ToolError::new(error_codes::INVALID_PARAM, reason)
                     .with_suggestion("pass project, absolute cwd, or target_project"),
-            ))
+            ));
         }
     };
     let paths = request_paths_for(&root, &request_id);
@@ -302,7 +302,7 @@ async fn action_status(state: &AppState, args: &Value) -> Result<ToolResult> {
                     format!("failed to read {}: {}", paths.request.display(), e),
                 )
                 .with_suggestion("check request_id and project/cwd resolution"),
-            ))
+            ));
         }
     };
 

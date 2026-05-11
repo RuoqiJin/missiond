@@ -119,7 +119,7 @@ pub(super) async fn action_resolve_review(state: &AppState, args: &Value) -> Res
             return Ok(ToolResult::structured_error(ToolError::new(
                 "REVIEW_ID_MALFORMED",
                 e.message(),
-            )))
+            )));
         }
     };
 
@@ -214,7 +214,7 @@ async fn action_resolve_review_with_policy_only(
             return Ok(ToolResult::structured_error(ToolError::new(
                 "REVIEW_ID_MALFORMED",
                 e.message(),
-            )))
+            )));
         }
     };
     if let Err(e) = validate_review_resolution_envelope(
@@ -306,7 +306,7 @@ async fn action_resolve_review_persisted(
             return Ok(ToolResult::structured_error(ToolError::new(
                 error_codes::NOT_FOUND,
                 format!("workflow `{}` not found for resolution", workflow_id),
-            )))
+            )));
         }
     };
 

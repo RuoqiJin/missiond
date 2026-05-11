@@ -499,7 +499,7 @@ async fn action_compile_sonnet(state: &AppState, args: &Value) -> Result<ToolRes
         Err(SexpValidationError { code, reason, hint }) => {
             return Ok(ToolResult::structured_error(
                 ToolError::new(code, reason).with_suggestion(hint),
-            ))
+            ));
         }
     };
     let sexp_hash = sha256_hex(&compiled_sexp);

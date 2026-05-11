@@ -142,7 +142,7 @@ pub(super) fn classify_projection_target(meta: &PipelineMeta) -> ProjectionTarge
     if let Some(stage) = meta.pipeline_stage.as_deref() {
         match stage {
             "s1_message_intake" | "s3_alignment_review_gate" => {
-                return ProjectionTarget::IntentAlignment
+                return ProjectionTarget::IntentAlignment;
             }
             "s4_plan_authoring" | "s5_plan_review_gate" => return ProjectionTarget::Plan,
             "s6_execution_runner" => return ProjectionTarget::Execute,
@@ -272,13 +272,13 @@ pub(super) fn plan_projection(
             return ProjectionPlan::Skip {
                 status: ProjectionStatus::SkippedExecuteStage,
                 kind: None,
-            }
+            };
         }
         ProjectionTarget::Unknown => {
             return ProjectionPlan::Skip {
                 status: ProjectionStatus::SkippedUnknownStage,
                 kind: None,
-            }
+            };
         }
     };
     match extract_projected_sexp(inner_payload) {

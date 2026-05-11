@@ -510,6 +510,11 @@ impl ConversationStore for PgMissionStore {
             "SELECT * FROM conversations
              WHERE status = 'completed'
                AND conversation_type = 'user'
+               AND (slot_id IS NULL OR (
+                   slot_id NOT LIKE 'slot-memory%'
+                   AND slot_id NOT LIKE 'slot-diagnosis%'
+                   AND slot_id NOT LIKE 'agent-%'
+               ))
                AND ended_at < (NOW() - INTERVAL '5 minutes')::text
                AND analysis_retries < $1
                AND (analyzed_at IS NULL OR analysis_version < $2)
@@ -519,6 +524,11 @@ impl ConversationStore for PgMissionStore {
              SELECT * FROM conversations
              WHERE status = 'compacted'
                AND conversation_type = 'user'
+               AND (slot_id IS NULL OR (
+                   slot_id NOT LIKE 'slot-memory%'
+                   AND slot_id NOT LIKE 'slot-diagnosis%'
+                   AND slot_id NOT LIKE 'agent-%'
+               ))
                AND analysis_retries < $1
                AND (analyzed_at IS NULL OR analysis_version < $2)
 
@@ -527,6 +537,11 @@ impl ConversationStore for PgMissionStore {
              SELECT * FROM conversations
              WHERE status = 'active'
                AND conversation_type = 'user'
+               AND (slot_id IS NULL OR (
+                   slot_id NOT LIKE 'slot-memory%'
+                   AND slot_id NOT LIKE 'slot-diagnosis%'
+                   AND slot_id NOT LIKE 'agent-%'
+               ))
                AND analysis_retries < $1
                AND EXISTS (
                    SELECT 1 FROM conversation_messages m
@@ -557,6 +572,11 @@ impl ConversationStore for PgMissionStore {
                 SELECT 1 FROM conversations
                 WHERE status = 'completed'
                   AND conversation_type = 'user'
+                  AND (slot_id IS NULL OR (
+                      slot_id NOT LIKE 'slot-memory%'
+                      AND slot_id NOT LIKE 'slot-diagnosis%'
+                      AND slot_id NOT LIKE 'agent-%'
+                  ))
                   AND ended_at < (NOW() - INTERVAL '5 minutes')::text
                   AND analysis_retries < $1
                   AND (analyzed_at IS NULL OR analysis_version < $2)
@@ -566,6 +586,11 @@ impl ConversationStore for PgMissionStore {
                 SELECT 1 FROM conversations
                 WHERE status = 'compacted'
                   AND conversation_type = 'user'
+                  AND (slot_id IS NULL OR (
+                      slot_id NOT LIKE 'slot-memory%'
+                      AND slot_id NOT LIKE 'slot-diagnosis%'
+                      AND slot_id NOT LIKE 'agent-%'
+                  ))
                   AND analysis_retries < $1
                   AND (analyzed_at IS NULL OR analysis_version < $2)
 
@@ -574,6 +599,11 @@ impl ConversationStore for PgMissionStore {
                 SELECT 1 FROM conversations
                 WHERE status = 'active'
                   AND conversation_type = 'user'
+                  AND (slot_id IS NULL OR (
+                      slot_id NOT LIKE 'slot-memory%'
+                      AND slot_id NOT LIKE 'slot-diagnosis%'
+                      AND slot_id NOT LIKE 'agent-%'
+                  ))
                   AND analysis_retries < $1
                   AND EXISTS (
                       SELECT 1 FROM conversation_messages m
@@ -603,6 +633,11 @@ impl ConversationStore for PgMissionStore {
                 SELECT id FROM conversations
                 WHERE status = 'completed'
                   AND conversation_type = 'user'
+                  AND (slot_id IS NULL OR (
+                      slot_id NOT LIKE 'slot-memory%'
+                      AND slot_id NOT LIKE 'slot-diagnosis%'
+                      AND slot_id NOT LIKE 'agent-%'
+                  ))
                   AND ended_at < (NOW() - INTERVAL '5 minutes')::text
                   AND analysis_retries < $1
                   AND (analyzed_at IS NULL OR analysis_version < $2)
@@ -612,6 +647,11 @@ impl ConversationStore for PgMissionStore {
                 SELECT id FROM conversations
                 WHERE status = 'compacted'
                   AND conversation_type = 'user'
+                  AND (slot_id IS NULL OR (
+                      slot_id NOT LIKE 'slot-memory%'
+                      AND slot_id NOT LIKE 'slot-diagnosis%'
+                      AND slot_id NOT LIKE 'agent-%'
+                  ))
                   AND analysis_retries < $1
                   AND (analyzed_at IS NULL OR analysis_version < $2)
 
@@ -620,6 +660,11 @@ impl ConversationStore for PgMissionStore {
                 SELECT id FROM conversations
                 WHERE status = 'active'
                   AND conversation_type = 'user'
+                  AND (slot_id IS NULL OR (
+                      slot_id NOT LIKE 'slot-memory%'
+                      AND slot_id NOT LIKE 'slot-diagnosis%'
+                      AND slot_id NOT LIKE 'agent-%'
+                  ))
                   AND analysis_retries < $1
                   AND EXISTS (
                       SELECT 1 FROM conversation_messages m
@@ -643,6 +688,11 @@ impl ConversationStore for PgMissionStore {
         let (count,): (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM conversations c
              WHERE c.conversation_type = 'user'
+               AND (c.slot_id IS NULL OR (
+                   c.slot_id NOT LIKE 'slot-memory%'
+                   AND c.slot_id NOT LIKE 'slot-diagnosis%'
+                   AND c.slot_id NOT LIKE 'agent-%'
+               ))
                AND EXISTS (
                    SELECT 1
                    FROM conversation_messages m
@@ -664,6 +714,11 @@ impl ConversationStore for PgMissionStore {
                  FROM conversation_messages m
                  JOIN conversations c ON c.id = m.session_id
                  WHERE c.conversation_type = 'user'
+                   AND (c.slot_id IS NULL OR (
+                       c.slot_id NOT LIKE 'slot-memory%'
+                       AND c.slot_id NOT LIKE 'slot-diagnosis%'
+                       AND c.slot_id NOT LIKE 'agent-%'
+                   ))
                    AND m.timestamp > COALESCE(c.realtime_forwarded_at, c.started_at)::timestamptz
                    AND m.role IN ('user', 'assistant')
                  ORDER BY m.timestamp ASC
@@ -689,6 +744,11 @@ impl ConversationStore for PgMissionStore {
             "SELECT id, COALESCE(ended_at, '[active]'), analysis_retries FROM conversations
              WHERE status = 'completed'
                AND conversation_type = 'user'
+               AND (slot_id IS NULL OR (
+                   slot_id NOT LIKE 'slot-memory%'
+                   AND slot_id NOT LIKE 'slot-diagnosis%'
+                   AND slot_id NOT LIKE 'agent-%'
+               ))
                AND ended_at < (NOW() - INTERVAL '5 minutes')::text
                AND analysis_retries < $1
                AND (analyzed_at IS NULL OR analysis_version < $2)
@@ -698,6 +758,11 @@ impl ConversationStore for PgMissionStore {
              SELECT id, '[checkpoint]', analysis_retries FROM conversations
              WHERE status = 'active'
                AND conversation_type = 'user'
+               AND (slot_id IS NULL OR (
+                   slot_id NOT LIKE 'slot-memory%'
+                   AND slot_id NOT LIKE 'slot-diagnosis%'
+                   AND slot_id NOT LIKE 'agent-%'
+               ))
                AND analysis_retries < $1
                AND EXISTS (
                    SELECT 1 FROM conversation_messages m

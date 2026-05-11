@@ -7,6 +7,17 @@ use crate::context::v3_blueprint_runtime::ConversationIngestionRuntimeConfig;
 use crate::lenient;
 use crate::state::AppState;
 
+fn compact_preview(content: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for ch in content.chars().take(max_chars) {
+        out.push(ch);
+    }
+    if content.chars().count() > max_chars {
+        out.push('…');
+    }
+    out
+}
+
 fn load_conversation_config() -> Result<ConversationIngestionRuntimeConfig> {
     ConversationIngestionRuntimeConfig::load_for_current_dir()
         .map_err(|err| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", err))
@@ -362,6 +373,127 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                 result["turns"] = serde_json::json!(items);
             }
             Ok(ToolResult::json(&result))
+        }
+
+        "mission_conversation_analysis_context" => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                #[serde(alias = "session_id")]
+                session_id: String,
+                #[serde(default, deserialize_with = "lenient::option_i64", alias = "max_turns")]
+                max_turns: Option<i64>,
+                #[serde(default, deserialize_with = "lenient::option_i64", alias = "max_chars")]
+                max_chars: Option<i64>,
+            }
+            let Args {
+                session_id,
+                max_turns,
+                max_chars,
+            } = serde_json::from_value(args)?;
+            let max_turns = max_turns.unwrap_or(30).clamp(1, 100);
+            let max_chars = max_chars.unwrap_or(240).clamp(80, 1000) as usize;
+            let conv = state
+                .store
+                .get_conversation(&session_id)
+                .await
+                .map_err(|e| anyhow!("DB error: {}", e))?;
+            let msgs = state
+                .store
+                .get_conversation_messages(&session_id, None, (max_turns * 8).max(50))
+                .await
+                .map_err(|e| anyhow!("DB error: {}", e))?;
+            let turns = state
+                .store
+                .get_turns_after(&session_id, -1)
+                .await
+                .unwrap_or_default();
+            let conversation_type = conv
+                .as_ref()
+                .map(|c| c.conversation_type.clone())
+                .unwrap_or_else(|| "unknown".to_string());
+            let is_human_read_model = matches!(
+                conversation_type.as_str(),
+                "user" | "jarvis" | "codex_chat" | "gemini_chat"
+            );
+
+            let mut role_counts = serde_json::Map::new();
+            let mut tool_counts = serde_json::Map::new();
+            let mut user_utterances = Vec::new();
+            let mut assistant_samples = Vec::new();
+            let mut worker_or_meta_messages = 0usize;
+
+            for msg in &msgs {
+                let role_count = role_counts
+                    .entry(msg.role.clone())
+                    .or_insert_with(|| serde_json::json!(0));
+                *role_count = serde_json::json!(role_count.as_i64().unwrap_or(0) + 1);
+
+                if let Some(tool_name) = msg.tool_name.as_deref() {
+                    for tool in tool_name
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        let entry = tool_counts
+                            .entry(tool.to_string())
+                            .or_insert_with(|| serde_json::json!(0));
+                        *entry = serde_json::json!(entry.as_i64().unwrap_or(0) + 1);
+                    }
+                }
+
+                if msg.role == "user" && is_human_read_model {
+                    user_utterances.push(serde_json::json!({
+                        "id": msg.id,
+                        "timestamp": msg.timestamp,
+                        "content": compact_preview(&msg.content, max_chars),
+                    }));
+                } else if msg.role == "assistant" && assistant_samples.len() < 12 {
+                    assistant_samples.push(serde_json::json!({
+                        "id": msg.id,
+                        "timestamp": msg.timestamp,
+                        "content": compact_preview(&msg.content, max_chars),
+                    }));
+                } else if msg.role == "worker_user"
+                    || msg.role == "agent_user"
+                    || msg.role == "system"
+                    || !is_human_read_model
+                {
+                    worker_or_meta_messages += 1;
+                }
+            }
+
+            let mut turn_items = Vec::new();
+            for turn in turns.iter().rev().take(max_turns as usize).rev() {
+                turn_items.push(serde_json::json!({
+                    "turnIdx": turn.turn_idx,
+                    "startMessageId": turn.start_message_id,
+                    "endMessageId": turn.end_message_id,
+                    "userContent": turn.user_content.as_deref().map(|s| compact_preview(s, max_chars)),
+                    "toolNames": turn.tool_names,
+                    "toolCallCount": turn.tool_call_count,
+                    "messageCount": turn.message_count,
+                    "topic": turn.topic,
+                    "startedAt": turn.started_at,
+                    "endedAt": turn.ended_at,
+                }));
+            }
+
+            Ok(ToolResult::json(&serde_json::json!({
+                "schema": "missiond.conversation.analysis_context.v1",
+                "sessionId": session_id,
+                "conversation": conv,
+                "conversationType": conversation_type,
+                "isHumanReadModel": is_human_read_model,
+                "roleCounts": role_counts,
+                "toolCounts": tool_counts,
+                "userUtterances": user_utterances,
+                "assistantSamples": assistant_samples,
+                "workerOrMetaMessageCount": worker_or_meta_messages,
+                "turns": turn_items,
+                "limits": { "maxTurns": max_turns, "maxChars": max_chars },
+                "policy": "bounded read model; worker/provider chatter is counted but not used as user intent",
+            })))
         }
 
         "mission_conversation_search" => {

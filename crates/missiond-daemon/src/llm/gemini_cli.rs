@@ -402,7 +402,8 @@ impl GeminiCli {
             if auth_config.mode == "google" && is_auth_error(exit_code, &stderr_msg) {
                 return Err(anyhow!(
                     "Gemini CLI: OAuth auth failed (exit {}). Run `gemini` to re-authenticate or switch to apikey mode. stderr: {}",
-                    exit_code.unwrap_or(-1), stderr_msg
+                    exit_code.unwrap_or(-1),
+                    stderr_msg
                 ));
             }
 

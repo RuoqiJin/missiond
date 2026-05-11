@@ -6,6 +6,46 @@ use crate::state::AppState;
 
 use super::args::{KBKeyArgs, KBListArgs, KBSearchArgs};
 
+fn parse_excluded_categories(value: Option<&Value>) -> Vec<String> {
+    match value {
+        Some(Value::String(s)) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                Vec::new()
+            } else {
+                vec![trimmed.to_string()]
+            }
+        }
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|item| item.as_str())
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn category_is_excluded(category: &str, excluded: &[String]) -> bool {
+    excluded
+        .iter()
+        .any(|needle| category == needle || category.starts_with(&format!("{needle}:")))
+}
+
+fn filter_entries_by_excluded_categories(
+    entries: Vec<missiond_core::types::KnowledgeEntry>,
+    excluded: &[String],
+) -> Vec<missiond_core::types::KnowledgeEntry> {
+    if excluded.is_empty() {
+        return entries;
+    }
+    entries
+        .into_iter()
+        .filter(|entry| !category_is_excluded(&entry.category, excluded))
+        .collect()
+}
+
 fn review_state_hidden(state: &str) -> bool {
     matches!(
         state,
@@ -97,6 +137,7 @@ pub(super) async fn handle_kb_search(state: &AppState, args: Value) -> Result<To
     let KBSearchArgs {
         query,
         category,
+        exclude_category,
         limit,
         offset,
         search_mode,
@@ -106,6 +147,7 @@ pub(super) async fn handle_kb_search(state: &AppState, args: Value) -> Result<To
     } = serde_json::from_value(args).unwrap_or(KBSearchArgs {
         query: None,
         category: None,
+        exclude_category: None,
         limit: None,
         offset: None,
         search_mode: None,
@@ -113,6 +155,7 @@ pub(super) async fn handle_kb_search(state: &AppState, args: Value) -> Result<To
         include_archived: false,
         state_filter: None,
     });
+    let excluded_categories = parse_excluded_categories(exclude_category.as_ref());
     let query = query.unwrap_or_default();
     if query.is_empty() && category.is_none() {
         let entries = state
@@ -123,6 +166,7 @@ pub(super) async fn handle_kb_search(state: &AppState, args: Value) -> Result<To
         let entries =
             filter_entries_by_review(state, entries, include_archived, state_filter.as_deref())
                 .await;
+        let entries = filter_entries_by_excluded_categories(entries, &excluded_categories);
         return Ok(ToolResult::json_pretty(&entries));
     }
 
@@ -268,6 +312,7 @@ pub(super) async fn handle_kb_search(state: &AppState, args: Value) -> Result<To
     };
     results =
         filter_entries_by_review(state, results, include_archived, state_filter.as_deref()).await;
+    results = filter_entries_by_excluded_categories(results, &excluded_categories);
     results.retain(|entry| {
         !suppress_for_sensitive_retrieval(entry, sensitive_retrieval, category.as_deref())
     });
@@ -359,7 +404,9 @@ pub(super) async fn handle_kb_get(state: &AppState, args: Value) -> Result<ToolR
                 return Ok(ToolResult::error(format!(
                     "Key is archived by KB review overlay: {} (state={}). Re-run with include_archived=true to inspect it.",
                     key,
-                    review.map(|r| r.state).unwrap_or_else(|| "unknown".to_string())
+                    review
+                        .map(|r| r.state)
+                        .unwrap_or_else(|| "unknown".to_string())
                 )));
             }
             Ok(ToolResult::json_pretty(&e))
@@ -371,12 +418,14 @@ pub(super) async fn handle_kb_get(state: &AppState, args: Value) -> Result<ToolR
 pub(super) async fn handle_kb_list(state: &AppState, args: Value) -> Result<ToolResult> {
     let args_parsed: KBListArgs = serde_json::from_value(args).unwrap_or(KBListArgs {
         category: None,
+        exclude_category: None,
         limit: 50,
         offset: 0,
         compact: false,
         include_archived: false,
         state_filter: None,
     });
+    let excluded_categories = parse_excluded_categories(args_parsed.exclude_category.as_ref());
     let entries = state
         .store
         .kb_list_paginated(
@@ -393,6 +442,7 @@ pub(super) async fn handle_kb_list(state: &AppState, args: Value) -> Result<Tool
         args_parsed.state_filter.as_deref(),
     )
     .await;
+    let entries = filter_entries_by_excluded_categories(entries, &excluded_categories);
 
     if args_parsed.compact {
         let compact: Vec<serde_json::Value> = entries
@@ -426,7 +476,10 @@ mod tests {
     use missiond_core::types::KnowledgeEntry;
     use serde_json::json;
 
-    use super::{is_sensitive_retrieval_intent, suppress_for_sensitive_retrieval};
+    use super::{
+        category_is_excluded, is_sensitive_retrieval_intent, parse_excluded_categories,
+        suppress_for_sensitive_retrieval,
+    };
 
     fn entry(category: &str) -> KnowledgeEntry {
         KnowledgeEntry {
@@ -475,6 +528,32 @@ mod tests {
             &entry("architecture:module"),
             false,
             None
+        ));
+    }
+
+    #[test]
+    fn parses_excluded_categories_from_string_or_array() {
+        assert_eq!(
+            parse_excluded_categories(Some(&json!("memory"))),
+            vec!["memory".to_string()]
+        );
+        assert_eq!(
+            parse_excluded_categories(Some(&json!(["memory", "preference", 7]))),
+            vec!["memory".to_string(), "preference".to_string()]
+        );
+        assert!(parse_excluded_categories(None).is_empty());
+    }
+
+    #[test]
+    fn exclude_category_matches_subcategories() {
+        assert!(category_is_excluded("memory:ops", &["memory".to_string()]));
+        assert!(category_is_excluded(
+            "policy:decision",
+            &["policy".to_string()]
+        ));
+        assert!(!category_is_excluded(
+            "memory:ops",
+            &["preference".to_string()]
         ));
     }
 }

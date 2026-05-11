@@ -1001,7 +1001,9 @@ pub(crate) async fn resolve_llm_credentials() -> Result<(String, String)> {
             .unwrap_or_default();
 
         if base_url.is_empty() {
-            return Err(anyhow!("No auth_url in credentials.json. Configure LLM credentials in llm.yaml or credentials.json."));
+            return Err(anyhow!(
+                "No auth_url in credentials.json. Configure LLM credentials in llm.yaml or credentials.json."
+            ));
         }
 
         info!("LLM credentials resolved from legacy credentials.json");

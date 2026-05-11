@@ -47,7 +47,7 @@ pub(super) async fn action_heartbeat(state: &AppState, args: &Value) -> Result<T
                     format!("claim {} not found", claim_id),
                 )
                 .with_suggestion("use action=status to list active claims"),
-            ))
+            ));
         }
     };
 

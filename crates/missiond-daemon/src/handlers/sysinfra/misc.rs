@@ -174,9 +174,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 missiond_core::types::EngineeringPhase::Finalize => "commit_hash",
                 other => {
                     return Ok(ToolResult::text(format!(
-                    "Error: Phase '{}' is a daemon phase or Done — cannot submit artifacts for it.",
-                    other.display_name()
-                )))
+                        "Error: Phase '{}' is a daemon phase or Done — cannot submit artifacts for it.",
+                        other.display_name()
+                    )));
                 }
             };
 
@@ -184,7 +184,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 return Ok(ToolResult::text(format!(
                     "Error: Task is currently in '{}' phase. Expected artifact_type is '{}', but got '{}'. \
                      Please submit the correct artifact type to proceed.",
-                    phase.display_name(), expected_artifact, args.artifact_type
+                    phase.display_name(),
+                    expected_artifact,
+                    args.artifact_type
                 )));
             }
 
@@ -450,17 +452,50 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 /// Humanize a component name into a Chinese label and educational description.
 fn humanize_component(comp: &str) -> (&str, &str) {
     match comp {
-        "storage" => ("仓库管理员", "全公司唯一有权操作数据库的人。所有数据存取都必须经过他。管理：会话记录、聊天消息、任务板、代码索引、游标。"),
-        "parser" => ("翻译官", "Claude Code 的工作日志(JSONL)是'外语'。翻译官逐行翻译成结构化消息——谁说了什么、用了什么工具、什么时候结束回合。"),
-        "watcher" => ("巡逻员", "每2秒去 Claude Code 的日志文件夹巡逻一圈。发现新日志就通过邮差广播。还能检测代码变更(Write/Edit)触发架构审计。"),
-        "awareness" => ("感知员/自我意识", "维护 S-EXP 灵魂文件和 @beacon 索引。每次 Claude 启动，把最新架构脉络注入它的脑海。每5秒检查文件变更自动刷新。"),
-        "ast_indexer" => ("代码解剖师", "用 tree-sitter 解析 Rust/TypeScript，提取每个函数、结构体、枚举的签名和调用链。daemon 启动时全量扫描一次。"),
-        "pty" => ("终端控制员", "直接操作 Claude Code 进程。用 bracketed paste 发消息，100ms 轮询状态机(空闲→思考→回复→工具运行→等确认)。他时刻知道 Claude 在干嘛。"),
-        "session" => ("大堂经理", "管理前台(你聊天用的)和后台(Autopilot 派去干活的)两种 Claude 会话。不碰数据库，只通过邮差通知记忆部门。"),
-        "autopilot" => ("后台监工", "监听'有新任务'事件，立刻认领→启动后台 Claude→等它就绪→发送任务指令。每5分钟巡检卡死任务。任务完成后杀掉后台进程。"),
-        "seed_tasks" => ("播种员", "只在系统启动时干一次活：确保任务板里有 Topology Guardian 种子任务。这是 Jarvis 自进化的第一颗种子。"),
-        "board" => ("任务板管理", "Claude Code 可调用的 MCP 工具：创建/查询/更新/删除任务，添加进度笔记。支持自动执行标记，让后台监工自动认领。"),
-        "code_map" => ("代码透视镜", "你现在看到的这个页面的数据源！Claude 也能调用它来查询代码结构，不需要一个个文件去读。"),
+        "storage" => (
+            "仓库管理员",
+            "全公司唯一有权操作数据库的人。所有数据存取都必须经过他。管理：会话记录、聊天消息、任务板、代码索引、游标。",
+        ),
+        "parser" => (
+            "翻译官",
+            "Claude Code 的工作日志(JSONL)是'外语'。翻译官逐行翻译成结构化消息——谁说了什么、用了什么工具、什么时候结束回合。",
+        ),
+        "watcher" => (
+            "巡逻员",
+            "每2秒去 Claude Code 的日志文件夹巡逻一圈。发现新日志就通过邮差广播。还能检测代码变更(Write/Edit)触发架构审计。",
+        ),
+        "awareness" => (
+            "感知员/自我意识",
+            "维护 S-EXP 灵魂文件和 @beacon 索引。每次 Claude 启动，把最新架构脉络注入它的脑海。每5秒检查文件变更自动刷新。",
+        ),
+        "ast_indexer" => (
+            "代码解剖师",
+            "用 tree-sitter 解析 Rust/TypeScript，提取每个函数、结构体、枚举的签名和调用链。daemon 启动时全量扫描一次。",
+        ),
+        "pty" => (
+            "终端控制员",
+            "直接操作 Claude Code 进程。用 bracketed paste 发消息，100ms 轮询状态机(空闲→思考→回复→工具运行→等确认)。他时刻知道 Claude 在干嘛。",
+        ),
+        "session" => (
+            "大堂经理",
+            "管理前台(你聊天用的)和后台(Autopilot 派去干活的)两种 Claude 会话。不碰数据库，只通过邮差通知记忆部门。",
+        ),
+        "autopilot" => (
+            "后台监工",
+            "监听'有新任务'事件，立刻认领→启动后台 Claude→等它就绪→发送任务指令。每5分钟巡检卡死任务。任务完成后杀掉后台进程。",
+        ),
+        "seed_tasks" => (
+            "播种员",
+            "只在系统启动时干一次活：确保任务板里有 Topology Guardian 种子任务。这是 Jarvis 自进化的第一颗种子。",
+        ),
+        "board" => (
+            "任务板管理",
+            "Claude Code 可调用的 MCP 工具：创建/查询/更新/删除任务，添加进度笔记。支持自动执行标记，让后台监工自动认领。",
+        ),
+        "code_map" => (
+            "代码透视镜",
+            "你现在看到的这个页面的数据源！Claude 也能调用它来查询代码结构，不需要一个个文件去读。",
+        ),
         _ => (comp, ""),
     }
 }
@@ -468,9 +503,18 @@ fn humanize_component(comp: &str) -> (&str, &str) {
 /// Humanize a pillar name into a Chinese label and educational description.
 fn humanize_pillar(id: &str) -> (&str, &str) {
     match id {
-        "memory" => ("记忆部门 🧠", "负责数据采集、存储和分析。包含：仓库管理员(唯一数据库入口)、翻译官(日志解析)、巡逻员(文件监听)、感知员(架构自知)、解剖师(代码索引)。"),
-        "control" => ("控制部门 🎮", "管理终端进程和会话生命周期。包含：终端控制员(操作 Claude 进程)、大堂经理(管理前后台会话)、后台监工(自动执行任务)、播种员(初始化系统任务)。"),
-        "tools" => ("工具部门 🔧", "提供 Claude Code 可调用的 MCP 工具。包含：任务板(任务增删改查)、代码透视镜(代码结构查询)。"),
+        "memory" => (
+            "记忆部门 🧠",
+            "负责数据采集、存储和分析。包含：仓库管理员(唯一数据库入口)、翻译官(日志解析)、巡逻员(文件监听)、感知员(架构自知)、解剖师(代码索引)。",
+        ),
+        "control" => (
+            "控制部门 🎮",
+            "管理终端进程和会话生命周期。包含：终端控制员(操作 Claude 进程)、大堂经理(管理前后台会话)、后台监工(自动执行任务)、播种员(初始化系统任务)。",
+        ),
+        "tools" => (
+            "工具部门 🔧",
+            "提供 Claude Code 可调用的 MCP 工具。包含：任务板(任务增删改查)、代码透视镜(代码结构查询)。",
+        ),
         _ => (id, ""),
     }
 }

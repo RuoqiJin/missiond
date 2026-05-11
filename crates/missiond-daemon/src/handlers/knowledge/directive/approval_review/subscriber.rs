@@ -59,7 +59,7 @@ pub(crate) async fn handle_review_resolved_event(
             return DirectiveSubscriberOutcome::ArtifactIdNotUuid {
                 artifact_id: parsed.artifact_id.clone(),
                 error: e.to_string(),
-            }
+            };
         }
     };
     let chain = match state.store.directive_get_version_chain(id).await {
@@ -67,7 +67,7 @@ pub(crate) async fn handle_review_resolved_event(
         Err(e) => {
             return DirectiveSubscriberOutcome::DbError {
                 detail: format!("directive_get_version_chain: {}", e),
-            }
+            };
         }
     };
     let current_version = match chain.iter().last() {

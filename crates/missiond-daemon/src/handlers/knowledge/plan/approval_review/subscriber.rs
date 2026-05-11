@@ -71,7 +71,7 @@ pub(crate) async fn handle_review_resolved_event(
             return PlanSubscriberOutcome::ArtifactIdNotUuid {
                 artifact_id: parsed.artifact_id.clone(),
                 error: e.to_string(),
-            }
+            };
         }
     };
     let plan = match state.store.plan_get(id).await {
@@ -80,7 +80,7 @@ pub(crate) async fn handle_review_resolved_event(
         Err(e) => {
             return PlanSubscriberOutcome::DbError {
                 detail: format!("plan_get: {}", e),
-            }
+            };
         }
     };
     if let Err(e) = validate_review_resolution_envelope(

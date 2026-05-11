@@ -27,7 +27,9 @@ pub(crate) async fn health_scan(state: &AppState) {
         Err(_) => false,
     };
     if !inet_ok {
-        warn!("AIOps health_scan: internet connectivity check failed (Google unreachable), skipping all server checks");
+        warn!(
+            "AIOps health_scan: internet connectivity check failed (Google unreachable), skipping all server checks"
+        );
         return;
     }
 

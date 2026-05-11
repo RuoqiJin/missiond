@@ -102,7 +102,7 @@ pub(crate) fn plan_review_resolved_dispatch(
         None => {
             return ReviewResolvedDispatch::IgnoreUnknownResolution {
                 resolution: resolution.to_string(),
-            }
+            };
         }
     };
     ReviewResolvedDispatch::Route { parsed, decision }

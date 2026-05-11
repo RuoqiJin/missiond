@@ -43,7 +43,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
         // ===== mission_conversation_analyze =====
         ToolDefinition::new(
             "mission_conversation_analyze",
@@ -62,7 +61,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
         // ===== mission_conversation_reconcile =====
         ToolDefinition::new(
             "mission_conversation_reconcile",
@@ -74,7 +72,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
         // ===== mission_retrospective_manage =====
         ToolDefinition::new(
             "mission_retrospective_manage",
@@ -89,7 +86,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
         // ===== mission_embedding_ops =====
         ToolDefinition::new(
             "mission_embedding_ops",
@@ -102,6 +98,5 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
     ]
 }

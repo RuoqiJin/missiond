@@ -224,6 +224,7 @@ function checkFiles(root, files) {
     'handle_retrospective_manage',
     '"mission_conversation_list"',
     '"mission_conversation_search"',
+    '"analysis_context"',
     '"mission_conversation_events"',
     '"mission_retrospective"',
     '"mission_agent_trajectory"',
@@ -246,6 +247,7 @@ function checkFiles(root, files) {
     '"mission_conversation_list"',
     '"mission_conversation_get"',
     '"mission_conversation_search"',
+    '"mission_conversation_analysis_context"',
     '"mission_message_search"',
     '"mission_user_message_index"',
     '"mission_conversation_set_label"',
@@ -254,6 +256,7 @@ function checkFiles(root, files) {
     'hybrid_message_search',
     'search_conversation_sessions_fts_filtered',
     'get_messages_around',
+    'analysis_context.v1',
   ]);
 
   requireAll(diagnostics, files.events, sources.events, [
@@ -305,6 +308,9 @@ function checkFiles(root, files) {
     'get_retrospective_meta',
     'list_retrospective_results',
     'retro_worker::backfill',
+    'signalQuality',
+    'bulkToolWhitelist',
+    'noiseAdjustedWasteRatio',
   ]);
 
   requireAll(diagnostics, files.contextPipeline, sources.contextPipeline, [
@@ -473,11 +479,11 @@ function buildFixture() {
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.router),
-    'handle_conversation_query handle_conversation_analyze handle_retrospective_manage "mission_conversation_list" "mission_conversation_search" "mission_conversation_events" "mission_retrospective" "mission_agent_trajectory" "mission_activity_report" "mission_retrospective_list" "mission_retrospective_backfill"',
+    'handle_conversation_query handle_conversation_analyze handle_retrospective_manage "mission_conversation_list" "mission_conversation_search" "analysis_context" "mission_conversation_events" "mission_retrospective" "mission_agent_trajectory" "mission_activity_report" "mission_retrospective_list" "mission_retrospective_backfill"',
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.query),
-    'handle_query ConversationIngestionRuntimeConfig load_conversation_config V3_BLUEPRINT_CONFIG_ERROR conversation_get_tail_default conversation_search_default_limit message_search_default_limit context_before_default context_after_default "mission_token_stats" "mission_conversation_list" "mission_conversation_get" "mission_conversation_search" "mission_message_search" "mission_user_message_index" "mission_conversation_set_label" "mission_conversation_delete_label" "mission_context_around" hybrid_message_search search_conversation_sessions_fts_filtered get_messages_around',
+    'handle_query ConversationIngestionRuntimeConfig load_conversation_config V3_BLUEPRINT_CONFIG_ERROR conversation_get_tail_default conversation_search_default_limit message_search_default_limit context_before_default context_after_default "mission_token_stats" "mission_conversation_list" "mission_conversation_get" "mission_conversation_search" "mission_conversation_analysis_context" "mission_message_search" "mission_user_message_index" "mission_conversation_set_label" "mission_conversation_delete_label" "mission_context_around" hybrid_message_search search_conversation_sessions_fts_filtered get_messages_around analysis_context.v1',
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.events),
@@ -493,7 +499,7 @@ function buildFixture() {
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.retrospective),
-    'mission_retrospective_list mission_retrospective_backfill run_analysis get_retrospective_meta list_retrospective_results retro_worker::backfill',
+    'mission_retrospective_list mission_retrospective_backfill run_analysis get_retrospective_meta list_retrospective_results retro_worker::backfill signalQuality bulkToolWhitelist noiseAdjustedWasteRatio',
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.contextPipeline),

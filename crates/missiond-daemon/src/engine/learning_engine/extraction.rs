@@ -2,6 +2,7 @@ use tracing::{debug, info, warn};
 
 use crate::bus::BusServices;
 use crate::context::v3_blueprint_runtime::LearningEngineRuntimeConfig;
+use crate::control_tree::CtlDomain;
 use crate::engine::intent_engine::{request_default_slot, request_execution_slot};
 use crate::state::{AppState, ExtractionPhase, ExtractionState};
 use crate::state::{CURRENT_ANALYSIS_VERSION, MAX_ANALYSIS_RETRIES};
@@ -91,6 +92,7 @@ async fn try_claim_extraction_probe(
     es.watermark_targets.clear();
     es.current_task_id = None;
     es.current_slot_task_id = None;
+    es.reset_current_output_count();
     es.clear_pending_batch_replay();
     true
 }
@@ -108,6 +110,7 @@ async fn release_extraction_probe(
         es.watermark_targets.clear();
         es.current_task_id = None;
         es.current_slot_task_id = None;
+        es.reset_current_output_count();
         es.clear_pending_batch_replay();
     }
 }
@@ -130,6 +133,71 @@ fn empty_backoff_secs(config: &LearningEngineRuntimeConfig, empty_count: u32) ->
         .saturating_mul(multiplier)
         .min(config.realtime_empty_backoff_max_secs)
         .max(config.realtime_empty_backoff_base_secs)
+}
+
+async fn should_skip_deep_analysis_zero_output_fuse(
+    extraction_state: &tokio::sync::RwLock<ExtractionState>,
+) -> bool {
+    let es = extraction_state.read().await;
+    es.deep_analysis_fuse_active(chrono::Utc::now().timestamp())
+}
+
+fn token_spend_guard_over_limit(total_tokens: i64, soft_limit: i64) -> bool {
+    soft_limit > 0 && total_tokens >= soft_limit
+}
+
+fn token_usage_total(row: &std::collections::HashMap<String, serde_json::Value>) -> i64 {
+    [
+        "total_input",
+        "total_cache_creation",
+        "total_cache_read",
+        "total_output",
+    ]
+    .iter()
+    .filter_map(|key| row.get(*key).and_then(|value| value.as_i64()))
+    .sum()
+}
+
+async fn should_skip_memory_due_to_token_spend_guard(
+    state: &AppState,
+    config: &LearningEngineRuntimeConfig,
+    slot_id: &str,
+    lane: &str,
+) -> bool {
+    let since = (chrono::Utc::now()
+        - chrono::Duration::seconds(config.token_spend_guard_window_secs.max(1)))
+    .to_rfc3339();
+    let stats = match state
+        .store
+        .token_stats(None, Some(slot_id), Some(&since), None)
+        .await
+    {
+        Ok(stats) => stats,
+        Err(err) => {
+            warn!(
+                slot_id,
+                lane,
+                error = %err,
+                "memory token-spend guard could not read token_usage_ledger; allowing dispatch"
+            );
+            return false;
+        }
+    };
+    let total_tokens: i64 = stats.iter().map(token_usage_total).sum();
+    if !token_spend_guard_over_limit(total_tokens, config.token_spend_guard_soft_limit) {
+        return false;
+    }
+
+    state.control_manager.set_domain(CtlDomain::Memory, true);
+    warn!(
+        slot_id,
+        lane,
+        total_tokens,
+        soft_limit = config.token_spend_guard_soft_limit,
+        window_secs = config.token_spend_guard_window_secs,
+        "memory token-spend guard paused the memory domain before dispatch"
+    );
+    true
 }
 
 async fn record_realtime_empty_probe(
@@ -160,8 +228,11 @@ async fn reset_realtime_empty_backoff(extraction_state: &tokio::sync::RwLock<Ext
 #[cfg(test)]
 mod tests {
     use crate::context::v3_blueprint_runtime::LearningEngineRuntimeConfig;
+    use crate::state::{ExtractionPhase, ExtractionState};
 
     use super::empty_backoff_secs;
+    use super::should_skip_deep_analysis_zero_output_fuse;
+    use super::token_spend_guard_over_limit;
 
     #[test]
     fn realtime_empty_backoff_is_exponential_and_capped() {
@@ -175,6 +246,40 @@ mod tests {
         assert_eq!(empty_backoff_secs(&cfg, 3), 40);
         assert_eq!(empty_backoff_secs(&cfg, 10), 40);
     }
+
+    #[tokio::test]
+    async fn deep_analysis_zero_output_fuse_skips_when_active() {
+        let state = tokio::sync::RwLock::new(ExtractionState {
+            phase: ExtractionPhase::Idle,
+            active_type: None,
+            phase_started_at: 0,
+            current_deep_conv_id: None,
+            watermark_targets: Vec::new(),
+            current_task_id: None,
+            current_slot_task_id: None,
+            is_checkpoint: false,
+            checkpoint_message_id: None,
+            pending_served: false,
+            pending_batch_id: None,
+            pending_payload: None,
+            pending_served_at: 0,
+            pending_replay_count: 0,
+            empty_probe_count: 0,
+            next_probe_after: 0,
+            current_output_count: 0,
+            deep_analysis_zero_output_count: 3,
+            deep_analysis_fuse_until: chrono::Utc::now().timestamp().saturating_add(60),
+            input_skip_diagnostics: std::collections::HashMap::new(),
+        });
+        assert!(should_skip_deep_analysis_zero_output_fuse(&state).await);
+    }
+
+    #[test]
+    fn token_spend_guard_is_sliding_window_soft_fuse() {
+        assert!(!token_spend_guard_over_limit(249_999, 250_000));
+        assert!(token_spend_guard_over_limit(250_000, 250_000));
+        assert!(!token_spend_guard_over_limit(1_000_000, 0));
+    }
 }
 
 // @beacon: memory
@@ -185,6 +290,10 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
     let Some(config) = load_learning_engine_config() else {
         return;
     };
+    if should_skip_memory_due_to_token_spend_guard(state, &config, MEMORY_SLOT_ID, "realtime").await
+    {
+        return;
+    }
     if should_skip_realtime_empty_backoff(&state.extraction_state).await {
         debug!("realtime: skipping empty-queue probe due to learning-engine backoff");
         return;
@@ -426,6 +535,7 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
                     es.current_slot_task_id = None;
                     es.is_checkpoint = false;
                     es.checkpoint_message_id = None;
+                    es.reset_current_output_count();
                     es.clear_pending_batch_replay();
                     return;
                 }
@@ -466,6 +576,7 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
                     es.current_slot_task_id = None;
                     es.is_checkpoint = false;
                     es.checkpoint_message_id = None;
+                    es.reset_current_output_count();
                     es.clear_pending_batch_replay();
                 }
             }
@@ -498,6 +609,7 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
                 es.current_slot_task_id = None;
                 es.is_checkpoint = false;
                 es.checkpoint_message_id = None;
+                es.reset_current_output_count();
                 es.clear_pending_batch_replay();
             }
         }
@@ -508,6 +620,23 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
 /// Reviews completed conversations using conversation-level watermark.
 pub(crate) async fn check_deep_analysis(state: &AppState) {
     if !check_extraction_gate(&state.slow_extraction_state, state, "deep_analysis").await {
+        return;
+    }
+    let Some(config) = load_learning_engine_config() else {
+        return;
+    };
+    if should_skip_memory_due_to_token_spend_guard(
+        state,
+        &config,
+        MEMORY_SLOW_SLOT_ID,
+        "deep_analysis",
+    )
+    .await
+    {
+        return;
+    }
+    if should_skip_deep_analysis_zero_output_fuse(&state.slow_extraction_state).await {
+        debug!("deep_analysis: skipping due to zero-output saturation fuse");
         return;
     }
 
@@ -729,6 +858,7 @@ pub(crate) async fn check_deep_analysis(state: &AppState) {
         let pty = Arc::clone(&state.pty);
         let extraction_state = Arc::clone(&state.slow_extraction_state);
         let store = Arc::clone(&state.store);
+        let bus = Arc::clone(&state.bus);
         tokio::spawn(async move {
             match pty.send(MEMORY_SLOW_SLOT_ID, &prompt, 900_000).await {
                 Ok(res) => {
@@ -748,6 +878,7 @@ pub(crate) async fn check_deep_analysis(state: &AppState) {
                         es.current_deep_conv_id = None;
                         es.is_checkpoint = false;
                         es.checkpoint_message_id = None;
+                        es.reset_current_output_count();
                         return;
                     }
                     info!(conv_id = %conv_id, duration_ms = res.duration_ms, "Deep analysis send() returned");
@@ -760,6 +891,7 @@ pub(crate) async fn check_deep_analysis(state: &AppState) {
                         let deep_cid = es.current_deep_conv_id.clone();
                         let is_ckpt = es.is_checkpoint;
                         let ckpt_msg_id = es.checkpoint_message_id.take();
+                        let output_count = es.current_output_count;
                         if let Some(cid) = &deep_cid {
                             if is_ckpt {
                                 if let Some(msg_id) = ckpt_msg_id {
@@ -772,8 +904,30 @@ pub(crate) async fn check_deep_analysis(state: &AppState) {
                                     .await;
                                 info!(conv_id = %cid, "Deep analysis: marked complete (send-path)");
                             }
+                            let _ = bus
+                                .publish_memory(MemoryEvent::DeepAnalysisCompleted {
+                                    session_id: cid.clone(),
+                                    kb_entries_created: output_count,
+                                })
+                                .await;
                         }
-                        let _ = store.slot_task_set_completed(&slot_task_id, 0).await;
+                        let fused = es.record_deep_analysis_completion(
+                            output_count,
+                            config.deep_analysis_zero_output_fuse_threshold,
+                            config.deep_analysis_zero_output_fuse_secs,
+                            chrono::Utc::now().timestamp(),
+                        );
+                        if fused {
+                            warn!(
+                                conv_id = %conv_id,
+                                consecutive_zero_output = es.deep_analysis_zero_output_count,
+                                fuse_until = es.deep_analysis_fuse_until,
+                                "Deep analysis zero-output saturation fuse engaged"
+                            );
+                        }
+                        let _ = store
+                            .slot_task_set_completed(&slot_task_id, output_count as i64)
+                            .await;
                         info!(conv_id = %conv_id, duration_ms = res.duration_ms, "Deep analysis complete (send-path)");
                         es.phase = ExtractionPhase::Idle;
                         es.active_type = None;
@@ -798,6 +952,7 @@ pub(crate) async fn check_deep_analysis(state: &AppState) {
                     es.current_deep_conv_id = None;
                     es.is_checkpoint = false;
                     es.checkpoint_message_id = None;
+                    es.reset_current_output_count();
                 }
             }
         });
@@ -953,6 +1108,7 @@ pub(crate) async fn check_kb_consolidation(state: &AppState) {
                     es.current_slot_task_id = None;
                     es.is_checkpoint = false;
                     es.checkpoint_message_id = None;
+                    es.reset_current_output_count();
                     return;
                 }
                 info!(
@@ -975,6 +1131,7 @@ pub(crate) async fn check_kb_consolidation(state: &AppState) {
                     es.current_slot_task_id = None;
                     es.is_checkpoint = false;
                     es.checkpoint_message_id = None;
+                    es.reset_current_output_count();
                 }
             }
             Err(e) => {
@@ -989,6 +1146,7 @@ pub(crate) async fn check_kb_consolidation(state: &AppState) {
                 es.current_slot_task_id = None;
                 es.is_checkpoint = false;
                 es.checkpoint_message_id = None;
+                es.reset_current_output_count();
             }
         }
     });

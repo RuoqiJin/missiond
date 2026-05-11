@@ -76,7 +76,7 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
                     "mission_capability_usage requires `action`",
                 )
                 .with_suggestion("actions: snapshot|report|candidates|mark|ack"),
-            ))
+            ));
         }
     };
 
@@ -156,7 +156,7 @@ fn parse_window(input: Option<&str>) -> Result<Vec<WindowSpec>, ToolResult> {
             return Err(ToolResult::structured_error(ToolError::new(
                 error_codes::INVALID_PARAM,
                 format!("window must be 7d|30d|90d|all, got `{}`", other),
-            )))
+            )));
         }
     };
     let now = Utc::now();
@@ -1099,7 +1099,7 @@ async fn action_mark(state: &AppState, args: &Value) -> Result<ToolResult> {
             return Ok(ToolResult::structured_error(ToolError::new(
                 error_codes::MISSING_PARAM,
                 "mark requires `candidate_id`",
-            )))
+            )));
         }
     };
     let decision = args
@@ -1309,7 +1309,7 @@ async fn action_ack(state: &AppState, args: &Value) -> Result<ToolResult> {
             return Ok(ToolResult::structured_error(ToolError::new(
                 error_codes::MISSING_PARAM,
                 "ack requires `candidate_id`",
-            )))
+            )));
         }
     };
     let ack_by = args
@@ -1333,7 +1333,7 @@ async fn action_ack(state: &AppState, args: &Value) -> Result<ToolResult> {
                     format!("no marked candidate `{}` in review state", candidate_id),
                 )
                 .with_suggestion("call action=mark first to record a decision"),
-            ))
+            ));
         }
     };
     if follow_up_ref.is_empty() {

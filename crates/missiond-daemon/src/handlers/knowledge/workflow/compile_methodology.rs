@@ -31,7 +31,7 @@ pub(super) async fn action_compile_methodology(
             return Ok(ToolResult::structured_error(ToolError::new(
                 error_codes::INVALID_PARAM,
                 msg,
-            )))
+            )));
         }
     };
 
@@ -45,7 +45,7 @@ pub(super) async fn action_compile_methodology(
                      compile_methodology refuses process-cwd fallback so the generated YAML \
                      always lands inside the registered project root.",
                 ),
-            ))
+            ));
         }
     };
     let workflows_dir = project_root.join(WORKFLOWS_DIR);
@@ -60,7 +60,7 @@ pub(super) async fn action_compile_methodology(
             return Ok(ToolResult::structured_error(ToolError::new(
                 error_codes::MISSING_PARAM,
                 msg,
-            )))
+            )));
         }
     };
 

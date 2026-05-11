@@ -115,6 +115,8 @@ function checkFiles(root, files) {
 	    ':realtime-extraction-timeout-secs 300',
 	    ':realtime-empty-backoff-base-secs 30',
 	    ':realtime-empty-backoff-max-secs 900',
+	    ':deep-analysis-zero-output-fuse-threshold 3',
+	    ':deep-analysis-zero-output-fuse-secs 3600',
 	    ':decision-tier3-timeout-secs 300',
 	    ':timeline-analysis-interval-secs 43200',
 	    ':habit-scan-timeout-secs 600',
@@ -146,13 +148,23 @@ function checkFiles(root, files) {
 	    'scripts/check-v3-memory-kb-isomorphism.mjs',
 	    'memory-kb-policy realtime extraction batch size and preview truncation budgets',
 	    'mission_memory_pending MUST cache the served realtime extraction batch',
+	    'mission_memory_pending MUST classify deployment-monitor',
+	    'deployment-monitor covers deploy/build/smoke/rollback/agent-update/provenance diagnostics',
 	    'mission_kb_query MUST suppress architecture:module details for sensitive credential/secret/SSH/token queries',
+	    'mission_kb_query MUST support excludeCategory / exclude_category',
+	    'mission_kb_mutate(action=batch_remember) MUST accept a bounded entries array',
+	    'mission_kb_remember MUST pass through one shared dedupe gate',
 	    'Realtime extraction MUST apply exponential empty-queue backoff from learning-engine-policy',
+	    'Deep analysis MUST apply a Lisp-projected zero-output saturation fuse',
+	    'token_usage_ledger through a Lisp-projected sliding-window token-spend soft guard',
+	    ':token-spend-guard-window-secs',
+	    ':token-spend-guard-soft-limit',
 	    'knowledge_review_state overlay',
     'projects learning-engine-policy into learning_engine pty send budgets, maintenance cadences, timeline read windows, and KB reflection policy',
     'Realtime extraction MUST claim the extraction lane before running pending-message DB probes',
     'pending realtime SQL MUST use EXISTS/LATERAL LIMIT or bounded materialized-candidate shapes instead of global COUNT(DISTINCT)/ROW_NUMBER scans',
     'deep-analysis active-conversation probes MUST use bounded EXISTS/OFFSET checks instead of full message COUNT scans',
+    'Memory extraction pending selectors MUST filter MissionD self-referential worker slots',
     'Timeline projection SQL MUST cast string-bound since/until parameters as ::timestamptz when comparing against event_log.ts',
     'Timeline Analyst MUST check the Gemini provider gate before collecting timeline evidence or calling Gemini',
     'kb.rs remains the memory-kb facade',
@@ -174,6 +186,10 @@ function checkFiles(root, files) {
     ':review-states [active superseded-by-lisp superseded-by-code historical-evidence duplicate wrong-or-stale delete-candidate needs-human]',
     'mission_kb_review MUST write a non-destructive knowledge_review_state overlay; it MUST NOT mutate or delete the original knowledge row.',
     'mission_kb_query default retrieval MUST honor the review overlay while include_archived=true and state_filter preserve audit access to historical evidence.',
+    'mission_kb_query MUST support excludeCategory / exclude_category for explicit category suppression',
+    'mission_kb_mutate(action=batch_remember) MUST accept a bounded entries array',
+    'mission_kb_remember MUST pass through one shared dedupe gate',
+    'Low-confidence semantic duplicate candidates MUST create a needs-human knowledge_review_state artifact',
     'apply knowledge_review_state overlay before default retrieval so superseded/historical/duplicate/stale/delete-candidate memories leave the active reasoning path without deletion',
     'crates/missiond-core/migrations/20260508001000_knowledge_review_state.sql',
     'crates/missiond-core/src/types/knowledge.rs',
@@ -197,12 +213,20 @@ function checkFiles(root, files) {
     'DEFAULT_LEARNING_REALTIME_EXTRACTION_TIMEOUT_SECS',
     'DEFAULT_LEARNING_REALTIME_EMPTY_BACKOFF_BASE_SECS',
     'DEFAULT_LEARNING_REALTIME_EMPTY_BACKOFF_MAX_SECS',
+    'DEFAULT_LEARNING_DEEP_ANALYSIS_ZERO_OUTPUT_FUSE_THRESHOLD',
+    'DEFAULT_LEARNING_DEEP_ANALYSIS_ZERO_OUTPUT_FUSE_SECS',
+    'DEFAULT_LEARNING_TOKEN_SPEND_GUARD_WINDOW_SECS',
+    'DEFAULT_LEARNING_TOKEN_SPEND_GUARD_SOFT_LIMIT',
     'DEFAULT_LEARNING_TIMELINE_ANALYSIS_INTERVAL_SECS',
     'DEFAULT_LEARNING_KB_REFLECTION_UTILITY_THRESHOLD',
     'learning-engine-policy',
     ':realtime-extraction-timeout-secs',
     ':realtime-empty-backoff-base-secs',
     ':realtime-empty-backoff-max-secs',
+    ':deep-analysis-zero-output-fuse-threshold',
+    ':deep-analysis-zero-output-fuse-secs',
+    ':token-spend-guard-window-secs',
+    ':token-spend-guard-soft-limit',
     ':cooccurrence-refresh-interval-secs',
   ]);
 
@@ -257,6 +281,19 @@ function checkFiles(root, files) {
     'assistant_preview_chars',
     'get_pending_realtime_messages_with_limit(pending_msg_limit)',
     'MAX_PENDING_BATCH_REPLAYS',
+    'classify_memory_input_noise',
+    'deployment-monitor',
+    'deployment-event-response',
+    'xjp_build_wait',
+    'xjp_deploy_watch',
+    'build_started',
+    'agent_update_failed',
+    'reported_digest_missing',
+    'runtime-report',
+    'worker-instruction',
+    'provider-preamble',
+    'inputSkipDiagnostics',
+    'inputFilter',
     'mark_pending_batch_served',
     'pending_payload',
     'MEMORY_PENDING_ALREADY_SERVED',
@@ -277,6 +314,14 @@ function checkFiles(root, files) {
     'try_claim_extraction_probe',
     'release_extraction_probe',
     'should_skip_realtime_empty_backoff',
+    'should_skip_deep_analysis_zero_output_fuse',
+    'should_skip_memory_due_to_token_spend_guard',
+    'token_spend_guard_window_secs',
+    'token_spend_guard_soft_limit',
+    'token_stats(None, Some(slot_id)',
+    'CtlDomain::Memory',
+    'record_deep_analysis_completion',
+    'deep_analysis_zero_output_fuse_threshold',
     'record_realtime_empty_probe',
     'reset_realtime_empty_backoff',
     'another extraction probe already claimed the lane',
@@ -294,6 +339,9 @@ function checkFiles(root, files) {
     'WITH candidate AS MATERIALIZED',
     'LIMIT 2000',
     'OFFSET 99',
+    "slot_id NOT LIKE 'slot-memory%'",
+    "slot_id NOT LIKE 'slot-diagnosis%'",
+    "slot_id NOT LIKE 'agent-%'",
   ]);
   forbidAll(diagnostics, files.pgConversation, sources.pgConversation, [
     'COUNT(DISTINCT c.id) FROM conversations c\n             JOIN conversation_messages',
@@ -357,6 +405,8 @@ function checkFiles(root, files) {
     'pub(super) struct KBReviewArgs',
     'pub(super) include_archived: bool',
     'pub(super) state_filter: Option<String>',
+    'pub(super) exclude_category: Option<Value>',
+    'pub(super) struct KBBatchRememberArgs',
     'lenient::option_i64',
     'fn default_list_limit()',
   ]);
@@ -384,6 +434,9 @@ function checkFiles(root, files) {
     'kb_add_ast_link',
     'KBBatchMutated',
     'detect_kb_conflicts',
+    'write_duplicate_review_artifact',
+    'KnowledgeReviewInput',
+    'needs-human',
     'kb_adjust_confidence',
     'contradicts',
   ]);
@@ -436,7 +489,10 @@ function checkFiles(root, files) {
     'kb_review_get_by_key',
     'include_archived',
     'state_filter',
+    'exclude_category',
     '"unreviewed"',
+    'parse_excluded_categories',
+    'category_is_excluded',
     'is_sensitive_retrieval_intent',
     'suppress_for_sensitive_retrieval',
     'architecture:module',
@@ -630,6 +686,10 @@ function checkFiles(root, files) {
     'WHERE is_current = TRUE AND knowledge_id = ANY($1)',
     'JOIN knowledge k ON k.id = r.knowledge_id',
     'GROUP BY state',
+    'SAME_SESSION_FUZZY_MERGE_THRESHOLD',
+    'merge_detail_for_dedupe',
+    'same_source_session',
+    '_dedupe_merge_events',
   ]);
 
   requireAll(diagnostics, files.mcpKb, sources.mcpKb, [
@@ -674,20 +734,27 @@ function buildFixture() {
 	    :invariants ["mission_memory_pending MUST cache the served realtime extraction batch"
 	                 "mission_kb_query MUST suppress architecture:module details for sensitive credential/secret/SSH/token queries"
 	                 "mission_kb_review MUST write a non-destructive knowledge_review_state overlay; it MUST NOT mutate or delete the original knowledge row."
+	                 "mission_kb_remember MUST pass through one shared dedupe gate in KbStore::kb_remember before any realtime/deep-analysis/manual pipeline can create a new active key."
+	                 "Low-confidence semantic duplicate candidates MUST create a needs-human knowledge_review_state artifact."
 	                 "mission_kb_query default retrieval MUST honor the review overlay while include_archived=true and state_filter preserve audit access to historical evidence."])
 	  (function knowledge-memory
 	    :surface memory-kb
-	    :core ((step s4 :logic "apply knowledge_review_state overlay before default retrieval so superseded/historical/duplicate/stale/delete-candidate memories leave the active reasoning path without deletion")))
+	    :core ((step s4 :logic "route all realtime extraction, deep-analysis, manual MCP, and internal learning writes through the shared KB dedupe gate before any new active key can be created")
+	           (step s5 :logic "apply knowledge_review_state overlay before default retrieval so superseded/historical/duplicate/stale/delete-candidate memories leave the active reasoning path without deletion")))
 	  (learning-engine-policy
 	    :realtime-extraction-timeout-secs 300
 	    :realtime-empty-backoff-base-secs 30
 	    :realtime-empty-backoff-max-secs 900
+	    :deep-analysis-zero-output-fuse-threshold 3
+	    :deep-analysis-zero-output-fuse-secs 3600
 	    :decision-tier3-timeout-secs 300
 	    :habit-scan-timeout-secs 600
 	    :timeline-analysis-interval-secs 43200
 	    :cooccurrence-refresh-interval-secs 21600
 	    :invariants ["LearningEngineRuntimeConfig MUST load learning-engine-policy"
 	                 "Realtime extraction MUST apply exponential empty-queue backoff from learning-engine-policy"
+	                 "Deep analysis MUST apply a Lisp-projected zero-output saturation fuse"
+	                 "mission_memory_pending MUST classify deployment-monitor"
 	                 "Timeline projection SQL MUST cast string-bound since/until parameters as ::timestamptz when comparing against event_log.ts"
 	                 "Timeline Analyst MUST check the Gemini provider gate before collecting timeline evidence or calling Gemini"])
 	  (implementation-map
@@ -759,7 +826,7 @@ pub(crate) async fn handle() {
   "mission_kb_query"; "mission_kb_mutate"; "mission_kb_ops"; "mission_kb_review"; "mission_beacon"; "mission_kb_remember";
 }`);
 	  writeFixture(root, DEFAULT_FILES.v3Runtime, `
-	MemoryKbRuntimeConfig; LearningEngineRuntimeConfig; parse_memory_kb_policy; parse_learning_engine_policy; DEFAULT_MEMORY_PENDING_MESSAGE_LIMIT; DEFAULT_MEMORY_TOOL_RESULT_PREVIEW_CHARS; DEFAULT_MEMORY_ASSISTANT_PREVIEW_CHARS; memory-kb-policy; :pending-message-limit; :tool-result-preview-chars; :assistant-preview-chars; DEFAULT_LEARNING_REALTIME_EXTRACTION_TIMEOUT_SECS; DEFAULT_LEARNING_REALTIME_EMPTY_BACKOFF_BASE_SECS; DEFAULT_LEARNING_REALTIME_EMPTY_BACKOFF_MAX_SECS; DEFAULT_LEARNING_TIMELINE_ANALYSIS_INTERVAL_SECS; DEFAULT_LEARNING_KB_REFLECTION_UTILITY_THRESHOLD; learning-engine-policy; :realtime-extraction-timeout-secs; :realtime-empty-backoff-base-secs; :realtime-empty-backoff-max-secs; :cooccurrence-refresh-interval-secs;
+	MemoryKbRuntimeConfig; LearningEngineRuntimeConfig; parse_memory_kb_policy; parse_learning_engine_policy; DEFAULT_MEMORY_PENDING_MESSAGE_LIMIT; DEFAULT_MEMORY_TOOL_RESULT_PREVIEW_CHARS; DEFAULT_MEMORY_ASSISTANT_PREVIEW_CHARS; memory-kb-policy; :pending-message-limit; :tool-result-preview-chars; :assistant-preview-chars; DEFAULT_LEARNING_REALTIME_EXTRACTION_TIMEOUT_SECS; DEFAULT_LEARNING_REALTIME_EMPTY_BACKOFF_BASE_SECS; DEFAULT_LEARNING_REALTIME_EMPTY_BACKOFF_MAX_SECS; DEFAULT_LEARNING_DEEP_ANALYSIS_ZERO_OUTPUT_FUSE_THRESHOLD; DEFAULT_LEARNING_DEEP_ANALYSIS_ZERO_OUTPUT_FUSE_SECS; DEFAULT_LEARNING_TIMELINE_ANALYSIS_INTERVAL_SECS; DEFAULT_LEARNING_KB_REFLECTION_UTILITY_THRESHOLD; learning-engine-policy; :realtime-extraction-timeout-secs; :realtime-empty-backoff-base-secs; :realtime-empty-backoff-max-secs; :deep-analysis-zero-output-fuse-threshold; :deep-analysis-zero-output-fuse-secs; :cooccurrence-refresh-interval-secs;
 	`);
   writeFixture(root, DEFAULT_FILES.kbArgs, `
 pub(super) struct KBRememberArgs;
@@ -783,7 +850,7 @@ pub(super) fn check_content_quality() {
 }`);
   writeFixture(root, DEFAULT_FILES.kbRemember, `
 pub(super) async fn handle_kb_remember() {
-  KBRememberArgs; check_content_quality(); KBRememberInput; EmbeddingTask::ProcessKBEntry; consolidated_from; kb_add_edge(); kb_add_ast_link(); KBBatchMutated; detect_kb_conflicts(); kb_adjust_confidence(); contradicts;
+  KBRememberArgs; check_content_quality(); KBRememberInput; EmbeddingTask::ProcessKBEntry; consolidated_from; kb_add_edge(); kb_add_ast_link(); KBBatchMutated; detect_kb_conflicts(); write_duplicate_review_artifact(); KnowledgeReviewInput; needs-human; kb_adjust_confidence(); contradicts;
 }`);
   writeFixture(root, DEFAULT_FILES.kbCompact, `
 pub(super) async fn handle_kb_compact() {
@@ -922,21 +989,26 @@ async fn kb_review_get_by_key() {
 async fn kb_review_stats() {
   GROUP BY state;
 }
+SAME_SESSION_FUZZY_MERGE_THRESHOLD;
+merge_detail_for_dedupe;
+same_source_session;
+_dedupe_merge_events;
 `);
 	  writeFixture(root, DEFAULT_FILES.memory, `
-	MemoryKbRuntimeConfig; load_memory_kb_config; V3_BLUEPRINT_CONFIG_ERROR; pending_message_limit; tool_result_preview_chars; assistant_preview_chars; get_pending_realtime_messages_with_limit(pending_msg_limit); MAX_PENDING_BATCH_REPLAYS; mark_pending_batch_served; pending_payload; MEMORY_PENDING_ALREADY_SERVED; ToolResult::structured_error;
+	MemoryKbRuntimeConfig; load_memory_kb_config; V3_BLUEPRINT_CONFIG_ERROR; pending_message_limit; tool_result_preview_chars; assistant_preview_chars; get_pending_realtime_messages_with_limit(pending_msg_limit); MAX_PENDING_BATCH_REPLAYS; classify_memory_input_noise; deployment-monitor; runtime-report; worker-instruction; provider-preamble; inputSkipDiagnostics; inputFilter; mark_pending_batch_served; pending_payload; MEMORY_PENDING_ALREADY_SERVED; ToolResult::structured_error;
 	`);
 	  writeFixture(root, DEFAULT_FILES.learningMod, `
 	LearningEngineRuntimeConfig; decision_harvest_interval_secs; cooccurrence_refresh_interval_secs; V3 learning-engine-policy unavailable;
 	`);
 	  writeFixture(root, DEFAULT_FILES.learningExtraction, `
-	LearningEngineRuntimeConfig; load_learning_engine_config; realtime_extraction_timeout_ms; try_claim_extraction_probe; release_extraction_probe; should_skip_realtime_empty_backoff; record_realtime_empty_probe; reset_realtime_empty_backoff; another extraction probe already claimed the lane; kb_consolidation_interval_secs; kb_auto_gc_interval_secs; kb_reflection_interval_secs; kb_reflection_utility_threshold; kb_reflection_max_tokens;
+	LearningEngineRuntimeConfig; load_learning_engine_config; realtime_extraction_timeout_ms; try_claim_extraction_probe; release_extraction_probe; should_skip_realtime_empty_backoff; should_skip_deep_analysis_zero_output_fuse; record_deep_analysis_completion; deep_analysis_zero_output_fuse_threshold; record_realtime_empty_probe; reset_realtime_empty_backoff; another extraction probe already claimed the lane; kb_consolidation_interval_secs; kb_auto_gc_interval_secs; kb_reflection_interval_secs; kb_reflection_utility_threshold; kb_reflection_max_tokens;
 	`);
 	  writeFixture(root, DEFAULT_FILES.pgConversation, `
 	SELECT COUNT(*) FROM conversations c WHERE EXISTS (SELECT 1 FROM conversation_messages m LIMIT 1);
 	SELECT * FROM conversations c CROSS JOIN LATERAL (SELECT * FROM conversation_messages m LIMIT 15) m;
 	WITH candidate AS MATERIALIZED (SELECT * FROM conversation_messages m LIMIT 2000) SELECT * FROM candidate;
 	SELECT 1 FROM conversation_messages m ORDER BY m.id ASC OFFSET 99 LIMIT 1;
+	slot_id NOT LIKE 'slot-memory%'; slot_id NOT LIKE 'slot-diagnosis%'; slot_id NOT LIKE 'agent-%';
 	`);
 	  writeFixture(root, DEFAULT_FILES.learningDecision, `
 	LearningEngineRuntimeConfig; decision_tier3_timeout_ms;

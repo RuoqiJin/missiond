@@ -73,7 +73,7 @@ pub(crate) async fn handle_review_resolved_plan_node_event(
             return PlanNodeResumeListenerOutcome::ArtifactIdNotUuid {
                 artifact_id: parsed_qid.artifact_id.clone(),
                 error: e.to_string(),
-            }
+            };
         }
     };
     let plan = match state.store.plan_get(id).await {
@@ -83,7 +83,7 @@ pub(crate) async fn handle_review_resolved_plan_node_event(
             return PlanNodeResumeListenerOutcome::DispatchError {
                 plan_id: id,
                 detail: format!("plan_get: {}", e),
-            }
+            };
         }
     };
     if !matches!(plan.status, PlanStatus::Approved | PlanStatus::Executing) {
@@ -99,7 +99,7 @@ pub(crate) async fn handle_review_resolved_plan_node_event(
             return PlanNodeResumeListenerOutcome::DagBuildFailed {
                 plan_id: id,
                 detail: format!("{:?}", e),
-            }
+            };
         }
     };
     let node = match validate_resume_request(parsed_qid, &plan, &parsed_dag) {
@@ -109,7 +109,7 @@ pub(crate) async fn handle_review_resolved_plan_node_event(
                 plan_id: id,
                 code: e.code(),
                 message: e.message(),
-            }
+            };
         }
     };
     let dispatch_strategy = node
@@ -178,7 +178,7 @@ pub(crate) async fn handle_review_resolved_plan_node_event(
                     return PlanNodeResumeListenerOutcome::DispatchError {
                         plan_id: id,
                         detail: e.to_string(),
-                    }
+                    };
                 }
             };
             let DispatchOutcome {

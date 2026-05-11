@@ -49,7 +49,7 @@ pub(in crate::handlers::knowledge) async fn action_execute_resume(
                 PlanNodeResumeError::IdMalformed {
                     detail: e.message(),
                 },
-            ))
+            ));
         }
     };
 
@@ -60,7 +60,7 @@ pub(in crate::handlers::knowledge) async fn action_execute_resume(
                 PlanNodeResumeError::DagBuildFailed {
                     detail: format!("{:?}", e),
                 },
-            ))
+            ));
         }
     };
 

@@ -152,6 +152,12 @@ function checkFiles(root, files) {
     'exclude equivalent-duplicate',
     'top-level raw_role=user inside automated slot sessions normalizes to worker_user',
     'raw_role is preserved for audit',
+    ':analysis-context-max-turns',
+    ':label-calibration-sample-limit',
+    ':jarvis-stream-envelope-schema',
+    'analysis_context MUST be a bounded read model',
+    'Conversation label calibration MUST remain overlay-first',
+    'Jarvis SSE and OpenAI-compatible chat surfaces MUST emit jarvis-stream-envelope-schema frames',
     'scripts/report-claude-role-attribution.mjs',
     'node scripts/check-v3-cli-conversation-ingestion-isomorphism.mjs',
     // BoardTask e1a5ac1f :: provider-aware classification authority.

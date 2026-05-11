@@ -277,7 +277,7 @@ fn parse_form(
                     None => {
                         return Err(TaskContractParseError::Lex(
                             "unbalanced parens — EOF inside list".to_string(),
-                        ))
+                        ));
                     }
                     Some(Tok::Close) => {
                         iter.next();
@@ -318,7 +318,7 @@ fn project_contract(form: &SExp) -> Result<ParsedTaskContract, TaskContractParse
             return Err(TaskContractParseError::NotATaskForm(format!(
                 "expected leading `task` symbol, got {:?}",
                 other
-            )))
+            )));
         }
     }
     // Skip the task id (must be a bare symbol per the schema, but we
@@ -411,7 +411,7 @@ fn require_string_list(
                         return Err(TaskContractParseError::FieldShape {
                             field,
                             detail: format!("non-string item in list: {:?}", other),
-                        })
+                        });
                     }
                 }
             }

@@ -236,7 +236,7 @@ fn compute_recommendation_block(
                 registry_info,
                 None,
                 "low",
-            )
+            );
         }
     };
     if !policy.dry_run_only {

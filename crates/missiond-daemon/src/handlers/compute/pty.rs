@@ -239,7 +239,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                         return Ok(ToolResult::structured_error(ToolError::new(
                             "V3_BLUEPRINT_CONFIG_ERROR",
                             err.to_string(),
-                        )))
+                        )));
                     }
                 };
                 let timeout_ms = runtime_config.clamp_pty_send_timeout_ms(timeout_ms);

@@ -121,7 +121,9 @@ pub(crate) fn start_v2_subscribers(
     // Strictly observation-only — never publishes / mutates DB.
     spawn_event_ref_cache_sub(bus.clone(), shutdown_rx.clone());
 
-    info!("v2 event-bus subscribers started (8 router consumers + 2 autopilot handoff nerves + 1 deployment event response nerve + 1 incident reactor + 1 review-resolution listener + 1 event-ref cache populator)");
+    info!(
+        "v2 event-bus subscribers started (8 router consumers + 2 autopilot handoff nerves + 1 deployment event response nerve + 1 incident reactor + 1 review-resolution listener + 1 event-ref cache populator)"
+    );
 }
 
 /// Incident reactor — subscribes to IncidentEvent and triages via
@@ -363,14 +365,25 @@ fn spawn_deployment_event_response_sub(
                         payload_json,
                     } = ack.event()
                     {
-                        if let Some(input) = deployment_event_board_task_input(
+                        let board_input = deployment_event_board_task_input(
                             service_id,
                             event_id,
                             event_kind,
                             summary,
                             trace_id.as_deref(),
                             payload_json,
-                        ) {
+                        )
+                        .or_else(|| {
+                            router_event_board_task_input(
+                                service_id,
+                                event_id,
+                                event_kind,
+                                summary,
+                                trace_id.as_deref(),
+                                payload_json,
+                            )
+                        });
+                        if let Some(input) = board_input {
                             match state.store.create_board_task(&input).await {
                                 Ok(task) => {
                                     let ev = BoardEvent::TaskCreated {
@@ -426,7 +439,7 @@ fn deployment_event_board_task_input(
         .map(|id| id.to_string())
         .unwrap_or_else(|| event_id.to_string());
     let description = format!(
-        "Deployment EventBridge created this task from a durable deploy-center event.\n\nService: {service_id}\nEvent: {event_kind}\nEvent ID: {event_id}\nDeploy event row: {deploy_event_id}\nProject: {project_id}\nSubject: {subject}\nCorrelation: {}\nTrace: {}\n\nSummary:\n{summary}\n\n## Dispatch metadata\n- task_class: deploy-ops\n- pool_hint: claude-code-deploy-ops\n- engine_hint: claude-code\n- read_scope: deploy-center provenance, deploy_events, deploy_logs, MissionD EventBridge envelope\n- write_scope: \n- must_not_touch: production DNS, Cloudflare, secrets, direct production mutation\n- acceptance: deploy-center provenance queried | deploy event row inspected | xjp_build_wait/xjp_deploy_watch or deploy-center event wait used for CI/build waiting | rollback/redeploy proposal uses deploy-center policy or explicit Board approval\n- output_contract: return Findings / Evidence / Recommendations / Verification with structured smoke/provenance evidence\n\nNext checks:\n1. Query deploy-center provenance for the project/service before using curl/git as fallback.\n2. Inspect deploy_events/deploy_logs around the event id and correlation id.\n3. If CI/build waiting is needed, use xjp_build_wait/xjp_deploy_watch or deploy-center event waits; do not run repeated gh api Actions polling loops.\n4. Propose rollback or redeploy only through deploy-center policy or explicit Board approval.\n5. Do not mutate DNS, Cloudflare, secrets, or production state from this task without approval.",
+        "Deployment EventBridge created this task from a durable deploy-center event.\n\nService: {service_id}\nEvent: {event_kind}\nEvent ID: {event_id}\nDeploy event row: {deploy_event_id}\nProject: {project_id}\nSubject: {subject}\nCorrelation: {}\nTrace: {}\n\nSummary:\n{summary}\n\n## Dispatch metadata\n- task_class: deploy-ops\n- pool_hint: claude-code-deploy-ops\n- engine_hint: claude-code\n- read_scope: deploy-center provenance, deploy_events, deploy_logs, MissionD EventBridge envelope, mission_infra_query skill_evidence, project deployment SSOT/workflow evidence\n- write_scope: \n- must_not_touch: production DNS, Cloudflare, secrets, direct production mutation\n- acceptance: deploy-center provenance queried | deploy event row inspected | project deployment facts and skill evidence checked before action | xjp_build_wait/xjp_deploy_watch or deploy-center event wait used for CI/build waiting | rollback/redeploy proposal uses deploy-center policy or explicit Board approval\n- output_contract: return Findings / Evidence / Recommendations / Verification with structured smoke/provenance evidence\n\nNext checks:\n1. Query MissionD project deployment facts and mission_infra_query(action=skill_evidence|reconcile) for the project before choosing scripts, hosts, agents, or login paths.\n2. Query deploy-center provenance for the project/service before using curl/git as fallback.\n3. Inspect deploy_events/deploy_logs around the event id and correlation id.\n4. If CI/build waiting is needed, use xjp_build_wait/xjp_deploy_watch or deploy-center event waits; do not run repeated gh api Actions polling loops.\n5. Propose rollback or redeploy only through deploy-center policy or explicit Board approval.\n6. Do not mutate DNS, Cloudflare, secrets, or production state from this task without approval.",
         correlation_id.as_deref().unwrap_or(""),
         trace_id.unwrap_or(""),
     );
@@ -452,6 +465,67 @@ fn deployment_event_is_actionable(event_kind: &str) -> bool {
             | "smoke_failed"
             | "rollback_failed"
             | "agent_update_failed"
+    )
+}
+
+fn router_event_board_task_input(
+    service_id: &str,
+    event_id: &str,
+    event_kind: &str,
+    summary: &str,
+    trace_id: Option<&str>,
+    payload_json: &str,
+) -> Option<CreateBoardTaskInput> {
+    if service_id != "router" || !router_event_is_actionable(event_kind) {
+        return None;
+    }
+    let payload: Value = serde_json::from_str(payload_json).unwrap_or(Value::Null);
+    let project_id = external_event_field(&payload, "project_id")
+        .or_else(|| external_event_field(&payload, "projectId"))
+        .unwrap_or_else(|| "router".to_string());
+    let provider = external_event_field(&payload, "provider")
+        .or_else(|| {
+            payload
+                .get("provider")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            payload
+                .get("payload")
+                .and_then(|p| p.get("provider"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "unknown-provider".to_string());
+    let model = payload
+        .get("payload")
+        .and_then(|p| p.get("model"))
+        .and_then(Value::as_str)
+        .or_else(|| payload.get("model").and_then(Value::as_str))
+        .unwrap_or("unknown-model");
+    let description = format!(
+        "Router EventBridge created this task from a durable usage/anomaly event.\n\nService: {service_id}\nEvent: {event_kind}\nEvent ID: {event_id}\nProject: {project_id}\nProvider: {provider}\nModel: {model}\nTrace: {}\n\nSummary:\n{summary}\n\n## Dispatch metadata\n- task_class: router-ops\n- pool_hint: claude-code-default\n- engine_hint: claude-code\n- read_scope: router usage_logs, router event envelope, provider/channel policy, MissionD EventBridge timeline\n- write_scope: \n- must_not_touch: production DNS, secrets, provider credentials, deploy mutation\n- acceptance: router usage burst inspected | provider/model attribution verified | remediation or quota/auth follow-up proposed | no hidden translation/background LLM retry loop\n- output_contract: return Findings / Evidence / Recommendations / Verification with event_id and provider/model attribution\n\nNext checks:\n1. Query router usage logs around the event time and provider/model.\n2. Determine whether this is expected user workload, runaway background worker, auth/quota failure, or provider outage.\n3. If credentials or provider quota are implicated, create a Decision Inbox item or deploy-center/secret-store follow-up; do not mutate secrets directly.",
+        trace_id.unwrap_or(""),
+    );
+    Some(CreateBoardTaskInput {
+        title: format!("Router event response: {event_kind} ({provider}/{model})"),
+        description: Some(description),
+        priority: Some("high".to_string()),
+        category: Some("ops".to_string()),
+        project: Some(project_id),
+        auto_execute: Some(false),
+        hidden: Some(false),
+        dedupe_key: Some(format!("router-event-response:{service_id}:{event_id}")),
+        context_intent: Some("router-ops".to_string()),
+        ..Default::default()
+    })
+}
+
+fn router_event_is_actionable(event_kind: &str) -> bool {
+    matches!(
+        event_kind,
+        "usage_burst" | "provider_error_burst" | "provider_auth_failure_burst" | "quota_exhaustion"
     )
 }
 

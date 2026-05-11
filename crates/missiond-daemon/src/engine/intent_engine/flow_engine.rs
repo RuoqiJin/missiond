@@ -270,7 +270,7 @@ pub(crate) async fn execute_flow_task(
                             "# 架构咨询\n\n## 任务\n{}\n\n## 描述\n{}\n\n## 代码调查报告\n{}\n\n请给出架构层面的解决方案和建议。重点关注：\n1. 技术选型与现有架构的兼容性\n2. 潜在的风险和边界情况\n3. 推荐的实现路径",
                             task.title, task.description, report
                         ),
-                        "gemini_advice_1"
+                        "gemini_advice_1",
                     )
                 }
                 missiond_core::types::EngineeringPhase::ConsultGemini2 => {
@@ -281,7 +281,7 @@ pub(crate) async fn execute_flow_task(
                             "# 执行方案审查\n\n## 任务\n{}\n\n## 第一轮架构建议\n{}\n\n## 执行方案\n{}\n\n请审查此方案，指出：\n1. 遗漏或风险点\n2. 与第一轮建议的一致性\n3. 优化建议",
                             task.title, advice1, plan
                         ),
-                        "gemini_advice_2"
+                        "gemini_advice_2",
                     )
                 }
                 _ => return Ok(()),

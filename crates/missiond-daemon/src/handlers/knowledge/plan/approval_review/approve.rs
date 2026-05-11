@@ -95,7 +95,7 @@ pub(in crate::handlers::knowledge::plan) async fn action_approve(
                 return Ok(ToolResult::structured_error(ToolError::new(
                     error_codes::NOT_FOUND,
                     format!("plan `{}` not found for apply gate", id),
-                )))
+                )));
             }
         };
         let resolved_mode = proposer_mode.unwrap_or(LlmAutoApproveProposalMode::Off);
@@ -210,7 +210,7 @@ async fn action_approve_with_resolution(
             return Ok(ToolResult::structured_error(ToolError::new(
                 "REVIEW_ID_MALFORMED",
                 e.message(),
-            )))
+            )));
         }
     };
     let plan = match state
@@ -224,7 +224,7 @@ async fn action_approve_with_resolution(
             return Ok(ToolResult::structured_error(ToolError::new(
                 error_codes::NOT_FOUND,
                 format!("plan `{}` not found for resolution", id),
-            )))
+            )));
         }
     };
     let current_version = plan.version;
@@ -347,7 +347,7 @@ async fn plan_action_approve_with_policy_only(
             return Ok(ToolResult::structured_error(ToolError::new(
                 "REVIEW_ID_MALFORMED",
                 e.message(),
-            )))
+            )));
         }
     };
     let plan = match state
@@ -361,7 +361,7 @@ async fn plan_action_approve_with_policy_only(
             return Ok(ToolResult::structured_error(ToolError::new(
                 error_codes::NOT_FOUND,
                 format!("plan `{}` not found for resolution", id),
-            )))
+            )));
         }
     };
     let current_version = plan.version;

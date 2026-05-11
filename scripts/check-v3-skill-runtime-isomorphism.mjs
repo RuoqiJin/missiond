@@ -191,6 +191,7 @@ function checkFiles(root, files) {
     'handle_exec',
     'execute_workflow',
     'dry_run',
+    'approve',
     'params',
     'Workflow execution failed',
   ]);
@@ -217,6 +218,7 @@ function checkFiles(root, files) {
     '"project_id"',
     '"project"',
     '"include_kb"',
+    '"approve"',
   ]);
 
   return diagnostics;
@@ -288,7 +290,7 @@ ProcessSkillTopic skill_version_get skill_version_list ingest_skills
 `);
 
   writeFixture(root, DEFAULT_FILES.exec, `
-handle_exec execute_workflow dry_run params Workflow execution failed
+handle_exec execute_workflow dry_run approve params Workflow execution failed
 `);
 
   writeFixture(root, DEFAULT_FILES.mcp, `
@@ -296,7 +298,7 @@ ToolDefinition::new
 "mission_skill_query" "mission_skill_context" "mission_skill_mutate" "mission_skill_exec"
 "required": ["action"]
 "list" "search" "topics" "actions" "stats" "project_links" "build" "resolve" "upsert" "record" "render" "rollback"
-"project_id" "project" "include_kb"
+"project_id" "project" "include_kb" "approve"
 `);
 
   return root;

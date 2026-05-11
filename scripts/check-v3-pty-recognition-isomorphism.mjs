@@ -254,6 +254,9 @@ function checkFiles(root, files) {
     '--skip-files',
     '--skip-db',
     '--apply',
+    '--manifest',
+    'manifest_path',
+    'fs.writeFileSync(manifestPath',
     'isPtyDiagnosticFile',
   ]);
 

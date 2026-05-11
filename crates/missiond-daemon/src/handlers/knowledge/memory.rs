@@ -2,6 +2,7 @@ use anyhow::{anyhow, Result};
 use missiond_mcp::tools::{ToolError, ToolResult};
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use tracing::info;
 
 use crate::context::v3_blueprint_runtime::MemoryKbRuntimeConfig;
@@ -13,6 +14,77 @@ use crate::state::{CURRENT_ANALYSIS_VERSION, MAX_ANALYSIS_RETRIES};
 use crate::state::{MEMORY_SLOT_ID, MEMORY_SLOW_SLOT_ID};
 
 const MAX_PENDING_BATCH_REPLAYS: u32 = 3;
+
+fn classify_memory_input_noise(role: &str, content: &str) -> Option<&'static str> {
+    // User utterances are the source of truth for memory extraction. Keep them
+    // even when they mention deployment, workers, or diagnostics.
+    if role == "user" {
+        return None;
+    }
+
+    let lower = content.to_ascii_lowercase();
+    const DEPLOYMENT_MONITOR_NEEDLES: &[&str] = &[
+        "deploy monitor",
+        "deployment-monitor",
+        "deployment-event-response",
+        "deploy-center provenance",
+        "xjp_build_wait",
+        "xjp_deploy_watch",
+        "xjp_deploy_status",
+        "deploy_created",
+        "build_started",
+        "build_succeeded",
+        "build_failed",
+        "deploy_started",
+        "deploy_succeeded",
+        "deploy_failed",
+        "smoke_succeeded",
+        "smoke_failed",
+        "rollback_started",
+        "rollback_succeeded",
+        "rollback_failed",
+        "agent_heartbeat",
+        "agent_update_started",
+        "agent_update_succeeded",
+        "agent_update_failed",
+        "provenance_changed",
+        "provenance_partial",
+        "digest_resolution_failed",
+        "reported_digest_missing",
+        "runner_queued",
+        "build_cache_unavailable",
+    ];
+    if DEPLOYMENT_MONITOR_NEEDLES
+        .iter()
+        .any(|needle| lower.contains(needle))
+    {
+        return Some("deployment-monitor");
+    }
+
+    if lower.contains("lisp-code-sync")
+        && (lower.contains("report")
+            || lower.contains("watcher")
+            || lower.contains("runtime/lisp-code-sync"))
+    {
+        return Some("runtime-report");
+    }
+
+    if lower.contains("matched skills")
+        || lower.contains("board task id")
+        || lower.contains("任务完成时")
+        || lower.contains("completion protocol")
+        || lower.contains("mission_board_update")
+        || lower.contains("mission_board_note_add")
+    {
+        return Some("worker-instruction");
+    }
+
+    if lower.contains("## 预加载上下文") || lower.contains("preloaded context") {
+        return Some("provider-preamble");
+    }
+
+    None
+}
 
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     // Consolidated tool: mission_memory
@@ -99,17 +171,19 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
 
             let mut output = String::new();
             let mut all_msg_ids: Vec<i64> = Vec::new();
+            let mut skip_counts: BTreeMap<&'static str, u32> = BTreeMap::new();
             let mut user_count = 0usize;
             for (session_id, project, msgs) in &pending {
-                output.push_str(&format!(
-                    "## session: {} (project: {})\n\n",
-                    session_id, project
-                ));
+                let mut session_output = String::new();
                 for msg in msgs {
+                    if let Some(reason) = classify_memory_input_noise(&msg.role, &msg.content) {
+                        *skip_counts.entry(reason).or_insert(0) += 1;
+                        continue;
+                    }
                     all_msg_ids.push(msg.id);
                     if msg.role == "user" {
                         user_count += 1;
-                        output.push_str(&format!(
+                        session_output.push_str(&format!(
                             "[#{}][{}] ★ user: {}\n\n",
                             msg.id, msg.timestamp, msg.content
                         ));
@@ -121,7 +195,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                         } else {
                             msg.content.clone()
                         };
-                        output.push_str(&format!(
+                        session_output.push_str(&format!(
                             "[#{}][{}] tool_result: {}\n\n",
                             msg.id, msg.timestamp, content
                         ));
@@ -133,24 +207,54 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                         } else {
                             msg.content.clone()
                         };
-                        output.push_str(&format!(
+                        session_output.push_str(&format!(
                             "[#{}][{}] assistant: {}\n\n",
                             msg.id, msg.timestamp, content
                         ));
                     }
+                }
+                if !session_output.is_empty() {
+                    output.push_str(&format!(
+                        "## session: {} (project: {})\n\n",
+                        session_id, project
+                    ));
+                    output.push_str(&session_output);
+                }
+            }
+            if !skip_counts.is_empty() {
+                let mut es = state.extraction_state.write().await;
+                for (reason, count) in &skip_counts {
+                    es.record_input_skip(reason, *count);
                 }
             }
 
             let session_count = pending.len();
             let msg_count = all_msg_ids.len();
             let truncated_note = if msg_count >= pending_msg_limit {
-                format!(" ⚠️ 已达上限 {}，可能还有更多未显示的消息。处理完当前批次后系统将自动推送下一批。", pending_msg_limit)
+                format!(
+                    " ⚠️ 已达上限 {}，可能还有更多未显示的消息。处理完当前批次后系统将自动推送下一批。",
+                    pending_msg_limit
+                )
             } else {
                 String::new()
             };
             let batch_id = format!("batch-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
+            let skip_note = if skip_counts.is_empty() {
+                String::new()
+            } else {
+                let parts = skip_counts
+                    .iter()
+                    .map(|(reason, count)| format!("{reason}={count}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "输入过滤诊断: 已跳过 {} 条噪声消息 ({parts})。\n",
+                    skip_counts.values().sum::<u32>()
+                )
+            };
             let header = format!(
                 "[realtime-extract] [{}] {} 个会话, {} 条消息 (其中 {} 条用户消息){}\n\
+                 {}\
                  水位线由系统自动管理，处理完毕后直接输出总结即可，无需调用 done 工具。\n\n\
                  ★ = 用户原话，优先级最高。每句用户消息都是刻意的。\n\
                  assistant 消息仅提供上下文，不需逐条分析。\n\
@@ -163,7 +267,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                  - 运维痛点/调试弯路 → category: memory:ops / memory:debug\n\
                  - 不存: 纯任务指令、当天工作日志、代码提交记录\n\
                  - 存入前用 mission_kb_search 检查去重\n\n",
-                batch_id, session_count, msg_count, user_count, truncated_note,
+                batch_id, session_count, msg_count, user_count, truncated_note, skip_note,
             );
             let rendered_payload = format!("{}{}", header, output);
 
@@ -193,8 +297,8 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 .control_manager
                 .current()
                 .is_domain_paused(crate::control_tree::CtlDomain::Memory);
+            // Route through ControlTree (single source of truth)
             let new_val = args.paused.unwrap_or(!current); // toggle if not specified
-                                                           // Route through ControlTree (single source of truth)
             state
                 .control_manager
                 .set_domain(crate::control_tree::CtlDomain::Memory, new_val);
@@ -238,6 +342,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 "pendingServed": fast_es.pending_served,
                 "pendingBatchId": fast_es.pending_batch_id,
                 "pendingReplayCount": fast_es.pending_replay_count,
+                "inputSkipDiagnostics": fast_es.input_skip_diagnostics(),
             });
             drop(fast_es);
 
@@ -255,6 +360,11 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 "busyDuration": if slow_busy > 0 { now - slow_busy } else { 0 },
                 "currentConvId": slow_es.current_deep_conv_id,
                 "currentTaskId": slow_es.current_task_id,
+                "currentOutputCount": slow_es.current_output_count,
+                "zeroOutputCount": slow_es.deep_analysis_zero_output_count,
+                "zeroOutputFuseUntil": slow_es.deep_analysis_fuse_until,
+                "zeroOutputFuseActive": slow_es.deep_analysis_fuse_active(now),
+                "inputSkipDiagnostics": slow_es.input_skip_diagnostics(),
             });
             drop(slow_es);
 
@@ -343,6 +453,15 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 "slowLane": slow_lane,
                 "pendingRealtime": pending_realtime,
                 "pendingDeep": pending_deep,
+                "inputFilter": {
+                    "slotExclusions": ["slot-memory*", "slot-diagnosis*", "agent-*"],
+                    "textNoiseReasons": [
+                        "deployment-monitor",
+                        "runtime-report",
+                        "worker-instruction",
+                        "provider-preamble"
+                    ],
+                },
                 "realtimeDetail": realtime_detail,
                 "deepDetail": deep_detail,
                 "lastKbConsolidation": if last_consolidation > 0 {
@@ -359,5 +478,56 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
         }
 
         _ => Err(anyhow!("Unknown memory tool: {name}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::classify_memory_input_noise;
+
+    #[test]
+    fn memory_input_filter_preserves_user_utterances() {
+        assert_eq!(
+            classify_memory_input_noise("user", "deploy_succeeded 这个事件要记入 EventBus"),
+            None
+        );
+    }
+
+    #[test]
+    fn memory_input_filter_classifies_deployment_monitor_noise() {
+        assert_eq!(
+            classify_memory_input_noise("assistant", "deploy monitor: deploy_succeeded"),
+            Some("deployment-monitor")
+        );
+        assert_eq!(
+            classify_memory_input_noise("tool_result", "agent_heartbeat from deploy-agent"),
+            Some("deployment-monitor")
+        );
+        assert_eq!(
+            classify_memory_input_noise(
+                "assistant",
+                "deployment-event-response observed build_started then reported_digest_missing; use xjp_deploy_watch",
+            ),
+            Some("deployment-monitor")
+        );
+        assert_eq!(
+            classify_memory_input_noise(
+                "tool_result",
+                "deploy-center provenance_partial with agent_update_failed diagnostic",
+            ),
+            Some("deployment-monitor")
+        );
+    }
+
+    #[test]
+    fn memory_input_filter_classifies_runtime_and_worker_noise() {
+        assert_eq!(
+            classify_memory_input_noise("assistant", "lisp-code-sync watcher report path"),
+            Some("runtime-report")
+        );
+        assert_eq!(
+            classify_memory_input_noise("assistant", "Board Task ID: abc; mission_board_update"),
+            Some("worker-instruction")
+        );
     }
 }

@@ -34,7 +34,7 @@ use mutate::{
 };
 use ops::{handle_kb_execute_plan, handle_kb_queue_status};
 use query::{handle_kb_get, handle_kb_list, handle_kb_search};
-use remember::handle_kb_remember;
+use remember::{handle_kb_remember, handle_kb_remember_batch};
 use review::handle_kb_review;
 
 // @beacon: knowledge
@@ -59,6 +59,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .and_then(|v| v.as_str())
                 .unwrap_or("forget");
             let legacy = match action {
+                "batch_remember" => "mission_kb_batch_remember",
                 "update" => "mission_kb_update",
                 "import" => "mission_kb_import",
                 "forget" if args.get("keys").is_some() => "mission_kb_batch_forget",
@@ -84,6 +85,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     match name {
         // ===== Knowledge Base (Jarvis Memory) =====
         "mission_kb_remember" => handle_kb_remember(state, args).await,
+        "mission_kb_batch_remember" => handle_kb_remember_batch(state, args).await,
         "mission_kb_forget" => handle_kb_forget(state, args).await,
         "mission_kb_batch_forget" => handle_kb_batch_forget(state, args).await,
         "mission_kb_batch_set_project" => handle_kb_batch_set_project(state, args).await,

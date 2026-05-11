@@ -175,7 +175,7 @@ pub async fn dispatch_tool<H: MissiondMcp>(handler: &H, name: &str, args: Value)
             handler.handle_router_chat(name, args).await
         }
         "mission_timeline" => handler.handle_timeline(name, args).await,
-        "mission_audit" => handler.handle_audit(name, args).await,
+        "mission_audit" | "mission_tool_directory" => handler.handle_audit(name, args).await,
         "mission_retrospective_manage" => handler.handle_retrospective(name, args).await,
         "mission_decision_stats" => handler.handle_decision(name, args).await,
         "mission_infra_query" | "mission_infra_ops" => handler.handle_infra(name, args).await,

@@ -14,6 +14,7 @@ pub(super) async fn handle_conversation_query(state: &AppState, args: Value) -> 
         "get" => "mission_conversation_get",
         "search" => "mission_conversation_search",
         "message_search" => "mission_message_search",
+        "analysis_context" => "mission_conversation_analysis_context",
         "context" => "mission_context_around",
         "events" => "mission_conversation_events",
         "user_index" => "mission_user_message_index",
@@ -45,6 +46,9 @@ pub(super) async fn handle_conversation_analyze(
         }
         "trajectory" => super::events::handle_events(state, "mission_agent_trajectory", args).await,
         "activity" => super::events::handle_events(state, "mission_activity_report", args).await,
+        "analysis_context" => {
+            super::query::handle_query(state, "mission_conversation_analysis_context", args).await
+        }
         other => Err(anyhow!("Unknown conversation_analyze action: {other}")),
     }
 }

@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
+use crate::context::v3_blueprint_runtime::LearningEngineRuntimeConfig;
 use crate::engine::master_control::{
     CLAUDE_CODE_MCP_MISSING_INCIDENT_KIND, CLAUDE_CODE_MCP_RECONNECT_FAILED_INCIDENT_KIND,
 };
@@ -251,7 +252,9 @@ async fn handle_memory_lane_state(
                         es.watermark_targets.clear();
                     }
                 }
+                let mut output_count = 0_u32;
                 if matches!(es.active_type, Some("deep_analysis")) {
+                    output_count = es.current_output_count;
                     if let Some(conv_id) = es.current_deep_conv_id.take() {
                         if es.is_checkpoint {
                             if let Some(msg_id) = es.checkpoint_message_id.take() {
@@ -274,10 +277,35 @@ async fn handle_memory_lane_state(
                                 info!(conv_id = %conv_id, version = CURRENT_ANALYSIS_VERSION, "Deep analysis: marked complete");
                             }
                         }
+                        let _ = s
+                            .bus
+                            .publish_memory(MemoryEvent::DeepAnalysisCompleted {
+                                session_id: conv_id,
+                                kb_entries_created: output_count,
+                            })
+                            .await;
+                    }
+                    let config = LearningEngineRuntimeConfig::load_for_current_dir()
+                        .unwrap_or_else(|_| LearningEngineRuntimeConfig::default());
+                    let fused = es.record_deep_analysis_completion(
+                        output_count,
+                        config.deep_analysis_zero_output_fuse_threshold,
+                        config.deep_analysis_zero_output_fuse_secs,
+                        chrono::Utc::now().timestamp(),
+                    );
+                    if fused {
+                        warn!(
+                            consecutive_zero_output = es.deep_analysis_zero_output_count,
+                            fuse_until = es.deep_analysis_fuse_until,
+                            "Deep analysis zero-output saturation fuse engaged"
+                        );
                     }
                 }
                 if let Some(ref st_id) = es.current_slot_task_id {
-                    let _ = s.store.slot_task_set_completed(st_id, 0).await;
+                    let _ = s
+                        .store
+                        .slot_task_set_completed(st_id, output_count as i64)
+                        .await;
                 }
                 let mem_trace_id = es
                     .current_deep_conv_id
@@ -299,6 +327,7 @@ async fn handle_memory_lane_state(
                 es.current_slot_task_id = None;
                 es.is_checkpoint = false;
                 es.checkpoint_message_id = None;
+                es.reset_current_output_count();
                 es.clear_pending_batch_replay();
                 let _ = s
                     .bus

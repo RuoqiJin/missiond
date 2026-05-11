@@ -12,12 +12,21 @@ pub(super) async fn handle_exec(state: &AppState, args: Value) -> Result<ToolRes
         action: String,
         #[serde(default)]
         dry_run: bool,
+        #[serde(default)]
+        approve: bool,
         params: Option<Value>,
     }
     let args: SkillExecArgs = serde_json::from_value(args)?;
 
     match state
-        .execute_workflow(&args.skill, &args.action, args.dry_run, args.params, 0)
+        .execute_workflow(
+            &args.skill,
+            &args.action,
+            args.dry_run,
+            args.approve,
+            args.params,
+            0,
+        )
         .await
     {
         Ok(result) => Ok(ToolResult::json_pretty(&result)),

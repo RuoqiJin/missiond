@@ -9357,7 +9357,8 @@ fn router_policy_dry_run_smoke_pins_wave26_invariants() {
         "wave26-06 invariant 4 prereq: seed claudecode runtime_allowed=true"
     );
     assert_eq!(
-        block_seed["router_apply_eligible"], Value::Bool(false),
+        block_seed["router_apply_eligible"],
+        Value::Bool(false),
         "wave26-06 invariant 4: current-default + high-confidence + runtime_allowed=true MUST still yield apply_eligible=false (current-default alone is INSUFFICIENT)"
     );
     assert!(
@@ -9408,7 +9409,8 @@ fn router_policy_dry_run_smoke_pins_wave26_invariants() {
     let block_ready = &v_ready["router_recommendation"];
 
     assert_eq!(
-        block_ready["applied"], Value::Bool(false),
+        block_ready["applied"],
+        Value::Bool(false),
         "wave26-06 invariant 3: applied MUST be literal Bool(false) EVEN UNDER apply_eligible=true (runtime replacement is rejected by contract)"
     );
     assert_eq!(
@@ -9598,7 +9600,8 @@ fn router_policy_cli_rust_parity_for_readiness() {
         "wave26-06 parity: Node CLI emits backend_runtime_allowed=true for seed claudecode"
     );
     assert_eq!(
-        block["router_apply_eligible"], Value::Bool(false),
+        block["router_apply_eligible"],
+        Value::Bool(false),
         "wave26-06 parity: Node CLI emits router_apply_eligible=false for current-default (current-default alone is INSUFFICIENT)"
     );
     assert_eq!(
@@ -9850,7 +9853,8 @@ fn router_dispatch_descriptor_dry_run_with_seed_registry_emits_no_execution_true
     assert_eq!(descriptor["backend_readiness_status"], "current-default");
     assert_eq!(descriptor["backend_runtime_allowed"], Value::Bool(true));
     assert_eq!(
-        descriptor["router_apply_eligible"], Value::Bool(false),
+        descriptor["router_apply_eligible"],
+        Value::Bool(false),
         "wave27-03: current-default registry does NOT satisfy the wave26-03 gate (runtime-ready required)"
     );
     let blockers = descriptor["router_apply_blockers"]
@@ -9901,7 +9905,8 @@ fn router_dispatch_descriptor_dry_run_with_runtime_ready_eligible() {
     // Cross-wave invariant: even when eligibility flips to true, the
     // three locked invariants MUST stay literal Bool literals.
     assert_eq!(
-        descriptor["router_apply_eligible"], Value::Bool(true),
+        descriptor["router_apply_eligible"],
+        Value::Bool(true),
         "wave27-03: runtime-ready + high confidence + runtime_allowed=true + zero blockers -> eligible=true"
     );
     let blockers = descriptor["router_apply_blockers"]

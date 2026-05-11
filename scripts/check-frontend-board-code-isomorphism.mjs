@@ -149,6 +149,19 @@ function checkRepo(repo, blueprintRel, v3Rel) {
     if (!v3.includes(needle)) diagnostics.push(diag(v3Rel, null, `V3 board-frontend registry/surface missing ${JSON.stringify(needle)}`));
   }
 
+  const execDashboardRel = 'packages/board/src/components/ExecDashboard.tsx';
+  const execDashboard = read(repo, execDashboardRel, diagnostics);
+  for (const needle of ['fetchTaskWithNotes', 'extractExecutionStepDigest', 'Execution Step Digest']) {
+    if (!execDashboard.includes(needle)) {
+      diagnostics.push(diag(execDashboardRel, null, `Exec cockpit missing execution-step-digest anchor ${JSON.stringify(needle)}`));
+    }
+  }
+  for (const needle of ['execution-step-digest', 'PTY as a detail panel']) {
+    if (!source.includes(needle)) {
+      diagnostics.push(diag(blueprintRel, null, `frontend blueprint missing execution cockpit intent ${JSON.stringify(needle)}`));
+    }
+  }
+
   return { ok: diagnostics.length === 0, surfaces: [...surfaces.keys()], diagnostics };
 }
 
@@ -192,13 +205,21 @@ function buildFixture() {
   }
   for (const rel of fixtureFiles) {
     fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
-    fs.writeFileSync(path.join(root, rel), '// fixture\n');
+    const body = rel === 'packages/board/src/components/ExecDashboard.tsx'
+      ? '// fixture\nfetchTaskWithNotes\nextractExecutionStepDigest\nExecution Step Digest\n'
+      : '// fixture\n';
+    fs.writeFileSync(path.join(root, rel), body);
   }
   const surfaceForms = [...REQUIRED_SURFACES.entries()].map(([surface, required]) => {
     const code = Array.from(new Set([...required, ...REQUIRED_MAJOR_FILES.filter((f) => surface === 'board-task-ui' && ['packages/board/src/constants.ts'].includes(f))]));
     return `(surface ${surface} :status "code-aligned" :implements [fn-${surface}] :code [${code.map((f) => JSON.stringify(f)).join(' ')}])`;
   });
-  fs.writeFileSync(path.join(root, BLUEPRINT), `(missiond-frontend-blueprint (implementation-map ${surfaceForms.join('\n')}))`);
+  fs.writeFileSync(path.join(root, BLUEPRINT), `(missiond-frontend-blueprint
+    (pillar execution-cockpit-ui
+      (function execution-cockpit
+        :core ((step s1 :logic "derive execution-step-digest")
+               (step s2 :logic "keep PTY as a detail panel"))))
+    (implementation-map ${surfaceForms.join('\n')}))`);
   fs.writeFileSync(path.join(root, V3_BLUEPRINT), `(missiond-blueprint (implementation-map (surface board-frontend :implements [board-frontend] :code [".missiond/frontend/board-blueprint.lisp" "packages/board/src/generated/board-frontend-config.ts" "scripts/project-frontend-board-config.mjs" "node scripts/check-frontend-board-code-isomorphism.mjs" "node scripts/check-frontend-board-lisp-schema.mjs" "node scripts/check-frontend-board-runtime-projection.mjs"])))`);
   return root;
 }

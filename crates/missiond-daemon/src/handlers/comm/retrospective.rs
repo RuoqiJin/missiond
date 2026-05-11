@@ -6,6 +6,19 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::state::AppState;
 
+const BULK_TOOL_WHITELIST: &[&str] = &[
+    "Read",
+    "Grep",
+    "Glob",
+    "LS",
+    "Bash",
+    "rg",
+    "git status",
+    "mission_conversation_query",
+    "mission_memory_pending",
+    "mission_kb_query",
+];
+
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     if name == "mission_retrospective_list" {
         return handle_list(state, args).await;
@@ -163,6 +176,11 @@ pub(crate) async fn run_analysis(
         .map(|c| c.status.as_str())
         .unwrap_or("unknown");
 
+    let conversation_type = conv_info
+        .as_ref()
+        .map(|c| c.conversation_type.as_str())
+        .unwrap_or("unknown");
+
     // 8. Waste score: repeat calls / total calls
     let total_repeat_calls: i64 = repeats.iter().map(|(_, streak, _, _)| streak).sum();
     let waste_ratio = if total_calls > 0 {
@@ -170,6 +188,26 @@ pub(crate) async fn run_analysis(
     } else {
         0.0
     };
+    let bulk_tool_calls: i64 = top_tools
+        .iter()
+        .filter(|(name, _, _, _, _)| {
+            BULK_TOOL_WHITELIST
+                .iter()
+                .any(|needle| name.contains(needle))
+        })
+        .map(|(_, count, _, _, _)| *count)
+        .sum();
+    let bulk_ratio = if total_calls > 0 {
+        (bulk_tool_calls as f64) / (total_calls as f64) * 100.0
+    } else {
+        0.0
+    };
+    let session_kind = match conversation_type {
+        "worker" | "meta" => "worker_or_meta",
+        "jarvis" | "user" | "codex_chat" | "gemini_chat" => "human_or_provider_chat",
+        _ => "unknown",
+    };
+    let noise_adjusted_waste = (waste_ratio - bulk_ratio.min(waste_ratio)).max(0.0);
 
     let mut result = json!({
         "sessionId": session_id,
@@ -181,6 +219,16 @@ pub(crate) async fn run_analysis(
             "compactCount": compact_count,
             "sessionStatus": session_status,
             "wasteRatio": format!("{:.1}%", waste_ratio),
+            "conversationType": conversation_type,
+            },
+        "signalQuality": {
+            "sessionKind": session_kind,
+            "bulkToolWhitelist": BULK_TOOL_WHITELIST,
+            "bulkToolCalls": bulk_tool_calls,
+            "bulkToolRatio": format!("{:.1}%", bulk_ratio),
+            "noiseAdjustedWasteRatio": format!("{:.1}%", noise_adjusted_waste),
+            "thresholdProfile": if session_kind == "worker_or_meta" { "worker_meta" } else { "human_chat" },
+            "interpretation": "bulk-tool and worker/meta sessions use separate thresholds so batch scans do not masquerade as reasoning waste",
         },
         "topTools": top_tools_json,
         "timeBlackHoles": time_black_holes,
@@ -959,7 +1007,9 @@ async fn handle_backfill(state: &AppState, args: Value) -> Result<ToolResult> {
 
     let msg = format!(
         "回填任务已启动（后台执行）。预计分析 {} 个会话（since: {}）。每个间隔 10s，总耗时约 {} 分钟。",
-        count, since, (count * 10) / 60 + 1
+        count,
+        since,
+        (count * 10) / 60 + 1
     );
 
     // Spawn background task — calls retro_worker::backfill which uses run_analysis

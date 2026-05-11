@@ -193,7 +193,10 @@ mod knowledge;
 mod sysinfra;
 
 // Domain aliases for readability
-use comm::{audit, capability_usage, codex_ops, conversation, question, router_chat, timeline};
+use comm::{
+    audit, capability_usage, codex_ops, conversation, question, router_chat, timeline,
+    tool_directory,
+};
 use compute::{
     cc_tasks, compute_slot, flow_run, forge, job, minimax, process, pty, slot, task, task_delegate,
     worker,
@@ -243,6 +246,7 @@ pub fn all_tools() -> Vec<ToolDefinition> {
     tools.extend(audit::definitions());
     tools.extend(capability_usage::definitions());
     tools.extend(codex_ops::definitions());
+    tools.extend(tool_directory::definitions());
     // sysinfra
     tools.extend(infra::definitions());
     tools.extend(permission::definitions());
@@ -386,8 +390,29 @@ mod tests {
             .expect("mission_kb_query schema must declare properties");
         assert!(
             query_props.contains_key("include_archived")
-                && query_props.contains_key("state_filter"),
+                && query_props.contains_key("state_filter")
+                && query_props.contains_key("excludeCategory")
+                && query_props.contains_key("exclude_category"),
             "mission_kb_query must expose archived-query controls"
+        );
+
+        let mutate = get_tool("mission_kb_mutate").expect("mission_kb_mutate registered");
+        let mutate_props = mutate
+            .input_schema
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .expect("mission_kb_mutate schema must declare properties");
+        let mutate_action_enum = mutate_props
+            .get("action")
+            .and_then(|v| v.get("enum"))
+            .and_then(|v| v.as_array())
+            .expect("mission_kb_mutate.action must be an enum");
+        assert!(
+            mutate_action_enum
+                .iter()
+                .any(|v| v.as_str() == Some("batch_remember"))
+                && mutate_props.contains_key("entries"),
+            "mission_kb_mutate must expose batch_remember entries"
         );
     }
 

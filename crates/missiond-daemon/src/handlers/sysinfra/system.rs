@@ -73,7 +73,7 @@ async fn sys_config_get(args: Value) -> Result<ToolResult> {
                 "Cannot read {}: {}",
                 path.display(),
                 e
-            )))
+            )));
         }
     };
 
@@ -98,7 +98,7 @@ async fn sys_config_patch(state: &AppState, args: Value) -> Result<ToolResult> {
         None => {
             return Ok(ToolResult::error(
                 "'path' (JSON Pointer, e.g. /slots/0/description) is required",
-            ))
+            ));
         }
     };
     let new_value = match args.get("value") {
@@ -129,7 +129,7 @@ async fn sys_config_patch(state: &AppState, args: Value) -> Result<ToolResult> {
                 "Cannot read {}: {}",
                 path.display(),
                 e
-            )))
+            )));
         }
     };
 
@@ -151,7 +151,7 @@ async fn sys_config_patch(state: &AppState, args: Value) -> Result<ToolResult> {
             return Ok(ToolResult::error(format!(
                 "JSON Pointer '{}' not found in {}",
                 pointer, file
-            )))
+            )));
         }
     };
     *target = new_value.clone();
@@ -163,7 +163,7 @@ async fn sys_config_patch(state: &AppState, args: Value) -> Result<ToolResult> {
             return Ok(ToolResult::error(format!(
                 "JSON→YAML serialization error: {}",
                 e
-            )))
+            )));
         }
     };
 
@@ -182,8 +182,12 @@ async fn sys_config_patch(state: &AppState, args: Value) -> Result<ToolResult> {
             if result.has_changes() {
                 return Ok(ToolResult::text(format!(
                     "Patched {} at '{}' → {:?}. Slots reloaded: {} added, {} removed, {} updated. (⚠️ YAML comments lost in round-trip)",
-                    file, pointer, new_value,
-                    result.added.len(), result.removed.len(), result.updated.len()
+                    file,
+                    pointer,
+                    new_value,
+                    result.added.len(),
+                    result.removed.len(),
+                    result.updated.len()
                 )));
             }
         }
@@ -221,7 +225,7 @@ async fn sys_logs(args: Value) -> Result<ToolResult> {
             return Ok(ToolResult::error(format!(
                 "No log files found in {}",
                 log_dir
-            )))
+            )));
         }
     };
 
@@ -231,7 +235,7 @@ async fn sys_logs(args: Value) -> Result<ToolResult> {
             return Ok(ToolResult::error(format!(
                 "Cannot read log file {}: {}",
                 log_path, e
-            )))
+            )));
         }
     };
 

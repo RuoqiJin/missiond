@@ -505,8 +505,22 @@ fn render_report(report: &NightlyReport) -> String {
         if report.apply { "true" } else { "false" },
         lisp_string(&report.reason),
         lisp_option_string(report.followup_task_id.as_deref()),
-        if report.convergence.get("ok").and_then(Value::as_bool).unwrap_or(false) { "true" } else { "false" },
-        lisp_option_string(report.convergence.get("failed_stage").and_then(Value::as_str)),
+        if report
+            .convergence
+            .get("ok")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            "true"
+        } else {
+            "false"
+        },
+        lisp_option_string(
+            report
+                .convergence
+                .get("failed_stage")
+                .and_then(Value::as_str)
+        ),
         lisp_string_list(&report.recent_commits),
         render_findings(&report.findings),
     )

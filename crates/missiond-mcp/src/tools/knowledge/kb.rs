@@ -16,6 +16,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "action": {"type": "string", "enum": ["search", "get", "list"], "default": "search"},
                     "query": {"type": "string", "description": "[search] 搜索关键词"},
                     "category": {"type": "string", "description": "[search/list] 分类过滤"},
+                    "excludeCategory": {"type": "array", "items": {"type": "string"}, "description": "[search/list] 排除分类；支持排除子分类，如 memory 排除 memory:*"},
+                    "exclude_category": {"type": "array", "items": {"type": "string"}, "description": "[search/list] excludeCategory 的 snake_case alias"},
                     "limit": {"type": "integer", "description": "[search] 返回条数上限(最大 50)", "default": 10},
                     "offset": {"type": "integer", "description": "[search] 分页偏移", "default": 0},
                     "search_mode": {"type": "string", "description": "[search] exact=纯相关性; explore=含 MMR 多样性", "enum": ["exact", "explore"], "default": "explore"},
@@ -25,7 +27,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
         // ===== mission_kb_remember =====
         ToolDefinition::new(
             "mission_kb_remember",
@@ -43,18 +44,18 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
         // ===== mission_kb_mutate =====
         ToolDefinition::new(
             "mission_kb_mutate",
-            "知识库写操作。forget: 删除; update: 部分更新; import: 导入",
+            "知识库写操作。forget: 删除; update: 部分更新; import: 导入; batch_remember: 批量写入记忆",
             json!({
                 "type": "object",
                 "required": ["action"],
                 "properties": {
-                    "action": {"type": "string", "enum": ["forget", "update", "import"]},
+                    "action": {"type": "string", "enum": ["forget", "update", "import", "batch_remember"]},
                     "key": {"type": "string", "description": "[forget/update] 目标 key"},
                     "keys": {"type": "array", "description": "[forget] 批量删除 key 列表(优先于 key)"},
+                    "entries": {"type": "array", "description": "[batch_remember] 批量写入条目", "items": {"type": "object"}},
                     "category": {"type": "string", "description": "[update] 新分类"},
                     "summary": {"type": "string", "description": "[update] 新摘要 ≤400字"},
                     "detail": {"type": "object", "description": "[update] 新详情 JSON"},
@@ -65,7 +66,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
         // ===== mission_kb_ops =====
         ToolDefinition::new(
             "mission_kb_ops",
@@ -96,7 +96,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
         // ===== mission_kb_review =====
         ToolDefinition::new(
             "mission_kb_review",
@@ -119,7 +118,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
         // ===== mission_beacon =====
         ToolDefinition::new(
             "mission_beacon",
@@ -137,7 +135,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
         // ===== mission_code_search =====
         ToolDefinition::new(
             "mission_code_search",
@@ -154,6 +151,5 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
     ]
 }

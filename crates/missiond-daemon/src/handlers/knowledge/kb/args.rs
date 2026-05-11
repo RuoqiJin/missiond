@@ -48,6 +48,8 @@ pub(super) struct KBSearchArgs {
     pub(super) query: Option<String>,
     #[serde(default)]
     pub(super) category: Option<String>,
+    #[serde(default, alias = "excludeCategory")]
+    pub(super) exclude_category: Option<Value>,
     #[serde(default)]
     pub(super) limit: Option<usize>,
     #[serde(default)]
@@ -66,6 +68,8 @@ pub(super) struct KBSearchArgs {
 pub(super) struct KBListArgs {
     #[serde(default)]
     pub(super) category: Option<String>,
+    #[serde(default, alias = "excludeCategory")]
+    pub(super) exclude_category: Option<Value>,
     #[serde(default = "default_list_limit")]
     pub(super) limit: u32,
     #[serde(default)]
@@ -87,6 +91,12 @@ pub(super) struct KBImportArgs {
     pub(super) format: String,
     #[serde(default)]
     pub(super) path: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct KBBatchRememberArgs {
+    #[serde(default)]
+    pub(super) entries: Vec<KBRememberArgs>,
 }
 
 #[derive(Deserialize)]

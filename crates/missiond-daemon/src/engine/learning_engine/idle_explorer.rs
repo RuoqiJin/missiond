@@ -185,7 +185,8 @@ async fn explore_kb_consistency(state: &AppState, assignee: &str) -> bool {
         2. If the information is outdated/wrong → use `mission_kb_forget` to remove it\n\
         3. If uncertain → leave as-is\n\n\
         Report your findings as a Board note on this task when done.",
-        entries.len(), keys_list,
+        entries.len(),
+        keys_list,
     );
 
     create_explore_task(
@@ -432,7 +433,9 @@ async fn explore_skill_synthesis(state: &AppState, assignee: &str) -> bool {
            - Confidence assessment of the synthesis quality\n\n\
         **Important**: The generated Skill should capture the *why* behind the rules, not just the *what*.\n\
         If entries contradict each other, flag the conflict rather than arbitrarily picking one.",
-        cluster_entries.len(), cluster_name, entries_str
+        cluster_entries.len(),
+        cluster_name,
+        entries_str
     );
 
     // Set reentry lock BEFORE creating task (cleared on failure by autopilot event listener)
@@ -628,7 +631,8 @@ async fn explore_stale_state_verification(state: &AppState, assignee: &str) -> b
         4. If STALE/WRONG → `mission_kb_forget` to remove outdated state\n\
         5. If CANNOT VERIFY → leave unchanged\n\n\
         Report findings as a Board note.",
-        entries.len(), keys_str,
+        entries.len(),
+        keys_str,
     );
 
     create_explore_task(

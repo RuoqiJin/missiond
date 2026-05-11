@@ -42,7 +42,7 @@ pub(super) async fn action_release(state: &AppState, args: &Value) -> Result<Too
                     format!("claim {} not found", claim_id),
                 )
                 .with_suggestion("use action=status to list active claims"),
-            ))
+            ));
         }
     };
 

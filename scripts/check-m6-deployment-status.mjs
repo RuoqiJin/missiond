@@ -6,7 +6,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const usage = `Usage:
-  node scripts/check-m6-deployment-status.mjs [--json] [--report-only] [--base-url URL]
+  node scripts/check-m6-deployment-status.mjs [--json] [--report-only] [--base-url URL] [--project ID]
 
 Checks whether projects currently marked M6 in MissionD Universe also have
 deploy-center evidence for a deployed production release.
@@ -70,10 +70,11 @@ const DEPLOYMENT_MAP = {
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   const m6Projects = readM6Projects(process.cwd());
+  const selectedProjects = selectProjects(m6Projects, opts.project);
   const deployStatus = await fetchDeployStatus(opts.baseUrl);
   const recentDeployments = deployStatus?.recent_deployments ?? [];
   const projects = [];
-  for (const projectId of m6Projects) {
+  for (const projectId of selectedProjects) {
     projects.push(await classifyProject(projectId, recentDeployments, opts.baseUrl));
   }
   const blocking = projects.filter((project) => !['deployed-current', 'no-deploy-target'].includes(project.status));
@@ -85,7 +86,7 @@ async function main() {
       deploy_center_status: `${opts.baseUrl.replace(/\/$/, '')}/api/deploy/status`,
     },
     deploy_center_healthy: deployStatus?.healthy ?? null,
-    m6_projects: m6Projects,
+    m6_projects: selectedProjects,
     projects,
     blocking_items: blocking.map((project) => ({
       project_id: project.project_id,
@@ -107,7 +108,7 @@ async function main() {
 }
 
 function parseArgs(args) {
-  const opts = { json: false, reportOnly: false, baseUrl: DEFAULT_BASE_URL };
+  const opts = { json: false, reportOnly: false, baseUrl: DEFAULT_BASE_URL, project: null };
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
     if (arg === '--json') opts.json = true;
@@ -119,11 +120,21 @@ function parseArgs(args) {
       opts.baseUrl = args[++i] ?? fail('--base-url requires a value');
     } else if (arg.startsWith('--base-url=')) {
       opts.baseUrl = arg.slice('--base-url='.length);
+    } else if (arg === '--project') {
+      opts.project = args[++i] ?? fail('--project requires a value');
+    } else if (arg.startsWith('--project=')) {
+      opts.project = arg.slice('--project='.length);
     } else {
       fail(`unknown argument: ${arg}`);
     }
   }
   return opts;
+}
+
+function selectProjects(m6Projects, requestedProject) {
+  if (!requestedProject) return m6Projects;
+  if (m6Projects.includes(requestedProject)) return [requestedProject];
+  return [requestedProject];
 }
 
 function fail(message) {

@@ -46,7 +46,7 @@ pub(crate) async fn handle(_state: &AppState, _name: &str, args: Value) -> Resul
             return Ok(ToolResult::structured_error(ToolError::new(
                 error_codes::INVALID_PARAM,
                 format!("cannot resolve target path: {}", e),
-            )))
+            )));
         }
     };
 
@@ -119,7 +119,7 @@ async fn edit_action(path: &Path, args: Value) -> Result<ToolResult> {
                     "`new_content` is required for edit",
                 )
                 .with_suggestion("Provide the full UTF-8 file body in `new_content`"),
-            ))
+            ));
         }
     };
     let dry_run = args

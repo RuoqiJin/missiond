@@ -12,7 +12,8 @@ import {
   TerminalSquare,
 } from 'lucide-react';
 import { Terminal } from './Terminal';
-import type { SlotDef, Task } from '../types';
+import { fetchTaskWithNotes } from '../api';
+import type { SlotDef, Task, TaskNote } from '../types';
 import { cn } from '@/lib/utils';
 
 const PROVIDER_LABELS: Record<string, string> = {
@@ -72,9 +73,43 @@ function formatTime(value?: string | null) {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 
+function extractExecutionStepDigest(task: Task | null, notes: TaskNote[], slot: SlotDef | null): string[] {
+  const sources = [
+    task?.description,
+    ...notes
+      .slice()
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .map((note) => note.content),
+  ].filter((value): value is string => !!value);
+  const stepLike: string[] = [];
+  const seen = new Set<string>();
+  for (const source of sources) {
+    for (const rawLine of source.split(/\r?\n/)) {
+      const line = rawLine.replace(/^[-*\s#>]+/, '').trim();
+      if (!line) continue;
+      if (!/(step|phase|stage|acceptance|验收|阶段|步骤|evidence|verification|blocked|done|failed|summary)/i.test(line)) {
+        continue;
+      }
+      const compact = line.length > 160 ? `${line.slice(0, 159)}...` : line;
+      if (seen.has(compact)) continue;
+      seen.add(compact);
+      stepLike.push(compact);
+      if (stepLike.length >= 12) return stepLike;
+    }
+  }
+  return [
+    task ? `BoardTask ${task.status}: ${task.title}` : 'No BoardTask selected.',
+    slot ? `slot ${slot.id}: ${stateLabel(slot)}` : 'No linked slot.',
+    slot?.latestConversation?.id
+      ? `conversation ${slot.latestConversation.id}: ${slot.latestConversation.status || 'unknown'}`
+      : 'No durable conversation linked.',
+  ];
+}
+
 export function ExecDashboard({ slots, tasks }: { slots: SlotDef[]; tasks: Task[] }) {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [selectedSlotId, setSelectedSlotId] = useState<string | null>(null);
+  const [selectedTaskNotes, setSelectedTaskNotes] = useState<TaskNote[]>([]);
 
   const activeTasks = useMemo(() => {
     return tasks
@@ -102,6 +137,10 @@ export function ExecDashboard({ slots, tasks }: { slots: SlotDef[]; tasks: Task[
   const selectedTask = activeTasks.find((task) => task.id === selectedTaskId) ?? activeTasks[0] ?? null;
   const taskSlot = slotForTask(selectedTask, sortedSlots);
   const selectedSlot = sortedSlots.find((slot) => slot.id === selectedSlotId) ?? taskSlot ?? sortedSlots[0] ?? null;
+  const stepDigest = useMemo(
+    () => extractExecutionStepDigest(selectedTask, selectedTaskNotes, selectedSlot),
+    [selectedTask, selectedTaskNotes, selectedSlot],
+  );
 
   useEffect(() => {
     if (selectedSlotId && sortedSlots.some((slot) => slot.id === selectedSlotId)) return;
@@ -111,6 +150,22 @@ export function ExecDashboard({ slots, tasks }: { slots: SlotDef[]; tasks: Task[
     }
     setSelectedSlotId(sortedSlots[0]?.id ?? null);
   }, [selectedSlotId, sortedSlots, taskSlot]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setSelectedTaskNotes([]);
+    if (!selectedTask?.id) return;
+    fetchTaskWithNotes(selectedTask.id)
+      .then((taskWithNotes) => {
+        if (!cancelled) setSelectedTaskNotes(taskWithNotes.notes || []);
+      })
+      .catch(() => {
+        if (!cancelled) setSelectedTaskNotes([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedTask?.id]);
 
   return (
     <div className="flex-1 grid grid-cols-[320px_minmax(0,1fr)_430px] min-h-0 overflow-hidden bg-neutral-950">
@@ -185,6 +240,17 @@ export function ExecDashboard({ slots, tasks }: { slots: SlotDef[]; tasks: Task[
             <KeyValue label="fallback" value="bounded HTTP refresh only" />
             <KeyValue label="slot" value={taskSlot?.id || '-'} mono />
             <KeyValue label="slot state" value={stateLabel(taskSlot)} tone={stateTone(taskSlot)} />
+          </DiagnosticBlock>
+
+          <DiagnosticBlock icon={<ListChecks className="w-4 h-4" />} title="Execution Step Digest">
+            <div className="max-h-48 overflow-y-auto rounded border border-neutral-850 bg-neutral-950/50">
+              {stepDigest.map((line, index) => (
+                <div key={`${index}-${line}`} className="grid grid-cols-[34px_minmax(0,1fr)] gap-2 border-b border-neutral-900 px-2 py-1.5 last:border-b-0">
+                  <span className="font-mono text-[10px] text-neutral-600">s{index + 1}</span>
+                  <span className="text-xs text-neutral-300 break-words">{line}</span>
+                </div>
+              ))}
+            </div>
           </DiagnosticBlock>
 
           <DiagnosticBlock icon={<CheckCircle2 className="w-4 h-4" />} title="Durable Conversation">

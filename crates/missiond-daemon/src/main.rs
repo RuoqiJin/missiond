@@ -38,7 +38,7 @@ use llm::{
 };
 use workers::codex::vision_worker;
 use workers::local::{ast_sync_worker, code_prefetch, experience_harvester};
-use workers::sonnet::{embedding_worker, translation_worker};
+use workers::sonnet::embedding_worker;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -722,6 +722,10 @@ async fn main() -> Result<()> {
             pending_replay_count: 0,
             empty_probe_count: 0,
             next_probe_after: 0,
+            current_output_count: 0,
+            deep_analysis_zero_output_count: 0,
+            deep_analysis_fuse_until: 0,
+            input_skip_diagnostics: std::collections::HashMap::new(),
         })),
         slow_extraction_state: Arc::new(tokio::sync::RwLock::new(ExtractionState {
             phase: ExtractionPhase::Idle,
@@ -740,6 +744,10 @@ async fn main() -> Result<()> {
             pending_replay_count: 0,
             empty_probe_count: 0,
             next_probe_after: 0,
+            current_output_count: 0,
+            deep_analysis_zero_output_count: 0,
+            deep_analysis_fuse_until: 0,
+            input_skip_diagnostics: std::collections::HashMap::new(),
         })),
         memory_slot_busy_since: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         slow_slot_busy_since: Arc::new(std::sync::atomic::AtomicI64::new(0)),
@@ -820,7 +828,9 @@ async fn main() -> Result<()> {
                                     "slot-gemini-router".to_string(),
                                     pty_cwd,
                                 ));
-                            info!("Gemini PTY transport initialized (via GeminiPtyDriver → PTYManager)");
+                            info!(
+                                "Gemini PTY transport initialized (via GeminiPtyDriver → PTYManager)"
+                            );
                             gemini_client::GeminiClient::with_cli(
                                 gemini_cli::GeminiCli::new(
                                     cli_cfg.binary,
@@ -1307,15 +1317,11 @@ async fn main() -> Result<()> {
     // previews come from payload_inline directly; semantic briefing is deferred.
     // v0.4.23 Phase 6: step_narrator worker deleted together with
     // message_narrations + narration_cursors tables.
-    if state.sonnet.is_some() {
-        workers::spawn_worker(
-            translation_worker::TranslationWorker,
-            Arc::new(state.clone()),
-            shutdown_rx.clone(),
-        );
-    } else {
-        warn!("SonnetGateway not available, translation worker disabled");
-    }
+    // Thinking-message translation was retired: it translated provider
+    // internal `thinking` logs, drained historical backlog, and could burn
+    // queued Sonnet/router capacity without user value. Conversation display
+    // now uses source text directly; any future translation must be explicit
+    // and user-visible, not an always-on background worker.
 
     // --- P0: IPC listener in dedicated task (never starved by other work) ---
     // Previously inside the main select! loop — a single slow branch (e.g. 120s PTY spawn)

@@ -59,7 +59,7 @@ pub(super) async fn action_distill(state: &AppState, args: &Value) -> Result<Too
             return Ok(ToolResult::structured_error(ToolError::new(
                 error_codes::INVALID_PARAM,
                 msg,
-            )))
+            )));
         }
     };
 
@@ -105,7 +105,7 @@ pub(super) async fn action_distill(state: &AppState, args: &Value) -> Result<Too
             return Ok(ToolResult::structured_error(ToolError::new(
                 error_codes::NOT_FOUND,
                 format!("plan `{}` not found", plan_id),
-            )))
+            )));
         }
     };
     if plan.status != PlanStatus::Succeeded {
@@ -261,7 +261,7 @@ pub(super) async fn action_distill_sonnet(
                     "supply `project` (registered id) or absolute `cwd` so the distiller \
                      can locate the evidence sidecar; relative cwd is refused.",
                 ),
-            ))
+            ));
         }
     };
     let evidence_path = evidence_sidecar_path(&project_root, plan.id);
@@ -320,7 +320,7 @@ pub(super) async fn action_distill_sonnet(
                 .with_suggestion(
                     "set ANTHROPIC_API_KEY / xjp-router credentials and restart daemon",
                 ),
-            ))
+            ));
         }
     };
 
@@ -342,7 +342,7 @@ pub(super) async fn action_distill_sonnet(
             return Ok(ToolResult::structured_error(ToolError::new(
                 error_codes::EXTERNAL_ERROR,
                 format!("Sonnet distiller call failed: {}", e),
-            )))
+            )));
         }
     };
 
@@ -368,7 +368,7 @@ pub(super) async fn action_distill_sonnet(
             return Ok(ToolResult::structured_error(ToolError::new(
                 error_codes::EXTERNAL_ERROR,
                 "distiller response missing required string field `workflow_sexp`",
-            )))
+            )));
         }
     };
     if let Err(msg) = validate_workflow_sexp(&workflow_sexp) {
@@ -384,7 +384,7 @@ pub(super) async fn action_distill_sonnet(
             return Ok(ToolResult::structured_error(ToolError::new(
                 error_codes::EXTERNAL_ERROR,
                 "distiller response missing required object field `match_rules`",
-            )))
+            )));
         }
     };
     if !match_rules.is_object() {
@@ -512,7 +512,7 @@ pub(super) fn read_evidence_sidecar(path: &Path) -> EvidenceOutcome {
         Err(e) => {
             return EvidenceOutcome::ParseFailed {
                 error: e.to_string(),
-            }
+            };
         }
     };
     let value: Value = match serde_json::from_str(&raw) {
@@ -520,7 +520,7 @@ pub(super) fn read_evidence_sidecar(path: &Path) -> EvidenceOutcome {
         Err(e) => {
             return EvidenceOutcome::ParseFailed {
                 error: e.to_string(),
-            }
+            };
         }
     };
     let entry_count = value

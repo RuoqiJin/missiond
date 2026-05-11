@@ -3090,10 +3090,10 @@ async fn dispatch_board_tasks_with_config(
                             "Autopilot: worker final reports a blocking commit/tool failure; preserving task for recovery"
                         );
                         let note = format!(
-                        "⚠️ **Autopilot blocked close** — worker final indicates `{}`. The BoardTask stays blocked so a supervisor/worker can recover instead of recording a false done state.\n\n{}",
-                        blocker,
-                        truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES),
-                    );
+                            "⚠️ **Autopilot blocked close** — worker final indicates `{}`. The BoardTask stays blocked so a supervisor/worker can recover instead of recording a false done state.\n\n{}",
+                            blocker,
+                            truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES),
+                        );
                         let _ = state
                             .store
                             .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
@@ -3168,10 +3168,10 @@ async fn dispatch_board_tasks_with_config(
                             "Autopilot: write-scope task lacks durable completion/acceptance evidence; preserving task for recovery"
                         );
                         let note = format!(
-                        "⚠️ **Autopilot blocked close** — write-scope task is missing `{}`. The BoardTask stays blocked so a supervisor/worker can recover instead of recording a false done state.\n\n{}",
-                        blocker,
-                        truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES),
-                    );
+                            "⚠️ **Autopilot blocked close** — write-scope task is missing `{}`. The BoardTask stays blocked so a supervisor/worker can recover instead of recording a false done state.\n\n{}",
+                            blocker,
+                            truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES),
+                        );
                         let _ = state
                             .store
                             .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
@@ -3609,7 +3609,8 @@ async fn apply_attributed_penalty(
             use crate::minimax_client::ChatMessage;
             let summarize_prompt = format!(
                 "以下是任务失败日志（{}字符）。提取关键因果链：错误类型、触发条件、失败点。≤400字，保留原始错误消息和关键状态变化。\n\n{}",
-                error_msg.len(), error_msg
+                error_msg.len(),
+                error_msg
             );
             let msgs = vec![ChatMessage {
                 role: "user".to_string(),
@@ -4800,7 +4801,9 @@ mod tests {
             None
         );
         assert!(
-            is_probably_active_tui_summary("Let me corroborate the MySQL classification by greping inside read scope and confirming the live DB driver."),
+            is_probably_active_tui_summary(
+                "Let me corroborate the MySQL classification by greping inside read scope and confirming the live DB driver."
+            ),
             "corroboration progress must not be treated as durable final"
         );
     }
@@ -5003,11 +5006,7 @@ mod tests {
             test_conversation_message(2, "assistant", progress, "2026-05-05T00:08:00Z"),
         ];
         assert_eq!(
-            latest_assistant_after_task_prompt(
-                &messages,
-                "task-123",
-                Some("2026-05-05T00:02:50Z")
-            ),
+            latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-05T00:02:50Z")),
             None,
             "complete-picture/share-insights/start-executing progress frame must not be selected as durable final"
         );
@@ -5053,11 +5052,7 @@ mod tests {
             test_conversation_message(2, "assistant", progress, "2026-05-04T23:11:00Z"),
         ];
         assert_eq!(
-            latest_assistant_after_task_prompt(
-                &messages,
-                "task-123",
-                Some("2026-05-04T23:09:50Z")
-            ),
+            latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-04T23:09:50Z")),
             None,
             "observed full-picture/planned-edits progress frame must not be picked up as durable final"
         );
@@ -5089,11 +5084,7 @@ mod tests {
             test_conversation_message(2, "assistant", progress, "2026-05-04T23:11:00Z"),
         ];
         assert_eq!(
-            latest_assistant_after_task_prompt(
-                &messages,
-                "task-123",
-                Some("2026-05-04T23:09:50Z")
-            ),
+            latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-04T23:09:50Z")),
             None,
             "exact M6-observed working-tree-clean / full-picture / planned-edits frame must not be selected as durable final"
         );
@@ -5151,11 +5142,7 @@ mod tests {
             test_conversation_message(2, "assistant", progress, "2026-05-04T23:42:00Z"),
         ];
         assert_eq!(
-            latest_assistant_after_task_prompt(
-                &messages,
-                "task-123",
-                Some("2026-05-04T23:34:50Z")
-            ),
+            latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-04T23:34:50Z")),
             None,
             "capture-baseline-then-update-SSOT progress frame must not be selected as durable final"
         );
@@ -5388,7 +5375,9 @@ Review only.
         assert_eq!(
             latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-03T10:14:50Z"))
                 .as_deref(),
-            Some("M6 closure is already in place.\n\n## Verification Report\n- checker-first mapping passes\n- no edits needed")
+            Some(
+                "M6 closure is already in place.\n\n## Verification Report\n- checker-first mapping passes\n- no edits needed"
+            )
         );
     }
 
@@ -5446,7 +5435,9 @@ Review only.
         assert_eq!(
             latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-04T07:03:50Z"))
                 .as_deref(),
-            Some("JARVIS_S6_RUNTIME_DONE\n\nCommit: `b4ceff8 feat(jarvis): add M6 runtime topology`.")
+            Some(
+                "JARVIS_S6_RUNTIME_DONE\n\nCommit: `b4ceff8 feat(jarvis): add M6 runtime topology`."
+            )
         );
     }
 
@@ -5530,7 +5521,9 @@ Review only.
         assert_eq!(
             latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-04T14:19:50Z"))
                 .as_deref(),
-            Some("AUTH_M6_GOOGLE_BRIDGE_DONE\n\nCommit: `47d76fa feat(auth): bridge google callback to product-access reporter (M6)`.")
+            Some(
+                "AUTH_M6_GOOGLE_BRIDGE_DONE\n\nCommit: `47d76fa feat(auth): bridge google callback to product-access reporter (M6)`."
+            )
         );
         assert!(
             is_probably_active_tui_summary(progress),
@@ -5559,11 +5552,7 @@ Review only.
             test_conversation_message(2, "assistant", progress, "2026-05-04T14:21:00Z"),
         ];
         assert_eq!(
-            latest_assistant_after_task_prompt(
-                &messages,
-                "task-123",
-                Some("2026-05-04T14:19:50Z")
-            ),
+            latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-04T14:19:50Z")),
             None,
             "exact observed `git diff --check is clean. Now let me append §13...` frame must not be picked up as the durable final"
         );
@@ -5851,8 +5840,7 @@ Review only.
         // When the paste was collapsed and only the label `📋 **Board Task ID**:`
         // line is visible (no `负责关闭此 BoardTask。` tail), the extractor must
         // skip the label line and still recover the worker tail.
-        let response =
-            "📋 **Board Task ID**: `task-collapsed`\n[Pasted text +200 lines, paste again to expand]\n\n执行总结：合格。";
+        let response = "📋 **Board Task ID**: `task-collapsed`\n[Pasted text +200 lines, paste again to expand]\n\n执行总结：合格。";
         let prompt = dispatched_prompt("task-collapsed");
         let summary = extract_worker_final_summary(response, &prompt);
         assert!(

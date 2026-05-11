@@ -164,12 +164,15 @@ pub(super) async fn handle_kb_analyze(state: &AppState, args: Value) -> Result<T
             }));
 
             let board_section = if let Some(ref ctx) = board_context {
-                format!("\n\n=== BOARD TASKS CONTEXT ===\n{}\n===========================\n\n\
+                format!(
+                    "\n\n=== BOARD TASKS CONTEXT ===\n{}\n===========================\n\n\
                     === 任务感知整理规则 ===\n\
                     1. 关联 Open 任务的 KB → 保护，不删不合并，仅用 update 补 linked_task_id\n\
                     2. 关联 Done 任务的 KB → distill 蒸馏收敛（提取最终结论升维到 architecture/feature，删流水账）\n\
                     3. 无关联 Orphan → preference/ops/platform 保留；老旧 debug/bugfix 可删除\n\
-                    4. 每个 action 的 reason 中说明关联了哪个任务（或标注 orphan）\n", ctx)
+                    4. 每个 action 的 reason 中说明关联了哪个任务（或标注 orphan）\n",
+                    ctx
+                )
             } else {
                 String::new()
             };

@@ -36,6 +36,5 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
     ]
 }

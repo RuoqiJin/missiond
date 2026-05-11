@@ -144,7 +144,7 @@ async fn action_mark_with_resolution(
             return Ok(ToolResult::structured_error(ToolError::new(
                 "REVIEW_ID_MALFORMED",
                 e.message(),
-            )))
+            )));
         }
     };
     let plan = match state
@@ -158,7 +158,7 @@ async fn action_mark_with_resolution(
             return Ok(ToolResult::structured_error(ToolError::new(
                 error_codes::NOT_FOUND,
                 format!("plan `{}` not found for resolution", id),
-            )))
+            )));
         }
     };
     let current_version = plan.version;
@@ -277,7 +277,7 @@ async fn plan_action_mark_with_policy_only(
             return Ok(ToolResult::structured_error(ToolError::new(
                 "REVIEW_ID_MALFORMED",
                 e.message(),
-            )))
+            )));
         }
     };
     let plan = match state
@@ -291,7 +291,7 @@ async fn plan_action_mark_with_policy_only(
             return Ok(ToolResult::structured_error(ToolError::new(
                 error_codes::NOT_FOUND,
                 format!("plan `{}` not found for resolution", id),
-            )))
+            )));
         }
     };
     let current_version = plan.version;

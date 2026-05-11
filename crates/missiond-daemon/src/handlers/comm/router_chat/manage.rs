@@ -278,9 +278,9 @@ pub(super) async fn handle_legacy(state: &AppState, name: &str, args: Value) -> 
 
             let user_prompt = if let Some(ref prev) = existing_summary {
                 format!(
-                                "[之前的摘要]\n{}\n\n[需要合并的新对话]\n{}\n\n请更新摘要，合并新对话的关键信息。",
-                                prev, messages_text
-                            )
+                    "[之前的摘要]\n{}\n\n[需要合并的新对话]\n{}\n\n请更新摘要，合并新对话的关键信息。",
+                    prev, messages_text
+                )
             } else {
                 format!(
                     "[需要摘要的对话]\n{}\n\n请生成对话摘要，保留关键技术细节和决策。",

@@ -566,8 +566,8 @@ pub(in crate::handlers::knowledge::plan) fn build_llm_inference_prompt(
         plan = plan_sexp,
         compiled = compiled_from.unwrap_or("(none)"),
         evidence = serde_json::to_string_pretty(&evidence_digest).unwrap_or_else(|_| "[]".into()),
-        deterministic = serde_json::to_string_pretty(&deterministic_block)
-            .unwrap_or_else(|_| "{}".into()),
+        deterministic =
+            serde_json::to_string_pretty(&deterministic_block).unwrap_or_else(|_| "{}".into()),
         caller = serde_json::to_string_pretty(caller_args).unwrap_or_else(|_| "{}".into()),
     );
     (system, user)

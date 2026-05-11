@@ -22,7 +22,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
         // ===== mission_skill_context =====
         ToolDefinition::new(
             "mission_skill_context",
@@ -41,7 +40,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
         // ===== mission_skill_mutate =====
         ToolDefinition::new(
             "mission_skill_mutate",
@@ -60,7 +58,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
         // ===== mission_skill_exec =====
         ToolDefinition::new(
             "mission_skill_exec",
@@ -72,10 +69,10 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "skill": {"type": "string", "description": "Skill 名称"},
                     "action": {"type": "string", "description": "Action ID(workflow block id)"},
                     "dry_run": {"type": "boolean", "description": "预览模式", "default": false},
+                    "approve": {"type": "boolean", "description": "requires_approval workflow 的显式二次确认；只有用户看过 pending_approval 预览并同意后才能设为 true", "default": false},
                     "params": {"type": "object", "description": "运行时参数覆盖(注入为 ${key})"}
                 }
             }),
         ),
-
     ]
 }

@@ -40,6 +40,14 @@ pub(crate) enum ExtractionPhase {
     WaitingForSlotIdle,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct InputSkipDiagnostic {
+    pub(crate) reason: String,
+    pub(crate) count: u32,
+    pub(crate) last_seen_at: i64,
+}
+
 pub(crate) struct ExtractionState {
     pub(crate) phase: ExtractionPhase,
     /// Which extraction type is active: "realtime", "deep_analysis", "kb_consolidation"
@@ -72,6 +80,14 @@ pub(crate) struct ExtractionState {
     pub(crate) empty_probe_count: u32,
     /// Epoch secs before which realtime extraction should skip empty-queue probes.
     pub(crate) next_probe_after: i64,
+    /// KB mutations created by the current extraction job.
+    pub(crate) current_output_count: u32,
+    /// Consecutive completed deep-analysis jobs that produced no KB mutations.
+    pub(crate) deep_analysis_zero_output_count: u32,
+    /// Epoch secs before which deep-analysis dispatch should be fused off.
+    pub(crate) deep_analysis_fuse_until: i64,
+    /// Explicit diagnostics for memory input filtered before agent extraction.
+    pub(crate) input_skip_diagnostics: HashMap<String, InputSkipDiagnostic>,
 }
 
 impl ExtractionState {
@@ -90,6 +106,73 @@ impl ExtractionState {
         self.pending_served_at = chrono::Utc::now().timestamp();
         self.pending_replay_count = 0;
     }
+
+    pub(crate) fn reset_current_output_count(&mut self) {
+        self.current_output_count = 0;
+    }
+
+    pub(crate) fn add_current_output_count(&mut self, count: u32) {
+        self.current_output_count = self.current_output_count.saturating_add(count);
+    }
+
+    pub(crate) fn deep_analysis_fuse_active(&self, now: i64) -> bool {
+        self.phase == ExtractionPhase::Idle && self.deep_analysis_fuse_until > now
+    }
+
+    pub(crate) fn record_deep_analysis_completion(
+        &mut self,
+        output_count: u32,
+        threshold: u32,
+        fuse_secs: i64,
+        now: i64,
+    ) -> bool {
+        self.current_output_count = 0;
+        if output_count > 0 {
+            self.deep_analysis_zero_output_count = 0;
+            self.deep_analysis_fuse_until = 0;
+            return false;
+        }
+
+        self.deep_analysis_zero_output_count =
+            self.deep_analysis_zero_output_count.saturating_add(1);
+        if threshold > 0 && self.deep_analysis_zero_output_count >= threshold {
+            self.deep_analysis_fuse_until = now.saturating_add(fuse_secs.max(1));
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn record_input_skip(&mut self, reason: &str, count: u32) {
+        if count == 0 {
+            return;
+        }
+        let now = chrono::Utc::now().timestamp();
+        let entry = self
+            .input_skip_diagnostics
+            .entry(reason.to_string())
+            .or_insert_with(|| InputSkipDiagnostic {
+                reason: reason.to_string(),
+                count: 0,
+                last_seen_at: now,
+            });
+        entry.count = entry.count.saturating_add(count);
+        entry.last_seen_at = now;
+    }
+
+    pub(crate) fn input_skip_diagnostics(&self) -> Vec<InputSkipDiagnostic> {
+        let mut diagnostics = self
+            .input_skip_diagnostics
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        diagnostics.sort_by(|a, b| {
+            b.last_seen_at
+                .cmp(&a.last_seen_at)
+                .then_with(|| a.reason.cmp(&b.reason))
+        });
+        diagnostics
+    }
 }
 
 /// Deep analysis schema version. Bump this when the analysis prompt changes
@@ -103,6 +186,8 @@ pub(crate) const MAX_WAIT_FOR_IDLE_SECS: i64 = 900;
 
 #[cfg(test)]
 mod extraction_state_tests {
+    use std::collections::HashMap;
+
     use super::{ExtractionPhase, ExtractionState};
 
     fn state() -> ExtractionState {
@@ -123,6 +208,10 @@ mod extraction_state_tests {
             pending_replay_count: 0,
             empty_probe_count: 0,
             next_probe_after: 0,
+            current_output_count: 0,
+            deep_analysis_zero_output_count: 0,
+            deep_analysis_fuse_until: 0,
+            input_skip_diagnostics: HashMap::new(),
         }
     }
 
@@ -143,6 +232,45 @@ mod extraction_state_tests {
         assert!(es.pending_payload.is_none());
         assert_eq!(es.pending_served_at, 0);
         assert_eq!(es.pending_replay_count, 0);
+    }
+
+    #[test]
+    fn deep_analysis_zero_output_completion_fuses_after_threshold() {
+        let mut es = state();
+        es.phase = ExtractionPhase::Idle;
+        assert!(!es.record_deep_analysis_completion(0, 2, 60, 100));
+        assert_eq!(es.deep_analysis_zero_output_count, 1);
+        assert_eq!(es.deep_analysis_fuse_until, 0);
+
+        assert!(es.record_deep_analysis_completion(0, 2, 60, 100));
+        assert_eq!(es.deep_analysis_zero_output_count, 2);
+        assert_eq!(es.deep_analysis_fuse_until, 160);
+        assert!(es.deep_analysis_fuse_active(120));
+    }
+
+    #[test]
+    fn deep_analysis_positive_output_resets_zero_output_fuse() {
+        let mut es = state();
+        es.deep_analysis_zero_output_count = 3;
+        es.deep_analysis_fuse_until = 160;
+        es.current_output_count = 5;
+
+        assert!(!es.record_deep_analysis_completion(2, 2, 60, 100));
+        assert_eq!(es.current_output_count, 0);
+        assert_eq!(es.deep_analysis_zero_output_count, 0);
+        assert_eq!(es.deep_analysis_fuse_until, 0);
+    }
+
+    #[test]
+    fn input_skip_diagnostic_counts_are_accumulated() {
+        let mut es = state();
+        es.record_input_skip("deployment-monitor", 2);
+        es.record_input_skip("deployment-monitor", 3);
+        let diagnostics = es.input_skip_diagnostics();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].reason, "deployment-monitor");
+        assert_eq!(diagnostics[0].count, 5);
+        assert!(diagnostics[0].last_seen_at > 0);
     }
 }
 

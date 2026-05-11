@@ -63,7 +63,7 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
                     "mission_directive requires `action`",
                 )
                 .with_suggestion("actions: compile|list|get|approve|archive|version_chain"),
-            ))
+            ));
         }
     };
 

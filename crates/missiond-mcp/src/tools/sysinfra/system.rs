@@ -19,7 +19,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
         // ===== mission_sys_config =====
         ToolDefinition::new(
             "mission_sys_config",
@@ -34,7 +33,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
         // ===== mission_daemon_update =====
         ToolDefinition::new(
             "mission_daemon_update",
@@ -47,6 +45,5 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
     ]
 }

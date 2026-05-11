@@ -30,7 +30,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
         // ===== mission_llm_trace =====
         ToolDefinition::new(
             "mission_llm_trace",
@@ -50,7 +49,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
         // ===== mission_decision_stats =====
         ToolDefinition::new(
             "mission_decision_stats",
@@ -62,7 +60,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
         // ===== mission_gemini_auth =====
         ToolDefinition::new(
             "mission_gemini_auth",
@@ -74,7 +71,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
         // ===== mission_incident =====
         ToolDefinition::new(
             "mission_incident",
@@ -96,6 +92,5 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
     ]
 }

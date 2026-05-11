@@ -131,7 +131,12 @@ pub enum WorkflowResult {
     },
     /// Waiting for user approval
     #[serde(rename = "pending_approval")]
-    PendingApproval { action_id: String, skill: String },
+    PendingApproval {
+        action_id: String,
+        skill: String,
+        steps: Vec<WorkflowStepPreview>,
+        next_step: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

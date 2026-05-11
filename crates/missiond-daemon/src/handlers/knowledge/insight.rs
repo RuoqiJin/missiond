@@ -16,7 +16,7 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
         Ok(None) => {
             return Ok(ToolResult::text(
                 "尚无战略分析数据。StrategyWorker 需要分析至少一个完成的会话后才会生成。",
-            ))
+            ));
         }
         Err(e) => return Ok(ToolResult::error(format!("KB 读取失败: {}", e))),
     };

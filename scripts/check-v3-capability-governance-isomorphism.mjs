@@ -22,9 +22,11 @@ const DEFAULT_FILES = {
   v3Runtime: 'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
   audit: 'crates/missiond-daemon/src/handlers/comm/audit.rs',
   codexOps: 'crates/missiond-daemon/src/handlers/comm/codex_ops.rs',
+  toolDirectory: 'crates/missiond-daemon/src/handlers/comm/tool_directory.rs',
   mcpCapability: 'crates/missiond-mcp/src/tools/comm/capability_usage.rs',
   mcpAudit: 'crates/missiond-mcp/src/tools/comm/audit.rs',
   mcpCodexOps: 'crates/missiond-mcp/src/tools/comm/codex_ops.rs',
+  mcpToolDirectory: 'crates/missiond-mcp/src/tools/comm/tool_directory.rs',
   v2Source: '.missiond/v2/intent-capability-governance.lisp',
 };
 
@@ -89,10 +91,15 @@ function checkFiles(root, files) {
     '(v2-item capability-governance',
     ':status runtime-projected',
     '(capability-governance-policy',
+    '(mcp-tool-governance-policy',
+    ':primary-families',
+    ':directory-tool mission_tool_directory',
     ':review-sidecar ".missiond/v3/runtime/capability-usage-review.json"',
     ':protected-tool-patterns',
     ':protected-flow-patterns',
     '(tool-group capability-audit-tools',
+    '(tool-group mcp-tool-governance-tools',
+    'mission_tool_directory',
     '(surface capability-governance',
     ':status "code-aligned"',
     'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
@@ -100,19 +107,23 @@ function checkFiles(root, files) {
     'crates/missiond-daemon/src/handlers/comm/capability_usage/runtime.rs',
     'crates/missiond-daemon/src/handlers/comm/audit.rs',
     'crates/missiond-daemon/src/handlers/comm/codex_ops.rs',
+    'crates/missiond-daemon/src/handlers/comm/tool_directory.rs',
     'crates/missiond-mcp/src/tools/comm/capability_usage.rs',
     'crates/missiond-mcp/src/tools/comm/audit.rs',
     'crates/missiond-mcp/src/tools/comm/codex_ops.rs',
+    'crates/missiond-mcp/src/tools/comm/tool_directory.rs',
     'scripts/check-v3-capability-governance-isomorphism.mjs',
     'capability_usage.rs is the thin capability-governance facade',
     'capability_usage/runtime.rs owns snapshot/report/candidates/mark/ack',
     'audit.rs owns mission_audit trace/detail/stats/export',
     'codex_ops.rs owns mission_codex_ops recent/thread/tool_stats',
+    'tool_directory.rs owns mission_tool_directory list/recommend/lookup/explain/deprecated',
     'node scripts/check-v3-capability-governance-isomorphism.mjs',
   ]);
 
   requireAll(diagnostics, files.dispatcher, sources.dispatcher, [
     '"mission_capability_usage" => capability_usage::handle',
+    '"mission_tool_directory" => tool_directory::handle',
     '"mission_audit" => audit::handle',
     '"mission_codex_ops" => codex_ops::handle',
     'n.starts_with("mission_audit_") => audit::handle',
@@ -190,6 +201,23 @@ function checkFiles(root, files) {
     'get_tool_call_stats',
   ]);
 
+  requireAll(diagnostics, files.toolDirectory, sources.toolDirectory, [
+    'mission_tool_directory',
+    'ToolFamily',
+    'FAMILIES',
+    'recommend',
+    'lookup_tool',
+    'deprecated',
+    'mission_board',
+    'mission_workflow',
+    'mission_workstation',
+    'mission_context',
+    'mission_memory',
+    'mission_universe',
+    'mission_ops',
+    'mission_router',
+  ]);
+
   requireAll(diagnostics, files.mcpCapability, sources.mcpCapability, [
     'ToolDefinition::new',
     '"mission_capability_usage"',
@@ -215,6 +243,15 @@ function checkFiles(root, files) {
     '"recent"',
     '"thread"',
     '"tool_stats"',
+  ]);
+
+  requireAll(diagnostics, files.mcpToolDirectory, sources.mcpToolDirectory, [
+    'ToolDefinition::new',
+    '"mission_tool_directory"',
+    '"recommend"',
+    '"lookup"',
+    '"explain"',
+    '"deprecated"',
   ]);
 
   requireAll(diagnostics, files.v2Source, sources.v2Source, [
@@ -246,10 +283,14 @@ function buildFixture() {
     :review-sidecar ".missiond/v3/runtime/capability-usage-review.json"
     :protected-tool-patterns ["mission_execution" "mission_intent" "mission_forge_"]
     :protected-flow-patterns ["engineering" "F-execution-log-governance"])
+  (mcp-tool-governance-policy
+    :primary-families [mission_board mission_workflow mission_workstation mission_context mission_memory mission_universe mission_ops mission_router mission_tool_directory]
+    :directory-tool mission_tool_directory)
   (v2-convergence-map
     (v2-item capability-governance :status runtime-projected))
   (public-surface-map
-    (tool-group capability-audit-tools :status code-aligned))
+    (tool-group capability-audit-tools :status code-aligned)
+    (tool-group mcp-tool-governance-tools :tools [mission_tool_directory]))
   (implementation-map
     (surface capability-governance
       :status "code-aligned"
@@ -258,17 +299,19 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/comm/capability_usage/runtime.rs"
              "crates/missiond-daemon/src/handlers/comm/audit.rs"
              "crates/missiond-daemon/src/handlers/comm/codex_ops.rs"
+             "crates/missiond-daemon/src/handlers/comm/tool_directory.rs"
              "crates/missiond-mcp/src/tools/comm/capability_usage.rs"
              "crates/missiond-mcp/src/tools/comm/audit.rs"
              "crates/missiond-mcp/src/tools/comm/codex_ops.rs"
+             "crates/missiond-mcp/src/tools/comm/tool_directory.rs"
              "scripts/check-v3-capability-governance-isomorphism.mjs"]
-      :note "capability_usage.rs is the thin capability-governance facade; capability_usage/runtime.rs owns snapshot/report/candidates/mark/ack; audit.rs owns mission_audit trace/detail/stats/export; codex_ops.rs owns mission_codex_ops recent/thread/tool_stats."))
+      :note "capability_usage.rs is the thin capability-governance facade; capability_usage/runtime.rs owns snapshot/report/candidates/mark/ack; audit.rs owns mission_audit trace/detail/stats/export; codex_ops.rs owns mission_codex_ops recent/thread/tool_stats; tool_directory.rs owns mission_tool_directory list/recommend/lookup/explain/deprecated."))
   (compression-contract
     :checks ["node scripts/check-v3-capability-governance-isomorphism.mjs"]))`,
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.dispatcher),
-    '"mission_capability_usage" => capability_usage::handle "mission_audit" => audit::handle "mission_codex_ops" => codex_ops::handle n.starts_with("mission_audit_") => audit::handle',
+    '"mission_capability_usage" => capability_usage::handle "mission_tool_directory" => tool_directory::handle "mission_audit" => audit::handle "mission_codex_ops" => codex_ops::handle n.starts_with("mission_audit_") => audit::handle',
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.capabilityFacade),
@@ -291,6 +334,10 @@ function buildFixture() {
     'mission_codex_ops handle_recent handle_thread handle_tool_stats parse_since_to_utc codex_cli get_tool_calls_by_session get_tool_call_stats',
   );
   fs.writeFileSync(
+    path.join(root, DEFAULT_FILES.toolDirectory),
+    'mission_tool_directory ToolFamily FAMILIES recommend lookup_tool deprecated mission_board mission_workflow mission_workstation mission_context mission_memory mission_universe mission_ops mission_router',
+  );
+  fs.writeFileSync(
     path.join(root, DEFAULT_FILES.mcpCapability),
     'ToolDefinition::new "mission_capability_usage" "snapshot" "report" "candidates" "mark" "ack"',
   );
@@ -301,6 +348,10 @@ function buildFixture() {
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.mcpCodexOps),
     'ToolDefinition::new "mission_codex_ops" "recent" "thread" "tool_stats"',
+  );
+  fs.writeFileSync(
+    path.join(root, DEFAULT_FILES.mcpToolDirectory),
+    'ToolDefinition::new "mission_tool_directory" "recommend" "lookup" "explain" "deprecated"',
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.v2Source),

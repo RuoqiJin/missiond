@@ -771,10 +771,8 @@ async fn create_sync_task(
         )
     } else {
         format!(
-        "Lisp-code real-time sync detected a failing SSOT/code gate.\n\nProject: {}\nChanged Lisp/checker path: {}\n\nChecker evidence:\n{}\n\nWorkflow:\n1. Read the changed Lisp/checker file and the failing gate output.\n2. Decide whether the intended change needs code, checker, or Lisp correction.\n3. Create/attach an exact accepted shard before any code implementation.\n4. Delegate implementation only with explicit write_scope, acceptance, and context_pack_path.\n5. Close this task only after the code-isomorphism gate is green.\n\nThis task exists because Lisp changed first; do not mark done by editing only the report.",
-        resolution.project_id,
-        changed_path,
-        checker
+            "Lisp-code real-time sync detected a failing SSOT/code gate.\n\nProject: {}\nChanged Lisp/checker path: {}\n\nChecker evidence:\n{}\n\nWorkflow:\n1. Read the changed Lisp/checker file and the failing gate output.\n2. Decide whether the intended change needs code, checker, or Lisp correction.\n3. Create/attach an exact accepted shard before any code implementation.\n4. Delegate implementation only with explicit write_scope, acceptance, and context_pack_path.\n5. Close this task only after the code-isomorphism gate is green.\n\nThis task exists because Lisp changed first; do not mark done by editing only the report.",
+            resolution.project_id, changed_path, checker
         )
     };
     let input = CreateBoardTaskInput {
@@ -926,7 +924,11 @@ fn render_report(report: &LispCodeSyncReport) -> String {
         lisp_option_string(report.checker_tail.as_deref()),
         lisp_option_string(report.sync_task_id.as_deref()),
         lisp_option_string(report.dedupe_key.as_deref()),
-        if report.storm_circuit { "true" } else { "false" },
+        if report.storm_circuit {
+            "true"
+        } else {
+            "false"
+        },
     )
 }
 

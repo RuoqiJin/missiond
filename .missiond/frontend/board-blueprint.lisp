@@ -268,9 +268,10 @@
         :surface board-task-ui
         :entry [TaskDialog QuickAdd TaskItem TaskFilters BoardConsolidated useTaskCenterStore]
         :core ((step s1 :logic "load BoardTasks through the tasks API and preserve optimistic local edits")
-               (step s2 :logic "create, update, delete, toggle, skip, reorder, and note BoardTasks through the API adapter")
-               (step s3 :logic "derive filters, grouping, hidden/skipped visibility, parent-child ordering, and flow badges")
-               (step s4 :logic "use runtime-projected slot choices when a user manually assigns Autopilot work"))
+               (step s2 :logic "optimistic create/update/delete/toggle/skip/reorder mutations must either reconcile to the API response or roll back the affected local task snapshot on failure")
+               (step s3 :logic "create, update, delete, toggle, skip, reorder, and note BoardTasks through the API adapter")
+               (step s4 :logic "derive filters, grouping, hidden/skipped visibility, parent-child ordering, and flow badges")
+               (step s5 :logic "use runtime-projected slot choices when a user manually assigns Autopilot work"))
         :egress [task-list task-dialog-state task-api-mutation task-note]))
 
     (pillar workstation-terminal-ui
@@ -296,9 +297,10 @@
         :core ((step s1 :logic "render Exec as an orchestration cockpit rather than a second Terminal surface")
                (step s2 :logic "start from active BoardTasks, then join each task to claimExecutorId/assignee/currentTaskId/activeBoardTaskId slot evidence")
                (step s3 :logic "show BoardTask status, dispatch/evidence/checkpoint diagnostics, latest durable conversation, and EventBus wait state")
-               (step s4 :logic "embed the selected PTY as a detail pane for diagnosis only; durable provider logs and MissionD events remain completion authority")
-               (step s5 :logic "surface stale/future timestamps, stopped PTY with durable conversation fallback, and missing MCP readiness as diagnostics"))
-        :egress [execution-queue evidence-panel eventbus-wait-state pty-detail diagnostics]))
+               (step s4 :logic "derive execution-step-digest from BoardTask description, recent notes, slot state, and durable conversation metadata so operators can flip through the work trace without reading raw PTY")
+               (step s5 :logic "embed the selected PTY as a detail panel for diagnosis only; durable provider logs and MissionD events remain completion authority")
+               (step s6 :logic "surface stale/future timestamps, stopped PTY with durable conversation fallback, and missing MCP readiness as diagnostics"))
+        :egress [execution-queue execution-step-digest evidence-panel eventbus-wait-state pty-detail diagnostics]))
 
     (pillar event-stream-ui
       (function event-stream-cache

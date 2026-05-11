@@ -162,8 +162,13 @@ pub(crate) async fn harvest_decisions_for_task(state: &AppState, task_id: &str, 
 
     if written > 0 {
         let note = if reinforced > 0 {
-            format!("[决策引擎] 从 {} 条主控决策中提炼 {} 条规则（{} 条新建，{} 条强化已有 policy confidence）",
-                master_questions.len(), written, written - reinforced, reinforced)
+            format!(
+                "[决策引擎] 从 {} 条主控决策中提炼 {} 条规则（{} 条新建，{} 条强化已有 policy confidence）",
+                master_questions.len(),
+                written,
+                written - reinforced,
+                reinforced
+            )
         } else {
             format!(
                 "[决策引擎] 从 {} 条主控决策中提炼了 {} 条 policy:decision 规则",

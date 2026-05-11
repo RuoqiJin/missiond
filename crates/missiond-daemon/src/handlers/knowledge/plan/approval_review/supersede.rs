@@ -146,7 +146,7 @@ async fn action_supersede_with_resolution(
             return Ok(ToolResult::structured_error(ToolError::new(
                 "REVIEW_ID_MALFORMED",
                 e.message(),
-            )))
+            )));
         }
     };
     let plan = match state
@@ -160,7 +160,7 @@ async fn action_supersede_with_resolution(
             return Ok(ToolResult::structured_error(ToolError::new(
                 error_codes::NOT_FOUND,
                 format!("old plan `{}` not found for resolution", old_id),
-            )))
+            )));
         }
     };
     let current_version = plan.version;
@@ -279,7 +279,7 @@ async fn plan_action_supersede_with_policy_only(
             return Ok(ToolResult::structured_error(ToolError::new(
                 "REVIEW_ID_MALFORMED",
                 e.message(),
-            )))
+            )));
         }
     };
     let plan = match state
@@ -293,7 +293,7 @@ async fn plan_action_supersede_with_policy_only(
             return Ok(ToolResult::structured_error(ToolError::new(
                 error_codes::NOT_FOUND,
                 format!("old plan `{}` not found for resolution", old_id),
-            )))
+            )));
         }
     };
     let current_version = plan.version;

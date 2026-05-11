@@ -30,7 +30,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
         // ===== mission_board_create =====
         ToolDefinition::new(
             "mission_board_create",
@@ -56,7 +55,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
         // ===== mission_board_update =====
         ToolDefinition::new(
             "mission_board_update",
@@ -85,7 +83,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
         // ===== mission_board_delete =====
         ToolDefinition::new(
             "mission_board_delete",
@@ -98,7 +95,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
         // ===== mission_board_claim =====
         ToolDefinition::new(
             "mission_board_claim",
@@ -113,7 +109,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
         // ===== mission_board_note_add =====
         ToolDefinition::new(
             "mission_board_note_add",
@@ -129,7 +124,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
         // ===== mission_board_decompose =====
         ToolDefinition::new(
             "mission_board_decompose",
@@ -144,7 +138,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
         // ===== mission_board_retry =====
         ToolDefinition::new(
             "mission_board_retry",
@@ -158,7 +151,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
         // ===== mission_submit_phase_result =====
         ToolDefinition::new(
             "mission_submit_phase_result",
@@ -174,6 +166,5 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
     ]
 }

@@ -326,7 +326,7 @@ impl CodexCli {
                         return Err(format!(
                             "idle timeout ({}s no output)",
                             idle_timeout.as_secs()
-                        ))
+                        ));
                     }
                 }
             }

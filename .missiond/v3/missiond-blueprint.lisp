@@ -735,6 +735,52 @@
                  "crates/missiond-daemon/src/engine/master_control.rs::spawn_incident_event_sub"]
       :rationale "Claude Code's /mcp picker numeric shortcuts have shifted between TUI versions; arrow-key navigation is the only stable substrate. When supports_mcp=true is advertised but no mission_* tool surfaces after slot ready, the worker is operating without orchestration tools and the master must be woken via a durable incident, not a silent reconnect retry loop."))
 
+  (workstation-policy-shards
+    :desc "Split workstation-config invariants into policy shards so runtime, checkers, and agents can reason over one small policy at a time."
+    (policy slot-lifecycle-policy
+      :owns [startup-slot dynamic-slot ttl heartbeat release stale-slot-reap]
+      :core ((step s1 :logic "reserve or create a slot with projected model/cwd/ttl")
+             (step s2 :logic "bind active task, conversation, and claim lease")
+             (step s3 :logic "heartbeat while provider is running")
+             (step s4 :logic "release or mark stale after durable completion or TTL expiry"))
+      :surface workstation-config)
+    (policy delegation-contract-policy
+      :owns [task_delegate swarm_run accepted_shard write_scope read_scope completion_protocol]
+      :core ((step s1 :logic "classify investigator versus implementer before dispatch")
+             (step s2 :logic "require context_pack_path and accepted_shard_id for implementation lanes")
+             (step s3 :logic "persist read/write scope and must-not-touch into BoardTask metadata")
+             (step s4 :logic "reject broad objectives in code-worker lanes before provider spawn"))
+      :surface workstation-config)
+    (policy completion-authority-policy
+      :owns [provider_final task_result_artifact board_note_projection pty_diagnostic]
+      :core ((step s1 :logic "prefer durable provider final over PTY")
+             (step s2 :logic "normalize final output into task-result-artifact")
+             (step s3 :logic "project concise summary to Board note and mission_execution")
+             (step s4 :logic "close BoardTask only after settle window and artifact validation"))
+      :surface task-result-artifact)
+    (policy cross-project-dispatch-policy
+      :owns [project_root cwd read_scope target_project_ids external_project_worker]
+      :core ((step s1 :logic "resolve every project id through ProjectRegistry")
+             (step s2 :logic "materialize absolute context_pack_path and project roots")
+             (step s3 :logic "spawn provider with target project cwd or explicit readable scope")
+             (step s4 :logic "record reroute or block reason when project evidence is missing"))
+      :surface project-registry)
+    (policy context-prefetch-policy
+      :owns [kb_prefetch skill_prefetch explicit_context memory_audit]
+      :core ((step s1 :logic "default to explicit context_pack/read_scope only")
+             (step s2 :logic "allow KB/skill prefetch only in explicit memory-audit or operator-approved sessions")
+             (step s3 :logic "redact noisy or unreviewed memory before worker prompt projection")
+             (step s4 :logic "record prefetch source and reason as diagnostic evidence"))
+      :surface memory-kb)
+    (policy mcp-recovery-policy
+      :owns [mcp_ready reconnect_ui navigation_hint provider_tool_availability]
+      :core ((step s1 :logic "detect missing MCP readiness from slot/provider diagnostics")
+             (step s2 :logic "surface human-like reconnect navigation hints without numeric shortcut assumptions")
+             (step s3 :logic "route repeated failure to BoardTask and not hidden prompt retry")
+             (step s4 :logic "only resume worker dispatch once readiness is verified"))
+      :surface capability-governance)
+    :checker "node scripts/check-v3-workstation-dispatch-isomorphism.mjs")
+
   (workstation-pool
     :desc "Compact V3 SSOT for human-owned external compute accounts exposed as MissionD workers."
     :account-mode single-login
@@ -902,8 +948,8 @@
       :refactor-rule "Master control is a phase machine, not a prompt blob; every new behavior must attach to one loop and state whether it wakes the resident slot, writes checkpoint only, or delegates work.")
     (domain eventbridge-deployment-plane
       :owner eventbridge
-      :source [eventbridge-policy deployment-event-ingest m6-deployment-confirmation deploy-agent-self-update-governance deployment-event-response m6-deployment-rollout]
-      :functions [event-envelope-contract event-waiter-contract deployment-event-ingest deployment-provenance-policy deploy-center-relay-contract deploy-agent-update-provenance]
+      :source [eventbridge-policy deployment-event-ingest router-usage-event-ingest m6-deployment-confirmation deploy-agent-self-update-governance deployment-event-response m6-deployment-rollout]
+      :functions [event-envelope-contract event-waiter-contract deployment-event-ingest router-usage-event-ingest deployment-provenance-policy deploy-center-relay-contract deploy-agent-update-provenance]
       :runtime-projection [ExternalServiceEvent mission_timeline.wait deploy-center-event-webhook deployment-event-response]
       :checker ["node scripts/check-v3-eventbridge-isomorphism.mjs" "node scripts/check-v3-project-registry-isomorphism.mjs" "node scripts/check-v3-control-plane-m6-split.mjs"]
       :refactor-rule "Deployment closure uses deploy-center provenance plus smoke; CI/GitHub/curl are diagnostics unless deploy-center lacks data.")
@@ -924,10 +970,10 @@
     (domain execution-control-plane
       :owner workflow-runner
       :source [autopilot-runtime workstation-config conversation-memory-distillation semantic-ir-shared-memory-convergence evidence-governance-policy]
-      :functions [workflow-runner task-result-artifact worker-completion-settle slot-lifecycle-manager memory-review-batch-runner board-cleanup-batch-runner board-search-noise-governance evidence-governance-view]
-      :runtime-projection [BoardTask EventBus task_result_artifacts evidence_governance_view conversation ended_at SlotReleased workflow_runs workflow_run memory_review_batch_runner board_cleanup_batch_runner board_search_scope]
+      :functions [workflow-runner task-result-artifact worker-completion-settle slot-lifecycle-manager memory-review-batch-runner board-cleanup-batch-runner board-search-noise-governance evidence-governance-view execution-step-digest conversation-label-calibration taxonomy-proposal jarvis-stream-affinity jarvis-usage-ledger]
+      :runtime-projection [BoardTask EventBus task_result_artifacts evidence_governance_view conversation ended_at SlotReleased workflow_runs workflow_run memory_review_batch_runner board_cleanup_batch_runner board_search_scope execution_step_digest message_labels token_usage_ledger]
       :checker ["node scripts/check-v3-control-plane-m6-split.mjs" "node scripts/check-v3-pty-recognition-isomorphism.mjs" "node scripts/check-v3-workflow-isomorphism.mjs"]
-      :refactor-rule "Long-running batch work must use checkpointed workflow_run state, canonical task-result artifacts, EventBus-driven completion settle, and slot lifecycle release; Board notes and PTY finals are projections, not the canonical result. Board cleanup is advisory by default: workers write task-result-artifacts and batch reports, generated review tasks may close after settle, and historical BoardTasks remain untouched until an approved maintenance workflow applies recommendations. Board keyword search defaults to active task scope so historical done/skipped tasks do not pollute current governance decisions; historical search requires includeHistorical=true, scope=all, or an explicit historical status.")
+      :refactor-rule "Long-running batch work must use checkpointed workflow_run state, canonical task-result artifacts, EventBus-driven completion settle, and slot lifecycle release; Board notes and PTY finals are projections, not the canonical result. Board cleanup is advisory by default: workers write task-result-artifacts and batch reports, generated review tasks may close after settle, and historical BoardTasks remain untouched until an approved maintenance workflow applies recommendations. Board keyword search defaults to active task scope so historical done/skipped tasks do not pollute current governance decisions; historical search requires includeHistorical=true, scope=all, or an explicit historical status. Execution cockpit read models derive execution-step-digest, conversation-label-calibration, taxonomy-proposal, Jarvis stream affinity, and Jarvis usage-ledger summaries from durable tables instead of asking operators to inspect raw PTY.")
 	    :workflow ".missiond/workflows/missiond-control-plane-m6-split.lisp"
 	    :egress [control-plane-split-report checker-pins compiled-runtime-projection-gaps]
 	    :checker "node scripts/check-v3-control-plane-m6-split.mjs")
@@ -968,7 +1014,7 @@
 	    :pty-retention
 	      (:ttl-days 1
 	       :scope [screen-buffer screenshots pty-log-files slot-last-responses]
-	       :rule "PTY content is transient diagnostic evidence only. MissionD keeps provider JSONL/Codex sqlite/Gemini chat files as durable logs, but PTY screen buffers, screenshots, pty-*.log files, and slot_last_responses MUST be treated as short-lived cache with a one-day retention window.")
+	       :rule "PTY content is transient diagnostic evidence only. MissionD keeps provider JSONL/Codex sqlite/Gemini chat files as durable logs, but PTY screen buffers, screenshots, pty-*.log files, and slot_last_responses MUST be treated as short-lived cache with a one-day retention window. Retention cleanup MUST be able to write a delete manifest so applied file/database removal remains reviewable and reversible by evidence.")
 	    :settle-policy
 	      "A worker can be closed only after durable final event or high-confidence final summary plus settle window; idle PTY alone is insufficient because provider SSE/final JSONL can lag the prompt returning."
     (master-checkpoint
@@ -1255,7 +1301,7 @@
     :stateless-sonnet-model "claude-sonnet"
     :queued-sonnet-model "claude-sonnet"
     :anthropic-urgent-model "claude-opus-4-6"
-    :anthropic-ops-model "claude-sonnet-4-6"
+    :anthropic-ops-model "claude-sonnet-4.5"
     :anthropic-docs-test-chore-model "claude-haiku-4-5-20251001"
     :compress-model "gemini-3.1-pro"
     :compress-channel "google"
@@ -1280,6 +1326,7 @@
        "mission_router_chat default idle_timeout MUST project from router-runtime-policy router-chat-idle-timeout-secs; explicit caller idle_timeout still wins."
        "mission_router_chat transient retry max attempts and bounded exponential backoff MUST project from router-runtime-policy; hard failures remain structured errors, and successful calls that retried MUST include retry diagnostics."
        "mission_router_chat_manage history lookup and compression model/channel/token/char budgets MUST project from router-runtime-policy."
+       "OpenAI-compatible chat-completions proxy mode MUST carry the full caller transcript as a direct prompt and MUST NOT send /clear to a shared PTY; clearing an interactive slot is a state mutation and PTY remains diagnostic/shared state."
        "Flow daemon Gemini calls, stateless Sonnet calls, and queued SonnetGateway calls MUST project their model and direct HTTP timeout from router-runtime-policy."
        "GeminiPtyDriver default slot model MUST project from router-runtime-policy flow-gemini-model; explicit caller model still wins."
        "Gemini CLI transport missing llm.yaml model MUST project from router-runtime-policy flow-gemini-model; explicit llm.yaml gemini_cli.model still wins."
@@ -1288,8 +1335,7 @@
        "Gemini File API upload and poll timeouts MUST project from router-runtime-policy instead of local 600s/300s literals."
        "Gemini CLI absolute and tool-exec timeouts MUST project from router-runtime-policy instead of local 900s/300s literals."
        "Queued SonnetGateway quota throttle sleep MUST project from router-runtime-policy instead of a local 30s literal."
-       "Translation worker message_translations.model MUST record the queued SonnetGateway model projected from router-runtime-policy instead of a local MiniMax literal."
-       "Translation worker MUST treat queued Sonnet provider auth failures (401/403/auth error) as a non-retryable provider-auth circuit breaker, pause backlog draining for a long cooldown, and avoid emitting one TranslationFailed event per pending message while credentials/router policy are broken."
+       "Thinking-message translation worker is retired: MissionD MUST NOT automatically translate provider internal thinking logs or drain historical thinking backlog through queued Sonnet/router. Any future translation path must be explicit, user-visible, bounded, and attributed."
        "xjp-router embedding client MUST project its missing timeout default from router-runtime-policy direct HTTP timeout; explicit llm.yaml timeout_secs still wins."
        "BoardTask urgent/ops/docs-test-chore ANTHROPIC_MODEL overrides MUST project from router-runtime-policy, not Rust literals."])
 
@@ -1307,7 +1353,7 @@
     :schema "missiond.eventbridge-policy.v1"
     :envelope missiond.event-envelope.v1
     :fields [event_id source project_id service_id event_kind subject correlation_id trace_id occurred_at observed_at authority schema_version payload privacy_class]
-    :taxonomy [deploy_created build_started build_succeeded build_failed deploy_started deploy_succeeded deploy_failed smoke_succeeded smoke_failed rollback_started rollback_succeeded rollback_failed agent_heartbeat agent_update_started agent_update_succeeded agent_update_failed provenance_changed]
+    :taxonomy [deploy_created build_started build_succeeded build_failed deploy_started deploy_succeeded deploy_failed smoke_succeeded smoke_failed rollback_started rollback_succeeded rollback_failed agent_heartbeat agent_update_started agent_update_succeeded agent_update_failed provenance_changed usage_burst provider_error_burst provider_auth_failure_burst quota_exhaustion]
     :rule "MissionD remains the local orchestrator and EventBridge. Cloud services send durable provider events through typed webhooks; MissionD stores them as SystemEvent::ExternalServiceEvent with idempotent event_id dedupe. PTY remains diagnostic only."
     :invariants
       ["External deploy events MUST enter through /webhooks/deploy-center-event or /webhooks/service-event with X-MissionD-Webhook-Token when MISSIOND_EXTERNAL_WEBHOOK_TOKEN is configured."
@@ -1326,6 +1372,17 @@
     :egress [ExternalServiceEvent mission_timeline.wait deployment-ops-BoardTask]
     :surfaces [eventbridge project-registry])
 
+  (router-usage-event-ingest
+    :schema "missiond.router-usage-event-ingest.v1"
+    :entry [/webhooks/service-event mission_timeline.wait router-usage-alert]
+    :core ((step s1 :logic "accept router service-event envelopes for usage_burst, provider_error_burst, provider_auth_failure_burst, and quota_exhaustion without treating PTY as evidence")
+           (step s2 :logic "preserve caller attribution fields project_id, service_id, provider, model, route, request_id, tenant_id hash, status_code, and error class")
+           (step s3 :logic "dedupe burst alerts by service_id + provider + model + window_start + event_kind")
+           (step s4 :logic "surface repeated provider/auth failures to Board as diagnostic incidents and do not retry hidden translation or background LLM work")
+           (step s5 :logic "allow mission_timeline waits and master-control observers to react to router anomalies from durable events"))
+    :egress [ExternalServiceEvent router-usage-diagnostic router-ops-BoardTask]
+    :surfaces [eventbridge router-policy])
+
   (m6-deployment-confirmation
     :schema "missiond.m6-deployment-confirmation.v1"
     :entry [project-maturity-registry service-runtime-universe deploy-center.status deploy-center.provenance]
@@ -1340,6 +1397,20 @@
     :surfaces ["scripts/check-m6-deployment-status.mjs" ".missiond/workflows/m6-deployment-rollout.lisp" ".missiond/workflows/pcea-deployment-rollout.lisp" "scripts/check-v3-project-registry-isomorphism.mjs"]
     :diagnostics [runner_queued build_cache_unavailable digest_resolution_failed reported_digest_missing provenance_partial]
     :rule "M6 maturity is not deployment evidence. Production deployment confirmation must come from deploy-center status/provenance and service smoke, with curl/git/GitHub probes only as diagnostics. Build-cache accelerators such as sccache/kellnr are performance aids and must not become implicit release blockers.")
+
+  (deployment-evidence-preflight
+    :schema "missiond.deployment-evidence-preflight.v1"
+    :entry [m6-deployment-rollout pcea-deployment-rollout mission_infra_query skill-runtime deploy-center.provenance]
+    :core ((step s1 :logic "resolve project_id to MissionD Universe identity, project deployment SSOT, and deploy-center slug(s)")
+           (step s2 :logic "collect skill-derived deployment evidence with include_kb=false, preserving source_skill/source_path/source_line and redacting credential-like values")
+           (step s3 :logic "query deploy-center runtime/provenance and compare with skill evidence for host, agent, script, artifact, health, and rollback facts")
+           (step s4 :logic "verify deploy-center pull-mode executor claim dependencies: deploy_executors.api_key_ref must resolve DEPLOY_AGENT_API_KEY from Secret Store before agent-offline or script-failure conclusions are trusted")
+           (step s5 :logic "if skill evidence, deploy-center facts, Secret Store dependency health, and project SSOT disagree, create a drift diagnostic/Decision item and do not let deploy workers guess host, login path, script path, or agent project")
+           (step s6 :logic "materialize a deploy context-pack for deploy-ops workers containing only reconciled facts, remaining unknowns, smoke commands, dependency-health evidence, and approval boundaries"))
+    :egress [deploy-context-pack runtime-fact-drift deploy-ops-BoardTask]
+    :surfaces [".missiond/workflows/m6-deployment-rollout.lisp" ".missiond/workflows/pcea-deployment-rollout.lisp" "crates/missiond-daemon/src/bus/v2_subscribers.rs" "scripts/check-v3-workflow-isomorphism.mjs"]
+    :rule "Every deployment task must perform deployment-evidence-preflight before action. Skills are evidence and operational guidance; deploy-center provenance is deployment authority; MissionD orchestrates and records the decision path."
+    :dependency-rule "Secret Store is the credential authority for deploy-center executor claim auth. If Secret Store is unreachable, classify deploy-blocked-by-secret-store and surface namespace/key refs only; never expose credential values.")
 
   (project-identity-contract
     :schema "missiond.project-identity-contract.v1"
@@ -1781,6 +1852,20 @@
        "Protected pattern semantics stay explicit: tool patterns ending '_' are prefixes; other tool patterns are exact; flow patterns match exact or prefix."
        "A real MissionD project with .missiond but no capability-governance-policy MUST return V3_BLUEPRINT_CONFIG_ERROR rather than silently using embedded defaults."])
 
+  (mcp-tool-governance-policy
+    :desc "Primary MCP tool families for agents; old public tools remain callable compatibility leaves, but agents should select by family first."
+    :schema "missiond.mcp-tool-governance.v1"
+    :primary-families [mission_board mission_workflow mission_workstation mission_context mission_memory mission_universe mission_ops mission_router mission_tool_directory]
+    :directory-tool mission_tool_directory
+    :max-primary-families 12
+    :metadata-required [tool_family primary_action tier danger_level intent_examples preferred_surface compatibility_tools]
+    :agent-rule "When unsure, call mission_tool_directory(action=\"recommend\", intent=...) before selecting a lower-level MCP tool. Tool families are a selection/readability layer; compatibility tools remain stable for existing workers."
+    :invariants
+      ["mission_tool_directory MUST expose list/recommend/lookup/explain/deprecated actions over the primary tool-family catalog."
+       "Public tools MAY remain numerous, but every high-frequency tool must map to a primary family and preferred surface."
+       "Deprecated/raw tools MUST return a preferredFamily/preferredSurface hint instead of relying on operator memory."
+       "MCP tool-family governance must be read-only; it guides selection and must not mutate Board, KB, projects, or runtime state."])
+
   (memory-kb-policy
     :desc "Lisp-owned memory extraction budget for the memory-kb surface."
     :pending-message-limit 60
@@ -1793,8 +1878,13 @@
     :invariants
       ["mission_memory_pending MUST project batch size and preview truncation lengths from memory-kb-policy."
        "mission_memory_pending MUST cache the served realtime extraction batch for the active extraction cycle and allow bounded replay after context compaction; if replay cache is missing or exhausted it MUST return structured MEMORY_PENDING_ALREADY_SERVED rather than a successful empty result."
+       "mission_memory_pending MUST classify deployment-monitor, runtime-report, worker-instruction, and provider-preamble text noise into input skip diagnostics before active memory extraction; deployment-monitor covers deploy/build/smoke/rollback/agent-update/provenance diagnostics plus deployment-event-response, xjp_build_wait, xjp_deploy_watch, and xjp_deploy_status monitor text; user utterances MUST never be filtered by these text classifiers."
        "mission_kb_query MUST suppress architecture:module details for sensitive credential/secret/SSH/token queries unless the caller explicitly scopes category/project to that architecture surface."
+       "mission_kb_query MUST support excludeCategory / exclude_category for explicit category suppression, including subcategory matches such as memory excluding memory:*."
+       "mission_kb_mutate(action=batch_remember) MUST accept a bounded entries array so memory review and distillation workflows do not need to spam one MCP call per KB row."
+       "mission_kb_remember MUST pass through one shared dedupe gate in KbStore::kb_remember before any realtime/deep-analysis/manual pipeline can create a new active key; same source-session duplicates use a stricter low threshold and merge evidence_refs/source_sessions/superseded_by instead of overwriting them."
        "mission_kb_review MUST write a non-destructive knowledge_review_state overlay; it MUST NOT mutate or delete the original knowledge row."
+       "Low-confidence semantic duplicate candidates MUST create a needs-human knowledge_review_state artifact and leave the raw row as evidence rather than deleting or silently activating it."
        "Large KB cleanup MUST calibrate with at least five manual batches before batch overlay application; target active memory is about 10%, with needs-human hidden from default retrieval."
        "mission_kb_query default retrieval MUST honor the review overlay while include_archived=true and state_filter preserve audit access to historical evidence."
        "A real MissionD project with .missiond but no memory-kb-policy MUST return V3_BLUEPRINT_CONFIG_ERROR rather than silently using embedded defaults."])
@@ -1804,8 +1894,12 @@
     :realtime-extraction-timeout-secs 300
     :realtime-empty-backoff-base-secs 30
     :realtime-empty-backoff-max-secs 900
+    :deep-analysis-zero-output-fuse-threshold 3
+    :deep-analysis-zero-output-fuse-secs 3600
     :decision-tier3-timeout-secs 300
     :habit-scan-timeout-secs 600
+    :token-spend-guard-window-secs 3600
+    :token-spend-guard-soft-limit 250000
     :timeline-analysis-interval-secs 43200
     :timeline-analysis-window-hours 12
     :timeline-error-limit 20
@@ -1828,7 +1922,10 @@
       ["LearningEngineRuntimeConfig MUST load learning-engine-policy from .missiond/v3/missiond-blueprint.lisp and fail with V3_BLUEPRINT_CONFIG_ERROR for real MissionD projects whose V3 blueprint or policy block is missing."
        "Realtime extraction, Tier3 decision escalation, and historical habit scan pty.send budgets MUST project from learning-engine-policy."
        "Realtime extraction MUST apply exponential empty-queue backoff from learning-engine-policy after consecutive no-user-work probes, and reset the backoff as soon as a real batch is dispatched."
+       "Deep analysis MUST apply a Lisp-projected zero-output saturation fuse after consecutive completed deep-analysis jobs produce no KB mutations; while fused it MUST skip dispatch and expose diagnostics."
+       "Memory/learning workers MUST consult token_usage_ledger through a Lisp-projected sliding-window token-spend soft guard before dispatch; if the window crosses token-spend-guard-soft-limit, MissionD MUST pause the memory domain through ControlTree and emit diagnostics instead of spending into a provider quota cliff."
        "Realtime extraction MUST claim the extraction lane before running pending-message DB probes; pending realtime SQL MUST use EXISTS/LATERAL LIMIT or bounded materialized-candidate shapes instead of global COUNT(DISTINCT)/ROW_NUMBER scans; deep-analysis active-conversation probes MUST use bounded EXISTS/OFFSET checks instead of full message COUNT scans so repeated ticks or status refreshes cannot exhaust the Postgres pool."
+       "Memory extraction pending selectors MUST filter MissionD self-referential worker slots, including slot-memory*, slot-diagnosis*, and agent-* sessions, even when historical role attribution mistakenly labeled them as user conversations."
        "Learning maintenance cadences (timeline analysis, idle exploration, habit scan, KB auto-GC, KB consolidation, KB reflection, decision harvest, co-occurrence refresh) MUST project from learning-engine-policy."
        "Timeline analysis read windows, event limits, and slow-request threshold MUST project from learning-engine-policy."
        "KB reflection low-utility threshold, minimum access count, max entries, and max_tokens MUST project from learning-engine-policy."
@@ -1840,6 +1937,9 @@
     :conversation-get-tail-default 50
     :conversation-search-default-limit 10
     :message-search-default-limit 20
+    :analysis-context-max-turns 50
+    :label-calibration-sample-limit 200
+    :jarvis-stream-envelope-schema "missiond.jarvis-stream-envelope.v1"
     :context-before-default 3
     :context-after-default 5
     :conversation-events-default-limit 100
@@ -1863,6 +1963,10 @@
        "Codex vision worker binary/model/idle timeout and CodexCli absolute timeout MUST project from conversation-ingestion-policy instead of local gpt-5.4/120s/300s literals."
        "Historical conversation event/tool-call backfills MUST NOT run unconditionally on daemon startup; they are opt-in maintenance/workflow operations gated by llm.yaml backfill_enabled or MISSIOND_CONVERSATION_BACKFILL_ON_STARTUP=1 so daemon restarts do not replay large provider histories as foreground CPU load."
        "llm_summary/topic embedding generation MUST default to human/Jarvis/direct CLI chat read models only; worker/meta/memory-slot conversations project their canonical result through task-result-artifact so skill-injection prompts, quota diagnostics, and worker instructions do not pollute user-facing conversation summaries."
+       "Conversation analysis_context MUST be a bounded read model: it samples at most analysis-context-max-turns from calibrated turns and never pulls raw worker/provider chatter into user-intent inference."
+       "Conversation label calibration MUST remain overlay-first: message_labels stores speaker/origin/canonical_state evidence, rawRole is preserved, and calibration reports are reviewed before any destructive rewrite."
+       "Jarvis SSE and OpenAI-compatible chat surfaces MUST emit jarvis-stream-envelope-schema frames with conversation_id/task_id correlation, process affinity, and semantic event kind; PTY status is diagnostic and cannot replace the envelope."
+       "Jarvis chat surfaces MUST write provider usage into token_usage_ledger with slot/task/message linkage so billing and quota views read one source of truth."
        "A real MissionD project with .missiond but no conversation-ingestion-policy MUST return V3_BLUEPRINT_CONFIG_ERROR rather than silently using embedded defaults."])
 
   (evidence-governance-policy
@@ -2435,6 +2539,13 @@
         :v3-function capability-governance
         :surface capability-governance
         :tools [mission_capability_usage mission_audit mission_codex_ops])
+      (tool-group mcp-tool-governance-tools
+        :status code-aligned
+        :v2-source ".missiond/v2/intent-capability-governance.lisp :: tool-directory"
+        :v3-pillar communication
+        :v3-function capability-governance
+        :surface capability-governance
+        :tools [mission_tool_directory])
       (tool-group sysinfra-control-tools
         :status code-aligned
         :v2-source ".missiond/v2/intent-system-layer.lisp :: sysinfra"
@@ -2721,11 +2832,14 @@
         :core ((step s1 :logic "load memory-kb-policy and learning-engine-policy for realtime extraction batch, preview budgets, learning cadences, and pty send budgets")
                (step s2 :logic "resolve project/global memory scope and normalize KB or intent query")
                (step s3 :logic "read or mutate durable knowledge rows through one Lisp-described memory contract")
-               (step s4 :logic "apply knowledge_review_state overlay before default retrieval so superseded/historical/duplicate/stale/delete-candidate memories leave the active reasoning path without deletion")
-               (step s5 :logic "keep needs-human out of default retrieval until adjudicated, because uncertain memory is evidence rather than active guidance")
-               (step s6 :logic "suppress architecture-module noise for sensitive credential/secret/SSH/token retrieval intents unless explicitly scoped")
-               (step s7 :logic "project search, beacon, insight, and memory responses into reviewable evidence")
-               (step s8 :logic "accept intent_memory_candidate from master/workflow context and persist stable high-confidence user intent as memory:decision while keeping uncertain intent in review overlay or candidate artifacts"))
+               (step s4 :logic "route all realtime extraction, deep-analysis, manual MCP, and internal learning writes through the shared KB dedupe gate before any new active key can be created")
+               (step s5 :logic "merge exact/fuzzy/same-session duplicates into one durable key while preserving evidence_refs, source_sessions, and superseded_by provenance")
+               (step s6 :logic "turn low-confidence semantic duplicate candidates into needs-human review artifacts instead of deleting or activating them")
+               (step s7 :logic "apply knowledge_review_state overlay before default retrieval so superseded/historical/duplicate/stale/delete-candidate memories leave the active reasoning path without deletion")
+               (step s8 :logic "keep needs-human out of default retrieval until adjudicated, because uncertain memory is evidence rather than active guidance")
+               (step s9 :logic "suppress architecture-module noise for sensitive credential/secret/SSH/token retrieval intents unless explicitly scoped")
+               (step s10 :logic "project search, beacon, insight, and memory responses into reviewable evidence")
+               (step s11 :logic "accept intent_memory_candidate from master/workflow context and persist stable high-confidence user intent as memory:decision while keeping uncertain intent in review overlay or candidate artifacts"))
         :egress [kb_result memory_projection search_hits insight_summary intent_memory_record])
       (function project-registry
         :surface project-registry
@@ -2772,8 +2886,10 @@
                (step s2 :logic "ingest or query conversation/session/timeline records by project scope")
 	               (step s3 :logic "when mission_conversation_query list is scoped by taskId and conversationType is omitted, query all provider conversation rows for that BoardTask by direct conversations.task_id plus message-anchored BoardTask id fallback, order direct bindings before message-only anchors and newest sessions before older sessions, so Claude/Codex/Gemini durable logs remain first-class evidence even after a reused slot is rebound to a later task without returning stale parent/subagent sessions first")
                (step s4 :logic "compaction timeline reconstruction tolerates legacy NULL started_at/message_count rows by coalescing before tuple decode")
-               (step s5 :logic "derive analysis, reconciliation, retrospective, and embedding work items")
-               (step s6 :logic "surface durable facts for context assembly and later memory projection"))
+               (step s5 :logic "derive bounded analysis_context from calibrated turns, message_labels, and task-result-artifacts without treating worker prompts as user intent")
+               (step s6 :logic "surface conversation label calibration overlays and dry-run reports before any role or turn backfill applies")
+               (step s7 :logic "derive analysis, reconciliation, retrospective, and embedding work items")
+               (step s8 :logic "surface durable facts for context assembly and later memory projection"))
         :egress [conversation_rows timeline_events retrospective_result embedding_jobs])
       (function eventbridge
         :surface eventbridge
@@ -2809,12 +2925,14 @@
         :egress [question_revalidation_status stale_evidence_answer QuestionEvent::Resolved])
       (function capability-governance
         :surface capability-governance
-        :entry [mission_capability_usage mission_audit mission_codex_ops]
-        :core ((step s1 :logic "load capability-governance-policy for review sidecar path and protected source/target lists")
+        :entry [mission_capability_usage mission_audit mission_codex_ops mission_tool_directory]
+        :core ((step s1 :logic "load capability-governance-policy and mcp-tool-governance-policy for review sidecar path, protected source/target lists, and primary tool families")
                (step s2 :logic "record capability usage, audit facts, and Codex operation acknowledgements")
                (step s3 :logic "bind evidence to plan/execution ids without becoming the primary execution gate")
-               (step s4 :logic "return traceable receipts for later learning and report finalization"))
-        :egress [capability_receipt audit_record codex_ops_result]))
+               (step s4 :logic "map natural-language operator intent to a primary tool family before raw MCP tool selection")
+               (step s5 :logic "lookup concrete MCP tool names, return preferred family/surface, and explain compatibility tools as leaves under the smaller family catalog")
+               (step s6 :logic "return traceable receipts and tool family/recommendation/deprecated hints for later learning and report finalization"))
+        :egress [capability_receipt audit_record codex_ops_result tool_family_directory tool_recommendation deprecated_tool_hint]))
 
     (pillar worker-runtime
       (function compute-primitives
@@ -2832,7 +2950,8 @@
         :core ((step s1 :logic "resolve skill metadata and context through the skill registry")
                (step s2 :logic "for operational questions such as remote hosts, deploy-agent, router embedding/rerank, 12900kf, Windows runner, CI runner, Ollama, or model host, extract bounded skill-derived operational_facts with source_path/source_line before ad-hoc probing")
                (step s3 :logic "validate mutation or execution request against project and permission policy")
-               (step s4 :logic "return skill execution result, operational fact bundle, or context bundle as a runtime receipt"))
+               (step s4 :logic "for requires_approval skill workflows, return a pending_approval preview first and require a second explicit approve=true call after human review before executing")
+               (step s5 :logic "return skill execution result, operational fact bundle, or context bundle as a runtime receipt"))
         :egress [skill_context skill_operational_facts skill_mutation skill_execution_receipt])
       (function cascade-governance
         :surface cascade-governance
@@ -3556,7 +3675,7 @@
              "crates/missiond-mcp/src/tools/knowledge/insight.rs"
              "crates/missiond-mcp/src/tools/knowledge/intent.rs"
              "scripts/check-v3-memory-kb-isomorphism.mjs"]
-	      :note "Runtime-projected V3 destination for memory/KB tools. memory-kb-policy and learning-engine-policy own realtime extraction budgets, pty send budgets, cadences, bounded SQL probes, and physical split ownership across kb/* modules. kb/review.rs owns non-destructive knowledge_review_state overlay so 90%+ stale memories can leave default retrieval without deleting evidence. Conversation history distillation is intentionally deferred behind .missiond/workflows/conversation-memory-distillation.lisp: default mode produces candidate-memory / infrastructure issue inventory only, rejects facts already superseded by project SSOT Lisp, and does not write or delete KB until log role attribution and project SSOT coverage are stable. [details: .missiond/v3/evidence/blueprint-notes.lisp#note-015]")
+	      :note "Runtime-projected V3 destination for memory/KB tools. memory-kb-policy and learning-engine-policy own budgets, cadences, bounded SQL probes, shared KB dedupe gate semantics, and physical split ownership across kb/* modules. KbStore::kb_remember is the shared write gate for realtime/deep-analysis/manual/internal memory writes; same-session duplicates preserve evidence_refs/source_sessions/superseded_by provenance instead of creating two active keys. kb/review.rs owns non-destructive knowledge_review_state overlay so stale memories leave default retrieval without deleting evidence; low-confidence semantic duplicates become needs-human review artifacts. Conversation history distillation remains deferred behind .missiond/workflows/conversation-memory-distillation.lisp. [details: .missiond/v3/evidence/blueprint-notes.lisp#note-015]")
 
     (surface project-registry
       :status "code-aligned"
@@ -3638,7 +3757,7 @@
              "scripts/audit-codex-history-ingestion.mjs"
              "scripts/check-v3-conversation-ingestion-isomorphism.mjs"
              "scripts/check-v3-cli-conversation-ingestion-isomorphism.mjs"]
-      :note "Runtime-projected V3 destination for conversation/session/timeline/retrospective/embedding public tools. context/v3_blueprint_runtime.rs projects conversation-ingestion-policy read-model default and max limits into conversation/query.rs, conversation/events.rs, and timeline.rs, projects context prefetch intent-router model/timeout into context/context_pipeline.rs, and projects Codex vision worker binary/model/idle/absolute timeout into workers/codex/vision_worker.rs plus llm/codex_cli.rs; conversation.rs is the thin conversation-ingestion facade; conversation/router.rs owns mission_conversation_query, mission_conversation_analyze, and mission_retrospective_manage consolidated routing; conversation/query.rs owns read-model query actions including list/get/search/message_search/user_index/labels/context; conversation/events.rs owns analysis/event egress including conver... [details: .missiond/v3/evidence/blueprint-notes.lisp#note-017]")
+      :note "Runtime-projected V3 destination for conversation/session/timeline/retrospective/embedding public tools. context/v3_blueprint_runtime.rs projects conversation-ingestion-policy read-model default and max limits into conversation/query.rs, conversation/events.rs, and timeline.rs, projects context prefetch intent-router model/timeout into context/context_pipeline.rs, and projects Codex vision worker binary/model/idle/absolute timeout into workers/codex/vision_worker.rs plus llm/codex_cli.rs; conversation.rs is the thin conversation-ingestion facade; conversation/router.rs owns mission_conversation_query, mission_conversation_analyze, and mission_retrospective_manage consolidated routing; conversation/query.rs owns read-model query actions including list/get/search/analysis_context/message_search/user_index/labels/context; retrospective.rs owns bulk-tool whitelist plus worker/meta threshold signalQuality so batch scans do not masquerade as reasoning waste; conversation/events.rs owns analysis/event egress including conver... [details: .missiond/v3/evidence/blueprint-notes.lisp#note-017]")
 
     (surface router-policy
       :status "code-aligned"
@@ -3657,8 +3776,10 @@
              "crates/missiond-daemon/src/llm/gemini_file_api.rs"
              "crates/missiond-daemon/src/llm/llm_gateway.rs"
              "crates/missiond-daemon/src/llm/sonnet_gateway.rs"
-             "crates/missiond-daemon/src/workers/sonnet/translation_worker.rs"
              "crates/missiond-daemon/src/llm/xjp_router_client.rs"
+             "crates/missiond-daemon/src/infra/message_handler.rs"
+             "crates/missiond-core/src/db/pg/observability.rs"
+             "crates/missiond-core/src/ws/server.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run/predicate.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run/readiness.rs"
@@ -3668,7 +3789,7 @@
              "scripts/check-router-backend-registry.mjs"
              "scripts/check-router-dispatch-descriptor.mjs"
              "scripts/check-v3-router-policy-isomorphism.mjs"]
-      :note "Runtime-projected V3 destination for the V2 router-policy dry-run chain and public router chat tools. router-runtime-policy owns default chat/flow/Sonnet models, BoardTask ANTHROPIC_MODEL override routing, GeminiClient request queue timeouts, Gemini CLI absolute/tool-exec timeouts, Gemini File API upload/poll timeouts, queued Sonnet quota throttle, xjp-router embedding timeout default, and token/timeout/compression budgets through RouterRuntimeConfig. router_chat.rs is the thin router-policy facade; router_chat/chat.rs owns mission_router_chat request normalization, context injection, LLM dispatch, persistence, and response projection; router_chat/files.rs owns attachment denylist and Gemini File API policy; router_chat/manage.rs owns mission_router_chat_manage history/list/delete/clear/delete_message/restore/stats/compress. embedding_worker.rs owns LlmConfig/GeminiCl... [details: .missiond/v3/evidence/blueprint-notes.lisp#note-018]")
+      :note "Runtime-projected V3 destination for the V2 router-policy dry-run chain and public router chat tools. router-runtime-policy owns chat/flow/Sonnet defaults, queue/tool/file timeouts, xjp-router embedding timeout, and token/compression budgets through RouterRuntimeConfig. router_chat/chat.rs owns mission_router_chat request normalization, LLM dispatch, persistence, and response projection; proxy mode carries the direct transcript prompt without sending /clear to shared PTY. Jarvis stream governance MUST write provider usage into token_usage_ledger through message_handler.rs and observability.rs so billing is a durable ledger. router_chat/files.rs owns attachment denylist; router_chat/manage.rs owns history/list/delete/clear/stats/compress. [details: .missiond/v3/evidence/blueprint-notes.lisp#note-018]")
 
     (surface incident-governance
       :status "code-aligned"
@@ -3698,18 +3819,20 @@
 
     (surface capability-governance
       :status "code-aligned"
-      :implements [capability-usage audit codex-ops]
+      :implements [capability-usage audit codex-ops mcp-tool-governance]
       :code ["crates/missiond-mcp/src/tools/comm/capability_usage.rs"
              "crates/missiond-mcp/src/tools/comm/audit.rs"
              "crates/missiond-mcp/src/tools/comm/codex_ops.rs"
+             "crates/missiond-mcp/src/tools/comm/tool_directory.rs"
              "crates/missiond-daemon/src/handlers/mod.rs"
              "crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"
              "crates/missiond-daemon/src/handlers/comm/capability_usage.rs"
              "crates/missiond-daemon/src/handlers/comm/capability_usage/runtime.rs"
              "crates/missiond-daemon/src/handlers/comm/audit.rs"
              "crates/missiond-daemon/src/handlers/comm/codex_ops.rs"
+             "crates/missiond-daemon/src/handlers/comm/tool_directory.rs"
              "scripts/check-v3-capability-governance-isomorphism.mjs"]
-      :note "Runtime-projected V3 destination for capability usage, audit, and Codex ops surfaces. capability_usage.rs is the thin capability-governance facade; capability_usage/runtime.rs owns snapshot/report/candidates/mark/ack, six source lanes, semantic hint merge review, protected source/target policy, review sidecar persistence, and non-blocking observability emissions; context/v3_blueprint_runtime.rs projects capability-governance-policy review sidecar path plus protected source/target lists into mission_capability_usage runtime; audit.rs owns mission_audit trace/detail/stats/export plus legacy mission_audit_* compatibility; codex_ops.rs owns mission_codex_ops recent/thread/tool_stats over codex_cli conversations.")
+      :note "Runtime-projected V3 destination for capability usage, audit, Codex ops, and MCP tool-family governance surfaces. capability_usage.rs is the thin capability-governance facade; capability_usage/runtime.rs owns snapshot/report/candidates/mark/ack, six source lanes, semantic hint merge review, protected source/target policy, review sidecar persistence, and non-blocking observability emissions; context/v3_blueprint_runtime.rs projects capability-governance-policy review sidecar path plus protected source/target lists into mission_capability_usage runtime; audit.rs owns mission_audit trace/detail/stats/export plus legacy mission_audit_* compatibility; codex_ops.rs owns mission_codex_ops recent/thread/tool_stats over codex_cli conversations; tool_directory.rs owns mission_tool_directory list/recommend/lookup/explain/deprecated so agents can select primary families before raw compatibility tools.")
 
     (surface compute-primitives
       :status "code-aligned"
@@ -3758,7 +3881,7 @@
              "crates/missiond-daemon/src/handlers/knowledge/skill/exec.rs"
              "crates/missiond-mcp/src/tools/knowledge/skill.rs"
              "scripts/check-v3-skill-runtime-isomorphism.mjs"]
-      :note "skill.rs is the thin mission_skill facade for mission_skill_query, mission_skill_context, mission_skill_mutate, mission_skill_exec, and direct legacy skill tools; skill/query.rs owns list/search/topics/actions/stats/project_links, FTS/vector ranking, topic hit recording, workflow action projection, composite registry/topic/action/embedding/execution statistics, and derived project-skill links; skill/context.rs owns context build/resolve, project-aware context resolution, optional-query resolve by project_id or skill, project_skill_links evidence, skill dependency expansion, infra aggregation, explicit opt-in KB dependency aggregation, skill-derived operational_facts with source_path/source_line for remote-host/deploy-agent/router embedding/rerank/12900kf lookups, and optional BoardTask context projection; skill/mutate.rs owns upsert/record/render/rollback, topic auto-create, block writes, materialization, skill version rollback, and embedding refresh through ProcessSkillTopic; skill/exec.rs owns mission_skill_exec and execute_workflow result/error egress.")
+      :note "skill-runtime is the code-aligned surface for skill query/context/mutate/exec. skill.rs is the thin facade; query/context/mutate/exec modules own FTS/vector lookup, project skill links, opt-in KB aggregation, skill-derived operational_facts, mutation rollback/materialization, and explicit approve=true replay for requires_approval workflows. [details: .missiond/v3/evidence/blueprint-notes.lisp#note-022]")
 
     (surface cascade-governance
       :status "code-aligned"
@@ -3791,7 +3914,7 @@
              "crates/missiond-mcp/src/tools/sysinfra/global_instruction.rs"
              "scripts/check-v3-sysinfra-control-isomorphism.mjs"
              "scripts/check-v3-infrastructure-universe-isomorphism.mjs"]
-      :note "Code-aligned V3 sysinfra surface. infra.rs owns infra query/ops, skill evidence, credential refs, and runtime target projection; project/reconcile reports runtime and credential drift. permission, power, system, and global-instruction handlers own their MCP tools. Long blue-green/self-update and infra-evidence anchors live in blueprint-notes#note-021.")
+      :note "Code-aligned V3 sysinfra surface. infra.rs owns infra query/ops, skill evidence, credential refs, and runtime target projection; project/reconcile reports runtime and credential drift. permission, power, system, and global-instruction handlers own their MCP tools. Learned permissions are scoped, non-blanket for Bash, TTL-governed with expires_at/source_evidence/renew_policy/audit_trail, and renewed only from provider-confirmation use. Long blue-green/self-update and infra-evidence anchors live in blueprint-notes#note-021.")
 
     (surface runtime-load-explanation
       :status "code-aligned"

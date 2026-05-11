@@ -71,7 +71,7 @@ pub(super) async fn action_respond(state: &AppState, args: &Value) -> Result<Too
                     .with_suggestion(
                         "pass the request_id returned by mission_request(action=start)",
                     ),
-            ))
+            ));
         }
     };
     let request_id = sanitize_request_id(&request_id_raw);
@@ -87,7 +87,7 @@ pub(super) async fn action_respond(state: &AppState, args: &Value) -> Result<Too
             return Ok(ToolResult::structured_error(
                 ToolError::new(error_codes::INVALID_PARAM, reason)
                     .with_suggestion("pass project, absolute cwd, or target_project"),
-            ))
+            ));
         }
     };
     let paths = request_paths_for(&root, &request_id);
@@ -374,7 +374,7 @@ pub(super) async fn action_respond(state: &AppState, args: &Value) -> Result<Too
                     ),
                 )
                 .with_suggestion("ensure the request_id and project root are correct"),
-            ))
+            ));
         }
     };
 

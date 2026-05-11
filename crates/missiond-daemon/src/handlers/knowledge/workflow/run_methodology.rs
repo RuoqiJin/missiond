@@ -56,7 +56,7 @@ pub(super) async fn action_run_methodology(state: &AppState, args: &Value) -> Re
                      run_methodology refuses process-cwd fallback so the compiled YAML \
                      resolves against the registered project root.",
                 ),
-            ))
+            ));
         }
     };
     let dry_run = args

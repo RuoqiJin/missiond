@@ -115,8 +115,12 @@ pub(crate) const DEFAULT_AUTOPILOT_DIRECTION_SHIFT_COOLDOWN_SECS: i64 = 3600;
 pub(crate) const DEFAULT_LEARNING_REALTIME_EXTRACTION_TIMEOUT_SECS: u64 = 300;
 pub(crate) const DEFAULT_LEARNING_REALTIME_EMPTY_BACKOFF_BASE_SECS: i64 = 30;
 pub(crate) const DEFAULT_LEARNING_REALTIME_EMPTY_BACKOFF_MAX_SECS: i64 = 900;
+pub(crate) const DEFAULT_LEARNING_DEEP_ANALYSIS_ZERO_OUTPUT_FUSE_THRESHOLD: u32 = 3;
+pub(crate) const DEFAULT_LEARNING_DEEP_ANALYSIS_ZERO_OUTPUT_FUSE_SECS: i64 = 3600;
 pub(crate) const DEFAULT_LEARNING_DECISION_TIER3_TIMEOUT_SECS: u64 = 300;
 pub(crate) const DEFAULT_LEARNING_HABIT_SCAN_TIMEOUT_SECS: u64 = 600;
+pub(crate) const DEFAULT_LEARNING_TOKEN_SPEND_GUARD_WINDOW_SECS: i64 = 3600;
+pub(crate) const DEFAULT_LEARNING_TOKEN_SPEND_GUARD_SOFT_LIMIT: i64 = 250_000;
 pub(crate) const DEFAULT_LEARNING_TIMELINE_ANALYSIS_INTERVAL_SECS: i64 = 12 * 3600;
 pub(crate) const DEFAULT_LEARNING_TIMELINE_ANALYSIS_WINDOW_HOURS: i64 = 12;
 pub(crate) const DEFAULT_LEARNING_TIMELINE_ERROR_LIMIT: i64 = 20;
@@ -148,7 +152,7 @@ pub(crate) const DEFAULT_ROUTER_FLOW_GEMINI_MODEL: &str = "gemini-3.1-pro";
 pub(crate) const DEFAULT_ROUTER_STATELESS_SONNET_MODEL: &str = "claude-sonnet";
 pub(crate) const DEFAULT_ROUTER_QUEUED_SONNET_MODEL: &str = "claude-sonnet";
 pub(crate) const DEFAULT_ROUTER_ANTHROPIC_URGENT_MODEL: &str = "claude-opus-4-6";
-pub(crate) const DEFAULT_ROUTER_ANTHROPIC_OPS_MODEL: &str = "claude-sonnet-4-6";
+pub(crate) const DEFAULT_ROUTER_ANTHROPIC_OPS_MODEL: &str = "claude-sonnet-4.5";
 pub(crate) const DEFAULT_ROUTER_ANTHROPIC_DOCS_TEST_CHORE_MODEL: &str = "claude-haiku-4-5-20251001";
 pub(crate) const DEFAULT_ROUTER_COMPRESS_MODEL: &str = "gemini-3.1-pro";
 pub(crate) const DEFAULT_ROUTER_COMPRESS_CHANNEL: &str = "google";
@@ -389,8 +393,12 @@ pub(crate) struct LearningEngineRuntimeConfig {
     pub realtime_extraction_timeout_secs: u64,
     pub realtime_empty_backoff_base_secs: i64,
     pub realtime_empty_backoff_max_secs: i64,
+    pub deep_analysis_zero_output_fuse_threshold: u32,
+    pub deep_analysis_zero_output_fuse_secs: i64,
     pub decision_tier3_timeout_secs: u64,
     pub habit_scan_timeout_secs: u64,
+    pub token_spend_guard_window_secs: i64,
+    pub token_spend_guard_soft_limit: i64,
     pub timeline_analysis_interval_secs: i64,
     pub timeline_analysis_window_hours: i64,
     pub timeline_error_limit: i64,
@@ -1120,8 +1128,14 @@ impl Default for LearningEngineRuntimeConfig {
             realtime_extraction_timeout_secs: DEFAULT_LEARNING_REALTIME_EXTRACTION_TIMEOUT_SECS,
             realtime_empty_backoff_base_secs: DEFAULT_LEARNING_REALTIME_EMPTY_BACKOFF_BASE_SECS,
             realtime_empty_backoff_max_secs: DEFAULT_LEARNING_REALTIME_EMPTY_BACKOFF_MAX_SECS,
+            deep_analysis_zero_output_fuse_threshold:
+                DEFAULT_LEARNING_DEEP_ANALYSIS_ZERO_OUTPUT_FUSE_THRESHOLD,
+            deep_analysis_zero_output_fuse_secs:
+                DEFAULT_LEARNING_DEEP_ANALYSIS_ZERO_OUTPUT_FUSE_SECS,
             decision_tier3_timeout_secs: DEFAULT_LEARNING_DECISION_TIER3_TIMEOUT_SECS,
             habit_scan_timeout_secs: DEFAULT_LEARNING_HABIT_SCAN_TIMEOUT_SECS,
+            token_spend_guard_window_secs: DEFAULT_LEARNING_TOKEN_SPEND_GUARD_WINDOW_SECS,
+            token_spend_guard_soft_limit: DEFAULT_LEARNING_TOKEN_SPEND_GUARD_SOFT_LIMIT,
             timeline_analysis_interval_secs: DEFAULT_LEARNING_TIMELINE_ANALYSIS_INTERVAL_SECS,
             timeline_analysis_window_hours: DEFAULT_LEARNING_TIMELINE_ANALYSIS_WINDOW_HOURS,
             timeline_error_limit: DEFAULT_LEARNING_TIMELINE_ERROR_LIMIT,
@@ -2560,8 +2574,18 @@ pub(crate) fn parse_learning_engine_policy(
             ":realtime-empty-backoff-base-secs",
         )?,
         realtime_empty_backoff_max_secs: int_keyword(&tokens, ":realtime-empty-backoff-max-secs")?,
+        deep_analysis_zero_output_fuse_threshold: u32_keyword(
+            &tokens,
+            ":deep-analysis-zero-output-fuse-threshold",
+        )?,
+        deep_analysis_zero_output_fuse_secs: int_keyword(
+            &tokens,
+            ":deep-analysis-zero-output-fuse-secs",
+        )?,
         decision_tier3_timeout_secs: u64_keyword(&tokens, ":decision-tier3-timeout-secs")?,
         habit_scan_timeout_secs: u64_keyword(&tokens, ":habit-scan-timeout-secs")?,
+        token_spend_guard_window_secs: int_keyword(&tokens, ":token-spend-guard-window-secs")?,
+        token_spend_guard_soft_limit: int_keyword(&tokens, ":token-spend-guard-soft-limit")?,
         timeline_analysis_interval_secs: int_keyword(&tokens, ":timeline-analysis-interval-secs")?,
         timeline_analysis_window_hours: int_keyword(&tokens, ":timeline-analysis-window-hours")?,
         timeline_error_limit: int_keyword(&tokens, ":timeline-error-limit")?,
@@ -2588,6 +2612,9 @@ pub(crate) fn parse_learning_engine_policy(
         cfg.timeline_analysis_interval_secs,
         cfg.realtime_empty_backoff_base_secs,
         cfg.realtime_empty_backoff_max_secs,
+        cfg.deep_analysis_zero_output_fuse_secs,
+        cfg.token_spend_guard_window_secs,
+        cfg.token_spend_guard_soft_limit,
         cfg.timeline_analysis_window_hours,
         cfg.timeline_error_limit,
         cfg.timeline_llm_sample_limit,
@@ -2613,7 +2640,10 @@ pub(crate) fn parse_learning_engine_policy(
             ":realtime-empty-backoff-max-secs must be >= :realtime-empty-backoff-base-secs".into(),
         ));
     }
-    if cfg.timeline_slow_event_limit == 0 || cfg.habit_scan_batch_size == 0 {
+    if cfg.timeline_slow_event_limit == 0
+        || cfg.habit_scan_batch_size == 0
+        || cfg.deep_analysis_zero_output_fuse_threshold == 0
+    {
         return Err(BlueprintConfigError::Parse(
             "learning-engine-policy batch/limit fields must be positive".into(),
         ));
@@ -3551,7 +3581,7 @@ mod tests {
     :stateless-sonnet-model "claude-sonnet"
     :queued-sonnet-model "claude-sonnet"
     :anthropic-urgent-model "claude-opus-4-6"
-    :anthropic-ops-model "claude-sonnet-4-6"
+    :anthropic-ops-model "claude-sonnet-4.5"
     :anthropic-docs-test-chore-model "claude-haiku-4-5-20251001"
     :compress-model "gemini-3.1-pro"
 	    :compress-channel "google"
@@ -3591,8 +3621,12 @@ mod tests {
 	    :realtime-extraction-timeout-secs 300
 	    :realtime-empty-backoff-base-secs 30
 	    :realtime-empty-backoff-max-secs 900
+	    :deep-analysis-zero-output-fuse-threshold 3
+	    :deep-analysis-zero-output-fuse-secs 3600
 	    :decision-tier3-timeout-secs 300
 	    :habit-scan-timeout-secs 600
+	    :token-spend-guard-window-secs 3600
+	    :token-spend-guard-soft-limit 250000
 	    :timeline-analysis-interval-secs 43200
 	    :timeline-analysis-window-hours 12
 	    :timeline-error-limit 20
@@ -4189,9 +4223,25 @@ mod tests {
             cfg.realtime_empty_backoff_max_secs,
             DEFAULT_LEARNING_REALTIME_EMPTY_BACKOFF_MAX_SECS
         );
+        assert_eq!(
+            cfg.deep_analysis_zero_output_fuse_threshold,
+            DEFAULT_LEARNING_DEEP_ANALYSIS_ZERO_OUTPUT_FUSE_THRESHOLD
+        );
+        assert_eq!(
+            cfg.deep_analysis_zero_output_fuse_secs,
+            DEFAULT_LEARNING_DEEP_ANALYSIS_ZERO_OUTPUT_FUSE_SECS
+        );
         assert_eq!(cfg.realtime_extraction_timeout_ms(), 300_000);
         assert_eq!(cfg.decision_tier3_timeout_ms(), 300_000);
         assert_eq!(cfg.habit_scan_timeout_ms(), 600_000);
+        assert_eq!(
+            cfg.token_spend_guard_window_secs,
+            DEFAULT_LEARNING_TOKEN_SPEND_GUARD_WINDOW_SECS
+        );
+        assert_eq!(
+            cfg.token_spend_guard_soft_limit,
+            DEFAULT_LEARNING_TOKEN_SPEND_GUARD_SOFT_LIMIT
+        );
         assert_eq!(
             cfg.timeline_analysis_interval_secs,
             DEFAULT_LEARNING_TIMELINE_ANALYSIS_INTERVAL_SECS

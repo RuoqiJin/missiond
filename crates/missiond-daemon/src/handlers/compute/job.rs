@@ -32,7 +32,7 @@ async fn poll_job(state: &AppState, args: &Value) -> Result<ToolResult> {
             return Ok(ToolResult::structured_error(ToolError::new(
                 error_codes::MISSING_PARAM,
                 "'job_id' is required",
-            )))
+            )));
         }
     };
 
@@ -75,7 +75,7 @@ async fn cancel_job(state: &AppState, args: &Value) -> Result<ToolResult> {
             return Ok(ToolResult::structured_error(ToolError::new(
                 error_codes::MISSING_PARAM,
                 "'job_id' is required",
-            )))
+            )));
         }
     };
 
