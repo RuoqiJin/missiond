@@ -1578,7 +1578,7 @@
     :schema "missiond.project-maturity-registry.v2"
     :default-target M6
     :common-m5-to-m6-gap [domain-model policy-flow-event-split compatibility-ledger hot-path-wiring regression-matrix final-m6-report]
-    (maturity :id missiond :current M5 :target M6 :gap [typed-compiler-cleanup runtime-projection-cutover global-m6-report])
+    (maturity :id missiond :current M6 :target M6 :gap [])
     (maturity :id board :current M5 :target M6 :gap [frontend-domain-model cockpit-hot-path-regressions final-m6-report])
     (maturity :id jarvis :current M5 :target M6 :gap [domain-shard-split missiond-integration-boundary final-m6-report])
     (maturity :id jarvis-forge :current M5 :target M6 :gap [forge-missiond-boundary component-reuse-ledger final-m6-report])

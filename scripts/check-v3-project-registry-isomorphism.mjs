@@ -128,7 +128,7 @@ function checkFiles(root, files) {
 	    '(project-identity-contract',
 	    '(registry-authority-map',
 	    'mission_project.reconcile',
-	    '(maturity :id missiond :current M5 :target M6',
+	    '(maturity :id missiond :current M6 :target M6',
 	    '(maturity :id auth :current M6 :target M6',
 	    '(project-blueprint-registry',
 	    ':id jarvis-forge',
@@ -386,7 +386,7 @@ function buildFixture() {
 	  (project-maturity-registry
 	    :schema "missiond.project-maturity-registry.v2"
 	    :common-m5-to-m6-gap [domain-model policy-flow-event-split compatibility-ledger hot-path-wiring regression-matrix final-m6-report]
-	    (maturity :id missiond :current M5 :target M6)
+	    (maturity :id missiond :current M6 :target M6)
 	    (maturity :id auth :current M6 :target M6 :gap []))
 	  (project-identity-contract :reconcile-action mission_project.reconcile)
 	  (registry-authority-map :authorities ((missiond) (deploy-center) (forge)))
