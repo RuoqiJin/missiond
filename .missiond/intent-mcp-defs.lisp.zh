@@ -690,16 +690,32 @@
 
     (tool mission_timeline
       :zh "工具: mission_timeline"
-      :description-zh "系统时间轴。query/trace/stats/search"
+      :description-zh "系统时间轴。query/trace/stats/search/wait; eventhub_status/query/append 访问跨服务 xjp-eventhub provider"
       (input
         (action)
         (eventType :description-zh "[query] 事件类型过滤")
-        (traceId :description-zh "[query/trace] 因果链 trace_id")
+        (traceId :description-zh "[query/trace/eventhub_append] 因果链 trace_id")
         (since :description-zh "起始时间(相对格式 1h/24h/7d 或 ISO)")
         (until :description-zh "结束时间")
         (limit :description-zh "[query/search] 返回条数")
         (offset :description-zh "[query] 分页偏移")
-        (keyword :description-zh "[search] 搜索关键字"))))
+        (keyword :description-zh "[search] 搜索关键字")
+        (domain :description-zh "[wait] EventBus domain: board/slot/task/system")
+        (kind :description-zh "[wait/eventhub] event kind")
+        (taskId :description-zh "[wait] Board/Task/Slot task id predicate")
+        (slotId :description-zh "[wait] Slot/System slot id predicate")
+        (status :description-zh "[wait] target board status or slot state")
+        (serviceId :description-zh "[wait/eventhub] service id")
+        (eventId :description-zh "[wait/eventhub_append] event id")
+        (eventKind :description-zh "[wait/eventhub] external event kind")
+        (projectId :description-zh "[wait/eventhub] project id")
+        (correlationId :description-zh "[wait/eventhub] correlation id")
+        (timeoutMs :description-zh "[wait] bounded EventBus wait timeout")
+        (source :description-zh "[eventhub_append] event source")
+        (subject :description-zh "[eventhub_append] subject")
+        (authority :description-zh "[eventhub_append] authority")
+        (privacyClass :description-zh "[eventhub_append] privacy class")
+        (payload :description-zh "[eventhub_append] event payload"))))
 
   (mcp-module audit
     :zh "MCP 模块: audit"

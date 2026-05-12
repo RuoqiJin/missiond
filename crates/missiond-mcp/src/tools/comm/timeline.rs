@@ -9,14 +9,14 @@ pub fn definitions() -> Vec<ToolDefinition> {
         // ===== mission_timeline =====
         ToolDefinition::new(
             "mission_timeline",
-            "系统时间轴。query/trace/stats/search/wait；wait 使用 EventBus 一等等待，轮询只作为 fallback",
+            "系统时间轴。query/trace/stats/search/wait；eventhub_status/query/append 访问跨服务 xjp-eventhub provider；wait 使用 EventBus 一等等待，轮询只作为 fallback",
             json!({
                 "type": "object",
                 "required": ["action"],
                 "properties": {
-                    "action": {"type": "string", "enum": ["query", "trace", "stats", "search", "wait"]},
+                    "action": {"type": "string", "enum": ["query", "trace", "stats", "search", "wait", "eventhub_status", "eventhub_query", "eventhub_append"]},
                     "eventType": {"type": "string", "description": "[query] 事件类型过滤"},
-                    "traceId": {"type": "string", "description": "[query/trace] 因果链 trace_id"},
+                    "traceId": {"type": "string", "description": "[query/trace/eventhub_append] 因果链 trace_id"},
                     "since": {"type": "string", "description": "起始时间(相对格式 1h/24h/7d 或 ISO)"},
                     "until": {"type": "string", "description": "结束时间"},
                     "limit": {"type": "integer", "description": "[query/search] 返回条数", "default": 50},
@@ -28,11 +28,16 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "slotId": {"type": "string", "description": "[wait] Slot/System slot id predicate"},
                     "status": {"type": "string", "description": "[wait] target board status or slot state"},
                     "serviceId": {"type": "string", "description": "[wait system external_service_event] service id"},
-                    "eventId": {"type": "string", "description": "[wait system external_service_event] external event id"},
-                    "eventKind": {"type": "string", "description": "[wait system external_service_event] external event kind"},
-                    "projectId": {"type": "string", "description": "[wait system external_service_event] event envelope project id"},
-                    "correlationId": {"type": "string", "description": "[wait system external_service_event] event envelope correlation id"},
-                    "timeoutMs": {"type": "integer", "description": "[wait] bounded EventBus wait timeout, default 30000, max 300000"}
+                    "eventId": {"type": "string", "description": "[wait/eventhub_append] external event id"},
+                    "eventKind": {"type": "string", "description": "[wait/eventhub] external event kind"},
+                    "projectId": {"type": "string", "description": "[wait/eventhub] event envelope project id"},
+                    "correlationId": {"type": "string", "description": "[wait/eventhub] event envelope correlation id"},
+                    "timeoutMs": {"type": "integer", "description": "[wait] bounded EventBus wait timeout, default 30000, max 300000"},
+                    "source": {"type": "string", "description": "[eventhub_append] event source"},
+                    "subject": {"type": "string", "description": "[eventhub_append] event subject"},
+                    "authority": {"type": "string", "description": "[eventhub_append] event authority"},
+                    "privacyClass": {"type": "string", "description": "[eventhub_append] privacy class"},
+                    "payload": {"type": "object", "description": "[eventhub_append] event payload"}
                 }
             }),
         ),

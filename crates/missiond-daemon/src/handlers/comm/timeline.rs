@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use missiond_core::event::events::{BoardEvent, SlotEvent, SystemEvent, TaskEvent};
 use missiond_core::event::DomainEvent;
-use missiond_mcp::tools::ToolResult;
+use missiond_mcp::tools::{ToolError, ToolResult};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -10,6 +10,10 @@ use tokio::sync::broadcast;
 use crate::context::v3_blueprint_runtime::ConversationIngestionRuntimeConfig;
 use crate::lenient;
 use crate::state::AppState;
+
+const EVENTHUB_PROVIDER_URL_ENV: &str = "MISSIOND_EVENTHUB_URL";
+const EVENTHUB_PROVIDER_TOKEN_ENV: &str = "MISSIOND_EVENTHUB_TOKEN";
+const EVENTHUB_PROVIDER_MODE_ENV: &str = "MISSIOND_EVENTHUB_MODE";
 
 fn load_conversation_config() -> Result<ConversationIngestionRuntimeConfig> {
     ConversationIngestionRuntimeConfig::load_for_current_dir()
@@ -29,6 +33,15 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             "stats" => handle_inner(state, "mission_timeline_stats", args).await,
             "search" => handle_inner(state, "mission_timeline_search", args).await,
             "wait" => handle_inner(state, "mission_timeline_wait", args).await,
+            "eventhub_status" | "eventhubStatus" => {
+                handle_inner(state, "mission_timeline_eventhub_status", args).await
+            }
+            "eventhub_query" | "eventhubQuery" => {
+                handle_inner(state, "mission_timeline_eventhub_query", args).await
+            }
+            "eventhub_append" | "eventhubAppend" => {
+                handle_inner(state, "mission_timeline_eventhub_append", args).await
+            }
             _ => Ok(ToolResult::error(format!("Unknown action: {}", action))),
         };
     }
@@ -280,7 +293,209 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             Ok(ToolResult::json(&wait_result))
         }
 
+        "mission_timeline_eventhub_status" => handle_eventhub_status(state).await,
+
+        "mission_timeline_eventhub_query" => handle_eventhub_query(state, args).await,
+
+        "mission_timeline_eventhub_append" => handle_eventhub_append(state, args).await,
+
         _ => Err(anyhow!("Unknown timeline tool: {name}")),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EventHubProviderSelection {
+    XjpEventHub {
+        base_url: String,
+        token: Option<String>,
+    },
+    LocalOnly,
+}
+
+impl EventHubProviderSelection {
+    fn from_env() -> Self {
+        if let Ok(url) = std::env::var(EVENTHUB_PROVIDER_URL_ENV) {
+            let base_url = url.trim().trim_end_matches('/').to_string();
+            if !base_url.is_empty() {
+                let token = std::env::var(EVENTHUB_PROVIDER_TOKEN_ENV)
+                    .ok()
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty());
+                return Self::XjpEventHub { base_url, token };
+            }
+        }
+
+        let _mode = std::env::var(EVENTHUB_PROVIDER_MODE_ENV).unwrap_or_default();
+        Self::LocalOnly
+    }
+
+    fn status_payload(&self) -> Value {
+        match self {
+            Self::XjpEventHub { base_url, token } => json!({
+                "provider": "xjp-eventhub",
+                "configured": true,
+                "baseUrl": base_url,
+                "auth": if token.is_some() { "bearer-token-configured" } else { "none" },
+                "mode": "remote-provider",
+            }),
+            Self::LocalOnly => json!({
+                "provider": "local-eventbus",
+                "configured": false,
+                "mode": "offline-local-first",
+                "requiredEnv": [EVENTHUB_PROVIDER_URL_ENV],
+                "optionalEnv": [EVENTHUB_PROVIDER_TOKEN_ENV, EVENTHUB_PROVIDER_MODE_ENV],
+                "diagnostic": "MissionD local EventBus remains active; xjp-eventhub cross-service relay/query is disabled until provider URL is configured.",
+            }),
+        }
+    }
+}
+
+fn get_string_any<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(|v| v.as_str()))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+fn get_i64_any(value: &Value, keys: &[&str]) -> Option<i64> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(|v| v.as_i64()))
+}
+
+fn eventhub_query_payload(args: &Value) -> Value {
+    json!({
+        "project_id": get_string_any(args, &["project_id", "projectId", "project"]),
+        "service_id": get_string_any(args, &["service_id", "serviceId"]),
+        "event_kind": get_string_any(args, &["event_kind", "eventKind", "kind"]),
+        "correlation_id": get_string_any(args, &["correlation_id", "correlationId"]),
+        "limit": get_i64_any(args, &["limit"]).unwrap_or(50).clamp(1, 500) as usize,
+    })
+}
+
+fn eventhub_append_payload(args: &Value) -> Result<Value> {
+    let event_kind = get_string_any(args, &["event_kind", "eventKind", "kind"])
+        .ok_or_else(|| anyhow!("mission_timeline eventhub_append requires eventKind"))?;
+    let payload = args.get("payload").cloned().unwrap_or_else(|| json!({}));
+    Ok(json!({
+        "event_id": get_string_any(args, &["event_id", "eventId"]),
+        "source": get_string_any(args, &["source"]).unwrap_or("missiond"),
+        "project_id": get_string_any(args, &["project_id", "projectId", "project"]),
+        "service_id": get_string_any(args, &["service_id", "serviceId"]),
+        "event_kind": event_kind,
+        "subject": get_string_any(args, &["subject"]),
+        "correlation_id": get_string_any(args, &["correlation_id", "correlationId"]),
+        "trace_id": get_string_any(args, &["trace_id", "traceId"]),
+        "authority": get_string_any(args, &["authority"]).unwrap_or("missiond-local-eventbus"),
+        "privacy_class": get_string_any(args, &["privacy_class", "privacyClass"]).unwrap_or("internal"),
+        "payload": payload,
+    }))
+}
+
+async fn call_eventhub(
+    state: &AppState,
+    base_url: &str,
+    token: Option<&str>,
+    method: reqwest::Method,
+    path: &str,
+    payload: Option<Value>,
+) -> Result<ToolResult> {
+    let url = format!("{base_url}{path}");
+    let mut request = state.http_client.request(method, &url);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    if let Some(payload) = payload {
+        request = request.json(&payload);
+    }
+    let response = request.send().await?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    let parsed = serde_json::from_str::<Value>(&body).unwrap_or_else(|_| json!({ "raw": body }));
+    if !status.is_success() {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(
+                "EVENTHUB_PROVIDER_HTTP_ERROR",
+                format!("xjp-eventhub returned HTTP {status} for {path}"),
+            )
+            .with_suggestion(format!(
+                "Check {EVENTHUB_PROVIDER_URL_ENV}, provider health, and token configuration."
+            )),
+        ));
+    }
+    Ok(ToolResult::json_pretty(&json!({
+        "provider": "xjp-eventhub",
+        "path": path,
+        "response": parsed,
+    })))
+}
+
+async fn handle_eventhub_status(state: &AppState) -> Result<ToolResult> {
+    match EventHubProviderSelection::from_env() {
+        EventHubProviderSelection::XjpEventHub { base_url, token } => {
+            call_eventhub(
+                state,
+                &base_url,
+                token.as_deref(),
+                reqwest::Method::GET,
+                "/v1/eventhub/status",
+                None,
+            )
+            .await
+        }
+        local => Ok(ToolResult::json_pretty(&local.status_payload())),
+    }
+}
+
+async fn handle_eventhub_query(state: &AppState, args: Value) -> Result<ToolResult> {
+    match EventHubProviderSelection::from_env() {
+        EventHubProviderSelection::XjpEventHub { base_url, token } => {
+            call_eventhub(
+                state,
+                &base_url,
+                token.as_deref(),
+                reqwest::Method::POST,
+                "/v1/eventhub/query",
+                Some(eventhub_query_payload(&args)),
+            )
+            .await
+        }
+        local => Ok(ToolResult::structured_error(
+            ToolError::new(
+                "EVENTHUB_PROVIDER_DISABLED",
+                "xjp-eventhub query is disabled because MISSIOND_EVENTHUB_URL is not configured.",
+            )
+            .with_suggestion(format!(
+                "Set {EVENTHUB_PROVIDER_URL_ENV} to the xjp-eventhub base URL, or use mission_timeline query/wait for local MissionD events. Current status: {}",
+                local.status_payload()
+            )),
+        )),
+    }
+}
+
+async fn handle_eventhub_append(state: &AppState, args: Value) -> Result<ToolResult> {
+    let payload = eventhub_append_payload(&args)?;
+    match EventHubProviderSelection::from_env() {
+        EventHubProviderSelection::XjpEventHub { base_url, token } => {
+            call_eventhub(
+                state,
+                &base_url,
+                token.as_deref(),
+                reqwest::Method::POST,
+                "/v1/eventhub/events",
+                Some(payload),
+            )
+            .await
+        }
+        local => Ok(ToolResult::structured_error(
+            ToolError::new(
+                "EVENTHUB_PROVIDER_DISABLED",
+                "xjp-eventhub append is disabled because MISSIOND_EVENTHUB_URL is not configured.",
+            )
+            .with_suggestion(format!(
+                "Set {EVENTHUB_PROVIDER_URL_ENV} for cross-service durable relay. MissionD local EventBus remains online. Current status: {}",
+                local.status_payload()
+            )),
+        )),
     }
 }
 

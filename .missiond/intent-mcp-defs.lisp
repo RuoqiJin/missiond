@@ -723,16 +723,32 @@
   :target "crates/missiond-mcp/src/tools/comm/timeline.rs"
 
   (tool mission_timeline
-    :description "系统时间轴。query/trace/stats/search"
+    :description "系统时间轴。query/trace/stats/search/wait; eventhub_status/query/append 访问跨服务 xjp-eventhub provider"
     (input
-      (action   string :required :enum (query trace stats search))
+      (action   string :required :enum (query trace stats search wait eventhub_status eventhub_query eventhub_append))
       (eventType string :description "[query] 事件类型过滤")
-      (traceId  string :description "[query/trace] 因果链 trace_id")
+      (traceId  string :description "[query/trace/eventhub_append] 因果链 trace_id")
       (since    string :description "起始时间(相对格式 1h/24h/7d 或 ISO)")
       (until    string :description "结束时间")
       (limit    integer :default 50 :description "[query/search] 返回条数")
       (offset   integer :default 0 :description "[query] 分页偏移")
-      (keyword  string :description "[search] 搜索关键字"))
+      (keyword  string :description "[search] 搜索关键字")
+      (domain   string :description "[wait] EventBus domain: board/slot/task/system")
+      (kind     string :description "[wait/eventhub] event kind")
+      (taskId   string :description "[wait] Board/Task/Slot task id predicate")
+      (slotId   string :description "[wait] Slot/System slot id predicate")
+      (status   string :description "[wait] target board status or slot state")
+      (serviceId string :description "[wait/eventhub] service id")
+      (eventId  string :description "[wait/eventhub_append] event id")
+      (eventKind string :description "[wait/eventhub] external event kind")
+      (projectId string :description "[wait/eventhub] project id")
+      (correlationId string :description "[wait/eventhub] correlation id")
+      (timeoutMs integer :description "[wait] bounded EventBus wait timeout")
+      (source   string :description "[eventhub_append] event source")
+      (subject  string :description "[eventhub_append] subject")
+      (authority string :description "[eventhub_append] authority")
+      (privacyClass string :description "[eventhub_append] privacy class")
+      (payload  object :description "[eventhub_append] event payload"))
     :returns "Value"
     :dispatch-on action))
 

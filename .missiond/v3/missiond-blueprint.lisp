@@ -1386,6 +1386,7 @@
         :rule "Local orchestration must continue when xjp-eventhub is unavailable; local events are spooled for later outbound relay when configured.")
        (owner xjp-eventhub
         :owns [durable-event-envelope stream-cursors subscriptions wait-predicates dead-letter-replay cross-service-events]
+        :runtime-env [MISSIOND_EVENTHUB_URL MISSIOND_EVENTHUB_TOKEN]
         :rule "xjp-eventhub is the cloud/service event backbone for deploy-center, auth, router, timeline, and selected MissionD local events.")
        (owner deploy-center
         :owns [deployment-provenance deploy-agent-events rollout-events]
@@ -1417,7 +1418,7 @@
                 (step s3 :logic "use xjp-eventhub for cross-service predicates when configured")
                 (step s4 :logic "fall back to bounded local event_log polling with visible diagnostic only when eventhub is unavailable"))
          :egress [wait-result timeout-diagnostic]))
-    :runtime-projection [xjp-eventhub service-runtime-universe eventbridge local-event-spool mission_timeline.wait]
+    :runtime-projection [xjp-eventhub service-runtime-universe eventbridge local-event-spool mission_timeline.wait mission_timeline.eventhub_status mission_timeline.eventhub_query mission_timeline.eventhub_append]
     :checker "node scripts/check-v3-service-extraction-isomorphism.mjs")
 
   (deployment-event-ingest
