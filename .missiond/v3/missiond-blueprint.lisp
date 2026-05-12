@@ -931,7 +931,7 @@
   (control-plane-m6-split
     :schema "missiond.control-plane-m6-split.v1"
     :purpose "Keep MissionD's fast-growing orchestration/control plane readable by splitting overloaded policy blocks into stable subplanes while preserving existing runtime projections."
-    :domains [workstation-control-plane master-control-plane eventbridge-deployment-plane project-universe-plane knowledge-skill-plane execution-control-plane]
+    :domains [workstation-control-plane master-control-plane eventbridge-deployment-plane eventhub-extraction-plane project-universe-plane memory-access-plane knowledge-skill-plane execution-control-plane]
     (domain workstation-control-plane
       :owner workstation-config
       :source [workstation-config workstation-pool agent-interaction-policy]
@@ -953,6 +953,13 @@
       :runtime-projection [ExternalServiceEvent mission_timeline.wait deploy-center-event-webhook deployment-event-response]
       :checker ["node scripts/check-v3-eventbridge-isomorphism.mjs" "node scripts/check-v3-project-registry-isomorphism.mjs" "node scripts/check-v3-control-plane-m6-split.mjs"]
       :refactor-rule "Deployment closure uses deploy-center provenance plus smoke; CI/GitHub/curl are diagnostics unless deploy-center lacks data.")
+    (domain eventhub-extraction-plane
+      :owner eventhub-service-contract
+      :source [eventhub-service-contract eventbridge-policy deployment-event-ingest router-usage-event-ingest]
+      :functions [eventhub-service-boundary eventhub-envelope-contract local-event-spool outbound-event-relay eventhub-subscription-contract eventhub-wait-contract eventhub-dead-letter-replay eventhub-missiond-adapter]
+      :runtime-projection [xjp-eventhub local-event-spool EventHubClient mission_timeline.wait ExternalServiceEvent]
+      :checker ["node scripts/check-v3-service-extraction-isomorphism.mjs" "node scripts/check-v3-eventbridge-isomorphism.mjs" "node scripts/check-v3-control-plane-m6-split.mjs"]
+      :refactor-rule "MissionD local EventBus remains the low-latency agent/Board/slot/workflow control bus. xjp-eventhub is the durable cross-service event backbone; MissionD syncs selected local events through an outbound spool and can continue local orchestration when xjp-eventhub is offline.")
     (domain project-universe-plane
       :owner project-registry
       :source [project-registry-policy project-identity-contract registry-authority-map project-maturity-model project-maturity-registry project-blueprint-registry service-runtime-universe]
@@ -960,13 +967,21 @@
       :runtime-projection [mission_project.universe compiled-project-universe project_registry_reconcile Board-System-Universe]
       :checker ["node scripts/check-project-ssot-universe.mjs" "node scripts/check-project-maturity.mjs --min-level M5" "node scripts/check-v3-control-plane-m6-split.mjs"]
       :refactor-rule "MissionD owns identity/SSOT/maturity; deploy-center owns runtime release facts; Forge owns component/pattern catalog. New project metadata must declare which authority owns it.")
+    (domain memory-access-plane
+      :owner memory-provider-contract
+      :source [memory-provider-contract memory-kb-policy conversation-memory-distillation ssot-retrieval-scope]
+      :functions [memory-provider-registry memory-scope-resolution memory-query-contract memory-write-contract memory-review-overlay-contract memory-export-contract memory-redaction-policy memory-context-injection-policy]
+      :runtime-projection [mission_memory mission_kb_query mission_kb_remember MemoryProviderConfig context-pack-builder]
+      :checker ["node scripts/check-v3-service-extraction-isomorphism.mjs" "node scripts/check-v3-memory-kb-isomorphism.mjs" "node scripts/check-v3-control-plane-m6-split.mjs"]
+      :refactor-rule "MissionD Core does not own long-term memory data. It owns provider registry, scope resolution, context injection policy, and compatibility facades; provider implementations own conversation stores, active memory, review overlay, skill evidence index, FTS, embedding, rerank, export, purge, and tenant/universe/project/user isolation.")
+
 		    (domain knowledge-skill-plane
 		      :owner memory-kb
-		      :source [memory-kb-policy learning-engine-policy conversation-memory-distillation skill-runtime skill-operational-fact-authority ssot-retrieval-scope]
-		      :functions [skill-registry skill-search skill-project-links skill-operational-facts skill-to-workflow-promotion memory-quarantine memory-distillation memory-search-v2]
+		      :source [memory-provider-contract memory-kb-policy learning-engine-policy conversation-memory-distillation skill-runtime skill-operational-fact-authority ssot-retrieval-scope]
+		      :functions [skill-registry skill-search skill-project-links skill-operational-facts skill-to-workflow-promotion memory-quarantine memory-distillation memory-search-v2 provider-backed-skill-evidence]
 		      :runtime-projection [mission_skill mission_skill_context.operational_facts mission_kb_query mission_kb_remember conversation-memory-distillation]
 		      :checker ["node scripts/check-v3-memory-kb-isomorphism.mjs" "node scripts/check-v3-skill-runtime-isomorphism.mjs" "node scripts/check-v3-control-plane-m6-split.mjs"]
-		      :refactor-rule "KB remains opt-in until memory is cleaned; operational skill facts are not noisy KB and must be explicitly retrievable for remote-host, deploy-agent, router embedding/rerank, CI runner, and model-host questions. Project constants should still move to SSOT/Universe rather than worker prompt preloads; broad SSOT review must exclude cold runtime artifacts unless include_runtime=true is explicit.")
+		      :refactor-rule "KB remains opt-in until memory is cleaned; operational skill facts are not noisy KB and must be explicitly retrievable through the configured MemoryProvider for remote-host, deploy-agent, router embedding/rerank, CI runner, and model-host questions. Project constants should still move to SSOT/Universe rather than worker prompt preloads; broad SSOT review must exclude cold runtime artifacts unless include_runtime=true is explicit.")
     (domain execution-control-plane
       :owner workflow-runner
       :source [autopilot-runtime workstation-config conversation-memory-distillation semantic-ir-shared-memory-convergence evidence-governance-policy]
@@ -1361,6 +1376,50 @@
        "mission_timeline(action=wait, domain=system) MUST support serviceId, eventKind, projectId, and correlationId predicates for deployment events."
        "ExternalServiceEvent append MUST use deterministic dedupe by service_id + event_id."])
 
+  (eventhub-service-contract
+    :schema "missiond.eventhub-service-contract.v1"
+    :service-id xjp-eventhub
+    :purpose "Extract cross-service durable event storage, waits, subscriptions, cursors, and replay into an XJP backend service while preserving MissionD's local low-latency EventBus for agent/Board/slot/workflow control."
+    :ownership
+      ((owner missiond-local-eventbus
+        :owns [agent-events board-events slot-events workflow-events pty-diagnostics local-wakeups]
+        :rule "Local orchestration must continue when xjp-eventhub is unavailable; local events are spooled for later outbound relay when configured.")
+       (owner xjp-eventhub
+        :owns [durable-event-envelope stream-cursors subscriptions wait-predicates dead-letter-replay cross-service-events]
+        :rule "xjp-eventhub is the cloud/service event backbone for deploy-center, auth, router, timeline, and selected MissionD local events.")
+       (owner deploy-center
+        :owns [deployment-provenance deploy-agent-events rollout-events]
+        :rule "deploy-center remains deployment fact authority; eventhub stores and distributes its emitted facts but does not infer release state."))
+    :event-envelope
+      (schema missiond.event-envelope.v1
+        :fields [event_id source project_id service_id event_kind subject correlation_id trace_id occurred_at observed_at authority schema_version payload privacy_class]
+        :idempotency [source event_id]
+        :privacy-classes [public internal private secret-redacted])
+    :functions
+      ((function eventhub-service-boundary
+         :entry [MissionD-local-EventBus deploy-center-events auth-events router-events timeline-events]
+         :core ((step s1 :logic "classify event as local-control, cross-service, or diagnostic")
+                (step s2 :logic "store local-control events in MissionD local bus first")
+                (step s3 :logic "spool selected events to xjp-eventhub with source/event_id idempotency")
+                (step s4 :logic "preserve MissionD offline operation when xjp-eventhub is unavailable"))
+         :egress [local-event-bus outbound-spool xjp-eventhub-event])
+       (function local-event-spool
+         :entry [EventBus-publish outbound-relay-tick]
+         :core ((step s1 :logic "persist selected local events with cursor and retry metadata")
+                (step s2 :logic "redact payload fields by privacy_class before relay")
+                (step s3 :logic "relay to xjp-eventhub when endpoint and token are configured")
+                (step s4 :logic "mark delivered, retryable, or dead-letter without blocking local MissionD workflows"))
+         :egress [spool-row relay-diagnostic])
+       (function eventhub-wait-contract
+         :entry [mission_timeline.wait eventhub.wait]
+         :core ((step s1 :logic "resolve predicate over project_id/service_id/event_kind/correlation_id/trace_id")
+                (step s2 :logic "prefer local EventBus for local-control predicates")
+                (step s3 :logic "use xjp-eventhub for cross-service predicates when configured")
+                (step s4 :logic "fall back to bounded local event_log polling with visible diagnostic only when eventhub is unavailable"))
+         :egress [wait-result timeout-diagnostic]))
+    :runtime-projection [xjp-eventhub service-runtime-universe eventbridge local-event-spool mission_timeline.wait]
+    :checker "node scripts/check-v3-service-extraction-isomorphism.mjs")
+
   (deployment-event-ingest
     :schema "missiond.deployment-event-ingest.v1"
     :entry [/webhooks/deploy-center-event mission_timeline.wait deployment-event-response.workflow]
@@ -1581,13 +1640,15 @@
     (maturity :id missiond :current M6 :target M6 :gap [])
     (maturity :id board :current M5 :target M6 :gap [frontend-domain-model cockpit-hot-path-regressions final-m6-report])
     (maturity :id jarvis :current M5 :target M6 :gap [domain-shard-split missiond-integration-boundary final-m6-report])
-    (maturity :id jarvis-forge :current M5 :target M6 :gap [forge-missiond-boundary component-reuse-ledger final-m6-report])
+    (maturity :id jarvis-forge :current M6 :target M6 :gap [])
     (maturity :id jarvis-mechanic :current M5 :target M6 :gap [mechanic-workflow-boundary missiond-overlap-ledger final-m6-report])
     (maturity :id xjpcode :current M5 :target M6 :gap [domain-shard-split codegen-policy-ledger final-m6-report])
     (maturity :id neural-codegen :current M5 :target M6 :gap [domain-shard-split generation-policy-hot-path final-m6-report])
     (maturity :id semantic-terminal :current M5 :target M6 :gap [domain-shard-split terminal-event-contract final-m6-report])
     (maturity :id xiaojinpro-backend :current M5 :target M6 :gap [monorepo-service-boundary deploy-fact-authority final-m6-report])
     (maturity :id deploy-center :current M6 :target M6 :gap [])
+    (maturity :id xjp-memory :current M5 :target M6 :gap [durable-storage-provider provider-api-regressions deployment-workflow final-m6-report])
+    (maturity :id xjp-eventhub :current M5 :target M6 :gap [durable-event-stream subscriptions-cursors-dead-letter deployment-workflow final-m6-report])
     (maturity :id xjp-mcp :current M5 :target M6 :gap [tool-policy-ledger mcp-permission-regressions final-m6-report])
     (maturity :id xjp-cli :current M5 :target M6 :gap [command-policy-ledger mcp-parity-regressions final-m6-report])
     (maturity :id deploy-agent :current M6 :target M6 :gap [])
@@ -1599,7 +1660,8 @@
     (maturity :id pcea :current M6 :target M6 :gap [])
     (maturity :id secret-store :current M5 :target M6 :gap [secret-version-rotation-domain capability-regressions final-m6-report])
     (maturity :id xiaojin-blog :current M5 :target M6 :gap [content-publishing-domain deploy-auth-boundary final-m6-report])
-    (maturity :id cuthub :current M5 :target M6 :gap [community-domain auth-product-dependency final-m6-report]))
+    (maturity :id cuthub :current M5 :target M6 :gap [community-domain auth-product-dependency final-m6-report])
+    (maturity :id legacy-refactor-service :current M5 :target M6 :gap [deep-code-rewrite-worker customer-frontend forge-runtime-provider production-deploy-provenance final-m6-report]))
 
   (project-blueprint-registry
     :schema "missiond.project-blueprint-registry.v1"
@@ -1732,6 +1794,24 @@
       :backend ".missiond/backend/router-backend-blueprint.lisp"
       :status v3-runtime-ssot
       :surface project-registry)
+    (project :id xjp-memory
+      :kind rust-service
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/xjp-memory"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/xjp-memory-backend-blueprint.lisp"
+      :status contract-first-service
+      :checks ["bash .missiond/check.sh"]
+      :missiond-role "registered memory provider service; owns private memory, review overlay, skill evidence, FTS/embedding/rerank storage behind MissionD memory-provider-contract"
+      :surface project-registry)
+    (project :id xjp-eventhub
+      :kind rust-service
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/xjp-eventhub"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/xjp-eventhub-backend-blueprint.lisp"
+      :status contract-first-service
+      :checks ["bash .missiond/check.sh"]
+      :missiond-role "registered EventHub service; owns cross-service durable event envelopes while MissionD local EventBus remains offline-safe"
+      :surface project-registry)
     (project :id payments
       :kind rust-workspace-service
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/payments"
@@ -1789,6 +1869,16 @@
       :note "Supervisor decision 39a2e6e8 — Downloads checkout accepted as temporary canonical M6 SSOT root until repo is cloned to /Users/jinchen/Projects/cuthub-frontend"
       :checks ["bash .missiond/check.sh"]
       :missiond-role "registered app; cuthub.ai frontend (Next.js 16 + React 19 + Tailwind 4 + Konva); independent repo rickyjim626/cuthub-frontend"
+      :surface project-registry)
+    (project :id legacy-refactor-service
+      :kind node-service
+      :root "/Users/jinchen/Projects/legacy-refactor-service"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/legacy-refactor-backend-blueprint.lisp"
+      :operations ".missiond/deploy/legacy-refactor-deploy-blueprint.lisp"
+      :status external-product-service
+      :checks ["node scripts/check-legacy-refactor-ssot.mjs --json"]
+      :missiond-role "registered external product service; MissionD may orchestrate and observe jobs, while the service owns customer-safe refactor runtime and never exposes internal Lisp/IR/Forge artifacts to customers"
       :surface project-registry))
 
   (mechanic-collaboration-boundary
@@ -1849,6 +1939,40 @@
       :events [deploy_created build_started build_succeeded build_failed deploy_started deploy_succeeded deploy_failed smoke_succeeded smoke_failed rollback_started rollback_succeeded rollback_failed agent_heartbeat agent_update_started agent_update_succeeded agent_update_failed provenance_changed]
       :ops-capability deploy-ops
       :surface service-runtime-universe)
+    (service :id xjp-memory
+      :project xjp-memory
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/xjp-memory"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/xjp-memory-backend-blueprint.lisp"
+      :environment planned
+      :deployment (:substrate deploy-center :dc_slug "xjp-memory" :container_name "xjp-memory" :default-port 8091 :authority release-provenance)
+      :health ["/health" "/health/live" "/health/ready" "/v1/memory/provider_status"]
+      :dependencies [xjp-router secret-store postgres?]
+      :ops-capability memory-provider
+      :surface service-runtime-universe)
+    (service :id xjp-eventhub
+      :project xjp-eventhub
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/xjp-eventhub"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/xjp-eventhub-backend-blueprint.lisp"
+      :environment planned
+      :deployment (:substrate deploy-center :dc_slug "xjp-eventhub" :container_name "xjp-eventhub" :default-port 8092 :authority release-provenance)
+      :health ["/health" "/health/live" "/health/ready" "/v1/eventhub/status"]
+      :dependencies [deploy-center timeline? postgres?]
+      :ops-capability eventhub
+      :surface service-runtime-universe)
+    (service :id legacy-refactor-service
+      :project legacy-refactor-service
+      :root "/Users/jinchen/Projects/legacy-refactor-service"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/legacy-refactor-backend-blueprint.lisp"
+      :environment local-dev
+      :public-base-url "http://127.0.0.1:8788"
+      :deployment (:substrate local-node :entrypoint "node src/server.mjs" :port-env LEGACY_REFACTOR_PORT :default-port 8788)
+      :health ["/health"]
+      :dependencies [forge-catalog? missiond-eventbridge?]
+      :ops-capability project-refactor
+      :surface service-runtime-universe)
     (capability :id cloudflare-dns
       :provider cloudflare
       :default-mode read-only-inventory
@@ -1893,6 +2017,78 @@
        "Public tools MAY remain numerous, but every high-frequency tool must map to a primary family and preferred surface."
        "Deprecated/raw tools MUST return a preferredFamily/preferredSurface hint instead of relying on operator memory."
        "MCP tool-family governance must be read-only; it guides selection and must not mutate Board, KB, projects, or runtime state."])
+
+  (memory-provider-contract
+    :schema "missiond.memory-provider.v1"
+    :purpose "Make memory pluggable so MissionD Core can be open-sourced, multi-tenant, and multi-universe without carrying private conversation, KB, skill-evidence, embedding, or review-overlay data."
+    :core-boundary "MissionD Core owns provider registry, scope resolution, query/write facades, context injection policy, and MCP compatibility; providers own memory data and retrieval internals."
+    :scope-fields [tenant_id universe_id project_id user_id source_type source_id authority privacy_class review_state]
+    :default-provider null-memory
+    :providers
+      ((provider null-memory
+         :kind disabled
+         :use-case open-source-default
+         :capabilities []
+         :rule "Open-source/default MissionD can run without private memory data; queries return explicit MEMORY_PROVIDER_DISABLED diagnostics.")
+       (provider local-postgres-memory
+         :kind local-postgres
+         :use-case single-user-dev-compatible
+         :capabilities [query remember review-overlay conversation-ingest skill-evidence export purge]
+         :data-owner "local MissionD database compatibility tables"
+         :rule "Current MissionD KB/conversation tables are a compatibility provider implementation, not the permanent MissionD Core memory model.")
+       (provider xjp-memory
+         :kind remote-service
+         :use-case private-multi-universe
+         :capabilities [query remember review-overlay conversation-ingest skill-evidence fts embedding rerank context-pack export purge]
+         :embedding-provider xjp-router
+         :rerank-provider xjp-router
+         :rule "Private deployments use xjp-memory for tenant/universe/project/user scoped memory, conversation history, skill evidence, embedding, rerank, and review overlay. Secrets and provider tokens stay in secret-store/env, never in Lisp."))
+    :functions
+      ((function memory-provider-registry
+         :entry [V3-compiled-runtime env-config mission_memory.provider_status]
+         :core ((step s1 :logic "load provider declarations and active provider selection")
+                (step s2 :logic "validate provider capabilities against requested operation")
+                (step s3 :logic "return provider health and explicit disabled/misconfigured diagnostics"))
+         :egress [MemoryProviderConfig provider-status])
+       (function memory-scope-resolution
+         :entry [BoardTask project-registry user-request active-universe]
+         :core ((step s1 :logic "resolve tenant/universe/project/user scope before every memory query or write")
+                (step s2 :logic "reject unscoped global memory reads unless workflow explicitly asks for cross-universe audit")
+                (step s3 :logic "attach scope fields to provider requests and task-result artifacts"))
+         :egress [memory-scope provider-namespace])
+       (function memory-query-contract
+         :entry [mission_memory.query mission_kb_query context-pack-builder]
+         :core ((step s1 :logic "apply memory-scope-resolution")
+                (step s2 :logic "apply review overlay and default active-only retrieval")
+                (step s3 :logic "call provider query with explicit capability and privacy class")
+                (step s4 :logic "return lane-labeled evidence without injecting broad KB into prompts by default"))
+         :egress [memory-query-result context-evidence-lane])
+       (function memory-write-contract
+         :entry [mission_memory.remember mission_kb_remember intent-memory-capture memory-review-batch-runner]
+         :core ((step s1 :logic "require explicit scope and write reason")
+                (step s2 :logic "route high-confidence stable intent to provider remember")
+                (step s3 :logic "route uncertain or conflicting items to review overlay/candidate artifacts")
+                (step s4 :logic "preserve source_refs and supersession metadata"))
+         :egress [memory-record review-candidate])
+       (function memory-review-overlay-contract
+         :entry [mission_memory.review mission_kb_review memory-review-batch-runner]
+         :core ((step s1 :logic "write non-destructive review overlay")
+                (step s2 :logic "exclude superseded/historical/duplicate/stale/delete-candidate/needs-human from default retrieval")
+                (step s3 :logic "keep original evidence available with include_archived=true or state_filter"))
+         :egress [review-overlay-state])
+       (function memory-context-injection-policy
+         :entry [resident-master context-pack-builder worker-brief]
+         :core ((step s1 :logic "default to no KB prefetch")
+                (step s2 :logic "inject memory only when workflow declares memory scope and evidence purpose")
+                (step s3 :logic "include provider/source/scope labels so agents can distinguish long-term memory from SSOT and runtime evidence"))
+         :egress [context-pack-memory-lane]))
+    :invariants
+      ["MissionD Core MUST NOT require private memory data to boot, run Board/workstation workflows, or pass open-source checks."
+       "Every memory query/write MUST resolve tenant/universe/project/user scope before calling a provider."
+       "mission_kb_query and mission_kb_remember are compatibility leaves; preferred agents use mission_memory query/remember/review/provider_status."
+       "Provider implementations own FTS, embedding, rerank, conversation archive, skill evidence index, active memory, archive state, export, and purge."
+       "Default context-pack generation MUST NOT preload KB/history/provider logs; memory is opt-in by workflow and scope."]
+    :checker "node scripts/check-v3-service-extraction-isomorphism.mjs")
 
   (memory-kb-policy
     :desc "Lisp-owned memory extraction budget for the memory-kb surface."
@@ -2233,6 +2429,20 @@
       :v3-function eventbridge
       :surface eventbridge
       :note "V2 event bus intent becomes the V3 EventBridge: local Board/slot/agent events and deploy-center/auth/timeline cloud events share missiond.event-envelope.v1, SystemEvent::ExternalServiceEvent, token-checked webhooks, idempotent durable event_log append, and mission_timeline EventBus waits.")
+    (v2-item memory-provider-extraction
+      :status code-aligned
+      :v2-source ".missiond/v2/intent.lisp :: memory-kb / conversation-memory-distillation / ssot-retrieval-scope"
+      :v3-pillar memory
+      :v3-function memory-provider
+      :surface memory-provider-boundary
+      :note "V2 memory/KB intent (conversation archive, active memory, review overlay, skill evidence, FTS/embedding/rerank, retrieval scope) converges to the V3 memory-provider-contract: MissionD Core owns provider registry, scope resolution, query/write facades, and context-injection policy; null/local/xjp providers own data and retrieval internals. mission_kb_* tools remain compatibility leaves.")
+    (v2-item eventhub-service-extraction
+      :status code-aligned
+      :v2-source ".missiond/v2/intent-event-bus.lisp :: cross-service durable events / waits / subscriptions"
+      :v3-pillar communication
+      :v3-function eventhub-service
+      :surface eventhub-service-boundary
+      :note "V2 cross-service event intent converges to the V3 eventhub-service-contract: xjp-eventhub owns durable streams, cursors, subscriptions, waits, dead-letter, and replay; MissionD keeps a local low-latency EventBus authoritative for agent/Board/slot/workflow wakeups with an outbound spool for cross-service relay so local orchestration stays offline-safe.")
     (v2-item review-gate-policy
       :status code-aligned
       :v2-source ".missiond/v2/intent.lisp :: review-gate-policy / review-gate-resolution-v0"
@@ -2855,6 +3065,15 @@
         :egress [WorkstationDispatchOutcome task_brief_preview delegated_board_task_id]))
 
     (pillar memory
+      (function memory-provider
+        :surface memory-provider-boundary
+        :entry [mission_memory mission_kb_query mission_kb_remember context-pack-builder provider-registry]
+        :core ((step s1 :logic "load memory-provider-contract and active provider selection")
+               (step s2 :logic "resolve tenant/universe/project/user scope before every memory operation")
+               (step s3 :logic "route query/write/review/export operations through provider capability checks")
+               (step s4 :logic "preserve local-postgres-memory as compatibility provider while allowing null-memory for open-source/default and xjp-memory for private multi-universe deployments")
+               (step s5 :logic "return explicit provider disabled/misconfigured diagnostics rather than silently falling back to stale private data"))
+        :egress [MemoryProviderConfig memory-provider-status scoped-memory-result])
       (function knowledge-memory
         :surface memory-kb
         :entry [mission_kb_query mission_kb_remember mission_kb_mutate mission_kb_review mission_kb_ops mission_beacon mission_code_search mission_memory mission_insight mission_intent]
@@ -2930,6 +3149,15 @@
                (step s4 :logic "allow bounded mission_timeline waits by service_id, event_kind, project_id, and correlation_id so deployment and worker orchestration can advance from durable events instead of PTY polling")
                (step s5 :logic "trigger deployment-event-response and project-registry-reconciliation workflows while keeping deploy-center as deployment fact authority and Forge as catalog authority"))
         :egress [ExternalServiceEvent event_log mission_timeline_wait deploy_ops_boardtask project_reconcile_report])
+      (function eventhub-service
+        :surface eventhub-service-boundary
+        :entry [EventBus-publish local-event-spool xjp-eventhub.wait xjp-eventhub.subscribe mission_timeline.wait]
+        :core ((step s1 :logic "keep MissionD local EventBus authoritative for local agent/Board/slot/workflow wakeups")
+               (step s2 :logic "classify selected local and external service events into missiond.event-envelope.v1")
+               (step s3 :logic "relay selected events to xjp-eventhub through local-event-spool with idempotency, privacy redaction, retry, and dead-letter state")
+               (step s4 :logic "consume xjp-eventhub waits/subscriptions for cross-service deploy/auth/router/timeline events")
+               (step s5 :logic "fallback to local event_log wait only with visible diagnostic when xjp-eventhub is unavailable"))
+        :egress [EventHubEvent local-event-spool-diagnostic mission_timeline_wait])
       (function router-policy
         :surface router-policy
         :entry [mission_router_chat mission_router_chat_manage router-policy-dry-run]
@@ -3738,6 +3966,26 @@
              "scripts/check-v3-eventbridge-isomorphism.mjs"]
       :note "MissionD local EventBridge accepts missiond.event-envelope.v1 cloud/service events, preserves project/correlation metadata under ExternalServiceEvent payload._envelope, dedupes by service/event id, and exposes EventBus waits for deployment workflows. deploy-center remains deployment fact authority; MissionD caches, displays, and triggers Board workflows only.")
 
+    (surface memory-provider-boundary
+      :status "code-aligned"
+      :implements [memory-provider-contract memory-provider]
+      :code [".missiond/research/missiond-memory-eventhub-modularization-20260512.md"
+             ".missiond/workflows/missiond-module-extraction.lisp"
+             ".missiond/v3/missiond-blueprint.lisp"
+             "scripts/check-v3-service-extraction-isomorphism.mjs"
+             "scripts/check-v3-code-isomorphism-complete.mjs"]
+      :note "Pinned modularization decision: MissionD Core remains local orchestrator and long-term memory becomes a MemoryProvider contract with null/local/xjp provider implementations. mission_kb_* remains a compatibility facade; providers own conversation stores, active memory, review overlay, skill evidence, FTS, embedding, rerank, export, purge, and tenant/universe/project/user isolation.")
+
+    (surface eventhub-service-boundary
+      :status "code-aligned"
+      :implements [eventhub-service-contract eventhub-service]
+      :code [".missiond/research/missiond-memory-eventhub-modularization-20260512.md"
+             ".missiond/workflows/missiond-module-extraction.lisp"
+             ".missiond/v3/missiond-blueprint.lisp"
+             "scripts/check-v3-service-extraction-isomorphism.mjs"
+             "scripts/check-v3-code-isomorphism-complete.mjs"]
+      :note "Pinned modularization decision: cross-service durable events move toward xjp-eventhub while MissionD keeps local EventBus and outbound spool for offline-safe agent orchestration. xjp-eventhub owns durable streams, cursors, subscriptions, waits, dead-letter, and replay for deploy-center/auth/router/timeline/service events.")
+
     (surface board-frontend
       :status "code-aligned"
       :implements [board-frontend]
@@ -4027,8 +4275,9 @@
              "node scripts/check-frontend-board-lisp-schema.mjs"
              "node scripts/check-frontend-board-code-isomorphism.mjs"
              "node scripts/check-frontend-board-runtime-projection.mjs"
-             "node scripts/check-v3-ops-infra-isomorphism.mjs"
-             "node scripts/check-v3-shared-memory-isomorphism.mjs"
+	             "node scripts/check-v3-ops-infra-isomorphism.mjs"
+	             "node scripts/check-v3-service-extraction-isomorphism.mjs"
+	             "node scripts/check-v3-shared-memory-isomorphism.mjs"
              "node scripts/check-v3-request-flow-smoke.mjs"
              "node scripts/check-v3-code-isomorphism-complete.mjs"
              "node scripts/check-v3-final-convergence.mjs"]

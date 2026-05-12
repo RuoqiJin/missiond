@@ -22,7 +22,9 @@
 //   board-frontend,
 //   conversation-ingestion, skill-runtime, cascade-governance,
 //   router-policy, incident-governance, capability-governance,
-//   compute-primitives, sysinfra-control, ops-infra, eventbridge, typed-lisp-compiler.
+//   compute-primitives, sysinfra-control, ops-infra, eventbridge,
+//   memory-provider-boundary, eventhub-service-boundary, typed-lisp-compiler,
+//   mission-shared-memory, evidence-governance-view.
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -77,6 +79,8 @@ export const EXPECTED_SURFACES = [
   'sysinfra-control',
   'ops-infra',
   'eventbridge',
+  'memory-provider-boundary',
+  'eventhub-service-boundary',
   'typed-lisp-compiler',
   'mission-shared-memory',
   'evidence-governance-view',
@@ -135,6 +139,7 @@ export const PER_SURFACE_CHECKERS = [
   'scripts/check-frontend-board-runtime-projection.mjs',
   'scripts/check-v3-ops-infra-isomorphism.mjs',
   'scripts/check-v3-eventbridge-isomorphism.mjs',
+  'scripts/check-v3-service-extraction-isomorphism.mjs',
   'scripts/check-typed-lisp-compiler.mjs',
   'scripts/check-v3-shared-memory-isomorphism.mjs',
   // Cross-surface request-flow smoke; aggregates the user-facing

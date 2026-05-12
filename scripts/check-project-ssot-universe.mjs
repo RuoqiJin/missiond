@@ -33,11 +33,14 @@ const PROJECT_CHECKERS = new Map([
   ['semantic-terminal', ['bash', ['.missiond/check.sh', '--dry-run']]],
   ['xjp-mcp', ['bash', ['.missiond/check.sh']]],
   ['xjp-cli', ['bash', ['.missiond/check.sh']]],
+  ['xjp-memory', ['bash', ['.missiond/check.sh']]],
+  ['xjp-eventhub', ['bash', ['.missiond/check.sh']]],
   ['deploy-agent', ['bash', ['.missiond/check.sh']]],
   ['pcea', ['node', ['scripts/check-pcea-ssot-complete.mjs', '--json']]],
   ['secret-store', ['bash', ['.missiond/check.sh']]],
   ['xiaojin-blog', ['bash', ['.missiond/check.sh']]],
   ['cuthub', ['bash', ['.missiond/check.sh']]],
+  ['legacy-refactor-service', ['node', ['scripts/check-legacy-refactor-ssot.mjs', '--json']]],
 ]);
 
 function main() {
