@@ -10,8 +10,9 @@ const usage = `Usage:
 Checks the V3 Jarvis Mechanic collaboration boundary:
   - jarvis-mechanic is registered as a project-local SSOT devtool.
   - MissionD owns orchestration, Board, event bus, Universe, dispatch, and approval.
-  - Mechanic is declared as an opt-in repair executor only.
-  - Runtime wiring stays disabled until a future explicit Lisp/checker change.
+  - Mechanic is declared as an opt-in repair executor lane only.
+  - Runtime wiring is restricted to mission_task_delegate engine_hint=mechanic,
+    accepted_shard_id, context_pack_path, write_scope, and task-result-artifact.
 `;
 
 const BLUEPRINT = '.missiond/v3/missiond-blueprint.lisp';
@@ -41,26 +42,51 @@ function main() {
     'opt-in repair executor CLI, not a MissionD orchestrator or automatic runtime worker',
     '(mechanic-collaboration-boundary',
     ':schema "missiond.mechanic-collaboration-boundary.v1"',
-    ':status declared-not-runtime-enabled',
+    ':status mechanic-executor-lane-enabled',
     ':owner missiond',
     ':executor jarvis-mechanic',
     'MissionD owns workflows, Board, event bus, project registry, Universe, worker dispatch, checkpoints, and approval',
     ':missiond-responsibilities [ssot-universe workflow-lisp boardtask-lifecycle eventbus resident-master-control swarm-dispatch approval checkpoint verification]',
     ':mechanic-responsibilities [compiler-as-judge-repair narrow-code-transform dry-run-diagnostics patch-proposal repair-report]',
-    ':runtime-policy (:enabled false',
-    ':default-mode disabled',
+    ':runtime-policy (:enabled true',
+    ':default-mode dry-run',
+    ':delegate-entry mission_task_delegate',
+    ':engine-hint mechanic',
     ':allowed-entrypoints [approved-repair-shard dry-run-diagnostics]',
     ':forbidden-entrypoints [resident-master-control night-scheduler nightly-evolution-loop autonomous-orchestrator generic-worker-pool]',
-    ':handoff-contract (:entry [BoardTaskApproved repair-shard write_scope acceptance]',
-    'MissionD creates an exact repair shard',
+    ':handoff-contract (:entry [BoardTaskApproved accepted_shard_id context_pack_path write_scope acceptance mechanic_mode]',
+    'Mechanic never performs broad architecture discovery',
+    'MissionD creates an accepted exact repair shard',
+    'mission_task_delegate routes engine_hint=mechanic only when accepted_shard_id, context_pack_path, and write_scope are present',
     'Mechanic runs compiler-as-judge repair only inside the approved write_scope',
-    'MissionD verifies diff, checker, tests, and commit/Lisp convergence',
+    'task-result-artifact',
+    'MissionD verifies diff, checker, tests, commit/Lisp convergence',
     'Mechanic MUST NOT be called by nightly-evolution by default.',
     'Mechanic MUST NOT become a resident master or project orchestrator.',
+    'standalone mission_mechanic tools remain forbidden',
     'node scripts/check-v3-mechanic-boundary-isomorphism.mjs',
   ]);
 
-  forbidRuntimeTool(diagnostics, root, [
+  requireAll(diagnostics, 'crates/missiond-mcp/src/tools/compute/task_delegate.rs',
+    readIfExists(root, 'crates/missiond-mcp/src/tools/compute/task_delegate.rs'), [
+      '"engine_hint": {"type": "string"',
+      '"mechanic_mode"',
+      '"mechanic_target"',
+      '"mechanic_bin"',
+    ]);
+
+  requireAll(diagnostics, 'crates/missiond-daemon/src/handlers/compute/task_delegate.rs',
+    readIfExists(root, 'crates/missiond-daemon/src/handlers/compute/task_delegate.rs'), [
+      'engine_hint_is_mechanic',
+      'parse_mechanic_run_config',
+      'spawn_mechanic_repair',
+      'mechanic_mode',
+      'task-result-artifact',
+      'worker_settle',
+      'MECHANIC_PROJECT_ROOT_REQUIRED',
+    ]);
+
+  forbidStandaloneMechanicTool(diagnostics, root, [
     'crates/missiond-mcp/src/tools',
     'crates/missiond-daemon/src/handlers',
   ]);
@@ -88,17 +114,23 @@ function requireAll(diagnostics, file, source, needles) {
   }
 }
 
-function forbidRuntimeTool(diagnostics, root, relDirs) {
+function readIfExists(root, relFile) {
+  const file = path.join(root, relFile);
+  if (!fs.existsSync(file)) return '';
+  return fs.readFileSync(file, 'utf8');
+}
+
+function forbidStandaloneMechanicTool(diagnostics, root, relDirs) {
   for (const relDir of relDirs) {
     const dir = path.join(root, relDir);
     if (!fs.existsSync(dir)) continue;
     for (const file of walk(dir)) {
       if (!file.endsWith('.rs')) continue;
       const source = fs.readFileSync(file, 'utf8');
-      if (source.includes('mission_mechanic') || source.includes('mechanic_')) {
+      if (source.includes('mission_mechanic')) {
         diagnostics.push({
           file: path.relative(root, file),
-          message: 'mechanic runtime tool wiring is forbidden while mechanic-collaboration-boundary :runtime-policy :enabled is false',
+          message: 'standalone mission_mechanic tool wiring is forbidden; mechanic must route through mission_task_delegate engine_hint=mechanic',
         });
       }
     }

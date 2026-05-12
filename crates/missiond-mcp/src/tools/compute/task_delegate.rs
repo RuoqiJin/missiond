@@ -35,6 +35,26 @@ fn dedup_linkage_properties() -> Value {
     })
 }
 
+/// BoardTask 9b88cfff :: mechanic executor-lane knobs added when
+/// mechanic-collaboration-boundary flipped to `mechanic-executor-lane-enabled`.
+/// Kept in a sibling helper for the same reason as dedup_linkage_properties:
+/// each json! property entry double-recurses through the macro and inlining
+/// these next to the base schema overflows the default recursion limit.
+fn mechanic_lane_properties() -> Value {
+    json!({
+        "mechanic_mode": {"type": "string", "enum": ["dry-run", "repair"], "default": "dry-run", "description": "engine_hint=mechanic 时使用：dry-run 只诊断，repair 才允许 mechanic 尝试修复"},
+        "mechanicMode": {"type": "string", "description": "mechanic_mode camelCase alias"},
+        "mechanic_target": {"type": "string", "description": "engine_hint=mechanic 时传给 mechanic --target；缺省使用 accepted_shard_id"},
+        "mechanicTarget": {"type": "string", "description": "mechanic_target camelCase alias"},
+        "mechanic_bin": {"type": "string", "description": "mechanic binary 路径；缺省 MISSIOND_MECHANIC_BIN 或 mechanic"},
+        "mechanicBin": {"type": "string", "description": "mechanic_bin camelCase alias"},
+        "mechanic_max_turns": {"type": "integer", "description": "engine_hint=mechanic 时传给 mechanic --max-turns"},
+        "mechanicMaxTurns": {"type": "integer", "description": "mechanic_max_turns camelCase alias"},
+        "mechanic_model": {"type": "string", "description": "engine_hint=mechanic 时传给 mechanic --model；缺省使用 mechanic 配置默认值"},
+        "mechanicModel": {"type": "string", "description": "mechanic_model camelCase alias"}
+    })
+}
+
 fn task_delegate_schema() -> Value {
     let mut schema = json!({
         "type": "object",
@@ -54,7 +74,7 @@ fn task_delegate_schema() -> Value {
             "taskClass": {"type": "string", "description": "task_class camelCase alias"},
             "pool_hint": {"type": "string", "description": "建议工位池，如 claude-code-default / gemini-ultra-pro"},
             "poolHint": {"type": "string", "description": "pool_hint camelCase alias"},
-            "engine_hint": {"type": "string", "description": "建议引擎，如 claude-code / gemini / codex"},
+            "engine_hint": {"type": "string", "description": "建议引擎，如 claude-code / gemini / codex / mechanic"},
             "engineHint": {"type": "string", "description": "engine_hint camelCase alias"},
             "context_pack_path": {"type": "string", "description": "两阶段 context-pack Lisp 路径"},
             "contextPackPath": {"type": "string", "description": "context_pack_path camelCase alias"},
@@ -71,15 +91,20 @@ fn task_delegate_schema() -> Value {
             "acceptanceCommands": {"type": "array", "description": "acceptance_commands camelCase alias"}
         }
     });
+    merge_properties(&mut schema, dedup_linkage_properties());
+    merge_properties(&mut schema, mechanic_lane_properties());
+    schema
+}
+
+fn merge_properties(schema: &mut Value, extras: Value) {
     if let (Some(properties), Value::Object(extras)) = (
         schema.get_mut("properties").and_then(|v| v.as_object_mut()),
-        dedup_linkage_properties(),
+        extras,
     ) {
         for (key, value) in extras {
             properties.insert(key, value);
         }
     }
-    schema
 }
 
 pub fn definitions() -> Vec<ToolDefinition> {

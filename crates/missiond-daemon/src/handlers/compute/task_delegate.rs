@@ -6,6 +6,7 @@ use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::process::Command;
 
 use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
 use crate::slot_dispatch::SlotAcquireGuard;
@@ -139,6 +140,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             .engine_hint
             .get_or_insert_with(|| "claude-code".to_string());
     }
+    let mechanic_config = match parse_mechanic_run_config(&args, &delegation_metadata) {
+        Ok(config) => config,
+        Err(error) => return Ok(error),
+    };
 
     if let Some(error) = exact_shard_contract_error(intent, &delegation_metadata) {
         return Ok(error);
@@ -179,6 +184,17 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     let target_project_root = target_project_resolution
         .as_ref()
         .map(|r| r.project_root.to_string_lossy().to_string());
+    if mechanic_config.is_some() && target_project_root.is_none() {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(
+                "MECHANIC_PROJECT_ROOT_REQUIRED",
+                "mission_task_delegate refused engine_hint=mechanic without a registered cwd/project root",
+            )
+            .with_suggestion(
+                "pass cwd inside the target project root so mechanic can run in a detached worktree",
+            ),
+        ));
+    }
 
     let runtime_config = match WorkstationRuntimeConfig::load_for_project_root(
         target_project_root.as_deref(),
@@ -335,7 +351,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     // Phase 6.1: Find idle slot with RAII guard (atomic check+reserve).
     // intent-flow.lisp F-task-delegate-autoprovision :: s2 requires
     // slot.project_root == target_project_root for reuse.
-    let guard = if prefer_gemini_researcher {
+    let guard = if mechanic_config.is_some() {
+        None
+    } else if prefer_gemini_researcher {
         find_and_reserve_gemini_researcher_slot(
             state,
             gemini_researcher_slot_id.as_deref().unwrap(),
@@ -358,6 +376,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     // 2. If no idle slot, try auto-provision dynamic slot
     let (assignee, provisioned) = if !assignee.is_empty() {
         (assignee, false)
+    } else if mechanic_config.is_some() {
+        (String::new(), false)
     } else if prefer_gemini_researcher {
         // V3: never auto-provision a dynamic Claude slot for research while a
         // gemini researcher slot is registered. Queue unassigned so the
@@ -477,10 +497,27 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     // causality. Duplicate Notify wakeups are coalesced and harmless.
     state.board_dispatch_notify.notify_one();
 
+    if let Some(config) = mechanic_config.clone() {
+        spawn_mechanic_repair(
+            state.shared_memory.clone(),
+            MechanicRepairRun {
+                task_id: task_id.clone(),
+                project_id: target_project_resolution
+                    .as_ref()
+                    .map(|resolution| resolution.project_id.clone()),
+                project_root: target_project_root.clone().unwrap_or_default(),
+                objective: objective.to_string(),
+                metadata: delegation_metadata.clone(),
+                config,
+                timeout_secs,
+            },
+        );
+    }
+
     Ok(ToolResult::json_pretty(&json!({
         "task_id": task_id,
         "assignee": if assignee.is_empty() { Value::Null } else { Value::String(assignee) },
-        "status": "queued",
+        "status": if mechanic_config.is_some() { "mechanic-dispatched" } else { "queued" },
         "intent": intent,
         "template": template,
         "model": requested_model,
@@ -494,6 +531,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "must_not_touch": delegation_metadata.must_not_touch,
         "acceptance": delegation_metadata.acceptance,
         "shared_claim_ids": delegation_metadata.shared_claim_ids,
+        "mechanic": mechanic_config.as_ref().map(MechanicRunConfig::to_json),
         "provisioned_new_slot": provisioned,
         "timeout_secs": timeout_secs,
         "parent_id": parent_id,
@@ -1465,6 +1503,118 @@ struct DelegationMetadata {
     source_id: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MechanicMode {
+    DryRun,
+    Repair,
+}
+
+impl MechanicMode {
+    fn as_str(&self) -> &'static str {
+        match self {
+            MechanicMode::DryRun => "dry-run",
+            MechanicMode::Repair => "repair",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MechanicRunConfig {
+    mode: MechanicMode,
+    target: String,
+    bin: String,
+    max_turns: Option<i64>,
+    model: Option<String>,
+}
+
+impl MechanicRunConfig {
+    fn to_json(&self) -> Value {
+        json!({
+            "mode": self.mode.as_str(),
+            "target": self.target,
+            "bin": self.bin,
+            "max_turns": self.max_turns,
+            "model": self.model,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MechanicRepairRun {
+    task_id: String,
+    project_id: Option<String>,
+    project_root: String,
+    objective: String,
+    metadata: DelegationMetadata,
+    config: MechanicRunConfig,
+    timeout_secs: i64,
+}
+
+fn engine_hint_is_mechanic(metadata: &DelegationMetadata) -> bool {
+    matches!(
+        metadata.engine_hint.as_deref(),
+        Some("mechanic") | Some("jarvis-mechanic")
+    ) || matches!(
+        metadata.pool_hint.as_deref(),
+        Some("mechanic") | Some("jarvis-mechanic")
+    )
+}
+
+fn parse_mechanic_run_config(
+    args: &Value,
+    metadata: &DelegationMetadata,
+) -> std::result::Result<Option<MechanicRunConfig>, ToolResult> {
+    if !engine_hint_is_mechanic(metadata) {
+        return Ok(None);
+    }
+    let mode = match string_arg(args, &["mechanic_mode", "mechanicMode"]).unwrap_or("dry-run") {
+        "dry-run" | "dry_run" | "diagnostic" | "diagnostics" => MechanicMode::DryRun,
+        "repair" => MechanicMode::Repair,
+        other => {
+            return Err(ToolResult::structured_error(
+                ToolError::new(
+                    "MECHANIC_MODE_INVALID",
+                    format!("unsupported mechanic_mode `{other}`; expected dry-run or repair"),
+                )
+                .with_suggestion(
+                    "use mechanic_mode=dry-run for diagnostics or mechanic_mode=repair for an approved exact repair shard",
+                ),
+            ));
+        }
+    };
+    let target = string_arg(args, &["mechanic_target", "mechanicTarget"])
+        .or(metadata.accepted_shard_id.as_deref())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            ToolResult::structured_error(
+                ToolError::new(
+                    "MECHANIC_TARGET_REQUIRED",
+                    "engine_hint=mechanic requires mechanic_target or accepted_shard_id",
+                )
+                .with_suggestion(
+                    "compile an accepted exact shard first, then pass accepted_shard_id or mechanic_target",
+                ),
+            )
+        })?;
+    let bin = string_arg(args, &["mechanic_bin", "mechanicBin"])
+        .map(str::to_string)
+        .or_else(|| std::env::var("MISSIOND_MECHANIC_BIN").ok())
+        .unwrap_or_else(|| "mechanic".to_string());
+    let max_turns = args
+        .get("mechanic_max_turns")
+        .or_else(|| args.get("mechanicMaxTurns"))
+        .and_then(Value::as_i64)
+        .filter(|value| *value > 0);
+    let model = string_arg(args, &["mechanic_model", "mechanicModel"]).map(str::to_string);
+    Ok(Some(MechanicRunConfig {
+        mode,
+        target,
+        bin,
+        max_turns,
+        model,
+    }))
+}
+
 fn exact_shard_contract_error(intent: &str, metadata: &DelegationMetadata) -> Option<ToolResult> {
     if !code_worker_requires_write_lease(intent, metadata) {
         return None;
@@ -2108,6 +2258,139 @@ fn render_delegation_metadata_block(metadata: &DelegationMetadata) -> String {
         );
     }
     lines.join("\n")
+}
+
+fn spawn_mechanic_repair(
+    shared_memory: std::sync::Arc<crate::engine::shared_memory::SharedMemoryService>,
+    run: MechanicRepairRun,
+) {
+    // Mechanic is a subprocess executor lane: its final output is normalized
+    // into the canonical task-result-artifact via worker_settle. It is not a
+    // PTY slot and it never becomes a resident orchestrator.
+    tokio::spawn(async move {
+        let result = run_mechanic_repair_subprocess(&run).await;
+        let (status, summary, content) = match result {
+            Ok(content) => {
+                let exit_code = content
+                    .get("exit_code")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(-1);
+                let status = if exit_code == 0 { "done" } else { "failed" };
+                let summary = if exit_code == 0 {
+                    format!(
+                        "Mechanic {} completed for accepted shard {}.",
+                        run.config.mode.as_str(),
+                        run.metadata
+                            .accepted_shard_id
+                            .as_deref()
+                            .unwrap_or(run.config.target.as_str())
+                    )
+                } else {
+                    format!(
+                        "Mechanic {} failed for accepted shard {} (exit {}).",
+                        run.config.mode.as_str(),
+                        run.metadata
+                            .accepted_shard_id
+                            .as_deref()
+                            .unwrap_or(run.config.target.as_str()),
+                        exit_code
+                    )
+                };
+                (status, summary, content)
+            }
+            Err(err) => (
+                "failed",
+                format!(
+                    "Mechanic {} could not start or timed out: {}",
+                    run.config.mode.as_str(),
+                    err
+                ),
+                json!({
+                    "schema": "missiond.mechanic-repair-result.v1",
+                    "ok": false,
+                    "error": err.to_string(),
+                    "mode": run.config.mode.as_str(),
+                    "target": run.config.target,
+                    "project_root": run.project_root,
+                }),
+            ),
+        };
+
+        let settle = shared_memory
+            .handle_action(&json!({
+                "action": "worker_settle",
+                "task_id": run.task_id,
+                "project_id": run.project_id,
+                "provider": "mechanic",
+                "status": status,
+                "summary": summary,
+                "accepted_shard_id": run.metadata.accepted_shard_id,
+                "json": content,
+            }))
+            .await;
+        if let Err(err) = settle {
+            tracing::warn!(task_id = %run.task_id, error = %err, "mechanic repair worker_settle failed");
+        }
+
+        for claim_id in &run.metadata.shared_claim_ids {
+            let release = shared_memory
+                .handle_action(&json!({
+                    "action": "release",
+                    "claim_id": claim_id,
+                }))
+                .await;
+            if let Err(err) = release {
+                tracing::warn!(task_id = %run.task_id, claim_id = %claim_id, error = %err, "mechanic repair claim release failed");
+            }
+        }
+    });
+}
+
+async fn run_mechanic_repair_subprocess(run: &MechanicRepairRun) -> Result<Value> {
+    let mut cmd = Command::new(&run.config.bin);
+    cmd.arg("repair").arg(&run.project_root);
+    if run.config.mode == MechanicMode::DryRun {
+        cmd.arg("--dry-run");
+    }
+    cmd.arg("--target").arg(&run.config.target);
+    if let Some(model) = &run.config.model {
+        cmd.arg("--model").arg(model);
+    }
+    if let Some(max_turns) = run.config.max_turns {
+        cmd.arg("--max-turns").arg(max_turns.to_string());
+    }
+    cmd.stdin(std::process::Stdio::null());
+
+    let timeout = std::time::Duration::from_secs(run.timeout_secs.clamp(30, 7200) as u64);
+    let output = tokio::time::timeout(timeout, cmd.output())
+        .await
+        .map_err(|_| anyhow!("mechanic subprocess timed out after {}s", timeout.as_secs()))?
+        .map_err(|err| anyhow!("mechanic subprocess spawn failed: {err}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    Ok(json!({
+        "schema": "missiond.mechanic-repair-result.v1",
+        "ok": output.status.success(),
+        "exit_code": output.status.code().unwrap_or(-1),
+        "mode": run.config.mode.as_str(),
+        "target": run.config.target,
+        "project_root": run.project_root,
+        "objective": run.objective,
+        "accepted_shard_id": run.metadata.accepted_shard_id,
+        "context_pack_path": run.metadata.context_pack_path,
+        "write_scope": run.metadata.write_scope,
+        "acceptance": run.metadata.acceptance,
+        "stdout_tail": tail_chars(&stdout, 8000),
+        "stderr_tail": tail_chars(&stderr, 8000),
+    }))
+}
+
+fn tail_chars(input: &str, max_chars: usize) -> String {
+    let len = input.chars().count();
+    if len <= max_chars {
+        return input.to_string();
+    }
+    input.chars().skip(len - max_chars).collect()
 }
 
 /// Legacy opt-in helper for KB/Skill context assembly.
@@ -3228,5 +3511,70 @@ mod tests {
             ..DelegationMetadata::default()
         };
         assert!(exact_shard_contract_error("code", &accepted).is_none());
+    }
+
+    #[test]
+    fn mechanic_engine_hint_is_opt_in_executor_lane() {
+        let mechanic = DelegationMetadata {
+            engine_hint: Some("mechanic".to_string()),
+            ..DelegationMetadata::default()
+        };
+        assert!(engine_hint_is_mechanic(&mechanic));
+
+        let jarvis_mechanic = DelegationMetadata {
+            pool_hint: Some("jarvis-mechanic".to_string()),
+            ..DelegationMetadata::default()
+        };
+        assert!(engine_hint_is_mechanic(&jarvis_mechanic));
+
+        let claude = DelegationMetadata {
+            engine_hint: Some("claude-code".to_string()),
+            ..DelegationMetadata::default()
+        };
+        assert!(!engine_hint_is_mechanic(&claude));
+    }
+
+    #[test]
+    fn mechanic_config_defaults_to_dry_run_and_accepted_shard_target() {
+        let args = json!({
+            "engine_hint": "mechanic",
+        });
+        let metadata = DelegationMetadata {
+            engine_hint: Some("mechanic".to_string()),
+            accepted_shard_id: Some("shard-fix-auth".to_string()),
+            ..DelegationMetadata::default()
+        };
+        let config = parse_mechanic_run_config(&args, &metadata)
+            .expect("valid mechanic args")
+            .expect("mechanic config should be present");
+        assert_eq!(config.mode, MechanicMode::DryRun);
+        assert_eq!(config.target, "shard-fix-auth");
+        assert_eq!(config.bin, "mechanic");
+    }
+
+    #[test]
+    fn mechanic_config_requires_explicit_target_or_shard() {
+        let args = json!({
+            "engine_hint": "mechanic",
+        });
+        let metadata = DelegationMetadata {
+            engine_hint: Some("mechanic".to_string()),
+            ..DelegationMetadata::default()
+        };
+        assert!(parse_mechanic_run_config(&args, &metadata).is_err());
+    }
+
+    #[test]
+    fn mechanic_config_rejects_unknown_mode() {
+        let args = json!({
+            "engine_hint": "mechanic",
+            "mechanic_mode": "autonomous",
+        });
+        let metadata = DelegationMetadata {
+            engine_hint: Some("mechanic".to_string()),
+            accepted_shard_id: Some("shard-a".to_string()),
+            ..DelegationMetadata::default()
+        };
+        assert!(parse_mechanic_run_config(&args, &metadata).is_err());
     }
 }

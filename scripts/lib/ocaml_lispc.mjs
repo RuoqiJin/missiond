@@ -33,7 +33,7 @@ export function runLispc(args, { repoRoot = process.cwd(), timeoutMs = 60_000 } 
   const proc = withDuneLock(toolRoot, timeoutMs, () => spawnSync(
     'dune',
     ['exec', '--root', toolRoot, './bin/main.exe', '--', ...args],
-    { cwd: repoRoot, encoding: 'utf8', timeout: timeoutMs },
+    { cwd: repoRoot, encoding: 'utf8', timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024 },
   ));
   const stdout = proc.stdout ?? '';
   const stderr = proc.stderr ?? '';

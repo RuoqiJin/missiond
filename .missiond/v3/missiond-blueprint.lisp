@@ -1922,25 +1922,30 @@
 
   (mechanic-collaboration-boundary
     :schema "missiond.mechanic-collaboration-boundary.v1"
-    :status declared-not-runtime-enabled
+    :status mechanic-executor-lane-enabled
     :owner missiond
     :executor jarvis-mechanic
     :rule "MissionD owns workflows, Board, event bus, project registry, Universe, worker dispatch, checkpoints, and approval. Jarvis Mechanic is only an opt-in repair executor used after MissionD has produced an explicit repair shard."
     :missiond-responsibilities [ssot-universe workflow-lisp boardtask-lifecycle eventbus resident-master-control swarm-dispatch approval checkpoint verification]
     :mechanic-responsibilities [compiler-as-judge-repair narrow-code-transform dry-run-diagnostics patch-proposal repair-report]
-    :runtime-policy (:enabled false
-                     :default-mode disabled
+    :runtime-policy (:enabled true
+                     :default-mode dry-run
+                     :delegate-entry mission_task_delegate
+                     :engine-hint mechanic
                      :allowed-entrypoints [approved-repair-shard dry-run-diagnostics]
                      :forbidden-entrypoints [resident-master-control night-scheduler nightly-evolution-loop autonomous-orchestrator generic-worker-pool])
-    :handoff-contract (:entry [BoardTaskApproved repair-shard write_scope acceptance]
-                       :core ((step s1 :logic "MissionD creates an exact repair shard with project_id, files, allowed ranges, acceptance, and rollback policy.")
-                              (step s2 :logic "Mechanic runs compiler-as-judge repair only inside the approved write_scope or returns a no-change diagnostic.")
-                              (step s3 :logic "MissionD verifies diff, checker, tests, and commit/Lisp convergence before closing the parent BoardTask."))
-                       :egress [patch-proposal repair-report verification-result])
+    :handoff-contract (:entry [BoardTaskApproved accepted_shard_id context_pack_path write_scope acceptance mechanic_mode]
+                       :core ((step s1 :logic "MissionD discovers/collates the issue through checker/EventBus/audit and resident-master-control; Mechanic never performs broad architecture discovery.")
+                              (step s2 :logic "MissionD creates an accepted exact repair shard with project_id, files, allowed ranges, acceptance, rollback policy, and a shared-memory write lease.")
+                              (step s3 :logic "mission_task_delegate routes engine_hint=mechanic only when accepted_shard_id, context_pack_path, and write_scope are present; default mechanic_mode is dry-run, repair requires explicit mechanic_mode=repair.")
+                              (step s4 :logic "Mechanic runs compiler-as-judge repair only inside the approved write_scope or returns a no-change diagnostic.")
+                              (step s5 :logic "Mechanic stdout/stderr/exit status is normalized into task-result-artifact; Board note/provider final/PTY are projections only.")
+                              (step s6 :logic "MissionD verifies diff, checker, tests, commit/Lisp convergence, and releases shared-memory claims before closing the parent BoardTask."))
+                       :egress [task-result-artifact patch-proposal repair-report verification-result])
     :safety ["Mechanic MUST NOT read Board/KB/provider logs as an architect unless MissionD passes a bounded context pack."
              "Mechanic MUST NOT be called by nightly-evolution by default."
              "Mechanic MUST NOT become a resident master or project orchestrator."
-             "Mechanic runtime enablement requires a future Lisp delta, checker update, and explicit operator approval."]
+             "Mechanic runtime enablement is limited to mission_task_delegate engine_hint=mechanic with accepted_shard_id, context_pack_path, write_scope, and acceptance; standalone mission_mechanic tools remain forbidden."]
     :checker "node scripts/check-v3-mechanic-boundary-isomorphism.mjs")
 
   (service-runtime-universe
