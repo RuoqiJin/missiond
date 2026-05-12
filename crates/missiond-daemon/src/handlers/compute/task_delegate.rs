@@ -1620,7 +1620,7 @@ fn parse_mechanic_run_config(
 }
 
 fn exact_shard_contract_error(intent: &str, metadata: &DelegationMetadata) -> Option<ToolResult> {
-    if !code_worker_requires_write_lease(intent, metadata) {
+    if !exact_shard_contract_required(intent, metadata) {
         return None;
     }
     if metadata
@@ -1657,7 +1657,28 @@ fn exact_shard_contract_error(intent: &str, metadata: &DelegationMetadata) -> Op
             ),
         ));
     }
+    if metadata.write_scope.is_empty() {
+        return Some(ToolResult::structured_error(
+            ToolError::new(
+                "EXACT_SHARD_WRITE_SCOPE_REQUIRED",
+                "mission_task_delegate refused an implementation worker without write_scope",
+            )
+            .with_suggestion(
+                "compile an accepted exact shard with a declared write_scope before dispatching an implementation worker",
+            ),
+        ));
+    }
     None
+}
+
+fn exact_shard_contract_required(intent: &str, metadata: &DelegationMetadata) -> bool {
+    let is_implementation_class = matches!(
+        metadata.task_class.as_deref(),
+        Some("code") | Some("implementation") | Some("implement") | Some("implementer")
+    );
+    let is_code_or_implementation = intent == "code" || is_implementation_class;
+    let mechanic_implementation = engine_hint_is_mechanic(metadata) && is_code_or_implementation;
+    mechanic_implementation || (is_code_or_implementation && !metadata.write_scope.is_empty())
 }
 
 fn code_worker_requires_write_lease(intent: &str, metadata: &DelegationMetadata) -> bool {
@@ -3512,6 +3533,41 @@ mod tests {
             context_pack_path: Some("/tmp/context-pack.lisp".to_string()),
             accepted_shard_id: Some("shard-auth-001".to_string()),
             write_scope: vec!["crates/foo.rs".to_string()],
+            ..DelegationMetadata::default()
+        };
+        assert!(exact_shard_contract_error("code", &accepted).is_none());
+    }
+
+    #[test]
+    fn mechanic_implementation_requires_exact_shard_metadata_even_without_write_scope() {
+        let broad_mechanic = DelegationMetadata {
+            task_class: Some("implementation".to_string()),
+            engine_hint: Some("mechanic".to_string()),
+            ..DelegationMetadata::default()
+        };
+        assert!(
+            exact_shard_contract_error("code", &broad_mechanic).is_some(),
+            "mechanic implementation must not accept a broad objective without exact shard metadata"
+        );
+
+        let missing_write_scope = DelegationMetadata {
+            task_class: Some("implementation".to_string()),
+            engine_hint: Some("mechanic".to_string()),
+            context_pack_path: Some(".missiond/workflows/mechanic-repair-lane.lisp".to_string()),
+            accepted_shard_id: Some("shard-mechanic-noop".to_string()),
+            ..DelegationMetadata::default()
+        };
+        assert!(
+            exact_shard_contract_error("code", &missing_write_scope).is_some(),
+            "mechanic implementation must carry a concrete write_scope"
+        );
+
+        let accepted = DelegationMetadata {
+            task_class: Some("implementation".to_string()),
+            engine_hint: Some("mechanic".to_string()),
+            context_pack_path: Some(".missiond/workflows/mechanic-repair-lane.lisp".to_string()),
+            accepted_shard_id: Some("shard-mechanic-noop".to_string()),
+            write_scope: vec![".missiond/workflows/mechanic-repair-lane.lisp".to_string()],
             ..DelegationMetadata::default()
         };
         assert!(exact_shard_contract_error("code", &accepted).is_none());
