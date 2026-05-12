@@ -2893,7 +2893,8 @@
                (step s4 :logic "track agent_cursors per stream so resident master and workers resume after restart without rereading whole ledgers")
                (step s5 :logic "serve mission_context_slice from compiled semantic IR plus task/shard artifacts so agents read compact facts before full Lisp")
                (step s6 :logic "treat .missiond/tasks/**/shared-memory.lisp as compatibility projection only; concurrent truth lives in Rust/Postgres shared memory")
-               (step s7 :logic "project mission_shared_memory action=evidence_view per evidence-governance-policy: task_result_artifacts as canonical worker output, conversations as provider/user read model, event_log/shared_events as causality, KB entries with knowledge_review_state as reviewed long-term knowledge, and BoardTask state as coordination projection, returned as named evidence lanes with authority order"))
+               (step s7 :logic "status snapshots must expire stale active leases before counting activeClaims/staleClaims so master/load diagnostics are based on current coordination truth rather than pre-reap residue")
+               (step s8 :logic "project mission_shared_memory action=evidence_view per evidence-governance-policy: task_result_artifacts as canonical worker output, conversations as provider/user read model, event_log/shared_events as causality, KB entries with knowledge_review_state as reviewed long-term knowledge, and BoardTask state as coordination projection, returned as named evidence lanes with authority order"))
         :egress [shared-event shared-artifact shared-claim agent-cursor context-slice EventBus-signal evidence_governance_view evidence_lane_summary authority_order])
       (function evidence-governance-view
         :surface evidence-governance-view

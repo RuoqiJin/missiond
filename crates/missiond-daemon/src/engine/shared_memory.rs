@@ -79,6 +79,7 @@ impl SharedMemoryService {
     }
 
     pub(crate) async fn status_snapshot(&self) -> Value {
+        let expired_stale_claims = self.expire_stale_claims().await.unwrap_or(0);
         let active_claims = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM shared_claims WHERE status = 'active' AND lease_expires_at >= now()",
         )
@@ -142,6 +143,7 @@ impl SharedMemoryService {
             "latestSeq": latest_seq,
             "activeClaims": active_claims,
             "staleClaims": stale_claims,
+            "expiredStaleClaims": expired_stale_claims,
             "artifactCount": artifacts,
             "taskResultArtifactCount": task_result_artifacts,
             "activeWorkflowRuns": active_workflow_runs,
