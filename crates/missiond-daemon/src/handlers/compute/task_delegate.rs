@@ -462,7 +462,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         } else {
             Some(assignee.clone())
         },
-        auto_execute: Some(true),
+        auto_execute: Some(!mechanic_config.is_some()),
         depends_on: if depends_on.is_empty() {
             None
         } else {
@@ -495,7 +495,11 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 
     // Legacy local fast-path while older producers finish moving to bus
     // causality. Duplicate Notify wakeups are coalesced and harmless.
-    state.board_dispatch_notify.notify_one();
+    // Mechanic BoardTasks are visible records for the subprocess executor
+    // lane; they must not enter the normal Autopilot/PTY dispatcher.
+    if mechanic_config.is_none() {
+        state.board_dispatch_notify.notify_one();
+    }
 
     if let Some(config) = mechanic_config.clone() {
         spawn_mechanic_repair(
