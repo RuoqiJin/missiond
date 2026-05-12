@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use missiond_mcp::tools::{ToolError, ToolResult};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use tracing::info;
 
@@ -14,6 +14,9 @@ use crate::state::{CURRENT_ANALYSIS_VERSION, MAX_ANALYSIS_RETRIES};
 use crate::state::{MEMORY_SLOT_ID, MEMORY_SLOW_SLOT_ID};
 
 const MAX_PENDING_BATCH_REPLAYS: u32 = 3;
+const MEMORY_PROVIDER_URL_ENV: &str = "MISSIOND_MEMORY_PROVIDER_URL";
+const MEMORY_PROVIDER_TOKEN_ENV: &str = "MISSIOND_MEMORY_PROVIDER_TOKEN";
+const MEMORY_PROVIDER_MODE_ENV: &str = "MISSIOND_MEMORY_PROVIDER_MODE";
 
 fn classify_memory_input_noise(role: &str, content: &str) -> Option<&'static str> {
     // User utterances are the source of truth for memory extraction. Keep them
@@ -94,6 +97,12 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             .and_then(|v| v.as_str())
             .unwrap_or("pending");
         return match action {
+            "provider_status" | "status" => {
+                handle_inner(state, "mission_memory_provider_status", args).await
+            }
+            "query" => handle_inner(state, "mission_memory_query", args).await,
+            "remember" => handle_inner(state, "mission_memory_remember", args).await,
+            "review" => handle_inner(state, "mission_memory_review", args).await,
             "pending" => handle_inner(state, "mission_memory_pending", args).await,
             "pause" => handle_inner(state, "mission_memory_pause", args).await,
             "token_stats" => {
@@ -106,6 +115,337 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     handle_inner(state, name, args).await
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MemoryProviderSelection {
+    XjpMemory {
+        base_url: String,
+        token: Option<String>,
+    },
+    LocalPostgresCompatibility,
+    NullMemory,
+}
+
+impl MemoryProviderSelection {
+    fn from_env() -> Self {
+        if let Ok(url) = std::env::var(MEMORY_PROVIDER_URL_ENV) {
+            let base_url = url.trim().trim_end_matches('/').to_string();
+            if !base_url.is_empty() {
+                let token = std::env::var(MEMORY_PROVIDER_TOKEN_ENV)
+                    .ok()
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty());
+                return Self::XjpMemory { base_url, token };
+            }
+        }
+
+        match std::env::var(MEMORY_PROVIDER_MODE_ENV)
+            .unwrap_or_else(|_| "null-memory".to_string())
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "local" | "local-postgres" | "local_postgres" | "compat" | "compatibility" => {
+                Self::LocalPostgresCompatibility
+            }
+            _ => Self::NullMemory,
+        }
+    }
+
+    fn status_payload(&self) -> Value {
+        match self {
+            Self::XjpMemory { base_url, token } => json!({
+                "provider": "xjp-memory",
+                "configured": true,
+                "baseUrl": base_url,
+                "auth": if token.is_some() { "bearer-token-configured" } else { "none" },
+                "mode": "remote-provider",
+            }),
+            Self::LocalPostgresCompatibility => json!({
+                "provider": "local-postgres-memory",
+                "configured": true,
+                "mode": "compatibility-provider",
+                "note": "mission_memory query/remember/review is routed to local mission_kb_* compatibility tools.",
+            }),
+            Self::NullMemory => json!({
+                "provider": "null-memory",
+                "configured": false,
+                "mode": "disabled",
+                "requiredEnv": [MEMORY_PROVIDER_URL_ENV],
+                "optionalEnv": [MEMORY_PROVIDER_TOKEN_ENV, MEMORY_PROVIDER_MODE_ENV],
+            }),
+        }
+    }
+}
+
+fn get_string_any<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(|v| v.as_str()))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+fn get_bool_any(value: &Value, keys: &[&str]) -> Option<bool> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(|v| v.as_bool()))
+}
+
+fn get_usize_any(value: &Value, keys: &[&str]) -> Option<usize> {
+    keys.iter().find_map(|key| {
+        value
+            .get(*key)
+            .and_then(|v| v.as_u64())
+            .and_then(|n| usize::try_from(n).ok())
+    })
+}
+
+fn provider_scope_from_args(args: &Value) -> Value {
+    let explicit_scope = args
+        .get("scope")
+        .and_then(|scope| scope.as_object())
+        .cloned()
+        .unwrap_or_default();
+    let mut scope = serde_json::Map::new();
+    for (key, value) in explicit_scope {
+        scope.insert(key, value);
+    }
+
+    let fields = [
+        ("tenant_id", ["tenant_id", "tenantId"].as_slice()),
+        ("universe_id", ["universe_id", "universeId"].as_slice()),
+        (
+            "project_id",
+            ["project_id", "projectId", "project"].as_slice(),
+        ),
+        ("user_id", ["user_id", "userId"].as_slice()),
+        ("source_type", ["source_type", "sourceType"].as_slice()),
+        ("source_id", ["source_id", "sourceId"].as_slice()),
+        ("authority", ["authority"].as_slice()),
+        (
+            "privacy_class",
+            ["privacy_class", "privacyClass"].as_slice(),
+        ),
+    ];
+    for (target, aliases) in fields {
+        if !scope.contains_key(target) {
+            if let Some(value) = get_string_any(args, aliases) {
+                scope.insert(target.to_string(), json!(value));
+            }
+        }
+    }
+    Value::Object(scope)
+}
+
+fn provider_query_payload(args: &Value) -> Value {
+    json!({
+        "scope": provider_scope_from_args(args),
+        "query": get_string_any(args, &["query"]).unwrap_or_default(),
+        "include_archived": get_bool_any(args, &["include_archived", "includeArchived"]).unwrap_or(false),
+        "limit": get_usize_any(args, &["limit"]).unwrap_or(20).clamp(1, 100),
+    })
+}
+
+fn provider_remember_payload(args: &Value) -> Result<Value> {
+    let text = get_string_any(args, &["text", "summary", "content"])
+        .ok_or_else(|| anyhow!("mission_memory remember requires text"))?;
+    let tags = args.get("tags").cloned().unwrap_or_else(|| json!([]));
+    Ok(json!({
+        "scope": provider_scope_from_args(args),
+        "text": text,
+        "tags": tags,
+    }))
+}
+
+fn provider_review_payload(args: &Value) -> Result<Value> {
+    let memory_id = get_string_any(
+        args,
+        &["memory_id", "memoryId", "knowledge_id", "knowledgeId"],
+    )
+    .ok_or_else(|| anyhow!("mission_memory review requires memoryId"))?;
+    let state = get_string_any(args, &["state"])
+        .ok_or_else(|| anyhow!("mission_memory review requires state"))?;
+    let rationale = get_string_any(args, &["rationale"])
+        .ok_or_else(|| anyhow!("mission_memory review requires rationale"))?;
+    Ok(json!({
+        "memory_id": memory_id,
+        "state": state,
+        "rationale": rationale,
+        "reviewer": get_string_any(args, &["reviewer"]).unwrap_or("missiond"),
+    }))
+}
+
+async fn call_xjp_memory(
+    state: &AppState,
+    base_url: &str,
+    token: Option<&str>,
+    method: reqwest::Method,
+    path: &str,
+    payload: Option<Value>,
+) -> Result<ToolResult> {
+    let url = format!("{base_url}{path}");
+    let mut request = state.http_client.request(method, &url);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    if let Some(payload) = payload {
+        request = request.json(&payload);
+    }
+    let response = request.send().await?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    let parsed = serde_json::from_str::<Value>(&body).unwrap_or_else(|_| json!({ "raw": body }));
+    if !status.is_success() {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(
+                "MEMORY_PROVIDER_HTTP_ERROR",
+                format!("xjp-memory returned HTTP {status} for {path}"),
+            )
+            .with_suggestion(format!(
+                "Check {MEMORY_PROVIDER_URL_ENV}, provider health, and secret-store token configuration."
+            )),
+        ));
+    }
+    Ok(ToolResult::json_pretty(&json!({
+        "provider": "xjp-memory",
+        "path": path,
+        "response": parsed,
+    })))
+}
+
+async fn handle_provider_status(state: &AppState) -> Result<ToolResult> {
+    let selection = MemoryProviderSelection::from_env();
+    match selection {
+        MemoryProviderSelection::XjpMemory { base_url, token } => {
+            let remote = call_xjp_memory(
+                state,
+                &base_url,
+                token.as_deref(),
+                reqwest::Method::GET,
+                "/v1/memory/provider_status",
+                None,
+            )
+            .await?;
+            Ok(remote)
+        }
+        other => Ok(ToolResult::json_pretty(&other.status_payload())),
+    }
+}
+
+async fn handle_provider_query(state: &AppState, args: Value) -> Result<ToolResult> {
+    match MemoryProviderSelection::from_env() {
+        MemoryProviderSelection::XjpMemory { base_url, token } => {
+            call_xjp_memory(
+                state,
+                &base_url,
+                token.as_deref(),
+                reqwest::Method::POST,
+                "/v1/memory/query",
+                Some(provider_query_payload(&args)),
+            )
+            .await
+        }
+        MemoryProviderSelection::LocalPostgresCompatibility => {
+            let local_args = json!({
+                "action": "search",
+                "query": get_string_any(&args, &["query"]).unwrap_or_default(),
+                "project": get_string_any(&args, &["project", "projectId", "project_id"]),
+                "include_archived": get_bool_any(&args, &["include_archived", "includeArchived"]).unwrap_or(false),
+                "limit": get_usize_any(&args, &["limit"]).unwrap_or(20),
+            });
+            crate::handlers::knowledge::kb::handle(state, "mission_kb_query", local_args).await
+        }
+        MemoryProviderSelection::NullMemory => Ok(ToolResult::structured_error(
+            ToolError::new(
+                "MEMORY_PROVIDER_DISABLED",
+                "mission_memory query requires a configured memory provider.",
+            )
+            .with_suggestion(format!(
+                "Set {MEMORY_PROVIDER_URL_ENV}=https://.../xjp-memory or {MEMORY_PROVIDER_MODE_ENV}=local-postgres for compatibility."
+            )),
+        )),
+    }
+}
+
+async fn handle_provider_remember(state: &AppState, args: Value) -> Result<ToolResult> {
+    match MemoryProviderSelection::from_env() {
+        MemoryProviderSelection::XjpMemory { base_url, token } => {
+            call_xjp_memory(
+                state,
+                &base_url,
+                token.as_deref(),
+                reqwest::Method::POST,
+                "/v1/memory/remember",
+                Some(provider_remember_payload(&args)?),
+            )
+            .await
+        }
+        MemoryProviderSelection::LocalPostgresCompatibility => {
+            let local_args = json!({
+                "category": get_string_any(&args, &["category"]).unwrap_or("memory:decision"),
+                "key": get_string_any(&args, &["key"]).unwrap_or("mission-memory-provider-write"),
+                "summary": get_string_any(&args, &["summary", "text", "content"]).unwrap_or_default(),
+                "detail": args.get("detail").cloned().unwrap_or_else(|| json!({
+                    "source": "mission_memory.local-postgres-compatibility",
+                    "scope": provider_scope_from_args(&args),
+                    "tags": args.get("tags").cloned().unwrap_or_else(|| json!([])),
+                })),
+                "source": get_string_any(&args, &["source"]).unwrap_or("mission_memory"),
+                "confidence": args.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.8),
+                "project": get_string_any(&args, &["project", "projectId", "project_id"]),
+            });
+            crate::handlers::knowledge::kb::handle(state, "mission_kb_remember", local_args).await
+        }
+        MemoryProviderSelection::NullMemory => Ok(ToolResult::structured_error(
+            ToolError::new(
+                "MEMORY_PROVIDER_DISABLED",
+                "mission_memory remember requires a configured memory provider.",
+            )
+            .with_suggestion(format!(
+                "Set {MEMORY_PROVIDER_URL_ENV}=https://.../xjp-memory or {MEMORY_PROVIDER_MODE_ENV}=local-postgres for compatibility."
+            )),
+        )),
+    }
+}
+
+async fn handle_provider_review(state: &AppState, args: Value) -> Result<ToolResult> {
+    match MemoryProviderSelection::from_env() {
+        MemoryProviderSelection::XjpMemory { base_url, token } => {
+            call_xjp_memory(
+                state,
+                &base_url,
+                token.as_deref(),
+                reqwest::Method::POST,
+                "/v1/memory/review",
+                Some(provider_review_payload(&args)?),
+            )
+            .await
+        }
+        MemoryProviderSelection::LocalPostgresCompatibility => {
+            let local_args = json!({
+                "action": "upsert",
+                "knowledge_id": get_string_any(&args, &["knowledge_id", "knowledgeId", "memory_id", "memoryId"]),
+                "key": get_string_any(&args, &["key"]),
+                "state": get_string_any(&args, &["state"]),
+                "rationale": get_string_any(&args, &["rationale"]),
+                "reviewer": get_string_any(&args, &["reviewer"]).unwrap_or("mission_memory"),
+                "confidence": args.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.8),
+                "evidence_refs": args.get("evidence_refs").cloned().unwrap_or_else(|| json!({
+                    "source": "mission_memory.local-postgres-compatibility"
+                })),
+            });
+            crate::handlers::knowledge::kb::handle(state, "mission_kb_review", local_args).await
+        }
+        MemoryProviderSelection::NullMemory => Ok(ToolResult::structured_error(
+            ToolError::new(
+                "MEMORY_PROVIDER_DISABLED",
+                "mission_memory review requires a configured memory provider.",
+            )
+            .with_suggestion(format!(
+                "Set {MEMORY_PROVIDER_URL_ENV}=https://.../xjp-memory or {MEMORY_PROVIDER_MODE_ENV}=local-postgres for compatibility."
+            )),
+        )),
+    }
+}
+
 fn load_memory_kb_config() -> Result<MemoryKbRuntimeConfig> {
     MemoryKbRuntimeConfig::load_for_current_dir()
         .map_err(|err| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", err))
@@ -113,6 +453,12 @@ fn load_memory_kb_config() -> Result<MemoryKbRuntimeConfig> {
 
 async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     match name {
+        // ===== Pluggable Memory Provider Facade =====
+        "mission_memory_provider_status" => handle_provider_status(state).await,
+        "mission_memory_query" => handle_provider_query(state, args).await,
+        "mission_memory_remember" => handle_provider_remember(state, args).await,
+        "mission_memory_review" => handle_provider_review(state, args).await,
+
         // ===== Memory Extraction =====
         // Message-level pipeline tracking: returns pending messages with IDs.
         // State auto-committed by Daemon on extraction completion — no manual done() needed.
@@ -483,7 +829,8 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
 
 #[cfg(test)]
 mod tests {
-    use super::classify_memory_input_noise;
+    use super::{classify_memory_input_noise, provider_query_payload, provider_remember_payload};
+    use serde_json::json;
 
     #[test]
     fn memory_input_filter_preserves_user_utterances() {
@@ -529,5 +876,36 @@ mod tests {
             classify_memory_input_noise("assistant", "Board Task ID: abc; mission_board_update"),
             Some("worker-instruction")
         );
+    }
+
+    #[test]
+    fn provider_query_payload_normalizes_scope_aliases() {
+        let payload = provider_query_payload(&json!({
+            "query": "12900kf",
+            "projectId": "missiond",
+            "tenantId": "xjp",
+            "includeArchived": true,
+            "limit": 500
+        }));
+        assert_eq!(payload["query"], "12900kf");
+        assert_eq!(payload["include_archived"], true);
+        assert_eq!(payload["limit"], 100);
+        assert_eq!(payload["scope"]["project_id"], "missiond");
+        assert_eq!(payload["scope"]["tenant_id"], "xjp");
+    }
+
+    #[test]
+    fn provider_remember_payload_requires_and_maps_text() {
+        let payload = provider_remember_payload(&json!({
+            "text": "MissionD memory provider uses xjp-memory.",
+            "tags": ["memory", "provider"],
+            "scope": {"universe_id": "xjp"}
+        }))
+        .expect("payload");
+        assert_eq!(payload["text"], "MissionD memory provider uses xjp-memory.");
+        assert_eq!(payload["tags"][0], "memory");
+        assert_eq!(payload["scope"]["universe_id"], "xjp");
+
+        assert!(provider_remember_payload(&json!({"tags": []})).is_err());
     }
 }

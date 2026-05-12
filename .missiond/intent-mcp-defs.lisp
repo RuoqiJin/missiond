@@ -264,9 +264,23 @@
   :target "crates/missiond-mcp/src/tools/knowledge/memory.rs"
 
   (tool mission_memory
-    :description "记忆与 Token 管理。pending: 待分析对话; pause: 暂停/恢复; token_stats: Token 消耗统计"
+    :description "记忆与 Token 管理。provider_status/query/remember/review: 可插拔 memory provider; pending: 待分析对话; pause: 暂停/恢复; token_stats: Token 消耗统计"
     (input
-      (action    string :required :enum (pending pause token_stats))
+      (action    string :required :enum (provider_status status query remember review pending pause token_stats))
+      (query     string :description "[query] 检索文本")
+      (text      string :description "[remember] 写入文本")
+      (tags      array  :description "[remember] 标签")
+      (scope     object :description "[query/remember] provider scope: tenant_id/universe_id/project_id/user_id/source_type/source_id/authority/privacy_class")
+      (tenantId  string :description "[query/remember] scope.tenant_id camelCase alias")
+      (universeId string :description "[query/remember] scope.universe_id camelCase alias")
+      (projectId string :description "[query/remember] scope.project_id camelCase alias")
+      (userId    string :description "[query/remember] scope.user_id camelCase alias")
+      (includeArchived boolean :description "[query] 是否包含 archived/review 非 active 记录")
+      (limit     integer :description "[query] 返回数量")
+      (memoryId  string :description "[review] xjp-memory memory id")
+      (state     string :description "[review] review state")
+      (rationale string :description "[review] review rationale")
+      (reviewer  string :description "[review] reviewer id")
       (paused    boolean :description "[pause] true=暂停, false=恢复, 省略=toggle")
       (sessionId string :description "[token_stats] 按会话 ID 过滤")
       (slotId    string :description "[token_stats] 按工位 ID 过滤")

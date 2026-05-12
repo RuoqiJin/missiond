@@ -9,12 +9,26 @@ pub fn definitions() -> Vec<ToolDefinition> {
         // ===== mission_memory =====
         ToolDefinition::new(
             "mission_memory",
-            "记忆与 Token 管理。pending: 待分析对话; pause: 暂停/恢复; token_stats: Token 消耗统计",
+            "记忆与 Token 管理。provider_status/query/remember/review: 可插拔 memory provider; pending: 待分析对话; pause: 暂停/恢复; token_stats: Token 消耗统计",
             json!({
                 "type": "object",
                 "required": ["action"],
                 "properties": {
-                    "action": {"type": "string", "enum": ["pending", "pause", "token_stats"]},
+                    "action": {"type": "string", "enum": ["provider_status", "status", "query", "remember", "review", "pending", "pause", "token_stats"]},
+                    "query": {"type": "string", "description": "[query] 检索文本"},
+                    "text": {"type": "string", "description": "[remember] 写入文本"},
+                    "tags": {"type": "array", "description": "[remember] 标签"},
+                    "scope": {"type": "object", "description": "[query/remember] provider scope: tenant_id/universe_id/project_id/user_id/source_type/source_id/authority/privacy_class"},
+                    "tenantId": {"type": "string", "description": "[query/remember] scope.tenant_id camelCase alias"},
+                    "universeId": {"type": "string", "description": "[query/remember] scope.universe_id camelCase alias"},
+                    "projectId": {"type": "string", "description": "[query/remember] scope.project_id camelCase alias"},
+                    "userId": {"type": "string", "description": "[query/remember] scope.user_id camelCase alias"},
+                    "includeArchived": {"type": "boolean", "description": "[query] 是否包含 archived/review 非 active 记录"},
+                    "limit": {"type": "integer", "description": "[query] 返回数量"},
+                    "memoryId": {"type": "string", "description": "[review] xjp-memory memory id"},
+                    "state": {"type": "string", "description": "[review] review state"},
+                    "rationale": {"type": "string", "description": "[review] review rationale"},
+                    "reviewer": {"type": "string", "description": "[review] reviewer id"},
                     "paused": {"type": "boolean", "description": "[pause] true=暂停, false=恢复, 省略=toggle"},
                     "sessionId": {"type": "string", "description": "[token_stats] 按会话 ID 过滤"},
                     "slotId": {"type": "string", "description": "[token_stats] 按工位 ID 过滤"},

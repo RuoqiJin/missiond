@@ -2040,15 +2040,16 @@
          :kind remote-service
          :use-case private-multi-universe
          :capabilities [query remember review-overlay conversation-ingest skill-evidence fts embedding rerank context-pack export purge]
+         :runtime-env [MISSIOND_MEMORY_PROVIDER_URL MISSIOND_MEMORY_PROVIDER_TOKEN]
          :embedding-provider xjp-router
          :rerank-provider xjp-router
          :rule "Private deployments use xjp-memory for tenant/universe/project/user scoped memory, conversation history, skill evidence, embedding, rerank, and review overlay. Secrets and provider tokens stay in secret-store/env, never in Lisp."))
     :functions
       ((function memory-provider-registry
          :entry [V3-compiled-runtime env-config mission_memory.provider_status]
-         :core ((step s1 :logic "load provider declarations and active provider selection")
+         :core ((step s1 :logic "load provider declarations and active provider selection from MISSIOND_MEMORY_PROVIDER_URL / MISSIOND_MEMORY_PROVIDER_MODE")
                 (step s2 :logic "validate provider capabilities against requested operation")
-                (step s3 :logic "return provider health and explicit disabled/misconfigured diagnostics"))
+                (step s3 :logic "call /v1/memory/provider_status for xjp-memory providers, or return explicit null/local compatibility diagnostics"))
          :egress [MemoryProviderConfig provider-status])
        (function memory-scope-resolution
          :entry [BoardTask project-registry user-request active-universe]

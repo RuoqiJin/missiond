@@ -260,9 +260,23 @@
 
     (tool mission_memory
       :zh "工具: mission_memory"
-      :description-zh "记忆与 Token 管理。pending: 待分析对话; pause: 暂停/恢复; token_stats: Token 消耗统计"
+      :description-zh "记忆与 Token 管理。provider_status/query/remember/review: 可插拔 memory provider; pending: 待分析对话; pause: 暂停/恢复; token_stats: Token 消耗统计"
       (input
         (action)
+        (query :description-zh "[query] 检索文本")
+        (text :description-zh "[remember] 写入文本")
+        (tags :description-zh "[remember] 标签")
+        (scope :description-zh "[query/remember] provider scope")
+        (tenantId :description-zh "[query/remember] scope.tenant_id")
+        (universeId :description-zh "[query/remember] scope.universe_id")
+        (projectId :description-zh "[query/remember] scope.project_id")
+        (userId :description-zh "[query/remember] scope.user_id")
+        (includeArchived :description-zh "[query] 是否包含 archived/review 非 active 记录")
+        (limit :description-zh "[query] 返回数量")
+        (memoryId :description-zh "[review] xjp-memory memory id")
+        (state :description-zh "[review] review state")
+        (rationale :description-zh "[review] review rationale")
+        (reviewer :description-zh "[review] reviewer id")
         (paused :description-zh "[pause] true=暂停, false=恢复, 省略=toggle")
         (sessionId :description-zh "[token_stats] 按会话 ID 过滤")
         (slotId :description-zh "[token_stats] 按工位 ID 过滤")
