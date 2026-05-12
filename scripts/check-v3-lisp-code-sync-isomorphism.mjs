@@ -11,6 +11,7 @@ const FILES = {
   engineMod: 'crates/missiond-daemon/src/engine/mod.rs',
   main: 'crates/missiond-daemon/src/main.rs',
   masterControl: 'crates/missiond-daemon/src/engine/master_control.rs',
+  questionFlow: 'crates/missiond-daemon/src/handlers/comm/question/question_flow.rs',
   aggregate: 'scripts/check-v3-code-isomorphism-complete.mjs',
   gitignore: '.gitignore',
 };
@@ -137,6 +138,16 @@ function check(s, diagnostics) {
     'crate::engine::lisp_code_sync::status_snapshot_for_state(state).await',
     'runtimeLoadExplanation',
     'runtime_load_explanation',
+  ]);
+  requireAll(diagnostics, FILES.questionFlow, s.questionFlow, [
+    'revalidate_questions_before_display',
+    'handle_get',
+    'annotate_questions_before_display',
+    'revalidation_status',
+    'evidence_fresh_at',
+    'close_stale_lisp_code_sync_linked_task',
+    'resolved_by_runtime_fix / stale_evidence',
+    'pending operator decision was auto-resolved before display',
   ]);
   requireAll(diagnostics, FILES.aggregate, s.aggregate, [
     "'lisp-code-sync-loop'",

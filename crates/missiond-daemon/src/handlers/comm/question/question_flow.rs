@@ -1,6 +1,8 @@
 use anyhow::{anyhow, Result};
-use missiond_core::event::events::{QuestionEvent, TaskEvent};
-use missiond_core::types::{AgentQuestion, AgentQuestionStatus};
+use missiond_core::event::events::{BoardEvent, QuestionEvent, TaskEvent};
+use missiond_core::types::{
+    AddBoardTaskNoteInput, AgentQuestion, AgentQuestionStatus, UpdateBoardTaskInput,
+};
 use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
 use serde_json::Value;
@@ -143,20 +145,35 @@ async fn handle_list(state: &AppState, args: Value) -> Result<ToolResult> {
             .await
             .map_err(|e| anyhow!("DB error: {}", e))?;
     }
+    annotate_questions_before_display(state, &mut questions).await;
     Ok(ToolResult::json_pretty(&questions))
 }
 
 async fn handle_get(state: &AppState, args: Value) -> Result<ToolResult> {
     let QuestionIdArgs { id } = serde_json::from_value(args)?;
-    match state
+    let mut question = match state
         .store
         .get_agent_question(&id)
         .await
         .map_err(|e| anyhow!("DB error: {}", e))?
     {
-        Some(q) => Ok(ToolResult::json_pretty(&q)),
-        None => Ok(ToolResult::error("Question not found")),
+        Some(q) => q,
+        None => return Ok(ToolResult::error("Question not found")),
+    };
+    if revalidate_questions_before_display(state, std::slice::from_ref(&question)).await? {
+        question = match state
+            .store
+            .get_agent_question(&id)
+            .await
+            .map_err(|e| anyhow!("DB error: {}", e))?
+        {
+            Some(q) => q,
+            None => return Ok(ToolResult::error("Question not found")),
+        };
     }
+    let mut questions = vec![question];
+    annotate_questions_before_display(state, &mut questions).await;
+    Ok(ToolResult::json_pretty(&questions[0]))
 }
 
 async fn handle_answer(state: &AppState, args: Value) -> Result<ToolResult> {
@@ -240,6 +257,7 @@ async fn revalidate_questions_before_display(
             .map_err(|e| anyhow!("DB error: {}", e))?
             .is_some()
         {
+            close_stale_lisp_code_sync_linked_task(state, question, &answer).await;
             let _ = state
                 .bus
                 .publish_question(QuestionEvent::Resolved {
@@ -252,6 +270,77 @@ async fn revalidate_questions_before_display(
     }
 
     Ok(changed)
+}
+
+async fn annotate_questions_before_display(state: &AppState, questions: &mut [AgentQuestion]) {
+    let has_lisp_sync_candidate = questions
+        .iter()
+        .any(is_lisp_code_sync_stale_decision_candidate);
+    if !has_lisp_sync_candidate {
+        return;
+    }
+    let snapshot = crate::engine::lisp_code_sync::status_snapshot_for_state(state).await;
+    let evidence_fresh_at = chrono::Utc::now().to_rfc3339();
+    let resolved = lisp_code_sync_evidence_is_resolved(&snapshot);
+    let reason = lisp_code_sync_revalidation_reason(&snapshot);
+    for question in questions {
+        if !is_lisp_code_sync_stale_decision_candidate(question) {
+            continue;
+        }
+        question.evidence_fresh_at = Some(evidence_fresh_at.clone());
+        question.revalidation_status = Some(if resolved {
+            "stale_evidence".to_string()
+        } else {
+            "still_valid".to_string()
+        });
+        question.stale_reason = Some(reason.clone());
+    }
+}
+
+async fn close_stale_lisp_code_sync_linked_task(
+    state: &AppState,
+    question: &AgentQuestion,
+    answer: &str,
+) {
+    let Some(task_id) = question.task_id.as_deref() else {
+        return;
+    };
+    let old_status = match state.store.get_board_task(task_id).await {
+        Ok(Some(task)) => format!("{:?}", task.status),
+        _ => "unknown".to_string(),
+    };
+    let note = format!(
+        "resolved_by_runtime_fix / stale_evidence: linked decision {} was auto-answered during Decision Inbox revalidation before display.\n\n{}",
+        question.id, answer
+    );
+    let _ = state
+        .store
+        .add_board_task_note(&AddBoardTaskNoteInput {
+            task_id: task_id.to_string(),
+            content: note,
+            note_type: Some("summary".to_string()),
+            author: Some("decision-inbox-revalidation".to_string()),
+        })
+        .await;
+    let _ = state
+        .store
+        .update_board_task(
+            task_id,
+            &UpdateBoardTaskInput {
+                status: Some("done".to_string()),
+                auto_execute: Some(false),
+                ..Default::default()
+            },
+        )
+        .await;
+    let _ = state
+        .bus
+        .publish_board(BoardEvent::StatusChanged {
+            task_id: task_id.to_string(),
+            old_status,
+            new_status: "done".to_string(),
+        })
+        .await;
 }
 
 fn is_lisp_code_sync_stale_decision_candidate(question: &AgentQuestion) -> bool {
@@ -295,6 +384,13 @@ fn lisp_code_sync_evidence_is_resolved(snapshot: &Value) -> bool {
 }
 
 fn lisp_code_sync_stale_answer(snapshot: &Value) -> String {
+    let reason = lisp_code_sync_revalidation_reason(snapshot);
+    format!(
+        "stale_evidence/resolved_by_runtime_fix: lisp-code-sync self-loop evidence is no longer current. {reason}; pending operator decision was auto-resolved before display."
+    )
+}
+
+fn lisp_code_sync_revalidation_reason(snapshot: &Value) -> String {
     let report_dirs = &snapshot["reportDirs"];
     let total = report_dirs["totalReports"].as_u64().unwrap_or(0);
     let recent = report_dirs["recentReports5m"].as_u64().unwrap_or(0);
@@ -302,7 +398,7 @@ fn lisp_code_sync_stale_answer(snapshot: &Value) -> String {
     let recent_tasks = snapshot["recentSyncTaskCreations"].as_u64().unwrap_or(0);
     let storm_hits = snapshot["stormCircuitHits"].as_u64().unwrap_or(0);
     format!(
-        "stale_evidence/resolved_by_runtime_fix: lisp-code-sync self-loop evidence is no longer current. runtime report dirs are within retention (totalReports={total}, recentReports5m={recent}, maxReportsPerProject={max}); recentSyncTaskCreations={recent_tasks}, stormCircuitHits={storm_hits}; pending operator decision was auto-resolved before display."
+        "runtime report dirs: totalReports={total}, recentReports5m={recent}, maxReportsPerProject={max}; recentSyncTaskCreations={recent_tasks}, stormCircuitHits={storm_hits}"
     )
 }
 
@@ -325,6 +421,9 @@ mod tests {
             decision_type: "debug".to_string(),
             retry_count: 0,
             routing_trace: None,
+            revalidation_status: None,
+            stale_reason: None,
+            evidence_fresh_at: None,
             created_at: "2026-05-09T00:00:00Z".to_string(),
             updated_at: "2026-05-09T00:00:00Z".to_string(),
         }

@@ -58,6 +58,15 @@ pub struct AgentQuestion {
     /// Decision routing trace: JSON recording which tiers were visited and why
     #[serde(skip_serializing_if = "Option::is_none")]
     pub routing_trace: Option<String>,
+    /// Display-time fact refresh status for operational questions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revalidation_status: Option<String>,
+    /// Short reason when the question was classified as stale or still live.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_reason: Option<String>,
+    /// Timestamp when the runtime evidence was last refreshed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence_fresh_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }

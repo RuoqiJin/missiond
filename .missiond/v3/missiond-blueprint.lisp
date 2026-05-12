@@ -2948,7 +2948,7 @@
         :entry [mission_question_list mission_question_get mission_master_status runtime-status-evidence]
         :core ((step s1 :logic "classify pending questions by revalidator kind such as lisp-code-sync self-loop, MCP reconnect, deploy event, or generic user decision")
                (step s2 :logic "for operational revalidators, read authoritative runtime status before showing the item to the user")
-               (step s3 :logic "mark stale evidence as answered with stale_evidence/resolved_by_runtime_fix, emit QuestionEvent::Resolved, and unblock linked BoardTask when no pending sibling questions remain")
+               (step s3 :logic "mark stale evidence as answered with stale_evidence/resolved_by_runtime_fix, emit QuestionEvent::Resolved, and close linked operational BoardTask as done/stale when the question itself was the blocker; only generic answered questions use normal unblock semantics")
                (step s4 :logic "show still-valid questions with revalidationStatus/evidenceFreshAt so the frontend can distinguish fresh decisions from stale accidents"))
         :egress [question_revalidation_status stale_evidence_answer QuestionEvent::Resolved])
       (function capability-governance
@@ -3843,7 +3843,7 @@
              "packages/board/src/components/PendingQuestions.tsx"
              "packages/board/src/types.ts"
              "scripts/check-v3-lisp-code-sync-isomorphism.mjs"]
-      :note "decision-inbox-revalidation makes operational questions revalidate their facts before reaching the user. mission_question list/get can classify stale lisp-code-sync self-loop questions, read authoritative runtime status such as reportDirs and recentReports5m, answer obsolete items as stale_evidence/resolved_by_runtime_fix, emit QuestionEvent::Resolved, and return revalidationStatus/evidenceFreshAt fields for still-valid questions. The Board frontend displays this status instead of treating old incident text as fresh truth.")
+      :note "decision-inbox-revalidation makes operational questions revalidate their facts before reaching the user. mission_question list/get can classify stale lisp-code-sync self-loop questions, read authoritative runtime status such as reportDirs and recentReports5m, answer obsolete items as stale_evidence/resolved_by_runtime_fix, close the linked stale operational BoardTask as done instead of reopening it, emit QuestionEvent::Resolved, and return revalidationStatus/evidenceFreshAt fields for still-valid questions. The Board frontend displays this status instead of treating old incident text as fresh truth.")
 
     (surface capability-governance
       :status "code-aligned"

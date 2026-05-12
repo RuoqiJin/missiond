@@ -860,6 +860,12 @@ pub struct AgentQuestion {
     pub retry_count: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub routing_trace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revalidation_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence_fresh_at: Option<String>,
 }
 
 /// Incident record

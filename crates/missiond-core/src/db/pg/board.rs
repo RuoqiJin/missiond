@@ -1392,6 +1392,9 @@ impl BoardStore for PgMissionStore {
                 .unwrap_or_else(|| "implementation".to_string()),
             retry_count: 0,
             routing_trace: None,
+            revalidation_status: None,
+            stale_reason: None,
+            evidence_fresh_at: None,
             created_at: now.clone(),
             updated_at: now.clone(),
         };
@@ -1896,6 +1899,9 @@ impl PgAgentQuestionRow {
                 .unwrap_or_else(|| "implementation".to_string()),
             retry_count: self.retry_count.unwrap_or(0),
             routing_trace: self.routing_trace,
+            revalidation_status: None,
+            stale_reason: None,
+            evidence_fresh_at: None,
             created_at: self.created_at,
             updated_at: self.updated_at,
         }
