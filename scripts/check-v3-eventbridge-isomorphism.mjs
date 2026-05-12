@@ -7,7 +7,7 @@ const repo = process.cwd();
 const json = process.argv.includes('--json');
 
 const checks = [
-  ['.missiond/v3/missiond-blueprint.lisp', ['(eventbridge-policy', '(deployment-event-ingest', '(router-usage-event-ingest', '(deploy-agent-self-update-governance', 'deploy_agent_update_provenance', 'missiond.event-envelope.v1', '/webhooks/deploy-center-event', 'agent_offline', 'break-glass-runbook-contract', 'usage_burst', 'provider_auth_failure_burst']],
+  ['.missiond/v3/missiond-blueprint.lisp', ['(eventbridge-policy', '(deployment-event-ingest', '(router-usage-event-ingest', '(deployment-change-classification-policy', '(deploy-agent-self-update-governance', 'deploy_agent_update_provenance', 'missiond.event-envelope.v1', '/webhooks/deploy-center-event', 'agent_offline', 'break-glass-runbook-contract', 'usage_burst', 'provider_auth_failure_burst', 'workflow-only-change', 'validation-only-run']],
   ['.missiond/workflows/deployment-event-response.lisp', ['deployment-event-response', 'deploy-center', 'no-auto-rollback', 'agent_offline', 'attach-break-glass-runbook', 'task_class=deploy-ops', 'pool_hint=claude-code-deploy-ops', 'raw gh api polling loops are forbidden']],
   ['.missiond/workflows/project-registry-reconciliation.lisp', ['project-registry-reconciliation', 'MissionD', 'deploy-center', 'Forge']],
   ['crates/missiond-core/src/ws/server.rs', ['/webhooks/deploy-center-event', 'require_event_id', '_envelope']],

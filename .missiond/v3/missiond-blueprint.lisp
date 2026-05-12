@@ -948,8 +948,8 @@
       :refactor-rule "Master control is a phase machine, not a prompt blob; every new behavior must attach to one loop and state whether it wakes the resident slot, writes checkpoint only, or delegates work.")
     (domain eventbridge-deployment-plane
       :owner eventbridge
-      :source [eventbridge-policy deployment-event-ingest router-usage-event-ingest m6-deployment-confirmation deploy-agent-self-update-governance deployment-event-response m6-deployment-rollout]
-      :functions [event-envelope-contract event-waiter-contract deployment-event-ingest router-usage-event-ingest deployment-provenance-policy deploy-center-relay-contract deploy-agent-update-provenance]
+      :source [eventbridge-policy deployment-event-ingest router-usage-event-ingest deployment-change-classification-policy m6-deployment-confirmation deploy-agent-self-update-governance deployment-event-response m6-deployment-rollout]
+      :functions [event-envelope-contract event-waiter-contract deployment-event-ingest router-usage-event-ingest deployment-change-classification-policy deployment-provenance-policy deploy-center-relay-contract deploy-agent-update-provenance]
       :runtime-projection [ExternalServiceEvent mission_timeline.wait deploy-center-event-webhook deployment-event-response]
       :checker ["node scripts/check-v3-eventbridge-isomorphism.mjs" "node scripts/check-v3-project-registry-isomorphism.mjs" "node scripts/check-v3-control-plane-m6-split.mjs"]
       :refactor-rule "Deployment closure uses deploy-center provenance plus smoke; CI/GitHub/curl are diagnostics unless deploy-center lacks data.")
@@ -1382,6 +1382,18 @@
            (step s5 :logic "allow mission_timeline waits and master-control observers to react to router anomalies from durable events"))
     :egress [ExternalServiceEvent router-usage-diagnostic router-ops-BoardTask]
     :surfaces [eventbridge router-policy])
+
+  (deployment-change-classification-policy
+    :schema "missiond.deployment-change-classification-policy.v1"
+    :entry [git-diff deploy-center.provenance ci-dispatcher xjp-workspace-ssot deploy-workflow-validation]
+    :core ((step s1 :logic "classify a change set before any deployment fanout: service-runtime-change, workflow-only-change, ssot-checker-only, deploy-config-change, secret-dns-change, or unknown")
+           (step s2 :logic "service-runtime-change may trigger the affected service deployment through deploy-center after normal provenance/smoke gates")
+           (step s3 :logic "workflow-only changes, reusable deploy workflow changes, checker-only changes, and SSOT-only changes run validation-only workflows and must not fan out production service deployments")
+           (step s4 :logic "deploy-config-change requires deploy-center provenance plus explicit rollout intent; secret-dns-change requires Decision Inbox or deploy-center policy before mutation")
+           (step s5 :logic "unknown classification creates a diagnostic BoardTask/context-pack instead of guessing or dispatching deploy-ops workers"))
+    :egress [deploy-intent validation-only-run deploy-rollout-suppression deploy-diagnostic-BoardTask]
+    :surfaces [".missiond/workflows/deployment-event-response.lisp" "xjp-backend:.missiond/backend/xiaojinpro-backend-blueprint.lisp" "xjp-backend:.github/workflows/deploy-workflow-validation.yml"]
+    :rule "Deployment work begins with change classification. A CI/workflow/tooling patch is not service runtime evidence and must be validated without causing broad production fanout. MissionD may observe and create diagnostics, but deploy-center remains the deployment fact authority.")
 
   (m6-deployment-confirmation
     :schema "missiond.m6-deployment-confirmation.v1"

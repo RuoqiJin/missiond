@@ -18,7 +18,7 @@ const checks = [
       '(domain master-control-plane',
       ':functions [master-checkpoint master-event-intake master-objective-loop master-delegation-loop master-recovery-loop master-maintenance-loop mcp-readiness]',
       '(domain eventbridge-deployment-plane',
-      ':functions [event-envelope-contract event-waiter-contract deployment-event-ingest router-usage-event-ingest deployment-provenance-policy deploy-center-relay-contract deploy-agent-update-provenance]',
+      ':functions [event-envelope-contract event-waiter-contract deployment-event-ingest router-usage-event-ingest deployment-change-classification-policy deployment-provenance-policy deploy-center-relay-contract deploy-agent-update-provenance]',
       '(domain project-universe-plane',
       ':functions [project-identity-root-resolution registry-authority-map maturity-contract service-runtime-summary deploy-fact-reference forge-catalog-reference registry-reconciliation]',
       '(domain knowledge-skill-plane',
