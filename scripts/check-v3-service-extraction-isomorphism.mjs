@@ -173,7 +173,7 @@ const xjpChecks = [
     [
       'xjp-memory=8091',
       'xjp-eventhub=8092',
-      'contract-first service rows',
+      'M6 durable service extractions',
     ],
   ],
   [
@@ -190,7 +190,7 @@ const xjpChecks = [
       'unwrap_or(8091)',
       'create_simple_health_routes',
       'xjp_memory::bootstrap_from_env',
-      'xjp_memory::router',
+      'xjp_memory::create_router',
     ],
   ],
   [
@@ -208,7 +208,7 @@ const xjpChecks = [
     'services/xjp-memory/.missiond/intent.lisp',
     [
       '(intent xjp-memory',
-      ':maturity-current M5',
+      ':maturity-current M6',
       ':maturity-target M6',
       'memory-provider',
     ],
@@ -255,7 +255,7 @@ const xjpChecks = [
       'unwrap_or(8092)',
       'create_simple_health_routes',
       'xjp_eventhub::bootstrap_from_env',
-      'xjp_eventhub::router',
+      'xjp_eventhub::create_router',
     ],
   ],
   [
@@ -272,7 +272,7 @@ const xjpChecks = [
     'services/xjp-eventhub/.missiond/intent.lisp',
     [
       '(intent xjp-eventhub',
-      ':maturity-current M5',
+      ':maturity-current M6',
       ':maturity-target M6',
       'eventhub-service',
     ],
