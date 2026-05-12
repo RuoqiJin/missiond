@@ -1421,6 +1421,44 @@
     :runtime-projection [xjp-eventhub service-runtime-universe eventbridge local-event-spool mission_timeline.wait mission_timeline.eventhub_status mission_timeline.eventhub_query mission_timeline.eventhub_append]
     :checker "node scripts/check-v3-service-extraction-isomorphism.mjs")
 
+  (provider-runtime-bringup-contract
+    :schema "missiond.provider-runtime-bringup.v1"
+    :purpose "Make local xjp-memory and xjp-eventhub provider runtime reproducible instead of relying on one-off LaunchAgent edits."
+    :script "scripts/manage-local-providers.sh"
+    :services
+      ((provider xjp-memory
+         :label "com.xjp.memory.provider"
+         :url "http://127.0.0.1:8091"
+         :database "xjp_memory"
+         :storage postgres-durable
+         :missiond-env [MISSIOND_MEMORY_PROVIDER_URL MISSIOND_MEMORY_PROVIDER_MODE])
+       (provider xjp-eventhub
+         :label "com.xjp.eventhub.provider"
+         :url "http://127.0.0.1:8092"
+         :database "xjp_eventhub"
+         :storage postgres-durable
+         :missiond-env [MISSIOND_EVENTHUB_URL MISSIOND_EVENTHUB_MODE]))
+    :functions
+      ((function local-provider-launchd
+         :entry [developer-local-install scripts.manage-local-providers.install launchd]
+         :core ((step s1 :logic "build xjp-memory and xjp-eventhub from the canonical XJP monorepo")
+                (step s2 :logic "ensure local Postgres databases xjp_memory and xjp_eventhub exist")
+                (step s3 :logic "write LaunchAgent plists for com.xjp.memory.provider and com.xjp.eventhub.provider")
+                (step s4 :logic "wire MissionD LaunchAgent provider env to 127.0.0.1 service URLs")
+                (step s5 :logic "bootstrap providers and MissionD, then smoke provider status endpoints"))
+         :egress [launchd-plist missiond-provider-env provider-smoke-report])
+       (function local-provider-smoke
+         :entry [scripts.manage-local-providers.smoke mission_memory.provider_status mission_timeline.eventhub_status]
+         :core ((step s1 :logic "query /v1/memory/provider_status and require postgres-durable storage")
+                (step s2 :logic "query /v1/eventhub/status and require postgres-durable storage")
+                (step s3 :logic "surface provider diagnostics through MCP instead of assuming local compatibility mode"))
+         :egress [provider-status diagnostic]))
+    :invariants
+      ["Local provider enablement MUST be reproducible through scripts/manage-local-providers.sh install, not manual plist editing."
+       "The script MUST not store secrets; provider tokens remain in secret-store/env and may be injected separately."
+       "MissionD must continue to support null/local compatibility providers when xjp-memory or xjp-eventhub are not configured."]
+    :checker "node scripts/check-v3-service-extraction-isomorphism.mjs")
+
   (deployment-event-ingest
     :schema "missiond.deployment-event-ingest.v1"
     :entry [/webhooks/deploy-center-event mission_timeline.wait deployment-event-response.workflow]
@@ -1945,8 +1983,9 @@
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/xjp-memory"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/xjp-memory-backend-blueprint.lisp"
-      :environment planned
+      :environment local-dev
       :deployment (:substrate deploy-center :dc_slug "xjp-memory" :container_name "xjp-memory" :default-port 8091 :authority release-provenance)
+      :local-runtime (:substrate launchd :label "com.xjp.memory.provider" :url "http://127.0.0.1:8091" :database "xjp_memory" :storage postgres-durable :bringup "scripts/manage-local-providers.sh")
       :health ["/health" "/health/live" "/health/ready" "/v1/memory/provider_status"]
       :dependencies [xjp-router secret-store postgres?]
       :ops-capability memory-provider
@@ -1956,8 +1995,9 @@
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/xjp-eventhub"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/xjp-eventhub-backend-blueprint.lisp"
-      :environment planned
+      :environment local-dev
       :deployment (:substrate deploy-center :dc_slug "xjp-eventhub" :container_name "xjp-eventhub" :default-port 8092 :authority release-provenance)
+      :local-runtime (:substrate launchd :label "com.xjp.eventhub.provider" :url "http://127.0.0.1:8092" :database "xjp_eventhub" :storage postgres-durable :bringup "scripts/manage-local-providers.sh")
       :health ["/health" "/health/live" "/health/ready" "/v1/eventhub/status"]
       :dependencies [deploy-center timeline? postgres?]
       :ops-capability eventhub
@@ -3974,6 +4014,7 @@
       :code [".missiond/research/missiond-memory-eventhub-modularization-20260512.md"
              ".missiond/workflows/missiond-module-extraction.lisp"
              ".missiond/v3/missiond-blueprint.lisp"
+             "scripts/manage-local-providers.sh"
              "scripts/check-v3-service-extraction-isomorphism.mjs"
              "scripts/check-v3-code-isomorphism-complete.mjs"]
       :note "Pinned modularization decision: MissionD Core remains local orchestrator and long-term memory becomes a MemoryProvider contract with null/local/xjp provider implementations. mission_kb_* remains a compatibility facade; providers own conversation stores, active memory, review overlay, skill evidence, FTS, embedding, rerank, export, purge, and tenant/universe/project/user isolation.")
@@ -3984,6 +4025,7 @@
       :code [".missiond/research/missiond-memory-eventhub-modularization-20260512.md"
              ".missiond/workflows/missiond-module-extraction.lisp"
              ".missiond/v3/missiond-blueprint.lisp"
+             "scripts/manage-local-providers.sh"
              "scripts/check-v3-service-extraction-isomorphism.mjs"
              "scripts/check-v3-code-isomorphism-complete.mjs"]
       :note "Pinned modularization decision: cross-service durable events move toward xjp-eventhub while MissionD keeps local EventBus and outbound spool for offline-safe agent orchestration. xjp-eventhub owns durable streams, cursors, subscriptions, waits, dead-letter, and replay for deploy-center/auth/router/timeline/service events.")

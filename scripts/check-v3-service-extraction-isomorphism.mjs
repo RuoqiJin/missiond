@@ -25,6 +25,14 @@ const checks = [
       ':service-id xjp-eventhub',
       'MissionD local EventBus remains the low-latency agent/Board/slot/workflow control bus',
       'xjp-eventhub is the durable cross-service event backbone',
+      '(provider-runtime-bringup-contract',
+      ':schema "missiond.provider-runtime-bringup.v1"',
+      'scripts/manage-local-providers.sh',
+      'local-provider-launchd',
+      'local-provider-smoke',
+      'com.xjp.memory.provider',
+      'com.xjp.eventhub.provider',
+      'postgres-durable',
       '(domain memory-access-plane',
       '(domain eventhub-extraction-plane',
       '(surface memory-provider-boundary',
@@ -308,6 +316,34 @@ const xjpChecks = [
 
 for (const [rel, needles] of xjpChecks) {
   checkFile(xjpRoot, rel, needles);
+}
+
+const localProviderChecks = [
+  [
+    'scripts/manage-local-providers.sh',
+    [
+      'com.xjp.memory.provider',
+      'com.xjp.eventhub.provider',
+      'MISSIOND_MEMORY_PROVIDER_URL',
+      'MISSIOND_EVENTHUB_URL',
+      'MISSIOND_MEMORY_PROVIDER_MODE',
+      'MISSIOND_EVENTHUB_MODE',
+      'XJP_MEMORY_DATABASE_URL',
+      'XJP_EVENTHUB_DATABASE_URL',
+      'XJP_MEMORY_PROVIDER_ID',
+      'XJP_EVENTHUB_PROVIDER_ID',
+      'xjp_memory',
+      'xjp_eventhub',
+      '/v1/memory/provider_status',
+      '/v1/eventhub/status',
+      'launchctl bootstrap',
+      'postgres-durable',
+    ],
+  ],
+];
+
+for (const [rel, needles] of localProviderChecks) {
+  checkFile(repo, rel, needles);
 }
 
 const ok = diagnostics.length === 0;
