@@ -40,6 +40,7 @@ function check(s, diagnostics) {
     'SystemEvent.ContextualCommitDetected',
     'dedupe-key "commit-lisp-backfill:<project>:<sha>"',
     'git diff-tree --root --no-commit-id -r --name-only <sha>',
+    'external-or-unavailable-commit',
     'covered when code changes have same-commit Lisp/checker/evidence coverage',
     'code-only commits need backfill',
     'visible BoardTask',
@@ -53,6 +54,7 @@ function check(s, diagnostics) {
     'SystemEvent::ContextualCommitDetected',
     'provider conversation project/project_id metadata',
     'git diff-tree --root --no-commit-id -r --name-only <sha>',
+    'external-or-unavailable-commit',
     'commit-lisp-backfill:<project>:<sha>',
     '(surface commit-lisp-convergence-loop',
     'crates/missiond-daemon/src/engine/commit_convergence.rs',
@@ -79,6 +81,7 @@ function check(s, diagnostics) {
     'classify_changed_files',
     'CommitCoverageStatus::NeedsBackfill',
     'CommitCoverageStatus::LispOnly',
+    'CommitCoverageStatus::ExternalOrUnavailableCommit',
     'find_open_task_by_dedupe_key',
     'CreateBoardTaskInput',
     'auto_execute: Some(false)',
@@ -89,6 +92,7 @@ function check(s, diagnostics) {
     'status_snapshot',
     'commit-lisp-convergence-report',
     'classifies_code_only_commit_as_needs_backfill',
+    'unavailable_commit_has_precise_status_label',
   ]);
   requireAll(diagnostics, FILES.engineMod, s.engineMod, ['pub mod commit_convergence;']);
   requireAll(diagnostics, FILES.main, s.main, [

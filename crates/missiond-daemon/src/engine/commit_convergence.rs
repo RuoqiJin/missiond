@@ -183,6 +183,7 @@ pub(crate) enum CommitCoverageStatus {
     NeedsBackfill,
     LispOnly,
     NoChangedFiles,
+    ExternalOrUnavailableCommit,
     UnknownProject,
 }
 
@@ -193,6 +194,7 @@ impl CommitCoverageStatus {
             Self::NeedsBackfill => "needs-backfill",
             Self::LispOnly => "lisp-only",
             Self::NoChangedFiles => "no-changed-files",
+            Self::ExternalOrUnavailableCommit => "external-or-unavailable-commit",
             Self::UnknownProject => "unknown-project",
         }
     }
@@ -309,7 +311,7 @@ async fn process_commit_event(
                     &CommitConvergenceReport {
                         project_id: "unknown".to_string(),
                         commit_hash: commit_hash.clone(),
-                        status: CommitCoverageStatus::UnknownProject,
+                        status: CommitCoverageStatus::ExternalOrUnavailableCommit,
                         files: Vec::new(),
                         classes: ChangedFileClasses::default(),
                         backfill_task_id: None,
@@ -324,7 +326,7 @@ async fn process_commit_event(
                 .await?;
                 return Ok(CommitConvergenceResult {
                     project_id: "unknown".to_string(),
-                    status: CommitCoverageStatus::UnknownProject,
+                    status: CommitCoverageStatus::ExternalOrUnavailableCommit,
                     backfill_task_id: None,
                     created_task: false,
                     dedupe_hit: false,
@@ -698,6 +700,14 @@ mod tests {
         assert_eq!(
             dedupe_key_for_commit("missiond", "abcdef"),
             "commit-lisp-backfill:missiond:abcdef"
+        );
+    }
+
+    #[test]
+    fn unavailable_commit_has_precise_status_label() {
+        assert_eq!(
+            CommitCoverageStatus::ExternalOrUnavailableCommit.as_str(),
+            "external-or-unavailable-commit"
         );
     }
 

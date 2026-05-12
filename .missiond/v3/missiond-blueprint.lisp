@@ -1110,7 +1110,7 @@
       :entry [SystemEvent::ContextualCommitDetected mission_execution.complete provider-durable-log]
       :core
         ((step s1 :logic "CommitConvergenceService subscribes to SystemEvent::ContextualCommitDetected with StartFrom::Latest and PerEvent cursor flush")
-         (step s2 :logic "resolve project from slot project_root/cwd, provider conversation project/project_id metadata, or project registry; unknown project writes a diagnostic report only")
+         (step s2 :logic "resolve project from slot project_root/cwd, provider conversation project/project_id metadata, or project registry; commits unavailable in registered local repos are classified external-or-unavailable-commit and write diagnostic reports only")
          (step s3 :logic "read committed snapshot with git diff-tree --root --no-commit-id -r --name-only <sha>, never current worktree diff")
          (step s4 :logic "classify changed files into code, lisp, checker, evidence, docs, or other")
          (step s5 :logic "for code-only commits create one visible deduped BoardTask commit-lisp-backfill:<project>:<sha>; lisp/checker/evidence-only commits do not recurse")
@@ -2739,10 +2739,11 @@
         :surface commit-lisp-convergence-loop
         :entry [SystemEvent::ContextualCommitDetected mission_execution.complete provider-durable-log]
         :core ((step s1 :logic "resolve project from commit event slot project_root/cwd or registry longest-prefix match")
-               (step s2 :logic "inspect committed snapshot with git diff-tree --root --no-commit-id -r --name-only <sha>")
-               (step s3 :logic "classify files into code/lisp/checker/evidence/docs/other")
-               (step s4 :logic "covered when code changes have same-commit Lisp/checker/evidence coverage; lisp-only commits do not recurse")
-               (step s5 :logic "create one visible deduped backfill BoardTask for code-only commits"))
+               (step s2 :logic "classify commit hashes absent from all registered local project roots as external-or-unavailable-commit so provider-log mentions of external commits do not masquerade as project-registry defects")
+               (step s3 :logic "inspect committed snapshot with git diff-tree --root --no-commit-id -r --name-only <sha>")
+               (step s4 :logic "classify files into code/lisp/checker/evidence/docs/other")
+               (step s5 :logic "covered when code changes have same-commit Lisp/checker/evidence coverage; lisp-only commits do not recurse")
+               (step s6 :logic "create one visible deduped backfill BoardTask for code-only commits"))
         :egress [commit_convergence_report backfill_boardtask mission_master_status.commitConvergence])
       (function lisp-code-sync
         :surface lisp-code-sync-loop
@@ -3489,7 +3490,7 @@
              "crates/missiond-daemon/src/engine/master_control.rs"
              "scripts/check-v3-commit-convergence-loop.mjs"
              "scripts/check-v3-code-isomorphism-complete.mjs"]
-      :note "commit-lisp-convergence-loop is the event-driven code->Lisp backfill muscle. CommitConvergenceService subscribes to SystemEvent::ContextualCommitDetected, resolves project from the committing slot, provider conversation project/project_id metadata, or registry, inspects committed snapshots with git diff-tree --root --no-commit-id -r --name-only <sha>, classifies code/lisp/checker/evidence/doc files, writes commit convergence reports, and creates one visible deduped BoardTask commit-lisp-backfill:<project>:<sha> for code-only commits. Lisp/checker/evidence-only commits do not recurse.")
+      :note "commit-lisp-convergence-loop is the event-driven code->Lisp backfill muscle. CommitConvergenceService subscribes to SystemEvent::ContextualCommitDetected, resolves project from the committing slot, provider conversation project/project_id metadata, or registry, inspects committed snapshots with git diff-tree --root --no-commit-id -r --name-only <sha>, classifies code/lisp/checker/evidence/doc files, writes commit convergence reports, and creates one visible deduped BoardTask commit-lisp-backfill:<project>:<sha> for code-only commits. Commits mentioned by provider logs but absent from all registered local roots are external-or-unavailable-commit diagnostics, not unknown-project registry defects. Lisp/checker/evidence-only commits do not recurse.")
 
     (surface lisp-code-sync-loop
       :status "code-aligned"
