@@ -55,6 +55,7 @@ const DEFAULT_FILES = {
   multiProjectM6Wave: '.missiond/workflows/multi-project-m6-wave.lisp',
   m6DeploymentRollout: '.missiond/workflows/m6-deployment-rollout.lisp',
   pceaDeploymentRollout: '.missiond/workflows/pcea-deployment-rollout.lisp',
+  xjpNativeCodebaseRunner: '.missiond/workflows/xjp-native-codebase-runner-convergence.lisp',
   boardCleanupBatchRunner: '.missiond/workflows/board-cleanup-batch-runner.lisp',
 };
 
