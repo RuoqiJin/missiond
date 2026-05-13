@@ -1,6 +1,7 @@
 pub(crate) mod agent_execution;
 pub(crate) mod board;
 pub(crate) mod cascade;
+pub(crate) mod context_gather;
 pub(crate) mod directive;
 pub(crate) mod evidence_collector;
 pub(crate) mod file_artifacts;

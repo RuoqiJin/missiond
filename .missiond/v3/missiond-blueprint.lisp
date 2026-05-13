@@ -2766,7 +2766,7 @@
         :v3-function knowledge-memory
         :surface memory-kb
         :tools [mission_kb_query mission_kb_remember mission_kb_mutate mission_kb_review mission_kb_ops mission_beacon
-                mission_code_search mission_memory mission_insight mission_intent])
+                mission_code_search mission_memory mission_insight mission_intent mission_context_gather])
       (tool-group shared-memory-tools
         :status code-aligned
         :v2-source ".missiond/tasks/schema/shared-memory-v1.lisp :: shared-memory-schema missiond.shared-memory.v1 (compatibility projection)"
@@ -3123,9 +3123,9 @@
         :egress [MemoryProviderConfig memory-provider-status scoped-memory-result])
       (function knowledge-memory
         :surface memory-kb
-        :entry [mission_kb_query mission_kb_remember mission_kb_mutate mission_kb_review mission_kb_ops mission_beacon mission_code_search mission_memory mission_insight mission_intent]
+        :entry [mission_context_gather mission_kb_query mission_kb_remember mission_kb_mutate mission_kb_review mission_kb_ops mission_beacon mission_code_search mission_memory mission_insight mission_intent]
         :core ((step s1 :logic "load memory-kb-policy and learning-engine-policy for realtime extraction batch, preview budgets, learning cadences, and pty send budgets")
-               (step s2 :logic "resolve project/global memory scope and normalize KB or intent query")
+               (step s2 :logic "resolve project/global memory scope and normalize KB or intent query; high-frequency intent grounding should use mission_context_gather to aggregate KB, SSOT, project registry, skill evidence, and infra evidence before falling back to leaf tools")
                (step s3 :logic "read or mutate durable knowledge rows through one Lisp-described memory contract")
                (step s4 :logic "route all realtime extraction, deep-analysis, manual MCP, and internal learning writes through the shared KB dedupe gate before any new active key can be created")
                (step s5 :logic "merge exact/fuzzy/same-session duplicates into one durable key while preserving evidence_refs, source_sessions, and superseded_by provenance")

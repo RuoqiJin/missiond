@@ -31,8 +31,8 @@ use compute::{
     worker,
 };
 use knowledge::{
-    agent_execution, board, cascade, directive, insight, intent, kb, memory, plan, project,
-    request, shared_memory, skill, workflow,
+    agent_execution, board, cascade, context_gather, directive, insight, intent, kb, memory, plan,
+    project, request, shared_memory, skill, workflow,
 };
 use sysinfra::{global_instruction, health, infra, misc, permission, power, system};
 
@@ -60,6 +60,7 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
         | "mission_skill_context"
         | "mission_skill_mutate"
         | "mission_skill_exec" => skill::handle(state, name, args).await,
+        "mission_context_gather" => context_gather::handle(state, name, args).await,
         "mission_question"
         | "mission_decision_stats"
         | "mission_incident"

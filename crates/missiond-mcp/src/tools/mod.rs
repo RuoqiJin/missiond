@@ -202,8 +202,8 @@ use compute::{
     worker,
 };
 use knowledge::{
-    agent_execution, board, cascade, directive, insight, intent, kb, memory, plan, project,
-    request, shared_memory, skill, workflow,
+    agent_execution, board, cascade, context_gather, directive, insight, intent, kb, memory, plan,
+    project, request, shared_memory, skill, workflow,
 };
 use sysinfra::{global_instruction, infra, permission, power, system};
 
@@ -217,6 +217,7 @@ pub fn all_tools() -> Vec<ToolDefinition> {
     tools.extend(memory::definitions());
     tools.extend(insight::definitions());
     tools.extend(cascade::definitions());
+    tools.extend(context_gather::definitions());
     tools.extend(intent::definitions());
     tools.extend(request::definitions());
     tools.extend(directive::definitions());
