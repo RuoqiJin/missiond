@@ -51,6 +51,7 @@ const DEFAULT_FILES = {
   workflowTests: 'crates/missiond-daemon/src/handlers/knowledge/workflow/tests.rs',
   mcpWorkflow: 'crates/missiond-mcp/src/tools/knowledge/workflow.rs',
   projectSsotConvergence: '.missiond/workflows/project-ssot-convergence.lisp',
+  intentIntakeGrounding: '.missiond/workflows/intent-intake-grounding.lisp',
   projectM6Depth: '.missiond/workflows/project-m6-depth.lisp',
   multiProjectM6Wave: '.missiond/workflows/multi-project-m6-wave.lisp',
   m6DeploymentRollout: '.missiond/workflows/m6-deployment-rollout.lisp',
@@ -247,6 +248,29 @@ function checkFiles(root, files) {
     'Dirty worktree SSOT convergence commits must stage explicit .missiond paths only',
     'Large existing intent files should use M6 overlay+manifest',
     'Dirty-baseline handling is explicit',
+  ]);
+
+  requireAll(diagnostics, files.intentIntakeGrounding, sources.intentIntakeGrounding, [
+    ':workflow_id intent-intake-grounding',
+    ':status active',
+    ':source_plans [mission_request resident-master-control work-order-lifecycle conversation-memory-distillation]',
+    ':id capture-request',
+    ':id intent-understanding',
+    ':id unknowns-inventory',
+    ':id scoped-grounding-search',
+    ':id evidence-synthesis',
+    ':id optional-investigation-worker',
+    ':id draft-intent-lisp',
+    ':id review-packet',
+    ':id intent-memory-candidate',
+    '第一轮：用户现在想做什么？',
+    '第二轮：用最小查询查一遍记忆库、项目注册、SSOT Lisp、skill 证据和必要代码锚点',
+    '第三轮：把已查证的理解整理成用户/主控可确认的 intent.lisp',
+    ':allowed-grounding-tools [mission_intent mission_kb_query mission_skill_context mission_infra_query mission_project_query mission_board_query]',
+    ':context-pack-artifacts [raw_user_message inferred_user_intent unknowns evidence_needed grounding_results grounded_intent_summary intent_lisp_path review_packet intent_memory_candidate]',
+    'No plan.lisp or worker dispatch before grounded intent exists and review policy is satisfied',
+    'Memory search is required for ambiguous user references but must be scoped by unknowns',
+    'Project identity must come from MissionD Universe or project SSOT',
   ]);
 
   requireAll(diagnostics, files.projectM6Depth, sources.projectM6Depth, [
