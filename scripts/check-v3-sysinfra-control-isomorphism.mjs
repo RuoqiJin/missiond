@@ -162,6 +162,7 @@ function checkFiles(root, files) {
     '"reconcile"',
     '"skill_evidence"',
     '"credential_refs"',
+    '"diagnostic_profiles"',
     '"health"',
     '"reachability"',
     '"diagnose"',
@@ -173,6 +174,10 @@ function checkFiles(root, files) {
     'collect_skill_evidence',
     'redact_skill_evidence_line',
     'credentialInlineRisk',
+    'mission_infra_diagnostic_profiles',
+    'diagnostic_profiles(',
+    'deploy-center-readonly-diagnostic-profile',
+    'noRawAgentExecFromMissionD',
     'privatecloud-hostvds',
     'WINDOWS_12900KF_SKILL',
     'WINDOWS_12900KF_INFRA_ID',
@@ -188,6 +193,7 @@ function checkFiles(root, files) {
     '"reconcile"',
     '"skill_evidence"',
     '"credential_refs"',
+    '"diagnostic_profiles"',
     'secret_ref',
   ]);
 
@@ -380,7 +386,7 @@ function buildFixture() {
     :checks ["node scripts/check-v3-sysinfra-control-isomorphism.mjs"]))`;
   ensureFile(root, DEFAULT_FILES.blueprint, blueprint);
 
-  const common = 'mission_infra_query mission_infra_ops mission_permission_query mission_permission_mutate mission_power_control mission_sys_logs mission_sys_config mission_daemon_update mission_global_instruction "read" "edit" "reload" "list" "get" "learned_list" "merged_for_slot" "slotId" "set_role" "set_slot" "auto_allow" "reload" "revoke" "wake" "suspend" "status" "health" "reachability" "diagnose" slots.yaml llm.yaml permissions.yaml manual-reload-required';
+  const common = 'mission_infra_query mission_infra_ops mission_permission_query mission_permission_mutate mission_power_control mission_sys_logs mission_sys_config mission_daemon_update mission_global_instruction "read" "edit" "reload" "list" "get" "diagnostic_profiles" "learned_list" "merged_for_slot" "slotId" "set_role" "set_slot" "auto_allow" "reload" "revoke" "wake" "suspend" "status" "health" "reachability" "diagnose" slots.yaml llm.yaml permissions.yaml manual-reload-required';
   for (const rel of Object.values(DEFAULT_FILES)) {
     if (rel === DEFAULT_FILES.blueprint) continue;
     ensureFile(root, rel, common);

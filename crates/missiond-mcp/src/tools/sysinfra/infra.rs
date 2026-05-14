@@ -9,14 +9,16 @@ pub fn definitions() -> Vec<ToolDefinition> {
         // ===== mission_infra_query =====
         ToolDefinition::new(
             "mission_infra_query",
-            "基础设施查询。list/get/health/reconcile/skill_evidence/credential_refs。skills 只是 evidence；凭据只返回 secret_ref，不返回明文值。",
+            "基础设施查询。list/get/health/reconcile/skill_evidence/credential_refs/diagnostic_profiles。skills 只是 evidence；凭据只返回 secret_ref，不返回明文值；远程诊断只返回 deploy-center 只读 profile 要求，不直接执行 raw agent。",
             json!({
                 "type": "object",
                 "required": ["action"],
                 "properties": {
-                    "action": {"type": "string", "enum": ["list", "get", "health", "reconcile", "skill_evidence", "credential_refs"]},
+                    "action": {"type": "string", "enum": ["list", "get", "health", "reconcile", "skill_evidence", "credential_refs", "diagnostic_profiles"]},
                     "id": {"type": "string", "description": "[get] 服务器 ID"},
-                    "target_id": {"type": "string", "description": "[skill_evidence/credential_refs] runtime target ID"},
+                    "target_id": {"type": "string", "description": "[skill_evidence/credential_refs/diagnostic_profiles] runtime target ID"},
+                    "service_id": {"type": "string", "description": "[diagnostic_profiles] 服务 ID"},
+                    "profile": {"type": "string", "description": "[diagnostic_profiles] deploy_provenance_snapshot/container_inventory/dependency_manifest_scan/supply_chain_ioc_scan"},
                     "skill": {"type": "string", "description": "[skill_evidence] 限定 skill 名称"},
                     "limit": {"type": "integer", "description": "[skill_evidence] 最大返回条数"},
                     "role": {"type": "string", "description": "[list] 角色: build/deploy/gpu/vpn/production"},

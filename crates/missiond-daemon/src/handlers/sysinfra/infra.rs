@@ -32,6 +32,16 @@ struct InfraEvidenceArgs {
 }
 
 #[derive(Deserialize)]
+struct InfraDiagnosticProfileArgs {
+    #[serde(default)]
+    target_id: Option<String>,
+    #[serde(default)]
+    service_id: Option<String>,
+    #[serde(default)]
+    profile: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct ReachabilityArgs {
     target: String,
     #[serde(default)]
@@ -59,6 +69,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             "reconcile" => handle_inner(state, "mission_infra_reconcile", args).await,
             "skill_evidence" => handle_inner(state, "mission_infra_skill_evidence", args).await,
             "credential_refs" => handle_inner(state, "mission_infra_credential_refs", args).await,
+            "diagnostic_profiles" => {
+                handle_inner(state, "mission_infra_diagnostic_profiles", args).await
+            }
             _ => Ok(ToolResult::error(format!("Unknown action: {}", action))),
         };
     }
@@ -161,6 +174,26 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 "schema": "missiond.credential-ref-inventory.v1",
                 "rule": "Only secret refs are returned. MissionD never returns credential values from Lisp, Board, or skills.",
                 "credentialRefs": refs
+            })))
+        }
+        "mission_infra_diagnostic_profiles" => {
+            let args: InfraDiagnosticProfileArgs =
+                serde_json::from_value(args).unwrap_or(InfraDiagnosticProfileArgs {
+                    target_id: None,
+                    service_id: None,
+                    profile: None,
+                });
+            let profiles = diagnostic_profiles(
+                args.target_id.as_deref(),
+                args.service_id.as_deref(),
+                args.profile.as_deref(),
+            );
+            Ok(ToolResult::json_pretty(&json!({
+                "schema": "missiond.remote-diagnostic-profile.v1",
+                "authority": "deploy-center owns remote runtime execution; MissionD only exposes profile requirements and consumes diagnostic artifacts",
+                "executionRule": "Use deploy-center read-only diagnostic profiles. Do not guess deploy-agent API keys or run raw agent exec from MissionD.",
+                "credentialAvailability": "unknown",
+                "profiles": profiles
             })))
         }
         "mission_infra_reconcile" => {
@@ -996,8 +1029,156 @@ fn redact_skill_evidence_line(line: &str) -> (String, bool) {
     (redacted, true)
 }
 
+fn diagnostic_profiles(
+    target_id: Option<&str>,
+    service_id: Option<&str>,
+    profile: Option<&str>,
+) -> Vec<Value> {
+    let target_filter = target_id.map(str::to_ascii_lowercase);
+    let profile_filter = profile.map(str::to_ascii_lowercase);
+    let service = service_id.unwrap_or("unspecified");
+    let targets = [
+        (
+            "ecs-pcea",
+            "ecs",
+            "http://104.194.81.38:9876/tunnel/proxy/ecs",
+            vec!["pcea", "pcea-api", "pcea-video-vault"],
+        ),
+        (
+            "gcp-runtime",
+            "gcp",
+            "http://34.104.147.118:9876",
+            vec![
+                "auth",
+                "router",
+                "deploy-center",
+                "secret-store",
+                "pcea-global",
+            ],
+        ),
+        (
+            "windows-12900kf",
+            "windows",
+            "http://104.194.81.38:9876/tunnel/proxy/windows",
+            vec!["router", "embedding", "rerank"],
+        ),
+        (
+            "privatecloud-10900kf",
+            "privatecloud",
+            "http://104.194.81.38:9876/tunnel/proxy/privatecloud",
+            vec!["cn-builder", "harbor-cache", "deploy-jump"],
+        ),
+        (
+            "synology-astrill-gw",
+            "manual-jump",
+            "credential-ref-required",
+            vec!["domestic-jump", "network-gateway"],
+        ),
+        (
+            "bwg-vps",
+            "bwg",
+            "http://104.194.81.38:9876",
+            vec!["router-relay", "model-relay"],
+        ),
+    ];
+    let profile_specs = [
+        json!({
+            "profileId": "deploy_provenance_snapshot",
+            "allowedOperations": ["deploy-center.project-info", "deploy-center.provenance", "deploy-center.health"],
+            "forbiddenOperations": ["raw-agent-exec", "secret-read", "container-env"],
+            "artifactKind": "deploy-provenance-diagnostic",
+            "requiresAgentCredential": false
+        }),
+        json!({
+            "profileId": "container_inventory",
+            "allowedOperations": ["agent.container-list", "docker ps --format name,image,status"],
+            "forbiddenOperations": ["docker inspect env", "printenv", "cat /proc/*/environ", "mutating docker commands"],
+            "artifactKind": "container-inventory-diagnostic",
+            "requiresAgentCredential": true
+        }),
+        json!({
+            "profileId": "dependency_manifest_scan",
+            "allowedOperations": ["read package.json", "read package-lock.json", "read pnpm-lock.yaml", "read yarn.lock", "read pyproject.toml", "read requirements*.txt"],
+            "forbiddenOperations": ["npm install", "pnpm install", "yarn install", "pip install", "python import", "node import", "lifecycle scripts"],
+            "artifactKind": "dependency-manifest-diagnostic",
+            "requiresAgentCredential": true
+        }),
+        json!({
+            "profileId": "supply_chain_ioc_scan",
+            "allowedOperations": ["grep known IoC strings in already-present files", "hash known suspicious setup/router files"],
+            "forbiddenOperations": ["package install", "network fetch", "import-time execution", "credential rotation"],
+            "artifactKind": "supply-chain-ioc-diagnostic",
+            "requiresAgentCredential": true
+        }),
+    ];
+
+    let mut items = Vec::new();
+    for (target, lane, endpoint, service_ids) in targets {
+        if target_filter
+            .as_deref()
+            .map_or(false, |filter| target != filter)
+        {
+            continue;
+        }
+        for spec in &profile_specs {
+            let profile_id = spec
+                .get("profileId")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            if profile_filter
+                .as_deref()
+                .map_or(false, |filter| profile_id != filter)
+            {
+                continue;
+            }
+            items.push(json!({
+                "targetId": target,
+                "serviceId": service,
+                "knownServiceIds": service_ids,
+                "deployCenterLane": lane,
+                "agentEndpoint": endpoint,
+                "profileId": profile_id,
+                "authority": "deploy-center",
+                "readOnly": true,
+                "requiredExecutor": "deploy-center-readonly-diagnostic-profile",
+                "credentialRefs": credential_refs(Some(target)),
+                "credentialAvailability": "unknown",
+                "canExecuteFromMissionD": false,
+                "eventSink": "SystemEvent::ExternalServiceEvent",
+                "artifactSink": "task-result-artifact",
+                "spec": spec,
+                "policy": {
+                    "noRawAgentExecFromMissionD": true,
+                    "noCredentialValues": true,
+                    "noInstallOrImport": true,
+                    "noContainerEnvRead": true
+                }
+            }));
+        }
+    }
+    items
+}
+
 fn credential_refs(target_id: Option<&str>) -> Vec<Value> {
     let refs = vec![
+        json!({
+            "targetId": "ecs-pcea",
+            "namespace": "deploy-agent",
+            "keyName": "DEPLOY_AGENT_ECS_API_KEY",
+            "secretRef": "secret-store://deploy-agent/ecs/DEPLOY_AGENT_API_KEY",
+            "purpose": "ECS/PCEA deploy-agent read-only diagnostics and deploy operations",
+            "requiredCapability": "deploy-ops",
+            "availability": "unknown"
+        }),
+        json!({
+            "targetId": "gcp-runtime",
+            "namespace": "deploy-agent",
+            "keyName": "DEPLOY_AGENT_GCP_API_KEY",
+            "secretRef": "secret-store://deploy-agent/gcp/DEPLOY_AGENT_API_KEY",
+            "purpose": "GCP deploy-agent read-only diagnostics and deploy operations",
+            "requiredCapability": "deploy-ops",
+            "availability": "unknown"
+        }),
         json!({
             "targetId": "windows-12900kf",
             "namespace": "deploy-agent",
@@ -1013,6 +1194,24 @@ fn credential_refs(target_id: Option<&str>) -> Vec<Value> {
             "keyName": "hostvds-ssh",
             "secretRef": "secret-store://infra/privatecloud-hostvds/ssh",
             "purpose": "privatecloud/HostVDS operations",
+            "requiredCapability": "deploy-ops",
+            "availability": "unknown"
+        }),
+        json!({
+            "targetId": "privatecloud-10900kf",
+            "namespace": "deploy-agent",
+            "keyName": "DEPLOY_AGENT_API_KEY",
+            "secretRef": "secret-store://deploy-agent/DEPLOY_AGENT_API_KEY",
+            "purpose": "privatecloud CN build/cache/jump operations on xjp-zibo-lan",
+            "requiredCapability": "deploy-ops",
+            "availability": "unknown"
+        }),
+        json!({
+            "targetId": "synology-astrill-gw",
+            "namespace": "ssh",
+            "keyName": "synology-astrill-gw-ssh",
+            "secretRef": "secret-store://infra/synology-astrill-gw/ssh",
+            "purpose": "Synology VM domestic jump/network gateway operations",
             "requiredCapability": "deploy-ops",
             "availability": "unknown"
         }),

@@ -52,6 +52,26 @@
      :at "2026-05-13T14:52:00+08:00"
      :actor "codex"
      :kind "deploy-center-observability-gap"
-     :summary "xjp project info secret-store-cn still reports No agent configured even though disabled normalized stage configs exist. Treat this as a read-model/UI gap; stage-configs API is the authority."))
-  :current_status "blocked-on-cn-runtime-material"
-  :next_action "Declare CN endpoint, DB/KEK/admin secret refs, and production compose override; then enable Deploy Center stages and run smoke before DNS mutation.")
+     :summary "xjp project info secret-store-cn still reports No agent configured even though disabled normalized stage configs exist. Treat this as a read-model/UI gap; stage-configs API is the authority.")
+   (event e11
+     :at "2026-05-13T20:32:00+08:00"
+     :actor "codex"
+     :kind "aliyun-risk-control"
+     :summary "Aliyun DNS OpenAPI from the local Mac triggered risk control because the observed source location was outside China. Future Aliyun DNS operations must use a domestic execution lane or user console approval, not this Mac as the caller.")
+   (event e12
+     :at "2026-05-13T20:40:00+08:00"
+     :actor "codex"
+     :kind "dns-fact"
+     :summary "ss-cn.xiaojinpro.com is now the selected CN Secret Store hostname and resolves to Aliyun ECS 106.15.2.17. This is endpoint fact, not proof that the secret-store-cn service is deployed.")
+   (event e13
+     :at "2026-05-13T20:46:00+08:00"
+     :actor "codex"
+     :kind "deploy-lane-failure"
+     :summary "GHCR image publish for secret-store-rs failed and is the wrong lane for ECS/CN anyway. ECS and Synology/domestic-only targets must not rely on target-side GitHub/GHCR; use cn-oss-bundle-lane.")
+   (event e14
+     :at "2026-05-13T21:02:00+08:00"
+     :actor "codex"
+     :kind "topology-fact"
+     :summary "User provided topology: privatecloud Ubuntu 10900KF+6800XT, Windows 12900KF+3090Ti, and Synology VM are in the same LAN. privatecloud is the preferred CN builder/jump candidate when its deploy-agent is online. Current privatecloud deploy-agent check returned client offline/wake signal."))
+  :current_status "blocked-on-domestic-artifact-lane"
+  :next_action "Recover/verify the privatecloud or another approved CN builder, then deploy secret-store-cn through cn-oss-bundle-lane with OSS object and digest provenance; do not retry GHCR/GitHub target pull from ECS.")

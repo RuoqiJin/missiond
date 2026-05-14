@@ -120,6 +120,16 @@ interface SkillEvidence {
   excerpt?: string;
 }
 
+interface DiagnosticProfile {
+  targetId?: string;
+  serviceId?: string;
+  profileId?: string;
+  authority?: string;
+  readOnly?: boolean;
+  requiredExecutor?: string;
+  canExecuteFromMissionD?: boolean;
+}
+
 interface InfraPayload {
   targets: InfraTarget[];
   health?: {
@@ -128,6 +138,7 @@ interface InfraPayload {
     credentialInlineRisks?: number;
   };
   credentialRefs?: { credentialRefs?: CredentialRef[] };
+  diagnosticProfiles?: { profiles?: DiagnosticProfile[] };
   skillEvidence?: { items?: SkillEvidence[] };
   reconcile?: {
     consistent?: boolean;
@@ -269,6 +280,7 @@ function InfraPanel() {
 
   const targets = infra?.targets ?? [];
   const refs = infra?.credentialRefs?.credentialRefs ?? [];
+  const profiles = infra?.diagnosticProfiles?.profiles ?? [];
   const evidence = infra?.skillEvidence?.items ?? [];
   const risks = evidence.filter((item) => item.credentialInlineRisk);
 
@@ -276,12 +288,13 @@ function InfraPanel() {
     <div className="px-4 sm:px-8 py-4 space-y-4">
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <MetricCard label="runtime targets" value={String(targets.length)} />
+        <MetricCard label="diagnostic profiles" value={String(profiles.length)} />
         <MetricCard label="skill evidence" value={String(infra?.health?.skillEvidenceItems ?? evidence.length)} />
         <MetricCard label="credential risks" value={String(infra?.health?.credentialInlineRisks ?? risks.length)} tone={risks.length ? 'warn' : 'ok'} />
         <MetricCard label="reconcile" value={infra?.reconcile?.consistent ? 'clean' : 'drift'} tone={infra?.reconcile?.consistent ? 'ok' : 'warn'} />
       </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-3">
         <div className="rounded-lg border border-neutral-800 bg-neutral-950/50 p-3">
           <div className="mb-2 text-xs font-medium text-neutral-300">Runtime Targets</div>
           <div className="space-y-2">
@@ -304,6 +317,24 @@ function InfraPanel() {
                   <RuntimeKV label="location" value={target.location} />
                   <RuntimeKV label="health" value={target.healthEndpoint} />
                   <RuntimeKV label="roles" value={(target.roles ?? []).slice(0, 3).join(', ')} />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="rounded-lg border border-neutral-800 bg-neutral-950/50 p-3">
+          <div className="mb-2 text-xs font-medium text-neutral-300">Read-only Diagnostic Profiles</div>
+          <div className="space-y-2">
+            {profiles.slice(0, 10).map((profile) => (
+              <div key={`${profile.targetId}-${profile.profileId}`} className="rounded-md border border-neutral-800 bg-neutral-900/50 p-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs text-neutral-300">{profile.targetId}</span>
+                  <span className="text-[9px] text-neutral-500">{profile.profileId}</span>
+                </div>
+                <div className="mt-1 text-[10px] text-neutral-500">{profile.requiredExecutor}</div>
+                <div className="mt-1 text-[10px] text-neutral-500">
+                  authority {profile.authority || 'deploy-center'} · MissionD direct exec {profile.canExecuteFromMissionD ? 'yes' : 'no'}
                 </div>
               </div>
             ))}

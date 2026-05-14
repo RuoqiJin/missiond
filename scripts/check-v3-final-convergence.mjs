@@ -81,6 +81,12 @@ const LIVE_CHECKS = [
     timeoutMs: 60_000,
   },
   {
+    id: 'data-residency-universe',
+    argv: ['scripts/check-v3-data-residency-universe-isomorphism.mjs', '--json'],
+    json: true,
+    timeoutMs: 60_000,
+  },
+  {
     id: 'project-maturity',
     argv: ['scripts/check-project-maturity.mjs', '--min-level', 'M5'],
     timeoutMs: 60_000,
@@ -128,6 +134,8 @@ const BLUEPRINT_NEEDLES = [
   ['workstation-config', '(workstation-config'],
   ['control-plane-m6-split', '(control-plane-m6-split'],
   ['control-plane split checker', 'check-v3-control-plane-m6-split.mjs'],
+  ['data-residency-universe', '(data-residency-universe'],
+  ['data-residency checker', 'check-v3-data-residency-universe-isomorphism.mjs'],
   ['lisp-code-sync-loop', '(lisp-code-sync-loop'],
   ['lisp-code-sync checker', 'check-v3-lisp-code-sync-isomorphism.mjs'],
   ['context-pack-run-wave', 'context-pack-run-wave'],

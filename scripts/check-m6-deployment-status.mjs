@@ -228,6 +228,21 @@ async function classifyProject(projectId, recentDeployments, baseUrl) {
         component.changed_paths_since_deploy.map((changedPath) => `${component.slug}:${changedPath}`)
       ),
       component_deploys: components,
+      regional_targets: regionalDeploymentTargets(projectId, false),
+    };
+  }
+  const regionalTargets = regionalDeploymentTargets(projectId, true);
+  const pendingRegionalTargets = regionalTargets.filter((target) => target.status !== 'deployed-current');
+  if (pendingRegionalTargets.length > 0) {
+    return {
+      project_id: projectId,
+      status: 'regional-rollout-incomplete',
+      reason: pendingRegionalTargets.map((target) => `${target.partition}: ${target.status}`).join('; '),
+      deploy_slugs: map.slugs,
+      latest_deploy: components[0].latest_deploy,
+      changed_paths_since_deploy: [],
+      component_deploys: components,
+      regional_targets: regionalTargets,
     };
   }
   return {
@@ -241,7 +256,45 @@ async function classifyProject(projectId, recentDeployments, baseUrl) {
     latest_deploy: components[0].latest_deploy,
     changed_paths_since_deploy: [],
     component_deploys: components,
+    regional_targets: regionalTargets,
   };
+}
+
+function regionalDeploymentTargets(projectId, componentsCurrent) {
+  if (projectId !== 'pcea') return [];
+  return [
+    {
+      partition: 'pcea-cn',
+      platform_partition: 'xjp-cn',
+      runtime_target: 'ecs-pcea',
+      runtime_provider: 'aliyun-ecs',
+      deploy_center_agent: 'ecs',
+      status: componentsCurrent ? 'deployed-current' : 'component-deploy-not-current',
+      authority: 'deploy-center',
+      notes: 'Existing pcea.top lane remains on Aliyun ECS; target-side builds are forbidden.',
+    },
+    {
+      partition: 'pcea-global',
+      platform_partition: 'xjp-global',
+      runtime_target: 'gcp-runtime',
+      runtime_provider: 'gcp-vm',
+      deploy_center_agent: 'gcp',
+      status: 'target-pending-provisioning',
+      authority: 'deploy-center',
+      notes:
+        'Requires separate deploy-center project/provenance, Secret Store namespace, auth issuer, storage/payment ledgers, and smoke rollout before traffic.',
+    },
+    {
+      partition: 'pcea-global-eu',
+      platform_partition: 'xjp-global-eu',
+      runtime_target: 'gcp-runtime',
+      runtime_provider: 'gcp-vm',
+      deploy_center_agent: 'gcp',
+      status: 'operating-zone-pending-dedicated-eu-runtime',
+      authority: 'deploy-center',
+      notes: 'Requires EU storage/KMS/support-access pinning before EU customer data is accepted.',
+    },
+  ];
 }
 
 async function classifyComponent(component, recentDeployments, baseUrl) {

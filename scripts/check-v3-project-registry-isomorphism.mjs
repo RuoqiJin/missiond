@@ -121,7 +121,7 @@ function checkFiles(root, files) {
 	    '(level M6 :name auth-grade',
 	    '(project-maturity-registry',
 	    ':schema "missiond.project-maturity-registry.v2"',
-	    ':common-m5-to-m6-gap [domain-model policy-flow-event-split compatibility-ledger hot-path-wiring regression-matrix final-m6-report]',
+	    ':common-m5-to-m6-gap [domain-model policy-flow-event-split compatibility-ledger hot-path-wiring regression-matrix data-residency-declaration final-m6-report]',
 	    'scripts/check-project-maturity.mjs --min-level M5',
 	    'scripts/check-project-maturity.mjs --min-level M6',
 	    'It resolves the MissionD blueprint from the checker script directory',
@@ -158,6 +158,19 @@ function checkFiles(root, files) {
 	    ':backend ".missiond/backend/pcea-backend-blueprint.lisp"',
 	    ':frontend ".missiond/frontend/pcea-frontend-blueprint.lisp"',
 	    ':capability deploy-ops',
+	    '(data-residency-universe',
+	    ':schema "missiond.data-residency-universe.v1"',
+	    '(data-region-partition-contract',
+	    '(regional-auth-issuer-contract',
+	    '(regional-storage-contract',
+	    '(regional-payment-ledger-contract',
+	    '(regional-router-model-policy',
+	    '(cross-region-data-policy',
+	    '(project-region-declaration :project pcea',
+	    ':data-regions [cn global]',
+	    ':contains-spi true',
+	    ':contains-important-data unknown',
+	    ':cross-region-default deny',
 	    '(service-runtime-universe',
 	    ':schema "missiond.service-runtime-universe.v1"',
 	    ':id auth',
@@ -385,7 +398,7 @@ function buildFixture() {
 	             (level M6 :name auth-grade)))
 	  (project-maturity-registry
 	    :schema "missiond.project-maturity-registry.v2"
-	    :common-m5-to-m6-gap [domain-model policy-flow-event-split compatibility-ledger hot-path-wiring regression-matrix final-m6-report]
+	    :common-m5-to-m6-gap [domain-model policy-flow-event-split compatibility-ledger hot-path-wiring regression-matrix data-residency-declaration final-m6-report]
 	    (maturity :id missiond :current M6 :target M6)
 	    (maturity :id auth :current M6 :target M6 :gap []))
 	  (project-identity-contract :reconcile-action mission_project.reconcile)

@@ -15,7 +15,7 @@
     ((step s1 :id review-question
        :logic "Ask the resident master to review only MissionD V3 SSOT control-plane granularity: which blocks are too large, which loops are ambiguous, and which rules are not named functions.")
      (step s2 :id inventory-overloaded-blocks
-       :logic "Measure workstation-config, resident-master-control, EventBridge/deployment, project-universe, memory/skill, and execution workflow blocks by function names, steps, long invariants, batch checkpoint ownership, and runtime projection ownership.")
+       :logic "Measure workstation-config, resident-master-control, EventBridge/deployment, project-universe, data-residency, memory/skill, and execution workflow blocks by function names, steps, long invariants, batch checkpoint ownership, and runtime projection ownership.")
      (step s3 :id define-subplanes
        :logic "Represent each overloaded area as a named domain with owner, source blocks, functions, runtime projection, checker pins, and a refactor rule.")
      (step s4 :id preserve-runtime-compatibility
@@ -33,7 +33,7 @@
      (gate g3 :rule "Historical methodology workflows remain reference artifacts; active workflow dispatch must use missiond.workflow.v1 contracts.")
      (gate g4 :rule "No production deploy, daemon restart, or MCP mutation is required for this workflow."))
   :completion
-    ((criterion c1 :rule "control-plane-m6-split contains six named domains: workstation, master, eventbridge/deployment, project/universe, knowledge/skill, and execution.")
+    ((criterion c1 :rule "control-plane-m6-split contains nine named domains: workstation, master, eventbridge/deployment, eventhub extraction, project/universe, data-residency, memory-access, knowledge/skill, and execution.")
      (criterion c2 :rule "Each domain declares owner, source, functions, runtime-projection, checker, and refactor-rule.")
      (criterion c3 :rule "check-v3-control-plane-m6-split and final convergence static gate pass.")
      (criterion c4 :rule "Compiled workflow projection includes missiond-control-plane-m6-split.")))

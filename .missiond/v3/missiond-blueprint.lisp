@@ -931,7 +931,7 @@
   (control-plane-m6-split
     :schema "missiond.control-plane-m6-split.v1"
     :purpose "Keep MissionD's fast-growing orchestration/control plane readable by splitting overloaded policy blocks into stable subplanes while preserving existing runtime projections."
-    :domains [workstation-control-plane master-control-plane eventbridge-deployment-plane eventhub-extraction-plane project-universe-plane memory-access-plane knowledge-skill-plane execution-control-plane]
+    :domains [workstation-control-plane master-control-plane eventbridge-deployment-plane eventhub-extraction-plane project-universe-plane data-residency-plane memory-access-plane knowledge-skill-plane execution-control-plane]
     (domain workstation-control-plane
       :owner workstation-config
       :source [workstation-config workstation-pool agent-interaction-policy]
@@ -962,11 +962,18 @@
       :refactor-rule "MissionD local EventBus remains the low-latency agent/Board/slot/workflow control bus. xjp-eventhub is the durable cross-service event backbone; MissionD syncs selected local events through an outbound spool and can continue local orchestration when xjp-eventhub is offline.")
     (domain project-universe-plane
       :owner project-registry
-      :source [project-registry-policy project-identity-contract registry-authority-map project-maturity-model project-maturity-registry project-blueprint-registry service-runtime-universe]
-      :functions [project-identity-root-resolution registry-authority-map maturity-contract service-runtime-summary deploy-fact-reference forge-catalog-reference registry-reconciliation]
+      :source [project-registry-policy project-identity-contract registry-authority-map project-maturity-model project-maturity-registry project-blueprint-registry service-runtime-universe data-residency-universe]
+      :functions [project-identity-root-resolution registry-authority-map maturity-contract service-runtime-summary data-residency-summary deploy-fact-reference forge-catalog-reference registry-reconciliation]
       :runtime-projection [mission_project.universe compiled-project-universe project_registry_reconcile Board-System-Universe]
       :checker ["node scripts/check-project-ssot-universe.mjs" "node scripts/check-project-maturity.mjs --min-level M5" "node scripts/check-v3-control-plane-m6-split.mjs"]
       :refactor-rule "MissionD owns identity/SSOT/maturity; deploy-center owns runtime release facts; Forge owns component/pattern catalog. New project metadata must declare which authority owns it.")
+    (domain data-residency-plane
+      :owner data-residency-universe
+      :source [data-residency-universe project-maturity-model project-blueprint-registry service-runtime-universe]
+      :functions [data-region-partition-contract regional-auth-issuer-contract regional-secret-store-contract regional-storage-contract regional-payment-ledger-contract regional-router-model-policy cross-region-data-policy project-region-declaration]
+      :runtime-projection [compiled-project-universe mission_project.universe Board-System-Universe project_registry_reconcile]
+      :checker ["node scripts/check-v3-data-residency-universe-isomorphism.mjs" "node scripts/check-project-ssot-universe.mjs" "node scripts/check-v3-control-plane-m6-split.mjs"]
+      :refactor-rule "Data-bearing projects must declare region partitions before release. cn/global are hard partitions; EU is an operating zone inside global until a project explicitly promotes it to a hard partition. Cross-region data flow is default-deny and whitelist-driven.")
     (domain memory-access-plane
       :owner memory-provider-contract
       :source [memory-provider-contract memory-kb-policy conversation-memory-distillation ssot-retrieval-scope]
@@ -984,11 +991,11 @@
 		      :refactor-rule "KB remains opt-in until memory is cleaned; operational skill facts are not noisy KB and must be explicitly retrievable through the configured MemoryProvider for remote-host, deploy-agent, router embedding/rerank, CI runner, and model-host questions. Project constants should still move to SSOT/Universe rather than worker prompt preloads; broad SSOT review must exclude cold runtime artifacts unless include_runtime=true is explicit.")
     (domain execution-control-plane
       :owner workflow-runner
-      :source [autopilot-runtime workstation-config conversation-memory-distillation semantic-ir-shared-memory-convergence evidence-governance-policy]
-      :functions [workflow-runner task-result-artifact worker-completion-settle slot-lifecycle-manager memory-review-batch-runner board-cleanup-batch-runner board-search-noise-governance evidence-governance-view execution-step-digest conversation-label-calibration taxonomy-proposal jarvis-stream-affinity jarvis-usage-ledger]
-      :runtime-projection [BoardTask EventBus task_result_artifacts evidence_governance_view conversation ended_at SlotReleased workflow_runs workflow_run memory_review_batch_runner board_cleanup_batch_runner board_search_scope execution_step_digest message_labels token_usage_ledger]
+      :source [autopilot-runtime workstation-config conversation-memory-distillation semantic-ir-shared-memory-convergence evidence-governance-policy file-artifacts mission_request mission_board]
+      :functions [work-order-lifecycle workflow-runner task-result-artifact worker-completion-settle slot-lifecycle-manager memory-review-batch-runner board-cleanup-batch-runner board-search-noise-governance evidence-governance-view execution-step-digest conversation-label-calibration taxonomy-proposal jarvis-stream-affinity jarvis-usage-ledger]
+      :runtime-projection [BoardTask EventBus work_order_intent work_order_plan work_order_audit task_result_artifacts evidence_governance_view conversation ended_at SlotReleased workflow_runs workflow_run memory_review_batch_runner board_cleanup_batch_runner board_search_scope execution_step_digest message_labels token_usage_ledger]
       :checker ["node scripts/check-v3-control-plane-m6-split.mjs" "node scripts/check-v3-pty-recognition-isomorphism.mjs" "node scripts/check-v3-workflow-isomorphism.mjs"]
-      :refactor-rule "Long-running batch work must use checkpointed workflow_run state, canonical task-result artifacts, EventBus-driven completion settle, and slot lifecycle release; Board notes and PTY finals are projections, not the canonical result. Board cleanup is advisory by default: workers write task-result-artifacts and batch reports, generated review tasks may close after settle, and historical BoardTasks remain untouched until an approved maintenance workflow applies recommendations. Board keyword search defaults to active task scope so historical done/skipped tasks do not pollute current governance decisions; historical search requires includeHistorical=true, scope=all, or an explicit historical status. Execution cockpit read models derive execution-step-digest, conversation-label-calibration, taxonomy-proposal, Jarvis stream affinity, and Jarvis usage-ledger summaries from durable tables instead of asking operators to inspect raw PTY.")
+      :refactor-rule "All operator, Board, and external-application delegation requests converge into one work-order lifecycle: intent.lisp or an equivalent external intent envelope is normalized, bound to a BoardTask, compiled into plan.lisp accepted shards, executed through workflow_run/shared-memory, and closed through task-result artifacts plus audit.lisp. Long-running batch work must use checkpointed workflow_run state, canonical task-result artifacts, EventBus-driven completion settle, and slot lifecycle release; Board notes and PTY finals are projections, not the canonical result. Board cleanup is advisory by default: workers write task-result-artifacts and batch reports, generated review tasks may close after settle, and historical BoardTasks remain untouched until an approved maintenance workflow applies recommendations. Board keyword search defaults to active task scope so historical done/skipped tasks do not pollute current governance decisions; historical search requires includeHistorical=true, scope=all, or an explicit historical status. Execution cockpit read models derive execution-step-digest, conversation-label-calibration, taxonomy-proposal, Jarvis stream affinity, and Jarvis usage-ledger summaries from durable tables instead of asking operators to inspect raw PTY.")
 	    :workflow ".missiond/workflows/missiond-control-plane-m6-split.lisp"
 	    :egress [control-plane-split-report checker-pins compiled-runtime-projection-gaps]
 	    :checker "node scripts/check-v3-control-plane-m6-split.mjs")
@@ -1545,7 +1552,7 @@
     :schema "missiond.infrastructure-universe.v1"
     :rule "Servers, runtime targets, deployment locations, agent/executor facts, and skill-derived ops knowledge are first-class governance objects. MissionD owns the Universe summary and dispatch policy; deploy-center owns verified runtime/deployment facts; secret-store owns credential values; skills are evidence only."
     (runtime-target-contract
-      :fields [target_id aliases kind environment owner_authority capabilities deploy_center_executor agent_url service_ids evidence_refs freshness]
+      :fields [target_id aliases kind environment owner_authority capabilities deploy_center_executor agent_url service_ids network_profile lan_group artifact_lanes evidence_refs freshness]
       :invariants ["Runtime targets promoted from skills MUST be marked unverified until deploy-center or an approved probe confirms them."
                    "MissionD workers encountering an unknown server MUST query mission_infra_query(action=skill_evidence|reconcile) before guessing login paths or deployment authority."
                    "Runtime facts from deploy-center provenance override local skill notes; MissionD never silently overwrites conflicts."])
@@ -1553,39 +1560,87 @@
       :fields [secret_ref namespace key_name purpose required_capability]
       :invariants ["Lisp, Board notes, context packs, and skills MUST NOT become active stores for login passwords, API keys, Cloudflare tokens, or SSH secrets."
                    "mission_infra_query(action=credential_refs) returns secret refs and availability only; it never returns credential values."
-                   "Credential-like skill lines are migration evidence and must be redacted before entering worker context."])
+                   "Credential-like skill lines are migration evidence and must be redacted before entering worker context."
+                   "Provider account credentials such as Aliyun AccessKey are stored once as account-level secrets; capability targets such as DNS, OSS, ECS, or billing reference the account credential instead of duplicating narrower key names."])
     (skill-evidence-contract
       :fields [source_skill source_path source_line confidence last_verified_at promote_to credential_inline_risk excerpt]
       :rule "Skills are operational guidance and discovery evidence. A skill fact becomes active runtime truth only after reconcile promotes it into deploy-center runtime inventory or MissionD Universe with a source reference.")
     (break-glass-runbook-contract
       :fields [runbook_id target_id service_id source_skill evidence_refs allowed_actions forbidden_actions credential_refs approval_required freshness]
       :rule "Manual ECS/SSH/operator fallback is a break-glass runbook, not the primary deploy path. It is attached to deploy-ops tasks only when deploy-center reports agent_offline/agent_update_failed or provenance cannot be obtained, and it must reference secret-store credential refs instead of inline secrets.")
+    (read-only-remote-diagnostic-contract
+      :fields [profile_id target_id service_id authority read_only allowed_operations forbidden_operations credential_refs event_sink artifact_sink]
+      :profiles [deploy_provenance_snapshot container_inventory dependency_manifest_scan supply_chain_ioc_scan]
+      :invariants ["Remote diagnostic work MUST resolve a deploy-center read-only diagnostic profile before touching agent endpoints. MissionD may list profile requirements with mission_infra_query(action=diagnostic_profiles), but it MUST NOT guess deploy-agent API keys or run raw agent exec for diagnostics."
+                   "Allowed profile operations are restricted to deploy provenance snapshots, container inventory without env, dependency manifest file scans, and supply-chain IoC grep over already-present files. npm/pnpm/yarn/pip install, Python/Node import, lifecycle scripts, container env reads, mutating docker/system commands, and secret dumps are forbidden."
+                   "Diagnostic output is stored as task-result-artifact or ExternalServiceEvent evidence; PTY/log output is a projection only and credential values are never returned."])
+    (target-network-profile-contract
+      :fields [profile_id allowed_outbound forbidden_outbound allowed_transfer_stores build_runtime_candidates target_side_build_allowed diagnostics]
+      :invariants ["CN restricted targets such as Aliyun ECS and Synology/domestic-only VMs MUST NOT depend on target-side GitHub, GHCR, Docker Hub, or source builds."
+                   "Privatecloud Ubuntu 10900KF, Windows 12900KF, and Synology VM share xjp-zibo-lan and may be used as build/cache/jump evidence when their agent/credential refs are healthy."
+                   "If a deploy worker sees a restricted target configured for GHCR/GitHub direct pull, it must create deployment-lane-mismatch instead of retrying network calls."])
+    (artifact-delivery-lane-contract
+      :fields [lane_id source_commit builder_id transfer_store target_runtime artifact_sha256 target_digest reported_digest rollback_artifact smoke_evidence]
+      :lanes [cloud-registry-lane cn-oss-bundle-lane gitee-source-mirror-lane manual-break-glass-lane]
+      :invariants ["cn-oss-bundle-lane means approved builder -> Aliyun OSS -> ECS internal download -> deploy-agent run -> reported digest; ECS must not build or pull GHCR as the normal path."
+                   "gitee-source-mirror-lane is source/control evidence only unless paired with a builder and artifact lane."
+                   "manual-break-glass-lane requires approval and post-action provenance."])
     (agent-offline-response-policy
-      :entry [deploy-center.agent_heartbeat deploy-center.agent_update_failed deployment-event-response mission_infra_query.skill_evidence]
+      :entry [deploy-center.agent_heartbeat deploy-center.agent_update_failed deployment-event-response mission_infra_query.skill_evidence mission_infra_query.diagnostic_profiles]
       :core ((step s1 :logic "when deploy-center emits agent_offline or repeated heartbeat/update failure, MissionD creates or updates one deploy-ops incident keyed by target_id/service_id/root_cause_key")
              (step s2 :logic "MissionD queries runtime target inventory and skill evidence for break-glass runbook refs such as PCEA ECS jump-host/OSS/deploy.sh facts, redacting any credential-like line")
-             (step s3 :logic "resident master presents options: wait for agent recovery, trigger deploy-center self-update, or use approved manual runbook; manual actions require explicit approval and deploy-ops worker context")
-             (step s4 :logic "if manual runbook is used, write evidence back to deploy-center/MissionD as provenance gap remediation instead of leaving an untracked shell operation"))
+             (step s3 :logic "MissionD first asks deploy-center for read-only diagnostic profiles such as deploy_provenance_snapshot, container_inventory, dependency_manifest_scan, and supply_chain_ioc_scan; unavailable credentials become Decision Inbox or secret-store binding gaps, not guessed raw agent calls")
+             (step s4 :logic "resident master presents options: wait for agent recovery, trigger deploy-center self-update, run an approved read-only diagnostic profile, or use approved manual runbook; manual actions require explicit approval and deploy-ops worker context")
+             (step s5 :logic "if a diagnostic profile or manual runbook is used, write evidence back to deploy-center/MissionD as provenance gap remediation instead of leaving an untracked shell operation"))
       :egress [deploy-ops-BoardTask break-glass-context-pack Decision-Inbox deploy-center-provenance-gap]
-      :surfaces [".missiond/workflows/deployment-event-response.lisp" ".missiond/workflows/m6-deployment-rollout.lisp" "mission_infra_query(action=skill_evidence|credential_refs)"])
+      :surfaces [".missiond/workflows/deployment-event-response.lisp" ".missiond/workflows/m6-deployment-rollout.lisp" "mission_infra_query(action=skill_evidence|credential_refs|diagnostic_profiles)"])
     (runtime-authority-map
       :authorities ((missiond :owns [project-identity universe-summary dispatch-policy eventbridge])
                     (deploy-center :owns [runtime-target-inventory executor-inventory service-deploy-location agent-heartbeat-provenance release-provenance])
                     (secret-store :owns [credential-values credential-rotation credential-availability])
                     (skills :owns [operational-guidance evidence-source workflow-procedure])
                     (forge :owns [component-catalog pattern-catalog code-reality-mirror])))
+    (cloud-ops-delegation-policy
+      :entry [operator-request mission_infra_query.credential_refs mission_infra_query.skill_evidence deployment-event-response m6-deployment-rollout]
+      :core ((step s1 :logic "classify credential rotation, DNS changes, cloud account inventory, OSS/ECS setup, and deploy-agent recovery as cloud/deploy ops rather than generic coding work")
+             (step s2 :logic "resident master builds a redacted context pack with target_id, credential_ref availability, skill evidence refs, intended mutation, rollback/verification command, and approval boundary")
+             (step s3 :logic "delegate operational execution to the explicit claude-code-deploy-ops lane; Codex/resident master supervises, validates evidence, and updates SSOT/evidence, but does not perform routine shell/cloud console operations itself")
+             (step s4 :logic "after one-off operation succeeds, promote reusable procedure into deploy-center/MissionD workflow evidence and keep only secret refs, not secret values"))
+      :egress [deploy-ops-BoardTask cloud-ops-context-pack task-result-artifact ssot-evidence-update]
+      :surfaces [".missiond/workflows/m6-deployment-rollout.lisp" ".missiond/workflows/deployment-event-response.lisp" "mission_infra_query(action=credential_refs|skill_evidence)"])
     (runtime-target :target_id gcp-runtime
       :aliases [gcp-production]
       :kind cloud-runtime
       :environment production
       :owner_authority deploy-center
-      :capabilities [auth router deploy-center secret-store credential-vault caddy-reverse-proxy production-runtime]
-      :service_ids [auth router deploy-center secret-store]
+      :capabilities [auth router deploy-center secret-store credential-vault caddy-reverse-proxy production-runtime google-cloud-storage global-object-store]
+      :service_ids [auth router deploy-center secret-store global-object-store]
       :public_domain "ss.xiaojinpro.top"
       :public_ip "34.104.147.118"
-      :credential_refs [secret-store://cloud/gcp/deploy-center-runtime secret-store://secret-store/cloudflare/CLOUDFLARE_DNS_TOKEN]
+      :credential_refs [secret-store://cloud/gcp/deploy-center-runtime secret-store://deploy-agent/gcp/DEPLOY_AGENT_API_KEY secret-store://secret-store/cloudflare/CLOUDFLARE_DNS_TOKEN]
+      :diagnostic_profiles [deploy_provenance_snapshot container_inventory dependency_manifest_scan supply_chain_ioc_scan]
       :freshness verified-2026-05-11
-      :evidence_refs [service-runtime-universe deploy-center-provenance secret-store-gcp-migration-20260511])
+      :evidence_refs [service-runtime-universe deploy-center-provenance secret-store-gcp-migration-20260511 gcp-global-object-store-20260513])
+    (runtime-target :target_id aliyun-account
+      :aliases [aliyun-global aliyun-cloud-account]
+      :kind cloud-account
+      :environment cn-production
+      :owner_authority deploy-center
+      :capabilities [alidns oss ecs ram cloud-account-inventory domain-record-inventory domain-record-upsert object-storage-bucket-management ecs-runtime-management]
+      :service_ids [long-image-service pcea secret-store-cn deploy-center-cn]
+      :freshness credential-rotated-and-dns-read-verified-2026-05-13
+      :credential_refs [secret-store://aliyun-global/ALIYUN_ACCESS_KEY_ID secret-store://aliyun-global/ALIYUN_ACCESS_KEY_SECRET]
+      :evidence_refs [aliyun-global-access-key-rotation-20260513 skill:aliyun])
+    (runtime-target :target_id aliyun-dns
+      :aliases [aliyun-alidns changtu-pro-dns]
+      :kind dns-provider
+      :environment cn-production
+      :owner_authority deploy-center
+      :capabilities [domain-record-inventory domain-record-upsert changtu-pro-dns]
+      :service_ids [long-image-service pcea]
+      :freshness dns-read-verified-2026-05-13
+      :credential_refs [secret-store://aliyun-global/ALIYUN_ACCESS_KEY_ID secret-store://aliyun-global/ALIYUN_ACCESS_KEY_SECRET]
+      :evidence_refs [aliyun-global-access-key-rotation-20260513 changtu-pro-deployment-and-payment-boundary-20260513 skill:aliyun])
     (runtime-target :target_id ecs-pcea
       :aliases [pcea-ecs]
       :kind cloud-vm
@@ -1593,10 +1648,35 @@
       :owner_authority deploy-center
       :capabilities [pcea deploy-agent runtime]
       :service_ids [pcea]
-      :freshness unverified
+      :network_profile ecs-cn-restricted
+      :artifact_lanes [cn-oss-bundle-lane gitee-source-mirror-lane manual-break-glass-lane]
+      :freshness verified-agent-online-2026-05-13
+      :runtime_facts (instance_id "i-uf6641fl52xo7ukf7kgl"
+                      instance_name "iZuf6641fl52xo7ukf7kglZ"
+                      public_ip "106.15.2.17"
+                      zone "cn-shanghai-e"
+                      agent_version "10.7.2"
+                      current_containers [pcea-app pcea-api pcea-postgres]
+                      missing_services [secret-store-cn])
       :break_glass_runbook_refs [skill:pcea#ssh skill:pcea#deploy skill:aliyun#ECS skill:deploy-ops#deploy-agent]
-      :credential_refs [secret-store://deploy-agent/ecs/DEPLOY_AGENT_API_KEY secret-store://infra/aliyun-ecs/ssh]
-      :evidence_refs [skill:pcea skill:aliyun skill:deploy-ops])
+      :credential_refs [secret-store://deploy-agent/DEPLOY_AGENT_ECS_API_KEY secret-store://infra/aliyun-ecs/ssh]
+      :diagnostic_profiles [deploy_provenance_snapshot container_inventory dependency_manifest_scan supply_chain_ioc_scan]
+      :evidence_refs [skill:pcea skill:aliyun skill:deploy-ops secret-store-cn-ecs-deploy-20260513])
+    (runtime-target :target_id privatecloud-10900kf
+      :aliases [privatecloud privatecloud-lan-192-168-1-20 ubuntu-10900kf]
+      :kind local-lan-builder
+      :environment local-lan
+      :owner_authority deploy-center
+      :deploy_center_executor privatecloud
+      :agent_url privatecloud
+      :capabilities [cn-build cache harbor github-runner deploy-agent domestic-jump]
+      :service_ids []
+      :network_profile privatecloud-build-lan
+      :lan_group xjp-zibo-lan
+      :artifact_lanes [cn-oss-bundle-lane gitee-source-mirror-lane]
+      :freshness declared-2026-05-13-agent-offline
+      :credential_refs [secret-store://deploy-agent/DEPLOY_AGENT_API_KEY]
+      :evidence_refs [skill:private-cloud user-topology-20260513])
     (runtime-target :target_id privatecloud-hostvds
       :aliases [hostvds privatecloud]
       :kind vps-runtime
@@ -1615,9 +1695,24 @@
       :agent_url windows
       :capabilities [gpu github-runner embedding rerank deploy-agent]
       :service_ids [router]
+      :network_profile privatecloud-build-lan
+      :lan_group xjp-zibo-lan
       :freshness skill-derived-unverified
       :credential_refs [secret-store://deploy-agent/windows-12900kf/agent-token]
       :evidence_refs [skill:windows-runner skill:missiond-model-routing])
+    (runtime-target :target_id synology-astrill-gw
+      :aliases [synology-vm astrill-gw domestic-jump]
+      :kind local-lan-gateway
+      :environment local-lan
+      :owner_authority deploy-center
+      :capabilities [domestic-jump network-gateway]
+      :service_ids []
+      :network_profile synology-cn-restricted
+      :lan_group xjp-zibo-lan
+      :artifact_lanes [manual-break-glass-lane]
+      :freshness declared-2026-05-13-credential-ref-required
+      :credential_refs [secret-store://infra/synology-astrill-gw/ssh]
+      :evidence_refs [skill:astrill-gateway user-topology-20260513])
     (runtime-target :target_id bwg-vps
       :aliases [bwg model-tunnel]
       :kind vps-tunnel
@@ -1635,6 +1730,8 @@
       :owner_authority deploy-center
       :capabilities [cache harbor dns registry]
       :service_ids []
+      :network_profile privatecloud-build-lan
+      :lan_group xjp-zibo-lan
       :freshness skill-derived-unverified
       :evidence_refs [skill:xjp-deploy-center])
     :surfaces ["crates/missiond-daemon/src/handlers/sysinfra/infra.rs"
@@ -1643,6 +1740,174 @@
                "packages/board/src/app/api/infra/route.ts"
                "packages/board/src/components/SystemDashboard.tsx"
                "scripts/check-v3-infrastructure-universe-isomorphism.mjs"])
+
+  (data-residency-universe
+    :schema "missiond.data-residency-universe.v1"
+    :purpose "Govern legal/technical data partitions for data-bearing projects. This is an architecture SSOT, not legal advice: it makes region identity, issuer, secrets, storage, payment, model routing, and cross-region egress explicit so MissionD can refuse ambiguous M6 releases."
+    :research ".missiond/research/data-residency-universe-report-20260512.md"
+    :rule "cn and global are hard partitions at the XJP platform layer. Applications such as PCEA and CUTHUB bind to xjp-cn or xjp-global instead of inventing separate auth/secret/payment/router stacks. global-eu is an operating zone inside xjp-global until a project explicitly declares a separate hard partition. Region routing uses explicit project/workspace selection plus account/payment signals; IP is a hint only."
+    (data-region-partition-contract
+      :partition-key project-or-workspace-id
+      :partitions
+        ((partition cn
+           :boundary hard
+           :authority "China mainland legal entity / ICP / local runtime"
+           :identity-namespace cn
+           :runtime "mainland cloud runtime; exact deploy-center target required before launch"
+           :must-not-share [issuer signing-key kek payment-ledger object-storage vector-db prompt-corpus eventhub user-table])
+         (partition global
+           :boundary hard
+           :authority "global legal entity / non-mainland runtime"
+           :identity-namespace global
+           :operating-zones [global-us global-eu]
+           :must-not-share-with [cn])
+         (operating-zone global-eu
+           :parent global
+           :boundary soft-plus
+           :authority "GDPR/EU data boundary inside global"
+           :pins [storage kms logs support-access customer-data])
+         (operating-zone global-us
+           :parent global
+           :boundary default
+           :authority "global US default runtime"))
+	      :invariants ["Partition id MUST appear in issuer, audience, storage bucket prefix, KMS/KEK id, event topic, payment account, and router policy."
+	                   "A token, API key, storage credential, model prompt route, or payment webhook from one hard partition MUST NOT be accepted by another hard partition."
+	                   "Cross-partition movement requires a fresh authentication/export flow and must be classified by cross-region-data-policy."])
+    (xjp-platform-partition-contract
+      :fields [platform-partition legal-region runtime-target runtime-provider deploy-center-agent auth-stack secret-store payment-ledger storage-ledger router-policy eventhub timeline deploy-center-lane application-bindings status]
+      :rule "XJP infrastructure, not each application, owns the cn/global separation. New data-bearing applications bind to a platform partition and inherit its auth, secret-store, payment, storage, router, event, deployment, and observability boundaries."
+      :partitions
+        ((xjp-cn
+           :legal-region cn
+           :runtime-target ecs-pcea
+           :runtime-provider aliyun-ecs
+           :deploy-center-agent ecs
+           :auth-stack auth-cn
+           :secret-store secret-store-cn
+           :payment-ledger xjp-cn-ledger
+           :storage-ledger xjp-cn-storage
+           :router-policy xjp-cn-router
+           :eventhub xjp-cn-eventhub
+           :timeline xjp-cn-timeline
+           :deploy-center-lane xjp-cn-deploy
+           :application-bindings [pcea-cn cuthub-cn]
+           :status active-cn-platform)
+         (xjp-global
+           :legal-region global
+           :runtime-target gcp-runtime
+           :runtime-provider gcp-vm
+           :deploy-center-agent gcp
+           :auth-stack auth-global
+           :secret-store secret-store-global
+           :payment-ledger xjp-global-ledger
+           :storage-ledger (xjp-global-storage :provider google-cloud-storage :bucket "gs://xjp-global-object-store-project-20250408" :location ASIA :ubla true)
+           :router-policy xjp-global-router
+           :eventhub xjp-global-eventhub
+           :timeline xjp-global-timeline
+           :deploy-center-lane xjp-global-deploy
+           :application-bindings [pcea-global cuthub-global]
+           :status active-global-platform)
+         (xjp-global-eu
+           :parent xjp-global
+           :legal-region eu
+           :runtime-target gcp-runtime
+           :runtime-provider gcp-vm
+           :deploy-center-agent gcp
+           :auth-stack auth-global
+           :storage-ledger xjp-global-eu-storage
+           :router-policy xjp-global-eu-router
+           :eventhub xjp-global-eu-eventhub
+           :application-bindings [pcea-global-eu]
+           :status operating-zone-pending-dedicated-eu-runtime))
+      :invariants ["Applications bind to exactly one hard platform partition for active user data; dual-homed user records are forbidden."
+                   "An app-level partition may narrow storage/model/payment policy, but it cannot weaken the platform partition boundary."
+                   "Deploy Center must expose platform-partition release provenance before MissionD can mark an app-region target deployed."])
+    (regional-auth-issuer-contract
+      :fields [partition issuer jwks audience oauth-clients token-signing-key session-store account-link-policy]
+      :pcea ((pcea-cn :issuer "https://auth.pcea.cn" :jwks "https://auth.pcea.cn/.well-known/jwks.json" :audience pcea-cn :account-link-policy separate-account)
+             (pcea-global :issuer "https://auth.pcea.io" :jwks "https://auth.pcea.io/.well-known/jwks.json" :audience pcea-global :account-link-policy separate-account)
+             (pcea-global-eu :issuer "https://auth.pcea.io" :audience pcea-global-eu :session-store eu-pinned))
+      :cuthub ((cuthub-cn :issuer "https://auth.cuthub.cn" :domain "cuthub.cn" :account-link-policy separate-account)
+               (cuthub-global :issuer "https://auth.cuthub.com" :domain "cuthub.com" :account-link-policy separate-account))
+      :forbidden [cross-partition-token-trust parent-domain-cookie-sharing shared-jwks-between-cn-and-global])
+    (regional-secret-store-contract
+      :fields [partition secret-store-url secret_ref_namespace kek_id kms_provider rotation_policy break_glass_policy]
+      :rule "Secret values live in secret-store only. Lisp records namespaced secret refs and region/KMS ownership; it never carries values."
+      :pcea ((pcea-cn :secret-namespace "pcea/cn" :kek "pcea-cn-kek" :kms-provider mainland-kms)
+             (pcea-global-us :secret-namespace "pcea/global/us" :kek "pcea-global-us-kek" :kms-provider aws-kms-us)
+             (pcea-global-eu :secret-namespace "pcea/global/eu" :kek "pcea-global-eu-kek" :kms-provider aws-kms-eu)))
+    (regional-runtime-target-contract
+      :fields [partition runtime-target runtime-provider deploy-center-agent public-domain deploy-mode artifact-flow release-provenance smoke rollback]
+      :rule "Data partitions must bind to explicit deploy-center runtime targets before production rollout. MissionD records the intended placement and refuses to infer region placement from IP, domain, git branch, or a stale deploy row."
+      :pcea ((pcea-cn :runtime-target ecs-pcea :runtime-provider aliyun-ecs :deploy-center-agent ecs :public-domain "pcea.top" :deploy-mode current-production-cn-compatible :artifact-flow [github-actions privatecloud-runner oss-cn-shanghai deploy-center ecs-agent] :must-not-build-on-target true)
+             (pcea-global :runtime-target gcp-runtime :runtime-provider gcp-vm :deploy-center-agent gcp :public-domain "pcea.io" :deploy-mode target-pending-provisioning :requires [deploy-center-project secret-store-namespace storage-ledger payment-ledger auth-issuer smoke-rollout])
+             (pcea-global-eu :runtime-target gcp-runtime :runtime-provider gcp-vm :deploy-center-agent gcp :deploy-mode operating-zone-pending-dedicated-eu-runtime :requires [eu-storage-kms-support-access-pinning]))
+      :invariants ["CN PCEA production traffic targets Aliyun ECS until an explicit deploy-center migration task proves otherwise."
+                   "Global PCEA traffic targets the GCP VM lane, but it MUST use a separate deploy-center project/release provenance from the CN/ECS lane."
+                   "A global rollout may reuse source code and container templates, but MUST NOT reuse CN secrets, ledgers, object stores, vector stores, or user tables."])
+    (regional-storage-contract
+      :fields [partition object-store vector-store database log-store backup-store encryption-key data-classification]
+      :rule "User files, subtitles, RAG chunks, embeddings, prompts, logs, and backups are region-pinned. Code, templates, and compiled artifacts are not user data and may be mirrored globally."
+      :pcea ((pcea-cn :object-store oss-cn :vector-store milvus-cn :database postgres-cn :log-store log-cn)
+             (pcea-global-us :object-store gcs-global-asia :bucket "gs://xjp-global-object-store-project-20250408" :vector-store pgvector-us :database postgres-us :log-store log-us)
+             (pcea-global-eu :object-store gcs-global-eu-pending :bucket "gs://xjp-global-object-store-project-20250408/eu-pending" :vector-store pgvector-eu :database postgres-eu :log-store log-eu)))
+    (regional-payment-ledger-contract
+      :fields [partition legal-entity payment-provider currency ledger-db tax-invoice-policy allowed-aggregate-egress]
+      :rule "Payment ledgers are hard-partitioned because acquiring, settlement, tax, invoice, and AML obligations differ by region. Cross-region finance egress is monthly aggregate only, never transaction detail."
+      :pcea ((pcea-cn :provider [wechat-pay alipay mainland-psp] :currency CNY :invoice fapiao :ledger pcea-cn-ledger)
+             (pcea-global-us :provider stripe-us :currency USD :ledger pcea-global-us-ledger)
+             (pcea-global-eu :provider stripe-eu :currency EUR :ledger pcea-global-eu-ledger)))
+    (regional-router-model-policy
+      :fields [partition allowed_models denied_models pii_prompt_policy embedding_region rerank_region rag_corpus_region model_audit_log]
+      :rule "Prompt and embedding data inherit the region of the project/workspace. Mainland partitions use mainland-approved models. EU user data uses EU-pinned providers or zero-data-retention agreements. DeepSeek/Qwen/Doubao are denied for global PI unless a project-specific privacy review allows a non-PI path."
+      :pcea ((pcea-cn :allowed_models [qwen doubao ernie kimi] :denied_models [openai-public anthropic-public deepseek-for-pi] :pii_prompt_policy cn-only)
+             (pcea-global-us :allowed_models [openai-us anthropic-bedrock-us gemini-vertex-us] :denied_models [qwen-for-pi doubao-for-pi deepseek-for-pi] :pii_prompt_policy us-global)
+             (pcea-global-eu :allowed_models [openai-eu anthropic-bedrock-eu gemini-vertex-eu] :denied_models [qwen-for-pi doubao-for-pi deepseek-for-pi openai-public-us-for-eu-pi] :pii_prompt_policy eu-pinned)))
+    (cross-region-data-policy
+      :default deny
+      :allowed-egress-categories
+        ((category anonymized-aggregate-metrics :requires [k-anonymity>=50 no-user-id no-prompt-content no-transaction-detail dpo-review])
+         (category public-content :requires [no-pii marketing-or-docs-review])
+         (category security-threat-intelligence :requires [secops-approval encrypted audited])
+         (category compliance-approved-export :requires [legal dpo business-owner export-record data-fingerprint])
+         (category code-and-artifacts :requires [no-pii no-config no-secret]))
+      :audit (:log central-audit-log :retention "5 years" :cadence quarterly-dpo-review))
+	    (project-region-declaration :project pcea
+	      :status active-ssot-required
+	      :data-regions [cn global]
+	      :primary-region global
+      :operating-zones [global-us global-eu]
+      :contains-personal-data true
+      :contains-spi true
+	      :contains-important-data unknown
+	      :contains-children-data false
+	      :cross-region-default deny
+	      :platform-partition-binding ((pcea-cn :platform xjp-cn :service-stack [auth-cn secret-store-cn xjp-cn-router xjp-cn-eventhub xjp-cn-ledger])
+	                                   (pcea-global :platform xjp-global :service-stack [auth-global secret-store-global xjp-global-router xjp-global-eventhub xjp-global-ledger])
+	                                   (pcea-global-eu :platform xjp-global-eu :service-stack [auth-global secret-store-global xjp-global-eu-router xjp-global-eu-eventhub xjp-global-ledger]))
+	      :runtime-placement ((pcea-cn :runtime-target ecs-pcea :runtime-provider aliyun-ecs :deploy-center-agent ecs :status current-production-cn-compatible)
+	                          (pcea-global :runtime-target gcp-runtime :runtime-provider gcp-vm :deploy-center-agent gcp :status target-pending-provisioning)
+	                          (pcea-global-eu :runtime-target gcp-runtime :runtime-provider gcp-vm :deploy-center-agent gcp :status operating-zone-pending-dedicated-eu-runtime))
+      :partition-primary-key project_id
+      :shared-assets [source-code lisp-blueprints ocaml-compiled-ir rust-binaries container-image-templates anonymized-aggregate-metrics]
+      :forbidden [single-instance-multi-region cross-partition-token-trust shared-payment-ledger parent-domain-cookie-sharing ip-only-region-binding]
+      :launch-blockers [cn-legal-entity icp-b25 mainland-psp cn-ai-filing important-data-assessment]
+      :checker ["node scripts/check-v3-data-residency-universe-isomorphism.mjs" "bash /Users/jinchen/Downloads/PCEA\\ develop/.missiond/check.sh"])
+    (project-region-declaration :project cuthub
+      :status design-required
+	      :data-regions [cn global]
+	      :domains ((cn "cuthub.cn") (global "cuthub.com"))
+	      :platform-partition-binding ((cuthub-cn :platform xjp-cn :service-stack [auth-cn secret-store-cn xjp-cn-router xjp-cn-eventhub xjp-cn-ledger])
+	                                   (cuthub-global :platform xjp-global :service-stack [auth-global secret-store-global xjp-global-router xjp-global-eventhub xjp-global-ledger]))
+	      :account-region-binding [explicit-choice phone-country-code payment-method]
+      :ip-policy hint-only
+      :forbidden [parent-domain-cookie-sharing online-region-switch cn-dot-global-subdomain single-account-dual-skin]
+      :next-action "Promote CUTHUB to M6 only after its local SSOT declares the same partition model and checker pins.")
+    :surfaces [".missiond/v3/missiond-blueprint.lisp"
+               ".missiond/research/data-residency-universe-report-20260512.md"
+               "scripts/check-v3-data-residency-universe-isomorphism.mjs"
+               "/Users/jinchen/Downloads/PCEA develop/.missiond/intent.lisp"
+               "/Users/jinchen/Downloads/PCEA develop/.missiond/check.sh"])
 
   (deploy-agent-self-update-governance
     :schema "missiond.deploy-agent-self-update-governance.v1"
@@ -1654,7 +1919,7 @@
 
   (project-maturity-model
     :schema "missiond.project-maturity-model.v2"
-    :rule "M6 is the highest maturity level and means Auth-grade production-ready SSOT/code/runtime/test clarity: domain model, policy, flow, event, runtime projection, implementation map, compatibility ledger, hot-path wiring, regression matrix, and source hygiene are fine-grained, code-aligned, and formatter-converged."
+    :rule "M6 is the highest maturity level and means Auth-grade production-ready SSOT/code/runtime/test clarity: domain model, policy, flow, event, runtime projection, implementation map, compatibility ledger, hot-path wiring, regression matrix, source hygiene, and data-residency declarations for data-bearing projects are fine-grained, code-aligned, and formatter-converged."
     :gate "scripts/check-project-maturity.mjs --min-level M5 is the default universe operational gate; scripts/check-project-maturity.mjs --min-level M6 proves Auth-grade final maturity."
     :levels
       ((level M0 :name raw :requires [] :meaning "unregistered or only scattered facts")
@@ -1663,11 +1928,11 @@
        (level M3 :name code-mapped :requires [M2 code-isomorphism-checker current-code-mapping drift-policy])
        (level M4 :name runtime-projected :requires [M3 runtime-config-from-lisp event-contract deploy-runtime-constants no-hardcoded-runtime-duplicates])
        (level M5 :name worker-operational :requires [M4 mission_swarm_run context-pack-shards scoped-write-guards durable-completion-evidence final-convergence-gate])
-       (level M6 :name auth-grade :requires [M5 domain-model policy flow event runtime-projection implementation-map compatibility-ledger hot-path-wiring regression-matrix formatter-converged final-m6-report] :meaning "Auth-grade: the project is fine-grained, clear, runtime-wired, regression-proven, formatter-safe, and safe for long-term dependency."))
+       (level M6 :name auth-grade :requires [M5 domain-model policy flow event runtime-projection implementation-map compatibility-ledger hot-path-wiring regression-matrix data-residency-declaration formatter-converged final-m6-report] :meaning "Auth-grade: the project is fine-grained, clear, runtime-wired, region-aware where it carries regulated data, regression-proven, formatter-safe, and safe for long-term dependency."))
     :invariants
       ["Project SSOT reports MUST use only M0..M6; H-levels and M10 are retired public maturity vocabulary."
        "Old M10 maps to new M5 unless the project also has Auth-grade depth evidence."
-       "M6 requires Auth-grade domain/policy/flow/event/runtime/implementation/compatibility/hot-path/regression evidence plus formatter convergence: official project formatter checks must be safe to run without unrelated churn."
+       "M6 requires Auth-grade domain/policy/flow/event/runtime/implementation/compatibility/hot-path/regression evidence plus formatter convergence: official project formatter checks must be safe to run without unrelated churn. Data-bearing projects also require a data-residency declaration that states region partitions, cross-region defaults, data classes, and compliance blockers."
        "Universe status MUST expose current and target maturity for each registered project."
        "Intent-only projects MUST NOT be marked M2+; projects without code-isomorphism evidence MUST NOT be marked M3+."
        "Resident master and swarm runners MUST use M6 SSOT convergence language and never create H-level tasks."])
@@ -1675,7 +1940,7 @@
   (project-maturity-registry
     :schema "missiond.project-maturity-registry.v2"
     :default-target M6
-    :common-m5-to-m6-gap [domain-model policy-flow-event-split compatibility-ledger hot-path-wiring regression-matrix final-m6-report]
+    :common-m5-to-m6-gap [domain-model policy-flow-event-split compatibility-ledger hot-path-wiring regression-matrix data-residency-declaration final-m6-report]
     (maturity :id missiond :current M6 :target M6 :gap [])
     (maturity :id board :current M5 :target M6 :gap [frontend-domain-model cockpit-hot-path-regressions final-m6-report])
     (maturity :id jarvis :current M5 :target M6 :gap [domain-shard-split missiond-integration-boundary final-m6-report])
@@ -1693,7 +1958,7 @@
     (maturity :id deploy-agent :current M6 :target M6 :gap [])
     (maturity :id auth :current M6 :target M6 :gap [])
     (maturity :id router :current M6 :target M6 :gap [])
-    (maturity :id payments :current M5 :target M6 :gap [payment-domain-ledger webhook-regressions final-m6-report])
+    (maturity :id payments :current M6 :target M6 :gap [])
     (maturity :id asr :current M5 :target M6 :gap [job-provider-transcript-domain callback-regressions final-m6-report])
     (maturity :id timeline :current M5 :target M6 :gap [revision-event-authority service-event-regressions final-m6-report])
     (maturity :id pcea :current M6 :target M6 :gap [])
@@ -1982,6 +2247,33 @@
       :event-ingest (:endpoint "/webhooks/deploy-center-event" :domain system :event ExternalServiceEvent :source deploy_events :token-env MISSIOND_EXTERNAL_WEBHOOK_TOKEN :authority deploy-center.deploy_events :rule "deploy-center relays durable deploy_events rows into MissionD EventBridge with stable event_id and MissionD idempotency; MissionD must not infer production release state by stitching GitHub/curl/git when deploy-center has provenance.")
       :events [deploy_created build_started build_succeeded build_failed deploy_started deploy_succeeded deploy_failed smoke_succeeded smoke_failed rollback_started rollback_succeeded rollback_failed agent_heartbeat agent_update_started agent_update_succeeded agent_update_failed provenance_changed]
       :ops-capability deploy-ops
+      :surface service-runtime-universe)
+    (service :id secret-store
+      :project secret-store
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/services/secret-store-rs"
+      :intent ".missiond/intent.lisp"
+      :environment production
+      :public-base-url "https://ss.xiaojinpro.top"
+      :domains ["ss.xiaojinpro.top"]
+      :deployment (:substrate gcp-vm :runtime-target gcp-runtime :container "secret-store" :local-bind "127.0.0.1:8091" :proxy caddy :authority deploy-center-provenance)
+      :health ["/livez" "/readyz"]
+      :dependencies [xjp-postgres secret-store-kek admin-key]
+      :ops-capability deploy-ops
+      :source-evidence [secret-store-gcp-migration-20260511]
+      :surface service-runtime-universe)
+    (service :id secret-store-cn
+      :project secret-store
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/services/secret-store-rs"
+      :intent ".missiond/intent.lisp"
+      :environment planned-cn
+      :public-base-url "https://ss-cn.xiaojinpro.com"
+      :domains ["ss-cn.xiaojinpro.com"]
+      :deployment (:substrate deploy-center :dc_slug "secret-store-cn" :runtime-target ecs-pcea :executor ecs-agent :work_dir "/opt/secret-store-cn" :compose_file "docker/docker-compose.cn.yml" :stage_configs disabled :skip_deployment true :artifact-delivery-lane cn-oss-bundle-lane :authority deploy-center-stage-configs)
+      :health ["/livez" "/readyz"]
+      :dependencies [cn-postgres? cn-redis? cn-secret-store-kek cn-admin-key]
+      :ops-capability deploy-ops
+      :source-evidence [secret-store-cn-ecs-deploy-20260513]
+      :risks [domestic-artifact-lane-required privatecloud-build-runtime-offline deploy-center-read-model-gap provenance-contract-required]
       :surface service-runtime-universe)
     (service :id xjp-memory
       :project xjp-memory
@@ -2469,6 +2761,13 @@
       :v3-function typed-lisp-compiler
       :surface typed-lisp-compiler
       :note "The typed Lisp compiler is the V3 destination for fragile V2-era Lisp shape/token-pin checking; Lisp remains SSOT while OCaml owns typed AST diagnostics and generated projections.")
+    (v2-item work-order-lifecycle
+      :status code-aligned
+      :v2-source ".missiond/v2/intent-flow.lisp :: F-intent-alignment-plan-execution-loop + .missiond/v2/intent.lisp :: unified-entry-pipeline-v1"
+      :v3-pillar workflow
+      :v3-function work-order-lifecycle
+      :surface work-order-lifecycle
+      :note "V2's split intent/plan/execute loops and unified-entry pipeline converge into one work-order lifecycle. User requests, BoardTask triggers, intent.lisp files, and external-application delegation are normalized into a work-order intent, bound to one BoardTask, compiled into plan.lisp accepted shards, executed through workflow_run/shared-memory, and closed via task-result-artifacts plus audit.lisp. The lifecycle reuses mission_request, mission_board, mission_workflow, mission_shared_memory, and file-artifacts rather than adding a new public MCP family.")
     (v2-item cloud-local-eventbridge
       :status code-aligned
       :v2-source ".missiond/v2/intent-event-bus.lisp :: event_router / external service event ingress"
@@ -2623,6 +2922,13 @@
       :v3-function project-registry
       :surface project-registry
       :note "Project root resolution and registry behavior are physically split and pinned under the V3 project-registry surface; project-registry-policy now projects intent-path candidates and default universe manifest into mission_project init/import_universe/survey runtime.")
+    (v2-item data-residency-universe
+      :status code-aligned
+      :v2-source ".missiond/v2/intent-worker.lisp :: project registry"
+      :v3-pillar memory
+      :v3-function data-residency-universe
+      :surface data-residency-universe
+      :note "Data-bearing project M6 gate is extended from registry-only to region-aware: cn/global hard partitions plus global-eu operating zone are pinned under data-residency-universe. The active abstraction is XJP platform partition first: xjp-cn on Aliyun ECS and xjp-global on GCP VM own auth/secret/payment/storage/router/event/deploy boundaries, while PCEA/CUTHUB bind their app partitions to those platform stacks. PCEA's project-local intent.lisp and check.sh mirror the same declarations so data-residency is a checked SSOT, not free-form deployment notes.")
     (v2-item board-frontend-project-blueprint
       :status code-aligned
       :v2-source ".missiond/v2/architecture-dsl.lisp :: lisp-code-isomorphism"
@@ -2953,7 +3259,19 @@
                (step s2 :logic "assign every fact a stable short id, source hash, file, line, and column for precise back-reference")
                (step s3 :logic "generate compiled-semantic-ir.json, compiled-agent-slices.json, and compiled-workflow-contracts.json for agents and runtime readers")
                (step s4 :logic "keep generated IR machine-oriented and compact while preserving diagnostics and source maps for human review"))
-        :egress [compiled-semantic-ir compiled-agent-slices compiled-workflow-contracts source-map-diagnostics]))
+        :egress [compiled-semantic-ir compiled-agent-slices compiled-workflow-contracts source-map-diagnostics])
+      (function work-order-lifecycle
+        :surface work-order-lifecycle
+        :entry [user-request external-application-intent.lisp external-service-intent-envelope BoardTaskCreated mission_board_create mission_request workflow-trigger]
+        :core ((step s1 :logic "normalize every source into a work-order intent with objective, inferred user intent, constraints, unknowns, evidence_refs, source app, and optional source_board_task_id")
+               (step s2 :logic "bind the intent to exactly one BoardTask; Board-sourced work uses the existing task as anchor, while file/API/external-app intent creates or links one visible BoardTask")
+               (step s3 :logic "compile plan.lisp with accepted shards, worker lanes, read_scope, write_scope, risk gates, completion authority, and retry policy")
+               (step s4 :logic "start workflow_run and shared-memory cursor, persist plan hash, and write an audit.lisp replay header before dispatch")
+               (step s5 :logic "dispatch workers only from accepted plan shards; external translation, code-refactor, deploy-ops, and memory-review requests use the same BoardTask/Autopilot chain")
+               (step s6 :logic "collect task-result-artifacts as canonical outputs; Board notes, provider finals, PTY snapshots, and app callbacks are projections or evidence")
+               (step s7 :logic "close or backfill only after durable final settle, audit.lisp append, slot release, and Lisp/checker/evidence convergence when code changes occurred")
+               (step s8 :logic "promote repeatable operation patterns into workflow.lisp or evidence, not ad hoc prompt text"))
+        :egress [work-order-intent.lisp plan.lisp audit.lisp BoardTask workflow_run accepted_shards task_result_artifacts task_contracts event_log workflow_promotion_candidate]))
 
     (pillar review
       (function review-gate
@@ -3143,6 +3461,15 @@
                (step s2 :logic "reject ambiguous or outside-root runtime paths before workstation spawn")
                (step s3 :logic "return project metadata usable by request, plan, context, and workstation surfaces"))
         :egress [project_root project_id requested_cwd_policy])
+      (function data-residency-universe
+        :surface data-residency-universe
+        :entry [project-maturity-registry project-blueprint-registry service-runtime-universe regional-compliance-research]
+        :core ((step s1 :logic "load data-region-partition-contract and classify each data-bearing project into cn/global hard partitions plus any global operating zones")
+               (step s2 :logic "load xjp-platform-partition-contract so data-bearing apps bind to xjp-cn or xjp-global rather than declaring independent auth/secret/payment/router stacks")
+               (step s3 :logic "require regional issuer, secret, storage, payment, router/model, and cross-region egress policy before a data-bearing project can claim M6")
+               (step s4 :logic "project PCEA and CUTHUB region declarations into Universe summaries without promoting unimplemented runtime targets to deployment truth")
+               (step s5 :logic "treat cross-region data movement as default-deny unless the movement matches an allowed egress category and records audit evidence"))
+        :egress [data_residency_summary region_partition_diagnostics m6_data_bearing_gate])
       (function board-frontend
         :surface board-frontend
         :entry [project-blueprint-registry board-blueprint.lisp packages/board]
@@ -3605,6 +3932,27 @@
       :model-projection "mission_workflow sonnet distiller compiler_model labels project from router-runtime-policy queued_sonnet_model through RouterRuntimeConfig; local Rust model literals are forbidden on this production path."
       :note "workflow.rs remains the thin mission_workflow action facade. workflow/store_actions.rs owns list/get/match/apply/record_execution and parse_id_arg; workflow/project_root.rs owns the canonical project-root resolver and the no process-cwd fallback invariant; workflow/compile_methodology.rs owns CompileMode, parse_compile_mode, action_compile_methodology, dry-run preview, deterministic YAML compile, methodology V3 artifact projection, review-gate receipt emission, and count_top_form; workflow/run_methodology.rs owns compiled YAML resolution, mission_flow_run dispatch, parse_run_methodology_record_intent, and methodology_execution_record_payload. workflow/distill.rs owns DistillMode, parse_distill_mode, action_distill, action_distill_dry_run, action_distill_sonnet, evidence sidecar path/read/gate, workflow_sexp JSON extraction, balanced-S-expression validation, name-refer... [details: .missiond/v3/evidence/blueprint-notes.lisp#note-008]")
 
+    (surface work-order-lifecycle
+      :status "code-aligned"
+      :implements [work-order-intent work-order-plan work-order-audit board-intent-unification external-app-delegation task-result-artifact-projection]
+      :code ["crates/missiond-daemon/src/handlers/knowledge/request.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/request/respond/materialization.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/file_artifacts.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/board/create.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/board/events.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/workflow.rs"
+             "crates/missiond-daemon/src/engine/shared_memory.rs"
+             "crates/missiond-daemon/src/handlers/compute/task_delegate.rs"
+             "crates/missiond-mcp/src/tools/knowledge/request.rs"
+             "crates/missiond-mcp/src/tools/knowledge/board.rs"
+             "crates/missiond-mcp/src/tools/knowledge/workflow.rs"
+             "crates/missiond-mcp/src/tools/knowledge/shared_memory.rs"
+             ".missiond/workflows/work-order-lifecycle.lisp"
+             "scripts/check-v3-work-order-lifecycle-isomorphism.mjs"]
+      :acceptance ["node scripts/check-v3-work-order-lifecycle-isomorphism.mjs --json"
+                   "node scripts/check-v3-pillar-flow-schema.mjs --engine=ocaml --json"]
+      :note "work-order-lifecycle is the single governance chain for user requests, Board-triggered worker tasks, intent.lisp files, and external application delegation such as translation or code-refactor jobs. It intentionally reuses mission_request, mission_board, mission_workflow, mission_shared_memory, and file_artifacts instead of adding another public MCP tool family: every source is normalized into work-order intent, bound to one BoardTask, compiled into plan.lisp accepted shards, executed through workflow_run/shared-memory, and closed by task-result-artifacts plus audit.lisp. Board notes and provider finals remain projections; external apps get the same audit/replay semantics without learning MissionD internals.")
+
     (surface typed-lisp-compiler
       :status "code-aligned"
       :implements [lisp-reader typed-ast semantic-validator diagnostic-json projection-json semantic-ir-json structured-project-universe-json structured-workflow-contract-json workflow-directory-structural-gate project-directory-structural-gate project-m6-depth-gate runtime-compiled-json-loader auth-domain-sample]
@@ -4000,6 +4348,18 @@
              "scripts/check-project-maturity.mjs"]
       :note "Code-aligned destination for project registry/root resolution. project.rs is the mission_project facade; project/registry.rs owns list/get/set_active/sync/init/import_universe; project/universe.rs owns mission_project(action=universe) and projects service-runtime-universe entries such as auth production domain/deployment/DNS capability to master, workers, and Board System. ProjectRegistry::resolve owns longest-prefix project lookup; inactive project aliases never participate in cwd resolution, and mission_project init archives inactive path aliases before upsert so stale aliases cannot block canonical root correction. check-project-maturity.mjs is the project-universe maturity gate: --min-level M5 proves worker-operational SSOT closure; --min-level M6 proves Auth-grade domain/policy/flow/event/runtime/compatibility depth. It resolves the MissionD blueprint from the checker script directory so external-project workers can run it from the target root. [details: .missiond/v3/evidence/blueprint-notes.lisp#note-016]")
 
+    (surface data-residency-universe
+      :status "code-aligned"
+      :implements [data-residency-universe data-region-partition-contract xjp-platform-partition-contract cross-region-data-policy project-region-declaration]
+      :code [".missiond/v3/missiond-blueprint.lisp"
+             ".missiond/research/data-residency-universe-report-20260512.md"
+             "scripts/check-v3-data-residency-universe-isomorphism.mjs"
+             "scripts/check-project-ssot-universe.mjs"
+             "scripts/check-project-maturity.mjs"
+             "/Users/jinchen/Downloads/PCEA develop/.missiond/intent.lisp"
+             "/Users/jinchen/Downloads/PCEA develop/.missiond/check.sh"]
+      :note "data-residency-universe is the SSOT surface for cn/global hard partitions and global-eu operating-zone policy. It now models XJP platform partitions first: xjp-cn owns the Aliyun ECS/CN infra stack, xjp-global owns the GCP/global stack, and app-level partitions such as pcea-cn/pcea-global or cuthub-cn/cuthub-global bind to those stacks. It keeps region identity, issuer, secret, storage, payment ledger, model router, event, deploy, and cross-region egress rules out of ad hoc deployment notes. PCEA's project-local .missiond/check.sh pins the same declarations so data-bearing M6 means platform-partition-aware, not merely code-mapped.")
+
     (surface eventbridge
       :status "code-aligned"
       :implements [eventbridge-policy deployment-event-ingest deploy-agent-self-update-governance]
@@ -4302,6 +4662,7 @@
              "node scripts/check-v3-evidence-collector-isomorphism.mjs"
              "node scripts/check-v3-mission-execution-isomorphism.mjs"
              "node scripts/check-v3-workflow-isomorphism.mjs"
+             "node scripts/check-v3-work-order-lifecycle-isomorphism.mjs"
              "node scripts/check-v3-review-gate-isomorphism.mjs"
              "node scripts/check-v3-task-lifecycle-isomorphism.mjs"
              "node scripts/check-v3-memory-kb-isomorphism.mjs"

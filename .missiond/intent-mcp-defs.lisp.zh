@@ -741,10 +741,15 @@
 
     (tool mission_infra_query
       :zh "工具: mission_infra_query"
-      :description-zh "基础设施查询。list: 列出服务器; get: 单个详情"
+      :description-zh "基础设施查询。list/get/health/reconcile/skill_evidence/credential_refs/diagnostic_profiles；远程诊断只返回 deploy-center 只读 profile 要求，不直接泄露凭据或执行 raw agent。"
       (input
         (action)
         (id :description-zh "[get] 服务器 ID")
+        (target_id :description-zh "[skill_evidence/credential_refs/diagnostic_profiles] runtime target ID")
+        (service_id :description-zh "[diagnostic_profiles] 服务 ID")
+        (profile :description-zh "[diagnostic_profiles] deploy_provenance_snapshot/container_inventory/dependency_manifest_scan/supply_chain_ioc_scan")
+        (skill :description-zh "[skill_evidence] 限定 skill 名称")
+        (limit :description-zh "[skill_evidence] 最大返回条数")
         (role :description-zh "[list] 角色: build/deploy/gpu/vpn/production")
         (provider :description-zh "[list] 云厂商: gcp/aliyun/self-hosted")))
 
