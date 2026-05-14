@@ -22,7 +22,7 @@
      (step normalize-intent
        :action "Normalize the source into work-order intent with objective, constraints, evidence refs, source app, privacy class, and optional source BoardTask.")
      (step board-anchor
-       :action "Bind the work-order to exactly one BoardTask; create one only when the source is not already a BoardTask.")
+       :action "Apply pre-task-board-anchor: every non-trivial mutation, deploy, skill edit, memory batch, or worker dispatch must bind the work-order to exactly one BoardTask before execution; create one only when the source is not already a BoardTask.")
      (step evidence-plan
        :question "Which evidence sources must be checked before deciding whether to dispatch a worker?"
        :writes [context-pack.evidence_needed])

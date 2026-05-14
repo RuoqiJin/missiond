@@ -32,6 +32,9 @@ const DEFAULT_FILES = {
   kbBeacon: 'crates/missiond-daemon/src/handlers/knowledge/kb/beacon.rs',
   kbCodeSearch: 'crates/missiond-daemon/src/handlers/knowledge/kb/code_search.rs',
   kbReview: 'crates/missiond-daemon/src/handlers/knowledge/kb/review.rs',
+  contextGather: 'crates/missiond-daemon/src/handlers/knowledge/context_gather.rs',
+  mcpContextGather: 'crates/missiond-mcp/src/tools/knowledge/context_gather.rs',
+  toolDirectory: 'crates/missiond-daemon/src/handlers/comm/tool_directory.rs',
   kbReviewMigration: 'crates/missiond-core/migrations/20260508001000_knowledge_review_state.sql',
   kbReviewTypes: 'crates/missiond-core/src/types/knowledge.rs',
   kbReviewTraits: 'crates/missiond-core/src/db/traits.rs',
@@ -138,6 +141,9 @@ function checkFiles(root, files) {
     'crates/missiond-daemon/src/handlers/knowledge/kb/ops.rs',
     'crates/missiond-daemon/src/handlers/knowledge/kb/beacon.rs',
 	    'crates/missiond-daemon/src/handlers/knowledge/kb/code_search.rs',
+	    'crates/missiond-daemon/src/handlers/knowledge/context_gather.rs',
+	    'crates/missiond-mcp/src/tools/knowledge/context_gather.rs',
+	    'crates/missiond-daemon/src/handlers/comm/tool_directory.rs',
 	    'crates/missiond-daemon/src/engine/learning_engine/mod.rs',
 	    'crates/missiond-daemon/src/engine/learning_engine/extraction.rs',
 	    'crates/missiond-daemon/src/engine/learning_engine/decision_engine.rs',
@@ -186,6 +192,14 @@ function checkFiles(root, files) {
     ':review-states [active superseded-by-lisp superseded-by-code historical-evidence duplicate wrong-or-stale delete-candidate needs-human]',
     'mission_kb_review MUST write a non-destructive knowledge_review_state overlay; it MUST NOT mutate or delete the original knowledge row.',
     'mission_kb_query default retrieval MUST honor the review overlay while include_archived=true and state_filter preserve audit access to historical evidence.',
+    'grounding-search-aggregate',
+    'skill-edit-delegation-policy',
+    'task-record-indexing',
+    'active Board task records',
+    'bounded conversation logs',
+    'mission_context_gather MUST aggregate KB, active SSOT, project registry, skill operational evidence, infra evidence, active Board task records, and bounded conversation logs.',
+    'Board/task/workflow records are searchable retrieval evidence',
+    'Mutating skill files under ~/.claude/skills, ~/.codex/skills, or project skill directories MUST be represented as a BoardTask/work-order and delegated to a ClaudeCode skill-maintainer or deploy-ops lane.',
     'mission_kb_query MUST support excludeCategory / exclude_category for explicit category suppression',
     'mission_kb_mutate(action=batch_remember) MUST accept a bounded entries array',
     'mission_kb_remember MUST pass through one shared dedupe gate',
@@ -196,6 +210,34 @@ function checkFiles(root, files) {
     'crates/missiond-core/src/db/traits.rs',
     'crates/missiond-core/src/db/pg/knowledge.rs',
     'node scripts/check-v3-memory-kb-isomorphism.mjs',
+  ]);
+
+  requireAll(diagnostics, files.contextGather, sources.contextGather, [
+    'include_board',
+    'include_conversations',
+    'conversation_time_range',
+    '"board_tasks"',
+    '"conversation_logs"',
+    '"mission_board_query"',
+    '"mission_conversation_query"',
+    '"scope": "active"',
+    '"time_range"',
+    'last_30d',
+  ]);
+
+  requireAll(diagnostics, files.mcpContextGather, sources.mcpContextGather, [
+    'Board task records',
+    'bounded conversation logs',
+    'include_board',
+    'include_conversations',
+    'conversation_time_range',
+  ]);
+
+  requireAll(diagnostics, files.toolDirectory, sources.toolDirectory, [
+    'mission_context_gather + mission_conversation_* + mission_timeline + mission_audit',
+    '"mission_context_gather"',
+    '"grounding"',
+    '"intent"',
   ]);
 
   requireAll(diagnostics, files.v3Runtime, sources.v3Runtime, [

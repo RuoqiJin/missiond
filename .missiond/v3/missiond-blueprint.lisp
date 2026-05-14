@@ -138,6 +138,51 @@
        "MissionD may query cold-runtime for trace/debug/report lookup, but that query must be explicit and visible in the context-pack."]
     :checker "node scripts/check-v3-runtime-path-hygiene.mjs")
 
+  (grounding-search-aggregate
+    :schema "missiond.grounding-search-aggregate.v1"
+    :purpose "Provide one high-frequency fact-gathering entry before intent.lisp, plan.lisp, Board triage, deploy decisions, or worker delegation so operators do not have to remember every retrieval surface."
+    :primary-tool mission_context_gather
+    :default-sources [project-registry ssot-intent active-kb skill-operational-evidence infra-evidence active-board-task-records bounded-conversation-logs]
+    :source-policy
+      ((source active-board-task-records
+         :tool mission_board_query
+         :scope active
+         :rule "Task records are retrieval evidence and must be searchable through FTS/embedding, but broad historical/done Board backlog is excluded unless include_historical=true.")
+       (source bounded-conversation-logs
+         :tool mission_conversation_query
+         :scope query-scoped
+         :default-time-range last_30d
+         :rule "Durable provider/user conversations are searched only by explicit query/unknowns; this is not prompt preloading and does not re-enable broad historical log context.")
+       (source skill-operational-evidence
+         :tool mission_skill_context
+         :rule "Skill files are operational evidence for ClaudeCode-compatible workers; mutation of skill files must be delegated through skill-edit-delegation-policy.")
+       (source active-kb
+         :tool mission_kb_query
+         :rule "Default retrieval applies knowledge_review_state overlay and excludes archived/superseded/noise memories.")
+       (source ssot-intent
+         :tool mission_intent
+         :rule "Active SSOT Lisp is the long-lived project fact authority; cold runtime evidence is opt-in."))
+    :functions
+      ((function context-gather-before-intent
+         :entry [user-request BoardTaskCreated external-intent-envelope unknowns-inventory]
+         :core ((step s1 :logic "ask unknowns-first: what facts are still missing before judging user intent?")
+                (step s2 :logic "call mission_context_gather once with query/unknowns/project/skill/infra_target and default sources")
+                (step s3 :logic "synthesize evidence_refs and remaining unknowns into intent.lisp review packet")
+                (step s4 :logic "write high-confidence inferred user intent as memory:decision candidate only after evidence refs are attached"))
+         :egress [context-gather-result intent-review-packet intent-memory-candidate])
+       (function task-record-indexing
+         :entry [BoardTask workflow_run task-result-artifact audit-event]
+         :core ((step s1 :logic "index BoardTask title/description/status/project/category, workflow_run summary, task-result-artifact summary, and audit event captions into the memory provider search corpus")
+                (step s2 :logic "dedupe by source_type/source_id and preserve source authority so Board noise does not become active KB memory")
+                (step s3 :logic "make active task records searchable by mission_context_gather without preloading full Board backlog"))
+         :egress [fts-document embedding-document retrieval-evidence-ref]))
+    :invariants
+      ["mission_context_gather MUST aggregate KB, active SSOT, project registry, skill operational evidence, infra evidence, active Board task records, and bounded conversation logs."
+       "Board/task/workflow records are searchable retrieval evidence, not active long-term memory unless promoted by an explicit review workflow."
+       "Conversation logs are searched by query and bounded window; they are not default prompt preloads."
+       "If mission_context_gather cannot answer a source, it returns source-specific diagnostics instead of making the resident master guess."]
+    :checker "node scripts/check-v3-memory-kb-isomorphism.mjs")
+
   (unified-entry
     :desc "request -> intent alignment -> plan -> execution -> evidence -> workflow"
     :modes
@@ -928,6 +973,21 @@
        "Direct implementation from an initial objective is allowed only when exact-shard-ready=true is explicitly present in the BoardTask metadata or description."]
     :checker "node scripts/check-v3-workflow-isomorphism.mjs")
 
+  (skill-edit-delegation-policy
+    :schema "missiond.skill-edit-delegation-policy.v1"
+    :purpose "Keep ClaudeCode/Codex/Gemini skill files as operational knowledge managed by the workstation that understands that ecosystem best."
+    :authority
+      ((reader resident-master)
+       (planner mission_context_gather)
+       (editor claude-code-skill-maintainer)
+       (reviewer codex-or-resident-master))
+    :rules
+      ["Codex/resident-master may read skill files as evidence through mission_skill_context or skill evidence artifacts."
+       "Mutating skill files under ~/.claude/skills, ~/.codex/skills, or project skill directories MUST be represented as a BoardTask/work-order and delegated to a ClaudeCode skill-maintainer or deploy-ops lane."
+       "Skill edits require context_pack_path, read_scope, write_scope, completion protocol, and a task-result-artifact; direct local edits by the resident master are not an accepted path."
+       "When a user asks for skill changes, first gather related skill evidence, then create an intent.lisp/plan.lisp work-order or exact shard for ClaudeCode."]
+    :checker "node scripts/check-v3-memory-kb-isomorphism.mjs")
+
   (control-plane-m6-split
     :schema "missiond.control-plane-m6-split.v1"
     :purpose "Keep MissionD's fast-growing orchestration/control plane readable by splitting overloaded policy blocks into stable subplanes while preserving existing runtime projections."
@@ -976,16 +1036,16 @@
       :refactor-rule "Data-bearing projects must declare region partitions before release. cn/global are hard partitions; EU is an operating zone inside global until a project explicitly promotes it to a hard partition. Cross-region data flow is default-deny and whitelist-driven.")
     (domain memory-access-plane
       :owner memory-provider-contract
-      :source [memory-provider-contract memory-kb-policy conversation-memory-distillation ssot-retrieval-scope]
-      :functions [memory-provider-registry memory-scope-resolution memory-query-contract memory-write-contract memory-review-overlay-contract memory-export-contract memory-redaction-policy memory-context-injection-policy]
-      :runtime-projection [mission_memory mission_kb_query mission_kb_remember MemoryProviderConfig context-pack-builder]
+      :source [memory-provider-contract memory-kb-policy conversation-memory-distillation ssot-retrieval-scope grounding-search-aggregate]
+      :functions [memory-provider-registry memory-scope-resolution memory-query-contract memory-write-contract memory-review-overlay-contract memory-export-contract memory-redaction-policy memory-context-injection-policy grounding-search-aggregate task-record-indexing]
+      :runtime-projection [mission_memory mission_kb_query mission_kb_remember mission_context_gather MemoryProviderConfig context-pack-builder]
       :checker ["node scripts/check-v3-service-extraction-isomorphism.mjs" "node scripts/check-v3-memory-kb-isomorphism.mjs" "node scripts/check-v3-control-plane-m6-split.mjs"]
       :refactor-rule "MissionD Core does not own long-term memory data. It owns provider registry, scope resolution, context injection policy, and compatibility facades; provider implementations own conversation stores, active memory, review overlay, skill evidence index, FTS, embedding, rerank, export, purge, and tenant/universe/project/user isolation.")
 
 		    (domain knowledge-skill-plane
 		      :owner memory-kb
-		      :source [memory-provider-contract memory-kb-policy learning-engine-policy conversation-memory-distillation skill-runtime skill-operational-fact-authority ssot-retrieval-scope]
-		      :functions [skill-registry skill-search skill-project-links skill-operational-facts skill-to-workflow-promotion memory-quarantine memory-distillation memory-search-v2 provider-backed-skill-evidence]
+		      :source [memory-provider-contract memory-kb-policy learning-engine-policy conversation-memory-distillation skill-runtime skill-operational-fact-authority ssot-retrieval-scope skill-edit-delegation-policy]
+		      :functions [skill-registry skill-search skill-project-links skill-operational-facts skill-to-workflow-promotion skill-edit-delegation-policy memory-quarantine memory-distillation memory-search-v2 provider-backed-skill-evidence]
 		      :runtime-projection [mission_skill mission_skill_context.operational_facts mission_kb_query mission_kb_remember conversation-memory-distillation]
 		      :checker ["node scripts/check-v3-memory-kb-isomorphism.mjs" "node scripts/check-v3-skill-runtime-isomorphism.mjs" "node scripts/check-v3-control-plane-m6-split.mjs"]
 		      :refactor-rule "KB remains opt-in until memory is cleaned; operational skill facts are not noisy KB and must be explicitly retrievable through the configured MemoryProvider for remote-host, deploy-agent, router embedding/rerank, CI runner, and model-host questions. Project constants should still move to SSOT/Universe rather than worker prompt preloads; broad SSOT review must exclude cold runtime artifacts unless include_runtime=true is explicit.")
@@ -2348,6 +2408,11 @@
     :primary-families [mission_board mission_workflow mission_workstation mission_context mission_memory mission_universe mission_ops mission_router mission_tool_directory]
     :directory-tool mission_tool_directory
     :max-primary-families 12
+    :xjp-cli-mcp-parity
+      ((authority tools/xjp-mcp)
+       (operator-shell xjp-cli)
+       (audit-command "xjp mcp parity --json")
+       (rule "XJP MCP is the latest ClaudeCode/MissionD tool authority; xjp-cli is an operator shell and must expose parity gaps rather than implying it contains every deploy/router/storage/cloudflare tool."))
     :metadata-required [tool_family primary_action tier danger_level intent_examples preferred_surface compatibility_tools]
     :agent-rule "When unsure, call mission_tool_directory(action=\"recommend\", intent=...) before selecting a lower-level MCP tool. Tool families are a selection/readability layer; compatibility tools remain stable for existing workers."
     :invariants
@@ -3264,7 +3329,7 @@
         :surface work-order-lifecycle
         :entry [user-request external-application-intent.lisp external-service-intent-envelope BoardTaskCreated mission_board_create mission_request workflow-trigger]
         :core ((step s1 :logic "normalize every source into a work-order intent with objective, inferred user intent, constraints, unknowns, evidence_refs, source app, and optional source_board_task_id")
-               (step s2 :logic "bind the intent to exactly one BoardTask; Board-sourced work uses the existing task as anchor, while file/API/external-app intent creates or links one visible BoardTask")
+               (step s2 :logic "apply pre-task-board-anchor: every non-trivial mutation, deploy, skill edit, memory batch, or worker dispatch must bind the intent to exactly one BoardTask before execution; Board-sourced work uses the existing task as anchor, while file/API/external-app intent creates or links one visible BoardTask")
                (step s3 :logic "compile plan.lisp with accepted shards, worker lanes, read_scope, write_scope, risk gates, completion authority, and retry policy")
                (step s4 :logic "start workflow_run and shared-memory cursor, persist plan hash, and write an audit.lisp replay header before dispatch")
                (step s5 :logic "dispatch workers only from accepted plan shards; external translation, code-refactor, deploy-ops, and memory-review requests use the same BoardTask/Autopilot chain")
@@ -3443,7 +3508,7 @@
         :surface memory-kb
         :entry [mission_context_gather mission_kb_query mission_kb_remember mission_kb_mutate mission_kb_review mission_kb_ops mission_beacon mission_code_search mission_memory mission_insight mission_intent]
         :core ((step s1 :logic "load memory-kb-policy and learning-engine-policy for realtime extraction batch, preview budgets, learning cadences, and pty send budgets")
-               (step s2 :logic "resolve project/global memory scope and normalize KB or intent query; high-frequency intent grounding should use mission_context_gather to aggregate KB, SSOT, project registry, skill evidence, and infra evidence before falling back to leaf tools")
+               (step s2 :logic "resolve project/global memory scope and normalize KB or intent query; high-frequency intent grounding should use mission_context_gather to aggregate KB, SSOT, project registry, skill evidence, infra evidence, active Board task records, and bounded conversation logs before falling back to leaf tools")
                (step s3 :logic "read or mutate durable knowledge rows through one Lisp-described memory contract")
                (step s4 :logic "route all realtime extraction, deep-analysis, manual MCP, and internal learning writes through the shared KB dedupe gate before any new active key can be created")
                (step s5 :logic "merge exact/fuzzy/same-session duplicates into one durable key while preserving evidence_refs, source_sessions, and superseded_by provenance")
@@ -4309,6 +4374,8 @@
              "crates/missiond-daemon/src/handlers/knowledge/kb/beacon.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/code_search.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/review.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/context_gather.rs"
+             "crates/missiond-mcp/src/tools/knowledge/context_gather.rs"
              "crates/missiond-core/migrations/20260508001000_knowledge_review_state.sql"
              "crates/missiond-core/src/types/knowledge.rs"
              "crates/missiond-core/src/db/traits.rs"

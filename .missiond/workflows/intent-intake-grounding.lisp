@@ -33,8 +33,8 @@
        :question "关于这个诉求，我还有哪些不知道的信息？每个未知信息应该向哪个权威源查询？"
        :core "Classify unknowns by authority: project SSOT, memory, skill operational facts, deployment facts, code surface, EventBus evidence, checker output, or user decision.")
      (step s4 :id scoped-grounding-search
-       :question "第二轮：用最小查询查一遍记忆库、项目注册、SSOT Lisp、skill 证据和必要代码锚点，确认用户说的对象到底是什么。"
-       :core "Run mission_context_gather as the primary aggregate over KB, project registry, SSOT Lisp, skill evidence, and infra evidence. Fall back to individual mission_kb_query/mission_intent/mission_skill_context/mission_infra_query only when the aggregate reports a source-specific diagnostic. Every query must be derived from s3 unknowns.")
+       :question "第二轮：用最小查询查一遍记忆库、项目注册、SSOT Lisp、skill 证据、任务记录、相关会话和必要代码锚点，确认用户说的对象到底是什么。"
+       :core "Run mission_context_gather as the primary aggregate over KB, project registry, SSOT Lisp, skill evidence, infra evidence, active Board task records, and bounded conversation logs. Fall back to individual mission_kb_query/mission_intent/mission_skill_context/mission_infra_query/mission_board_query/mission_conversation_query only when the aggregate reports a source-specific diagnostic. Every query must be derived from s3 unknowns.")
      (step s5 :id evidence-synthesis
        :question "这些证据是否足以支持意图判断？有没有过期事实、同名项目、路径不明、服务器未知或用户前后偏好冲突？"
        :core "Merge evidence into grounded_intent_summary, evidence_refs, confidence, stale_fact_notes, unresolved_unknowns, and decision_needed flags.")

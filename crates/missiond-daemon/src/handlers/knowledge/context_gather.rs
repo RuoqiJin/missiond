@@ -3,10 +3,11 @@ use missiond_mcp::tools::{ToolContent, ToolResult};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::handlers::comm::conversation;
 use crate::handlers::sysinfra::infra;
 use crate::state::AppState;
 
-use super::{intent, kb, project, skill};
+use super::{board, intent, kb, project, skill};
 
 #[derive(Debug, Deserialize)]
 struct ContextGatherArgs {
@@ -30,6 +31,20 @@ struct ContextGatherArgs {
     include_skill: Option<bool>,
     #[serde(default, deserialize_with = "crate::lenient::option_bool")]
     include_infra: Option<bool>,
+    #[serde(
+        default,
+        alias = "includeBoard",
+        deserialize_with = "crate::lenient::option_bool"
+    )]
+    include_board: Option<bool>,
+    #[serde(
+        default,
+        alias = "includeConversations",
+        deserialize_with = "crate::lenient::option_bool"
+    )]
+    include_conversations: Option<bool>,
+    #[serde(default, alias = "conversationTimeRange")]
+    conversation_time_range: Option<String>,
     #[serde(default = "default_limit")]
     limit: usize,
 }
@@ -144,6 +159,50 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
                     "target_id": args.infra_target,
                     "skill": args.skill,
                     "limit": limit
+                }),
+            )
+            .await,
+        );
+    }
+
+    if args.include_board.unwrap_or(true) {
+        insert_subcall(
+            &mut sources,
+            &mut diagnostics,
+            "board_tasks",
+            board::handle(
+                state,
+                "mission_board_query",
+                json!({
+                    "action": "search",
+                    "query": query,
+                    "project": args.project_id,
+                    "scope": "active",
+                    "limit": limit
+                }),
+            )
+            .await,
+        );
+    }
+
+    if args.include_conversations.unwrap_or(true) {
+        insert_subcall(
+            &mut sources,
+            &mut diagnostics,
+            "conversation_logs",
+            conversation::handle(
+                state,
+                "mission_conversation_query",
+                json!({
+                    "action": "search",
+                    "query": query,
+                    "project": args.project_id,
+                    "limit": limit,
+                    "time_range": args
+                        .conversation_time_range
+                        .as_deref()
+                        .unwrap_or("last_30d"),
+                    "query_mode": "hybrid"
                 }),
             )
             .await,
