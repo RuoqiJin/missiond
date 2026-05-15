@@ -17,7 +17,7 @@
      :at "2026-05-13T13:22:00+08:00"
      :actor "codex"
      :kind "runtime-fact"
-     :summary "Confirmed current Secret Store SSOT says production is on the GCP xjp-backend VM; CN/ECS Secret Store remains a target requirement until deployed and recorded."))
+     :summary "Confirmed current Secret Store SSOT says production is on the GCP xjp-backend VM; CN/ECS Secret Store remains a target requirement until deployed and recorded.")
    (event e4
      :at "2026-05-13T13:31:00+08:00"
      :actor "codex"
@@ -72,6 +72,16 @@
      :at "2026-05-13T21:02:00+08:00"
      :actor "codex"
      :kind "topology-fact"
-     :summary "User provided topology: privatecloud Ubuntu 10900KF+6800XT, Windows 12900KF+3090Ti, and Synology VM are in the same LAN. privatecloud is the preferred CN builder/jump candidate when its deploy-agent is online. Current privatecloud deploy-agent check returned client offline/wake signal."))
-  :current_status "blocked-on-domestic-artifact-lane"
-  :next_action "Recover/verify the privatecloud or another approved CN builder, then deploy secret-store-cn through cn-oss-bundle-lane with OSS object and digest provenance; do not retry GHCR/GitHub target pull from ECS.")
+     :summary "User provided topology: privatecloud Ubuntu 10900KF+6800XT, Windows 12900KF+3090Ti, and Synology VM are in the same LAN. privatecloud is the preferred CN builder/jump candidate when its deploy-agent is online. Current privatecloud deploy-agent check returned client offline/wake signal.")
+   (event e15
+     :at "2026-05-15T22:13:39+08:00"
+     :actor "codex"
+     :kind "runtime-smoke"
+     :summary "Verified https://ss-cn.xiaojinpro.com/livez and /readyz both return 200 OK. Treat secret-store-cn as running on Aliyun ECS; deploy-center still has a stale runtime shell with skip_deployment/stage configs disabled and incomplete release provenance.")
+   (event e16
+     :at "2026-05-15T22:13:42+08:00"
+     :actor "codex"
+     :kind "adjacent-runtime-smoke"
+     :summary "Verified changtu.pro currently returns Aliyun ICP interstitial for public host requests; direct ECS/IP request reaches Nginx/PCEA default page. Long Image CN remains deployed behind host-header evidence but not publicly launched until ICP or alternative edge/domain strategy is complete."))
+  :current_status "runtime-verified-with-provenance-gap"
+  :next_action "Promote the ad-hoc GCP docker-save -> Aliyun OSS -> ECS docker-load Secret Store CN deployment into deploy-center release provenance, then replace the stale skip_deployment/stage-disabled read model with a configured CN OSS artifact lane.")

@@ -1706,22 +1706,23 @@
       :kind cloud-vm
       :environment production
       :owner_authority deploy-center
-      :capabilities [pcea deploy-agent runtime]
-      :service_ids [pcea]
+      :capabilities [pcea deploy-agent runtime secret-store-cn long-image-service]
+      :service_ids [pcea secret-store-cn long-image-service]
       :network_profile ecs-cn-restricted
       :artifact_lanes [cn-oss-bundle-lane gitee-source-mirror-lane manual-break-glass-lane]
-      :freshness verified-agent-online-2026-05-13
+      :freshness verified-runtime-smoke-2026-05-15
       :runtime_facts (instance_id "i-uf6641fl52xo7ukf7kgl"
                       instance_name "iZuf6641fl52xo7ukf7kglZ"
                       public_ip "106.15.2.17"
                       zone "cn-shanghai-e"
                       agent_version "10.7.2"
-                      current_containers [pcea-app pcea-api pcea-postgres]
-                      missing_services [secret-store-cn])
+                      current_containers [pcea-app pcea-api pcea-postgres secret-store-cn-app long-image-service]
+                      runtime_smoke [secret-store-cn-livez secret-store-cn-readyz long-image-host-header]
+                      public_domain_blocks [changtu-pro-icp])
       :break_glass_runbook_refs [skill:pcea#ssh skill:pcea#deploy skill:aliyun#ECS skill:deploy-ops#deploy-agent]
       :credential_refs [secret-store://deploy-agent/DEPLOY_AGENT_ECS_API_KEY secret-store://infra/aliyun-ecs/ssh]
       :diagnostic_profiles [deploy_provenance_snapshot container_inventory dependency_manifest_scan supply_chain_ioc_scan]
-      :evidence_refs [skill:pcea skill:aliyun skill:deploy-ops secret-store-cn-ecs-deploy-20260513])
+      :evidence_refs [skill:pcea skill:aliyun skill:deploy-ops secret-store-cn-ecs-deploy-20260513 secret-store-cn-runtime-verified-20260515 changtu-pro-cn-deployment-20260513])
     (runtime-target :target_id privatecloud-10900kf
       :aliases [privatecloud privatecloud-lan-192-168-1-20 ubuntu-10900kf]
       :kind local-lan-builder
@@ -2325,15 +2326,15 @@
       :project secret-store
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/services/secret-store-rs"
       :intent ".missiond/intent.lisp"
-      :environment planned-cn
+      :environment cn-production
       :public-base-url "https://ss-cn.xiaojinpro.com"
       :domains ["ss-cn.xiaojinpro.com"]
-      :deployment (:substrate deploy-center :dc_slug "secret-store-cn" :runtime-target ecs-pcea :executor ecs-agent :work_dir "/opt/secret-store-cn" :compose_file "docker/docker-compose.cn.yml" :stage_configs disabled :skip_deployment true :artifact-delivery-lane cn-oss-bundle-lane :authority deploy-center-stage-configs)
+      :deployment (:substrate aliyun-ecs :dc_slug "secret-store-cn" :runtime-target ecs-pcea :executor ecs-agent :work_dir "/opt/secret-store-cn" :compose_file "/opt/secret-store-cn/docker-compose.cn.yml" :local-bind "127.0.0.1:8091" :proxy nginx :artifact-delivery-lane cn-oss-bundle-lane :authority verified-smoke :deploy-center-status stale-runtime-shell :provenance partial)
       :health ["/livez" "/readyz"]
-      :dependencies [cn-postgres? cn-redis? cn-secret-store-kek cn-admin-key]
+      :dependencies [cn-postgres secret-store-cn-kek secret-store-cn-admin-key]
       :ops-capability deploy-ops
-      :source-evidence [secret-store-cn-ecs-deploy-20260513]
-      :risks [domestic-artifact-lane-required privatecloud-build-runtime-offline deploy-center-read-model-gap provenance-contract-required]
+      :source-evidence [secret-store-cn-ecs-deploy-20260513 secret-store-cn-runtime-verified-20260515 skill:secret-store skill:aliyun]
+      :risks [deploy-center-read-model-gap provenance-contract-required docker-healthcheck-disabled-until-next-image-promotion]
       :surface service-runtime-universe)
     (service :id xjp-memory
       :project xjp-memory
