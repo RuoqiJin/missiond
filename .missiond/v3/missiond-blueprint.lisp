@@ -1717,7 +1717,7 @@
                       zone "cn-shanghai-e"
                       agent_version "10.7.2"
                       current_containers [pcea-app pcea-api pcea-postgres secret-store-cn-app long-image-service]
-                      runtime_smoke [secret-store-cn-livez secret-store-cn-readyz long-image-host-header]
+                      runtime_smoke [secret-store-cn-livez secret-store-cn-readyz long-image-public-icp-blocked long-image-host-header-stale]
                       public_domain_blocks [changtu-pro-icp])
       :break_glass_runbook_refs [skill:pcea#ssh skill:pcea#deploy skill:aliyun#ECS skill:deploy-ops#deploy-agent]
       :credential_refs [secret-store://deploy-agent/DEPLOY_AGENT_ECS_API_KEY secret-store://infra/aliyun-ecs/ssh]
@@ -2329,7 +2329,7 @@
       :environment cn-production
       :public-base-url "https://ss-cn.xiaojinpro.com"
       :domains ["ss-cn.xiaojinpro.com"]
-      :deployment (:substrate aliyun-ecs :dc_slug "secret-store-cn" :runtime-target ecs-pcea :executor ecs-agent :work_dir "/opt/secret-store-cn" :compose_file "/opt/secret-store-cn/docker-compose.cn.yml" :local-bind "127.0.0.1:8091" :proxy nginx :artifact-delivery-lane cn-oss-bundle-lane :authority verified-smoke :deploy-center-status stale-runtime-shell :provenance partial)
+      :deployment (:substrate aliyun-ecs :dc_slug "secret-store-cn" :runtime-target ecs-pcea :network-profile ecs-cn-restricted :executor ecs-agent :work_dir "/opt/secret-store-cn" :compose_file "/opt/secret-store-cn/docker-compose.cn.yml" :local-bind "127.0.0.1:8091" :proxy nginx :artifact-delivery-lane cn-oss-bundle-lane :authority verified-smoke :deploy-center-status stale-runtime-shell :provenance partial)
       :health ["/livez" "/readyz"]
       :dependencies [cn-postgres secret-store-cn-kek secret-store-cn-admin-key]
       :ops-capability deploy-ops

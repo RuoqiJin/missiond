@@ -82,6 +82,6 @@
      :at "2026-05-15T22:13:42+08:00"
      :actor "codex"
      :kind "adjacent-runtime-smoke"
-     :summary "Verified changtu.pro currently returns Aliyun ICP interstitial for public host requests; direct ECS/IP request reaches Nginx/PCEA default page. Long Image CN remains deployed behind host-header evidence but not publicly launched until ICP or alternative edge/domain strategy is complete."))
+     :summary "Verified changtu.pro currently returns Aliyun ICP interstitial for public host requests; the latest external host-header API probe no longer returns the previous Long Image health response. Treat prior local/host-header evidence as stale until deploy-center can run an internal deploy-agent diagnostic for /opt/changtu and 127.0.0.1:4177."))
   :current_status "runtime-verified-with-provenance-gap"
   :next_action "Promote the ad-hoc GCP docker-save -> Aliyun OSS -> ECS docker-load Secret Store CN deployment into deploy-center release provenance, then replace the stale skip_deployment/stage-disabled read model with a configured CN OSS artifact lane.")
