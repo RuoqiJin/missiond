@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use missiond_mcp::tools::ToolResult;
 use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub(super) async fn handle_universe(args: Value) -> Result<ToolResult> {
     let filter_id = args.get("id").and_then(|v| v.as_str()).map(str::to_string);
@@ -99,19 +99,8 @@ pub(super) async fn handle_universe(args: Value) -> Result<ToolResult> {
 }
 
 fn locate_v3_blueprint() -> Result<PathBuf> {
-    let cwd = std::env::current_dir().map_err(|e| anyhow!("current_dir failed: {}", e))?;
-    for ancestor in cwd.ancestors() {
-        let candidate = ancestor.join(".missiond/v3/missiond-blueprint.lisp");
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-    }
-    let fallback =
-        Path::new("/Users/jinchen/Projects/missiond/.missiond/v3/missiond-blueprint.lisp");
-    if fallback.exists() {
-        return Ok(fallback.to_path_buf());
-    }
-    Err(anyhow!("MissionD V3 blueprint not found"))
+    crate::helpers::missiond_blueprint_path()
+        .ok_or_else(|| anyhow!("MissionD V3 blueprint not found"))
 }
 
 fn extract_forms(source: &str, marker: &str) -> Vec<String> {

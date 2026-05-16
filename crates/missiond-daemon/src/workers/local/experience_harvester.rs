@@ -242,11 +242,15 @@ async fn resolve_ast_candidates_async(
 
 /// Strip project root prefix to get repo-relative path.
 fn strip_project_prefix(path: &str) -> String {
-    // Common prefixes in this project
-    for prefix in &["/Users/jinchen/Projects/missiond/", "missiond/"] {
-        if let Some(stripped) = path.strip_prefix(prefix) {
+    let root = crate::helpers::missiond_project_root();
+    if let Some(root) = root.to_str() {
+        let prefix = format!("{}/", root.trim_end_matches('/'));
+        if let Some(stripped) = path.strip_prefix(&prefix) {
             return stripped.to_string();
         }
+    }
+    if let Some(stripped) = path.strip_prefix("missiond/") {
+        return stripped.to_string();
     }
     path.to_string()
 }

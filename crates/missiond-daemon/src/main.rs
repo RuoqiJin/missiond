@@ -318,6 +318,7 @@ impl AppState {
 async fn main() -> Result<()> {
     let home = default_mission_home();
     std::fs::create_dir_all(&home).ok();
+    let missiond_project_root = missiond_project_root();
 
     // Dual-layer logging: stderr + file (daily rotation)
     let log_dir = home.join("logs");
@@ -576,10 +577,9 @@ async fn main() -> Result<()> {
     let ws_port = ws_port();
     let context_enricher_slot: missiond_core::ContextEnricherSlot =
         Arc::new(tokio::sync::RwLock::new(None));
-    let missiond_project_root_for_ws = std::path::PathBuf::from("/Users/jinchen/Projects/missiond");
     let workstation_config_for_ws =
         context::v3_blueprint_runtime::WorkstationRuntimeConfig::load_for_project_root(Some(
-            missiond_project_root_for_ws.to_string_lossy().as_ref(),
+            missiond_project_root.to_string_lossy().as_ref(),
         ))
         .map_err(|e| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", e))?;
     let default_chat_slot = std::env::var("MISSIOND_CHAT_COMPLETIONS_DEFAULT_SLOT")
@@ -1046,7 +1046,6 @@ async fn main() -> Result<()> {
 
     // Register SlotManager task configs
     {
-        let missiond_project_root = std::path::PathBuf::from("/Users/jinchen/Projects/missiond");
         let workstation_config =
             context::v3_blueprint_runtime::WorkstationRuntimeConfig::load_for_project_root(Some(
                 missiond_project_root.to_string_lossy().as_ref(),

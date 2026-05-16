@@ -124,7 +124,9 @@ impl ProjectStore for PgMissionStore {
     async fn skill_topic_get(&self, topic: &str) -> DbResult<Option<SkillTopic>> {
         let row = sqlx::query(
             "SELECT topic, description, aka, allowed_tools, file_path,
-                    hit_count, last_hit_at, fragment_count, total_lines, checksum,
+                    hit_count::bigint AS hit_count, last_hit_at,
+                    fragment_count::bigint AS fragment_count,
+                    total_lines::bigint AS total_lines, checksum,
                     requires_json, actions_json, context_hooks_json, created_at, updated_at
              FROM skill_topics WHERE topic = $1",
         )
@@ -157,7 +159,9 @@ impl ProjectStore for PgMissionStore {
     async fn skill_topic_list(&self) -> DbResult<Vec<SkillTopic>> {
         let rows = sqlx::query(
             "SELECT topic, description, aka, allowed_tools, file_path,
-                    hit_count, last_hit_at, fragment_count, total_lines, checksum,
+                    hit_count::bigint AS hit_count, last_hit_at,
+                    fragment_count::bigint AS fragment_count,
+                    total_lines::bigint AS total_lines, checksum,
                     requires_json, actions_json, context_hooks_json, created_at, updated_at
              FROM skill_topics ORDER BY topic",
         )
@@ -388,7 +392,9 @@ impl ProjectStore for PgMissionStore {
         let pattern = format!("%{}%", query.to_lowercase());
         let rows = sqlx::query(
             "SELECT topic, description, aka, allowed_tools, file_path,
-                    hit_count, last_hit_at, fragment_count, total_lines, checksum,
+                    hit_count::bigint AS hit_count, last_hit_at,
+                    fragment_count::bigint AS fragment_count,
+                    total_lines::bigint AS total_lines, checksum,
                     requires_json, actions_json, context_hooks_json, created_at, updated_at
              FROM skill_topics
              WHERE LOWER(topic) LIKE $1

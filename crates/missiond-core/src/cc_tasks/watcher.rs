@@ -151,6 +151,14 @@ impl CCTasksWatcher {
 
         info!(projects_dir = ?self.projects_dir, "Starting CCTasksWatcher");
 
+        if let Err(e) = tokio::fs::create_dir_all(&self.projects_dir).await {
+            warn!(
+                error = %e,
+                projects_dir = ?self.projects_dir,
+                "Failed to create Claude Code projects directory before watching"
+            );
+        }
+
         // Load persisted cursors from DB before scanning
         if let Some(ref store) = self.store {
             match store.load_watcher_cursors().await {

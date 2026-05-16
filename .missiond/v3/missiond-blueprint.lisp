@@ -687,6 +687,8 @@
       ["code and research dynamic slots MUST NOT hardcode --model sonnet"
        "daemon startup SlotManager ClaudeCode task configs MUST project coder/researcher model profiles from workstation-config and omit --model for coding-default-opus-4-7"
        "daemon startup SlotManager task configs MUST be generated from workstation-config startup-slot entries, including engine/lifecycle/slot_id/role/timeout_secs/skip_permissions"
+       "daemon startup MUST resolve the MissionD orchestrator root from MISSIOND_PROJECT_ROOT, MISSIOND_ORCHESTRATOR_ROOT, or the current working directory ancestor containing .missiond/v3/missiond-blueprint.lisp; runtime code MUST NOT hardcode /Users/jinchen/Projects/missiond as the orchestrator root because managed machines may install MissionD under their own user home."
+       "Clean-machine daemon startup MUST create missing provider history watch directories such as ~/.claude/projects before registering filesystem watchers; absence of prior ClaudeCode/Codex/Gemini history is not a fatal condition for a managed MissionD node."
        "mission_compute_slot dynamic template role/description/mcp_config/default_cwd and allowed cwd prefixes MUST project from workstation-config slot-template + cwd-policy dynamic-slot, not a Rust-local template table"
        "Jarvis/OpenAI-compatible chat completions default slot MUST project from workstation-config chat-completions-policy jarvis-api; X-Slot-Id remains the explicit request override and Rust MUST NOT hardcode slot-jarvis."
        "model=\"default\" and model_profile=coding-default-opus-4-7 both mean no CLI --model override"
@@ -3679,10 +3681,11 @@
         :surface skill-runtime
         :entry [mission_skill_query mission_skill_context mission_skill_mutate mission_skill_exec]
         :core ((step s1 :logic "resolve skill metadata and context through the skill registry")
-               (step s2 :logic "for operational questions such as remote hosts, deploy-agent, router embedding/rerank, 12900kf, Windows runner, CI runner, Ollama, or model host, extract bounded skill-derived operational_facts with source_path/source_line before ad-hoc probing")
-               (step s3 :logic "validate mutation or execution request against project and permission policy")
-               (step s4 :logic "for requires_approval skill workflows, return a pending_approval preview first and require a second explicit approve=true call after human review before executing")
-               (step s5 :logic "return skill execution result, operational fact bundle, or context bundle as a runtime receipt"))
+               (step s2 :logic "clean-machine skill SQL counter reads MUST cast integer counters to bigint before decoding into SkillTopic i64 fields")
+               (step s3 :logic "for operational questions such as remote hosts, deploy-agent, router embedding/rerank, 12900kf, Windows runner, CI runner, Ollama, or model host, extract bounded skill-derived operational_facts with source_path/source_line before ad-hoc probing")
+               (step s4 :logic "validate mutation or execution request against project and permission policy")
+               (step s5 :logic "for requires_approval skill workflows, return a pending_approval preview first and require a second explicit approve=true call after human review before executing")
+               (step s6 :logic "return skill execution result, operational fact bundle, or context bundle as a runtime receipt"))
         :egress [skill_context skill_operational_facts skill_mutation skill_execution_receipt])
       (function cascade-governance
         :surface cascade-governance

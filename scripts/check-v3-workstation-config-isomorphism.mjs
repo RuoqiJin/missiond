@@ -26,6 +26,7 @@ Checks the V3 workstation-config Lisp/code isomorphism contract:
 
 const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
+  helpers: 'crates/missiond-daemon/src/helpers.rs',
   main: 'crates/missiond-daemon/src/main.rs',
   computeSlot: 'crates/missiond-daemon/src/handlers/compute/compute_slot.rs',
   taskDelegate: 'crates/missiond-daemon/src/handlers/compute/task_delegate.rs',
@@ -35,6 +36,7 @@ const DEFAULT_FILES = {
   spawner: 'crates/missiond-daemon/src/slot_orchestrator/spawner.rs',
   ccController: 'crates/missiond-daemon/src/slot_orchestrator/cc_controller.rs',
   geminiDriver: 'crates/missiond-daemon/src/llm/gemini_driver.rs',
+  ccWatcher: 'crates/missiond-core/src/cc_tasks/watcher.rs',
   flowEngine: 'crates/missiond-daemon/src/engine/intent_engine/flow_engine.rs',
   memoryScheduler: 'crates/missiond-daemon/src/engine/intent_engine/memory_scheduler.rs',
   autopilot: 'crates/missiond-daemon/src/engine/intent_engine/autopilot.rs',
@@ -127,6 +129,8 @@ function checkFiles(root, files) {
     'code and research dynamic slots MUST NOT hardcode --model sonnet',
     'daemon startup SlotManager ClaudeCode task configs MUST project coder/researcher model profiles from workstation-config',
     'daemon startup SlotManager task configs MUST be generated from workstation-config startup-slot entries',
+    'daemon startup MUST resolve the MissionD orchestrator root from MISSIOND_PROJECT_ROOT',
+    'Clean-machine daemon startup MUST create missing provider history watch directories',
     'mission_compute_slot dynamic template role/description/mcp_config/default_cwd and allowed cwd prefixes MUST project from workstation-config slot-template + cwd-policy dynamic-slot',
     'Jarvis/OpenAI-compatible chat completions default slot MUST project from workstation-config chat-completions-policy jarvis-api',
     '(startup-slot arch_maintenance',
@@ -229,6 +233,12 @@ function checkFiles(root, files) {
     'V3_BLUEPRINT_CONFIG_ERROR',
     'PTYSpawnOptions',
   ]);
+
+  requireAll(diagnostics, files.ccWatcher, sources.ccWatcher, [
+    'tokio::fs::create_dir_all(&self.projects_dir).await',
+    'Failed to create Claude Code projects directory before watching',
+    'watcher.watch(&self.projects_dir, RecursiveMode::Recursive)',
+  ]);
   forbidAll(diagnostics, files.computeSlot, sources.computeSlot, [
     'const ALLOWED_CWD_PREFIXES',
     'TemplateConfig {',
@@ -237,6 +247,7 @@ function checkFiles(root, files) {
   ]);
 
   requireAll(diagnostics, files.main, sources.main, [
+    'missiond_project_root()',
     'parse_startup_slot_engine',
     'parse_startup_slot_lifecycle',
     'WorkstationRuntimeConfig::load_for_project_root',
@@ -250,10 +261,21 @@ function checkFiles(root, files) {
     'default_chat_slot',
   ]);
   forbidAll(diagnostics, files.main, sources.main, [
+    'PathBuf::from("/Users/jinchen/Projects/missiond")',
     'claude-sonnet-4-6',
     'std::time::Duration::from_secs(600)',
     'std::time::Duration::from_secs(120)',
     'std::time::Duration::from_secs(900)',
+  ]);
+  requireAll(diagnostics, files.helpers, sources.helpers, [
+    'pub(crate) fn missiond_project_root() -> PathBuf',
+    'MISSIOND_PROJECT_ROOT',
+    'MISSIOND_ORCHESTRATOR_ROOT',
+    'nearest_project_root_with_blueprint',
+    'pub(crate) fn missiond_blueprint_path() -> Option<PathBuf>',
+  ]);
+  forbidAll(diagnostics, files.v3Runtime, sources.v3Runtime, [
+    'Path::new("/Users/jinchen/Projects/missiond/.missiond/v3/missiond-blueprint.lisp")',
   ]);
 
   requireAll(diagnostics, files.taskDelegate, sources.taskDelegate, [
@@ -691,6 +713,7 @@ function buildFixture() {
   (compression-contract
     :checks ["node scripts/check-v3-workstation-config-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.main, `
+missiond_project_root();
 WorkstationRuntimeConfig::load_for_project_root();
 parse_startup_slot_engine();
 parse_startup_slot_lifecycle();
@@ -702,6 +725,13 @@ std::time::Duration::from_secs(startup_slot.timeout_secs);
 skip_permissions: startup_slot.skip_permissions;
 chat_completions_default_slot();
 let default_chat_slot = String::new();`);
+  writeFixture(root, DEFAULT_FILES.helpers, `
+pub(crate) fn missiond_project_root() -> PathBuf {
+  let _ = "MISSIOND_PROJECT_ROOT";
+  let _ = "MISSIOND_ORCHESTRATOR_ROOT";
+  nearest_project_root_with_blueprint();
+}
+pub(crate) fn missiond_blueprint_path() -> Option<PathBuf> { None }`);
   writeFixture(root, DEFAULT_FILES.server, `
 let default_chat_slot = String::new();
 // V3-projected default slot

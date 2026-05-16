@@ -2799,37 +2799,11 @@ fn nearest_missiond_root(start: &Path) -> PathBuf {
 /// project lacks its own per-project override.
 ///
 /// Resolution order:
-/// 1. `MISSIOND_ORCHESTRATOR_ROOT` env -> $ROOT/.missiond/v3/missiond-blueprint.lisp
-/// 2. Walk current cwd ancestors for `.missiond/v3/missiond-blueprint.lisp`
-/// 3. Hardcoded `/Users/jinchen/Projects/missiond/.missiond/v3/missiond-blueprint.lisp`
-///    — matches main.rs startup path and `universe.rs::locate_v3_blueprint`.
+/// 1. `MISSIOND_PROJECT_ROOT` env -> $ROOT/.missiond/v3/missiond-blueprint.lisp
+/// 2. `MISSIOND_ORCHESTRATOR_ROOT` env -> $ROOT/.missiond/v3/missiond-blueprint.lisp
+/// 3. Walk current cwd ancestors for `.missiond/v3/missiond-blueprint.lisp`
 fn locate_orchestrator_blueprint() -> Option<PathBuf> {
-    if let Ok(root) = std::env::var("MISSIOND_ORCHESTRATOR_ROOT") {
-        let candidate = Path::new(&root)
-            .join(".missiond")
-            .join("v3")
-            .join("missiond-blueprint.lisp");
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        for ancestor in cwd.ancestors() {
-            let candidate = ancestor
-                .join(".missiond")
-                .join("v3")
-                .join("missiond-blueprint.lisp");
-            if candidate.exists() {
-                return Some(candidate);
-            }
-        }
-    }
-    let fallback =
-        Path::new("/Users/jinchen/Projects/missiond/.missiond/v3/missiond-blueprint.lisp");
-    if fallback.exists() {
-        return Some(fallback.to_path_buf());
-    }
-    None
+    crate::helpers::missiond_blueprint_path()
 }
 
 /// Resolve and read the V3 blueprint source for a target project.

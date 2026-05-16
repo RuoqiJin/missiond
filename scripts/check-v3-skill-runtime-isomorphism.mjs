@@ -21,6 +21,7 @@ const DEFAULT_FILES = {
   context: 'crates/missiond-daemon/src/handlers/knowledge/skill/context.rs',
   mutate: 'crates/missiond-daemon/src/handlers/knowledge/skill/mutate.rs',
   exec: 'crates/missiond-daemon/src/handlers/knowledge/skill/exec.rs',
+  pgSkill: 'crates/missiond-core/src/db/pg/skill.rs',
   mcp: 'crates/missiond-mcp/src/tools/knowledge/skill.rs',
 };
 
@@ -100,6 +101,7 @@ function checkFiles(root, files) {
     'project_skill_links evidence',
     'skill-derived operational_facts',
     'remote-host/deploy-agent/router embedding/rerank/12900kf lookups',
+    'clean-machine skill SQL counter reads MUST cast integer counters to bigint before decoding into SkillTopic i64 fields',
     'mission_skill_context.operational_facts',
     'explicit opt-in KB dependency aggregation',
     'skill/context.rs owns context build/resolve',
@@ -196,6 +198,12 @@ function checkFiles(root, files) {
     'Workflow execution failed',
   ]);
 
+  requireAll(diagnostics, files.pgSkill, sources.pgSkill, [
+    'hit_count::bigint AS hit_count',
+    'fragment_count::bigint AS fragment_count',
+    'total_lines::bigint AS total_lines',
+  ]);
+
   requireAll(diagnostics, files.mcp, sources.mcp, [
     'ToolDefinition::new',
     '"mission_skill_query"',
@@ -246,7 +254,7 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/skill/exec.rs"
              "crates/missiond-mcp/src/tools/knowledge/skill.rs"
              "scripts/check-v3-skill-runtime-isomorphism.mjs"]
-      :note "skill.rs is the thin mission_skill facade; skill/query.rs owns list/search/topics/actions/stats/project_links, composite registry/topic/action/embedding/execution statistics, and derived project-skill links; skill/context.rs owns context build/resolve plus project-aware context resolution, optional-query resolve by project_id or skill, project_skill_links evidence, skill-derived operational_facts for remote-host/deploy-agent/router embedding/rerank/12900kf lookups, and explicit opt-in KB dependency aggregation; skill/mutate.rs owns upsert/record/render/rollback; skill/exec.rs owns mission_skill_exec."))
+      :note "skill.rs is the thin mission_skill facade; skill/query.rs owns list/search/topics/actions/stats/project_links, composite registry/topic/action/embedding/execution statistics, and derived project-skill links; clean-machine skill SQL counter reads MUST cast integer counters to bigint before decoding into SkillTopic i64 fields; skill/context.rs owns context build/resolve plus project-aware context resolution, optional-query resolve by project_id or skill, project_skill_links evidence, skill-derived operational_facts for remote-host/deploy-agent/router embedding/rerank/12900kf lookups, and explicit opt-in KB dependency aggregation; skill/mutate.rs owns upsert/record/render/rollback; skill/exec.rs owns mission_skill_exec."))
   (runtime-projection [mission_skill_context.operational_facts])
   (compression-contract
     :checks ["node scripts/check-v3-skill-runtime-isomorphism.mjs"]))`);
@@ -291,6 +299,12 @@ ProcessSkillTopic skill_version_get skill_version_list ingest_skills
 
   writeFixture(root, DEFAULT_FILES.exec, `
 handle_exec execute_workflow dry_run approve params Workflow execution failed
+`);
+
+  writeFixture(root, DEFAULT_FILES.pgSkill, `
+hit_count::bigint AS hit_count
+fragment_count::bigint AS fragment_count
+total_lines::bigint AS total_lines
 `);
 
   writeFixture(root, DEFAULT_FILES.mcp, `

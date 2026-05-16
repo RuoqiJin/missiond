@@ -365,7 +365,7 @@ async fn process_commit(state: &AppState, repo: &str, hash: &str) -> Result<bool
     // 4. Read current YAML manifest
     // For missiond repo, the YAML is in the same repo
     // For other repos, it's still in the missiond repo
-    let missiond_root = PathBuf::from("/Users/jinchen/Projects/missiond");
+    let missiond_root = crate::helpers::missiond_project_root();
     let yaml_path = missiond_root.join(yaml_rel);
     let yaml_content = tokio::fs::read_to_string(&yaml_path)
         .await

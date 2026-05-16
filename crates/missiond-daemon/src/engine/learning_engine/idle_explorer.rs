@@ -201,7 +201,8 @@ async fn explore_kb_consistency(state: &AppState, assignee: &str) -> bool {
 /// Explore 1: stale dependencies — check Cargo.toml for outdated crates.
 async fn explore_stale_dependencies(state: &AppState, assignee: &str) -> bool {
     // Only trigger if Cargo.toml exists in cwd
-    let cargo_path = std::path::Path::new("/Users/jinchen/Projects/missiond/Cargo.toml");
+    let project_root = crate::helpers::missiond_project_root();
+    let cargo_path = project_root.join("Cargo.toml");
     if !cargo_path.exists() {
         return false;
     }

@@ -7,7 +7,56 @@ pub(crate) fn default_mission_home() -> PathBuf {
 }
 
 pub(crate) fn env_path(var: &str) -> Option<PathBuf> {
-    std::env::var(var).ok().map(PathBuf::from)
+    std::env::var(var)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn nearest_project_root_with_blueprint(start: &Path) -> Option<PathBuf> {
+    start
+        .ancestors()
+        .find(|candidate| {
+            candidate
+                .join(".missiond")
+                .join("v3")
+                .join("missiond-blueprint.lisp")
+                .exists()
+        })
+        .map(Path::to_path_buf)
+}
+
+pub(crate) fn missiond_project_root() -> PathBuf {
+    if let Some(root) =
+        env_path("MISSIOND_PROJECT_ROOT").or_else(|| env_path("MISSIOND_ORCHESTRATOR_ROOT"))
+    {
+        return root;
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        return nearest_project_root_with_blueprint(&cwd).unwrap_or(cwd);
+    }
+    default_mission_home()
+}
+
+pub(crate) fn missiond_blueprint_path() -> Option<PathBuf> {
+    let from_root = |root: PathBuf| {
+        root.join(".missiond")
+            .join("v3")
+            .join("missiond-blueprint.lisp")
+    };
+    for env in ["MISSIOND_PROJECT_ROOT", "MISSIOND_ORCHESTRATOR_ROOT"] {
+        if let Some(root) = env_path(env) {
+            let candidate = from_root(root);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    std::env::current_dir()
+        .ok()
+        .and_then(|cwd| nearest_project_root_with_blueprint(&cwd))
+        .map(from_root)
 }
 
 pub(crate) fn ipc_endpoint_from_env() -> String {

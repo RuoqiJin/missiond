@@ -296,10 +296,12 @@ fn codex_boot_context_candidates() -> Vec<PathBuf> {
     if let Ok(root) = env::var("MISSIOND_PROJECT_ROOT") {
         candidates.push(PathBuf::from(root).join(CODEX_BOOT_CONTEXT_REL));
     }
+    if let Ok(root) = env::var("MISSIOND_ORCHESTRATOR_ROOT") {
+        candidates.push(PathBuf::from(root).join(CODEX_BOOT_CONTEXT_REL));
+    }
     if let Ok(cwd) = env::current_dir() {
         candidates.push(cwd.join(CODEX_BOOT_CONTEXT_REL));
     }
-    candidates.push(PathBuf::from("/Users/jinchen/Projects/missiond").join(CODEX_BOOT_CONTEXT_REL));
     candidates
 }
 
