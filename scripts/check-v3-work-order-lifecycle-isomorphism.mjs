@@ -26,6 +26,14 @@ const checks = [
       'work-order-lifecycle is the single governance chain',
       'pre-task-board-anchor',
       'scripts/check-v3-work-order-lifecycle-isomorphism.mjs',
+      '(function external-work-order-gate',
+      'missiond-work-order.verify-staged',
+      'missiond-work-order.verify-commit',
+      'MissionD-Work-Order',
+      'accepted_shard_id',
+      'scripts/missiond-work-order.mjs',
+      '.githooks/pre-commit',
+      'scripts/hooks/pre-commit-missiond-work-order',
     ],
   ],
   [
@@ -42,8 +50,37 @@ const checks = [
       'deploy_ops',
       'no-broad-implementation',
       'external-app-same-chain',
+      'external-work-order-submit-gate',
+      'missiond-work-order verify --staged',
+      'missiond-work-order verify --commit <sha>',
       'task-result-artifact',
       'audit.lisp',
+    ],
+  ],
+  [
+    'scripts/missiond-work-order.mjs',
+    [
+      'MissionD-Work-Order',
+      'verify --staged',
+      'verify --commit <sha>',
+      ':write_scope',
+      'accepted_shard_id',
+      '.missiond/work-orders',
+    ],
+  ],
+  [
+    '.githooks/pre-commit',
+    [
+      'missiond-work-order.mjs',
+      'verify --staged',
+      'MISSIOND_TASK_CONTRACT',
+    ],
+  ],
+  [
+    'scripts/hooks/pre-commit-missiond-work-order',
+    [
+      'missiond-work-order.mjs verify --staged',
+      'MISSIOND_WORK_ORDER',
     ],
   ],
   [

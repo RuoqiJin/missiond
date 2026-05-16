@@ -60,7 +60,9 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
         | "mission_skill_context"
         | "mission_skill_mutate"
         | "mission_skill_exec" => skill::handle(state, name, args).await,
-        "mission_context_gather" => context_gather::handle(state, name, args).await,
+        "mission_context_boot" | "mission_context_gather" => {
+            context_gather::handle(state, name, args).await
+        }
         "mission_question"
         | "mission_decision_stats"
         | "mission_incident"

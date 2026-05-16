@@ -109,6 +109,7 @@ export const PER_SURFACE_CHECKERS = [
   'scripts/check-v3-work-order-lifecycle-isomorphism.mjs',
   'scripts/check-v3-review-gate-isomorphism.mjs',
   'scripts/check-v3-task-lifecycle-isomorphism.mjs',
+  'scripts/check-v3-codex-boot-context-isomorphism.mjs',
   'scripts/check-v3-memory-kb-isomorphism.mjs',
   'scripts/check-v3-project-registry-isomorphism.mjs',
   'scripts/check-project-ssot-universe.mjs',

@@ -2,6 +2,7 @@ use anyhow::Result;
 use missiond_mcp::tools::{ToolContent, ToolResult};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::{env, fs, path::PathBuf};
 
 use crate::handlers::comm::conversation;
 use crate::handlers::sysinfra::infra;
@@ -49,11 +50,29 @@ struct ContextGatherArgs {
     limit: usize,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct ContextBootArgs {
+    #[serde(default, alias = "project", alias = "projectId")]
+    project_id: Option<String>,
+    #[serde(default, alias = "taskId")]
+    task_id: Option<String>,
+    #[serde(default, deserialize_with = "crate::lenient::option_bool")]
+    include_capsule: Option<bool>,
+}
+
+const CODEX_BOOT_CONTEXT_REL: &str = ".missiond/v3/evidence/codex-boot-context.lisp";
+const CODEX_BOOT_CONTEXT_FALLBACK: &str =
+    include_str!("../../../../../.missiond/v3/evidence/codex-boot-context.lisp");
+
 fn default_limit() -> usize {
     8
 }
 
-pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result<ToolResult> {
+pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
+    if name == "mission_context_boot" {
+        return handle_context_boot(args);
+    }
+
     let args: ContextGatherArgs = serde_json::from_value(args)?;
     let query = normalized_query(&args);
     if query.is_empty() && args.project_id.is_none() && args.skill.is_none() {
@@ -237,6 +256,51 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
         "diagnostics": diagnostics,
         "next_action": "Synthesize grounded intent. If intent is confirmed, assign a plan-authoring worker to compile plan.lisp from the confirmed intent plus tool/resource inventory."
     })))
+}
+
+fn handle_context_boot(args: Value) -> Result<ToolResult> {
+    let args: ContextBootArgs = serde_json::from_value(args).unwrap_or_default();
+    let (capsule, source_path) = read_codex_boot_context();
+    let include_capsule = args.include_capsule.unwrap_or(true);
+    let capsule_len = capsule.chars().count();
+    Ok(ToolResult::json_pretty(&json!({
+        "ok": true,
+        "schema": "missiond.codex-boot-context.v1",
+        "project_id": args.project_id,
+        "task_id": args.task_id,
+        "source_path": source_path,
+        "capsule_chars": capsule_len,
+        "layers": ["L0-always-on", "L1-current-task", "L2-grounded-facts", "L3-cold-evidence"],
+        "capsule": if include_capsule { Value::String(capsule) } else { Value::Null },
+        "next_action": "Use this boot capsule as the collaboration protocol. For missing task/project facts, call mission_context_gather with explicit unknowns instead of preloading broad KB or logs."
+    })))
+}
+
+fn read_codex_boot_context() -> (String, String) {
+    for candidate in codex_boot_context_candidates() {
+        if let Ok(text) = fs::read_to_string(&candidate) {
+            return (text, candidate.display().to_string());
+        }
+    }
+    (
+        CODEX_BOOT_CONTEXT_FALLBACK.to_string(),
+        "compiled-fallback:.missiond/v3/evidence/codex-boot-context.lisp".to_string(),
+    )
+}
+
+fn codex_boot_context_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(path) = env::var("MISSIOND_CODEX_BOOT_CONTEXT") {
+        candidates.push(PathBuf::from(path));
+    }
+    if let Ok(root) = env::var("MISSIOND_PROJECT_ROOT") {
+        candidates.push(PathBuf::from(root).join(CODEX_BOOT_CONTEXT_REL));
+    }
+    if let Ok(cwd) = env::current_dir() {
+        candidates.push(cwd.join(CODEX_BOOT_CONTEXT_REL));
+    }
+    candidates.push(PathBuf::from("/Users/jinchen/Projects/missiond").join(CODEX_BOOT_CONTEXT_REL));
+    candidates
 }
 
 fn normalized_query(args: &ContextGatherArgs) -> String {

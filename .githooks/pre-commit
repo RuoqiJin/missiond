@@ -28,33 +28,39 @@
 
 set -euo pipefail
 
-if [ -z "${MISSIOND_TASK_CONTRACT:-}" ]; then
-  exit 0
-fi
-
 repo_root="$(git rev-parse --show-toplevel)"
 hygiene="${repo_root}/scripts/check-staged-source-hygiene.mjs"
-contract="${MISSIOND_TASK_CONTRACT}"
+contract="${MISSIOND_TASK_CONTRACT:-}"
+work_order_gate="${repo_root}/scripts/missiond-work-order.mjs"
 
-if [ ! -f "${hygiene}" ]; then
-  echo "pre-commit: check-staged-source-hygiene.mjs not found at ${hygiene}" >&2
+if [ -n "${MISSIOND_TASK_CONTRACT:-}" ]; then
+  if [ ! -f "${hygiene}" ]; then
+    echo "pre-commit: check-staged-source-hygiene.mjs not found at ${hygiene}" >&2
+    exit 1
+  fi
+
+  # Resolve the contract path relative to the repo root if it is not absolute
+  # and not already resolvable from the current working directory.
+  case "${contract}" in
+    /*) ;;
+    *)
+      if [ ! -f "${contract}" ] && [ -f "${repo_root}/${contract}" ]; then
+        contract="${repo_root}/${contract}"
+      fi
+      ;;
+  esac
+
+  if [ ! -f "${contract}" ]; then
+    echo "pre-commit: task contract file not found: ${MISSIOND_TASK_CONTRACT}" >&2
+    exit 1
+  fi
+
+  node "${hygiene}" --task "${contract}"
+fi
+
+if [ ! -f "${work_order_gate}" ]; then
+  echo "pre-commit: missiond-work-order.mjs not found at ${work_order_gate}" >&2
   exit 1
 fi
 
-# Resolve the contract path relative to the repo root if it is not absolute
-# and not already resolvable from the current working directory.
-case "${contract}" in
-  /*) ;;
-  *)
-    if [ ! -f "${contract}" ] && [ -f "${repo_root}/${contract}" ]; then
-      contract="${repo_root}/${contract}"
-    fi
-    ;;
-esac
-
-if [ ! -f "${contract}" ]; then
-  echo "pre-commit: task contract file not found: ${MISSIOND_TASK_CONTRACT}" >&2
-  exit 1
-fi
-
-exec node "${hygiene}" --task "${contract}"
+exec node "${work_order_gate}" verify --staged

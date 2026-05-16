@@ -143,9 +143,10 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.preCommit, sources.preCommit, [
     'MissionD task-contract aware pre-commit hook',
     'MISSIOND_TASK_CONTRACT',
-    'Without that variable the hook is a no-op',
+    'missiond-work-order.mjs',
     'scripts/check-staged-source-hygiene.mjs',
-    'exec node "${hygiene}" --task "${contract}"',
+    'node "${hygiene}" --task "${contract}"',
+    'verify --staged',
   ]);
 
   requireAll(diagnostics, files.batchVerifier, sources.batchVerifier, [
@@ -238,9 +239,10 @@ repo ships scripts/check-staged-source-hygiene.mjs
   writeFixture(root, DEFAULT_FILES.preCommit, `
 MissionD task-contract aware pre-commit hook
 MISSIOND_TASK_CONTRACT
-Without that variable the hook is a no-op
+missiond-work-order.mjs
 scripts/check-staged-source-hygiene.mjs
-exec node "\${hygiene}" --task "\${contract}"
+node "\${hygiene}" --task "\${contract}"
+verify --staged
 `);
 
   writeFixture(root, DEFAULT_FILES.batchVerifier, `

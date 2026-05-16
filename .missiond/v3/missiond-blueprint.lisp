@@ -973,6 +973,22 @@
        "Direct implementation from an initial objective is allowed only when exact-shard-ready=true is explicitly present in the BoardTask metadata or description."]
     :checker "node scripts/check-v3-workflow-isomorphism.mjs")
 
+  (codex-boot-context-policy
+    :schema "missiond.codex-boot-context-policy.v1"
+    :purpose "Every resident Codex, Codex worker, or external Codex handoff should start from a small validated capsule instead of inheriting a giant historical chat or hoping the agent reads a repo note."
+    :capsule ".missiond/v3/evidence/codex-boot-context.lisp"
+    :mcp mission_context_boot
+    :layers
+      ((layer L0-always-on :source ".missiond/v3/evidence/codex-boot-context.lisp" :rule "Always inject the shared collaboration protocol: Lisp SSOT, intent->plan->work-order, unknowns-first grounding, exact shard/write lease, and durable evidence completion.")
+       (layer L1-current-task :source [mission_master_status BoardTask work-order] :rule "Load only active objective, BoardTask/work-order id, project_id, context_pack_path, accepted_shard_id, and checkpoint.")
+       (layer L2-grounded-facts :source mission_context_gather :rule "Query SSOT/project registry/skill evidence/active memory/infra/tool directory only for explicit unknowns.")
+       (layer L3-cold-evidence :source [raw-conversations historical-board provider-logs runtime-reports] :rule "Cold evidence is opt-in for audit/debug and must not be startup prompt preload."))
+    :rules
+      ["Boot capsule is a compact contract and MUST NOT contain secrets, raw provider logs, bulk chat history, or unreviewed KB dumps."
+       "mission_context_boot is the public retrieval surface for external new conversations and resident/worker startup."
+       "Every confirmed durable user intent that should survive a fresh conversation becomes an intent_memory_candidate, then active memory only after review or high-confidence evidence."]
+    :checker "node scripts/check-v3-codex-boot-context-isomorphism.mjs")
+
   (skill-edit-delegation-policy
     :schema "missiond.skill-edit-delegation-policy.v1"
     :purpose "Keep ClaudeCode/Codex/Gemini skill files as operational knowledge managed by the workstation that understands that ecosystem best."
@@ -3138,7 +3154,7 @@
         :v3-function knowledge-memory
         :surface memory-kb
         :tools [mission_kb_query mission_kb_remember mission_kb_mutate mission_kb_review mission_kb_ops mission_beacon
-                mission_code_search mission_memory mission_insight mission_intent mission_context_gather])
+                mission_code_search mission_memory mission_insight mission_intent mission_context_gather mission_context_boot])
       (tool-group shared-memory-tools
         :status code-aligned
         :v2-source ".missiond/tasks/schema/shared-memory-v1.lisp :: shared-memory-schema missiond.shared-memory.v1 (compatibility projection)"
@@ -3367,6 +3383,15 @@
                (step s3 :logic "enforce task contract write-scope and must-not-touch patterns")
                (step s4 :logic "separate active SSOT authoring paths from warm evidence and cold runtime artifacts for broad search/review"))
         :egress [source_hygiene_result scope_guard_diagnostics hook_doctor_status ssot_retrieval_scope_diagnostics])
+      (function external-work-order-gate
+        :surface external-work-order-gate
+        :entry [missiond-work-order.start missiond-work-order.verify-staged missiond-work-order.verify-commit pre-commit-hook ci-merge-gate code-first-drift-watcher]
+        :core ((step s1 :logic "create or locate .missiond/work-orders/<id>/ with intent.lisp, plan.lisp, audit.lisp, accepted_shard_id, read_scope, and write_scope")
+               (step s2 :logic "for staged code changes, require MissionD-Work-Order id from env or commit trailer and require intent.lisp/plan.lisp to exist")
+               (step s3 :logic "verify changed code files are covered by accepted shard write_scope before local commit")
+               (step s4 :logic "for commit/merge/deploy, rerun missiond-work-order verify --commit <sha> so bypassed hooks cannot land uncovered code")
+               (step s5 :logic "if code changes appear outside a work-order, create a visible code-first drift backfill BoardTask instead of silently accepting the diff"))
+        :egress [work_order_verify_result precommit_rejection ci_gate_result code_first_drift_boardtask])
       (function lisp-code-drift
         :surface lisp-code-drift-policy
         :entry [git-diff task-contract blueprint-registry emergency-waiver board-task-close]
@@ -3505,9 +3530,17 @@
                (step s4 :logic "preserve local-postgres-memory as compatibility provider while allowing null-memory for open-source/default and xjp-memory for private multi-universe deployments")
                (step s5 :logic "return explicit provider disabled/misconfigured diagnostics rather than silently falling back to stale private data"))
         :egress [MemoryProviderConfig memory-provider-status scoped-memory-result])
+      (function codex-boot-context
+        :surface codex-boot-context
+        :entry [mission_context_boot resident-master-start codex-worker-start external-chat-handoff]
+        :core ((step s1 :logic "load the small versioned capsule from .missiond/v3/evidence/codex-boot-context.lisp")
+               (step s2 :logic "validate the capsule has L0/L1/L2/L3 layers, required collaboration rules, and no secrets/raw logs/bulk chat history")
+               (step s3 :logic "return L0 always-on protocol plus optional L1 task ids; tell the agent to call mission_context_gather for bounded L2 facts")
+               (step s4 :logic "keep historical conversations, provider logs, and old Board tasks as L3 cold evidence opened only by explicit audit/debug intent"))
+        :egress [codex_boot_context_capsule external_handoff_card boot_context_diagnostic])
       (function knowledge-memory
         :surface memory-kb
-        :entry [mission_context_gather mission_kb_query mission_kb_remember mission_kb_mutate mission_kb_review mission_kb_ops mission_beacon mission_code_search mission_memory mission_insight mission_intent]
+        :entry [mission_context_boot mission_context_gather mission_kb_query mission_kb_remember mission_kb_mutate mission_kb_review mission_kb_ops mission_beacon mission_code_search mission_memory mission_insight mission_intent]
         :core ((step s1 :logic "load memory-kb-policy and learning-engine-policy for realtime extraction batch, preview budgets, learning cadences, and pty send budgets")
                (step s2 :logic "resolve project/global memory scope and normalize KB or intent query; high-frequency intent grounding should use mission_context_gather to aggregate KB, SSOT, project registry, skill evidence, infra evidence, active Board task records, and bounded conversation logs before falling back to leaf tools")
                (step s3 :logic "read or mutate durable knowledge rows through one Lisp-described memory contract")
@@ -4014,10 +4047,24 @@
              "crates/missiond-mcp/src/tools/knowledge/workflow.rs"
              "crates/missiond-mcp/src/tools/knowledge/shared_memory.rs"
              ".missiond/workflows/work-order-lifecycle.lisp"
+             "scripts/missiond-work-order.mjs"
+             ".githooks/pre-commit"
+             "scripts/hooks/pre-commit-missiond-work-order"
              "scripts/check-v3-work-order-lifecycle-isomorphism.mjs"]
       :acceptance ["node scripts/check-v3-work-order-lifecycle-isomorphism.mjs --json"
                    "node scripts/check-v3-pillar-flow-schema.mjs --engine=ocaml --json"]
       :note "work-order-lifecycle is the single governance chain for user requests, Board-triggered worker tasks, intent.lisp files, and external application delegation such as translation or code-refactor jobs. It intentionally reuses mission_request, mission_board, mission_workflow, mission_shared_memory, and file_artifacts instead of adding another public MCP tool family: every source is normalized into work-order intent, bound to one BoardTask, compiled into plan.lisp accepted shards, executed through workflow_run/shared-memory, and closed by task-result-artifacts plus audit.lisp. Board notes and provider finals remain projections; external apps get the same audit/replay semantics without learning MissionD internals.")
+
+    (surface external-work-order-gate
+      :status "code-aligned"
+      :implements [work-order-start work-order-staged-verify work-order-commit-verify precommit-work-order-gate ci-work-order-gate code-first-drift-backfill]
+      :code ["scripts/missiond-work-order.mjs"
+             ".githooks/pre-commit"
+             "scripts/hooks/pre-commit-missiond-work-order"
+             ".missiond/workflows/work-order-lifecycle.lisp"
+             "scripts/check-v3-work-order-lifecycle-isomorphism.mjs"]
+      :acceptance ["node scripts/check-v3-work-order-lifecycle-isomorphism.mjs --json"]
+      :note "external-work-order-gate is the engineering boundary for external Codex/ClaudeCode/user-local code changes. It does not assume the agent read a prompt file: local hooks, commit trailers, and CI/deploy verification require a MissionD-Work-Order id, intent.lisp, plan.lisp, accepted_shard_id, and write_scope coverage before accepting code changes. Code-first changes that bypass the gate become visible drift backfill tasks rather than silent accepted work.")
 
     (surface typed-lisp-compiler
       :status "code-aligned"
@@ -4156,7 +4203,7 @@
              "scripts/verify-task-runner-batch.mjs"
              "scripts/check-v3-source-hygiene-isomorphism.mjs"
              "scripts/check-v3-runtime-path-hygiene.mjs"]
-      :note "check-staged-source-hygiene.mjs is the read-only staged/source preflight: default mode reads staged ACMR files, rejects raw NUL bytes from staged blobs, runs git diff --cached --check, and delegates to task-scope-guard.mjs when --task or MISSIOND_TASK_CONTRACT is set; --files mode checks supplied files without reading git blobs. task-scope-guard.mjs owns task contract write-scope/must-not-touch enforcement for staged and commit modes. .githooks/pre-commit is opt-in per task via MISSIOND_TASK_CONTRACT; check-missiond-hooks.mjs is a read-only doctor and install-missiond-hooks.mjs is the only mutating hook installer. verify-task-runner-batch imports checkSuppliedFiles for source-hygiene fixture coverage without mutating git. ssot-retrieval-scope keeps broad review/search on active authoring Lisp and treats .missiond/v3/runtime/** reports as cold diagnostic evidence unless include_runtime=true or a concrete trace path is requested.")
+      :note "check-staged-source-hygiene.mjs is the read-only staged/source preflight: default mode reads staged ACMR files, rejects raw NUL bytes from staged blobs, runs git diff --cached --check, and delegates to task-scope-guard.mjs when --task or MISSIOND_TASK_CONTRACT is set; --files mode checks supplied files without reading git blobs. task-scope-guard.mjs owns task contract write-scope/must-not-touch enforcement for staged and commit modes. .githooks/pre-commit runs task-contract hygiene when MISSIOND_TASK_CONTRACT is set, then always runs missiond-work-order verify --staged so code-like staged files require MissionD-Work-Order coverage; check-missiond-hooks.mjs is a read-only doctor and install-missiond-hooks.mjs is the only mutating hook installer. verify-task-runner-batch imports checkSuppliedFiles for source-hygiene fixture coverage without mutating git. ssot-retrieval-scope keeps broad review/search on active authoring Lisp and treats .missiond/v3/runtime/** reports as cold diagnostic evidence unless include_runtime=true or a concrete trace path is requested.")
 
     (surface lisp-code-drift-policy
       :status "code-aligned"
@@ -4397,6 +4444,17 @@
              "crates/missiond-mcp/src/tools/knowledge/intent.rs"
              "scripts/check-v3-memory-kb-isomorphism.mjs"]
 	      :note "Runtime-projected V3 destination for memory/KB tools. memory-kb-policy and learning-engine-policy own budgets, cadences, bounded SQL probes, shared KB dedupe gate semantics, and physical split ownership across kb/* modules. KbStore::kb_remember is the shared write gate for realtime/deep-analysis/manual/internal memory writes; same-session duplicates preserve evidence_refs/source_sessions/superseded_by provenance instead of creating two active keys. kb/review.rs owns non-destructive knowledge_review_state overlay so stale memories leave default retrieval without deleting evidence; low-confidence semantic duplicates become needs-human review artifacts. Conversation history distillation remains deferred behind .missiond/workflows/conversation-memory-distillation.lisp. [details: .missiond/v3/evidence/blueprint-notes.lisp#note-015]")
+
+    (surface codex-boot-context
+      :status "code-aligned"
+      :implements [codex-boot-context mission_context_boot boot-capsule external-chat-handoff]
+      :code [".missiond/v3/evidence/codex-boot-context.lisp"
+             "crates/missiond-daemon/src/handlers/knowledge/context_gather.rs"
+             "crates/missiond-daemon/src/handlers/mod.rs"
+             "crates/missiond-mcp/src/tools/knowledge/context_gather.rs"
+             "scripts/check-v3-codex-boot-context-isomorphism.mjs"]
+      :acceptance ["node scripts/check-v3-codex-boot-context-isomorphism.mjs --json"]
+      :note "codex-boot-context is the small versioned startup capsule for resident Codex, Codex workers, and external Codex handoffs. It carries only collaboration protocol and layer rules; task/project facts must be gathered through mission_context_gather and cold evidence stays explicit. This lets new conversations start with MissionD's learned operating contract without injecting raw chat history, secrets, provider logs, or unreviewed KB.")
 
     (surface project-registry
       :status "code-aligned"
