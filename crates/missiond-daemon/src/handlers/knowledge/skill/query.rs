@@ -269,9 +269,8 @@ pub(super) async fn handle_stats(state: &AppState, args: Value) -> Result<ToolRe
         skill: Option<String>,
     }
     let args: StatsArgs = serde_json::from_value(args).unwrap_or(StatsArgs { skill: None });
-    let registry_skills: Vec<_> = state
-        .skills
-        .list()
+    let skill_snapshot = state.skills.list();
+    let registry_skills: Vec<_> = skill_snapshot
         .iter()
         .filter(|skill| {
             args.skill

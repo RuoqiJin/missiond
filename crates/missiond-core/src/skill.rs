@@ -5,7 +5,7 @@
 //! - In-memory search by name/aka/keyword
 //! - Context block generation for agent prompt injection
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -210,6 +210,13 @@ pub struct SkillIndex {
     skills: Vec<SkillMeta>,
     /// name/aka → index into skills vec
     lookup: HashMap<String, usize>,
+}
+
+#[derive(Debug)]
+pub struct SkillSyncResult {
+    pub index: SkillIndex,
+    pub ingested: usize,
+    pub removed: usize,
 }
 
 impl SkillIndex {
@@ -633,6 +640,13 @@ pub async fn ingest_skills(
     skills_dir: &Path,
 ) -> usize {
     let index = SkillIndex::build(skills_dir);
+    ingest_skill_index(store, &index).await
+}
+
+async fn ingest_skill_index(
+    store: &dyn crate::db::traits::ProjectStore,
+    index: &SkillIndex,
+) -> usize {
     let skills = index.list();
     let mut ingested = 0;
 
@@ -742,6 +756,87 @@ pub async fn ingest_skills(
 
     tracing::info!(count = ingested, "Skill ingest complete");
     ingested
+}
+
+/// Sync SKILL.md files into the database and remove stale DB topics whose files
+/// were deleted or renamed under the same skills root.
+pub async fn sync_skills(
+    store: &dyn crate::db::traits::ProjectStore,
+    skills_dir: &Path,
+) -> SkillSyncResult {
+    let index = SkillIndex::build(skills_dir);
+    let ingested = ingest_skill_index(store, &index).await;
+    let removed = delete_stale_skill_topics(store, skills_dir, &index).await;
+    if removed > 0 {
+        tracing::info!(removed, "Removed stale skill topics from DB");
+    }
+    SkillSyncResult {
+        index,
+        ingested,
+        removed,
+    }
+}
+
+async fn delete_stale_skill_topics(
+    store: &dyn crate::db::traits::ProjectStore,
+    skills_dir: &Path,
+    index: &SkillIndex,
+) -> usize {
+    let active_topics: HashSet<&str> = index
+        .skills
+        .iter()
+        .map(|skill| skill.name.as_str())
+        .collect();
+    let active_paths: HashSet<String> = index
+        .skills
+        .iter()
+        .map(|skill| normalize_path_for_compare(&skill.path))
+        .collect();
+
+    let topics = match store.skill_topic_list().await {
+        Ok(topics) => topics,
+        Err(e) => {
+            warn!(error = %e, "Failed to list skill topics for stale cleanup");
+            return 0;
+        }
+    };
+
+    let mut removed = 0;
+    for topic in topics {
+        if active_topics.contains(topic.topic.as_str()) {
+            continue;
+        }
+
+        let path = PathBuf::from(&topic.file_path);
+        if !path_is_under(&path, skills_dir) {
+            continue;
+        }
+
+        let normalized_path = normalize_path_for_compare(&path);
+        let should_delete = !path.exists() || active_paths.contains(&normalized_path);
+        if !should_delete {
+            continue;
+        }
+
+        match store.skill_topic_delete(&topic.topic).await {
+            Ok(true) => {
+                removed += 1;
+                debug!(topic = %topic.topic, path = %topic.file_path, "Deleted stale skill topic");
+            }
+            Ok(false) => {}
+            Err(e) => warn!(topic = %topic.topic, error = %e, "Failed to delete stale skill topic"),
+        }
+    }
+
+    removed
+}
+
+fn normalize_path_for_compare(path: &Path) -> String {
+    path.to_string_lossy().to_string()
+}
+
+fn path_is_under(path: &Path, root: &Path) -> bool {
+    path.starts_with(root)
 }
 
 /// Simple hash for checksum (no crypto needed)

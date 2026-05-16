@@ -189,6 +189,28 @@ impl ProjectStore for PgMissionStore {
             .collect())
     }
 
+    async fn skill_topic_delete(&self, topic: &str) -> DbResult<bool> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM skill_blocks WHERE topic = $1")
+            .bind(topic)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM skill_versions WHERE topic = $1")
+            .bind(topic)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM skill_executions WHERE skill_topic = $1")
+            .bind(topic)
+            .execute(&mut *tx)
+            .await?;
+        let result = sqlx::query("DELETE FROM skill_topics WHERE topic = $1")
+            .bind(topic)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     async fn skill_topic_hit(&self, topic: &str) -> DbResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query(

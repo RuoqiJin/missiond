@@ -4,7 +4,7 @@ use std::sync::Arc;
 use missiond_core::db::traits::MissionStore;
 use missiond_core::{
     CCTasksWatcher, CorePermissionDecision, InfraConfig, MissionControl, PTYManager,
-    PermissionPolicy, SkillIndex,
+    PermissionPolicy, SkillIndex, SkillMeta,
 };
 use tokio::sync::Mutex;
 
@@ -26,6 +26,51 @@ use crate::workers::WorkerRegistry;
 pub(crate) const MEMORY_SLOT_ID: &str = "slot-memory"; // Fast lane (realtime)
 pub(crate) const MEMORY_SLOW_SLOT_ID: &str = "slot-memory-slow"; // Slow lane (deep + consolidation)
 pub(crate) const SUPERVISOR_SLOT_ID: &str = "slot-supervisor"; // Supervisor (Opus patrol)
+
+#[derive(Clone)]
+pub(crate) struct SharedSkillIndex {
+    inner: Arc<std::sync::RwLock<SkillIndex>>,
+}
+
+impl SharedSkillIndex {
+    pub(crate) fn new(index: SkillIndex) -> Self {
+        Self {
+            inner: Arc::new(std::sync::RwLock::new(index)),
+        }
+    }
+
+    pub(crate) fn replace(&self, index: SkillIndex) {
+        *self.write() = index;
+    }
+
+    pub(crate) fn list(&self) -> Vec<SkillMeta> {
+        self.read().list().to_vec()
+    }
+
+    pub(crate) fn search(&self, query: &str) -> Vec<SkillMeta> {
+        self.read()
+            .search(query)
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>()
+    }
+
+    pub(crate) fn get(&self, name: &str) -> Option<SkillMeta> {
+        self.read().get(name).cloned()
+    }
+
+    pub(crate) fn build_context(&self, query: &str) -> String {
+        self.read().build_context(query)
+    }
+
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, SkillIndex> {
+        self.inner.read().unwrap_or_else(|err| err.into_inner())
+    }
+
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, SkillIndex> {
+        self.inner.write().unwrap_or_else(|err| err.into_inner())
+    }
+}
 
 /// Extraction phase state machine. Replaces rigid 120s cooldown with
 /// event-driven completion detection.
@@ -314,7 +359,7 @@ pub(crate) struct AppState {
     pub(crate) permission: Arc<PermissionPolicy>,
     pub(crate) pty: Arc<PTYManager>,
     pub(crate) cc_tasks: Arc<Mutex<CCTasksWatcher>>,
-    pub(crate) skills: Arc<SkillIndex>,
+    pub(crate) skills: SharedSkillIndex,
     pub(crate) infra: Arc<std::sync::RwLock<InfraConfig>>,
     pub(crate) infra_path: std::path::PathBuf,
     /// JSONL session UUIDs belonging to PTY-managed slots.

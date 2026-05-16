@@ -1524,6 +1524,7 @@ pub trait ProjectStore: Send + Sync {
     ) -> DbResult<()>;
     async fn skill_topic_get(&self, topic: &str) -> DbResult<Option<SkillTopic>>;
     async fn skill_topic_list(&self) -> DbResult<Vec<SkillTopic>>;
+    async fn skill_topic_delete(&self, topic: &str) -> DbResult<bool>;
     async fn skill_topic_hit(&self, topic: &str) -> DbResult<()>;
     async fn skill_topic_update_stats(
         &self,

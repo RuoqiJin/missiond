@@ -78,6 +78,54 @@ fn env_truthy(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn is_skill_watch_path(path: &Path, skills_dir: &Path) -> bool {
+    if !path.starts_with(skills_dir) {
+        return false;
+    }
+
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+
+    if file_name == "SKILL.md" || file_name == "skill.md" {
+        return true;
+    }
+
+    path.parent() == Some(skills_dir) && path.extension().is_some_and(|ext| ext == "md")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_skill_watch_path;
+    use std::path::Path;
+
+    #[test]
+    fn skill_watcher_filters_skill_files_only() {
+        let skills_dir = Path::new("/tmp/skills");
+
+        assert!(is_skill_watch_path(
+            Path::new("/tmp/skills/router/SKILL.md"),
+            skills_dir
+        ));
+        assert!(is_skill_watch_path(
+            Path::new("/tmp/skills/router/skill.md"),
+            skills_dir
+        ));
+        assert!(is_skill_watch_path(
+            Path::new("/tmp/skills/stardew-game.md"),
+            skills_dir
+        ));
+        assert!(!is_skill_watch_path(
+            Path::new("/tmp/skills/router/README.md"),
+            skills_dir
+        ));
+        assert!(!is_skill_watch_path(
+            Path::new("/tmp/other/router/SKILL.md"),
+            skills_dir
+        ));
+    }
+}
+
 fn parse_startup_slot_engine(value: &str) -> Result<missiond_core::types::CliEngine> {
     match value {
         "claude-code" | "claude_code" => Ok(missiond_core::types::CliEngine::ClaudeCode),
@@ -578,8 +626,9 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".claude")
         .join("skills");
-    let skills = Arc::new(SkillIndex::build(&skills_dir));
-    info!(count = skills.list().len(), "Skill index loaded");
+    let skills_index = SkillIndex::build(&skills_dir);
+    info!(count = skills_index.list().len(), "Skill index loaded");
+    let skills = SharedSkillIndex::new(skills_index);
 
     // Skill Engine: ingest SKILL.md files into DB for FTS5 search
     // (deferred to after store creation — needs async trait access)
@@ -595,9 +644,18 @@ async fn main() -> Result<()> {
     }
     let pty_session_uuids_arc = Arc::new(tokio::sync::RwLock::new(pty_uuids));
 
-    // M1 Step 6: Skill ingest via async store (moved from pre-store section)
-    let ingested = missiond_core::skill::ingest_skills(store.as_ref(), &skills_dir).await;
-    info!(count = ingested, "Skill engine: ingested skills into DB");
+    // M1 Step 6: Skill sync via async store (moved from pre-store section)
+    let skill_sync = missiond_core::skill::sync_skills(store.as_ref(), &skills_dir).await;
+    let skill_count = skill_sync.index.list().len();
+    let ingested = skill_sync.ingested;
+    let removed = skill_sync.removed;
+    skills.replace(skill_sync.index);
+    info!(
+        ingested,
+        removed,
+        total = skill_count,
+        "Skill engine: synced skills into DB"
+    );
 
     // Pre-parse llm.yaml for config flags needed by AppState
     let llm_config_parsed: Option<embedding_worker::LlmConfig> = {
@@ -1915,6 +1973,129 @@ async fn main() -> Result<()> {
                                 }
                             }
                         }
+                    }
+                }
+            }
+        });
+    }
+
+    // Skill hot-reload: watch ~/.claude/skills and sync only after filesystem changes.
+    {
+        let watch_state = state.clone();
+        let watch_skills_dir = skills_dir.clone();
+        tokio::spawn(async move {
+            use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+
+            if !watch_skills_dir.exists() {
+                warn!(path = %watch_skills_dir.display(), "Skills directory missing; skill watcher disabled");
+                return;
+            }
+
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(128);
+            let mut watcher = match RecommendedWatcher::new(
+                move |res: Result<Event, notify::Error>| {
+                    if let Ok(event) = res {
+                        let _ = tx.blocking_send(event);
+                    }
+                },
+                Config::default(),
+            ) {
+                Ok(w) => w,
+                Err(e) => {
+                    error!(error = %e, "Failed to create skills watcher");
+                    return;
+                }
+            };
+
+            if let Err(e) = watcher.watch(&watch_skills_dir, RecursiveMode::Recursive) {
+                error!(error = %e, path = %watch_skills_dir.display(), "Failed to watch skills directory");
+                return;
+            }
+
+            info!(path = %watch_skills_dir.display(), "Skill watcher started");
+
+            let mut debounce: Option<tokio::time::Instant> = None;
+            let mut pending_paths: HashSet<String> = HashSet::new();
+
+            loop {
+                tokio::select! {
+                    Some(event) = rx.recv() => {
+                        let is_relevant = matches!(
+                            event.kind,
+                            EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+                        );
+                        if !is_relevant {
+                            continue;
+                        }
+
+                        let mut matched = false;
+                        for path in &event.paths {
+                            if is_skill_watch_path(path, &watch_skills_dir) {
+                                pending_paths.insert(path.display().to_string());
+                                matched = true;
+                            }
+                        }
+
+                        if matched {
+                            debounce = Some(tokio::time::Instant::now() + std::time::Duration::from_millis(1000));
+                        }
+                    }
+                    _ = async {
+                        match debounce {
+                            Some(deadline) => tokio::time::sleep_until(deadline).await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        let Some(deadline) = debounce else {
+                            continue;
+                        };
+                        if tokio::time::Instant::now() < deadline {
+                            continue;
+                        }
+                        debounce = None;
+
+                        let paths = std::mem::take(&mut pending_paths);
+                        let result = missiond_core::skill::sync_skills(
+                            watch_state.store.as_ref(),
+                            &watch_skills_dir,
+                        )
+                        .await;
+                        let indexed_skills = result.index.list().to_vec();
+                        let topic_names = indexed_skills
+                            .iter()
+                            .filter(|skill| paths.contains(&skill.path.display().to_string()))
+                            .map(|skill| skill.name.clone())
+                            .collect::<Vec<_>>();
+                        let total = indexed_skills.len();
+                        let changed_topics = topic_names.len();
+                        watch_state.skills.replace(result.index);
+
+                        for topic in topic_names {
+                            let _ = watch_state
+                                .embedding_tx
+                                .try_send(EmbeddingTask::ProcessSkillTopic(topic));
+                        }
+
+                        info!(
+                            ingested = result.ingested,
+                            removed = result.removed,
+                            total,
+                            changed_paths = paths.len(),
+                            changed_topics,
+                            "Skills synced after filesystem change"
+                        );
+                        let _ = watch_state
+                            .bus
+                            .publish_system(
+                                missiond_core::event::events::SystemEvent::ConfigChanged {
+                                    path: watch_skills_dir.display().to_string(),
+                                    kind: format!(
+                                        "skills-synced ingested={} removed={} total={}",
+                                        result.ingested, result.removed, total
+                                    ),
+                                },
+                            )
+                            .await;
                     }
                 }
             }
