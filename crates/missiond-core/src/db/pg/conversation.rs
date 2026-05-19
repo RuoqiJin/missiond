@@ -52,6 +52,12 @@ fn vec_to_pg_literal(v: &[f32]) -> String {
 
 #[cfg(feature = "postgres")]
 impl PgMissionStore {
+    pub(crate) fn row_message_count(row: &sqlx::postgres::PgRow) -> i64 {
+        row.try_get::<i64, _>("message_count")
+            .or_else(|_| row.try_get::<i32, _>("message_count").map(i64::from))
+            .unwrap_or(0)
+    }
+
     /// Extract a Conversation from a sqlx::PgRow.
     fn row_to_conversation(row: &sqlx::postgres::PgRow) -> Conversation {
         use sqlx::Row;
@@ -66,7 +72,7 @@ impl PgMissionStore {
             jsonl_path: row.get("jsonl_path"),
             parent_session_id: row.get("parent_session_id"),
             task_id: row.get("task_id"),
-            message_count: row.get("message_count"),
+            message_count: Self::row_message_count(row),
             started_at: row.get("started_at"),
             ended_at: row.get("ended_at"),
             status: row.get("status"),
@@ -1149,7 +1155,7 @@ impl ConversationStore for PgMissionStore {
         let rows: Vec<(String,)> = sqlx::query_as(
             "SELECT c.id FROM conversations c
              WHERE c.status = 'active'
-               AND (SELECT MAX(m.timestamp) FROM conversation_messages m WHERE m.session_id = c.id) < $1::timestamptz"
+               AND (SELECT MAX(m.timestamp::timestamptz) FROM conversation_messages m WHERE m.session_id = c.id) < $1::timestamptz"
         )
         .bind(cutoff)
         .fetch_all(&self.pool)
@@ -2722,7 +2728,7 @@ impl ConversationStore for PgMissionStore {
             .map(|row| {
                 (
                     row.get::<String, _>("id"),
-                    row.get::<i64, _>("message_count"),
+                    Self::row_message_count(row),
                     row.get::<i64, _>("tool_count"),
                     row.get::<f64, _>("error_rate"),
                 )
@@ -2780,7 +2786,7 @@ impl ConversationStore for PgMissionStore {
             .map(|row| {
                 (
                     row.get::<String, _>("id"),
-                    row.get::<i64, _>("message_count"),
+                    Self::row_message_count(row),
                     row.get::<i64, _>("tool_count"),
                     row.get::<f64, _>("error_rate"),
                 )

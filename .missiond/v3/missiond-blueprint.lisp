@@ -596,19 +596,19 @@
       :role coder
       :description "Dynamic coder slot (ephemeral)"
       :default-model-profile coding-default-opus-4-7
-      :mcp-config "/Users/jinchen/.xjp-mission/xjp-mcp-config.json"
+      :mcp-config "$MISSION_HOME/xjp-mcp-config.json"
       :default-cwd "/Users/jinchen/Projects")
     (slot-template researcher
       :role coder
       :description "Dynamic researcher slot (read-only analysis)"
       :default-model-profile research-default
-      :mcp-config "/Users/jinchen/.xjp-mission/xjp-mcp-config.json"
+      :mcp-config "$MISSION_HOME/xjp-mcp-config.json"
       :default-cwd "/Users/jinchen/Projects")
     (slot-template ops
       :role operator
       :description "Dynamic ops slot (ephemeral)"
       :default-model-profile daily-sonnet
-      :mcp-config "/Users/jinchen/.xjp-mission/xjp-mcp-config.json"
+      :mcp-config "$MISSION_HOME/xjp-mcp-config.json"
       :default-cwd "/Users/jinchen/Projects")
     (cwd-policy dynamic-slot
       :allowed-prefixes ["/Users/jinchen/Projects" "/Users/jinchen/Downloads" "/Users/jinchen/Documents" "/tmp"])
@@ -683,13 +683,34 @@
       :max_secs 28800
       :default_extend_secs 3600
       :max_extend_secs 3600)
+    (managed-node-runtime-policy host-portability
+      :mcp-config-resolution host-relative
+      :mcp-config-placeholders ["$MISSION_HOME"]
+      :registered-project-roots-allowed true
+      :db-integer-portability [ttl_seconds extend_count message_count])
+    (pty-provider-unavailable-policy provider-blocked-diagnostics
+      (state auth_missing
+        :state blocked
+        :blocked-kind auth_missing
+        :keywords [credentials credential login auth authenticated])
+      (state billing_or_account
+        :state blocked
+        :blocked-kind billing_or_account
+        :keywords [billing payment subscription suspended paused account])
+      (state usage_limit
+        :state blocked
+        :blocked-kind usage_limit
+        :keywords [quota limit rate-limit usage]))
     :invariants
       ["code and research dynamic slots MUST NOT hardcode --model sonnet"
        "daemon startup SlotManager ClaudeCode task configs MUST project coder/researcher model profiles from workstation-config and omit --model for coding-default-opus-4-7"
        "daemon startup SlotManager task configs MUST be generated from workstation-config startup-slot entries, including engine/lifecycle/slot_id/role/timeout_secs/skip_permissions"
        "daemon startup MUST resolve the MissionD orchestrator root from MISSIOND_PROJECT_ROOT, MISSIOND_ORCHESTRATOR_ROOT, or the current working directory ancestor containing .missiond/v3/missiond-blueprint.lisp; runtime code MUST NOT hardcode /Users/jinchen/Projects/missiond as the orchestrator root because managed machines may install MissionD under their own user home."
        "Clean-machine daemon startup MUST create missing provider history watch directories such as ~/.claude/projects before registering filesystem watchers; absence of prior ClaudeCode/Codex/Gemini history is not a fatal condition for a managed MissionD node."
-       "mission_compute_slot dynamic template role/description/mcp_config/default_cwd and allowed cwd prefixes MUST project from workstation-config slot-template + cwd-policy dynamic-slot, not a Rust-local template table"
+       "mission_compute_slot dynamic template role/description/mcp_config/default_cwd and allowed cwd prefixes MUST project from workstation-config slot-template + cwd-policy dynamic-slot, not a Rust-local template table; dynamic slots MUST also allow cwd under any registered active ProjectRegistry root so managed nodes installed under a different user home (for example /Users/rickyhq/Projects/missiond) can run without host-specific Lisp rewrites."
+       "ClaudeCode mcp_config MUST be host-relative: workstation-config may use $MISSION_HOME/xjp-mcp-config.json, and PTY launch MUST resolve stale or missing xjp-mcp-config.json paths to the current host's MissionD home before spawning. A managed node MUST NOT inherit /Users/jinchen/.xjp-mission/xjp-mcp-config.json as an executable truth."
+       "PTY recognition MUST classify provider unavailable states as blocked diagnostics, not completed turns: auth_missing covers missing credentials/login-required screens, billing_or_account covers paused/suspended/payment/subscription failures, and usage_limit covers quota/rate-limit exhaustion. Exited/Error SessionState may override stale running text, but MUST preserve these provider-unavailable blocked snapshots so Board/Terminal can show the real action required."
+       "Dynamic slot database rows MUST decode ttl_seconds and extend_count portably from Postgres INTEGER or BIGINT so clean managed nodes initialized from current migrations do not panic with int4/i64 mismatches."
        "Jarvis/OpenAI-compatible chat completions default slot MUST project from workstation-config chat-completions-policy jarvis-api; X-Slot-Id remains the explicit request override and Rust MUST NOT hardcode slot-jarvis."
        "model=\"default\" and model_profile=coding-default-opus-4-7 both mean no CLI --model override"
 	       "mission_compute_slot model_profile resolution MUST use workstation-config model-profile spawn-model-arg, not a Rust-local profile table"
@@ -1656,11 +1677,13 @@
       :fields [profile_id allowed_outbound forbidden_outbound allowed_transfer_stores build_runtime_candidates target_side_build_allowed diagnostics]
       :invariants ["CN restricted targets such as Aliyun ECS and Synology/domestic-only VMs MUST NOT depend on target-side GitHub, GHCR, Docker Hub, or source builds."
                    "Privatecloud Ubuntu 10900KF, Windows 12900KF, and Synology VM share xjp-zibo-lan and may be used as build/cache/jump evidence when their agent/credential refs are healthy."
+                   "Managed Mac nodes with enough local CPU such as rickyhq-macmini-m4 SHOULD receive source through the XJP native codebase lane and build on target; direct binary scp is a break-glass bootstrap path only."
                    "If a deploy worker sees a restricted target configured for GHCR/GitHub direct pull, it must create deployment-lane-mismatch instead of retrying network calls."])
     (artifact-delivery-lane-contract
       :fields [lane_id source_commit builder_id transfer_store target_runtime artifact_sha256 target_digest reported_digest rollback_artifact smoke_evidence]
-      :lanes [cloud-registry-lane cn-oss-bundle-lane gitee-source-mirror-lane manual-break-glass-lane]
+      :lanes [cloud-registry-lane cn-oss-bundle-lane gitee-source-mirror-lane macmini-codebase-local-build-lane manual-break-glass-lane]
       :invariants ["cn-oss-bundle-lane means approved builder -> Aliyun OSS -> ECS internal download -> deploy-agent run -> reported digest; ECS must not build or pull GHCR as the normal path."
+                   "macmini-codebase-local-build-lane means MissionD/deploy-center sync source and workflow definition to the managed Mac node, the node builds locally, signs/installs into its own ~/.xjp-mission release path, and reports build/test/health provenance. This lane is preferred after bootstrap because it avoids brittle large binary transfer and proves the managed node can rebuild itself."
                    "gitee-source-mirror-lane is source/control evidence only unless paired with a builder and artifact lane."
                    "manual-break-glass-lane requires approval and post-action provenance."])
     (agent-offline-response-policy
@@ -1779,6 +1802,29 @@
       :freshness skill-derived-unverified
       :credential_refs [secret-store://deploy-agent/windows-12900kf/agent-token]
       :evidence_refs [skill:windows-runner skill:missiond-model-routing])
+    (runtime-target :target_id rickyhq-macmini-m4
+      :aliases [rickyhqmac-mini macmini-managed-node macmini-missiond-worker]
+      :kind managed-mac-node
+      :environment local-lan
+      :owner_authority missiond
+      :deploy_center_executor macmini
+      :agent_url rickyhqmac-mini
+      :capabilities [missiond-daemon mission-mcp claude-code codex-cli gemini-cli local-rust-build codebase-runner local-blue-green]
+      :service_ids [missiond]
+      :network_profile mac-managed-node
+      :artifact_lanes [macmini-codebase-local-build-lane manual-break-glass-lane]
+      :freshness health-verified-2026-05-18
+      :runtime_facts (hostname "RickyHQdeMac-mini.local"
+                      user "rickyhq"
+                      project_root "/Users/rickyhq/Projects/missiond"
+                      runtime_root "/Users/rickyhq/.xjp-mission"
+                      health "http://127.0.0.1:9120/health"
+                      launchd_label "com.missiond.daemon"
+                      local_build_capability true
+                      bootstrap_note "direct binary transfer is allowed only for initial repair; steady state should use codebase sync plus local build")
+      :credential_refs [secret-store://managed-node/rickyhq-macmini/ssh secret-store://managed-node/rickyhq-macmini/claude]
+      :diagnostic_profiles [deploy_provenance_snapshot container_inventory dependency_manifest_scan supply_chain_ioc_scan]
+      :evidence_refs [work-order:20260516-macmini-managed-node skill:rickyhqmac-mini])
     (runtime-target :target_id synology-astrill-gw
       :aliases [synology-vm astrill-gw domestic-jump]
       :kind local-lan-gateway
@@ -3325,7 +3371,7 @@
         :egress [workflow.lisp workflow_row compiled_yaml run_result])
       (function typed-lisp-compiler
         :surface typed-lisp-compiler
-        :entry [missiond-lispc.check-v3 missiond-lispc.check-workflow missiond-lispc.check-workflow-dir missiond-lispc.check-project missiond-lispc.check-project-dir missiond-lispc.check-auth-domain missiond-lispc.check-m6-depth missiond-lispc.check-domain-hardening-deprecated-alias missiond-lispc.emit-json missiond-lispc.emit-v3 missiond-lispc.emit-semantic-ir missiond-lispc.emit-universe missiond-lispc.emit-workflows]
+        :entry [missiond-lispc.check-v3 missiond-lispc.check-workstation-config missiond-lispc.check-workflow missiond-lispc.check-workflow-dir missiond-lispc.check-project missiond-lispc.check-project-dir missiond-lispc.check-auth-domain missiond-lispc.check-m6-depth missiond-lispc.check-domain-hardening-deprecated-alias missiond-lispc.emit-json missiond-lispc.emit-v3 missiond-lispc.emit-semantic-ir missiond-lispc.emit-universe missiond-lispc.emit-workflows]
         :core ((step s1 :logic "parse Lisp SSOT files into source-located typed AST nodes")
                (step s2 :logic "validate pillar/function entry-core-egress surfaces, workflow contracts, universe registry, maturity gates, and event/outbox contracts")
                (step s3 :logic "emit stable JSON diagnostics for JS compatibility wrappers and CI gates")
@@ -3334,7 +3380,8 @@
                (step s6 :logic "validate the full .missiond/workflows directory with typed AST so old methodology workflows and active runtime workflows carry explicit source plans, risk gates, completion criteria, and step contracts")
                (step s7 :logic "validate project-local .missiond blueprint directories with typed AST before M5 maturity can rely on project-local shape evidence")
                (step s8 :logic "use Auth as the first external project M6-depth semantic checker sample before shrinking more project checkers")
-               (step s9 :logic "validate generic Auth-grade M6 evidence before claiming production-ready architecture"))
+               (step s9 :logic "validate generic Auth-grade M6 evidence before claiming production-ready architecture")
+               (step s10 :logic "validate workstation-config semantic policies with typed AST so managed-node portability, provider-unavailable diagnostics, model profiles, slot templates, timeouts, and policy shards are structural gates rather than brittle prose pins"))
         :egress [typed_diagnostics compiled_json compiled_runtime_snapshot compiled_project_universe compiled_workflow_contracts js_wrapper_result])
       (function semantic-ir-compiler
         :surface semantic-ir-compiler
@@ -4071,7 +4118,7 @@
 
     (surface typed-lisp-compiler
       :status "code-aligned"
-      :implements [lisp-reader typed-ast semantic-validator diagnostic-json projection-json semantic-ir-json structured-project-universe-json structured-workflow-contract-json workflow-directory-structural-gate project-directory-structural-gate project-m6-depth-gate runtime-compiled-json-loader auth-domain-sample]
+      :implements [lisp-reader typed-ast semantic-validator diagnostic-json projection-json semantic-ir-json structured-project-universe-json structured-workflow-contract-json workflow-directory-structural-gate project-directory-structural-gate workstation-config-structural-gate project-m6-depth-gate runtime-compiled-json-loader auth-domain-sample]
       :code ["tools/missiond_lispc/dune-project"
              "tools/missiond_lispc/bin/dune"
              "tools/missiond_lispc/bin/main.ml"
@@ -4080,6 +4127,7 @@
              "tools/missiond_lispc/bin/schema_v3.ml"
              "tools/missiond_lispc/bin/workflow_schema.ml"
              "tools/missiond_lispc/bin/project_schema.ml"
+             "tools/missiond_lispc/bin/workstation_schema.ml"
              "tools/missiond_lispc/bin/emit_json.ml"
              "tools/missiond_lispc/test/dune"
              "tools/missiond_lispc/test/parser_golden.ml"

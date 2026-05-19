@@ -17,6 +17,7 @@ const REQUIRED_FILES = [
   'tools/missiond_lispc/bin/schema_v3.ml',
   'tools/missiond_lispc/bin/workflow_schema.ml',
   'tools/missiond_lispc/bin/project_schema.ml',
+  'tools/missiond_lispc/bin/workstation_schema.ml',
   'tools/missiond_lispc/bin/emit_json.ml',
   'tools/missiond_lispc/test/dune',
   'tools/missiond_lispc/test/parser_golden.ml',
@@ -113,10 +114,12 @@ const REQUIRED_BLUEPRINT_TOKENS = [
   ':surface typed-lisp-compiler',
   '(surface typed-lisp-compiler',
   'tools/missiond_lispc/bin/main.ml',
+  'check-workstation-config',
   'check-workflow-dir',
   'check-m6-depth',
   'check-domain-hardening-deprecated-alias',
   'tools/missiond_lispc/bin/schema_v3.ml',
+  'tools/missiond_lispc/bin/workstation_schema.ml',
   'tools/missiond_lispc/bin/emit_json.ml',
   'node scripts/check-typed-lisp-compiler.mjs',
 ];
@@ -207,6 +210,7 @@ function main() {
       ['emit-v3', '--blueprint', BLUEPRINT],
       ['emit-universe', '--blueprint', BLUEPRINT],
       ['emit-workflows', '--workflow-dir', '.missiond/workflows'],
+      ['check-workstation-config', '--blueprint', BLUEPRINT],
       ['check-workflow-dir', '--workflow-dir', '.missiond/workflows'],
       ['check-project-dir', '--dir', '.missiond/frontend'],
     ]) {
@@ -229,7 +233,7 @@ function main() {
         if (!typedCompiler || typedCompiler.surface !== 'typed-lisp-compiler') {
           diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_V3_PROJECTION_MISSING_TYPED_COMPILER', 'emit-v3 must project the typed-lisp-compiler function with its surface'));
         }
-        if (!Array.isArray(typedCompiler?.steps) || !typedCompiler.steps.includes('s9')) {
+        if (!Array.isArray(typedCompiler?.steps) || !typedCompiler.steps.includes('s10')) {
           diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_V3_PROJECTION_MISSING_FUNCTION_STEPS', 'emit-v3 must project V3 function step ids'));
         }
       } else if (argv[0] === 'emit-universe') {

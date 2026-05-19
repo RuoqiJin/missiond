@@ -18,7 +18,9 @@ use super::session::{
     ConfirmInfo, ConfirmResponse, McpReconnectOutcome, PTYSession, PTYSessionOptions,
     PermissionDecision, SessionEvent, SessionState, TextOutputEvent,
 };
-use crate::pty_recognition::{session_state_snapshot, PtyRecognitionSnapshot};
+use crate::pty_recognition::{
+    is_provider_unavailable_snapshot, session_state_snapshot, PtyRecognitionSnapshot,
+};
 
 // ========== Types ==========
 
@@ -374,8 +376,15 @@ impl PTYManager {
                             let mut info = agent_info_for_forward.write().await;
                             if let Some(entry) = info.get_mut(&slot_id_for_events) {
                                 entry.state = new_state;
-                                entry.recognition =
-                                    Some(session_state_snapshot(entry.engine, new_state));
+                                if !matches!(new_state, SessionState::Exited | SessionState::Error)
+                                    || !entry
+                                        .recognition
+                                        .as_ref()
+                                        .is_some_and(is_provider_unavailable_snapshot)
+                                {
+                                    entry.recognition =
+                                        Some(session_state_snapshot(entry.engine, new_state));
+                                }
                                 // Clear status_text when leaving processing state
                                 if !new_state.is_processing() {
                                     entry.status_text = None;
@@ -417,8 +426,14 @@ impl PTYManager {
                                 entry.state = SessionState::Exited;
                                 entry.pid = None;
                                 entry.status_text = None;
-                                entry.recognition =
-                                    Some(session_state_snapshot(entry.engine, entry.state));
+                                if !entry
+                                    .recognition
+                                    .as_ref()
+                                    .is_some_and(is_provider_unavailable_snapshot)
+                                {
+                                    entry.recognition =
+                                        Some(session_state_snapshot(entry.engine, entry.state));
+                                }
                             }
                         }
                         let _ = event_tx.send(ManagerEvent::Exited {
@@ -1115,7 +1130,13 @@ impl PTYManager {
                     ai.state = SessionState::Exited;
                     ai.pid = None;
                     ai.status_text = None;
-                    ai.recognition = Some(session_state_snapshot(ai.engine, ai.state));
+                    if !ai
+                        .recognition
+                        .as_ref()
+                        .is_some_and(is_provider_unavailable_snapshot)
+                    {
+                        ai.recognition = Some(session_state_snapshot(ai.engine, ai.state));
+                    }
                 }
                 info!(slot_id = %slot_id, "PTY session killed");
             });
@@ -1130,7 +1151,13 @@ fn normalize_agent_info(mut info: PTYAgentInfo) -> PTYAgentInfo {
     if matches!(info.state, SessionState::Exited | SessionState::Error) {
         info.pid = None;
         info.status_text = None;
-        info.recognition = Some(session_state_snapshot(info.engine, info.state));
+        if !info
+            .recognition
+            .as_ref()
+            .is_some_and(is_provider_unavailable_snapshot)
+        {
+            info.recognition = Some(session_state_snapshot(info.engine, info.state));
+        }
     }
     info
 }
@@ -1182,5 +1209,42 @@ mod tests {
         let recognition = normalized.recognition.expect("recognition");
         assert_eq!(recognition.state, PtyCanonicalState::Complete);
         assert_eq!(recognition.reason, "session_state:Exited");
+    }
+
+    #[test]
+    fn exited_status_preserves_provider_unavailable_recognition() {
+        let info = PTYAgentInfo {
+            slot_id: "slot-claude-code-default".to_string(),
+            role: "coder".to_string(),
+            engine: CliEngine::ClaudeCode,
+            pid: Some(947),
+            state: SessionState::Exited,
+            status_text: Some("Starting Claude Code".to_string()),
+            recognition: Some(PtyRecognitionSnapshot {
+                provider: CliEngine::ClaudeCode,
+                state: PtyCanonicalState::Blocked,
+                confidence: 0.95,
+                reason: "provider:billing_or_account".to_string(),
+                phase: None,
+                active_tool: None,
+                elapsed_secs: None,
+                blocked_kind: Some("billing_or_account".to_string()),
+                source: "screen_final".to_string(),
+            }),
+            started_at: Some(1),
+            current_task_id: None,
+            log_file: PathBuf::from("/tmp/pty.log"),
+        };
+
+        let normalized = normalize_agent_info(info);
+        assert_eq!(normalized.pid, None);
+        assert_eq!(normalized.status_text, None);
+        let recognition = normalized.recognition.expect("recognition");
+        assert_eq!(recognition.state, PtyCanonicalState::Blocked);
+        assert_eq!(recognition.reason, "provider:billing_or_account");
+        assert_eq!(
+            recognition.blocked_kind.as_deref(),
+            Some("billing_or_account")
+        );
     }
 }

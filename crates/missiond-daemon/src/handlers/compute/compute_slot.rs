@@ -112,7 +112,10 @@ fn allowed_cwd_prefixes_suggestion(config: &WorkstationRuntimeConfig) -> String 
         .iter()
         .map(|prefix| prefix.display().to_string())
         .collect();
-    format!("Allowed prefixes: {:?}", prefixes)
+    format!(
+        "Allowed prefixes: {:?}; registered active project roots are also allowed",
+        prefixes
+    )
 }
 
 pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result<ToolResult> {
@@ -205,10 +208,15 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
     };
 
     let canonical_path = std::path::Path::new(&canonical_cwd);
-    let cwd_allowed = workstation_config
+    let cwd_allowed_by_policy = workstation_config
         .allowed_cwd_prefixes()
         .iter()
         .any(|prefix| canonical_path.starts_with(prefix));
+    let cwd_allowed_by_registry = {
+        let registry = state.project_registry.read().await;
+        registry.resolve(&canonical_cwd).is_some()
+    };
+    let cwd_allowed = cwd_allowed_by_policy || cwd_allowed_by_registry;
     if !cwd_allowed {
         return Ok(ToolResult::structured_error(
             ToolError::new(

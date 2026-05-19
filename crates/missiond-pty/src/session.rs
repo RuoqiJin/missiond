@@ -460,6 +460,39 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+fn resolve_mcp_config_path(config: Option<&std::path::Path>) -> Option<PathBuf> {
+    let config = config?;
+    if config.exists() {
+        return Some(config.to_path_buf());
+    }
+
+    let file_name = config.file_name()?.to_string_lossy();
+    if file_name != "xjp-mcp-config.json" && file_name != "mcp-config.json" {
+        return Some(config.to_path_buf());
+    }
+
+    let mission_home = std::env::var_os("MISSION_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|home| home.join(".xjp-mission"))
+        });
+    if let Some(home) = mission_home {
+        let candidate = home.join(file_name.as_ref());
+        if candidate.exists() {
+            warn!(
+                configured = %config.display(),
+                resolved = %candidate.display(),
+                "MCP config path missing; using host-local MissionD MCP config"
+            );
+            return Some(candidate);
+        }
+    }
+
+    Some(config.to_path_buf())
+}
+
 impl PTYSession {
     /// Create a new PTY session
     pub fn new(options: PTYSessionOptions) -> Result<Self> {
@@ -674,10 +707,11 @@ impl PTYSession {
         })?;
 
         // Build CLI command based on engine type
+        let resolved_mcp_config = resolve_mcp_config_path(self.mcp_config.as_deref());
         let cli_cmd = build_cli_command(
             self.engine,
             &self.cwd,
-            self.mcp_config.as_deref(),
+            resolved_mcp_config.as_deref(),
             self.dangerously_skip_permissions,
             self.model.as_deref(),
             self.reasoning_effort.as_deref(),

@@ -103,6 +103,14 @@ pub fn session_state_snapshot(provider: CliEngine, state: SessionState) -> PtyRe
     .with_source("session_state")
 }
 
+pub fn is_provider_unavailable_snapshot(snapshot: &PtyRecognitionSnapshot) -> bool {
+    snapshot.state == PtyCanonicalState::Blocked
+        && matches!(
+            snapshot.blocked_kind.as_deref(),
+            Some("auth_missing" | "billing_or_account" | "usage_limit")
+        )
+}
+
 pub fn recognize_screen(
     provider: CliEngine,
     lines: &[String],
@@ -133,6 +141,9 @@ fn fuse_with_session_state(
     snapshot: PtyRecognitionSnapshot,
 ) -> PtyRecognitionSnapshot {
     if matches!(current_state, SessionState::Exited | SessionState::Error) {
+        if is_provider_unavailable_snapshot(&snapshot) {
+            return snapshot.with_source("screen_final");
+        }
         return session_state_snapshot(provider, current_state);
     }
     if current_state == SessionState::Confirming {
@@ -235,6 +246,18 @@ fn recognize_codex(lines: &[String]) -> PtyRecognitionSnapshot {
     let lower = text.to_ascii_lowercase();
     let elapsed = extract_elapsed_secs(&text);
 
+    if let Some((kind, reason)) = provider_unavailable_match(&lower) {
+        return PtyRecognitionSnapshot::new(
+            CliEngine::Codex,
+            PtyCanonicalState::Blocked,
+            0.95,
+            reason,
+        )
+        .with_blocked_kind(kind)
+        .with_elapsed(elapsed)
+        .with_source("provider_error_signature");
+    }
+
     if is_codex_approval_menu(&lower) {
         return PtyRecognitionSnapshot::new(
             CliEngine::Codex,
@@ -329,6 +352,18 @@ fn recognize_gemini(lines: &[String]) -> PtyRecognitionSnapshot {
     let lower = text.to_ascii_lowercase();
     let elapsed = extract_elapsed_secs(&text);
 
+    if let Some((kind, reason)) = provider_unavailable_match(&lower) {
+        return PtyRecognitionSnapshot::new(
+            CliEngine::Gemini,
+            PtyCanonicalState::Blocked,
+            0.95,
+            reason,
+        )
+        .with_blocked_kind(kind)
+        .with_elapsed(elapsed)
+        .with_source("provider_error_signature");
+    }
+
     if lower.contains("waiting_for_confirmation")
         || lower.contains("awaitingapproval")
         || lower.contains("confirming")
@@ -400,6 +435,18 @@ fn recognize_claude_code(lines: &[String]) -> PtyRecognitionSnapshot {
     let lower = text.to_ascii_lowercase();
     let elapsed = extract_elapsed_secs(&text);
 
+    if let Some((kind, reason)) = provider_unavailable_match(&lower) {
+        return PtyRecognitionSnapshot::new(
+            CliEngine::ClaudeCode,
+            PtyCanonicalState::Blocked,
+            0.95,
+            reason,
+        )
+        .with_blocked_kind(kind)
+        .with_elapsed(elapsed)
+        .with_source("provider_error_signature");
+    }
+
     // Only explicit confirmation / model-picker UI surfaces count. Generic
     // mentions of `approval` or `permission(s)` in the visible scroll buffer
     // (task brief prose, historical tool output, the "bypass permissions on"
@@ -469,6 +516,67 @@ fn recognize_claude_code(lines: &[String]) -> PtyRecognitionSnapshot {
         0.2,
         "claude_code:no_match",
     )
+}
+
+fn provider_unavailable_match(lower: &str) -> Option<(&'static str, &'static str)> {
+    if contains_any(
+        lower,
+        &[
+            "credentials file not found",
+            "may require interactive login",
+            "not logged in",
+            "login required",
+            "please log in",
+            "run /login",
+            "authentication required",
+            "invalid api key",
+            "api key required",
+            "invalid credentials",
+            "no auth credentials",
+            "unauthorized",
+        ],
+    ) {
+        return Some(("auth_missing", "provider:auth_missing"));
+    }
+    if contains_any(
+        lower,
+        &[
+            "account has been paused",
+            "account is paused",
+            "account suspended",
+            "subscription is inactive",
+            "subscription paused",
+            "payment failed",
+            "payment required",
+            "update your billing",
+            "billing issue",
+            "billing problem",
+            "organization has been disabled",
+            "api access disabled",
+            "claude code subscription",
+        ],
+    ) {
+        return Some(("billing_or_account", "provider:billing_or_account"));
+    }
+    if contains_any(
+        lower,
+        &[
+            "usage limit",
+            "usage exceeded",
+            "quota exceeded",
+            "exhausted your daily quota",
+            "terminalquotaerror",
+            "rate limit exceeded",
+            "too many requests",
+        ],
+    ) {
+        return Some(("usage_limit", "provider:usage_limit"));
+    }
+    None
+}
+
+fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
 }
 
 pub struct CodexCliStateParser {
@@ -816,6 +924,50 @@ mod tests {
         assert_eq!(result.state, PtyCanonicalState::Complete);
         assert_eq!(result.source, "session_state");
         assert_eq!(result.reason, "session_state:Exited");
+    }
+
+    #[test]
+    fn claude_code_auth_missing_is_blocked_even_after_exit() {
+        let result = recognize_screen(
+            CliEngine::ClaudeCode,
+            &lines(&[
+                "Credentials file not found — Claude Code may require interactive login",
+                "Please log in to continue.",
+            ]),
+            SessionState::Exited,
+        );
+        assert_eq!(result.state, PtyCanonicalState::Blocked);
+        assert_eq!(result.source, "screen_final");
+        assert_eq!(result.reason, "provider:auth_missing");
+        assert_eq!(result.blocked_kind.as_deref(), Some("auth_missing"));
+    }
+
+    #[test]
+    fn claude_code_billing_pause_is_blocked_even_after_exit() {
+        let result = recognize_screen(
+            CliEngine::ClaudeCode,
+            &lines(&[
+                "Your account has been paused because payment failed.",
+                "Update your billing details to continue using Claude Code.",
+            ]),
+            SessionState::Exited,
+        );
+        assert_eq!(result.state, PtyCanonicalState::Blocked);
+        assert_eq!(result.source, "screen_final");
+        assert_eq!(result.reason, "provider:billing_or_account");
+        assert_eq!(result.blocked_kind.as_deref(), Some("billing_or_account"));
+    }
+
+    #[test]
+    fn gemini_quota_error_is_blocked() {
+        let result = recognize_screen(
+            CliEngine::Gemini,
+            &lines(&["TerminalQuotaError: exhausted your daily quota"]),
+            SessionState::Error,
+        );
+        assert_eq!(result.state, PtyCanonicalState::Blocked);
+        assert_eq!(result.source, "screen_final");
+        assert_eq!(result.blocked_kind.as_deref(), Some("usage_limit"));
     }
 
     #[test]

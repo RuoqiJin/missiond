@@ -5,6 +5,7 @@ use crate::db::error::DbResult;
 use crate::db::traits::SlotStore;
 use crate::types::*;
 use async_trait::async_trait;
+use sqlx::postgres::PgRow;
 use sqlx::Row;
 
 #[cfg(feature = "postgres")]
@@ -727,7 +728,7 @@ impl SlotStore for PgMissionStore {
         };
 
         let current_expires: String = row.get("expires_at");
-        let extend_count: i64 = row.get("extend_count");
+        let extend_count = row_int_to_i64(&row, "extend_count");
         let created_at_str: String = row.get("created_at");
 
         if extend_count >= 2 {
@@ -798,7 +799,7 @@ impl SlotStore for PgMissionStore {
 
 // -- Helper functions --
 
-fn row_to_slot_task(row: &sqlx::postgres::PgRow) -> SlotTask {
+fn row_to_slot_task(row: &PgRow) -> SlotTask {
     SlotTask {
         id: row.get("id"),
         slot_id: row.get("slot_id"),
@@ -816,7 +817,7 @@ fn row_to_slot_task(row: &sqlx::postgres::PgRow) -> SlotTask {
     }
 }
 
-fn row_to_task(row: &sqlx::postgres::PgRow) -> Task {
+fn row_to_task(row: &PgRow) -> Task {
     let status_str: String = row.get("status");
     let status = TaskStatus::from_str(&status_str).unwrap_or(TaskStatus::Queued);
 
@@ -835,7 +836,7 @@ fn row_to_task(row: &sqlx::postgres::PgRow) -> Task {
     }
 }
 
-fn row_to_dynamic_slot(row: &sqlx::postgres::PgRow) -> DynamicSlot {
+fn row_to_dynamic_slot(row: &PgRow) -> DynamicSlot {
     DynamicSlot {
         id: row.get("id"),
         parent_slot_id: row.get("parent_slot_id"),
@@ -846,8 +847,14 @@ fn row_to_dynamic_slot(row: &sqlx::postgres::PgRow) -> DynamicSlot {
         termination_reason: row.get("termination_reason"),
         created_at: row.get("created_at"),
         terminated_at: row.get("terminated_at"),
-        ttl_seconds: row.get("ttl_seconds"),
+        ttl_seconds: row_int_to_i64(row, "ttl_seconds"),
         expires_at: row.get("expires_at"),
-        extend_count: row.get("extend_count"),
+        extend_count: row_int_to_i64(row, "extend_count"),
     }
+}
+
+fn row_int_to_i64(row: &PgRow, column: &str) -> i64 {
+    row.try_get::<i64, _>(column)
+        .or_else(|_| row.try_get::<i32, _>(column).map(i64::from))
+        .unwrap_or(0)
 }

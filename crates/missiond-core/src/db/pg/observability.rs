@@ -1141,7 +1141,7 @@ impl ObservabilityStore for PgMissionStore {
                     "id": r.get::<String, _>("id"),
                     "task_id": r.get::<Option<String>, _>("task_id"),
                     "model": r.get::<Option<String>, _>("model"),
-                    "message_count": r.get::<i64, _>("message_count"),
+                    "message_count": Self::row_message_count(r),
                     "started_at": r.get::<String, _>("started_at"),
                     "status": r.get::<String, _>("status"),
                     "total_chars": total_chars,

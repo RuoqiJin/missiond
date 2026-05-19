@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { readBlueprintWithEvidenceSidecars } from './lib/v3_blueprint_contract_source.mjs';
+import { maybeRunLispc } from './lib/ocaml_lispc.mjs';
 
 const usage = `Usage:
   node scripts/check-v3-workstation-config-isomorphism.mjs [--json] [--dry-fixture]
@@ -46,6 +47,8 @@ const DEFAULT_FILES = {
   mcpCcTasks: 'crates/missiond-mcp/src/tools/compute/cc_tasks.rs',
 };
 
+let workstationBlueprintSemanticsOk = false;
+
 function main() {
   const args = process.argv.slice(2);
   let json = false;
@@ -66,7 +69,7 @@ function main() {
   }
 
   const repoRoot = dryFixture ? buildFixture() : process.cwd();
-  const diagnostics = checkFiles(repoRoot, DEFAULT_FILES);
+  const diagnostics = checkFiles(repoRoot, DEFAULT_FILES, { useOcaml: !dryFixture });
   const result = {
     ok: diagnostics.length === 0,
     files: Object.keys(DEFAULT_FILES).length,
@@ -89,8 +92,9 @@ function main() {
   process.exit(result.ok ? 0 : 1);
 }
 
-function checkFiles(root, files) {
+function checkFiles(root, files, { useOcaml = false } = {}) {
   const diagnostics = [];
+  workstationBlueprintSemanticsOk = false;
   const sources = {};
   for (const [key, rel] of Object.entries(files)) {
     const abs = path.join(root, rel);
@@ -101,6 +105,29 @@ function checkFiles(root, files) {
     }
   }
   if (diagnostics.length > 0) return diagnostics;
+
+  if (useOcaml) {
+    const semantic = maybeRunLispc(
+      ['check-workstation-config', '--blueprint', files.blueprint],
+      { engine: 'ocaml', repoRoot: root },
+    );
+    if (semantic.mode !== 'ocaml' || semantic.result?.ok !== true) {
+      for (const d of semantic.result?.diagnostics ?? []) {
+        diagnostics.push({
+          file: d.file ?? files.blueprint,
+          message: `OCaml workstation-config semantic gate failed: ${d.message ?? JSON.stringify(d)}`,
+        });
+      }
+      if ((semantic.result?.diagnostics ?? []).length === 0) {
+        diagnostics.push({
+          file: files.blueprint,
+          message: 'OCaml workstation-config semantic gate failed without diagnostics',
+        });
+      }
+    } else {
+      workstationBlueprintSemanticsOk = true;
+    }
+  }
 
   requireAll(diagnostics, files.blueprint, sources.blueprint, [
     'workstation-config',
@@ -572,6 +599,12 @@ function checkFiles(root, files) {
 
 function requireAll(diagnostics, file, source, needles) {
   for (const needle of needles) {
+    if (workstationBlueprintSemanticsOk && file === DEFAULT_FILES.blueprint) {
+      // Blueprint semantics are owned by missiond-lispc check-workstation-config.
+      // JS remains a compatibility wrapper and Rust/TS code-anchor scanner; it
+      // must not fail on exact prose wording in workstation-config invariants.
+      continue;
+    }
     if (!source.includes(needle)) {
       diagnostics.push({ file, message: `missing required contract text: ${needle}` });
     }
