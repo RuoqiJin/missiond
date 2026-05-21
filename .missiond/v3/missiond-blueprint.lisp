@@ -2087,6 +2087,7 @@
     (maturity :id asr :current M5 :target M6 :gap [job-provider-transcript-domain callback-regressions final-m6-report])
     (maturity :id timeline :current M5 :target M6 :gap [revision-event-authority service-event-regressions final-m6-report])
     (maturity :id pcea :current M6 :target M6 :gap [])
+    (maturity :id xiaojinpro-ios :current M6 :target M6 :gap [])
     (maturity :id secret-store :current M5 :target M6 :gap [secret-version-rotation-domain capability-regressions final-m6-report])
     (maturity :id xiaojin-blog :current M5 :target M6 :gap [content-publishing-domain deploy-auth-boundary final-m6-report])
     (maturity :id cuthub :current M5 :target M6 :gap [community-domain auth-product-dependency final-m6-report])
@@ -2269,6 +2270,16 @@
       :backend ".missiond/backend/pcea-backend-blueprint.lisp"
       :frontend ".missiond/frontend/pcea-frontend-blueprint.lisp"
       :status project-ssot-owned
+      :surface project-registry)
+    (project :id xiaojinpro-ios
+      :kind ios-swiftui-app
+      :root "/Users/jinchen/development/xiaojinproIOS/xiaojinpro"
+      :intent ".missiond/intent.lisp"
+      :frontend ".missiond/frontend/xiaojinpro-ios-blueprint.lisp"
+      :operations ".missiond/operations/xiaojinpro-ios-operations-blueprint.lisp"
+      :status project-ssot-owned
+      :checks ["bash .missiond/check.sh"]
+      :missiond-role "registered mobile control client; iPhone entry for Jarvis/MissionD, using Auth JWT and Jarvis HTTPS proxy to control the Mac mini MissionD node"
       :surface project-registry)
     ;; ── App + external-infra projects — already-converged with project-local check.sh runners ──
     (project :id secret-store
