@@ -12,7 +12,7 @@ pub(crate) const DIRECTIVE_COLS: &str =
 /// Plan table column list.
 #[allow(dead_code)]
 pub(crate) const PLAN_COLS: &str =
-    "id, board_task_id, source_directive_id, version, sexp_text, sexp_hash, status, compiler_model, compiled_from, created_at, approved_at, finished_at";
+    "id, board_task_id, source_directive_id, version, sexp_text, sexp_hash, status, compiler_model, compiled_from, contract_json, created_at, approved_at, finished_at";
 
 /// Workflow table column list.
 ///

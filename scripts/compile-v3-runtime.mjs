@@ -27,6 +27,11 @@ const targets = [
     file: 'compiled-semantic-ir.json',
   },
   {
+    id: 'contract-abi',
+    argv: ['emit-contract-abi', '--blueprint', BLUEPRINT],
+    file: 'compiled-contract-abi.json',
+  },
+  {
     id: 'universe',
     argv: ['emit-universe', '--blueprint', BLUEPRINT],
     file: 'compiled-project-universe.json',
@@ -67,9 +72,9 @@ function main() {
     results.push({ id: target.id, ok: true, path: outPath, source_hash: compiled.source_hash });
   }
   const ssotHashRows = results.filter((row) => (
-    row.ok && ['v3', 'runtime-config', 'semantic-ir'].includes(row.id)
+    row.ok && ['v3', 'runtime-config', 'semantic-ir', 'contract-abi'].includes(row.id)
   ));
-  if (ssotHashRows.length === 3) {
+  if (ssotHashRows.length === 4) {
     const hashes = new Set(ssotHashRows.map((row) => row.source_hash));
     if (hashes.size !== 1) {
       results.push({

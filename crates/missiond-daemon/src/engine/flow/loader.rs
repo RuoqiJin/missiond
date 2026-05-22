@@ -359,6 +359,16 @@ mod tests {
 "#,
         )
         .unwrap();
+        crate::context::v3_blueprint_runtime::tests::write_compiled_runtime_config_fixture_with_flow(
+            root,
+            FlowRuntimeConfig {
+                llm_call_default_max_tokens: 42,
+                slot_task_default_model: "project-opus".to_string(),
+                slot_task_default_timeout_secs: 77,
+                parallel_slot_default_parallelism: 5,
+                parallel_slot_default_timeout_secs: 88,
+            },
+        );
     }
 
     #[test]

@@ -215,19 +215,20 @@
       :policy (:workflow ".missiond/workflows/lisp-code-sync.lisp"
                :watch-env MISSIOND_LISP_CODE_SYNC_WATCH
                :default-watch-enabled true
+               :queue-table lisp_code_sync_jobs
                :dedupe-key "lisp-code-sync:<project>:<path-hash>"
-               :rule "Lisp/checker edits under .missiond are observed through EventBus, compiled/checked immediately, runtime report paths are ignored, unchanged content fingerprints are suppressed, debounce repeated path events, retention/GC bounds report volume, and only failing gates create visible BoardTasks.")
+               :rule "Lisp/checker edits under .missiond are observed through EventBus, subscription only enqueues durable lisp_code_sync_jobs, reconciler claims due jobs with lease before compile/check, runtime report paths are ignored, unchanged content fingerprints are suppressed, debounce repeated path events, retention/GC bounds report volume, and only failing gates create visible BoardTasks.")
       :core
         ((step s1 :logic "watch active ProjectRegistry .missiond directories recursively for .lisp and .mjs changes")
-         (step s2 :logic "publish each relevant filesystem change as SystemEvent::ConfigChanged; sync processing subscribes to EventBus, rechecks path/content fingerprint before expensive gates, and does not bypass EventBus")
+         (step s2 :logic "publish each relevant filesystem change as SystemEvent::ConfigChanged; sync subscriber rechecks path/content fingerprint, upserts lisp_code_sync_jobs, and does not compile/check inline")
          (step s3 :logic "resolve project by longest-prefix ProjectRegistry match")
-         (step s4 :logic "for missiond run compile-v3-runtime then check-v3-code-isomorphism-complete; for external projects run .missiond/check.sh when present")
+         (step s4 :logic "reconciler claims due jobs with lease, batches project work, and for missiond runs compile-v3-runtime then check-v3-code-isomorphism-complete; for external projects run .missiond/check.sh when present")
          (step s5 :logic "write .missiond/v3/runtime/lisp-code-sync/<timestamp>-<path-hash>.report.lisp with synced/needs-sync/observed-only status")
          (step s6 :logic "ignore .missiond/v3/runtime/** and .missiond/runtime-state/** before EventBus publication so self-generated reports cannot recurse")
          (step s7 :logic "suppress unchanged content fingerprints at both watcher publication and subscription consumption, debounce repeated path events, and apply report retention/GC to keep the sync loop bounded")
          (step s8 :logic "on failed code-isomorphism create or reuse one visible BoardTask lisp-code-sync:<project>:<path-hash> that requires evidence-plan and exact accepted shard before code mutation")
          (step s9 :logic "Autopilot revalidates lisp-code-sync runtime report BoardTasks before slot selection; tasks that point at .missiond/v3/runtime/lisp-code-sync/** are closed as resolved_by_runtime_fix/stale_evidence and never sent to PTY")
-         (step s10 :logic "expose lispCodeSync status in mission_master_status so the resident master and frontend can see the live Lisp->code loop"))
+         (step s10 :logic "expose lispCodeSync status and queue metrics queued/running/due/failed/oldest_due_age/active_leases/batch_last_result in mission_master_status so the resident master and frontend can see the live Lisp->code loop"))
       :egress [lisp-code-sync-report sync-boardtask mission_master_status.lispCodeSync])
     (nightly-evolution-loop
       :entry [night-scheduler mission_nightly_evolution final-convergence-snapshot]

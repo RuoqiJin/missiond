@@ -59,6 +59,47 @@
     (surface mission_plan
       :status "code-aligned"
       :implements [plan plan-review-gate plan-runner evidence-collector]
+      :public-facade "mission_plan(action=compile|approve|mark|supersede|execute|record_evidence|...) remains wire-compatible; split contracts are internal ownership surfaces."
+      :internal-surfaces [mission_plan-facade
+                          plan-authoring-contract
+                          plan-review-contract
+                          plan-field-inference-contract
+                          plan-execution-contract
+                          plan-dag-contract
+                          plan-rollback-contract
+                          plan-task-runner-contract]
+      :contract-split ((mission_plan-facade
+                         :owns ["crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+                                "crates/missiond-mcp/src/tools/knowledge/plan.rs"])
+                        (plan-authoring-contract
+                         :owns ["crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs"
+                                "crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring/artifact.rs"
+                                "crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring/validation.rs"])
+                        (plan-review-contract
+                         :owns ["crates/missiond-daemon/src/handlers/knowledge/plan/approval_review.rs"
+                                "crates/missiond-daemon/src/handlers/knowledge/plan/approval_review/approve.rs"
+                                "crates/missiond-daemon/src/handlers/knowledge/plan/approval_review/mark.rs"
+                                "crates/missiond-daemon/src/handlers/knowledge/plan/approval_review/supersede.rs"])
+                        (plan-field-inference-contract
+                         :owns ["crates/missiond-daemon/src/handlers/knowledge/plan/field_inference.rs"
+                                "crates/missiond-daemon/src/handlers/knowledge/plan/field_inference/apply.rs"
+                                "crates/missiond-daemon/src/handlers/knowledge/plan/field_inference/llm.rs"])
+                        (plan-execution-contract
+                         :owns ["crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime.rs"
+                                "crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime/internal.rs"
+                                "crates/missiond-daemon/src/handlers/knowledge/plan/internal_dispatch.rs"
+                                "crates/missiond-daemon/src/handlers/knowledge/plan/execute_hints.rs"])
+                        (plan-dag-contract
+                         :owns ["crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs"
+                                "crates/missiond-daemon/src/handlers/knowledge/plan_dag/runtime.rs"
+                                "crates/missiond-daemon/src/handlers/knowledge/plan_dag/parser.rs"])
+                        (plan-rollback-contract
+                         :owns ["crates/missiond-daemon/src/handlers/knowledge/plan_dag/rollback.rs"
+                                "crates/missiond-daemon/src/handlers/knowledge/plan_dag/rollback/cascade.rs"])
+                        (plan-task-runner-contract
+                         :owns ["crates/missiond-daemon/src/handlers/knowledge/plan/task_runner_dry_run.rs"
+                                "crates/missiond-daemon/src/handlers/knowledge/plan/task_runner_dry_run/manifest.rs"
+                                "crates/missiond-daemon/src/handlers/knowledge/plan/task_runner_dry_run/projection.rs"]))
       :code ["crates/missiond-daemon/src/handlers/knowledge/plan.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring/artifact.rs"
@@ -185,7 +226,7 @@
       :runtime-spawn "plan_dag/runtime/spawn.rs owns DAG runtime dispatch spawn projection: running lifecycle transition, running evidence emission, task-contract context clone, AppState/Plan clone, and JoinSet dispatch task spawn."
       :runtime-success "plan_dag/runtime/success.rs owns DAG runtime successful dispatch projection: success acceptance handoff, terminal claim release, acceptance-rejected rollback, accepted NodeResult projection, rejection taint propagation, and fail-fast rejection signaling."
       :model-projection "mission_plan sonnet compiler_model labels for plan-authoring, plan-review proposals, and field-inference proposals project from router-runtime-policy queued_sonnet_model through RouterRuntimeConfig; local Rust model literals are forbidden on these production paths."
-      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold with :target, :objective, and :nodes; execute can derive target_source=plan_hint from plan.sexp_text instead of caller escape parameters."
+      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold with :target, :objective, and :nodes; compile/materialization persist plan.contract_json using missiond.plan-contract.v1 shape, execute derives target_source=plan_hint from plan.contract_json, and empty legacy rows are reprojected through missiond-lispc emit-plan-contract before dispatch."
       :evidence-sidecar ".missiond/v3/evidence/blueprint-notes.lisp#note-004")
 
     (surface evidence-collector
@@ -373,11 +414,16 @@
              "scripts/check-ocaml-toolchain.mjs"
              "scripts/check-typed-lisp-compiler.mjs"
              "scripts/compile-v3-runtime.mjs"
+             "scripts/project-v3-contracts.mjs"
+             "scripts/generated/v3_contracts.mjs"
+             "scripts/generated/v3_contracts.d.ts"
              "scripts/check-auth-domain-ssot.mjs"
              "scripts/check-project-domain-hardening.mjs"
+             "crates/missiond-daemon/src/context/v3_contracts/mod.rs"
+             "crates/missiond-daemon/src/context/v3_contracts/generated.rs"
              "crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"
              ".missiond/workflows/typed-lisp-compiler-convergence.lisp"]
-      :note "Lisp remains the canonical authoring SSOT. The OCaml layer is a dev-time typed compiler/checker/projection layer for source-located diagnostics and generated runtime JSON; compiled-runtime-config.json carries workstation/flow/compute/router/autopilot/learning runtime policy, project universe and workflow projections include structured project/maturity/workflow payloads, workflow-directory gates validate every .missiond/workflows/*.lisp contract, project-directory structural gates validate each registered project's active blueprint shards before M5 maturity can rely on project-local shape evidence, and M6-depth gates validate Auth-grade domain/policy/flow/event/runtime/compatibility evidence. OCaml is not in the daemon hot path. JS checkers remain compatibility wrappers and code-anchor validators, but their live surface/function facts are loaded through scripts/lib/v3_compiled_contract.mjs from missiond-lispc emit-v3 / emit-semantic-ir instead of a hand-maintained surface list.")
+      :note "Lisp remains the canonical authoring SSOT. OCaml is the dev-time typed compiler/checker/projection layer for diagnostics, generated runtime JSON, generated V3 contract ABI, and typed plan-contract projection. compiled-contract-abi.json plus scripts/project-v3-contracts.mjs generate Rust/JS/TS readers; compiled-runtime-config.json carries runtime policy, project universe, workflow, maturity, and M6-depth projections. OCaml is not in the daemon hot path. JS checkers remain compatibility/code-anchor validators, but live surface/function facts load through scripts/lib/v3_compiled_contract.mjs from missiond-lispc emit-v3 / emit-semantic-ir / emit-contract-abi instead of hand-maintained lists.")
 
     (surface semantic-ir-compiler
       :status "code-aligned"
@@ -531,7 +577,7 @@
              "crates/missiond-daemon/src/engine/master_control.rs"
              "scripts/check-v3-lisp-code-sync-isomorphism.mjs"
              "scripts/check-v3-code-isomorphism-complete.mjs"]
-      :note "lisp-code-sync-loop is the event-driven Lisp->code isomorphism muscle. It watches active ProjectRegistry .missiond authoring paths, emits SystemEvent::ConfigChanged, ignores .missiond/v3/runtime/** and cold evidence, suppresses unchanged content fingerprints before EventBus publication and again when consuming queued ConfigChanged events, debounces, runs typed compile plus code-isomorphism gates, writes bounded reports, exposes reportDirs/stormCircuitHits/recentSyncTaskCreations, creates one deduped BoardTask for failing gates, switches to lisp-code-sync:<project>:storm-circuit on same-source storms, and lets Autopilot close stale runtime-report BoardTasks as resolved_by_runtime_fix/stale_evidence before slot selection. It never edits code directly; mutation still requires evidence-plan, accepted exact shard, write_scope, acceptance, and durable green gates.")
+      :note "lisp-code-sync-loop watches active ProjectRegistry .missiond authoring paths, emits SystemEvent::ConfigChanged, ignores .missiond/v3/runtime/** plus cold evidence, suppresses unchanged fingerprints, and keeps the subscriber enqueue-only through the durable reconciliation queue in lisp_code_sync_jobs for queued ConfigChanged events. The reconciler claims due jobs with lease, runs typed compile plus code-isomorphism gates, writes bounded reports, exposes queue metrics/reportDirs/stormCircuitHits/recentSyncTaskCreations, creates or reuses one deduped BoardTask for failing gates, switches to lisp-code-sync:<project>:storm-circuit on storms, and lets Autopilot close stale runtime-report tasks before slot selection. It never edits code directly; mutation still requires evidence-plan, accepted shard, write_scope, acceptance, and durable green gates.")
 
     (surface lisp-code-sync-storm-circuit
       :status "code-aligned"

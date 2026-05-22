@@ -21,6 +21,7 @@ fn fixture_plan(sexp: &str) -> Plan {
         status: PlanStatus::Approved,
         compiler_model: None,
         compiled_from: None,
+        contract_json: serde_json::json!({}),
         created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
         approved_at: None,
         finished_at: None,

@@ -1,4 +1,7 @@
 use super::*;
+use std::io::Write as _;
+use std::path::PathBuf;
+use tokio::process::Command;
 
 // ───────────────────────────────────────────────────────────────────────
 // execute — plan-runner v0
@@ -19,6 +22,143 @@ use super::*;
 // tool's response and the evidence sidecar so the audit trail is complete
 // even before the schema-side field exists.
 // ───────────────────────────────────────────────────────────────────────
+
+async fn ensure_plan_contract_json(
+    state: &AppState,
+    plan: &mut Plan,
+) -> Result<Option<ToolResult>> {
+    if !plan_contract_json_is_missing(&plan.contract_json) {
+        return Ok(None);
+    }
+
+    let projected = match emit_plan_contract_json_via_lispc(&plan.sexp_text).await {
+        Ok(projected) => projected,
+        Err(err) => {
+            return Ok(Some(ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::INVALID_PARAM,
+                    format!(
+                        "plan `{}` is missing contract_json and missiond-lispc emit-plan-contract failed: {}",
+                        plan.id, err
+                    ),
+                )
+                .with_suggestion(
+                    "recompile and approve this plan so the typed plan contract can be materialized before execution",
+                ),
+            )));
+        }
+    };
+
+    if let Err(err) = state
+        .store
+        .plan_update_contract_json(plan.id, &projected)
+        .await
+    {
+        return Ok(Some(ToolResult::structured_error(
+            ToolError::new(
+                error_codes::INVALID_PARAM,
+                format!(
+                    "plan `{}` typed contract was projected but could not be persisted: {}",
+                    plan.id, err
+                ),
+            )
+            .with_suggestion(
+                "retry execution after database write availability is restored, or recompile the plan",
+            ),
+        )));
+    }
+    plan.contract_json = projected;
+    Ok(None)
+}
+
+fn plan_contract_json_is_missing(contract: &Value) -> bool {
+    contract
+        .as_object()
+        .map(|object| object.is_empty())
+        .unwrap_or(true)
+}
+
+async fn emit_plan_contract_json_via_lispc(sexp: &str) -> Result<Value> {
+    let mut file = tempfile::NamedTempFile::new()?;
+    file.write_all(sexp.as_bytes())?;
+    file.flush()?;
+    let plan_path = file.path().to_path_buf();
+    let repo_root = find_missiond_lispc_root()?;
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        Command::new("dune")
+            .args([
+                "exec",
+                "--root",
+                "tools/missiond_lispc",
+                "./bin/main.exe",
+                "--",
+                "emit-plan-contract",
+                "--file",
+            ])
+            .arg(&plan_path)
+            .current_dir(&repo_root)
+            .output(),
+    )
+    .await
+    .map_err(|_| anyhow!("missiond-lispc emit-plan-contract timed out"))??;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(anyhow!(
+            "missiond-lispc exited with status {}; stderr: {}; stdout: {}",
+            output.status,
+            trim_for_error(&stderr),
+            trim_for_error(&stdout)
+        ));
+    }
+    let envelope: Value = serde_json::from_slice(&output.stdout)?;
+    if envelope.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Err(anyhow!(
+            "missiond-lispc rejected plan contract: {}",
+            trim_for_error(&String::from_utf8_lossy(&output.stdout))
+        ));
+    }
+    let compiled = envelope
+        .get("compiled")
+        .cloned()
+        .ok_or_else(|| anyhow!("missiond-lispc output missing compiled plan contract"))?;
+    if compiled.get("schema_version").and_then(Value::as_str) != Some("missiond.plan-contract.v1") {
+        return Err(anyhow!(
+            "missiond-lispc output schema_version was not missiond.plan-contract.v1"
+        ));
+    }
+    Ok(compiled)
+}
+
+fn find_missiond_lispc_root() -> Result<PathBuf> {
+    let mut dir = std::env::current_dir()?;
+    loop {
+        if dir.join("tools/missiond_lispc/bin/main.ml").exists() {
+            return Ok(dir);
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    Err(anyhow!(
+        "could not locate tools/missiond_lispc/bin/main.ml from current working directory"
+    ))
+}
+
+fn trim_for_error(value: &str) -> String {
+    let value = value.trim();
+    let chars: Vec<char> = value.chars().collect();
+    if chars.len() <= 600 {
+        value.to_string()
+    } else {
+        format!(
+            "{}...",
+            chars[chars.len() - 600..].iter().collect::<String>()
+        )
+    }
+}
 
 pub(super) async fn action_execute(state: &AppState, args: &Value) -> Result<ToolResult> {
     let id = parse_id_arg(args, "plan_id")?;
@@ -114,7 +254,7 @@ pub(super) async fn action_execute(state: &AppState, args: &Value) -> Result<Too
         return Ok(err);
     }
 
-    let plan = match state
+    let mut plan = match state
         .store
         .plan_get(id)
         .await
@@ -136,6 +276,9 @@ pub(super) async fn action_execute(state: &AppState, args: &Value) -> Result<Too
                 plan.status.as_str()
             ),
         )));
+    }
+    if let Some(error) = ensure_plan_contract_json(state, &mut plan).await? {
+        return Ok(error);
     }
 
     // wave-18 / task 06 — autonomous PLAN field inference. We always run
@@ -202,7 +345,7 @@ pub(super) async fn action_execute(state: &AppState, args: &Value) -> Result<Too
         let evidence_entries =
             read_recent_evidence_entries(state, id, project_arg, cwd_arg, target_project_arg, 16)
                 .await;
-        let plan_hints = parse_plan_hints(&plan.sexp_text);
+        let plan_hints = parse_plan_hints_for_plan(&plan);
         let input = PlanInferenceInput {
             plan_hints,
             plan_sexp: &plan.sexp_text,
@@ -433,7 +576,7 @@ pub(super) async fn action_execute(state: &AppState, args: &Value) -> Result<Too
 
     // plan-runner auto-selection v1: parse hints up front so caller-omitted
     // target / dispatch knobs can be derived from PLAN.lisp itself.
-    let hints = parse_plan_hints(&plan.sexp_text);
+    let hints = parse_plan_hints_for_plan(&plan);
 
     let explicit_target = args
         .get("target")
@@ -467,7 +610,7 @@ pub(super) async fn action_execute(state: &AppState, args: &Value) -> Result<Too
             ToolError::new(
                 error_codes::MISSING_PARAM,
                 "execute requires `target` (mission_execution|mission_task_delegate|mission_flow_run); \
-                 plan.sexp_text did not contain a usable :target / :target-tool / :tool hint",
+                 plan.contract_json did not contain a usable target hint",
             )
             .with_suggestion(
                 "pass `target` explicitly, or add a :target hint (and :flow-id when targeting flow_run) to PLAN.lisp",

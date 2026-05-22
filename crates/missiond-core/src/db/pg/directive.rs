@@ -60,10 +60,62 @@ type PlanRow = (
     String,                // status
     Option<String>,        // compiler_model
     Option<String>,        // compiled_from
+    JsonValue,             // contract_json
     DateTime<Utc>,         // created_at
     Option<DateTime<Utc>>, // approved_at
     Option<DateTime<Utc>>, // finished_at
 );
+
+#[derive(sqlx::FromRow)]
+struct LispCodeSyncJobRow {
+    id: Uuid,
+    project_id: String,
+    root_path: String,
+    changed_path: String,
+    content_hash: String,
+    event_kind: String,
+    status: String,
+    attempts: i32,
+    next_run_at: DateTime<Utc>,
+    lease_owner: Option<String>,
+    lease_expires_at: Option<DateTime<Utc>>,
+    checker_ok: Option<bool>,
+    checker_command: Option<String>,
+    checker_tail: Option<String>,
+    sync_task_id: Option<String>,
+    dedupe_key: String,
+    storm_circuit: bool,
+    last_error: Option<String>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+const LISP_CODE_SYNC_JOB_COLS: &str = "id, project_id, root_path, changed_path, content_hash, event_kind, status, attempts, next_run_at, lease_owner, lease_expires_at, checker_ok, checker_command, checker_tail, sync_task_id, dedupe_key, storm_circuit, last_error, created_at, updated_at";
+
+fn lisp_code_sync_job_row_to_job(r: LispCodeSyncJobRow) -> crate::types::LispCodeSyncJob {
+    crate::types::LispCodeSyncJob {
+        id: r.id,
+        project_id: r.project_id,
+        root_path: r.root_path,
+        changed_path: r.changed_path,
+        content_hash: r.content_hash,
+        event_kind: r.event_kind,
+        status: r.status,
+        attempts: r.attempts,
+        next_run_at: r.next_run_at,
+        lease_owner: r.lease_owner,
+        lease_expires_at: r.lease_expires_at,
+        checker_ok: r.checker_ok,
+        checker_command: r.checker_command,
+        checker_tail: r.checker_tail,
+        sync_task_id: r.sync_task_id,
+        dedupe_key: r.dedupe_key,
+        storm_circuit: r.storm_circuit,
+        last_error: r.last_error,
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+    }
+}
 
 fn plan_row_to_plan(r: PlanRow) -> Plan {
     Plan {
@@ -76,9 +128,10 @@ fn plan_row_to_plan(r: PlanRow) -> Plan {
         status: PlanStatus::from_str(&r.6).unwrap_or(PlanStatus::Draft),
         compiler_model: r.7,
         compiled_from: r.8,
-        created_at: r.9,
-        approved_at: r.10,
-        finished_at: r.11,
+        contract_json: r.9,
+        created_at: r.10,
+        approved_at: r.11,
+        finished_at: r.12,
     }
 }
 
@@ -260,8 +313,8 @@ impl DirectiveLayerStore for PgMissionStore {
         compiled_from: Option<&str>,
     ) -> DbResult<Uuid> {
         let row: (Uuid,) = sqlx::query_as(
-            "INSERT INTO plan (board_task_id, source_directive_id, version, sexp_text, sexp_hash, status, compiler_model, compiled_from)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            "INSERT INTO plan (board_task_id, source_directive_id, version, sexp_text, sexp_hash, status, compiler_model, compiled_from, contract_json)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, '{}'::jsonb)
              RETURNING id",
         )
         .bind(board_task_id)
@@ -284,6 +337,17 @@ impl DirectiveLayerStore for PgMissionStore {
                 .fetch_optional(&self.pool)
                 .await?;
         Ok(row.map(plan_row_to_plan))
+    }
+
+    async fn plan_update_contract_json(&self, id: Uuid, contract_json: &JsonValue) -> DbResult<()> {
+        let contract_str =
+            serde_json::to_string(contract_json).unwrap_or_else(|_| "{}".to_string());
+        sqlx::query("UPDATE plan SET contract_json = $2::jsonb WHERE id = $1")
+            .bind(id)
+            .bind(contract_str)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     async fn plan_update_status(&self, id: Uuid, new_status: PlanStatus) -> DbResult<()> {
@@ -380,6 +444,175 @@ impl DirectiveLayerStore for PgMissionStore {
             }
         };
         Ok(rows.into_iter().map(plan_row_to_plan).collect())
+    }
+
+    async fn lisp_code_sync_enqueue_job(
+        &self,
+        input: &crate::types::EnqueueLispCodeSyncJob,
+    ) -> DbResult<Uuid> {
+        let row: (Uuid,) = sqlx::query_as(
+            "INSERT INTO lisp_code_sync_jobs
+                (project_id, root_path, changed_path, content_hash, event_kind, dedupe_key, storm_circuit)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT (dedupe_key) DO UPDATE SET
+                project_id = EXCLUDED.project_id,
+                root_path = EXCLUDED.root_path,
+                changed_path = EXCLUDED.changed_path,
+                content_hash = EXCLUDED.content_hash,
+                event_kind = EXCLUDED.event_kind,
+                status = CASE
+                    WHEN lisp_code_sync_jobs.status IN ('synced', 'cancelled') THEN 'queued'
+                    WHEN lisp_code_sync_jobs.status = 'failed' THEN 'queued'
+                    ELSE lisp_code_sync_jobs.status
+                END,
+                next_run_at = LEAST(lisp_code_sync_jobs.next_run_at, now()),
+                checker_ok = NULL,
+                checker_command = NULL,
+                checker_tail = NULL,
+                storm_circuit = EXCLUDED.storm_circuit,
+                last_error = NULL,
+                updated_at = now()
+             RETURNING id",
+        )
+        .bind(&input.project_id)
+        .bind(&input.root_path)
+        .bind(&input.changed_path)
+        .bind(&input.content_hash)
+        .bind(&input.event_kind)
+        .bind(&input.dedupe_key)
+        .bind(input.storm_circuit)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.0)
+    }
+
+    async fn lisp_code_sync_claim_due_jobs(
+        &self,
+        lease_owner: &str,
+        limit: i64,
+        lease_secs: i64,
+    ) -> DbResult<Vec<crate::types::LispCodeSyncJob>> {
+        let rows: Vec<LispCodeSyncJobRow> = sqlx::query_as(&format!(
+            "WITH due AS (
+                SELECT id
+                FROM lisp_code_sync_jobs
+                WHERE next_run_at <= now()
+                  AND (
+                    status IN ('queued', 'failed')
+                    OR (status = 'running' AND lease_expires_at < now())
+                  )
+                ORDER BY next_run_at ASC, created_at ASC
+                LIMIT $2
+                FOR UPDATE SKIP LOCKED
+             )
+             UPDATE lisp_code_sync_jobs AS job
+             SET status = 'running',
+                 attempts = attempts + 1,
+                 lease_owner = $1,
+                 lease_expires_at = now() + ($3::text || ' seconds')::interval,
+                 updated_at = now()
+             FROM due
+             WHERE job.id = due.id
+             RETURNING {}",
+            LISP_CODE_SYNC_JOB_COLS
+        ))
+        .bind(lease_owner)
+        .bind(limit.max(1))
+        .bind(lease_secs.max(1))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(lisp_code_sync_job_row_to_job)
+            .collect())
+    }
+
+    async fn lisp_code_sync_complete_job(
+        &self,
+        id: Uuid,
+        status: &str,
+        checker_ok: Option<bool>,
+        checker_command: Option<&str>,
+        checker_tail: Option<&str>,
+        sync_task_id: Option<&str>,
+        last_error: Option<&str>,
+        retry_after_secs: Option<i64>,
+    ) -> DbResult<()> {
+        sqlx::query(
+            "UPDATE lisp_code_sync_jobs
+             SET status = $2,
+                 checker_ok = $3,
+                 checker_command = $4,
+                 checker_tail = $5,
+                 sync_task_id = $6,
+                 last_error = $7,
+                 next_run_at = CASE
+                    WHEN $8::bigint IS NULL THEN next_run_at
+                    ELSE now() + ($8::text || ' seconds')::interval
+                 END,
+                 lease_owner = NULL,
+                 lease_expires_at = NULL,
+                 updated_at = now()
+             WHERE id = $1",
+        )
+        .bind(id)
+        .bind(status)
+        .bind(checker_ok)
+        .bind(checker_command)
+        .bind(checker_tail)
+        .bind(sync_task_id)
+        .bind(last_error)
+        .bind(retry_after_secs)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn lisp_code_sync_queue_stats(&self) -> DbResult<crate::types::LispCodeSyncQueueStats> {
+        let counts: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT status, COUNT(*)::bigint FROM lisp_code_sync_jobs GROUP BY status",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let due: (i64, Option<i64>) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint,
+                    EXTRACT(EPOCH FROM (now() - MIN(next_run_at)))::bigint
+             FROM lisp_code_sync_jobs
+             WHERE next_run_at <= now() AND status IN ('queued', 'failed')",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        let active_leases: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM lisp_code_sync_jobs
+             WHERE status = 'running' AND lease_expires_at > now()",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        let last: Option<(String,)> = sqlx::query_as(
+            "SELECT CONCAT(status, COALESCE(': ' || last_error, ''))
+             FROM lisp_code_sync_jobs
+             WHERE status IN ('synced', 'failed', 'observed-only', 'unknown-project')
+             ORDER BY updated_at DESC
+             LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        let mut stats = crate::types::LispCodeSyncQueueStats {
+            due: due.0,
+            oldest_due_age_secs: due.1,
+            active_leases: active_leases.0,
+            batch_last_result: last.map(|row| row.0),
+            ..Default::default()
+        };
+        for (status, count) in counts {
+            match status.as_str() {
+                "queued" => stats.queued = count,
+                "running" => stats.running = count,
+                "failed" => stats.failed = count,
+                _ => {}
+            }
+        }
+        Ok(stats)
     }
 
     // ================================================================

@@ -5,9 +5,9 @@ use crate::handlers::knowledge::workstation_dispatch;
 // plan-runner auto-selection v1
 //
 // When `mission_plan(action=execute)` is called without `target` (or other
-// dispatch knobs), a small conservative parser extracts hints from
-// `plan.sexp_text` so the runner can route on its own. Explicit args still
-// win; this is purely a fallback so PLAN.lisp can speak for itself.
+// dispatch knobs), execution reads hints from plan.contract_json. New rows
+// receive that projection at compile/materialization time; old empty rows are
+// reprojected by missiond-lispc before dispatch. Explicit args still win.
 //
 // Lisp authority:
 //   intent-flow.lisp        :: F-intent-alignment-plan-execution-loop ::
@@ -189,6 +189,69 @@ pub(crate) struct ResolvedExec {
     pub(super) plan_hint_summary: Value,
 }
 
+pub(crate) fn parse_plan_hints_for_plan(plan: &Plan) -> ParsedPlanHints {
+    parse_plan_hints_from_contract_json(&plan.contract_json).unwrap_or_default()
+}
+
+pub(crate) fn plan_contract_json_from_sexp(sexp: &str) -> Value {
+    json!({
+        "schema_version": "missiond.plan-contract.v1",
+        "projection_engine": "rust-compat",
+        "payload": {
+            "head": if sexp.trim_start().starts_with("(plan-draft") { "plan-draft" } else { "plan" },
+            "hints": parse_plan_hints(sexp).to_summary_json(),
+            "nodes": [],
+        },
+    })
+}
+
+pub(crate) fn parse_plan_hints_from_contract_json(contract: &Value) -> Option<ParsedPlanHints> {
+    let payload = contract.get("payload").unwrap_or(contract);
+    let hints = payload.get("hints")?.as_object()?;
+    if hints.is_empty() {
+        return None;
+    }
+    let mut out = ParsedPlanHints::default();
+    let fill = |slot: &mut Option<String>, key: &str| {
+        if let Some(value) = hints.get(key).and_then(plan_contract_value_to_hint_string) {
+            if !value.trim().is_empty() {
+                *slot = Some(value);
+            }
+        }
+    };
+    fill(&mut out.target, "target");
+    fill(&mut out.flow_id, "flow_id");
+    fill(&mut out.dispatch_strategy, "dispatch_strategy");
+    fill(&mut out.parallelism, "parallelism");
+    fill(&mut out.target_project, "target_project");
+    fill(&mut out.requested_cwd, "requested_cwd");
+    fill(&mut out.objective, "objective");
+    fill(&mut out.summary, "summary");
+    fill(&mut out.scope, "scope");
+    fill(&mut out.commit_policy, "commit_policy");
+    fill(&mut out.owned_files_raw, "owned_files");
+    fill(&mut out.forbidden_files_raw, "forbidden_files");
+    fill(&mut out.acceptance_commands_raw, "acceptance_commands");
+    fill(&mut out.workstation_dispatch_flag, "workstation_dispatch");
+    Some(out)
+}
+
+fn plan_contract_value_to_hint_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(s) => Some(s.clone()),
+        Value::Bool(v) => Some(v.to_string()),
+        Value::Number(v) => Some(v.to_string()),
+        Value::Array(values) => {
+            let parts: Vec<String> = values
+                .iter()
+                .filter_map(plan_contract_value_to_hint_string)
+                .collect();
+            Some(format!("[{}]", parts.join(" ")))
+        }
+        _ => None,
+    }
+}
+
 /// Parse a PLAN.lisp s-expression for known runner hints. This is NOT a full
 /// Lisp interpreter; it scans `:keyword value` pairs at any depth and keeps
 /// the first occurrence per keyword. Conservative on purpose: anything that
@@ -253,8 +316,16 @@ pub(crate) fn scan_keyword_pairs(sexp: &str) -> Vec<(String, String)> {
     let mut i = 0;
     let mut in_string = false;
     let mut esc = false;
+    let mut in_comment = false;
     while i < n {
         let c = chars[i];
+        if in_comment {
+            if c == '\n' {
+                in_comment = false;
+            }
+            i += 1;
+            continue;
+        }
         if in_string {
             if esc {
                 esc = false;
@@ -269,6 +340,11 @@ pub(crate) fn scan_keyword_pairs(sexp: &str) -> Vec<(String, String)> {
             if c == '"' {
                 in_string = false;
             }
+            i += 1;
+            continue;
+        }
+        if c == ';' {
+            in_comment = true;
             i += 1;
             continue;
         }
@@ -413,6 +489,29 @@ pub(crate) fn scan_keyword_pairs(sexp: &str) -> Vec<(String, String)> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scan_keyword_pairs_ignores_strings_and_comments() {
+        let pairs = scan_keyword_pairs(
+            r#"(plan
+              :note "debug :target wrong"
+              ; :target comment-wrong
+              :target "mission_task_delegate")"#,
+        );
+        assert_eq!(
+            pairs
+                .iter()
+                .find(|(key, _)| key == "target")
+                .map(|(_, value)| value.as_str()),
+            Some("mission_task_delegate")
+        );
+        assert!(!pairs.iter().any(|(_, value)| value == "comment-wrong"));
+    }
 }
 
 /// Map a free-form target string from a plan hint to the canonical 3-target

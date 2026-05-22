@@ -1440,6 +1440,11 @@ pub trait DirectiveLayerStore: Send + Sync {
         compiled_from: Option<&str>,
     ) -> DbResult<uuid::Uuid>;
     async fn plan_get(&self, id: uuid::Uuid) -> DbResult<Option<Plan>>;
+    async fn plan_update_contract_json(
+        &self,
+        id: uuid::Uuid,
+        contract_json: &serde_json::Value,
+    ) -> DbResult<()>;
     async fn plan_update_status(&self, id: uuid::Uuid, new_status: PlanStatus) -> DbResult<()>;
     async fn plan_supersede(&self, old_id: uuid::Uuid, new_id: uuid::Uuid) -> DbResult<()>;
     async fn plan_list_by_task(&self, board_task_id: &str) -> DbResult<Vec<Plan>>;
@@ -1447,6 +1452,29 @@ pub trait DirectiveLayerStore: Send + Sync {
     /// Recent plans, optionally filtered by status (cross-task, manager-surface only).
     async fn plan_list_recent(&self, status: Option<PlanStatus>, limit: i64)
         -> DbResult<Vec<Plan>>;
+
+    async fn lisp_code_sync_enqueue_job(
+        &self,
+        input: &EnqueueLispCodeSyncJob,
+    ) -> DbResult<uuid::Uuid>;
+    async fn lisp_code_sync_claim_due_jobs(
+        &self,
+        lease_owner: &str,
+        limit: i64,
+        lease_secs: i64,
+    ) -> DbResult<Vec<LispCodeSyncJob>>;
+    async fn lisp_code_sync_complete_job(
+        &self,
+        id: uuid::Uuid,
+        status: &str,
+        checker_ok: Option<bool>,
+        checker_command: Option<&str>,
+        checker_tail: Option<&str>,
+        sync_task_id: Option<&str>,
+        last_error: Option<&str>,
+        retry_after_secs: Option<i64>,
+    ) -> DbResult<()>;
+    async fn lisp_code_sync_queue_stats(&self) -> DbResult<LispCodeSyncQueueStats>;
 
     // -- workflow 表 (5 方法) --
     async fn workflow_insert(

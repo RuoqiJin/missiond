@@ -157,6 +157,8 @@ pub struct Plan {
     pub compiler_model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compiled_from: Option<String>,
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub contract_json: serde_json::Value,
     pub created_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approved_at: Option<DateTime<Utc>>,

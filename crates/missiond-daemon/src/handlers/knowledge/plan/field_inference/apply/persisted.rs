@@ -541,6 +541,19 @@ pub(in crate::handlers::knowledge::plan) async fn execute_persisted_apply(
         )
         .await
         .map_err(|e| (error_codes::DB_ERROR, format!("plan_insert: {}", e)))?;
+    state
+        .store
+        .plan_update_contract_json(
+            new_plan_id,
+            &plan_contract_json_from_sexp(&resulting_sexp_text),
+        )
+        .await
+        .map_err(|e| {
+            (
+                error_codes::DB_ERROR,
+                format!("plan_update_contract_json: {}", e),
+            )
+        })?;
 
     state
         .store

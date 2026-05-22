@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::Result;
 use missiond_core::event::events::{BoardEvent, SystemEvent};
 use missiond_core::event::subscription::{CursorFlush, StartFrom, SubscriptionOpts};
-use missiond_core::types::CreateBoardTaskInput;
+use missiond_core::types::{CreateBoardTaskInput, EnqueueLispCodeSyncJob, LispCodeSyncJob};
 use notify::Watcher;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -27,6 +27,8 @@ const LISP_CODE_SYNC_MAX_REPORT_AGE_SECS: u64 = 7 * 24 * 60 * 60;
 const LISP_CODE_SYNC_RECENT_REPORT_WINDOW_SECS: u64 = 5 * 60;
 const LISP_CODE_SYNC_STORM_WINDOW_SECS: i64 = 60;
 const LISP_CODE_SYNC_STORM_PRECREATE_THRESHOLD: usize = 4;
+const LISP_CODE_SYNC_RECONCILER_LEASE_SECS: i64 = 120;
+const LISP_CODE_SYNC_RECONCILER_BATCH_LIMIT: i64 = 16;
 
 static LISP_CODE_SYNC_RUNTIME: OnceLock<Arc<LispCodeSyncRuntime>> = OnceLock::new();
 
@@ -185,6 +187,10 @@ pub(crate) async fn status_snapshot_for_state(state: &AppState) -> Value {
             "reportDirs".to_string(),
             collect_report_dir_status_for_state(state).await,
         );
+        obj.insert(
+            "queue".to_string(),
+            collect_queue_status_for_state(state).await,
+        );
     }
     snapshot
 }
@@ -207,6 +213,7 @@ pub(crate) fn start_lisp_code_sync_service(
         runtime: runtime(),
     };
     tokio::spawn(service.clone().run_subscription(shutdown_rx.clone()));
+    tokio::spawn(service.clone().run_reconciler(shutdown_rx.clone()));
     if lisp_code_sync_watch_enabled() {
         tokio::spawn(service.run_file_watcher(shutdown_rx));
         info!("lisp-code-sync service started (.missiond Lisp watcher -> EventBus -> sync report)");
@@ -262,10 +269,12 @@ impl LispCodeSyncService {
                                 continue;
                             }
                             self.runtime.record_event(seq, path).await;
-                            match process_lisp_change(&self.state, path).await {
-                                Ok(result) => self.runtime.record_result(&result).await,
+                            match enqueue_lisp_code_sync_job(&self.state, path, kind).await {
+                                Ok(_) => {
+                                    *self.runtime.last_status.write().await = Some("queued".to_string());
+                                }
                                 Err(err) => {
-                                    warn!(error = %err, path = %path, "lisp-code-sync processing failed");
+                                    warn!(error = %err, path = %path, "lisp-code-sync enqueue failed");
                                     self.runtime.record_error(err.to_string()).await;
                                 }
                             }
@@ -275,6 +284,270 @@ impl LispCodeSyncService {
                 }
             }
         }
+    }
+
+    async fn run_reconciler(self, mut shutdown: watch::Receiver<bool>) {
+        let lease_owner = format!("missiond:{}:{}", std::process::id(), "lisp-code-sync");
+        let mut tick = tokio::time::interval(Duration::from_secs(2));
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown.changed() => break,
+                _ = tick.tick() => {
+                    let jobs = match self.state.store
+                        .lisp_code_sync_claim_due_jobs(
+                            &lease_owner,
+                            LISP_CODE_SYNC_RECONCILER_BATCH_LIMIT,
+                            LISP_CODE_SYNC_RECONCILER_LEASE_SECS,
+                        )
+                        .await
+                    {
+                        Ok(jobs) => jobs,
+                        Err(err) => {
+                            warn!(error = %err, "lisp-code-sync reconciler claim failed");
+                            self.runtime.record_error(err.to_string()).await;
+                            continue;
+                        }
+                    };
+                    if jobs.is_empty() {
+                        continue;
+                    }
+                    if let Err(err) = self.process_claimed_jobs(jobs).await {
+                        warn!(error = %err, "lisp-code-sync reconciler batch failed");
+                        self.runtime.record_error(err.to_string()).await;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn process_claimed_jobs(&self, jobs: Vec<LispCodeSyncJob>) -> Result<()> {
+        let mut by_project: HashMap<(String, String), Vec<LispCodeSyncJob>> = HashMap::new();
+        for job in jobs {
+            by_project
+                .entry((job.project_id.clone(), job.root_path.clone()))
+                .or_default()
+                .push(job);
+        }
+
+        let mut first_error: Option<anyhow::Error> = None;
+        for ((_project_id, _root_path), batch) in by_project {
+            if let Err(err) = self.process_claimed_project_batch(batch).await {
+                warn!(error = %err, "lisp-code-sync project batch failed");
+                if first_error.is_none() {
+                    first_error = Some(err);
+                }
+            }
+        }
+        if let Some(err) = first_error {
+            Err(err)
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn process_claimed_project_batch(&self, jobs: Vec<LispCodeSyncJob>) -> Result<()> {
+        let Some(first) = jobs.first() else {
+            return Ok(());
+        };
+        if first.project_id == "unknown" {
+            let mut first_error: Option<anyhow::Error> = None;
+            for job in jobs {
+                if let Err(err) = self.process_unknown_claimed_job(&job).await {
+                    self.state
+                        .store
+                        .lisp_code_sync_complete_job(
+                            job.id,
+                            "failed",
+                            Some(false),
+                            None,
+                            None,
+                            None,
+                            Some(&err.to_string()),
+                            Some(backoff_secs(job.attempts)),
+                        )
+                        .await?;
+                    if first_error.is_none() {
+                        first_error = Some(err);
+                    }
+                }
+            }
+            return if let Some(err) = first_error {
+                Err(err)
+            } else {
+                Ok(())
+            };
+        }
+
+        let resolution = ProjectResolution {
+            project_id: first.project_id.clone(),
+            root: PathBuf::from(&first.root_path),
+        };
+        let check = run_project_sync_check(&resolution).await;
+        let status = status_from_sync_check(&check);
+
+        let mut first_error: Option<anyhow::Error> = None;
+        for job in jobs {
+            match self
+                .process_claimed_project_job(&job, &resolution, status, check.as_ref())
+                .await
+            {
+                Ok(result) => {
+                    self.runtime.record_result(&result).await;
+                    self.complete_claimed_job(&job, &result).await?;
+                }
+                Err(err) => {
+                    self.state
+                        .store
+                        .lisp_code_sync_complete_job(
+                            job.id,
+                            "failed",
+                            Some(false),
+                            check.as_ref().map(|result| result.command.as_str()),
+                            check.as_ref().map(|result| result.tail.as_str()),
+                            None,
+                            Some(&err.to_string()),
+                            Some(backoff_secs(job.attempts)),
+                        )
+                        .await?;
+                    if first_error.is_none() {
+                        first_error = Some(err);
+                    }
+                }
+            }
+        }
+        if let Some(err) = first_error {
+            Err(err)
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn process_claimed_project_job(
+        &self,
+        job: &LispCodeSyncJob,
+        resolution: &ProjectResolution,
+        status: LispCodeSyncStatus,
+        check: Option<&SyncCheckResult>,
+    ) -> Result<LispCodeSyncResult> {
+        let mut storm_circuit = false;
+        let dedupe_key = if status == LispCodeSyncStatus::NeedsSync {
+            if job.storm_circuit || self.runtime.should_use_storm_circuit_key().await {
+                storm_circuit = true;
+                Some(storm_dedupe_key_for_lisp_sync(&resolution.project_id))
+            } else {
+                Some(job.dedupe_key.clone())
+            }
+        } else {
+            None
+        };
+        let mut sync_task_id = None;
+        let mut created_task = false;
+        let mut dedupe_hit = false;
+
+        if let Some(dedupe_key) = dedupe_key.as_deref() {
+            if let Some(existing) = self
+                .state
+                .store
+                .find_open_task_by_dedupe_key(dedupe_key)
+                .await?
+            {
+                sync_task_id = Some(existing.id.to_string());
+                dedupe_hit = true;
+            } else {
+                let task_id = create_sync_task(
+                    &self.state,
+                    resolution,
+                    &job.changed_path,
+                    &check.cloned(),
+                    dedupe_key,
+                    storm_circuit,
+                )
+                .await?;
+                sync_task_id = Some(task_id);
+                created_task = true;
+            }
+        }
+
+        let report = LispCodeSyncReport {
+            project_id: resolution.project_id.clone(),
+            changed_path: job.changed_path.clone(),
+            status,
+            checker_ok: check.map(|result| result.ok),
+            checker_command: check.map(|result| result.command.clone()),
+            checker_tail: check.map(|result| result.tail.clone()),
+            sync_task_id: sync_task_id.clone(),
+            dedupe_key,
+            storm_circuit,
+        };
+        let report_path = write_report(&resolution.root, &report).await?;
+
+        Ok(LispCodeSyncResult {
+            project_id: resolution.project_id.clone(),
+            status,
+            sync_task_id,
+            checker_ok: check.map(|result| result.ok),
+            checker_command: check.map(|result| result.command.clone()),
+            checker_tail: check.map(|result| result.tail.clone()),
+            created_task,
+            dedupe_hit,
+            storm_circuit,
+            report_path,
+        })
+    }
+
+    async fn process_unknown_claimed_job(&self, job: &LispCodeSyncJob) -> Result<()> {
+        let report = LispCodeSyncReport {
+            project_id: job.project_id.clone(),
+            changed_path: job.changed_path.clone(),
+            status: LispCodeSyncStatus::UnknownProject,
+            checker_ok: None,
+            checker_command: None,
+            checker_tail: None,
+            sync_task_id: None,
+            dedupe_key: None,
+            storm_circuit: false,
+        };
+        let report_path = write_report(Path::new(&job.root_path), &report).await?;
+        let result = LispCodeSyncResult {
+            project_id: job.project_id.clone(),
+            status: LispCodeSyncStatus::UnknownProject,
+            sync_task_id: None,
+            checker_ok: None,
+            checker_command: None,
+            checker_tail: None,
+            created_task: false,
+            dedupe_hit: false,
+            storm_circuit: false,
+            report_path,
+        };
+        self.runtime.record_result(&result).await;
+        self.complete_claimed_job(job, &result).await
+    }
+
+    async fn complete_claimed_job(
+        &self,
+        job: &LispCodeSyncJob,
+        result: &LispCodeSyncResult,
+    ) -> Result<()> {
+        self.state
+            .store
+            .lisp_code_sync_complete_job(
+                job.id,
+                job_status_for_result(result.status),
+                result.checker_ok,
+                result.checker_command.as_deref(),
+                result.checker_tail.as_deref(),
+                result.sync_task_id.as_deref(),
+                None,
+                if matches!(result.status, LispCodeSyncStatus::NeedsSync) {
+                    Some(backoff_secs(job.attempts))
+                } else {
+                    None
+                },
+            )
+            .await?;
+        Ok(())
     }
 
     async fn run_file_watcher(self, mut shutdown: watch::Receiver<bool>) {
@@ -349,6 +622,41 @@ impl LispCodeSyncService {
             }
         }
     }
+}
+
+async fn enqueue_lisp_code_sync_job(
+    state: &AppState,
+    changed_path: &str,
+    event_kind: &str,
+) -> Result<uuid::Uuid> {
+    let resolution = match resolve_project_for_path(state, Path::new(changed_path)).await {
+        Some(resolution) => resolution,
+        None => ProjectResolution {
+            project_id: "unknown".to_string(),
+            root: missiond_fallback_root(state).await,
+        },
+    };
+    let content_hash = lisp_sync_content_fingerprint(Path::new(changed_path), event_kind).await;
+    let dedupe_key = dedupe_key_for_lisp_sync(&resolution.project_id, changed_path);
+    let input = EnqueueLispCodeSyncJob {
+        project_id: resolution.project_id,
+        root_path: resolution.root.display().to_string(),
+        changed_path: changed_path.to_string(),
+        content_hash,
+        event_kind: event_kind.to_string(),
+        dedupe_key,
+        storm_circuit: false,
+    };
+    state
+        .store
+        .lisp_code_sync_enqueue_job(&input)
+        .await
+        .map_err(Into::into)
+}
+
+fn backoff_secs(attempts: i32) -> i64 {
+    let attempts = attempts.max(0).min(6) as u32;
+    15 * 2_i64.pow(attempts)
 }
 
 async fn watched_missiond_dirs(state: &AppState) -> Vec<PathBuf> {
@@ -426,6 +734,23 @@ impl LispCodeSyncStatus {
     }
 }
 
+fn status_from_sync_check(check: &Option<SyncCheckResult>) -> LispCodeSyncStatus {
+    match check {
+        Some(result) if result.ok => LispCodeSyncStatus::Synced,
+        Some(_) => LispCodeSyncStatus::NeedsSync,
+        None => LispCodeSyncStatus::ObservedOnly,
+    }
+}
+
+fn job_status_for_result(status: LispCodeSyncStatus) -> &'static str {
+    match status {
+        LispCodeSyncStatus::Synced => "synced",
+        LispCodeSyncStatus::NeedsSync => "failed",
+        LispCodeSyncStatus::ObservedOnly => "observed-only",
+        LispCodeSyncStatus::UnknownProject => "unknown-project",
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ProjectResolution {
     project_id: String,
@@ -437,107 +762,13 @@ struct LispCodeSyncResult {
     project_id: String,
     status: LispCodeSyncStatus,
     sync_task_id: Option<String>,
+    checker_ok: Option<bool>,
+    checker_command: Option<String>,
+    checker_tail: Option<String>,
     created_task: bool,
     dedupe_hit: bool,
     storm_circuit: bool,
     report_path: PathBuf,
-}
-
-async fn process_lisp_change(state: &AppState, changed_path: &str) -> Result<LispCodeSyncResult> {
-    let resolution = match resolve_project_for_path(state, Path::new(changed_path)).await {
-        Some(resolution) => resolution,
-        None => {
-            let root = missiond_fallback_root(state).await;
-            let report = LispCodeSyncReport {
-                project_id: "unknown".to_string(),
-                changed_path: changed_path.to_string(),
-                status: LispCodeSyncStatus::UnknownProject,
-                checker_ok: None,
-                checker_command: None,
-                checker_tail: None,
-                sync_task_id: None,
-                dedupe_key: None,
-                storm_circuit: false,
-            };
-            let report_path = write_report(&root, &report).await?;
-            return Ok(LispCodeSyncResult {
-                project_id: "unknown".to_string(),
-                status: LispCodeSyncStatus::UnknownProject,
-                sync_task_id: None,
-                created_task: false,
-                dedupe_hit: false,
-                storm_circuit: false,
-                report_path,
-            });
-        }
-    };
-
-    let check = run_project_sync_check(&resolution).await;
-    let status = match &check {
-        Some(result) if result.ok => LispCodeSyncStatus::Synced,
-        Some(_) => LispCodeSyncStatus::NeedsSync,
-        None => LispCodeSyncStatus::ObservedOnly,
-    };
-    let mut storm_circuit = false;
-    let dedupe_key = if status == LispCodeSyncStatus::NeedsSync {
-        let runtime = runtime();
-        if runtime.should_use_storm_circuit_key().await {
-            storm_circuit = true;
-            Some(storm_dedupe_key_for_lisp_sync(&resolution.project_id))
-        } else {
-            Some(dedupe_key_for_lisp_sync(
-                &resolution.project_id,
-                changed_path,
-            ))
-        }
-    } else {
-        None
-    };
-    let mut sync_task_id = None;
-    let mut created_task = false;
-    let mut dedupe_hit = false;
-
-    if let Some(dedupe_key) = dedupe_key.as_deref() {
-        if let Some(existing) = state.store.find_open_task_by_dedupe_key(dedupe_key).await? {
-            sync_task_id = Some(existing.id.to_string());
-            dedupe_hit = true;
-        } else {
-            let task_id = create_sync_task(
-                state,
-                &resolution,
-                changed_path,
-                &check,
-                dedupe_key,
-                storm_circuit,
-            )
-            .await?;
-            sync_task_id = Some(task_id);
-            created_task = true;
-        }
-    }
-
-    let report = LispCodeSyncReport {
-        project_id: resolution.project_id.clone(),
-        changed_path: changed_path.to_string(),
-        status,
-        checker_ok: check.as_ref().map(|result| result.ok),
-        checker_command: check.as_ref().map(|result| result.command.clone()),
-        checker_tail: check.as_ref().map(|result| result.tail.clone()),
-        sync_task_id: sync_task_id.clone(),
-        dedupe_key,
-        storm_circuit,
-    };
-    let report_path = write_report(&resolution.root, &report).await?;
-
-    Ok(LispCodeSyncResult {
-        project_id: resolution.project_id,
-        status,
-        sync_task_id,
-        created_task,
-        dedupe_hit,
-        storm_circuit,
-        report_path,
-    })
 }
 
 async fn collect_report_dir_status_for_state(state: &AppState) -> Value {
@@ -574,6 +805,30 @@ async fn collect_report_dir_status_for_state(state: &AppState) -> Value {
         "overLimitProjects": over_limit_projects,
         "projects": projects,
     })
+}
+
+async fn collect_queue_status_for_state(state: &AppState) -> Value {
+    match state.store.lisp_code_sync_queue_stats().await {
+        Ok(stats) => json!({
+            "queued": stats.queued,
+            "running": stats.running,
+            "due": stats.due,
+            "failed": stats.failed,
+            "oldest_due_age": stats.oldest_due_age_secs,
+            "active_leases": stats.active_leases,
+            "batch_last_result": stats.batch_last_result,
+        }),
+        Err(err) => json!({
+            "queued": null,
+            "running": null,
+            "due": null,
+            "failed": null,
+            "oldest_due_age": null,
+            "active_leases": null,
+            "batch_last_result": null,
+            "error": err.to_string(),
+        }),
+    }
 }
 
 async fn collect_report_dir_status_for_root(project_id: &str, root: &Path) -> Value {

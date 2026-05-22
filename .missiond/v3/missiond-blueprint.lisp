@@ -168,14 +168,21 @@
     :compiled-abi ["compiled-v3-blueprint.json"
                    "compiled-runtime-config.json"
                    "compiled-semantic-ir.json"
+                   "compiled-contract-abi.json"
                    "compiled-project-universe.json"
                    "compiled-workflows.json"
                    "compiled-genomes.json"]
+    :generated-abi ["crates/missiond-daemon/src/context/v3_contracts/generated.rs"
+                    "scripts/generated/v3_contracts.mjs"
+                    "scripts/generated/v3_contracts.d.ts"]
+    :contract-commands [emit-contract-abi emit-plan-contract check-plan-contract]
     :envelope-fields [:schema_version :source_hash :generated_at :diagnostics :payload]
-    :payload-fields [:source_units :surfaces :functions :artifact_contracts :runtime_policies :checker_registry]
+    :payload-fields [:source_units :surfaces :functions :artifact_contracts :runtime_policies :checker_registry :plan_contract]
     :authority-boundary
       ["missiond-lispc is the only production component allowed to assign Lisp semantics."
+       "Generated V3 contract ABI source is tracked in Rust and JS/TS; ignored compiled JSON remains a runtime projection."
        "Rust runtime hot paths consume compiled JSON/runtime config; raw Lisp fallback requires MISSIOND_V3_ALLOW_SOURCE_FALLBACK and emits blocking diagnostics otherwise."
+       "Plan execution hints are read from missiond-lispc emit-plan-contract projection, not ad-hoc Rust keyword scanners."
        "JS checkers consume semantic-ir/resolved compiler output for active surfaces; JS Lisp parsing is compatibility scaffolding for legacy fixtures and checker migration only."
        "Freshness is source_hash plus source_units; mtime is not semantic authority."]
     :forbidden-production-consumers
@@ -188,6 +195,7 @@
        :checker "node scripts/check-typed-lisp-compiler.mjs"
        :aggregate "node scripts/check-v3-code-isomorphism-complete.mjs"
        :goldens ["tools/missiond_lispc/test/parser_golden.ml"
+                 "node scripts/project-v3-contracts.mjs --check --json"
                  "node scripts/compile-v3-runtime.mjs --json"])
     :non-goal "Do not add a second governance layer for the compiler plane; this contract plus typed compiler checks are the boundary.")
 

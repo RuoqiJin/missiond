@@ -21,7 +21,7 @@ let print_diagnostics diagnostics =
 
 let usage () =
   prerr_endline
-    "Usage: missiond-lispc <emit-json|emit-resolved-v3|emit-v3|emit-runtime-config|emit-semantic-ir|emit-universe|emit-workflows|emit-genomes|check-v3|check-workstation-config|check-workflow|check-workflow-dir|check-genome|check-genome-dir|check-project|check-project-dir|check-auth-domain|check-m6-depth|check-domain-hardening> --file <path>|--dir <path>|--blueprint <path>|--workflow-dir <path>|--genome-dir <path>";
+    "Usage: missiond-lispc <emit-json|emit-resolved-v3|emit-v3|emit-runtime-config|emit-semantic-ir|emit-contract-abi|emit-plan-contract|emit-universe|emit-workflows|emit-genomes|check-v3|check-plan-contract|check-workstation-config|check-workflow|check-workflow-dir|check-genome|check-genome-dir|check-project|check-project-dir|check-auth-domain|check-m6-depth|check-domain-hardening> --file <path>|--dir <path>|--blueprint <path>|--workflow-dir <path>|--genome-dir <path>";
   2
 
 let () =
@@ -46,6 +46,13 @@ let () =
   | "emit-semantic-ir" :: rest ->
       let file = Option.value ~default:".missiond/v3/missiond-blueprint.lisp" (find_arg "--blueprint" rest) in
       exit (Emit_json.emit_semantic_ir file)
+  | "emit-contract-abi" :: rest ->
+      let file = Option.value ~default:".missiond/v3/missiond-blueprint.lisp" (find_arg "--blueprint" rest) in
+      exit (Emit_json.emit_contract_abi file)
+  | "emit-plan-contract" :: rest -> (
+      match find_arg "--file" rest with
+      | Some file -> exit (Emit_json.emit_plan_contract file)
+      | None -> exit (usage ()))
   | "emit-universe" :: rest ->
       let file = Option.value ~default:".missiond/v3/missiond-blueprint.lisp" (find_arg "--blueprint" rest) in
       exit (Emit_json.emit_universe file)
@@ -63,6 +70,10 @@ let () =
         find_arg "--expected-surfaces" rest |> Option.map split_csv |> Option.value ~default:[]
       in
       exit (print_diagnostics (Schema_v3.validate file expected))
+  | "check-plan-contract" :: rest -> (
+      match find_arg "--file" rest with
+      | Some file -> exit (Emit_json.check_plan_contract file)
+      | None -> exit (usage ()))
   | "check-workstation-config" :: rest ->
       let file =
         Option.value ~default:".missiond/v3/missiond-blueprint.lisp"

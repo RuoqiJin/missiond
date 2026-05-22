@@ -12,6 +12,7 @@ import {
   readKeywordProps,
 } from './missiond_lisp.mjs';
 import { readBlueprintResolvedSource } from './v3_blueprint_contract_source.mjs';
+import { SOURCE_HASH as V3_CONTRACT_SOURCE_HASH } from '../generated/v3_contracts.mjs';
 
 export const DEFAULT_MODEL_PROFILE = 'coding-default-opus-4-7';
 export const DEFAULT_TIMEOUT_SECS = 1800;
@@ -269,9 +270,15 @@ function loadCompiledWorkstationRuntimeConfig(repo) {
 
 function validateCompiledSourceUnits(repo, compiled) {
   const diagnostics = [];
+  if (compiled?.source_hash !== V3_CONTRACT_SOURCE_HASH) {
+    diagnostics.push(
+      `compiled runtime config source_hash differs from generated V3 contract ABI: expected ${V3_CONTRACT_SOURCE_HASH}, got ${compiled?.source_hash ?? '<missing>'}; run node scripts/project-v3-contracts.mjs --write and node scripts/compile-v3-runtime.mjs --json`,
+    );
+  }
   const sourceUnits = compiled?.payload?.source_units;
   if (!Array.isArray(sourceUnits) || sourceUnits.length === 0) {
-    return ['compiled runtime config missing payload.source_units'];
+    diagnostics.push('compiled runtime config missing payload.source_units');
+    return diagnostics;
   }
 
   const unitHashes = [];

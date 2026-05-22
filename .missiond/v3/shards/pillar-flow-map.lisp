@@ -194,13 +194,14 @@
         :surface lisp-code-sync-loop
         :entry [SystemEvent::ConfigChanged file-watch project-registry]
         :core ((step s1 :logic "watch active project .missiond directories and publish SystemEvent::ConfigChanged for .lisp/.mjs changes")
-               (step s2 :logic "compile typed runtime projection and run the project code-isomorphism checker")
-               (step s3 :logic "treat .missiond/v3/runtime/**, runtime-state, compiled projection, reports, checkpoints, and cold runtime evidence as non-authoring paths; ignore them before EventBus publication and before sync-task creation")
-               (step s4 :logic "write a lisp-code-sync report for every accepted authoring event and bound report volume with retention/GC plus reportDir live counters")
-               (step s5 :logic "create exactly one visible deduped sync BoardTask for failing gates; use root_cause_key lisp-code-sync:<project>:storm-circuit when same-source failures exceed the storm threshold")
-               (step s6 :logic "require master evidence-plan and exact accepted shard before downstream code worker mutation")
-               (step s7 :logic "Autopilot closes stale runtime-report sync BoardTasks as resolved_by_runtime_fix/stale_evidence before slot selection so historical self-loop tasks cannot consume worker slots")
-               (step s8 :logic "expose stormCircuitHits/recentSyncTaskCreations/reportDirs in mission_master_status so stale decisions can be revalidated without shell archaeology"))
+               (step s2 :logic "subscription consumer only upserts durable lisp_code_sync_jobs; reconciler claims due jobs with lease before compile/check")
+               (step s3 :logic "compile typed runtime projection and run the project code-isomorphism checker from reconciler batches")
+               (step s4 :logic "treat .missiond/v3/runtime/**, runtime-state, compiled projection, reports, checkpoints, and cold runtime evidence as non-authoring paths; ignore them before EventBus publication and before sync-task creation")
+               (step s5 :logic "write a lisp-code-sync report for every accepted authoring event and bound report volume with retention/GC plus reportDir live counters")
+               (step s6 :logic "create exactly one visible deduped sync BoardTask for failing gates; use root_cause_key lisp-code-sync:<project>:storm-circuit when same-source failures exceed the storm threshold")
+               (step s7 :logic "require master evidence-plan and exact accepted shard before downstream code worker mutation")
+               (step s8 :logic "Autopilot closes stale runtime-report sync BoardTasks as resolved_by_runtime_fix/stale_evidence before slot selection so historical self-loop tasks cannot consume worker slots")
+               (step s9 :logic "expose stormCircuitHits/recentSyncTaskCreations/reportDirs and queue metrics in mission_master_status so stale decisions can be revalidated without shell archaeology"))
         :egress [lisp_code_sync_report sync_boardtask mission_master_status.lispCodeSync])
       (function same-source-storm-circuit-breaker
         :surface lisp-code-sync-storm-circuit

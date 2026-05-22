@@ -312,6 +312,11 @@ async fn action_compile_dry_run(state: &AppState, args: &Value) -> Result<ToolRe
             )
             .await
             .map_err(|e| anyhow!("DB error: {}", e))?;
+        state
+            .store
+            .plan_update_contract_json(id, &plan_contract_json_from_sexp(&dry_run_sexp))
+            .await
+            .map_err(|e| anyhow!("DB error: {}", e))?;
         payload["persisted"] = json!(true);
         payload["plan_id"] = json!(id);
         payload["version"] = json!(next_version);
@@ -545,6 +550,11 @@ async fn action_compile_sonnet(state: &AppState, args: &Value) -> Result<ToolRes
                 Some(compiler_model.as_str()),
                 Some(&compiled_from),
             )
+            .await
+            .map_err(|e| anyhow!("DB error: {}", e))?;
+        state
+            .store
+            .plan_update_contract_json(id, &plan_contract_json_from_sexp(&compiled_sexp))
             .await
             .map_err(|e| anyhow!("DB error: {}", e))?;
         payload["persisted"] = json!(true);

@@ -87,7 +87,7 @@ fn build_properties() -> Value {
 
     p.insert("target_project".into(), prop(
         "string",
-        "[compile dry_run|sonnet | execute] for compile dry_run this is rendered into PLAN.lisp as :target-project; for compile sonnet this is prompt context. For execute internal mission_task_delegate it is treated as cwd if it looks like a path; for execute internal mission_execution it is forwarded as `project`. Auto-selection v1: when omitted, runner extracts from plan.sexp_text :target-project / :target_project / :project hints; explicit arg still wins.",
+        "[compile dry_run|sonnet | execute] for compile dry_run this is rendered into PLAN.lisp as :target-project; for compile sonnet this is prompt context. For execute internal mission_task_delegate it is treated as cwd if it looks like a path; for execute internal mission_execution it is forwarded as `project`. Auto-selection v1: when omitted, runner reads the typed plan contract generated from PLAN.lisp :target-project / :target_project / :project hints; explicit arg still wins.",
     ));
 
     p.insert("parallelism".into(), prop(
@@ -151,7 +151,7 @@ fn build_properties() -> Value {
 
     p.insert("target".into(), prop_enum(
         "string",
-        "[compile dry_run | execute] compile dry_run renders this into PLAN.lisp as :target (default mission_task_delegate). At execute time this is the routing target — bridge mode hands back next_call; internal mode dispatches inside MissionD. OPTIONAL under plan-runner auto-selection v1: when omitted, runner scans plan.sexp_text for :target / :target-tool / :tool hints (case-insensitive substring: `mission_execution`/`execution`→mission_execution; `task_delegate`/`claudecode`/`code-alignment`→mission_task_delegate; `flow_run`/`flow` + a resolvable :flow-id→mission_flow_run). Source-resolution precedence is explicit_arg > plan_hint > missing; the response surfaces target_source. If parser cannot derive a safe target and caller didn't pass one, the existing MISSING_PARAM structured error is returned with a suggestion to add `target` arg or PLAN hint fields.",
+        "[compile dry_run | execute] compile dry_run renders this into PLAN.lisp as :target (default mission_task_delegate). At execute time this is the routing target — bridge mode hands back next_call; internal mode dispatches inside MissionD. OPTIONAL under plan-runner auto-selection v1: when omitted, runner reads plan.contract_json generated from PLAN.lisp :target / :target-tool / :tool hints (case-insensitive substring: `mission_execution`/`execution`→mission_execution; `task_delegate`/`claudecode`/`code-alignment`→mission_task_delegate; `flow_run`/`flow` + a resolvable :flow-id→mission_flow_run). Source-resolution precedence is explicit_arg > plan_hint > missing; the response surfaces target_source. If the contract cannot derive a safe target and caller didn't pass one, the existing MISSING_PARAM structured error is returned with a suggestion to add `target` arg or PLAN hint fields.",
         &["mission_execution", "mission_task_delegate", "mission_flow_run"],
     ));
 

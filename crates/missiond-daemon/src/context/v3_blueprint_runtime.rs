@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use md5::{Digest, Md5};
 use serde::Deserialize;
 
+use crate::context::v3_contracts::generated as v3_contracts;
+
 // Embedded defaults are the test/no-install fallback. Runtime authority is the
 // current compiled V3 projection; source Lisp fallback is explicit only.
 const V3_ALLOW_SOURCE_FALLBACK_ENV: &str = "MISSIOND_V3_ALLOW_SOURCE_FALLBACK";
@@ -3078,6 +3080,7 @@ fn resolve_blueprint_root(project_root: Option<&str>) -> Option<PathBuf> {
     locate_orchestrator_blueprint().and_then(|path| {
         path.parent()
             .and_then(|v3| v3.parent())
+            .and_then(|missiond| missiond.parent())
             .map(Path::to_path_buf)
     })
 }
@@ -3479,23 +3482,45 @@ fn load_compiled_runtime_config(
         "runtime-config",
         expected_source_hash,
     );
-    let source_unit_diagnostics =
-        if let (Some(payload), Some(snapshot)) = (&loaded.payload, &loaded.snapshot) {
-            validate_compiled_source_units(
-                project_root,
-                &snapshot.source_hash,
-                &payload.source_units,
-                "compiled runtime config",
-            )
-        } else {
-            Vec::new()
-        };
+    let source_unit_diagnostics = if let (Some(payload), Some(snapshot)) =
+        (&loaded.payload, &loaded.snapshot)
+    {
+        let mut diagnostics = validate_compiled_source_units(
+            project_root,
+            &snapshot.source_hash,
+            &payload.source_units,
+            "compiled runtime config",
+        );
+        if expected_source_hash.is_none()
+            && v3_contract_abi_expected(project_root)
+            && snapshot.source_hash != v3_contracts::SOURCE_HASH
+        {
+            diagnostics.push(format!(
+                    "compiled runtime config source_hash differs from generated V3 contract ABI: expected {}, got {}; run node scripts/project-v3-contracts.mjs --write and {}",
+                    v3_contracts::SOURCE_HASH,
+                    snapshot.source_hash,
+                    V3_COMPILE_RUNTIME_ACTION
+                ));
+        }
+        diagnostics
+    } else {
+        Vec::new()
+    };
     if !source_unit_diagnostics.is_empty() {
         loaded.payload = None;
         loaded.snapshot = None;
         loaded.diagnostics.extend(source_unit_diagnostics);
     }
     loaded
+}
+
+fn v3_contract_abi_expected(project_root: &Path) -> bool {
+    project_root
+        .join("scripts/project-v3-contracts.mjs")
+        .exists()
+        && project_root
+            .join("crates/missiond-daemon/src/context/v3_contracts/generated.rs")
+            .exists()
 }
 
 pub(crate) fn compiled_runtime_projection_status(project_root: &Path) -> serde_json::Value {
@@ -3543,6 +3568,16 @@ pub(crate) fn compiled_runtime_projection_status(project_root: &Path) -> serde_j
             "blockingReason": blocking_reason,
             "requiredAction": required_action,
             "diagnostics": runtime_config.diagnostics,
+        },
+        "contractAbi": {
+            "schema": v3_contracts::SCHEMA_VERSION,
+            "sourceHash": v3_contracts::SOURCE_HASH,
+            "sourceUnits": v3_contracts::SOURCE_UNITS.len(),
+            "surfaceCount": v3_contracts::SURFACE_IDS.len(),
+            "functionCount": v3_contracts::FUNCTION_IDS.len(),
+            "artifactContractCount": v3_contracts::ARTIFACT_CONTRACT_IDS.len(),
+            "runtimePolicyCount": v3_contracts::RUNTIME_POLICY_IDS.len(),
+            "checkerCommandCount": v3_contracts::CHECKER_COMMANDS.len(),
         },
         "projectUniverse": {
             "ok": universe.payload.is_some() && universe.diagnostics.is_empty(),
@@ -3853,7 +3888,7 @@ fn tokenize_lisp(source: &str) -> Vec<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -5097,20 +5132,47 @@ mod tests {
         .replace("__SOURCE_UNITS__", source_units)
     }
 
-    fn write_compiled_runtime_config_fixture(root: &std::path::Path) -> String {
+    pub(crate) fn write_compiled_runtime_config_fixture_with_flow(
+        root: &std::path::Path,
+        flow: FlowRuntimeConfig,
+    ) -> String {
         let (source_hash, source_units) = compiled_source_unit_fixture(root);
         let compiled_dir = root
             .join(".missiond")
             .join("v3")
             .join("runtime")
             .join("compiled");
+        let mut fixture: serde_json::Value = serde_json::from_str(
+            &compiled_runtime_config_fixture(&source_hash, &source_units),
+        )
+        .expect("compiled runtime config fixture json");
+        fixture["payload"]["flow"] = serde_json::json!({
+            "llm_call_default_max_tokens": flow.llm_call_default_max_tokens,
+            "slot_task_default_model": flow.slot_task_default_model,
+            "slot_task_default_timeout_secs": flow.slot_task_default_timeout_secs,
+            "parallel_slot_default_parallelism": flow.parallel_slot_default_parallelism,
+            "parallel_slot_default_timeout_secs": flow.parallel_slot_default_timeout_secs,
+        });
         fs::create_dir_all(&compiled_dir).expect("compiled dir");
         fs::write(
             compiled_dir.join("compiled-runtime-config.json"),
-            compiled_runtime_config_fixture(&source_hash, &source_units),
+            serde_json::to_string_pretty(&fixture).expect("serialize compiled runtime fixture"),
         )
         .expect("write compiled runtime config");
         source_hash
+    }
+
+    fn write_compiled_runtime_config_fixture(root: &std::path::Path) -> String {
+        write_compiled_runtime_config_fixture_with_flow(
+            root,
+            FlowRuntimeConfig {
+                llm_call_default_max_tokens: 777,
+                slot_task_default_model: "compiled-flow".to_string(),
+                slot_task_default_timeout_secs: 778,
+                parallel_slot_default_parallelism: 2,
+                parallel_slot_default_timeout_secs: 779,
+            },
+        )
     }
 
     fn write_compiled_v3_blueprint_fixture(root: &std::path::Path, marker: &str) -> String {

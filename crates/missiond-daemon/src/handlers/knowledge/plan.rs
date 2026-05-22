@@ -102,10 +102,12 @@ pub(super) fn load_sonnet_compiler_model() -> Result<String> {
 }
 
 mod execute_hints;
-pub(super) use execute_hints::{
-    canonicalize_strategy, normalize_target, parse_plan_hints, resolve_dispatch_strategy,
-    scan_keyword_pairs, split_lisp_string_list, ParsedPlanHints, ResolvedExec,
-    AGENT_TEAM_OBJECTIVE_HINT,
+#[cfg(test)]
+pub(super) use execute_hints::parse_plan_hints;
+pub(crate) use execute_hints::{
+    canonicalize_strategy, normalize_target, parse_plan_hints_for_plan,
+    plan_contract_json_from_sexp, resolve_dispatch_strategy, scan_keyword_pairs,
+    split_lisp_string_list, ParsedPlanHints, ResolvedExec, AGENT_TEAM_OBJECTIVE_HINT,
 };
 
 mod task_contract;

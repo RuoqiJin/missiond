@@ -1125,6 +1125,263 @@ let runtime_config_required_diagnostics file root =
     ];
   List.rev !diagnostics
 
+let contract_abi_payload_json blueprint source_hash source_units root =
+  let surfaces =
+    root |> Option.map v3_surfaces_to_json |> Option.value ~default:[]
+  in
+  let functions =
+    root |> Option.map v3_functions_to_json |> Option.value ~default:[]
+  in
+  let facts =
+    root
+    |> Option.map (semantic_facts source_hash blueprint source_units)
+    |> Option.value ~default:[]
+  in
+  json_assoc
+    [
+      ("blueprint", json_string blueprint);
+      ("source_units", Source_resolver.source_units_to_json source_units);
+      ("surfaces", json_array surfaces);
+      ("functions", json_array functions);
+      ("facts", json_array facts);
+      ( "plan_contract",
+        json_assoc
+          [
+            ("schema_version", json_string "missiond.plan-contract.v1");
+            ("accepted_heads", json_string_list [ "plan"; "plan-draft" ]);
+            ( "top_level_hint_keys",
+              json_string_list
+                [
+                  ":target";
+                  ":flow-id";
+                  ":dispatch-strategy";
+                  ":parallelism";
+                  ":target-project";
+                  ":requested-cwd";
+                  ":objective";
+                  ":summary";
+                  ":scope";
+                  ":commit-policy";
+                  ":owned-files";
+                  ":forbidden-files";
+                  ":acceptance-commands";
+                  ":workstation-dispatch";
+                ] );
+            ( "node_hint_keys",
+              json_string_list
+                [
+                  ":id";
+                  ":target";
+                  ":depends-on";
+                  ":workstation-dispatch";
+                  ":acceptance";
+                  ":rollback";
+                  ":max-attempts";
+                  ":retry-count";
+                  ":timeout-ms";
+                ] );
+          ] );
+    ]
+
+let normalize_keyword key =
+  let s =
+    if starts_with ~prefix:":" key then
+      String.sub key 1 (String.length key - 1)
+    else key
+  in
+  String.map (function '-' -> '_' | c -> c) s
+
+let rec plan_value_to_json = function
+  | Atom (_, "nil") -> "null"
+  | Atom (_, "true") -> "true"
+  | Atom (_, "false") -> "false"
+  | Atom (_, value) -> json_string value
+  | String (_, value) -> json_string value
+  | List (_, _, xs) -> xs |> List.map plan_value_to_json |> json_array
+
+let props_to_object_json ?keys props =
+  let key_allowed key =
+    match keys with
+    | None -> true
+    | Some keys -> List.mem key keys
+  in
+  props
+  |> List.filter_map (fun (key, value) ->
+         if not (key_allowed key) then None
+         else value |> Option.map (fun value -> (normalize_keyword key, plan_value_to_json value)))
+  |> json_object_map
+
+let plan_hint_keys =
+  [
+    ":target";
+    ":flow-id";
+    ":dispatch-strategy";
+    ":parallelism";
+    ":target-project";
+    ":requested-cwd";
+    ":objective";
+    ":summary";
+    ":scope";
+    ":commit-policy";
+    ":owned-files";
+    ":forbidden-files";
+    ":acceptance-commands";
+    ":workstation-dispatch";
+  ]
+
+let plan_node_contract_json node =
+  let props = keyword_props ~start:1 node in
+  let depends_on =
+    match prop ":depends-on" props with
+    | Some value -> list_texts value
+    | None -> []
+  in
+  json_assoc
+    [
+      ("id", json_opt_string (prop_text ":id" props));
+      ("target", json_opt_string (prop_text ":target" props));
+      ("depends_on", json_string_list depends_on);
+      ("hints", props_to_object_json props);
+      ("source", source_map_json "" "" node);
+    ]
+
+let plan_contract_payload_json file forms =
+  let root =
+    forms
+    |> List.find_opt (fun form ->
+           match head form with
+           | Some "plan" | Some "plan-draft" -> true
+           | _ -> false)
+  in
+  match root with
+  | None ->
+      json_assoc
+        [
+          ("file", json_string file);
+          ("head", "null");
+          ("hints", "{}");
+          ("nodes", "[]");
+          ("diagnostic_summary", json_string "missing plan/plan-draft root");
+        ]
+  | Some root ->
+      let props = keyword_props ~start:1 root in
+      let nodes = collect_forms "node" root |> List.map plan_node_contract_json in
+      json_assoc
+        [
+          ("file", json_string file);
+          ("head", json_opt_string (head root));
+          ("hints", props_to_object_json ~keys:plan_hint_keys props);
+          ("top_level", props_to_object_json props);
+          ("nodes", json_array nodes);
+        ]
+
+let plan_contract_diagnostics file forms =
+  let diagnostics = ref [] in
+  let roots =
+    forms
+    |> List.filter (fun form ->
+           match head form with
+           | Some "plan" | Some "plan-draft" -> true
+           | _ -> false)
+  in
+  (match roots with
+  | [] ->
+      diagnostics :=
+        diag file (synthetic_loc file) "plan_contract.root_missing"
+          "plan contract source must contain a (plan ...) or (plan-draft ...) root"
+        :: !diagnostics
+  | _ :: _ :: _ ->
+      diagnostics :=
+        diag file (loc_of (List.hd roots)) "plan_contract.multiple_roots"
+          "plan contract source must contain exactly one plan root"
+        :: !diagnostics
+  | [ root ] ->
+      let seen = Hashtbl.create 16 in
+      collect_forms "node" root
+      |> List.iter (fun node ->
+             match prop_text ":id" (keyword_props ~start:1 node) with
+             | None ->
+                 diagnostics :=
+                   diag file (loc_of node) "plan_contract.node_id_missing"
+                     "plan node is missing :id"
+                   :: !diagnostics
+             | Some id ->
+                 if Hashtbl.mem seen id then
+                   diagnostics :=
+                     diag file (loc_of node) "plan_contract.node_id_duplicate"
+                       ("duplicate plan node :id " ^ id)
+                     :: !diagnostics
+                 else Hashtbl.add seen id ()));
+  List.rev !diagnostics
+
+let emit_contract_abi blueprint =
+  try
+    let resolved = Source_resolver.resolve_blueprint_file blueprint in
+    let diagnostics = Schema_v3.validate blueprint [] in
+    let payload =
+      contract_abi_payload_json blueprint resolved.source_hash resolved.source_units
+        resolved.root
+    in
+    print_endline
+      (result_json
+         ~extra:[
+           Printf.sprintf {|"compiled":%s|}
+             (compiled_envelope "missiond.contract-abi.v1"
+                resolved.source_hash diagnostics payload);
+         ]
+         (diagnostics = []) diagnostics);
+    if diagnostics = [] then 0 else 1
+  with
+  | Reader_error (l, msg) ->
+      let d = diag blueprint l "parse.error" msg in
+      print_endline (result_json false [ d ]);
+      1
+  | Sys_error msg ->
+      let d = diag blueprint (synthetic_loc blueprint) "io.error" msg in
+      print_endline (result_json false [ d ]);
+      1
+
+let emit_plan_contract file =
+  try
+    let source = read_file file in
+    let forms = Parser.parse_source file source in
+    let diagnostics = plan_contract_diagnostics file forms in
+    let payload = plan_contract_payload_json file forms in
+    print_endline
+      (result_json
+         ~extra:[
+           Printf.sprintf {|"compiled":%s|}
+             (compiled_envelope "missiond.plan-contract.v1" (source_hash source)
+                diagnostics payload);
+         ]
+         (diagnostics = []) diagnostics);
+    if diagnostics = [] then 0 else 1
+  with
+  | Reader_error (l, msg) ->
+      let d = diag file l "parse.error" msg in
+      print_endline (result_json false [ d ]);
+      1
+  | Sys_error msg ->
+      let d = diag file (synthetic_loc file) "io.error" msg in
+      print_endline (result_json false [ d ]);
+      1
+
+let check_plan_contract file =
+  try
+    let forms = Parser.parse_file file in
+    let diagnostics = plan_contract_diagnostics file forms in
+    print_endline (result_json (diagnostics = []) diagnostics);
+    if diagnostics = [] then 0 else 1
+  with
+  | Reader_error (l, msg) ->
+      let d = diag file l "parse.error" msg in
+      print_endline (result_json false [ d ]);
+      1
+  | Sys_error msg ->
+      let d = diag file (synthetic_loc file) "io.error" msg in
+      print_endline (result_json false [ d ]);
+      1
+
 let emit_ast file =
   try
     let forms = Parser.parse_file file in

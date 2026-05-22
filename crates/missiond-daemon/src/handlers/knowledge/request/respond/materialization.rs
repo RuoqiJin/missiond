@@ -1,4 +1,5 @@
 use super::*;
+use crate::handlers::knowledge::plan::plan_contract_json_from_sexp;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::handlers::knowledge::request) struct BoardTaskMaterialization {
@@ -184,6 +185,11 @@ pub(in crate::handlers::knowledge::request) async fn materialize_request_plan(
             None,
             Some("mission_request request-local plan.lisp"),
         )
+        .await
+        .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
+    state
+        .store
+        .plan_update_contract_json(plan_id, &plan_contract_json_from_sexp(plan_text))
         .await
         .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
 

@@ -32,6 +32,11 @@ const REQUIRED_FILES = [
   'scripts/check-ocaml-toolchain.mjs',
   'scripts/check-typed-lisp-compiler.mjs',
   'scripts/compile-v3-runtime.mjs',
+  'scripts/project-v3-contracts.mjs',
+  'scripts/generated/v3_contracts.mjs',
+  'scripts/generated/v3_contracts.d.ts',
+  'crates/missiond-daemon/src/context/v3_contracts/mod.rs',
+  'crates/missiond-daemon/src/context/v3_contracts/generated.rs',
   'scripts/check-project-domain-hardening.mjs',
   '.missiond/workflows/typed-lisp-compiler-convergence.lisp',
   '.missiond/workflows/typed-lisp-compiler-cleanup.lisp',
@@ -63,6 +68,8 @@ const REQUIRED_RUNTIME_LOADER = {
     'load_compiled_project_universe',
     'load_compiled_workflow_contracts',
     'compiled_runtime_projection_status',
+    'v3_contracts::SOURCE_HASH',
+    'contractAbi',
     'runtimeConfig',
   ],
 };
@@ -136,7 +143,13 @@ const REQUIRED_BLUEPRINT_TOKENS = [
   'check-genome-dir',
   'emit-genomes',
   'emit-runtime-config',
+  'emit-contract-abi',
+  'emit-plan-contract',
+  'check-plan-contract',
   'compiled-runtime-config.json',
+  'compiled-contract-abi.json',
+  'project-v3-contracts.mjs',
+  'generated V3 contract ABI',
   'genome-runtime',
   'check-m6-depth',
   'check-domain-hardening-deprecated-alias',
@@ -252,14 +265,22 @@ function main() {
     if (!ocaml.ok) {
       for (const d of ocaml.diagnostics ?? []) diagnostics.push({ ...d, code: d.code ?? 'OCAML_CHECK_FAILED' });
     }
+    const planContractSmoke = '/tmp/missiond-plan-contract-smoke.lisp';
+    fs.writeFileSync(
+      planContractSmoke,
+      '(plan :target "mission_execution" :objective "ship" (node :id "n1" :target "mission_execution"))\n',
+    );
     for (const argv of [
       ['emit-v3', '--blueprint', BLUEPRINT],
       ['emit-runtime-config', '--blueprint', BLUEPRINT],
       ['emit-semantic-ir', '--blueprint', BLUEPRINT],
+      ['emit-contract-abi', '--blueprint', BLUEPRINT],
       ['emit-universe', '--blueprint', BLUEPRINT],
       ['emit-workflows', '--workflow-dir', '.missiond/workflows'],
       ['emit-genomes', '--genome-dir', '.missiond/v3/genome'],
+      ['emit-plan-contract', '--file', planContractSmoke],
       ['check-workstation-config', '--blueprint', BLUEPRINT],
+      ['check-plan-contract', '--file', planContractSmoke],
       ['check-workflow-dir', '--workflow-dir', '.missiond/workflows'],
       ['check-genome-dir', '--genome-dir', '.missiond/v3/genome'],
       ['check-project-dir', '--dir', '.missiond/frontend'],
@@ -327,6 +348,32 @@ function main() {
         const runtimePolicies = facts.filter((fact) => fact.kind === 'runtime_policy');
         if (runtimePolicies.length < 5) {
           diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_SEMANTIC_IR_RUNTIME_POLICIES_INCOMPLETE', 'emit-semantic-ir must project runtime policy facts for compiled ABI consumers'));
+        }
+      } else if (argv[0] === 'emit-contract-abi') {
+        const payload = emit.compiled?.payload ?? {};
+        const facts = payload.facts ?? [];
+        const factKinds = new Set(facts.map((fact) => fact.kind));
+        if (emit.compiled?.schema_version !== 'missiond.contract-abi.v1') {
+          diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_CONTRACT_ABI_SCHEMA_MISMATCH', 'emit-contract-abi must use schema missiond.contract-abi.v1'));
+        }
+        if (!Array.isArray(payload.surfaces) || payload.surfaces.length === 0 || !Array.isArray(payload.functions) || payload.functions.length === 0) {
+          diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_CONTRACT_ABI_SURFACE_FUNCTIONS_MISSING', 'emit-contract-abi must project surfaces[] and functions[]'));
+        }
+        for (const kind of ['artifact_contract', 'runtime_policy', 'checker_registry', 'module_source_unit']) {
+          if (!factKinds.has(kind)) {
+            diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_CONTRACT_ABI_FACT_KIND_MISSING', `emit-contract-abi must project ${kind} facts`));
+          }
+        }
+        if (payload.plan_contract?.schema_version !== 'missiond.plan-contract.v1') {
+          diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_CONTRACT_ABI_PLAN_SCHEMA_MISSING', 'emit-contract-abi must include plan_contract schema metadata'));
+        }
+      } else if (argv[0] === 'emit-plan-contract') {
+        const payload = emit.compiled?.payload ?? {};
+        if (emit.compiled?.schema_version !== 'missiond.plan-contract.v1') {
+          diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_PLAN_CONTRACT_SCHEMA_MISMATCH', 'emit-plan-contract must use schema missiond.plan-contract.v1'));
+        }
+        if (payload.head !== 'plan' || payload.hints?.target !== 'mission_execution' || !Array.isArray(payload.nodes) || payload.nodes.length !== 1) {
+          diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_PLAN_CONTRACT_PROJECTION_MISSING', 'emit-plan-contract must project plan head, top-level hints, and nodes[]'));
         }
       } else if (argv[0] === 'emit-universe') {
         if (!Array.isArray(emit.compiled?.payload?.projects) || emit.compiled.payload.projects.length === 0) {
