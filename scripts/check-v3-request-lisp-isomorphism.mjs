@@ -4,6 +4,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { readBlueprintWithEvidenceSidecars } from './lib/v3_blueprint_contract_source.mjs';
+import {
+  compiledSurfaceMap,
+  loadCompiledV3Contract,
+} from './lib/v3_compiled_contract.mjs';
 
 const usage = `Usage:
   node scripts/check-v3-request-lisp-isomorphism.mjs [--json] [--dry-fixture]
@@ -51,7 +55,7 @@ function main() {
   }
 
   const repoRoot = dryFixture ? buildFixture() : process.cwd();
-  const diagnostics = checkFiles(repoRoot, DEFAULT_FILES);
+  const diagnostics = checkFiles(repoRoot, DEFAULT_FILES, { useCompiled: !dryFixture });
   const result = {
     ok: diagnostics.length === 0,
     files: Object.keys(DEFAULT_FILES).length,
@@ -72,7 +76,7 @@ function main() {
   process.exit(result.ok ? 0 : 1);
 }
 
-function checkFiles(root, files) {
+function checkFiles(root, files, { useCompiled = true } = {}) {
   const diagnostics = [];
   const sources = {};
   for (const [key, rel] of Object.entries(files)) {
@@ -88,14 +92,27 @@ function checkFiles(root, files) {
   requireText(diagnostics, files.blueprint, sources.blueprint, 'intent-alignment files MUST carry :directive_id + :version');
   requireText(diagnostics, files.blueprint, sources.blueprint, 'plan artifact MUST be amended with :plan_id + :version + :board_task_id');
   requireText(diagnostics, files.blueprint, sources.blueprint, 'start/advance/status/respond expose request-local :artifact_paths');
-  requireText(diagnostics, files.blueprint, sources.blueprint, '(surface mission_request');
-  requireText(diagnostics, files.blueprint, sources.blueprint, ':status "code-aligned"');
-  requireText(diagnostics, files.blueprint, sources.blueprint, 'crates/missiond-daemon/src/handlers/knowledge/request/respond.rs');
-  requireText(diagnostics, files.blueprint, sources.blueprint, 'crates/missiond-daemon/src/handlers/knowledge/request/respond/events.rs');
-  requireText(diagnostics, files.blueprint, sources.blueprint, 'crates/missiond-daemon/src/handlers/knowledge/request/respond/materialization.rs');
-  requireText(diagnostics, files.blueprint, sources.blueprint, 'crates/missiond-daemon/src/handlers/knowledge/request/respond/routing.rs');
-  requireText(diagnostics, files.blueprint, sources.blueprint, 'crates/missiond-daemon/src/handlers/knowledge/request/review_packet.rs');
-  requireText(diagnostics, files.blueprint, sources.blueprint, 'crates/missiond-daemon/src/handlers/knowledge/request/tests.rs');
+  if (useCompiled) {
+    const compiled = loadCompiledV3Contract({
+      repoRoot: root,
+      blueprint: files.blueprint,
+      semanticIr: true,
+    });
+    diagnostics.push(...compiled.diagnostics.map((d) => ({
+      file: d.file ?? files.blueprint,
+      message: d.message,
+    })));
+    validateCompiledMissionRequestContract(diagnostics, files, compiled);
+  } else {
+    requireText(diagnostics, files.blueprint, sources.blueprint, '(surface mission_request');
+    requireText(diagnostics, files.blueprint, sources.blueprint, ':status "code-aligned"');
+    requireText(diagnostics, files.blueprint, sources.blueprint, 'crates/missiond-daemon/src/handlers/knowledge/request/respond.rs');
+    requireText(diagnostics, files.blueprint, sources.blueprint, 'crates/missiond-daemon/src/handlers/knowledge/request/respond/events.rs');
+    requireText(diagnostics, files.blueprint, sources.blueprint, 'crates/missiond-daemon/src/handlers/knowledge/request/respond/materialization.rs');
+    requireText(diagnostics, files.blueprint, sources.blueprint, 'crates/missiond-daemon/src/handlers/knowledge/request/respond/routing.rs');
+    requireText(diagnostics, files.blueprint, sources.blueprint, 'crates/missiond-daemon/src/handlers/knowledge/request/review_packet.rs');
+    requireText(diagnostics, files.blueprint, sources.blueprint, 'crates/missiond-daemon/src/handlers/knowledge/request/tests.rs');
+  }
 
   const directiveSurface = `${sources.directiveHandler}\n${sources.directiveCompileAuthoring}`;
   const directiveSurfaceLabel = `${files.directiveHandler} + ${files.directiveCompileAuthoring}`;
@@ -138,6 +155,60 @@ function checkFiles(root, files) {
   requireText(diagnostics, files.mcpRequest, sources.mcpRequest, 'writes the persisted ref back into plan.lisp');
 
   return diagnostics;
+}
+
+function validateCompiledMissionRequestContract(diagnostics, files, compiled) {
+  if (compiled.ok !== true) {
+    diagnostics.push({
+      file: files.blueprint,
+      message: 'missiond-lispc emit-v3/emit-semantic-ir must pass before request isomorphism can validate the Lisp contract structurally',
+    });
+    return;
+  }
+  const surfaces = compiledSurfaceMap(compiled);
+  const surface = surfaces.get('mission_request');
+  if (!surface) {
+    diagnostics.push({ file: files.blueprint, message: 'compiled semantic IR missing surface mission_request' });
+    return;
+  }
+  if (surface.status !== 'code-aligned') {
+    diagnostics.push({ file: files.blueprint, message: `compiled mission_request surface must be code-aligned, got ${surface.status}` });
+  }
+  for (const rel of [
+    files.requestHandler,
+    files.requestArtifacts,
+    files.requestRespond,
+    files.requestRespondEvents,
+    files.requestRespondMaterialization,
+    files.requestRespondRouting,
+    files.requestReviewPacket,
+    files.requestTests,
+    files.mcpRequest,
+  ]) {
+    if (!surface.code.includes(rel)) {
+      diagnostics.push({ file: files.blueprint, message: `compiled mission_request surface missing code path ${rel}` });
+    }
+  }
+  const fn = compiled.functions.find((candidate) => candidate.surface === 'mission_request');
+  if (!fn) {
+    diagnostics.push({ file: files.blueprint, message: 'compiled semantic IR missing function mapped to mission_request' });
+    return;
+  }
+  for (const entry of [
+    'mission_request.start',
+    'mission_request.advance',
+    'mission_request.status',
+    'mission_request.respond',
+  ]) {
+    if (!fn.entry.includes(entry)) {
+      diagnostics.push({ file: files.blueprint, message: `compiled mission_request function missing entry ${entry}` });
+    }
+  }
+  for (const egress of ['request-local-artifacts', 'review_packet', 'respond_result']) {
+    if (!fn.egress.includes(egress)) {
+      diagnostics.push({ file: files.blueprint, message: `compiled mission_request function missing egress ${egress}` });
+    }
+  }
 }
 
 function requireText(diagnostics, file, source, needle) {

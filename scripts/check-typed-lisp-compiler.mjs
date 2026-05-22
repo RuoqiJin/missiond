@@ -3,6 +3,10 @@
 import fs from 'node:fs';
 import { runLispc, toolchainStatus } from './lib/ocaml_lispc.mjs';
 import { EXPECTED_SURFACES } from './check-v3-code-isomorphism-complete.mjs';
+import {
+  compiledSurfaceIds,
+  loadCompiledV3Contract,
+} from './lib/v3_compiled_contract.mjs';
 
 const BLUEPRINT = '.missiond/v3/missiond-blueprint.lisp';
 const DEFAULT_AUTH_MISSIOND =
@@ -22,6 +26,7 @@ const REQUIRED_FILES = [
   'tools/missiond_lispc/test/dune',
   'tools/missiond_lispc/test/parser_golden.ml',
   'scripts/lib/ocaml_lispc.mjs',
+  'scripts/lib/v3_compiled_contract.mjs',
   'scripts/check-ocaml-toolchain.mjs',
   'scripts/check-typed-lisp-compiler.mjs',
   'scripts/compile-v3-runtime.mjs',
@@ -36,10 +41,13 @@ const REQUIRED_RUNTIME_LOADER = {
   file: 'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
   tokens: [
     'load_runtime_blueprint_source',
+    'load_runtime_blueprint_source_with_diagnostics',
     'load_compiled_v3_lisp_source',
+    'load_compiled_v3_lisp_source_with_diagnostics',
     'compiled_v3_snapshot_is_current',
     'compiled_sexp_to_lisp',
     'CompiledV3Payload',
+    'RuntimeBlueprintSourceKind',
     'load_runtime_blueprint_source(project_root)',
     'CompiledProjectUniverse',
     'CompiledWorkflowContracts',
@@ -121,6 +129,7 @@ const REQUIRED_BLUEPRINT_TOKENS = [
   'tools/missiond_lispc/bin/schema_v3.ml',
   'tools/missiond_lispc/bin/workstation_schema.ml',
   'tools/missiond_lispc/bin/emit_json.ml',
+  'scripts/lib/v3_compiled_contract.mjs',
   'node scripts/check-typed-lisp-compiler.mjs',
 ];
 
@@ -196,12 +205,29 @@ function main() {
   let ocaml = null;
   const emitChecks = [];
   if (toolchain.ok) {
+    const compiledContract = loadCompiledV3Contract({ blueprint: BLUEPRINT, semanticIr: true });
+    const expectedSurfaces = compiledSurfaceIds(compiledContract);
+    if (!compiledContract.ok || expectedSurfaces.length === 0) {
+      for (const d of compiledContract.diagnostics) {
+        diagnostics.push({
+          ...d,
+          code: d.code ?? 'COMPILED_V3_CONTRACT_FAILED',
+        });
+      }
+      if (expectedSurfaces.length === 0) {
+        diagnostics.push(diag(
+          'scripts/lib/v3_compiled_contract.mjs',
+          'COMPILED_V3_SURFACES_MISSING',
+          'missiond-lispc emit-v3/emit-semantic-ir must project implementation surfaces for downstream checkers',
+        ));
+      }
+    }
     ocaml = runLispc([
       'check-v3',
       '--blueprint',
       BLUEPRINT,
       '--expected-surfaces',
-      EXPECTED_SURFACES.join(','),
+      (expectedSurfaces.length > 0 ? expectedSurfaces : EXPECTED_SURFACES).join(','),
     ]);
     if (!ocaml.ok) {
       for (const d of ocaml.diagnostics ?? []) diagnostics.push({ ...d, code: d.code ?? 'OCAML_CHECK_FAILED' });

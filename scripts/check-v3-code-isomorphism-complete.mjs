@@ -37,10 +37,17 @@ import {
   parseLisp,
   readKeywordProps,
 } from './lib/missiond_lisp.mjs';
+import {
+  compiledSurfaceIds,
+  loadCompiledV3Contract,
+} from './lib/v3_compiled_contract.mjs';
 
 const BLUEPRINT_PATH = '.missiond/v3/missiond-blueprint.lisp';
 const AGGREGATE_COMMAND = 'node scripts/check-v3-code-isomorphism-complete.mjs';
 
+// Bootstrap/dry-fixture surface list. Live validation derives the active
+// surface set from missiond-lispc emit-v3 + emit-semantic-ir so checker
+// correctness follows typed Lisp structure instead of this compatibility list.
 export const EXPECTED_SURFACES = [
   'mission_request',
   'unified-entry-runtime',
@@ -202,7 +209,9 @@ function parseArgs(argv) {
   return opts;
 }
 
-export function validateBlueprintSource(source, file = BLUEPRINT_PATH) {
+export function validateBlueprintSource(source, file = BLUEPRINT_PATH, {
+  expectedSurfaces = EXPECTED_SURFACES,
+} = {}) {
   const diagnostics = [];
   let forms;
   try {
@@ -259,7 +268,7 @@ export function validateBlueprintSource(source, file = BLUEPRINT_PATH) {
     };
   }
 
-  for (const expected of EXPECTED_SURFACES) {
+  for (const expected of expectedSurfaces) {
     const surface = surfaces[expected];
     if (!surface) {
       diagnostics.push({
@@ -313,7 +322,7 @@ export function validateBlueprintSource(source, file = BLUEPRINT_PATH) {
   // Catch ANY surface (not just expected) still labelled partial; the V3
   // gate is "no surface is partial", not just "expected surfaces aren't".
   for (const [id, surface] of Object.entries(surfaces)) {
-    if (EXPECTED_SURFACES.includes(id)) continue;
+    if (expectedSurfaces.includes(id)) continue;
     if (surface.status === 'code-aligned-partial') {
       diagnostics.push({
         severity: 'error',
@@ -357,6 +366,7 @@ export function validateBlueprintSource(source, file = BLUEPRINT_PATH) {
     ok: !diagnostics.some((d) => d.severity === 'error'),
     diagnostics,
     surfaces,
+    expectedSurfaces,
   };
 }
 
@@ -412,22 +422,38 @@ function main() {
     process.stderr.write(`error: cannot read blueprint ${blueprintAbs}: ${err.message}\n`);
     process.exit(1);
   }
-  const blueprintResult = validateBlueprintSource(source, blueprintAbs);
+  const compiled = loadCompiledV3Contract({
+    repoRoot: opts.repo,
+    blueprint: opts.blueprint,
+    semanticIr: true,
+  });
+  const expectedSurfaces = compiledSurfaceIds(compiled);
+  const expectedSurfaceSet = expectedSurfaces.length > 0 ? expectedSurfaces : EXPECTED_SURFACES;
+  const blueprintResult = validateBlueprintSource(source, blueprintAbs, {
+    expectedSurfaces: expectedSurfaceSet,
+  });
   const checkerResults = runPerSurfaceCheckers(opts.repo);
   const checkerOk = checkerResults.every((r) => r.ok);
-  const ok = blueprintResult.ok && checkerOk;
+  const compiledOk = compiled.ok === true && expectedSurfaces.length > 0;
+  const ok = blueprintResult.ok && checkerOk && compiledOk;
 
   const result = {
     ok,
     blueprint: opts.blueprint,
-    expected_surfaces: EXPECTED_SURFACES,
+    expected_surfaces: expectedSurfaceSet,
+    surface_source: expectedSurfaces.length > 0
+      ? 'missiond-lispc emit-semantic-ir'
+      : 'bootstrap-fallback',
+    typed_surface_count: expectedSurfaces.length,
+    typed_source_hash: compiled.sourceHash,
+    typed_semantic_source_hash: compiled.semanticSourceHash,
     surfaces: Object.fromEntries(
       Object.entries(blueprintResult.surfaces).map(([id, s]) => [
         id,
         { status: s.status, has_code: s.hasCode, has_note: s.hasNote },
       ]),
     ),
-    diagnostics: blueprintResult.diagnostics,
+    diagnostics: [...compiled.diagnostics, ...blueprintResult.diagnostics],
     checks: checkerResults,
   };
 
@@ -435,9 +461,12 @@ function main() {
     fs.writeSync(1, `${JSON.stringify(result, null, 2)}\n`);
   } else if (ok) {
     console.log(
-      `v3 code-isomorphism gate OK (${EXPECTED_SURFACES.length} surfaces graduated, ${checkerResults.length} per-surface checkers passed)`,
+      `v3 code-isomorphism gate OK (${expectedSurfaceSet.length} typed surfaces graduated, ${checkerResults.length} per-surface checkers passed)`,
     );
   } else {
+    for (const d of compiled.diagnostics) {
+      console.error(`${d.file}:${d.line ?? 1}:${d.column ?? 1}: error: ${d.message}`);
+    }
     for (const d of blueprintResult.diagnostics) {
       console.error(`${d.file}:${d.line}:${d.column}: ${d.severity}: ${d.message}`);
     }
@@ -504,6 +533,10 @@ function runDryFixture(opts) {
       :status "code-aligned"
       :code ["a"]
       :note "n")
+    (surface work-order-lifecycle
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
     (surface review-gate
       :status "code-aligned"
       :code ["a"]
@@ -521,6 +554,10 @@ function runDryFixture(opts) {
       :code ["a"]
       :note "n")
     (surface commit-lisp-convergence-loop
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
+    (surface lisp-code-sync-loop
       :status "code-aligned"
       :code ["a"]
       :note "n")
@@ -608,7 +645,27 @@ function runDryFixture(opts) {
       :status "code-aligned"
       :code ["a"]
       :note "n")
+    (surface data-residency-universe
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
+    (surface memory-provider-boundary
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
+    (surface eventhub-service-boundary
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
     (surface typed-lisp-compiler
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
+    (surface mission-shared-memory
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
+    (surface evidence-governance-view
       :status "code-aligned"
       :code ["a"]
       :note "n"))

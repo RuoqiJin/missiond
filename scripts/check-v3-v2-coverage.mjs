@@ -22,6 +22,10 @@ import {
   readKeywordProps,
 } from './lib/missiond_lisp.mjs';
 import { EXPECTED_SURFACES } from './check-v3-code-isomorphism-complete.mjs';
+import {
+  compiledSurfaceIds,
+  loadCompiledV3Contract,
+} from './lib/v3_compiled_contract.mjs';
 
 const BLUEPRINT_PATH = '.missiond/v3/missiond-blueprint.lisp';
 const CHECK_COMMAND = 'node scripts/check-v3-v2-coverage.mjs';
@@ -59,11 +63,24 @@ function main() {
   const blueprintAbs = path.resolve(opts.repo, opts.blueprint);
   const toolNames = scanMcpToolNames(path.resolve(opts.repo, 'crates/missiond-mcp/src/tools'));
   const source = fs.readFileSync(blueprintAbs, 'utf8');
+  const compiled = loadCompiledV3Contract({
+    repoRoot: path.resolve(opts.repo),
+    blueprint: opts.blueprint,
+    semanticIr: true,
+  });
+  const expectedSurfaces = compiledSurfaceIds(compiled);
   const result = validateV2CoverageSource(source, {
     file: blueprintAbs,
     repoRoot: path.resolve(opts.repo),
     toolNames,
+    expectedSurfaces: expectedSurfaces.length > 0 ? expectedSurfaces : EXPECTED_SURFACES,
   });
+  result.surface_source = expectedSurfaces.length > 0
+    ? 'missiond-lispc emit-semantic-ir'
+    : 'bootstrap-fallback';
+  result.typed_surface_count = expectedSurfaces.length;
+  result.diagnostics.push(...compiled.diagnostics);
+  result.ok = result.ok && compiled.ok === true && expectedSurfaces.length > 0;
 
   if (opts.json) {
     console.log(JSON.stringify(result, null, 2));
@@ -121,6 +138,7 @@ export function validateV2CoverageSource(source, {
   file = BLUEPRINT_PATH,
   repoRoot = null,
   toolNames = [],
+  expectedSurfaces = EXPECTED_SURFACES,
 } = {}) {
   const diagnostics = [];
   let forms;
@@ -181,12 +199,12 @@ export function validateV2CoverageSource(source, {
     });
     if (status === 'code-aligned' || status === 'runtime-projected') {
       for (const surface of surfaceRefs(props)) {
-        if (EXPECTED_SURFACES.includes(surface)) codeAlignedCovered.add(surface);
+        if (expectedSurfaces.includes(surface)) codeAlignedCovered.add(surface);
       }
     }
   }
 
-  for (const expected of EXPECTED_SURFACES) {
+  for (const expected of expectedSurfaces) {
     if (!codeAlignedCovered.has(expected)) {
       diagnostics.push(diag(
         file,

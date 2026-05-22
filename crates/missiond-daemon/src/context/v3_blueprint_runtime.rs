@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+// Embedded defaults are the test/no-install fallback. Runtime authority is the
+// V3 Lisp source or its current compiled projection.
 pub(crate) const DEFAULT_MODEL_PROFILE: &str = "coding-default-opus-4-7";
 pub(crate) const DEFAULT_TIMEOUT_SECS: i64 = 1800;
 pub(crate) const MIN_TIMEOUT_SECS: i64 = 60;
@@ -459,6 +461,36 @@ pub(crate) struct CompiledRuntimeSnapshot {
 pub(crate) struct CompiledRuntimeLoad {
     pub snapshot: Option<CompiledRuntimeSnapshot>,
     pub diagnostics: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeBlueprintSourceLoad {
+    source: Option<String>,
+    source_kind: RuntimeBlueprintSourceKind,
+    diagnostics: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RuntimeBlueprintSourceKind {
+    CompiledV3,
+    SourceLisp,
+    EmbeddedDefaults,
+}
+
+impl RuntimeBlueprintSourceKind {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::CompiledV3 => "compiled-v3",
+            Self::SourceLisp => "source-lisp",
+            Self::EmbeddedDefaults => "embedded-defaults",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CompiledV3LispSourceLoad {
+    source: Option<String>,
+    diagnostics: Vec<String>,
 }
 
 #[allow(dead_code)]
@@ -2852,13 +2884,53 @@ fn load_blueprint_source(
 fn load_runtime_blueprint_source(
     project_root: Option<&str>,
 ) -> Result<Option<String>, BlueprintConfigError> {
+    Ok(load_runtime_blueprint_source_with_diagnostics(project_root)?.source)
+}
+
+fn load_runtime_blueprint_source_with_diagnostics(
+    project_root: Option<&str>,
+) -> Result<RuntimeBlueprintSourceLoad, BlueprintConfigError> {
     let Some(root) = resolve_blueprint_root(project_root) else {
-        return Ok(None);
+        return Ok(RuntimeBlueprintSourceLoad {
+            source: None,
+            source_kind: RuntimeBlueprintSourceKind::EmbeddedDefaults,
+            diagnostics: vec![
+                "no MissionD V3 blueprint root located; using embedded test/no-install defaults"
+                    .to_string(),
+            ],
+        });
     };
-    if let Some(source) = load_compiled_v3_lisp_source(&root) {
-        return Ok(Some(source));
+    let compiled = load_compiled_v3_lisp_source_with_diagnostics(&root);
+    if let Some(source) = compiled.source {
+        return Ok(RuntimeBlueprintSourceLoad {
+            source: Some(source),
+            source_kind: RuntimeBlueprintSourceKind::CompiledV3,
+            diagnostics: compiled.diagnostics,
+        });
     }
-    load_blueprint_source(Some(root.to_string_lossy().as_ref()))
+    let source = load_blueprint_source(Some(root.to_string_lossy().as_ref()))?;
+    let mut diagnostics = compiled.diagnostics;
+    if source.is_some() && !diagnostics.is_empty() {
+        diagnostics.push(
+            "using source Lisp fallback after compiled V3 projection was unavailable".to_string(),
+        );
+    } else if source.is_none() {
+        diagnostics.push(
+            "source Lisp fallback unavailable; using embedded test/no-install defaults".to_string(),
+        );
+    }
+    Ok(RuntimeBlueprintSourceLoad {
+        source,
+        source_kind: if diagnostics
+            .iter()
+            .any(|line| line.contains("embedded test/no-install defaults"))
+        {
+            RuntimeBlueprintSourceKind::EmbeddedDefaults
+        } else {
+            RuntimeBlueprintSourceKind::SourceLisp
+        },
+        diagnostics,
+    })
 }
 
 fn resolve_blueprint_root(project_root: Option<&str>) -> Option<PathBuf> {
@@ -2883,6 +2955,10 @@ fn resolve_blueprint_root(project_root: Option<&str>) -> Option<PathBuf> {
 }
 
 fn load_compiled_v3_lisp_source(project_root: &Path) -> Option<String> {
+    load_compiled_v3_lisp_source_with_diagnostics(project_root).source
+}
+
+fn load_compiled_v3_lisp_source_with_diagnostics(project_root: &Path) -> CompiledV3LispSourceLoad {
     let path = project_root
         .join(".missiond")
         .join("v3")
@@ -2893,24 +2969,103 @@ fn load_compiled_v3_lisp_source(project_root: &Path) -> Option<String> {
         .join(".missiond")
         .join("v3")
         .join("missiond-blueprint.lisp");
+    if !path.exists() {
+        return CompiledV3LispSourceLoad {
+            source: None,
+            diagnostics: vec![format!("compiled V3 snapshot missing: {}", path.display())],
+        };
+    }
     if !compiled_v3_snapshot_is_current(&path, &source_path) {
-        return None;
+        return CompiledV3LispSourceLoad {
+            source: None,
+            diagnostics: vec![format!(
+                "compiled V3 snapshot stale relative to source Lisp: {}",
+                path.display()
+            )],
+        };
     }
-    let raw = fs::read_to_string(&path).ok()?;
-    let parsed: CompiledRuntimeEnvelope = serde_json::from_str(&raw).ok()?;
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(err) => {
+            return CompiledV3LispSourceLoad {
+                source: None,
+                diagnostics: vec![format!(
+                    "failed to read compiled V3 snapshot {}: {err}",
+                    path.display()
+                )],
+            };
+        }
+    };
+    let parsed: CompiledRuntimeEnvelope = match serde_json::from_str(&raw) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            return CompiledV3LispSourceLoad {
+                source: None,
+                diagnostics: vec![format!(
+                    "failed to parse compiled V3 snapshot {}: {err}",
+                    path.display()
+                )],
+            };
+        }
+    };
     if !parsed.diagnostics.is_empty() {
-        return None;
+        return CompiledV3LispSourceLoad {
+            source: None,
+            diagnostics: vec![format!(
+                "compiled V3 snapshot {} contains {} diagnostic(s)",
+                path.display(),
+                parsed.diagnostics.len()
+            )],
+        };
     }
-    let payload: CompiledV3Payload = serde_json::from_value(parsed.payload).ok()?;
+    let payload: CompiledV3Payload = match serde_json::from_value(parsed.payload) {
+        Ok(payload) => payload,
+        Err(err) => {
+            return CompiledV3LispSourceLoad {
+                source: None,
+                diagnostics: vec![format!(
+                    "failed to decode compiled V3 payload {}: {err}",
+                    path.display()
+                )],
+            };
+        }
+    };
     if payload.forms.is_empty() {
-        return None;
+        return CompiledV3LispSourceLoad {
+            source: None,
+            diagnostics: vec![format!(
+                "compiled V3 snapshot {} contains no root forms",
+                path.display()
+            )],
+        };
     }
     let mut rendered = Vec::with_capacity(payload.forms.len());
     for form in &payload.forms {
-        rendered.push(compiled_sexp_to_lisp(form)?);
+        let Some(form) = compiled_sexp_to_lisp(form) else {
+            return CompiledV3LispSourceLoad {
+                source: None,
+                diagnostics: vec![format!(
+                    "compiled V3 snapshot {} contains an unsupported sexp node",
+                    path.display()
+                )],
+            };
+        };
+        rendered.push(form);
     }
     let source = rendered.join("\n");
-    source.contains("(missiond-blueprint").then_some(source)
+    if !source.contains("(missiond-blueprint") {
+        return CompiledV3LispSourceLoad {
+            source: None,
+            diagnostics: vec![format!(
+                "compiled V3 snapshot {} does not render a missiond-blueprint root",
+                path.display()
+            )],
+        };
+    }
+    CompiledV3LispSourceLoad {
+        source: Some(source),
+        diagnostics: Vec::new(),
+    }
 }
 
 fn compiled_v3_snapshot_is_current(compiled_path: &Path, source_path: &Path) -> bool {
@@ -3099,10 +3254,24 @@ pub(crate) fn load_compiled_workflow_contracts(
 }
 
 pub(crate) fn compiled_runtime_projection_status(project_root: &Path) -> serde_json::Value {
+    let v3_source = load_runtime_blueprint_source_with_diagnostics(Some(
+        project_root.to_string_lossy().as_ref(),
+    ))
+    .unwrap_or_else(|err| RuntimeBlueprintSourceLoad {
+        source: None,
+        source_kind: RuntimeBlueprintSourceKind::EmbeddedDefaults,
+        diagnostics: vec![err.to_string()],
+    });
     let universe = load_compiled_project_universe(project_root, None);
     let workflow_contracts = load_compiled_workflow_contracts(project_root, None);
     serde_json::json!({
         "schema": "missiond.compiled-runtime-projection-status.v1",
+        "v3Blueprint": {
+            "ok": v3_source.source.is_some(),
+            "sourceKind": v3_source.source_kind.as_str(),
+            "compiledPreferred": matches!(v3_source.source_kind, RuntimeBlueprintSourceKind::CompiledV3),
+            "diagnostics": v3_source.diagnostics,
+        },
         "projectUniverse": {
             "ok": universe.payload.is_some() && universe.diagnostics.is_empty(),
             "snapshot": compiled_runtime_snapshot_json(universe.snapshot.as_ref()),
@@ -4398,6 +4567,14 @@ mod tests {
             .join("compiled");
         fs::create_dir_all(&compiled_dir).expect("compiled dir");
         fs::write(
+            temp.path()
+                .join(".missiond")
+                .join("v3")
+                .join("missiond-blueprint.lisp"),
+            "(missiond-blueprint test-runtime-source)",
+        )
+        .expect("write source blueprint");
+        fs::write(
             compiled_dir.join("compiled-project-universe.json"),
             r#"{
               "schema_version": "missiond.compiled-project-universe.v1",
@@ -4581,6 +4758,15 @@ mod tests {
             status["schema"].as_str(),
             Some("missiond.compiled-runtime-projection-status.v1")
         );
+        assert_eq!(status["v3Blueprint"]["ok"].as_bool(), Some(true));
+        assert_eq!(
+            status["v3Blueprint"]["sourceKind"].as_str(),
+            Some("source-lisp")
+        );
+        assert_eq!(
+            status["v3Blueprint"]["compiledPreferred"].as_bool(),
+            Some(false)
+        );
         assert_eq!(status["projectUniverse"]["ok"].as_bool(), Some(true));
         assert_eq!(status["projectUniverse"]["projectCount"].as_u64(), Some(1));
         assert_eq!(
@@ -4668,6 +4854,20 @@ mod tests {
             .expect("runtime source")
             .expect("source");
         assert!(source.contains("fallback-runtime-marker"), "{source}");
+
+        let loaded = load_runtime_blueprint_source_with_diagnostics(Some(
+            temp.path().to_string_lossy().as_ref(),
+        ))
+        .expect("runtime source with diagnostics");
+        assert_eq!(loaded.source_kind, RuntimeBlueprintSourceKind::SourceLisp);
+        assert!(
+            loaded
+                .diagnostics
+                .iter()
+                .any(|line| line.contains("compiled V3 snapshot")),
+            "{:?}",
+            loaded.diagnostics
+        );
     }
 
     #[test]

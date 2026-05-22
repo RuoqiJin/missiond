@@ -1,21 +1,22 @@
 # missiond
 
-**Multi-agent orchestration for Claude Code** — Spawn, control, and coordinate multiple Claude Code instances from a single session via MCP.
+**Lisp-governed local orchestration for Claude Code, Codex, Gemini, and MissionD workers** — normalize requests, review intent and plans, dispatch BoardTasks to managed PTY slots, and close work from durable evidence.
 
 [![Crates.io](https://img.shields.io/crates/v/missiond-core.svg)](https://crates.io/crates/missiond-core)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
 ## What is missiond?
 
-missiond is a daemon that turns a single Claude Code session into a multi-agent system. The main Claude Code instance acts as an orchestrator, dispatching tasks to background Claude Code agents running in managed pseudo-terminals (PTY slots). Each slot is a fully independent Claude Code session with its own working directory, role, and permissions.
+MissionD is a daemon and tool surface that turns requests into reviewed Lisp artifacts, approved plans, BoardTasks, and worker execution. The V3 control-plane authority is `.missiond/v3/missiond-blueprint.lisp`; generated JSON under `.missiond/v3/runtime/compiled/` is the machine projection. Postgres is the runtime store and event log; Board and PTY screens are projections over that state.
 
 ## Features
 
 ### Core
 - **PTY Sessions** — Spawn Claude Code in pseudo-terminals with full terminal emulation (via Alacritty terminal)
 - **Semantic Parsing** — Real-time state detection (Idle/Thinking/Responding/Confirming/Error), tool output extraction, status bar parsing, confirm dialog parsing
-- **MCP Integration** — 40+ tools exposed through Model Context Protocol for agent control
-- **Task Queue** — Async task submission (`mission_submit`) and sync consultation (`mission_ask`) with automatic slot routing
+- **MCP Integration** — generated tool groups exposed through Model Context Protocol and the daemon IPC bridge
+- **Request/Plan Gates** — `mission_request` writes request-local Lisp artifacts and requires explicit intent/plan approval before execution in human mode
+- **BoardTask Dispatch** — approved plans route through `mission_task_delegate`, Board claims, Autopilot, and managed PTY slots
 - **Permission System** — Role-based tool permissions (allow/confirm/deny) with glob pattern matching
 - **Cross-Platform** — macOS, Linux, Windows; Unix domain sockets or TCP loopback IPC
 
@@ -25,8 +26,8 @@ missiond is a daemon that turns a single Claude Code session into a multi-agent 
 - **Autonomous Workflow** — Agents can work autonomously with safety guardrails and reporting back to the orchestrator
 
 ### Knowledge & Memory
-- **Knowledge Base (KB)** — SQLite-backed knowledge store with FTS5 full-text search, auto-GC, and tiered categories
-- **Conversation Logging** — Records all Claude Code conversations (including tool_use/tool_result and thinking blocks) into SQLite
+- **Knowledge Base (KB)** — Postgres-backed reviewed memory and FTS/read-model projections
+- **Conversation Logging** — Ingests provider-local logs into MissionD's Postgres read models and event stream
 - **Memory Extraction** — Real-time and deep analysis pipelines that extract insights from agent conversations
 - **KB Injection** — Automatically injects relevant knowledge into agent context via MCP server instructions and UserPromptSubmit hooks
 
@@ -56,9 +57,11 @@ missiond is a daemon that turns a single Claude Code session into a multi-agent 
                                │    missiond       │
                                │    (Daemon)       │
                                ├──────────────────┤
-                               │ • Task Queue      │
+                               │ • Request/Plan    │
+                               │ • Board/EventBus  │
                                │ • PTY Manager     │
                                │ • Permission Mgr  │
+                               │ • Postgres Store  │
                                │ • Knowledge Base  │
                                │ • Memory Pipeline │
                                │ • WebSocket API   │
@@ -115,7 +118,7 @@ Add to `~/.claude/settings.json`:
 
 ### 2. Configure Slots
 
-Create `~/.missiond/slots.yaml`:
+Runtime slot policy is projected from `.missiond/v3/missiond-blueprint.lisp` workstation config. Legacy `~/.missiond/slots.yaml` may still exist for compatibility, but new dispatchable workers should be represented in V3.
 
 ```yaml
 slots:

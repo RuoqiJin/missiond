@@ -371,7 +371,10 @@ export function runFinalConvergenceCheck(repoRoot, blueprintRel = BLUEPRINT_PATH
   const aggregate = subchecks.find((c) => c.id === 'v3-code-isomorphism-complete')?.json_data;
   const coverage = subchecks.find((c) => c.id === 'v2-public-coverage')?.json_data;
   diagnostics.push(...checkAggregateSummary(aggregate));
-  diagnostics.push(...checkCoverageSummary(coverage));
+  const expectedSurfaceCount = Array.isArray(aggregate?.expected_surfaces)
+    ? aggregate.expected_surfaces.length
+    : EXPECTED_SURFACES.length;
+  diagnostics.push(...checkCoverageSummary(coverage, expectedSurfaceCount));
 
   const summary = {
     surfaces: Array.isArray(aggregate?.expected_surfaces)
@@ -545,10 +548,24 @@ function checkAggregateSummary(aggregate) {
     });
   }
   const surfaces = aggregate.expected_surfaces ?? [];
-  if (!Array.isArray(surfaces) || surfaces.length !== EXPECTED_SURFACES.length) {
+  if (!Array.isArray(surfaces) || surfaces.length < 40) {
     diagnostics.push({
       file: 'scripts/check-v3-code-isomorphism-complete.mjs',
-      message: `expected ${EXPECTED_SURFACES.length} V3 surfaces, got ${surfaces.length}`,
+      message: `expected at least 40 V3 surfaces from typed projection, got ${surfaces.length}`,
+    });
+  }
+  if (aggregate.surface_source !== 'missiond-lispc emit-semantic-ir') {
+    diagnostics.push({
+      file: 'scripts/check-v3-code-isomorphism-complete.mjs',
+      message: `aggregate must derive surfaces from missiond-lispc emit-semantic-ir; got ${aggregate.surface_source ?? '<missing>'}`,
+    });
+  }
+  if (Number.isInteger(aggregate.typed_surface_count)
+    && Array.isArray(surfaces)
+    && aggregate.typed_surface_count !== surfaces.length) {
+    diagnostics.push({
+      file: 'scripts/check-v3-code-isomorphism-complete.mjs',
+      message: `typed surface count mismatch: expected_surfaces=${surfaces.length}, typed_surface_count=${aggregate.typed_surface_count}`,
     });
   }
   const checks = aggregate.checks ?? [];
@@ -568,7 +585,7 @@ function checkAggregateSummary(aggregate) {
   return diagnostics;
 }
 
-function checkCoverageSummary(coverage) {
+function checkCoverageSummary(coverage, expectedSurfaceCount = EXPECTED_SURFACES.length) {
   const diagnostics = [];
   if (!coverage) {
     diagnostics.push({
@@ -595,10 +612,10 @@ function checkCoverageSummary(coverage) {
       message: `expected at least 84 public tools, got ${coverage.public_tools}`,
     });
   }
-  if (coverage.code_aligned_surfaces < EXPECTED_SURFACES.length) {
+  if (coverage.code_aligned_surfaces < expectedSurfaceCount) {
     diagnostics.push({
       file: 'scripts/check-v3-v2-coverage.mjs',
-      message: `expected ${EXPECTED_SURFACES.length} code-aligned surfaces, got ${coverage.code_aligned_surfaces}`,
+      message: `expected ${expectedSurfaceCount} code-aligned surfaces, got ${coverage.code_aligned_surfaces}`,
     });
   }
   return diagnostics;

@@ -12,6 +12,10 @@ import {
 } from './lib/missiond_lisp.mjs';
 import { maybeRunLispc } from './lib/ocaml_lispc.mjs';
 import { EXPECTED_SURFACES } from './check-v3-code-isomorphism-complete.mjs';
+import {
+  compiledSurfaceIds,
+  loadCompiledV3Contract,
+} from './lib/v3_compiled_contract.mjs';
 
 const BLUEPRINT_PATH = '.missiond/v3/missiond-blueprint.lisp';
 const CHECK_COMMAND = 'node scripts/check-v3-pillar-flow-schema.mjs';
@@ -33,12 +37,39 @@ function main() {
     runDryFixture(opts);
     return;
   }
+  const compiled = opts.engine === 'js'
+    ? null
+    : loadCompiledV3Contract({ blueprint: opts.blueprint, semanticIr: true });
+  const expectedSurfaces = compiled ? compiledSurfaceIds(compiled) : EXPECTED_SURFACES;
+  if (opts.engine !== 'js' && (!compiled?.ok || expectedSurfaces.length === 0)) {
+    const result = {
+      ok: false,
+      engine: {
+        requested: opts.engine,
+        selected: 'compiled-contract',
+      },
+      diagnostics: compiled?.diagnostics ?? [{
+        file: opts.blueprint,
+        line: 1,
+        column: 1,
+        message: 'missiond-lispc emit-v3/emit-semantic-ir did not return surfaces',
+      }],
+    };
+    if (opts.json) console.log(JSON.stringify(result, null, 2));
+    else {
+      for (const d of result.diagnostics) {
+        console.error(`${d.file}:${d.line ?? 1}:${d.column ?? 1}: ${d.message}`);
+      }
+      console.error('v3 pillar-flow schema FAILED (compiled contract)');
+    }
+    process.exit(1);
+  }
   const ocamlAttempt = maybeRunLispc([
     'check-v3',
     '--blueprint',
     opts.blueprint,
     '--expected-surfaces',
-    EXPECTED_SURFACES.join(','),
+    expectedSurfaces.join(','),
   ], { engine: opts.engine });
   if (ocamlAttempt.mode === 'ocaml' || ocamlAttempt.mode === 'invalid') {
     const result = normalizeOcamlResult(ocamlAttempt.result, opts.engine);
@@ -55,7 +86,7 @@ function main() {
     process.exit(result.ok ? 0 : 1);
   }
   const source = fs.readFileSync(opts.blueprint, 'utf8');
-  const result = validatePillarFlowSource(source, opts.blueprint);
+  const result = validatePillarFlowSource(source, opts.blueprint, { expectedSurfaces });
   result.engine = {
     requested: opts.engine,
     selected: 'js',
@@ -124,7 +155,9 @@ function fail(message) {
   process.exit(2);
 }
 
-export function validatePillarFlowSource(source, file = BLUEPRINT_PATH) {
+export function validatePillarFlowSource(source, file = BLUEPRINT_PATH, {
+  expectedSurfaces = EXPECTED_SURFACES,
+} = {}) {
   const diagnostics = [];
   let forms;
   try {
@@ -201,7 +234,7 @@ export function validatePillarFlowSource(source, file = BLUEPRINT_PATH) {
     }
   }
 
-  for (const expected of EXPECTED_SURFACES) {
+  for (const expected of expectedSurfaces) {
     const refs = surfaceToFunctions.get(expected) ?? [];
     if (refs.length === 0) {
       diagnostics.push(diag(file, flowMap.loc, `surface "${expected}" is not mapped by pillar-flow-map`));

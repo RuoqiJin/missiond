@@ -111,6 +111,7 @@
     (tier active-authoring
       :default true
       :paths [".missiond/v3/missiond-blueprint.lisp"
+              ".missiond/v3/shards/*.lisp"
               ".missiond/workflows/*.lisp"
               ".missiond/frontend/board-blueprint.lisp"
               ".missiond/**/intent.lisp"
@@ -137,6 +138,13 @@
        "Generated compiled JSON and runtime reports are projections/evidence; they must not be treated as editable blueprint source."
        "MissionD may query cold-runtime for trace/debug/report lookup, but that query must be explicit and visible in the context-pack."]
     :checker "node scripts/check-v3-runtime-path-hygiene.mjs")
+
+  (blueprint-shard-index
+    :schema "missiond.blueprint-shard-index.v1"
+    :index ".missiond/v3/shards/index.lisp"
+    :root ".missiond/v3/missiond-blueprint.lisp"
+    :rule "The root blueprint remains the executable compiler input. Shards are active-authoring scope indexes for high-change domains and must be promoted into root contracts before runtime code depends on them."
+    :shards [typed-compiler-runtime-projection workstation-policy-shards project-universe-shards])
 
   (grounding-search-aggregate
     :schema "missiond.grounding-search-aggregate.v1"
@@ -2902,6 +2910,13 @@
       :v3-function typed-lisp-compiler
       :surface typed-lisp-compiler
       :note "The typed Lisp compiler is the V3 destination for fragile V2-era Lisp shape/token-pin checking; Lisp remains SSOT while OCaml owns typed AST diagnostics and generated projections.")
+    (v2-item semantic-ir-compiler-projection
+      :status code-aligned
+      :v2-source ".missiond/v2/intent.lisp :: checker/token-pin debt and worker context projection"
+      :v3-pillar workflow
+      :v3-function semantic-ir-compiler
+      :surface semantic-ir-compiler
+      :note "The V3 semantic IR compiler projects typed surface/function facts, source maps, compact agent slices, and workflow contracts so JS checkers and workers consume structured facts instead of prose/token pins.")
     (v2-item work-order-lifecycle
       :status code-aligned
       :v2-source ".missiond/v2/intent-flow.lisp :: F-intent-alignment-plan-execution-loop + .missiond/v2/intent.lisp :: unified-entry-pipeline-v1"
@@ -2909,6 +2924,13 @@
       :v3-function work-order-lifecycle
       :surface work-order-lifecycle
       :note "V2's split intent/plan/execute loops and unified-entry pipeline converge into one work-order lifecycle. User requests, BoardTask triggers, intent.lisp files, and external-application delegation are normalized into a work-order intent, bound to one BoardTask, compiled into plan.lisp accepted shards, executed through workflow_run/shared-memory, and closed via task-result-artifacts plus audit.lisp. The lifecycle reuses mission_request, mission_board, mission_workflow, mission_shared_memory, and file-artifacts rather than adding a new public MCP family.")
+    (v2-item external-work-order-gate
+      :status code-aligned
+      :v2-source ".missiond/v2/architecture-dsl.lisp :: SSOT-before-code invariant + task contract write scope"
+      :v3-pillar source-control
+      :v3-function external-work-order-gate
+      :surface external-work-order-gate
+      :note "External Codex/ClaudeCode/user-local edits converge through the V3 work-order gate: start/verify/commit hooks require a work-order id, intent.lisp, plan.lisp, accepted_shard_id, and write-scope coverage before code is accepted.")
     (v2-item cloud-local-eventbridge
       :status code-aligned
       :v2-source ".missiond/v2/intent-event-bus.lisp :: event_router / external service event ingress"
@@ -2972,6 +2994,13 @@
       :v3-function lisp-code-sync
       :surface lisp-code-sync-loop
       :note "The SSOT-before-code invariant is now event-driven for Lisp edits: .missiond Lisp/checker changes emit SystemEvent::ConfigChanged, run typed compile plus code-isomorphism gates, write lisp-code-sync reports, and create visible exact-shard BoardTasks when code falls behind Lisp.")
+    (v2-item lisp-code-sync-storm-circuit
+      :status runtime-projected
+      :v2-source ".missiond/v2/architecture-dsl.lisp :: SSOT-before-code invariant / worker backfill expectation"
+      :v3-pillar source-control
+      :v3-function same-source-storm-circuit-breaker
+      :surface lisp-code-sync-storm-circuit
+      :note "Repeated same-source Lisp/code sync failures converge into the V3 storm circuit so MissionD creates one deduped diagnostic task instead of recursively fanning out sync BoardTasks.")
     (v2-item context-pack-two-stage-parallel-work
       :status runtime-projected
       :v2-source ".missiond/v2/intent.lisp :: task-runner loop evidence + wave29 context-pack upgrade"
@@ -2986,6 +3015,13 @@
       :v3-function mission-board
       :surface mission_board
       :note "V2 board task lifecycle and claim mechanics converge into mission_board.")
+    (v2-item board-search-noise-governance
+      :status code-aligned
+      :v2-source ".missiond/v2/intent-flow.lisp :: board-task-main-lifecycle"
+      :v3-pillar coordination
+      :v3-function board-search-noise-governance
+      :surface board-search-noise-governance
+      :note "Board search defaults converge into a V3 noise-governance surface: active task scope is default, historical done/skipped search is opt-in, and cleanup candidate queries remain explicit.")
     (v2-item claudecode-workstation-config
       :status runtime-projected
       :v2-source ".missiond/v2/intent-worker.lisp :: claudecode-workstation-orchestration"
@@ -3035,6 +3071,20 @@
       :v3-function ops-infra
       :surface ops-infra
       :note "Local deploy, smoke, and scoped formatting are code-aligned V3 operations.")
+    (v2-item runtime-load-explanation
+      :status code-aligned
+      :v2-source ".missiond/v2/intent-system-layer.lisp :: infra/deploy/governance"
+      :v3-pillar operations
+      :v3-function runtime-load-explanation
+      :surface runtime-load-explanation
+      :note "Runtime-load explanation converges V2 operational diagnostics into one V3 read surface that attributes daemon-internal load across lisp-code-sync, EventBus, shared-memory/workflow-runner, context-prefetch, Autopilot/DB, and nightly evolution.")
+    (v2-item missiond-blue-green-self-update
+      :status code-aligned
+      :v2-source ".missiond/v2/intent-system-layer.lisp :: infra/deploy/governance"
+      :v3-pillar operations
+      :v3-function missiond-blue-green-self-update
+      :surface missiond-blue-green-self-update
+      :note "MissionD self-update converges into a V3 blue-green release surface: typed Lisp runtime projection, immutable release directories, active symlink switch, smoke gates, rollback, and cleanup are all code-aligned.")
     (v2-item knowledge-memory-and-kb
       :status runtime-projected
       :v2-source ".missiond/v2/intent.lisp :: memory/kb-manager"
@@ -3042,6 +3092,13 @@
       :v3-function knowledge-memory
       :surface memory-kb
       :note "KB, beacon, memory, insight, and intent snapshot tools are physically split under the V3 memory-kb surface; memory-kb-policy now projects realtime memory pending batch size and preview truncation budgets into mission_memory runtime.")
+    (v2-item codex-boot-context
+      :status code-aligned
+      :v2-source ".missiond/v2/intent-worker.lisp :: claudecode-workstation-orchestration"
+      :v3-pillar memory
+      :v3-function codex-boot-context
+      :surface codex-boot-context
+      :note "Codex boot context converges worker startup and external-chat handoff into a compact V3 context capsule so agents receive shared collaboration protocol and task grounding before full Lisp.")
     (v2-item durable-shared-memory
       :status code-aligned
       :v2-source ".missiond/tasks/schema/shared-memory-v1.lisp :: shared-memory-schema missiond.shared-memory.v1 (compatibility projection)"
@@ -3098,6 +3155,13 @@
       :v3-function incident-question-governance
       :surface incident-governance
       :note "Question CRUD, decision stats, LLM trace, Gemini auth, and incident routing are physically split and pinned under the V3 incident-governance surface.")
+    (v2-item decision-inbox-revalidation
+      :status code-aligned
+      :v2-source ".missiond/v2/intent-flow.lisp :: review/decision queue"
+      :v3-pillar communication
+      :v3-function decision-inbox-revalidation
+      :surface decision-inbox-revalidation
+      :note "Decision inbox revalidation converges stale question handling into a V3 communication surface: mission_question list/get re-checks current runtime evidence, resolves obsolete lisp-code-sync incident questions, closes linked stale BoardTasks, and returns revalidation status before asking the user.")
     (v2-item capability-governance
       :status runtime-projected
       :v2-source ".missiond/v2/intent-capability-governance.lisp"
@@ -3778,7 +3842,15 @@
 	               (step s2 :logic "retry IPC initialize smoke after socket readiness and rollback on real failure")
 	               (step s3 :logic "prove MissionD-owned crates are formatter-converged through rustfmt-missiond; use cargo-fmt-touched only for external or non-M6 scoped waves")
 	               (step s4 :logic "keep restart-time background indexing event-driven unless an operator explicitly opts into repository-wide AST full sync"))
-        :egress [deployed-daemon rollback-result formatter-convergence-result scoped-rustfmt-result])))
+        :egress [deployed-daemon rollback-result formatter-convergence-result scoped-rustfmt-result])
+      (function missiond-blue-green-self-update
+        :surface missiond-blue-green-self-update
+        :entry [scripts/deploy-daemon.sh mission_daemon_update release-manifest cleanup rollback]
+        :core ((step s1 :logic "compile typed Lisp runtime projections before building release candidates")
+               (step s2 :logic "build immutable paired missiond/mission-mcp release directories and write release-manifest.json")
+               (step s3 :logic "switch the active symlink only after pre-switch MCP smoke and post-switch daemon IPC smoke pass")
+               (step s4 :logic "support previous-release rollback, cleanup-only dry-run/apply, and incomplete release removal without mutating active on failure"))
+        :egress [release-manifest active-symlink rollback-result cleanup-report typed_lisp_runtime])))
 
   (implementation-map
     (surface mission_request
@@ -4143,6 +4215,7 @@
              "tools/missiond_lispc/test/dune"
              "tools/missiond_lispc/test/parser_golden.ml"
              "scripts/lib/ocaml_lispc.mjs"
+             "scripts/lib/v3_compiled_contract.mjs"
              "scripts/check-ocaml-toolchain.mjs"
              "scripts/check-typed-lisp-compiler.mjs"
              "scripts/compile-v3-runtime.mjs"
@@ -4150,7 +4223,7 @@
              "scripts/check-project-domain-hardening.mjs"
              "crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"
              ".missiond/workflows/typed-lisp-compiler-convergence.lisp"]
-      :note "Lisp remains the canonical authoring SSOT. The OCaml layer is a dev-time typed compiler/checker/projection layer for source-located diagnostics and generated runtime JSON; project universe and workflow projections include structured project/maturity/workflow payloads, workflow-directory gates validate every .missiond/workflows/*.lisp contract, project-directory structural gates validate each registered project's active blueprint shards before M5 maturity can rely on project-local shape evidence, and M6-depth gates validate Auth-grade domain/policy/flow/event/runtime/compatibility evidence. OCaml is not in the daemon hot path. JS checkers remain compatibility wrappers and code-anchor validators while OCaml takes ownership of Lisp AST semantics.")
+      :note "Lisp remains the canonical authoring SSOT. The OCaml layer is a dev-time typed compiler/checker/projection layer for source-located diagnostics and generated runtime JSON; project universe and workflow projections include structured project/maturity/workflow payloads, workflow-directory gates validate every .missiond/workflows/*.lisp contract, project-directory structural gates validate each registered project's active blueprint shards before M5 maturity can rely on project-local shape evidence, and M6-depth gates validate Auth-grade domain/policy/flow/event/runtime/compatibility evidence. OCaml is not in the daemon hot path. JS checkers remain compatibility wrappers and code-anchor validators, but their live surface/function facts are loaded through scripts/lib/v3_compiled_contract.mjs from missiond-lispc emit-v3 / emit-semantic-ir instead of a hand-maintained surface list.")
 
     (surface semantic-ir-compiler
       :status "code-aligned"
