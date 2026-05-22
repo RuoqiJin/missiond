@@ -48,6 +48,11 @@ let source_unit_to_json unit =
 let source_units_to_json units =
   "[" ^ (units |> List.map source_unit_to_json |> String.concat ",") ^ "]"
 
+let shard_kind forms =
+  match forms with
+  | [ form ] -> section_kind form
+  | _ -> "multi-section-shard"
+
 let load_shard ~blueprint_dir ~included_by ~include_loc ~stack target =
   if not (valid_include_path target) then
     raise
@@ -65,25 +70,22 @@ let load_shard ~blueprint_dir ~included_by ~include_loc ~stack target =
   let source = read_file file in
   let forms = Parser.parse_source file source in
   match forms with
-  | [ form ] ->
-      if is_list form "include" || is_list form "missiond-blueprint" then
-        raise
-          (Reader_error
-             ( loc_of form,
-               "included shard must provide exactly one top-level blueprint section"
-             ));
-      ( form,
+  | _ :: _ ->
+      List.iter
+        (fun form ->
+          if is_list form "include" || is_list form "missiond-blueprint" then
+            raise
+              (Reader_error
+                 ( loc_of form,
+                   "included shard must provide only blueprint sections; nested include and missiond-blueprint roots are forbidden"
+                 )))
+        forms;
+      ( forms,
         source,
         source_unit ~included_by ~include_line:include_loc.line file source
-          (section_kind form) )
+          (shard_kind forms) )
   | [] ->
       raise (Reader_error (include_loc, "included shard is empty: " ^ target))
-  | form :: _ ->
-      raise
-        (Reader_error
-           ( loc_of form,
-             "included shard must contain exactly one top-level blueprint section"
-           ))
 
 let expand_root blueprint_file root =
   let blueprint_dir = Filename.dirname blueprint_file in
@@ -97,12 +99,12 @@ let expand_root blueprint_file root =
                match include_target child with
                | None -> [ child ]
                | Some target ->
-                   let form, _source, unit =
+                   let forms, _source, unit =
                      load_shard ~blueprint_dir ~included_by:blueprint_file
                        ~include_loc:(loc_of child) ~stack:[ blueprint_file ] target
                    in
                    units := unit :: !units;
-                   [ form ])
+                   forms)
         |> List.flatten
       in
       (List (loc, kind, expanded), List.rev !units)

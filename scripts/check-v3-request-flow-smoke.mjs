@@ -136,6 +136,7 @@ import {
   parseLisp,
   readKeywordProps,
 } from './lib/missiond_lisp.mjs';
+import { readBlueprintWithEvidenceSidecars } from './lib/v3_blueprint_contract_source.mjs';
 import { callToolViaIpc } from './task-runner-submit-dispatch.mjs';
 
 const BLUEPRINT_PATH = '.missiond/v3/missiond-blueprint.lisp';
@@ -1406,9 +1407,16 @@ async function main() {
 
   if (!opts.dryFixture) {
     const blueprintAbs = path.resolve(opts.repo, opts.blueprint);
+    const repoRoot = path.resolve(opts.repo);
+    const blueprintRel = path.isAbsolute(opts.blueprint)
+      ? path.relative(repoRoot, blueprintAbs)
+      : opts.blueprint;
     let blueprintSource;
     try {
-      blueprintSource = fs.readFileSync(blueprintAbs, 'utf8');
+      blueprintSource =
+        blueprintRel.startsWith('..') || path.isAbsolute(blueprintRel)
+          ? fs.readFileSync(blueprintAbs, 'utf8')
+          : readBlueprintWithEvidenceSidecars(repoRoot, blueprintRel);
     } catch (err) {
       diagnostics.push({ file: opts.blueprint, message: `cannot read blueprint: ${err.message}` });
       blueprintSource = null;

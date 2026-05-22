@@ -199,7 +199,8 @@ let validate_provider_unavailable_policy diagnostics file forms =
 
 let validate file =
   try
-    let forms = Parser.parse_file file in
+    let resolved = Source_resolver.resolve_blueprint_file file in
+    let forms = resolved.forms in
     let diagnostics = ref [] in
     let root = find_root forms "missiond-blueprint" in
     (match root with

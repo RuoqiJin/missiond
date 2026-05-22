@@ -1,0 +1,28 @@
+  (ops-infra
+    :desc "Lisp-owned operational scripts for deploy, smoke, and formatter-converged source hygiene."
+    :scripts [scripts/deploy-daemon.sh scripts/rustfmt-missiond.sh scripts/cargo-fmt-touched.sh]
+    :invariants
+      ["Daemon redeploy MUST stay one command: build -> candidate release -> manifest -> active symlink -> launchctl kickstart -> socket wait -> IPC smoke."
+       "Active daemon and MCP entrypoints MUST resolve through ~/.xjp-mission/active."
+       "Blue-green rollback MUST switch active back to the previous release."
+       "Release cleanup MUST keep active, previous, and newest retained releases."
+       "IPC smoke MUST retry after socket readiness and then rollback on failure; socket-bound is not enough evidence that the MCP initialize path is ready."
+       "Deploy smoke timeout MUST be configurable through MISSIOND_DEPLOY_SMOKE_TIMEOUT so local launchd cold-start races do not force code edits."
+       "Deploy scripts MUST emit timing for cargo-build, release-copy, codesign, pre-switch smoke, kickstart, socket wait, post-switch smoke, and cleanup so iteration bottlenecks are observable."
+       "Dev-only fast deploy may select debug profile and sccache through explicit operator flags/env, but must preserve release manifest, active symlink, smoke, and rollback semantics unless smoke is explicitly disabled."
+       "AST repository-wide startup full sync MUST be opt-in through MISSIOND_AST_FULL_SYNC_ON_STARTUP; routine blue-green restarts stay event-driven and must not rewrite topology KB when no stale code files were synced."
+       "Deploy scripts MUST NOT write git state or delete the launchd-owned socket; rollback may restore only the installed binary and restart the launchd job."
+       "M6 MissionD formatting MUST be converged: scripts/rustfmt-missiond.sh --check is the repository-owned Rust formatter gate for crates/**."
+       "Rust formatter edition MUST be derived from workspace Cargo.toml; ad-hoc rustfmt --edition overrides are forbidden because Rust edition migration is an explicit codebase migration, not a formatter flag choice."
+       "No MissionD Rust source may carry formatter exemption markers; legacy rustfmt exemptions are incompatible with MissionD M6."
+       "rustfmt MUST run with skip_children=true so formatting a crate root cannot recursively churn child modules outside the intended formatter scope."
+       "Rust formatting for external or non-M6 projects MAY remain scoped through scripts/cargo-fmt-touched.sh, including staged, unstaged, and branch-diff modes."
+       "The no-Rust-files path MUST exit 0 under set -euo pipefail; filters must not turn an empty grep match into a script failure."
+       "MissionD primary runtime database MUST be PostgreSQL-only; the old MissionD SQLite backend, SQLite-to-Postgres migration module, and sqlite feature cfg MUST be absent from active code/build paths."
+       "SQLite references are allowed only for external provider durable sources such as Codex CLI state_5.sqlite, or for independent non-MissionD storage crates such as skill-store; they MUST NOT reintroduce a MissionD runtime database backend."]
+    :checks ["bash -n scripts/deploy-daemon.sh"
+             "bash -n scripts/rustfmt-missiond.sh"
+             "scripts/rustfmt-missiond.sh --check"
+             "bash -n scripts/cargo-fmt-touched.sh"
+             "scripts/cargo-fmt-touched.sh --check"
+             "node scripts/check-v3-ops-infra-isomorphism.mjs"])

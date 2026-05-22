@@ -1,0 +1,471 @@
+  (workstation-config
+    :desc "Lisp-owned workstation spawn policy; runtime slot config is a projection, not an independent default."
+    :config-fields [:template :model_profile :model :cwd :project_root :mcp_config :ttl :permission_mode]
+    :resolution-order [caller-model caller-model-profile task-intent-template claude-code-default]
+    (model-profile coding-default-opus-4-7
+      :applies-to [code research]
+      :claude-code-ui "Default recommended"
+      :effective-model "Opus 4.7 with 1M context"
+      :spawn-model-arg nil
+      :rule "Omit --model so Claude Code uses the user's Default model selection.")
+    (model-profile research-default
+      :applies-to [research review context-pack lisp-compression]
+      :pool-binding gemini-ultra-pro
+      :spawn-model-arg nil
+      :rule "Research-class delegations route to the workstation-pool gemini researcher slot. spawn-model-arg is nil because the binding is to a pre-spawned Gemini PTY; explicit caller model_profile=coding-default-opus-4-7 overrides this and pins the work to Claude.")
+    (model-profile gemini-ultra-pro-preview
+      :applies-to [research review context-pack lisp-compression language-explanation]
+      :pool-binding gemini-ultra-pro
+      :spawn-model-arg "gemini-3.1-pro-preview"
+      :rule "Gemini Ultra defaults to Gemini 3.1 Pro Preview for high-level read-only investigation; lower-authority fast survey lanes must be explicitly requested.")
+    (model-profile codex-master-gpt-5-5-xhigh
+      :applies-to [master-control orchestration governance night-audit]
+      :pool-binding codex-master-control
+      :spawn-model-arg "gpt-5.5"
+      :reasoning-effort xhigh
+      :search true
+      :sandbox danger-full-access
+      :approval-policy never
+      :rule "Resident master control uses Codex GPT-5.5 with xhigh reasoning and full local sandbox access. It remains an audited orchestrator: every direct mutation must leave Board/KB/checkpoint evidence, while ordinary implementation still prefers delegated workers.")
+    (model-profile daily-sonnet
+      :applies-to [ops low-risk-maintenance]
+      :spawn-model-arg "sonnet"
+      :rule "Use only when the task or caller explicitly asks for Sonnet-class daily work.")
+    (model-profile quick-haiku
+      :applies-to [docs test chore low-risk-fast-path]
+      :spawn-model-arg "haiku"
+      :rule "Use only when the task or caller explicitly asks for a low-cost fast Claude Code model.")
+    (slot-template coder
+      :role coder
+      :description "Dynamic coder slot (ephemeral)"
+      :default-model-profile coding-default-opus-4-7
+      :mcp-config "$MISSION_HOME/xjp-mcp-config.json"
+      :default-cwd "/Users/jinchen/Projects")
+    (slot-template researcher
+      :role coder
+      :description "Dynamic researcher slot (read-only analysis)"
+      :default-model-profile research-default
+      :mcp-config "$MISSION_HOME/xjp-mcp-config.json"
+      :default-cwd "/Users/jinchen/Projects")
+    (slot-template ops
+      :role operator
+      :description "Dynamic ops slot (ephemeral)"
+      :default-model-profile daily-sonnet
+      :mcp-config "$MISSION_HOME/xjp-mcp-config.json"
+      :default-cwd "/Users/jinchen/Projects")
+    (cwd-policy dynamic-slot
+      :allowed-prefixes ["/Users/jinchen/Projects" "/Users/jinchen/Downloads" "/Users/jinchen/Documents" "/tmp"])
+    (chat-completions-policy jarvis-api
+      :default_slot "slot-claude-code-default"
+      :header_override "X-Slot-Id"
+      :rule "OpenAI-compatible /v1/chat/completions routes to the explicit X-Slot-Id header when present; otherwise it uses this V3-projected default slot. Rust must not hardcode slot-jarvis.")
+    (startup-slot arch_maintenance
+      :engine claude-code
+      :lifecycle persistent
+      :slot_id "slot-arch-maint"
+      :role arch-maint
+      :model_profile coding-default-opus-4-7
+      :timeout_secs 600
+      :skip_permissions true)
+    (startup-slot strategy_analyst
+      :engine gemini
+      :lifecycle persistent
+      :slot_id "slot-gemini-strategy"
+      :role strategy
+      :model_profile nil
+      :timeout_secs 600
+      :skip_permissions true)
+    (startup-slot gemini_router
+      :engine gemini
+      :lifecycle persistent
+      :slot_id "slot-gemini-router"
+      :role gemini-router
+      :model_profile nil
+      :timeout_secs 120
+      :skip_permissions true)
+    (startup-slot lisp_survey
+      :engine claude-code
+      :lifecycle persistent
+      :slot_id "lisp-surveyor"
+      :role coder
+      :model_profile coding-default-opus-4-7
+      :timeout_secs 900
+      :skip_permissions true)
+    (timeout-policy boardtask-dispatch
+      :default_secs 1800
+      :min_secs 60
+      :max_secs 7200
+      :watchdog_grace_secs 120
+      :missing_session_probe_secs 120)
+    (timeout-policy claudecode-swarm
+      :default_secs 600
+      :min_secs 60
+      :max_secs 7200)
+    (timeout-policy pty-send-blocking
+      :default_secs 300
+      :min_secs 1
+      :max_secs 7200)
+    (timeout-policy dynamic-slot-spawn
+      :default_secs 60
+      :min_secs 10
+      :max_secs 600)
+    (dispatch-policy context-pack-run-wave
+      :default_max_parallel 4
+      :min_parallel 1
+      :max_parallel 8)
+    (capacity-policy swarm-workers
+      :default_claude_workers 8
+      :max_claude_workers 16
+      :default_gemini_workers 2
+      :max_gemini_workers 6
+      :dynamic_slot_limit 20
+      :delegate_rate_per_minute 24)
+    (ttl-policy dynamic-slot
+      :default_secs 14400
+      :min_secs 300
+      :max_secs 28800
+      :default_extend_secs 3600
+      :max_extend_secs 3600)
+    (managed-node-runtime-policy host-portability
+      :mcp-config-resolution host-relative
+      :mcp-config-placeholders ["$MISSION_HOME"]
+      :registered-project-roots-allowed true
+      :db-integer-portability [ttl_seconds extend_count message_count])
+    (pty-provider-unavailable-policy provider-blocked-diagnostics
+      (state auth_missing
+        :state blocked
+        :blocked-kind auth_missing
+        :keywords [credentials credential login auth authenticated])
+      (state billing_or_account
+        :state blocked
+        :blocked-kind billing_or_account
+        :keywords [billing payment subscription suspended paused account])
+      (state usage_limit
+        :state blocked
+        :blocked-kind usage_limit
+        :keywords [quota limit rate-limit usage]))
+    :invariants
+      ["code and research dynamic slots MUST NOT hardcode --model sonnet"
+       "daemon startup SlotManager ClaudeCode task configs MUST project coder/researcher model profiles from workstation-config and omit --model for coding-default-opus-4-7"
+       "daemon startup SlotManager task configs MUST be generated from workstation-config startup-slot entries, including engine/lifecycle/slot_id/role/timeout_secs/skip_permissions"
+       "daemon startup MUST resolve the MissionD orchestrator root from MISSIOND_PROJECT_ROOT, MISSIOND_ORCHESTRATOR_ROOT, or the current working directory ancestor containing .missiond/v3/missiond-blueprint.lisp; runtime code MUST NOT hardcode /Users/jinchen/Projects/missiond as the orchestrator root because managed machines may install MissionD under their own user home."
+       "Clean-machine daemon startup MUST create missing provider history watch directories such as ~/.claude/projects before registering filesystem watchers; absence of prior ClaudeCode/Codex/Gemini history is not a fatal condition for a managed MissionD node."
+       "mission_compute_slot dynamic template role/description/mcp_config/default_cwd and allowed cwd prefixes MUST project from workstation-config slot-template + cwd-policy dynamic-slot, not a Rust-local template table; dynamic slots MUST also allow cwd under any registered active ProjectRegistry root so managed nodes installed under a different user home (for example /Users/rickyhq/Projects/missiond) can run without host-specific Lisp rewrites."
+       "ClaudeCode mcp_config MUST be host-relative: workstation-config may use $MISSION_HOME/xjp-mcp-config.json, and PTY launch MUST resolve stale or missing xjp-mcp-config.json paths to the current host's MissionD home before spawning. MissionD blue-green deploy MUST create a host-local xjp-mcp-config.json with at least the missiond MCP server when it is missing, so fresh managed nodes do not fail with a literal $MISSION_HOME path. A managed node MUST NOT inherit /Users/jinchen/.xjp-mission/xjp-mcp-config.json as an executable truth. If a slot keeps a live PTY process while its public agent_info state is Exited/Error, readiness MUST classify stale_slot and spawn MUST clean the stale session before respawn instead of reporting both already-running and exited."
+       "PTY recognition MUST classify provider unavailable states as blocked diagnostics, not completed turns: auth_missing covers missing credentials/login-required screens, billing_or_account covers paused/suspended/payment/subscription failures, and usage_limit covers quota/rate-limit exhaustion. Exited/Error SessionState may override stale running text, but MUST preserve these provider-unavailable blocked snapshots so Board/Terminal can show the real action required."
+       "Dynamic slot database rows MUST decode ttl_seconds and extend_count portably from Postgres INTEGER or BIGINT so clean managed nodes initialized from current migrations do not panic with int4/i64 mismatches."
+       "Jarvis/OpenAI-compatible chat completions default slot MUST project from workstation-config chat-completions-policy jarvis-api; X-Slot-Id remains the explicit request override and Rust MUST NOT hardcode slot-jarvis."
+       "model=\"default\" and model_profile=coding-default-opus-4-7 both mean no CLI --model override"
+	       "mission_compute_slot model_profile resolution MUST use workstation-config model-profile spawn-model-arg, not a Rust-local profile table"
+	       "caller-supplied model wins over model_profile, but must be a single shell token"
+	       "task_delegate must pass model/model_profile through to compute_slot and must not reuse an idle slot with a conflicting model override"
+	       "mission_task_delegate MUST accept structured two-stage delegation metadata (task_class, pool_hint, engine_hint, context_pack_path, read_scope, write_scope, must_not_touch, acceptance) and persist it into the BoardTask description so Autopilot workers see context-pack path, explicit readable evidence, exact write scope, forbidden write paths, and acceptance commands without relying on side-channel PTY text. The generated scope_semantics line MUST state that must_not_touch forbids write/stage/commit and is not a read ban by itself; review/context-pack/research tasks MUST carry an output_contract requiring a structured artifact with Findings / Evidence / Recommendations / Verification rather than raw KB JSON or full logs."
+	       "mission_task_delegate duplicate-code-worker guard MUST compare relative write_scope entries inside their resolved BoardTask.project/project_root only; cross-project sibling tasks may all write .missiond/check.sh or .missiond/evidence/current-code-mapping.md without false DUPLICATE_CODE_WORKER_BLOCKED refusals. Absolute write_scope entries remain globally comparable."
+	       "mission_task_delegate MUST NOT auto-preload KB/Skill context from context_hints into worker prompts by default; current KB/skill stores are noisy and hidden prompt injection obscures task contracts. Context must come from explicit read_scope, context_pack_path, task contract, or a future explicit memory-audit workflow."
+		       "Autopilot context prefetch defaults disabled until memory stores are cleaned: delegated worker prompts MUST NOT prepend KB/Skill/context-pipeline output unless an explicit memory-audit workflow opts in via MISSIOND_AUTOPILOT_CONTEXT_PREFETCH=1."
+	       "mission-mcp initialize MUST NOT inject KB summary / search-path instructions by default; noisy memory context is opt-in only via MISSIOND_MCP_PRELOAD_INSTRUCTIONS=1 for explicit memory-audit sessions."
+	       "Deploy/CI wait loops MUST use deploy-center provenance/events or bounded XJP MCP wait/watch tools such as xjp_build_wait and xjp_deploy_watch. Workers MUST NOT repeatedly poll GitHub Actions with raw gh api loops; GitHub API calls are diagnostic snapshots only, not the waiting mechanism."
+	       "mission_swarm_run MUST honor max_gemini_workers exactly: when max_gemini_workers=0, no spawned context-pack BoardTask may use intent=research or any other routing signal that sends the task to Gemini; Claude context-pack workers use code/coder routing plus read-only completion protocol."
+	       "mission_swarm_run MUST resolve project_id to a registered project_root before creating external-project BoardTasks; generated swarm metadata and default read_scope must include that project_root so Autopilot can spawn provider PTYs in the target project instead of MissionD's own cwd. For cross-project universe work, mission_swarm_run MUST accept target_project_ids/targetProjectIds, resolve every id through ProjectRegistry, render target_projects into the worker Swarm metadata and missiond.swarm-context-pack.v1 sidecar, and merge every target root into read_scope so workers can inspect all declared projects without relying on prompt prose. When target_project_ids is present and more than one context-pack worker is requested, mission_swarm_run MUST partition target project roots across workers by default, while preserving any non-target caller read_scope entries for every worker; duplicate all-target broad audits are allowed only through an explicit caller read_scope override. If a child task's read_scope/write_scope resolves to exactly one target project, the child BoardTask.project, Swarm metadata project_id/project_root, and auto-provisioned dynamic slot cwd/project_root MUST be that target project rather than the orchestrator project. Worker-facing context_pack_path MUST be an absolute MissionD workspace path (or an already absolute caller path), because external-project workers run with cwd at the target project root and relative .missiond paths would point at the wrong project. For non-dry-run dispatch, mission_swarm_run MUST materialize a missiond.swarm-context-pack.v1 sidecar at context_pack_path before publishing worker BoardTaskCreated events."
+	       "mission_swarm_run MUST auto-provision per-Claude dynamic slots by default for non-dry-run Claude context-pack / implement shards and persist each created slot id as the child BoardTask assignee before publishing BoardTaskCreated. This is the productized fanout path for M6 SSOT waves; otherwise all children collapse onto the single persistent ClaudeCode slot. auto_provision_slots=false is allowed only as an explicit diagnostic override."
+	       "mission_swarm_run context-pack/read-only lanes MUST render write_policy=read-only and the strict no-edit/no-stage/no-commit completion protocol even when the parent wave write_policy is lisp-first or code; write permission is granted only to lanes with a non-empty write_scope."
+	       "mission_swarm_run MUST fail fast with SWARM_IMPLEMENT_WRITE_SCOPE_REQUIRED when write_policy is not read-only and the caller did not pass an explicit write_scope; the tool must never dry-run or dispatch an implementation shard with an empty write_scope because that turns disjoint ownership into prompt prose."
+	       "mission_swarm_run MUST fail fast with SWARM_ACCEPTED_SHARD_REQUIRED when write_policy is not read-only and the caller did not pass accepted_shard_id/acceptedShardId; implementation workers consume already-accepted exact shards, never broad M6 objectives."
+	       "mission_task_delegate MUST fail fast with EXACT_SHARD_CONTEXT_PACK_REQUIRED / EXACT_SHARD_ID_REQUIRED when a code/implementation worker declares write_scope but lacks context_pack_path or accepted_shard_id. Broad review/design goals belong to investigator lanes; implementation lanes must name the accepted shard id."
+	       "Implementation worker prompts MUST explicitly forbid internal ClaudeCode TaskCreate/TaskUpdate subagent delegation; recursive decomposition belongs to MissionD master/workflow and is audited from provider durable logs as a workflow violation."
+	       "mission_task_delegate and mission_swarm_run MUST accept parent_id/parentId aliases and persist them into CreateBoardTaskInput.parent_id when a master objective spawns child shards; mission_swarm_run MUST also render parent_board_task_id in the worker-facing Swarm metadata so the Board hierarchy, parent-note closeout, and master recovery loop can connect child completion evidence back to the active objective."
+	       "Autopilot ensure_pty MUST override pty_slot.cwd to the BoardTask.project's registered project_root when the BoardTask carries a project label that resolves under ProjectRegistry and that root differs from slot.config.cwd; spawn_tracked_slot's project-root-spawn-cwd contract then handles Gemini/Codex hard-fail and ClaudeCode normalization. Slot reuse for cross-project dispatch MUST require slot.project_root == BoardTask project_root (already enforced for mission_task_delegate; mission_swarm_run BoardTasks rely on the spawn-side cwd override for the same effect)."
+	       "Autopilot MUST unclaim a BoardTask when ensure_pty returns false after a claim, because spawn-pending / busy / transient PTY states are retryable dispatch conditions and must not wedge the task in running with no prompt delivered."
+	       "Autopilot ensure_pty MUST treat `PTY session already running` from spawn_tracked_slot as a pre-provisioned dynamic-slot race: wait briefly for Idle and reuse the PTY instead of recording a spawn failure note or incrementing BoardTask retry. If the session remains non-idle, it is a retryable busy condition and the task must be unclaimed for a later tick."
+	       "Autopilot/flow-engine BoardTask dispatch MUST bind conversations.task_id to the active BoardTask via a bounded retry helper at dispatch time (5 attempts at 200 ms) and MUST re-bind after the worker final settle window to cover provider JSONL/session-discovery races; completion-time durable_provider_completion_for_slot_task remains a fallback. The dispatch site is the single rebind authority: when a new BoardTask claims a slot whose conversation row carries a different earlier task_id, Autopilot MUST authoritatively overwrite conversations.task_id to the incoming task. The conservative `conversation_task_binding_update_allowed` predicate is reserved for the post-completion durable backfill path (set only when unbound or already matching); the pre-dispatch path uses a force-rebind helper that logs the displaced task id for audit. Historical attribution lives in durable messages (mission_conversation_query(taskId=...) MUST also recover provider conversations whose durable messages contain the BoardTask id), so a stale conversations.task_id pointer is unnecessary and previously caused mission_conversation_query(taskId=<new>) to return the prior task's conversation (BoardTask 31e5449c-e315-4003-ad59-c3eebd5eb837 evidence: slot-claude-code-default returned the 5599b07a conversation when queried by 738c96f5)."
+       "Autopilot dispatch MUST enforce a single-running-BoardTask-per-slot invariant: before claim_board_task, scan running tasks for any other BoardTask whose claim_executor_type=pty_slot and claim_executor_id matches the incoming slot id, and unclaim each one with a durable note. A queued task with assignee=slot but no claim_executor_id is NOT considered running on the slot and MUST NOT be unclaimed by this guard. The display layer (handlers/compute/slot.rs `active_board_task_for_slot`) projects the slot's running task from this single-claim invariant, so two tasks can never appear running on the same slot for the same dispatch tick."
+       "Autopilot close path MUST gate PTY-only completion (durable provider final unavailable after settle) for delegated worker BoardTasks (description carries `## Swarm metadata` or `## Dispatch metadata`). pty_only_close_blocker requires the PTY summary to contain a structured artifact marker (Findings / Evidence / Recommendations / Verification / Summary heading / acceptance evidence) before close; otherwise the BoardTask stays running so the watchdog/next tick can re-extract once the provider log lands. If the worker description declares output_contract Findings / Evidence / Recommendations / Verification, output_contract_close_blocker applies even when a durable provider summary exists, because a reused provider session may expose an older task's accepted summary before the current task's final artifact lands. Workflow-specific structured artifacts may satisfy the same contract when they carry Findings + Verification plus explicit candidate/rationale sections; memory-review-batch-runner accepts Active Memory Candidates / SSOT-Workflow Backfill Candidates / Needs Human / Discard Rationale as the Evidence/Recommendations equivalent. Repro evidence: BoardTask 31e5449c-e315-4003-ad59-c3eebd5eb837 child tasks a5ebf6c4..., 5599b07a..., b5be6eed... had Board summary notes that captured an intermediate assistant sentence while the structured artifact landed only in Claude JSONL after settle; BoardTask 7b5f3174... briefly picked a prior M10 overlay summary before the current context-pack's Findings/Evidence/Recommendations/Verification report arrived; memory review child e1ea8d06... produced valid memory-review sections but was repeatedly blocked as missing-output-contract-sections until the contract admitted workflow-specific artifact headings."
+       "Autopilot durable final acceptance evidence MUST recognize provider final summaries that say gates green/pass, checks pass, checker passed, check.sh passed, acceptance commands passed, or final M10 evidence-only gate confirmation, not just legacy words like verified/passed/changed files. Repro evidence: M10 child tasks 5ecb01cd..., d699c9c7..., 66aed32d..., ae72b0ec..., and f6c5475d... produced durable ClaudeCode finals with gate/checker completion language but were incorrectly blocked as missing-acceptance-evidence."
+       "mission_swarm_run callers (resident master, autopilot, ad-hoc operators) MUST pass multi-project objectives via target_project_ids/targetProjectIds/target_projects/targetProjects structurally; project lists embedded only in the objective prose are ignored by the tool because the schema does not parse natural language. The MCP schema MUST expose target_project_ids and aliases as an array property of mission_swarm_run so MCP clients can pass it without guessing naming conventions. Failure mode (BoardTask 31e5449c regression): when only project_id was supplied and the objective text named multiple registered projects in prose, target_projects collapsed to project_id only and the swarm could not fan out across the universe."
+	       "Autopilot MUST treat explicit engine_hint/pool_hint as hard constraints when the V3 workstation-pool declares at least one matching worker: resolve matching workers against the full workstation-pool before task_class fallback can narrow candidates away; if that worker is busy or stopped, the task waits instead of silently spending a different provider. Fallback to a non-matching worker is allowed only when no declared worker satisfies the hint at all, and that fallback MUST record a durable reroute_reason as a BoardTask note before dispatching so the operator can see why the requested engine/pool was not used. Autopilot close-owner MUST block task close when a worker final says it could not write the requested deliverable because of plan/read-only mode."
+	       "mission_task_delegate intent=research without an explicit Claude coding model/model_profile MUST prefer the workstation-pool gemini researcher slot (slot-gemini-ultra) when registered; the researcher slot-template's :default-model-profile is research-default, which binds to the gemini-ultra worker. Auto-provisioning a dynamic Claude slot for research is forbidden while a V3 gemini researcher slot exists; the BoardTask is queued unassigned and the autopilot routes it to the gemini slot once idle. Explicit model_profile=coding-default-opus-4-7 (or any Claude profile) still routes the BoardTask to Claude."
+       "Project-bound workstation spawn MUST sync MissionD Claude hooks into <project>/.claude/settings.local.json before PTY start and MUST inject MISSION_IPC_ENDPOINT into the slot env; this preserves global ~/.claude/settings.json while making SessionStart UUID capture local, idempotent, and project-scoped. UserPromptSubmit context prefetch MUST be opt-in only through MISSIOND_CLAUDE_CONTEXT_PREFETCH=1 and the hook sync MUST remove missiond-context-inject-v2.sh from project settings by default while KB/history stores are noisy."
+       "Autopilot pty.send budget MUST project from BoardTask.timeout_secs (default 1800s, clamped 60..7200) — never a fixed 600_000ms — so a delegated long-running task gets the timeout the delegator already declared"
+       "mission_cc_swarm pty.send budget MUST project from workstation-config timeout-policy claudecode-swarm (default 600s, clamped 60..7200) — never a local 600_000ms literal"
+       "mission_pty_send waitForResponse budget MUST project from workstation-config timeout-policy pty-send-blocking (default 300s, clamped 1..7200) — never a local 300_000ms literal"
+       "mission_compute_slot and Claude/Gemini slot-orchestrator dynamic slot spawn wait_for_idle timeouts MUST project from workstation-config timeout-policy dynamic-slot-spawn (default 60s, clamped 10..600) — never local Some(60)/Some(120) literals"
+       "context-pack-run-wave default worker fanout MUST project from workstation-config dispatch-policy context-pack-run-wave (default 4, clamped 1..8), while caller --max-parallel remains an explicit override"
+       "mission_swarm_run fanout defaults/caps and dynamic slot limits MUST project from workstation-config capacity-policy swarm-workers (default Claude 8 max 16, default Gemini 2 max 6, dynamic slots 20, delegate rate 24/min) so supervised waves can scale without divergent Rust constants"
+       "Dynamic slot TTL and per-request extension budget MUST project from workstation-config ttl-policy dynamic-slot (create default 14400s, clamped 300..28800; extend default/max 3600s) — direct mission_compute_slot create/extend and delegated task_delegate auto-provision must not hardcode the TTL window"
+       "Smart watchdog idle-recovery threshold MUST equal the projected pty.send budget plus a small grace (default 120s); only the no-PTY-session branch may reclaim sooner so a missing process can never wedge the slot"
+       "Autopilot BoardTask claim lease MUST equal the smart-watchdog idle-recovery threshold (projected pty.send budget plus grace); the legacy fixed 20-minute lease is forbidden because it lets the watchdog reclaim a slot whose claim is still legitimately ticking inside the declared timeout"
+       "Autopilot summary-note source MUST prefer durable provider final evidence after wait_for_worker_final_settle_window(), per-session reconcile, and a bounded await_durable_provider_completion_for_slot_task poll. Inside durable provider evidence, provider_completion_summary_for_task MUST prefer latest_assistant_after_task_prompt for the current BoardTask before any conversation.task_id latest-after-claim fallback, because a single provider session may execute multiple sequential BoardTasks and later rebinds must not let an older final leak into the current task. Durable assistant messages that are tool invocations, survey/progress narration such as 'Checking ...', 'Surveying ...', 'Reading ...', 'Inspecting ...', 'Reviewing ...', 'Looking at ...', or 'Gathering ...', initial worker-intent narration such as 'I'll execute...' / 'I'll begin by reading...' / 'Acknowledged... I will redo...' / 'Let me start/re-verify...', intermediate investigation narration such as 'Let me ...' / 'Let me inspect/check/read/verify/confirm/corroborate/write/create/examine...' / 'Now I'll ...' / 'Now I will ...', mutation-progress narration such as 'Now committing...' / 'staging and committing...' / 'Writing the ... now', or retry/wakeup blocker narration such as 'wakeup will fire' / 'scheduled to retry' / 'wait for that retry' / 'ENOSPC' / 'no space left on device' are not valid finals. Raw res.response is forbidden in the **Autopilot 执行完成** note format string and in the synthesized mission_execution(action=complete) summary; fallback extract_worker_final_summary(res.response, full_prompt) is allowed only after durable evidence is unavailable and MUST strip bare tool-call lines such as Bash(...), ●/⎿ tool logs, echoed task contract, and `[Pasted text +N lines, paste again to expand]` collapse markers. Auth-error and quota-exhausted diagnostic notes intentionally bypass this path and keep the raw response so on-call sees the verbatim platform error"
+       "Autopilot close path MUST call wait_for_worker_final_settle_window() after pty.send completion and before summary-note / mission_execution / BoardTask done writes, then poll durable provider evidence for one additional bounded settle budget before using the PTY fallback. PTY idle alone is diagnostic, while pty.send completion plus durable evidence or sanitized fallback is the high-confidence final summary path."
+       "If pty.send returns an active/progress frame but the provider later records a durable final assistant message in claude-jsonl/codex-sqlite/gemini-chat-file, or the master/worker later writes a durable BoardTask summary note, and the claimed slot is idle, Autopilot watchdog MUST synthesize the missing BoardTask summary when needed and close the running BoardTask from durable provider-or-note evidence + idle slot diagnosis; it MUST NOT wait for the full timeout/grace or close from PTY idle alone."]
+    (prompt-tool-contract autopilot-claudecode-prompt
+      :applies-to [coder researcher ops]
+      :always-shown
+        ["Board Task ID is surfaced in every dispatched prompt so the worker (and any reader of the prompt snapshot) can audit which BoardTask the slot is executing."]
+      :objective-dedupe
+        "Prompt assembly MUST suppress duplicated objective text: when BoardTask.description equals BoardTask.title or starts with the title followed only by blank lines, the assembled prompt uses description alone; distinct title + description still renders both joined by a blank line."
+      :board-self-close
+        (:mode conditional
+         :when-tools-present "If mission_board_update and mission_board_note_add MCP tools are attached to the slot, the worker SHOULD call mission_board_update(status=\"done\") and mission_board_note_add(noteType=\"summary\") when the task completes."
+         :when-tools-absent "If those board tools are not attached to the slot, the worker MUST instead return a concise final completion summary; Autopilot/orchestrator remains responsible for closing the BoardTask."
+         :rationale "ClaudeCode slots may run with reduced MCP surfaces; an unconditional must-call instruction makes such slots unable to honor the prompt and leaks orchestrator state into the worker contract.")
+      :non-prompt-guidance
+        ["Decision Engine escalation suffix (mission_question_create) and ops-task focus suffix remain behaviorally intact and are appended after the deduplicated base prompt."])
+    (execution-ownership delegated-boardtask
+      :applies-to [coder researcher ops]
+      :prompt-owner
+        "For delegated BoardTask execution, Autopilot is the sole task-prompt owner. mission_task_delegate auto-provision (compute_slot/spawner) MAY warm a dynamic slot but MUST NOT send the task objective as a fire-and-forget initial-prompt; objective is slot metadata only. The slot starts idle and Autopilot sends the BoardTask prompt via state.pty.send. Direct compute_slot warmup requires an explicit initial_prompt field."
+	 :close-owner
+        (:default "Autopilot is the close owner — when state.pty.send returns Complete, Autopilot transitions the BoardTask running→done and writes the summary note."
+         :worker-self-close "If the slot has board MCP tools attached and the worker already drove the BoardTask to Done via mission_board_update before pty.send returns, Autopilot preserves the worker's Done state and only logs that the task self-closed."
+         :execution-log-synthesis "If the delegated prompt carries a pre-opened mission_execution log and the slot returned a final summary without appending a completion, Autopilot MUST synthesize mission_execution(action=complete, commit_status=\"not-required\", enforce_scoped_commit=true) before closing the BoardTask."
+	         :summary-note-source "The `**Autopilot 执行完成**` BoardTask summary note and the synthesized mission_execution(action=complete) summary MUST prefer durable provider final evidence after settle + per-session reconcile + bounded durable-final polling (claude-jsonl/codex-sqlite/gemini-chat-file), but durable assistant tool-invocation records such as `[Tool: Bash] ...`, active/progress frames, initial worker-intent narration such as 'I'll execute...' / 'I'll begin by reading...' / 'Acknowledged... I will redo...' / 'Let me start/re-verify...', intermediate investigation narration such as 'Let me ...' / 'Let me inspect/check/read/verify/confirm/corroborate/write/create/examine...' / 'Now I'll ...' / 'Now I will ...', mutation-progress narration such as 'Now committing...' / 'Writing the ... now', and retry/wakeup blocker narration such as 'wakeup will fire' / 'scheduled to retry' / 'wait for that retry' / 'ENOSPC' / 'no space left on device' are not valid finals; only fall back to extract_worker_final_summary(res.response, full_prompt) when no valid durable final exists after polling. The note body is capped via truncate_safe, and passing raw res.response into the note format string is forbidden because the Claude Code TUI screen capture includes the echoed prompt + task contract, bare Bash(...)-style tool-call lines, ●/⎿ tool log lines, and `[Pasted text +N lines, paste again to expand]` collapse markers. Auth-error and quota-exhausted diagnostic notes intentionally bypass this path and keep the raw response so on-call operators see the verbatim platform error."
+	         :settle-window "After pty.send returns Complete, Autopilot MUST wait through wait_for_worker_final_settle_window() and then poll durable provider evidence for one bounded settle budget before writing the summary note, synthesizing mission_execution completion, or transitioning the BoardTask to Done; default settle is intentionally long enough for provider JSONL/SSE final text to land, and may be overridden only by MISSIOND_AUTOPILOT_FINAL_SETTLE_MS."
+	         :commit-failure-blocker "If the worker final indicates a blocking commit/tool failure such as GPG pinentry cancellation, commit failed, failed to commit, or could not commit, Autopilot MUST NOT mark the BoardTask done or synthesize a successful mission_execution completion. It writes an autopilot blocker note, transitions the task to Blocked, and leaves recovery to a supervisor/worker with explicit scope."
+	         :idle-durable-summary-close "If pty.send returned an active/progress frame and left the BoardTask running, a later watchdog tick MAY close only when the claimed slot is Idle AND either get_board_task_with_notes shows a claim-after durable summary note OR the provider conversation store has a claim-after task prompt plus assistant final for the same BoardTask. Provider-final closure must synthesize a BoardTask summary note and backfill conversation.task_id before Done; this closes from durable evidence plus idle diagnosis, never from PTY idle alone."
+	         :blocked "If the task transitioned to Blocked (e.g. mission_question_create) during execution, Autopilot preserves the Blocked state on pty.send return and never overwrites it with done.")
+      :dispatch-guard
+        "The per-slot dispatch guard MUST be held across the entire state.pty.send call; the legacy release-before-send pattern allowed a second caller to dispatch to the same slot mid-flight. The guard is per-slot, so holding it does not starve callers targeting other slots."
+      :concurrent-slot-dispatch
+        "Autopilot dispatch_board_tasks MUST start state.pty.send work concurrently across different slots and MUST NOT wait for worker turn completion inside the dispatch tick. The legacy serial loop awaited one slot's pty.send before any other slot's send could begin, and the later JoinSet-drain variant still starved newly-idle pre-provisioned dynamic slots because the tick did not return until early workers finished. The implementation MUST hand each ready BoardTask's send + post-send tail to a detached tokio task with an OwnedSlotDispatchGuard moved in, so same-slot exclusion covers the entire send + close-owner / KB-feedback / deploy-review sequence while the Autopilot event loop can keep dispatching other idle slots on later ticks. Quota / global-pause / KB-feedback / retry semantics run inside that background tail and MUST update durable BoardTask/event state instead of relying on the dispatch tick return."
+      :restart-recovery
+        "Restart recovery MUST clear stale slot-dyn-* BoardTask assignee pins when the runtime slot is absent and the dynamic_slots row is not active, using BoardStore::clear_board_task_assignee before normal no-assignee routing resumes."
+	    :rationale
+	        "Wave33 evidence: a delegated BoardTask was sent twice — once via spawner.initial_prompt fire-and-forget, then again via Autopilot pty.send — and the slot's TextOutputEvent::Complete arrived without Autopilot transitioning the BoardTask to done. Single ownership of prompt+close eliminates the orphaned-task class entirely.")
+    (claude-code-mcp-recovery
+      :desc "Lisp-owned ClaudeCode MCP reconnect ritual and missing-MCP incident contract; the mounting and reconnect navigation are Lisp-pinned, never tool-registry-decided at runtime."
+      :reconnect-keystrokes ["/mcp" "<enter>" "<arrow-down>*N" "<enter>" "<enter>"]
+      :forbid-numeric-shortcut true
+      :missing-incident-kind "claude_code_mcp_missing"
+      :reconnect-failed-incident-kind "claude_code_mcp_reconnect_failed"
+      :reconnect-budget-attempts 1
+      :wake-resident-master true
+      :surfaces ["crates/missiond-pty/src/session.rs::Session::mcp_reconnect_sequence"
+                 "crates/missiond-pty/src/session.rs::PTYSession::mcp_reconnect"
+                 "crates/missiond-pty/src/manager.rs::PTYManager::mcp_reconnect"
+                 "crates/missiond-daemon/src/workers/local/pty_event_worker.rs::handle_mcp_tool_error"
+                 "crates/missiond-daemon/src/engine/master_control.rs::spawn_incident_event_sub"]
+      :rationale "Claude Code's /mcp picker numeric shortcuts have shifted between TUI versions; arrow-key navigation is the only stable substrate. When supports_mcp=true is advertised but no mission_* tool surfaces after slot ready, the worker is operating without orchestration tools and the master must be woken via a durable incident, not a silent reconnect retry loop."))
+
+  (workstation-policy-shards
+    :desc "Split workstation-config invariants into policy shards so runtime, checkers, and agents can reason over one small policy at a time."
+    (policy slot-lifecycle-policy
+      :owns [startup-slot dynamic-slot ttl heartbeat release stale-slot-reap]
+      :core ((step s1 :logic "reserve or create a slot with projected model/cwd/ttl")
+             (step s2 :logic "bind active task, conversation, and claim lease")
+             (step s3 :logic "heartbeat while provider is running")
+             (step s4 :logic "release or mark stale after durable completion or TTL expiry"))
+      :surface workstation-config)
+    (policy delegation-contract-policy
+      :owns [task_delegate swarm_run accepted_shard write_scope read_scope completion_protocol]
+      :core ((step s1 :logic "classify investigator versus implementer before dispatch")
+             (step s2 :logic "require context_pack_path and accepted_shard_id for implementation lanes")
+             (step s3 :logic "persist read/write scope and must-not-touch into BoardTask metadata")
+             (step s4 :logic "reject broad objectives in code-worker lanes before provider spawn"))
+      :surface workstation-config)
+    (policy completion-authority-policy
+      :owns [provider_final task_result_artifact board_note_projection pty_diagnostic]
+      :core ((step s1 :logic "prefer durable provider final over PTY")
+             (step s2 :logic "normalize final output into task-result-artifact")
+             (step s3 :logic "project concise summary to Board note and mission_execution")
+             (step s4 :logic "close BoardTask only after settle window and artifact validation"))
+      :surface task-result-artifact)
+    (policy cross-project-dispatch-policy
+      :owns [project_root cwd read_scope target_project_ids external_project_worker]
+      :core ((step s1 :logic "resolve every project id through ProjectRegistry")
+             (step s2 :logic "materialize absolute context_pack_path and project roots")
+             (step s3 :logic "spawn provider with target project cwd or explicit readable scope")
+             (step s4 :logic "record reroute or block reason when project evidence is missing"))
+      :surface project-registry)
+    (policy context-prefetch-policy
+      :owns [kb_prefetch skill_prefetch explicit_context memory_audit]
+      :core ((step s1 :logic "default to explicit context_pack/read_scope only")
+             (step s2 :logic "allow KB/skill prefetch only in explicit memory-audit or operator-approved sessions")
+             (step s3 :logic "redact noisy or unreviewed memory before worker prompt projection")
+             (step s4 :logic "record prefetch source and reason as diagnostic evidence"))
+      :surface memory-kb)
+    (policy mcp-recovery-policy
+      :owns [mcp_ready reconnect_ui navigation_hint provider_tool_availability]
+      :core ((step s1 :logic "detect missing MCP readiness from slot/provider diagnostics")
+             (step s2 :logic "surface human-like reconnect navigation hints without numeric shortcut assumptions")
+             (step s3 :logic "route repeated failure to BoardTask and not hidden prompt retry")
+             (step s4 :logic "only resume worker dispatch once readiness is verified"))
+      :surface capability-governance)
+    :checker "node scripts/check-v3-workstation-dispatch-isomorphism.mjs")
+
+  (workstation-pool
+    :desc "Compact V3 SSOT for human-owned external compute accounts exposed as MissionD workers."
+    :account-mode single-login
+    :selection [task_class capability idle_state same_slot_guard]
+    :evidence ".missiond/v3/evidence/workstation-pool.lisp"
+    (worker claude-code-default
+      :engine claude-code
+      :role coder
+      :slot-id "slot-claude-code-default"
+      :task-type claude_code_default
+      :model-profile coding-default-opus-4-7
+      :model nil
+      :task-classes [code implementation review context-pack ops]
+      :capabilities [code-read code-write scoped-commit mcp]
+      :max-concurrency 1
+      :timeout-secs 1800
+      :default-use code-implementation
+      :accepts-boardtask true
+      :write-allowed true)
+    (worker claude-code-deploy-ops
+      :engine claude-code
+      :role deploy-ops
+      :slot-id "slot-claude-code-deploy-ops"
+      :task-type claude_code_deploy_ops
+      :model-profile coding-default-opus-4-7
+      :model nil
+      :task-classes [deploy-ops deployment ops incident-response]
+      :capabilities [deploy-read deploy-observe deploy-center-query rollback-plan mcp]
+      :max-concurrency 1
+      :timeout-secs 2400
+      :default-use deployment-operations
+      :accepts-boardtask true
+      :write-allowed false)
+    (worker claude-code-fast-patch
+      :engine claude-code
+      :role patcher
+      :slot-id "slot-claude-code-fast-patch"
+      :task-type claude_code_fast_patch
+      :model-profile daily-sonnet
+      :model nil
+      :task-classes [patch test chore low-risk-fast-path]
+      :capabilities [code-read code-write scoped-commit narrow-patch mcp]
+      :max-concurrency 1
+      :timeout-secs 900
+      :default-use narrow-patch
+      :accepts-boardtask true
+      :write-allowed true)
+    (worker gemini-ultra-pro
+      :engine gemini
+      :role researcher
+      :slot-id "slot-gemini-ultra"
+      :task-type gemini_ultra
+      :model-profile gemini-ultra-pro-preview
+      :model nil
+      :approval-policy plan
+      :tool-policy-path ".missiond/v3/policies/gemini-readonly-policy.toml"
+      :task-classes [research review context-pack lisp-compression general]
+      :capabilities [read-only analysis design-review]
+      :max-concurrency 1
+      :timeout-secs 900
+      :default-use research-review
+      :accepts-boardtask true
+      :write-allowed false)
+    (worker gemini-fast-survey
+      :engine gemini
+      :role survey
+      :slot-id "slot-gemini-fast-survey"
+      :task-type gemini_fast_survey
+      :model-profile nil
+      :model "gemini-2.5-flash"
+      :approval-policy plan
+      :tool-policy-path ".missiond/v3/policies/gemini-readonly-policy.toml"
+      :task-classes [survey summary mechanical-scan]
+      :capabilities [read-only summary]
+      :max-concurrency 1
+      :timeout-secs 600
+      :default-use low-authority-survey
+      :accepts-boardtask true
+      :write-allowed false)
+    (worker codex-master-control
+      :engine codex
+      :role orchestrator
+      :slot-id "slot-codex-master-control"
+      :task-type codex_master_control
+      :model-profile codex-master-gpt-5-5-xhigh
+      :model nil
+      :reasoning-effort xhigh
+      :search true
+      :sandbox danger-full-access
+      :approval-policy never
+      :task-classes [master-control orchestration governance night-audit]
+      :capabilities [board-write kb-write execution-log dispatch code-read code-write shell-exec search mcp full-access]
+      :max-concurrency 1
+      :timeout-secs 7200
+      :default-use resident-master-control
+      :accepts-boardtask false
+      :write-allowed true)
+    :invariants
+      ["Claude coding workers use coding-default-opus-4-7, which means no Claude Code --model override; Sonnet cannot be the coding default."
+       "Codex master-control is a resident orchestrator lane with full local sandbox access, not a normal BoardTask code shard candidate; it may directly repair MissionD control-plane issues when necessary, but every direct mutation must leave Board/KB/checkpoint evidence and ordinary implementation still prefers delegated workers."
+       "Deployment/Ops work MUST route to the explicit claude-code-deploy-ops lane when context_intent=deploy-ops or task_class=deploy-ops is present; generic claude-code-default is not the default deployment lane. Deploy-ops is observation/planning first: it may query deploy-center, provenance, skills, and logs, but production mutation requires deploy-center policy or explicit Board approval. CI/build waiting uses deploy-center events/provenance or bounded XJP MCP wait/watch tools; raw gh api polling loops are forbidden."
+       "Claude fast-patch may use Sonnet only for narrow atomic tasks whose context-pack already identifies exact files/regions; it is not a default coding lane."
+       "Autopilot must resolve workstation-pool dispatch by task class before hints: `pool_hint` may select a concrete worker across the full pool, but `engine_hint` alone only filters/ranks the current task-class candidates and MUST NOT widen a complex `task_class=code` shard into the `claude-code-fast-patch` Sonnet lane."
+       "Gemini Ultra Pro is the high-language read-only investigation lane using gemini-3.1-pro-preview; Gemini fast survey is explicitly low-authority mechanical scan/summary work."
+       "Gemini is initially read-only: research, review, context-pack, and Lisp compression advice may route there; scoped write/commit work stays on Claude until a separate Gemini write smoke passes."
+       "Read-only Gemini pool workers MUST project to Gemini CLI `--approval-mode plan --policy .missiond/v3/policies/gemini-readonly-policy.toml`; workstation-pool registration MUST NOT set dangerously_skip_permissions/YOLO for any worker with :write-allowed false, and the policy MUST deny subagent delegation and write/shell tools."
+       "Autopilot unassigned BoardTasks select from workstation-pool by task class before considering any legacy slot; old slots.yaml Sonnet entries are not generic coding candidates."
+       "mission_compute_slot action=list must expose workstation_pool with runtime slot presence and idle/busy/stopped status."
+       "Supervisor patrol (slot-supervisor) is gated on V3 workstation-pool / runtime-config registration; absent a supervisor worker entry the patrol stays inert and MUST NOT call ensure_memory_slot_by_id, so the legacy 'Memory slot not configured in slots.yaml' warning cannot fire."
+       "V3 workstation-pool (plus startup-slots) is authoritative for dispatchable slots; mission_compute_slot list MUST tag any static slot whose id is not in the V3 projection as legacy=true and dispatchable=false (or split it into legacy_static_slots) so retired Sonnet entries (autopilot/topology-guardian/extraction-worker/delta-validator/...) cannot resurface as candidates."
+       "mission_compute_slot list status MUST derive from PTYManager (state.pty.get_status) for every slot it surfaces, so it cannot contradict mission_pty_status for V3 pool slots; the SlotManager session_id field is only a fallback when no PTY status exists, and it MUST NOT report 'running' when no PTY is attached."]
+    :checker "node scripts/check-v3-workstation-pool-isomorphism.mjs")
+
+  (agent-interaction-policy
+    :schema "missiond.agent-interaction-policy.v1"
+    :desc "Prompt style is an interaction aid, not the safety boundary. Agents receive heuristic questions and prepared context; hard constraints live in BoardTask metadata, workflow Lisp, checker gates, and Rust runtime guards."
+    (role resident-master
+      :style heuristic-review
+      :intake-question "关于用户提出的这个问题或需求，我还有哪些不知道的信息？这些未知信息分别应该从 SSOT、skill operational facts、项目代码、部署事实、事件总线、还是用户决策入口取得？"
+      :intent-question "基于已补齐的证据，请判断用户此刻的真实意图、长期偏好或治理原则是什么；若判断成立，产出带 evidence_refs/confidence/supersession_scope 的 intent_memory_candidate；高置信意图必须写入 memory:decision，低置信只进入 needs-review/candidate。"
+      :prompt-question "请审视当前目标和 SSOT Lisp：颗粒度是否足够细？哪些架构可以更优雅？你还需要哪些证据、调查工位或 exact shard？"
+      :required-output-fields [decision reasoning_summary unknowns inferred_user_intent intent_memory_candidate evidence_needed delegation_plan? next_question_or_action]
+      :default-inputs [active-boardtask context-pack-path current-phase event-summary]
+      :forbidden-default-inputs [kb board-backlog historical-conversation provider-durable-logs]
+      :rule "resident-master must complete unknowns-first-intake, intent-inference, intent-memory-capture, review-question, and evidence-plan before investigation/implementation unless the active BoardTask explicitly declares exact-shard-ready=true. Intent memory capture records the judged intent with evidence and confidence: high-confidence stable intent is written through mission_kb_remember(category=memory:decision), while uncertain intent stays as needs-review/candidate artifact. This does not re-enable broad KB prompt preloading.")
+    (role investigator-worker
+      :style context-prepared-question
+      :prompt-opening "请审视、比较、找缺口并给出建议；只使用给定 read_scope/context_pack_path 的证据。"
+      :metadata [BoardTask-ID project_id context_pack_path read_scope write_scope must_not_touch acceptance completion_protocol]
+      :output-contract [Findings Evidence Recommendations Verification]
+      :rule "investigator workers are read-only by default and produce context-pack evidence, not implementation patches or raw KB/log dumps.")
+    (role implementer-worker
+      :style accepted-shard-question
+      :prompt-opening "基于已接受 shard 和上下文，请完成这个最小同构改动；保持现有行为，只在 declared write_scope 内修改。"
+      :metadata [BoardTask-ID project_id context_pack_path read_scope write_scope must_not_touch acceptance completion_protocol]
+      :output-contract [Changed-Files Acceptance-Evidence Residual-Risk]
+      :rule "implementer workers may write only declared write_scope; exact shard ownership is enforced by task_delegate/Autopilot, not by prompt prose.")
+    (role deterministic-llm-tool
+      :style precise-instruction
+      :rule "non-agent deterministic LLM calls may use exact prompts because they do not autonomously dispatch tools or workers.")
+    :runtime-invariants
+      ["Prompt text MUST NOT be the primary safety boundary; read/write scope, acceptance, pool routing, and closure policy are structured BoardTask/runtime fields."
+       "Worker prompts MUST NOT prepend KB/Skill/history/provider-log context unless an explicit memory-audit workflow opts in."
+       "M6 workflows MUST materialize context-pack artifacts with questions, hypotheses, evidence_needed, findings, design_options, and accepted_shards before implementation shards."
+       "Direct implementation from an initial objective is allowed only when exact-shard-ready=true is explicitly present in the BoardTask metadata or description."]
+    :checker "node scripts/check-v3-workflow-isomorphism.mjs")
+
+  (codex-boot-context-policy
+    :schema "missiond.codex-boot-context-policy.v1"
+    :purpose "Every resident Codex, Codex worker, or external Codex handoff should start from a small validated capsule instead of inheriting a giant historical chat or hoping the agent reads a repo note."
+    :capsule ".missiond/v3/evidence/codex-boot-context.lisp"
+    :mcp mission_context_boot
+    :layers
+      ((layer L0-always-on :source ".missiond/v3/evidence/codex-boot-context.lisp" :rule "Always inject the shared collaboration protocol: Lisp SSOT, intent->plan->work-order, unknowns-first grounding, exact shard/write lease, and durable evidence completion.")
+       (layer L1-current-task :source [mission_master_status BoardTask work-order] :rule "Load only active objective, BoardTask/work-order id, project_id, context_pack_path, accepted_shard_id, and checkpoint.")
+       (layer L2-grounded-facts :source mission_context_gather :rule "Query SSOT/project registry/skill evidence/active memory/infra/tool directory only for explicit unknowns.")
+       (layer L3-cold-evidence :source [raw-conversations historical-board provider-logs runtime-reports] :rule "Cold evidence is opt-in for audit/debug and must not be startup prompt preload."))
+    :rules
+      ["Boot capsule is a compact contract and MUST NOT contain secrets, raw provider logs, bulk chat history, or unreviewed KB dumps."
+       "mission_context_boot is the public retrieval surface for external new conversations and resident/worker startup."
+       "Every confirmed durable user intent that should survive a fresh conversation becomes an intent_memory_candidate, then active memory only after review or high-confidence evidence."]
+    :checker "node scripts/check-v3-codex-boot-context-isomorphism.mjs")
+
+  (skill-edit-delegation-policy
+    :schema "missiond.skill-edit-delegation-policy.v1"
+    :purpose "Keep ClaudeCode/Codex/Gemini skill files as operational knowledge managed by the workstation that understands that ecosystem best."
+    :authority
+      ((reader resident-master)
+       (planner mission_context_gather)
+       (editor claude-code-skill-maintainer)
+       (reviewer codex-or-resident-master))
+    :rules
+      ["Codex/resident-master may read skill files as evidence through mission_skill_context or skill evidence artifacts."
+       "Mutating skill files under ~/.claude/skills, ~/.codex/skills, or project skill directories MUST be represented as a BoardTask/work-order and delegated to a ClaudeCode skill-maintainer or deploy-ops lane."
+       "Skill edits require context_pack_path, read_scope, write_scope, completion protocol, and a task-result-artifact; direct local edits by the resident master are not an accepted path."
+       "When a user asks for skill changes, first gather related skill evidence, then create an intent.lisp/plan.lisp work-order or exact shard for ClaudeCode."]
+    :checker "node scripts/check-v3-memory-kb-isomorphism.mjs")

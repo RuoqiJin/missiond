@@ -2,6 +2,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { readBlueprintWithEvidenceSidecars } from './lib/v3_blueprint_contract_source.mjs';
 
 const json = process.argv.includes('--json');
 const repo = process.cwd();
@@ -136,7 +137,10 @@ for (const [rel, needles] of checks) {
     diagnostics.push({ file: rel, message: 'missing file' });
     continue;
   }
-  const text = fs.readFileSync(file, 'utf8');
+  const text =
+    rel === '.missiond/v3/missiond-blueprint.lisp'
+      ? readBlueprintWithEvidenceSidecars(repo, rel)
+      : fs.readFileSync(file, 'utf8');
   for (const needle of needles) {
     if (!text.includes(needle)) {
       diagnostics.push({ file: rel, message: `missing ${needle}` });
@@ -146,7 +150,7 @@ for (const [rel, needles] of checks) {
 
 const blueprint = path.join(repo, '.missiond/v3/missiond-blueprint.lisp');
 if (fs.existsSync(blueprint)) {
-  const text = fs.readFileSync(blueprint, 'utf8');
+  const text = readBlueprintWithEvidenceSidecars(repo, '.missiond/v3/missiond-blueprint.lisp');
   const domainMatches = [...text.matchAll(/\(domain\s+([^\s\)]+)/g)].map((m) => m[1]);
   const required = [
     'workstation-control-plane',

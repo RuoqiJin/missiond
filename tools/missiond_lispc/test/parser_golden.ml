@@ -90,19 +90,58 @@ let test_source_resolver_include () =
       :entry [check]
       :core ((step s1 :logic "parse"))
       :egress [diagnostics])))
+
+(state-machines
+  (state-machine fixture
+    :states [ready done]))
 |};
       close_out oc;
       let resolved = Source_resolver.resolve_blueprint_file blueprint in
       assert_true "root and shard source units are present"
         (List.length resolved.source_units = 2);
       match resolved.root with
-      | Some root -> (
-          match Ast.find_child root "pillar-flow-map" with
+      | Some root ->
+          begin
+          (match Ast.find_child root "pillar-flow-map" with
           | Some flow ->
               assert_true "shard source file is preserved"
                 ((Ast.loc_of flow).source_file = shard)
-          | None -> failwith "included pillar-flow-map missing")
+          | None -> failwith "included pillar-flow-map missing");
+          match Ast.find_child root "state-machines" with
+          | Some states ->
+              assert_true "second shard form source file is preserved"
+                ((Ast.loc_of states).source_file = shard)
+          | None -> failwith "second included shard form missing"
+          end
       | None -> failwith "resolved root missing")
+
+let test_source_resolver_rejects_nested_include () =
+  with_temp_dir "v3-resolver-nested" (fun dir ->
+      let shards = Filename.concat dir "shards" in
+      if Sys.command ("mkdir -p " ^ Filename.quote shards) <> 0 then
+        failwith "failed to create shards dir";
+      let blueprint = Filename.concat dir "missiond-blueprint.lisp" in
+      let shard = Filename.concat shards "nested.lisp" in
+      let oc = open_out_bin blueprint in
+      output_string oc
+        {|
+(missiond-blueprint
+  (include "shards/nested.lisp"))
+|};
+      close_out oc;
+      let oc = open_out_bin shard in
+      output_string oc
+        {|
+(include "shards/other.lisp")
+|};
+      close_out oc;
+      let rejected =
+        try
+          ignore (Source_resolver.resolve_blueprint_file blueprint);
+          false
+        with Ast.Reader_error _ -> true
+      in
+      assert_true "nested shard includes are rejected" rejected)
 
 let test_v3_missing_entry () =
   with_temp "missiond-v3-invalid"
@@ -343,6 +382,7 @@ let test_runtime_config_missing_policy_diagnostics () =
 let () =
   test_parser_locations ();
   test_source_resolver_include ();
+  test_source_resolver_rejects_nested_include ();
   test_v3_missing_entry ();
   test_v3_step_order ();
   test_workflow_missing_risk_gate ();

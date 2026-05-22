@@ -10,6 +10,7 @@ import {
   parseLisp,
   readKeywordProps,
 } from './lib/missiond_lisp.mjs';
+import { readBlueprintWithEvidenceSidecars } from './lib/v3_blueprint_contract_source.mjs';
 
 const BLUEPRINT = '.missiond/frontend/board-blueprint.lisp';
 const V3_BLUEPRINT = '.missiond/v3/missiond-blueprint.lisp';
@@ -106,7 +107,7 @@ function checkRepo(repo, blueprintRel, v3Rel) {
     return result(false, [], [], [{ file: blueprintRel, line: 1, column: 1, message: `cannot read: ${err.message}` }]);
   }
   try {
-    v3Source = fs.readFileSync(v3Path, 'utf8');
+    v3Source = readBlueprintWithEvidenceSidecars(repo, v3Rel);
   } catch (err) {
     diagnostics.push(diag(v3Rel, null, `cannot read: ${err.message}`));
     v3Source = '';

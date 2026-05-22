@@ -141,7 +141,8 @@ let validate_project_root_form file form =
 
 let validate file =
   try
-    let forms = Parser.parse_file file in
+    let resolved = Source_resolver.resolve_blueprint_file file in
+    let forms = resolved.forms in
     let diagnostics = ref [] in
     let add d = diagnostics := d :: !diagnostics in
     (match find_root forms "missiond-blueprint" with

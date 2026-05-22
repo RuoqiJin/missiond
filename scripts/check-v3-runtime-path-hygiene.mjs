@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { readBlueprintWithEvidenceSidecars } from './lib/v3_blueprint_contract_source.mjs';
 
 const usage = `Usage:
   node scripts/check-v3-runtime-path-hygiene.mjs [--json] [--dry-fixture]
@@ -111,7 +112,10 @@ function checkFiles(root) {
   for (const [key, rel] of Object.entries(FILES)) {
     const abs = path.join(root, rel);
     try {
-      sources[key] = fs.readFileSync(abs, 'utf8');
+      sources[key] =
+        key === 'blueprint'
+          ? readBlueprintWithEvidenceSidecars(root, rel)
+          : fs.readFileSync(abs, 'utf8');
     } catch (err) {
       diagnostics.push({ file: rel, message: `cannot read: ${err.message}` });
     }
