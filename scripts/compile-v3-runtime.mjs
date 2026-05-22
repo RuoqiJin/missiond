@@ -7,6 +7,7 @@ import { runLispc } from './lib/ocaml_lispc.mjs';
 const OUT_DIR = '.missiond/v3/runtime/compiled';
 const BLUEPRINT = '.missiond/v3/missiond-blueprint.lisp';
 const WORKFLOW_DIR = '.missiond/workflows';
+const GENOME_DIR = '.missiond/v3/genome';
 
 const targets = [
   {
@@ -28,6 +29,11 @@ const targets = [
     id: 'workflows',
     argv: ['emit-workflows', '--workflow-dir', WORKFLOW_DIR],
     file: 'compiled-workflows.json',
+  },
+  {
+    id: 'genomes',
+    argv: ['emit-genomes', '--genome-dir', GENOME_DIR],
+    file: 'compiled-genomes.json',
   },
 ];
 

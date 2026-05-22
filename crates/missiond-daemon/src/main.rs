@@ -20,6 +20,7 @@ mod events_sync;
 mod handlers;
 mod helpers;
 mod lenient;
+mod organism;
 mod permission_extract;
 mod slot_dispatch;
 mod slot_orchestrator;
@@ -60,7 +61,6 @@ use tracing::{debug, error, info, warn};
 
 // Re-imports from extracted modules
 use aiops::health_scan;
-use autopilot::autopilot_tick;
 use embedding_worker::init_embedding_provider;
 use helpers::*;
 use ipc_handler::{bind_ipc_listener, handle_ipc_connection};
@@ -1423,13 +1423,13 @@ async fn main() -> Result<()> {
                 tokio::select! {
                     _ = interval.tick() => {
                         // Full autopilot tick: maintenance + dispatch
-                        if let Err(e) = autopilot_tick(&auto_state).await {
+                        if let Err(e) = organism::autopilot_organ::run_autopilot_tick(&auto_state).await {
                             warn!(error = %e, "Autopilot tick failed");
                         }
                     }
                     _ = auto_state.board_dispatch_notify.notified() => {
                         // Slot became idle — run board dispatch immediately (skip maintenance)
-                        if let Err(e) = autopilot::dispatch_board_tasks(&auto_state).await {
+                        if let Err(e) = organism::autopilot_organ::run_autopilot_board_dispatch(&auto_state).await {
                             warn!(error = %e, "Board dispatch (idle-triggered) failed");
                         }
                     }

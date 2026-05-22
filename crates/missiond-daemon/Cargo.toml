@@ -39,6 +39,8 @@ notify = { workspace = true }
 
 thiserror = { workspace = true }
 missiond-core = { workspace = true }
+missiond-kernel = { workspace = true }
+missiond-organism-runtime = { workspace = true }
 missiond-mcp = { workspace = true }
 regex = { workspace = true }
 sha2 = "0.10.9"

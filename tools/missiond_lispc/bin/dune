@@ -1,7 +1,7 @@
 (library
  (name missiond_lispc_core)
  (wrapped false)
- (modules ast parser schema_v3 workflow_schema project_schema workstation_schema emit_json))
+ (modules ast parser schema_v3 workflow_schema project_schema workstation_schema genome_schema emit_json))
 
 (executable
  (name main)

@@ -24,7 +24,7 @@
 //   router-policy, incident-governance, capability-governance,
 //   compute-primitives, sysinfra-control, ops-infra, eventbridge,
 //   memory-provider-boundary, eventhub-service-boundary, typed-lisp-compiler,
-//   mission-shared-memory, evidence-governance-view.
+//   genome-runtime, mission-shared-memory, evidence-governance-view.
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -91,6 +91,7 @@ export const EXPECTED_SURFACES = [
   'memory-provider-boundary',
   'eventhub-service-boundary',
   'typed-lisp-compiler',
+  'genome-runtime',
   'mission-shared-memory',
   'evidence-governance-view',
 ];
@@ -153,6 +154,8 @@ export const PER_SURFACE_CHECKERS = [
   'scripts/check-v3-eventbridge-isomorphism.mjs',
   'scripts/check-v3-service-extraction-isomorphism.mjs',
   'scripts/check-typed-lisp-compiler.mjs',
+  'scripts/check-v3-genome-runtime-isomorphism.mjs',
+  'scripts/check-v3-autopilot-genome-isomorphism.mjs',
   'scripts/check-v3-shared-memory-isomorphism.mjs',
   // Cross-surface request-flow smoke; aggregates the user-facing
   // request -> intent -> plan -> execute-review path declared in
@@ -658,6 +661,10 @@ function runDryFixture(opts) {
       :code ["a"]
       :note "n")
     (surface typed-lisp-compiler
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
+    (surface genome-runtime
       :status "code-aligned"
       :code ["a"]
       :note "n")

@@ -21,7 +21,7 @@ let print_diagnostics diagnostics =
 
 let usage () =
   prerr_endline
-    "Usage: missiond-lispc <emit-json|emit-v3|emit-semantic-ir|emit-universe|emit-workflows|check-v3|check-workstation-config|check-workflow|check-workflow-dir|check-project|check-project-dir|check-auth-domain|check-m6-depth|check-domain-hardening> --file <path>|--dir <path>|--blueprint <path>|--workflow-dir <path>";
+    "Usage: missiond-lispc <emit-json|emit-v3|emit-semantic-ir|emit-universe|emit-workflows|emit-genomes|check-v3|check-workstation-config|check-workflow|check-workflow-dir|check-genome|check-genome-dir|check-project|check-project-dir|check-auth-domain|check-m6-depth|check-domain-hardening> --file <path>|--dir <path>|--blueprint <path>|--workflow-dir <path>|--genome-dir <path>";
   2
 
 let () =
@@ -44,6 +44,10 @@ let () =
       match find_arg "--workflow-dir" rest with
       | Some dir -> exit (Emit_json.emit_workflows dir)
       | None -> exit (usage ()))
+  | "emit-genomes" :: rest -> (
+      match (find_arg "--genome-dir" rest, find_arg "--dir" rest) with
+      | Some dir, _ | None, Some dir -> exit (Genome_schema.emit_genomes dir)
+      | None, None -> exit (usage ()))
   | "check-v3" :: rest ->
       let file = Option.value ~default:".missiond/v3/missiond-blueprint.lisp" (find_arg "--blueprint" rest) in
       let expected =
@@ -64,6 +68,15 @@ let () =
       match (find_arg "--workflow-dir" rest, find_arg "--dir" rest) with
       | Some dir, _ | None, Some dir ->
           exit (print_diagnostics (Workflow_schema.validate_dir dir))
+      | None, None -> exit (usage ()))
+  | "check-genome" :: rest -> (
+      match find_arg "--file" rest with
+      | Some file -> exit (print_diagnostics (Genome_schema.validate file))
+      | None -> exit (usage ()))
+  | "check-genome-dir" :: rest -> (
+      match (find_arg "--genome-dir" rest, find_arg "--dir" rest) with
+      | Some dir, _ | None, Some dir ->
+          exit (print_diagnostics (Genome_schema.validate_dir dir))
       | None, None -> exit (usage ()))
   | "check-project" :: rest -> (
       match find_arg "--file" rest with

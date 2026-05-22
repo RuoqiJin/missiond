@@ -44,6 +44,7 @@ dist/
 .missiond/v3/runtime/lisp-code-sync/*.report.lisp
 .missiond/v3/runtime/convergence-status-cache.json
 .missiond/v3/runtime/compiled/*.json
+.missiond/v3/runtime/genome/*.json
 .missiond/research/resident-codex-master-gpt-pro*.md
 .missiond/research/memory-review/
 .missiond/research/memory-review-v2/

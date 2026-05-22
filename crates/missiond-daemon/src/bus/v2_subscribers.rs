@@ -270,7 +270,14 @@ fn spawn_autopilot_board_event_sub(
                 _ = shutdown.changed() => break,
                 ack = sub.next() => {
                     let Some(ack) = ack else { break; };
-                    if board_event_should_wake_autopilot(ack.event()) {
+                    let should_wake = board_event_should_wake_autopilot(ack.event());
+                    crate::organism::autopilot_organ::process_autopilot_board_event(
+                        &state,
+                        ack.event(),
+                        should_wake,
+                    )
+                    .await;
+                    if should_wake && !crate::organism::autopilot_organ::autopilot_organ_active() {
                         state.board_dispatch_notify.notify_one();
                     }
                     ack.ack().await;
@@ -305,7 +312,14 @@ fn spawn_autopilot_slot_event_sub(
                 _ = shutdown.changed() => break,
                 ack = sub.next() => {
                     let Some(ack) = ack else { break; };
-                    if slot_event_should_wake_autopilot(ack.event()) {
+                    let should_wake = slot_event_should_wake_autopilot(ack.event());
+                    crate::organism::autopilot_organ::process_autopilot_slot_event(
+                        &state,
+                        ack.event(),
+                        should_wake,
+                    )
+                    .await;
+                    if should_wake && !crate::organism::autopilot_organ::autopilot_organ_active() {
                         state.board_dispatch_notify.notify_one();
                     }
                     ack.ack().await;

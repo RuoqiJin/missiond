@@ -2713,7 +2713,9 @@ dependencies = [
  "governor",
  "libc",
  "missiond-core",
+ "missiond-kernel",
  "missiond-mcp",
+ "missiond-organism-runtime",
  "notify",
  "regex",
  "reqwest",
@@ -2735,6 +2737,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "missiond-genome"
+version = "0.1.0"
+dependencies = [
+ "missiond-kernel",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "missiond-kernel"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "missiond-mcp"
 version = "0.1.0"
 dependencies = [
@@ -2748,6 +2773,21 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "missiond-organism-runtime"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "missiond-core",
+ "missiond-genome",
+ "missiond-kernel",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

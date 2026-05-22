@@ -103,7 +103,15 @@
       :path ".missiond/requests/<request_id>/receipts/<receipt_id>.lisp"
       :ssot true
       :writer verifier
-      :required [:receipt_id :valid_for_files :commit_hash :tier :exit_code :commands]))
+      :required [:receipt_id :valid_for_files :commit_hash :tier :exit_code :commands])
+
+    (artifact compiled-genomes
+      :schema "missiond.compiled-genomes.v1"
+      :path ".missiond/v3/runtime/compiled/compiled-genomes.json"
+      :ssot false
+      :writer missiond-lispc.emit-genomes
+      :required [:schema_version :source_hash :diagnostics :payload]
+      :invariant "Runtime projection for genome organs/cells/tissues; daemon hot paths load compiled JSON or explicit fallback, never parse raw genome Lisp in process."))
 
   (ssot-retrieval-scope
     :schema "missiond.ssot-retrieval-scope.v1"
@@ -112,6 +120,7 @@
       :default true
       :paths [".missiond/v3/missiond-blueprint.lisp"
               ".missiond/v3/shards/*.lisp"
+              ".missiond/v3/genome/*.lisp"
               ".missiond/workflows/*.lisp"
               ".missiond/frontend/board-blueprint.lisp"
               ".missiond/**/intent.lisp"
@@ -130,6 +139,7 @@
               ".missiond/research/memory-review*/**"]
       :examples [".missiond/v3/runtime/lisp-code-sync/*.report.lisp"
                  ".missiond/v3/runtime/nightly-evolution/*.report.lisp"
+                 ".missiond/v3/runtime/genome/*.json"
                  ".missiond/v3/runtime/master-control/context-packs/*.lisp"
                  ".missiond/v3/runtime/compiled/*.json"]
       :rule "Cold runtime artifacts are diagnostic/query targets, not authoring SSOT. They are excluded from broad rg/review/search unless include_runtime=true or a concrete trace/report path is requested.")
@@ -2910,6 +2920,13 @@
       :v3-function typed-lisp-compiler
       :surface typed-lisp-compiler
       :note "The typed Lisp compiler is the V3 destination for fragile V2-era Lisp shape/token-pin checking; Lisp remains SSOT while OCaml owns typed AST diagnostics and generated projections.")
+    (v2-item genome-driven-organ-runtime
+      :status code-aligned
+      :v2-source ".missiond/v2/intent-event-bus.lisp :: event-bus subscriber handoff and delegated-boardtask autopilot"
+      :v3-pillar workflow
+      :v3-function genome-runtime
+      :surface genome-runtime
+      :note "The genome runtime is the V3 destination for moving hand-written subscriber predicates into Lisp-declared Genome receptors/effects and Rust Atom/Cell/Tissue/Organ execution, starting with Autopilot shadow parity before active cutover.")
     (v2-item semantic-ir-compiler-projection
       :status code-aligned
       :v2-source ".missiond/v2/intent.lisp :: checker/token-pin debt and worker context projection"
@@ -3446,7 +3463,7 @@
         :egress [workflow.lisp workflow_row compiled_yaml run_result])
       (function typed-lisp-compiler
         :surface typed-lisp-compiler
-        :entry [missiond-lispc.check-v3 missiond-lispc.check-workstation-config missiond-lispc.check-workflow missiond-lispc.check-workflow-dir missiond-lispc.check-project missiond-lispc.check-project-dir missiond-lispc.check-auth-domain missiond-lispc.check-m6-depth missiond-lispc.check-domain-hardening-deprecated-alias missiond-lispc.emit-json missiond-lispc.emit-v3 missiond-lispc.emit-semantic-ir missiond-lispc.emit-universe missiond-lispc.emit-workflows]
+        :entry [missiond-lispc.check-v3 missiond-lispc.check-workstation-config missiond-lispc.check-workflow missiond-lispc.check-workflow-dir missiond-lispc.check-genome missiond-lispc.check-genome-dir missiond-lispc.check-project missiond-lispc.check-project-dir missiond-lispc.check-auth-domain missiond-lispc.check-m6-depth missiond-lispc.check-domain-hardening-deprecated-alias missiond-lispc.emit-json missiond-lispc.emit-v3 missiond-lispc.emit-semantic-ir missiond-lispc.emit-universe missiond-lispc.emit-workflows missiond-lispc.emit-genomes]
         :core ((step s1 :logic "parse Lisp SSOT files into source-located typed AST nodes")
                (step s2 :logic "validate pillar/function entry-core-egress surfaces, workflow contracts, universe registry, maturity gates, and event/outbox contracts")
                (step s3 :logic "emit stable JSON diagnostics for JS compatibility wrappers and CI gates")
@@ -3457,7 +3474,16 @@
                (step s8 :logic "use Auth as the first external project M6-depth semantic checker sample before shrinking more project checkers")
                (step s9 :logic "validate generic Auth-grade M6 evidence before claiming production-ready architecture")
                (step s10 :logic "validate workstation-config semantic policies with typed AST so managed-node portability, provider-unavailable diagnostics, model profiles, slot templates, timeouts, and policy shards are structural gates rather than brittle prose pins"))
-        :egress [typed_diagnostics compiled_json compiled_runtime_snapshot compiled_project_universe compiled_workflow_contracts js_wrapper_result])
+        :egress [typed_diagnostics compiled_json compiled_runtime_snapshot compiled_project_universe compiled_workflow_contracts compiled_genomes js_wrapper_result])
+      (function genome-runtime
+        :surface genome-runtime
+        :entry [missiond-lispc.check-genome missiond-lispc.check-genome-dir missiond-lispc.emit-genomes missiond-kernel.AtomRegistry missiond-organism-runtime.AutopilotCell AutopilotOrganRuntime]
+        :core ((step s1 :logic "parse genome Lisp into typed genome/organ/tissue/molecule projections and emit compiled-genomes JSON")
+               (step s2 :logic "validate tissue receptors, allowed atoms/effects, activation, and runtime budgets before daemon hot paths can consume them")
+               (step s3 :logic "run Autopilot Organ in shadow mode by comparing Cell effects against legacy board/slot wakeup helpers")
+               (step s4 :logic "enable active mode only after checker, unit, integration, and shadow parity receipts pass")
+               (step s5 :logic "quarantine shadow mismatches or active runtime errors by falling back to legacy Autopilot behavior and publishing IncidentEvent::Reported"))
+        :egress [compiled-genomes AutopilotOrgan shadow-report activation-snapshot quarantine-incident])
       (function semantic-ir-compiler
         :surface semantic-ir-compiler
         :entry [missiond-lispc.emit-semantic-ir scripts/compile-v3-runtime.mjs]
@@ -4476,6 +4502,22 @@
              "scripts/check-v3-autopilot-runtime-isomorphism.mjs"]
       :note "autopilot-runtime is the event-driven muscle layer for delegated BoardTasks. task_delegate and mission_board_create publish BoardEvent::TaskCreated; v2_subscribers owns the event-bus nerves v2_autopilot_board_event and v2_autopilot_slot_event, which wake board_dispatch_notify on BoardEvent::TaskCreated, reopened BoardEvent status updates, and SlotEvent::BecameIdle, then ack immediately without running pty.send inline. The dedicated Autopilot task remains the only prompt/close owner: it claims eligible open BoardTasks, derives leases/timeouts from V3 policy, holds a per-slot dispatch guard across state.pty.send, emits SlotEvent::TaskDispatched, synthesizes mission_execution completion when needed, and closes/preserves the BoardTask according to execution-ownership delegated-boardtask. This preserves the event-bus causal chain while keeping long-running worker interaction outside subscriber ack paths.")
 
+    (surface genome-runtime
+      :status "code-aligned"
+      :implements [genome-compiler atom-registry cell-runtime tissue-profile autopilot-organ shadow-activation]
+      :code [".missiond/v3/genome/autopilot.lisp"
+             "tools/missiond_lispc/bin/genome_schema.ml"
+             "crates/missiond-kernel/src/lib.rs"
+             "crates/missiond-genome/src/lib.rs"
+             "crates/missiond-organism-runtime/src/lib.rs"
+             "crates/missiond-organism-runtime/src/autopilot.rs"
+             "crates/missiond-daemon/src/organism/autopilot_organ.rs"
+             "crates/missiond-daemon/src/bus/v2_subscribers.rs"
+             "crates/missiond-daemon/src/main.rs"
+             "scripts/check-v3-genome-runtime-isomorphism.mjs"
+             "scripts/check-v3-autopilot-genome-isomorphism.mjs"]
+      :note "genome-runtime introduces MissionD's Lisp Genome -> Rust Atom/Cell/Tissue/Organ runtime boundary. missiond-lispc validates genome Lisp and emits compiled-genomes JSON; missiond-kernel owns EventEnvelope, Effect, CommandEnvelope, AtomRegistry, Molecule, RuleGraph, Cell, TissueProfile, Genome, and ActivationMode; missiond-organism-runtime executes Cell::on_event under shadow, active, or rollback activation with budget/idempotency guards. The first migrated organ is Autopilot: board/slot subscribers run shadow parity against legacy wakeup helpers by default, active mode routes notifications/ticks/dispatch through AutopilotEffectInterpreter, and runtime errors publish incidents while falling back to the legacy path.")
+
     (surface workstation-dispatch
       :status "code-aligned"
       :implements [workstation-dispatch substrate-dispatch audit-dispatch]
@@ -4900,7 +4942,7 @@
   (compression-contract
     :v1 "Organized by .missiond/v1/manifest.lisp; root files remain compatibility paths."
     :v2 "Kept as historical source index, implementation status, and wave evidence."
-    :v3 "Small executable contracts only: request, artifact, state-machine, policy, pillar-flow-map, implementation map."
+    :v3 "Small executable contracts only: request, artifact, state-machine, policy, genome, pillar-flow-map, implementation map."
     :checks ["node scripts/check-lisp-blueprint-compression.mjs"
              "node scripts/check-architecture-lisp.mjs --no-structure .missiond/v3/missiond-blueprint.lisp"
              "node scripts/check-typed-lisp-compiler.mjs"
@@ -4938,6 +4980,8 @@
              "node scripts/check-v3-control-plane-m6-split.mjs"
              "node scripts/check-v3-master-control-isomorphism.mjs"
              "node scripts/check-v3-direct-code-drift-policy.mjs"
+             "node scripts/check-v3-genome-runtime-isomorphism.mjs"
+             "node scripts/check-v3-autopilot-genome-isomorphism.mjs"
              "node scripts/check-v3-commit-convergence-loop.mjs"
              "node scripts/check-v3-nightly-evolution-isomorphism.mjs"
              "node scripts/check-v3-autopilot-runtime-isomorphism.mjs"

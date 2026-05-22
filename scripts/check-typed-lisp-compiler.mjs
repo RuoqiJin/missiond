@@ -22,6 +22,7 @@ const REQUIRED_FILES = [
   'tools/missiond_lispc/bin/workflow_schema.ml',
   'tools/missiond_lispc/bin/project_schema.ml',
   'tools/missiond_lispc/bin/workstation_schema.ml',
+  'tools/missiond_lispc/bin/genome_schema.ml',
   'tools/missiond_lispc/bin/emit_json.ml',
   'tools/missiond_lispc/test/dune',
   'tools/missiond_lispc/test/parser_golden.ml',
@@ -124,6 +125,9 @@ const REQUIRED_BLUEPRINT_TOKENS = [
   'tools/missiond_lispc/bin/main.ml',
   'check-workstation-config',
   'check-workflow-dir',
+  'check-genome-dir',
+  'emit-genomes',
+  'genome-runtime',
   'check-m6-depth',
   'check-domain-hardening-deprecated-alias',
   'tools/missiond_lispc/bin/schema_v3.ml',
@@ -236,8 +240,10 @@ function main() {
       ['emit-v3', '--blueprint', BLUEPRINT],
       ['emit-universe', '--blueprint', BLUEPRINT],
       ['emit-workflows', '--workflow-dir', '.missiond/workflows'],
+      ['emit-genomes', '--genome-dir', '.missiond/v3/genome'],
       ['check-workstation-config', '--blueprint', BLUEPRINT],
       ['check-workflow-dir', '--workflow-dir', '.missiond/workflows'],
+      ['check-genome-dir', '--genome-dir', '.missiond/v3/genome'],
       ['check-project-dir', '--dir', '.missiond/frontend'],
     ]) {
       const emit = runLispc(argv);
@@ -297,6 +303,15 @@ function main() {
         const m6Depth = emit.compiled?.payload?.workflows?.find((workflow) => workflow.name === 'project-m6-depth');
         if (!Array.isArray(m6Depth?.steps) || !m6Depth.steps.includes('s10')) {
           diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_WORKFLOW_PROJECTION_MISSING_STRUCTURED_STEPS', 'emit-workflows must project step ids from structured (step sN ...) forms'));
+        }
+      } else if (argv[0] === 'emit-genomes') {
+        const genomes = emit.compiled?.payload?.genomes ?? [];
+        if (!Array.isArray(genomes) || genomes.length === 0) {
+          diagnostics.push(diag('tools/missiond_lispc/bin/genome_schema.ml', 'OCAML_GENOME_PROJECTION_MISSING_GENOMES', 'emit-genomes must project structured genomes[]'));
+        }
+        const autopilot = genomes.find((genome) => genome.id === 'missiond-autopilot');
+        if (!autopilot) {
+          diagnostics.push(diag('tools/missiond_lispc/bin/genome_schema.ml', 'OCAML_GENOME_PROJECTION_MISSING_AUTOPILOT', 'emit-genomes must project missiond-autopilot genome'));
         }
       }
     }
