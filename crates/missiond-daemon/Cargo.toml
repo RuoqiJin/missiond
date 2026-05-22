@@ -44,6 +44,7 @@ missiond-organism-runtime = { workspace = true }
 missiond-mcp = { workspace = true }
 regex = { workspace = true }
 sha2 = "0.10.9"
+md-5 = "0.10.6"
 base64 = { workspace = true }
 tempfile = "3"
 async-trait.workspace = true

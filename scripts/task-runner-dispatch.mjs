@@ -145,6 +145,7 @@ export function runDispatch({
   requestEventsDir = null,
   blueprintPath = null,
   allowDefaultConfig = false,
+  allowSourceFallback = false,
   allowMissingBriefs = false,
   emitDispatchEvents = false,
   nowIso = isoNow(),
@@ -153,6 +154,7 @@ export function runDispatch({
   const runtimeConfig = loadWorkstationRuntimeConfigForRepo(repo, {
     blueprintPath,
     allowDefaultFallback: allowDefaultConfig,
+    allowSourceFallback,
   });
   const before = runNextAction({
     manifestPath,
@@ -489,6 +491,7 @@ function runFixtures() {
     const readOnly = runDispatch({
       manifestPath,
       repoRoot: tmp,
+      allowSourceFallback: true,
       maxParallel: 1,
       nowIso: '2026-04-28T00:00:00Z',
     });
@@ -528,6 +531,7 @@ function runFixtures() {
     const emitted = runDispatch({
       manifestPath,
       repoRoot: tmp,
+      allowSourceFallback: true,
       maxParallel: 1,
       requestId: 'req-wave99-dispatch',
       requestEventsDir: '.missiond/requests/req-wave99-dispatch/events',
@@ -555,6 +559,7 @@ function runFixtures() {
     const missing = runDispatch({
       manifestPath: missingManifestPath,
       repoRoot: tmp,
+      allowSourceFallback: true,
       maxParallel: 'all',
     });
     assert(missing.status === 'blocked_missing_briefs', 'missing briefs should block delegation');
@@ -563,6 +568,7 @@ function runFixtures() {
     const finalized = runDispatch({
       manifestPath,
       repoRoot: tmp,
+      allowSourceFallback: true,
       maxParallel: 'all',
       nowIso: '2026-04-28T00:02:00Z',
     });

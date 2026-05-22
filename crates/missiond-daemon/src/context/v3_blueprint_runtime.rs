@@ -3,6 +3,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use md5::{Digest, Md5};
 use serde::Deserialize;
 
 // Embedded defaults are the test/no-install fallback. Runtime authority is the
@@ -569,8 +570,20 @@ struct CompiledRuntimeEnvelope {
     payload: serde_json::Value,
 }
 
+#[allow(dead_code)]
+#[derive(Clone, Debug, Deserialize)]
+struct CompiledSourceUnit {
+    file: String,
+    kind: String,
+    included_by: Option<String>,
+    include_line: Option<i64>,
+    source_hash: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct CompiledV3Payload {
+    #[serde(default)]
+    source_units: Vec<CompiledSourceUnit>,
     #[serde(default)]
     forms: Vec<CompiledSexpNode>,
 }
@@ -603,6 +616,8 @@ struct CompiledWorkflowsPayload {
 
 #[derive(Clone, Debug, Deserialize)]
 struct CompiledRuntimeConfigPayload {
+    #[serde(default)]
+    source_units: Vec<CompiledSourceUnit>,
     workstation: WorkstationRuntimeConfig,
     flow: FlowRuntimeConfig,
     compute: ComputePrimitivesRuntimeConfig,
@@ -1234,7 +1249,7 @@ fn required_compiled_runtime_config(
         loaded.diagnostics.join("; ")
     };
     Err(BlueprintConfigError::Parse(format!(
-        "MissionD V3 blueprint exists at {}; compiled runtime config is required but unavailable or invalid: {detail}. Required action: {V3_COMPILE_RUNTIME_ACTION}. Set {V3_ALLOW_SOURCE_FALLBACK_ENV}=1 only for explicit development/test source fallback.",
+        "MissionD V3 blueprint exists at {}; compiled runtime config is required but unavailable or invalid: {detail}. Required action: {V3_COMPILE_RUNTIME_ACTION}. Set {V3_ALLOW_SOURCE_FALLBACK_ENV}=1 only for explicit debug/test source fallback.",
         root.join(".missiond")
             .join("v3")
             .join("missiond-blueprint.lisp")
@@ -1243,6 +1258,9 @@ fn required_compiled_runtime_config(
 }
 
 fn v3_source_fallback_allowed() -> bool {
+    if !(cfg!(debug_assertions) || cfg!(test)) {
+        return false;
+    }
     std::env::var(V3_ALLOW_SOURCE_FALLBACK_ENV)
         .ok()
         .map(|value| {
@@ -3012,7 +3030,7 @@ fn load_runtime_blueprint_source_with_diagnostics(
     let mut diagnostics = compiled.diagnostics;
     if source.is_some() && !v3_source_fallback_allowed() {
         diagnostics.push(format!(
-            "source Lisp fallback blocked because compiled runtime projection is required; run {V3_COMPILE_RUNTIME_ACTION} or set {V3_ALLOW_SOURCE_FALLBACK_ENV}=1 for explicit development/test fallback"
+            "source Lisp fallback blocked because compiled runtime projection is required; run {V3_COMPILE_RUNTIME_ACTION} or set {V3_ALLOW_SOURCE_FALLBACK_ENV}=1 for explicit debug/test fallback"
         ));
         return Ok(RuntimeBlueprintSourceLoad {
             source: None,
@@ -3075,23 +3093,10 @@ fn load_compiled_v3_lisp_source_with_diagnostics(project_root: &Path) -> Compile
         .join("runtime")
         .join("compiled")
         .join("compiled-v3-blueprint.json");
-    let source_path = project_root
-        .join(".missiond")
-        .join("v3")
-        .join("missiond-blueprint.lisp");
     if !path.exists() {
         return CompiledV3LispSourceLoad {
             source: None,
             diagnostics: vec![format!("compiled V3 snapshot missing: {}", path.display())],
-        };
-    }
-    if !compiled_v3_snapshot_is_current(&path, &source_path) {
-        return CompiledV3LispSourceLoad {
-            source: None,
-            diagnostics: vec![format!(
-                "compiled V3 snapshot stale relative to source Lisp: {}",
-                path.display()
-            )],
         };
     }
     let raw = match fs::read_to_string(&path) {
@@ -3118,6 +3123,16 @@ fn load_compiled_v3_lisp_source_with_diagnostics(project_root: &Path) -> Compile
             };
         }
     };
+    if parsed.schema_version != "missiond.compiled-v3-blueprint.v1" {
+        return CompiledV3LispSourceLoad {
+            source: None,
+            diagnostics: vec![format!(
+                "compiled V3 snapshot {} schema_version mismatch: expected missiond.compiled-v3-blueprint.v1, got {}",
+                path.display(),
+                parsed.schema_version
+            )],
+        };
+    }
     if !parsed.diagnostics.is_empty() {
         return CompiledV3LispSourceLoad {
             source: None,
@@ -3128,6 +3143,7 @@ fn load_compiled_v3_lisp_source_with_diagnostics(project_root: &Path) -> Compile
             )],
         };
     }
+    let source_hash = parsed.source_hash.clone();
     let payload: CompiledV3Payload = match serde_json::from_value(parsed.payload) {
         Ok(payload) => payload,
         Err(err) => {
@@ -3140,6 +3156,18 @@ fn load_compiled_v3_lisp_source_with_diagnostics(project_root: &Path) -> Compile
             };
         }
     };
+    let source_unit_diagnostics = validate_compiled_source_units(
+        project_root,
+        &source_hash,
+        &payload.source_units,
+        "compiled V3 snapshot",
+    );
+    if !source_unit_diagnostics.is_empty() {
+        return CompiledV3LispSourceLoad {
+            source: None,
+            diagnostics: source_unit_diagnostics,
+        };
+    }
     if payload.forms.is_empty() {
         return CompiledV3LispSourceLoad {
             source: None,
@@ -3178,20 +3206,68 @@ fn load_compiled_v3_lisp_source_with_diagnostics(project_root: &Path) -> Compile
     }
 }
 
-fn compiled_v3_snapshot_is_current(compiled_path: &Path, source_path: &Path) -> bool {
-    if !source_path.exists() {
-        return true;
+fn validate_compiled_source_units(
+    project_root: &Path,
+    expected_composite_hash: &str,
+    source_units: &[CompiledSourceUnit],
+    label: &str,
+) -> Vec<String> {
+    if source_units.is_empty() {
+        return vec![format!(
+            "{label} missing source_units; rerun {V3_COMPILE_RUNTIME_ACTION}"
+        )];
     }
-    let Ok(compiled_meta) = fs::metadata(compiled_path) else {
-        return false;
-    };
-    let Ok(source_meta) = fs::metadata(source_path) else {
-        return true;
-    };
-    match (compiled_meta.modified(), source_meta.modified()) {
-        (Ok(compiled_time), Ok(source_time)) => compiled_time >= source_time,
-        _ => true,
+
+    let mut diagnostics = Vec::new();
+    let mut unit_hashes = Vec::with_capacity(source_units.len());
+    for unit in source_units {
+        if unit.file.trim().is_empty() {
+            diagnostics.push(format!("{label} contains a source_unit with an empty file"));
+            continue;
+        }
+        let path = compiled_source_unit_path(project_root, &unit.file);
+        let actual_hash = match fs::read(&path) {
+            Ok(raw) => md5_hex(&raw),
+            Err(err) => {
+                diagnostics.push(format!(
+                    "{label} source_units reference unreadable source {}: {err}",
+                    path.display()
+                ));
+                continue;
+            }
+        };
+        if actual_hash != unit.source_hash {
+            diagnostics.push(format!(
+                "{label} source_units stale for {}: expected {}, got {}",
+                unit.file, unit.source_hash, actual_hash
+            ));
+        }
+        unit_hashes.push(unit.source_hash.clone());
     }
+
+    if diagnostics.is_empty() {
+        let actual_composite_hash = md5_hex(unit_hashes.join("\n").as_bytes());
+        if actual_composite_hash != expected_composite_hash {
+            diagnostics.push(format!(
+                "{label} source_hash mismatch from source_units: expected {}, got {}",
+                expected_composite_hash, actual_composite_hash
+            ));
+        }
+    }
+    diagnostics
+}
+
+fn compiled_source_unit_path(project_root: &Path, file: &str) -> PathBuf {
+    let path = Path::new(file);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        project_root.join(path)
+    }
+}
+
+fn md5_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Md5::digest(bytes))
 }
 
 fn compiled_sexp_to_lisp(node: &CompiledSexpNode) -> Option<String> {
@@ -3388,10 +3464,6 @@ fn load_compiled_runtime_config(
         .join("runtime")
         .join("compiled")
         .join("compiled-runtime-config.json");
-    let source_path = project_root
-        .join(".missiond")
-        .join("v3")
-        .join("missiond-blueprint.lisp");
     if !path.exists() {
         return CompiledPayloadLoad {
             payload: None,
@@ -3402,21 +3474,28 @@ fn load_compiled_runtime_config(
             )],
         };
     }
-    if !compiled_v3_snapshot_is_current(&path, &source_path) {
-        return CompiledPayloadLoad {
-            payload: None,
-            snapshot: None,
-            diagnostics: vec![format!(
-                "compiled runtime config stale relative to source Lisp: {}",
-                path.display()
-            )],
-        };
-    }
-    load_compiled_payload::<CompiledRuntimeConfigPayload>(
+    let mut loaded = load_compiled_payload::<CompiledRuntimeConfigPayload>(
         project_root,
         "runtime-config",
         expected_source_hash,
-    )
+    );
+    let source_unit_diagnostics =
+        if let (Some(payload), Some(snapshot)) = (&loaded.payload, &loaded.snapshot) {
+            validate_compiled_source_units(
+                project_root,
+                &snapshot.source_hash,
+                &payload.source_units,
+                "compiled runtime config",
+            )
+        } else {
+            Vec::new()
+        };
+    if !source_unit_diagnostics.is_empty() {
+        loaded.payload = None;
+        loaded.snapshot = None;
+        loaded.diagnostics.extend(source_unit_diagnostics);
+    }
+    loaded
 }
 
 pub(crate) fn compiled_runtime_projection_status(project_root: &Path) -> serde_json::Value {
@@ -4796,13 +4875,25 @@ mod tests {
         assert!(err.to_string().contains("conversation-ingestion-policy"));
     }
 
-    fn compiled_runtime_config_fixture(source_hash: &str) -> String {
+    fn compiled_source_unit_fixture(root: &std::path::Path) -> (String, String) {
+        let rel = ".missiond/v3/missiond-blueprint.lisp";
+        let source = fs::read(root.join(rel)).expect("read source blueprint");
+        let unit_hash = md5_hex(&source);
+        let composite_hash = md5_hex(unit_hash.as_bytes());
+        let source_units = format!(
+            r#"[{{"file":"{rel}","kind":"root","included_by":null,"include_line":null,"source_hash":"{unit_hash}"}}]"#
+        );
+        (composite_hash, source_units)
+    }
+
+    fn compiled_runtime_config_fixture(source_hash: &str, source_units: &str) -> String {
         r#"{
             "schema_version": "missiond.compiled-runtime-config.v1",
             "source_hash": "__SOURCE_HASH__",
             "generated_at": null,
             "diagnostics": [],
             "payload": {
+                "source_units": __SOURCE_UNITS__,
                 "workstation": {
                     "slot_default_profiles": {"coder": "compiled-profile"},
                     "slot_templates": {
@@ -5003,9 +5094,11 @@ mod tests {
             }
         }"#
         .replace("__SOURCE_HASH__", source_hash)
+        .replace("__SOURCE_UNITS__", source_units)
     }
 
-    fn write_compiled_runtime_config_fixture(root: &std::path::Path, source_hash: &str) {
+    fn write_compiled_runtime_config_fixture(root: &std::path::Path) -> String {
+        let (source_hash, source_units) = compiled_source_unit_fixture(root);
         let compiled_dir = root
             .join(".missiond")
             .join("v3")
@@ -5014,12 +5107,14 @@ mod tests {
         fs::create_dir_all(&compiled_dir).expect("compiled dir");
         fs::write(
             compiled_dir.join("compiled-runtime-config.json"),
-            compiled_runtime_config_fixture(source_hash),
+            compiled_runtime_config_fixture(&source_hash, &source_units),
         )
         .expect("write compiled runtime config");
+        source_hash
     }
 
-    fn write_compiled_v3_blueprint_fixture(root: &std::path::Path, marker: &str) {
+    fn write_compiled_v3_blueprint_fixture(root: &std::path::Path, marker: &str) -> String {
+        let (source_hash, source_units) = compiled_source_unit_fixture(root);
         let compiled_dir = root
             .join(".missiond")
             .join("v3")
@@ -5031,10 +5126,11 @@ mod tests {
             format!(
                 r#"{{
                   "schema_version": "missiond.compiled-v3-blueprint.v1",
-                  "source_hash": "v3-hash",
+                  "source_hash": "{source_hash}",
                   "generated_at": null,
                   "diagnostics": [],
                   "payload": {{
+                    "source_units": {source_units},
                     "forms": [{{
                       "type": "list",
                       "kind": "paren",
@@ -5050,6 +5146,7 @@ mod tests {
             ),
         )
         .expect("write compiled v3 blueprint");
+        source_hash
     }
 
     #[test]
@@ -5062,9 +5159,9 @@ mod tests {
             .join("missiond-blueprint.lisp");
         fs::create_dir_all(blueprint_path.parent().unwrap()).expect("blueprint dir");
         fs::write(&blueprint_path, "(missiond-blueprint)").expect("write source");
-        write_compiled_runtime_config_fixture(temp.path(), "runtime-hash");
+        let runtime_hash = write_compiled_runtime_config_fixture(temp.path());
 
-        let loaded = load_compiled_runtime_config(temp.path(), Some("runtime-hash"));
+        let loaded = load_compiled_runtime_config(temp.path(), Some(&runtime_hash));
         assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
         let payload = loaded.payload.expect("payload");
         assert_eq!(payload.router.default_chat_model, "compiled-router");
@@ -5089,25 +5186,26 @@ mod tests {
     }
 
     #[test]
-    fn stale_compiled_runtime_config_blocks_source_lisp_fallback_by_default() {
+    fn stale_source_units_compiled_runtime_config_blocks_source_lisp_fallback_by_default() {
         let _env = source_fallback_env(None);
         let temp = tempfile::tempdir().expect("tempdir");
-        write_compiled_runtime_config_fixture(temp.path(), "runtime-hash");
-        std::thread::sleep(std::time::Duration::from_millis(20));
         let blueprint_path = temp
             .path()
             .join(".missiond")
             .join("v3")
             .join("missiond-blueprint.lisp");
-        fs::write(&blueprint_path, "(missiond-blueprint)").expect("write source");
+        fs::create_dir_all(blueprint_path.parent().unwrap()).expect("blueprint dir");
+        fs::write(&blueprint_path, "(missiond-blueprint old)").expect("write old source");
+        let runtime_hash = write_compiled_runtime_config_fixture(temp.path());
+        fs::write(&blueprint_path, "(missiond-blueprint fresh)").expect("write fresh source");
 
-        let loaded = load_compiled_runtime_config(temp.path(), Some("runtime-hash"));
+        let loaded = load_compiled_runtime_config(temp.path(), Some(&runtime_hash));
         assert!(loaded.payload.is_none());
         assert!(
             loaded
                 .diagnostics
                 .iter()
-                .any(|line| line.contains("stale relative to source Lisp")),
+                .any(|line| line.contains("source_units stale")),
             "{:?}",
             loaded.diagnostics
         );
@@ -5160,16 +5258,17 @@ mod tests {
             .join("runtime")
             .join("compiled");
         fs::create_dir_all(&compiled_dir).expect("compiled dir");
+        let (runtime_hash, source_units) = compiled_source_unit_fixture(temp.path());
         fs::write(
             compiled_dir.join("compiled-runtime-config.json"),
-            compiled_runtime_config_fixture("runtime-hash").replace(
+            compiled_runtime_config_fixture(&runtime_hash, &source_units).replace(
                 "missiond.compiled-runtime-config.v1",
                 "missiond.compiled-runtime-config.v0",
             ),
         )
         .expect("write schema mismatch compiled runtime config");
 
-        let loaded = load_compiled_runtime_config(temp.path(), Some("runtime-hash"));
+        let loaded = load_compiled_runtime_config(temp.path(), Some(&runtime_hash));
         assert!(loaded.payload.is_none());
         assert!(
             loaded
@@ -5416,7 +5515,7 @@ mod tests {
             .join("v3")
             .join("missiond-blueprint.lisp");
         fs::write(&blueprint_path, "(missiond-blueprint)").expect("write source");
-        write_compiled_runtime_config_fixture(temp.path(), "runtime-hash");
+        let runtime_hash = write_compiled_runtime_config_fixture(temp.path());
         write_compiled_v3_blueprint_fixture(temp.path(), "status-compiled-marker");
         fs::write(
             compiled_dir.join("compiled-project-universe.json"),
@@ -5478,7 +5577,7 @@ mod tests {
         );
         assert_eq!(
             status["runtimeConfig"]["sourceHash"].as_str(),
-            Some("runtime-hash")
+            Some(runtime_hash.as_str())
         );
         assert!(status["runtimeConfig"]["path"]
             .as_str()
@@ -5524,28 +5623,7 @@ mod tests {
             r#"(missiond-blueprint (workstation-config (model-profile coding-default-opus-4-7 :spawn-model-arg nil)))"#,
         )
         .expect("fallback blueprint");
-        fs::write(
-            compiled_dir.join("compiled-v3-blueprint.json"),
-            r#"{
-              "schema_version": "missiond.compiled-v3-blueprint.v1",
-              "source_hash": "compiled",
-              "generated_at": null,
-              "diagnostics": [],
-              "payload": {
-                "forms": [{
-                  "type": "list",
-                  "kind": "paren",
-                  "children": [
-                    {"type": "atom", "value": "missiond-blueprint"},
-                    {"type": "list", "kind": "paren", "children": [
-                      {"type": "atom", "value": "compiled-runtime-marker"}
-                    ]}
-                  ]
-                }]
-              }
-            }"#,
-        )
-        .expect("compiled snapshot");
+        write_compiled_v3_blueprint_fixture(temp.path(), "compiled-runtime-marker");
 
         let source = load_runtime_blueprint_source(Some(temp.path().to_string_lossy().as_ref()))
             .expect("runtime source")
@@ -5601,28 +5679,11 @@ mod tests {
         let compiled_dir = v3_dir.join("runtime").join("compiled");
         fs::create_dir_all(&compiled_dir).expect("compiled dir");
         fs::write(
-            compiled_dir.join("compiled-v3-blueprint.json"),
-            r#"{
-              "schema_version": "missiond.compiled-v3-blueprint.v1",
-              "source_hash": "old",
-              "generated_at": null,
-              "diagnostics": [],
-              "payload": {
-                "forms": [{
-                  "type": "list",
-                  "kind": "paren",
-                  "children": [
-                    {"type": "atom", "value": "missiond-blueprint"},
-                    {"type": "list", "kind": "paren", "children": [
-                      {"type": "atom", "value": "stale-compiled-marker"}
-                    ]}
-                  ]
-                }]
-              }
-            }"#,
+            v3_dir.join("missiond-blueprint.lisp"),
+            r#"(missiond-blueprint (old-source-marker))"#,
         )
-        .expect("compiled snapshot");
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        .expect("old source");
+        write_compiled_v3_blueprint_fixture(temp.path(), "stale-compiled-marker");
         fs::write(
             v3_dir.join("missiond-blueprint.lisp"),
             r#"(missiond-blueprint (fresh-source-marker))"#,

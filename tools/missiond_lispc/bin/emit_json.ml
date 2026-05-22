@@ -338,6 +338,50 @@ let semantic_source_unit_fact unit =
     (match unit.include_line with Some value -> string_of_int value | None -> "null")
     (json_string unit.source_hash)
 
+let runtime_policy_names =
+  [
+    "autopilot-policy";
+    "cascade-policy";
+    "flow-runtime-policy";
+    "compute-runtime-policy";
+    "minimax-runtime-policy";
+    "router-runtime-policy";
+    "project-registry-policy";
+    "capability-governance-policy";
+    "memory-kb-policy";
+    "conversation-ingestion-policy";
+    "learning-engine-policy";
+  ]
+
+let semantic_runtime_policy_fact source_hash file name node =
+  let props = keyword_props ~start:1 node in
+  let keyword_keys = props |> List.map fst in
+  let nested_forms = children node |> List.filter_map head in
+  Printf.sprintf
+    {|{"fact_id":%s,"kind":"runtime_policy","project_id":"missiond","id":%s,"keyword_keys":%s,"nested_forms":%s,"source":%s}|}
+    (json_string ("runtime-policy:" ^ safe_id name))
+    (json_string name)
+    (json_string_list keyword_keys)
+    (json_string_list nested_forms)
+    (source_map_json source_hash file node)
+
+let semantic_checker_registry_fact source_hash file root =
+  match find_child root "compression-contract" with
+  | None -> []
+  | Some node ->
+      let props = keyword_props ~start:1 node in
+      let checks =
+        match prop ":checks" props with
+        | Some value -> list_texts value
+        | None -> []
+      in
+      [
+        Printf.sprintf
+          {|{"fact_id":"checker-registry:v3-compression-contract","kind":"checker_registry","project_id":"missiond","id":"v3-compression-contract","checks":%s,"source":%s}|}
+          (json_string_list checks)
+          (source_map_json source_hash file node);
+      ]
+
 let semantic_facts source_hash file source_units root =
   let function_facts =
     match find_child root "pillar-flow-map" with
@@ -388,11 +432,21 @@ let semantic_facts source_hash file source_units root =
     | Some workstation ->
         [ semantic_workstation_config_fact source_hash file workstation ]
   in
+  let runtime_policy_facts =
+    runtime_policy_names
+    |> List.filter_map (fun name ->
+           find_child root name
+           |> Option.map (semantic_runtime_policy_fact source_hash file name))
+  in
+  let checker_registry_facts =
+    semantic_checker_registry_fact source_hash file root
+  in
   let source_unit_facts =
     source_units |> List.map semantic_source_unit_fact
   in
   function_facts @ surface_facts @ artifact_facts @ workflow_contract_facts
-  @ workstation_facts @ source_unit_facts
+  @ workstation_facts @ runtime_policy_facts @ checker_registry_facts
+  @ source_unit_facts
 
 let project_entry_to_json node =
   let props = keyword_props ~start:1 node in
@@ -858,10 +912,11 @@ let learning_engine_runtime_config_json root =
           ("cooccurrence_refresh_interval_secs", json_number_token [ ":cooccurrence-refresh-interval-secs" ] props);
         ]
 
-let runtime_config_payload_json blueprint root =
+let runtime_config_payload_json blueprint source_units root =
   json_assoc
     [
       ("blueprint", json_string blueprint);
+      ("source_units", Source_resolver.source_units_to_json source_units);
       ("workstation", workstation_runtime_config_json root);
       ("flow", flow_runtime_config_json root);
       ("compute", compute_runtime_config_json root);
@@ -1169,7 +1224,9 @@ let emit_runtime_config blueprint =
               "missing missiond-blueprint root";
           ]
     in
-    let payload = runtime_config_payload_json blueprint root in
+    let payload =
+      runtime_config_payload_json blueprint resolved.source_units root
+    in
     print_endline
       (result_json
          ~extra:[

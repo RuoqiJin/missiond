@@ -206,6 +206,7 @@ export async function runContextPackWave({
   modelProfile = null,
   blueprintPath = null,
   allowDefaultConfig = false,
+  allowSourceFallback = false,
   maxParallel = null,
   force = false,
   dryRun = false,
@@ -230,6 +231,7 @@ export async function runContextPackWave({
   const runtimeConfig = loadWorkstationRuntimeConfigForRepo(repo, {
     blueprintPath,
     allowDefaultFallback: allowDefaultConfig,
+    allowSourceFallback,
   });
   const effectiveMaxParallel = runtimeConfig.contextPackMaxParallel(maxParallel);
   const materialize = materializeContextPackWave({
@@ -243,6 +245,7 @@ export async function runContextPackWave({
     modelProfile,
     blueprintPath,
     allowDefaultConfig,
+    allowSourceFallback,
     dryRun,
     force,
     nowIso,
@@ -301,6 +304,7 @@ export async function runContextPackWave({
         requestEventsDir,
         blueprintPath,
         allowDefaultConfig,
+        allowSourceFallback,
         allowMissingBriefs,
         apply,
       });
@@ -318,6 +322,7 @@ export async function runContextPackWave({
         requestEventsDir,
         blueprintPath,
         allowDefaultConfig,
+        allowSourceFallback,
         allowMissingBriefs,
         emitDispatchEvents,
         nowIso,
@@ -419,6 +424,7 @@ async function runFixtures() {
     const descriptor = await runContextPackWave({
       contextPackPath: packPath,
       repoRoot: tmp,
+      allowSourceFallback: true,
       nowIso: '2026-04-29T00:00:00Z',
     });
     assert(descriptor.mode === 'descriptor', 'default mode should return dispatch descriptor');
@@ -443,6 +449,7 @@ async function runFixtures() {
     const override = await runContextPackWave({
       contextPackPath: packPath,
       repoRoot: tmp,
+      allowSourceFallback: true,
       maxParallel: '2',
       force: false,
       nowIso: '2026-04-29T00:00:00Z',
@@ -454,6 +461,7 @@ async function runFixtures() {
     const submitDry = await runContextPackWave({
       contextPackPath: packPath,
       repoRoot: tmp,
+      allowSourceFallback: true,
       submit: true,
       force: false,
       nowIso: '2026-04-29T00:00:00Z',
@@ -465,6 +473,7 @@ async function runFixtures() {
     const dry = await runContextPackWave({
       contextPackPath: packPath,
       repoRoot: tmp,
+      allowSourceFallback: true,
       wave: 'wave100',
       taskPrefix: 'wave100',
       dryRun: true,

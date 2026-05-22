@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import path from 'node:path';
 
 import {
@@ -52,6 +53,8 @@ const COMPILED_RUNTIME_CONFIG_REL = path.join(
   'compiled',
   'compiled-runtime-config.json',
 );
+const V3_ALLOW_SOURCE_FALLBACK_ENV = 'MISSIOND_V3_ALLOW_SOURCE_FALLBACK';
+const V3_COMPILE_RUNTIME_ACTION = 'node scripts/compile-v3-runtime.mjs --json';
 
 export class V3BlueprintRuntimeConfigError extends Error {
   constructor(message) {
@@ -179,7 +182,7 @@ export class WorkstationRuntimeConfig {
 
 export function loadWorkstationRuntimeConfigForRepo(
   repoRoot = process.cwd(),
-  { blueprintPath = null, allowDefaultFallback = false } = {},
+  { blueprintPath = null, allowDefaultFallback = false, allowSourceFallback = null } = {},
 ) {
   const repo = path.resolve(repoRoot);
   const explicitBlueprint = blueprintPath != null;
@@ -187,20 +190,31 @@ export function loadWorkstationRuntimeConfigForRepo(
     ? path.resolve(repo, blueprintPath)
     : path.join(repo, '.missiond', 'v3', 'missiond-blueprint.lisp');
   const missiondDir = path.join(repo, '.missiond');
+  const fallbackAllowed = allowSourceFallback ?? v3SourceFallbackAllowed();
+  let compiledDiagnostics = [];
 
   if (!explicitBlueprint) {
-    const compiled = tryLoadCompiledWorkstationRuntimeConfig(repo, resolvedBlueprint);
-    if (compiled) return compiled;
+    const compiled = loadCompiledWorkstationRuntimeConfig(repo);
+    compiledDiagnostics = compiled.diagnostics;
+    if (compiled.config) return compiled.config;
   }
   const fallbackDiagnostic = explicitBlueprint
     ? 'explicit blueprint requested; parsing raw Lisp workstation config'
-    : 'compiled runtime config unavailable or stale; parsing raw Lisp workstation config fallback';
+    : 'compiled runtime config unavailable or stale; explicit source Lisp fallback enabled';
 
   if (!fs.existsSync(resolvedBlueprint)) {
     if ((explicitBlueprint || fs.existsSync(missiondDir)) && !allowDefaultFallback) {
       throw new V3BlueprintRuntimeConfigError(`V3 blueprint missing at ${resolvedBlueprint}`);
     }
     return defaultWorkstationRuntimeConfig('fallback-defaults');
+  }
+  if (!explicitBlueprint && !fallbackAllowed) {
+    const detail = compiledDiagnostics.length > 0
+      ? compiledDiagnostics.join('; ')
+      : 'compiled runtime config payload missing';
+    throw new V3BlueprintRuntimeConfigError(
+      `MissionD V3 blueprint exists at ${resolvedBlueprint}; compiled runtime config is required but unavailable or invalid: ${detail}. Required action: ${V3_COMPILE_RUNTIME_ACTION}. Set ${V3_ALLOW_SOURCE_FALLBACK_ENV}=1 only for explicit development/test source fallback.`,
+    );
   }
 
   let source;
@@ -216,25 +230,95 @@ export function loadWorkstationRuntimeConfigForRepo(
   return config;
 }
 
-function tryLoadCompiledWorkstationRuntimeConfig(repo, sourceBlueprint) {
+function loadCompiledWorkstationRuntimeConfig(repo) {
   const compiledPath = path.join(repo, COMPILED_RUNTIME_CONFIG_REL);
-  if (!fs.existsSync(compiledPath)) return null;
-  try {
-    if (
-      fs.existsSync(sourceBlueprint)
-      && fs.statSync(compiledPath).mtimeMs < fs.statSync(sourceBlueprint).mtimeMs
-    ) {
-      return null;
-    }
-    const compiled = JSON.parse(fs.readFileSync(compiledPath, 'utf8'));
-    if (compiled?.schema_version !== 'missiond.compiled-runtime-config.v1') return null;
-    if (Array.isArray(compiled?.diagnostics) && compiled.diagnostics.length > 0) return null;
-    const workstation = compiled?.payload?.workstation;
-    if (!workstation || typeof workstation !== 'object') return null;
-    return workstationConfigFromCompiled(workstation, compiledPath);
-  } catch {
-    return null;
+  const diagnostics = [];
+  if (!fs.existsSync(compiledPath)) {
+    return {
+      config: null,
+      diagnostics: [`compiled runtime config missing: ${compiledPath}`],
+    };
   }
+  try {
+    const compiled = JSON.parse(fs.readFileSync(compiledPath, 'utf8'));
+    if (compiled?.schema_version !== 'missiond.compiled-runtime-config.v1') {
+      diagnostics.push(`compiled runtime config has unsupported schema_version ${JSON.stringify(compiled?.schema_version)}`);
+    }
+    if (Array.isArray(compiled?.diagnostics) && compiled.diagnostics.length > 0) {
+      diagnostics.push(`compiled runtime config contains diagnostics: ${compiled.diagnostics.map((d) => d?.message ?? String(d)).join('; ')}`);
+    }
+    diagnostics.push(...validateCompiledSourceUnits(repo, compiled));
+    const workstation = compiled?.payload?.workstation;
+    if (!workstation || typeof workstation !== 'object') {
+      diagnostics.push('compiled runtime config payload.workstation missing');
+    }
+    if (diagnostics.length > 0) {
+      return { config: null, diagnostics };
+    }
+    return {
+      config: workstationConfigFromCompiled(workstation, compiledPath),
+      diagnostics: [],
+    };
+  } catch (err) {
+    return {
+      config: null,
+      diagnostics: [`failed to load compiled runtime config ${compiledPath}: ${err.message}`],
+    };
+  }
+}
+
+function validateCompiledSourceUnits(repo, compiled) {
+  const diagnostics = [];
+  const sourceUnits = compiled?.payload?.source_units;
+  if (!Array.isArray(sourceUnits) || sourceUnits.length === 0) {
+    return ['compiled runtime config missing payload.source_units'];
+  }
+
+  const unitHashes = [];
+  for (const unit of sourceUnits) {
+    const file = typeof unit?.file === 'string' ? unit.file : '';
+    const expectedHash = typeof unit?.source_hash === 'string' ? unit.source_hash : '';
+    if (!file) {
+      diagnostics.push('compiled runtime config contains a source_unit with an empty file');
+      continue;
+    }
+    if (!expectedHash) {
+      diagnostics.push(`compiled runtime config source_unit ${file} missing source_hash`);
+      continue;
+    }
+    const sourcePath = path.isAbsolute(file) ? file : path.join(repo, file);
+    let actualHash;
+    try {
+      actualHash = md5Hex(fs.readFileSync(sourcePath));
+    } catch (err) {
+      diagnostics.push(`compiled runtime config source_units reference unreadable source ${sourcePath}: ${err.message}`);
+      continue;
+    }
+    if (actualHash !== expectedHash) {
+      diagnostics.push(`compiled runtime config source_units stale for ${file}: expected ${expectedHash}, got ${actualHash}`);
+    }
+    unitHashes.push(expectedHash);
+  }
+
+  if (diagnostics.length === 0) {
+    const actualCompositeHash = md5Hex(Buffer.from(unitHashes.join('\n'), 'utf8'));
+    if (actualCompositeHash !== compiled?.source_hash) {
+      diagnostics.push(
+        `compiled runtime config source_hash mismatch from source_units: expected ${compiled?.source_hash ?? '<missing>'}, got ${actualCompositeHash}`,
+      );
+    }
+  }
+  return diagnostics;
+}
+
+function md5Hex(bytes) {
+  return crypto.createHash('md5').update(bytes).digest('hex');
+}
+
+function v3SourceFallbackAllowed() {
+  if (process.env.NODE_ENV === 'production') return false;
+  const value = process.env[V3_ALLOW_SOURCE_FALLBACK_ENV];
+  return /^(1|true|yes|on)$/i.test(String(value ?? '').trim());
 }
 
 function workstationConfigFromCompiled(raw, source) {

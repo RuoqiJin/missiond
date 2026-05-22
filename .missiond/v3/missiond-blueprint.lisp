@@ -158,6 +158,39 @@
        "MissionD may query cold-runtime for trace/debug/report lookup, but that query must be explicit and visible in the context-pack."]
     :checker "node scripts/check-v3-runtime-path-hygiene.mjs")
 
+  (compiler-plane
+    :schema "missiond.compiler-plane.v1"
+    :purpose "Keep Lisp as high-density architecture SSOT while preventing every runtime language from becoming a Lisp semantic interpreter."
+    :authoring-source ".missiond/v3/**/*.lisp"
+    :semantic-compiler missiond-lispc
+    :compiler-root "tools/missiond_lispc"
+    :runtime-abi ".missiond/v3/runtime/compiled/*.json"
+    :compiled-abi ["compiled-v3-blueprint.json"
+                   "compiled-runtime-config.json"
+                   "compiled-semantic-ir.json"
+                   "compiled-project-universe.json"
+                   "compiled-workflows.json"
+                   "compiled-genomes.json"]
+    :envelope-fields [:schema_version :source_hash :generated_at :diagnostics :payload]
+    :payload-fields [:source_units :surfaces :functions :artifact_contracts :runtime_policies :checker_registry]
+    :authority-boundary
+      ["missiond-lispc is the only production component allowed to assign Lisp semantics."
+       "Rust runtime hot paths consume compiled JSON/runtime config; raw Lisp fallback requires MISSIOND_V3_ALLOW_SOURCE_FALLBACK and emits blocking diagnostics otherwise."
+       "JS checkers consume semantic-ir/resolved compiler output for active surfaces; JS Lisp parsing is compatibility scaffolding for legacy fixtures and checker migration only."
+       "Freshness is source_hash plus source_units; mtime is not semantic authority."]
+    :forbidden-production-consumers
+      [rust-scan_keyword_pairs
+       rust-ad-hoc-colon-keyword-scanner
+       js-new-raw-blueprint-parser
+       worker-direct-lisp-reader]
+    :governance
+      (:contract "compiler-plane"
+       :checker "node scripts/check-typed-lisp-compiler.mjs"
+       :aggregate "node scripts/check-v3-code-isomorphism-complete.mjs"
+       :goldens ["tools/missiond_lispc/test/parser_golden.ml"
+                 "node scripts/compile-v3-runtime.mjs --json"])
+    :non-goal "Do not add a second governance layer for the compiler plane; this contract plus typed compiler checks are the boundary.")
+
   (blueprint-shard-index
     :schema "missiond.blueprint-shard-index.v1"
     :index ".missiond/v3/shards/index.lisp"

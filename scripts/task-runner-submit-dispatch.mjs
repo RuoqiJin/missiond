@@ -143,6 +143,7 @@ export async function submitDispatch({
   requestEventsDir = null,
   blueprintPath = null,
   allowDefaultConfig = false,
+  allowSourceFallback = false,
   allowMissingBriefs = false,
   apply = false,
   callTool = null,
@@ -161,6 +162,7 @@ export async function submitDispatch({
     requestEventsDir,
     blueprintPath,
     allowDefaultConfig,
+    allowSourceFallback,
     allowMissingBriefs,
     emitDispatchEvents: false,
     nowIso,
@@ -385,6 +387,7 @@ async function submitDispatchFixtures() {
     const dry = await submitDispatch({
       manifestPath,
       repoRoot: tmp,
+      allowSourceFallback: true,
       maxParallel: 1,
       apply: false,
       nowIso: '2026-04-28T00:00:00Z',
@@ -405,6 +408,7 @@ async function submitDispatchFixtures() {
     const applied = await submitDispatch({
       manifestPath,
       repoRoot: tmp,
+      allowSourceFallback: true,
       maxParallel: 1,
       apply: true,
       requestId: 'req-wave99-submit',
@@ -437,6 +441,7 @@ async function submitDispatchFixtures() {
     const partial = await submitDispatch({
       manifestPath,
       repoRoot: tmp,
+      allowSourceFallback: true,
       maxParallel: 'all',
       apply: true,
       callTool: async (name, args) => ({

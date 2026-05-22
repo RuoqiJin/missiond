@@ -45,6 +45,11 @@ import { readBlueprintWithEvidenceSidecars } from './lib/v3_blueprint_contract_s
 
 const BLUEPRINT_PATH = '.missiond/v3/missiond-blueprint.lisp';
 const AGGREGATE_COMMAND = 'node scripts/check-v3-code-isomorphism-complete.mjs';
+const LEGACY_LISP_SCANNER_ALLOWLIST = new Set([
+  'crates/missiond-daemon/src/handlers/knowledge/plan/execute_hints.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/plan_dag/parser/scanner/keyword_pairs.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/request/respond/routing.rs',
+]);
 
 // Bootstrap/dry-fixture surface list. Live validation derives the active
 // surface set from missiond-lispc emit-v3 + emit-semantic-ir so checker
@@ -436,10 +441,15 @@ function main() {
     expectedSurfaces: expectedSurfaceSet,
   });
   const ssotReadGuardDiagnostics = checkV3SsotReadGuards(opts.repo);
+  const compilerPlaneDiagnostics = checkCompilerPlaneGuards(opts.repo);
   const checkerResults = runPerSurfaceCheckers(opts.repo);
   const checkerOk = checkerResults.every((r) => r.ok);
   const compiledOk = compiled.ok === true && expectedSurfaces.length > 0;
-  const ok = blueprintResult.ok && checkerOk && compiledOk && ssotReadGuardDiagnostics.length === 0;
+  const ok = blueprintResult.ok
+    && checkerOk
+    && compiledOk
+    && ssotReadGuardDiagnostics.length === 0
+    && compilerPlaneDiagnostics.length === 0;
 
   const result = {
     ok,
@@ -457,7 +467,12 @@ function main() {
         { status: s.status, has_code: s.hasCode, has_note: s.hasNote },
       ]),
     ),
-    diagnostics: [...compiled.diagnostics, ...blueprintResult.diagnostics, ...ssotReadGuardDiagnostics],
+    diagnostics: [
+      ...compiled.diagnostics,
+      ...blueprintResult.diagnostics,
+      ...ssotReadGuardDiagnostics,
+      ...compilerPlaneDiagnostics,
+    ],
     checks: checkerResults,
   };
 
@@ -477,6 +492,9 @@ function main() {
     for (const d of ssotReadGuardDiagnostics) {
       console.error(`${d.file}:${d.line}:${d.column}: ${d.severity}: ${d.message}`);
     }
+    for (const d of compilerPlaneDiagnostics) {
+      console.error(`${d.file}:${d.line}:${d.column}: ${d.severity}: ${d.message}`);
+    }
     for (const r of checkerResults) {
       if (r.ok) continue;
       console.error(`per-surface checker FAILED: ${r.script} (exit ${r.exit_code})`);
@@ -487,6 +505,46 @@ function main() {
     console.error('v3 code-isomorphism gate FAILED');
   }
   process.exit(ok ? 0 : 1);
+}
+
+function checkCompilerPlaneGuards(repoRoot) {
+  const diagnostics = [];
+  const repoAbs = path.resolve(repoRoot);
+  const root = path.join(repoAbs, 'crates/missiond-daemon/src');
+  if (!fs.existsSync(root)) return diagnostics;
+  for (const abs of walkFiles(root, (file) => file.endsWith('.rs'))) {
+    const rel = path.relative(repoAbs, abs).split(path.sep).join('/');
+    const source = fs.readFileSync(abs, 'utf8');
+    const lines = source.split('\n');
+    for (let i = 0; i < lines.length; i += 1) {
+      const line = lines[i];
+      if (!/\bfn\s+scan_keyword_pairs\s*\(/.test(line)
+        && !/\bfn\s+extract_lisp_keyword_(?:string|int)\s*\(/.test(line)) {
+        continue;
+      }
+      if (LEGACY_LISP_SCANNER_ALLOWLIST.has(rel)) continue;
+      diagnostics.push({
+        severity: 'error',
+        file: rel,
+        line: i + 1,
+        column: Math.max(1, line.search(/\bfn\s+/) + 1),
+        code: 'COMPILER_PLANE_AD_HOC_LISP_SCANNER_FORBIDDEN',
+        message: 'Production Rust paths must not add new ad hoc Lisp keyword scanners; project new semantics through missiond-lispc compiled JSON/semantic-ir instead.',
+      });
+    }
+  }
+  return diagnostics;
+}
+
+function walkFiles(root, predicate) {
+  const out = [];
+  const entries = fs.readdirSync(root, { withFileTypes: true });
+  for (const entry of entries) {
+    const abs = path.join(root, entry.name);
+    if (entry.isDirectory()) out.push(...walkFiles(abs, predicate));
+    else if (!predicate || predicate(abs)) out.push(abs);
+  }
+  return out;
 }
 
 function checkV3SsotReadGuards(repoRoot) {

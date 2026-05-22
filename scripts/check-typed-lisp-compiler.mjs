@@ -50,7 +50,9 @@ const REQUIRED_RUNTIME_LOADER = {
     'required_compiled_runtime_config',
     'MISSIOND_V3_ALLOW_SOURCE_FALLBACK',
     'CompiledRuntimeConfigPayload',
-    'compiled_v3_snapshot_is_current',
+    'CompiledSourceUnit',
+    'validate_compiled_source_units',
+    'md5_hex',
     'compiled_sexp_to_lisp',
     'CompiledV3Payload',
     'RuntimeBlueprintSourceKind',
@@ -143,6 +145,12 @@ const REQUIRED_BLUEPRINT_TOKENS = [
   'tools/missiond_lispc/bin/emit_json.ml',
   'scripts/lib/v3_compiled_contract.mjs',
   'node scripts/check-typed-lisp-compiler.mjs',
+  '(compiler-plane',
+  ':semantic-compiler missiond-lispc',
+  ':runtime-abi ".missiond/v3/runtime/compiled/*.json"',
+  ':payload-fields [:source_units',
+  'Freshness is source_hash plus source_units',
+  'rust-scan_keyword_pairs',
 ];
 
 const REQUIRED_WORKFLOW_PROJECTIONS = [
@@ -247,6 +255,7 @@ function main() {
     for (const argv of [
       ['emit-v3', '--blueprint', BLUEPRINT],
       ['emit-runtime-config', '--blueprint', BLUEPRINT],
+      ['emit-semantic-ir', '--blueprint', BLUEPRINT],
       ['emit-universe', '--blueprint', BLUEPRINT],
       ['emit-workflows', '--workflow-dir', '.missiond/workflows'],
       ['emit-genomes', '--genome-dir', '.missiond/v3/genome'],
@@ -279,6 +288,9 @@ function main() {
         }
       } else if (argv[0] === 'emit-runtime-config') {
         const payload = emit.compiled?.payload ?? {};
+        if (!Array.isArray(payload.source_units) || payload.source_units.length === 0) {
+          diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_RUNTIME_CONFIG_SOURCE_UNITS_MISSING', 'emit-runtime-config must project payload.source_units for source_hash freshness'));
+        }
         const requiredGroups = [
           'workstation',
           'flow',
@@ -303,6 +315,18 @@ function main() {
         }
         if (!payload.workstation?.timeout_policy || !payload.router?.default_chat_model || !payload.autopilot?.boardtask_timeout_policy) {
           diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_RUNTIME_CONFIG_POLICY_MISSING', 'emit-runtime-config must project workstation/router/autopilot runtime policy fields'));
+        }
+      } else if (argv[0] === 'emit-semantic-ir') {
+        const facts = emit.compiled?.payload?.facts ?? [];
+        const factKinds = new Set(facts.map((fact) => fact.kind));
+        for (const kind of ['artifact_contract', 'surface', 'function', 'runtime_policy', 'checker_registry', 'module_source_unit']) {
+          if (!factKinds.has(kind)) {
+            diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_SEMANTIC_IR_FACT_KIND_MISSING', `emit-semantic-ir must project ${kind} facts`));
+          }
+        }
+        const runtimePolicies = facts.filter((fact) => fact.kind === 'runtime_policy');
+        if (runtimePolicies.length < 5) {
+          diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_SEMANTIC_IR_RUNTIME_POLICIES_INCOMPLETE', 'emit-semantic-ir must project runtime policy facts for compiled ABI consumers'));
         }
       } else if (argv[0] === 'emit-universe') {
         if (!Array.isArray(emit.compiled?.payload?.projects) || emit.compiled.payload.projects.length === 0) {

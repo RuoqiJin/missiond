@@ -100,7 +100,7 @@ const LIVE_CHECKS = [
   },
   {
     id: 'typed-lisp-runtime-compile',
-    argv: ['scripts/compile-v3-runtime.mjs', '--json'],
+    argv: ['scripts/compile-v3-runtime.mjs', '--check', '--json'],
     json: true,
     timeoutMs: 60_000,
   },
@@ -196,6 +196,9 @@ const REQUIRED_RUNTIME_FILES = [
       'coding-default-opus-4-7',
       'contextPackDispatchPolicy',
       'V3_BLUEPRINT_CONFIG_ERROR',
+      'source_units',
+      'MISSIOND_V3_ALLOW_SOURCE_FALLBACK',
+      'compiled runtime config is required',
     ],
   },
   {

@@ -142,6 +142,7 @@ export function materializeContextPackWave({
   modelProfile = null,
   blueprintPath = null,
   allowDefaultConfig = false,
+  allowSourceFallback = false,
   dryRun = false,
   force = false,
   nowIso = isoNow(),
@@ -150,6 +151,7 @@ export function materializeContextPackWave({
   const runtimeConfig = loadWorkstationRuntimeConfigForRepo(repo, {
     blueprintPath,
     allowDefaultFallback: allowDefaultConfig,
+    allowSourceFallback,
   });
   const effectiveModelProfile =
     modelProfile ??
@@ -498,6 +500,7 @@ function runFixtures() {
     const result = materializeContextPackWave({
       contextPackPath: packPath,
       repoRoot: tmp,
+      allowSourceFallback: true,
       nowIso: '2026-04-29T00:00:00Z',
     });
     assert(result.task_count === 2, 'expected two generated tasks');
@@ -532,6 +535,7 @@ function runFixtures() {
     const dry = materializeContextPackWave({
       contextPackPath: packPath,
       repoRoot: tmp,
+      allowSourceFallback: true,
       dryRun: true,
       taskPrefix: 'wave100',
       wave: 'wave100',
@@ -552,6 +556,7 @@ function runFixtures() {
         materializeContextPackWave({
           contextPackPath: packPath,
           repoRoot: tmp,
+          allowSourceFallback: true,
           wave: 'wave101',
           taskPrefix: 'wave101',
           nowIso: '2026-04-29T00:02:00Z',
