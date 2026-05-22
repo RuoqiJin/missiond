@@ -41,6 +41,7 @@ import {
   compiledSurfaceIds,
   loadCompiledV3Contract,
 } from './lib/v3_compiled_contract.mjs';
+import { readBlueprintWithEvidenceSidecars } from './lib/v3_blueprint_contract_source.mjs';
 
 const BLUEPRINT_PATH = '.missiond/v3/missiond-blueprint.lisp';
 const AGGREGATE_COMMAND = 'node scripts/check-v3-code-isomorphism-complete.mjs';
@@ -417,12 +418,11 @@ function main() {
     runDryFixture(opts);
     return;
   }
-  const blueprintAbs = path.resolve(opts.repo, opts.blueprint);
   let source;
   try {
-    source = fs.readFileSync(blueprintAbs, 'utf8');
+    source = readBlueprintWithEvidenceSidecars(path.resolve(opts.repo), opts.blueprint);
   } catch (err) {
-    process.stderr.write(`error: cannot read blueprint ${blueprintAbs}: ${err.message}\n`);
+    process.stderr.write(`error: cannot read blueprint ${opts.blueprint}: ${err.message}\n`);
     process.exit(1);
   }
   const compiled = loadCompiledV3Contract({
@@ -432,7 +432,7 @@ function main() {
   });
   const expectedSurfaces = compiledSurfaceIds(compiled);
   const expectedSurfaceSet = expectedSurfaces.length > 0 ? expectedSurfaces : EXPECTED_SURFACES;
-  const blueprintResult = validateBlueprintSource(source, blueprintAbs, {
+  const blueprintResult = validateBlueprintSource(source, opts.blueprint, {
     expectedSurfaces: expectedSurfaceSet,
   });
   const checkerResults = runPerSurfaceCheckers(opts.repo);

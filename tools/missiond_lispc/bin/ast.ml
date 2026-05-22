@@ -1,4 +1,4 @@
-type loc = { line : int; column : int }
+type loc = { source_file : string; line : int; column : int }
 
 type sexp =
   | Atom of loc * string
@@ -67,7 +67,10 @@ let result_json ?(extra = []) ok diagnostics =
     (if ok then "true" else "false")
     diag_json extra_json
 
+let synthetic_loc file = { source_file = file; line = 1; column = 1 }
+
 let diag ?(path = "") (file : string) (loc : loc) code message =
+  let file = if loc.source_file = "" then file else loc.source_file in
   { file; line = loc.line; column = loc.column; code; message; path }
 
 let atom_text = function
@@ -139,15 +142,18 @@ let prop_text key props =
 let sexp_to_json =
   let rec loop = function
     | Atom (l, value) ->
-        Printf.sprintf {|{"type":"atom","value":%s,"line":%d,"column":%d}|}
-          (json_string value) l.line l.column
+        Printf.sprintf
+          {|{"type":"atom","value":%s,"file":%s,"line":%d,"column":%d}|}
+          (json_string value) (json_string l.source_file) l.line l.column
     | String (l, value) ->
-        Printf.sprintf {|{"type":"string","value":%s,"line":%d,"column":%d}|}
-          (json_string value) l.line l.column
+        Printf.sprintf
+          {|{"type":"string","value":%s,"file":%s,"line":%d,"column":%d}|}
+          (json_string value) (json_string l.source_file) l.line l.column
     | List (l, kind, xs) ->
         let kind = match kind with Paren -> "paren" | Bracket -> "bracket" in
-        Printf.sprintf {|{"type":"list","kind":%s,"line":%d,"column":%d,"children":[%s]}|}
-          (json_string kind) l.line l.column
+        Printf.sprintf
+          {|{"type":"list","kind":%s,"file":%s,"line":%d,"column":%d,"children":[%s]}|}
+          (json_string kind) (json_string l.source_file) l.line l.column
           (xs |> List.map loop |> String.concat ",")
   in
   loop

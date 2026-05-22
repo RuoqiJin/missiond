@@ -20,6 +20,7 @@ import {
   parseLisp,
   readKeywordProps,
 } from './lib/missiond_lisp.mjs';
+import { readBlueprintWithEvidenceSidecars } from './lib/v3_blueprint_contract_source.mjs';
 
 const CHECK_COMMAND = 'node scripts/check-v3-final-convergence.mjs';
 const BLUEPRINT_PATH = '.missiond/v3/missiond-blueprint.lisp';
@@ -320,7 +321,7 @@ export function runFinalConvergenceCheck(repoRoot, blueprintRel = BLUEPRINT_PATH
   const blueprintPath = path.resolve(repoRoot, blueprintRel);
   let blueprintSource = '';
   try {
-    blueprintSource = fs.readFileSync(blueprintPath, 'utf8');
+    blueprintSource = readBlueprintWithEvidenceSidecars(repoRoot, blueprintRel);
   } catch (err) {
     diagnostics.push({
       file: blueprintRel,

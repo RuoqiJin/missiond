@@ -10,6 +10,7 @@ import {
   readKeywordProps,
   readLispFile,
 } from './lib/missiond_lisp.mjs';
+import { readBlueprintResolvedSource } from './lib/v3_blueprint_contract_source.mjs';
 
 const usage = `Usage:
   node scripts/check-lisp-blueprint-compression.mjs [--json] [--dry-fixture]
@@ -113,8 +114,18 @@ function validateV1Manifest(file, repoRoot, diagnostics) {
 }
 
 function validateV3Blueprint(file, repoRoot, diagnostics) {
-  const forms = safeRead(file, diagnostics);
-  if (!forms) return;
+  let forms;
+  try {
+    forms = parseLisp(readBlueprintResolvedSource(repoRoot, path.relative(repoRoot, file)), file);
+  } catch (err) {
+    diagnostics.push({
+      file,
+      line: err.line ?? 1,
+      column: err.column ?? 1,
+      message: err.message,
+    });
+    return;
+  }
   const root = singleRoot(file, forms, 'missiond-blueprint', diagnostics);
   if (!root) return;
   validateV3Root(file, root, diagnostics);

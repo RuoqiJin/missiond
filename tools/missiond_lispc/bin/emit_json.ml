@@ -232,8 +232,10 @@ let safe_id value =
 
 let source_map_json source_hash file node =
   let loc = loc_of node in
-  Printf.sprintf {|{"source_file":%s,"source_line":%d,"source_column":%d,"source_hash":%s}|}
-    (json_string file) loc.line loc.column (json_string source_hash)
+  let source_file = if loc.source_file = "" then file else loc.source_file in
+  Printf.sprintf
+    {|{"source_file":%s,"source_line":%d,"source_column":%d,"source_hash":%s}|}
+    (json_string source_file) loc.line loc.column (json_string source_hash)
 
 let semantic_function_fact source_hash file pillar_id node =
   let props = keyword_props ~start:2 node in
@@ -277,7 +279,66 @@ let semantic_surface_fact source_hash file node =
     (json_string_list (prop_text_list ":code" props))
     (source_map_json source_hash file node)
 
-let semantic_facts source_hash file root =
+let semantic_artifact_fact source_hash file node =
+  let props = keyword_props ~start:2 node in
+  let id =
+    match children node with
+    | _ :: id_node :: _ -> Option.value ~default:"<missing>" (atom_text id_node)
+    | _ -> "<missing>"
+  in
+  Printf.sprintf
+    {|{"fact_id":%s,"kind":"artifact_contract","project_id":"missiond","id":%s,"schema":%s,"path":%s,"writer":%s,"ssot":%s,"required":%s,"source":%s}|}
+    (json_string ("artifact:" ^ safe_id id))
+    (json_string id)
+    (json_opt_string (prop_text ":schema" props))
+    (json_opt_string (prop_text ":path" props))
+    (json_opt_string (prop_text ":writer" props))
+    (json_bool_token [ ":ssot" ] props)
+    (json_string_list (prop_text_list ":required" props))
+    (source_map_json source_hash file node)
+
+let semantic_workflow_contract_fact source_hash file node =
+  let props = keyword_props ~start:2 node in
+  let id =
+    match children node with
+    | _ :: id_node :: _ -> Option.value ~default:"<missing>" (atom_text id_node)
+    | _ -> "<missing>"
+  in
+  Printf.sprintf
+    {|{"fact_id":%s,"kind":"workflow_contract","project_id":"missiond","id":%s,"schema":%s,"path":%s,"writer":%s,"required":%s,"source":%s}|}
+    (json_string ("workflow-contract:" ^ safe_id id))
+    (json_string id)
+    (json_opt_string (prop_text ":schema" props))
+    (json_opt_string (prop_text ":path" props))
+    (json_opt_string (prop_text ":writer" props))
+    (json_string_list (prop_text_list ":required" props))
+    (source_map_json source_hash file node)
+
+let semantic_workstation_config_fact source_hash file node =
+  let model_profiles =
+    list_forms "model-profile" node |> List.filter_map form_id
+  in
+  let slot_templates =
+    list_forms "slot-template" node |> List.filter_map form_id
+  in
+  Printf.sprintf
+    {|{"fact_id":"workstation-config","kind":"workstation_config","project_id":"missiond","id":"workstation-config","model_profiles":%s,"slot_templates":%s,"source":%s}|}
+    (json_string_list model_profiles)
+    (json_string_list slot_templates)
+    (source_map_json source_hash file node)
+
+let semantic_source_unit_fact unit =
+  Printf.sprintf
+    {|{"fact_id":%s,"kind":"module_source_unit","project_id":"missiond","id":%s,"file":%s,"unit_kind":%s,"included_by":%s,"include_line":%s,"source_hash":%s}|}
+    (json_string ("source-unit:" ^ safe_id unit.Source_resolver.file))
+    (json_string unit.file)
+    (json_string unit.file)
+    (json_string unit.kind)
+    (match unit.included_by with Some value -> json_string value | None -> "null")
+    (match unit.include_line with Some value -> string_of_int value | None -> "null")
+    (json_string unit.source_hash)
+
+let semantic_facts source_hash file source_units root =
   let function_facts =
     match find_child root "pillar-flow-map" with
     | None -> []
@@ -304,7 +365,34 @@ let semantic_facts source_hash file root =
         |> List.filter (fun node -> is_list node "surface")
         |> List.map (semantic_surface_fact source_hash file)
   in
-  function_facts @ surface_facts
+  let artifact_facts =
+    match find_child root "artifact-contracts" with
+    | None -> []
+    | Some contracts ->
+        contracts
+        |> list_forms "artifact"
+        |> List.map (semantic_artifact_fact source_hash file)
+  in
+  let workflow_contract_facts =
+    match find_child root "artifact-contracts" with
+    | None -> []
+    | Some contracts ->
+        contracts
+        |> list_forms "artifact"
+        |> List.filter (fun node -> form_id node = Some "workflow")
+        |> List.map (semantic_workflow_contract_fact source_hash file)
+  in
+  let workstation_facts =
+    match find_child root "workstation-config" with
+    | None -> []
+    | Some workstation ->
+        [ semantic_workstation_config_fact source_hash file workstation ]
+  in
+  let source_unit_facts =
+    source_units |> List.map semantic_source_unit_fact
+  in
+  function_facts @ surface_facts @ artifact_facts @ workflow_contract_facts
+  @ workstation_facts @ source_unit_facts
 
 let project_entry_to_json node =
   let props = keyword_props ~start:1 node in
@@ -994,12 +1082,40 @@ let emit_ast file =
     print_endline (result_json false [ d ]);
     1
 
+let emit_resolved_v3 blueprint =
+  try
+    let resolved = Source_resolver.resolve_blueprint_file blueprint in
+    let payload =
+      Printf.sprintf {|{"blueprint":%s,"source_units":%s,"forms":[%s]}|}
+        (json_string blueprint)
+        (Source_resolver.source_units_to_json resolved.source_units)
+        (resolved.forms |> List.map sexp_to_json |> String.concat ",")
+    in
+    print_endline
+      (result_json
+         ~extra:[
+           Printf.sprintf {|"compiled":%s|}
+             (compiled_envelope "missiond.resolved-v3-blueprint.v1"
+                resolved.source_hash [] payload);
+         ]
+         true []);
+    0
+  with
+  | Reader_error (l, msg) ->
+      let d = diag blueprint l "parse.error" msg in
+      print_endline (result_json false [ d ]);
+      1
+  | Sys_error msg ->
+      let d = diag blueprint (synthetic_loc blueprint) "io.error" msg in
+      print_endline (result_json false [ d ]);
+      1
+
 let emit_v3 blueprint =
   try
-    let source = read_file blueprint in
+    let resolved = Source_resolver.resolve_blueprint_file blueprint in
     let diagnostics = Schema_v3.validate blueprint [] in
-    let forms = Parser.parse_source blueprint source in
-    let root = find_root forms "missiond-blueprint" in
+    let forms = resolved.forms in
+    let root = resolved.root in
     let surfaces =
       root |> Option.map v3_surfaces_to_json |> Option.value ~default:[]
     in
@@ -1007,8 +1123,10 @@ let emit_v3 blueprint =
       root |> Option.map v3_functions_to_json |> Option.value ~default:[]
     in
     let payload =
-      Printf.sprintf {|{"blueprint":%s,"surfaces":[%s],"functions":[%s],"forms":[%s]}|}
+      Printf.sprintf
+        {|{"blueprint":%s,"source_units":%s,"surfaces":[%s],"functions":[%s],"forms":[%s]}|}
         (json_string blueprint)
+        (Source_resolver.source_units_to_json resolved.source_units)
         (String.concat "," surfaces)
         (String.concat "," functions)
         (forms |> List.map sexp_to_json |> String.concat ",")
@@ -1016,7 +1134,8 @@ let emit_v3 blueprint =
     print_endline
       (result_json ~extra:[
         Printf.sprintf {|"compiled":%s|}
-          (compiled_envelope "missiond.compiled-v3-blueprint.v1" (source_hash source) diagnostics payload)
+          (compiled_envelope "missiond.compiled-v3-blueprint.v1"
+             resolved.source_hash diagnostics payload)
       ] (diagnostics = []) diagnostics);
     if diagnostics = [] then 0 else 1
   with
@@ -1025,15 +1144,14 @@ let emit_v3 blueprint =
       print_endline (result_json false [ d ]);
       1
   | Sys_error msg ->
-      let d = diag blueprint { line = 1; column = 1 } "io.error" msg in
+      let d = diag blueprint (synthetic_loc blueprint) "io.error" msg in
       print_endline (result_json false [ d ]);
       1
 
 let emit_runtime_config blueprint =
   try
-    let source = read_file blueprint in
-    let forms = Parser.parse_source blueprint source in
-    let root = find_root forms "missiond-blueprint" in
+    let resolved = Source_resolver.resolve_blueprint_file blueprint in
+    let root = resolved.root in
     let diagnostics =
       Schema_v3.validate blueprint []
       @ Workstation_schema.validate blueprint
@@ -1042,7 +1160,7 @@ let emit_runtime_config blueprint =
       | Some root -> runtime_config_required_diagnostics blueprint root
       | None ->
           [
-            diag blueprint { line = 1; column = 1 } "root.missing"
+            diag blueprint (synthetic_loc blueprint) "root.missing"
               "missing missiond-blueprint root";
           ]
     in
@@ -1052,7 +1170,7 @@ let emit_runtime_config blueprint =
          ~extra:[
            Printf.sprintf {|"compiled":%s|}
              (compiled_envelope "missiond.compiled-runtime-config.v1"
-                (source_hash source) diagnostics payload);
+                resolved.source_hash diagnostics payload);
          ]
          (diagnostics = []) diagnostics);
     if diagnostics = [] then 0 else 1
@@ -1062,21 +1180,26 @@ let emit_runtime_config blueprint =
       print_endline (result_json false [ d ]);
       1
   | Sys_error msg ->
-      let d = diag blueprint { line = 1; column = 1 } "io.error" msg in
+      let d = diag blueprint (synthetic_loc blueprint) "io.error" msg in
       print_endline (result_json false [ d ]);
       1
 
 let emit_semantic_ir blueprint =
   try
-    let source = read_file blueprint in
-    let hash = source_hash source in
+    let resolved = Source_resolver.resolve_blueprint_file blueprint in
+    let hash = resolved.source_hash in
     let diagnostics = Schema_v3.validate blueprint [] in
-    let forms = Parser.parse_source blueprint source in
-    let root = find_root forms "missiond-blueprint" in
-    let facts = root |> Option.map (semantic_facts hash blueprint) |> Option.value ~default:[] in
+    let root = resolved.root in
+    let facts =
+      root
+      |> Option.map (semantic_facts hash blueprint resolved.source_units)
+      |> Option.value ~default:[]
+    in
     let payload =
-      Printf.sprintf {|{"blueprint":%s,"facts":[%s],"fact_count":%d}|}
+      Printf.sprintf
+        {|{"blueprint":%s,"source_units":%s,"facts":[%s],"fact_count":%d}|}
         (json_string blueprint)
+        (Source_resolver.source_units_to_json resolved.source_units)
         (String.concat "," facts)
         (List.length facts)
     in
@@ -1092,16 +1215,20 @@ let emit_semantic_ir blueprint =
       print_endline (result_json false [ d ]);
       1
   | Sys_error msg ->
-      let d = diag blueprint { line = 1; column = 1 } "io.error" msg in
+      let d = diag blueprint (synthetic_loc blueprint) "io.error" msg in
       print_endline (result_json false [ d ]);
       1
 
 let emit_universe blueprint =
   try
-    let source = read_file blueprint in
-    let forms = Parser.parse_source blueprint source in
+    let resolved = Source_resolver.resolve_blueprint_file blueprint in
+    let forms = resolved.forms in
     let diagnostics = Project_schema.validate blueprint in
-    let root = find_root forms "missiond-blueprint" in
+    let root =
+      match resolved.root with
+      | Some root -> Some root
+      | None -> find_root forms "missiond-blueprint"
+    in
     let project_registry = Option.bind root (fun root -> find_child root "project-blueprint-registry") in
     let maturity_registry = Option.bind root (fun root -> find_child root "project-maturity-registry") in
     let projects =
@@ -1125,11 +1252,12 @@ let emit_universe blueprint =
     print_endline
       (result_json ~extra:[
         Printf.sprintf {|"compiled":%s|}
-          (compiled_envelope "missiond.compiled-project-universe.v1" (source_hash source) diagnostics payload)
+          (compiled_envelope "missiond.compiled-project-universe.v1"
+             resolved.source_hash diagnostics payload)
       ] (diagnostics = []) diagnostics);
     if diagnostics = [] then 0 else 1
   with Sys_error msg ->
-    let d = diag blueprint { line = 1; column = 1 } "io.error" msg in
+    let d = diag blueprint (synthetic_loc blueprint) "io.error" msg in
     print_endline (result_json false [ d ]);
     1
 
@@ -1152,6 +1280,6 @@ let emit_workflows workflow_dir =
       ] (diagnostics = []) diagnostics);
     if diagnostics = [] then 0 else 1
   with Sys_error msg ->
-    let d = diag workflow_dir { line = 1; column = 1 } "io.error" msg in
+    let d = diag workflow_dir (synthetic_loc workflow_dir) "io.error" msg in
     print_endline (result_json false [ d ]);
     1

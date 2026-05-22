@@ -2,6 +2,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { readBlueprintWithEvidenceSidecars } from './lib/v3_blueprint_contract_source.mjs';
 
 const FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
@@ -28,7 +29,9 @@ function main() {
   const sources = {};
   for (const [key, rel] of Object.entries(FILES)) {
     try {
-      sources[key] = fs.readFileSync(path.join(process.cwd(), rel), 'utf8');
+      sources[key] = key === 'blueprint'
+        ? readBlueprintWithEvidenceSidecars(process.cwd(), rel)
+        : fs.readFileSync(path.join(process.cwd(), rel), 'utf8');
     } catch (err) {
       diagnostics.push(`${rel}: cannot read: ${err.message}`);
     }

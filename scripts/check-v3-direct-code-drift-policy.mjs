@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { readBlueprintWithEvidenceSidecars } from './lib/v3_blueprint_contract_source.mjs';
 
 const FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
@@ -73,6 +74,7 @@ function main() {
 
 function read(rel, diagnostics) {
   try {
+    if (rel === FILES.blueprint) return readBlueprintWithEvidenceSidecars(process.cwd(), rel);
     return fs.readFileSync(path.join(process.cwd(), rel), 'utf8');
   } catch (err) {
     diagnostics.push(`${rel}: cannot read: ${err.message}`);

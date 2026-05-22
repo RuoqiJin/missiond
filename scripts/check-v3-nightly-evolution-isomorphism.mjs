@@ -2,10 +2,18 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import {
+  compiledFunctionMap,
+  compiledSurfaceMap,
+  compiledWorkflowMap,
+  loadCompiledV3Contract,
+} from './lib/v3_compiled_contract.mjs';
+import { readBlueprintWithEvidenceSidecars } from './lib/v3_blueprint_contract_source.mjs';
 
 const FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   workflow: '.missiond/workflows/nightly-evolution.lisp',
+  analyzer: 'scripts/analyze-v3-self-evolution.mjs',
   runtime: 'crates/missiond-daemon/src/engine/nightly_evolution.rs',
   engineMod: 'crates/missiond-daemon/src/engine/mod.rs',
   main: 'crates/missiond-daemon/src/main.rs',
@@ -23,7 +31,9 @@ function main() {
   const sources = {};
   for (const [key, rel] of Object.entries(FILES)) {
     try {
-      sources[key] = fs.readFileSync(path.join(process.cwd(), rel), 'utf8');
+      sources[key] = key === 'blueprint'
+        ? readBlueprintWithEvidenceSidecars(process.cwd(), rel)
+        : fs.readFileSync(path.join(process.cwd(), rel), 'utf8');
     } catch (err) {
       diagnostics.push(`${rel}: cannot read: ${err.message}`);
     }
@@ -38,6 +48,24 @@ function main() {
 }
 
 function check(s, diagnostics) {
+  const contract = loadCompiledV3Contract({ workflows: true });
+  if (contract.ok !== true) {
+    diagnostics.push(
+      ...contract.diagnostics.map((d) => `${d.file}:${d.line}:${d.column}: ${d.message}`),
+    );
+  }
+  const surfaces = compiledSurfaceMap(contract);
+  const functions = compiledFunctionMap(contract);
+  const workflows = compiledWorkflowMap(contract);
+  if (!surfaces.has('nightly-evolution-loop')) {
+    diagnostics.push('compiled semantic IR missing surface nightly-evolution-loop');
+  }
+  if (![...functions.values()].some((fn) => fn.surface === 'nightly-evolution-loop')) {
+    diagnostics.push('compiled semantic IR missing function for surface nightly-evolution-loop');
+  }
+  if (!workflows.has('nightly-evolution')) {
+    diagnostics.push('compiled workflows missing nightly-evolution');
+  }
   requireAll(diagnostics, FILES.workflow, s.workflow, [
     '(workflow nightly-evolution',
     ':workflow_id nightly-evolution',
@@ -51,13 +79,21 @@ function check(s, diagnostics) {
     'architecture-proposal',
     'requires-user-decision',
     'missiond-v3-blueprint',
+    'compiled-semantic-ir',
+    'compiled-workflows',
     'final-convergence-static-snapshot',
-    'recent-v3-commits',
-    'Default nightly mode does not read KB, historical conversations, provider logs, worker telemetry, or Board open tasks',
-    'Check only MissionD V3 SSOT logic',
-    'select only findings whose class matches the requested mode',
+    'KB, historical conversations, provider logs, worker telemetry, Board open tasks',
+    'recent commit history',
+    'scripts/analyze-v3-self-evolution.mjs --json',
+    'final-convergence-blocker',
+    'facade-budget-near-limit',
+    'oversized-authoring-block',
+    'surface-flow-gap',
     '.missiond/v3/runtime/nightly-evolution/<date>.report.lisp',
-    'must not hide, delete, or bulk-mutate historical tasks',
+    '.missiond/v3/runtime/self-evolution/<timestamp>-<finding_id>.proposal.lisp',
+    ':proposal_id :finding_id :class :risk :summary :evidence_refs :affected_surfaces :recommended_change :acceptance :non_goals :created_at',
+    'auto_execute=false',
+    'must not auto-execute, hide, delete, or bulk-mutate historical tasks',
     'no KB task or memory mutation is created in default mode',
   ]);
   requireAll(diagnostics, FILES.blueprint, s.blueprint, [
@@ -69,15 +105,40 @@ function check(s, diagnostics) {
     ':schedule-enabled false',
     ':enable-env MISSIOND_NIGHTLY_EVOLUTION_SCHEDULE',
     ':default-mode observe-only',
+    ':proposal-artifact ".missiond/v3/runtime/self-evolution/<timestamp>-<finding_id>.proposal.lisp"',
+    ':analyzer "scripts/analyze-v3-self-evolution.mjs --json"',
     ':risk-gate',
-    'requested mode matches finding class',
+    'auto_execute=false',
+    ':required [:proposal_id :finding_id :class :risk :summary :evidence_refs :affected_surfaces :recommended_change :acceptance :non_goals :created_at]',
     '(surface nightly-evolution-loop',
     'crates/missiond-daemon/src/engine/nightly_evolution.rs',
+    'scripts/analyze-v3-self-evolution.mjs',
     'mission_nightly_evolution',
     'scripts/check-v3-nightly-evolution-isomorphism.mjs',
   ]);
+  requireAll(diagnostics, FILES.analyzer, s.analyzer, [
+    'scripts/analyze-v3-self-evolution.mjs',
+    'COMPILED_SEMANTIC_IR',
+    'COMPILED_WORKFLOWS',
+    'check-v3-final-convergence.mjs',
+    '--static-only',
+    'final-convergence-blocker',
+    'facade-budget-near-limit',
+    'oversized-authoring-block',
+    'surface-flow-gap',
+    'SURFACE_FLOW_GAP_ALLOWLIST',
+    'evidenceRefs',
+    'affectedSurfaces',
+    'recommendedChange',
+    'acceptance',
+    'nonGoals',
+    '--dry-fixture',
+  ]);
   requireAll(diagnostics, FILES.runtime, s.runtime, [
     'NIGHTLY_REPORT_DIR',
+    'SELF_EVOLUTION_PROPOSAL_DIR',
+    'SELF_EVOLUTION_ANALYZER',
+    'MAX_SELF_EVOLUTION_PROPOSALS',
     'NightlyEvolutionRuntime',
     'start_nightly_evolution_service',
     'NIGHTLY_SCHEDULE_ENABLED_ENV',
@@ -88,24 +149,39 @@ function check(s, diagnostics) {
     'interval.tick().await;',
     'mission_nightly_evolution',
     'NightlyEvolutionArgs',
+    'proposalPaths',
+    'analyzerDiagnostics',
+    'SelfEvolutionAnalyzerOutput',
+    'SelfEvolutionAnalyzerRun',
+    'ensure_compiled_runtime_available',
+    'compile-v3-runtime.mjs',
+    'run_self_evolution_analyzer',
+    'analyzer_error_finding',
+    'self-evolution-analyzer-error',
+    'select_proposal_findings',
+    'write_proposals',
+    'render_proposal',
+    ':proposal_id',
+    ':finding_id',
+    ':evidence_refs',
+    ':affected_surfaces',
+    ':recommended_change',
+    ':non_goals',
+    ':created_at',
+    'auto_execute: Some(false)',
+    'hidden: Some(false)',
     'read_final_convergence_snapshot',
     'check-v3-final-convergence.mjs',
     '--static-only',
-    'read_recent_commits',
-    '".missiond/v3"',
-    'build_findings',
-    'v3-runtime-projection-review',
-    'v3-surface-checker-drift',
-    'v3-logic-consistency-review',
-    'v3-lisp-density-review',
-    'select_requested_followup',
     'create_requested_followup_if_needed',
-    'followup_selection_respects_requested_mode',
-    'auto_execute: Some(false)',
-    'hidden: Some(false)',
+    'build_followup_task_input',
+    'proposal_selection_is_bounded_and_risk_sorted',
+    'proposal_renderer_escapes_strings_and_uses_fixed_fields',
+    'followup_task_is_visible_review_only',
     'status_snapshot',
     'nightly-evolution-report',
-    'findings_focus_only_on_v3_ssot_topics',
+    ':proposal-paths',
+    ':analyzer-diagnostics',
   ]);
   requireAll(diagnostics, FILES.engineMod, s.engineMod, ['pub mod nightly_evolution;']);
   requireAll(diagnostics, FILES.main, s.main, [
@@ -132,6 +208,7 @@ function check(s, diagnostics) {
   ]);
   requireAll(diagnostics, FILES.gitignore, s.gitignore, [
     '.missiond/v3/runtime/nightly-evolution/*.report.lisp',
+    '.missiond/v3/runtime/self-evolution/*.proposal.lisp',
   ]);
 }
 

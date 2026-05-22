@@ -40,6 +40,7 @@ dist/
 .missiond/v3/runtime/master-control/context-packs/*.lisp
 .missiond/v3/runtime/swarm/*.lisp
 .missiond/v3/runtime/nightly-evolution/*.report.lisp
+.missiond/v3/runtime/self-evolution/*.proposal.lisp
 .missiond/v3/runtime/commit-lisp-convergence/*.report.lisp
 .missiond/v3/runtime/lisp-code-sync/*.report.lisp
 .missiond/v3/runtime/convergence-status-cache.json

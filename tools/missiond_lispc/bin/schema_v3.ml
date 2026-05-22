@@ -47,18 +47,23 @@ let validate_core_steps file fn_id core =
           (Printf.sprintf "function %s must declare list :core" fn_id)
       ]
   | None ->
-      [ diag file { line = 1; column = 1 } "core.missing"
+      [ diag file (synthetic_loc file) "core.missing"
           (Printf.sprintf "function %s must declare :core" fn_id)
       ]
 
 let validate file expected_surfaces =
   try
-    let forms = Parser.parse_file file in
+    let resolved = Source_resolver.resolve_blueprint_file file in
+    let forms = resolved.forms in
     let diagnostics = ref [] in
-    let root = find_root forms "missiond-blueprint" in
+    let root =
+      match resolved.root with
+      | Some root -> Some root
+      | None -> find_root forms "missiond-blueprint"
+    in
     let add d = diagnostics := d :: !diagnostics in
     (match root with
-    | None -> add (diag file { line = 1; column = 1 } "root.missing" "missing missiond-blueprint root")
+    | None -> add (diag file (synthetic_loc file) "root.missing" "missing missiond-blueprint root")
     | Some root -> (
         let implementation_map = find_child root "implementation-map" in
         let flow_map = find_child root "pillar-flow-map" in
@@ -122,4 +127,4 @@ let validate file expected_surfaces =
     List.rev !diagnostics
   with
   | Reader_error (l, msg) -> [ diag file l "parse.error" msg ]
-  | Sys_error msg -> [ diag file { line = 1; column = 1 } "io.error" msg ]
+  | Sys_error msg -> [ diag file (synthetic_loc file) "io.error" msg ]

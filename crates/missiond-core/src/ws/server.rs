@@ -624,6 +624,19 @@ impl PTYWebSocketServer {
         Ok(())
     }
 
+    fn http_json_response(body: String) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\n\
+             Content-Type: application/json\r\n\
+             Access-Control-Allow-Origin: *\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\
+             \r\n{}",
+            body.len(),
+            body
+        )
+    }
+
     /// #2: HTTP API — slot status endpoint
     async fn handle_slot_status(
         mut stream: TcpStream,
@@ -645,6 +658,268 @@ impl PTYWebSocketServer {
             body.len(),
             body
         );
+        stream.write_all(response.as_bytes()).await?;
+        stream.shutdown().await?;
+        Ok(())
+    }
+
+    async fn build_jarvis_readiness(
+        pty_manager: &PTYManager,
+        default_slot: &str,
+    ) -> serde_json::Value {
+        let session_running = pty_manager.is_running(default_slot).await;
+        let status = pty_manager.get_status(default_slot).await;
+        let (readiness, reason, slot_state, recognition) = match status {
+            None => (
+                "slot_unavailable",
+                format!("Default slot {} is not registered.", default_slot),
+                None,
+                None,
+            ),
+            Some(info) => {
+                let slot_state = format!("{:?}", info.state);
+                let recognition = info
+                    .recognition
+                    .as_ref()
+                    .and_then(|r| serde_json::to_value(r).ok());
+                match info.state {
+                    SessionState::Idle => (
+                        "ready",
+                        format!("Default slot {} is idle.", default_slot),
+                        Some(slot_state),
+                        recognition,
+                    ),
+                    SessionState::Exited if session_running => (
+                        "stale_slot",
+                        format!(
+                            "Default slot {} has a live PTY process but MissionD reports Exited; restart the slot.",
+                            default_slot
+                        ),
+                        Some(slot_state),
+                        recognition,
+                    ),
+                    SessionState::Exited => (
+                        "slot_unavailable",
+                        format!("Default slot {} is not running.", default_slot),
+                        Some(slot_state),
+                        recognition,
+                    ),
+                    other => (
+                        "busy",
+                        format!(
+                            "Default slot {} is busy (state: {:?}).",
+                            default_slot, other
+                        ),
+                        Some(slot_state),
+                        recognition,
+                    ),
+                }
+            }
+        };
+
+        serde_json::json!({
+            "status": readiness,
+            "default_slot": default_slot,
+            "slot_state": slot_state,
+            "session_running": session_running,
+            "reason": reason,
+            "recognition": recognition,
+            "checked_at": chrono::Utc::now().to_rfc3339(),
+        })
+    }
+
+    /// HTTP API — default Jarvis slot readiness.
+    ///
+    /// `/health` only proves the public proxy and daemon are reachable. Jarvis
+    /// callers also need to know whether the default executable slot can accept
+    /// a turn, or whether it is busy/unavailable.
+    async fn handle_readiness(
+        mut stream: TcpStream,
+        pty_manager: Arc<PTYManager>,
+        default_slot: String,
+    ) -> anyhow::Result<()> {
+        // Consume the request.
+        let mut buf = vec![0u8; 4096];
+        let _ = stream.read(&mut buf).await;
+
+        let body = Self::build_jarvis_readiness(&pty_manager, &default_slot)
+            .await
+            .to_string();
+        let response = Self::http_json_response(body);
+        stream.write_all(response.as_bytes()).await?;
+        stream.shutdown().await?;
+        Ok(())
+    }
+
+    fn file_check(id: &str, label: &str, path: std::path::PathBuf) -> serde_json::Value {
+        let metadata = std::fs::metadata(&path).ok();
+        serde_json::json!({
+            "id": id,
+            "label": label,
+            "ok": metadata.is_some(),
+            "status": if metadata.is_some() { "ok" } else { "missing" },
+            "path": path,
+            "size_bytes": metadata.as_ref().map(|m| m.len()),
+            "modified_unix_secs": metadata
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs()),
+        })
+    }
+
+    fn mission_home() -> std::path::PathBuf {
+        if let Ok(root) = std::env::var("MISSIOND_INSTALL_ROOT") {
+            return std::path::PathBuf::from(root);
+        }
+        std::env::var("HOME")
+            .map(|home| std::path::PathBuf::from(home).join(".xjp-mission"))
+            .unwrap_or_else(|_| std::path::PathBuf::from(".xjp-mission"))
+    }
+
+    fn release_snapshot() -> serde_json::Value {
+        let home = Self::mission_home();
+        let active = std::env::var("MISSIOND_ACTIVE_LINK")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| home.join("active"));
+        let active_target = std::fs::read_link(&active)
+            .ok()
+            .map(|p| p.to_string_lossy().to_string());
+        serde_json::json!({
+            "install_root": home,
+            "active_link": active,
+            "active_target": active_target,
+            "daemon_pid": std::process::id(),
+        })
+    }
+
+    async fn handle_jarvis_monitor(
+        mut stream: TcpStream,
+        pty_manager: Arc<PTYManager>,
+        default_slot: String,
+    ) -> anyhow::Result<()> {
+        let mut buf = vec![0u8; 4096];
+        let _ = stream.read(&mut buf).await;
+
+        let readiness = Self::build_jarvis_readiness(&pty_manager, &default_slot).await;
+        let readiness_status = readiness
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let default_slot_status = pty_manager.get_status(&default_slot).await;
+        let all_status = pty_manager.get_all_status().await;
+
+        let home = Self::mission_home();
+        let mcp_config = home.join("xjp-mcp-config.json");
+        let mcp_binary = std::env::var("MISSIOND_MCP_BIN_PATH")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| home.join("mission-mcp"));
+        let compiled_runtime =
+            std::path::PathBuf::from(".missiond/v3/runtime/compiled/compiled-runtime-config.json");
+        let slot_log = default_slot_status
+            .as_ref()
+            .map(|info| info.log_file.clone())
+            .unwrap_or_else(|| home.join(format!("logs/pty-{}.log", default_slot)));
+        let slot_screen_available = pty_manager
+            .get_screen(&default_slot)
+            .await
+            .map(|screen| !screen.trim().is_empty())
+            .unwrap_or(false);
+
+        let mcp_config_text = std::fs::read_to_string(&mcp_config).unwrap_or_default();
+        let mcp_config_ok = mcp_config.exists() && mcp_config_text.contains("\"missiond\"");
+
+        let slot_log_check = if slot_log.exists() {
+            Self::file_check("default-slot-log", "Default slot PTY log", slot_log)
+        } else {
+            serde_json::json!({
+                "id": "default-slot-log",
+                "label": "Default slot PTY log",
+                "ok": slot_screen_available,
+                "status": if slot_screen_available { "live_screen_available" } else { "missing" },
+                "path": slot_log,
+                "reason": if slot_screen_available {
+                    "PTY log file is missing, but the default slot live screen is readable."
+                } else {
+                    "PTY log file is missing and no live screen is available."
+                },
+            })
+        };
+
+        let mut checks = vec![
+            serde_json::json!({
+                "id": "public-entry",
+                "label": "HTTP request reached MissionD daemon",
+                "ok": true,
+                "status": "ok",
+            }),
+            serde_json::json!({
+                "id": "default-slot-readiness",
+                "label": "Default Jarvis slot readiness",
+                "ok": readiness_status == "ready",
+                "status": readiness_status,
+                "reason": readiness.get("reason"),
+            }),
+            serde_json::json!({
+                "id": "mcp-config",
+                "label": "Host-local MissionD MCP config",
+                "ok": mcp_config_ok,
+                "status": if mcp_config_ok { "ok" } else { "missing_or_invalid" },
+                "path": mcp_config,
+            }),
+            Self::file_check("mission-mcp-binary", "MissionD MCP binary", mcp_binary),
+            slot_log_check,
+            Self::file_check(
+                "compiled-runtime-config",
+                "Compiled V3 runtime config",
+                compiled_runtime,
+            ),
+        ];
+
+        let non_critical_failures = checks
+            .iter()
+            .filter(|check| check.get("ok").and_then(|v| v.as_bool()) == Some(false))
+            .count();
+        let overall = match readiness_status {
+            "ready" if non_critical_failures == 0 => "ready",
+            "ready" => "degraded",
+            "busy" => "busy",
+            "stale_slot" => "stale_slot",
+            "slot_unavailable" | "unavailable" => "unavailable",
+            _ => "unknown",
+        };
+        let recommended_action = match overall {
+            "ready" => "none",
+            "degraded" => "check failed non-critical monitor rows before the next deploy",
+            "busy" => "wait for default slot completion or choose another slot",
+            "stale_slot" => "respawn default slot; MissionD spawn now cleans stale PTY sessions",
+            "unavailable" => {
+                "start the default Jarvis slot or inspect provider credentials/billing"
+            }
+            _ => "inspect /api/slots and daemon logs",
+        };
+
+        let body = serde_json::json!({
+            "schema": "missiond.jarvis-chain-monitor.v1",
+            "overall": overall,
+            "recommended_action": recommended_action,
+            "checked_at": chrono::Utc::now().to_rfc3339(),
+            "public_endpoint": "/jarvis",
+            "chat_endpoint": "/v1/chat/completions",
+            "readiness": readiness,
+            "release": Self::release_snapshot(),
+            "slots": {
+                "default_slot": default_slot,
+                "total": all_status.len(),
+                "states": all_status.iter().fold(std::collections::BTreeMap::<String, usize>::new(), |mut acc, info| {
+                    *acc.entry(format!("{:?}", info.state)).or_insert(0) += 1;
+                    acc
+                }),
+            },
+            "checks": checks.drain(..).collect::<Vec<_>>(),
+        })
+        .to_string();
+
+        let response = Self::http_json_response(body);
         stream.write_all(response.as_bytes()).await?;
         stream.shutdown().await?;
         Ok(())
@@ -2191,6 +2466,43 @@ impl PTYWebSocketServer {
             // Health check
             if request_line.starts_with("GET /health") && !request_line.contains("Upgrade:") {
                 return Self::handle_health(stream).await;
+            }
+            // Jarvis readiness: daemon/proxy health plus default slot availability.
+            if request_line.starts_with("GET /api/readiness") && !request_line.contains("Upgrade:")
+            {
+                return match pty_manager {
+                    Some(pm) => Self::handle_readiness(stream, pm, default_chat_slot.clone()).await,
+                    None => {
+                        let mut s = stream;
+                        let err = serde_json::json!({
+                            "status": "slot_unavailable",
+                            "error": {"message": "PTY manager not available"}
+                        });
+                        Self::send_http_error(&mut s, 503, "Service Unavailable", &err.to_string())
+                            .await
+                    }
+                };
+            }
+            // Jarvis chain monitor: one endpoint for public proxy, daemon,
+            // default slot, MCP config, release, and diagnostic files.
+            if request_line.starts_with("GET /api/monitor/jarvis")
+                && !request_line.contains("Upgrade:")
+            {
+                return match pty_manager {
+                    Some(pm) => {
+                        Self::handle_jarvis_monitor(stream, pm, default_chat_slot.clone()).await
+                    }
+                    None => {
+                        let mut s = stream;
+                        let err = serde_json::json!({
+                            "schema": "missiond.jarvis-chain-monitor.v1",
+                            "overall": "unavailable",
+                            "error": {"message": "PTY manager not available"}
+                        });
+                        Self::send_http_error(&mut s, 503, "Service Unavailable", &err.to_string())
+                            .await
+                    }
+                };
             }
             // AIOps webhook endpoint
             if request_line.starts_with("POST /webhooks/") {

@@ -21,7 +21,7 @@ let print_diagnostics diagnostics =
 
 let usage () =
   prerr_endline
-    "Usage: missiond-lispc <emit-json|emit-v3|emit-runtime-config|emit-semantic-ir|emit-universe|emit-workflows|emit-genomes|check-v3|check-workstation-config|check-workflow|check-workflow-dir|check-genome|check-genome-dir|check-project|check-project-dir|check-auth-domain|check-m6-depth|check-domain-hardening> --file <path>|--dir <path>|--blueprint <path>|--workflow-dir <path>|--genome-dir <path>";
+    "Usage: missiond-lispc <emit-json|emit-resolved-v3|emit-v3|emit-runtime-config|emit-semantic-ir|emit-universe|emit-workflows|emit-genomes|check-v3|check-workstation-config|check-workflow|check-workflow-dir|check-genome|check-genome-dir|check-project|check-project-dir|check-auth-domain|check-m6-depth|check-domain-hardening> --file <path>|--dir <path>|--blueprint <path>|--workflow-dir <path>|--genome-dir <path>";
   2
 
 let () =
@@ -34,6 +34,12 @@ let () =
   | "emit-v3" :: rest ->
       let file = Option.value ~default:".missiond/v3/missiond-blueprint.lisp" (find_arg "--blueprint" rest) in
       exit (Emit_json.emit_v3 file)
+  | "emit-resolved-v3" :: rest ->
+      let file =
+        Option.value ~default:".missiond/v3/missiond-blueprint.lisp"
+          (find_arg "--blueprint" rest)
+      in
+      exit (Emit_json.emit_resolved_v3 file)
   | "emit-runtime-config" :: rest ->
       let file = Option.value ~default:".missiond/v3/missiond-blueprint.lisp" (find_arg "--blueprint" rest) in
       exit (Emit_json.emit_runtime_config file)

@@ -75,6 +75,30 @@ APPLY_BACKUP_CLEANUP="${MISSIOND_APPLY_BACKUP_CLEANUP:-0}"
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
+augment_managed_node_path() {
+  local candidates=(
+    "${HOME}/.local/share/node-v24.14.0-darwin-arm64/bin"
+    "${HOME}/.local/opt/node-v22.13.1-darwin-arm64/bin"
+    "${HOME}/.opam/missiond/bin"
+    "${HOME}/.opam/default/bin"
+    "${HOME}/.local/bin"
+    "/opt/homebrew/bin"
+    "/usr/local/bin"
+  )
+  local dir
+  for dir in "${candidates[@]}"; do
+    if [ -d "$dir" ]; then
+      case ":$PATH:" in
+        *":$dir:"*) ;;
+        *) PATH="$dir:$PATH" ;;
+      esac
+    fi
+  done
+  export PATH
+}
+
+augment_managed_node_path
+
 case "$PROFILE" in
   release)
     BUILD_ARG="--release"
@@ -166,6 +190,20 @@ update_stable_entrypoints() {
   atomic_symlink_update "$MCP_BIN_PATH" "$ACTIVE_LINK/bin/mission-mcp"
   log "entrypoints: $BIN_PATH -> $ACTIVE_LINK/bin/missiond"
   log "entrypoints: $MCP_BIN_PATH -> $ACTIVE_LINK/bin/mission-mcp"
+}
+
+ensure_default_mcp_config() {
+  local config_path="$INSTALL_ROOT/xjp-mcp-config.json"
+  if [ -f "$config_path" ]; then
+    log "mcp-config: keep existing $config_path"
+    return 0
+  fi
+  mkdir -p "$INSTALL_ROOT"
+  cat > "$config_path" <<EOF
+{"mcpServers":{"missiond":{"command":"$MCP_BIN_PATH","args":[],"env":{"MISSIOND_SOCKET_PATH":"$SOCK_PATH"}}}}
+EOF
+  chmod 600 "$config_path"
+  log "mcp-config: created default MissionD MCP config $config_path"
 }
 
 run_mcp_initialize_smoke() {
@@ -453,6 +491,7 @@ fi
 record_timing "pre-switch-mcp-smoke" "$PRE_SWITCH_SMOKE_START"
 
 switch_active_release "$CANDIDATE_DIR"
+ensure_default_mcp_config
 
 KICKSTART_START="$(date +%s)"
 if ! kickstart_daemon; then

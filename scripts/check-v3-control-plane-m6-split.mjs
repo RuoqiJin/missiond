@@ -32,7 +32,7 @@ const checks = [
       '(domain knowledge-skill-plane',
       ':functions [skill-registry skill-search skill-project-links skill-operational-facts skill-to-workflow-promotion skill-edit-delegation-policy memory-quarantine memory-distillation memory-search-v2 provider-backed-skill-evidence]',
       '(domain execution-control-plane',
-      ':functions [work-order-lifecycle workflow-runner task-result-artifact worker-completion-settle slot-lifecycle-manager memory-review-batch-runner board-cleanup-batch-runner board-search-noise-governance evidence-governance-view execution-step-digest conversation-label-calibration taxonomy-proposal jarvis-stream-affinity jarvis-usage-ledger]',
+      ':functions [work-order-lifecycle workflow-runner task-result-artifact worker-completion-settle slot-lifecycle-manager memory-review-batch-runner board-cleanup-batch-runner board-search-noise-governance evidence-governance-view execution-step-digest conversation-label-calibration taxonomy-proposal jarvis-stream-affinity jarvis-usage-ledger jarvis-chain-monitor]',
       'work_order_intent',
       'work_order_plan',
       'work_order_audit',

@@ -1,16 +1,17 @@
 open Ast
 
 type t = {
+  file : string;
   source : string;
   mutable i : int;
   mutable line : int;
   mutable column : int;
 }
 
-let make _file source = { source; i = 0; line = 1; column = 1 }
+let make file source = { file; source; i = 0; line = 1; column = 1 }
 let eof p = p.i >= String.length p.source
 let peek p = if eof p then '\000' else p.source.[p.i]
-let loc p = { line = p.line; column = p.column }
+let loc p = { source_file = p.file; line = p.line; column = p.column }
 
 let advance p =
   let c = peek p in

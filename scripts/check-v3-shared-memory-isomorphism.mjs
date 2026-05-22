@@ -37,6 +37,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { readBlueprintWithEvidenceSidecars } from './lib/v3_blueprint_contract_source.mjs';
 
 const ROOT = process.cwd();
 
@@ -239,7 +240,11 @@ function main() {
   }
   for (const [id, file, needle] of NEEDLES) {
     const full = path.join(ROOT, file);
-    const text = fs.existsSync(full) ? fs.readFileSync(full, 'utf8') : '';
+    const text = fs.existsSync(full)
+      ? (file === '.missiond/v3/missiond-blueprint.lisp'
+          ? readBlueprintWithEvidenceSidecars(ROOT, file)
+          : fs.readFileSync(full, 'utf8'))
+      : '';
     if (!text.includes(needle)) {
       diagnostics.push({ severity: 'error', id, file, message: `missing needle: ${needle}` });
     }

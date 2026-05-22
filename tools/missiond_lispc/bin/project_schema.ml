@@ -147,7 +147,9 @@ let validate file =
     (match find_root forms "missiond-blueprint" with
     | None ->
         if forms = [] then
-          add (diag file { line = 1; column = 1 } "project.root_missing" "missing Lisp root");
+          add
+            (diag file (synthetic_loc file) "project.root_missing"
+               "missing Lisp root");
         let functions =
           forms |> List.map (collect_forms "function") |> List.flatten
         in
@@ -160,7 +162,7 @@ let validate file =
             |> List.exists (fun h -> has_suffix h "blueprint" || has_suffix h "intent")
           in
           if project_like_root then
-            add (diag file { line = 1; column = 1 } "project.function_missing"
+            add (diag file (synthetic_loc file) "project.function_missing"
                    "project blueprint/intent must declare at least one function")
     | Some root ->
         if find_child root "project-maturity-registry" = None then
@@ -170,7 +172,7 @@ let validate file =
     List.rev !diagnostics
   with
   | Reader_error (l, msg) -> [ diag file l "parse.error" msg ]
-  | Sys_error msg -> [ diag file { line = 1; column = 1 } "io.error" msg ]
+  | Sys_error msg -> [ diag file (synthetic_loc file) "io.error" msg ]
 
 let active_project_lisp_file file =
   let base = Filename.basename file in
@@ -191,7 +193,7 @@ let validate_project_file file =
   try Parser.parse_file file |> validate_project_forms_in_file file
   with
   | Reader_error (l, msg) -> [ diag file l "parse.error" msg ]
-  | Sys_error msg -> [ diag file { line = 1; column = 1 } "io.error" msg ]
+  | Sys_error msg -> [ diag file (synthetic_loc file) "io.error" msg ]
 
 let rec lisp_files_under dir =
   Sys.readdir dir
@@ -214,7 +216,7 @@ let validate_project_dir dir =
     let add d = diagnostics := d :: !diagnostics in
     if files = [] then
       add
-        (diag dir { line = 1; column = 1 } "project.lisp_missing"
+        (diag dir (synthetic_loc dir) "project.lisp_missing"
            "project .missiond directory has no active Lisp SSOT files");
     let structured_count = ref 0 in
     files
@@ -242,13 +244,13 @@ let validate_project_dir dir =
                         | _ -> ())
            | exception Reader_error (loc, msg) -> add (diag file loc "parse.error" msg)
            | exception Sys_error msg ->
-               add (diag file { line = 1; column = 1 } "io.error" msg));
+               add (diag file (synthetic_loc file) "io.error" msg));
     if !structured_count = 0 then
       add
-        (diag dir { line = 1; column = 1 } "project.function_missing"
+        (diag dir (synthetic_loc dir) "project.function_missing"
            "project .missiond active SSOT files must declare at least one function or structured blueprint root");
     List.rev !diagnostics
-  with Sys_error msg -> [ diag dir { line = 1; column = 1 } "io.error" msg ]
+  with Sys_error msg -> [ diag dir (synthetic_loc dir) "io.error" msg ]
 
 let validate_auth_domain_source file source =
   let required =
@@ -272,7 +274,7 @@ let validate_auth_domain_source file source =
          if contains_substring source needle then None
          else
            Some
-             (diag file { line = 1; column = 1 } code
+             (diag file (synthetic_loc file) code
                 (Printf.sprintf "auth domain SSOT missing required concept: %s" needle)))
 
 let validate_core_steps file form_id_label form =
@@ -356,7 +358,7 @@ let require_ids file forms named required =
          if List.mem id ids then None
          else
            Some
-             (diag file { line = 1; column = 1 }
+             (diag file (synthetic_loc file)
                 ("auth." ^ named ^ "_missing")
                 (Printf.sprintf "missing auth %s %s" named id)))
 
@@ -381,7 +383,9 @@ let validate_auth_domain_structured_dir dir =
     |> List.filter_map (fun rel ->
            let path = file rel in
            if not (Sys.file_exists path) then (
-             add (diag path { line = 1; column = 1 } "auth.shard_missing" "missing required auth shard");
+             add
+               (diag path (synthetic_loc path) "auth.shard_missing"
+                  "missing required auth shard");
              None)
            else
              try Some (path, Parser.parse_file path)
@@ -390,7 +394,7 @@ let validate_auth_domain_structured_dir dir =
                  add (diag path loc "parse.error" msg);
                  None
              | Sys_error msg ->
-                 add (diag path { line = 1; column = 1 } "io.error" msg);
+                 add (diag path (synthetic_loc path) "io.error" msg);
                  None)
   in
   let all_forms = parsed_files |> List.map snd |> List.flatten in
@@ -437,14 +441,14 @@ let validate_auth_domain_structured_dir dir =
 let validate_auth_domain file =
   try
     validate_auth_domain_source file (read_file file)
-  with Sys_error msg -> [ diag file { line = 1; column = 1 } "io.error" msg ]
+  with Sys_error msg -> [ diag file (synthetic_loc file) "io.error" msg ]
 
 let validate_auth_domain_dir dir =
   try
     let files = lisp_files_under dir |> List.sort String.compare in
     let source = files |> List.map read_file |> String.concat "\n" in
     validate_auth_domain_source dir source @ validate_auth_domain_structured_dir dir
-  with Sys_error msg -> [ diag dir { line = 1; column = 1 } "io.error" msg ]
+  with Sys_error msg -> [ diag dir (synthetic_loc dir) "io.error" msg ]
 
 let m6_depth_required_concepts =
   [
@@ -469,7 +473,7 @@ let validate_m6_depth_source file source =
          if contains_any source needles then None
          else
            Some
-             (diag file { line = 1; column = 1 } code
+             (diag file (synthetic_loc file) code
                 (Printf.sprintf "project M6 depth evidence missing one of: %s"
                    (String.concat ", " needles))))
 
@@ -480,12 +484,12 @@ let validate_m6_depth_dir dir =
     let diagnostics = ref [] in
     let add d = diagnostics := d :: !diagnostics in
     if files = [] then
-      add (diag dir { line = 1; column = 1 } "project.m6_lisp_missing"
+      add (diag dir (synthetic_loc dir) "project.m6_lisp_missing"
              "project .missiond directory has no Lisp files for M6 depth");
     validate_m6_depth_source dir source |> List.iter add;
     validate_project_dir dir |> List.iter add;
     List.rev !diagnostics
-  with Sys_error msg -> [ diag dir { line = 1; column = 1 } "io.error" msg ]
+  with Sys_error msg -> [ diag dir (synthetic_loc dir) "io.error" msg ]
 
 let validate_domain_hardening_source = validate_m6_depth_source
 

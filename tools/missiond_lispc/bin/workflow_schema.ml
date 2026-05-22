@@ -82,7 +82,10 @@ let validate file =
     let add d = diagnostics := d :: !diagnostics in
     let workflow = List.find_opt (fun n -> is_list n "workflow") forms in
     (match workflow with
-    | None -> add (diag file { line = 1; column = 1 } "workflow.missing" "missing workflow root")
+    | None ->
+        add
+          (diag file (synthetic_loc file) "workflow.missing"
+             "missing workflow root")
     | Some wf ->
         let props = keyword_props ~start:1 wf in
         if prop_text ":workflow_id" props = None then
@@ -101,7 +104,7 @@ let validate file =
     List.rev !diagnostics
   with
   | Reader_error (l, msg) -> [ diag file l "parse.error" msg ]
-  | Sys_error msg -> [ diag file { line = 1; column = 1 } "io.error" msg ]
+  | Sys_error msg -> [ diag file (synthetic_loc file) "io.error" msg ]
 
 let workflow_files dir =
   Sys.readdir dir
@@ -112,4 +115,4 @@ let workflow_files dir =
 
 let validate_dir dir =
   try workflow_files dir |> List.map validate |> List.flatten
-  with Sys_error msg -> [ diag dir { line = 1; column = 1 } "io.error" msg ]
+  with Sys_error msg -> [ diag dir (synthetic_loc dir) "io.error" msg ]

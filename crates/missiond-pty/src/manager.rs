@@ -264,11 +264,29 @@ impl PTYManager {
                             .await
                             .map(|o| o.status.success())
                             .unwrap_or(false);
-                        if alive {
+                        if alive
+                            && !matches!(info.state, SessionState::Exited | SessionState::Error)
+                        {
                             return Err(anyhow!("PTY session already running: {}", slot.id));
                         }
-                        // Process is dead (zombie) — fall through to clean up
-                        warn!(slot_id = %slot.id, pid = pid, "PTY session claims running but process is dead, cleaning up");
+                        if alive {
+                            warn!(
+                                slot_id = %slot.id,
+                                pid = pid,
+                                state = ?info.state,
+                                "PTY session process is alive but agent status is terminal, cleaning up stale session before respawn"
+                            );
+                        }
+                        // Process is dead (zombie), or the manager status has
+                        // drifted to Exited/Error while the process is still
+                        // alive. Either way, the public slot state is stale:
+                        // remove it so spawn can create a clean PTY.
+                        warn!(
+                            slot_id = %slot.id,
+                            pid = pid,
+                            alive,
+                            "PTY session claims running but is not a valid public running slot, cleaning up"
+                        );
                     }
                     // Drop read guard before acquiring write
                     drop(session_guard);

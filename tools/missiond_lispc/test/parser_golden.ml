@@ -60,8 +60,49 @@ let test_parser_locations () =
   assert_true "one top-level form" (List.length forms = 1);
   match forms with
   | Ast.List (loc, Ast.Paren, Ast.Atom (_, "missiond-blueprint") :: _) :: _ ->
+      assert_true "root file is preserved" (loc.source_file = "golden");
       assert_true "root line preserves comments" (loc.line = 3)
   | _ -> failwith "unexpected parser shape"
+
+let test_source_resolver_include () =
+  with_temp_dir "v3-resolver" (fun dir ->
+      let shards = Filename.concat dir "shards" in
+      if Sys.command ("mkdir -p " ^ Filename.quote shards) <> 0 then
+        failwith "failed to create shards dir";
+      let blueprint = Filename.concat dir "missiond-blueprint.lisp" in
+      let shard = Filename.concat shards "pillar-flow-map.lisp" in
+      let oc = open_out_bin blueprint in
+      output_string oc
+        {|
+(missiond-blueprint
+  (implementation-map
+    (surface typed-lisp-compiler :status code-aligned :code ["compiler.ml"]))
+  (include "shards/pillar-flow-map.lisp"))
+|};
+      close_out oc;
+      let oc = open_out_bin shard in
+      output_string oc
+        {|
+(pillar-flow-map
+  (pillar workflow
+    (function typed-lisp-compiler
+      :surface typed-lisp-compiler
+      :entry [check]
+      :core ((step s1 :logic "parse"))
+      :egress [diagnostics])))
+|};
+      close_out oc;
+      let resolved = Source_resolver.resolve_blueprint_file blueprint in
+      assert_true "root and shard source units are present"
+        (List.length resolved.source_units = 2);
+      match resolved.root with
+      | Some root -> (
+          match Ast.find_child root "pillar-flow-map" with
+          | Some flow ->
+              assert_true "shard source file is preserved"
+                ((Ast.loc_of flow).source_file = shard)
+          | None -> failwith "included pillar-flow-map missing")
+      | None -> failwith "resolved root missing")
 
 let test_v3_missing_entry () =
   with_temp "missiond-v3-invalid"
@@ -301,6 +342,7 @@ let test_runtime_config_missing_policy_diagnostics () =
 
 let () =
   test_parser_locations ();
+  test_source_resolver_include ();
   test_v3_missing_entry ();
   test_v3_step_order ();
   test_workflow_missing_risk_gate ();

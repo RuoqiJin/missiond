@@ -26,6 +26,7 @@ import {
   compiledSurfaceIds,
   loadCompiledV3Contract,
 } from './lib/v3_compiled_contract.mjs';
+import { readBlueprintResolvedSource } from './lib/v3_blueprint_contract_source.mjs';
 
 const BLUEPRINT_PATH = '.missiond/v3/missiond-blueprint.lisp';
 const CHECK_COMMAND = 'node scripts/check-v3-v2-coverage.mjs';
@@ -62,7 +63,7 @@ function main() {
 
   const blueprintAbs = path.resolve(opts.repo, opts.blueprint);
   const toolNames = scanMcpToolNames(path.resolve(opts.repo, 'crates/missiond-mcp/src/tools'));
-  const source = fs.readFileSync(blueprintAbs, 'utf8');
+  const source = readBlueprintResolvedSource(path.resolve(opts.repo), opts.blueprint);
   const compiled = loadCompiledV3Contract({
     repoRoot: path.resolve(opts.repo),
     blueprint: opts.blueprint,

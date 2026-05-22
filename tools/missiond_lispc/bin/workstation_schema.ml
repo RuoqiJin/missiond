@@ -74,7 +74,7 @@ let validate_model_profile diagnostics file forms id =
   match form_by_id forms "model-profile" id with
   | None ->
       diagnostics :=
-        diag file { line = 1; column = 1 } "workstation.model_profile_missing"
+        diag file (synthetic_loc file) "workstation.model_profile_missing"
           (Printf.sprintf "missing model-profile %s" id)
         :: !diagnostics
   | Some form ->
@@ -102,7 +102,7 @@ let validate_slot_template diagnostics file forms id =
   match form_by_id forms "slot-template" id with
   | None ->
       diagnostics :=
-        diag file { line = 1; column = 1 } "workstation.slot_template_missing"
+        diag file (synthetic_loc file) "workstation.slot_template_missing"
           (Printf.sprintf "missing slot-template %s" id)
         :: !diagnostics
   | Some form ->
@@ -132,7 +132,7 @@ let validate_managed_node_policy diagnostics file forms =
   match form_by_id forms "managed-node-runtime-policy" "host-portability" with
   | None ->
       diagnostics :=
-        diag file { line = 1; column = 1 } "workstation.managed_node_policy_missing"
+        diag file (synthetic_loc file) "workstation.managed_node_policy_missing"
           "missing (managed-node-runtime-policy host-portability ...)"
         :: !diagnostics
   | Some form ->
@@ -168,7 +168,7 @@ let validate_provider_unavailable_policy diagnostics file forms =
   match form_by_id forms "pty-provider-unavailable-policy" "provider-blocked-diagnostics" with
   | None ->
       diagnostics :=
-        diag file { line = 1; column = 1 } "workstation.pty_provider_policy_missing"
+        diag file (synthetic_loc file) "workstation.pty_provider_policy_missing"
           "missing (pty-provider-unavailable-policy provider-blocked-diagnostics ...)"
         :: !diagnostics
   | Some form ->
@@ -205,7 +205,7 @@ let validate file =
     (match root with
     | None ->
         diagnostics :=
-          diag file { line = 1; column = 1 } "root.missing"
+          diag file (synthetic_loc file) "root.missing"
             "missing missiond-blueprint root"
           :: !diagnostics
     | Some root -> (
@@ -285,4 +285,4 @@ let validate file =
     List.rev !diagnostics
   with
   | Reader_error (l, msg) -> [ diag file l "parse.error" msg ]
-  | Sys_error msg -> [ diag file { line = 1; column = 1 } "io.error" msg ]
+  | Sys_error msg -> [ diag file (synthetic_loc file) "io.error" msg ]

@@ -6,6 +6,8 @@ export function loadCompiledV3Contract({
   repoRoot = process.cwd(),
   blueprint = DEFAULT_V3_BLUEPRINT,
   semanticIr = true,
+  workflows = false,
+  workflowDir = '.missiond/workflows',
   timeoutMs = 60_000,
 } = {}) {
   const diagnostics = [];
@@ -22,6 +24,13 @@ export function loadCompiledV3Contract({
       diagnostics.push(...lispcDiagnostics(semantic, 'emit-semantic-ir'));
     }
   }
+  let workflowProjection = null;
+  if (workflows) {
+    workflowProjection = runLispc(['emit-workflows', '--workflow-dir', workflowDir], { repoRoot, timeoutMs });
+    if (workflowProjection.ok !== true || !workflowProjection.compiled) {
+      diagnostics.push(...lispcDiagnostics(workflowProjection, 'emit-workflows'));
+    }
+  }
 
   const v3Surfaces = normalizeSurfaces(v3.compiled?.payload?.surfaces ?? []);
   const v3Functions = normalizeFunctions(v3.compiled?.payload?.functions ?? []);
@@ -31,6 +40,20 @@ export function loadCompiledV3Contract({
   );
   const semanticFunctions = normalizeFunctions(
     facts.filter((fact) => fact?.kind === 'function'),
+  );
+  const artifactContracts = normalizeArtifactContracts(
+    facts.filter((fact) => fact?.kind === 'artifact_contract'),
+  );
+  const workflowContracts = normalizeWorkflowContracts([
+    ...facts.filter((fact) => fact?.kind === 'workflow_contract'),
+    ...(workflowProjection?.compiled?.payload?.workflows ?? []),
+  ]);
+  const sourceUnits = normalizeSourceUnits([
+    ...(semantic?.compiled?.payload?.source_units ?? []),
+    ...facts.filter((fact) => fact?.kind === 'module_source_unit'),
+  ]);
+  const workstationConfig = normalizeWorkstationConfig(
+    facts.find((fact) => fact?.kind === 'workstation_config'),
   );
   const surfaces = semanticSurfaces.length > 0 ? semanticSurfaces : v3Surfaces;
   const functions = semanticFunctions.length > 0 ? semanticFunctions : v3Functions;
@@ -55,8 +78,13 @@ export function loadCompiledV3Contract({
     diagnostics,
     v3: v3.compiled,
     semantic: semantic?.compiled ?? null,
+    workflowProjection: workflowProjection?.compiled ?? null,
     surfaces,
     functions,
+    artifactContracts,
+    workflowContracts,
+    sourceUnits,
+    workstationConfig,
     sourceHash: v3.compiled.source_hash,
     semanticSourceHash: semantic?.compiled?.source_hash ?? null,
   };
@@ -79,6 +107,30 @@ export function compiledFunctionMap(contract) {
     (contract?.functions ?? [])
       .filter((fn) => fn.id)
       .map((fn) => [fn.id, fn]),
+  );
+}
+
+export function compiledArtifactContractMap(contract) {
+  return new Map(
+    (contract?.artifactContracts ?? [])
+      .filter((artifact) => artifact.id)
+      .map((artifact) => [artifact.id, artifact]),
+  );
+}
+
+export function compiledWorkflowMap(contract) {
+  return new Map(
+    (contract?.workflowContracts ?? [])
+      .filter((workflow) => workflow.id)
+      .map((workflow) => [workflow.id, workflow]),
+  );
+}
+
+export function compiledSourceUnitMap(contract) {
+  return new Map(
+    (contract?.sourceUnits ?? [])
+      .filter((unit) => unit.file)
+      .map((unit) => [unit.file, unit]),
   );
 }
 
@@ -108,6 +160,66 @@ function normalizeFunctions(rows) {
     .filter((row) => row.id);
 }
 
+function normalizeArtifactContracts(rows) {
+  return rows
+    .map((row) => ({
+      id: stringOrNull(row?.id),
+      schema: stringOrNull(row?.schema),
+      path: stringOrNull(row?.path),
+      writer: stringOrNull(row?.writer),
+      ssot: typeof row?.ssot === 'boolean' ? row.ssot : null,
+      required: stringArray(row?.required),
+      source: row?.source ?? null,
+    }))
+    .filter((row) => row.id);
+}
+
+function normalizeWorkflowContracts(rows) {
+  return rows
+    .map((row) => ({
+      id: stringOrNull(row?.workflow_id ?? row?.id ?? row?.name),
+      name: stringOrNull(row?.name),
+      schema: stringOrNull(row?.schema),
+      path: stringOrNull(row?.path),
+      file: stringOrNull(row?.file),
+      status: stringOrNull(row?.status),
+      writer: stringOrNull(row?.writer),
+      required: stringArray(row?.required),
+      sourcePlans: stringArray(row?.source_plans ?? row?.sourcePlans),
+      steps: stringArray(row?.steps),
+      source: row?.source ?? null,
+    }))
+    .filter((row) => row.id);
+}
+
+function normalizeSourceUnits(rows) {
+  const seen = new Set();
+  const units = [];
+  for (const row of rows) {
+    const file = stringOrNull(row?.file ?? row?.id);
+    if (!file || seen.has(file)) continue;
+    seen.add(file);
+    units.push({
+      file,
+      kind: stringOrNull(row?.kind === 'module_source_unit' ? row?.unit_kind : row?.kind),
+      includedBy: stringOrNull(row?.included_by ?? row?.includedBy),
+      includeLine: typeof row?.include_line === 'number' ? row.include_line : null,
+      sourceHash: stringOrNull(row?.source_hash ?? row?.sourceHash),
+    });
+  }
+  return units;
+}
+
+function normalizeWorkstationConfig(row) {
+  if (!row) return null;
+  return {
+    id: stringOrNull(row?.id),
+    modelProfiles: stringArray(row?.model_profiles ?? row?.modelProfiles),
+    slotTemplates: stringArray(row?.slot_templates ?? row?.slotTemplates),
+    source: row?.source ?? null,
+  };
+}
+
 function stringOrNull(value) {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
@@ -130,8 +242,13 @@ function emptyContract({ ok, diagnostics, v3 }) {
     diagnostics,
     v3: v3?.compiled ?? null,
     semantic: null,
+    workflowProjection: null,
     surfaces: [],
     functions: [],
+    artifactContracts: [],
+    workflowContracts: [],
+    sourceUnits: [],
+    workstationConfig: null,
     sourceHash: null,
     semanticSourceHash: null,
   };

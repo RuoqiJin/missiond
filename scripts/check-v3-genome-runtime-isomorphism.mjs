@@ -2,6 +2,7 @@
 
 import fs from 'node:fs';
 import { runLispc } from './lib/ocaml_lispc.mjs';
+import { readBlueprintWithEvidenceSidecars } from './lib/v3_blueprint_contract_source.mjs';
 
 const BLUEPRINT = '.missiond/v3/missiond-blueprint.lisp';
 const GENOME_DIR = '.missiond/v3/genome';
@@ -132,6 +133,7 @@ function parseArgs(argv) {
 
 function read(file) {
   try {
+    if (file === BLUEPRINT) return readBlueprintWithEvidenceSidecars(process.cwd(), file);
     return fs.readFileSync(file, 'utf8');
   } catch {
     return '';

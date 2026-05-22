@@ -7,6 +7,7 @@ import {
   compiledSurfaceIds,
   loadCompiledV3Contract,
 } from './lib/v3_compiled_contract.mjs';
+import { readBlueprintWithEvidenceSidecars } from './lib/v3_blueprint_contract_source.mjs';
 
 const BLUEPRINT = '.missiond/v3/missiond-blueprint.lisp';
 const DEFAULT_AUTH_MISSIOND =
@@ -426,6 +427,7 @@ function parseArgs(argv) {
 
 function read(file) {
   try {
+    if (file === BLUEPRINT) return readBlueprintWithEvidenceSidecars(process.cwd(), file);
     return fs.readFileSync(file, 'utf8');
   } catch {
     return '';

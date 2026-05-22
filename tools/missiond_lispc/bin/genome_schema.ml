@@ -196,16 +196,21 @@ let validate file =
   try
     let forms = Parser.parse_file file in
     match find_root forms "genome" with
-    | None -> [ diag file { line = 1; column = 1 } "genome.missing" "missing genome root" ]
+    | None ->
+        [
+          diag file (synthetic_loc file) "genome.missing"
+            "missing genome root";
+        ]
     | Some root -> List.rev (validate_root file root)
   with
   | Reader_error (l, msg) -> [ diag file l "parse.error" msg ]
-  | Sys_error msg -> [ diag file { line = 1; column = 1 } "io.error" msg ]
-  | Invalid_argument msg -> [ diag file { line = 1; column = 1 } "genome.invalid" msg ]
+  | Sys_error msg -> [ diag file (synthetic_loc file) "io.error" msg ]
+  | Invalid_argument msg ->
+      [ diag file (synthetic_loc file) "genome.invalid" msg ]
 
 let validate_dir dir =
   try genome_files dir |> List.map validate |> List.flatten
-  with Sys_error msg -> [ diag dir { line = 1; column = 1 } "io.error" msg ]
+  with Sys_error msg -> [ diag dir (synthetic_loc dir) "io.error" msg ]
 
 let string_list_json xs =
   "[" ^ (xs |> List.map json_string |> String.concat ",") ^ "]"
@@ -288,6 +293,6 @@ let emit_genomes dir =
          (diagnostics = []) diagnostics);
     if diagnostics = [] then 0 else 1
   with Sys_error msg ->
-    let d = diag dir { line = 1; column = 1 } "io.error" msg in
+    let d = diag dir (synthetic_loc dir) "io.error" msg in
     print_endline (result_json false [ d ]);
     1

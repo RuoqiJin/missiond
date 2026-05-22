@@ -1,8 +1,26 @@
 (missiond-blueprint-shards
   :schema "missiond.blueprint-shard-index.v1"
   :root ".missiond/v3/missiond-blueprint.lisp"
-  :status active-authoring-index
-  :rule "The root V3 blueprint remains the executable compiler input. Shards are scoped authoring indexes that keep worker context small; runtime behavior must not depend on a shard until the root blueprint and compiled projections expose the same contract."
+  :status compiler-active-index
+  :rule "The root V3 blueprint is the compiler entrypoint. Shards referenced through root include forms are executable SSOT source units; runtime behavior must depend on compiled projections, not raw shard reads."
+
+  (shard v2-convergence-map
+    :status compiler-active
+    :path "shards/v2-convergence-map.lisp"
+    :root-include "(include \"shards/v2-convergence-map.lisp\")"
+    :invariant "V2 convergence coverage is compiled through missiond-lispc resolver and remains part of final convergence.")
+
+  (shard pillar-flow-map
+    :status compiler-active
+    :path "shards/pillar-flow-map.lisp"
+    :root-include "(include \"shards/pillar-flow-map.lisp\")"
+    :invariant "Pillar function entry/core/egress facts are compiled through semantic IR with shard source locations.")
+
+  (shard implementation-map
+    :status compiler-active
+    :path "shards/implementation-map.lisp"
+    :root-include "(include \"shards/implementation-map.lisp\")"
+    :invariant "Implementation surfaces are compiled through semantic IR with shard source locations.")
 
   (shard typed-compiler-runtime-projection
     :status active

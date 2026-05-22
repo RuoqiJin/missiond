@@ -72,6 +72,7 @@ export class WorkstationRuntimeConfig {
     contextPackDispatchPolicy = defaultContextPackDispatchPolicy(),
     slotTtlPolicy = defaultSlotTtlPolicy(),
     source = 'defaults',
+    diagnostics = [],
   } = {}) {
     this.slotDefaultProfiles = new Map(slotDefaultProfiles);
     this.slotTemplates = new Map(slotTemplates);
@@ -83,6 +84,7 @@ export class WorkstationRuntimeConfig {
     this.contextPackDispatchPolicy = { ...contextPackDispatchPolicy };
     this.slotTtlPolicy = { ...slotTtlPolicy };
     this.source = source;
+    this.diagnostics = [...diagnostics];
   }
 
   defaultModelProfileForTemplate(template) {
@@ -189,6 +191,9 @@ export function loadWorkstationRuntimeConfigForRepo(
     const compiled = tryLoadCompiledWorkstationRuntimeConfig(repo, resolvedBlueprint);
     if (compiled) return compiled;
   }
+  const fallbackDiagnostic = explicitBlueprint
+    ? 'explicit blueprint requested; parsing raw Lisp workstation config'
+    : 'compiled runtime config unavailable or stale; parsing raw Lisp workstation config fallback';
 
   if (!fs.existsSync(resolvedBlueprint)) {
     if ((explicitBlueprint || fs.existsSync(missiondDir)) && !allowDefaultFallback) {
@@ -205,7 +210,9 @@ export function loadWorkstationRuntimeConfigForRepo(
       `failed to read V3 blueprint ${resolvedBlueprint}: ${err.message}`,
     );
   }
-  return parseWorkstationRuntimeConfig(source, resolvedBlueprint);
+  const config = parseWorkstationRuntimeConfig(source, resolvedBlueprint);
+  config.diagnostics.push(fallbackDiagnostic);
+  return config;
 }
 
 function tryLoadCompiledWorkstationRuntimeConfig(repo, sourceBlueprint) {
@@ -245,6 +252,7 @@ function workstationConfigFromCompiled(raw, source) {
       raw.context_pack_dispatch_policy ?? defaultContextPackDispatchPolicy(),
     slotTtlPolicy: raw.slot_ttl_policy ?? defaultSlotTtlPolicy(),
     source,
+    diagnostics: [],
   });
 }
 
@@ -483,6 +491,9 @@ function defaultWorkstationRuntimeConfig(source) {
     contextPackDispatchPolicy: defaultContextPackDispatchPolicy(),
     slotTtlPolicy: defaultSlotTtlPolicy(),
     source,
+    diagnostics: source === 'fallback-defaults'
+      ? ['using embedded JS workstation runtime defaults']
+      : [],
   });
 }
 
