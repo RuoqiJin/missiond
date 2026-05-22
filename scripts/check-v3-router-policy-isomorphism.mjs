@@ -269,6 +269,10 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.v3Runtime, sources.v3Runtime, [
     'pub(crate) struct RouterRuntimeConfig',
+    'CompiledRuntimeConfigPayload',
+    'load_compiled_runtime_config',
+    'try_compiled_runtime_config',
+    'compiled-runtime-config.json',
     'DEFAULT_ROUTER_CHAT_MODEL',
     'DEFAULT_ROUTER_FLOW_GEMINI_MODEL',
     'DEFAULT_ROUTER_STATELESS_SONNET_MODEL',
@@ -653,6 +657,7 @@ is_file_denied /.ssh/ .env credentials.json
 
   writeFixture(root, DEFAULT_FILES.v3Runtime, `
 pub(crate) struct RouterRuntimeConfig DEFAULT_ROUTER_CHAT_MODEL DEFAULT_ROUTER_FLOW_GEMINI_MODEL
+CompiledRuntimeConfigPayload load_compiled_runtime_config try_compiled_runtime_config compiled-runtime-config.json
 DEFAULT_ROUTER_STATELESS_SONNET_MODEL DEFAULT_ROUTER_QUEUED_SONNET_MODEL DEFAULT_ROUTER_COMPRESS_MODEL
 DEFAULT_ROUTER_CHAT_IDLE_TIMEOUT_SECS router_chat_idle_timeout
 DEFAULT_ROUTER_CHAT_RETRY_MAX_ATTEMPTS DEFAULT_ROUTER_CHAT_RETRY_INITIAL_BACKOFF_MS DEFAULT_ROUTER_CHAT_RETRY_MAX_BACKOFF_MS

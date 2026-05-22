@@ -302,6 +302,7 @@ const path = require('node:path');
 const compiledDir = '.missiond/v3/runtime/compiled';
 const targets = {
   v3: 'compiled-v3-blueprint.json',
+  runtimeConfig: 'compiled-runtime-config.json',
   universe: 'compiled-project-universe.json',
   workflows: 'compiled-workflows.json',
 };

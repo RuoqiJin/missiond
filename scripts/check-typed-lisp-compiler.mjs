@@ -45,6 +45,9 @@ const REQUIRED_RUNTIME_LOADER = {
     'load_runtime_blueprint_source_with_diagnostics',
     'load_compiled_v3_lisp_source',
     'load_compiled_v3_lisp_source_with_diagnostics',
+    'load_compiled_runtime_config',
+    'try_compiled_runtime_config',
+    'CompiledRuntimeConfigPayload',
     'compiled_v3_snapshot_is_current',
     'compiled_sexp_to_lisp',
     'CompiledV3Payload',
@@ -56,6 +59,7 @@ const REQUIRED_RUNTIME_LOADER = {
     'load_compiled_project_universe',
     'load_compiled_workflow_contracts',
     'compiled_runtime_projection_status',
+    'runtimeConfig',
   ],
 };
 
@@ -127,6 +131,8 @@ const REQUIRED_BLUEPRINT_TOKENS = [
   'check-workflow-dir',
   'check-genome-dir',
   'emit-genomes',
+  'emit-runtime-config',
+  'compiled-runtime-config.json',
   'genome-runtime',
   'check-m6-depth',
   'check-domain-hardening-deprecated-alias',
@@ -238,6 +244,7 @@ function main() {
     }
     for (const argv of [
       ['emit-v3', '--blueprint', BLUEPRINT],
+      ['emit-runtime-config', '--blueprint', BLUEPRINT],
       ['emit-universe', '--blueprint', BLUEPRINT],
       ['emit-workflows', '--workflow-dir', '.missiond/workflows'],
       ['emit-genomes', '--genome-dir', '.missiond/v3/genome'],
@@ -267,6 +274,33 @@ function main() {
         }
         if (!Array.isArray(typedCompiler?.steps) || !typedCompiler.steps.includes('s10')) {
           diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_V3_PROJECTION_MISSING_FUNCTION_STEPS', 'emit-v3 must project V3 function step ids'));
+        }
+      } else if (argv[0] === 'emit-runtime-config') {
+        const payload = emit.compiled?.payload ?? {};
+        const requiredGroups = [
+          'workstation',
+          'flow',
+          'compute',
+          'minimax',
+          'router',
+          'cascade',
+          'projectRegistry',
+          'capabilityGovernance',
+          'memoryKb',
+          'conversationIngestion',
+          'autopilot',
+          'learningEngine',
+        ];
+        for (const group of requiredGroups) {
+          if (!payload[group] || typeof payload[group] !== 'object') {
+            diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_RUNTIME_CONFIG_GROUP_MISSING', `emit-runtime-config must project payload.${group}`));
+          }
+        }
+        if (emit.compiled?.schema_version !== 'missiond.compiled-runtime-config.v1') {
+          diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_RUNTIME_CONFIG_SCHEMA_MISMATCH', 'emit-runtime-config must use schema missiond.compiled-runtime-config.v1'));
+        }
+        if (!payload.workstation?.timeout_policy || !payload.router?.default_chat_model || !payload.autopilot?.boardtask_timeout_policy) {
+          diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_RUNTIME_CONFIG_POLICY_MISSING', 'emit-runtime-config must project workstation/router/autopilot runtime policy fields'));
         }
       } else if (argv[0] === 'emit-universe') {
         if (!Array.isArray(emit.compiled?.payload?.projects) || emit.compiled.payload.projects.length === 0) {

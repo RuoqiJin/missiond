@@ -16,6 +16,11 @@ const targets = [
     file: 'compiled-v3-blueprint.json',
   },
   {
+    id: 'runtime-config',
+    argv: ['emit-runtime-config', '--blueprint', BLUEPRINT],
+    file: 'compiled-runtime-config.json',
+  },
+  {
     id: 'semantic-ir',
     argv: ['emit-semantic-ir', '--blueprint', BLUEPRINT],
     file: 'compiled-semantic-ir.json',

@@ -44,6 +44,13 @@ export const DEFAULT_ALLOWED_CWD_PREFIXES = [
 ];
 
 const PROFILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const COMPILED_RUNTIME_CONFIG_REL = path.join(
+  '.missiond',
+  'v3',
+  'runtime',
+  'compiled',
+  'compiled-runtime-config.json',
+);
 
 export class V3BlueprintRuntimeConfigError extends Error {
   constructor(message) {
@@ -178,6 +185,11 @@ export function loadWorkstationRuntimeConfigForRepo(
     : path.join(repo, '.missiond', 'v3', 'missiond-blueprint.lisp');
   const missiondDir = path.join(repo, '.missiond');
 
+  if (!explicitBlueprint) {
+    const compiled = tryLoadCompiledWorkstationRuntimeConfig(repo, resolvedBlueprint);
+    if (compiled) return compiled;
+  }
+
   if (!fs.existsSync(resolvedBlueprint)) {
     if ((explicitBlueprint || fs.existsSync(missiondDir)) && !allowDefaultFallback) {
       throw new V3BlueprintRuntimeConfigError(`V3 blueprint missing at ${resolvedBlueprint}`);
@@ -194,6 +206,51 @@ export function loadWorkstationRuntimeConfigForRepo(
     );
   }
   return parseWorkstationRuntimeConfig(source, resolvedBlueprint);
+}
+
+function tryLoadCompiledWorkstationRuntimeConfig(repo, sourceBlueprint) {
+  const compiledPath = path.join(repo, COMPILED_RUNTIME_CONFIG_REL);
+  if (!fs.existsSync(compiledPath)) return null;
+  try {
+    if (
+      fs.existsSync(sourceBlueprint)
+      && fs.statSync(compiledPath).mtimeMs < fs.statSync(sourceBlueprint).mtimeMs
+    ) {
+      return null;
+    }
+    const compiled = JSON.parse(fs.readFileSync(compiledPath, 'utf8'));
+    if (compiled?.schema_version !== 'missiond.compiled-runtime-config.v1') return null;
+    if (Array.isArray(compiled?.diagnostics) && compiled.diagnostics.length > 0) return null;
+    const workstation = compiled?.payload?.workstation;
+    if (!workstation || typeof workstation !== 'object') return null;
+    return workstationConfigFromCompiled(workstation, compiledPath);
+  } catch {
+    return null;
+  }
+}
+
+function workstationConfigFromCompiled(raw, source) {
+  return new WorkstationRuntimeConfig({
+    slotDefaultProfiles: objectMapEntries(raw.slot_default_profiles),
+    slotTemplates: objectMapEntries(raw.slot_templates),
+    allowedCwdPrefixes: Array.isArray(raw.allowed_cwd_prefixes)
+      ? raw.allowed_cwd_prefixes
+      : DEFAULT_ALLOWED_CWD_PREFIXES,
+    timeoutPolicy: raw.timeout_policy ?? defaultTimeoutPolicy(),
+    ccSwarmTimeoutPolicy: raw.cc_swarm_timeout_policy ?? defaultCcSwarmTimeoutPolicy(),
+    ptySendTimeoutPolicy: raw.pty_send_timeout_policy ?? defaultPtySendTimeoutPolicy(),
+    dynamicSlotSpawnTimeoutPolicy:
+      raw.dynamic_slot_spawn_timeout_policy ?? defaultDynamicSlotSpawnTimeoutPolicy(),
+    contextPackDispatchPolicy:
+      raw.context_pack_dispatch_policy ?? defaultContextPackDispatchPolicy(),
+    slotTtlPolicy: raw.slot_ttl_policy ?? defaultSlotTtlPolicy(),
+    source,
+  });
+}
+
+function objectMapEntries(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+  return Object.entries(value);
 }
 
 export function parseWorkstationRuntimeConfig(source, file = '<memory>') {

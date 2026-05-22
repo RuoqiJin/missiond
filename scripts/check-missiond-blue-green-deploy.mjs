@@ -79,6 +79,7 @@ function check(root) {
     'typed_lisp_runtime_manifest_json',
     'typed_lisp_runtime',
     'compiled-v3-blueprint.json',
+    'compiled-runtime-config.json',
     'compiled-project-universe.json',
     'compiled-workflows.json',
     'file_sha256',
@@ -140,7 +141,7 @@ node scripts/compile-v3-runtime.mjs --json
 typed-lisp-runtime-compile
 typed Lisp runtime compile failed
 typed_lisp_runtime_manifest_json typed_lisp_runtime
-compiled-v3-blueprint.json compiled-project-universe.json compiled-workflows.json file_sha256
+compiled-v3-blueprint.json compiled-runtime-config.json compiled-project-universe.json compiled-workflows.json file_sha256
 release-manifest.json "schema":"missiond.release-manifest.v1" daemon_sha256 mcp_sha256
 atomic_symlink_update switch_active_release rollback_to_previous cleanup_old_releases create_legacy_release_if_needed
 codesign_or_verify force-sign failed but verified linker signature

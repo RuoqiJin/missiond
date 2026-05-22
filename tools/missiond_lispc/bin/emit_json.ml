@@ -58,6 +58,110 @@ let prop_text_list key props =
   | Some value -> list_texts value
   | None -> []
 
+let form_id = function
+  | List (_, _, _ :: id_node :: _) -> atom_text id_node
+  | _ -> None
+
+let child_by_id parent name id =
+  children parent
+  |> List.find_opt (fun node -> is_list node name && form_id node = Some id)
+
+let rec prop_text_any keys props =
+  match keys with
+  | [] -> None
+  | key :: rest -> (
+      match prop_text key props with
+      | Some value -> Some value
+      | None -> prop_text_any rest props)
+
+let rec prop_any keys props =
+  match keys with
+  | [] -> None
+  | key :: rest -> (
+      match prop key props with
+      | Some value -> Some value
+      | None -> prop_any rest props)
+
+let non_nil = function
+  | Some "nil" -> None
+  | Some value -> Some value
+  | None -> None
+
+let prop_opt_non_nil keys props = prop_text_any keys props |> non_nil
+
+let json_field name value = Printf.sprintf "%s:%s" (json_string name) value
+
+let json_assoc fields =
+  "{"
+  ^ (fields |> List.map (fun (name, value) -> json_field name value) |> String.concat ",")
+  ^ "}"
+
+let json_object_map entries =
+  "{"
+  ^ (entries |> List.map (fun (name, value) -> json_field name value) |> String.concat ",")
+  ^ "}"
+
+let json_array values = "[" ^ String.concat "," values ^ "]"
+
+let json_bool value = if value then "true" else "false"
+
+let json_bool_token ?(default = false) keys props =
+  match prop_text_any keys props with
+  | Some "true" -> "true"
+  | Some "false" -> "false"
+  | _ -> json_bool default
+
+let json_number_token ?(default = "0") keys props =
+  match prop_text_any keys props with
+  | Some value -> value
+  | None -> default
+
+let json_string_token ?(default = "") keys props =
+  json_string (Option.value ~default (prop_text_any keys props))
+
+let json_opt_string_token keys props =
+  json_opt_string (prop_opt_non_nil keys props)
+
+let json_string_list_token keys props =
+  match prop_any keys props with
+  | Some value -> json_string_list (list_texts value)
+  | None -> "[]"
+
+let timeout_policy_json props =
+  json_assoc
+    [
+      ("default_secs", json_number_token [ ":default_secs" ] props);
+      ("min_secs", json_number_token [ ":min_secs" ] props);
+      ("max_secs", json_number_token [ ":max_secs" ] props);
+      ("watchdog_grace_secs", json_number_token [ ":watchdog_grace_secs" ] props);
+      ( "missing_session_probe_secs",
+        json_number_token [ ":missing_session_probe_secs" ] props );
+    ]
+
+let simple_timeout_policy_json props =
+  json_assoc
+    [
+      ("default_secs", json_number_token [ ":default_secs" ] props);
+      ("min_secs", json_number_token [ ":min_secs" ] props);
+      ("max_secs", json_number_token [ ":max_secs" ] props);
+    ]
+
+let slot_ttl_policy_json props =
+  json_assoc
+    [
+      ("default_secs", json_number_token [ ":default_secs" ] props);
+      ("min_secs", json_number_token [ ":min_secs" ] props);
+      ("max_secs", json_number_token [ ":max_secs" ] props);
+      ("default_extend_secs", json_number_token [ ":default_extend_secs" ] props);
+      ("max_extend_secs", json_number_token [ ":max_extend_secs" ] props);
+    ]
+
+let policy_props root name =
+  Option.bind root (fun root -> find_child root name) |> Option.map (keyword_props ~start:1)
+
+let named_child_props parent name id =
+  child_by_id parent name id |> Option.map (keyword_props ~start:2)
+
 let v3_surface_to_json node =
   let props = keyword_props ~start:2 node in
   let id =
@@ -293,6 +397,591 @@ let workflow_entry_to_json file =
         (json_string_list steps)
         risk_gate_count completion_criteria_count
 
+let workstation_model_profile_spawn_args_json workstation =
+  list_forms "model-profile" workstation
+  |> List.filter_map (fun node ->
+         match form_id node with
+         | None -> None
+         | Some id ->
+             let props = keyword_props ~start:2 node in
+             Some (id, json_opt_string_token [ ":spawn-model-arg" ] props))
+  |> json_object_map
+
+let workstation_slot_default_profiles_json workstation =
+  list_forms "slot-template" workstation
+  |> List.filter_map (fun node ->
+         match form_id node with
+         | None -> None
+         | Some id -> (
+             let props = keyword_props ~start:2 node in
+             match prop_opt_non_nil [ ":default-model-profile" ] props with
+             | Some profile -> Some (id, json_string profile)
+             | None -> None))
+  |> json_object_map
+
+let workstation_slot_template_json node =
+  let id = Option.value ~default:"<missing>" (form_id node) in
+  let props = keyword_props ~start:2 node in
+  json_assoc
+    [
+      ("name", json_string id);
+      ("role", json_string_token [ ":role" ] props);
+      ("description", json_string_token [ ":description" ] props);
+      ("default_model_profile", json_opt_string_token [ ":default-model-profile" ] props);
+      ("mcp_config", json_opt_string_token [ ":mcp-config" ] props);
+      ("default_cwd", json_string_token [ ":default-cwd" ] props);
+    ]
+
+let workstation_slot_templates_json workstation =
+  list_forms "slot-template" workstation
+  |> List.filter_map (fun node ->
+         form_id node |> Option.map (fun id -> (id, workstation_slot_template_json node)))
+  |> json_object_map
+
+let workstation_startup_slot_json node =
+  let props = keyword_props ~start:2 node in
+  json_assoc
+    [
+      ("task_type", json_string (Option.value ~default:"<missing>" (form_id node)));
+      ("engine", json_string_token [ ":engine" ] props);
+      ("lifecycle", json_string_token [ ":lifecycle" ] props);
+      ("slot_id", json_opt_string_token [ ":slot_id"; ":slot-id" ] props);
+      ("role", json_opt_string_token [ ":role" ] props);
+      ("model_profile", json_opt_string_token [ ":model_profile"; ":model-profile" ] props);
+      ("timeout_secs", json_number_token [ ":timeout_secs"; ":timeout-secs" ] props);
+      ("skip_permissions", json_bool_token ~default:true [ ":skip_permissions"; ":skip-permissions" ] props);
+    ]
+
+let workstation_pool_worker_json node =
+  let props = keyword_props ~start:2 node in
+  json_assoc
+    [
+      ("id", json_string (Option.value ~default:"<missing>" (form_id node)));
+      ("engine", json_string_token [ ":engine" ] props);
+      ("role", json_string_token [ ":role" ] props);
+      ("slot_id", json_string_token [ ":slot-id"; ":slot_id" ] props);
+      ("task_type", json_string_token [ ":task-type"; ":task_type" ] props);
+      ("model_profile", json_opt_string_token [ ":model-profile"; ":model_profile" ] props);
+      ("model", json_opt_string_token [ ":model" ] props);
+      ("task_classes", json_string_list_token [ ":task-classes"; ":task_classes" ] props);
+      ("capabilities", json_string_list_token [ ":capabilities" ] props);
+      ("max_concurrency", json_number_token ~default:"1" [ ":max-concurrency"; ":max_concurrency" ] props);
+      ("timeout_secs", json_number_token ~default:"1800" [ ":timeout-secs"; ":timeout_secs" ] props);
+      ("default_use", json_string_token [ ":default-use"; ":default_use" ] props);
+      ("accepts_boardtask", json_bool_token ~default:true [ ":accepts-boardtask"; ":accepts_boardtask" ] props);
+      ("write_allowed", json_bool_token ~default:false [ ":write-allowed"; ":write_allowed" ] props);
+      ("reasoning_effort", json_opt_string_token [ ":reasoning-effort"; ":reasoning_effort" ] props);
+      ("search_enabled", json_bool_token ~default:false [ ":search"; ":search-enabled"; ":search_enabled" ] props);
+      ("sandbox", json_opt_string_token [ ":sandbox" ] props);
+      ("approval_policy", json_opt_string_token [ ":approval-policy"; ":approval_policy" ] props);
+      ("tool_policy_path", json_opt_string_token [ ":tool-policy-path"; ":tool_policy_path" ] props);
+    ]
+
+let workstation_pool_json root =
+  match Option.bind root (fun root -> find_child root "workstation-pool") with
+  | Some pool ->
+      pool |> list_forms "worker" |> List.map workstation_pool_worker_json |> json_array
+  | None -> "[]"
+
+let workstation_runtime_config_json root =
+  match Option.bind root (fun root -> find_child root "workstation-config") with
+  | None -> "{}"
+  | Some workstation ->
+      let cwd_policy = named_child_props workstation "cwd-policy" "dynamic-slot" in
+      let chat_policy =
+        named_child_props workstation "chat-completions-policy" "jarvis-api"
+      in
+      let boardtask_timeout =
+        named_child_props workstation "timeout-policy" "boardtask-dispatch"
+      in
+      let cc_swarm_timeout =
+        named_child_props workstation "timeout-policy" "claudecode-swarm"
+      in
+      let pty_send_timeout =
+        named_child_props workstation "timeout-policy" "pty-send-blocking"
+      in
+      let dynamic_slot_spawn_timeout =
+        named_child_props workstation "timeout-policy" "dynamic-slot-spawn"
+      in
+      let context_pack_dispatch =
+        named_child_props workstation "dispatch-policy" "context-pack-run-wave"
+      in
+      let capacity = named_child_props workstation "capacity-policy" "swarm-workers" in
+      let ttl = named_child_props workstation "ttl-policy" "dynamic-slot" in
+      json_assoc
+        [
+          ("slot_default_profiles", workstation_slot_default_profiles_json workstation);
+          ("slot_templates", workstation_slot_templates_json workstation);
+          ("model_profile_spawn_args", workstation_model_profile_spawn_args_json workstation);
+          ( "startup_slots",
+            workstation
+            |> list_forms "startup-slot"
+            |> List.map workstation_startup_slot_json
+            |> json_array );
+          ("workstation_pool", workstation_pool_json root);
+          ( "allowed_cwd_prefixes",
+            cwd_policy
+            |> Option.map (json_string_list_token [ ":allowed-prefixes" ])
+            |> Option.value ~default:"[]" );
+          ( "chat_completions_default_slot",
+            chat_policy
+            |> Option.map (fun props ->
+                   json_string_token [ ":default_slot"; ":default-slot" ] props)
+            |> Option.value ~default:(json_string "") );
+          ( "timeout_policy",
+            boardtask_timeout
+            |> Option.map timeout_policy_json
+            |> Option.value ~default:"{}" );
+          ( "cc_swarm_timeout_policy",
+            cc_swarm_timeout
+            |> Option.map simple_timeout_policy_json
+            |> Option.value ~default:"{}" );
+          ( "pty_send_timeout_policy",
+            pty_send_timeout
+            |> Option.map simple_timeout_policy_json
+            |> Option.value ~default:"{}" );
+          ( "dynamic_slot_spawn_timeout_policy",
+            dynamic_slot_spawn_timeout
+            |> Option.map simple_timeout_policy_json
+            |> Option.value ~default:"{}" );
+          ( "context_pack_dispatch_policy",
+            context_pack_dispatch
+            |> Option.map (fun props ->
+                   json_assoc
+                     [
+                       ("default_max_parallel", json_number_token [ ":default_max_parallel" ] props);
+                       ("min_parallel", json_number_token [ ":min_parallel" ] props);
+                       ("max_parallel", json_number_token [ ":max_parallel" ] props);
+                     ])
+            |> Option.value ~default:"{}" );
+          ( "swarm_capacity_policy",
+            capacity
+            |> Option.map (fun props ->
+                   json_assoc
+                     [
+                       ("default_claude_workers", json_number_token [ ":default_claude_workers" ] props);
+                       ("max_claude_workers", json_number_token [ ":max_claude_workers" ] props);
+                       ("default_gemini_workers", json_number_token [ ":default_gemini_workers" ] props);
+                       ("max_gemini_workers", json_number_token [ ":max_gemini_workers" ] props);
+                       ("dynamic_slot_limit", json_number_token [ ":dynamic_slot_limit" ] props);
+                       ("delegate_rate_per_minute", json_number_token [ ":delegate_rate_per_minute" ] props);
+                     ])
+            |> Option.value ~default:"{}" );
+          ("slot_ttl_policy", ttl |> Option.map slot_ttl_policy_json |> Option.value ~default:"{}");
+        ]
+
+let flow_runtime_config_json root =
+  match policy_props root "flow-runtime-policy" with
+  | None -> "{}"
+  | Some props ->
+      json_assoc
+        [
+          ("llm_call_default_max_tokens", json_number_token [ ":llm-call-default-max-tokens" ] props);
+          ("slot_task_default_model", json_string_token [ ":slot-task-default-model" ] props);
+          ("slot_task_default_timeout_secs", json_number_token [ ":slot-task-default-timeout-secs" ] props);
+          ("parallel_slot_default_parallelism", json_number_token [ ":parallel-slot-default-parallelism" ] props);
+          ("parallel_slot_default_timeout_secs", json_number_token [ ":parallel-slot-default-timeout-secs" ] props);
+        ]
+
+let compute_runtime_config_json root =
+  match Option.bind root (fun root -> find_child root "compute-runtime-policy") with
+  | None -> "{}"
+  | Some compute -> (
+      match named_child_props compute "timeout-policy" "tracked-pty-spawn" with
+      | None -> "{}"
+      | Some props ->
+          json_assoc [ ("pty_spawn_timeout_policy", simple_timeout_policy_json props) ])
+
+let minimax_runtime_config_json root =
+  match policy_props root "minimax-runtime-policy" with
+  | None -> "{}"
+  | Some props ->
+      json_assoc
+        [
+          ("model", json_string_token [ ":model" ] props);
+          ("direct_http_timeout_secs", json_number_token [ ":direct-http-timeout-secs" ] props);
+          ("quota_throttle_secs", json_number_token [ ":quota-throttle-secs" ] props);
+          ("default_max_tokens", json_number_token [ ":default-max-tokens" ] props);
+        ]
+
+let router_runtime_config_json root =
+  match policy_props root "router-runtime-policy" with
+  | None -> "{}"
+  | Some props ->
+      json_assoc
+        [
+          ("default_chat_model", json_string_token [ ":default-chat-model" ] props);
+          ("chat_default_max_tokens", json_number_token [ ":chat-default-max-tokens" ] props);
+          ("file_chat_default_max_tokens", json_number_token [ ":file-chat-default-max-tokens" ] props);
+          ("flow_gemini_model", json_string_token [ ":flow-gemini-model" ] props);
+          ("stateless_sonnet_model", json_string_token [ ":stateless-sonnet-model" ] props);
+          ("queued_sonnet_model", json_string_token [ ":queued-sonnet-model" ] props);
+          ("anthropic_urgent_model", json_string_token [ ":anthropic-urgent-model" ] props);
+          ("anthropic_ops_model", json_string_token [ ":anthropic-ops-model" ] props);
+          ("anthropic_docs_test_chore_model", json_string_token [ ":anthropic-docs-test-chore-model" ] props);
+          ("compress_model", json_string_token [ ":compress-model" ] props);
+          ("compress_channel", json_string_token [ ":compress-channel" ] props);
+          ("compress_max_tokens", json_number_token [ ":compress-max-tokens" ] props);
+          ("compress_char_budget_chars", json_number_token [ ":compress-char-budget-chars" ] props);
+          ("direct_http_timeout_secs", json_number_token [ ":direct-http-timeout-secs" ] props);
+          ("router_chat_idle_timeout_secs", json_number_token [ ":router-chat-idle-timeout-secs" ] props);
+          ("router_chat_retry_max_attempts", json_number_token [ ":router-chat-retry-max-attempts" ] props);
+          ("router_chat_retry_initial_backoff_ms", json_number_token [ ":router-chat-retry-initial-backoff-ms" ] props);
+          ("router_chat_retry_max_backoff_ms", json_number_token [ ":router-chat-retry-max-backoff-ms" ] props);
+          ("gemini_pty_queue_timeout_secs", json_number_token [ ":gemini-pty-queue-timeout-secs" ] props);
+          ("gemini_http_queue_timeout_secs", json_number_token [ ":gemini-http-queue-timeout-secs" ] props);
+          ("gemini_file_upload_timeout_secs", json_number_token [ ":gemini-file-upload-timeout-secs" ] props);
+          ("gemini_file_poll_timeout_secs", json_number_token [ ":gemini-file-poll-timeout-secs" ] props);
+          ("gemini_cli_absolute_timeout_secs", json_number_token [ ":gemini-cli-absolute-timeout-secs" ] props);
+          ("gemini_cli_tool_exec_timeout_secs", json_number_token [ ":gemini-cli-tool-exec-timeout-secs" ] props);
+          ("queued_sonnet_quota_throttle_secs", json_number_token [ ":queued-sonnet-quota-throttle-secs" ] props);
+          ("queued_sonnet_default_max_tokens", json_number_token [ ":queued-sonnet-default-max-tokens" ] props);
+        ]
+
+let cascade_runtime_config_json root =
+  match policy_props root "cascade-policy" with
+  | None -> "{}"
+  | Some props ->
+      json_assoc
+        [
+          ("default_manifest_path", json_string_token [ ":default-manifest" ] props);
+          ("allowed_root", json_string_token [ ":allowed-root" ] props);
+          ("trigger_enabled", json_bool_token [ ":trigger-enabled" ] props);
+          ("default_max_cycles", json_number_token [ ":default-max-cycles" ] props);
+          ("max_cycles_limit", json_number_token [ ":max-cycles-limit" ] props);
+        ]
+
+let project_registry_runtime_config_json root =
+  match policy_props root "project-registry-policy" with
+  | None -> "{}"
+  | Some props ->
+      json_assoc
+        [
+          ("intent_path_candidates", json_string_list_token [ ":intent-path-candidates" ] props);
+          ("default_universe_manifest", json_string_token [ ":default-universe-manifest" ] props);
+        ]
+
+let capability_governance_runtime_config_json root =
+  match policy_props root "capability-governance-policy" with
+  | None -> "{}"
+  | Some props ->
+      json_assoc
+        [
+          ("review_sidecar_path", json_string_token [ ":review-sidecar" ] props);
+          ("protected_tool_patterns", json_string_list_token [ ":protected-tool-patterns" ] props);
+          ("protected_flow_patterns", json_string_list_token [ ":protected-flow-patterns" ] props);
+        ]
+
+let memory_kb_runtime_config_json root =
+  match policy_props root "memory-kb-policy" with
+  | None -> "{}"
+  | Some props ->
+      json_assoc
+        [
+          ("pending_message_limit", json_number_token [ ":pending-message-limit" ] props);
+          ("tool_result_preview_chars", json_number_token [ ":tool-result-preview-chars" ] props);
+          ("assistant_preview_chars", json_number_token [ ":assistant-preview-chars" ] props);
+        ]
+
+let conversation_ingestion_runtime_config_json root =
+  match policy_props root "conversation-ingestion-policy" with
+  | None -> "{}"
+  | Some props ->
+      json_assoc
+        [
+          ("conversation_get_tail_default", json_number_token [ ":conversation-get-tail-default" ] props);
+          ("conversation_search_default_limit", json_number_token [ ":conversation-search-default-limit" ] props);
+          ("message_search_default_limit", json_number_token [ ":message-search-default-limit" ] props);
+          ("context_before_default", json_number_token [ ":context-before-default" ] props);
+          ("context_after_default", json_number_token [ ":context-after-default" ] props);
+          ("conversation_events_default_limit", json_number_token [ ":conversation-events-default-limit" ] props);
+          ("agent_trajectory_default_limit", json_number_token [ ":agent-trajectory-default-limit" ] props);
+          ("timeline_query_default_limit", json_number_token [ ":timeline-query-default-limit" ] props);
+          ("timeline_query_max_limit", json_number_token [ ":timeline-query-max-limit" ] props);
+          ("timeline_search_default_limit", json_number_token [ ":timeline-search-default-limit" ] props);
+          ("timeline_search_max_limit", json_number_token [ ":timeline-search-max-limit" ] props);
+          ("intent_router_model", json_string_token [ ":intent-router-model" ] props);
+          ("intent_router_timeout_ms", json_number_token [ ":intent-router-timeout-ms" ] props);
+          ("vision_codex_binary", json_string_token [ ":vision-codex-binary" ] props);
+          ("vision_codex_model", json_string_token [ ":vision-codex-model" ] props);
+          ("vision_codex_idle_timeout_secs", json_number_token [ ":vision-codex-idle-timeout-secs" ] props);
+          ("vision_codex_absolute_timeout_secs", json_number_token [ ":vision-codex-absolute-timeout-secs" ] props);
+        ]
+
+let autopilot_runtime_config_json root =
+  let boardtask_timeout =
+    Option.bind root (fun root -> find_child root "workstation-config")
+    |> fun workstation ->
+    Option.bind workstation (fun workstation ->
+        named_child_props workstation "timeout-policy" "boardtask-dispatch")
+  in
+  match policy_props root "autopilot-policy" with
+  | None -> "{}"
+  | Some props ->
+      json_assoc
+        [
+          ("boardtask_timeout_policy", boardtask_timeout |> Option.map timeout_policy_json |> Option.value ~default:"{}");
+          ("stale_conversation_minutes", json_number_token [ ":stale-conversation-minutes" ] props);
+          ("slot_task_reap_stale_secs", json_number_token [ ":slot-task-reap-stale-secs" ] props);
+          ("recover_stale_running_minutes", json_number_token [ ":recover-stale-running-minutes" ] props);
+          ("slot_failure_throttle_secs", json_number_token [ ":slot-failure-throttle-secs" ] props);
+          ("deploy_review_timeout_secs", json_number_token [ ":deploy-review-timeout-secs" ] props);
+          ("dynamic_slot_expiring_soon_secs", json_number_token [ ":dynamic-slot-expiring-soon-secs" ] props);
+          ("stale_board_progress_minutes", json_number_token [ ":stale-board-progress-minutes" ] props);
+          ("completed_job_gc_minutes", json_number_token [ ":completed-job-gc-minutes" ] props);
+          ("idle_persistent_slot_secs", json_number_token [ ":idle-persistent-slot-secs" ] props);
+          ("recent_intents_window_secs", json_number_token [ ":recent-intents-window-secs" ] props);
+          ("user_stuck_cooldown_secs", json_number_token [ ":user-stuck-cooldown-secs" ] props);
+          ("direction_shift_cooldown_secs", json_number_token [ ":direction-shift-cooldown-secs" ] props);
+        ]
+
+let learning_engine_runtime_config_json root =
+  match policy_props root "learning-engine-policy" with
+  | None -> "{}"
+  | Some props ->
+      json_assoc
+        [
+          ("realtime_extraction_timeout_secs", json_number_token [ ":realtime-extraction-timeout-secs" ] props);
+          ("realtime_empty_backoff_base_secs", json_number_token [ ":realtime-empty-backoff-base-secs" ] props);
+          ("realtime_empty_backoff_max_secs", json_number_token [ ":realtime-empty-backoff-max-secs" ] props);
+          ("deep_analysis_zero_output_fuse_threshold", json_number_token [ ":deep-analysis-zero-output-fuse-threshold" ] props);
+          ("deep_analysis_zero_output_fuse_secs", json_number_token [ ":deep-analysis-zero-output-fuse-secs" ] props);
+          ("decision_tier3_timeout_secs", json_number_token [ ":decision-tier3-timeout-secs" ] props);
+          ("habit_scan_timeout_secs", json_number_token [ ":habit-scan-timeout-secs" ] props);
+          ("token_spend_guard_window_secs", json_number_token [ ":token-spend-guard-window-secs" ] props);
+          ("token_spend_guard_soft_limit", json_number_token [ ":token-spend-guard-soft-limit" ] props);
+          ("timeline_analysis_interval_secs", json_number_token [ ":timeline-analysis-interval-secs" ] props);
+          ("timeline_analysis_window_hours", json_number_token [ ":timeline-analysis-window-hours" ] props);
+          ("timeline_error_limit", json_number_token [ ":timeline-error-limit" ] props);
+          ("timeline_llm_sample_limit", json_number_token [ ":timeline-llm-sample-limit" ] props);
+          ("timeline_slow_event_limit", json_number_token [ ":timeline-slow-event-limit" ] props);
+          ("timeline_slow_threshold_ms", json_number_token [ ":timeline-slow-threshold-ms" ] props);
+          ("idle_explore_interval_secs", json_number_token [ ":idle-explore-interval-secs" ] props);
+          ("habit_scan_interval_secs", json_number_token [ ":habit-scan-interval-secs" ] props);
+          ("habit_scan_batch_size", json_number_token [ ":habit-scan-batch-size" ] props);
+          ("kb_auto_gc_interval_secs", json_number_token [ ":kb-auto-gc-interval-secs" ] props);
+          ("kb_consolidation_interval_secs", json_number_token [ ":kb-consolidation-interval-secs" ] props);
+          ("kb_reflection_interval_secs", json_number_token [ ":kb-reflection-interval-secs" ] props);
+          ("kb_reflection_utility_threshold", json_number_token [ ":kb-reflection-utility-threshold" ] props);
+          ("kb_reflection_min_access", json_number_token [ ":kb-reflection-min-access" ] props);
+          ("kb_reflection_max_entries", json_number_token [ ":kb-reflection-max-entries" ] props);
+          ("kb_reflection_max_tokens", json_number_token [ ":kb-reflection-max-tokens" ] props);
+          ("decision_harvest_interval_secs", json_number_token [ ":decision-harvest-interval-secs" ] props);
+          ("cooccurrence_refresh_interval_secs", json_number_token [ ":cooccurrence-refresh-interval-secs" ] props);
+        ]
+
+let runtime_config_payload_json blueprint root =
+  json_assoc
+    [
+      ("blueprint", json_string blueprint);
+      ("workstation", workstation_runtime_config_json root);
+      ("flow", flow_runtime_config_json root);
+      ("compute", compute_runtime_config_json root);
+      ("minimax", minimax_runtime_config_json root);
+      ("router", router_runtime_config_json root);
+      ("cascade", cascade_runtime_config_json root);
+      ("projectRegistry", project_registry_runtime_config_json root);
+      ("capabilityGovernance", capability_governance_runtime_config_json root);
+      ("memoryKb", memory_kb_runtime_config_json root);
+      ("conversationIngestion", conversation_ingestion_runtime_config_json root);
+      ("autopilot", autopilot_runtime_config_json root);
+      ("learningEngine", learning_engine_runtime_config_json root);
+    ]
+
+let require_props diagnostics file node label keys =
+  let props = keyword_props ~start:1 node in
+  List.iter
+    (fun key ->
+      if prop key props = None then
+        diagnostics :=
+          diag ~path:label file (loc_of node) "runtime_config.prop_missing"
+            (Printf.sprintf "%s missing %s" label key)
+          :: !diagnostics)
+    keys
+
+let require_policy diagnostics file root name keys =
+  match find_child root name with
+  | None ->
+      diagnostics :=
+        diag ~path:name file (loc_of root) "runtime_config.policy_missing"
+          (Printf.sprintf "missing (%s ...)" name)
+        :: !diagnostics
+  | Some node -> require_props diagnostics file node name keys
+
+let require_named_policy diagnostics file parent parent_label name id keys =
+  match child_by_id parent name id with
+  | None ->
+      diagnostics :=
+        diag ~path:parent_label file (loc_of parent) "runtime_config.policy_missing"
+          (Printf.sprintf "missing (%s %s ...) in %s" name id parent_label)
+        :: !diagnostics
+  | Some node ->
+      let props = keyword_props ~start:2 node in
+      List.iter
+        (fun key ->
+          if prop key props = None then
+            diagnostics :=
+              diag ~path:(parent_label ^ "." ^ id) file (loc_of node)
+                "runtime_config.prop_missing"
+                (Printf.sprintf "%s %s missing %s" name id key)
+              :: !diagnostics)
+        keys
+
+let runtime_config_required_diagnostics file root =
+  let diagnostics = ref [] in
+  (match find_child root "workstation-pool" with
+  | None ->
+      diagnostics :=
+        diag ~path:"workstation-pool" file (loc_of root)
+          "runtime_config.policy_missing" "missing (workstation-pool ...)"
+        :: !diagnostics
+  | Some pool ->
+      if list_forms "worker" pool = [] then
+        diagnostics :=
+          diag ~path:"workstation-pool" file (loc_of pool)
+            "runtime_config.worker_missing"
+            "workstation-pool must declare at least one worker"
+          :: !diagnostics);
+  (match find_child root "workstation-config" with
+  | None -> ()
+  | Some workstation ->
+      require_named_policy diagnostics file workstation "workstation-config"
+        "dispatch-policy" "context-pack-run-wave"
+        [ ":default_max_parallel"; ":min_parallel"; ":max_parallel" ]);
+  require_policy diagnostics file root "autopilot-policy"
+    [
+      ":stale-conversation-minutes";
+      ":slot-task-reap-stale-secs";
+      ":recover-stale-running-minutes";
+      ":slot-failure-throttle-secs";
+      ":deploy-review-timeout-secs";
+      ":dynamic-slot-expiring-soon-secs";
+      ":stale-board-progress-minutes";
+      ":completed-job-gc-minutes";
+      ":idle-persistent-slot-secs";
+      ":recent-intents-window-secs";
+      ":user-stuck-cooldown-secs";
+      ":direction-shift-cooldown-secs";
+    ];
+  require_policy diagnostics file root "cascade-policy"
+    [
+      ":default-manifest";
+      ":allowed-root";
+      ":trigger-enabled";
+      ":default-max-cycles";
+      ":max-cycles-limit";
+    ];
+  require_policy diagnostics file root "flow-runtime-policy"
+    [
+      ":llm-call-default-max-tokens";
+      ":slot-task-default-model";
+      ":slot-task-default-timeout-secs";
+      ":parallel-slot-default-parallelism";
+      ":parallel-slot-default-timeout-secs";
+    ];
+  (match find_child root "compute-runtime-policy" with
+  | None ->
+      diagnostics :=
+        diag ~path:"compute-runtime-policy" file (loc_of root)
+          "runtime_config.policy_missing" "missing (compute-runtime-policy ...)"
+        :: !diagnostics
+  | Some compute ->
+      require_named_policy diagnostics file compute "compute-runtime-policy"
+        "timeout-policy" "tracked-pty-spawn"
+        [ ":default_secs"; ":min_secs"; ":max_secs" ]);
+  require_policy diagnostics file root "minimax-runtime-policy"
+    [ ":model"; ":direct-http-timeout-secs"; ":quota-throttle-secs"; ":default-max-tokens" ];
+  require_policy diagnostics file root "router-runtime-policy"
+    [
+      ":default-chat-model";
+      ":chat-default-max-tokens";
+      ":file-chat-default-max-tokens";
+      ":flow-gemini-model";
+      ":stateless-sonnet-model";
+      ":queued-sonnet-model";
+      ":anthropic-urgent-model";
+      ":anthropic-ops-model";
+      ":anthropic-docs-test-chore-model";
+      ":compress-model";
+      ":compress-channel";
+      ":compress-max-tokens";
+      ":compress-char-budget-chars";
+      ":direct-http-timeout-secs";
+      ":router-chat-idle-timeout-secs";
+      ":router-chat-retry-max-attempts";
+      ":router-chat-retry-initial-backoff-ms";
+      ":router-chat-retry-max-backoff-ms";
+      ":gemini-pty-queue-timeout-secs";
+      ":gemini-http-queue-timeout-secs";
+      ":gemini-file-upload-timeout-secs";
+      ":gemini-file-poll-timeout-secs";
+      ":gemini-cli-absolute-timeout-secs";
+      ":gemini-cli-tool-exec-timeout-secs";
+      ":queued-sonnet-quota-throttle-secs";
+      ":queued-sonnet-default-max-tokens";
+    ];
+  require_policy diagnostics file root "project-registry-policy"
+    [ ":intent-path-candidates"; ":default-universe-manifest" ];
+  require_policy diagnostics file root "capability-governance-policy"
+    [ ":review-sidecar"; ":protected-tool-patterns"; ":protected-flow-patterns" ];
+  require_policy diagnostics file root "memory-kb-policy"
+    [
+      ":pending-message-limit";
+      ":tool-result-preview-chars";
+      ":assistant-preview-chars";
+    ];
+  require_policy diagnostics file root "learning-engine-policy"
+    [
+      ":realtime-extraction-timeout-secs";
+      ":realtime-empty-backoff-base-secs";
+      ":realtime-empty-backoff-max-secs";
+      ":deep-analysis-zero-output-fuse-threshold";
+      ":deep-analysis-zero-output-fuse-secs";
+      ":decision-tier3-timeout-secs";
+      ":habit-scan-timeout-secs";
+      ":token-spend-guard-window-secs";
+      ":token-spend-guard-soft-limit";
+      ":timeline-analysis-interval-secs";
+      ":timeline-analysis-window-hours";
+      ":timeline-error-limit";
+      ":timeline-llm-sample-limit";
+      ":timeline-slow-event-limit";
+      ":timeline-slow-threshold-ms";
+      ":idle-explore-interval-secs";
+      ":habit-scan-interval-secs";
+      ":habit-scan-batch-size";
+      ":kb-auto-gc-interval-secs";
+      ":kb-consolidation-interval-secs";
+      ":kb-reflection-interval-secs";
+      ":kb-reflection-utility-threshold";
+      ":kb-reflection-min-access";
+      ":kb-reflection-max-entries";
+      ":kb-reflection-max-tokens";
+      ":decision-harvest-interval-secs";
+      ":cooccurrence-refresh-interval-secs";
+    ];
+  require_policy diagnostics file root "conversation-ingestion-policy"
+    [
+      ":conversation-get-tail-default";
+      ":conversation-search-default-limit";
+      ":message-search-default-limit";
+      ":context-before-default";
+      ":context-after-default";
+      ":conversation-events-default-limit";
+      ":agent-trajectory-default-limit";
+      ":timeline-query-default-limit";
+      ":timeline-query-max-limit";
+      ":timeline-search-default-limit";
+      ":timeline-search-max-limit";
+      ":intent-router-model";
+      ":intent-router-timeout-ms";
+      ":vision-codex-binary";
+      ":vision-codex-model";
+      ":vision-codex-idle-timeout-secs";
+      ":vision-codex-absolute-timeout-secs";
+    ];
+  List.rev !diagnostics
+
 let emit_ast file =
   try
     let forms = Parser.parse_file file in
@@ -329,6 +1018,43 @@ let emit_v3 blueprint =
         Printf.sprintf {|"compiled":%s|}
           (compiled_envelope "missiond.compiled-v3-blueprint.v1" (source_hash source) diagnostics payload)
       ] (diagnostics = []) diagnostics);
+    if diagnostics = [] then 0 else 1
+  with
+  | Reader_error (l, msg) ->
+      let d = diag blueprint l "parse.error" msg in
+      print_endline (result_json false [ d ]);
+      1
+  | Sys_error msg ->
+      let d = diag blueprint { line = 1; column = 1 } "io.error" msg in
+      print_endline (result_json false [ d ]);
+      1
+
+let emit_runtime_config blueprint =
+  try
+    let source = read_file blueprint in
+    let forms = Parser.parse_source blueprint source in
+    let root = find_root forms "missiond-blueprint" in
+    let diagnostics =
+      Schema_v3.validate blueprint []
+      @ Workstation_schema.validate blueprint
+      @
+      match root with
+      | Some root -> runtime_config_required_diagnostics blueprint root
+      | None ->
+          [
+            diag blueprint { line = 1; column = 1 } "root.missing"
+              "missing missiond-blueprint root";
+          ]
+    in
+    let payload = runtime_config_payload_json blueprint root in
+    print_endline
+      (result_json
+         ~extra:[
+           Printf.sprintf {|"compiled":%s|}
+             (compiled_envelope "missiond.compiled-runtime-config.v1"
+                (source_hash source) diagnostics payload);
+         ]
+         (diagnostics = []) diagnostics);
     if diagnostics = [] then 0 else 1
   with
   | Reader_error (l, msg) ->

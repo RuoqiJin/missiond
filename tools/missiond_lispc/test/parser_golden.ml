@@ -1,6 +1,18 @@
 let assert_true label cond =
   if not cond then failwith ("assertion failed: " ^ label)
 
+let contains_substring haystack needle =
+  let haystack_len = String.length haystack in
+  let needle_len = String.length needle in
+  if needle_len = 0 then true
+  else
+    let rec loop index =
+      if index + needle_len > haystack_len then false
+      else if String.sub haystack index needle_len = needle then true
+      else loop (index + 1)
+    in
+    loop 0
+
 let write_temp name source =
   let file = Filename.temp_file name ".lisp" in
   let oc = open_out_bin file in
@@ -24,6 +36,11 @@ let with_temp_dir name f =
 
 let has_code code diagnostics =
   List.exists (fun (d : Ast.diagnostic) -> d.code = code) diagnostics
+
+let single_missiond_root source =
+  match Parser.parse_source "runtime-config-fixture" source with
+  | [ root ] when Ast.is_list root "missiond-blueprint" -> root
+  | _ -> failwith "expected one missiond-blueprint root"
 
 let test_parser_locations () =
   let forms =
@@ -227,6 +244,61 @@ let test_project_dir_rejects_invalid_blueprint () =
       assert_true "missing egress in project dir is diagnosed"
         (has_code "project.egress_missing" diagnostics))
 
+let test_runtime_config_payload_shape () =
+  let root =
+    single_missiond_root
+      {|
+(missiond-blueprint
+  (workstation-config)
+  (flow-runtime-policy :slot-task-default-model "sonnet")
+  (router-runtime-policy :default-chat-model "router"))
+|}
+  in
+  let payload =
+    Emit_json.runtime_config_payload_json "runtime-config-fixture.lisp"
+      (Some root)
+  in
+  let envelope =
+    Emit_json.compiled_envelope "missiond.compiled-runtime-config.v1"
+      "fixture-hash" [] payload
+  in
+  List.iter
+    (fun needle ->
+      assert_true ("runtime config payload contains " ^ needle)
+        (contains_substring envelope needle))
+    [
+      "\"schema_version\":\"missiond.compiled-runtime-config.v1\"";
+      "\"workstation\"";
+      "\"flow\"";
+      "\"compute\"";
+      "\"minimax\"";
+      "\"router\"";
+      "\"cascade\"";
+      "\"projectRegistry\"";
+      "\"capabilityGovernance\"";
+      "\"memoryKb\"";
+      "\"conversationIngestion\"";
+      "\"autopilot\"";
+      "\"learningEngine\"";
+    ]
+
+let test_runtime_config_missing_policy_diagnostics () =
+  let root =
+    single_missiond_root
+      {|
+(missiond-blueprint
+  (autopilot-policy :stale-conversation-minutes 15))
+|}
+  in
+  let diagnostics =
+    Emit_json.runtime_config_required_diagnostics "runtime-config-invalid.lisp"
+      root
+  in
+  assert_true "missing runtime policy is diagnosed"
+    (has_code "runtime_config.policy_missing" diagnostics);
+  assert_true "missing runtime policy field is diagnosed"
+    (has_code "runtime_config.prop_missing" diagnostics)
+
 let () =
   test_parser_locations ();
   test_v3_missing_entry ();
@@ -239,4 +311,6 @@ let () =
   test_project_function_requires_surface ();
   test_project_dir_validates_active_blueprints ();
   test_project_dir_rejects_invalid_blueprint ();
+  test_runtime_config_payload_shape ();
+  test_runtime_config_missing_policy_diagnostics ();
   print_endline "missiond_lispc parser and validator golden tests passed"

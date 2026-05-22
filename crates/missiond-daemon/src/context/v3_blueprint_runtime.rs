@@ -174,7 +174,7 @@ pub(crate) const DEFAULT_ROUTER_GEMINI_CLI_TOOL_EXEC_TIMEOUT_SECS: u64 = 300;
 pub(crate) const DEFAULT_ROUTER_QUEUED_SONNET_QUOTA_THROTTLE_SECS: u64 = 30;
 pub(crate) const DEFAULT_ROUTER_QUEUED_SONNET_MAX_TOKENS: u32 = 1024;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub(crate) struct WorkstationRuntimeConfig {
     slot_default_profiles: HashMap<String, String>,
     slot_templates: HashMap<String, SlotTemplateRuntimeConfig>,
@@ -191,7 +191,7 @@ pub(crate) struct WorkstationRuntimeConfig {
     pub slot_ttl_policy: SlotTtlPolicy,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub(crate) struct SlotTemplateRuntimeConfig {
     pub name: String,
     pub role: String,
@@ -201,7 +201,7 @@ pub(crate) struct SlotTemplateRuntimeConfig {
     pub default_cwd: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub(crate) struct StartupSlotRuntimeConfig {
     pub task_type: String,
     pub engine: String,
@@ -213,7 +213,7 @@ pub(crate) struct StartupSlotRuntimeConfig {
     pub skip_permissions: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub(crate) struct SwarmCapacityPolicy {
     pub default_claude_workers: usize,
     pub max_claude_workers: usize,
@@ -223,7 +223,7 @@ pub(crate) struct SwarmCapacityPolicy {
     pub delegate_rate_per_minute: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub(crate) struct WorkstationPoolRuntimeConfig {
     pub id: String,
     pub engine: String,
@@ -246,7 +246,7 @@ pub(crate) struct WorkstationPoolRuntimeConfig {
     pub tool_policy_path: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub(crate) struct FlowRuntimeConfig {
     pub llm_call_default_max_tokens: u32,
     pub slot_task_default_model: String,
@@ -255,12 +255,12 @@ pub(crate) struct FlowRuntimeConfig {
     pub parallel_slot_default_timeout_secs: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 pub(crate) struct ComputePrimitivesRuntimeConfig {
     pub pty_spawn_timeout_policy: SimpleTimeoutPolicy,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub(crate) struct MinimaxRuntimeConfig {
     pub model: String,
     pub direct_http_timeout_secs: u64,
@@ -268,7 +268,7 @@ pub(crate) struct MinimaxRuntimeConfig {
     pub default_max_tokens: u32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 pub(crate) struct TimeoutPolicy {
     pub default_secs: i64,
     pub min_secs: i64,
@@ -277,14 +277,14 @@ pub(crate) struct TimeoutPolicy {
     pub missing_session_probe_secs: i64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 pub(crate) struct SimpleTimeoutPolicy {
     pub default_secs: i64,
     pub min_secs: i64,
     pub max_secs: i64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 pub(crate) struct SlotTtlPolicy {
     pub default_secs: i64,
     pub min_secs: i64,
@@ -293,7 +293,7 @@ pub(crate) struct SlotTtlPolicy {
     pub max_extend_secs: i64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub(crate) struct CascadeRuntimeConfig {
     pub default_manifest_path: PathBuf,
     pub allowed_root: PathBuf,
@@ -302,27 +302,27 @@ pub(crate) struct CascadeRuntimeConfig {
     pub max_cycles_limit: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub(crate) struct ProjectRegistryRuntimeConfig {
     pub intent_path_candidates: Vec<String>,
     pub default_universe_manifest: PathBuf,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub(crate) struct CapabilityGovernanceRuntimeConfig {
     pub review_sidecar_path: PathBuf,
     pub protected_tool_patterns: Vec<String>,
     pub protected_flow_patterns: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub(crate) struct MemoryKbRuntimeConfig {
     pub pending_message_limit: usize,
     pub tool_result_preview_chars: usize,
     pub assistant_preview_chars: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub(crate) struct ConversationIngestionRuntimeConfig {
     pub conversation_get_tail_default: i64,
     pub conversation_search_default_limit: i64,
@@ -343,7 +343,7 @@ pub(crate) struct ConversationIngestionRuntimeConfig {
     pub vision_codex_absolute_timeout_secs: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub(crate) struct AutopilotRuntimeConfig {
     pub boardtask_timeout_policy: TimeoutPolicy,
     pub stale_conversation_minutes: i64,
@@ -360,7 +360,7 @@ pub(crate) struct AutopilotRuntimeConfig {
     pub direction_shift_cooldown_secs: i64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub(crate) struct RouterRuntimeConfig {
     pub default_chat_model: String,
     pub chat_default_max_tokens: u32,
@@ -390,7 +390,7 @@ pub(crate) struct RouterRuntimeConfig {
     pub queued_sonnet_default_max_tokens: u32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
 pub(crate) struct LearningEngineRuntimeConfig {
     pub realtime_extraction_timeout_secs: u64,
     pub realtime_empty_backoff_base_secs: i64,
@@ -597,6 +597,27 @@ struct CompiledProjectUniversePayload {
 struct CompiledWorkflowsPayload {
     #[serde(default)]
     workflows: Vec<CompiledWorkflowEntry>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct CompiledRuntimeConfigPayload {
+    workstation: WorkstationRuntimeConfig,
+    flow: FlowRuntimeConfig,
+    compute: ComputePrimitivesRuntimeConfig,
+    minimax: MinimaxRuntimeConfig,
+    router: RouterRuntimeConfig,
+    cascade: CascadeRuntimeConfig,
+    #[serde(rename = "projectRegistry")]
+    project_registry: ProjectRegistryRuntimeConfig,
+    #[serde(rename = "capabilityGovernance")]
+    capability_governance: CapabilityGovernanceRuntimeConfig,
+    #[serde(rename = "memoryKb")]
+    memory_kb: MemoryKbRuntimeConfig,
+    #[serde(rename = "conversationIngestion")]
+    conversation_ingestion: ConversationIngestionRuntimeConfig,
+    autopilot: AutopilotRuntimeConfig,
+    #[serde(rename = "learningEngine")]
+    learning_engine: LearningEngineRuntimeConfig,
 }
 
 impl Default for TimeoutPolicy {
@@ -1190,6 +1211,16 @@ impl Default for LearningEngineRuntimeConfig {
     }
 }
 
+fn try_compiled_runtime_config(project_root: Option<&str>) -> Option<CompiledRuntimeConfigPayload> {
+    let root = resolve_blueprint_root(project_root)?;
+    let loaded = load_compiled_runtime_config(&root, None);
+    if loaded.diagnostics.is_empty() {
+        loaded.payload
+    } else {
+        None
+    }
+}
+
 impl WorkstationRuntimeConfig {
     pub(crate) fn load_for_current_dir() -> Result<Self, BlueprintConfigError> {
         let cwd = std::env::current_dir().map_err(|err| BlueprintConfigError::Read {
@@ -1203,6 +1234,9 @@ impl WorkstationRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
+        if let Some(compiled) = try_compiled_runtime_config(project_root) {
+            return Ok(compiled.workstation);
+        }
         match load_runtime_blueprint_source(project_root)? {
             Some(source) => parse_workstation_config(&source),
             None => Ok(Self::default()),
@@ -1415,6 +1449,9 @@ impl FlowRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
+        if let Some(compiled) = try_compiled_runtime_config(project_root) {
+            return Ok(compiled.flow);
+        }
         match load_runtime_blueprint_source(project_root)? {
             Some(source) => parse_flow_runtime_policy(&source),
             None => Ok(Self::default()),
@@ -1426,6 +1463,9 @@ impl ComputePrimitivesRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
+        if let Some(compiled) = try_compiled_runtime_config(project_root) {
+            return Ok(compiled.compute);
+        }
         match load_runtime_blueprint_source(project_root)? {
             Some(source) => parse_compute_runtime_policy(&source),
             None => Ok(Self::default()),
@@ -1456,6 +1496,9 @@ impl MinimaxRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
+        if let Some(compiled) = try_compiled_runtime_config(project_root) {
+            return Ok(compiled.minimax);
+        }
         match load_runtime_blueprint_source(project_root)? {
             Some(source) => parse_minimax_runtime_policy(&source),
             None => Ok(Self::default()),
@@ -1484,6 +1527,9 @@ impl RouterRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
+        if let Some(compiled) = try_compiled_runtime_config(project_root) {
+            return Ok(compiled.router);
+        }
         match load_runtime_blueprint_source(project_root)? {
             Some(source) => parse_router_runtime_policy(&source),
             None => Ok(Self::default()),
@@ -1548,6 +1594,9 @@ impl CascadeRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
+        if let Some(compiled) = try_compiled_runtime_config(project_root) {
+            return Ok(compiled.cascade);
+        }
         match load_runtime_blueprint_source(project_root)? {
             Some(source) => parse_cascade_policy(&source),
             None => Ok(Self::default()),
@@ -1594,6 +1643,9 @@ impl ProjectRegistryRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
+        if let Some(compiled) = try_compiled_runtime_config(project_root) {
+            return Ok(compiled.project_registry);
+        }
         match load_runtime_blueprint_source(project_root)? {
             Some(source) => parse_project_registry_policy(&source),
             None => Ok(Self::default()),
@@ -1611,6 +1663,9 @@ impl CapabilityGovernanceRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
+        if let Some(compiled) = try_compiled_runtime_config(project_root) {
+            return Ok(compiled.capability_governance);
+        }
         match load_runtime_blueprint_source(project_root)? {
             Some(source) => parse_capability_governance_policy(&source),
             None => Ok(Self::default()),
@@ -1647,6 +1702,9 @@ impl MemoryKbRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
+        if let Some(compiled) = try_compiled_runtime_config(project_root) {
+            return Ok(compiled.memory_kb);
+        }
         match load_runtime_blueprint_source(project_root)? {
             Some(source) => parse_memory_kb_policy(&source),
             None => Ok(Self::default()),
@@ -1667,6 +1725,9 @@ impl ConversationIngestionRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
+        if let Some(compiled) = try_compiled_runtime_config(project_root) {
+            return Ok(compiled.conversation_ingestion);
+        }
         match load_runtime_blueprint_source(project_root)? {
             Some(source) => parse_conversation_ingestion_policy(&source),
             None => Ok(Self::default()),
@@ -1711,6 +1772,9 @@ impl AutopilotRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
+        if let Some(compiled) = try_compiled_runtime_config(project_root) {
+            return Ok(compiled.autopilot);
+        }
         match load_runtime_blueprint_source(project_root)? {
             Some(source) => parse_autopilot_policy(&source),
             None => Ok(Self::default()),
@@ -1735,6 +1799,9 @@ impl LearningEngineRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
+        if let Some(compiled) = try_compiled_runtime_config(project_root) {
+            return Ok(compiled.learning_engine);
+        }
         match load_runtime_blueprint_source(project_root)? {
             Some(source) => parse_learning_engine_policy(&source),
             None => Ok(Self::default()),
@@ -3133,6 +3200,7 @@ pub(crate) fn load_compiled_runtime_snapshot(
 ) -> CompiledRuntimeLoad {
     let file_name = match kind {
         "v3" => "compiled-v3-blueprint.json",
+        "runtime-config" => "compiled-runtime-config.json",
         "universe" => "compiled-project-universe.json",
         "workflows" => "compiled-workflows.json",
         other => {
@@ -3253,6 +3321,47 @@ pub(crate) fn load_compiled_workflow_contracts(
     }
 }
 
+fn load_compiled_runtime_config(
+    project_root: &Path,
+    expected_source_hash: Option<&str>,
+) -> CompiledPayloadLoad<CompiledRuntimeConfigPayload> {
+    let path = project_root
+        .join(".missiond")
+        .join("v3")
+        .join("runtime")
+        .join("compiled")
+        .join("compiled-runtime-config.json");
+    let source_path = project_root
+        .join(".missiond")
+        .join("v3")
+        .join("missiond-blueprint.lisp");
+    if !path.exists() {
+        return CompiledPayloadLoad {
+            payload: None,
+            snapshot: None,
+            diagnostics: vec![format!(
+                "compiled runtime config missing: {}",
+                path.display()
+            )],
+        };
+    }
+    if !compiled_v3_snapshot_is_current(&path, &source_path) {
+        return CompiledPayloadLoad {
+            payload: None,
+            snapshot: None,
+            diagnostics: vec![format!(
+                "compiled runtime config stale relative to source Lisp: {}",
+                path.display()
+            )],
+        };
+    }
+    load_compiled_payload::<CompiledRuntimeConfigPayload>(
+        project_root,
+        "runtime-config",
+        expected_source_hash,
+    )
+}
+
 pub(crate) fn compiled_runtime_projection_status(project_root: &Path) -> serde_json::Value {
     let v3_source = load_runtime_blueprint_source_with_diagnostics(Some(
         project_root.to_string_lossy().as_ref(),
@@ -3262,6 +3371,7 @@ pub(crate) fn compiled_runtime_projection_status(project_root: &Path) -> serde_j
         source_kind: RuntimeBlueprintSourceKind::EmbeddedDefaults,
         diagnostics: vec![err.to_string()],
     });
+    let runtime_config = load_compiled_runtime_config(project_root, None);
     let universe = load_compiled_project_universe(project_root, None);
     let workflow_contracts = load_compiled_workflow_contracts(project_root, None);
     serde_json::json!({
@@ -3271,6 +3381,13 @@ pub(crate) fn compiled_runtime_projection_status(project_root: &Path) -> serde_j
             "sourceKind": v3_source.source_kind.as_str(),
             "compiledPreferred": matches!(v3_source.source_kind, RuntimeBlueprintSourceKind::CompiledV3),
             "diagnostics": v3_source.diagnostics,
+        },
+        "runtimeConfig": {
+            "ok": runtime_config.payload.is_some() && runtime_config.diagnostics.is_empty(),
+            "schema": runtime_config.snapshot.as_ref().map(|snapshot| snapshot.schema_version.clone()),
+            "sourceHash": runtime_config.snapshot.as_ref().map(|snapshot| snapshot.source_hash.clone()),
+            "path": runtime_config.snapshot.as_ref().map(|snapshot| snapshot.path.display().to_string()),
+            "diagnostics": runtime_config.diagnostics,
         },
         "projectUniverse": {
             "ok": universe.payload.is_some() && universe.diagnostics.is_empty(),
@@ -3412,6 +3529,7 @@ where
 fn compiled_runtime_file_name(kind: &str) -> Option<&'static str> {
     match kind {
         "v3" => Some("compiled-v3-blueprint.json"),
+        "runtime-config" => Some("compiled-runtime-config.json"),
         "universe" => Some("compiled-project-universe.json"),
         "workflows" => Some("compiled-workflows.json"),
         _ => None,
@@ -4526,6 +4644,294 @@ mod tests {
         assert!(err.to_string().contains("conversation-ingestion-policy"));
     }
 
+    fn compiled_runtime_config_fixture(source_hash: &str) -> String {
+        r#"{
+            "schema_version": "missiond.compiled-runtime-config.v1",
+            "source_hash": "__SOURCE_HASH__",
+            "generated_at": null,
+            "diagnostics": [],
+            "payload": {
+                "workstation": {
+                    "slot_default_profiles": {"coder": "compiled-profile"},
+                    "slot_templates": {
+                        "coder": {
+                            "name": "coder",
+                            "role": "coder",
+                            "description": "Compiled coder",
+                            "default_model_profile": "compiled-profile",
+                            "mcp_config": "/tmp/mcp.json",
+                            "default_cwd": "/tmp"
+                        }
+                    },
+                    "model_profile_spawn_args": {"compiled-profile": null},
+                    "startup_slots": [],
+                    "workstation_pool": [{
+                        "id": "compiled-worker",
+                        "engine": "claude-code",
+                        "role": "coder",
+                        "slot_id": "slot-compiled",
+                        "task_type": "compiled_task",
+                        "model_profile": "compiled-profile",
+                        "model": null,
+                        "task_classes": ["code"],
+                        "capabilities": ["mcp"],
+                        "max_concurrency": 1,
+                        "timeout_secs": 901,
+                        "default_use": "compiled",
+                        "accepts_boardtask": true,
+                        "write_allowed": true,
+                        "reasoning_effort": null,
+                        "search_enabled": false,
+                        "sandbox": null,
+                        "approval_policy": null,
+                        "tool_policy_path": null
+                    }],
+                    "allowed_cwd_prefixes": ["/tmp"],
+                    "chat_completions_default_slot": "slot-compiled",
+                    "timeout_policy": {
+                        "default_secs": 901,
+                        "min_secs": 60,
+                        "max_secs": 7200,
+                        "watchdog_grace_secs": 120,
+                        "missing_session_probe_secs": 120
+                    },
+                    "cc_swarm_timeout_policy": {"default_secs": 601, "min_secs": 60, "max_secs": 7200},
+                    "pty_send_timeout_policy": {"default_secs": 301, "min_secs": 1, "max_secs": 7200},
+                    "dynamic_slot_spawn_timeout_policy": {"default_secs": 61, "min_secs": 10, "max_secs": 600},
+                    "swarm_capacity_policy": {
+                        "default_claude_workers": 1,
+                        "max_claude_workers": 2,
+                        "default_gemini_workers": 1,
+                        "max_gemini_workers": 2,
+                        "dynamic_slot_limit": 3,
+                        "delegate_rate_per_minute": 4
+                    },
+                    "slot_ttl_policy": {
+                        "default_secs": 14400,
+                        "min_secs": 300,
+                        "max_secs": 28800,
+                        "default_extend_secs": 3600,
+                        "max_extend_secs": 3600
+                    }
+                },
+                "flow": {
+                    "llm_call_default_max_tokens": 777,
+                    "slot_task_default_model": "compiled-flow",
+                    "slot_task_default_timeout_secs": 778,
+                    "parallel_slot_default_parallelism": 2,
+                    "parallel_slot_default_timeout_secs": 779
+                },
+                "compute": {
+                    "pty_spawn_timeout_policy": {"default_secs": 31, "min_secs": 1, "max_secs": 600}
+                },
+                "minimax": {
+                    "model": "compiled-minimax",
+                    "direct_http_timeout_secs": 32,
+                    "quota_throttle_secs": 33,
+                    "default_max_tokens": 34
+                },
+                "router": {
+                    "default_chat_model": "compiled-router",
+                    "chat_default_max_tokens": 35,
+                    "file_chat_default_max_tokens": 36,
+                    "flow_gemini_model": "compiled-gemini",
+                    "stateless_sonnet_model": "compiled-stateless",
+                    "queued_sonnet_model": "compiled-queued",
+                    "anthropic_urgent_model": "compiled-urgent",
+                    "anthropic_ops_model": "compiled-ops",
+                    "anthropic_docs_test_chore_model": "compiled-docs",
+                    "compress_model": "compiled-compress",
+                    "compress_channel": "compiled-channel",
+                    "compress_max_tokens": 37,
+                    "compress_char_budget_chars": 38,
+                    "direct_http_timeout_secs": 39,
+                    "router_chat_idle_timeout_secs": 40,
+                    "router_chat_retry_max_attempts": 3,
+                    "router_chat_retry_initial_backoff_ms": 41,
+                    "router_chat_retry_max_backoff_ms": 42,
+                    "gemini_pty_queue_timeout_secs": 43,
+                    "gemini_http_queue_timeout_secs": 44,
+                    "gemini_file_upload_timeout_secs": 45,
+                    "gemini_file_poll_timeout_secs": 46,
+                    "gemini_cli_absolute_timeout_secs": 47,
+                    "gemini_cli_tool_exec_timeout_secs": 48,
+                    "queued_sonnet_quota_throttle_secs": 49,
+                    "queued_sonnet_default_max_tokens": 50
+                },
+                "cascade": {
+                    "default_manifest_path": "/tmp/universe.intent.lisp",
+                    "allowed_root": "/tmp",
+                    "trigger_enabled": true,
+                    "default_max_cycles": 2,
+                    "max_cycles_limit": 3
+                },
+                "projectRegistry": {
+                    "intent_path_candidates": ["intent.lisp"],
+                    "default_universe_manifest": "/tmp/universe.intent.lisp"
+                },
+                "capabilityGovernance": {
+                    "review_sidecar_path": "/tmp/review.json",
+                    "protected_tool_patterns": ["mission_execution"],
+                    "protected_flow_patterns": ["engineering"]
+                },
+                "memoryKb": {
+                    "pending_message_limit": 51,
+                    "tool_result_preview_chars": 52,
+                    "assistant_preview_chars": 53
+                },
+                "conversationIngestion": {
+                    "conversation_get_tail_default": 54,
+                    "conversation_search_default_limit": 55,
+                    "message_search_default_limit": 56,
+                    "context_before_default": 57,
+                    "context_after_default": 58,
+                    "conversation_events_default_limit": 59,
+                    "agent_trajectory_default_limit": 60,
+                    "timeline_query_default_limit": 61,
+                    "timeline_query_max_limit": 62,
+                    "timeline_search_default_limit": 63,
+                    "timeline_search_max_limit": 64,
+                    "intent_router_model": "compiled-intent",
+                    "intent_router_timeout_ms": 65,
+                    "vision_codex_binary": "compiled-codex",
+                    "vision_codex_model": "compiled-vision",
+                    "vision_codex_idle_timeout_secs": 66,
+                    "vision_codex_absolute_timeout_secs": 67
+                },
+                "autopilot": {
+                    "boardtask_timeout_policy": {
+                        "default_secs": 901,
+                        "min_secs": 60,
+                        "max_secs": 7200,
+                        "watchdog_grace_secs": 120,
+                        "missing_session_probe_secs": 120
+                    },
+                    "stale_conversation_minutes": 68,
+                    "slot_task_reap_stale_secs": 69,
+                    "recover_stale_running_minutes": 70,
+                    "slot_failure_throttle_secs": 71,
+                    "deploy_review_timeout_secs": 72,
+                    "dynamic_slot_expiring_soon_secs": 73,
+                    "stale_board_progress_minutes": 74,
+                    "completed_job_gc_minutes": 75,
+                    "idle_persistent_slot_secs": 76,
+                    "recent_intents_window_secs": 77,
+                    "user_stuck_cooldown_secs": 78,
+                    "direction_shift_cooldown_secs": 79
+                },
+                "learningEngine": {
+                    "realtime_extraction_timeout_secs": 80,
+                    "realtime_empty_backoff_base_secs": 81,
+                    "realtime_empty_backoff_max_secs": 82,
+                    "deep_analysis_zero_output_fuse_threshold": 3,
+                    "deep_analysis_zero_output_fuse_secs": 83,
+                    "decision_tier3_timeout_secs": 84,
+                    "habit_scan_timeout_secs": 85,
+                    "token_spend_guard_window_secs": 86,
+                    "token_spend_guard_soft_limit": 87,
+                    "timeline_analysis_interval_secs": 88,
+                    "timeline_analysis_window_hours": 89,
+                    "timeline_error_limit": 90,
+                    "timeline_llm_sample_limit": 91,
+                    "timeline_slow_event_limit": 92,
+                    "timeline_slow_threshold_ms": 93,
+                    "idle_explore_interval_secs": 94,
+                    "habit_scan_interval_secs": 95,
+                    "habit_scan_batch_size": 96,
+                    "kb_auto_gc_interval_secs": 97,
+                    "kb_consolidation_interval_secs": 98,
+                    "kb_reflection_interval_secs": 99,
+                    "kb_reflection_utility_threshold": 0.4,
+                    "kb_reflection_min_access": 100,
+                    "kb_reflection_max_entries": 101,
+                    "kb_reflection_max_tokens": 102,
+                    "decision_harvest_interval_secs": 103,
+                    "cooccurrence_refresh_interval_secs": 104
+                }
+            }
+        }"#
+        .replace("__SOURCE_HASH__", source_hash)
+    }
+
+    fn write_compiled_runtime_config_fixture(root: &std::path::Path, source_hash: &str) {
+        let compiled_dir = root
+            .join(".missiond")
+            .join("v3")
+            .join("runtime")
+            .join("compiled");
+        fs::create_dir_all(&compiled_dir).expect("compiled dir");
+        fs::write(
+            compiled_dir.join("compiled-runtime-config.json"),
+            compiled_runtime_config_fixture(source_hash),
+        )
+        .expect("write compiled runtime config");
+    }
+
+    #[test]
+    fn compiled_runtime_config_loads_structured_policy_and_public_loaders_use_it() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let blueprint_path = temp
+            .path()
+            .join(".missiond")
+            .join("v3")
+            .join("missiond-blueprint.lisp");
+        fs::create_dir_all(blueprint_path.parent().unwrap()).expect("blueprint dir");
+        fs::write(&blueprint_path, "(missiond-blueprint)").expect("write source");
+        write_compiled_runtime_config_fixture(temp.path(), "runtime-hash");
+
+        let loaded = load_compiled_runtime_config(temp.path(), Some("runtime-hash"));
+        assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
+        let payload = loaded.payload.expect("payload");
+        assert_eq!(payload.router.default_chat_model, "compiled-router");
+        assert_eq!(payload.autopilot.stale_conversation_minutes, 68);
+        assert_eq!(payload.learning_engine.habit_scan_batch_size, 96);
+
+        let root = temp.path().to_string_lossy();
+        let workstation =
+            WorkstationRuntimeConfig::load_for_project_root(Some(root.as_ref())).unwrap();
+        assert_eq!(workstation.chat_completions_default_slot(), "slot-compiled");
+        assert_eq!(workstation.timeout_policy.default_secs, 901);
+
+        let router = RouterRuntimeConfig::load_for_project_root(Some(root.as_ref())).unwrap();
+        assert_eq!(router.default_chat_model, "compiled-router");
+
+        let autopilot = AutopilotRuntimeConfig::load_for_project_root(Some(root.as_ref())).unwrap();
+        assert_eq!(autopilot.stale_conversation_minutes, 68);
+
+        let learning =
+            LearningEngineRuntimeConfig::load_for_project_root(Some(root.as_ref())).unwrap();
+        assert_eq!(learning.habit_scan_batch_size, 96);
+    }
+
+    #[test]
+    fn stale_compiled_runtime_config_falls_back_to_source_lisp_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_compiled_runtime_config_fixture(temp.path(), "runtime-hash");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let blueprint_path = temp
+            .path()
+            .join(".missiond")
+            .join("v3")
+            .join("missiond-blueprint.lisp");
+        fs::write(&blueprint_path, "(missiond-blueprint)").expect("write source");
+
+        let loaded = load_compiled_runtime_config(temp.path(), Some("runtime-hash"));
+        assert!(loaded.payload.is_none());
+        assert!(
+            loaded
+                .diagnostics
+                .iter()
+                .any(|line| line.contains("stale relative to source Lisp")),
+            "{:?}",
+            loaded.diagnostics
+        );
+
+        let root = temp.path().to_string_lossy();
+        let err = RouterRuntimeConfig::load_for_project_root(Some(root.as_ref()))
+            .expect_err("stale compiled runtime config must use source Lisp fallback");
+        assert!(err.to_string().contains("router-runtime-policy"));
+    }
+
     #[test]
     fn compiled_runtime_snapshot_loads_generated_shape() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -4720,6 +5126,7 @@ mod tests {
             .join("runtime")
             .join("compiled");
         fs::create_dir_all(&compiled_dir).expect("compiled dir");
+        write_compiled_runtime_config_fixture(temp.path(), "runtime-hash");
         fs::write(
             compiled_dir.join("compiled-project-universe.json"),
             r#"{
@@ -4767,6 +5174,18 @@ mod tests {
             status["v3Blueprint"]["compiledPreferred"].as_bool(),
             Some(false)
         );
+        assert_eq!(status["runtimeConfig"]["ok"].as_bool(), Some(true));
+        assert_eq!(
+            status["runtimeConfig"]["schema"].as_str(),
+            Some("missiond.compiled-runtime-config.v1")
+        );
+        assert_eq!(
+            status["runtimeConfig"]["sourceHash"].as_str(),
+            Some("runtime-hash")
+        );
+        assert!(status["runtimeConfig"]["path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("compiled-runtime-config.json")));
         assert_eq!(status["projectUniverse"]["ok"].as_bool(), Some(true));
         assert_eq!(status["projectUniverse"]["projectCount"].as_u64(), Some(1));
         assert_eq!(
