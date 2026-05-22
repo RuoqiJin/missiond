@@ -1,6 +1,68 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { runLispc } from './ocaml_lispc.mjs';
 
 export const DEFAULT_V3_BLUEPRINT = '.missiond/v3/missiond-blueprint.lisp';
+export const BLUEPRINT_NOTES_SIDECAR = '.missiond/v3/evidence/blueprint-notes.lisp';
+
+export function loadResolvedV3Contract({
+  repoRoot = process.cwd(),
+  blueprint = DEFAULT_V3_BLUEPRINT,
+  includeEvidenceSidecar = false,
+  timeoutMs = 60_000,
+} = {}) {
+  const targetRoot = path.resolve(repoRoot);
+  const lispcRepoRoot = resolveLispcToolchainRoot(targetRoot);
+  const blueprintArg = absolutizeFrom(targetRoot, blueprint);
+  const diagnostics = [];
+  const resolved = runLispc(['emit-resolved-v3', '--blueprint', blueprintArg], { repoRoot: lispcRepoRoot, timeoutMs });
+  if (resolved.ok !== true || !resolved.compiled) {
+    diagnostics.push(...lispcDiagnostics(resolved, 'emit-resolved-v3'));
+    return {
+      ok: false,
+      diagnostics,
+      resolved: resolved?.compiled ?? null,
+      resolvedSource: null,
+      sourceUnits: [],
+      sourceHash: null,
+    };
+  }
+
+  let resolvedSource = stringOrNull(resolved.compiled?.payload?.resolved_source);
+  if (!resolvedSource) {
+    diagnostics.push(diag(blueprint, 'RESOLVED_V3_SOURCE_MISSING', 'emit-resolved-v3 did not project payload.resolved_source'));
+  }
+
+  if (includeEvidenceSidecar && resolvedSource) {
+    const sidecarPath = path.join(targetRoot, BLUEPRINT_NOTES_SIDECAR);
+    if (fs.existsSync(sidecarPath)) {
+      const sidecar = fs.readFileSync(sidecarPath, 'utf8');
+      resolvedSource = `${resolvedSource}\n\n;; evidence sidecar included for contract-anchor checks\n${sidecar}`;
+    }
+  }
+
+  return {
+    ok: diagnostics.length === 0,
+    diagnostics,
+    resolved: resolved.compiled,
+    resolvedSource,
+    sourceUnits: normalizeSourceUnits(resolved.compiled?.payload?.source_units ?? []),
+    sourceHash: resolved.compiled.source_hash,
+  };
+}
+
+export function assertResolvedAnchors({ resolvedSource, anchors, file = DEFAULT_V3_BLUEPRINT } = {}) {
+  const text = resolvedSource ?? '';
+  return (anchors ?? [])
+    .filter((anchor) => typeof anchor === 'string' && !text.includes(anchor))
+    .map((anchor) => ({
+      file,
+      line: 1,
+      column: 1,
+      code: 'RESOLVED_V3_ANCHOR_MISSING',
+      message: `missing required anchor: ${anchor}`,
+    }));
+}
 
 export function loadCompiledV3Contract({
   repoRoot = process.cwd(),
@@ -10,8 +72,12 @@ export function loadCompiledV3Contract({
   workflowDir = '.missiond/workflows',
   timeoutMs = 60_000,
 } = {}) {
+  const targetRoot = path.resolve(repoRoot);
+  const lispcRepoRoot = resolveLispcToolchainRoot(targetRoot);
+  const blueprintArg = absolutizeFrom(targetRoot, blueprint);
+  const workflowDirArg = absolutizeFrom(targetRoot, workflowDir);
   const diagnostics = [];
-  const v3 = runLispc(['emit-v3', '--blueprint', blueprint], { repoRoot, timeoutMs });
+  const v3 = runLispc(['emit-v3', '--blueprint', blueprintArg], { repoRoot: lispcRepoRoot, timeoutMs });
   if (v3.ok !== true || !v3.compiled) {
     diagnostics.push(...lispcDiagnostics(v3, 'emit-v3'));
     return emptyContract({ ok: false, diagnostics, v3 });
@@ -19,14 +85,14 @@ export function loadCompiledV3Contract({
 
   let semantic = null;
   if (semanticIr) {
-    semantic = runLispc(['emit-semantic-ir', '--blueprint', blueprint], { repoRoot, timeoutMs });
+    semantic = runLispc(['emit-semantic-ir', '--blueprint', blueprintArg], { repoRoot: lispcRepoRoot, timeoutMs });
     if (semantic.ok !== true || !semantic.compiled) {
       diagnostics.push(...lispcDiagnostics(semantic, 'emit-semantic-ir'));
     }
   }
   let workflowProjection = null;
   if (workflows) {
-    workflowProjection = runLispc(['emit-workflows', '--workflow-dir', workflowDir], { repoRoot, timeoutMs });
+    workflowProjection = runLispc(['emit-workflows', '--workflow-dir', workflowDirArg], { repoRoot: lispcRepoRoot, timeoutMs });
     if (workflowProjection.ok !== true || !workflowProjection.compiled) {
       diagnostics.push(...lispcDiagnostics(workflowProjection, 'emit-workflows'));
     }
@@ -88,6 +154,30 @@ export function loadCompiledV3Contract({
     sourceHash: v3.compiled.source_hash,
     semanticSourceHash: semantic?.compiled?.source_hash ?? null,
   };
+}
+
+function absolutizeFrom(root, maybePath) {
+  return path.isAbsolute(maybePath) ? maybePath : path.join(root, maybePath);
+}
+
+function resolveLispcToolchainRoot(targetRoot) {
+  const direct = findLispcRoot(targetRoot);
+  if (direct) return direct;
+  const cwd = findLispcRoot(process.cwd());
+  if (cwd) return cwd;
+  return targetRoot;
+}
+
+function findLispcRoot(start) {
+  let current = path.resolve(start);
+  while (true) {
+    if (fs.existsSync(path.join(current, 'tools', 'missiond_lispc', 'dune-project'))) {
+      return current;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
 }
 
 export function compiledSurfaceIds(contract) {

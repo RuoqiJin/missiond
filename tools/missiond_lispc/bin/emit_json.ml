@@ -1085,10 +1085,15 @@ let emit_ast file =
 let emit_resolved_v3 blueprint =
   try
     let resolved = Source_resolver.resolve_blueprint_file blueprint in
+    let resolved_source =
+      resolved.forms |> List.map sexp_to_lisp |> String.concat "\n"
+    in
     let payload =
-      Printf.sprintf {|{"blueprint":%s,"source_units":%s,"forms":[%s]}|}
+      Printf.sprintf
+        {|{"blueprint":%s,"source_units":%s,"resolved_source":%s,"forms":[%s]}|}
         (json_string blueprint)
         (Source_resolver.source_units_to_json resolved.source_units)
+        (json_string resolved_source)
         (resolved.forms |> List.map sexp_to_json |> String.concat ",")
     in
     print_endline

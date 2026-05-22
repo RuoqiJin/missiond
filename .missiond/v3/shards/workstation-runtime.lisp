@@ -144,6 +144,111 @@
         :state blocked
         :blocked-kind usage_limit
         :keywords [quota limit rate-limit usage]))
+    (policy-clause workstation-startup-slot-projection
+      :owner workstation-config
+      :applies-to [daemon-startup slot-manager workstation-runtime]
+      :must [project-startup-slot-entries project-engine-lifecycle-slot-role-timeout-skip-permissions omit-local-startup-slot-table]
+      :evidence [compiled-runtime-config daemon-slot-manager-check workstation-config-isomorphism-check]
+      :checker "node scripts/check-v3-workstation-config-isomorphism.mjs"
+      :legacy-rule "Daemon startup SlotManager task configs MUST be generated from workstation-config startup-slot entries.")
+    (policy-clause workstation-model-profile-resolution
+      :owner workstation-config
+      :applies-to [compute-slot mission-task-delegate slot-spawn]
+      :must [project-model-profile-spawn-model-arg caller-model-wins single-shell-token no-default-profile-model-override]
+      :evidence [compiled-runtime-config compute-slot-tests workstation-config-isomorphism-check]
+      :checker "node scripts/check-v3-workstation-config-isomorphism.mjs"
+      :legacy-rule "mission_compute_slot model_profile resolution MUST use workstation-config model-profile spawn-model-arg, not a Rust-local profile table.")
+    (policy-clause workstation-host-relative-mcp-config
+      :owner workstation-config
+      :applies-to [claudecode-pty blue-green-deploy dynamic-slot]
+      :must [resolve-mission-home-mcp-config create-host-local-mcp-config reject-stale-jinchen-mcp-path stale-slot-clean-before-respawn]
+      :evidence [blue-green-deploy-check pty-recognition-check workstation-dispatch-check]
+      :checker "node scripts/check-v3-workstation-dispatch-isomorphism.mjs"
+      :legacy-rule "ClaudeCode mcp_config MUST be host-relative and PTY launch MUST resolve stale or missing xjp-mcp-config.json paths to the current host's MissionD home before spawning.")
+    (policy-clause workstation-provider-unavailable-blocked
+      :owner workstation-config
+      :applies-to [pty-recognition board-terminal slot-state]
+      :must [classify-auth-missing classify-billing-or-account classify-usage-limit preserve-blocked-provider-snapshot forbid-completed-provider-unavailable]
+      :evidence [provider-unavailable-policy pty-recognition-check board-terminal-diagnostics]
+      :checker "node scripts/check-v3-pty-recognition-isomorphism.mjs"
+      :legacy-rule "PTY recognition MUST classify provider unavailable states as blocked diagnostics, not completed turns.")
+    (policy-clause workstation-task-delegate-structured-metadata
+      :owner workstation-config
+      :applies-to [mission-task-delegate board-task-description autopilot-worker-prompt]
+      :must [persist-task-class-pool-engine-context-pack read-write-scope must-not-touch acceptance output-contract forbid-side-channel-only-context]
+      :evidence [task-delegate-tests workstation-dispatch-check context-pack-check]
+      :checker "node scripts/check-v3-workstation-dispatch-isomorphism.mjs"
+      :legacy-rule "mission_task_delegate MUST accept structured two-stage delegation metadata and persist it into the BoardTask description.")
+    (policy-clause workstation-swarm-project-root-resolution
+      :owner workstation-config
+      :applies-to [mission-swarm-run project-registry autopilot-dynamic-slot]
+      :must [resolve-project-id-to-root render-target-projects merge-target-read-scope project-bound-child-boardtask absolute-context-pack-path]
+      :evidence [project-registry-check workstation-dispatch-check context-pack-check]
+      :checker "node scripts/check-v3-workstation-dispatch-isomorphism.mjs"
+      :legacy-rule "mission_swarm_run MUST resolve project_id to a registered project_root before creating external-project BoardTasks.")
+    (policy-clause workstation-autoprovision-dynamic-slots
+      :owner workstation-config
+      :applies-to [mission-swarm-run mission-task-delegate dynamic-slot-autoprovision]
+      :must [auto-provision-claude-dynamic-slots persist-child-assignee publish-after-slot-created explicit-auto-provision-false-only-diagnostic]
+      :evidence [workstation-dispatch-check compute-slot-check autopilot-runtime-check]
+      :checker "node scripts/check-v3-workstation-dispatch-isomorphism.mjs"
+      :legacy-rule "mission_swarm_run MUST auto-provision per-Claude dynamic slots by default for non-dry-run Claude context-pack / implement shards.")
+    (policy-clause workstation-implementation-exact-shard-required
+      :owner workstation-config
+      :applies-to [mission-task-delegate mission-swarm-run implementation-worker]
+      :must [require-write-scope require-context-pack-path require-accepted-shard-id forbid-broad-implementation-objective fail-fast]
+      :evidence [workstation-dispatch-check context-pack-check direct-code-drift-check]
+      :checker "node scripts/check-v3-workstation-dispatch-isomorphism.mjs"
+      :legacy-rule "Implementation lanes must name the accepted shard id and exact context pack before code writes.")
+    (policy-clause workstation-project-root-spawn-cwd
+      :owner workstation-config
+      :applies-to [autopilot ensure-pty spawn-tracked-slot project-registry]
+      :must [override-slot-cwd-to-boardtask-project-root require-reuse-project-root-match reject-cross-project-slot-reuse inject-project-hooks]
+      :evidence [autopilot-runtime-check workstation-dispatch-check project-registry-check]
+      :checker "node scripts/check-v3-autopilot-runtime-isomorphism.mjs"
+      :legacy-rule "Autopilot ensure_pty MUST override pty_slot.cwd to the BoardTask.project registered project_root before PTY start.")
+    (policy-clause workstation-single-running-task-per-slot
+      :owner workstation-config
+      :applies-to [autopilot board-task-claims slot-display]
+      :must [scan-running-slot-claims before-claim unclaim-conflicting-running-task ignore-queued-unclaimed-task project-slot-active-task-from-single-claim]
+      :evidence [autopilot-runtime-check workstation-dispatch-check board-isomorphism-check]
+      :checker "node scripts/check-v3-autopilot-runtime-isomorphism.mjs"
+      :legacy-rule "Autopilot dispatch MUST enforce a single-running-BoardTask-per-slot invariant.")
+    (policy-clause workstation-durable-completion-evidence
+      :owner workstation-config
+      :applies-to [autopilot-close board-summary mission-execution-completion]
+      :must [wait-final-settle prefer-durable-provider-final poll-bounded-durable-final sanitize-pty-fallback require-output-contract-sections]
+      :evidence [autopilot-runtime-check mission-execution-check board-task-notes]
+      :checker "node scripts/check-v3-autopilot-runtime-isomorphism.mjs"
+      :legacy-rule "Autopilot close path MUST prefer durable provider final evidence after settle and block PTY-only closes without structured artifacts.")
+    (policy-clause workstation-timeout-budget-projection
+      :owner workstation-config
+      :applies-to [autopilot-pty-send cc-swarm pty-send compute-slot-spawn watchdog]
+      :must [project-boardtask-timeout project-claudecode-swarm-timeout project-pty-send-timeout project-dynamic-slot-spawn-timeout project-watchdog-threshold]
+      :evidence [compiled-runtime-config workstation-config-isomorphism-check autopilot-runtime-check]
+      :checker "node scripts/check-v3-workstation-config-isomorphism.mjs"
+      :legacy-rule "Runtime wait budgets MUST project from workstation-config timeout policies rather than local fixed literals.")
+    (policy-clause workstation-claim-lease-timeout-projection
+      :owner workstation-config
+      :applies-to [autopilot-claim-lease smart-watchdog boardtask-dispatch]
+      :must [claim-lease-equals-pty-send-budget-plus-grace forbid-fixed-twenty-minute-lease preserve-legitimate-long-running-task]
+      :evidence [compiled-runtime-config autopilot-runtime-check workstation-config-isomorphism-check]
+      :checker "node scripts/check-v3-autopilot-runtime-isomorphism.mjs"
+      :legacy-rule "Autopilot BoardTask claim lease MUST equal the smart-watchdog idle-recovery threshold.")
+    (policy-clause workstation-autopilot-completion-settle
+      :owner workstation-config
+      :applies-to [autopilot-close watchdog provider-conversation-store]
+      :must [wait-worker-final-settle rebind-conversation-task-id recover-from-durable-provider-or-note never-close-from-pty-idle-alone]
+      :evidence [autopilot-runtime-check conversation-ingestion-check mission-execution-check]
+      :checker "node scripts/check-v3-autopilot-runtime-isomorphism.mjs"
+      :legacy-rule "Autopilot close path MUST call wait_for_worker_final_settle_window() before summary-note / mission_execution / BoardTask done writes.")
+    (policy-clause workstation-research-routes-to-gemini-pool
+      :owner workstation-config
+      :applies-to [mission-task-delegate autopilot-routing workstation-pool]
+      :must [prefer-gemini-researcher-slot for-research-intent without-explicit-claude-model forbid-claude-autoprovision-while-gemini-researcher-exists honor-explicit-claude-profile]
+      :evidence [workstation-pool-check workstation-dispatch-check autopilot-runtime-check]
+      :checker "node scripts/check-v3-workstation-pool-isomorphism.mjs"
+      :legacy-rule "mission_task_delegate intent=research without an explicit Claude model/profile MUST prefer the workstation-pool gemini researcher slot.")
     :invariants
       ["code and research dynamic slots MUST NOT hardcode --model sonnet"
        "daemon startup SlotManager ClaudeCode task configs MUST project coder/researcher model profiles from workstation-config and omit --model for coding-default-opus-4-7"

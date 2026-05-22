@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import https from 'node:https';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { readBlueprintWithEvidenceSidecars } from './lib/v3_blueprint_contract_source.mjs';
 
 const usage = `Usage:
   node scripts/check-m6-deployment-status.mjs [--json] [--report-only] [--base-url URL] [--project ID]
@@ -143,7 +144,7 @@ function fail(message) {
 }
 
 function readM6Projects(root) {
-  const source = fs.readFileSync(path.join(root, BLUEPRINT), 'utf8');
+  const source = readBlueprintWithEvidenceSidecars(root, BLUEPRINT);
   const projects = [];
   const re = /\(maturity\s+:id\s+([a-zA-Z0-9_-]+)\s+:current\s+M6\b/g;
   let match;

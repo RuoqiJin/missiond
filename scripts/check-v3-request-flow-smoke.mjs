@@ -1413,10 +1413,12 @@ async function main() {
       : opts.blueprint;
     let blueprintSource;
     try {
-      blueprintSource =
+      blueprintSource = readBlueprintWithEvidenceSidecars(
+        repoRoot,
         blueprintRel.startsWith('..') || path.isAbsolute(blueprintRel)
-          ? fs.readFileSync(blueprintAbs, 'utf8')
-          : readBlueprintWithEvidenceSidecars(repoRoot, blueprintRel);
+          ? blueprintAbs
+          : blueprintRel,
+      );
     } catch (err) {
       diagnostics.push({ file: opts.blueprint, message: `cannot read blueprint: ${err.message}` });
       blueprintSource = null;

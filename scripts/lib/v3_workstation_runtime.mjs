@@ -10,6 +10,7 @@ import {
   parseLisp,
   readKeywordProps,
 } from './missiond_lisp.mjs';
+import { readBlueprintResolvedSource } from './v3_blueprint_contract_source.mjs';
 
 export const DEFAULT_MODEL_PROFILE = 'coding-default-opus-4-7';
 export const DEFAULT_TIMEOUT_SECS = 1800;
@@ -204,10 +205,10 @@ export function loadWorkstationRuntimeConfigForRepo(
 
   let source;
   try {
-    source = fs.readFileSync(resolvedBlueprint, 'utf8');
+    source = readBlueprintResolvedSource(repo, resolvedBlueprint);
   } catch (err) {
     throw new V3BlueprintRuntimeConfigError(
-      `failed to read V3 blueprint ${resolvedBlueprint}: ${err.message}`,
+      `failed to load resolved V3 blueprint ${resolvedBlueprint}: ${err.message}`,
     );
   }
   const config = parseWorkstationRuntimeConfig(source, resolvedBlueprint);

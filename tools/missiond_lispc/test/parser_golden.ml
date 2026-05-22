@@ -93,12 +93,19 @@ let test_source_resolver_include () =
 
 (state-machines
   (state-machine fixture
-    :states [ready done]))
+    :states [ready done]
+    :anchor secret-store://fixture/shard-only-anchor))
 |};
       close_out oc;
       let resolved = Source_resolver.resolve_blueprint_file blueprint in
       assert_true "root and shard source units are present"
         (List.length resolved.source_units = 2);
+      let resolved_source =
+        resolved.forms |> List.map Ast.sexp_to_lisp |> String.concat "\n"
+      in
+      assert_true "resolved source contains shard-only anchor"
+        (contains_substring resolved_source
+           "secret-store://fixture/shard-only-anchor");
       match resolved.root with
       | Some root ->
           begin
@@ -179,6 +186,39 @@ let test_v3_step_order () =
       let diagnostics = Schema_v3.validate file [ "typed-lisp-compiler" ] in
       assert_true "unordered step is diagnosed"
         (has_code "core.step_order" diagnostics))
+
+let test_policy_clause_requires_structured_fields () =
+  with_temp "missiond-v3-policy-invalid"
+    {|
+(missiond-blueprint
+  (implementation-map
+    (surface mission_request))
+  (pillar-flow-map
+    (pillar request
+      (function mission-request
+        :surface mission_request
+        :entry [request]
+        :core ((step s1 :logic "route"))
+        :egress [review-packet])))
+  (policy-clause missing-fields
+    :applies-to [mission_request])
+  (policy-clause duplicate-policy
+    :owner mission_request
+    :applies-to [mission_request]
+    :must [route-through-review-gate])
+  (policy-clause duplicate-policy
+    :owner mission_request
+    :applies-to [mission_request]
+    :must [route-through-review-gate]))
+|}
+    (fun file ->
+      let diagnostics = Schema_v3.validate file [ "mission_request" ] in
+      assert_true "missing policy owner is diagnosed"
+        (has_code "policy_clause.owner_missing" diagnostics);
+      assert_true "missing policy must is diagnosed"
+        (has_code "policy_clause.must_missing" diagnostics);
+      assert_true "duplicate policy id is diagnosed"
+        (has_code "policy_clause.duplicate_id" diagnostics))
 
 let test_workflow_missing_risk_gate () =
   with_temp "missiond-workflow-invalid"
@@ -385,6 +425,7 @@ let () =
   test_source_resolver_rejects_nested_include ();
   test_v3_missing_entry ();
   test_v3_step_order ();
+  test_policy_clause_requires_structured_fields ();
   test_workflow_missing_risk_gate ();
   test_workflow_dir_validates_all_files ();
   test_auth_domain_requires_compatibility_ledger ();

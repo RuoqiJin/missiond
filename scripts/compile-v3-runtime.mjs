@@ -62,6 +62,21 @@ function main() {
     fs.writeFileSync(outPath, `${JSON.stringify(compiled, null, 2)}\n`);
     results.push({ id: target.id, ok: true, path: outPath, source_hash: compiled.source_hash });
   }
+  const ssotHashRows = results.filter((row) => (
+    row.ok && ['v3', 'runtime-config', 'semantic-ir'].includes(row.id)
+  ));
+  if (ssotHashRows.length === 3) {
+    const hashes = new Set(ssotHashRows.map((row) => row.source_hash));
+    if (hashes.size !== 1) {
+      results.push({
+        id: 'source-hash-consistency',
+        ok: false,
+        diagnostics: [{
+          message: `compiled V3 SSOT source_hash mismatch: ${ssotHashRows.map((row) => `${row.id}=${row.source_hash}`).join(', ')}`,
+        }],
+      });
+    }
+  }
   const semantic = results.find((row) => row.id === 'semantic-ir' && row.ok);
   if (semantic) {
     const semanticPath = path.join(opts.outDir, 'compiled-semantic-ir.json');

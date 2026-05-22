@@ -28,6 +28,7 @@
                      "scripts/check-v3-pillar-flow-schema.mjs"
                      "scripts/check-v3-request-lisp-isomorphism.mjs"
                      "scripts/check-v3-v2-coverage.mjs"
+                     "scripts/compile-v3-runtime.mjs"
                      "scripts/lib/v3_blueprint_contract_source.mjs"
                      "scripts/lib/v3_compiled_contract.mjs"
                      "scripts/lib/v3_workstation_runtime.mjs"

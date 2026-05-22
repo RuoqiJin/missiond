@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import fs from 'node:fs';
+import { readBlueprintWithEvidenceSidecars } from './lib/v3_blueprint_contract_source.mjs';
 
 const json = process.argv.includes('--json');
 
@@ -101,7 +102,9 @@ const diagnostics = [];
 const contents = {};
 for (const [key, file] of Object.entries(files)) {
   try {
-    contents[key] = fs.readFileSync(file, 'utf8');
+    contents[key] = key === 'blueprint'
+      ? readBlueprintWithEvidenceSidecars(process.cwd(), file)
+      : fs.readFileSync(file, 'utf8');
   } catch (error) {
     diagnostics.push({ file, message: `cannot read: ${error.message}` });
   }

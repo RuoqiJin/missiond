@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 // Embedded defaults are the test/no-install fallback. Runtime authority is the
-// V3 Lisp source or its current compiled projection.
+// current compiled V3 projection; source Lisp fallback is explicit only.
+const V3_ALLOW_SOURCE_FALLBACK_ENV: &str = "MISSIOND_V3_ALLOW_SOURCE_FALLBACK";
+const V3_COMPILE_RUNTIME_ACTION: &str = "node scripts/compile-v3-runtime.mjs --json";
 pub(crate) const DEFAULT_MODEL_PROFILE: &str = "coding-default-opus-4-7";
 pub(crate) const DEFAULT_TIMEOUT_SECS: i64 = 1800;
 pub(crate) const MIN_TIMEOUT_SECS: i64 = 60;
@@ -1211,14 +1213,45 @@ impl Default for LearningEngineRuntimeConfig {
     }
 }
 
-fn try_compiled_runtime_config(project_root: Option<&str>) -> Option<CompiledRuntimeConfigPayload> {
-    let root = resolve_blueprint_root(project_root)?;
+fn required_compiled_runtime_config(
+    project_root: Option<&str>,
+) -> Result<Option<CompiledRuntimeConfigPayload>, BlueprintConfigError> {
+    let Some(root) = resolve_blueprint_root(project_root) else {
+        return Ok(None);
+    };
     let loaded = load_compiled_runtime_config(&root, None);
     if loaded.diagnostics.is_empty() {
-        loaded.payload
-    } else {
-        None
+        if let Some(payload) = loaded.payload {
+            return Ok(Some(payload));
+        }
     }
+    if v3_source_fallback_allowed() {
+        return Ok(None);
+    }
+    let detail = if loaded.diagnostics.is_empty() {
+        "compiled runtime config payload missing".to_string()
+    } else {
+        loaded.diagnostics.join("; ")
+    };
+    Err(BlueprintConfigError::Parse(format!(
+        "MissionD V3 blueprint exists at {}; compiled runtime config is required but unavailable or invalid: {detail}. Required action: {V3_COMPILE_RUNTIME_ACTION}. Set {V3_ALLOW_SOURCE_FALLBACK_ENV}=1 only for explicit development/test source fallback.",
+        root.join(".missiond")
+            .join("v3")
+            .join("missiond-blueprint.lisp")
+            .display()
+    )))
+}
+
+fn v3_source_fallback_allowed() -> bool {
+    std::env::var(V3_ALLOW_SOURCE_FALLBACK_ENV)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 impl WorkstationRuntimeConfig {
@@ -1234,7 +1267,7 @@ impl WorkstationRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        if let Some(compiled) = try_compiled_runtime_config(project_root) {
+        if let Some(compiled) = required_compiled_runtime_config(project_root)? {
             return Ok(compiled.workstation);
         }
         match load_runtime_blueprint_source(project_root)? {
@@ -1449,7 +1482,7 @@ impl FlowRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        if let Some(compiled) = try_compiled_runtime_config(project_root) {
+        if let Some(compiled) = required_compiled_runtime_config(project_root)? {
             return Ok(compiled.flow);
         }
         match load_runtime_blueprint_source(project_root)? {
@@ -1463,7 +1496,7 @@ impl ComputePrimitivesRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        if let Some(compiled) = try_compiled_runtime_config(project_root) {
+        if let Some(compiled) = required_compiled_runtime_config(project_root)? {
             return Ok(compiled.compute);
         }
         match load_runtime_blueprint_source(project_root)? {
@@ -1496,7 +1529,7 @@ impl MinimaxRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        if let Some(compiled) = try_compiled_runtime_config(project_root) {
+        if let Some(compiled) = required_compiled_runtime_config(project_root)? {
             return Ok(compiled.minimax);
         }
         match load_runtime_blueprint_source(project_root)? {
@@ -1527,7 +1560,7 @@ impl RouterRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        if let Some(compiled) = try_compiled_runtime_config(project_root) {
+        if let Some(compiled) = required_compiled_runtime_config(project_root)? {
             return Ok(compiled.router);
         }
         match load_runtime_blueprint_source(project_root)? {
@@ -1594,7 +1627,7 @@ impl CascadeRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        if let Some(compiled) = try_compiled_runtime_config(project_root) {
+        if let Some(compiled) = required_compiled_runtime_config(project_root)? {
             return Ok(compiled.cascade);
         }
         match load_runtime_blueprint_source(project_root)? {
@@ -1643,7 +1676,7 @@ impl ProjectRegistryRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        if let Some(compiled) = try_compiled_runtime_config(project_root) {
+        if let Some(compiled) = required_compiled_runtime_config(project_root)? {
             return Ok(compiled.project_registry);
         }
         match load_runtime_blueprint_source(project_root)? {
@@ -1663,7 +1696,7 @@ impl CapabilityGovernanceRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        if let Some(compiled) = try_compiled_runtime_config(project_root) {
+        if let Some(compiled) = required_compiled_runtime_config(project_root)? {
             return Ok(compiled.capability_governance);
         }
         match load_runtime_blueprint_source(project_root)? {
@@ -1702,7 +1735,7 @@ impl MemoryKbRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        if let Some(compiled) = try_compiled_runtime_config(project_root) {
+        if let Some(compiled) = required_compiled_runtime_config(project_root)? {
             return Ok(compiled.memory_kb);
         }
         match load_runtime_blueprint_source(project_root)? {
@@ -1725,7 +1758,7 @@ impl ConversationIngestionRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        if let Some(compiled) = try_compiled_runtime_config(project_root) {
+        if let Some(compiled) = required_compiled_runtime_config(project_root)? {
             return Ok(compiled.conversation_ingestion);
         }
         match load_runtime_blueprint_source(project_root)? {
@@ -1772,7 +1805,7 @@ impl AutopilotRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        if let Some(compiled) = try_compiled_runtime_config(project_root) {
+        if let Some(compiled) = required_compiled_runtime_config(project_root)? {
             return Ok(compiled.autopilot);
         }
         match load_runtime_blueprint_source(project_root)? {
@@ -1799,7 +1832,7 @@ impl LearningEngineRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        if let Some(compiled) = try_compiled_runtime_config(project_root) {
+        if let Some(compiled) = required_compiled_runtime_config(project_root)? {
             return Ok(compiled.learning_engine);
         }
         match load_runtime_blueprint_source(project_root)? {
@@ -2977,6 +3010,16 @@ fn load_runtime_blueprint_source_with_diagnostics(
     }
     let source = load_blueprint_source(Some(root.to_string_lossy().as_ref()))?;
     let mut diagnostics = compiled.diagnostics;
+    if source.is_some() && !v3_source_fallback_allowed() {
+        diagnostics.push(format!(
+            "source Lisp fallback blocked because compiled runtime projection is required; run {V3_COMPILE_RUNTIME_ACTION} or set {V3_ALLOW_SOURCE_FALLBACK_ENV}=1 for explicit development/test fallback"
+        ));
+        return Ok(RuntimeBlueprintSourceLoad {
+            source: None,
+            source_kind: RuntimeBlueprintSourceKind::SourceLisp,
+            diagnostics,
+        });
+    }
     if source.is_some() && !diagnostics.is_empty() {
         diagnostics.push(
             "using source Lisp fallback after compiled V3 projection was unavailable".to_string(),
@@ -3250,6 +3293,20 @@ pub(crate) fn load_compiled_runtime_snapshot(
         }
     };
     let mut diagnostics = Vec::new();
+    if let Some(expected_schema) = compiled_runtime_schema_version(kind) {
+        if parsed.schema_version != expected_schema {
+            diagnostics.push(format!(
+                "compiled runtime snapshot {} schema_version mismatch: expected {}, got {}",
+                path.display(),
+                expected_schema,
+                parsed.schema_version
+            ));
+            return CompiledRuntimeLoad {
+                snapshot: None,
+                diagnostics,
+            };
+        }
+    }
     if !parsed.diagnostics.is_empty() {
         diagnostics.push(format!(
             "compiled runtime snapshot {} contains {} diagnostic(s)",
@@ -3374,19 +3431,38 @@ pub(crate) fn compiled_runtime_projection_status(project_root: &Path) -> serde_j
     let runtime_config = load_compiled_runtime_config(project_root, None);
     let universe = load_compiled_project_universe(project_root, None);
     let workflow_contracts = load_compiled_workflow_contracts(project_root, None);
+    let fallback_allowed = v3_source_fallback_allowed();
+    let runtime_config_ok =
+        runtime_config.payload.is_some() && runtime_config.diagnostics.is_empty();
+    let blocking_reason = if resolve_blueprint_root(Some(project_root.to_string_lossy().as_ref()))
+        .is_some()
+        && !runtime_config_ok
+        && !fallback_allowed
+    {
+        Some("compiled runtime config unavailable or invalid")
+    } else {
+        None
+    };
+    let required_action = blocking_reason.map(|_| V3_COMPILE_RUNTIME_ACTION);
     serde_json::json!({
         "schema": "missiond.compiled-runtime-projection-status.v1",
         "v3Blueprint": {
             "ok": v3_source.source.is_some(),
             "sourceKind": v3_source.source_kind.as_str(),
             "compiledPreferred": matches!(v3_source.source_kind, RuntimeBlueprintSourceKind::CompiledV3),
+            "fallbackAllowed": fallback_allowed,
+            "blockingReason": blocking_reason,
+            "requiredAction": required_action,
             "diagnostics": v3_source.diagnostics,
         },
         "runtimeConfig": {
-            "ok": runtime_config.payload.is_some() && runtime_config.diagnostics.is_empty(),
+            "ok": runtime_config_ok,
             "schema": runtime_config.snapshot.as_ref().map(|snapshot| snapshot.schema_version.clone()),
             "sourceHash": runtime_config.snapshot.as_ref().map(|snapshot| snapshot.source_hash.clone()),
             "path": runtime_config.snapshot.as_ref().map(|snapshot| snapshot.path.display().to_string()),
+            "fallbackAllowed": fallback_allowed,
+            "blockingReason": blocking_reason,
+            "requiredAction": required_action,
             "diagnostics": runtime_config.diagnostics,
         },
         "projectUniverse": {
@@ -3478,6 +3554,21 @@ where
         }
     };
     let mut diagnostics = Vec::new();
+    if let Some(expected_schema) = compiled_runtime_schema_version(kind) {
+        if parsed.schema_version != expected_schema {
+            diagnostics.push(format!(
+                "compiled runtime snapshot {} schema_version mismatch: expected {}, got {}",
+                path.display(),
+                expected_schema,
+                parsed.schema_version
+            ));
+            return CompiledPayloadLoad {
+                payload: None,
+                snapshot: None,
+                diagnostics,
+            };
+        }
+    }
     if !parsed.diagnostics.is_empty() {
         diagnostics.push(format!(
             "compiled runtime snapshot {} contains {} diagnostic(s)",
@@ -3532,6 +3623,16 @@ fn compiled_runtime_file_name(kind: &str) -> Option<&'static str> {
         "runtime-config" => Some("compiled-runtime-config.json"),
         "universe" => Some("compiled-project-universe.json"),
         "workflows" => Some("compiled-workflows.json"),
+        _ => None,
+    }
+}
+
+fn compiled_runtime_schema_version(kind: &str) -> Option<&'static str> {
+    match kind {
+        "v3" => Some("missiond.compiled-v3-blueprint.v1"),
+        "runtime-config" => Some("missiond.compiled-runtime-config.v1"),
+        "universe" => Some("missiond.compiled-project-universe.v1"),
+        "workflows" => Some("missiond.compiled-workflows.v1"),
         _ => None,
     }
 }
@@ -3675,6 +3776,57 @@ fn tokenize_lisp(source: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct SourceFallbackEnvGuard {
+        original: Option<std::ffi::OsString>,
+        _guard: MutexGuard<'static, ()>,
+    }
+
+    impl Drop for SourceFallbackEnvGuard {
+        fn drop(&mut self) {
+            match self.original.as_ref() {
+                Some(value) => std::env::set_var(V3_ALLOW_SOURCE_FALLBACK_ENV, value),
+                None => std::env::remove_var(V3_ALLOW_SOURCE_FALLBACK_ENV),
+            }
+        }
+    }
+
+    fn source_fallback_env(value: Option<&str>) -> SourceFallbackEnvGuard {
+        let guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let original = std::env::var_os(V3_ALLOW_SOURCE_FALLBACK_ENV);
+        match value {
+            Some(value) => std::env::set_var(V3_ALLOW_SOURCE_FALLBACK_ENV, value),
+            None => std::env::remove_var(V3_ALLOW_SOURCE_FALLBACK_ENV),
+        }
+        SourceFallbackEnvGuard {
+            original,
+            _guard: guard,
+        }
+    }
+
+    struct CurrentDirGuard {
+        original: PathBuf,
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.original);
+        }
+    }
+
+    fn current_dir_scope(path: &std::path::Path) -> CurrentDirGuard {
+        let original = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(path).expect("set current dir");
+        CurrentDirGuard { original }
+    }
 
     const BLUEPRINT: &str = r#"
 (missiond-blueprint
@@ -4867,6 +5019,39 @@ mod tests {
         .expect("write compiled runtime config");
     }
 
+    fn write_compiled_v3_blueprint_fixture(root: &std::path::Path, marker: &str) {
+        let compiled_dir = root
+            .join(".missiond")
+            .join("v3")
+            .join("runtime")
+            .join("compiled");
+        fs::create_dir_all(&compiled_dir).expect("compiled dir");
+        fs::write(
+            compiled_dir.join("compiled-v3-blueprint.json"),
+            format!(
+                r#"{{
+                  "schema_version": "missiond.compiled-v3-blueprint.v1",
+                  "source_hash": "v3-hash",
+                  "generated_at": null,
+                  "diagnostics": [],
+                  "payload": {{
+                    "forms": [{{
+                      "type": "list",
+                      "kind": "paren",
+                      "children": [
+                        {{"type": "atom", "value": "missiond-blueprint"}},
+                        {{"type": "list", "kind": "paren", "children": [
+                          {{"type": "atom", "value": "{marker}"}}
+                        ]}}
+                      ]
+                    }}]
+                  }}
+                }}"#
+            ),
+        )
+        .expect("write compiled v3 blueprint");
+    }
+
     #[test]
     fn compiled_runtime_config_loads_structured_policy_and_public_loaders_use_it() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -4904,7 +5089,8 @@ mod tests {
     }
 
     #[test]
-    fn stale_compiled_runtime_config_falls_back_to_source_lisp_path() {
+    fn stale_compiled_runtime_config_blocks_source_lisp_fallback_by_default() {
+        let _env = source_fallback_env(None);
         let temp = tempfile::tempdir().expect("tempdir");
         write_compiled_runtime_config_fixture(temp.path(), "runtime-hash");
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -4928,8 +5114,105 @@ mod tests {
 
         let root = temp.path().to_string_lossy();
         let err = RouterRuntimeConfig::load_for_project_root(Some(root.as_ref()))
-            .expect_err("stale compiled runtime config must use source Lisp fallback");
-        assert!(err.to_string().contains("router-runtime-policy"));
+            .expect_err("stale compiled runtime config must block source Lisp fallback");
+        assert!(err
+            .to_string()
+            .contains("compiled runtime config is required"));
+        assert!(err.to_string().contains(V3_COMPILE_RUNTIME_ACTION));
+    }
+
+    #[test]
+    fn missing_compiled_runtime_config_blocks_source_lisp_fallback_by_default() {
+        let _env = source_fallback_env(None);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let blueprint_path = temp
+            .path()
+            .join(".missiond")
+            .join("v3")
+            .join("missiond-blueprint.lisp");
+        fs::create_dir_all(blueprint_path.parent().unwrap()).expect("blueprint dir");
+        fs::write(&blueprint_path, BLUEPRINT).expect("write source");
+
+        let root = temp.path().to_string_lossy();
+        let err = RouterRuntimeConfig::load_for_project_root(Some(root.as_ref()))
+            .expect_err("missing compiled runtime config must block source Lisp fallback");
+        assert!(err
+            .to_string()
+            .contains("compiled runtime config is required"));
+        assert!(err.to_string().contains(V3_COMPILE_RUNTIME_ACTION));
+    }
+
+    #[test]
+    fn compiled_runtime_config_schema_mismatch_blocks_source_lisp_fallback_by_default() {
+        let _env = source_fallback_env(None);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let blueprint_path = temp
+            .path()
+            .join(".missiond")
+            .join("v3")
+            .join("missiond-blueprint.lisp");
+        fs::create_dir_all(blueprint_path.parent().unwrap()).expect("blueprint dir");
+        fs::write(&blueprint_path, BLUEPRINT).expect("write source");
+        let compiled_dir = temp
+            .path()
+            .join(".missiond")
+            .join("v3")
+            .join("runtime")
+            .join("compiled");
+        fs::create_dir_all(&compiled_dir).expect("compiled dir");
+        fs::write(
+            compiled_dir.join("compiled-runtime-config.json"),
+            compiled_runtime_config_fixture("runtime-hash").replace(
+                "missiond.compiled-runtime-config.v1",
+                "missiond.compiled-runtime-config.v0",
+            ),
+        )
+        .expect("write schema mismatch compiled runtime config");
+
+        let loaded = load_compiled_runtime_config(temp.path(), Some("runtime-hash"));
+        assert!(loaded.payload.is_none());
+        assert!(
+            loaded
+                .diagnostics
+                .iter()
+                .any(|line| line.contains("schema_version mismatch")),
+            "{:?}",
+            loaded.diagnostics
+        );
+
+        let root = temp.path().to_string_lossy();
+        let err = RouterRuntimeConfig::load_for_project_root(Some(root.as_ref()))
+            .expect_err("schema mismatch compiled runtime config must block source Lisp fallback");
+        assert!(err.to_string().contains("schema_version mismatch"));
+        assert!(err.to_string().contains(V3_COMPILE_RUNTIME_ACTION));
+    }
+
+    #[test]
+    fn source_lisp_runtime_config_fallback_requires_explicit_env() {
+        let _env = source_fallback_env(Some("1"));
+        let temp = tempfile::tempdir().expect("tempdir");
+        let blueprint_path = temp
+            .path()
+            .join(".missiond")
+            .join("v3")
+            .join("missiond-blueprint.lisp");
+        fs::create_dir_all(blueprint_path.parent().unwrap()).expect("blueprint dir");
+        fs::write(&blueprint_path, BLUEPRINT).expect("write source");
+
+        let root = temp.path().to_string_lossy();
+        let router = RouterRuntimeConfig::load_for_project_root(Some(root.as_ref()))
+            .expect("source fallback with explicit env");
+        assert_eq!(router.default_chat_model, DEFAULT_ROUTER_CHAT_MODEL);
+    }
+
+    #[test]
+    fn no_v3_blueprint_still_uses_embedded_defaults() {
+        let _env = source_fallback_env(None);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _cwd = current_dir_scope(temp.path());
+        let router = RouterRuntimeConfig::load_for_project_root(None)
+            .expect("embedded defaults without V3 blueprint");
+        assert_eq!(router.default_chat_model, DEFAULT_ROUTER_CHAT_MODEL);
     }
 
     #[test]
@@ -5118,6 +5401,7 @@ mod tests {
 
     #[test]
     fn compiled_runtime_projection_status_reports_counts_and_hashes() {
+        let _env = source_fallback_env(None);
         let temp = tempfile::tempdir().expect("tempdir");
         let compiled_dir = temp
             .path()
@@ -5126,7 +5410,14 @@ mod tests {
             .join("runtime")
             .join("compiled");
         fs::create_dir_all(&compiled_dir).expect("compiled dir");
+        let blueprint_path = temp
+            .path()
+            .join(".missiond")
+            .join("v3")
+            .join("missiond-blueprint.lisp");
+        fs::write(&blueprint_path, "(missiond-blueprint)").expect("write source");
         write_compiled_runtime_config_fixture(temp.path(), "runtime-hash");
+        write_compiled_v3_blueprint_fixture(temp.path(), "status-compiled-marker");
         fs::write(
             compiled_dir.join("compiled-project-universe.json"),
             r#"{
@@ -5168,12 +5459,18 @@ mod tests {
         assert_eq!(status["v3Blueprint"]["ok"].as_bool(), Some(true));
         assert_eq!(
             status["v3Blueprint"]["sourceKind"].as_str(),
-            Some("source-lisp")
+            Some("compiled-v3")
         );
         assert_eq!(
             status["v3Blueprint"]["compiledPreferred"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            status["v3Blueprint"]["fallbackAllowed"].as_bool(),
             Some(false)
         );
+        assert!(status["v3Blueprint"]["blockingReason"].is_null());
+        assert!(status["v3Blueprint"]["requiredAction"].is_null());
         assert_eq!(status["runtimeConfig"]["ok"].as_bool(), Some(true));
         assert_eq!(
             status["runtimeConfig"]["schema"].as_str(),
@@ -5186,6 +5483,12 @@ mod tests {
         assert!(status["runtimeConfig"]["path"]
             .as_str()
             .is_some_and(|path| path.ends_with("compiled-runtime-config.json")));
+        assert_eq!(
+            status["runtimeConfig"]["fallbackAllowed"].as_bool(),
+            Some(false)
+        );
+        assert!(status["runtimeConfig"]["blockingReason"].is_null());
+        assert!(status["runtimeConfig"]["requiredAction"].is_null());
         assert_eq!(status["projectUniverse"]["ok"].as_bool(), Some(true));
         assert_eq!(status["projectUniverse"]["projectCount"].as_u64(), Some(1));
         assert_eq!(
@@ -5252,6 +5555,7 @@ mod tests {
 
     #[test]
     fn runtime_blueprint_source_falls_back_when_compiled_ast_is_invalid() {
+        let _env = source_fallback_env(Some("1"));
         let temp = tempfile::tempdir().expect("tempdir");
         let v3_dir = temp.path().join(".missiond").join("v3");
         fs::create_dir_all(v3_dir.join("runtime").join("compiled")).expect("compiled dir");
@@ -5291,6 +5595,7 @@ mod tests {
 
     #[test]
     fn runtime_blueprint_source_falls_back_when_compiled_snapshot_is_stale() {
+        let _env = source_fallback_env(Some("1"));
         let temp = tempfile::tempdir().expect("tempdir");
         let v3_dir = temp.path().join(".missiond").join("v3");
         let compiled_dir = v3_dir.join("runtime").join("compiled");

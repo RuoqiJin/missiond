@@ -158,4 +158,31 @@ let sexp_to_json =
   in
   loop
 
+let lisp_string s =
+  let b = Buffer.create (String.length s + 16) in
+  Buffer.add_char b '"';
+  String.iter
+    (function
+      | '"' -> Buffer.add_string b "\\\""
+      | '\\' -> Buffer.add_string b "\\\\"
+      | '\n' -> Buffer.add_string b "\\n"
+      | '\r' -> Buffer.add_string b "\\r"
+      | '\t' -> Buffer.add_string b "\\t"
+      | c -> Buffer.add_char b c)
+    s;
+  Buffer.add_char b '"';
+  Buffer.contents b
+
+let sexp_to_lisp =
+  let rec loop = function
+    | Atom (_, value) -> value
+    | String (_, value) -> lisp_string value
+    | List (_, kind, xs) ->
+        let open_delim, close_delim =
+          match kind with Paren -> ("(", ")") | Bracket -> ("[", "]")
+        in
+        open_delim ^ (xs |> List.map loop |> String.concat " ") ^ close_delim
+  in
+  loop
+
 let source_hash s = Digest.to_hex (Digest.string s)

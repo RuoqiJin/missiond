@@ -51,6 +51,52 @@ let validate_core_steps file fn_id core =
           (Printf.sprintf "function %s must declare :core" fn_id)
       ]
 
+let rec collect_named_forms name node =
+  let here = if is_list node name then [ node ] else [] in
+  match node with
+  | List (_, _, xs) -> here @ (xs |> List.map (collect_named_forms name) |> List.flatten)
+  | _ -> here
+
+let validate_policy_clauses file root =
+  let diagnostics = ref [] in
+  let seen = Hashtbl.create 64 in
+  let add d = diagnostics := d :: !diagnostics in
+  collect_named_forms "policy-clause" root
+  |> List.iter (fun clause ->
+         let id =
+           match children clause with _ :: id :: _ -> atom_text id | _ -> None
+         in
+         let label = Option.value ~default:"<missing>" id in
+         (match id with
+         | Some value when String.trim value <> "" ->
+             if Hashtbl.mem seen value then
+               add
+                 (diag file (loc_of clause) "policy_clause.duplicate_id"
+                    (Printf.sprintf "duplicate policy-clause id %s" value))
+             else Hashtbl.add seen value true
+         | _ ->
+             add
+               (diag file (loc_of clause) "policy_clause.id_missing"
+                  "policy-clause must declare an id"));
+         let props = keyword_props ~start:2 clause in
+         (match prop_text ":owner" props with
+         | Some value when String.trim value <> "" -> ()
+         | _ ->
+             add
+               (diag file (loc_of clause) "policy_clause.owner_missing"
+                  (Printf.sprintf "policy-clause %s missing :owner" label)));
+         let require_non_empty_list key code =
+           match prop key props |> Option.map list_texts with
+           | Some (_ :: _) -> ()
+           | _ ->
+               add
+                 (diag file (loc_of clause) code
+                    (Printf.sprintf "policy-clause %s missing non-empty %s" label key))
+         in
+         require_non_empty_list ":applies-to" "policy_clause.applies_to_missing";
+         require_non_empty_list ":must" "policy_clause.must_missing");
+  List.rev !diagnostics
+
 let validate file expected_surfaces =
   try
     let resolved = Source_resolver.resolve_blueprint_file file in
@@ -74,6 +120,7 @@ let validate file expected_surfaces =
           add (diag file (loc_of root) "implementation_map.missing" "missing implementation-map");
         if flow_map = None then
           add (diag file (loc_of root) "pillar_flow_map.missing" "missing pillar-flow-map");
+        validate_policy_clauses file root |> List.iter add;
         List.iter
           (fun expected ->
             if not (List.mem expected surfaces) then

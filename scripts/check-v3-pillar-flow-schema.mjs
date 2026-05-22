@@ -16,6 +16,7 @@ import {
   compiledSurfaceIds,
   loadCompiledV3Contract,
 } from './lib/v3_compiled_contract.mjs';
+import { readBlueprintResolvedSource } from './lib/v3_blueprint_contract_source.mjs';
 
 const BLUEPRINT_PATH = '.missiond/v3/missiond-blueprint.lisp';
 const CHECK_COMMAND = 'node scripts/check-v3-pillar-flow-schema.mjs';
@@ -85,7 +86,30 @@ function main() {
     }
     process.exit(result.ok ? 0 : 1);
   }
-  const source = fs.readFileSync(opts.blueprint, 'utf8');
+  let source;
+  try {
+    source = readBlueprintResolvedSource(process.cwd(), opts.blueprint);
+  } catch (err) {
+    const result = {
+      ok: false,
+      engine: {
+        requested: opts.engine,
+        selected: 'js',
+        fallback_reason: ocamlAttempt.mode === 'js-fallback'
+          ? (ocamlAttempt.result?.diagnostics?.[0]?.message ?? 'OCaml engine unavailable')
+          : null,
+      },
+      diagnostics: [{
+        file: opts.blueprint,
+        line: 1,
+        column: 1,
+        message: `cannot load resolved V3 blueprint: ${err.message}`,
+      }],
+    };
+    if (opts.json) console.log(JSON.stringify(result, null, 2));
+    else console.error(`${opts.blueprint}:1:1: ${result.diagnostics[0].message}`);
+    process.exit(1);
+  }
   const result = validatePillarFlowSource(source, opts.blueprint, { expectedSurfaces });
   result.engine = {
     requested: opts.engine,

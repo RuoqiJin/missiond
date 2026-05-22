@@ -1,39 +1,24 @@
-import fs from 'node:fs';
-import path from 'node:path';
-
-const BLUEPRINT_NOTES_SIDECAR = '.missiond/v3/evidence/blueprint-notes.lisp';
+import { loadResolvedV3Contract } from './v3_compiled_contract.mjs';
 
 export function readBlueprintWithEvidenceSidecars(repoRoot, relPath) {
-  const blueprintPath = path.join(repoRoot, relPath);
-  const blueprint = readBlueprintResolvedSource(repoRoot, relPath);
-  const sidecarPath = path.join(repoRoot, BLUEPRINT_NOTES_SIDECAR);
-  if (!fs.existsSync(sidecarPath)) {
-    return blueprint;
-  }
-  const sidecar = fs.readFileSync(sidecarPath, 'utf8');
-  return `${blueprint}\n\n;; evidence sidecar included for contract-anchor checks\n${sidecar}`;
+  return readResolvedBlueprint(repoRoot, relPath, { includeEvidenceSidecar: true });
 }
 
 export function readBlueprintResolvedSource(repoRoot, relPath) {
-  const blueprintPath = path.join(repoRoot, relPath);
-  const blueprintDir = path.dirname(blueprintPath);
-  const blueprint = fs.readFileSync(blueprintPath, 'utf8');
-  return blueprint.replace(
-    /\n([ \t]*)\(include\s+"(shards\/[^"]+)"\)/g,
-    (match, indent, includePath) => {
-      validateIncludePath(includePath);
-      const shardPath = path.join(blueprintDir, includePath);
-      const shard = fs.readFileSync(shardPath, 'utf8').trimEnd();
-      return `\n${indent};; compiler-active include: ${includePath}\n${indent}${shard.replace(/\n/g, `\n${indent}`)}`;
-    },
-  );
+  return readResolvedBlueprint(repoRoot, relPath, { includeEvidenceSidecar: false });
 }
 
-function validateIncludePath(includePath) {
-  if (!includePath.startsWith('shards/')) {
-    throw new Error(`invalid blueprint include path: ${includePath}`);
+function readResolvedBlueprint(repoRoot, blueprint, { includeEvidenceSidecar }) {
+  const contract = loadResolvedV3Contract({
+    repoRoot,
+    blueprint,
+    includeEvidenceSidecar,
+  });
+  if (!contract.ok || !contract.resolvedSource) {
+    const detail = (contract.diagnostics ?? [])
+      .map((diagnostic) => diagnostic.message ?? JSON.stringify(diagnostic))
+      .join('; ');
+    throw new Error(`missiond-lispc emit-resolved-v3 failed for ${blueprint}: ${detail || 'missing resolved_source'}`);
   }
-  if (path.isAbsolute(includePath) || includePath.split('/').includes('..')) {
-    throw new Error(`unsafe blueprint include path: ${includePath}`);
-  }
+  return contract.resolvedSource;
 }

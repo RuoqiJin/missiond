@@ -435,10 +435,11 @@ function main() {
   const blueprintResult = validateBlueprintSource(source, opts.blueprint, {
     expectedSurfaces: expectedSurfaceSet,
   });
+  const ssotReadGuardDiagnostics = checkV3SsotReadGuards(opts.repo);
   const checkerResults = runPerSurfaceCheckers(opts.repo);
   const checkerOk = checkerResults.every((r) => r.ok);
   const compiledOk = compiled.ok === true && expectedSurfaces.length > 0;
-  const ok = blueprintResult.ok && checkerOk && compiledOk;
+  const ok = blueprintResult.ok && checkerOk && compiledOk && ssotReadGuardDiagnostics.length === 0;
 
   const result = {
     ok,
@@ -456,7 +457,7 @@ function main() {
         { status: s.status, has_code: s.hasCode, has_note: s.hasNote },
       ]),
     ),
-    diagnostics: [...compiled.diagnostics, ...blueprintResult.diagnostics],
+    diagnostics: [...compiled.diagnostics, ...blueprintResult.diagnostics, ...ssotReadGuardDiagnostics],
     checks: checkerResults,
   };
 
@@ -473,6 +474,9 @@ function main() {
     for (const d of blueprintResult.diagnostics) {
       console.error(`${d.file}:${d.line}:${d.column}: ${d.severity}: ${d.message}`);
     }
+    for (const d of ssotReadGuardDiagnostics) {
+      console.error(`${d.file}:${d.line}:${d.column}: ${d.severity}: ${d.message}`);
+    }
     for (const r of checkerResults) {
       if (r.ok) continue;
       console.error(`per-surface checker FAILED: ${r.script} (exit ${r.exit_code})`);
@@ -483,6 +487,41 @@ function main() {
     console.error('v3 code-isomorphism gate FAILED');
   }
   process.exit(ok ? 0 : 1);
+}
+
+function checkV3SsotReadGuards(repoRoot) {
+  const candidates = new Set([
+    ...PER_SURFACE_CHECKERS,
+    'scripts/check-v3-infrastructure-universe-isomorphism.mjs',
+    'scripts/check-v3-final-convergence.mjs',
+    'scripts/check-m6-deployment-status.mjs',
+    'scripts/lib/v3_workstation_runtime.mjs',
+  ]);
+  const diagnostics = [];
+  for (const rel of candidates) {
+    const abs = path.resolve(repoRoot, rel);
+    if (!fs.existsSync(abs)) continue;
+    const source = fs.readFileSync(abs, 'utf8');
+    const lines = source.split('\n');
+    for (let i = 0; i < lines.length; i += 1) {
+      const line = lines[i];
+      if (!line.includes('fs.readFileSync')) continue;
+      const window = lines.slice(i, Math.min(i + 4, lines.length)).join(' ');
+      if (!/(opts\.blueprint|BLUEPRINT(?:_PATH)?\b|blueprintAbs\b|resolvedBlueprint\b|missiond-blueprint\.lisp)/.test(window)) {
+        continue;
+      }
+      if (/readBlueprint(?:WithEvidenceSidecars|ResolvedSource)\b/.test(window)) continue;
+      diagnostics.push({
+        severity: 'error',
+        file: rel,
+        line: i + 1,
+        column: line.indexOf('fs.readFileSync') + 1,
+        code: 'V3_RAW_BLUEPRINT_READ_FORBIDDEN',
+        message: 'V3 checkers must load .missiond/v3/missiond-blueprint.lisp via scripts/lib/v3_blueprint_contract_source.mjs or loadResolvedV3Contract; direct raw source reads miss compiler-active shards.',
+      });
+    }
+  }
+  return diagnostics;
 }
 
 function runDryFixture(opts) {
