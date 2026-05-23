@@ -104,6 +104,30 @@ const LIVE_CHECKS = [
     json: true,
     timeoutMs: 60_000,
   },
+  {
+    id: 'production-runtime-boundary',
+    argv: ['scripts/check-v3-production-runtime-boundary.mjs', '--json'],
+    json: true,
+    timeoutMs: 60_000,
+  },
+  {
+    id: 'semantic-checker-coverage',
+    argv: ['scripts/check-v3-semantic-checker-coverage.mjs', '--json'],
+    json: true,
+    timeoutMs: 60_000,
+  },
+  {
+    id: 'runtime-artifact-catalog',
+    argv: ['scripts/check-v3-runtime-artifact-catalog.mjs', '--json'],
+    json: true,
+    timeoutMs: 60_000,
+  },
+  {
+    id: 'typed-sidecar-compression',
+    argv: ['scripts/check-v3-typed-sidecar-compression.mjs', '--json'],
+    json: true,
+    timeoutMs: 60_000,
+  },
 ];
 
 const RUNTIME_CHECKS = [

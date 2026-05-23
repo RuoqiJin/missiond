@@ -7,7 +7,7 @@
 
 ## What is missiond?
 
-MissionD is a daemon and tool surface that turns requests into reviewed Lisp artifacts, approved plans, BoardTasks, and worker execution. The V3 control-plane authority is `.missiond/v3/missiond-blueprint.lisp`; generated JSON under `.missiond/v3/runtime/compiled/` is the machine projection. Postgres is the runtime store and event log; Board and PTY screens are projections over that state.
+MissionD is a daemon and tool surface that turns requests into reviewed Lisp artifacts, approved plans, BoardTasks, and worker execution. The V3 control-plane authority is `.missiond/v3/missiond-blueprint.lisp`; generated JSON under `.missiond/v3/runtime/compiled/` is the machine projection. Production runtime paths consume compiled JSON only. Source Lisp fallback is debug/test-only and must be explicitly enabled with `MISSIOND_V3_ALLOW_SOURCE_FALLBACK`. Postgres is the runtime store, event log, and runtime artifact catalog; Board and PTY screens are projections over that state.
 
 ## Features
 
@@ -17,6 +17,7 @@ MissionD is a daemon and tool surface that turns requests into reviewed Lisp art
 - **MCP Integration** — generated tool groups exposed through Model Context Protocol and the daemon IPC bridge
 - **Request/Plan Gates** — `mission_request` writes request-local Lisp artifacts and requires explicit intent/plan approval before execution in human mode
 - **BoardTask Dispatch** — approved plans route through `mission_task_delegate`, Board claims, Autopilot, and managed PTY slots
+- **V3 Compiled Contracts** — `missiond-lispc` emits source-hash checked runtime config, semantic IR, contract ABI, project universe, workflow contracts, and genome projections
 - **Permission System** — Role-based tool permissions (allow/confirm/deny) with glob pattern matching
 - **Cross-Platform** — macOS, Linux, Windows; Unix domain sockets or TCP loopback IPC
 
@@ -27,6 +28,7 @@ MissionD is a daemon and tool surface that turns requests into reviewed Lisp art
 
 ### Knowledge & Memory
 - **Knowledge Base (KB)** — Postgres-backed reviewed memory and FTS/read-model projections
+- **Runtime Artifact Catalog** — cold `.missiond/v3/runtime/**` files stay as diagnostic caches and are indexed in `runtime_artifacts` for evidence views and retention governance
 - **Conversation Logging** — Ingests provider-local logs into MissionD's Postgres read models and event stream
 - **Memory Extraction** — Real-time and deep analysis pipelines that extract insights from agent conversations
 - **KB Injection** — Automatically injects relevant knowledge into agent context via MCP server instructions and UserPromptSubmit hooks

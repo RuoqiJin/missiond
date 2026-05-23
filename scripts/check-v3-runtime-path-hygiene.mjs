@@ -32,6 +32,8 @@ const REQUIRED = {
     'cold-runtime',
     '.missiond/v3/runtime/**',
     '.missiond/v3/runtime/lisp-code-sync/*.report.lisp',
+    '.missiond/v3/runtime/jarvis-smoke/*.json',
+    'runtime_artifacts',
     'include_runtime=true',
     '.missiond/v3/runtime/capability-usage-review.json',
     'node scripts/check-v3-runtime-path-hygiene.mjs',
@@ -43,6 +45,8 @@ const REQUIRED = {
     '.missiond/v3/runtime/capability-usage-review.json',
     '.missiond/v3/runtime/nightly-evolution/*.report.lisp',
     '.missiond/v3/runtime/lisp-code-sync/*.report.lisp',
+    '.missiond/v3/runtime/jarvis-smoke/*.json',
+    '.missiond/v3/runtime/jarvis-smoke/*.lisp',
   ],
   coreExecution: [
     '.missiond/v3/runtime/executions/<id>.lisp',
@@ -160,6 +164,7 @@ function buildFixture() {
     (tier cold-runtime
       :paths [".missiond/v3/runtime/**"]
       :examples [".missiond/v3/runtime/lisp-code-sync/*.report.lisp"]
+      :catalog runtime_artifacts
       :rule "Cold runtime artifacts are excluded unless include_runtime=true is explicit."))
   (capability-governance-policy
     :review-sidecar ".missiond/v3/runtime/capability-usage-review.json")
@@ -171,7 +176,9 @@ function buildFixture() {
 .missiond/v3/runtime/plans/*.evidence.json
 .missiond/v3/runtime/capability-usage-review.json
 .missiond/v3/runtime/nightly-evolution/*.report.lisp
-.missiond/v3/runtime/lisp-code-sync/*.report.lisp`);
+.missiond/v3/runtime/lisp-code-sync/*.report.lisp
+.missiond/v3/runtime/jarvis-smoke/*.json
+.missiond/v3/runtime/jarvis-smoke/*.lisp`);
   write(root, 'coreExecution', `
 //! Durable evidence remains the on-disk <project_root>/.missiond/v3/runtime/executions/<id>.lisp companion file.
 /// lives in <project_root>/.missiond/v3/runtime/plans/<plan_id>.evidence.json`);

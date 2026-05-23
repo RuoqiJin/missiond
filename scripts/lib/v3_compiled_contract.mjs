@@ -110,6 +110,18 @@ export function loadCompiledV3Contract({
   const artifactContracts = normalizeArtifactContracts(
     facts.filter((fact) => fact?.kind === 'artifact_contract'),
   );
+  const runtimePolicies = normalizeRuntimePolicies(
+    facts.filter((fact) => fact?.kind === 'runtime_policy'),
+  );
+  const checkerRegistry = normalizeCheckerRegistry(
+    facts.filter((fact) => fact?.kind === 'checker_registry'),
+  );
+  const contractSplits = normalizeContractSplits(
+    facts.filter((fact) => fact?.kind === 'contract_split'),
+  );
+  const controlPlaneDomains = normalizeControlPlaneDomains(
+    facts.filter((fact) => fact?.kind === 'control_plane_domain'),
+  );
   const workflowContracts = normalizeWorkflowContracts([
     ...facts.filter((fact) => fact?.kind === 'workflow_contract'),
     ...(workflowProjection?.compiled?.payload?.workflows ?? []),
@@ -148,6 +160,10 @@ export function loadCompiledV3Contract({
     surfaces,
     functions,
     artifactContracts,
+    runtimePolicies,
+    checkerRegistry,
+    contractSplits,
+    controlPlaneDomains,
     workflowContracts,
     sourceUnits,
     workstationConfig,
@@ -208,6 +224,38 @@ export function compiledArtifactContractMap(contract) {
   );
 }
 
+export function compiledRuntimePolicyMap(contract) {
+  return new Map(
+    (contract?.runtimePolicies ?? [])
+      .filter((policy) => policy.id)
+      .map((policy) => [policy.id, policy]),
+  );
+}
+
+export function compiledCheckerRegistryMap(contract) {
+  return new Map(
+    (contract?.checkerRegistry ?? [])
+      .filter((entry) => entry.id)
+      .map((entry) => [entry.id, entry]),
+  );
+}
+
+export function compiledContractSplitMap(contract) {
+  return new Map(
+    (contract?.contractSplits ?? [])
+      .filter((split) => split.id)
+      .map((split) => [`${split.surface}:${split.id}`, split]),
+  );
+}
+
+export function compiledControlPlaneDomainMap(contract) {
+  return new Map(
+    (contract?.controlPlaneDomains ?? [])
+      .filter((domain) => domain.id)
+      .map((domain) => [domain.id, domain]),
+  );
+}
+
 export function compiledWorkflowMap(contract) {
   return new Map(
     (contract?.workflowContracts ?? [])
@@ -259,6 +307,55 @@ function normalizeArtifactContracts(rows) {
       writer: stringOrNull(row?.writer),
       ssot: typeof row?.ssot === 'boolean' ? row.ssot : null,
       required: stringArray(row?.required),
+      source: row?.source ?? null,
+    }))
+    .filter((row) => row.id);
+}
+
+function normalizeRuntimePolicies(rows) {
+  return rows
+    .map((row) => ({
+      id: stringOrNull(row?.id),
+      schemaVersion: stringOrNull(row?.schema_version ?? row?.schemaVersion),
+      form: stringOrNull(row?.form),
+      payloadKey: stringOrNull(row?.payload_key ?? row?.payloadKey),
+      keywordKeys: stringArray(row?.keyword_keys ?? row?.keywordKeys),
+      nestedForms: stringArray(row?.nested_forms ?? row?.nestedForms),
+      source: row?.source ?? null,
+    }))
+    .filter((row) => row.id);
+}
+
+function normalizeCheckerRegistry(rows) {
+  return rows
+    .map((row) => ({
+      id: stringOrNull(row?.id),
+      checks: stringArray(row?.checks),
+      source: row?.source ?? null,
+    }))
+    .filter((row) => row.id);
+}
+
+function normalizeContractSplits(rows) {
+  return rows
+    .map((row) => ({
+      id: stringOrNull(row?.id),
+      surface: stringOrNull(row?.surface),
+      owns: stringArray(row?.owns),
+      source: row?.source ?? null,
+    }))
+    .filter((row) => row.id && row.surface);
+}
+
+function normalizeControlPlaneDomains(rows) {
+  return rows
+    .map((row) => ({
+      id: stringOrNull(row?.id),
+      owner: stringOrNull(row?.owner),
+      sourceRefs: stringArray(row?.source_refs ?? row?.sourceRefs),
+      functions: stringArray(row?.functions),
+      runtimeProjection: stringArray(row?.runtime_projection ?? row?.runtimeProjection),
+      checker: stringArray(row?.checker),
       source: row?.source ?? null,
     }))
     .filter((row) => row.id);
@@ -336,6 +433,10 @@ function emptyContract({ ok, diagnostics, v3 }) {
     surfaces: [],
     functions: [],
     artifactContracts: [],
+    runtimePolicies: [],
+    checkerRegistry: [],
+    contractSplits: [],
+    controlPlaneDomains: [],
     workflowContracts: [],
     sourceUnits: [],
     workstationConfig: null,

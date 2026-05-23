@@ -37,12 +37,10 @@ export const MIN_SLOT_TTL_SECS = 300;
 export const MAX_SLOT_TTL_SECS = 28800;
 export const DEFAULT_SLOT_EXTEND_SECS = 3600;
 export const MAX_SLOT_EXTEND_SECS = 3600;
-export const DEFAULT_SLOT_DEFAULT_CWD = '/Users/jinchen/Projects';
-export const DEFAULT_SLOT_MCP_CONFIG = '/Users/jinchen/.xjp-mission/xjp-mcp-config.json';
+export const DEFAULT_SLOT_DEFAULT_CWD = '.';
+export const DEFAULT_SLOT_MCP_CONFIG = '.missiond/mcp-config.json';
 export const DEFAULT_ALLOWED_CWD_PREFIXES = [
-  '/Users/jinchen/Projects',
-  '/Users/jinchen/Downloads',
-  '/Users/jinchen/Documents',
+  '.',
   '/tmp',
 ];
 

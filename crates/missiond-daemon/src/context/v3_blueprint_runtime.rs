@@ -39,27 +39,20 @@ pub(crate) const MIN_SLOT_TTL_SECS: i64 = 300;
 pub(crate) const MAX_SLOT_TTL_SECS: i64 = 28800;
 pub(crate) const DEFAULT_SLOT_EXTEND_SECS: i64 = 3600;
 pub(crate) const MAX_SLOT_EXTEND_SECS: i64 = 3600;
-pub(crate) const DEFAULT_SLOT_DEFAULT_CWD: &str = "/Users/jinchen/Projects";
-pub(crate) const DEFAULT_SLOT_MCP_CONFIG: &str = "/Users/jinchen/.xjp-mission/xjp-mcp-config.json";
-pub(crate) const DEFAULT_ALLOWED_CWD_PREFIXES: [&str; 4] = [
-    "/Users/jinchen/Projects",
-    "/Users/jinchen/Downloads",
-    "/Users/jinchen/Documents",
-    "/tmp",
-];
+pub(crate) const DEFAULT_SLOT_DEFAULT_CWD: &str = ".";
+pub(crate) const DEFAULT_SLOT_MCP_CONFIG: &str = ".missiond/mcp-config.json";
+pub(crate) const DEFAULT_ALLOWED_CWD_PREFIXES: [&str; 2] = [".", "/tmp"];
 pub(crate) const DEFAULT_FLOW_LLM_MAX_TOKENS: u32 = 65536;
 pub(crate) const DEFAULT_FLOW_SLOT_MODEL: &str = "opus";
 pub(crate) const DEFAULT_FLOW_SLOT_TIMEOUT_SECS: u64 = 3600;
 pub(crate) const DEFAULT_FLOW_PARALLELISM: usize = 3;
 pub(crate) const DEFAULT_FLOW_PARALLEL_TIMEOUT_SECS: u64 = 1800;
-pub(crate) const DEFAULT_CASCADE_MANIFEST_PATH: &str =
-    "/Users/jinchen/Projects/universe.intent.lisp";
-pub(crate) const DEFAULT_CASCADE_ALLOWED_ROOT: &str = "/Users/jinchen/Projects";
+pub(crate) const DEFAULT_CASCADE_MANIFEST_PATH: &str = "universe.intent.lisp";
+pub(crate) const DEFAULT_CASCADE_ALLOWED_ROOT: &str = ".";
 pub(crate) const DEFAULT_CASCADE_TRIGGER_ENABLED: bool = true;
 pub(crate) const DEFAULT_CASCADE_MAX_CYCLES: usize = 3;
 pub(crate) const MAX_CASCADE_MAX_CYCLES: usize = 12;
-pub(crate) const DEFAULT_PROJECT_UNIVERSE_MANIFEST: &str =
-    "/Users/jinchen/Projects/universe.intent.lisp";
+pub(crate) const DEFAULT_PROJECT_UNIVERSE_MANIFEST: &str = "universe.intent.lisp";
 pub(crate) const DEFAULT_PROJECT_INTENT_PATH_CANDIDATES: [&str; 3] = [
     ".missiond/intent.lisp",
     ".jarvis/intent.lisp",
@@ -4641,12 +4634,9 @@ pub(crate) mod tests {
         let cfg = parse_cascade_policy(BLUEPRINT).expect("parse cascade policy");
         assert_eq!(
             cfg.default_manifest_path,
-            PathBuf::from(DEFAULT_CASCADE_MANIFEST_PATH)
+            PathBuf::from("/Users/jinchen/Projects/universe.intent.lisp")
         );
-        assert_eq!(
-            cfg.allowed_root,
-            PathBuf::from(DEFAULT_CASCADE_ALLOWED_ROOT)
-        );
+        assert_eq!(cfg.allowed_root, PathBuf::from("/Users/jinchen/Projects"));
         assert!(cfg.trigger_enabled);
         assert_eq!(cfg.default_max_cycles, 3);
         assert_eq!(cfg.max_cycles_limit, 12);
@@ -4676,7 +4666,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             cfg.default_universe_manifest,
-            PathBuf::from(DEFAULT_PROJECT_UNIVERSE_MANIFEST)
+            PathBuf::from("/Users/jinchen/Projects/universe.intent.lisp")
         );
     }
 

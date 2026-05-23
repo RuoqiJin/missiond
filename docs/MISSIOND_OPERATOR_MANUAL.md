@@ -13,16 +13,24 @@ MissionD has five distinct authority lanes:
   workflow Lisp define architecture, runtime policy, maturity, and worker
   contracts.
 - **OCaml compiler/checker**: `tools/missiond_lispc` validates typed Lisp
-  semantics and emits compiled projections.
+  semantics and emits compiled projections. Production runtime code consumes
+  `.missiond/v3/runtime/compiled/*.json`; raw source fallback is debug/test-only
+  and requires `MISSIOND_V3_ALLOW_SOURCE_FALLBACK`.
 - **Rust runtime**: daemon, MCP tools, EventBus, worker orchestration, shared
   memory, and provider ingestion.
 - **Board**: coordination and operator decision surface. Board notes are
   projections, not canonical worker results.
 - **Evidence stores**: task-result artifacts, provider durable logs, event log,
-  reviewed KB, and cold evidence files.
+  reviewed KB, indexed runtime artifacts, and cold evidence files.
 
 Do not treat raw PTY output, unreviewed KB entries, or old Board tasks as higher
 authority than task-result artifacts and durable events.
+
+Cold `.missiond/v3/runtime/**` files are diagnostic caches. They are excluded
+from default SSOT search unless `include_runtime=true` or a concrete path is
+requested. Runtime diagnostics are discoverable through the `runtimeArtifacts`
+lane in `mission_shared_memory(action=evidence_view)` and through the shared
+memory status counters backed by the `runtime_artifacts` catalog.
 
 ## Standard Work Loop
 
@@ -46,7 +54,9 @@ authority than task-result artifacts and durable events.
    scope.
 7. Wait for durable final evidence, not PTY idle alone.
 8. Normalize worker output into a task-result artifact.
-9. Project the summary into Board notes and close tasks only after settle.
+9. Index any generated cold runtime diagnostics with `runtime_artifact_index`
+   when the file is not a canonical task-result artifact.
+10. Project the summary into Board notes and close tasks only after settle.
 
 ## Worker Types
 

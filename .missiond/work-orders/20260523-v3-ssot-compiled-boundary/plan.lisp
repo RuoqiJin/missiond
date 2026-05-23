@@ -1,0 +1,40 @@
+(work-order-plan
+  :schema "missiond.work-order.plan.v1"
+  :id "20260523-v3-ssot-compiled-boundary"
+  :intent "20260523-v3-ssot-compiled-boundary"
+  :status accepted
+  :accepted_shards
+    ((shard default
+       :accepted_shard_id "20260523-v3-ssot-compiled-boundary-shard-default"
+       :read_scope ["."]
+       :write_scope [".gitignore"
+                     ".missiond/v3/missiond-blueprint.lisp"
+                     ".missiond/work-orders/20260523-v3-ssot-compiled-boundary/**"
+                     "README.md"
+                     "crates/missiond-core/migrations/20260523000000_runtime_artifacts.sql"
+                     "crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"
+                     "crates/missiond-daemon/src/context/v3_contracts/generated.rs"
+                     "crates/missiond-daemon/src/engine/shared_memory.rs"
+                     "docs/MISSIOND_OPERATOR_MANUAL.md"
+                     "scripts/check-v3-final-convergence.mjs"
+                     "scripts/check-v3-production-runtime-boundary.mjs"
+                     "scripts/check-v3-runtime-artifact-catalog.mjs"
+                     "scripts/check-v3-runtime-path-hygiene.mjs"
+                     "scripts/check-v3-semantic-checker-coverage.mjs"
+                     "scripts/check-v3-typed-sidecar-compression.mjs"
+                     "scripts/generated/v3_contracts.d.ts"
+                     "scripts/generated/v3_contracts.mjs"
+                     "scripts/lib/v3_compiled_contract.mjs"
+                     "scripts/lib/v3_semantic_facts.mjs"
+                     "scripts/lib/v3_workstation_runtime.mjs"
+                     "scripts/project-v3-contracts.mjs"
+                     "tools/missiond_lispc/bin/emit_json.ml"]
+       :acceptance ["node scripts/project-v3-contracts.mjs --check --json"
+                    "node scripts/compile-v3-runtime.mjs --check --json"
+                    "node scripts/check-typed-lisp-compiler.mjs --json"
+                    "node scripts/check-v3-code-isomorphism-complete.mjs --json"
+                    "node scripts/check-v3-runtime-path-hygiene.mjs --json"
+                    "node scripts/check-v3-final-convergence.mjs --json --static-only"
+                    "cargo test -p missiond-daemon v3_blueprint_runtime"
+                    "cargo test -p missiond-daemon shared_memory::tests::runtime_artifact"
+                    "git diff --check"])))

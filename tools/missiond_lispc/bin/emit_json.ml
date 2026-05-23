@@ -353,17 +353,75 @@ let runtime_policy_names =
     "learning-engine-policy";
   ]
 
+let runtime_policy_payload_key = function
+  | "autopilot-policy" -> "autopilot"
+  | "cascade-policy" -> "cascade"
+  | "flow-runtime-policy" -> "flow"
+  | "compute-runtime-policy" -> "compute"
+  | "minimax-runtime-policy" -> "minimax"
+  | "router-runtime-policy" -> "router"
+  | "project-registry-policy" -> "projectRegistry"
+  | "capability-governance-policy" -> "capabilityGovernance"
+  | "memory-kb-policy" -> "memoryKb"
+  | "conversation-ingestion-policy" -> "conversationIngestion"
+  | "learning-engine-policy" -> "learningEngine"
+  | name -> name
+
+let runtime_policy_descriptor_json source_hash file name node =
+  let props = keyword_props ~start:1 node in
+  let keyword_keys = props |> List.map fst in
+  let nested_forms = children node |> List.filter_map head in
+  json_assoc
+    [
+      ("id", json_string name);
+      ("schema_version", json_string "missiond.runtime-policy-descriptor.v1");
+      ("form", json_string name);
+      ("payload_key", json_string (runtime_policy_payload_key name));
+      ("keyword_keys", json_string_list keyword_keys);
+      ("nested_forms", json_string_list nested_forms);
+      ("source", source_map_json source_hash file node);
+    ]
+
+let runtime_policy_descriptors_json source_hash file root =
+  runtime_policy_names
+  |> List.filter_map (fun name ->
+         find_child root name
+         |> Option.map (runtime_policy_descriptor_json source_hash file name))
+  |> json_array
+
 let semantic_runtime_policy_fact source_hash file name node =
   let props = keyword_props ~start:1 node in
   let keyword_keys = props |> List.map fst in
   let nested_forms = children node |> List.filter_map head in
   Printf.sprintf
-    {|{"fact_id":%s,"kind":"runtime_policy","project_id":"missiond","id":%s,"keyword_keys":%s,"nested_forms":%s,"source":%s}|}
+    {|{"fact_id":%s,"kind":"runtime_policy","project_id":"missiond","id":%s,"schema_version":"missiond.runtime-policy-descriptor.v1","form":%s,"payload_key":%s,"keyword_keys":%s,"nested_forms":%s,"source":%s}|}
     (json_string ("runtime-policy:" ^ safe_id name))
     (json_string name)
+    (json_string name)
+    (json_string (runtime_policy_payload_key name))
     (json_string_list keyword_keys)
     (json_string_list nested_forms)
     (source_map_json source_hash file node)
+
+let checker_registry_json source_hash file root =
+  match find_child root "compression-contract" with
+  | None -> "[]"
+  | Some node ->
+      let props = keyword_props ~start:1 node in
+      let checks =
+        match prop ":checks" props with
+        | Some value -> list_texts value
+        | None -> []
+      in
+      [
+        json_assoc
+          [
+            ("id", json_string "v3-compression-contract");
+            ("checks", json_string_list checks);
+            ("source", source_map_json source_hash file node);
+          ];
+      ]
+      |> json_array
 
 let semantic_checker_registry_fact source_hash file root =
   match find_child root "compression-contract" with
@@ -381,6 +439,68 @@ let semantic_checker_registry_fact source_hash file root =
           (json_string_list checks)
           (source_map_json source_hash file node);
       ]
+
+let semantic_contract_split_facts source_hash file surface_node =
+  let props = keyword_props ~start:2 surface_node in
+  let surface_id = Option.value ~default:"<missing>" (form_id surface_node) in
+  match prop ":contract-split" props with
+  | None -> []
+  | Some split ->
+      children split
+      |> List.filter_map (fun entry ->
+             match head entry with
+             | None -> None
+             | Some id ->
+                 let entry_props = keyword_props ~start:1 entry in
+                 let owns =
+                   match prop ":owns" entry_props with
+                   | Some value -> list_texts value
+                   | None -> []
+                 in
+                 Some
+                   (Printf.sprintf
+                      {|{"fact_id":%s,"kind":"contract_split","project_id":"missiond","surface":%s,"id":%s,"owns":%s,"source":%s}|}
+                      (json_string
+                         ("contract-split:" ^ safe_id surface_id ^ ":"
+                        ^ safe_id id))
+                      (json_string surface_id)
+                      (json_string id)
+                      (json_string_list owns)
+                      (source_map_json source_hash file entry)))
+
+let semantic_control_plane_domain_fact source_hash file node =
+  let props = keyword_props ~start:2 node in
+  let id = Option.value ~default:"<missing>" (form_id node) in
+  Printf.sprintf
+    {|{"fact_id":%s,"kind":"control_plane_domain","project_id":"missiond","id":%s,"owner":%s,"source_refs":%s,"functions":%s,"runtime_projection":%s,"checker":%s,"source":%s}|}
+    (json_string ("control-plane-domain:" ^ safe_id id))
+    (json_string id)
+    (json_opt_string (prop_text ":owner" props))
+    (json_string_list (prop_text_list ":source" props))
+    (json_string_list (prop_text_list ":functions" props))
+    (json_string_list (prop_text_list ":runtime-projection" props))
+    (json_string_list (prop_text_list ":checker" props))
+    (source_map_json source_hash file node)
+
+let semantic_typed_subplane_facts source_hash file root =
+  let contract_split_facts =
+    match find_child root "implementation-map" with
+    | None -> []
+    | Some implementation_map ->
+        children implementation_map
+        |> List.filter (fun node -> is_list node "surface")
+        |> List.map (semantic_contract_split_facts source_hash file)
+        |> List.flatten
+  in
+  let control_plane_facts =
+    match find_child root "control-plane-m6-split" with
+    | None -> []
+    | Some control_plane ->
+        children control_plane
+        |> List.filter (fun node -> is_list node "domain")
+        |> List.map (semantic_control_plane_domain_fact source_hash file)
+  in
+  contract_split_facts @ control_plane_facts
 
 let semantic_facts source_hash file source_units root =
   let function_facts =
@@ -444,9 +564,12 @@ let semantic_facts source_hash file source_units root =
   let source_unit_facts =
     source_units |> List.map semantic_source_unit_fact
   in
+  let typed_subplane_facts =
+    semantic_typed_subplane_facts source_hash file root
+  in
   function_facts @ surface_facts @ artifact_facts @ workflow_contract_facts
   @ workstation_facts @ runtime_policy_facts @ checker_registry_facts
-  @ source_unit_facts
+  @ source_unit_facts @ typed_subplane_facts
 
 let project_entry_to_json node =
   let props = keyword_props ~start:1 node in
@@ -912,11 +1035,15 @@ let learning_engine_runtime_config_json root =
           ("cooccurrence_refresh_interval_secs", json_number_token [ ":cooccurrence-refresh-interval-secs" ] props);
         ]
 
-let runtime_config_payload_json blueprint source_units root =
+let runtime_config_payload_json blueprint source_hash source_units root =
   json_assoc
     [
       ("blueprint", json_string blueprint);
       ("source_units", Source_resolver.source_units_to_json source_units);
+      ( "runtime_policies",
+        root
+        |> Option.map (runtime_policy_descriptors_json source_hash blueprint)
+        |> Option.value ~default:"[]" );
       ("workstation", workstation_runtime_config_json root);
       ("flow", flow_runtime_config_json root);
       ("compute", compute_runtime_config_json root);
@@ -1144,6 +1271,14 @@ let contract_abi_payload_json blueprint source_hash source_units root =
       ("surfaces", json_array surfaces);
       ("functions", json_array functions);
       ("facts", json_array facts);
+      ( "runtime_policies",
+        root
+        |> Option.map (runtime_policy_descriptors_json source_hash blueprint)
+        |> Option.value ~default:"[]" );
+      ( "checker_registry",
+        root
+        |> Option.map (checker_registry_json source_hash blueprint)
+        |> Option.value ~default:"[]" );
       ( "plan_contract",
         json_assoc
           [
@@ -1482,7 +1617,8 @@ let emit_runtime_config blueprint =
           ]
     in
     let payload =
-      runtime_config_payload_json blueprint resolved.source_units root
+      runtime_config_payload_json blueprint resolved.source_hash resolved.source_units
+        root
     in
     print_endline
       (result_json

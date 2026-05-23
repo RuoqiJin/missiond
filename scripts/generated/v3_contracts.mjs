@@ -4,76 +4,76 @@
 // Do not edit by hand.
 
 export const SCHEMA_VERSION = "missiond.contract-abi.v1";
-export const SOURCE_HASH = "cd46f6f70e8ab645088b4f1bcd6c4547";
+export const SOURCE_HASH = "fa392f4499e25e996c51351dabbe62c8";
 export const SOURCE_UNITS = Object.freeze([
   {
     "file": ".missiond/v3/missiond-blueprint.lisp",
     "kind": "missiond-blueprint",
     "included_by": null,
     "include_line": null,
-    "source_hash": "1f2df22466548eafdd011bd42bdb48f9"
+    "source_hash": "3d46a540de4642471c870c9634ed1072"
   },
   {
     "file": ".missiond/v3/shards/request-runtime.lisp",
     "kind": "multi-section-shard",
     "included_by": ".missiond/v3/missiond-blueprint.lisp",
-    "include_line": 237,
+    "include_line": 248,
     "source_hash": "b57b01678281f3719dd9b1a5a52846a6"
   },
   {
     "file": ".missiond/v3/shards/workstation-runtime.lisp",
     "kind": "multi-section-shard",
     "included_by": ".missiond/v3/missiond-blueprint.lisp",
-    "include_line": 239,
+    "include_line": 250,
     "source_hash": "b6a3bf63b98f0d3e5b47e113823a81d3"
   },
   {
     "file": ".missiond/v3/shards/control-plane-runtime.lisp",
     "kind": "multi-section-shard",
     "included_by": ".missiond/v3/missiond-blueprint.lisp",
-    "include_line": 241,
+    "include_line": 252,
     "source_hash": "c1231d91115f19666ac99f0a03dad1fa"
   },
   {
     "file": ".missiond/v3/shards/project-universe.lisp",
     "kind": "multi-section-shard",
     "included_by": ".missiond/v3/missiond-blueprint.lisp",
-    "include_line": 243,
+    "include_line": 254,
     "source_hash": "74f97a54baa2adf9b3e9239a05653c8c"
   },
   {
     "file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
     "kind": "multi-section-shard",
     "included_by": ".missiond/v3/missiond-blueprint.lisp",
-    "include_line": 245,
+    "include_line": 256,
     "source_hash": "9cd8ce05236e5996c463151f4b42af5d"
   },
   {
     "file": ".missiond/v3/shards/ops-infra.lisp",
     "kind": "ops-infra",
     "included_by": ".missiond/v3/missiond-blueprint.lisp",
-    "include_line": 247,
+    "include_line": 258,
     "source_hash": "1d22cd3453cd5e339abd345862496288"
   },
   {
     "file": ".missiond/v3/shards/v2-convergence-map.lisp",
     "kind": "v2-convergence-map",
     "included_by": ".missiond/v3/missiond-blueprint.lisp",
-    "include_line": 249,
+    "include_line": 260,
     "source_hash": "56e4bcc50ae394e946dc057bb7819ce7"
   },
   {
     "file": ".missiond/v3/shards/pillar-flow-map.lisp",
     "kind": "pillar-flow-map",
     "included_by": ".missiond/v3/missiond-blueprint.lisp",
-    "include_line": 251,
+    "include_line": 262,
     "source_hash": "2dbf0b4e536386784a6f2a2c90fad467"
   },
   {
     "file": ".missiond/v3/shards/implementation-map.lisp",
     "kind": "implementation-map",
     "included_by": ".missiond/v3/missiond-blueprint.lisp",
-    "include_line": 253,
+    "include_line": 264,
     "source_hash": "a5a9c61280545863199bae52fb9e4e7b"
   }
 ]);
@@ -199,6 +199,274 @@ export const ARTIFACT_CONTRACT_IDS = Object.freeze([
   "verification-receipt",
   "workflow"
 ]);
+export const RUNTIME_POLICIES = Object.freeze([
+  {
+    "id": "autopilot-policy",
+    "schema_version": "missiond.runtime-policy-descriptor.v1",
+    "form": "autopilot-policy",
+    "payload_key": "autopilot",
+    "keyword_keys": [
+      ":desc",
+      ":stale-conversation-minutes",
+      ":slot-task-reap-stale-secs",
+      ":recover-stale-running-minutes",
+      ":slot-failure-throttle-secs",
+      ":deploy-review-timeout-secs",
+      ":dynamic-slot-expiring-soon-secs",
+      ":stale-board-progress-minutes",
+      ":completed-job-gc-minutes",
+      ":idle-persistent-slot-secs",
+      ":recent-intents-window-secs",
+      ":user-stuck-cooldown-secs",
+      ":direction-shift-cooldown-secs",
+      ":invariants",
+      ":checker"
+    ],
+    "nested_forms": [],
+    "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
+    "source_line": 323
+  },
+  {
+    "id": "capability-governance-policy",
+    "schema_version": "missiond.runtime-policy-descriptor.v1",
+    "form": "capability-governance-policy",
+    "payload_key": "capabilityGovernance",
+    "keyword_keys": [
+      ":desc",
+      ":review-sidecar",
+      ":protected-tool-patterns",
+      ":protected-flow-patterns",
+      ":invariants"
+    ],
+    "nested_forms": [],
+    "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
+    "source_line": 1
+  },
+  {
+    "id": "cascade-policy",
+    "schema_version": "missiond.runtime-policy-descriptor.v1",
+    "form": "cascade-policy",
+    "payload_key": "cascade",
+    "keyword_keys": [
+      ":desc",
+      ":default-manifest",
+      ":allowed-root",
+      ":trigger-enabled",
+      ":default-max-cycles",
+      ":max-cycles-limit",
+      ":env-overrides",
+      ":invariants"
+    ],
+    "nested_forms": [
+      "UNIVERSE_MANIFEST"
+    ],
+    "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
+    "source_line": 344
+  },
+  {
+    "id": "compute-runtime-policy",
+    "schema_version": "missiond.runtime-policy-descriptor.v1",
+    "form": "compute-runtime-policy",
+    "payload_key": "compute",
+    "keyword_keys": [
+      ":desc",
+      ":invariants"
+    ],
+    "nested_forms": [
+      "timeout-policy"
+    ],
+    "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
+    "source_line": 369
+  },
+  {
+    "id": "conversation-ingestion-policy",
+    "schema_version": "missiond.runtime-policy-descriptor.v1",
+    "form": "conversation-ingestion-policy",
+    "payload_key": "conversationIngestion",
+    "keyword_keys": [
+      ":desc",
+      ":conversation-get-tail-default",
+      ":conversation-search-default-limit",
+      ":message-search-default-limit",
+      ":analysis-context-max-turns",
+      ":label-calibration-sample-limit",
+      ":jarvis-stream-envelope-schema",
+      ":context-before-default",
+      ":context-after-default",
+      ":conversation-events-default-limit",
+      ":agent-trajectory-default-limit",
+      ":timeline-query-default-limit",
+      ":timeline-query-max-limit",
+      ":timeline-search-default-limit",
+      ":timeline-search-max-limit",
+      ":intent-router-model",
+      ":intent-router-timeout-ms",
+      ":vision-codex-binary",
+      ":vision-codex-model",
+      ":vision-codex-idle-timeout-secs",
+      ":vision-codex-absolute-timeout-secs",
+      ":invariants"
+    ],
+    "nested_forms": [],
+    "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
+    "source_line": 183
+  },
+  {
+    "id": "flow-runtime-policy",
+    "schema_version": "missiond.runtime-policy-descriptor.v1",
+    "form": "flow-runtime-policy",
+    "payload_key": "flow",
+    "keyword_keys": [
+      ":desc",
+      ":llm-call-default-max-tokens",
+      ":slot-task-default-model",
+      ":slot-task-default-timeout-secs",
+      ":parallel-slot-default-parallelism",
+      ":parallel-slot-default-timeout-secs",
+      ":invariants"
+    ],
+    "nested_forms": [],
+    "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
+    "source_line": 357
+  },
+  {
+    "id": "learning-engine-policy",
+    "schema_version": "missiond.runtime-policy-descriptor.v1",
+    "form": "learning-engine-policy",
+    "payload_key": "learningEngine",
+    "keyword_keys": [
+      ":desc",
+      ":realtime-extraction-timeout-secs",
+      ":realtime-empty-backoff-base-secs",
+      ":realtime-empty-backoff-max-secs",
+      ":deep-analysis-zero-output-fuse-threshold",
+      ":deep-analysis-zero-output-fuse-secs",
+      ":decision-tier3-timeout-secs",
+      ":habit-scan-timeout-secs",
+      ":token-spend-guard-window-secs",
+      ":token-spend-guard-soft-limit",
+      ":timeline-analysis-interval-secs",
+      ":timeline-analysis-window-hours",
+      ":timeline-error-limit",
+      ":timeline-llm-sample-limit",
+      ":timeline-slow-event-limit",
+      ":timeline-slow-threshold-ms",
+      ":idle-explore-interval-secs",
+      ":habit-scan-interval-secs",
+      ":habit-scan-batch-size",
+      ":kb-auto-gc-interval-secs",
+      ":kb-consolidation-interval-secs",
+      ":kb-reflection-interval-secs",
+      ":kb-reflection-utility-threshold",
+      ":kb-reflection-min-access",
+      ":kb-reflection-max-entries",
+      ":kb-reflection-max-tokens",
+      ":decision-harvest-interval-secs",
+      ":cooccurrence-refresh-interval-secs",
+      ":invariants"
+    ],
+    "nested_forms": [],
+    "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
+    "source_line": 140
+  },
+  {
+    "id": "memory-kb-policy",
+    "schema_version": "missiond.runtime-policy-descriptor.v1",
+    "form": "memory-kb-policy",
+    "payload_key": "memoryKb",
+    "keyword_keys": [
+      ":desc",
+      ":pending-message-limit",
+      ":tool-result-preview-chars",
+      ":assistant-preview-chars",
+      ":active-memory-target-ratio",
+      ":sensitive-query-suppression",
+      ":review-states",
+      ":default-query-policy",
+      ":invariants"
+    ],
+    "nested_forms": [
+      "architecture:module",
+      "active"
+    ],
+    "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
+    "source_line": 117
+  },
+  {
+    "id": "minimax-runtime-policy",
+    "schema_version": "missiond.runtime-policy-descriptor.v1",
+    "form": "minimax-runtime-policy",
+    "payload_key": "minimax",
+    "keyword_keys": [
+      ":desc",
+      ":model",
+      ":direct-http-timeout-secs",
+      ":quota-throttle-secs",
+      ":default-max-tokens",
+      ":invariants"
+    ],
+    "nested_forms": [],
+    "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
+    "source_line": 379
+  },
+  {
+    "id": "project-registry-policy",
+    "schema_version": "missiond.runtime-policy-descriptor.v1",
+    "form": "project-registry-policy",
+    "payload_key": "projectRegistry",
+    "keyword_keys": [
+      ":desc",
+      ":intent-path-candidates",
+      ":default-universe-manifest",
+      ":env-overrides",
+      ":invariants"
+    ],
+    "nested_forms": [
+      "UNIVERSE_MANIFEST"
+    ],
+    "source_file": ".missiond/v3/shards/project-universe.lisp",
+    "source_line": 1
+  },
+  {
+    "id": "router-runtime-policy",
+    "schema_version": "missiond.runtime-policy-descriptor.v1",
+    "form": "router-runtime-policy",
+    "payload_key": "router",
+    "keyword_keys": [
+      ":desc",
+      ":default-chat-model",
+      ":chat-default-max-tokens",
+      ":file-chat-default-max-tokens",
+      ":flow-gemini-model",
+      ":stateless-sonnet-model",
+      ":queued-sonnet-model",
+      ":anthropic-urgent-model",
+      ":anthropic-ops-model",
+      ":anthropic-docs-test-chore-model",
+      ":compress-model",
+      ":compress-channel",
+      ":compress-max-tokens",
+      ":compress-char-budget-chars",
+      ":direct-http-timeout-secs",
+      ":router-chat-idle-timeout-secs",
+      ":router-chat-retry-max-attempts",
+      ":router-chat-retry-initial-backoff-ms",
+      ":router-chat-retry-max-backoff-ms",
+      ":gemini-pty-queue-timeout-secs",
+      ":gemini-http-queue-timeout-secs",
+      ":gemini-file-upload-timeout-secs",
+      ":gemini-file-poll-timeout-secs",
+      ":gemini-cli-absolute-timeout-secs",
+      ":gemini-cli-tool-exec-timeout-secs",
+      ":queued-sonnet-quota-throttle-secs",
+      ":queued-sonnet-default-max-tokens",
+      ":invariants"
+    ],
+    "nested_forms": [],
+    "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
+    "source_line": 390
+  }
+]);
 export const RUNTIME_POLICY_IDS = Object.freeze([
   "autopilot-policy",
   "capability-governance-policy",
@@ -211,6 +479,72 @@ export const RUNTIME_POLICY_IDS = Object.freeze([
   "minimax-runtime-policy",
   "project-registry-policy",
   "router-runtime-policy"
+]);
+export const CHECKER_REGISTRY = Object.freeze([
+  {
+    "id": "v3-compression-contract",
+    "checks": [
+      "node scripts/check-lisp-blueprint-compression.mjs",
+      "node scripts/check-architecture-lisp.mjs --no-structure .missiond/v3/missiond-blueprint.lisp",
+      "node scripts/check-typed-lisp-compiler.mjs",
+      "node scripts/check-v3-pillar-flow-schema.mjs",
+      "node scripts/check-v3-v2-coverage.mjs",
+      "node scripts/check-v3-runtime-path-hygiene.mjs",
+      "node scripts/check-v3-production-runtime-boundary.mjs",
+      "node scripts/check-v3-semantic-checker-coverage.mjs",
+      "node scripts/check-v3-runtime-artifact-catalog.mjs",
+      "node scripts/check-v3-typed-sidecar-compression.mjs",
+      "node scripts/check-v3-conversation-ingestion-isomorphism.mjs",
+      "node scripts/check-v3-cli-conversation-ingestion-isomorphism.mjs",
+      "node scripts/check-v3-pty-recognition-isomorphism.mjs",
+      "node scripts/check-v3-capability-governance-isomorphism.mjs",
+      "node scripts/check-v3-mechanic-boundary-isomorphism.mjs",
+      "node scripts/check-v3-compute-primitives-isomorphism.mjs",
+      "node scripts/check-v3-sysinfra-control-isomorphism.mjs",
+      "node scripts/check-v3-router-policy-isomorphism.mjs",
+      "node scripts/check-v3-request-lisp-isomorphism.mjs",
+      "node scripts/check-v3-unified-entry-isomorphism.mjs",
+      "node scripts/check-v3-file-artifacts-isomorphism.mjs",
+      "node scripts/check-v3-intent-alignment-isomorphism.mjs",
+      "node scripts/check-v3-plan-execution-isomorphism.mjs",
+      "node scripts/check-v3-evidence-collector-isomorphism.mjs",
+      "node scripts/check-v3-mission-execution-isomorphism.mjs",
+      "node scripts/check-v3-workflow-isomorphism.mjs",
+      "node scripts/check-v3-work-order-lifecycle-isomorphism.mjs",
+      "node scripts/check-v3-review-gate-isomorphism.mjs",
+      "node scripts/check-v3-task-lifecycle-isomorphism.mjs",
+      "node scripts/check-v3-memory-kb-isomorphism.mjs",
+      "node scripts/check-v3-project-registry-isomorphism.mjs",
+      "node scripts/check-v3-skill-runtime-isomorphism.mjs",
+      "node scripts/check-v3-cascade-governance-isomorphism.mjs",
+      "node scripts/check-v3-incident-governance-isomorphism.mjs",
+      "node scripts/check-v3-source-hygiene-isomorphism.mjs",
+      "node scripts/check-v3-context-pack-isomorphism.mjs",
+      "node scripts/check-v3-workstation-config-isomorphism.mjs",
+      "node scripts/check-v3-workstation-pool-isomorphism.mjs",
+      "node scripts/check-v3-control-plane-m6-split.mjs",
+      "node scripts/check-v3-master-control-isomorphism.mjs",
+      "node scripts/check-v3-direct-code-drift-policy.mjs",
+      "node scripts/check-v3-genome-runtime-isomorphism.mjs",
+      "node scripts/check-v3-autopilot-genome-isomorphism.mjs",
+      "node scripts/check-v3-commit-convergence-loop.mjs",
+      "node scripts/check-v3-nightly-evolution-isomorphism.mjs",
+      "node scripts/check-v3-autopilot-runtime-isomorphism.mjs",
+      "node scripts/check-v3-workstation-dispatch-isomorphism.mjs",
+      "node scripts/check-v3-board-isomorphism.mjs",
+      "node scripts/check-frontend-board-lisp-schema.mjs",
+      "node scripts/check-frontend-board-code-isomorphism.mjs",
+      "node scripts/check-frontend-board-runtime-projection.mjs",
+      "node scripts/check-v3-ops-infra-isomorphism.mjs",
+      "node scripts/check-v3-service-extraction-isomorphism.mjs",
+      "node scripts/check-v3-shared-memory-isomorphism.mjs",
+      "node scripts/check-v3-request-flow-smoke.mjs",
+      "node scripts/check-v3-code-isomorphism-complete.mjs",
+      "node scripts/check-v3-final-convergence.mjs"
+    ],
+    "source_file": ".missiond/v3/missiond-blueprint.lisp",
+    "source_line": 266
+  }
 ]);
 export const CHECKER_COMMANDS = Object.freeze([
   "node scripts/check-architecture-lisp.mjs --no-structure .missiond/v3/missiond-blueprint.lisp",
@@ -246,19 +580,23 @@ export const CHECKER_COMMANDS = Object.freeze([
   "node scripts/check-v3-ops-infra-isomorphism.mjs",
   "node scripts/check-v3-pillar-flow-schema.mjs",
   "node scripts/check-v3-plan-execution-isomorphism.mjs",
+  "node scripts/check-v3-production-runtime-boundary.mjs",
   "node scripts/check-v3-project-registry-isomorphism.mjs",
   "node scripts/check-v3-pty-recognition-isomorphism.mjs",
   "node scripts/check-v3-request-flow-smoke.mjs",
   "node scripts/check-v3-request-lisp-isomorphism.mjs",
   "node scripts/check-v3-review-gate-isomorphism.mjs",
   "node scripts/check-v3-router-policy-isomorphism.mjs",
+  "node scripts/check-v3-runtime-artifact-catalog.mjs",
   "node scripts/check-v3-runtime-path-hygiene.mjs",
+  "node scripts/check-v3-semantic-checker-coverage.mjs",
   "node scripts/check-v3-service-extraction-isomorphism.mjs",
   "node scripts/check-v3-shared-memory-isomorphism.mjs",
   "node scripts/check-v3-skill-runtime-isomorphism.mjs",
   "node scripts/check-v3-source-hygiene-isomorphism.mjs",
   "node scripts/check-v3-sysinfra-control-isomorphism.mjs",
   "node scripts/check-v3-task-lifecycle-isomorphism.mjs",
+  "node scripts/check-v3-typed-sidecar-compression.mjs",
   "node scripts/check-v3-unified-entry-isomorphism.mjs",
   "node scripts/check-v3-v2-coverage.mjs",
   "node scripts/check-v3-work-order-lifecycle-isomorphism.mjs",

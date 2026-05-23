@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -64,6 +65,15 @@ impl SharedMemoryService {
             "workflow_start" | "start_workflow" => self.workflow_start(args).await,
             "workflow_checkpoint" | "checkpoint_workflow" => self.workflow_checkpoint(args).await,
             "workflow_status" | "get_workflow_status" => self.workflow_status(args).await,
+            "runtime_artifact_index" | "index_runtime_artifact" => {
+                self.runtime_artifact_index(args).await
+            }
+            "runtime_artifact_list" | "list_runtime_artifacts" => {
+                self.runtime_artifact_list(args).await
+            }
+            "runtime_artifact_prune" | "prune_runtime_artifacts" => {
+                self.runtime_artifact_prune(args).await
+            }
             "evidence_view" | "evidence_governance_view" | "get_evidence_view" => {
                 self.evidence_view(args).await
             }
@@ -101,6 +111,18 @@ impl SharedMemoryService {
                 .fetch_one(&self.pool)
                 .await
                 .unwrap_or(0);
+        let runtime_artifacts = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM runtime_artifacts WHERE status = 'active'",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(0);
+        let expired_runtime_artifacts = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM runtime_artifacts WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at < now()",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(0);
         let active_workflow_runs = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM workflow_runs WHERE status IN ('running','blocked')",
         )
@@ -146,6 +168,14 @@ impl SharedMemoryService {
             "expiredStaleClaims": expired_stale_claims,
             "artifactCount": artifacts,
             "taskResultArtifactCount": task_result_artifacts,
+            "runtimeArtifactCount": runtime_artifacts,
+            "expiredRuntimeArtifactCount": expired_runtime_artifacts,
+            "runtimeArtifactRetention": {
+                "compiled": "current compiled outputs plus recent historical snapshots; no time expiry",
+                "reports": "14 days or last 200 per kind",
+                "masterContextPacks": "7 days or last 100",
+                "canonicalTaskEvidence": "indexed without automatic deletion"
+            },
             "activeWorkflowRuns": active_workflow_runs,
             "cursorLag": cursor_lag
         })
@@ -739,6 +769,122 @@ impl SharedMemoryService {
         }))
     }
 
+    async fn runtime_artifact_index(&self, args: &Value) -> Result<Value> {
+        let path_arg = string_arg(args, "path").ok_or_else(|| anyhow!("path is required"))?;
+        let path = self.resolve_runtime_artifact_path(path_arg)?;
+        let rel_path = self.runtime_artifact_catalog_path(&path);
+        let bytes = fs::read(&path)?;
+        let hash = string_arg(args, "hash")
+            .map(str::to_string)
+            .unwrap_or_else(|| sha256_hex(&bytes));
+        let size_bytes = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
+        let kind = string_arg(args, "kind")
+            .map(str::to_string)
+            .unwrap_or_else(|| infer_runtime_artifact_kind(&rel_path));
+        let source_surface =
+            string_arg(args, "source_surface").or_else(|| string_arg(args, "sourceSurface"));
+        let project_id = string_arg(args, "project_id").or_else(|| string_arg(args, "projectId"));
+        let task_id = string_arg(args, "task_id").or_else(|| string_arg(args, "taskId"));
+        let media_type = string_arg(args, "media_type")
+            .or_else(|| string_arg(args, "mediaType"))
+            .unwrap_or_else(|| infer_media_type(&rel_path));
+        let metadata = args.get("metadata").cloned().unwrap_or_else(|| json!({}));
+        let expires_at = runtime_artifact_expires_at(&kind, &rel_path);
+
+        let row = sqlx::query(
+            r#"
+            INSERT INTO runtime_artifacts
+              (hash, path, kind, source_surface, project_id, task_id,
+               media_type, size_bytes, status, metadata, expires_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'active',$9,$10)
+            ON CONFLICT(path, hash)
+            DO UPDATE SET
+              kind = EXCLUDED.kind,
+              source_surface = EXCLUDED.source_surface,
+              project_id = EXCLUDED.project_id,
+              task_id = EXCLUDED.task_id,
+              media_type = EXCLUDED.media_type,
+              size_bytes = EXCLUDED.size_bytes,
+              status = 'active',
+              metadata = EXCLUDED.metadata,
+              indexed_at = now(),
+              expires_at = EXCLUDED.expires_at
+            RETURNING id::text, hash, path, kind, source_surface, project_id,
+                      task_id, media_type, size_bytes, status, metadata,
+                      created_at, indexed_at, expires_at
+            "#,
+        )
+        .bind(&hash)
+        .bind(&rel_path)
+        .bind(&kind)
+        .bind(source_surface)
+        .bind(project_id)
+        .bind(task_id)
+        .bind(media_type)
+        .bind(size_bytes)
+        .bind(&metadata)
+        .bind(expires_at)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(json!({
+            "schema": "missiond.runtime-artifact.v1",
+            "ok": true,
+            "artifact": runtime_artifact_row_json(row)
+        }))
+    }
+
+    async fn runtime_artifact_list(&self, args: &Value) -> Result<Value> {
+        let project_id = string_arg(args, "project_id")
+            .or_else(|| string_arg(args, "projectId"))
+            .or_else(|| string_arg(args, "project"));
+        let task_id = string_arg(args, "task_id").or_else(|| string_arg(args, "taskId"));
+        let kind = string_arg(args, "kind");
+        let include_expired = args
+            .get("include_expired")
+            .or_else(|| args.get("includeExpired"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let limit = bounded_limit(args).min(100);
+        let rows = self
+            .runtime_artifacts_for_scope(project_id, task_id, kind, include_expired, limit)
+            .await?;
+        Ok(json!({
+            "schema": "missiond.runtime-artifacts.v1",
+            "artifacts": rows
+        }))
+    }
+
+    async fn runtime_artifact_prune(&self, args: &Value) -> Result<Value> {
+        let dry_run = args
+            .get("dry_run")
+            .or_else(|| args.get("dryRun"))
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let expired = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM runtime_artifacts WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at < now()",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        let marked = if dry_run {
+            0
+        } else {
+            sqlx::query(
+                "UPDATE runtime_artifacts SET status = 'expired' WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at < now()",
+            )
+            .execute(&self.pool)
+            .await?
+            .rows_affected() as i64
+        };
+        Ok(json!({
+            "schema": "missiond.runtime-artifact-retention.v1",
+            "dryRun": dry_run,
+            "expiredActiveCount": expired,
+            "markedExpired": marked,
+            "note": "Retention marks catalog rows expired; destructive file deletion remains an explicit maintenance workflow."
+        }))
+    }
+
     async fn evidence_view(&self, args: &Value) -> Result<Value> {
         let task_id = string_arg(args, "task_id").or_else(|| string_arg(args, "taskId"));
         let project_id = string_arg(args, "project_id")
@@ -856,6 +1002,10 @@ impl SharedMemoryService {
         .fetch_all(&self.pool)
         .await?;
 
+        let runtime_artifacts = self
+            .runtime_artifacts_for_scope(project_id, task_id, None, false, limit)
+            .await?;
+
         Ok(json!({
             "schema": "missiond.evidence-governance-view.v1",
             "taskId": task_id,
@@ -865,14 +1015,16 @@ impl SharedMemoryService {
                 "conversations": "provider/user turn read model; useful for audit and retrieval, not worker completion authority",
                 "timelineEvents": "event causality and external/system event projection",
                 "kbMemory": "curated reviewed long-term knowledge; active retrieval is controlled by knowledge_review_state",
-                "board": "coordination projection and operator-facing task state"
+                "board": "coordination projection and operator-facing task state",
+                "runtimeArtifacts": "indexed cold .missiond/v3/runtime/** diagnostics; queryable by path/hash/kind, excluded from broad SSOT search"
             },
             "authorityOrder": [
                 "task_result_artifacts",
                 "provider_durable_conversation",
                 "event_log",
                 "knowledge_review_state",
-                "board_projection"
+                "board_projection",
+                "runtime_artifacts_catalog"
             ],
             "lanes": {
                 "board": board_task,
@@ -880,7 +1032,8 @@ impl SharedMemoryService {
                 "conversations": conversations.into_iter().map(conversation_evidence_row_json).collect::<Vec<_>>(),
                 "sharedEvents": shared_events.into_iter().map(event_row_json).collect::<Vec<_>>(),
                 "timelineEvents": timeline_events.into_iter().map(timeline_event_row_json).collect::<Vec<_>>(),
-                "kbMemory": kb_entries.into_iter().map(kb_evidence_row_json).collect::<Vec<_>>()
+                "kbMemory": kb_entries.into_iter().map(kb_evidence_row_json).collect::<Vec<_>>(),
+                "runtimeArtifacts": runtime_artifacts
             }
         }))
     }
@@ -1328,6 +1481,66 @@ impl SharedMemoryService {
             .collect())
     }
 
+    async fn runtime_artifacts_for_scope(
+        &self,
+        project_id: Option<&str>,
+        task_id: Option<&str>,
+        kind: Option<&str>,
+        include_expired: bool,
+        limit: i64,
+    ) -> Result<Vec<Value>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id::text, hash, path, kind, source_surface, project_id, task_id,
+                   media_type, size_bytes, status, metadata, created_at, indexed_at, expires_at
+            FROM runtime_artifacts
+            WHERE ($1::text IS NULL OR project_id = $1)
+              AND ($2::text IS NULL OR task_id = $2)
+              AND ($3::text IS NULL OR kind = $3)
+              AND ($4::bool OR status = 'active')
+            ORDER BY indexed_at DESC
+            LIMIT $5
+            "#,
+        )
+        .bind(project_id)
+        .bind(task_id)
+        .bind(kind)
+        .bind(include_expired)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(runtime_artifact_row_json).collect())
+    }
+
+    fn resolve_runtime_artifact_path(&self, value: &str) -> Result<PathBuf> {
+        let path = PathBuf::from(value);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            self.missiond_root.join(path)
+        };
+        let runtime_root = self
+            .missiond_root
+            .join(".missiond")
+            .join("v3")
+            .join("runtime");
+        let normalized = normalize_path_for_prefix_check(&path);
+        let normalized_runtime_root = normalize_path_for_prefix_check(&runtime_root);
+        if !normalized.starts_with(&normalized_runtime_root) {
+            return Err(anyhow!(
+                "runtime artifact path must be under {}",
+                runtime_root.display()
+            ));
+        }
+        Ok(path)
+    }
+
+    fn runtime_artifact_catalog_path(&self, path: &Path) -> String {
+        path.strip_prefix(&self.missiond_root)
+            .map(|rel| rel.to_string_lossy().to_string())
+            .unwrap_or_else(|_| path.to_string_lossy().to_string())
+    }
+
     fn read_compiled_json(&self, name: &str) -> Result<Value> {
         let path = self
             .missiond_root
@@ -1383,6 +1596,69 @@ fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     format!("{:x}", hasher.finalize())
+}
+
+fn normalize_path_for_prefix_check(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+fn infer_runtime_artifact_kind(path: &str) -> String {
+    if path.contains("/compiled/") {
+        "compiled-output".to_string()
+    } else if path.contains("/lisp-code-sync/") {
+        "lisp-code-sync-report".to_string()
+    } else if path.contains("/commit-lisp-convergence/") {
+        "commit-convergence-report".to_string()
+    } else if path.contains("/nightly-evolution/") {
+        "nightly-evolution-report".to_string()
+    } else if path.contains("/jarvis-smoke/") {
+        "jarvis-smoke-report".to_string()
+    } else if path.contains("/master-control/context-packs/") {
+        "master-control-context-pack".to_string()
+    } else if path.contains("/plans/") || path.contains("/executions/") {
+        "canonical-task-evidence".to_string()
+    } else {
+        "runtime-diagnostic".to_string()
+    }
+}
+
+fn infer_media_type(path: &str) -> &'static str {
+    if path.ends_with(".json") {
+        "application/json"
+    } else if path.ends_with(".lisp") {
+        "application/x-lisp"
+    } else if path.ends_with(".md") {
+        "text/markdown"
+    } else {
+        "application/octet-stream"
+    }
+}
+
+fn runtime_artifact_expires_at(kind: &str, path: &str) -> Option<DateTime<Utc>> {
+    if kind == "master-control-context-pack" || path.contains("/master-control/context-packs/") {
+        Some(Utc::now() + Duration::days(7))
+    } else if matches!(
+        kind,
+        "lisp-code-sync-report"
+            | "commit-convergence-report"
+            | "nightly-evolution-report"
+            | "jarvis-smoke-report"
+            | "runtime-diagnostic"
+    ) {
+        Some(Utc::now() + Duration::days(14))
+    } else {
+        None
+    }
 }
 
 fn fact_relevant_to_project(fact: &Value, project_id: &str) -> bool {
@@ -1480,6 +1756,29 @@ fn task_result_row_json(row: sqlx::postgres::PgRow) -> Value {
     })
 }
 
+fn runtime_artifact_row_json(row: sqlx::postgres::PgRow) -> Value {
+    let created_at: DateTime<Utc> = row.get("created_at");
+    let indexed_at: DateTime<Utc> = row.get("indexed_at");
+    let expires_at: Option<DateTime<Utc>> = row.try_get("expires_at").ok().flatten();
+    json!({
+        "id": row.get::<String, _>("id"),
+        "hash": row.get::<String, _>("hash"),
+        "path": row.get::<String, _>("path"),
+        "kind": row.get::<String, _>("kind"),
+        "source_surface": row.try_get::<Option<String>, _>("source_surface").ok().flatten(),
+        "project_id": row.try_get::<Option<String>, _>("project_id").ok().flatten(),
+        "task_id": row.try_get::<Option<String>, _>("task_id").ok().flatten(),
+        "media_type": row.get::<String, _>("media_type"),
+        "size_bytes": row.get::<i64, _>("size_bytes"),
+        "status": row.get::<String, _>("status"),
+        "metadata": row.get::<Value, _>("metadata"),
+        "created_at": created_at.to_rfc3339(),
+        "indexed_at": indexed_at.to_rfc3339(),
+        "expires_at": expires_at.map(|dt| dt.to_rfc3339()),
+        "role": "runtime_diagnostic_catalog"
+    })
+}
+
 fn board_task_evidence_row_json(row: sqlx::postgres::PgRow) -> Value {
     json!({
         "id": row.get::<String, _>("id"),
@@ -1572,4 +1871,67 @@ fn workflow_run_row_json(row: sqlx::postgres::PgRow) -> Value {
 #[allow(dead_code)]
 fn normalize_path(path: &str) -> String {
     Path::new(path).to_string_lossy().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_artifact_kind_is_inferred_from_v3_runtime_path() {
+        assert_eq!(
+            infer_runtime_artifact_kind(
+                ".missiond/v3/runtime/compiled/compiled-runtime-config.json"
+            ),
+            "compiled-output"
+        );
+        assert_eq!(
+            infer_runtime_artifact_kind(".missiond/v3/runtime/lisp-code-sync/20260523.report.lisp"),
+            "lisp-code-sync-report"
+        );
+        assert_eq!(
+            infer_runtime_artifact_kind(".missiond/v3/runtime/jarvis-smoke/smoke.json"),
+            "jarvis-smoke-report"
+        );
+        assert_eq!(
+            infer_runtime_artifact_kind(
+                ".missiond/v3/runtime/master-control/context-packs/pack.lisp"
+            ),
+            "master-control-context-pack"
+        );
+        assert_eq!(
+            infer_runtime_artifact_kind(".missiond/v3/runtime/plans/plan.evidence.json"),
+            "canonical-task-evidence"
+        );
+    }
+
+    #[test]
+    fn runtime_artifact_retention_keeps_canonical_and_compiled_outputs() {
+        assert!(runtime_artifact_expires_at(
+            "compiled-output",
+            ".missiond/v3/runtime/compiled/compiled-runtime-config.json"
+        )
+        .is_none());
+        assert!(runtime_artifact_expires_at(
+            "canonical-task-evidence",
+            ".missiond/v3/runtime/plans/plan.evidence.json"
+        )
+        .is_none());
+        assert!(runtime_artifact_expires_at(
+            "jarvis-smoke-report",
+            ".missiond/v3/runtime/jarvis-smoke/smoke.json"
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn runtime_artifact_media_type_tracks_file_extension() {
+        assert_eq!(
+            infer_media_type("compiled-runtime-config.json"),
+            "application/json"
+        );
+        assert_eq!(infer_media_type("report.lisp"), "application/x-lisp");
+        assert_eq!(infer_media_type("notes.md"), "text/markdown");
+        assert_eq!(infer_media_type("screen.bin"), "application/octet-stream");
+    }
 }

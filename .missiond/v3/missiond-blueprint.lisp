@@ -145,17 +145,20 @@
       :paths [".missiond/v3/runtime/**"
               ".missiond/tasks/**"
               ".missiond/research/memory-review*/**"]
+      :catalog runtime_artifacts
       :examples [".missiond/v3/runtime/lisp-code-sync/*.report.lisp"
                  ".missiond/v3/runtime/nightly-evolution/*.report.lisp"
+                 ".missiond/v3/runtime/jarvis-smoke/*.json"
                  ".missiond/v3/runtime/genome/*.json"
                  ".missiond/v3/runtime/self-evolution/*.proposal.lisp"
                  ".missiond/v3/runtime/master-control/context-packs/*.lisp"
                  ".missiond/v3/runtime/compiled/*.json"]
-      :rule "Cold runtime artifacts are diagnostic/query targets, not authoring SSOT. They are excluded from broad rg/review/search unless include_runtime=true or a concrete trace/report path is requested.")
+      :rule "Cold runtime artifacts are diagnostic/query targets, not authoring SSOT. They are indexed in Postgres runtime_artifacts for evidence_view/master-status lookup and excluded from broad rg/review/search unless include_runtime=true or a concrete trace/report path is requested.")
     :invariants
       ["Tools that answer 'what does the SSOT say?' MUST search active-authoring first and exclude cold-runtime by default."
        "Generated compiled JSON and runtime reports are projections/evidence; they must not be treated as editable blueprint source."
-       "MissionD may query cold-runtime for trace/debug/report lookup, but that query must be explicit and visible in the context-pack."]
+       "MissionD may query cold-runtime for trace/debug/report lookup, but that query must be explicit and visible in the context-pack."
+       "runtime_artifacts retention marks/prunes diagnostic caches only; canonical task/plan evidence is indexed without automatic deletion."]
     :checker "node scripts/check-v3-runtime-path-hygiene.mjs")
 
   (compiler-plane
@@ -178,6 +181,7 @@
     :contract-commands [emit-contract-abi emit-plan-contract check-plan-contract]
     :envelope-fields [:schema_version :source_hash :generated_at :diagnostics :payload]
     :payload-fields [:source_units :surfaces :functions :artifact_contracts :runtime_policies :checker_registry :plan_contract]
+
     :authority-boundary
       ["missiond-lispc is the only production component allowed to assign Lisp semantics."
        "Generated V3 contract ABI source is tracked in Rust and JS/TS; ignored compiled JSON remains a runtime projection."
@@ -198,6 +202,13 @@
                  "node scripts/project-v3-contracts.mjs --check --json"
                  "node scripts/compile-v3-runtime.mjs --json"])
     :non-goal "Do not add a second governance layer for the compiler plane; this contract plus typed compiler checks are the boundary.")
+
+  (typed-subplane-contracts
+    :schema "missiond.typed-subplane-contracts.v1"
+    :forms [surface contract-split domain runtime-projection policy-clause acceptance owner source]
+    :semantic-ir-facts [contract_split control_plane_domain runtime_policy checker_registry]
+    :sidecar-policy "Long prose and historical notes move to .missiond/v3/evidence/blueprint-notes.lisp; active shards keep compiler-readable ids, ownership, runtime projection, checker, and source/evidence anchors."
+    :checker "node scripts/check-v3-typed-sidecar-compression.mjs")
 
   (blueprint-shard-index
     :schema "missiond.blueprint-shard-index.v1"
@@ -262,6 +273,10 @@
              "node scripts/check-v3-pillar-flow-schema.mjs"
              "node scripts/check-v3-v2-coverage.mjs"
              "node scripts/check-v3-runtime-path-hygiene.mjs"
+             "node scripts/check-v3-production-runtime-boundary.mjs"
+             "node scripts/check-v3-semantic-checker-coverage.mjs"
+             "node scripts/check-v3-runtime-artifact-catalog.mjs"
+             "node scripts/check-v3-typed-sidecar-compression.mjs"
              "node scripts/check-v3-conversation-ingestion-isomorphism.mjs"
              "node scripts/check-v3-cli-conversation-ingestion-isomorphism.mjs"
              "node scripts/check-v3-pty-recognition-isomorphism.mjs"
