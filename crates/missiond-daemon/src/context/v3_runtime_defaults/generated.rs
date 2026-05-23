@@ -4,7 +4,7 @@
 // Do not edit by hand.
 
 pub const SCHEMA_VERSION: &str = "missiond.compiled-runtime-config.v1";
-pub const SOURCE_HASH: &str = "5efdca9d0e77e30bee2421e2a15bd149";
+pub const SOURCE_HASH: &str = "f51b090c0248a23436caf9b2000b3b57";
 pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
   "blueprint": ".missiond/v3/missiond-blueprint.lisp",
   "source_units": [
@@ -27,7 +27,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
       "kind": "multi-section-shard",
       "included_by": ".missiond/v3/missiond-blueprint.lisp",
       "include_line": 278,
-      "source_hash": "b6a3bf63b98f0d3e5b47e113823a81d3"
+      "source_hash": "1477709a5741c931a0bfabf20e9edee3"
     },
     {
       "file": ".missiond/v3/shards/control-plane-runtime.lisp",
@@ -76,7 +76,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
       "kind": "multi-section-shard",
       "included_by": ".missiond/v3/missiond-blueprint.lisp",
       "include_line": 292,
-      "source_hash": "7e8474d882fb26cfecffbb0617b292ed"
+      "source_hash": "6b2e914f03d12bcde8af5a271e1e0abc"
     },
     {
       "file": ".missiond/v3/shards/universe/data-residency.lisp",
@@ -118,7 +118,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
       "kind": "implementation-map",
       "included_by": ".missiond/v3/missiond-blueprint.lisp",
       "include_line": 304,
-      "source_hash": "7b5c1a2a89b0b494442d4b1c7b69989e"
+      "source_hash": "830ab127c6ba5096faa73225847a688e"
     },
     {
       "file": ".missiond/v3/shards/implementation/knowledge-surfaces.lisp",
@@ -163,7 +163,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 323,
         "source_column": 3,
-        "source_hash": "5efdca9d0e77e30bee2421e2a15bd149"
+        "source_hash": "f51b090c0248a23436caf9b2000b3b57"
       }
     },
     {
@@ -188,7 +188,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 344,
         "source_column": 3,
-        "source_hash": "5efdca9d0e77e30bee2421e2a15bd149"
+        "source_hash": "f51b090c0248a23436caf9b2000b3b57"
       }
     },
     {
@@ -210,7 +210,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 357,
         "source_column": 3,
-        "source_hash": "5efdca9d0e77e30bee2421e2a15bd149"
+        "source_hash": "f51b090c0248a23436caf9b2000b3b57"
       }
     },
     {
@@ -229,7 +229,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 369,
         "source_column": 3,
-        "source_hash": "5efdca9d0e77e30bee2421e2a15bd149"
+        "source_hash": "f51b090c0248a23436caf9b2000b3b57"
       }
     },
     {
@@ -250,7 +250,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 379,
         "source_column": 3,
-        "source_hash": "5efdca9d0e77e30bee2421e2a15bd149"
+        "source_hash": "f51b090c0248a23436caf9b2000b3b57"
       }
     },
     {
@@ -293,7 +293,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 390,
         "source_column": 3,
-        "source_hash": "5efdca9d0e77e30bee2421e2a15bd149"
+        "source_hash": "f51b090c0248a23436caf9b2000b3b57"
       }
     },
     {
@@ -315,7 +315,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/universe/project-registry.lisp",
         "source_line": 1,
         "source_column": 1,
-        "source_hash": "5efdca9d0e77e30bee2421e2a15bd149"
+        "source_hash": "f51b090c0248a23436caf9b2000b3b57"
       }
     },
     {
@@ -335,7 +335,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 1,
         "source_column": 3,
-        "source_hash": "5efdca9d0e77e30bee2421e2a15bd149"
+        "source_hash": "f51b090c0248a23436caf9b2000b3b57"
       }
     },
     {
@@ -362,7 +362,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 117,
         "source_column": 3,
-        "source_hash": "5efdca9d0e77e30bee2421e2a15bd149"
+        "source_hash": "f51b090c0248a23436caf9b2000b3b57"
       }
     },
     {
@@ -399,7 +399,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 183,
         "source_column": 3,
-        "source_hash": "5efdca9d0e77e30bee2421e2a15bd149"
+        "source_hash": "f51b090c0248a23436caf9b2000b3b57"
       }
     },
     {
@@ -443,7 +443,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 140,
         "source_column": 3,
-        "source_hash": "5efdca9d0e77e30bee2421e2a15bd149"
+        "source_hash": "f51b090c0248a23436caf9b2000b3b57"
       }
     }
   ],
@@ -684,6 +684,99 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "sandbox": null,
         "approval_policy": "plan",
         "tool_policy_path": ".missiond/v3/policies/gemini-readonly-policy.toml"
+      },
+      {
+        "id": "agy-research",
+        "engine": "agy",
+        "role": "researcher",
+        "slot_id": "slot-agy-research",
+        "task_type": "agy_research",
+        "model_profile": null,
+        "model": null,
+        "task_classes": [
+          "research",
+          "review",
+          "context-pack",
+          "survey"
+        ],
+        "capabilities": [
+          "read-only",
+          "analysis",
+          "design-review",
+          "provider-successor"
+        ],
+        "max_concurrency": 1,
+        "timeout_secs": 900,
+        "default_use": "agy-read-only-research",
+        "accepts_boardtask": true,
+        "write_allowed": false,
+        "reasoning_effort": null,
+        "search_enabled": false,
+        "sandbox": null,
+        "approval_policy": null,
+        "tool_policy_path": null
+      },
+      {
+        "id": "codex-code-worker",
+        "engine": "codex",
+        "role": "coder",
+        "slot_id": "slot-codex-code-worker",
+        "task_type": "codex_code_worker",
+        "model_profile": "codex-master-gpt-5-5-xhigh",
+        "model": null,
+        "task_classes": [
+          "code",
+          "implementation",
+          "design",
+          "review",
+          "regression-analysis"
+        ],
+        "capabilities": [
+          "code-read",
+          "code-write",
+          "scoped-commit",
+          "shell-exec",
+          "search"
+        ],
+        "max_concurrency": 1,
+        "timeout_secs": 1800,
+        "default_use": "codex-code-shard",
+        "accepts_boardtask": true,
+        "write_allowed": true,
+        "reasoning_effort": "xhigh",
+        "search_enabled": true,
+        "sandbox": "danger-full-access",
+        "approval_policy": "never",
+        "tool_policy_path": null
+      },
+      {
+        "id": "codex-review-worker",
+        "engine": "codex",
+        "role": "reviewer",
+        "slot_id": "slot-codex-review-worker",
+        "task_type": "codex_review_worker",
+        "model_profile": "codex-master-gpt-5-5-xhigh",
+        "model": null,
+        "task_classes": [
+          "review",
+          "architecture-review",
+          "regression-analysis"
+        ],
+        "capabilities": [
+          "code-read",
+          "design-review",
+          "search"
+        ],
+        "max_concurrency": 1,
+        "timeout_secs": 1200,
+        "default_use": "codex-review-shard",
+        "accepts_boardtask": true,
+        "write_allowed": false,
+        "reasoning_effort": "xhigh",
+        "search_enabled": true,
+        "sandbox": "read-only",
+        "approval_policy": "never",
+        "tool_policy_path": null
       },
       {
         "id": "codex-master-control",

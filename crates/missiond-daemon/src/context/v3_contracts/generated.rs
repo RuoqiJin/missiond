@@ -13,7 +13,7 @@ pub struct SourceUnit {
 }
 
 pub const SCHEMA_VERSION: &str = "missiond.contract-abi.v1";
-pub const SOURCE_HASH: &str = "5efdca9d0e77e30bee2421e2a15bd149";
+pub const SOURCE_HASH: &str = "f51b090c0248a23436caf9b2000b3b57";
 
 pub const SOURCE_UNITS: &[SourceUnit] = &[
     SourceUnit {
@@ -35,7 +35,7 @@ pub const SOURCE_UNITS: &[SourceUnit] = &[
         kind: "multi-section-shard",
         included_by: Some(".missiond/v3/missiond-blueprint.lisp"),
         include_line: Some(278u32),
-        source_hash: "b6a3bf63b98f0d3e5b47e113823a81d3",
+        source_hash: "1477709a5741c931a0bfabf20e9edee3",
     },
     SourceUnit {
         file: ".missiond/v3/shards/control-plane-runtime.lisp",
@@ -84,7 +84,7 @@ pub const SOURCE_UNITS: &[SourceUnit] = &[
         kind: "multi-section-shard",
         included_by: Some(".missiond/v3/missiond-blueprint.lisp"),
         include_line: Some(292u32),
-        source_hash: "7e8474d882fb26cfecffbb0617b292ed",
+        source_hash: "6b2e914f03d12bcde8af5a271e1e0abc",
     },
     SourceUnit {
         file: ".missiond/v3/shards/universe/data-residency.lisp",
@@ -126,7 +126,7 @@ pub const SOURCE_UNITS: &[SourceUnit] = &[
         kind: "implementation-map",
         included_by: Some(".missiond/v3/missiond-blueprint.lisp"),
         include_line: Some(304u32),
-        source_hash: "7b5c1a2a89b0b494442d4b1c7b69989e",
+        source_hash: "830ab127c6ba5096faa73225847a688e",
     },
     SourceUnit {
         file: ".missiond/v3/shards/implementation/knowledge-surfaces.lisp",

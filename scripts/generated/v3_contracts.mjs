@@ -4,7 +4,7 @@
 // Do not edit by hand.
 
 export const SCHEMA_VERSION = "missiond.contract-abi.v1";
-export const SOURCE_HASH = "5efdca9d0e77e30bee2421e2a15bd149";
+export const SOURCE_HASH = "f51b090c0248a23436caf9b2000b3b57";
 export const SOURCE_UNITS = Object.freeze([
   {
     "file": ".missiond/v3/missiond-blueprint.lisp",
@@ -25,7 +25,7 @@ export const SOURCE_UNITS = Object.freeze([
     "kind": "multi-section-shard",
     "included_by": ".missiond/v3/missiond-blueprint.lisp",
     "include_line": 278,
-    "source_hash": "b6a3bf63b98f0d3e5b47e113823a81d3"
+    "source_hash": "1477709a5741c931a0bfabf20e9edee3"
   },
   {
     "file": ".missiond/v3/shards/control-plane-runtime.lisp",
@@ -74,7 +74,7 @@ export const SOURCE_UNITS = Object.freeze([
     "kind": "multi-section-shard",
     "included_by": ".missiond/v3/missiond-blueprint.lisp",
     "include_line": 292,
-    "source_hash": "7e8474d882fb26cfecffbb0617b292ed"
+    "source_hash": "6b2e914f03d12bcde8af5a271e1e0abc"
   },
   {
     "file": ".missiond/v3/shards/universe/data-residency.lisp",
@@ -116,7 +116,7 @@ export const SOURCE_UNITS = Object.freeze([
     "kind": "implementation-map",
     "included_by": ".missiond/v3/missiond-blueprint.lisp",
     "include_line": 304,
-    "source_hash": "7b5c1a2a89b0b494442d4b1c7b69989e"
+    "source_hash": "830ab127c6ba5096faa73225847a688e"
   },
   {
     "file": ".missiond/v3/shards/implementation/knowledge-surfaces.lisp",
@@ -1068,7 +1068,7 @@ export const FINAL_CONVERGENCE_GATE = Object.freeze({
     "source_file": ".missiond/v3/missiond-blueprint.lisp",
     "source_line": 310,
     "source_column": 3,
-    "source_hash": "5efdca9d0e77e30bee2421e2a15bd149"
+    "source_hash": "f51b090c0248a23436caf9b2000b3b57"
   }
 });
 export const PLAN_CONTRACT = Object.freeze({
