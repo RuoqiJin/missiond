@@ -118,7 +118,8 @@
        "Jarvis dispatch metadata MUST derive read_scope from the active runtime/project root (MISSIOND_PROJECT_ROOT, MISSIOND_REPO_ROOT, MISSIOND_WORKSPACE_ROOT, or current daemon cwd) and MUST NOT hardcode a developer-machine root path."
        "Jarvis result streaming MUST use task-result-artifact as canonical completion authority; Board summary notes are converted to artifacts before client-visible result_artifact events."
        "Jarvis result artifact writes MUST be bounded; missing or stalled artifact writes produce typed diagnostics and MUST NOT silently fall back to Board note final text."
-       "Jarvis public SSE streams MUST return a typed result_pending/follow_payload before mobile or reverse-proxy timeouts; follow-up requests with missiond_follow_task_id resume the existing BoardTask instead of creating a new intent or plan."]
+       "Jarvis public SSE streams MUST return a typed result_pending/follow_payload before mobile or reverse-proxy timeouts; follow-up requests with missiond_follow_task_id resume the existing BoardTask instead of creating a new intent or plan."
+       "Jarvis intent/plan confirmations MUST accept both top-level missiond_intent_confirmed/missiond_plan_confirmed fields and wrapped missiond_confirm payloads, so iOS and external clients do not need to mirror MissionD's internal JSON shape."]
     :checks ["node scripts/check-v3-grounded-dispatch-isomorphism.mjs --json"])
 
   (unified-entry

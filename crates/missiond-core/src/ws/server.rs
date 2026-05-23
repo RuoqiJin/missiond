@@ -267,6 +267,24 @@ fn jarvis_public_stream_budget_secs() -> u64 {
     )
 }
 
+fn jarvis_confirm_bool(req: &serde_json::Value, key: &str) -> bool {
+    fn bool_at<'a>(value: &'a serde_json::Value, key: &str) -> Option<bool> {
+        value.get(key).and_then(|field| field.as_bool())
+    }
+
+    bool_at(req, key)
+        .or_else(|| {
+            req.get("missiond_confirm")
+                .and_then(|confirm| bool_at(confirm, key))
+        })
+        .or_else(|| {
+            req.get("missiond_confirm")
+                .and_then(|confirm| confirm.get("confirm_payload"))
+                .and_then(|payload| bool_at(payload, key))
+        })
+        .unwrap_or(false)
+}
+
 /// Parse Deploy Center failure webhook into an incident.
 /// Returns None for non-failure events (e.g. deploy success).
 fn parse_deploy_webhook(body: &str) -> Option<crate::types::MissionIncident> {
@@ -2206,14 +2224,8 @@ impl PTYWebSocketServer {
             return Ok(());
         }
 
-        let intent_confirmed = req
-            .get("missiond_intent_confirmed")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let plan_confirmed = req
-            .get("missiond_plan_confirmed")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let intent_confirmed = jarvis_confirm_bool(&req, "missiond_intent_confirmed");
+        let plan_confirmed = jarvis_confirm_bool(&req, "missiond_plan_confirmed");
         let exact_shard_ready = req
             .get("exact_shard_ready")
             .and_then(|v| v.as_bool())
@@ -4656,5 +4668,34 @@ mod tests {
         assert_eq!(clamp_jarvis_public_stream_budget_secs(Some(1)), 10);
         assert_eq!(clamp_jarvis_public_stream_budget_secs(Some(90)), 90);
         assert_eq!(clamp_jarvis_public_stream_budget_secs(Some(900)), 240);
+    }
+
+    #[test]
+    fn jarvis_confirmation_accepts_top_level_and_wrapped_payloads() {
+        let top_level = serde_json::json!({
+            "missiond_intent_confirmed": true,
+            "missiond_plan_confirmed": false
+        });
+        assert!(jarvis_confirm_bool(&top_level, "missiond_intent_confirmed"));
+        assert!(!jarvis_confirm_bool(&top_level, "missiond_plan_confirmed"));
+
+        let wrapped = serde_json::json!({
+            "missiond_confirm": {
+                "missiond_intent_confirmed": true
+            }
+        });
+        assert!(jarvis_confirm_bool(&wrapped, "missiond_intent_confirmed"));
+
+        let nested_payload = serde_json::json!({
+            "missiond_confirm": {
+                "confirm_payload": {
+                    "missiond_plan_confirmed": true
+                }
+            }
+        });
+        assert!(jarvis_confirm_bool(
+            &nested_payload,
+            "missiond_plan_confirmed"
+        ));
     }
 }
