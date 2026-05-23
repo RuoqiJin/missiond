@@ -231,6 +231,24 @@ fn jarvis_final_settle_ms() -> u64 {
         .clamp(MIN_SETTLE_MS, MAX_SETTLE_MS)
 }
 
+fn clamp_jarvis_task_wait_secs(value: Option<u64>) -> u64 {
+    const DEFAULT_WAIT_SECS: u64 = 180;
+    const MIN_WAIT_SECS: u64 = 15;
+    const MAX_WAIT_SECS: u64 = 300;
+
+    value
+        .unwrap_or(DEFAULT_WAIT_SECS)
+        .clamp(MIN_WAIT_SECS, MAX_WAIT_SECS)
+}
+
+fn jarvis_task_wait_secs() -> u64 {
+    clamp_jarvis_task_wait_secs(
+        std::env::var("MISSIOND_JARVIS_TASK_WAIT_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok()),
+    )
+}
+
 /// Parse Deploy Center failure webhook into an incident.
 /// Returns None for non-failure events (e.g. deploy success).
 fn parse_deploy_webhook(body: &str) -> Option<crate::types::MissionIncident> {
@@ -1444,10 +1462,7 @@ impl PTYWebSocketServer {
         chat_id: &str,
         task_id: &str,
     ) -> anyhow::Result<()> {
-        let wait_secs = std::env::var("MISSIOND_JARVIS_TASK_WAIT_SECS")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or(180);
+        let wait_secs = jarvis_task_wait_secs();
         let started_at = std::time::Instant::now();
         let mut last_status = String::new();
         let mut last_slot: Option<String> = None;
@@ -1461,9 +1476,18 @@ impl PTYWebSocketServer {
                     "phase": "workers_running",
                     "task_id": task_id,
                     "error": {"code": "JARVIS_WORKER_TIMEOUT", "message": format!("BoardTask did not reach a terminal state within {wait_secs}s")},
+                    "wait_secs": wait_secs,
                     "next_action": "Inspect the BoardTask, slot state, and task-result-artifact before retrying."
                 });
                 Self::write_sse_event(stream, "diagnostic", &diagnostic).await?;
+                let final_event = serde_json::json!({
+                    "phase": "timeout",
+                    "task_id": task_id,
+                    "status": "worker_timeout",
+                    "wait_secs": wait_secs,
+                    "terminal_task_result": false
+                });
+                Self::write_sse_event(stream, "final", &final_event).await?;
                 Self::write_sse_openai_text(
                     stream,
                     chat_id,
@@ -4479,5 +4503,13 @@ mod tests {
             "POST / HTTP/1.1\r\n\r\n",
             Some("secret")
         ));
+    }
+
+    #[test]
+    fn jarvis_task_wait_budget_is_bounded_for_mobile_clients() {
+        assert_eq!(clamp_jarvis_task_wait_secs(None), 180);
+        assert_eq!(clamp_jarvis_task_wait_secs(Some(1)), 15);
+        assert_eq!(clamp_jarvis_task_wait_secs(Some(120)), 120);
+        assert_eq!(clamp_jarvis_task_wait_secs(Some(900)), 300);
     }
 }
