@@ -19,6 +19,16 @@ pub struct SlotTaskConfig {
     pub role: Option<String>,
     /// Model override (for example, "sonnet", "opus", or a project Gemini model).
     pub model: Option<String>,
+    /// Provider-specific reasoning level, for example Codex `xhigh`.
+    pub reasoning_effort: Option<String>,
+    /// Provider web/search enablement.
+    pub search_enabled: bool,
+    /// Sandbox profile projected from V3 Lisp.
+    pub sandbox: Option<String>,
+    /// Approval profile projected from V3 Lisp.
+    pub approval_policy: Option<String>,
+    /// Optional provider tool policy file.
+    pub tool_policy_path: Option<PathBuf>,
     /// Max time to wait for LLM response.
     pub timeout: Duration,
     /// Working directory for the slot.
@@ -35,6 +45,11 @@ pub struct SlotTaskRequest {
     pub timeout: Duration,
     pub slot_id: Option<String>,
     pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub search_enabled: bool,
+    pub sandbox: Option<String>,
+    pub approval_policy: Option<String>,
+    pub tool_policy_path: Option<PathBuf>,
     pub lifecycle: Lifecycle,
     pub cwd: PathBuf,
     pub skip_permissions: bool,
@@ -48,6 +63,11 @@ impl SlotTaskRequest {
             timeout: config.timeout,
             slot_id: config.slot_id.clone(),
             model: config.model.clone(),
+            reasoning_effort: config.reasoning_effort.clone(),
+            search_enabled: config.search_enabled,
+            sandbox: config.sandbox.clone(),
+            approval_policy: config.approval_policy.clone(),
+            tool_policy_path: config.tool_policy_path.clone(),
             lifecycle: config.lifecycle,
             cwd: config.cwd.clone(),
             skip_permissions: config.skip_permissions,

@@ -56,6 +56,75 @@ pub type ContextEnricherFn = Arc<
 /// Late-bound container for context enricher (set after AppState is constructed).
 pub type ContextEnricherSlot = Arc<tokio::sync::RwLock<Option<ContextEnricherFn>>>;
 
+/// Persisted grounding context returned by the daemon-side context gatherer.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct JarvisGroundingResult {
+    pub grounding_context_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_pack_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_hash: Option<String>,
+    #[serde(default)]
+    pub sources_used: Vec<String>,
+    #[serde(default)]
+    pub diagnostics: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct JarvisGroundingRequest {
+    pub query: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
+    pub chat_id: String,
+    #[serde(default)]
+    pub unknowns: Vec<String>,
+}
+
+pub type JarvisGroundingFn = Arc<
+    dyn Fn(
+            JarvisGroundingRequest,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<JarvisGroundingResult, String>> + Send>,
+        > + Send
+        + Sync,
+>;
+
+pub type JarvisGroundingSlot = Arc<tokio::sync::RwLock<Option<JarvisGroundingFn>>>;
+
+/// Shared-artifact result for Jarvis intent/plan lifecycle artifacts.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct JarvisArtifactResult {
+    pub artifact_id: String,
+    pub artifact_hash: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct JarvisArtifactRequest {
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    pub payload: serde_json::Value,
+    pub metadata: serde_json::Value,
+}
+
+pub type JarvisArtifactFn = Arc<
+    dyn Fn(
+            JarvisArtifactRequest,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<JarvisArtifactResult, String>> + Send>,
+        > + Send
+        + Sync,
+>;
+
+pub type JarvisArtifactSlot = Arc<tokio::sync::RwLock<Option<JarvisArtifactFn>>>;
+
 /// WebSocket server options
 pub struct WSServerOptions {
     /// Server port
@@ -76,6 +145,10 @@ pub struct WSServerOptions {
     pub db: Option<Arc<dyn crate::db::traits::MissionStore>>,
     /// Context enricher for Jarvis chat completions (late-bound by daemon)
     pub context_enricher: ContextEnricherSlot,
+    /// Grounded-dispatch context gatherer for Jarvis intent/plan gate.
+    pub jarvis_grounding: JarvisGroundingSlot,
+    /// Shared artifact writer for Jarvis intent/plan gate.
+    pub jarvis_artifact_writer: JarvisArtifactSlot,
     /// Number of native MCP tools (injected into Jarvis system prompt)
     pub tool_count: usize,
     /// V3-projected default slot for OpenAI-compatible chat completions.
@@ -95,6 +168,8 @@ pub struct PTYWebSocketServer {
     frontend_events_tx: Option<broadcast::Sender<String>>,
     db: Option<Arc<dyn crate::db::traits::MissionStore>>,
     context_enricher: ContextEnricherSlot,
+    jarvis_grounding: JarvisGroundingSlot,
+    jarvis_artifact_writer: JarvisArtifactSlot,
     tool_count: usize,
     default_chat_slot: String,
 }
@@ -457,6 +532,8 @@ impl PTYWebSocketServer {
             frontend_events_tx: options.frontend_events_tx,
             db: options.db,
             context_enricher: Arc::clone(&options.context_enricher),
+            jarvis_grounding: Arc::clone(&options.jarvis_grounding),
+            jarvis_artifact_writer: Arc::clone(&options.jarvis_artifact_writer),
             tool_count: options.tool_count,
             default_chat_slot: options.default_chat_slot,
         }
@@ -470,6 +547,16 @@ impl PTYWebSocketServer {
     /// Get the context enricher slot for late-binding by daemon.
     pub fn context_enricher_slot(&self) -> &ContextEnricherSlot {
         &self.context_enricher
+    }
+
+    /// Get the Jarvis grounding slot for late-binding by daemon.
+    pub fn jarvis_grounding_slot(&self) -> &JarvisGroundingSlot {
+        &self.jarvis_grounding
+    }
+
+    /// Get the Jarvis artifact writer slot for late-binding by daemon.
+    pub fn jarvis_artifact_writer_slot(&self) -> &JarvisArtifactSlot {
+        &self.jarvis_artifact_writer
     }
 
     /// Start the server
@@ -519,6 +606,8 @@ impl PTYWebSocketServer {
         let frontend_events_tx = self.frontend_events_tx.clone();
         let db = self.db.clone();
         let context_enricher = self.context_enricher.clone();
+        let jarvis_grounding = self.jarvis_grounding.clone();
+        let jarvis_artifact_writer = self.jarvis_artifact_writer.clone();
         let tool_count = self.tool_count;
         let default_chat_slot = self.default_chat_slot.clone();
 
@@ -538,10 +627,12 @@ impl PTYWebSocketServer {
                                 let frontend_events_tx = frontend_events_tx.clone();
                                 let db = db.clone();
                                 let context_enricher = context_enricher.clone();
+                                let jarvis_grounding = jarvis_grounding.clone();
+                                let jarvis_artifact_writer = jarvis_artifact_writer.clone();
                                 let tool_count = tool_count;
                                 let default_chat_slot = default_chat_slot.clone();
                                 tokio::spawn(async move {
-                                    if let Err(e) = Self::handle_connection(stream, addr, pty_manager, cc_tasks_watcher, screenshot_broker, jarvis_trace, incident_tx, system_event_tx, frontend_events_tx, db, context_enricher, tool_count, default_chat_slot).await {
+                                    if let Err(e) = Self::handle_connection(stream, addr, pty_manager, cc_tasks_watcher, screenshot_broker, jarvis_trace, incident_tx, system_event_tx, frontend_events_tx, db, context_enricher, jarvis_grounding, jarvis_artifact_writer, tool_count, default_chat_slot).await {
                                         error!(?e, ?addr, "WebSocket connection error");
                                     }
                                 });
@@ -1215,6 +1306,101 @@ impl PTYWebSocketServer {
         Ok(())
     }
 
+    async fn write_sse_event(
+        stream: &mut TcpStream,
+        event: &str,
+        payload: &serde_json::Value,
+    ) -> anyhow::Result<()> {
+        stream
+            .write_all(format!("event: {event}\ndata: {payload}\n\n").as_bytes())
+            .await?;
+        stream.flush().await?;
+        Ok(())
+    }
+
+    async fn write_sse_openai_text(
+        stream: &mut TcpStream,
+        chat_id: &str,
+        text: &str,
+        finish_reason: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let chunk = serde_json::json!({
+            "id": chat_id,
+            "object": "chat.completion.chunk",
+            "model": "jarvis-missiond",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": text},
+                "finish_reason": finish_reason.unwrap_or("stop")
+            }]
+        });
+        stream
+            .write_all(format!("data: {chunk}\n\n").as_bytes())
+            .await?;
+        stream.flush().await?;
+        Ok(())
+    }
+
+    async fn finish_sse(stream: &mut TcpStream) -> anyhow::Result<()> {
+        stream.write_all(b"data: [DONE]\n\n").await?;
+        stream.flush().await?;
+        stream.shutdown().await?;
+        Ok(())
+    }
+
+    async fn fail_jarvis_gate(
+        stream: &mut TcpStream,
+        message: impl Into<String>,
+        stage: &str,
+    ) -> anyhow::Result<()> {
+        let message = message.into();
+        let diagnostic = serde_json::json!({
+            "phase": stage,
+            "error": {"message": message},
+            "next_action": "Fix the missing runtime capability instead of falling back to direct PTY execution."
+        });
+        Self::write_sse_event(stream, "diagnostic", &diagnostic).await?;
+        Self::finish_sse(stream).await
+    }
+
+    async fn gather_jarvis_grounding(
+        slot: &JarvisGroundingSlot,
+        req: JarvisGroundingRequest,
+    ) -> Result<JarvisGroundingResult, String> {
+        let guard = slot.read().await;
+        let Some(ref grounder) = *guard else {
+            return Err("Jarvis grounding runtime is not configured".to_string());
+        };
+        let grounder = Arc::clone(grounder);
+        drop(guard);
+        grounder(req).await.and_then(|result| {
+            if result.grounding_context_id.trim().is_empty() {
+                Err("Jarvis grounding returned an empty grounding_context_id".to_string())
+            } else {
+                Ok(result)
+            }
+        })
+    }
+
+    async fn put_jarvis_artifact(
+        slot: &JarvisArtifactSlot,
+        req: JarvisArtifactRequest,
+    ) -> Result<JarvisArtifactResult, String> {
+        let guard = slot.read().await;
+        let Some(ref writer) = *guard else {
+            return Err("Jarvis artifact writer is not configured".to_string());
+        };
+        let writer = Arc::clone(writer);
+        drop(guard);
+        writer(req).await.and_then(|result| {
+            if result.artifact_id.trim().is_empty() || result.artifact_hash.trim().is_empty() {
+                Err("Jarvis artifact writer returned an empty artifact id/hash".to_string())
+            } else {
+                Ok(result)
+            }
+        })
+    }
+
     /// Handle POST /v1/chat/completions — OpenAI-compatible SSE endpoint
     async fn handle_chat_completions(
         mut stream: TcpStream,
@@ -1222,6 +1408,8 @@ impl PTYWebSocketServer {
         pty_manager: Arc<PTYManager>,
         trace_store: JarvisTraceStore,
         context_enricher: ContextEnricherSlot,
+        jarvis_grounding: JarvisGroundingSlot,
+        jarvis_artifact_writer: JarvisArtifactSlot,
         db: Option<Arc<dyn crate::db::traits::MissionStore>>,
         cc_tasks_watcher: Option<Arc<Mutex<CCTasksWatcher>>>,
         tool_count: usize,
@@ -1382,6 +1570,325 @@ impl PTYWebSocketServer {
         if user_message.is_empty() {
             let err = serde_json::json!({"error": {"message": "No user message found"}});
             Self::send_http_error(&mut stream, 400, "Bad Request", &err.to_string()).await?;
+            return Ok(());
+        }
+
+        let intent_confirmed = req
+            .get("missiond_intent_confirmed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let plan_confirmed = req
+            .get("missiond_plan_confirmed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let exact_shard_ready = req
+            .get("exact_shard_ready")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let strict_jarvis_gate = std::env::var("MISSIOND_JARVIS_INTENT_PLAN_GATE")
+            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+            .unwrap_or(true);
+        if strict_jarvis_gate && !proxy_mode && !exact_shard_ready {
+            let chat_id = format!(
+                "chatcmpl-jarvis-gate-{}",
+                chrono::Utc::now().timestamp_millis()
+            );
+            let sse_headers = "HTTP/1.1 200 OK\r\n\
+                Content-Type: text/event-stream\r\n\
+                Cache-Control: no-cache\r\n\
+                Connection: keep-alive\r\n\
+                Access-Control-Allow-Origin: *\r\n\
+                \r\n";
+            stream.write_all(sse_headers.as_bytes()).await?;
+            stream.flush().await?;
+
+            let jarvis_conv_id = if let Some(ref db) = db {
+                match db.jarvis_get_or_create(conversation_id.as_deref()).await {
+                    Ok(id) => {
+                        if !raw_user_text.is_empty() {
+                            let _ = db
+                                .router_chat_append_messages(
+                                    &id,
+                                    &[("user".to_string(), raw_user_text.clone())],
+                                )
+                                .await;
+                        }
+                        Some(id)
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Jarvis intent/plan gate cannot persist conversation");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            if let Some(ref cid) = jarvis_conv_id {
+                let meta_evt = serde_json::json!({"conversation_id": cid, "chat_id": chat_id});
+                let _ = stream
+                    .write_all(format!("event: meta\ndata: {}\n\n", meta_evt).as_bytes())
+                    .await;
+            }
+
+            let grounding = match Self::gather_jarvis_grounding(
+                &jarvis_grounding,
+                JarvisGroundingRequest {
+                    query: raw_user_text.clone(),
+                    conversation_id: jarvis_conv_id.clone(),
+                    chat_id: chat_id.clone(),
+                    unknowns: vec![
+                        "What project, skill, deploy fact, or tool context is needed before dispatch?"
+                            .to_string(),
+                        "Is this broad request ready for intent/plan confirmation or already an exact shard?"
+                            .to_string(),
+                    ],
+                },
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    Self::fail_jarvis_gate(&mut stream, error, "grounding").await?;
+                    return Ok(());
+                }
+            };
+            let grounding_context_id = grounding.grounding_context_id.clone();
+            let context_pack_path = grounding.context_pack_path.clone();
+            let grounding_artifact_hash = grounding.artifact_hash.clone();
+            let sources_used = grounding.sources_used.clone();
+            let grounding_diagnostics = grounding.diagnostics.clone();
+            let grounding_event = serde_json::json!({
+                "phase": "grounding",
+                "grounding_context_id": grounding_context_id,
+                "context_pack_path": context_pack_path,
+                "artifact_hash": grounding_artifact_hash,
+                "sources_used": sources_used,
+                "diagnostics": grounding_diagnostics,
+            });
+            Self::write_sse_event(&mut stream, "status", &grounding_event).await?;
+
+            let intent_payload = serde_json::json!({
+                "phase": "intent_draft",
+                "grounding_context_id": grounding_context_id,
+                "context_pack_path": context_pack_path,
+                "understanding": "我理解这是一个需要先确认意图、再拆 plan.lisp、再派工位执行的 Jarvis 请求。",
+                "user_message_preview": raw_user_text.chars().take(240).collect::<String>(),
+                "sources_used": sources_used,
+                "requires_confirmation": true
+            });
+            let intent_artifact = match Self::put_jarvis_artifact(
+                &jarvis_artifact_writer,
+                JarvisArtifactRequest {
+                    kind: "jarvis-intent-draft".to_string(),
+                    project_id: None,
+                    task_id: None,
+                    payload: intent_payload.clone(),
+                    metadata: serde_json::json!({
+                        "schema": "missiond.jarvis-intent-artifact.v1",
+                        "chat_id": chat_id.clone(),
+                        "conversation_id": jarvis_conv_id.clone(),
+                        "grounding_context_id": grounding_context_id,
+                    }),
+                },
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    Self::fail_jarvis_gate(&mut stream, error, "intent_artifact").await?;
+                    return Ok(());
+                }
+            };
+            let intent_artifact_id = intent_artifact.artifact_id.clone();
+            let intent_artifact_hash = intent_artifact.artifact_hash.clone();
+            let intent_artifact_path = intent_artifact.path.clone();
+            if !intent_confirmed {
+                let mut intent = intent_payload;
+                if let Some(object) = intent.as_object_mut() {
+                    object.insert(
+                        "intent_artifact_id".to_string(),
+                        serde_json::Value::String(intent_artifact_id.clone()),
+                    );
+                    object.insert(
+                        "intent_artifact_hash".to_string(),
+                        serde_json::Value::String(intent_artifact_hash.clone()),
+                    );
+                    object.insert(
+                        "intent_artifact_path".to_string(),
+                        serde_json::Value::String(intent_artifact_path.clone()),
+                    );
+                }
+                Self::write_sse_event(&mut stream, "intent_draft", &intent).await?;
+                let confirm = serde_json::json!({
+                    "phase": "awaiting_intent_confirmation",
+                    "message": "请确认：我的意图理解是否正确？确认后我会生成 plan.lisp，再等你确认后创建 BoardTask 并派工位。",
+                    "confirm_payload": {
+                        "missiond_intent_confirmed": true,
+                        "missiond_grounding_context_id": grounding_context_id,
+                        "missiond_intent_artifact_id": intent_artifact_id
+                    }
+                });
+                Self::write_sse_event(&mut stream, "confirm_required", &confirm).await?;
+                Self::write_sse_openai_text(
+                    &mut stream,
+                    &chat_id,
+                    "我已生成 intent.lisp 草案，等待你确认意图。",
+                    Some("stop"),
+                )
+                .await?;
+                Self::finish_sse(&mut stream).await?;
+                return Ok(());
+            }
+
+            let plan_payload = serde_json::json!({
+                "phase": "plan_draft",
+                "grounding_context_id": grounding_context_id,
+                "context_pack_path": context_pack_path,
+                "intent_artifact_id": intent_artifact_id,
+                "steps": [
+                    "确认 project_id / read_scope / skill evidence / deploy facts 等 grounding 证据",
+                    "把用户目标拆成可验收的 BoardTask / accepted shard",
+                    "按任务类型选择 Codex / ClaudeCode / Agy 工位",
+                    "等待 task-result-artifact，再由主控返回结果"
+                ],
+                "requires_confirmation": true
+            });
+            let plan_artifact = match Self::put_jarvis_artifact(
+                &jarvis_artifact_writer,
+                JarvisArtifactRequest {
+                    kind: "jarvis-plan-draft".to_string(),
+                    project_id: None,
+                    task_id: None,
+                    payload: plan_payload.clone(),
+                    metadata: serde_json::json!({
+                        "schema": "missiond.jarvis-plan-artifact.v1",
+                        "chat_id": chat_id.clone(),
+                        "conversation_id": jarvis_conv_id.clone(),
+                        "grounding_context_id": grounding_context_id,
+                        "intent_artifact_id": intent_artifact_id,
+                    }),
+                },
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    Self::fail_jarvis_gate(&mut stream, error, "plan_artifact").await?;
+                    return Ok(());
+                }
+            };
+            let plan_artifact_id = plan_artifact.artifact_id.clone();
+            let plan_artifact_hash = plan_artifact.artifact_hash.clone();
+            let plan_artifact_path = plan_artifact.path.clone();
+            if !plan_confirmed {
+                let mut plan = plan_payload;
+                if let Some(object) = plan.as_object_mut() {
+                    object.insert(
+                        "plan_artifact_id".to_string(),
+                        serde_json::Value::String(plan_artifact_id.clone()),
+                    );
+                    object.insert(
+                        "plan_artifact_hash".to_string(),
+                        serde_json::Value::String(plan_artifact_hash.clone()),
+                    );
+                    object.insert(
+                        "plan_artifact_path".to_string(),
+                        serde_json::Value::String(plan_artifact_path.clone()),
+                    );
+                }
+                Self::write_sse_event(&mut stream, "plan_draft", &plan).await?;
+                let confirm = serde_json::json!({
+                    "phase": "awaiting_plan_confirmation",
+                    "message": "请确认 plan.lisp。确认后我会创建 BoardTask 并派工位，不会让主控直接做实现。",
+                    "confirm_payload": {
+                        "missiond_intent_confirmed": true,
+                        "missiond_plan_confirmed": true,
+                        "missiond_grounding_context_id": grounding_context_id,
+                        "missiond_intent_artifact_id": intent_artifact_id,
+                        "missiond_plan_artifact_id": plan_artifact_id
+                    }
+                });
+                Self::write_sse_event(&mut stream, "confirm_required", &confirm).await?;
+                Self::write_sse_openai_text(
+                    &mut stream,
+                    &chat_id,
+                    "我已生成 plan.lisp 草案，等待你确认计划。",
+                    Some("stop"),
+                )
+                .await?;
+                Self::finish_sse(&mut stream).await?;
+                return Ok(());
+            }
+
+            let Some(ref db) = db else {
+                let err = serde_json::json!({"error": {"message": "MissionD DB unavailable; cannot create grounded BoardTask"}});
+                let _ = stream
+                    .write_all(format!("event: diagnostic\ndata: {}\n\n", err).as_bytes())
+                    .await;
+                let _ = stream.write_all(b"data: [DONE]\n\n").await;
+                let _ = stream.flush().await;
+                stream.shutdown().await?;
+                return Ok(());
+            };
+
+            let task_title: String = if raw_user_text.chars().count() > 80 {
+                format!("{}...", raw_user_text.chars().take(77).collect::<String>())
+            } else {
+                raw_user_text.clone()
+            };
+            let meta = serde_json::json!({
+                "source": "jarvis-intent-plan-gate",
+                "conversation_id": jarvis_conv_id.as_deref().unwrap_or(""),
+                "grounding_context_id": grounding_context_id,
+                "context_pack_path": context_pack_path,
+                "intent_artifact_id": intent_artifact_id,
+                "plan_artifact_id": plan_artifact_id,
+                "user_message": raw_user_text,
+            });
+            let task_input = crate::types::CreateBoardTaskInput {
+                title: task_title,
+                description: Some(meta.to_string()),
+                priority: None,
+                category: Some("jarvis".to_string()),
+                project: None,
+                server: None,
+                due_date: None,
+                parent_id: None,
+                assignee: None,
+                auto_execute: Some(true),
+                prompt_template: Some(user_message.clone()),
+                hidden: Some(false),
+                flow_template: None,
+                depends_on: None,
+                dedupe_key: None,
+                timeout_secs: None,
+                context_intent: Some("jarvis-plan-confirmed".to_string()),
+            };
+            match db.create_board_task(&task_input).await {
+                Ok(task) => {
+                    let event = serde_json::json!({
+                        "task_id": task.id,
+                        "title": task.title,
+                        "grounding_context_id": grounding_context_id,
+                        "intent_artifact_id": intent_artifact_id,
+                        "plan_artifact_id": plan_artifact_id,
+                    });
+                    Self::write_sse_event(&mut stream, "board_task_created", &event).await?;
+                    Self::write_sse_openai_text(
+                        &mut stream,
+                        &chat_id,
+                        "计划已确认，我已创建 BoardTask 并交给调度链路。后续结果会由主控通过 durable artifact 返回。",
+                        Some("stop"),
+                    )
+                    .await?;
+                }
+                Err(e) => {
+                    let err = serde_json::json!({"error": {"message": format!("Failed to create BoardTask: {}", e)}});
+                    Self::write_sse_event(&mut stream, "diagnostic", &err).await?;
+                }
+            }
+            Self::finish_sse(&mut stream).await?;
             return Ok(());
         }
 
@@ -2677,6 +3184,8 @@ impl PTYWebSocketServer {
         frontend_events_tx: Option<broadcast::Sender<String>>,
         db: Option<Arc<dyn crate::db::traits::MissionStore>>,
         context_enricher: ContextEnricherSlot,
+        jarvis_grounding: JarvisGroundingSlot,
+        jarvis_artifact_writer: JarvisArtifactSlot,
         tool_count: usize,
         default_chat_slot: String,
     ) -> anyhow::Result<()> {
@@ -2741,6 +3250,8 @@ impl PTYWebSocketServer {
                             pm,
                             jarvis_trace,
                             context_enricher,
+                            jarvis_grounding,
+                            jarvis_artifact_writer,
                             db,
                             cc_tasks_watcher,
                             tool_count,

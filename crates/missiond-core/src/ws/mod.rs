@@ -11,6 +11,8 @@ mod server;
 pub use jarvis_trace::JarvisTraceStore;
 pub use screenshot_broker::{ScreenshotBroker, ScreenshotResult};
 pub use server::{
-    ContextEnrichResult, ContextEnricherFn, ContextEnricherSlot, PTYWebSocketServer,
+    ContextEnrichResult, ContextEnricherFn, ContextEnricherSlot, JarvisArtifactFn,
+    JarvisArtifactRequest, JarvisArtifactResult, JarvisArtifactSlot, JarvisGroundingFn,
+    JarvisGroundingRequest, JarvisGroundingResult, JarvisGroundingSlot, PTYWebSocketServer,
     WSServerOptions,
 };

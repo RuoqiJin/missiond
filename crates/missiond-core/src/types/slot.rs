@@ -222,6 +222,9 @@ impl SlotConfig {
             CliEngine::Gemini => {
                 // Gemini CLI: no special capabilities yet
             }
+            CliEngine::Agy => {
+                // Antigravity CLI: no special capabilities yet
+            }
         }
     }
 }

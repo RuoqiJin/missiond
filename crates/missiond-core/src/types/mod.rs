@@ -144,6 +144,11 @@ mod tests {
         let json = r#"{"id":"s3","role":"vision","description":"test","engine":"codex"}"#;
         let config: SlotConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.engine, CliEngine::Codex);
+
+        // JSON with engine: agy
+        let json = r#"{"id":"s4","role":"research","description":"test","engine":"agy"}"#;
+        let config: SlotConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.engine, CliEngine::Agy);
     }
 
     #[test]
@@ -151,6 +156,7 @@ mod tests {
         assert_eq!(CliEngine::ClaudeCode.to_string(), "claude_code");
         assert_eq!(CliEngine::Gemini.to_string(), "gemini");
         assert_eq!(CliEngine::Codex.to_string(), "codex");
+        assert_eq!(CliEngine::Agy.to_string(), "agy");
     }
 
     #[test]

@@ -13,6 +13,7 @@
           "Implementation workers require accepted_shard_id, context_pack_path, write_scope, and write lease; broad objectives are investigation/design work, not code shards."
           "Skill edits route to ClaudeCode skill-maintainer/deploy-ops lanes; Codex owns CLI, architecture, verification, and small control-plane patches."
           "Deployment facts live in deploy-center, secrets in secret-store, and project identity/maturity in MissionD Universe."
+          "Remote node updates, including Mac mini MissionD, sync source through GitHub or XJP codebase/deploy-center lanes, then build and deploy on the target node; ad-hoc rsync/scp from an operator laptop is break-glass only and must not be the normal workflow."
           "PTY is diagnostic only; durable provider logs, EventBus, task-result-artifact, and Board lifecycle are completion authority."])
      (layer L1-current-task
        :source "mission_context_boot + mission_master_status + active BoardTask/work-order"

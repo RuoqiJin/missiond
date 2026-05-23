@@ -170,11 +170,12 @@ let v3_surface_to_json node =
     | _ -> None
   in
   Printf.sprintf
-    {|{"id":%s,"status":%s,"implements":%s,"code":%s}|}
+    {|{"id":%s,"status":%s,"implements":%s,"code":%s,"note":%s}|}
     (json_opt_string id)
     (json_opt_string (prop_text ":status" props))
     (json_string_list (prop_text_list ":implements" props))
     (json_string_list (prop_text_list ":code" props))
+    (json_opt_string (prop_text ":note" props))
 
 let v3_function_to_json pillar_id node =
   let props = keyword_props ~start:2 node in
@@ -271,12 +272,13 @@ let semantic_surface_fact source_hash file node =
     | _ -> "<missing>"
   in
   Printf.sprintf
-    {|{"fact_id":%s,"kind":"surface","project_id":"missiond","id":%s,"status":%s,"implements":%s,"code":%s,"source":%s}|}
+    {|{"fact_id":%s,"kind":"surface","project_id":"missiond","id":%s,"status":%s,"implements":%s,"code":%s,"note":%s,"source":%s}|}
     (json_string ("surface:" ^ safe_id id))
     (json_string id)
     (json_opt_string (prop_text ":status" props))
     (json_string_list (prop_text_list ":implements" props))
     (json_string_list (prop_text_list ":code" props))
+    (json_opt_string (prop_text ":note" props))
     (source_map_json source_hash file node)
 
 let semantic_artifact_fact source_hash file node =

@@ -455,6 +455,7 @@ fn canonical_source_for_engine(engine: CliEngine) -> &'static str {
         CliEngine::ClaudeCode => "claude_code",
         CliEngine::Gemini => "gemini_cli",
         CliEngine::Codex => "codex_cli",
+        CliEngine::Agy => "agy_cli",
     }
 }
 

@@ -19,7 +19,7 @@ const usage = `Usage:
   node scripts/check-v3-workstation-pool-isomorphism.mjs [--json] [--dry-fixture]
 
 Checks the V3 workstation-pool Lisp/code isomorphism contract:
-  - V3 declares Claude Code Default, Claude fast-patch, Gemini, and Codex master workers.
+  - V3 declares Claude Code Default, Claude fast-patch, Gemini, Codex, and Agy workers.
   - Claude coding default remains coding-default-opus-4-7, which omits --model.
   - Gemini remains read-only until a separate write smoke promotes it.
   - Rust projects the pool into SlotManager, MissionControl runtime slots,
@@ -32,7 +32,10 @@ const FILES = {
   geminiPolicy: '.missiond/v3/policies/gemini-readonly-policy.toml',
   runtime: 'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
   main: 'crates/missiond-daemon/src/main.rs',
+  genericCli: 'crates/missiond-daemon/src/slot_orchestrator/generic_cli.rs',
+  controlTree: 'crates/missiond-daemon/src/control_tree.rs',
   ptySession: 'crates/missiond-pty/src/session.rs',
+  ptyRecognition: 'crates/missiond-pty/src/pty_recognition.rs',
   autopilot: 'crates/missiond-daemon/src/engine/intent_engine/autopilot.rs',
   computeSlot: 'crates/missiond-daemon/src/handlers/compute/compute_slot.rs',
   slotTool: 'crates/missiond-daemon/src/handlers/compute/slot.rs',
@@ -100,6 +103,9 @@ function checkFiles(root) {
     'gemini-ultra-pro',
     'gemini-fast-survey',
     'codex-master-control',
+    'codex-code-worker',
+    'codex-review-worker',
+    'agy-research',
     'read-only',
     ':tool-policy-path ".missiond/v3/policies/gemini-readonly-policy.toml"',
     'mission_compute_slot action=list exposes workstation_pool',
@@ -123,11 +129,16 @@ function checkFiles(root) {
     'find_form(source, "workstation-pool")',
     'workstation-pool must include a Claude Code default BoardTask worker',
     'workstation-pool must include a read-only Gemini BoardTask worker',
+    'workstation-pool must include a read-only Agy BoardTask worker',
     'workstation-pool must include a non-shard Codex master-control worker',
+    'workstation-pool must include at least one Codex non-master worker lane',
     '"claude-code-default"',
     '"claude-code-deploy-ops"',
     '"gemini-ultra-pro"',
     '"codex-master-control"',
+    'worker.engine == "agy"',
+    'worker.engine == "codex"',
+    'worker.role != "orchestrator"',
     'reasoning_effort',
     'search_enabled',
     'approval_policy',
@@ -137,6 +148,9 @@ function checkFiles(root) {
 
   requireAll(diagnostics, FILES.main, sources.main, [
     'fn workstation_pool_model',
+    'GenericCliSlotManager::new',
+    'CliEngine::Agy',
+    '"agy" | "agy-cli"',
     'fn startup_slot_config',
     'fn workstation_pool_slot_config',
     'reasoning_effort: worker.reasoning_effort.clone()',
@@ -146,13 +160,34 @@ function checkFiles(root) {
     'for worker in workstation_config.workstation_pool()',
     'dangerously_skip_permissions: Some(worker.write_allowed)',
     'tool_policy_path: worker.tool_policy_path.clone()',
+    'reasoning_effort: worker.reasoning_effort.clone()',
+    'search_enabled: worker.search_enabled',
     'skip_permissions: worker.write_allowed',
     'state.mission.register_runtime_slot(slot_config)',
     'SlotManager: workstation pool registered from V3',
   ]);
 
+  requireAll(diagnostics, FILES.genericCli, sources.genericCli, [
+    'GenericCliSlotManager',
+    'PTYSpawnOptions',
+    'reasoning_effort: req.reasoning_effort.clone()',
+    'search_enabled: req.search_enabled',
+    'sandbox: req.sandbox.clone()',
+    'approval_policy: req.approval_policy.clone()',
+    'tool_policy_path: req.tool_policy_path.clone()',
+    'canonical_source_for_engine(self.engine)',
+    'TextComplete',
+  ]);
+
+  requireAll(diagnostics, FILES.controlTree, sources.controlTree, [
+    'Agy,',
+    'Self::Agy => None',
+  ]);
+
   requireAll(diagnostics, FILES.ptySession, sources.ptySession, [
     'CliEngine::Gemini',
+    'CliEngine::Agy',
+    '"agy chat"',
     '--approval-mode plan',
     '--policy',
     '--approval-mode yolo',
@@ -160,6 +195,12 @@ function checkFiles(root) {
     'Gemini CLI: read-only tool policy enabled',
     'Gemini CLI: plan/read-only approval mode enabled',
     'gemini_command_uses_plan_mode_unless_permissions_are_skipped',
+  ]);
+  requireAll(diagnostics, FILES.ptyRecognition, sources.ptyRecognition, [
+    'CliEngine::Agy => recognize_agy(lines)',
+    'fn recognize_agy',
+    'agy_idle_screen_is_idle',
+    'agy_auth_or_quota_error_is_blocked',
   ]);
   forbidAll(diagnostics, FILES.ptySession, sources.ptySession, [
     'parts.push_str(" --yolo")',
@@ -289,6 +330,22 @@ function validateBlueprint(file, source, diagnostics) {
   validateGeminiWorker(file, byId.get('gemini-ultra-pro'), diagnostics);
   validateGeminiFastWorker(file, byId.get('gemini-fast-survey'), diagnostics);
   validateCodexMasterWorker(file, byId.get('codex-master-control'), diagnostics);
+  validateCodexWorker(file, byId.get('codex-code-worker'), diagnostics, {
+    role: 'coder',
+    slotId: 'slot-codex-code-worker',
+    taskType: 'codex_code_worker',
+    writeAllowed: true,
+    taskClasses: ['code', 'design', 'review', 'regression-analysis'],
+  });
+  validateCodexWorker(file, byId.get('codex-review-worker'), diagnostics, {
+    role: 'reviewer',
+    slotId: 'slot-codex-review-worker',
+    taskType: 'codex_review_worker',
+    writeAllowed: false,
+    sandbox: 'read-only',
+    taskClasses: ['review', 'architecture-review', 'regression-analysis'],
+  });
+  validateAgyWorker(file, byId.get('agy-research'), diagnostics);
 
   const impl = root.children.find((form) => isList(form) && head(form) === 'implementation-map');
   const surface = impl?.children.find(
@@ -306,7 +363,9 @@ function validateBlueprint(file, source, diagnostics) {
   for (const required of [
     'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
     'crates/missiond-daemon/src/main.rs',
+    'crates/missiond-daemon/src/slot_orchestrator/generic_cli.rs',
     'crates/missiond-pty/src/session.rs',
+    'crates/missiond-pty/src/pty_recognition.rs',
     'crates/missiond-daemon/src/engine/intent_engine/autopilot.rs',
     'crates/missiond-daemon/src/handlers/compute/compute_slot.rs',
     'crates/missiond-daemon/src/handlers/compute/slot.rs',
@@ -316,6 +375,42 @@ function validateBlueprint(file, source, diagnostics) {
       diagnostics.push({ file, message: `workstation-pool surface missing code ref: ${required}` });
     }
   }
+}
+
+function validateCodexWorker(file, worker, diagnostics, expected) {
+  if (!worker) {
+    diagnostics.push({ file, message: `workstation-pool missing ${expected.taskType} worker` });
+    return;
+  }
+  const props = readKeywordProps(worker, { start: 2 });
+  requirePropText(diagnostics, file, props, ':engine', 'codex');
+  requirePropText(diagnostics, file, props, ':role', expected.role);
+  requirePropText(diagnostics, file, props, ':slot-id', expected.slotId);
+  requirePropText(diagnostics, file, props, ':task-type', expected.taskType);
+  requirePropText(diagnostics, file, props, ':model-profile', 'codex-master-gpt-5-5-xhigh');
+  requirePropText(diagnostics, file, props, ':reasoning-effort', 'xhigh');
+  requirePropText(diagnostics, file, props, ':sandbox', expected.sandbox ?? 'danger-full-access');
+  requirePropText(diagnostics, file, props, ':approval-policy', 'never');
+  requirePropBool(diagnostics, file, props, ':search', true);
+  requirePropBool(diagnostics, file, props, ':accepts-boardtask', true);
+  requirePropBool(diagnostics, file, props, ':write-allowed', expected.writeAllowed);
+  requireListItems(diagnostics, file, props, ':task-classes', expected.taskClasses);
+}
+
+function validateAgyWorker(file, worker, diagnostics) {
+  if (!worker) {
+    diagnostics.push({ file, message: 'workstation-pool missing agy-research worker' });
+    return;
+  }
+  const props = readKeywordProps(worker, { start: 2 });
+  requirePropText(diagnostics, file, props, ':engine', 'agy');
+  requirePropText(diagnostics, file, props, ':role', 'researcher');
+  requirePropText(diagnostics, file, props, ':slot-id', 'slot-agy-research');
+  requirePropText(diagnostics, file, props, ':task-type', 'agy_research');
+  requirePropBool(diagnostics, file, props, ':accepts-boardtask', true);
+  requirePropBool(diagnostics, file, props, ':write-allowed', false);
+  requireListItems(diagnostics, file, props, ':task-classes', ['research', 'review', 'context-pack']);
+  requireListItems(diagnostics, file, props, ':capabilities', ['read-only', 'analysis', 'design-review']);
 }
 
 function validateClaudeWorker(file, worker, diagnostics) {

@@ -167,6 +167,11 @@
       (route :events [user_message assistant_message thinking_message system_message] :bump [timelineVersion] :delay-ms 500)
       (custom-event :event briefing_summary_generated :name "timeline-summary-update" :detail [target_seq summary])
       (custom-event :event jarvis_task_completed :name "jarvis-task-completed" :detail [conversation_id task_id])
+      (custom-event :event jarvis_intent_draft :name "jarvis-intent-draft" :detail [conversation_id grounding_context_id intent_artifact_id])
+      (custom-event :event jarvis_plan_draft :name "jarvis-plan-draft" :detail [conversation_id grounding_context_id plan_artifact_id])
+      (custom-event :event jarvis_confirm_required :name "jarvis-confirm-required" :detail [conversation_id confirmation_type])
+      (custom-event :event jarvis_worker_status :name "jarvis-worker-status" :detail [conversation_id task_id slot_id provider])
+      (custom-event :event jarvis_result_artifact :name "jarvis-result-artifact" :detail [conversation_id task_id artifact_id])
       (prefix-route :prefix "narration_" :bump [timelineVersion] :delay-ms 500))
     (timeline-visuals
       :rule "Timeline event, slot, lane, session, and window visual taxonomy is Lisp data; TSX only maps icon names to components."

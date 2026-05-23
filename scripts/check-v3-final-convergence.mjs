@@ -12,8 +12,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
-import { EXPECTED_SURFACES } from './check-v3-code-isomorphism-complete.mjs';
 import {
+  compiledSurfaceIds,
   loadCompiledV3Contract,
   loadResolvedV3Contract,
 } from './lib/v3_compiled_contract.mjs';
@@ -107,6 +107,12 @@ const LIVE_CHECKS = [
     timeoutMs: 60_000,
   },
   {
+    id: 'agent-cli-regression',
+    argv: ['scripts/check-v3-agent-cli-regression.mjs', '--json'],
+    json: true,
+    timeoutMs: 60_000,
+  },
+  {
     id: 'semantic-checker-coverage',
     argv: ['scripts/check-v3-semantic-checker-coverage.mjs', '--json'],
     json: true,
@@ -153,6 +159,7 @@ const BLUEPRINT_NEEDLES = [
   ['pillar-flow-map', '(pillar-flow-map'],
   ['implementation-map', '(implementation-map'],
   ['workstation-config', '(workstation-config'],
+  ['agent-cli-regression-policy', 'check-v3-agent-cli-regression.mjs'],
   ['control-plane-m6-split', '(control-plane-m6-split'],
   ['control-plane split checker', 'check-v3-control-plane-m6-split.mjs'],
   ['data-residency-universe', '(data-residency-universe'],
@@ -346,6 +353,7 @@ export function runFinalConvergenceCheck(repoRoot, blueprintRel = BLUEPRINT_PATH
     blueprint: blueprintRel,
     semanticIr: true,
   });
+  const compiledSurfaceCount = compiledSurfaceIds(contract).length;
   diagnostics.push(...compiledDiagnostics(contract, blueprintRel));
   const gate = contract.finalConvergenceGate;
   if (!gate) {
@@ -412,13 +420,13 @@ export function runFinalConvergenceCheck(repoRoot, blueprintRel = BLUEPRINT_PATH
   diagnostics.push(...checkAggregateSummary(aggregate));
   const expectedSurfaceCount = Array.isArray(aggregate?.expected_surfaces)
     ? aggregate.expected_surfaces.length
-    : EXPECTED_SURFACES.length;
+    : compiledSurfaceCount;
   diagnostics.push(...checkCoverageSummary(coverage, expectedSurfaceCount));
 
   const summary = {
     surfaces: Array.isArray(aggregate?.expected_surfaces)
       ? aggregate.expected_surfaces.length
-      : EXPECTED_SURFACES.length,
+      : compiledSurfaceCount,
     checkers: Array.isArray(aggregate?.checks) ? aggregate.checks.length : 0,
     v2_items: Number.isInteger(coverage?.v2_items) ? coverage.v2_items : 0,
     public_tools: Number.isInteger(coverage?.public_tools) ? coverage.public_tools : 0,
@@ -574,10 +582,14 @@ function checkAggregateSummary(aggregate) {
       message: `expected at least 40 V3 surfaces from typed projection, got ${surfaces.length}`,
     });
   }
-  if (aggregate.surface_source !== 'missiond-lispc emit-semantic-ir') {
+  const acceptedSurfaceSources = new Set([
+    'missiond-lispc emit-contract-abi',
+    'missiond-lispc emit-semantic-ir',
+  ]);
+  if (!acceptedSurfaceSources.has(aggregate.surface_source)) {
     diagnostics.push({
       file: 'scripts/check-v3-code-isomorphism-complete.mjs',
-      message: `aggregate must derive surfaces from missiond-lispc emit-semantic-ir; got ${aggregate.surface_source ?? '<missing>'}`,
+      message: `aggregate must derive surfaces from missiond-lispc compiled facts; got ${aggregate.surface_source ?? '<missing>'}`,
     });
   }
   if (Number.isInteger(aggregate.typed_surface_count)
@@ -605,7 +617,7 @@ function checkAggregateSummary(aggregate) {
   return diagnostics;
 }
 
-function checkCoverageSummary(coverage, expectedSurfaceCount = EXPECTED_SURFACES.length) {
+function checkCoverageSummary(coverage, expectedSurfaceCount = 0) {
   const diagnostics = [];
   if (!coverage) {
     diagnostics.push({

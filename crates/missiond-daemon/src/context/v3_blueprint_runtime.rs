@@ -9,6 +9,10 @@ use serde::Deserialize;
 use crate::context::v3_contracts::generated as v3_contracts;
 use crate::context::v3_runtime_defaults;
 
+mod compiled_snapshot;
+
+use compiled_snapshot::{compiled_runtime_schema_version, compiled_runtime_snapshot_path};
+
 // Embedded defaults are the test/no-install fallback. Runtime authority is the
 // current compiled V3 projection; source Lisp fallback is explicit only.
 const V3_ALLOW_SOURCE_FALLBACK_ENV: &str = "MISSIOND_V3_ALLOW_SOURCE_FALLBACK";
@@ -1640,6 +1644,22 @@ pub(crate) fn parse_workstation_config(
             "workstation-pool must include a read-only Gemini BoardTask worker".into(),
         ));
     }
+    if !config
+        .workstation_pool
+        .iter()
+        .any(|worker| worker.accepts_boardtask && worker.engine == "agy" && !worker.write_allowed)
+    {
+        return Err(BlueprintConfigError::Parse(
+            "workstation-pool must include a read-only Agy BoardTask worker".into(),
+        ));
+    }
+    if !config.workstation_pool.iter().any(|worker| {
+        worker.accepts_boardtask && worker.engine == "codex" && worker.role != "orchestrator"
+    }) {
+        return Err(BlueprintConfigError::Parse(
+            "workstation-pool must include at least one Codex non-master worker lane".into(),
+        ));
+    }
     if config.workstation_pool.iter().any(|worker| {
         worker.accepts_boardtask
             && worker.engine == "gemini"
@@ -2658,12 +2678,8 @@ fn load_compiled_v3_lisp_source(project_root: &Path) -> Option<String> {
 }
 
 fn load_compiled_v3_lisp_source_with_diagnostics(project_root: &Path) -> CompiledV3LispSourceLoad {
-    let path = project_root
-        .join(".missiond")
-        .join("v3")
-        .join("runtime")
-        .join("compiled")
-        .join("compiled-v3-blueprint.json");
+    let path = compiled_runtime_snapshot_path(project_root, "v3")
+        .expect("compiled V3 snapshot kind must be registered");
     if !path.exists() {
         return CompiledV3LispSourceLoad {
             source: None,
@@ -2888,24 +2904,15 @@ pub(crate) fn load_compiled_runtime_snapshot(
     kind: &str,
     expected_source_hash: Option<&str>,
 ) -> CompiledRuntimeLoad {
-    let file_name = match kind {
-        "v3" => "compiled-v3-blueprint.json",
-        "runtime-config" => "compiled-runtime-config.json",
-        "universe" => "compiled-project-universe.json",
-        "workflows" => "compiled-workflows.json",
-        other => {
+    let path = match compiled_runtime_snapshot_path(project_root, kind) {
+        Some(path) => path,
+        None => {
             return CompiledRuntimeLoad {
                 snapshot: None,
-                diagnostics: vec![format!("unknown compiled runtime kind `{other}`")],
+                diagnostics: vec![format!("unknown compiled runtime kind `{kind}`")],
             };
         }
     };
-    let path = project_root
-        .join(".missiond")
-        .join("v3")
-        .join("runtime")
-        .join("compiled")
-        .join(file_name);
     if !path.exists() {
         return CompiledRuntimeLoad {
             snapshot: None,
@@ -3029,12 +3036,8 @@ fn load_compiled_runtime_config(
     project_root: &Path,
     expected_source_hash: Option<&str>,
 ) -> CompiledPayloadLoad<CompiledRuntimeConfigPayload> {
-    let path = project_root
-        .join(".missiond")
-        .join("v3")
-        .join("runtime")
-        .join("compiled")
-        .join("compiled-runtime-config.json");
+    let path = compiled_runtime_snapshot_path(project_root, "runtime-config")
+        .expect("compiled runtime-config snapshot kind must be registered");
     if !path.exists() {
         return CompiledPayloadLoad {
             payload: None,
@@ -3183,8 +3186,8 @@ fn load_compiled_payload<T>(
 where
     T: for<'de> Deserialize<'de>,
 {
-    let file_name = match compiled_runtime_file_name(kind) {
-        Some(file_name) => file_name,
+    let path = match compiled_runtime_snapshot_path(project_root, kind) {
+        Some(path) => path,
         None => {
             return CompiledPayloadLoad {
                 payload: None,
@@ -3193,12 +3196,6 @@ where
             };
         }
     };
-    let path = project_root
-        .join(".missiond")
-        .join("v3")
-        .join("runtime")
-        .join("compiled")
-        .join(file_name);
     if !path.exists() {
         return CompiledPayloadLoad {
             payload: None,
@@ -3296,26 +3293,6 @@ where
             source_hash: parsed.source_hash,
         }),
         diagnostics,
-    }
-}
-
-fn compiled_runtime_file_name(kind: &str) -> Option<&'static str> {
-    match kind {
-        "v3" => Some("compiled-v3-blueprint.json"),
-        "runtime-config" => Some("compiled-runtime-config.json"),
-        "universe" => Some("compiled-project-universe.json"),
-        "workflows" => Some("compiled-workflows.json"),
-        _ => None,
-    }
-}
-
-fn compiled_runtime_schema_version(kind: &str) -> Option<&'static str> {
-    match kind {
-        "v3" => Some("missiond.compiled-v3-blueprint.v1"),
-        "runtime-config" => Some("missiond.compiled-runtime-config.v1"),
-        "universe" => Some("missiond.compiled-project-universe.v1"),
-        "workflows" => Some("missiond.compiled-workflows.v1"),
-        _ => None,
     }
 }
 
@@ -3834,7 +3811,7 @@ pub(crate) mod tests {
             Some("gpt-5.5".to_string())
         );
         assert_eq!(cfg.startup_slots().len(), 4);
-        assert_eq!(cfg.workstation_pool().len(), 6);
+        assert_eq!(cfg.workstation_pool().len(), 9);
         assert_eq!(
             cfg.chat_completions_default_slot(),
             DEFAULT_CHAT_COMPLETIONS_DEFAULT_SLOT

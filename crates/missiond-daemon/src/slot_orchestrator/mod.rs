@@ -16,6 +16,7 @@ pub mod claude_code;
 pub mod controller;
 pub mod gemini_cli;
 pub mod gemini_controller;
+pub mod generic_cli;
 pub mod perm_injector;
 pub mod project_root;
 pub mod spawner;
@@ -24,6 +25,7 @@ pub mod types;
 pub use agent::AgentSlotManager;
 pub use claude_code::ClaudeCodeSlotManager;
 pub use gemini_cli::GeminiCliSlotManager;
+pub use generic_cli::GenericCliSlotManager;
 pub use types::{EngineSlotManager, EngineStatus, SlotTaskConfig, SlotTaskRequest};
 
 use missiond_core::db::traits::MissionStore;
@@ -37,6 +39,7 @@ pub(crate) fn canonical_source_for_engine(engine: CliEngine) -> &'static str {
         CliEngine::ClaudeCode => "claude_code",
         CliEngine::Gemini => "gemini_cli",
         CliEngine::Codex => "codex_cli",
+        CliEngine::Agy => "agy_cli",
     }
 }
 
@@ -44,6 +47,7 @@ pub(crate) fn chat_type_for_source(source: &str) -> Option<String> {
     match source {
         "gemini_cli" => Some("gemini_cli".to_string()),
         "codex_cli" => Some("codex_cli".to_string()),
+        "agy_cli" => Some("agy_cli".to_string()),
         _ => None,
     }
 }

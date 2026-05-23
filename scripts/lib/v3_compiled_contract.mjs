@@ -82,6 +82,10 @@ export function loadCompiledV3Contract({
     diagnostics.push(...lispcDiagnostics(v3, 'emit-v3'));
     return emptyContract({ ok: false, diagnostics, v3 });
   }
+  const contractAbi = runLispc(['emit-contract-abi', '--blueprint', blueprintArg], { repoRoot: lispcRepoRoot, timeoutMs });
+  if (contractAbi.ok !== true || !contractAbi.compiled) {
+    diagnostics.push(...lispcDiagnostics(contractAbi, 'emit-contract-abi'));
+  }
 
   let semantic = null;
   if (semanticIr) {
@@ -98,9 +102,11 @@ export function loadCompiledV3Contract({
     }
   }
 
-  const v3Surfaces = normalizeSurfaces(v3.compiled?.payload?.surfaces ?? []);
-  const v3Functions = normalizeFunctions(v3.compiled?.payload?.functions ?? []);
-  const facts = semantic?.compiled?.payload?.facts ?? [];
+  const abiPayload = contractAbi?.compiled?.payload ?? {};
+  const abiFacts = abiPayload?.facts ?? [];
+  const v3Surfaces = normalizeSurfaces(abiPayload?.surfaces ?? v3.compiled?.payload?.surfaces ?? []);
+  const v3Functions = normalizeFunctions(abiPayload?.functions ?? v3.compiled?.payload?.functions ?? []);
+  const facts = abiFacts.length > 0 ? abiFacts : semantic?.compiled?.payload?.facts ?? [];
   const semanticSurfaces = normalizeSurfaces(
     facts.filter((fact) => fact?.kind === 'surface'),
   );
@@ -111,10 +117,10 @@ export function loadCompiledV3Contract({
     facts.filter((fact) => fact?.kind === 'artifact_contract'),
   );
   const runtimePolicies = normalizeRuntimePolicies(
-    facts.filter((fact) => fact?.kind === 'runtime_policy'),
+    abiPayload?.runtime_policies ?? facts.filter((fact) => fact?.kind === 'runtime_policy'),
   );
   const checkerRegistry = normalizeCheckerRegistry(
-    facts.filter((fact) => fact?.kind === 'checker_registry'),
+    abiPayload?.checker_registry ?? facts.filter((fact) => fact?.kind === 'checker_registry'),
   );
   const finalConvergenceGate = normalizeFinalConvergenceGate(
     facts.find((fact) => fact?.kind === 'final_convergence_gate'),
@@ -130,6 +136,7 @@ export function loadCompiledV3Contract({
     ...(workflowProjection?.compiled?.payload?.workflows ?? []),
   ]);
   const sourceUnits = normalizeSourceUnits([
+    ...(abiPayload?.source_units ?? []),
     ...(semantic?.compiled?.payload?.source_units ?? []),
     ...facts.filter((fact) => fact?.kind === 'module_source_unit'),
   ]);
@@ -157,6 +164,7 @@ export function loadCompiledV3Contract({
   return {
     ok: diagnostics.length === 0,
     diagnostics,
+    contractAbi: contractAbi?.compiled ?? null,
     v3: v3.compiled,
     semantic: semantic?.compiled ?? null,
     workflowProjection: workflowProjection?.compiled ?? null,
@@ -171,7 +179,8 @@ export function loadCompiledV3Contract({
     workflowContracts,
     sourceUnits,
     workstationConfig,
-    sourceHash: v3.compiled.source_hash,
+    planContract: normalizePlanContract(abiPayload?.plan_contract),
+    sourceHash: contractAbi?.compiled?.source_hash ?? v3.compiled.source_hash,
     semanticSourceHash: semantic?.compiled?.source_hash ?? null,
   };
 }
@@ -244,6 +253,17 @@ export function compiledCheckerRegistryMap(contract) {
   );
 }
 
+export function compiledCheckerCommands(contract, { registryId = 'v3-compression-contract' } = {}) {
+  const registry = compiledCheckerRegistryMap(contract).get(registryId);
+  return (registry?.checks ?? [])
+    .map((command) => parseCheckerCommand(command))
+    .filter((check) => check.command && check.script);
+}
+
+export function compiledCheckerScripts(contract, opts = {}) {
+  return [...new Set(compiledCheckerCommands(contract, opts).map((check) => check.script).filter(Boolean))].sort();
+}
+
 export function compiledFinalConvergenceGate(contract) {
   return contract?.finalConvergenceGate ?? null;
 }
@@ -287,6 +307,7 @@ function normalizeSurfaces(rows) {
       status: normalizeStatus(row?.status),
       implements: stringArray(row?.implements),
       code: stringArray(row?.code),
+      note: stringOrNull(row?.note),
       source: row?.source ?? null,
     }))
     .filter((row) => row.id);
@@ -457,6 +478,73 @@ function normalizeWorkstationConfig(row) {
   };
 }
 
+function normalizePlanContract(row) {
+  if (!row || typeof row !== 'object') return null;
+  return {
+    schemaVersion: stringOrNull(row?.schema_version ?? row?.schemaVersion),
+    acceptedHeads: stringArray(row?.accepted_heads ?? row?.acceptedHeads),
+    topLevelHintKeys: stringArray(row?.top_level_hint_keys ?? row?.topLevelHintKeys),
+    nodeHintKeys: stringArray(row?.node_hint_keys ?? row?.nodeHintKeys),
+  };
+}
+
+function parseCheckerCommand(command) {
+  const tokens = splitCommand(command);
+  const scriptIndex = tokens.findIndex((token) => token.startsWith('scripts/') && token.endsWith('.mjs'));
+  if (scriptIndex < 0) {
+    return {
+      command: stringOrNull(command),
+      runner: tokens[0] ?? null,
+      script: null,
+      argv: [],
+    };
+  }
+  return {
+    command: stringOrNull(command),
+    runner: tokens[0] ?? null,
+    script: tokens[scriptIndex],
+    argv: tokens.slice(scriptIndex + 1),
+  };
+}
+
+function splitCommand(command) {
+  if (typeof command !== 'string') return [];
+  const tokens = [];
+  let current = '';
+  let quote = null;
+  let escaped = false;
+  for (const ch of command.trim()) {
+    if (escaped) {
+      current += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (ch === quote) quote = null;
+      else current += ch;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (current) {
+        tokens.push(current);
+        current = '';
+      }
+      continue;
+    }
+    current += ch;
+  }
+  if (current) tokens.push(current);
+  return tokens;
+}
+
 function stringOrNull(value) {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
@@ -485,6 +573,7 @@ function emptyContract({ ok, diagnostics, v3 }) {
   return {
     ok,
     diagnostics,
+    contractAbi: null,
     v3: v3?.compiled ?? null,
     semantic: null,
     workflowProjection: null,
@@ -499,6 +588,7 @@ function emptyContract({ ok, diagnostics, v3 }) {
     workflowContracts: [],
     sourceUnits: [],
     workstationConfig: null,
+    planContract: null,
     sourceHash: null,
     semanticSourceHash: null,
   };

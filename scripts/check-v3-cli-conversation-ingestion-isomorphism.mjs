@@ -204,6 +204,7 @@ function checkFiles(root, files) {
     'CliEngine::ClaudeCode => "claude_code"',
     'CliEngine::Gemini => "gemini_cli"',
     'CliEngine::Codex => "codex_cli"',
+    'CliEngine::Agy => "agy_cli"',
     'chat_type_for_source',
     'source: &str',
     'session_id,\n        source',
@@ -215,7 +216,7 @@ function checkFiles(root, files) {
   ]);
 
   requireAll(diagnostics, files.slotSpawner, sources.slotSpawner, [
-    'missiond_core::CliEngine::Gemini | missiond_core::CliEngine::Codex',
+    'missiond_core::CliEngine::Agy',
     'format!("pty-{}", pty_slot.id)',
     'canonical_source_for_engine(pty_slot.engine)',
     'register_slot_session(',
@@ -254,6 +255,7 @@ function checkFiles(root, files) {
     'CliEngine::ClaudeCode => "claude_code"',
     'CliEngine::Gemini => "gemini_cli"',
     'CliEngine::Codex => "codex_cli"',
+    'CliEngine::Agy => "agy_cli"',
   ]);
 
   requireAll(diagnostics, files.claudeWatcher, sources.claudeWatcher, [

@@ -119,6 +119,7 @@ pub fn recognize_screen(
     let mut snapshot = match provider {
         CliEngine::Codex => recognize_codex(lines),
         CliEngine::Gemini => recognize_gemini(lines),
+        CliEngine::Agy => recognize_agy(lines),
         CliEngine::ClaudeCode => recognize_claude_code(lines),
     };
     if snapshot.state == PtyCanonicalState::Unknown {
@@ -235,6 +236,32 @@ fn active_running_evidence(
                 .with_phase("thinking")
                 .with_elapsed(elapsed)
                 .with_source("screen_fused");
+                Some(snapshot)
+            } else {
+                None
+            }
+        }
+        CliEngine::Agy => {
+            if lower.contains("working")
+                || lower.contains("thinking")
+                || lower.contains("running command")
+                || lower.contains("tool running")
+                || lower.contains(" esc to interrupt")
+                || has_spinner(lines)
+            {
+                let mut snapshot = PtyRecognitionSnapshot::new(
+                    CliEngine::Agy,
+                    PtyCanonicalState::Running,
+                    0.88,
+                    "agy:active_status",
+                )
+                .with_elapsed(elapsed)
+                .with_source("screen_fused");
+                if let Some(tool) = extract_tool_name(lines) {
+                    snapshot = snapshot.with_tool(tool).with_phase("tool");
+                } else {
+                    snapshot = snapshot.with_phase("thinking");
+                }
                 Some(snapshot)
             } else {
                 None
@@ -429,6 +456,96 @@ fn recognize_gemini(lines: &[String]) -> PtyRecognitionSnapshot {
         PtyCanonicalState::Unknown,
         0.2,
         "gemini:no_match",
+    )
+}
+
+fn recognize_agy(lines: &[String]) -> PtyRecognitionSnapshot {
+    let text = joined_text(lines);
+    let lower = text.to_ascii_lowercase();
+    let elapsed = extract_elapsed_secs(&text);
+
+    if let Some((kind, reason)) = provider_unavailable_match(&lower) {
+        return PtyRecognitionSnapshot::new(
+            CliEngine::Agy,
+            PtyCanonicalState::Blocked,
+            0.95,
+            reason,
+        )
+        .with_blocked_kind(kind)
+        .with_elapsed(elapsed)
+        .with_source("provider_error_signature");
+    }
+
+    if lower.contains("approval request")
+        || lower.contains("allow command")
+        || lower.contains("requires approval")
+        || lower.contains("do you want to proceed")
+        || lower.contains("do you want to allow")
+        || lower.contains("confirm command")
+        || lower.contains("confirm action")
+        || lower.contains("mcp disconnected")
+        || lower.contains("reconnect failed")
+    {
+        return PtyRecognitionSnapshot::new(
+            CliEngine::Agy,
+            PtyCanonicalState::Blocked,
+            0.9,
+            "agy:approval_or_mcp_recovery",
+        )
+        .with_blocked_kind("approval")
+        .with_elapsed(elapsed);
+    }
+
+    if lower.contains("working")
+        || lower.contains("thinking")
+        || lower.contains("running command")
+        || lower.contains("tool running")
+        || lower.contains(" esc to interrupt")
+        || has_spinner(lines)
+    {
+        let mut snapshot = PtyRecognitionSnapshot::new(
+            CliEngine::Agy,
+            PtyCanonicalState::Running,
+            0.88,
+            "agy:active_status",
+        )
+        .with_elapsed(elapsed);
+        if let Some(tool) = extract_tool_name(lines) {
+            snapshot = snapshot.with_tool(tool).with_phase("tool");
+        } else {
+            snapshot = snapshot.with_phase("thinking");
+        }
+        return snapshot;
+    }
+
+    if has_completion_line(lines) && has_idle_prompt(lines) {
+        return PtyRecognitionSnapshot::new(
+            CliEngine::Agy,
+            PtyCanonicalState::Complete,
+            0.84,
+            "agy:turn_complete_prompt_returned",
+        )
+        .with_elapsed(elapsed);
+    }
+
+    if lower.contains("type your message")
+        || lower.contains("welcome back")
+        || lower.contains("bypass permissions on")
+        || has_idle_prompt(lines)
+    {
+        return PtyRecognitionSnapshot::new(
+            CliEngine::Agy,
+            PtyCanonicalState::Idle,
+            0.86,
+            "agy:composer_idle",
+        );
+    }
+
+    PtyRecognitionSnapshot::new(
+        CliEngine::Agy,
+        PtyCanonicalState::Unknown,
+        0.2,
+        "agy:no_match",
     )
 }
 
@@ -866,6 +983,29 @@ mod tests {
             "→ Confirming",
         ]));
         assert_eq!(result.state, PtyCanonicalState::Blocked);
+    }
+
+    #[test]
+    fn agy_idle_screen_is_idle() {
+        let result = recognize_agy(&lines(&[
+            "Antigravity 1.107.0",
+            "Welcome back Ricky!",
+            "> Type your message",
+        ]));
+        assert_eq!(result.state, PtyCanonicalState::Idle);
+        assert_eq!(result.reason, "agy:composer_idle");
+    }
+
+    #[test]
+    fn agy_auth_or_quota_error_is_blocked() {
+        let result = recognize_screen(
+            CliEngine::Agy,
+            &lines(&["quota exceeded; please check billing to continue"]),
+            SessionState::Error,
+        );
+        assert_eq!(result.state, PtyCanonicalState::Blocked);
+        assert_eq!(result.source, "screen_final");
+        assert_eq!(result.blocked_kind.as_deref(), Some("usage_limit"));
     }
 
     #[test]

@@ -70,7 +70,9 @@ pub use gemini_cli::{GeminiCliWatcher, GeminiCliWatcherOptions};
 
 // Re-export WebSocket types
 pub use ws::{
-    ContextEnrichResult, ContextEnricherFn, ContextEnricherSlot, PTYWebSocketServer,
+    ContextEnrichResult, ContextEnricherFn, ContextEnricherSlot, JarvisArtifactFn,
+    JarvisArtifactRequest, JarvisArtifactResult, JarvisArtifactSlot, JarvisGroundingFn,
+    JarvisGroundingRequest, JarvisGroundingResult, JarvisGroundingSlot, PTYWebSocketServer,
     WSServerOptions,
 };
 

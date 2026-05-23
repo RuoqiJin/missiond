@@ -10,21 +10,9 @@
 //   - The compression-contract :checks list omits this aggregate command.
 //   - Any per-surface V3 checker fails when run live.
 //
-// The aggregate covers exactly these implementation surfaces unless the
-// blueprint explicitly changes the V3 surface set:
-//   mission_request, unified-entry-runtime, file-artifacts,
-//   mission_directive, mission_plan, evidence-collector,
-//   mission_execution-log, mission_execution-claim-lease,
-//   mission_execution-completion-audit, mission_workflow, review-gate,
-//   task-runner-cli, source-hygiene, context-pack, workstation-config,
-//   workstation-pool, resident-master-control, commit-lisp-convergence-loop,
-//   nightly-evolution-loop, autopilot-runtime, workstation-dispatch, mission_board, memory-kb, project-registry,
-//   board-frontend,
-//   conversation-ingestion, skill-runtime, cascade-governance,
-//   router-policy, incident-governance, capability-governance,
-//   compute-primitives, sysinfra-control, ops-infra, eventbridge,
-//   memory-provider-boundary, eventhub-service-boundary, typed-lisp-compiler,
-//   genome-runtime, mission-shared-memory, evidence-governance-view.
+// The aggregate covers exactly the implementation surfaces and checker
+// registry projected by missiond-lispc. The hand-written lists below are kept
+// only for --dry-fixture compatibility.
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -38,10 +26,10 @@ import {
   readKeywordProps,
 } from './lib/v3_resolved_lisp_compat.mjs';
 import {
+  compiledCheckerCommands,
   compiledSurfaceIds,
   loadCompiledV3Contract,
 } from './lib/v3_compiled_contract.mjs';
-import { readBlueprintWithEvidenceSidecars } from './lib/v3_blueprint_contract_source.mjs';
 
 const BLUEPRINT_PATH = '.missiond/v3/missiond-blueprint.lisp';
 const AGGREGATE_COMMAND = 'node scripts/check-v3-code-isomorphism-complete.mjs';
@@ -52,8 +40,8 @@ const LEGACY_LISP_SCANNER_ALLOWLIST = new Set([
 ]);
 
 // Bootstrap/dry-fixture surface list. Live validation derives the active
-// surface set from missiond-lispc emit-v3 + emit-semantic-ir so checker
-// correctness follows typed Lisp structure instead of this compatibility list.
+// surface set from missiond-lispc compiled facts, so checker correctness
+// follows typed Lisp structure instead of this compatibility list.
 export const EXPECTED_SURFACES = [
   'mission_request',
   'unified-entry-runtime',
@@ -219,6 +207,115 @@ function parseArgs(argv) {
   return opts;
 }
 
+export function validateCompiledContract(contract, file = BLUEPRINT_PATH, {
+  expectedSurfaces = compiledSurfaceIds(contract),
+} = {}) {
+  const diagnostics = [];
+  const surfaces = {};
+  for (const surface of contract?.surfaces ?? []) {
+    if (!surface.id) continue;
+    surfaces[surface.id] = {
+      status: surface.status,
+      hasCode: surface.code.length > 0,
+      hasNote: typeof surface.note === 'string' && surface.note.trim() !== '',
+      source: surface.source ?? null,
+    };
+  }
+
+  for (const expected of expectedSurfaces) {
+    const surface = surfaces[expected];
+    const loc = surfaceLoc(surface, file);
+    if (!surface) {
+      diagnostics.push({
+        severity: 'error',
+        file,
+        line: 1,
+        column: 1,
+        message: `compiled implementation-map missing required surface "${expected}"`,
+      });
+      continue;
+    }
+    if (surface.status === 'code-aligned-partial') {
+      diagnostics.push({
+        severity: 'error',
+        file: loc.file,
+        line: loc.line,
+        column: loc.column,
+        message: `surface "${expected}" still carries :status "code-aligned-partial"; graduate it before merging`,
+      });
+      continue;
+    }
+    if (surface.status !== 'code-aligned') {
+      diagnostics.push({
+        severity: 'error',
+        file: loc.file,
+        line: loc.line,
+        column: loc.column,
+        message: `surface "${expected}" must declare :status "code-aligned"; got ${JSON.stringify(surface.status)}`,
+      });
+    }
+    if (!surface.hasCode) {
+      diagnostics.push({
+        severity: 'error',
+        file: loc.file,
+        line: loc.line,
+        column: loc.column,
+        message: `surface "${expected}" must declare :code [...]`,
+      });
+    }
+    if (!surface.hasNote) {
+      diagnostics.push({
+        severity: 'error',
+        file: loc.file,
+        line: loc.line,
+        column: loc.column,
+        message: `surface "${expected}" must declare :note "..."`,
+      });
+    }
+  }
+
+  for (const [id, surface] of Object.entries(surfaces)) {
+    if (expectedSurfaces.includes(id)) continue;
+    if (surface.status === 'code-aligned-partial') {
+      const loc = surfaceLoc(surface, file);
+      diagnostics.push({
+        severity: 'error',
+        file: loc.file,
+        line: loc.line,
+        column: loc.column,
+        message: `surface "${id}" still carries :status "code-aligned-partial"`,
+      });
+    }
+  }
+
+  const checkerCommands = compiledCheckerCommands(contract).map((check) => check.command);
+  if (!checkerCommands.includes(AGGREGATE_COMMAND)) {
+    diagnostics.push({
+      severity: 'error',
+      file,
+      line: 1,
+      column: 1,
+      message: `compiled checker_registry must include ${JSON.stringify(AGGREGATE_COMMAND)}`,
+    });
+  }
+
+  return {
+    ok: !diagnostics.some((d) => d.severity === 'error'),
+    diagnostics,
+    surfaces,
+    expectedSurfaces,
+  };
+}
+
+function surfaceLoc(surface, fallbackFile) {
+  const source = surface?.source ?? {};
+  return {
+    file: source.source_file ?? source.file ?? fallbackFile,
+    line: source.source_line ?? source.line ?? 1,
+    column: source.source_column ?? source.column ?? 1,
+  };
+}
+
 export function validateBlueprintSource(source, file = BLUEPRINT_PATH, {
   expectedSurfaces = EXPECTED_SURFACES,
 } = {}) {
@@ -380,13 +477,21 @@ export function validateBlueprintSource(source, file = BLUEPRINT_PATH, {
   };
 }
 
-function runPerSurfaceCheckers(repoRoot) {
+function compiledAggregateCheckers(contract) {
+  return compiledCheckerCommands(contract)
+    .filter((check) => check.script !== 'scripts/check-v3-code-isomorphism-complete.mjs')
+    .filter((check) => check.script !== 'scripts/check-v3-final-convergence.mjs');
+}
+
+function runPerSurfaceCheckers(repoRoot, checkerSpecs) {
   const results = [];
-  for (const script of PER_SURFACE_CHECKERS) {
+  for (const checker of checkerSpecs) {
+    const script = checker.script;
     const abs = path.resolve(repoRoot, script);
     if (!fs.existsSync(abs)) {
       results.push({
         script,
+        command: checker.command,
         ok: false,
         exit_code: null,
         stderr_tail: '',
@@ -395,7 +500,7 @@ function runPerSurfaceCheckers(repoRoot) {
       });
       continue;
     }
-    const proc = spawnSync(process.execPath, [abs], {
+    const proc = spawnSync(process.execPath, [abs, ...checker.argv], {
       cwd: repoRoot,
       encoding: 'utf8',
       timeout: 60_000,
@@ -403,6 +508,7 @@ function runPerSurfaceCheckers(repoRoot) {
     const ok = proc.status === 0 && proc.error == null;
     results.push({
       script,
+      command: checker.command,
       ok,
       exit_code: proc.status,
       stderr_tail: tail(proc.stderr ?? ''),
@@ -424,29 +530,26 @@ function main() {
     runDryFixture(opts);
     return;
   }
-  let source;
-  try {
-    source = readBlueprintWithEvidenceSidecars(path.resolve(opts.repo), opts.blueprint);
-  } catch (err) {
-    process.stderr.write(`error: cannot read blueprint ${opts.blueprint}: ${err.message}\n`);
-    process.exit(1);
-  }
   const compiled = loadCompiledV3Contract({
     repoRoot: opts.repo,
     blueprint: opts.blueprint,
     semanticIr: true,
   });
   const expectedSurfaces = compiledSurfaceIds(compiled);
-  const expectedSurfaceSet = expectedSurfaces.length > 0 ? expectedSurfaces : EXPECTED_SURFACES;
-  const blueprintResult = validateBlueprintSource(source, opts.blueprint, {
+  const expectedSurfaceSet = expectedSurfaces;
+  const contractResult = validateCompiledContract(compiled, opts.blueprint, {
     expectedSurfaces: expectedSurfaceSet,
   });
-  const ssotReadGuardDiagnostics = checkV3SsotReadGuards(opts.repo);
+  const checkerSpecs = compiledAggregateCheckers(compiled);
+  const ssotReadGuardDiagnostics = checkV3SsotReadGuards(
+    opts.repo,
+    checkerSpecs.map((checker) => checker.script),
+  );
   const compilerPlaneDiagnostics = checkCompilerPlaneGuards(opts.repo);
-  const checkerResults = runPerSurfaceCheckers(opts.repo);
+  const checkerResults = runPerSurfaceCheckers(opts.repo, checkerSpecs);
   const checkerOk = checkerResults.every((r) => r.ok);
-  const compiledOk = compiled.ok === true && expectedSurfaces.length > 0;
-  const ok = blueprintResult.ok
+  const compiledOk = compiled.ok === true && expectedSurfaces.length > 0 && checkerSpecs.length > 0;
+  const ok = contractResult.ok
     && checkerOk
     && compiledOk
     && ssotReadGuardDiagnostics.length === 0
@@ -456,21 +559,19 @@ function main() {
     ok,
     blueprint: opts.blueprint,
     expected_surfaces: expectedSurfaceSet,
-    surface_source: expectedSurfaces.length > 0
-      ? 'missiond-lispc emit-semantic-ir'
-      : 'bootstrap-fallback',
+    surface_source: 'missiond-lispc emit-contract-abi',
     typed_surface_count: expectedSurfaces.length,
     typed_source_hash: compiled.sourceHash,
     typed_semantic_source_hash: compiled.semanticSourceHash,
     surfaces: Object.fromEntries(
-      Object.entries(blueprintResult.surfaces).map(([id, s]) => [
+      Object.entries(contractResult.surfaces).map(([id, s]) => [
         id,
         { status: s.status, has_code: s.hasCode, has_note: s.hasNote },
       ]),
     ),
     diagnostics: [
       ...compiled.diagnostics,
-      ...blueprintResult.diagnostics,
+      ...contractResult.diagnostics,
       ...ssotReadGuardDiagnostics,
       ...compilerPlaneDiagnostics,
     ],
@@ -487,7 +588,7 @@ function main() {
     for (const d of compiled.diagnostics) {
       console.error(`${d.file}:${d.line ?? 1}:${d.column ?? 1}: error: ${d.message}`);
     }
-    for (const d of blueprintResult.diagnostics) {
+    for (const d of contractResult.diagnostics) {
       console.error(`${d.file}:${d.line}:${d.column}: ${d.severity}: ${d.message}`);
     }
     for (const d of ssotReadGuardDiagnostics) {
@@ -548,9 +649,9 @@ function walkFiles(root, predicate) {
   return out;
 }
 
-function checkV3SsotReadGuards(repoRoot) {
+function checkV3SsotReadGuards(repoRoot, checkerScripts = []) {
   const candidates = new Set([
-    ...PER_SURFACE_CHECKERS,
+    ...checkerScripts,
     'scripts/check-v3-infrastructure-universe-isomorphism.mjs',
     'scripts/check-v3-final-convergence.mjs',
     'scripts/check-m6-deployment-status.mjs',

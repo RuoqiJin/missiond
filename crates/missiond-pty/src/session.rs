@@ -453,6 +453,33 @@ fn build_cli_command(
             }
             parts
         }
+        CliEngine::Agy => {
+            // Antigravity (`agy`) CLI: interactive chat mode. Working
+            // directory is set through PTY cwd, not a CLI flag.
+            let parts = "agy chat".to_string();
+            if let Some(m) = model {
+                // Current agy help does not advertise a model flag. Keep the
+                // value visible in logs so model-profile drift is diagnosable.
+                info!(model = %m, "Agy CLI: model override ignored (no stable flag)");
+            }
+            if dangerously_skip_permissions {
+                info!("Agy CLI: permission bypass is controlled by the logged-in CLI profile");
+            }
+            if search_enabled {
+                info!("Agy CLI: search flag ignored (no stable flag)");
+            }
+            if let Some(profile) = sandbox {
+                info!(sandbox = %profile, "Agy CLI: sandbox override ignored (no stable flag)");
+            }
+            if let Some(policy) = approval_policy {
+                info!(approval_policy = %policy, "Agy CLI: approval policy ignored (no stable flag)");
+            }
+            if let Some(mcp) = mcp_config {
+                info!(mcp_config = %mcp.display(), "MCP config ignored for Agy CLI (profile-managed)");
+            }
+            info!("Agy CLI command assembled");
+            parts
+        }
     }
 }
 
@@ -1015,12 +1042,13 @@ impl PTYSession {
             )),
             CliEngine::Gemini => Box::new(GeminiCliUpstreamStateParser::new()),
             CliEngine::Codex => Box::new(CodexCliStateParser::new()),
+            CliEngine::Agy => Box::new(GeminiCliUpstreamStateParser::new()),
         };
         let confirm_parser: Option<Box<dyn ConfirmParser + Send + Sync>> = match engine {
             CliEngine::ClaudeCode => Some(Box::new(ClaudeCodeConfirmParser::with_patterns(
                 compiled_patterns.clone(),
             ))),
-            CliEngine::Gemini | CliEngine::Codex => None,
+            CliEngine::Gemini | CliEngine::Codex | CliEngine::Agy => None,
         };
         let status_parser = ClaudeCodeStatusParser::with_patterns(compiled_patterns.clone());
         let tool_parser = ClaudeCodeToolOutputParser::with_patterns(compiled_patterns.clone());
@@ -1932,6 +1960,7 @@ impl PTYSession {
         }
         match self.engine {
             missiond_shared::CliEngine::Codex => 4,
+            missiond_shared::CliEngine::Agy => 4,
             _ => 3,
         }
     }

@@ -81,7 +81,10 @@ pub async fn spawn_tracked_slot(
             Some(_) => { /* already at canonical root */ }
             None => {
                 use missiond_core::CliEngine;
-                if matches!(pty_slot_owned.engine, CliEngine::Gemini | CliEngine::Codex) {
+                if matches!(
+                    pty_slot_owned.engine,
+                    CliEngine::Gemini | CliEngine::Codex | CliEngine::Agy
+                ) {
                     return Err(anyhow!(
                         "spawn_tracked_slot rejected: cwd '{}' is not under any registered project; \
                          {} CLI cannot run cross-folder. Resolve target_project_root before spawn \
@@ -90,6 +93,7 @@ pub async fn spawn_tracked_slot(
                         match pty_slot_owned.engine {
                             CliEngine::Gemini => "Gemini",
                             CliEngine::Codex => "Codex",
+                            CliEngine::Agy => "Agy",
                             _ => unreachable!(),
                         }
                     ));
@@ -150,7 +154,9 @@ pub async fn spawn_tracked_slot(
     // manual operators bypasses those controllers.
     if matches!(
         pty_slot.engine,
-        missiond_core::CliEngine::Gemini | missiond_core::CliEngine::Codex
+        missiond_core::CliEngine::Gemini
+            | missiond_core::CliEngine::Codex
+            | missiond_core::CliEngine::Agy
     ) {
         let session_id = format!("pty-{}", pty_slot.id);
         register_slot_session(
@@ -250,9 +256,13 @@ mod tests {
         for (engine, must_hard_fail_unresolved) in [
             (CliEngine::Gemini, true),
             (CliEngine::Codex, true),
+            (CliEngine::Agy, true),
             (CliEngine::ClaudeCode, false),
         ] {
-            let hard_fail = matches!(engine, CliEngine::Gemini | CliEngine::Codex);
+            let hard_fail = matches!(
+                engine,
+                CliEngine::Gemini | CliEngine::Codex | CliEngine::Agy
+            );
             assert_eq!(hard_fail, must_hard_fail_unresolved, "{:?}", engine);
         }
     }

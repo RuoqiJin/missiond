@@ -53,7 +53,7 @@ use missiond_core::{
     InfraConfig, LearnedPermissions, MissionControl, MissionControlOptions, PTYManager,
     PTYWebSocketServer, PermissionPolicy, SkillIndex, WSServerOptions,
 };
-use missiond_mcp::tools::{all_tools, ToolResult};
+use missiond_mcp::tools::{all_tools, ToolContent, ToolResult};
 use serde_json::Value;
 use tokio::io::BufReader;
 use tokio::sync::{broadcast, Mutex};
@@ -76,6 +76,30 @@ fn env_truthy(name: &str) -> bool {
             )
         })
         .unwrap_or(false)
+}
+
+fn tool_result_json_value(result: ToolResult) -> std::result::Result<Value, String> {
+    if result.is_error.unwrap_or(false) {
+        let text = result
+            .content
+            .into_iter()
+            .map(|content| match content {
+                ToolContent::Text { text } => text,
+            })
+            .next()
+            .unwrap_or_else(|| "tool returned error".to_string());
+        return Err(text);
+    }
+    let text = result
+        .content
+        .into_iter()
+        .map(|content| match content {
+            ToolContent::Text { text } => text,
+        })
+        .next()
+        .ok_or_else(|| "tool returned no text content".to_string())?;
+    serde_json::from_str::<Value>(&text)
+        .map_err(|err| format!("tool returned non-json content: {err}"))
 }
 
 fn is_skill_watch_path(path: &Path, skills_dir: &Path) -> bool {
@@ -131,6 +155,9 @@ fn parse_startup_slot_engine(value: &str) -> Result<missiond_core::types::CliEng
         "claude-code" | "claude_code" => Ok(missiond_core::types::CliEngine::ClaudeCode),
         "gemini" | "gemini-cli" | "gemini_cli" => Ok(missiond_core::types::CliEngine::Gemini),
         "codex" | "codex-cli" | "codex_cli" => Ok(missiond_core::types::CliEngine::Codex),
+        "agy" | "agy-cli" | "agy_cli" | "antigravity" | "antigravity-cli" => {
+            Ok(missiond_core::types::CliEngine::Agy)
+        }
         other => Err(anyhow!("unknown workstation startup-slot engine {}", other)),
     }
 }
@@ -577,6 +604,10 @@ async fn main() -> Result<()> {
     let ws_port = ws_port();
     let context_enricher_slot: missiond_core::ContextEnricherSlot =
         Arc::new(tokio::sync::RwLock::new(None));
+    let jarvis_grounding_slot: missiond_core::JarvisGroundingSlot =
+        Arc::new(tokio::sync::RwLock::new(None));
+    let jarvis_artifact_writer_slot: missiond_core::JarvisArtifactSlot =
+        Arc::new(tokio::sync::RwLock::new(None));
     let workstation_config_for_ws =
         context::v3_blueprint_runtime::WorkstationRuntimeConfig::load_for_project_root(Some(
             missiond_project_root.to_string_lossy().as_ref(),
@@ -601,6 +632,8 @@ async fn main() -> Result<()> {
         frontend_events_tx: Some(frontend_events_tx.clone()),
         db: Some(Arc::clone(&store)),
         context_enricher: Arc::clone(&context_enricher_slot),
+        jarvis_grounding: Arc::clone(&jarvis_grounding_slot),
+        jarvis_artifact_writer: Arc::clone(&jarvis_artifact_writer_slot),
         tool_count: all_tools().len(),
         default_chat_slot,
     });
@@ -748,6 +781,10 @@ async fn main() -> Result<()> {
 
     let slot_mgr_pty2 = Arc::clone(&pty);
     let slot_mgr_store2 = Arc::clone(&store);
+    let slot_mgr_pty3 = Arc::clone(&pty);
+    let slot_mgr_store3 = Arc::clone(&store);
+    let slot_mgr_pty4 = Arc::clone(&pty);
+    let slot_mgr_store4 = Arc::clone(&store);
     let pty_for_gemini_transport = Arc::clone(&pty);
     let pending_spawns_for_slot: Arc<
         tokio::sync::RwLock<Vec<(String, String, String, tokio::time::Instant)>>,
@@ -993,6 +1030,22 @@ async fn main() -> Result<()> {
                 gemini_driver_for_slots,
                 slot_mgr_store2,
             ));
+            let codex_mgr = Arc::new(slot_orchestrator::GenericCliSlotManager::new(
+                missiond_core::types::CliEngine::Codex,
+                slot_mgr_pty3,
+                slot_mgr_store3,
+                pty_session_uuids_arc.clone(),
+                project_registry.clone(),
+                learned.clone(),
+            ));
+            let agy_mgr = Arc::new(slot_orchestrator::GenericCliSlotManager::new(
+                missiond_core::types::CliEngine::Agy,
+                slot_mgr_pty4,
+                slot_mgr_store4,
+                pty_session_uuids_arc.clone(),
+                project_registry.clone(),
+                learned.clone(),
+            ));
             Arc::new(slot_orchestrator::AgentSlotManager::new(
                 vec![
                     (
@@ -1002,6 +1055,14 @@ async fn main() -> Result<()> {
                     (
                         missiond_core::types::CliEngine::Gemini,
                         gemini_mgr as Arc<dyn slot_orchestrator::EngineSlotManager>,
+                    ),
+                    (
+                        missiond_core::types::CliEngine::Codex,
+                        codex_mgr as Arc<dyn slot_orchestrator::EngineSlotManager>,
+                    ),
+                    (
+                        missiond_core::types::CliEngine::Agy,
+                        agy_mgr as Arc<dyn slot_orchestrator::EngineSlotManager>,
                     ),
                 ],
                 Arc::clone(&control_manager_arc),
@@ -1093,6 +1154,11 @@ async fn main() -> Result<()> {
                     slot_id: startup_slot.slot_id.clone(),
                     role: startup_slot.role.clone(),
                     model,
+                    reasoning_effort: None,
+                    search_enabled: false,
+                    sandbox: None,
+                    approval_policy: None,
+                    tool_policy_path: None,
                     timeout: std::time::Duration::from_secs(startup_slot.timeout_secs),
                     cwd: missiond_project_root.clone(),
                     skip_permissions: startup_slot.skip_permissions,
@@ -1118,6 +1184,11 @@ async fn main() -> Result<()> {
                         slot_id: Some(worker.slot_id.clone()),
                         role: Some(worker.role.clone()),
                         model: model.clone(),
+                        reasoning_effort: worker.reasoning_effort.clone(),
+                        search_enabled: worker.search_enabled,
+                        sandbox: worker.sandbox.clone(),
+                        approval_policy: worker.approval_policy.clone(),
+                        tool_policy_path: worker.tool_policy_path.clone().map(Into::into),
                         timeout: std::time::Duration::from_secs(worker.timeout_secs),
                         cwd: missiond_project_root.clone(),
                         skip_permissions: worker.write_allowed,
@@ -1158,6 +1229,100 @@ async fn main() -> Result<()> {
         });
         *context_enricher_slot.write().await = Some(enricher);
         info!("Jarvis context enricher activated");
+    }
+
+    // Late-bind grounded-dispatch primitives for the strict Jarvis intent/plan gate.
+    {
+        let state_for_grounding = state.clone();
+        let grounder: missiond_core::JarvisGroundingFn =
+            Arc::new(move |req: missiond_core::JarvisGroundingRequest| {
+                let s = state_for_grounding.clone();
+                Box::pin(async move {
+                    let result = handlers::knowledge::context_gather::handle(
+                        &s,
+                        "mission_context_gather",
+                        serde_json::json!({
+                            "query": req.query,
+                            "unknowns": req.unknowns,
+                            "source_id": req.chat_id,
+                            "persist": true,
+                            "limit": 8
+                        }),
+                    )
+                    .await
+                    .map_err(|err| err.to_string())?;
+                    let value = tool_result_json_value(result)?;
+                    let grounding_context_id = value
+                        .get("grounding_context_id")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            "mission_context_gather did not return grounding_context_id".to_string()
+                        })?
+                        .to_string();
+                    let context_pack_path = value
+                        .get("context_pack_path")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    let artifact_hash = value
+                        .get("artifact_hash")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    let sources_used = value
+                        .get("sources_used")
+                        .and_then(Value::as_array)
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .map(str::to_string)
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    let diagnostics = value
+                        .get("diagnostics")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!([]));
+                    Ok(missiond_core::JarvisGroundingResult {
+                        grounding_context_id,
+                        context_pack_path,
+                        artifact_hash,
+                        sources_used,
+                        diagnostics,
+                    })
+                })
+            });
+        *jarvis_grounding_slot.write().await = Some(grounder);
+
+        let state_for_artifact = state.clone();
+        let artifact_writer: missiond_core::JarvisArtifactFn =
+            Arc::new(move |req: missiond_core::JarvisArtifactRequest| {
+                let s = state_for_artifact.clone();
+                Box::pin(async move {
+                    let artifact = s
+                        .shared_memory
+                        .put_json_artifact(
+                            &req.kind,
+                            req.project_id.as_deref(),
+                            req.task_id.as_deref(),
+                            &req.payload,
+                            req.metadata,
+                        )
+                        .await
+                        .map_err(|err| err.to_string())?;
+                    let hash = artifact
+                        .get("hash")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| "shared artifact writer returned no hash".to_string())?
+                        .to_string();
+                    Ok(missiond_core::JarvisArtifactResult {
+                        artifact_id: format!("{}:{hash}", req.kind),
+                        artifact_hash: hash.clone(),
+                        path: format!("shared-artifact://{hash}"),
+                    })
+                })
+            });
+        *jarvis_artifact_writer_slot.write().await = Some(artifact_writer);
+        info!("Jarvis grounded intent/plan runtime activated");
     }
 
     // Startup: kill orphan PTY processes from previous daemon instance.

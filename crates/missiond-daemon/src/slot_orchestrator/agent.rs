@@ -21,6 +21,7 @@ fn engine_to_provider(engine: CliEngine) -> CtlProvider {
         CliEngine::ClaudeCode => CtlProvider::Sonnet, // Historical provider lane for Claude Code slots.
         CliEngine::Gemini => CtlProvider::Gemini,
         CliEngine::Codex => CtlProvider::Codex,
+        CliEngine::Agy => CtlProvider::Agy,
     }
 }
 

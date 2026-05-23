@@ -28,6 +28,8 @@
        :logic "If deploy-center reports agent_offline, repeated agent_update_failed, or unreachable provenance for an otherwise known runtime target, query mission_infra_query(action=skill_evidence|credential_refs) for break_glass_runbook_refs and produce an approval-gated manual-ops option. Manual ECS/SSH/OSS/deploy.sh guidance from skills may enter the context pack as redacted evidence, but deploy-center remains the authority to reconcile the final deployment fact.")
      (step s5d :name select-artifact-delivery-lane
        :logic "Before any build or deploy worker is dispatched, ask deploy-center for target-network-profile and artifact-delivery-lane. CN restricted targets such as Aliyun ECS/Synology must use cn-oss-bundle-lane or an approved domestic mirror+builder lane; GHCR/GitHub target pulls and target-side source builds are invalid architecture, not retryable transient failures.")
+     (step s5e :name select-source-sync-lane
+       :logic "For managed build targets such as rickyhq Mac mini, sync source through GitHub or XJP codebase/deploy-center CodebaseSyncOperation, then run build/test/install on the target node. Operator-laptop rsync/scp is break-glass only, must be recorded as a failed-process diagnostic if attempted, and must not be used as the steady-state path.")
      (step s6 :name order-rollout
        :logic "Deploy deployment infrastructure before dependents: deploy-center first, then router, then pcea; auth is skipped unless auth-relevant files changed after its successful deploy.")
      (step s7 :name deploy-through-deploy-center
@@ -48,7 +50,8 @@
      (gate g7 :rule "Deployment workers must consult project deployment SSOT plus mission_infra_query skill evidence before acting on any host/script/agent path; skill facts are evidence, deploy-center provenance is authority.")
      (gate g8 :rule "Pull-mode executor status must distinguish agent-offline from claim-auth-dependency-failed. Secret Store lookup failure for deploy_executors.api_key_ref / DEPLOY_AGENT_API_KEY blocks deployment and must surface as deploy-blocked-by-secret-store on gcp-runtime, not as a PCEA, deploy-agent, or historical ClawCloud bug.")
      (gate g9 :rule "Agent-offline manual fallback is break-glass only: the context pack may include redacted skill runbook refs and credential refs, but manual SSH/ECS/deploy actions need explicit approval and must write post-action provenance evidence.")
-     (gate g10 :rule "Domestic runtime targets cannot depend on target-side GitHub/GHCR/DockerHub availability. Deployment workers must use deploy-center artifact-delivery-lane selection and record lane provenance before attempting CN deploys."))
+     (gate g10 :rule "Domestic runtime targets cannot depend on target-side GitHub/GHCR/DockerHub availability. Deployment workers must use deploy-center artifact-delivery-lane selection and record lane provenance before attempting CN deploys.")
+     (gate g11 :rule "Managed remote build nodes must receive source through GitHub or XJP codebase/deploy-center sync and build locally; direct rsync/scp source mirroring from an operator laptop is forbidden outside documented break-glass recovery."))
   :completion
     ((criterion c1 :rule "scripts/check-m6-deployment-status.mjs reports every M6 project as deployed-current or explicitly no-deploy-target.")
      (criterion c2 :rule "deploy-center status/provenance is available for every deployed M6 service slug.")
@@ -56,4 +59,5 @@
      (criterion c4 :rule "Partial provenance such as reported_digest_missing is recorded as a follow-up deploy-agent/deploy-center evidence gap instead of being lost in the deployment summary.")
      (criterion c5 :rule "If deployment is blocked by Secret Store, rollout report names Secret Store as the failed dependency and records the executor namespace/key reference without exposing credential values.")
      (criterion c6 :rule "If deployment is blocked by agent_offline, rollout report names the runtime target, last heartbeat/update evidence, break-glass runbook refs, and approval boundary.")
-     (criterion c7 :rule "For CN targets, rollout report names the selected artifact-delivery-lane, builder/runtime target, transfer store, artifact digest, and why GHCR/GitHub target pulls were not used.")))
+     (criterion c7 :rule "For CN targets, rollout report names the selected artifact-delivery-lane, builder/runtime target, transfer store, artifact digest, and why GHCR/GitHub target pulls were not used.")
+     (criterion c8 :rule "For Mac mini / managed local-build targets, rollout report names the source-sync lane (GitHub or XJP codebase), target-side build command, release id, smoke result, and rollback artifact.")))

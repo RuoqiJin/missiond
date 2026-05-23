@@ -58,7 +58,13 @@
     (chat-completions-policy jarvis-api
       :default_slot "slot-claude-code-default"
       :header_override "X-Slot-Id"
-      :rule "OpenAI-compatible /v1/chat/completions routes to the explicit X-Slot-Id header when present; otherwise it uses this V3-projected default slot. Rust must not hardcode slot-jarvis.")
+      :rule "OpenAI-compatible /v1/chat/completions routes to the explicit X-Slot-Id header when present; otherwise it uses this V3-projected default slot. Rust must not hardcode slot-jarvis. Jarvis broad requests MUST pass the strict intent/plan gate: emit intent_draft and await user confirmation, then emit plan_draft and await confirmation, then create BoardTask metadata with grounding_context_id, intent_artifact_id, and plan_artifact_id before any worker dispatch.")
+    (agent-cli-regression-policy
+      :schema "missiond.agent-cli-regression-policy.v1"
+      :checker "node scripts/check-v3-agent-cli-regression.mjs"
+      :providers [claude-code codex agy gemini-legacy]
+      :states [idle running tool-running approval-blocked auth-unavailable billing-unavailable quota-unavailable complete]
+      :rule "Every provider lane must have command construction, PTY recognition, slot visibility, durable conversation source mapping, task-result-artifact completion, and regression fixtures before it can be promoted beyond read-only research.")
     (startup-slot arch_maintenance
       :engine claude-code
       :lifecycle persistent
@@ -476,6 +482,56 @@
       :default-use low-authority-survey
       :accepts-boardtask true
       :write-allowed false)
+    (worker agy-research
+      :engine agy
+      :role researcher
+      :slot-id "slot-agy-research"
+      :task-type agy_research
+      :model-profile nil
+      :model nil
+      :task-classes [research review context-pack survey]
+      :capabilities [read-only analysis design-review provider-successor]
+      :max-concurrency 1
+      :timeout-secs 900
+      :default-use agy-read-only-research
+      :accepts-boardtask true
+      :write-allowed false)
+    (worker codex-code-worker
+      :engine codex
+      :role coder
+      :slot-id "slot-codex-code-worker"
+      :task-type codex_code_worker
+      :model-profile codex-master-gpt-5-5-xhigh
+      :model nil
+      :reasoning-effort xhigh
+      :search true
+      :sandbox danger-full-access
+      :approval-policy never
+      :task-classes [code implementation design review regression-analysis]
+      :capabilities [code-read code-write scoped-commit shell-exec search]
+      :max-concurrency 1
+      :timeout-secs 1800
+      :default-use codex-code-shard
+      :accepts-boardtask true
+      :write-allowed true)
+    (worker codex-review-worker
+      :engine codex
+      :role reviewer
+      :slot-id "slot-codex-review-worker"
+      :task-type codex_review_worker
+      :model-profile codex-master-gpt-5-5-xhigh
+      :model nil
+      :reasoning-effort xhigh
+      :search true
+      :sandbox read-only
+      :approval-policy never
+      :task-classes [review architecture-review regression-analysis]
+      :capabilities [code-read design-review search]
+      :max-concurrency 1
+      :timeout-secs 1200
+      :default-use codex-review-shard
+      :accepts-boardtask true
+      :write-allowed false)
     (worker codex-master-control
       :engine codex
       :role orchestrator
@@ -501,7 +557,9 @@
        "Claude fast-patch may use Sonnet only for narrow atomic tasks whose context-pack already identifies exact files/regions; it is not a default coding lane."
        "Autopilot must resolve workstation-pool dispatch by task class before hints: `pool_hint` may select a concrete worker across the full pool, but `engine_hint` alone only filters/ranks the current task-class candidates and MUST NOT widen a complex `task_class=code` shard into the `claude-code-fast-patch` Sonnet lane."
        "Gemini Ultra Pro is the high-language read-only investigation lane using gemini-3.1-pro-preview; Gemini fast survey is explicitly low-authority mechanical scan/summary work."
+       "Agy is the successor research CLI lane. It starts as read-only until PTY recognition, durable-log mapping, and task-result-artifact smoke prove it can safely take implementation shards."
        "Gemini is initially read-only: research, review, context-pack, and Lisp compression advice may route there; scoped write/commit work stays on Claude until a separate Gemini write smoke passes."
+       "Codex code/review worker lanes are ordinary BoardTask candidates and are separate from codex-master-control; the resident master cannot consume ordinary shard work."
        "Read-only Gemini pool workers MUST project to Gemini CLI `--approval-mode plan --policy .missiond/v3/policies/gemini-readonly-policy.toml`; workstation-pool registration MUST NOT set dangerously_skip_permissions/YOLO for any worker with :write-allowed false, and the policy MUST deny subagent delegation and write/shell tools."
        "Autopilot unassigned BoardTasks select from workstation-pool by task class before considering any legacy slot; old slots.yaml Sonnet entries are not generic coding candidates."
        "mission_compute_slot action=list must expose workstation_pool with runtime slot presence and idle/busy/stopped status."

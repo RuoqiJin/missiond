@@ -81,15 +81,23 @@
       :fields [profile_id allowed_outbound forbidden_outbound allowed_transfer_stores build_runtime_candidates target_side_build_allowed diagnostics]
       :invariants ["CN restricted targets such as Aliyun ECS and Synology/domestic-only VMs MUST NOT depend on target-side GitHub, GHCR, Docker Hub, or source builds."
                    "Privatecloud Ubuntu 10900KF, Windows 12900KF, and Synology VM share xjp-zibo-lan and may be used as build/cache/jump evidence when their agent/credential refs are healthy."
-                   "Managed Mac nodes with enough local CPU such as rickyhq-macmini-m4 SHOULD receive source through the XJP native codebase lane and build on target; direct binary scp is a break-glass bootstrap path only."
+                   "Managed Mac nodes with enough local CPU such as rickyhq-macmini-m4 SHOULD receive source through GitHub or the XJP native codebase lane and build on target; direct rsync/scp/binary transfer from an operator laptop is a break-glass bootstrap path only."
                    "If a deploy worker sees a restricted target configured for GHCR/GitHub direct pull, it must create deployment-lane-mismatch instead of retrying network calls."])
     (artifact-delivery-lane-contract
       :fields [lane_id source_commit builder_id transfer_store target_runtime artifact_sha256 target_digest reported_digest rollback_artifact smoke_evidence]
       :lanes [cloud-registry-lane cn-oss-bundle-lane gitee-source-mirror-lane macmini-codebase-local-build-lane manual-break-glass-lane]
       :invariants ["cn-oss-bundle-lane means approved builder -> Aliyun OSS -> ECS internal download -> deploy-agent run -> reported digest; ECS must not build or pull GHCR as the normal path."
-                   "macmini-codebase-local-build-lane means MissionD/deploy-center sync source and workflow definition to the managed Mac node, the node builds locally, signs/installs into its own ~/.xjp-mission release path, and reports build/test/health provenance. This lane is preferred after bootstrap because it avoids brittle large binary transfer and proves the managed node can rebuild itself."
+                   "macmini-codebase-local-build-lane means MissionD/deploy-center sync source and workflow definition through GitHub or XJP codebase to the managed Mac node, the node builds locally, signs/installs into its own ~/.xjp-mission release path, and reports build/test/health provenance. This lane is preferred after bootstrap because it avoids brittle operator-laptop file mirroring and proves the managed node can rebuild itself."
                    "gitee-source-mirror-lane is source/control evidence only unless paired with a builder and artifact lane."
                    "manual-break-glass-lane requires approval and post-action provenance."])
+    (managed-source-sync-policy
+      :entry [deploy-request remote-node-update missiond-work-order codebase-runner github-remote deploy-center.workflow-run]
+      :core ((step s1 :logic "classify remote source update targets; managed Mac mini nodes and other capable build nodes must prefer GitHub or XJP codebase/deploy-center source synchronization")
+             (step s2 :logic "after source synchronization, build, test, package, install, and smoke on the target node or on the deploy-center approved private-cloud builder, not on an operator laptop")
+             (step s3 :logic "if deploy-center owns the rollout, GA/GitHub Actions may only act as control-plane trigger and must route actual build/deploy through the private-cloud/codebase/agent channel")
+             (step s4 :logic "if an operator attempts rsync/scp source mirroring, classify it as break-glass diagnostic, require approval/provenance, and create a process-drift follow-up so the steady-state lane is repaired"))
+      :egress [source-sync-provenance target-build-provenance deploy-center-workflow-run process-drift-diagnostic]
+      :surfaces [".missiond/workflows/m6-deployment-rollout.lisp" "mission_infra_query(action=runtime_targets|skill_evidence)" "deploy-center.codebase_sync_operation" "deploy-center.workflow-run"])
     (agent-offline-response-policy
       :entry [deploy-center.agent_heartbeat deploy-center.agent_update_failed deployment-event-response mission_infra_query.skill_evidence mission_infra_query.diagnostic_profiles]
       :core ((step s1 :logic "when deploy-center emits agent_offline or repeated heartbeat/update failure, MissionD creates or updates one deploy-ops incident keyed by target_id/service_id/root_cause_key")

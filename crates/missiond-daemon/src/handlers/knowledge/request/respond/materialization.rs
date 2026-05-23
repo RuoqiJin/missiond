@@ -201,7 +201,7 @@ pub(in crate::handlers::knowledge::request) async fn materialize_request_plan(
     };
     let enriched_plan_text =
         enrich_materialized_plan_lisp(plan_text, &plan_ref, version, &anchor.board_task_id);
-    let (artifact_projection, artifact_projection_error) = if enriched_plan_text != plan_text {
+    let artifact_projection = if enriched_plan_text != plan_text {
         match ArtifactCommitEnvelope::commit_text(
             state,
             ArtifactCommitEnvelopeInput {
@@ -227,19 +227,21 @@ pub(in crate::handlers::knowledge::request) async fn materialize_request_plan(
         )
         .await
         {
-            Ok(write) => (
-                Some(PlanArtifactProjection {
-                    path: write.path,
-                    sha256: write.sha256,
-                    bytes: write.bytes,
-                    overwritten: write.overwritten,
-                }),
-                None,
-            ),
-            Err(e) => (None, Some(format!("{:#}", e))),
+            Ok(write) => Some(PlanArtifactProjection {
+                path: write.path,
+                sha256: write.sha256,
+                bytes: write.bytes,
+                overwritten: write.overwritten,
+            }),
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "request-local plan materialized into DB but failed to commit plan.lisp through ArtifactCommitEnvelope: {:#}",
+                    e
+                ));
+            }
         }
     } else {
-        (None, None)
+        None
     };
 
     Ok(PlanMaterialization {
@@ -249,6 +251,6 @@ pub(in crate::handlers::knowledge::request) async fn materialize_request_plan(
         sexp_hash,
         board_task_created: anchor.board_task_created,
         artifact_projection,
-        artifact_projection_error,
+        artifact_projection_error: None,
     })
 }

@@ -21,6 +21,7 @@ use tracing::{info, warn};
 #[serde(rename_all = "lowercase")]
 pub enum CtlProvider {
     Gemini,
+    Agy,
     Sonnet,
     Codex,
     Opus,
@@ -30,6 +31,7 @@ impl CtlProvider {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Gemini => "gemini",
+            Self::Agy => "agy",
             Self::Sonnet => "sonnet",
             Self::Codex => "codex",
             Self::Opus => "opus",
@@ -39,6 +41,7 @@ impl CtlProvider {
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "gemini" => Some(Self::Gemini),
+            "agy" | "antigravity" => Some(Self::Agy),
             "sonnet" => Some(Self::Sonnet),
             "codex" => Some(Self::Codex),
             "opus" => Some(Self::Opus),
@@ -46,7 +49,13 @@ impl CtlProvider {
         }
     }
 
-    pub const ALL: [Self; 4] = [Self::Gemini, Self::Sonnet, Self::Codex, Self::Opus];
+    pub const ALL: [Self; 5] = [
+        Self::Gemini,
+        Self::Agy,
+        Self::Sonnet,
+        Self::Codex,
+        Self::Opus,
+    ];
 }
 
 /// Functional domain.
@@ -362,6 +371,7 @@ impl CtlProvider {
             Self::Gemini => Some(crate::llm_gate::LlmProvider::Gemini),
             Self::Sonnet => Some(crate::llm_gate::LlmProvider::Sonnet),
             Self::Codex => Some(crate::llm_gate::LlmProvider::Codex),
+            Self::Agy => None,
             Self::Opus => None, // Opus has no legacy gate
         }
     }
