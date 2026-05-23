@@ -249,6 +249,24 @@ fn jarvis_task_wait_secs() -> u64 {
     )
 }
 
+fn clamp_jarvis_public_stream_budget_secs(value: Option<u64>) -> u64 {
+    const DEFAULT_BUDGET_SECS: u64 = 85;
+    const MIN_BUDGET_SECS: u64 = 10;
+    const MAX_BUDGET_SECS: u64 = 240;
+
+    value
+        .unwrap_or(DEFAULT_BUDGET_SECS)
+        .clamp(MIN_BUDGET_SECS, MAX_BUDGET_SECS)
+}
+
+fn jarvis_public_stream_budget_secs() -> u64 {
+    clamp_jarvis_public_stream_budget_secs(
+        std::env::var("MISSIOND_JARVIS_PUBLIC_STREAM_BUDGET_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok()),
+    )
+}
+
 /// Parse Deploy Center failure webhook into an incident.
 /// Returns None for non-failure events (e.g. deploy success).
 fn parse_deploy_webhook(body: &str) -> Option<crate::types::MissionIncident> {
@@ -1463,6 +1481,7 @@ impl PTYWebSocketServer {
         task_id: &str,
     ) -> anyhow::Result<()> {
         let wait_secs = jarvis_task_wait_secs();
+        let public_stream_budget_secs = jarvis_public_stream_budget_secs();
         let started_at = std::time::Instant::now();
         let mut last_status = String::new();
         let mut last_slot: Option<String> = None;
@@ -1777,6 +1796,45 @@ impl PTYWebSocketServer {
                     return Ok(());
                 }
                 _ => {
+                    if started_at.elapsed()
+                        > tokio::time::Duration::from_secs(public_stream_budget_secs)
+                    {
+                        let follow_payload = serde_json::json!({
+                            "missiond_follow_task_id": task_id,
+                            "stream": true
+                        });
+                        let diagnostic = serde_json::json!({
+                            "phase": "result_pending",
+                            "task_id": task_id,
+                            "status": task.status.as_str(),
+                            "slot_id": task.claim_executor_id.clone().or_else(|| task.assignee.clone()),
+                            "public_stream_budget_secs": public_stream_budget_secs,
+                            "terminal_task_result": false,
+                            "follow_payload": follow_payload.clone(),
+                            "message": "Worker task is still running; return a resumable pending result before the public SSE route times out."
+                        });
+                        Self::write_sse_event(stream, "diagnostic", &diagnostic).await?;
+                        let final_event = serde_json::json!({
+                            "phase": "result_pending",
+                            "task_id": task_id,
+                            "status": "result_pending",
+                            "terminal_task_result": false,
+                            "public_stream_budget_secs": public_stream_budget_secs,
+                            "follow_payload": follow_payload
+                        });
+                        Self::write_sse_event(stream, "final", &final_event).await?;
+                        Self::write_sse_openai_text(
+                            stream,
+                            chat_id,
+                            &format!(
+                                "任务仍在运行，我已返回可续接状态而不是伪造结果。后续请求携带 missiond_follow_task_id={} 即可继续等待或读取最终 task-result-artifact。",
+                                task_id
+                            ),
+                            Some("stop"),
+                        )
+                        .await?;
+                        return Ok(());
+                    }
                     stream.write_all(b":\n\n").await?;
                     stream.flush().await?;
                     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -1978,6 +2036,77 @@ impl PTYWebSocketServer {
             .get("conversation_id")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+
+        if let Some(follow_task_id) = req
+            .get("missiond_follow_task_id")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let chat_id = format!(
+                "chatcmpl-jarvis-follow-{}",
+                chrono::Utc::now().timestamp_millis()
+            );
+            let sse_headers = "HTTP/1.1 200 OK\r\n\
+                Content-Type: text/event-stream\r\n\
+                Cache-Control: no-cache\r\n\
+                Connection: keep-alive\r\n\
+                Access-Control-Allow-Origin: *\r\n\
+                \r\n";
+            stream.write_all(sse_headers.as_bytes()).await?;
+            stream.flush().await?;
+
+            if let Some(ref db) = db {
+                match db.jarvis_get_or_create(conversation_id.as_deref()).await {
+                    Ok(id) => {
+                        let meta_evt = serde_json::json!({
+                            "conversation_id": id,
+                            "chat_id": chat_id,
+                            "follow_task_id": follow_task_id,
+                            "mode": "missiond_follow_task"
+                        });
+                        Self::write_sse_event(&mut stream, "meta", &meta_evt).await?;
+                        let status_evt = serde_json::json!({
+                            "phase": "result_followup",
+                            "task_id": follow_task_id,
+                            "message": "Continuing an existing BoardTask result stream; intent/plan is not regenerated."
+                        });
+                        Self::write_sse_event(&mut stream, "status", &status_evt).await?;
+                        Self::stream_jarvis_task_until_terminal(
+                            db,
+                            &jarvis_artifact_writer,
+                            &mut stream,
+                            &chat_id,
+                            follow_task_id,
+                        )
+                        .await?;
+                    }
+                    Err(error) => {
+                        let diagnostic = serde_json::json!({
+                            "phase": "result_followup",
+                            "task_id": follow_task_id,
+                            "error": {
+                                "code": "JARVIS_CONVERSATION_OPEN_FAILED",
+                                "message": error.to_string()
+                            }
+                        });
+                        Self::write_sse_event(&mut stream, "diagnostic", &diagnostic).await?;
+                    }
+                }
+            } else {
+                let diagnostic = serde_json::json!({
+                    "phase": "result_followup",
+                    "task_id": follow_task_id,
+                    "error": {
+                        "code": "MISSIOND_DB_UNAVAILABLE",
+                        "message": "MissionD DB unavailable; cannot follow BoardTask result"
+                    }
+                });
+                Self::write_sse_event(&mut stream, "diagnostic", &diagnostic).await?;
+            }
+            Self::finish_sse(&mut stream).await?;
+            return Ok(());
+        }
 
         let messages = req.get("messages").and_then(|m| m.as_array());
 
@@ -4519,5 +4648,13 @@ mod tests {
         assert_eq!(clamp_jarvis_task_wait_secs(Some(1)), 15);
         assert_eq!(clamp_jarvis_task_wait_secs(Some(120)), 120);
         assert_eq!(clamp_jarvis_task_wait_secs(Some(900)), 300);
+    }
+
+    #[test]
+    fn jarvis_public_stream_budget_is_bounded_for_proxy_routes() {
+        assert_eq!(clamp_jarvis_public_stream_budget_secs(None), 85);
+        assert_eq!(clamp_jarvis_public_stream_budget_secs(Some(1)), 10);
+        assert_eq!(clamp_jarvis_public_stream_budget_secs(Some(90)), 90);
+        assert_eq!(clamp_jarvis_public_stream_budget_secs(Some(900)), 240);
     }
 }

@@ -100,7 +100,15 @@
                 (step s5 :logic "if a BoardTask is done with a summary but no artifact hash, emit TASK_RESULT_ARTIFACT_REQUIRED and fail fast instead of streaming the Board note as final text")
                 (step s6 :logic "stream final text only after the task-result artifact hash is known or the diagnostic is surfaced")
                 (step s7 :logic "if the worker provider returns an empty final after its slot is idle/exited/error, write provider-empty-final as a task-result-artifact diagnostic, fail the BoardTask, and notify Jarvis instead of leaving the task running until mobile timeout"))
-         :egress [task-result-artifact result_artifact_event final_event diagnostic]))
+         :egress [task-result-artifact result_artifact_event final_event diagnostic])
+       (function jarvis-result-followup
+         :entry [JarvisSSE missiond_follow_task_id BoardTask task-result-artifact]
+         :core ((step s1 :logic "public Jarvis SSE routes use MISSIOND_JARVIS_PUBLIC_STREAM_BUDGET_SECS to avoid relying on a single multi-minute mobile/proxy connection")
+                (step s2 :logic "when a worker task is still running after the public stream budget, emit result_pending with follow_payload.missiond_follow_task_id and finish the SSE cleanly")
+                (step s3 :logic "a follow-up request carrying missiond_follow_task_id bypasses intent/plan regeneration and resumes observation of the existing BoardTask")
+                (step s4 :logic "if the followed task is already terminal, immediately revalidate task-result-artifact and stream result_artifact/final")
+                (step s5 :logic "result_pending is not a fallback answer; it is a resumable transport state and terminal_task_result remains false"))
+         :egress [result_pending follow_payload result_followup_stream result_artifact_event final_event]))
     :invariants
       ["All non-exact worker dispatch must carry grounding_context_id before a provider PTY receives the prompt."
        "mission_context_gather is the only default aggregate for KB/SSOT/project/skill/infra/Board/conversation/tool facts; callers should not hand-roll partial context lookup."
@@ -109,7 +117,8 @@
        "Direct local code search is allowed only after the grounding artifact identifies code surface evidence as a required source."
        "Jarvis dispatch metadata MUST derive read_scope from the active runtime/project root (MISSIOND_PROJECT_ROOT, MISSIOND_REPO_ROOT, MISSIOND_WORKSPACE_ROOT, or current daemon cwd) and MUST NOT hardcode a developer-machine root path."
        "Jarvis result streaming MUST use task-result-artifact as canonical completion authority; Board summary notes are converted to artifacts before client-visible result_artifact events."
-       "Jarvis result artifact writes MUST be bounded; missing or stalled artifact writes produce typed diagnostics and MUST NOT silently fall back to Board note final text."]
+       "Jarvis result artifact writes MUST be bounded; missing or stalled artifact writes produce typed diagnostics and MUST NOT silently fall back to Board note final text."
+       "Jarvis public SSE streams MUST return a typed result_pending/follow_payload before mobile or reverse-proxy timeouts; follow-up requests with missiond_follow_task_id resume the existing BoardTask instead of creating a new intent or plan."]
     :checks ["node scripts/check-v3-grounded-dispatch-isomorphism.mjs --json"])
 
   (unified-entry
