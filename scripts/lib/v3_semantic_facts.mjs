@@ -1,6 +1,7 @@
 import {
   compiledArtifactContractMap,
   compiledAgentEntryMap,
+  compiledAgentNavigationPolicyMap,
   compiledCheckerRegistryMap,
   compiledContractSplitMap,
   compiledControlPlaneDomainMap,
@@ -27,6 +28,7 @@ export function loadV3SemanticFacts(options = {}) {
     functions: compiledFunctionMap(contract),
     artifacts: compiledArtifactContractMap(contract),
     agentEntries: compiledAgentEntryMap(contract),
+    agentNavigationPolicies: compiledAgentNavigationPolicyMap(contract),
     runtimePolicies: compiledRuntimePolicyMap(contract),
     checkerRegistry: compiledCheckerRegistryMap(contract),
     productionConsumerBoundaries: compiledProductionConsumerBoundaryMap(contract),

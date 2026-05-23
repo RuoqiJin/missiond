@@ -6,10 +6,12 @@ import {
   BASELINE_AGENT_ENTRY_IDS,
   PRIMARY_TOOL_FAMILIES,
   validateCompiledAgentSlices,
+  validateCompiledProjectAgentNavigation,
 } from './lib/v3_agent_slices.mjs';
 
 const SEMANTIC_IR = '.missiond/v3/runtime/compiled/compiled-semantic-ir.json';
 const AGENT_SLICES = '.missiond/v3/runtime/compiled/compiled-agent-slices.json';
+const PROJECT_AGENT_NAVIGATION = '.missiond/v3/runtime/compiled/compiled-project-agent-navigation.json';
 const MCP_TOOL_DIRECTORY = 'crates/missiond-mcp/src/tools/comm/tool_directory.rs';
 const DAEMON_TOOL_DIRECTORY = 'crates/missiond-daemon/src/handlers/comm/tool_directory.rs';
 const CONTEXT_SLICE_TOOL = 'crates/missiond-mcp/src/tools/knowledge/shared_memory.rs';
@@ -21,14 +23,19 @@ function main() {
   const diagnostics = [];
   const semantic = readJson(path.join(repo, SEMANTIC_IR), SEMANTIC_IR, diagnostics);
   const compiled = readJson(path.join(repo, AGENT_SLICES), AGENT_SLICES, diagnostics);
+  const projectNavigation = readJson(path.join(repo, PROJECT_AGENT_NAVIGATION), PROJECT_AGENT_NAVIGATION, diagnostics);
 
   const facts = Array.isArray(semantic?.payload?.facts) ? semantic.payload.facts : [];
   const rawEntries = facts.filter((fact) => fact?.kind === 'agent_entry');
   if (rawEntries.length === 0) {
     diagnostics.push(diag(SEMANTIC_IR, 'compiled semantic IR must include agent_entry facts'));
   }
+  if (!facts.some((fact) => fact?.kind === 'agent_navigation_policy' && fact.id === 'closure')) {
+    diagnostics.push(diag(SEMANTIC_IR, 'compiled semantic IR must include agent_navigation_policy closure fact'));
+  }
 
   diagnostics.push(...validateCompiledAgentSlices(compiled));
+  diagnostics.push(...validateCompiledProjectAgentNavigation(projectNavigation));
   const entries = Array.isArray(compiled?.payload?.entries) ? compiled.payload.entries : [];
   const factsByKind = {
     surface: mapByKind(facts, 'surface'),
@@ -89,6 +96,7 @@ function main() {
     ok: diagnostics.length === 0,
     semantic_agent_entries: rawEntries.length,
     compiled_entries: entries.length,
+    project_navigation_projects: Array.isArray(projectNavigation?.payload?.projects) ? projectNavigation.payload.projects.length : 0,
     baseline_entries: BASELINE_AGENT_ENTRY_IDS.length,
     diagnostics,
   };

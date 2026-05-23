@@ -36,6 +36,7 @@ dist/
 .missiond/v3/runtime/executions/*.lisp
 .missiond/v3/runtime/plans/*.evidence.json
 .missiond/v3/runtime/capability-usage-review.json
+.missiond/v3/runtime/agent-navigation-review.json
 .missiond/v3/runtime/master-control-checkpoint.lisp
 .missiond/v3/runtime/master-control/context-packs/*.lisp
 .missiond/v3/runtime/swarm/*.lisp

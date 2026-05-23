@@ -95,6 +95,7 @@
       :default jarvis
       (tab :id jarvis :label "Jarvis" :icon Sparkles)
       (tab :id board :label "Board" :icon ClipboardList)
+      (tab :id navigator :label "Navigator" :icon Compass)
       (tab :id terminal :label "Terminal" :icon MonitorUp)
       (tab :id exec :label "Exec" :icon Crosshair)
       (tab :id codex :label "Codex Loop" :icon Repeat2)

@@ -225,14 +225,44 @@ impl SharedMemoryService {
         let entry_id = string_arg(args, "entryId").or_else(|| string_arg(args, "entry_id"));
         let surface = string_arg(args, "surface");
         let compiled = self.read_compiled_json("compiled-semantic-ir.json").ok();
-        let agent_slices = if intent.is_some() || entry_id.is_some() || surface.is_some() {
+        let wants_agent_entry =
+            intent.is_some() || entry_id.is_some() || surface.is_some() || project_id != "missiond";
+        let agent_slices = if wants_agent_entry && project_id == "missiond" {
             self.read_compiled_json("compiled-agent-slices.json").ok()
+        } else {
+            None
+        };
+        let project_agent_navigation = if wants_agent_entry && project_id != "missiond" {
+            self.read_compiled_json("compiled-project-agent-navigation.json")
+                .ok()
         } else {
             None
         };
         let agent_entry = agent_slices
             .as_ref()
             .and_then(|compiled| select_agent_entry(compiled, entry_id, surface, intent));
+        let project_agent_entry = project_agent_navigation
+            .as_ref()
+            .and_then(|compiled| select_project_agent_entry(compiled, project_id));
+        let coverage_diagnostic = if project_id != "missiond" {
+            Some(match (&project_agent_entry, &project_agent_navigation) {
+                (Some(entry), _) => json!({
+                    "code": "PROJECT_AGENT_NAVIGATION_DERIVED",
+                    "coverageState": entry.get("coverageState").cloned().unwrap_or(Value::Null),
+                    "message": "Project navigation card is derived read-only from MissionD project registry."
+                }),
+                (None, Some(_)) => json!({
+                    "code": "PROJECT_AGENT_ENTRY_NOT_FOUND",
+                    "message": "No registered project navigation card matched project_id."
+                }),
+                (None, None) => json!({
+                    "code": "PROJECT_AGENT_NAVIGATION_UNAVAILABLE",
+                    "message": "compiled-project-agent-navigation.json is missing or unreadable."
+                }),
+            })
+        } else {
+            None
+        };
         let facts = compiled
             .as_ref()
             .and_then(|value| value.pointer("/payload/facts"))
@@ -259,9 +289,11 @@ impl SharedMemoryService {
             "source": {
                 "semanticIr": compiled.as_ref().map(|v| v.pointer("/source_hash").cloned()).flatten(),
                 "agentSlices": agent_slices.as_ref().map(|v| v.pointer("/source_hash").cloned()).flatten(),
+                "projectAgentNavigation": project_agent_navigation.as_ref().map(|v| v.pointer("/source_hash").cloned()).flatten(),
                 "artifactStore": "shared_artifacts"
             },
-            "agentEntry": agent_entry,
+            "agentEntry": agent_entry.or(project_agent_entry),
+            "coverageDiagnostic": coverage_diagnostic,
             "facts": facts,
             "artifacts": artifacts,
             "note": "Agents should read this slice before full Lisp. Use source_file/source_line in each fact for focused lookup."
@@ -1958,6 +1990,15 @@ fn select_agent_entry(
         .map(|(_, entry)| entry.clone())
 }
 
+fn select_project_agent_entry(compiled: &Value, project_id: &str) -> Option<Value> {
+    compiled
+        .pointer("/payload/projects")?
+        .as_array()?
+        .iter()
+        .find(|entry| entry.get("projectId").and_then(Value::as_str) == Some(project_id))
+        .cloned()
+}
+
 fn score_agent_entry(entry: &Value, normalized_intent: &str) -> i64 {
     let mut score = 0;
     if let Some(id) = entry.get("id").and_then(Value::as_str) {
@@ -2063,6 +2104,27 @@ mod tests {
         assert_eq!(
             entry.get("id").and_then(Value::as_str),
             Some("modify-plan-execution")
+        );
+    }
+
+    #[test]
+    fn context_slice_project_agent_entry_selects_registered_project() {
+        let compiled = json!({
+            "payload": {
+                "projects": [
+                    {
+                        "id": "project:jarvis",
+                        "projectId": "jarvis",
+                        "coverageState": "native-ssot-present",
+                        "readFirst": ["/Users/jinchen/Projects/jarvis/.missiond/intent.lisp"]
+                    }
+                ]
+            }
+        });
+        let entry = select_project_agent_entry(&compiled, "jarvis").expect("project should match");
+        assert_eq!(
+            entry.get("projectId").and_then(Value::as_str),
+            Some("jarvis")
         );
     }
 }

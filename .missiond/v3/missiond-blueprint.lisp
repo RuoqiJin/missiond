@@ -187,6 +187,8 @@
     :compiled-abi ["compiled-v3-blueprint.json"
                    "compiled-runtime-config.json"
                    "compiled-semantic-ir.json"
+                   "compiled-agent-slices.json"
+                   "compiled-project-agent-navigation.json"
                    "compiled-contract-abi.json"
                    "compiled-project-universe.json"
                    "compiled-workflows.json"
@@ -279,7 +281,7 @@
       :surface final_convergence
       :owner missiond-lispc
       :authority compiled-semantic-ir
-      :requires [surface function artifact_contract runtime_policy contract_split control_plane_domain source_domain checker_registry agent_entry
+      :requires [surface function artifact_contract runtime_policy contract_split control_plane_domain source_domain checker_registry agent_entry agent_navigation_policy
                  production_consumer_boundary request_state_projection scanner_policy semantic_gate]
       :must [verify_compiled_semantic_facts treat_text_needles_as_code_anchor_only]
       :forbidden [blueprint_needle_as_semantic_requirement]
@@ -361,6 +363,8 @@
     :required-live-checks [generated-v3-contracts-current
                            typed-lisp-runtime-compile
                            agent-entry-slices
+                           agent-navigation-quality
+                           agent-navigation-closure
                            runtime-domain-projections
                            control-plane-m6-split
                            production-runtime-boundary]
@@ -415,6 +419,10 @@
       :argv ["scripts/compile-v3-runtime.mjs" "--check" "--json"] :json true :timeout-ms 60000)
     (live-check agent-entry-slices
       :argv ["scripts/check-v3-agent-entry-slices.mjs" "--json"] :json true :timeout-ms 60000)
+    (live-check agent-navigation-quality
+      :argv ["scripts/check-v3-agent-navigation-quality.mjs" "--json" "--check"] :json true :timeout-ms 60000)
+    (live-check agent-navigation-closure
+      :argv ["scripts/check-v3-agent-navigation-closure.mjs" "--json"] :json true :timeout-ms 60000)
     (live-check runtime-domain-projections
       :argv ["scripts/check-v3-runtime-domain-projections.mjs" "--json"] :json true :timeout-ms 60000)
     (live-check control-plane-m6-split
@@ -476,6 +484,11 @@
       :file ".missiond/v3/runtime/compiled/compiled-final-convergence-manifest.json"
       :needles ["missiond.compiled-final-convergence-manifest.v1"
                 "runtime-domain-projections"])
+    (runtime-file project-agent-navigation-artifact
+      :file ".missiond/v3/runtime/compiled/compiled-project-agent-navigation.json"
+      :needles ["missiond.compiled-project-agent-navigation.v1"
+                "read-only-registered-projects"
+                "coverageState"])
     (runtime-file behavior-navigation-artifact
       :file ".missiond/v3/runtime/compiled/compiled-behavior-navigation.json"
       :needles ["missiond.compiled-behavior-navigation.v1" "anchors"])
@@ -511,6 +524,8 @@
              "node scripts/check-v3-runtime-domain-projections.mjs"
              "node scripts/check-v3-semantic-checker-coverage.mjs"
              "node scripts/check-v3-agent-entry-slices.mjs"
+             "node scripts/check-v3-agent-navigation-quality.mjs"
+             "node scripts/check-v3-agent-navigation-closure.mjs"
              "node scripts/check-v3-runtime-artifact-catalog.mjs"
              "node scripts/check-v3-typed-sidecar-compression.mjs"
              "node scripts/check-v3-conversation-ingestion-isomorphism.mjs"

@@ -5,7 +5,7 @@
 
 import type { FlowPhase, GroupBy, TaskCategory, TaskPriority, TaskStatus } from '../types';
 
-export type BoardTabId = "jarvis" | "board" | "terminal" | "exec" | "codex" | "system" | "knowledge" | "logs";
+export type BoardTabId = "jarvis" | "board" | "navigator" | "terminal" | "exec" | "codex" | "system" | "knowledge" | "logs";
 export type EventVersionKey = "slotVersion" | "taskVersion" | "questionVersion" | "decisionVersion" | "memoryVersion" | "deployVersion" | "engineVersion" | "timelineVersion";
 
 export interface BoardTabConfig {
@@ -73,6 +73,7 @@ export const DEFAULT_TAB: BoardTabId = "jarvis";
 export const BOARD_TABS = [
   { id: "jarvis", label: "Jarvis", icon: "Sparkles" },
   { id: "board", label: "Board", icon: "ClipboardList" },
+  { id: "navigator", label: "Navigator", icon: "Compass" },
   { id: "terminal", label: "Terminal", icon: "MonitorUp" },
   { id: "exec", label: "Exec", icon: "Crosshair" },
   { id: "codex", label: "Codex Loop", icon: "Repeat2" },

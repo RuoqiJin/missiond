@@ -1,3 +1,4 @@
+pub(crate) mod agent_navigation;
 pub(crate) mod audit;
 pub(crate) mod capability_usage;
 pub(crate) mod codex_ops;

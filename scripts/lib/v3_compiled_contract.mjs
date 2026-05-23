@@ -140,6 +140,9 @@ export function loadCompiledV3Contract({
   const agentEntries = normalizeAgentEntries(
     facts.filter((fact) => fact?.kind === 'agent_entry'),
   );
+  const agentNavigationPolicies = normalizeAgentNavigationPolicies(
+    facts.filter((fact) => fact?.kind === 'agent_navigation_policy'),
+  );
   const contractSplits = normalizeContractSplits(
     facts.filter((fact) => fact?.kind === 'contract_split'),
   );
@@ -199,6 +202,7 @@ export function loadCompiledV3Contract({
     scannerPolicies,
     semanticGates,
     agentEntries,
+    agentNavigationPolicies,
     contractSplits,
     controlPlaneDomains,
     workflowContracts,
@@ -312,6 +316,10 @@ export function compiledSemanticGateMap(contract) {
 
 export function compiledAgentEntryMap(contract) {
   return compiledTypedFactMap(contract?.agentEntries);
+}
+
+export function compiledAgentNavigationPolicyMap(contract) {
+  return compiledTypedFactMap(contract?.agentNavigationPolicies);
 }
 
 function compiledTypedFactMap(rows) {
@@ -496,6 +504,27 @@ function normalizeAgentEntries(rows) {
       mustNotTouch: stringArray(row?.must_not_touch ?? row?.mustNotTouch),
       readFirstOverride: stringArray(row?.read_first_override ?? row?.readFirstOverride),
       fallback: stringOrNull(row?.fallback),
+      source: row?.source ?? null,
+    }))
+    .filter((row) => row.id);
+}
+
+function normalizeAgentNavigationPolicies(rows) {
+  return arrayOrEmpty(rows)
+    .map((row) => ({
+      id: stringOrNull(row?.id),
+      schemaVersion: stringOrNull(row?.schema_version ?? row?.schemaVersion),
+      reviewSidecar: stringOrNull(row?.review_sidecar ?? row?.reviewSidecar),
+      projectNavigationArtifact: stringOrNull(row?.project_navigation_artifact ?? row?.projectNavigationArtifact),
+      qualityCorpus: stringOrNull(row?.quality_corpus ?? row?.qualityCorpus),
+      minFixturesPerEntry: positiveIntOrNull(row?.min_fixtures_per_entry ?? row?.minFixturesPerEntry),
+      minMatchAccuracy: Number.isFinite(Number(row?.min_match_accuracy ?? row?.minMatchAccuracy))
+        ? Number(row?.min_match_accuracy ?? row?.minMatchAccuracy)
+        : null,
+      projectMode: stringOrNull(row?.project_mode ?? row?.projectMode),
+      actions: stringArray(row?.actions),
+      checks: stringArray(row?.checks),
+      rule: stringOrNull(row?.rule),
       source: row?.source ?? null,
     }))
     .filter((row) => row.id);

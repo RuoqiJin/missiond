@@ -215,6 +215,7 @@
              "crates/missiond-mcp/src/tools/comm/audit.rs"
              "crates/missiond-mcp/src/tools/comm/codex_ops.rs"
              "crates/missiond-mcp/src/tools/comm/tool_directory.rs"
+             "crates/missiond-mcp/src/tools/comm/agent_navigation.rs"
              "crates/missiond-daemon/src/handlers/mod.rs"
              "crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"
              "crates/missiond-daemon/src/handlers/comm/capability_usage.rs"
@@ -222,8 +223,9 @@
              "crates/missiond-daemon/src/handlers/comm/audit.rs"
              "crates/missiond-daemon/src/handlers/comm/codex_ops.rs"
              "crates/missiond-daemon/src/handlers/comm/tool_directory.rs"
+             "crates/missiond-daemon/src/handlers/comm/agent_navigation.rs"
              "scripts/check-v3-capability-governance-isomorphism.mjs"]
-      :note "Runtime-projected V3 destination for capability usage, audit, Codex ops, and MCP tool-family governance surfaces. capability_usage.rs is the thin capability-governance facade; capability_usage/runtime.rs owns snapshot/report/candidates/mark/ack, six source lanes, semantic hint merge review, protected source/target policy, review sidecar persistence, and non-blocking observability emissions; context/v3_blueprint_runtime.rs projects capability-governance-policy review sidecar path plus protected source/target lists into mission_capability_usage runtime; audit.rs owns mission_audit trace/detail/stats/export plus legacy mission_audit_* compatibility; codex_ops.rs owns mission_codex_ops recent/thread/tool_stats over codex_cli conversations; tool_directory.rs owns mission_tool_directory list/recommend/lookup/explain/deprecated/guide so agents can select primary families and task entry cards before raw compatibility tools.")
+      :note "Runtime-projected V3 destination for capability usage, audit, Codex ops, and MCP tool-family governance surfaces. capability_usage.rs is the thin capability-governance facade; capability_usage/runtime.rs owns snapshot/report/candidates/mark/ack, six source lanes, semantic hint merge review, protected source/target policy, review sidecar persistence, and non-blocking observability emissions; context/v3_blueprint_runtime.rs projects capability-governance-policy review sidecar path plus protected source/target lists into mission_capability_usage runtime; audit.rs owns mission_audit trace/detail/stats/export plus legacy mission_audit_* compatibility; codex_ops.rs owns mission_codex_ops recent/thread/tool_stats over codex_cli conversations; tool_directory.rs owns read-only mission_tool_directory list/recommend/lookup/explain/deprecated/guide so agents can select primary families and task entry cards before raw compatibility tools; agent_navigation.rs owns mission_agent_navigation catalog/review/feedback/suggest_entries and may append only the agent-navigation review sidecar.")
 
 (surface skill-runtime
       :status "code-aligned"

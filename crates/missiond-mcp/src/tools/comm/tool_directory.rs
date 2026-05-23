@@ -30,6 +30,18 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "type": "string",
                     "description": "[guide] camelCase alias for entry_id"
                 },
+                "project": {
+                    "type": "string",
+                    "description": "[guide] Project id; missiond uses native entry cards, other registered projects use read-only project navigation cards"
+                },
+                "project_id": {
+                    "type": "string",
+                    "description": "[guide] snake_case project id alias"
+                },
+                "projectId": {
+                    "type": "string",
+                    "description": "[guide] camelCase project id alias"
+                },
                 "surface": {
                     "type": "string",
                     "description": "[guide] Surface id such as mission_plan or autopilot-runtime"

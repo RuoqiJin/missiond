@@ -21,6 +21,9 @@ struct Args {
     query: Option<String>,
     #[serde(default, alias = "entry_id")]
     entry_id: Option<String>,
+    project: Option<String>,
+    #[serde(default, alias = "project_id")]
+    project_id: Option<String>,
     surface: Option<String>,
     tool: Option<String>,
     family: Option<String>,
@@ -43,6 +46,8 @@ struct ToolFamily {
 }
 
 const AGENT_SLICES_REL: &str = ".missiond/v3/runtime/compiled/compiled-agent-slices.json";
+const PROJECT_AGENT_NAVIGATION_REL: &str =
+    ".missiond/v3/runtime/compiled/compiled-project-agent-navigation.json";
 
 const FAMILIES: &[ToolFamily] = &[
     ToolFamily {
@@ -387,6 +392,10 @@ fn guide_from_agent_slices(args: &Args, compiled: Result<Value>) -> Value {
         .clone()
         .or_else(|| args.query.clone())
         .unwrap_or_default();
+    let project = guide_project(args);
+    if project != "missiond" {
+        return project_agent_navigation_guide(&project, &intent, read_project_agent_navigation());
+    }
     let compiled = match compiled {
         Ok(value) => value,
         Err(err) => {
@@ -398,6 +407,7 @@ fn guide_from_agent_slices(args: &Args, compiled: Result<Value>) -> Value {
                     "message": format!("cannot read {AGENT_SLICES_REL}: {err}"),
                     "recovery": "Run node scripts/compile-v3-runtime.mjs --write, then retry mission_tool_directory(action=\"guide\")."
                 },
+                "project": project,
                 "intent": intent,
                 "fallbackRecommendations": recommend(&intent).iter().map(|family| render_family(*family, true)).collect::<Vec<_>>(),
             });
@@ -442,6 +452,7 @@ fn guide_from_agent_slices(args: &Args, compiled: Result<Value>) -> Value {
             json!({
                 "schema": "missiond.tool-directory-guide.v1",
                 "ok": true,
+                "project": project,
                 "intent": intent,
                 "entryId": args.entry_id.as_deref(),
                 "surface": args.surface.as_deref(),
@@ -463,6 +474,7 @@ fn guide_from_agent_slices(args: &Args, compiled: Result<Value>) -> Value {
         None => json!({
             "schema": "missiond.tool-directory-guide.v1",
             "ok": false,
+            "project": project,
             "diagnostic": {
                 "code": "AGENT_ENTRY_NOT_FOUND",
                 "message": "No agent entry matched entry_id, surface, or intent.",
@@ -480,6 +492,89 @@ fn read_agent_slices() -> Result<Value> {
     let path = missiond_project_root().join(AGENT_SLICES_REL);
     let text = fs::read_to_string(&path)?;
     Ok(serde_json::from_str(&text)?)
+}
+
+fn read_project_agent_navigation() -> Result<Value> {
+    let path = missiond_project_root().join(PROJECT_AGENT_NAVIGATION_REL);
+    let text = fs::read_to_string(&path)?;
+    Ok(serde_json::from_str(&text)?)
+}
+
+fn project_agent_navigation_guide(project: &str, intent: &str, compiled: Result<Value>) -> Value {
+    match compiled {
+        Ok(value) => {
+            let selected = value
+                .pointer("/payload/projects")
+                .and_then(Value::as_array)
+                .and_then(|projects| {
+                    projects
+                        .iter()
+                        .find(|entry| {
+                            entry.get("projectId").and_then(Value::as_str) == Some(project)
+                        })
+                        .cloned()
+                });
+            match selected {
+                Some(entry) => json!({
+                    "schema": "missiond.tool-directory-guide.v1",
+                    "ok": true,
+                    "project": project,
+                    "intent": intent,
+                    "selectedEntry": entry.clone(),
+                    "alternatives": [],
+                    "primaryFamily": find_family("mission_universe").map(|family| render_family(family, true)),
+                    "readFirst": entry.get("readFirst").cloned().unwrap_or_else(|| json!([])),
+                    "writeScope": entry.get("writeScope").cloned().unwrap_or_else(|| json!([])),
+                    "mustNotTouch": entry.get("mustNotTouch").cloned().unwrap_or_else(|| json!([])),
+                    "checks": entry.get("checks").cloned().unwrap_or_else(|| json!([])),
+                    "authorityNotes": entry.get("authorityNotes").cloned().unwrap_or_else(|| json!([])),
+                    "sourceRefs": entry.get("sourceRefs").cloned().unwrap_or_else(|| json!([])),
+                    "coverageDiagnostic": {
+                        "coverageState": entry.get("coverageState").cloned().unwrap_or(Value::Null),
+                        "rule": "non-MissionD project navigation is read-only and suggestion-only"
+                    },
+                    "source": {
+                        "projectAgentNavigation": PROJECT_AGENT_NAVIGATION_REL,
+                        "sourceHash": value.get("source_hash").cloned().unwrap_or(Value::Null)
+                    }
+                }),
+                None => json!({
+                    "schema": "missiond.tool-directory-guide.v1",
+                    "ok": false,
+                    "project": project,
+                    "intent": intent,
+                    "diagnostic": {
+                        "code": "PROJECT_AGENT_ENTRY_NOT_FOUND",
+                        "message": "No registered project navigation card matched the requested project.",
+                        "recovery": "Call mission_agent_navigation(action=\"suggest_entries\", project=...) or mission_project(action=\"list\")."
+                    },
+                    "fallbackRecommendations": recommend(intent).iter().map(|family| render_family(*family, true)).collect::<Vec<_>>(),
+                }),
+            }
+        }
+        Err(err) => json!({
+            "schema": "missiond.tool-directory-guide.v1",
+            "ok": false,
+            "project": project,
+            "intent": intent,
+            "diagnostic": {
+                "code": "PROJECT_AGENT_NAVIGATION_UNAVAILABLE",
+                "message": format!("cannot read {PROJECT_AGENT_NAVIGATION_REL}: {err}"),
+                "recovery": "Run node scripts/compile-v3-runtime.mjs --write."
+            },
+            "fallbackRecommendations": recommend(intent).iter().map(|family| render_family(*family, true)).collect::<Vec<_>>(),
+        }),
+    }
+}
+
+fn guide_project(args: &Args) -> String {
+    args.project
+        .as_deref()
+        .or(args.project_id.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("missiond")
+        .to_string()
 }
 
 fn guide_matches(entries: &[Value], args: &Args, intent: &str) -> Vec<(i64, Value)> {
@@ -689,6 +784,20 @@ mod tests {
     }
 
     #[test]
+    fn guide_by_intent_scores_autopilot_completion_over_board_backend() {
+        let args = Args {
+            action: "guide".to_string(),
+            intent: Some("我要修改 autopilot 的 BoardTask 完成判定".to_string()),
+            ..Args::default()
+        };
+        let value = guide_from_agent_slices(&args, Ok(test_agent_slices()));
+        assert_eq!(
+            value.pointer("/selectedEntry/id").and_then(Value::as_str),
+            Some("modify-workstation-autopilot")
+        );
+    }
+
+    #[test]
     fn guide_missing_agent_slices_returns_diagnostic() {
         let args = Args {
             action: "guide".to_string(),
@@ -713,6 +822,19 @@ mod tests {
             "payload": {
                 "entries": [
                     {
+                        "id": "modify-board-backend",
+                        "label": "Modify Board backend",
+                        "primaryFamily": "mission_board",
+                        "intentKeywords": ["board", "boardtask", "board backend"],
+                        "surfaces": ["mission_board"],
+                        "readFirst": [],
+                        "writeScope": [],
+                        "mustNotTouch": [],
+                        "checks": [],
+                        "authorityNotes": [],
+                        "sourceRefs": []
+                    },
+                    {
                         "id": "modify-plan-execution",
                         "label": "Modify plan execution",
                         "primaryFamily": "mission_workflow",
@@ -729,7 +851,7 @@ mod tests {
                         "id": "modify-workstation-autopilot",
                         "label": "Modify workstation autopilot",
                         "primaryFamily": "mission_workstation",
-                        "intentKeywords": ["autopilot", "worker dispatch"],
+                        "intentKeywords": ["autopilot", "boardtask completion", "boardtask 完成", "完成判定", "worker dispatch"],
                         "surfaces": ["autopilot-runtime"],
                         "readFirst": [],
                         "writeScope": [],

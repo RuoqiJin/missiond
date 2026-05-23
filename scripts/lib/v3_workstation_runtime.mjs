@@ -1,8 +1,8 @@
 import fs from 'node:fs';
-import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import path from 'node:path';
 
+import { runLispc } from './ocaml_lispc.mjs';
 import {
   head,
   isList,
@@ -243,48 +243,30 @@ function emitWorkstationRuntimeConfigViaLispc(
   { requireGeneratedHash = true, allowDiagnostics = false } = {},
 ) {
   const lispcRoot = findMissiondLispcRoot();
-  const result = spawnSync(
-    'dune',
+  const result = runLispc(
     [
-      'exec',
-      '--root',
-      'tools/missiond_lispc',
-      './bin/main.exe',
-      '--',
       'emit-runtime-config',
       '--blueprint',
       resolvedBlueprint,
     ],
-    {
-      cwd: lispcRoot,
-      encoding: 'utf8',
-      maxBuffer: 10 * 1024 * 1024,
-    },
+    { repoRoot: lispcRoot, timeoutMs: 60_000 },
   );
+  if (result.unavailable) {
+    throw new V3BlueprintRuntimeConfigError(
+      `missiond-lispc emit-runtime-config unavailable: ${trimForError(JSON.stringify(result.diagnostics ?? []))}`,
+    );
+  }
   if (result.error) {
     throw new V3BlueprintRuntimeConfigError(
-      `missiond-lispc emit-runtime-config failed to start: ${result.error.message}`,
+      `missiond-lispc emit-runtime-config failed to start: ${result.error}`,
     );
   }
-  let envelope;
-  try {
-    envelope = JSON.parse(result.stdout);
-  } catch (err) {
-    if (result.status !== 0) {
-      throw new V3BlueprintRuntimeConfigError(
-        `missiond-lispc emit-runtime-config failed with status ${result.status}: ${trimForError(result.stderr || result.stdout || '')}`,
-      );
-    }
+  if ((result.exit_code !== 0 || result.ok !== true) && (!allowDiagnostics || !result?.compiled)) {
     throw new V3BlueprintRuntimeConfigError(
-      `missiond-lispc emit-runtime-config returned invalid JSON: ${err.message}`,
+      `missiond-lispc rejected runtime config: ${trimForError(result.stdout || result.stderr || JSON.stringify(result.diagnostics ?? []))}`,
     );
   }
-  if ((result.status !== 0 || envelope?.ok !== true) && (!allowDiagnostics || !envelope?.compiled)) {
-    throw new V3BlueprintRuntimeConfigError(
-      `missiond-lispc rejected runtime config: ${trimForError(result.stdout)}`,
-    );
-  }
-  const compiled = envelope.compiled;
+  const compiled = result.compiled;
   const diagnostics = [];
   if (compiled?.schema_version !== 'missiond.compiled-runtime-config.v1') {
     diagnostics.push(`compiled runtime config has unsupported schema_version ${JSON.stringify(compiled?.schema_version)}`);

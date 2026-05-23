@@ -23,10 +23,12 @@ const DEFAULT_FILES = {
   audit: 'crates/missiond-daemon/src/handlers/comm/audit.rs',
   codexOps: 'crates/missiond-daemon/src/handlers/comm/codex_ops.rs',
   toolDirectory: 'crates/missiond-daemon/src/handlers/comm/tool_directory.rs',
+  agentNavigation: 'crates/missiond-daemon/src/handlers/comm/agent_navigation.rs',
   mcpCapability: 'crates/missiond-mcp/src/tools/comm/capability_usage.rs',
   mcpAudit: 'crates/missiond-mcp/src/tools/comm/audit.rs',
   mcpCodexOps: 'crates/missiond-mcp/src/tools/comm/codex_ops.rs',
   mcpToolDirectory: 'crates/missiond-mcp/src/tools/comm/tool_directory.rs',
+  mcpAgentNavigation: 'crates/missiond-mcp/src/tools/comm/agent_navigation.rs',
   v2Source: '.missiond/v2/intent-capability-governance.lisp',
 };
 
@@ -108,22 +110,26 @@ function checkFiles(root, files) {
     'crates/missiond-daemon/src/handlers/comm/audit.rs',
     'crates/missiond-daemon/src/handlers/comm/codex_ops.rs',
     'crates/missiond-daemon/src/handlers/comm/tool_directory.rs',
+    'crates/missiond-daemon/src/handlers/comm/agent_navigation.rs',
     'crates/missiond-mcp/src/tools/comm/capability_usage.rs',
     'crates/missiond-mcp/src/tools/comm/audit.rs',
     'crates/missiond-mcp/src/tools/comm/codex_ops.rs',
     'crates/missiond-mcp/src/tools/comm/tool_directory.rs',
+    'crates/missiond-mcp/src/tools/comm/agent_navigation.rs',
     'scripts/check-v3-capability-governance-isomorphism.mjs',
     'capability_usage.rs is the thin capability-governance facade',
     'capability_usage/runtime.rs owns snapshot/report/candidates/mark/ack',
     'audit.rs owns mission_audit trace/detail/stats/export',
     'codex_ops.rs owns mission_codex_ops recent/thread/tool_stats',
-    'tool_directory.rs owns mission_tool_directory list/recommend/lookup/explain/deprecated/guide',
+    'tool_directory.rs owns read-only mission_tool_directory list/recommend/lookup/explain/deprecated/guide',
+    'agent_navigation.rs owns mission_agent_navigation catalog/review/feedback/suggest_entries',
     'node scripts/check-v3-capability-governance-isomorphism.mjs',
   ]);
 
   requireAll(diagnostics, files.dispatcher, sources.dispatcher, [
     '"mission_capability_usage" => capability_usage::handle',
     '"mission_tool_directory" => tool_directory::handle',
+    '"mission_agent_navigation" => agent_navigation::handle',
     '"mission_audit" => audit::handle',
     '"mission_codex_ops" => codex_ops::handle',
     'n.starts_with("mission_audit_") => audit::handle',
@@ -208,6 +214,8 @@ function checkFiles(root, files) {
     'recommend',
     'lookup_tool',
     'deprecated',
+    'guide_tool_directory',
+    'PROJECT_AGENT_NAVIGATION_REL',
     'mission_board',
     'mission_workflow',
     'mission_workstation',
@@ -216,6 +224,17 @@ function checkFiles(root, files) {
     'mission_universe',
     'mission_ops',
     'mission_router',
+  ]);
+
+  requireAll(diagnostics, files.agentNavigation, sources.agentNavigation, [
+    'mission_agent_navigation',
+    'catalog',
+    'review',
+    'feedback',
+    'suggest_entries',
+    'agent-navigation-review.json',
+    'atomic_write_json',
+    'missiond.agent-navigation.catalog.v1',
   ]);
 
   requireAll(diagnostics, files.mcpCapability, sources.mcpCapability, [
@@ -255,6 +274,15 @@ function checkFiles(root, files) {
     '"guide"',
   ]);
 
+  requireAll(diagnostics, files.mcpAgentNavigation, sources.mcpAgentNavigation, [
+    'ToolDefinition::new',
+    '"mission_agent_navigation"',
+    '"catalog"',
+    '"review"',
+    '"feedback"',
+    '"suggest_entries"',
+  ]);
+
   requireAll(diagnostics, files.v2Source, sources.v2Source, [
     'capability-governance',
     'mission_capability_usage',
@@ -291,7 +319,7 @@ function buildFixture() {
     (v2-item capability-governance :status runtime-projected))
   (public-surface-map
     (tool-group capability-audit-tools :status code-aligned)
-    (tool-group mcp-tool-governance-tools :tools [mission_tool_directory]))
+    (tool-group mcp-tool-governance-tools :tools [mission_tool_directory mission_agent_navigation]))
   (implementation-map
     (surface capability-governance
       :status "code-aligned"
@@ -301,18 +329,20 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/comm/audit.rs"
              "crates/missiond-daemon/src/handlers/comm/codex_ops.rs"
              "crates/missiond-daemon/src/handlers/comm/tool_directory.rs"
+             "crates/missiond-daemon/src/handlers/comm/agent_navigation.rs"
              "crates/missiond-mcp/src/tools/comm/capability_usage.rs"
              "crates/missiond-mcp/src/tools/comm/audit.rs"
              "crates/missiond-mcp/src/tools/comm/codex_ops.rs"
              "crates/missiond-mcp/src/tools/comm/tool_directory.rs"
+             "crates/missiond-mcp/src/tools/comm/agent_navigation.rs"
              "scripts/check-v3-capability-governance-isomorphism.mjs"]
-      :note "capability_usage.rs is the thin capability-governance facade; capability_usage/runtime.rs owns snapshot/report/candidates/mark/ack; audit.rs owns mission_audit trace/detail/stats/export; codex_ops.rs owns mission_codex_ops recent/thread/tool_stats; tool_directory.rs owns mission_tool_directory list/recommend/lookup/explain/deprecated/guide."))
+      :note "capability_usage.rs is the thin capability-governance facade; capability_usage/runtime.rs owns snapshot/report/candidates/mark/ack; audit.rs owns mission_audit trace/detail/stats/export; codex_ops.rs owns mission_codex_ops recent/thread/tool_stats; tool_directory.rs owns read-only mission_tool_directory list/recommend/lookup/explain/deprecated/guide; agent_navigation.rs owns mission_agent_navigation catalog/review/feedback/suggest_entries."))
   (compression-contract
     :checks ["node scripts/check-v3-capability-governance-isomorphism.mjs"]))`,
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.dispatcher),
-    '"mission_capability_usage" => capability_usage::handle "mission_tool_directory" => tool_directory::handle "mission_audit" => audit::handle "mission_codex_ops" => codex_ops::handle n.starts_with("mission_audit_") => audit::handle',
+    '"mission_capability_usage" => capability_usage::handle "mission_tool_directory" => tool_directory::handle "mission_agent_navigation" => agent_navigation::handle "mission_audit" => audit::handle "mission_codex_ops" => codex_ops::handle n.starts_with("mission_audit_") => audit::handle',
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.capabilityFacade),
@@ -336,7 +366,11 @@ function buildFixture() {
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.toolDirectory),
-    'mission_tool_directory ToolFamily FAMILIES recommend lookup_tool deprecated guide_tool_directory mission_board mission_workflow mission_workstation mission_context mission_memory mission_universe mission_ops mission_router',
+    'mission_tool_directory ToolFamily FAMILIES recommend lookup_tool deprecated guide_tool_directory PROJECT_AGENT_NAVIGATION_REL mission_board mission_workflow mission_workstation mission_context mission_memory mission_universe mission_ops mission_router',
+  );
+  fs.writeFileSync(
+    path.join(root, DEFAULT_FILES.agentNavigation),
+    'mission_agent_navigation catalog review feedback suggest_entries agent-navigation-review.json atomic_write_json missiond.agent-navigation.catalog.v1',
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.mcpCapability),
@@ -353,6 +387,10 @@ function buildFixture() {
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.mcpToolDirectory),
     'ToolDefinition::new "mission_tool_directory" "recommend" "lookup" "explain" "deprecated" "guide"',
+  );
+  fs.writeFileSync(
+    path.join(root, DEFAULT_FILES.mcpAgentNavigation),
+    'ToolDefinition::new "mission_agent_navigation" "catalog" "review" "feedback" "suggest_entries"',
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.v2Source),

@@ -23,6 +23,7 @@ const REQUIRED_HELPER_ANCHORS = [
   'compiledRuntimePolicyMap',
   'compiledCheckerRegistryMap',
   'compiledAgentEntryMap',
+  'compiledAgentNavigationPolicyMap',
   'compiledContractSplitMap',
   'compiledControlPlaneDomainMap',
   'compiledProductionConsumerBoundaryMap',
@@ -66,6 +67,9 @@ function main() {
   if (!facts.agentEntries.has('modify-semantic-ir-ssot')) {
     diagnostics.push(diag('.missiond/v3/shards/agent-navigation.lisp', 'compiled semantic IR missing agent_entry fact: modify-semantic-ir-ssot'));
   }
+  if (!facts.agentNavigationPolicies.has('closure')) {
+    diagnostics.push(diag('.missiond/v3/shards/agent-navigation.lisp', 'compiled semantic IR missing agent_navigation_policy fact: closure'));
+  }
   if (facts.sourceUnits.size < 2) {
     diagnostics.push(diag('.missiond/v3/missiond-blueprint.lisp', 'compiled source_units must include root plus compiler-active shards'));
   }
@@ -102,6 +106,7 @@ function main() {
     scannerPolicies: facts.scannerPolicies.size,
     semanticGates: facts.semanticGates.size,
     agentEntries: facts.agentEntries.size,
+    agentNavigationPolicies: facts.agentNavigationPolicies.size,
     contractSplits: facts.contractSplits.size,
     controlPlaneDomains: facts.controlPlaneDomains.size,
     sourceUnits: facts.sourceUnits.size,

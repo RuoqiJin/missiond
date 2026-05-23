@@ -669,6 +669,34 @@ let semantic_agent_entry_facts source_hash file root =
       index |> list_forms "entry"
       |> List.map (semantic_agent_entry_fact source_hash file)
 
+let semantic_agent_navigation_policy_fact source_hash file node =
+  let props = keyword_props ~start:2 node in
+  let id = Option.value ~default:"closure" (form_id node) in
+  Printf.sprintf
+    {|{"fact_id":%s,"kind":"agent_navigation_policy","project_id":"missiond","id":%s,"schema_version":%s,"review_sidecar":%s,"project_navigation_artifact":%s,"quality_corpus":%s,"min_fixtures_per_entry":%s,"min_match_accuracy":%s,"project_mode":%s,"actions":%s,"checks":%s,"rule":%s,"source":%s}|}
+    (json_string ("agent-navigation-policy:" ^ safe_id id))
+    (json_string id)
+    (json_opt_string_token [ ":schema" ] props)
+    (json_opt_string_token [ ":review-sidecar"; ":review_sidecar" ] props)
+    (json_opt_string_token
+       [ ":project-navigation-artifact"; ":project_navigation_artifact" ]
+       props)
+    (json_opt_string_token [ ":quality-corpus"; ":quality_corpus" ] props)
+    (json_number_token [ ":min-fixtures-per-entry"; ":min_fixtures_per_entry" ] props)
+    (json_number_token [ ":min-match-accuracy"; ":min_match_accuracy" ] props)
+    (json_opt_string_token [ ":project-mode"; ":project_mode" ] props)
+    (json_string_list_token [ ":actions" ] props)
+    (json_string_list_token [ ":checks" ] props)
+    (json_opt_string_token [ ":rule" ] props)
+    (source_map_json source_hash file node)
+
+let semantic_agent_navigation_policy_facts source_hash file root =
+  match find_child root "agent-entry-index" with
+  | None -> []
+  | Some index ->
+      index |> list_forms "agent-navigation-policy"
+      |> List.map (semantic_agent_navigation_policy_fact source_hash file)
+
 let semantic_facts source_hash file source_units root =
   let function_facts =
     match find_child root "pillar-flow-map" with
@@ -743,10 +771,13 @@ let semantic_facts source_hash file source_units root =
   let agent_entry_facts =
     semantic_agent_entry_facts source_hash file root
   in
+  let agent_navigation_policy_facts =
+    semantic_agent_navigation_policy_facts source_hash file root
+  in
   function_facts @ surface_facts @ artifact_facts @ workflow_contract_facts
   @ workstation_facts @ runtime_policy_facts @ checker_registry_facts
   @ final_convergence_gate_facts @ source_unit_facts @ typed_subplane_facts
-  @ key_domain_facts @ agent_entry_facts
+  @ key_domain_facts @ agent_entry_facts @ agent_navigation_policy_facts
 
 let project_entry_to_json node =
   let props = keyword_props ~start:1 node in

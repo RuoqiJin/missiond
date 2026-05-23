@@ -10,6 +10,7 @@
        :write_scope [".missiond/v3/**"
                      ".missiond/frontend/**"
                      ".missiond/work-orders/20260523-agent-navigation-closure/**"
+                     ".gitignore"
                      "crates/missiond-daemon/**"
                      "crates/missiond-mcp/**"
                      "packages/board/**"

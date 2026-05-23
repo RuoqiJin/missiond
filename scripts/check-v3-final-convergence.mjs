@@ -15,6 +15,7 @@ import { spawnSync } from 'node:child_process';
 import {
   compiledArtifactContractMap,
   compiledAgentEntryMap,
+  compiledAgentNavigationPolicyMap,
   compiledCheckerRegistryMap,
   compiledContractSplitMap,
   compiledControlPlaneDomainMap,
@@ -48,6 +49,7 @@ const REQUIRED_SEMANTIC_GATE_FACT_KINDS = Object.freeze([
   'source_domain',
   'checker_registry',
   'agent_entry',
+  'agent_navigation_policy',
   'production_consumer_boundary',
   'request_state_projection',
   'scanner_policy',
@@ -388,6 +390,7 @@ export function checkSemanticGateClosure(contract, file = BLUEPRINT_PATH) {
     ['source_domain', [...compiledSourceDomainMap(contract).keys()]],
     ['checker_registry', [...checkerRegistry.keys()]],
     ['agent_entry', [...compiledAgentEntryMap(contract).keys()]],
+    ['agent_navigation_policy', [...compiledAgentNavigationPolicyMap(contract).keys()]],
     ['production_consumer_boundary', [...compiledProductionConsumerBoundaryMap(contract).keys()]],
     ['request_state_projection', [...compiledRequestStateProjectionMap(contract).keys()]],
     ['scanner_policy', [...compiledScannerPolicyMap(contract).keys()]],

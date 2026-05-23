@@ -518,7 +518,7 @@
         :v3-pillar communication
         :v3-function capability-governance
         :surface capability-governance
-        :tools [mission_tool_directory])
+        :tools [mission_tool_directory mission_agent_navigation])
       (tool-group sysinfra-control-tools
         :status code-aligned
         :v2-source ".missiond/v2/intent-system-layer.lisp :: sysinfra"

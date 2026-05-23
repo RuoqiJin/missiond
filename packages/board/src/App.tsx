@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import type { ElementType } from 'react';
-import { Plus, ClipboardList, Loader2, MonitorUp, Brain, MessageSquareText, Gauge, Crosshair, Sparkles, Repeat2 } from 'lucide-react';
+import { Plus, ClipboardList, Loader2, MonitorUp, Brain, MessageSquareText, Gauge, Crosshair, Sparkles, Repeat2, Compass } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
@@ -15,6 +15,7 @@ import { KnowledgeConsolidated } from './components/KnowledgeConsolidated';
 import { LogsConsolidated } from './components/LogsConsolidated';
 import { JarvisChat } from './components/JarvisChat';
 import { CodexReplayDashboard } from './components/CodexReplayDashboard';
+import { AgentNavigationDashboard } from './components/AgentNavigationDashboard';
 import { useEventStream, useConnectionState, useEventInvalidation } from './hooks/useEventStream';
 import { BOARD_TABS, DEFAULT_TAB, TAB_MIGRATION, type BoardTabId } from './generated/board-frontend-config';
 import type { SlotDef } from './types';
@@ -23,6 +24,7 @@ type Tab = BoardTabId;
 
 const TAB_ICON_MAP: Record<string, ElementType> = {
   Brain,
+  Compass,
   ClipboardList,
   Crosshair,
   Gauge,
@@ -263,6 +265,8 @@ export default function App() {
         <JarvisChat />
       ) : tab === 'board' ? (
         <BoardConsolidated />
+      ) : tab === 'navigator' ? (
+        <AgentNavigationDashboard />
       ) : tab === 'terminal' ? (
         <div className="mx-4 mb-4 flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-neutral-800 bg-neutral-950/60 sm:mx-8 lg:flex-row">
           <aside className="flex max-h-48 shrink-0 flex-col border-b border-neutral-800 bg-neutral-950/80 lg:max-h-none lg:w-72 lg:border-b-0 lg:border-r">

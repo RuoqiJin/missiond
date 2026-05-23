@@ -36,10 +36,11 @@
     :metadata-required [tool_family primary_action tier danger_level intent_examples preferred_surface compatibility_tools]
     :agent-rule "When unsure, call mission_tool_directory(action=\"recommend\", intent=...) before selecting a lower-level MCP tool. Tool families are a selection/readability layer; compatibility tools remain stable for existing workers."
     :invariants
-      ["mission_tool_directory MUST expose list/recommend/lookup/explain/deprecated/guide actions over the primary tool-family catalog."
+      ["mission_tool_directory MUST expose list/recommend/lookup/explain/deprecated/guide actions over the primary tool-family catalog and remain read-only."
+       "mission_agent_navigation owns catalog/review/feedback/suggest_entries; feedback may append only .missiond/v3/runtime/agent-navigation-review.json and must not mutate Board, KB, project registries, SSOT shards, or sibling repositories."
        "Public tools MAY remain numerous, but every high-frequency tool must map to a primary family and preferred surface."
        "Deprecated/raw tools MUST return a preferredFamily/preferredSurface hint instead of relying on operator memory."
-       "MCP tool-family governance must be read-only; it guides selection and must not mutate Board, KB, projects, or runtime state."])
+       "MCP tool-family guide semantics must be read-only; the only allowed navigation write is mission_agent_navigation feedback appending its review sidecar."])
 
   (memory-provider-contract
     :schema "missiond.memory-provider.v1"

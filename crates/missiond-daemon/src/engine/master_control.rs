@@ -40,6 +40,8 @@ const MASTER_INCIDENT_SUBSCRIPTION: &str = "master_event_subscriber_incident_v2_
 const MASTER_MCP_APPROVED_TOOLS: &[&str] = &[
     "mission_agent",
     "mission_audit",
+    "mission_tool_directory",
+    "mission_agent_navigation",
     "mission_beacon",
     "mission_intent",
     "mission_board_query",

@@ -436,7 +436,7 @@
         :egress [question_revalidation_status stale_evidence_answer QuestionEvent::Resolved])
       (function capability-governance
         :surface capability-governance
-        :entry [mission_capability_usage mission_audit mission_codex_ops mission_tool_directory]
+        :entry [mission_capability_usage mission_audit mission_codex_ops mission_tool_directory mission_agent_navigation]
         :core ((step s1 :logic "load capability-governance-policy and mcp-tool-governance-policy for review sidecar path, protected source/target lists, and primary tool families")
                (step s2 :logic "record capability usage, audit facts, and Codex operation acknowledgements")
                (step s3 :logic "bind evidence to plan/execution ids without becoming the primary execution gate")

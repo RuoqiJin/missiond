@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { runLispc } from './lib/ocaml_lispc.mjs';
-import { buildAgentSlices } from './lib/v3_agent_slices.mjs';
+import { buildAgentSlices, buildProjectAgentNavigation } from './lib/v3_agent_slices.mjs';
 import { runSemanticRules } from './lib/v3_semantic_rules.mjs';
 import { RUNTIME_DOMAIN_SPECS } from './lib/v3_runtime_domains.mjs';
 
@@ -178,6 +178,25 @@ function main() {
       source_hash: semanticJson.source_hash,
       diagnostics: slices.diagnostics ?? [],
     });
+    const universe = results.find((row) => row.id === 'universe' && row.ok);
+    if (universe) {
+      const universePath = path.join(outDir, 'compiled-project-universe.json');
+      const universeJson = JSON.parse(fs.readFileSync(universePath, 'utf8'));
+      const projectNavigation = buildProjectAgentNavigation({
+        semanticJson,
+        universeJson,
+        agentSlicesJson: slices,
+      });
+      const projectNavigationPath = path.join(outDir, 'compiled-project-agent-navigation.json');
+      fs.writeFileSync(projectNavigationPath, `${JSON.stringify(projectNavigation, null, 2)}\n`);
+      results.push({
+        id: 'project-agent-navigation',
+        ok: (projectNavigation.diagnostics ?? []).length === 0,
+        path: projectNavigationPath,
+        source_hash: projectNavigation.source_hash,
+        diagnostics: projectNavigation.diagnostics ?? [],
+      });
+    }
   }
   const workflows = results.find((row) => row.id === 'workflows' && row.ok);
   if (workflows) {
