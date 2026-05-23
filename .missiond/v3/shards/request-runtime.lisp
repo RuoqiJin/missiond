@@ -60,7 +60,7 @@
          :id-field grounding_context_id
          :storage "shared_artifacts(kind=context-gather)"
          :fields [unknowns query project_id sources_used evidence_refs diagnostics grounded_intent_summary context_pack_path context_pack_file]
-         :rule "mission_context_gather(persist=true) returns grounding_context_id, shared-artifact context_pack_path, and a bounded context_pack_file for provider CLIs that do not have MissionD MCP mounted; worker prompts receive only this small context slice, not broad KB/history preloads.")
+         :rule "mission_context_gather(persist=true) returns grounding_context_id, shared-artifact context_pack_path, and a bounded context_pack_file for provider CLIs that do not have MissionD MCP mounted; worker prompts receive only this small context slice plus confirmed intent/plan artifact refs and accepted execution metadata, not broad KB/history preloads.")
        (kind task-result-artifact
          :schema "missiond.task-result-artifact.v1"
          :id-field artifact_hash
@@ -74,7 +74,8 @@
                 (step s2 :logic "query project registry, active SSOT, active KB, skill evidence, infra/deploy facts, active Board task records, bounded conversations, and tool directory through the aggregate")
                 (step s3 :logic "return source-specific diagnostics for missing or stale authorities instead of letting the worker guess")
                 (step s4 :logic "persist the payload into shared_artifacts(kind=context-gather), materialize a bounded runtime context_pack_file, and return both grounding_context_id and shared-artifact context_pack_path")
-                (step s5 :logic "Jarvis worker prompts must prefer context_pack_file; if unavailable, they may use mission_shared_memory(action=artifact_get, hash=...) or mission_context_slice. Opaque artifact URIs without retrieval instructions are invalid"))
+                (step s5 :logic "Jarvis worker prompts must prefer context_pack_file; if unavailable, they may use mission_shared_memory(action=artifact_get, hash=...) or mission_context_slice. Opaque artifact URIs without retrieval instructions are invalid")
+                (step s6 :logic "Jarvis worker prompts must include target engine/pool, write_policy, read/write scope, confirmed intent_artifact_id, confirmed plan_artifact_id, and a compact accepted execution slice for no-MCP workers"))
          :egress [grounding_context_id context_pack_path context_pack_file sources_used diagnostics shared_artifact])
        (function task-delegate-grounding-gate
          :entry [mission_task_delegate mission_swarm_run mission_plan_execute]

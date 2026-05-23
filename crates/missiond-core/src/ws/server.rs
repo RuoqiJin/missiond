@@ -1966,6 +1966,64 @@ impl PTYWebSocketServer {
             .get("task_kind")
             .and_then(|v| v.as_str())
             .unwrap_or("jarvis-grounded-review");
+        let task_class = dispatch_metadata
+            .get("task_class")
+            .and_then(|v| v.as_str())
+            .unwrap_or("review");
+        let engine_hint = dispatch_metadata
+            .get("engine_hint")
+            .and_then(|v| v.as_str())
+            .unwrap_or("codex");
+        let pool_hint = dispatch_metadata
+            .get("pool_hint")
+            .and_then(|v| v.as_str())
+            .unwrap_or("codex-review-worker");
+        let write_policy = dispatch_metadata
+            .get("write_policy")
+            .and_then(|v| v.as_str())
+            .unwrap_or("read-only");
+        let intent_artifact_id = dispatch_metadata
+            .get("intent_artifact_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let plan_artifact_id = dispatch_metadata
+            .get("plan_artifact_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let read_scope = dispatch_metadata
+            .get("read_scope")
+            .and_then(|v| v.as_array())
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| value.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        let write_scope = dispatch_metadata
+            .get("write_scope")
+            .and_then(|v| v.as_array())
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| value.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        let acceptance = dispatch_metadata
+            .get("acceptance")
+            .and_then(|v| v.as_array())
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| value.as_str())
+                    .map(|value| format!("- {}", value))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default();
         let context_pack_hash = context_pack_path
             .strip_prefix("shared-artifact://")
             .unwrap_or(context_pack_path);
@@ -1973,9 +2031,21 @@ impl PTYWebSocketServer {
             "请基于已确认的 Jarvis intent.lisp / plan.lisp 执行一个只读工位任务。\n\n\
              用户目标：\n{}\n\n\
              任务类型：{}\n\
+             任务类别：{}\n\
+             目标工位：engine_hint={} pool_hint={}\n\
+             write_policy: {}\n\
+             read_scope: [{}]\n\
+             write_scope: [{}]\n\
              grounding_context_id: {}\n\
              context_pack_path: {}\n\
-             context_pack_file: {}\n\n\
+             context_pack_file: {}\n\
+             intent_artifact_id: {}\n\
+             plan_artifact_id: {}\n\n\
+             已接受执行切片：\n\
+             - 这个任务已经通过 Jarvis intent 确认和 plan 确认。\n\
+             - 你不是主控；不要重新拆任务、不要创建 BoardTask、不要派子工位。\n\
+             - 你只需要按 task_kind 和 acceptance 验证当前工位能力，并返回结构化结果。\n\
+             - acceptance:\n{}\n\n\
              工作方式：\n\
              - 这是已经过 Jarvis 意图确认和计划确认的 grounded dispatch，不要重新扮演主控。\n\
              - 先读取 context_pack_file；这是 MissionD 为没有 MCP 的工位物化的 bounded context slice。\n\
@@ -1985,9 +2055,18 @@ impl PTYWebSocketServer {
              - 输出必须是结构化 artifact，包含 Findings / Evidence / Recommendations / Verification 四段。",
             raw_user_text,
             task_kind,
+            task_class,
+            engine_hint,
+            pool_hint,
+            write_policy,
+            read_scope,
+            write_scope,
             grounding_context_id,
             context_pack_path,
             context_pack_file,
+            intent_artifact_id,
+            plan_artifact_id,
+            acceptance,
             context_pack_hash
         )
     }
@@ -4730,6 +4809,10 @@ mod tests {
         let prompt =
             PTYWebSocketServer::build_jarvis_worker_prompt("请接入并验证 agy CLI", &metadata);
         assert!(prompt.contains("context_pack_file: /tmp/missiond/context-gather/abc.json"));
+        assert!(prompt.contains("目标工位：engine_hint=agy pool_hint=agy-research"));
+        assert!(prompt.contains("intent_artifact_id: intent-abc"));
+        assert!(prompt.contains("plan_artifact_id: plan-abc"));
+        assert!(prompt.contains("已接受执行切片"));
         assert!(prompt.contains("先读取 context_pack_file"));
         assert!(prompt.contains("context unavailable"));
         assert!(prompt.contains("mission_shared_memory(action=\"artifact_get\", hash=\"abc\")"));
