@@ -1,14 +1,23 @@
 use tracing::{info, warn};
 
+use crate::context::effects::{self, EffectContext};
 use crate::state::AppState;
 
 const MANAGED_START: &str = "<!-- missiond:managed:start -->";
 const MANAGED_END: &str = "<!-- missiond:managed:end -->";
+const CLAUDE_MD_SYNC_ENABLED_ENV: &str = "MISSIOND_CLAUDE_MD_SYNC";
+const CLAUDE_MD_SYNC_EFFECT: EffectContext =
+    EffectContext::new("global-claude-md-sync", "global-claude-md-managed-section");
 
 /// Sync KB preferences + strategic context + hot topics into ~/.claude/CLAUDE.md managed section.
+/// Temporarily opt-in only because the generated strategic context can become stale.
 /// Only writes when content actually changes (hash-based detection).
 /// Respects Strategy domain pause — `mission_control pause domain strategy` stops sync.
 pub(crate) async fn sync_claude_md(state: &AppState) {
+    if !claude_md_sync_enabled() {
+        return;
+    }
+
     if state
         .control_manager
         .current()
@@ -157,7 +166,7 @@ pub(crate) async fn sync_claude_md(state: &AppState) {
         return;
     }
 
-    match std::fs::write(&claude_md_path, &new_content) {
+    match effects::write_text(CLAUDE_MD_SYNC_EFFECT, &claude_md_path, &new_content) {
         Ok(_) => {
             info!(
                 prefs = preferences.len(),
@@ -170,6 +179,17 @@ pub(crate) async fn sync_claude_md(state: &AppState) {
         }
         Err(e) => warn!(error = %e, "Failed to write CLAUDE.md"),
     }
+}
+
+fn claude_md_sync_enabled() -> bool {
+    claude_md_sync_enabled_from(std::env::var(CLAUDE_MD_SYNC_ENABLED_ENV).ok().as_deref())
+}
+
+fn claude_md_sync_enabled_from(raw: Option<&str>) -> bool {
+    matches!(
+        raw.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
 }
 
 /// Build strategic context section from Strategic State JSON.
@@ -244,5 +264,22 @@ fn build_strategic_section(managed: &mut String, state_json: &serde_json::Value)
                 managed.push_str(&format!("- 避免: {}\n", neg));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::claude_md_sync_enabled_from;
+
+    #[test]
+    fn claude_md_sync_is_opt_in() {
+        assert!(!claude_md_sync_enabled_from(None));
+        assert!(!claude_md_sync_enabled_from(Some("")));
+        assert!(!claude_md_sync_enabled_from(Some("0")));
+        assert!(!claude_md_sync_enabled_from(Some("false")));
+        assert!(!claude_md_sync_enabled_from(Some("off")));
+        assert!(claude_md_sync_enabled_from(Some("1")));
+        assert!(claude_md_sync_enabled_from(Some("true")));
+        assert!(claude_md_sync_enabled_from(Some("ON")));
     }
 }

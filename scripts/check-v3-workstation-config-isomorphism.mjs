@@ -375,7 +375,7 @@ function checkFiles(root, files, { useOcaml = false } = {}) {
     'CompiledRuntimeConfigPayload',
     'load_compiled_runtime_config',
     'required_compiled_runtime_config',
-    'source_fallback::allowed()',
+    'Raw V3 Lisp source fallback is not a production runtime path',
     'compiled-runtime-config.json',
     'pub(crate) struct SlotTemplateRuntimeConfig',
     'pub(crate) struct StartupSlotRuntimeConfig',

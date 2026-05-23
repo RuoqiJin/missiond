@@ -17,6 +17,10 @@ import {
   loadCompiledV3Contract,
   loadResolvedV3Contract,
 } from './lib/v3_compiled_contract.mjs';
+import {
+  REQUIRED_FINAL_LIVE_CHECK_IDS,
+  runSemanticRules,
+} from './lib/v3_semantic_rules.mjs';
 
 const CHECK_COMMAND = 'node scripts/check-v3-final-convergence.mjs';
 const BLUEPRINT_PATH = '.missiond/v3/missiond-blueprint.lisp';
@@ -91,6 +95,12 @@ const DRY_FIXTURE_LIVE_CHECKS = [
   {
     id: 'auth-m6-depth',
     argv: ['scripts/check-project-maturity.mjs', '--min-level', 'M6', '--project', 'auth', '--json'],
+    json: true,
+    timeoutMs: 60_000,
+  },
+  {
+    id: 'generated-v3-contracts-current',
+    argv: ['scripts/project-v3-contracts.mjs', '--check', '--json'],
     json: true,
     timeoutMs: 60_000,
   },
@@ -224,7 +234,7 @@ const DRY_FIXTURE_REQUIRED_RUNTIME_FILES = [
       'contextPackDispatchPolicy',
       'V3_BLUEPRINT_CONFIG_ERROR',
       'source_units',
-      'MISSIOND_V3_ALLOW_SOURCE_FALLBACK',
+      'Raw V3 Lisp source fallback is not a production runtime path',
       'compiled runtime config is required',
     ],
   },
@@ -361,6 +371,13 @@ export function runFinalConvergenceCheck(repoRoot, blueprintRel = BLUEPRINT_PATH
       file: blueprintRel,
       message: 'compiled semantic IR missing final_convergence_gate fact',
     });
+  } else {
+    diagnostics.push(...runSemanticRules({
+      rules: ['required-final-live-checks'],
+      file: blueprintRel,
+      gate,
+      requiredLiveCheckIds: REQUIRED_FINAL_LIVE_CHECK_IDS,
+    }));
   }
 
   let blueprintSource = '';

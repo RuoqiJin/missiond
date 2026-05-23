@@ -168,6 +168,7 @@ function main() {
   }
 
   const checkerResults = [];
+  const behaviorClosureResults = [];
   for (const project of projects) {
     if (!project.root) continue;
     if (!fs.existsSync(project.root)) {
@@ -188,6 +189,34 @@ function main() {
       });
       if (!ok) diagnostics.push({ file: project.root, message: `project checker failed: ${cmd} ${args.join(' ')}` });
     }
+    const behaviorProc = spawnSync('node', [
+      'scripts/check-project-behavior-closure.mjs',
+      '--project',
+      project.id,
+      '--root',
+      project.root,
+      '--json',
+    ], { cwd: process.cwd(), encoding: 'utf8', timeout: 60_000 });
+    const behaviorOk = behaviorProc.status === 0 && !behaviorProc.error;
+    let behaviorJson = null;
+    try {
+      behaviorJson = JSON.parse(behaviorProc.stdout || '{}');
+    } catch {
+      behaviorJson = null;
+    }
+    behaviorClosureResults.push({
+      id: project.id,
+      ok: behaviorOk,
+      observed_count: behaviorJson?.observed_count ?? null,
+      behavior_count: behaviorJson?.behavior_count ?? null,
+      effect_count: behaviorJson?.effect_count ?? null,
+      diagnostics: behaviorJson?.diagnostics ?? [],
+      stderr_tail: tail(behaviorProc.stderr ?? ''),
+      error: behaviorProc.error?.message ?? null,
+    });
+    if (!behaviorOk) {
+      diagnostics.push({ file: project.root, message: `project behavior closure failed for ${project.id}` });
+    }
   }
 
   const result = {
@@ -205,6 +234,7 @@ function main() {
       gap: entry.gap,
     }])),
     checkerResults,
+    behaviorClosureResults,
     diagnostics,
   };
   if (opts.json) {

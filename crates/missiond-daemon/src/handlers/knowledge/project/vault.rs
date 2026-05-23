@@ -3,7 +3,11 @@ use chrono::Utc;
 use missiond_mcp::tools::ToolResult;
 use serde_json::Value;
 
+use crate::context::effects::{self, EffectContext};
 use crate::state::AppState;
+
+const PROJECT_VAULT_EFFECT: EffectContext =
+    EffectContext::new("project-vault-sync", "project-vault-sync-write");
 
 pub(super) async fn handle_vault_sync(state: &AppState, args: Value) -> Result<ToolResult> {
     let id = required_str(&args, "id")?;
@@ -61,8 +65,9 @@ pub(super) async fn handle_vault_sync(state: &AppState, args: Value) -> Result<T
         "synced_at": Utc::now().to_rfc3339(),
         "file_count": synced,
     });
-    let _ = std::fs::write(
-        vault_dir.join("_meta.json"),
+    let _ = effects::write_text(
+        PROJECT_VAULT_EFFECT,
+        &vault_dir.join("_meta.json"),
         serde_json::to_string_pretty(&meta).unwrap_or_default(),
     );
 

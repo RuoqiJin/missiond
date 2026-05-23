@@ -545,7 +545,12 @@ pub(in crate::handlers::knowledge::plan) async fn execute_persisted_apply(
         .store
         .plan_update_contract_json(
             new_plan_id,
-            &plan_contract_json_from_sexp(&resulting_sexp_text),
+            &plan_contract_json_from_sexp(&resulting_sexp_text).map_err(|e| {
+                (
+                    error_codes::INVALID_PARAM,
+                    format!("missiond-lispc emit-plan-contract: {}", e),
+                )
+            })?,
         )
         .await
         .map_err(|e| {

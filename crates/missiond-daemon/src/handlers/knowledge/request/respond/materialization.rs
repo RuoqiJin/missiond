@@ -192,7 +192,11 @@ pub(in crate::handlers::knowledge::request) async fn materialize_request_plan(
         .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
     state
         .store
-        .plan_update_contract_json(plan_id, &plan_contract_json_from_sexp(plan_text))
+        .plan_update_contract_json(
+            plan_id,
+            &plan_contract_json_from_sexp(plan_text)
+                .map_err(|e| anyhow::anyhow!("missiond-lispc emit-plan-contract: {}", e))?,
+        )
         .await
         .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
 

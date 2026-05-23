@@ -76,6 +76,12 @@
     :root-include "(include \"shards/universe/project-registry.lisp\")"
     :surfaces [project-registry])
 
+  (shard universe-behavior-closure
+    :status compiler-active
+    :path "shards/universe/behavior-closure.lisp"
+    :root-include "(include \"shards/universe/behavior-closure.lisp\")"
+    :surfaces [behavior-closure])
+
   (shard implementation-request-surfaces
     :status compiler-active
     :path "shards/implementation/request-surfaces.lisp"

@@ -7,7 +7,7 @@
 
 ## What is missiond?
 
-MissionD is a daemon and tool surface that turns requests into reviewed Lisp artifacts, approved plans, BoardTasks, and worker execution. The V3 control-plane authority is `.missiond/v3/missiond-blueprint.lisp`; generated JSON under `.missiond/v3/runtime/compiled/` is the machine projection. Production runtime paths consume compiled JSON only. Source Lisp fallback is debug/test-only and must be explicitly enabled with `MISSIOND_V3_ALLOW_SOURCE_FALLBACK`. Postgres is the runtime store, event log, and runtime artifact catalog; Board and PTY screens are projections over that state.
+MissionD is a daemon and tool surface that turns requests into reviewed Lisp artifacts, approved plans, BoardTasks, and worker execution. The V3 control-plane authority is `.missiond/v3/missiond-blueprint.lisp`; generated JSON under `.missiond/v3/runtime/compiled/` is the machine projection. Production runtime paths consume compiled JSON only; raw V3 Lisp source fallback is not a runtime escape hatch. Postgres is the runtime store, event log, and runtime artifact catalog; Board and PTY screens are projections over that state.
 
 ## Features
 

@@ -35,6 +35,9 @@
 //!                          transitions plan status to executing.
 //!                      dispatch_strategy is recorded in response + evidence
 //!                      (mission_execution companion-log persistence is future).
+//!   backfill_contracts — migration surface for historical plan.contract_json:
+//!                        dry-run by default, apply=true materializes
+//!                        missiond.plan-contract.v2 outside the execute path.
 //!   record_evidence  — full: persists evidence sidecar at
 //!                      <project>/.missiond/v3/runtime/plans/<plan_id>.evidence.json
 //!                      while retaining .missiond/v2/plans as a legacy
@@ -106,8 +109,9 @@ mod execute_hints;
 pub(super) use execute_hints::parse_plan_hints;
 pub(crate) use execute_hints::{
     canonicalize_strategy, normalize_target, parse_plan_hints_for_plan,
-    plan_contract_json_from_sexp, resolve_dispatch_strategy, scan_keyword_pairs,
-    split_lisp_string_list, ParsedPlanHints, ResolvedExec, AGENT_TEAM_OBJECTIVE_HINT,
+    plan_contract_json_from_sexp, plan_contract_json_requires_projection,
+    resolve_dispatch_strategy, scan_keyword_pairs, split_lisp_string_list, ParsedPlanHints,
+    ResolvedExec, AGENT_TEAM_OBJECTIVE_HINT,
 };
 
 mod task_contract;
@@ -179,6 +183,9 @@ use execution_runtime::action_execute;
 #[cfg(test)]
 use execution_runtime::*;
 
+mod contract_backfill;
+use contract_backfill::action_backfill_contracts;
+
 mod internal_dispatch;
 #[cfg(test)]
 use internal_dispatch::derive_objective_from_plan;
@@ -191,7 +198,7 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
         None => return Ok(ToolResult::structured_error(
             ToolError::new(error_codes::MISSING_PARAM, "mission_plan requires `action`")
                 .with_suggestion(
-                "actions: compile|list|get|by_task|approve|mark|supersede|execute|record_evidence",
+                "actions: compile|list|get|by_task|approve|mark|supersede|execute|backfill_contracts|record_evidence",
             ),
         )),
     };
@@ -205,6 +212,7 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
         "mark" => action_mark(state, &args).await,
         "supersede" => action_supersede(state, &args).await,
         "execute" => action_execute(state, &args).await,
+        "backfill_contracts" => action_backfill_contracts(state, &args).await,
         "record_evidence" => action_record_evidence(state, &args).await,
         other => Ok(ToolResult::structured_error(
             ToolError::new(
@@ -212,7 +220,7 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
                 format!("unknown mission_plan action `{}`", other),
             )
             .with_suggestion(
-                "valid: compile|list|get|by_task|approve|mark|supersede|execute|record_evidence",
+                "valid: compile|list|get|by_task|approve|mark|supersede|execute|backfill_contracts|record_evidence",
             ),
         )),
     }

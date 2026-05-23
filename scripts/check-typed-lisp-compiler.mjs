@@ -38,7 +38,6 @@ const REQUIRED_FILES = [
   'crates/missiond-daemon/src/context/v3_contracts/mod.rs',
   'crates/missiond-daemon/src/context/v3_contracts/generated.rs',
   'crates/missiond-daemon/src/context/v3_blueprint_runtime/compiled_envelope.rs',
-  'crates/missiond-daemon/src/context/v3_blueprint_runtime/source_fallback.rs',
   'scripts/check-project-domain-hardening.mjs',
   '.missiond/workflows/typed-lisp-compiler-convergence.lisp',
   '.missiond/workflows/typed-lisp-compiler-cleanup.lisp',
@@ -55,7 +54,7 @@ const REQUIRED_RUNTIME_LOADER = {
     'load_compiled_v3_lisp_source_with_diagnostics',
     'load_compiled_runtime_config',
     'required_compiled_runtime_config',
-    'source_fallback::allowed()',
+    'Raw V3 Lisp source fallback is not a production runtime path',
     'CompiledRuntimeConfigPayload',
     'CompiledSourceUnit',
     'validate_compiled_source_units',
@@ -63,7 +62,6 @@ const REQUIRED_RUNTIME_LOADER = {
     'compiled_sexp_to_lisp',
     'CompiledV3Payload',
     'RuntimeBlueprintSourceKind',
-    'load_runtime_blueprint_source(project_root)',
     'CompiledProjectUniverse',
     'CompiledWorkflowContracts',
     'CompiledPayloadLoad',
@@ -73,18 +71,6 @@ const REQUIRED_RUNTIME_LOADER = {
     'v3_contracts::SOURCE_HASH',
     'contractAbi',
     'runtimeConfig',
-  ],
-};
-
-const REQUIRED_SOURCE_FALLBACK = {
-  file: 'crates/missiond-daemon/src/context/v3_blueprint_runtime/source_fallback.rs',
-  tokens: [
-    'ALLOW_SOURCE_FALLBACK_ENV',
-    'MISSIOND_V3_ALLOW_SOURCE_FALLBACK',
-    'COMPILE_RUNTIME_ACTION',
-    'node scripts/compile-v3-runtime.mjs --json',
-    'cfg!(debug_assertions) || cfg!(test)',
-    'return false;',
   ],
 };
 
@@ -177,7 +163,7 @@ const REQUIRED_BLUEPRINT_TOKENS = [
   ':runtime-abi ".missiond/v3/runtime/compiled/*.json"',
   ':payload-fields [:source_units',
   'Freshness is source_hash plus source_units',
-  'rust-scan_keyword_pairs',
+  'production-consumer-raw-parser-forbidden',
 ];
 
 const REQUIRED_WORKFLOW_PROJECTIONS = [
@@ -214,13 +200,6 @@ function main() {
   for (const token of REQUIRED_RUNTIME_LOADER.tokens) {
     if (!runtimeLoader.includes(token)) {
       diagnostics.push(diag(REQUIRED_RUNTIME_LOADER.file, 'RUNTIME_LOADER_TOKEN_MISSING', `missing token ${JSON.stringify(token)}`));
-    }
-  }
-
-  const sourceFallback = read(REQUIRED_SOURCE_FALLBACK.file);
-  for (const token of REQUIRED_SOURCE_FALLBACK.tokens) {
-    if (!sourceFallback.includes(token)) {
-      diagnostics.push(diag(REQUIRED_SOURCE_FALLBACK.file, 'SOURCE_FALLBACK_TOKEN_MISSING', `missing token ${JSON.stringify(token)}`));
     }
   }
 
@@ -385,16 +364,22 @@ function main() {
             diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_CONTRACT_ABI_FACT_KIND_MISSING', `emit-contract-abi must project ${kind} facts`));
           }
         }
-        if (payload.plan_contract?.schema_version !== 'missiond.plan-contract.v1') {
+        if (payload.plan_contract?.schema_version !== 'missiond.plan-contract.v2') {
           diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_CONTRACT_ABI_PLAN_SCHEMA_MISSING', 'emit-contract-abi must include plan_contract schema metadata'));
         }
       } else if (argv[0] === 'emit-plan-contract') {
         const payload = emit.compiled?.payload ?? {};
-        if (emit.compiled?.schema_version !== 'missiond.plan-contract.v1') {
-          diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_PLAN_CONTRACT_SCHEMA_MISMATCH', 'emit-plan-contract must use schema missiond.plan-contract.v1'));
+        if (emit.compiled?.schema_version !== 'missiond.plan-contract.v2') {
+          diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_PLAN_CONTRACT_SCHEMA_MISMATCH', 'emit-plan-contract must use schema missiond.plan-contract.v2'));
         }
         if (payload.head !== 'plan' || payload.hints?.target !== 'mission_execution' || !Array.isArray(payload.nodes) || payload.nodes.length !== 1) {
           diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_PLAN_CONTRACT_PROJECTION_MISSING', 'emit-plan-contract must project plan head, top-level hints, and nodes[]'));
+        }
+        const node = payload.nodes?.[0] ?? {};
+        for (const key of ['id', 'target', 'depends_on', 'acceptance_commands', 'retry_count', 'rollback_after', 'unsupported_fields']) {
+          if (!(key in node)) {
+            diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_PLAN_CONTRACT_TYPED_NODE_FIELD_MISSING', `emit-plan-contract v2 node must include ${key}`));
+          }
         }
       } else if (argv[0] === 'emit-universe') {
         if (!Array.isArray(emit.compiled?.payload?.projects) || emit.compiled.payload.projects.length === 0) {

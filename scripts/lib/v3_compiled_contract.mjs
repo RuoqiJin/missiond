@@ -140,6 +140,11 @@ export function loadCompiledV3Contract({
     ...(semantic?.compiled?.payload?.source_units ?? []),
     ...facts.filter((fact) => fact?.kind === 'module_source_unit'),
   ]);
+  const sourceDomains = normalizeSourceDomains([
+    ...(abiPayload?.source_domains ?? []),
+    ...(semantic?.compiled?.payload?.source_domains ?? []),
+    ...(v3.compiled?.payload?.source_domains ?? []),
+  ]);
   const workstationConfig = normalizeWorkstationConfig(
     facts.find((fact) => fact?.kind === 'workstation_config'),
   );
@@ -178,6 +183,7 @@ export function loadCompiledV3Contract({
     controlPlaneDomains,
     workflowContracts,
     sourceUnits,
+    sourceDomains,
     workstationConfig,
     planContract: normalizePlanContract(abiPayload?.plan_contract),
     sourceHash: contractAbi?.compiled?.source_hash ?? v3.compiled.source_hash,
@@ -297,6 +303,14 @@ export function compiledSourceUnitMap(contract) {
     (contract?.sourceUnits ?? [])
       .filter((unit) => unit.file)
       .map((unit) => [unit.file, unit]),
+  );
+}
+
+export function compiledSourceDomainMap(contract) {
+  return new Map(
+    (contract?.sourceDomains ?? [])
+      .filter((domain) => domain.id)
+      .map((domain) => [domain.id, domain]),
   );
 }
 
@@ -468,6 +482,22 @@ function normalizeSourceUnits(rows) {
   return units;
 }
 
+function normalizeSourceDomains(rows) {
+  const seen = new Set();
+  const domains = [];
+  for (const row of rows) {
+    const id = stringOrNull(row?.id);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    domains.push({
+      id,
+      sourceHash: stringOrNull(row?.source_hash ?? row?.sourceHash),
+      sourceUnits: normalizeSourceUnits(row?.source_units ?? row?.sourceUnits ?? []),
+    });
+  }
+  return domains;
+}
+
 function normalizeWorkstationConfig(row) {
   if (!row) return null;
   return {
@@ -587,6 +617,7 @@ function emptyContract({ ok, diagnostics, v3 }) {
     controlPlaneDomains: [],
     workflowContracts: [],
     sourceUnits: [],
+    sourceDomains: [],
     workstationConfig: null,
     planContract: null,
     sourceHash: null,

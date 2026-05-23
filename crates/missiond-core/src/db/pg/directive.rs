@@ -446,6 +446,53 @@ impl DirectiveLayerStore for PgMissionStore {
         Ok(rows.into_iter().map(plan_row_to_plan).collect())
     }
 
+    async fn plan_list_contract_backfill_candidates(
+        &self,
+        status: Option<PlanStatus>,
+        include_terminal: bool,
+        limit: i64,
+    ) -> DbResult<Vec<Plan>> {
+        const CANDIDATE_CLAUSE: &str = "(contract_json = '{}'::jsonb
+            OR contract_json = 'null'::jsonb
+            OR contract_json->>'schema_version' IS DISTINCT FROM 'missiond.plan-contract.v2'
+            OR contract_json->>'projection_engine' = 'rust-compat'
+            OR jsonb_typeof(contract_json->'payload'->'nodes') IS DISTINCT FROM 'array')";
+        let rows: Vec<PlanRow> = match status {
+            Some(status) => {
+                sqlx::query_as(&format!(
+                "SELECT {} FROM plan WHERE status = $1 AND {} ORDER BY created_at DESC LIMIT $2",
+                PLAN_COLS, CANDIDATE_CLAUSE
+            ))
+                .bind(status.as_str())
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            None if include_terminal => {
+                sqlx::query_as(&format!(
+                    "SELECT {} FROM plan WHERE {} ORDER BY created_at DESC LIMIT $1",
+                    PLAN_COLS, CANDIDATE_CLAUSE
+                ))
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            None => {
+                sqlx::query_as(&format!(
+                    "SELECT {} FROM plan
+                     WHERE status IN ('draft', 'awaiting_approval', 'approved', 'executing')
+                       AND {}
+                     ORDER BY created_at DESC LIMIT $1",
+                    PLAN_COLS, CANDIDATE_CLAUSE
+                ))
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+        };
+        Ok(rows.into_iter().map(plan_row_to_plan).collect())
+    }
+
     async fn lisp_code_sync_enqueue_job(
         &self,
         input: &crate::types::EnqueueLispCodeSyncJob,

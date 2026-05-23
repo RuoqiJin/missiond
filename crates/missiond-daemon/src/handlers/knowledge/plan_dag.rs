@@ -186,7 +186,7 @@ mod parser;
 #[cfg(test)]
 #[allow(unused_imports)]
 use parser::FAILURE_POLICY_FAIL_FAST;
-use parser::{build_validated_dag, ReviewGateKind};
+use parser::{build_validated_dag_from_contract_json, ReviewGateKind};
 pub(super) use parser::{DagNode, ParsedDag};
 
 mod runtime;
@@ -224,7 +224,7 @@ pub(super) async fn action_execute_dag_v1(
         Err(err) => return Ok(err),
     };
 
-    let (parsed, order) = match build_validated_dag(&plan.sexp_text) {
+    let (parsed, order) = match build_validated_dag_from_contract_json(&plan.contract_json) {
         Ok(v) => v,
         Err(e) => return Ok(e.into_tool_result()),
     };

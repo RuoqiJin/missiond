@@ -463,6 +463,7 @@ let m6_depth_required_concepts =
     ("project.hot_path_wiring", [ "hot-path"; "hot path"; "runtime caller"; "runtime-callers" ]);
     ("project.regression_matrix", [ "regression-matrix"; "regression matrix"; "regression-tests"; "regression tests"; "backward compatibility" ]);
     ("project.final_m6_report", [ "final-m6-report"; "auth-grade"; "final-hardening-report"; "domain-hardening-report"; "final convergence"; "final-convergence" ]);
+    ("project.behavior_closure", [ "behavior-universe"; "program-level behavior closure"; "observed behavior" ]);
   ]
 
 let contains_any source needles =

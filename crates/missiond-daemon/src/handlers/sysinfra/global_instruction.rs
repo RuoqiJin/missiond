@@ -22,7 +22,13 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
+use crate::context::effects::{self, EffectContext};
 use crate::state::AppState;
+
+const GLOBAL_INSTRUCTION_EFFECT: EffectContext = EffectContext::new(
+    "mission_global_instruction",
+    "mission-global-instruction-write",
+);
 
 /// Resolve `~/.claude/CLAUDE.md`. The tool is hard-bound to this path and
 /// rejects anything else.
@@ -198,27 +204,7 @@ async fn edit_action(path: &Path, args: Value) -> Result<ToolResult> {
         None
     };
 
-    // Atomic write: temp file in same dir → rename. Same-dir is required for
-    // POSIX rename atomicity on the target filesystem.
-    let stamp = Utc::now().format("%Y%m%dT%H%M%S%fZ").to_string();
-    let tmp = dir.join(format!(".CLAUDE.md.tmp.{}", stamp));
-    if let Err(e) = tokio::fs::write(&tmp, new_content.as_bytes()).await {
-        let _ = tokio::fs::remove_file(&tmp).await;
-        return Err(anyhow!(
-            "failed to write temp file {}: {}",
-            tmp.display(),
-            e
-        ));
-    }
-    if let Err(e) = tokio::fs::rename(&tmp, path).await {
-        let _ = tokio::fs::remove_file(&tmp).await;
-        return Err(anyhow!(
-            "failed to rename temp into place {} → {}: {}",
-            tmp.display(),
-            path.display(),
-            e
-        ));
-    }
+    effects::atomic_write_text(GLOBAL_INSTRUCTION_EFFECT, path, new_content.as_bytes())?;
 
     Ok(ToolResult::json_pretty(&json!({
         "status": "written",

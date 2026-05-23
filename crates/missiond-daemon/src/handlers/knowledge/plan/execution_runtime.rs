@@ -1,7 +1,4 @@
 use super::*;
-use std::io::Write as _;
-use std::path::PathBuf;
-use tokio::process::Command;
 
 // ───────────────────────────────────────────────────────────────────────
 // execute — plan-runner v0
@@ -23,141 +20,22 @@ use tokio::process::Command;
 // even before the schema-side field exists.
 // ───────────────────────────────────────────────────────────────────────
 
-async fn ensure_plan_contract_json(
-    state: &AppState,
-    plan: &mut Plan,
-) -> Result<Option<ToolResult>> {
-    if !plan_contract_json_is_missing(&plan.contract_json) {
-        return Ok(None);
+fn require_usable_plan_contract_json(plan: &Plan) -> Option<ToolResult> {
+    if !plan_contract_json_requires_projection(&plan.contract_json) {
+        return None;
     }
-
-    let projected = match emit_plan_contract_json_via_lispc(&plan.sexp_text).await {
-        Ok(projected) => projected,
-        Err(err) => {
-            return Ok(Some(ToolResult::structured_error(
-                ToolError::new(
-                    error_codes::INVALID_PARAM,
-                    format!(
-                        "plan `{}` is missing contract_json and missiond-lispc emit-plan-contract failed: {}",
-                        plan.id, err
-                    ),
-                )
-                .with_suggestion(
-                    "recompile and approve this plan so the typed plan contract can be materialized before execution",
-                ),
-            )));
-        }
-    };
-
-    if let Err(err) = state
-        .store
-        .plan_update_contract_json(plan.id, &projected)
-        .await
-    {
-        return Ok(Some(ToolResult::structured_error(
-            ToolError::new(
-                error_codes::INVALID_PARAM,
-                format!(
-                    "plan `{}` typed contract was projected but could not be persisted: {}",
-                    plan.id, err
-                ),
-            )
-            .with_suggestion(
-                "retry execution after database write availability is restored, or recompile the plan",
+    Some(ToolResult::structured_error(
+        ToolError::new(
+            error_codes::INVALID_PARAM,
+            format!(
+                "plan `{}` requires a persisted missiond.plan-contract.v2 projection before execution",
+                plan.id
             ),
-        )));
-    }
-    plan.contract_json = projected;
-    Ok(None)
-}
-
-fn plan_contract_json_is_missing(contract: &Value) -> bool {
-    contract
-        .as_object()
-        .map(|object| object.is_empty())
-        .unwrap_or(true)
-}
-
-async fn emit_plan_contract_json_via_lispc(sexp: &str) -> Result<Value> {
-    let mut file = tempfile::NamedTempFile::new()?;
-    file.write_all(sexp.as_bytes())?;
-    file.flush()?;
-    let plan_path = file.path().to_path_buf();
-    let repo_root = find_missiond_lispc_root()?;
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        Command::new("dune")
-            .args([
-                "exec",
-                "--root",
-                "tools/missiond_lispc",
-                "./bin/main.exe",
-                "--",
-                "emit-plan-contract",
-                "--file",
-            ])
-            .arg(&plan_path)
-            .current_dir(&repo_root)
-            .output(),
-    )
-    .await
-    .map_err(|_| anyhow!("missiond-lispc emit-plan-contract timed out"))??;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        return Err(anyhow!(
-            "missiond-lispc exited with status {}; stderr: {}; stdout: {}",
-            output.status,
-            trim_for_error(&stderr),
-            trim_for_error(&stdout)
-        ));
-    }
-    let envelope: Value = serde_json::from_slice(&output.stdout)?;
-    if envelope.get("ok").and_then(Value::as_bool) != Some(true) {
-        return Err(anyhow!(
-            "missiond-lispc rejected plan contract: {}",
-            trim_for_error(&String::from_utf8_lossy(&output.stdout))
-        ));
-    }
-    let compiled = envelope
-        .get("compiled")
-        .cloned()
-        .ok_or_else(|| anyhow!("missiond-lispc output missing compiled plan contract"))?;
-    if compiled.get("schema_version").and_then(Value::as_str) != Some("missiond.plan-contract.v1") {
-        return Err(anyhow!(
-            "missiond-lispc output schema_version was not missiond.plan-contract.v1"
-        ));
-    }
-    Ok(compiled)
-}
-
-fn find_missiond_lispc_root() -> Result<PathBuf> {
-    let mut dir = std::env::current_dir()?;
-    loop {
-        if dir.join("tools/missiond_lispc/bin/main.ml").exists() {
-            return Ok(dir);
-        }
-        if !dir.pop() {
-            break;
-        }
-    }
-    Err(anyhow!(
-        "could not locate tools/missiond_lispc/bin/main.ml from current working directory"
-    ))
-}
-
-fn trim_for_error(value: &str) -> String {
-    let value = value.trim();
-    let chars: Vec<char> = value.chars().collect();
-    if chars.len() <= 600 {
-        value.to_string()
-    } else {
-        format!(
-            "{}...",
-            chars[chars.len() - 600..].iter().collect::<String>()
         )
-    }
+        .with_suggestion(
+            "run mission_plan(action=\"backfill_contracts\", apply=true, limit=100) or recompile and approve this plan; execution never invokes missiond-lispc on the hot path",
+        ),
+    ))
 }
 
 pub(super) async fn action_execute(state: &AppState, args: &Value) -> Result<ToolResult> {
@@ -254,7 +132,7 @@ pub(super) async fn action_execute(state: &AppState, args: &Value) -> Result<Too
         return Ok(err);
     }
 
-    let mut plan = match state
+    let plan = match state
         .store
         .plan_get(id)
         .await
@@ -277,7 +155,7 @@ pub(super) async fn action_execute(state: &AppState, args: &Value) -> Result<Too
             ),
         )));
     }
-    if let Some(error) = ensure_plan_contract_json(state, &mut plan).await? {
+    if let Some(error) = require_usable_plan_contract_json(&plan) {
         return Ok(error);
     }
 

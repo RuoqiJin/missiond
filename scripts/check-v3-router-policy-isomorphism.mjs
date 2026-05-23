@@ -273,7 +273,7 @@ function checkFiles(root, files) {
     'CompiledRuntimeConfigPayload',
     'load_compiled_runtime_config',
     'required_compiled_runtime_config',
-    'source_fallback::allowed()',
+    'Raw V3 Lisp source fallback is not a production runtime path',
     'compiled-runtime-config.json',
     'DEFAULT_ROUTER_CHAT_MODEL',
     'DEFAULT_ROUTER_FLOW_GEMINI_MODEL',

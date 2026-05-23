@@ -28,9 +28,15 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{mpsc, RwLock};
 use tracing::{info, warn};
 
+use crate::context::effects::{self, EffectContext};
 use crate::context::v3_blueprint_runtime::RouterRuntimeConfig;
 
 // ===== API Key Pool =====
+
+const GEMINI_SHADOW_SETTINGS_EFFECT: EffectContext = EffectContext::new(
+    "gemini-cli-auth-shadow-home",
+    "gemini-shadow-settings-write",
+);
 
 /// A resolved API key entry with optional alias and default flag.
 #[derive(Clone, Debug)]
@@ -975,9 +981,8 @@ fn ensure_auth_home(channel: &str, selected_type: &str, symlink_oauth: bool) -> 
         .ok_or_else(|| anyhow!("Cannot resolve home directory"))?
         .join(".gemini");
 
-    // Atomic write: write to PID-suffixed temp file, then rename to avoid corruption
+    // Effect guard owns the temp-file write and rename so external state stays declared.
     let settings_path = shadow_gemini_dir.join("settings.json");
-    let tmp_path = shadow_gemini_dir.join(format!("settings.json.{}.tmp", std::process::id()));
     let real_settings = std::fs::read_to_string(real_gemini_dir.join("settings.json"))
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
@@ -991,10 +996,12 @@ fn ensure_auth_home(channel: &str, selected_type: &str, symlink_oauth: bool) -> 
     }
     settings["security"]["auth"]["selectedType"] = serde_json::json!(selected_type);
 
-    std::fs::write(&tmp_path, serde_json::to_string_pretty(&settings)?)
-        .map_err(|e| anyhow!("Failed to write shadow settings.json: {}", e))?;
-    std::fs::rename(&tmp_path, &settings_path)
-        .map_err(|e| anyhow!("Failed to atomically place shadow settings.json: {}", e))?;
+    effects::atomic_write_text(
+        GEMINI_SHADOW_SETTINGS_EFFECT,
+        &settings_path,
+        serde_json::to_string_pretty(&settings)?,
+    )
+    .map_err(|e| anyhow!("Failed to write shadow settings.json: {}", e))?;
 
     // Symlink OAuth credential files (only needed for google mode)
     if symlink_oauth {

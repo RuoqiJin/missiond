@@ -5,6 +5,7 @@ import {
   compiledControlPlaneDomainMap,
   compiledFunctionMap,
   compiledRuntimePolicyMap,
+  compiledSourceDomainMap,
   compiledSourceUnitMap,
   compiledSurfaceMap,
   loadCompiledV3Contract,
@@ -25,6 +26,7 @@ export function loadV3SemanticFacts(options = {}) {
     contractSplits: compiledContractSplitMap(contract),
     controlPlaneDomains: compiledControlPlaneDomainMap(contract),
     sourceUnits: compiledSourceUnitMap(contract),
+    sourceDomains: compiledSourceDomainMap(contract),
   };
 }
 

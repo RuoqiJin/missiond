@@ -12,7 +12,7 @@ Checks the V3 plan.lisp execution isomorphism contract:
   - V3 blueprint declares plan.lisp as an executable routing artifact.
   - mission_plan compile dry_run renders routing hints into Lisp.
   - mission_plan execute can derive target/objective/dispatch hints from plan.contract_json.
-  - DAG execution parses node-local Lisp hints and forwards them to the same dispatch path.
+  - DAG execution consumes missiond-lispc typed plan contracts and forwards nodes to the same dispatch path.
   - unified_entry/planner.rs forwards plan compile/execute args instead of inventing a second plan schema.
 `;
 
@@ -46,6 +46,8 @@ const DEFAULT_FILES = {
   planFieldInferenceApplyPersisted:
     'crates/missiond-daemon/src/handlers/knowledge/plan/field_inference/apply/persisted.rs',
   planExecutionRuntime: 'crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime.rs',
+  planContractBackfill:
+    'crates/missiond-daemon/src/handlers/knowledge/plan/contract_backfill.rs',
   planExecutionBridge:
     'crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime/bridge.rs',
   planExecutionInternal:
@@ -313,7 +315,7 @@ function checkFiles(root, files) {
     'plan/execution_runtime/workstation.rs owns workstation proposal/auto-spawn execution adjuncts',
     'plan/internal_dispatch.rs owns mission_plan inner target argument projection',
     'plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing',
-    'compile/materialization persist plan.contract_json using missiond.plan-contract.v1 shape',
+    'compile/materialization persist plan.contract_json using missiond.plan-contract.v2 shape',
     'plan/task_contract.rs owns mission_plan task-contract Lisp projection',
     'plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress',
     'plan/dispatch_response.rs owns mission_plan execution response egress',
@@ -331,12 +333,7 @@ function checkFiles(root, files) {
     'plan_dag/parser/types.rs is the DAG parser types facade',
     'plan_dag/parser/types/node.rs owns DAG node shapes and typed hint projections',
     'plan_dag/parser/types/errors.rs owns DAG build error egress',
-    'plan_dag/parser/scanner.rs is the DAG scanner facade',
-    'plan_dag/parser/scanner/top_level.rs owns top-level PLAN.lisp S-expression scanning',
-    'plan_dag/parser/scanner/node_form.rs owns node form keyword lowering',
-    'plan_dag/parser/scanner/lists.rs owns DAG id-list parsing',
-    'plan_dag/parser/scanner/keyword_pairs.rs owns Lisp keyword/value token scanning',
-    'plan_dag/parser/validation.rs owns DAG contract validation/topological ordering',
+    'plan_dag/parser/validation.rs owns typed plan-contract validation/topological ordering',
     'plan_dag/acceptance.rs is the DAG acceptance facade',
     'plan_dag/acceptance/types.rs owns typed acceptance contracts',
     'plan_dag/acceptance/evaluator.rs owns per-node acceptance evaluation',
@@ -415,6 +412,9 @@ function checkFiles(root, files) {
     'use compile_authoring::{action_compile, collect_string_list}',
     'mod execution_runtime',
     'use execution_runtime::action_execute',
+    'mod contract_backfill',
+    'use contract_backfill::action_backfill_contracts',
+    '"backfill_contracts" => action_backfill_contracts',
     'mod internal_dispatch',
     'pub(super) use internal_dispatch::{build_internal_dispatch_args, tool_result_payload}',
     '#[cfg(test)]',
@@ -435,10 +435,8 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.planExecutionRuntime, sources.planExecutionRuntime, [
     'pub(super) async fn action_execute',
-    'ensure_plan_contract_json',
-    'emit_plan_contract_json_via_lispc',
-    'emit-plan-contract',
-    'plan_update_contract_json',
+    'require_usable_plan_contract_json',
+    'execution never invokes missiond-lispc on the hot path',
     'parse_plan_hints_for_plan(&plan)',
     '(t, "plan_hint")',
     'target_source',
@@ -770,18 +768,28 @@ function checkFiles(root, files) {
     'fn attach_persisted_apply_block',
   ]);
 
+  requireAll(diagnostics, files.planContractBackfill, sources.planContractBackfill, [
+    'pub(super) async fn action_backfill_contracts',
+    'plan_list_contract_backfill_candidates',
+    'plan_contract_json_from_sexp(&plan.sexp_text)',
+    'plan_update_contract_json',
+    '"apply"',
+    '"include_terminal"',
+  ]);
+
   requireAll(diagnostics, files.planExecuteHints, sources.planExecuteHints, [
     'pub(crate) struct ParsedPlanHints',
     'pub(crate) struct ResolvedExec',
     'pub(crate) fn parse_plan_hints_for_plan',
     'pub(crate) fn parse_plan_hints_from_contract_json',
     'pub(crate) fn plan_contract_json_from_sexp',
+    'pub(crate) fn plan_contract_json_requires_projection',
     'parse_plan_hints_from_contract_json(&plan.contract_json).unwrap_or_default()',
-    '"missiond.plan-contract.v1"',
-    'pub(crate) fn parse_plan_hints',
+    '"missiond.plan-contract.v2"',
+    'emit_plan_contract_json_via_lispc_sync',
+    'emit-plan-contract',
     '"target" | "target-tool" | "tool"',
     '"objective" => store_first(&mut h.objective, &value)',
-    'pub(crate) fn scan_keyword_pairs',
     'pub(crate) fn normalize_target',
     'pub(crate) fn canonicalize_strategy',
     'pub(crate) fn resolve_dispatch_strategy',
@@ -789,6 +797,8 @@ function checkFiles(root, files) {
   ]);
   forbidAll(diagnostics, files.planExecuteHints, sources.planExecuteHints, [
     'unwrap_or_else(|| parse_plan_hints(&plan.sexp_text))',
+    '"projection_engine": "rust-compat"',
+    '"missiond.plan-contract.v1"',
   ]);
 
   requireAll(diagnostics, files.planTaskContract, sources.planTaskContract, [
@@ -968,7 +978,8 @@ function checkFiles(root, files) {
     'use outcome::{ExecutionOutcome, NodeResult, NodeState};',
     'mod parser;',
     'pub(super) use parser::{DagNode, ParsedDag};',
-    'use parser::{build_validated_dag, ReviewGateKind};',
+    'use parser::{build_validated_dag_from_contract_json, ReviewGateKind};',
+    'build_validated_dag_from_contract_json(&plan.contract_json)',
     'mod projection;',
     'use projection::{build_node_hint_summary, build_nodes_summary, build_retry_plan};',
     'mod scheduler;',
@@ -1156,6 +1167,7 @@ function checkFiles(root, files) {
     'mod validation;',
     'pub(super) use scanner::parse_plan_dag;',
     'pub(super) use validation::build_validated_dag;',
+    'pub(super) use validation::build_validated_dag_from_contract_json;',
     'pub(in crate::handlers::knowledge) use types::{DagNode, ParsedDag};',
   ]);
 

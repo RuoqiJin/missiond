@@ -1453,6 +1453,12 @@ pub trait DirectiveLayerStore: Send + Sync {
     /// Recent plans, optionally filtered by status (cross-task, manager-surface only).
     async fn plan_list_recent(&self, status: Option<PlanStatus>, limit: i64)
         -> DbResult<Vec<Plan>>;
+    async fn plan_list_contract_backfill_candidates(
+        &self,
+        status: Option<PlanStatus>,
+        include_terminal: bool,
+        limit: i64,
+    ) -> DbResult<Vec<Plan>>;
 
     async fn lisp_code_sync_enqueue_job(
         &self,

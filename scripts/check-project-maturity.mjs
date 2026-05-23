@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -429,6 +430,7 @@ function assessProject(repoRoot, id, maturity, registry) {
     has_worker_contract: structural.worker_operational > 0,
     has_final_convergence: structural.final_convergence > 0,
     has_m6_depth: hasM6DepthEvidence(text, blueprintText),
+    has_behavior_closure: hasBehaviorClosureEvidence(repoRoot, id, root, text),
   };
   return {
     id,
@@ -566,13 +568,30 @@ function hasM6DepthEvidence(allLispText, blueprintText) {
   return groups.every((needles) => needles.some((needle) => source.includes(needle)));
 }
 
+function hasBehaviorClosureEvidence(repoRoot, id, root, allLispText) {
+  if (!allLispText.includes('(behavior-universe')) return false;
+  const args = [
+    path.join(SCRIPT_DIR, 'check-project-behavior-closure.mjs'),
+    '--project',
+    id,
+    '--json',
+  ];
+  if (id !== 'missiond' && root) args.push('--root', root);
+  const proc = spawnSync('node', args, {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    timeout: 60_000,
+  });
+  return proc.status === 0 && !proc.error;
+}
+
 function nextGap(current, evidence) {
   if (levelValue(current) < 1 || !evidence.intent_exists) return 'm1-registered-intent';
   if (levelValue(current) < 2 || !evidence.has_project_blueprint || !evidence.has_lisp_shape || !evidence.has_ordered_steps) return 'm2-blueprint-split';
   if (levelValue(current) < 3 || !evidence.has_code_isomorphism) return 'm3-code-mapping';
   if (levelValue(current) < 4 || !evidence.has_runtime_projection || !evidence.has_event_loop) return 'm4-runtime-projection';
   if (levelValue(current) < 5 || !evidence.has_worker_contract || !evidence.has_final_convergence) return 'm5-worker-operational';
-  if (levelValue(current) < 6 || !evidence.has_m6_depth) return 'm6-auth-grade-depth';
+  if (levelValue(current) < 6 || !evidence.has_m6_depth || !evidence.has_behavior_closure) return 'm6-auth-grade-depth';
   return null;
 }
 
@@ -637,6 +656,9 @@ function diagnosticsForProject(row, minLevel, { evidenceOnly = false } = {}) {
   if (levelValue(minLevel) >= 6 && !row.evidence.has_m6_depth) {
     diagnostics.push({ file, message: `${row.id} missing M6 Auth-grade depth evidence` });
   }
+  if (levelValue(minLevel) >= 6 && !row.evidence.has_behavior_closure) {
+    diagnostics.push({ file, message: `${row.id} missing M6 program-level behavior closure` });
+  }
   if (levelValue(row.declared_current) < 6 && row.declared_gap.length === 0) {
     diagnostics.push({ file, message: `${row.id} is below M6 but declares no gap` });
   }
@@ -649,7 +671,7 @@ function evidenceLevel(evidence) {
   if (!evidence.has_code_isomorphism) return 'M2';
   if (!evidence.has_runtime_projection || !evidence.has_event_loop) return 'M3';
   if (!evidence.has_worker_contract || !evidence.has_final_convergence) return 'M4';
-  if (!evidence.has_m6_depth) return 'M5';
+  if (!evidence.has_m6_depth || !evidence.has_behavior_closure) return 'M5';
   return 'M6';
 }
 
@@ -684,6 +706,10 @@ function buildFixture() {
     (maturity :id app :current M5 :target M6 :gap [final-m6-report]))
   (project-blueprint-registry
     (project :id app :root "${path.join(root, 'projects/app')}" :intent ".missiond/intent.lisp" :backend ".missiond/backend/app-backend-blueprint.lisp" :checks ["bash .missiond/check.sh"])))`);
+  fs.writeFileSync(path.join(root, '.missiond/behavior-universe.lisp'), `(behavior-universe missiond
+  :schema "missiond.behavior-universe.v1"
+  :project missiond
+  (behavior :id missiond-fixture :kind worker :owner test :observed ["worker:*"] :code ["src/main.rs"] :effects []))`);
   fs.writeFileSync(path.join(root, 'projects/app/.missiond/intent.lisp'), `(project app
   :pillars [api]
   :maturity M6
@@ -704,6 +730,10 @@ function buildFixture() {
       :egress [JSON]
       :surfaces ["src/main.rs"]
       :runtime-projection [APP_PORT])))`);
+  fs.writeFileSync(path.join(root, 'projects/app/.missiond/behavior-universe.lisp'), `(behavior-universe app
+  :schema "missiond.behavior-universe.v1"
+  :project app
+  (behavior :id app-fixture :kind route :owner test :observed ["route:*"] :code ["src/main.rs"] :effects []))`);
   fs.writeFileSync(path.join(root, 'projects/app/.missiond/check.sh'), '#!/usr/bin/env bash\nexit 0\n');
   return root;
 }

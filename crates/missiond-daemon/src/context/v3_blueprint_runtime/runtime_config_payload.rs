@@ -6,6 +6,8 @@ use super::*;
 pub(super) struct CompiledRuntimeConfigPayload {
     #[serde(default)]
     pub(super) source_units: Vec<CompiledSourceUnit>,
+    #[serde(default)]
+    pub(super) source_domains: Vec<CompiledSourceDomain>,
     pub(super) workstation: WorkstationRuntimeConfig,
     pub(super) flow: FlowRuntimeConfig,
     pub(super) compute: ComputePrimitivesRuntimeConfig,

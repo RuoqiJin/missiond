@@ -8,11 +8,18 @@ type source_unit = {
   source_hash : string;
 }
 
+type source_domain = {
+  id : string;
+  source_hash : string;
+  source_units : source_unit list;
+}
+
 type resolved = {
   forms : sexp list;
   root : sexp option;
   source_hash : string;
   source_units : source_unit list;
+  source_domains : source_domain list;
 }
 
 let is_absolute path =
@@ -56,6 +63,81 @@ let source_unit_to_json unit =
 
 let source_units_to_json units =
   "[" ^ (units |> List.map source_unit_to_json |> String.concat ",") ^ "]"
+
+let source_domain_to_json domain =
+  Printf.sprintf {|{"id":%s,"source_hash":%s,"source_units":%s}|}
+    (json_string domain.id)
+    (json_string domain.source_hash)
+    (source_units_to_json domain.source_units)
+
+let source_domains_to_json domains =
+  "["
+  ^ (domains |> List.map source_domain_to_json |> String.concat ",")
+  ^ "]"
+
+let source_domains_to_json_for_ids domains ids =
+  domains
+  |> List.filter (fun domain -> List.mem domain.id ids)
+  |> source_domains_to_json
+
+let source_domain_ids =
+  [
+    "blueprint-core";
+    "workstation-runtime";
+    "control-plane-runtime";
+    "memory-knowledge-runtime";
+    "ops-infra";
+    "universe";
+    "implementation-map";
+    "pillar-flow";
+    "v2-convergence";
+  ]
+
+let string_contains haystack needle =
+  let haystack_len = String.length haystack in
+  let needle_len = String.length needle in
+  let rec loop idx =
+    if needle_len = 0 then true
+    else if idx + needle_len > haystack_len then false
+    else if String.sub haystack idx needle_len = needle then true
+    else loop (idx + 1)
+  in
+  loop 0
+
+let normalize_path_separators path =
+  String.map (fun ch -> if ch = '\\' then '/' else ch) path
+
+let domain_id_for_file file =
+  let file = normalize_path_separators file in
+  let base = Filename.basename file in
+  if base = "missiond-blueprint.lisp" || string_contains file "/shards/index.lisp"
+  then "blueprint-core"
+  else if string_contains file "/shards/universe/" then "universe"
+  else if string_contains file "/shards/implementation/" then "implementation-map"
+  else
+    match base with
+    | "workstation-runtime.lisp" -> "workstation-runtime"
+    | "control-plane-runtime.lisp" | "request-runtime.lisp" ->
+        "control-plane-runtime"
+    | "memory-knowledge-runtime.lisp" -> "memory-knowledge-runtime"
+    | "ops-infra.lisp" -> "ops-infra"
+    | "pillar-flow-map.lisp" -> "pillar-flow"
+    | "v2-convergence-map.lisp" -> "v2-convergence"
+    | _ -> "blueprint-core"
+
+let source_domains_of_units units =
+  source_domain_ids
+  |> List.map (fun id ->
+         let source_units =
+           units |> List.filter (fun unit -> domain_id_for_file unit.file = id)
+         in
+         let source_hash =
+           source_units
+           |> List.map (fun (unit : source_unit) -> unit.source_hash)
+           |> String.concat "\n"
+           |> source_hash
+         in
+         { id; source_hash; source_units })
 
 let shard_kind forms =
   match forms with
@@ -235,6 +317,7 @@ let resolve_blueprint_file blueprint_file =
         root = None;
         source_hash = source_hash root_source;
         source_units = [ root_unit ];
+        source_domains = source_domains_of_units [ root_unit ];
       }
   | Some root ->
       let expanded_root, shard_units = expand_root blueprint_file root in
@@ -255,4 +338,5 @@ let resolve_blueprint_file blueprint_file =
         root = Some expanded_root;
         source_hash = composite_hash;
         source_units;
+        source_domains = source_domains_of_units source_units;
       }

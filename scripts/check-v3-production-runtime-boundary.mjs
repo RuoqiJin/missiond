@@ -2,10 +2,10 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { runSemanticRules } from './lib/v3_semantic_rules.mjs';
 
 const FILES = {
   rustRuntime: 'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
-  rustSourceFallback: 'crates/missiond-daemon/src/context/v3_blueprint_runtime/source_fallback.rs',
   jsRuntime: 'scripts/lib/v3_workstation_runtime.mjs',
   contractProjector: 'scripts/project-v3-contracts.mjs',
 };
@@ -20,24 +20,57 @@ function main() {
   if (diagnostics.length === 0) {
     checkDefaultConstants(FILES.rustRuntime, sources.rustRuntime, diagnostics, /^pub\(crate\) const DEFAULT_/);
     checkDefaultConstants(FILES.jsRuntime, sources.jsRuntime, diagnostics, /^export const DEFAULT_/);
-    requireAll(FILES.rustRuntime, sources.rustRuntime, diagnostics, [
-      'required_compiled_runtime_config',
-      'compiled runtime config is required',
-      'load_compiled_runtime_config',
-      'v3_contracts::SOURCE_HASH',
-      'source_fallback::allowed()',
-    ]);
-    requireAll(FILES.rustSourceFallback, sources.rustSourceFallback, diagnostics, [
-      'cfg!(debug_assertions) || cfg!(test)',
-      'MISSIOND_V3_ALLOW_SOURCE_FALLBACK',
-      'return false;',
-    ]);
-    requireAll(FILES.jsRuntime, sources.jsRuntime, diagnostics, [
-      'COMPILED_RUNTIME_CONFIG_REL',
-      'compiled runtime config is required',
-      'MISSIOND_V3_ALLOW_SOURCE_FALLBACK',
-      'V3_CONTRACT_SOURCE_HASH',
-    ]);
+    diagnostics.push(...runSemanticRules({
+      rules: ['runtime-boundary-no-production-raw-lisp'],
+      repoRoot: repo,
+      runtimeBoundary: {
+        required: [
+          {
+            file: FILES.rustRuntime,
+            source: sources.rustRuntime,
+            needles: [
+              'required_compiled_runtime_config',
+              'compiled runtime config is required',
+              'load_compiled_runtime_config',
+              'v3_contracts::RUNTIME_CONFIG_SOURCE_HASH',
+              'Raw V3 Lisp source fallback is not a production runtime path',
+            ],
+          },
+          {
+            file: FILES.jsRuntime,
+            source: sources.jsRuntime,
+            needles: [
+              'COMPILED_RUNTIME_CONFIG_REL',
+              'compiled runtime config is required',
+              'Raw V3 Lisp source fallback is not a production runtime path',
+              'V3_RUNTIME_CONFIG_SOURCE_HASH',
+              'emit-runtime-config',
+            ],
+          },
+        ],
+        forbidden: [
+          {
+            file: FILES.rustRuntime,
+            source: sources.rustRuntime,
+            needles: [
+              'source_fallback::allowed()',
+              'load_runtime_blueprint_source(project_root)',
+              'Some(source) => parse_workstation_config(&source)',
+            ],
+          },
+          {
+            file: FILES.jsRuntime,
+            source: sources.jsRuntime,
+            needles: [
+              'MISSIOND_V3_ALLOW_SOURCE_FALLBACK',
+              'v3SourceFallbackAllowed',
+              'readBlueprintResolvedSource',
+              'explicit source Lisp fallback',
+            ],
+          },
+        ],
+      },
+    }));
     requireAll(FILES.contractProjector, sources.contractProjector, diagnostics, [
       'RuntimePolicyDescriptor',
       'RUNTIME_POLICIES',
@@ -87,6 +120,20 @@ function requireAll(file, source, diagnostics, needles) {
         column: 1,
         code: 'PRODUCTION_RUNTIME_BOUNDARY_MISSING',
         message: `missing production runtime boundary anchor: ${needle}`,
+      });
+    }
+  }
+}
+
+function forbidAll(file, source, diagnostics, needles) {
+  for (const needle of needles) {
+    if (source.includes(needle)) {
+      diagnostics.push({
+        file,
+        line: 1,
+        column: 1,
+        code: 'PRODUCTION_RUNTIME_BOUNDARY_FORBIDDEN',
+        message: `forbidden production runtime fallback/scanner anchor present: ${needle}`,
       });
     }
   }

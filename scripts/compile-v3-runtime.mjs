@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { runLispc } from './lib/ocaml_lispc.mjs';
+import { runSemanticRules } from './lib/v3_semantic_rules.mjs';
 
 const OUT_DIR = '.missiond/v3/runtime/compiled';
 const BLUEPRINT = '.missiond/v3/missiond-blueprint.lisp';
@@ -88,30 +89,21 @@ function main() {
     fs.writeFileSync(outPath, `${JSON.stringify(compiled, null, 2)}\n`);
     results.push({ id: target.id, ok: true, path: outPath, source_hash: compiled.source_hash });
   }
-  const ssotHashRows = results.filter((row) => (
-    row.ok && ['v3', 'runtime-config', 'semantic-ir', 'contract-abi'].includes(row.id)
+  const ssotRows = results.filter((row) => (
+    row.ok && ['v3', 'runtime-config', 'semantic-ir', 'contract-abi', 'universe'].includes(row.id)
   ));
-  if (ssotHashRows.length === 4) {
-    const hashes = new Set(ssotHashRows.map((row) => row.source_hash));
-    if (hashes.size !== 1) {
-      results.push({
-        id: 'source-hash-consistency',
-        ok: false,
-        diagnostics: [{
-          message: `compiled V3 SSOT source_hash mismatch: ${ssotHashRows.map((row) => `${row.id}=${row.source_hash}`).join(', ')}`,
-        }],
-      });
-    }
-    const sourceUnitsRows = ssotHashRows.map((row) => {
+  if (ssotRows.length >= 4) {
+    const compiledTargets = ssotRows.map((row) => {
       const compiledPath = path.join(outDir, targets.find((target) => target.id === row.id).file);
       const compiled = JSON.parse(fs.readFileSync(compiledPath, 'utf8'));
       return {
         id: row.id,
+        compiled,
         count: Array.isArray(compiled?.payload?.source_units) ? compiled.payload.source_units.length : 0,
-        source_units: normalizeSourceUnits(compiled?.payload?.source_units),
+        source_domains: Array.isArray(compiled?.payload?.source_domains) ? compiled.payload.source_domains.length : 0,
       };
     });
-    for (const row of sourceUnitsRows) {
+    for (const row of compiledTargets) {
       if (row.count === 0) {
         results.push({
           id: `${row.id}-source-units-present`,
@@ -122,15 +114,15 @@ function main() {
         });
       }
     }
-    const reference = sourceUnitsRows[0];
-    const mismatches = sourceUnitsRows
-      .filter((row) => row.source_units !== reference.source_units)
-      .map((row) => `${row.id} source_units differ from ${reference.id}`);
-    if (mismatches.length > 0) {
+    const domainDiagnostics = runSemanticRules({
+      rules: ['source-domain-hash-consistency'],
+      compiledTargets,
+    });
+    if (domainDiagnostics.length > 0) {
       results.push({
-        id: 'source-units-consistency',
+        id: 'source-domain-hash-consistency',
         ok: false,
-        diagnostics: mismatches.map((message) => ({ message })),
+        diagnostics: domainDiagnostics,
       });
     }
   }

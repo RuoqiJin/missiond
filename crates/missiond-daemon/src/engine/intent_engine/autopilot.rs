@@ -647,6 +647,61 @@ async fn close_idle_running_task_from_durable_summary(
         }
     }
     if !has_durable_summary {
+        let pty_response = {
+            let cached = state.slot_last_responses.read().await.get(slot_id).cloned();
+            match cached {
+                Some(value) if !value.trim().is_empty() => Some(value),
+                _ => state
+                    .pty
+                    .get_last_lines(slot_id, 160)
+                    .await
+                    .ok()
+                    .map(|lines| lines.join("\n"))
+                    .filter(|value| !value.trim().is_empty()),
+            }
+        };
+        if let Some(response) = pty_response {
+            let summary = extract_worker_final_summary(&response, "");
+            let has_structured_artifact = !summary.trim().is_empty()
+                && pty_summary_has_structured_artifact(&summary)
+                && output_contract_close_blocker(&task_with_notes.task.description, &summary)
+                    .is_none()
+                && worker_final_close_blocker(&summary).is_none()
+                && pty_only_close_blocker(&task_with_notes.task.description, false, &summary)
+                    .is_none();
+            if has_structured_artifact {
+                let artifact_hash = put_autopilot_task_result_artifact(
+                    state,
+                    &task_with_notes.task,
+                    slot_id,
+                    None,
+                    &summary,
+                    0,
+                )
+                .await;
+                let artifact_suffix = artifact_hash
+                    .as_ref()
+                    .map(|hash| format!("\n\ntask_result_artifact: `{hash}`"))
+                    .unwrap_or_default();
+                state
+                    .store
+                    .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+                        task_id: task_id.to_string(),
+                        content: format!(
+                            "**PTY structured final observed** ({})\n\n{}{}",
+                            slot_id,
+                            truncate_safe(&summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES),
+                            artifact_suffix
+                        ),
+                        note_type: Some("summary".to_string()),
+                        author: Some("autopilot".to_string()),
+                    })
+                    .await?;
+                has_durable_summary = true;
+            }
+        }
+    }
+    if !has_durable_summary {
         return Ok(false);
     }
 

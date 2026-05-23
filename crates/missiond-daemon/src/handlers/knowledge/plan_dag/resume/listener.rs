@@ -7,8 +7,8 @@ use crate::handlers::knowledge::review_gate::{
 use crate::state::AppState;
 
 use super::super::{
-    build_validated_dag, dispatch_node, emit_evidence_finished, emit_evidence_running,
-    DispatchOutcome, EvidenceCtx, ExecutionOutcome, TaskContractDispatchCtx,
+    build_validated_dag_from_contract_json, dispatch_node, emit_evidence_finished,
+    emit_evidence_running, DispatchOutcome, EvidenceCtx, ExecutionOutcome, TaskContractDispatchCtx,
     PLAN_NODE_DEFAULT_ATTEMPT,
 };
 use super::evidence::emit_resume_decision_evidence;
@@ -93,7 +93,7 @@ pub(crate) async fn handle_review_resolved_plan_node_event(
             message: format!("plan status `{}` is not executable", plan.status.as_str()),
         };
     }
-    let (parsed_dag, _order) = match build_validated_dag(&plan.sexp_text) {
+    let (parsed_dag, _order) = match build_validated_dag_from_contract_json(&plan.contract_json) {
         Ok(v) => v,
         Err(e) => {
             return PlanNodeResumeListenerOutcome::DagBuildFailed {

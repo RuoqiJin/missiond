@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import path from 'node:path';
 
@@ -11,8 +12,10 @@ import {
   parseLisp,
   readKeywordProps,
 } from './missiond_lisp.mjs';
-import { readBlueprintResolvedSource } from './v3_blueprint_contract_source.mjs';
-import { SOURCE_HASH as V3_CONTRACT_SOURCE_HASH } from '../generated/v3_contracts.mjs';
+import {
+  RUNTIME_CONFIG_SOURCE_HASH as V3_RUNTIME_CONFIG_SOURCE_HASH,
+  SOURCE_HASH as V3_CONTRACT_SOURCE_HASH,
+} from '../generated/v3_contracts.mjs';
 import { DEFAULT_WORKSTATION_RUNTIME_CONFIG } from '../generated/v3_runtime_defaults.mjs';
 
 const GENERATED_DEFAULT_WORKSTATION = DEFAULT_WORKSTATION_RUNTIME_CONFIG;
@@ -59,7 +62,6 @@ const COMPILED_RUNTIME_CONFIG_REL = path.join(
   'compiled',
   'compiled-runtime-config.json',
 );
-const V3_ALLOW_SOURCE_FALLBACK_ENV = 'MISSIOND_V3_ALLOW_SOURCE_FALLBACK';
 const V3_COMPILE_RUNTIME_ACTION = 'node scripts/compile-v3-runtime.mjs --json';
 
 export class V3BlueprintRuntimeConfigError extends Error {
@@ -192,11 +194,11 @@ export function loadWorkstationRuntimeConfigForRepo(
 ) {
   const repo = path.resolve(repoRoot);
   const explicitBlueprint = blueprintPath != null;
+  const allowCompilerProjection = allowSourceFallback === true;
   const resolvedBlueprint = explicitBlueprint
     ? path.resolve(repo, blueprintPath)
     : path.join(repo, '.missiond', 'v3', 'missiond-blueprint.lisp');
   const missiondDir = path.join(repo, '.missiond');
-  const fallbackAllowed = allowSourceFallback ?? v3SourceFallbackAllowed();
   let compiledDiagnostics = [];
 
   if (!explicitBlueprint) {
@@ -204,9 +206,6 @@ export function loadWorkstationRuntimeConfigForRepo(
     compiledDiagnostics = compiled.diagnostics;
     if (compiled.config) return compiled.config;
   }
-  const fallbackDiagnostic = explicitBlueprint
-    ? 'explicit blueprint requested; parsing raw Lisp workstation config'
-    : 'compiled runtime config unavailable or stale; explicit source Lisp fallback enabled';
 
   if (!fs.existsSync(resolvedBlueprint)) {
     if ((explicitBlueprint || fs.existsSync(missiondDir)) && !allowDefaultFallback) {
@@ -214,26 +213,103 @@ export function loadWorkstationRuntimeConfigForRepo(
     }
     return defaultWorkstationRuntimeConfig('fallback-defaults');
   }
-  if (!explicitBlueprint && !fallbackAllowed) {
+  if (explicitBlueprint || allowCompilerProjection) {
+    return emitWorkstationRuntimeConfigViaLispc(repo, resolvedBlueprint, {
+      requireGeneratedHash: false,
+      allowDiagnostics: allowCompilerProjection && !explicitBlueprint,
+    });
+  }
+  {
     const detail = compiledDiagnostics.length > 0
       ? compiledDiagnostics.join('; ')
       : 'compiled runtime config payload missing';
     throw new V3BlueprintRuntimeConfigError(
-      `MissionD V3 blueprint exists at ${resolvedBlueprint}; compiled runtime config is required but unavailable or invalid: ${detail}. Required action: ${V3_COMPILE_RUNTIME_ACTION}. Set ${V3_ALLOW_SOURCE_FALLBACK_ENV}=1 only for explicit development/test source fallback.`,
+      `MissionD V3 blueprint exists at ${resolvedBlueprint}; compiled runtime config is required but unavailable or invalid: ${detail}. Required action: ${V3_COMPILE_RUNTIME_ACTION}. Raw V3 Lisp source fallback is not a production runtime path.`,
     );
   }
+}
 
-  let source;
-  try {
-    source = readBlueprintResolvedSource(repo, resolvedBlueprint);
-  } catch (err) {
+function emitWorkstationRuntimeConfigViaLispc(
+  repo,
+  resolvedBlueprint,
+  { requireGeneratedHash = true, allowDiagnostics = false } = {},
+) {
+  const lispcRoot = findMissiondLispcRoot();
+  const result = spawnSync(
+    'dune',
+    [
+      'exec',
+      '--root',
+      'tools/missiond_lispc',
+      './bin/main.exe',
+      '--',
+      'emit-runtime-config',
+      '--blueprint',
+      resolvedBlueprint,
+    ],
+    {
+      cwd: lispcRoot,
+      encoding: 'utf8',
+      maxBuffer: 10 * 1024 * 1024,
+    },
+  );
+  if (result.error) {
     throw new V3BlueprintRuntimeConfigError(
-      `failed to load resolved V3 blueprint ${resolvedBlueprint}: ${err.message}`,
+      `missiond-lispc emit-runtime-config failed to start: ${result.error.message}`,
     );
   }
-  const config = parseWorkstationRuntimeConfig(source, resolvedBlueprint);
-  config.diagnostics.push(fallbackDiagnostic);
-  return config;
+  let envelope;
+  try {
+    envelope = JSON.parse(result.stdout);
+  } catch (err) {
+    if (result.status !== 0) {
+      throw new V3BlueprintRuntimeConfigError(
+        `missiond-lispc emit-runtime-config failed with status ${result.status}: ${trimForError(result.stderr || result.stdout || '')}`,
+      );
+    }
+    throw new V3BlueprintRuntimeConfigError(
+      `missiond-lispc emit-runtime-config returned invalid JSON: ${err.message}`,
+    );
+  }
+  if ((result.status !== 0 || envelope?.ok !== true) && (!allowDiagnostics || !envelope?.compiled)) {
+    throw new V3BlueprintRuntimeConfigError(
+      `missiond-lispc rejected runtime config: ${trimForError(result.stdout)}`,
+    );
+  }
+  const compiled = envelope.compiled;
+  const diagnostics = [];
+  if (compiled?.schema_version !== 'missiond.compiled-runtime-config.v1') {
+    diagnostics.push(`compiled runtime config has unsupported schema_version ${JSON.stringify(compiled?.schema_version)}`);
+  }
+  if (!allowDiagnostics && Array.isArray(compiled?.diagnostics) && compiled.diagnostics.length > 0) {
+    diagnostics.push(`compiled runtime config contains diagnostics: ${compiled.diagnostics.map((d) => d?.message ?? String(d)).join('; ')}`);
+  }
+  diagnostics.push(...validateCompiledSourceUnits(repo, compiled, { requireGeneratedHash }));
+  const workstation = compiled?.payload?.workstation;
+  if (!workstation || typeof workstation !== 'object') {
+    diagnostics.push('compiled runtime config payload.workstation missing');
+  }
+  if (diagnostics.length > 0) {
+    throw new V3BlueprintRuntimeConfigError(
+      `missiond-lispc emitted invalid runtime config for ${resolvedBlueprint}: ${diagnostics.join('; ')}`,
+    );
+  }
+  return workstationConfigFromCompiled(workstation, `missiond-lispc:${resolvedBlueprint}`);
+}
+
+function findMissiondLispcRoot(start = process.cwd()) {
+  let dir = path.resolve(start);
+  while (true) {
+    if (fs.existsSync(path.join(dir, 'tools', 'missiond_lispc', 'bin', 'main.ml'))) {
+      return dir;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  throw new V3BlueprintRuntimeConfigError(
+    `could not locate tools/missiond_lispc/bin/main.ml from ${start}`,
+  );
 }
 
 function loadCompiledWorkstationRuntimeConfig(repo) {
@@ -273,16 +349,50 @@ function loadCompiledWorkstationRuntimeConfig(repo) {
   }
 }
 
-function validateCompiledSourceUnits(repo, compiled) {
+function validateCompiledSourceUnits(repo, compiled, { requireGeneratedHash = true } = {}) {
   const diagnostics = [];
-  if (compiled?.source_hash !== V3_CONTRACT_SOURCE_HASH) {
+  const sourceDomains = compiled?.payload?.source_domains;
+  const sourceDomainHash = Array.isArray(sourceDomains) && sourceDomains.length > 0
+    ? sourceDomainBundleHash(sourceDomains)
+    : null;
+  if (requireGeneratedHash && sourceDomainHash && sourceDomainHash !== V3_RUNTIME_CONFIG_SOURCE_HASH) {
+    diagnostics.push(
+      `compiled runtime config source_domains differ from generated V3 runtime contract: expected ${V3_RUNTIME_CONFIG_SOURCE_HASH}, got ${sourceDomainHash}; run node scripts/project-v3-contracts.mjs --write and node scripts/compile-v3-runtime.mjs --json`,
+    );
+  } else if (requireGeneratedHash && !sourceDomainHash && compiled?.source_hash !== V3_CONTRACT_SOURCE_HASH) {
     diagnostics.push(
       `compiled runtime config source_hash differs from generated V3 contract ABI: expected ${V3_CONTRACT_SOURCE_HASH}, got ${compiled?.source_hash ?? '<missing>'}; run node scripts/project-v3-contracts.mjs --write and node scripts/compile-v3-runtime.mjs --json`,
     );
   }
+
+  if (sourceDomainHash) {
+    for (const domain of sourceDomains) {
+      const id = typeof domain?.id === 'string' ? domain.id : '<missing>';
+      const domainDiagnostics = validateSourceUnitArray(repo, domain?.source_units, {
+        label: `compiled runtime config source domain ${id}`,
+        expectedCompositeHash: domain?.source_hash,
+        allowEmpty: true,
+      });
+      diagnostics.push(...domainDiagnostics);
+    }
+    return diagnostics;
+  }
+
   const sourceUnits = compiled?.payload?.source_units;
+  diagnostics.push(...validateSourceUnitArray(repo, sourceUnits, {
+    label: 'compiled runtime config',
+    expectedCompositeHash: compiled?.source_hash,
+  }));
+  return diagnostics;
+}
+
+function validateSourceUnitArray(repo, sourceUnits, { label, expectedCompositeHash, allowEmpty = false }) {
+  const diagnostics = [];
   if (!Array.isArray(sourceUnits) || sourceUnits.length === 0) {
-    diagnostics.push('compiled runtime config missing payload.source_units');
+    if (allowEmpty && expectedCompositeHash === md5Hex(Buffer.from('', 'utf8'))) {
+      return diagnostics;
+    }
+    diagnostics.push(`${label} missing source_units`);
     return diagnostics;
   }
 
@@ -291,11 +401,11 @@ function validateCompiledSourceUnits(repo, compiled) {
     const file = typeof unit?.file === 'string' ? unit.file : '';
     const expectedHash = typeof unit?.source_hash === 'string' ? unit.source_hash : '';
     if (!file) {
-      diagnostics.push('compiled runtime config contains a source_unit with an empty file');
+      diagnostics.push(`${label} contains a source_unit with an empty file`);
       continue;
     }
     if (!expectedHash) {
-      diagnostics.push(`compiled runtime config source_unit ${file} missing source_hash`);
+      diagnostics.push(`${label} source_unit ${file} missing source_hash`);
       continue;
     }
     const sourcePath = path.isAbsolute(file) ? file : path.join(repo, file);
@@ -303,34 +413,37 @@ function validateCompiledSourceUnits(repo, compiled) {
     try {
       actualHash = md5Hex(fs.readFileSync(sourcePath));
     } catch (err) {
-      diagnostics.push(`compiled runtime config source_units reference unreadable source ${sourcePath}: ${err.message}`);
+      diagnostics.push(`${label} source_units reference unreadable source ${sourcePath}: ${err.message}`);
       continue;
     }
     if (actualHash !== expectedHash) {
-      diagnostics.push(`compiled runtime config source_units stale for ${file}: expected ${expectedHash}, got ${actualHash}`);
+      diagnostics.push(`${label} source_units stale for ${file}: expected ${expectedHash}, got ${actualHash}`);
     }
     unitHashes.push(expectedHash);
   }
 
   if (diagnostics.length === 0) {
     const actualCompositeHash = md5Hex(Buffer.from(unitHashes.join('\n'), 'utf8'));
-    if (actualCompositeHash !== compiled?.source_hash) {
+    if (actualCompositeHash !== expectedCompositeHash) {
       diagnostics.push(
-        `compiled runtime config source_hash mismatch from source_units: expected ${compiled?.source_hash ?? '<missing>'}, got ${actualCompositeHash}`,
+        `${label} source_hash mismatch from source_units: expected ${expectedCompositeHash ?? '<missing>'}, got ${actualCompositeHash}`,
       );
     }
   }
   return diagnostics;
 }
 
+function sourceDomainBundleHash(sourceDomains) {
+  return md5Hex(Buffer.from(sourceDomains.map((domain) => String(domain?.source_hash ?? '')).join('\n'), 'utf8'));
+}
+
 function md5Hex(bytes) {
   return crypto.createHash('md5').update(bytes).digest('hex');
 }
 
-function v3SourceFallbackAllowed() {
-  if (process.env.NODE_ENV === 'production') return false;
-  const value = process.env[V3_ALLOW_SOURCE_FALLBACK_ENV];
-  return /^(1|true|yes|on)$/i.test(String(value ?? '').trim());
+function trimForError(value) {
+  const text = String(value ?? '').trim();
+  return text.length <= 600 ? text : `${text.slice(-600)}...`;
 }
 
 function workstationConfigFromCompiled(raw, source) {

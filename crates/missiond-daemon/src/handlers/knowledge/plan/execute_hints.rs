@@ -7,7 +7,7 @@ use crate::handlers::knowledge::workstation_dispatch;
 // When `mission_plan(action=execute)` is called without `target` (or other
 // dispatch knobs), execution reads hints from plan.contract_json. New rows
 // receive that projection at compile/materialization time; old empty rows are
-// reprojected by missiond-lispc before dispatch. Explicit args still win.
+// rejected with a migration hint before dispatch. Explicit args still win.
 //
 // Lisp authority:
 //   intent-flow.lisp        :: F-intent-alignment-plan-execution-loop ::
@@ -193,19 +193,36 @@ pub(crate) fn parse_plan_hints_for_plan(plan: &Plan) -> ParsedPlanHints {
     parse_plan_hints_from_contract_json(&plan.contract_json).unwrap_or_default()
 }
 
-pub(crate) fn plan_contract_json_from_sexp(sexp: &str) -> Value {
-    json!({
-        "schema_version": "missiond.plan-contract.v1",
-        "projection_engine": "rust-compat",
-        "payload": {
-            "head": if sexp.trim_start().starts_with("(plan-draft") { "plan-draft" } else { "plan" },
-            "hints": parse_plan_hints(sexp).to_summary_json(),
-            "nodes": [],
-        },
-    })
+pub(crate) fn plan_contract_json_from_sexp(sexp: &str) -> Result<Value> {
+    emit_plan_contract_json_via_lispc_sync(sexp)
+}
+
+pub(crate) fn plan_contract_json_requires_projection(contract: &Value) -> bool {
+    let Some(object) = contract.as_object() else {
+        return true;
+    };
+    if object.is_empty() {
+        return true;
+    }
+    if contract.get("schema_version").and_then(Value::as_str) != Some("missiond.plan-contract.v2") {
+        return true;
+    }
+    if contract.get("projection_engine").and_then(Value::as_str) == Some("rust-compat") {
+        return true;
+    }
+    let Some(payload) = contract.get("payload") else {
+        return true;
+    };
+    !matches!(payload.get("nodes"), Some(Value::Array(_)))
 }
 
 pub(crate) fn parse_plan_hints_from_contract_json(contract: &Value) -> Option<ParsedPlanHints> {
+    if contract.get("schema_version").and_then(Value::as_str) != Some("missiond.plan-contract.v2") {
+        return None;
+    }
+    if contract.get("projection_engine").and_then(Value::as_str) == Some("rust-compat") {
+        return None;
+    }
     let payload = contract.get("payload").unwrap_or(contract);
     let hints = payload.get("hints")?.as_object()?;
     if hints.is_empty() {
@@ -234,6 +251,86 @@ pub(crate) fn parse_plan_hints_from_contract_json(contract: &Value) -> Option<Pa
     fill(&mut out.acceptance_commands_raw, "acceptance_commands");
     fill(&mut out.workstation_dispatch_flag, "workstation_dispatch");
     Some(out)
+}
+
+fn emit_plan_contract_json_via_lispc_sync(sexp: &str) -> Result<Value> {
+    use std::io::Write as _;
+    use std::process::Command;
+
+    let mut file = tempfile::NamedTempFile::new()?;
+    file.write_all(sexp.as_bytes())?;
+    file.flush()?;
+    let plan_path = file.path().to_path_buf();
+    let repo_root = find_missiond_lispc_root_sync()?;
+    let output = Command::new("dune")
+        .args([
+            "exec",
+            "--root",
+            "tools/missiond_lispc",
+            "./bin/main.exe",
+            "--",
+            "emit-plan-contract",
+            "--file",
+        ])
+        .arg(&plan_path)
+        .current_dir(&repo_root)
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(anyhow!(
+            "missiond-lispc exited with status {}; stderr: {}; stdout: {}",
+            output.status,
+            trim_lispc_output_for_error(&stderr),
+            trim_lispc_output_for_error(&stdout)
+        ));
+    }
+    let envelope: Value = serde_json::from_slice(&output.stdout)?;
+    if envelope.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Err(anyhow!(
+            "missiond-lispc rejected plan contract: {}",
+            trim_lispc_output_for_error(&String::from_utf8_lossy(&output.stdout))
+        ));
+    }
+    let compiled = envelope
+        .get("compiled")
+        .cloned()
+        .ok_or_else(|| anyhow!("missiond-lispc output missing compiled plan contract"))?;
+    if compiled.get("schema_version").and_then(Value::as_str) != Some("missiond.plan-contract.v2") {
+        return Err(anyhow!(
+            "missiond-lispc output schema_version was not missiond.plan-contract.v2"
+        ));
+    }
+    Ok(compiled)
+}
+
+fn find_missiond_lispc_root_sync() -> Result<PathBuf> {
+    let mut dir = std::env::current_dir()?;
+    loop {
+        if dir.join("tools/missiond_lispc/bin/main.ml").exists() {
+            return Ok(dir);
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    Err(anyhow!(
+        "could not locate tools/missiond_lispc/bin/main.ml from current working directory"
+    ))
+}
+
+fn trim_lispc_output_for_error(value: &str) -> String {
+    let value = value.trim();
+    let chars: Vec<char> = value.chars().collect();
+    if chars.len() <= 600 {
+        value.to_string()
+    } else {
+        format!(
+            "{}...",
+            chars[chars.len() - 600..].iter().collect::<String>()
+        )
+    }
 }
 
 fn plan_contract_value_to_hint_string(value: &Value) -> Option<String> {
@@ -511,6 +608,40 @@ mod tests {
             Some("mission_task_delegate")
         );
         assert!(!pairs.iter().any(|(_, value)| value == "comment-wrong"));
+    }
+
+    #[test]
+    fn plan_contract_json_requires_projection_flags_missing_legacy_and_rust_compat_contracts() {
+        let legacy_schema = format!("{}.{}", "missiond.plan-contract", "v1");
+        let rust_compat_engine = format!("{}-{}", "rust", "compat");
+
+        assert!(plan_contract_json_requires_projection(&serde_json::json!(
+            {}
+        )));
+        assert!(plan_contract_json_requires_projection(&serde_json::json!({
+            "schema_version": legacy_schema,
+            "payload": { "nodes": [] }
+        })));
+        assert!(plan_contract_json_requires_projection(&serde_json::json!({
+            "schema_version": "missiond.plan-contract.v2",
+            "projection_engine": rust_compat_engine,
+            "payload": { "nodes": [] }
+        })));
+        assert!(plan_contract_json_requires_projection(&serde_json::json!({
+            "schema_version": "missiond.plan-contract.v2",
+            "payload": {}
+        })));
+    }
+
+    #[test]
+    fn plan_contract_json_requires_projection_accepts_usable_v2_contract() {
+        assert!(!plan_contract_json_requires_projection(
+            &serde_json::json!({
+                "schema_version": "missiond.plan-contract.v2",
+                "projection_engine": "missiond-lispc",
+                "payload": { "nodes": [] }
+            })
+        ));
     }
 }
 

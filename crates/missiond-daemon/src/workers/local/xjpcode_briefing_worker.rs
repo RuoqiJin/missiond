@@ -5,11 +5,15 @@ use std::time::Duration;
 
 use tracing::{info, warn};
 
+use crate::context::effects::{self, EffectContext};
 use crate::state::AppState;
 
 use super::{BackgroundWorker, WorkerContext, WorkerKind};
 
 pub(crate) struct XjpcodeBriefingWorker;
+
+const XJPCODE_BRIEFING_EFFECT: EffectContext =
+    EffectContext::new("xjpcode-briefing-worker", "xjpcode-briefing-write");
 
 impl BackgroundWorker for XjpcodeBriefingWorker {
     const KIND: WorkerKind = WorkerKind::Local;
@@ -55,11 +59,8 @@ async fn generate_and_write(state: &AppState) -> anyhow::Result<()> {
     let path = dirs::home_dir()
         .ok_or_else(|| anyhow::anyhow!("no home dir"))?
         .join(".xjpcode/xjpcode.md");
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
     let bytes = markdown.len();
-    std::fs::write(&path, markdown)?;
+    effects::write_text(XJPCODE_BRIEFING_EFFECT, &path, markdown)?;
     info!(path = %path.display(), bytes, "xjpcode briefing written");
     Ok(())
 }

@@ -2,6 +2,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 
 import { runLispc } from './lib/ocaml_lispc.mjs';
 
@@ -18,6 +19,7 @@ function main() {
   const blueprint = opts.blueprint;
   const contract = loadContract({ repo, blueprint });
   const runtimeDefaults = loadRuntimeDefaults({ repo, blueprint });
+  const projectUniverse = loadProjectUniverse({ repo, blueprint });
   const generated = renderAll(contract, {
     blueprint,
     rustOutput: RUST_OUTPUT,
@@ -25,6 +27,8 @@ function main() {
     dtsOutput: DTS_OUTPUT,
     rustRuntimeDefaultsOutput: RUST_RUNTIME_DEFAULTS_OUTPUT,
     jsRuntimeDefaultsOutput: JS_RUNTIME_DEFAULTS_OUTPUT,
+    runtimeConfigSourceHash: runtimeDefaults.sourceDomainHash,
+    projectUniverseSourceHash: projectUniverse.sourceDomainHash,
   });
   const generatedRuntimeDefaults = renderRuntimeDefaults(runtimeDefaults, {
     blueprint,
@@ -72,6 +76,9 @@ function main() {
     functions: contract.functionIds.length,
     artifact_contracts: contract.artifactContractIds.length,
     runtime_policies: contract.runtimePolicies.length,
+    source_domains: contract.sourceDomains.length,
+    runtime_config_source_hash: runtimeDefaults.sourceDomainHash,
+    project_universe_source_hash: projectUniverse.sourceDomainHash,
     checker_commands: checkerCommands(contract).length,
     final_convergence_gate: contract.finalConvergenceGate?.id ?? null,
     diagnostics,
@@ -142,6 +149,7 @@ function loadContract({ repo, blueprint }) {
     schemaVersion: result.compiled.schema_version,
     sourceHash: result.compiled.source_hash,
     sourceUnits: normalizeSourceUnits(payload.source_units),
+    sourceDomains: normalizeSourceDomains(payload.source_domains),
     surfaceIds: uniqueSorted((payload.surfaces ?? []).map((row) => row?.id)),
     functionIds: uniqueSorted((payload.functions ?? []).map((row) => row?.id)),
     artifactContractIds: uniqueSorted(facts.filter((fact) => fact?.kind === 'artifact_contract').map((fact) => fact?.id)),
@@ -158,10 +166,31 @@ function loadRuntimeDefaults({ repo, blueprint }) {
     const detail = (result?.diagnostics ?? []).map((d) => d.message ?? JSON.stringify(d)).join('; ');
     fail(`missiond-lispc emit-runtime-config failed${detail ? `: ${detail}` : ''}`);
   }
+  const payload = result.compiled.payload ?? {};
+  const sourceDomains = normalizeSourceDomains(payload.source_domains);
   return {
     schemaVersion: result.compiled.schema_version,
     sourceHash: result.compiled.source_hash,
-    payload: result.compiled.payload ?? {},
+    sourceDomains,
+    sourceDomainHash: sourceDomainBundleHash(sourceDomains),
+    payload,
+  };
+}
+
+function loadProjectUniverse({ repo, blueprint }) {
+  const result = runLispc(['emit-universe', '--blueprint', blueprint], { repoRoot: repo, timeoutMs: 60_000 });
+  if (!result?.ok || !result?.compiled) {
+    const detail = (result?.diagnostics ?? []).map((d) => d.message ?? JSON.stringify(d)).join('; ');
+    fail(`missiond-lispc emit-universe failed${detail ? `: ${detail}` : ''}`);
+  }
+  const payload = result.compiled.payload ?? {};
+  const sourceDomains = normalizeSourceDomains(payload.source_domains);
+  return {
+    schemaVersion: result.compiled.schema_version,
+    sourceHash: result.compiled.source_hash,
+    sourceDomains,
+    sourceDomainHash: sourceDomainBundleHash(sourceDomains),
+    payload,
   };
 }
 
@@ -206,9 +235,22 @@ pub struct SourceUnit {
 
 pub const SCHEMA_VERSION: &str = ${rustString(contract.schemaVersion)};
 pub const SOURCE_HASH: &str = ${rustString(contract.sourceHash)};
+pub const RUNTIME_CONFIG_SOURCE_HASH: &str = ${rustString(labels.runtimeConfigSourceHash)};
+pub const PROJECT_UNIVERSE_SOURCE_HASH: &str = ${rustString(labels.projectUniverseSourceHash)};
 
 pub const SOURCE_UNITS: &[SourceUnit] = &[
 ${contract.sourceUnits.map(renderRustSourceUnit).join('\n')}
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceDomain {
+    pub id: &'static str,
+    pub source_hash: &'static str,
+    pub source_units: &'static [SourceUnit],
+}
+
+pub const SOURCE_DOMAINS: &[SourceDomain] = &[
+${contract.sourceDomains.map(renderRustSourceDomain).join('\n')}
 ];
 
 ${rustStringArrayConst('SURFACE_IDS', contract.surfaceIds)}
@@ -253,7 +295,10 @@ function renderJs(contract, labels) {
 
 export const SCHEMA_VERSION = ${JSON.stringify(contract.schemaVersion)};
 export const SOURCE_HASH = ${JSON.stringify(contract.sourceHash)};
+export const RUNTIME_CONFIG_SOURCE_HASH = ${JSON.stringify(labels.runtimeConfigSourceHash)};
+export const PROJECT_UNIVERSE_SOURCE_HASH = ${JSON.stringify(labels.projectUniverseSourceHash)};
 export const SOURCE_UNITS = Object.freeze(${JSON.stringify(contract.sourceUnits, null, 2)});
+export const SOURCE_DOMAINS = Object.freeze(${JSON.stringify(contract.sourceDomains, null, 2)});
 export const SURFACE_IDS = Object.freeze(${JSON.stringify(contract.surfaceIds, null, 2)});
 export const FUNCTION_IDS = Object.freeze(${JSON.stringify(contract.functionIds, null, 2)});
 export const ARTIFACT_CONTRACT_IDS = Object.freeze(${JSON.stringify(contract.artifactContractIds, null, 2)});
@@ -286,6 +331,12 @@ export interface SourceUnit {
   included_by: string | null;
   include_line: number | null;
   source_hash: string;
+}
+
+export interface SourceDomain {
+  id: string;
+  source_hash: string;
+  source_units: readonly SourceUnit[];
 }
 
 export interface RuntimePolicyDescriptor {
@@ -332,7 +383,10 @@ export type V3RuntimePolicyId = ${tsUnion(contract.runtimePolicies.map((policy) 
 
 export const SCHEMA_VERSION: ${JSON.stringify(contract.schemaVersion)};
 export const SOURCE_HASH: ${JSON.stringify(contract.sourceHash)};
+export const RUNTIME_CONFIG_SOURCE_HASH: ${JSON.stringify(labels.runtimeConfigSourceHash)};
+export const PROJECT_UNIVERSE_SOURCE_HASH: ${JSON.stringify(labels.projectUniverseSourceHash)};
 export const SOURCE_UNITS: readonly SourceUnit[];
+export const SOURCE_DOMAINS: readonly SourceDomain[];
 export const SURFACE_IDS: readonly V3SurfaceId[];
 export const FUNCTION_IDS: readonly V3FunctionId[];
 export const ARTIFACT_CONTRACT_IDS: readonly V3ArtifactContractId[];
@@ -368,6 +422,23 @@ function normalizeSourceUnits(rows) {
     include_line: Number.isInteger(unit?.include_line) ? unit.include_line : null,
     source_hash: String(unit?.source_hash ?? ''),
   }));
+}
+
+function normalizeSourceDomains(rows) {
+  return (Array.isArray(rows) ? rows : [])
+    .map((domain) => ({
+      id: String(domain?.id ?? ''),
+      source_hash: String(domain?.source_hash ?? ''),
+      source_units: normalizeSourceUnits(domain?.source_units),
+    }))
+    .filter((domain) => domain.id);
+}
+
+function sourceDomainBundleHash(sourceDomains) {
+  return crypto
+    .createHash('md5')
+    .update(sourceDomains.map((domain) => domain.source_hash).join('\n'))
+    .digest('hex');
 }
 
 function normalizeRuntimePolicies(rows, facts) {
@@ -482,13 +553,42 @@ function numberOrZero(value) {
 }
 
 function renderRustSourceUnit(unit) {
-  return `    SourceUnit {
-        file: ${rustString(unit.file)},
-        kind: ${rustString(unit.kind)},
-        included_by: ${rustOptionString(unit.included_by)},
-        include_line: ${rustOptionU32(unit.include_line)},
-        source_hash: ${rustString(unit.source_hash)},
+  return renderRustSourceUnitWithIndent(unit, '    ', true);
+}
+
+function renderRustSourceDomain(domain) {
+  const sourceUnits = renderRustSourceDomainUnits(domain.source_units);
+  return `    SourceDomain {
+        id: ${rustString(domain.id)},
+        source_hash: ${rustString(domain.source_hash)},
+        source_units: ${sourceUnits},
     },`;
+}
+
+function renderRustSourceDomainUnits(units) {
+  if (!units.length) return '&[]';
+  if (units.length === 1) {
+    return `&[SourceUnit {
+            file: ${rustString(units[0].file)},
+            kind: ${rustString(units[0].kind)},
+            included_by: ${rustOptionString(units[0].included_by)},
+            include_line: ${rustOptionU32(units[0].include_line)},
+            source_hash: ${rustString(units[0].source_hash)},
+        }]`;
+  }
+  return `&[
+${units.map((unit) => renderRustSourceUnitWithIndent(unit, '            ', true)).join('\n')}
+        ]`;
+}
+
+function renderRustSourceUnitWithIndent(unit, indent, trailingComma) {
+  return `${indent}SourceUnit {
+${indent}    file: ${rustString(unit.file)},
+${indent}    kind: ${rustString(unit.kind)},
+${indent}    included_by: ${rustOptionString(unit.included_by)},
+${indent}    include_line: ${rustOptionU32(unit.include_line)},
+${indent}    source_hash: ${rustString(unit.source_hash)},
+${indent}}${trailingComma ? ',' : ''}`;
 }
 
 function rustStringArrayConst(name, values) {

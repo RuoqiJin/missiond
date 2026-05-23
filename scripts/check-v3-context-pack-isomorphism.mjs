@@ -226,12 +226,10 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.v3Runtime, sources.v3Runtime, [
     'export class WorkstationRuntimeConfig',
     'export function loadWorkstationRuntimeConfigForRepo',
-    'export function parseWorkstationRuntimeConfig',
     'V3_BLUEPRINT_CONFIG_ERROR',
-    'workstation-config',
-    'slot-template',
-    'timeout-policy',
-    'boardtask-dispatch',
+    'COMPILED_RUNTIME_CONFIG_REL',
+    'emit-runtime-config',
+    'compiled runtime config is required',
     'defaultModelProfileForTemplate',
     'clampTimeoutSecs',
     'DEFAULT_MODEL_PROFILE',
@@ -240,9 +238,6 @@ function checkFiles(root, files) {
     'MIN_CONTEXT_PACK_MAX_PARALLEL',
     'MAX_CONTEXT_PACK_MAX_PARALLEL',
     'contextPackMaxParallel',
-    'dispatch-policy',
-    'context-pack-run-wave',
-    ':default_max_parallel',
   ]);
 
   requireAll(diagnostics, files.taskDelegate, sources.taskDelegate, [

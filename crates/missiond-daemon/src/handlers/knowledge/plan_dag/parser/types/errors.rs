@@ -4,6 +4,7 @@ use super::node::VALID_TARGETS;
 
 #[derive(Debug, Clone)]
 pub(in crate::handlers::knowledge::plan_dag) enum DagBuildError {
+    InvalidContract(String),
     NoNodes,
     DuplicateId(String),
     InvalidTarget {
@@ -88,6 +89,16 @@ pub(in crate::handlers::knowledge::plan_dag) enum DagBuildError {
 impl DagBuildError {
     pub(in crate::handlers::knowledge::plan_dag) fn into_tool_result(self) -> ToolResult {
         match self {
+            DagBuildError::InvalidContract(detail) => ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::INVALID_PARAM,
+                    format!("DAG plan contract is invalid: {}", detail),
+                )
+                .with_suggestion(
+                    "recompile the plan contract with `missiond-lispc emit-plan-contract`; \
+                     production DAG execution only accepts missiond.plan-contract.v2 with typed nodes",
+                ),
+            ),
             DagBuildError::NoNodes => ToolResult::structured_error(
                 ToolError::new(
                     error_codes::INVALID_PARAM,

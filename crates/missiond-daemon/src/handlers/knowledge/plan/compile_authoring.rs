@@ -314,7 +314,11 @@ async fn action_compile_dry_run(state: &AppState, args: &Value) -> Result<ToolRe
             .map_err(|e| anyhow!("DB error: {}", e))?;
         state
             .store
-            .plan_update_contract_json(id, &plan_contract_json_from_sexp(&dry_run_sexp))
+            .plan_update_contract_json(
+                id,
+                &plan_contract_json_from_sexp(&dry_run_sexp)
+                    .map_err(|e| anyhow!("missiond-lispc emit-plan-contract: {}", e))?,
+            )
             .await
             .map_err(|e| anyhow!("DB error: {}", e))?;
         payload["persisted"] = json!(true);
@@ -554,7 +558,11 @@ async fn action_compile_sonnet(state: &AppState, args: &Value) -> Result<ToolRes
             .map_err(|e| anyhow!("DB error: {}", e))?;
         state
             .store
-            .plan_update_contract_json(id, &plan_contract_json_from_sexp(&compiled_sexp))
+            .plan_update_contract_json(
+                id,
+                &plan_contract_json_from_sexp(&compiled_sexp)
+                    .map_err(|e| anyhow!("missiond-lispc emit-plan-contract: {}", e))?,
+            )
             .await
             .map_err(|e| anyhow!("DB error: {}", e))?;
         payload["persisted"] = json!(true);

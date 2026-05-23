@@ -456,6 +456,27 @@ fn build_cli_command(
                 parts.push_str(&format!(" --ask-for-approval {}", shell_quote(policy)));
                 info!(approval_policy = %policy, "Codex CLI: approval policy override");
             }
+            // Codex CLI treats MCP tool calls as a separate approval surface
+            // from shell command approval. Worker lanes must be unattended once
+            // MissionD has accepted a BoardTask shard, so pin the MissionD MCP
+            // tools they need as approved at launch time. This is intentionally
+            // command-local and does not rely on each host's ~/.codex/config.toml
+            // being pre-edited.
+            const MISSIOND_CODEX_AUTO_APPROVE_TOOLS: &[&str] = &[
+                r#"mcp_servers.missiond.tools.mission_board_query.approval_mode="approve""#,
+                r#"mcp_servers.missiond.tools.mission_board_update.approval_mode="approve""#,
+                r#"mcp_servers.missiond.tools.mission_board_note_add.approval_mode="approve""#,
+                r#"mcp_servers.missiond.tools.mission_compute_slot.approval_mode="approve""#,
+                r#"mcp_servers.missiond.tools.mission_context_boot.approval_mode="approve""#,
+                r#"mcp_servers.missiond.tools.mission_conversation_query.approval_mode="approve""#,
+                r#"mcp_servers.missiond.tools.mission_slots.approval_mode="approve""#,
+                r#"mcp_servers.missiond.tools.mission_pty_status.approval_mode="approve""#,
+                r#"mcp_servers.missiond.tools.mission_task_delegate.approval_mode="approve""#,
+                r#"mcp_servers.missiond.tools.mission_swarm_run.approval_mode="approve""#,
+            ];
+            for approval_override in MISSIOND_CODEX_AUTO_APPROVE_TOOLS {
+                parts.push_str(&format!(" -c {}", shell_quote(approval_override)));
+            }
             if let Some(mcp) = mcp_config {
                 info!(mcp_config = %mcp.display(), "MCP config ignored for Codex CLI (not supported)");
             }
@@ -3077,6 +3098,12 @@ Some prose.
         assert!(cmd.contains("--search"));
         assert!(cmd.contains("--sandbox 'danger-full-access'"));
         assert!(cmd.contains("--ask-for-approval 'never'"));
+        assert!(cmd.contains(
+            "-c 'mcp_servers.missiond.tools.mission_compute_slot.approval_mode=\"approve\"'"
+        ));
+        assert!(cmd.contains(
+            "-c 'mcp_servers.missiond.tools.mission_context_boot.approval_mode=\"approve\"'"
+        ));
     }
 
     #[test]

@@ -15,6 +15,31 @@ let compiled_envelope schema_version source_hash diagnostics payload =
     (diagnostics |> List.map diagnostic_to_json |> String.concat ",")
     payload
 
+let all_v3_source_domain_ids =
+  [
+    "blueprint-core";
+    "workstation-runtime";
+    "control-plane-runtime";
+    "memory-knowledge-runtime";
+    "ops-infra";
+    "universe";
+    "implementation-map";
+    "pillar-flow";
+    "v2-convergence";
+  ]
+
+let runtime_config_source_domain_ids =
+  [
+    "blueprint-core";
+    "workstation-runtime";
+    "control-plane-runtime";
+    "memory-knowledge-runtime";
+    "ops-infra";
+    "universe";
+  ]
+
+let project_universe_source_domain_ids = [ "blueprint-core"; "universe" ]
+
 let json_opt_string = function
   | Some value -> json_string value
   | None -> "null"
@@ -1121,11 +1146,14 @@ let learning_engine_runtime_config_json root =
           ("cooccurrence_refresh_interval_secs", json_number_token [ ":cooccurrence-refresh-interval-secs" ] props);
         ]
 
-let runtime_config_payload_json blueprint source_hash source_units root =
+let runtime_config_payload_json blueprint source_hash source_units source_domains root =
   json_assoc
     [
       ("blueprint", json_string blueprint);
       ("source_units", Source_resolver.source_units_to_json source_units);
+      ( "source_domains",
+        Source_resolver.source_domains_to_json_for_ids source_domains
+          runtime_config_source_domain_ids );
       ( "runtime_policies",
         root
         |> Option.map (runtime_policy_descriptors_json source_hash blueprint)
@@ -1338,7 +1366,7 @@ let runtime_config_required_diagnostics file root =
     ];
   List.rev !diagnostics
 
-let contract_abi_payload_json blueprint source_hash source_units root =
+let contract_abi_payload_json blueprint source_hash source_units source_domains root =
   let surfaces =
     root |> Option.map v3_surfaces_to_json |> Option.value ~default:[]
   in
@@ -1354,6 +1382,9 @@ let contract_abi_payload_json blueprint source_hash source_units root =
     [
       ("blueprint", json_string blueprint);
       ("source_units", Source_resolver.source_units_to_json source_units);
+      ( "source_domains",
+        Source_resolver.source_domains_to_json_for_ids source_domains
+          all_v3_source_domain_ids );
       ("surfaces", json_array surfaces);
       ("functions", json_array functions);
       ("facts", json_array facts);
@@ -1368,7 +1399,7 @@ let contract_abi_payload_json blueprint source_hash source_units root =
       ( "plan_contract",
         json_assoc
           [
-            ("schema_version", json_string "missiond.plan-contract.v1");
+            ("schema_version", json_string "missiond.plan-contract.v2");
             ("accepted_heads", json_string_list [ "plan"; "plan-draft" ]);
             ( "top_level_hint_keys",
               json_string_list
@@ -1387,19 +1418,84 @@ let contract_abi_payload_json blueprint source_hash source_units root =
                   ":forbidden-files";
                   ":acceptance-commands";
                   ":workstation-dispatch";
+                  ":workstation_dispatch";
                 ] );
             ( "node_hint_keys",
               json_string_list
                 [
                   ":id";
                   ":target";
+                  ":target-tool";
+                  ":tool";
+                  ":objective";
                   ":depends-on";
-                  ":workstation-dispatch";
-                  ":acceptance";
-                  ":rollback";
-                  ":max-attempts";
-                  ":retry-count";
+                  ":depends_on";
+                  ":deps";
+                  ":condition";
+                  ":failure-policy";
+                  ":failure_policy";
                   ":timeout-ms";
+                  ":timeout_ms";
+                  ":dispatch-strategy";
+                  ":dispatch_strategy";
+                  ":target-project";
+                  ":target_project";
+                  ":project";
+                  ":requested-cwd";
+                  ":requested_cwd";
+                  ":cwd";
+                  ":flow-id";
+                  ":flow_id";
+                  ":scope";
+                  ":commit-policy";
+                  ":commit_policy";
+                  ":owned-files";
+                  ":owned_files";
+                  ":forbidden-files";
+                  ":forbidden_files";
+                  ":acceptance-commands";
+                  ":acceptance_commands";
+                  ":acceptance-mode";
+                  ":acceptance_mode";
+                  ":acceptance-evidence-keys";
+                  ":acceptance_evidence_keys";
+                  ":acceptance-depends-on";
+                  ":acceptance_depends_on";
+                  ":acceptance-requires";
+                  ":acceptance_requires";
+                  ":acceptance-source-node";
+                  ":acceptance_source_node";
+                  ":workstation-dispatch";
+                  ":workstation_dispatch";
+                  ":review-gate";
+                  ":review_gate";
+                  ":review-action";
+                  ":review_action";
+                  ":review-text";
+                  ":review_text";
+                  ":retry-count";
+                  ":retry_count";
+                  ":max-attempts";
+                  ":max_attempts";
+                  ":retry-delay-ms";
+                  ":retry_delay_ms";
+                  ":rollback-policy";
+                  ":rollback_policy";
+                  ":rollback-objective";
+                  ":rollback_objective";
+                  ":rollback-owned-files";
+                  ":rollback_owned_files";
+                  ":rollback-acceptance-commands";
+                  ":rollback_acceptance_commands";
+                  ":compensates";
+                  ":compensate-node";
+                  ":compensate_node";
+                  ":compensate-ref";
+                  ":compensate_ref";
+                  ":rollback-cascade";
+                  ":rollback_cascade";
+                  ":rollback-after";
+                  ":rollback_after";
                 ] );
           ] );
     ]
@@ -1435,38 +1531,267 @@ let props_to_object_json ?keys props =
 let plan_hint_keys =
   [
     ":target";
+    ":target-tool";
+    ":tool";
     ":flow-id";
+    ":flow_id";
     ":dispatch-strategy";
+    ":dispatch_strategy";
     ":parallelism";
     ":target-project";
+    ":target_project";
+    ":project";
     ":requested-cwd";
+    ":requested_cwd";
+    ":cwd";
     ":objective";
     ":summary";
     ":scope";
     ":commit-policy";
+    ":commit_policy";
     ":owned-files";
+    ":owned_files";
     ":forbidden-files";
+    ":forbidden_files";
     ":acceptance-commands";
+    ":acceptance_commands";
     ":workstation-dispatch";
+    ":workstation_dispatch";
   ]
 
-let plan_node_contract_json node =
+let node_contract_keys =
+  [
+    ":id";
+    ":target";
+    ":target-tool";
+    ":tool";
+    ":objective";
+    ":depends-on";
+    ":depends_on";
+    ":deps";
+    ":condition";
+    ":failure-policy";
+    ":failure_policy";
+    ":timeout-ms";
+    ":timeout_ms";
+    ":dispatch-strategy";
+    ":dispatch_strategy";
+    ":target-project";
+    ":target_project";
+    ":project";
+    ":requested-cwd";
+    ":requested_cwd";
+    ":cwd";
+    ":flow-id";
+    ":flow_id";
+    ":scope";
+    ":commit-policy";
+    ":commit_policy";
+    ":owned-files";
+    ":owned_files";
+    ":forbidden-files";
+    ":forbidden_files";
+    ":acceptance-commands";
+    ":acceptance_commands";
+    ":acceptance-mode";
+    ":acceptance_mode";
+    ":acceptance-evidence-keys";
+    ":acceptance_evidence_keys";
+    ":acceptance-depends-on";
+    ":acceptance_depends_on";
+    ":acceptance-requires";
+    ":acceptance_requires";
+    ":acceptance-source-node";
+    ":acceptance_source_node";
+    ":workstation-dispatch";
+    ":workstation_dispatch";
+    ":review-gate";
+    ":review_gate";
+    ":review-action";
+    ":review_action";
+    ":review-text";
+    ":review_text";
+    ":retry-count";
+    ":retry_count";
+    ":max-attempts";
+    ":max_attempts";
+    ":retry-delay-ms";
+    ":retry_delay_ms";
+    ":rollback-policy";
+    ":rollback_policy";
+    ":rollback-objective";
+    ":rollback_objective";
+    ":rollback-owned-files";
+    ":rollback_owned_files";
+    ":rollback-acceptance-commands";
+    ":rollback_acceptance_commands";
+    ":compensates";
+    ":compensate-node";
+    ":compensate_node";
+    ":compensate-ref";
+    ":compensate_ref";
+    ":rollback-cascade";
+    ":rollback_cascade";
+    ":rollback-after";
+    ":rollback_after";
+  ]
+
+let prop_text_alias keys props = prop_text_any keys props
+
+let prop_value_alias keys props = prop_any keys props
+
+let string_list_value = function
+  | Some value -> (
+      match value with
+      | List (_, _, _) -> list_texts value
+      | Atom (_, text) | String (_, text) ->
+          if String.trim text = "" then [] else [ text ])
+  | None -> []
+
+let json_string_list_value keys props =
+  json_string_list (string_list_value (prop_value_alias keys props))
+
+let json_opt_string_alias keys props =
+  json_opt_string (prop_opt_non_nil keys props)
+
+let json_nullable_int raw =
+  match raw with
+  | None -> "null"
+  | Some value -> (
+      match int_of_string_opt (String.trim value) with
+      | Some n -> string_of_int n
+      | None -> "null")
+
+let unsupported_field_json (key, value) =
+  json_assoc [ ("key", json_string key); ("value", plan_value_to_json value) ]
+
+let add_unknown_unsupported props =
+  props
+  |> List.filter_map (fun (key, value) ->
+         if List.mem key node_contract_keys then None
+         else value |> Option.map (fun value -> (key, value)))
+
+let add_enum_unsupported props unsupported keys valid =
+  match prop_text_alias keys props with
+  | Some raw when String.trim raw <> "" ->
+      let normalized =
+        raw |> String.trim |> String.lowercase_ascii
+        |> String.map (function '-' -> '_' | c -> c)
+      in
+      if List.mem normalized valid then unsupported
+      else
+        (match prop_value_alias keys props with
+        | Some value -> (List.hd keys, value) :: unsupported
+        | None -> unsupported)
+  | _ -> unsupported
+
+let plan_node_contract_json source_hash file node =
   let props = keyword_props ~start:1 node in
-  let depends_on =
-    match prop ":depends-on" props with
-    | Some value -> list_texts value
-    | None -> []
+  let retry_count_json =
+    match prop_text_alias [ ":retry-count"; ":retry_count" ] props with
+    | Some value -> json_nullable_int (Some value)
+    | None -> (
+        match prop_text_alias [ ":max-attempts"; ":max_attempts" ] props with
+        | Some value -> (
+            match int_of_string_opt (String.trim value) with
+            | Some n when n >= 1 -> string_of_int (n - 1)
+            | _ -> "null")
+        | None -> "null")
+  in
+  let unsupported =
+    add_unknown_unsupported props
+    |> fun unsupported ->
+    add_enum_unsupported props unsupported
+      [ ":acceptance-mode"; ":acceptance_mode" ]
+      [ "inner_status"; "evidence_keys"; "manual" ]
+    |> fun unsupported ->
+    add_enum_unsupported props unsupported
+      [ ":acceptance-requires"; ":acceptance_requires" ]
+      [ "all_succeeded"; "any_succeeded"; "evidence_keys" ]
+    |> fun unsupported ->
+    add_enum_unsupported props unsupported [ ":review-gate"; ":review_gate" ]
+      [ "none"; "question_event" ]
+    |> fun unsupported ->
+    add_enum_unsupported props unsupported
+      [ ":rollback-policy"; ":rollback_policy" ]
+      [ "none"; "descriptor"; "workstation" ]
+    |> fun unsupported ->
+    add_enum_unsupported props unsupported
+      [ ":rollback-cascade"; ":rollback_cascade" ]
+      [ "none"; "plan"; "dispatch_safe" ]
   in
   json_assoc
     [
-      ("id", json_opt_string (prop_text ":id" props));
-      ("target", json_opt_string (prop_text ":target" props));
-      ("depends_on", json_string_list depends_on);
-      ("hints", props_to_object_json props);
-      ("source", source_map_json "" "" node);
+      ("id", json_opt_string_alias [ ":id" ] props);
+      ("target", json_opt_string_alias [ ":target"; ":target-tool"; ":tool" ] props);
+      ("objective", json_opt_string_alias [ ":objective" ] props);
+      ("depends_on", json_string_list_value [ ":depends-on"; ":depends_on"; ":deps" ] props);
+      ("condition", json_opt_string_alias [ ":condition" ] props);
+      ( "failure_policy",
+        json_string
+          (Option.value ~default:"fail-fast"
+             (prop_text_alias [ ":failure-policy"; ":failure_policy" ] props)) );
+      ("timeout_ms", json_nullable_int (prop_text_alias [ ":timeout-ms"; ":timeout_ms" ] props));
+      ( "dispatch_strategy",
+        json_opt_string_alias [ ":dispatch-strategy"; ":dispatch_strategy" ] props );
+      ( "target_project",
+        json_opt_string_alias [ ":target-project"; ":target_project"; ":project" ] props );
+      ( "requested_cwd",
+        json_opt_string_alias [ ":requested-cwd"; ":requested_cwd"; ":cwd" ] props );
+      ("flow_id", json_opt_string_alias [ ":flow-id"; ":flow_id" ] props);
+      ("scope", json_opt_string_alias [ ":scope" ] props);
+      ("commit_policy", json_opt_string_alias [ ":commit-policy"; ":commit_policy" ] props);
+      ("owned_files", json_string_list_value [ ":owned-files"; ":owned_files" ] props);
+      ("forbidden_files", json_string_list_value [ ":forbidden-files"; ":forbidden_files" ] props);
+      ( "acceptance_commands",
+        json_string_list_value [ ":acceptance-commands"; ":acceptance_commands" ] props );
+      ( "acceptance_mode",
+        json_opt_string_alias [ ":acceptance-mode"; ":acceptance_mode" ] props );
+      ( "acceptance_evidence_keys",
+        json_string_list_value
+          [ ":acceptance-evidence-keys"; ":acceptance_evidence_keys" ]
+          props );
+      ( "acceptance_depends_on",
+        json_string_list_value
+          [ ":acceptance-depends-on"; ":acceptance_depends_on" ]
+          props );
+      ( "acceptance_requires",
+        json_opt_string_alias [ ":acceptance-requires"; ":acceptance_requires" ] props );
+      ( "acceptance_source_node",
+        json_opt_string_alias [ ":acceptance-source-node"; ":acceptance_source_node" ] props );
+      ( "workstation_dispatch",
+        json_opt_string_alias [ ":workstation-dispatch"; ":workstation_dispatch" ] props );
+      ("review_gate", json_opt_string_alias [ ":review-gate"; ":review_gate" ] props);
+      ("review_action", json_opt_string_alias [ ":review-action"; ":review_action" ] props);
+      ("review_text", json_opt_string_alias [ ":review-text"; ":review_text" ] props);
+      ("retry_count", retry_count_json);
+      ( "retry_delay_ms",
+        json_nullable_int (prop_text_alias [ ":retry-delay-ms"; ":retry_delay_ms" ] props) );
+      ("rollback_policy", json_opt_string_alias [ ":rollback-policy"; ":rollback_policy" ] props);
+      ( "rollback_objective",
+        json_opt_string_alias [ ":rollback-objective"; ":rollback_objective" ] props );
+      ( "rollback_owned_files",
+        json_string_list_value [ ":rollback-owned-files"; ":rollback_owned_files" ] props );
+      ( "rollback_acceptance_commands",
+        json_string_list_value
+          [ ":rollback-acceptance-commands"; ":rollback_acceptance_commands" ]
+          props );
+      ("compensates", json_opt_string_alias [ ":compensates" ] props);
+      ( "compensate_node",
+        json_opt_string_alias
+          [ ":compensate-node"; ":compensate_node"; ":compensate-ref"; ":compensate_ref" ]
+          props );
+      ( "rollback_cascade",
+        json_opt_string_alias [ ":rollback-cascade"; ":rollback_cascade" ] props );
+      ("rollback_after", json_string_list_value [ ":rollback-after"; ":rollback_after" ] props);
+      ( "unsupported_fields",
+        json_array (unsupported |> List.rev |> List.map unsupported_field_json) );
+      ("source", source_map_json source_hash file node);
     ]
 
-let plan_contract_payload_json file forms =
+let plan_contract_schema_version = "missiond.plan-contract.v2"
+
+let plan_contract_payload_json file source_hash forms =
   let root =
     forms
     |> List.find_opt (fun form ->
@@ -1479,6 +1804,7 @@ let plan_contract_payload_json file forms =
       json_assoc
         [
           ("file", json_string file);
+          ("source_hash", json_string source_hash);
           ("head", "null");
           ("hints", "{}");
           ("nodes", "[]");
@@ -1486,15 +1812,62 @@ let plan_contract_payload_json file forms =
         ]
   | Some root ->
       let props = keyword_props ~start:1 root in
-      let nodes = collect_forms "node" root |> List.map plan_node_contract_json in
+      let nodes =
+        collect_forms "node" root
+        |> List.map (plan_node_contract_json source_hash file)
+      in
       json_assoc
         [
           ("file", json_string file);
+          ("source_hash", json_string source_hash);
           ("head", json_opt_string (head root));
           ("hints", props_to_object_json ~keys:plan_hint_keys props);
           ("top_level", props_to_object_json props);
           ("nodes", json_array nodes);
         ]
+
+let prop_entry_any keys props =
+  List.find_opt (fun (key, _) -> List.mem key keys) props
+
+let prop_entry_loc node = function
+  | Some (_, Some value) -> loc_of value
+  | _ -> loc_of node
+
+let is_scalar_contract_value = function
+  | Atom _ | String _ -> true
+  | List _ -> false
+
+let is_list_contract_value = function
+  | List _ -> true
+  | Atom _ | String _ -> false
+
+let add_shape_diagnostic diagnostics file _node keys field expected predicate props =
+  match prop_entry_any keys props with
+  | Some (_, Some value) when not (predicate value) ->
+      diagnostics :=
+        diag file (loc_of value) "plan_contract.field_shape_invalid"
+          (Printf.sprintf "plan node field %s must be %s" field expected)
+        :: !diagnostics
+  | _ -> ()
+
+let add_integer_diagnostic diagnostics file _node keys field props =
+  match prop_entry_any keys props with
+  | Some (_, Some value) -> (
+      match atom_text value with
+      | Some raw -> (
+          match int_of_string_opt (String.trim raw) with
+          | Some _ -> ()
+          | None ->
+              diagnostics :=
+                diag file (loc_of value) "plan_contract.integer_invalid"
+                  (Printf.sprintf "plan node field %s must be an integer" field)
+                :: !diagnostics)
+      | None ->
+          diagnostics :=
+            diag file (loc_of value) "plan_contract.field_shape_invalid"
+              (Printf.sprintf "plan node field %s must be a scalar integer" field)
+            :: !diagnostics)
+  | _ -> ()
 
 let plan_contract_diagnostics file forms =
   let diagnostics = ref [] in
@@ -1520,10 +1893,125 @@ let plan_contract_diagnostics file forms =
       let seen = Hashtbl.create 16 in
       collect_forms "node" root
       |> List.iter (fun node ->
-             match prop_text ":id" (keyword_props ~start:1 node) with
+             let props = keyword_props ~start:1 node in
+             add_shape_diagnostic diagnostics file node [ ":id" ] ":id"
+               "a scalar string" is_scalar_contract_value props;
+             add_shape_diagnostic diagnostics file node
+               [ ":target"; ":target-tool"; ":tool" ]
+               ":target" "a scalar string" is_scalar_contract_value props;
+             add_shape_diagnostic diagnostics file node [ ":objective" ]
+               ":objective" "a scalar string" is_scalar_contract_value props;
+             add_shape_diagnostic diagnostics file node [ ":condition" ]
+               ":condition" "a scalar string" is_scalar_contract_value props;
+             add_shape_diagnostic diagnostics file node
+               [ ":failure-policy"; ":failure_policy" ]
+               ":failure-policy" "a scalar string" is_scalar_contract_value props;
+             add_shape_diagnostic diagnostics file node
+               [ ":dispatch-strategy"; ":dispatch_strategy" ]
+               ":dispatch-strategy" "a scalar string" is_scalar_contract_value
+               props;
+             add_shape_diagnostic diagnostics file node
+               [ ":target-project"; ":target_project"; ":project" ]
+               ":target-project" "a scalar string" is_scalar_contract_value
+               props;
+             add_shape_diagnostic diagnostics file node
+               [ ":requested-cwd"; ":requested_cwd"; ":cwd" ]
+               ":requested-cwd" "a scalar string" is_scalar_contract_value
+               props;
+             add_shape_diagnostic diagnostics file node [ ":flow-id"; ":flow_id" ]
+               ":flow-id" "a scalar string" is_scalar_contract_value props;
+             add_shape_diagnostic diagnostics file node [ ":scope" ] ":scope"
+               "a scalar string" is_scalar_contract_value props;
+             add_shape_diagnostic diagnostics file node
+               [ ":commit-policy"; ":commit_policy" ]
+               ":commit-policy" "a scalar string" is_scalar_contract_value props;
+             add_shape_diagnostic diagnostics file node
+               [ ":acceptance-mode"; ":acceptance_mode" ]
+               ":acceptance-mode" "a scalar string" is_scalar_contract_value
+               props;
+             add_shape_diagnostic diagnostics file node
+               [ ":acceptance-requires"; ":acceptance_requires" ]
+               ":acceptance-requires" "a scalar string" is_scalar_contract_value
+               props;
+             add_shape_diagnostic diagnostics file node
+               [ ":acceptance-source-node"; ":acceptance_source_node" ]
+               ":acceptance-source-node" "a scalar string"
+               is_scalar_contract_value props;
+             add_shape_diagnostic diagnostics file node
+               [ ":workstation-dispatch"; ":workstation_dispatch" ]
+               ":workstation-dispatch" "a scalar string" is_scalar_contract_value
+               props;
+             add_shape_diagnostic diagnostics file node
+               [ ":review-gate"; ":review_gate" ]
+               ":review-gate" "a scalar string" is_scalar_contract_value props;
+             add_shape_diagnostic diagnostics file node
+               [ ":review-action"; ":review_action" ]
+               ":review-action" "a scalar string" is_scalar_contract_value props;
+             add_shape_diagnostic diagnostics file node
+               [ ":review-text"; ":review_text" ]
+               ":review-text" "a scalar string" is_scalar_contract_value props;
+             add_shape_diagnostic diagnostics file node
+               [ ":rollback-policy"; ":rollback_policy" ]
+               ":rollback-policy" "a scalar string" is_scalar_contract_value
+               props;
+             add_shape_diagnostic diagnostics file node
+               [ ":rollback-objective"; ":rollback_objective" ]
+               ":rollback-objective" "a scalar string" is_scalar_contract_value
+               props;
+             add_shape_diagnostic diagnostics file node [ ":compensates" ]
+               ":compensates" "a scalar string" is_scalar_contract_value props;
+             add_shape_diagnostic diagnostics file node
+               [ ":compensate-node"; ":compensate_node"; ":compensate-ref"; ":compensate_ref" ]
+               ":compensate-node" "a scalar string" is_scalar_contract_value
+               props;
+             add_shape_diagnostic diagnostics file node
+               [ ":rollback-cascade"; ":rollback_cascade" ]
+               ":rollback-cascade" "a scalar string" is_scalar_contract_value
+               props;
+             add_shape_diagnostic diagnostics file node
+               [ ":depends-on"; ":depends_on"; ":deps" ]
+               ":depends-on" "a list" is_list_contract_value props;
+             add_shape_diagnostic diagnostics file node
+               [ ":owned-files"; ":owned_files" ]
+               ":owned-files" "a list" is_list_contract_value props;
+             add_shape_diagnostic diagnostics file node
+               [ ":forbidden-files"; ":forbidden_files" ]
+               ":forbidden-files" "a list" is_list_contract_value props;
+             add_shape_diagnostic diagnostics file node
+               [ ":acceptance-commands"; ":acceptance_commands" ]
+               ":acceptance-commands" "a list" is_list_contract_value props;
+             add_shape_diagnostic diagnostics file node
+               [ ":acceptance-evidence-keys"; ":acceptance_evidence_keys" ]
+               ":acceptance-evidence-keys" "a list" is_list_contract_value
+               props;
+             add_shape_diagnostic diagnostics file node
+               [ ":acceptance-depends-on"; ":acceptance_depends_on" ]
+               ":acceptance-depends-on" "a list" is_list_contract_value props;
+             add_shape_diagnostic diagnostics file node
+               [ ":rollback-owned-files"; ":rollback_owned_files" ]
+               ":rollback-owned-files" "a list" is_list_contract_value props;
+             add_shape_diagnostic diagnostics file node
+               [ ":rollback-acceptance-commands"; ":rollback_acceptance_commands" ]
+               ":rollback-acceptance-commands" "a list" is_list_contract_value
+               props;
+             add_shape_diagnostic diagnostics file node
+               [ ":rollback-after"; ":rollback_after" ]
+               ":rollback-after" "a list" is_list_contract_value props;
+             add_integer_diagnostic diagnostics file node
+               [ ":timeout-ms"; ":timeout_ms" ]
+               ":timeout-ms" props;
+             add_integer_diagnostic diagnostics file node
+               [ ":retry-count"; ":retry_count"; ":max-attempts"; ":max_attempts" ]
+               ":retry-count/:max-attempts" props;
+             add_integer_diagnostic diagnostics file node
+               [ ":retry-delay-ms"; ":retry_delay_ms" ]
+               ":retry-delay-ms" props;
+             (match prop_text_alias [ ":id" ] props with
              | None ->
                  diagnostics :=
-                   diag file (loc_of node) "plan_contract.node_id_missing"
+                   diag file
+                     (prop_entry_loc node (prop_entry_any [ ":id" ] props))
+                     "plan_contract.node_id_missing"
                      "plan node is missing :id"
                    :: !diagnostics
              | Some id ->
@@ -1532,17 +2020,30 @@ let plan_contract_diagnostics file forms =
                      diag file (loc_of node) "plan_contract.node_id_duplicate"
                        ("duplicate plan node :id " ^ id)
                      :: !diagnostics
-                 else Hashtbl.add seen id ()));
+                 else Hashtbl.add seen id ());
+             (match prop_text_alias [ ":target"; ":target-tool"; ":tool" ] props with
+             | None ->
+                 diagnostics :=
+                   diag file
+                     (prop_entry_loc node
+                        (prop_entry_any [ ":target"; ":target-tool"; ":tool" ] props))
+                     "plan_contract.node_target_missing"
+                     "plan node is missing :target"
+                   :: !diagnostics
+             | Some _ -> ())));
   List.rev !diagnostics
 
 let compiled_contract_abi_for_resolved blueprint resolved =
   let diagnostics = Schema_v3.validate blueprint [] in
+  let source_hash = resolved.Source_resolver.source_hash in
+  let source_units = resolved.Source_resolver.source_units in
+  let source_domains = resolved.Source_resolver.source_domains in
+  let root = resolved.Source_resolver.root in
   let payload =
-    contract_abi_payload_json blueprint resolved.Source_resolver.source_hash
-      resolved.Source_resolver.source_units resolved.Source_resolver.root
+    contract_abi_payload_json blueprint source_hash source_units source_domains
+      root
   in
-  ( compiled_envelope "missiond.contract-abi.v1" resolved.source_hash
-      diagnostics payload,
+  ( compiled_envelope "missiond.contract-abi.v1" source_hash diagnostics payload,
     diagnostics )
 
 let compiled_v3_for_resolved blueprint resolved =
@@ -1557,9 +2058,11 @@ let compiled_v3_for_resolved blueprint resolved =
   in
   let payload =
     Printf.sprintf
-      {|{"blueprint":%s,"source_units":%s,"surfaces":[%s],"functions":[%s],"forms":[%s]}|}
+      {|{"blueprint":%s,"source_units":%s,"source_domains":%s,"surfaces":[%s],"functions":[%s],"forms":[%s]}|}
       (json_string blueprint)
       (Source_resolver.source_units_to_json resolved.source_units)
+      (Source_resolver.source_domains_to_json_for_ids resolved.source_domains
+         all_v3_source_domain_ids)
       (String.concat "," surfaces)
       (String.concat "," functions)
       (forms |> List.map sexp_to_json |> String.concat ",")
@@ -1584,7 +2087,7 @@ let compiled_runtime_config_for_resolved blueprint resolved =
   in
   let payload =
     runtime_config_payload_json blueprint resolved.source_hash
-      resolved.source_units root
+      resolved.source_units resolved.source_domains root
   in
   ( compiled_envelope "missiond.compiled-runtime-config.v1"
       resolved.source_hash diagnostics payload,
@@ -1600,9 +2103,11 @@ let compiled_semantic_ir_for_resolved blueprint resolved =
   in
   let payload =
     Printf.sprintf
-      {|{"blueprint":%s,"source_units":%s,"facts":[%s],"fact_count":%d}|}
+      {|{"blueprint":%s,"source_units":%s,"source_domains":%s,"facts":[%s],"fact_count":%d}|}
       (json_string blueprint)
       (Source_resolver.source_units_to_json resolved.source_units)
+      (Source_resolver.source_domains_to_json_for_ids resolved.source_domains
+         all_v3_source_domain_ids)
       (String.concat "," facts)
       (List.length facts)
   in
@@ -1636,8 +2141,11 @@ let compiled_universe_for_resolved blueprint resolved =
   in
   let payload =
     Printf.sprintf
-      {|{"blueprint":%s,"project_registry_present":%s,"maturity_registry_present":%s,"projects":[%s],"maturity":[%s]}|}
+      {|{"blueprint":%s,"source_units":%s,"source_domains":%s,"project_registry_present":%s,"maturity_registry_present":%s,"projects":[%s],"maturity":[%s]}|}
       (json_string blueprint)
+      (Source_resolver.source_units_to_json resolved.source_units)
+      (Source_resolver.source_domains_to_json_for_ids resolved.source_domains
+         project_universe_source_domain_ids)
       (if project_registry <> None then "true" else "false")
       (if maturity_registry <> None then "true" else "false")
       (String.concat "," projects)
@@ -1722,7 +2230,7 @@ let emit_contract_abi blueprint =
     let diagnostics = Schema_v3.validate blueprint [] in
     let payload =
       contract_abi_payload_json blueprint resolved.source_hash resolved.source_units
-        resolved.root
+        resolved.source_domains resolved.root
     in
     print_endline
       (result_json
@@ -1748,13 +2256,14 @@ let emit_plan_contract file =
     let source = read_file file in
     let forms = Parser.parse_source file source in
     let diagnostics = plan_contract_diagnostics file forms in
-    let payload = plan_contract_payload_json file forms in
+    let hash = source_hash source in
+    let payload = plan_contract_payload_json file hash forms in
     print_endline
       (result_json
          ~extra:[
            Printf.sprintf {|"compiled":%s|}
-             (compiled_envelope "missiond.plan-contract.v1" (source_hash source)
-                diagnostics payload);
+             (compiled_envelope plan_contract_schema_version hash diagnostics
+                payload);
          ]
          (diagnostics = []) diagnostics);
     if diagnostics = [] then 0 else 1
@@ -1804,9 +2313,11 @@ let emit_resolved_v3 blueprint =
     in
     let payload =
       Printf.sprintf
-        {|{"blueprint":%s,"source_units":%s,"resolved_source":%s,"forms":[%s]}|}
+        {|{"blueprint":%s,"source_units":%s,"source_domains":%s,"resolved_source":%s,"forms":[%s]}|}
         (json_string blueprint)
         (Source_resolver.source_units_to_json resolved.source_units)
+        (Source_resolver.source_domains_to_json_for_ids resolved.source_domains
+           all_v3_source_domain_ids)
         (json_string resolved_source)
         (resolved.forms |> List.map sexp_to_json |> String.concat ",")
     in
@@ -1843,9 +2354,11 @@ let emit_v3 blueprint =
     in
     let payload =
       Printf.sprintf
-        {|{"blueprint":%s,"source_units":%s,"surfaces":[%s],"functions":[%s],"forms":[%s]}|}
+        {|{"blueprint":%s,"source_units":%s,"source_domains":%s,"surfaces":[%s],"functions":[%s],"forms":[%s]}|}
         (json_string blueprint)
         (Source_resolver.source_units_to_json resolved.source_units)
+        (Source_resolver.source_domains_to_json_for_ids resolved.source_domains
+           all_v3_source_domain_ids)
         (String.concat "," surfaces)
         (String.concat "," functions)
         (forms |> List.map sexp_to_json |> String.concat ",")
@@ -1885,7 +2398,7 @@ let emit_runtime_config blueprint =
     in
     let payload =
       runtime_config_payload_json blueprint resolved.source_hash resolved.source_units
-        root
+        resolved.source_domains root
     in
     print_endline
       (result_json
@@ -1919,9 +2432,11 @@ let emit_semantic_ir blueprint =
     in
     let payload =
       Printf.sprintf
-        {|{"blueprint":%s,"source_units":%s,"facts":[%s],"fact_count":%d}|}
+        {|{"blueprint":%s,"source_units":%s,"source_domains":%s,"facts":[%s],"fact_count":%d}|}
         (json_string blueprint)
         (Source_resolver.source_units_to_json resolved.source_units)
+        (Source_resolver.source_domains_to_json_for_ids resolved.source_domains
+           all_v3_source_domain_ids)
         (String.concat "," facts)
         (List.length facts)
     in
@@ -1964,8 +2479,11 @@ let emit_universe blueprint =
       |> Option.value ~default:[]
     in
     let payload =
-      Printf.sprintf {|{"blueprint":%s,"project_registry_present":%s,"maturity_registry_present":%s,"projects":[%s],"maturity":[%s]}|}
+      Printf.sprintf {|{"blueprint":%s,"source_units":%s,"source_domains":%s,"project_registry_present":%s,"maturity_registry_present":%s,"projects":[%s],"maturity":[%s]}|}
         (json_string blueprint)
+        (Source_resolver.source_units_to_json resolved.source_units)
+        (Source_resolver.source_domains_to_json_for_ids resolved.source_domains
+           project_universe_source_domain_ids)
         (if project_registry <> None then "true" else "false")
         (if maturity_registry <> None then "true" else "false")
         (String.concat "," projects)

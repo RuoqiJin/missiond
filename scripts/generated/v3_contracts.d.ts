@@ -11,6 +11,12 @@ export interface SourceUnit {
   source_hash: string;
 }
 
+export interface SourceDomain {
+  id: string;
+  source_hash: string;
+  source_units: readonly SourceUnit[];
+}
+
 export interface RuntimePolicyDescriptor {
   id: string;
   schema_version: string;
@@ -54,8 +60,11 @@ export type V3ArtifactContractId = "compiled-genomes" | "context-pack" | "final-
 export type V3RuntimePolicyId = "autopilot-policy" | "capability-governance-policy" | "cascade-policy" | "compute-runtime-policy" | "conversation-ingestion-policy" | "flow-runtime-policy" | "learning-engine-policy" | "memory-kb-policy" | "minimax-runtime-policy" | "project-registry-policy" | "router-runtime-policy";
 
 export const SCHEMA_VERSION: "missiond.contract-abi.v1";
-export const SOURCE_HASH: "1631c8dbe16363f0016a37e6f426e384";
+export const SOURCE_HASH: "208408c92a68b29ade49f1c125b69133";
+export const RUNTIME_CONFIG_SOURCE_HASH: "496e5b7c932e3bc95d96025df1027d73";
+export const PROJECT_UNIVERSE_SOURCE_HASH: "b5f8fe051fd445b334ec3c0e650e7c52";
 export const SOURCE_UNITS: readonly SourceUnit[];
+export const SOURCE_DOMAINS: readonly SourceDomain[];
 export const SURFACE_IDS: readonly V3SurfaceId[];
 export const FUNCTION_IDS: readonly V3FunctionId[];
 export const ARTIFACT_CONTRACT_IDS: readonly V3ArtifactContractId[];

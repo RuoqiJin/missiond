@@ -1,8 +1,14 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use super::super::acceptance::AcceptanceRequires;
+use serde_json::Value;
+
+use super::super::acceptance::{AcceptanceMode, AcceptanceRequires};
+use super::super::rollback::{RollbackCascadeMode, RollbackPolicy};
 use super::scanner::parse_plan_dag;
-use super::types::{DagBuildError, DagNode, ParsedDag, VALID_TARGETS};
+use super::types::{
+    DagBuildError, DagNode, ParsedDag, FAILURE_POLICY_CONTINUE, FAILURE_POLICY_FAIL_FAST,
+    VALID_TARGETS,
+};
 
 /// Parse and validate a PLAN.lisp body, returning a topologically-sorted node
 /// list ready for sequential dispatch.
@@ -10,6 +16,19 @@ pub(in crate::handlers::knowledge::plan_dag) fn build_validated_dag(
     sexp: &str,
 ) -> std::result::Result<(ParsedDag, Vec<String>), DagBuildError> {
     let parsed = parse_plan_dag(sexp);
+    validate_parsed_dag(parsed)
+}
+
+pub(in crate::handlers::knowledge::plan_dag) fn build_validated_dag_from_contract_json(
+    contract: &Value,
+) -> std::result::Result<(ParsedDag, Vec<String>), DagBuildError> {
+    let parsed = parsed_dag_from_contract_json(contract)?;
+    validate_parsed_dag(parsed)
+}
+
+fn validate_parsed_dag(
+    parsed: ParsedDag,
+) -> std::result::Result<(ParsedDag, Vec<String>), DagBuildError> {
     if parsed.nodes.is_empty() {
         return Err(DagBuildError::NoNodes);
     }
@@ -253,6 +272,380 @@ pub(in crate::handlers::knowledge::plan_dag) fn build_validated_dag(
     }
 
     Ok((parsed, order))
+}
+
+fn parsed_dag_from_contract_json(contract: &Value) -> Result<ParsedDag, DagBuildError> {
+    let schema_version = contract
+        .get("schema_version")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if schema_version != "missiond.plan-contract.v2" {
+        return Err(DagBuildError::InvalidContract(format!(
+            "expected schema_version=missiond.plan-contract.v2, got `{}`",
+            if schema_version.is_empty() {
+                "<missing>"
+            } else {
+                schema_version
+            }
+        )));
+    }
+
+    let payload = contract
+        .get("payload")
+        .ok_or_else(|| DagBuildError::InvalidContract("missing payload object".to_string()))?;
+    let nodes = payload
+        .get("nodes")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            DagBuildError::InvalidContract("payload.nodes must be an array".to_string())
+        })?;
+
+    let mut out = Vec::with_capacity(nodes.len());
+    for (idx, node) in nodes.iter().enumerate() {
+        let object = node.as_object().ok_or_else(|| {
+            DagBuildError::InvalidContract(format!("payload.nodes[{}] must be an object", idx))
+        })?;
+        let id = required_string(node, "id", idx)?;
+        let target = required_string(node, "target", idx)?;
+        let mut unsupported_fields = unsupported_fields_from_contract(node, idx)?;
+        add_unknown_enum_unsupported(node, "acceptance_mode", &mut unsupported_fields, |raw| {
+            AcceptanceMode::parse(raw).is_some()
+        });
+        add_unknown_enum_unsupported(
+            node,
+            "acceptance_requires",
+            &mut unsupported_fields,
+            |raw| AcceptanceRequires::parse(raw).is_some(),
+        );
+        add_unknown_enum_unsupported(node, "review_gate", &mut unsupported_fields, |raw| {
+            let lc = raw.trim().to_ascii_lowercase();
+            matches!(
+                lc.as_str(),
+                "" | "none" | "question-event" | "question_event"
+            )
+        });
+        add_unknown_enum_unsupported(node, "rollback_policy", &mut unsupported_fields, |raw| {
+            RollbackPolicy::parse(raw).is_some()
+        });
+        add_unknown_enum_unsupported(node, "rollback_cascade", &mut unsupported_fields, |raw| {
+            RollbackCascadeMode::parse(raw).is_some()
+        });
+
+        let failure_policy = optional_string(node, "failure_policy", idx)?
+            .unwrap_or_else(|| FAILURE_POLICY_FAIL_FAST.to_string());
+        let failure_policy = match failure_policy.as_str() {
+            FAILURE_POLICY_FAIL_FAST | FAILURE_POLICY_CONTINUE => failure_policy,
+            other => {
+                unsupported_fields.push(("failure_policy".to_string(), other.to_string()));
+                FAILURE_POLICY_FAIL_FAST.to_string()
+            }
+        };
+
+        let retry_count = optional_u32(node, "retry_count", idx)?;
+        let retry_delay_ms = optional_u64(node, "retry_delay_ms", idx)?;
+        let retry_parse_error = retry_parse_error_from_contract(node, idx)?;
+
+        let node = DagNode {
+            id,
+            target,
+            objective: optional_string(node, "objective", idx)?,
+            depends_on: string_vec(node, "depends_on", idx)?,
+            condition: optional_string(node, "condition", idx)?,
+            failure_policy,
+            timeout_ms: optional_i64(node, "timeout_ms", idx)?,
+            dispatch_strategy: optional_string(node, "dispatch_strategy", idx)?,
+            target_project: optional_string(node, "target_project", idx)?,
+            requested_cwd: optional_string(node, "requested_cwd", idx)?,
+            flow_id: optional_string(node, "flow_id", idx)?,
+            scope: optional_string(node, "scope", idx)?,
+            commit_policy: optional_string(node, "commit_policy", idx)?,
+            owned_files_raw: raw_string_list(node, "owned_files", idx)?,
+            forbidden_files_raw: raw_string_list(node, "forbidden_files", idx)?,
+            acceptance_commands_raw: raw_string_list(node, "acceptance_commands", idx)?,
+            acceptance_mode_raw: optional_string(node, "acceptance_mode", idx)?,
+            acceptance_evidence_keys_raw: raw_string_list(node, "acceptance_evidence_keys", idx)?,
+            acceptance_depends_on: string_vec(node, "acceptance_depends_on", idx)?,
+            acceptance_requires_raw: optional_string(node, "acceptance_requires", idx)?,
+            acceptance_source_node: optional_string(node, "acceptance_source_node", idx)?,
+            workstation_dispatch_flag: optional_string(node, "workstation_dispatch", idx)?,
+            review_gate: optional_string(node, "review_gate", idx)?,
+            review_action: optional_string(node, "review_action", idx)?,
+            review_text: optional_string(node, "review_text", idx)?,
+            retry_count,
+            retry_delay_ms,
+            retry_parse_error,
+            rollback_policy: optional_string(node, "rollback_policy", idx)?,
+            rollback_objective: optional_string(node, "rollback_objective", idx)?,
+            rollback_owned_files_raw: raw_string_list(node, "rollback_owned_files", idx)?,
+            rollback_acceptance_commands_raw: raw_string_list(
+                node,
+                "rollback_acceptance_commands",
+                idx,
+            )?,
+            compensates: optional_string(node, "compensates", idx)?,
+            compensate_node: optional_string(node, "compensate_node", idx)?,
+            rollback_cascade: optional_string(node, "rollback_cascade", idx)?,
+            rollback_after: string_vec(node, "rollback_after", idx)?,
+            unsupported_fields,
+        };
+        if object.is_empty() {
+            return Err(DagBuildError::InvalidContract(format!(
+                "payload.nodes[{}] must not be empty",
+                idx
+            )));
+        }
+        out.push(node);
+    }
+
+    Ok(ParsedDag {
+        nodes: out,
+        unsupported_top_forms: Vec::new(),
+    })
+}
+
+fn required_string(node: &Value, key: &str, idx: usize) -> Result<String, DagBuildError> {
+    optional_string(node, key, idx)?
+        .and_then(non_empty)
+        .ok_or_else(|| {
+            DagBuildError::InvalidContract(format!(
+                "payload.nodes[{}].{} must be a non-empty string",
+                idx, key
+            ))
+        })
+}
+
+fn optional_string(node: &Value, key: &str, idx: usize) -> Result<Option<String>, DagBuildError> {
+    match node.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(raw)) => Ok(non_empty(raw.clone())),
+        Some(Value::Bool(value)) => Ok(Some(value.to_string())),
+        Some(Value::Number(value)) => Ok(Some(value.to_string())),
+        Some(_) => Err(DagBuildError::InvalidContract(format!(
+            "payload.nodes[{}].{} must be a scalar or null",
+            idx, key
+        ))),
+    }
+}
+
+fn non_empty(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn string_vec(node: &Value, key: &str, idx: usize) -> Result<Vec<String>, DagBuildError> {
+    match node.get(key) {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(values)) => values
+            .iter()
+            .map(|value| match value {
+                Value::String(raw) => Ok(raw.trim().to_string()),
+                Value::Bool(value) => Ok(value.to_string()),
+                Value::Number(value) => Ok(value.to_string()),
+                _ => Err(DagBuildError::InvalidContract(format!(
+                    "payload.nodes[{}].{} must be an array of scalars",
+                    idx, key
+                ))),
+            })
+            .filter_map(|result| match result {
+                Ok(value) if value.is_empty() => None,
+                other => Some(other),
+            })
+            .collect(),
+        Some(_) => Err(DagBuildError::InvalidContract(format!(
+            "payload.nodes[{}].{} must be an array",
+            idx, key
+        ))),
+    }
+}
+
+fn raw_string_list(node: &Value, key: &str, idx: usize) -> Result<Option<String>, DagBuildError> {
+    let values = string_vec(node, key, idx)?;
+    if values.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(lisp_string_list(&values)))
+    }
+}
+
+fn lisp_string_list(values: &[String]) -> String {
+    let escaped: Vec<String> = values
+        .iter()
+        .map(|value| format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\"")))
+        .collect();
+    format!("[{}]", escaped.join(" "))
+}
+
+fn optional_i64(node: &Value, key: &str, idx: usize) -> Result<Option<i64>, DagBuildError> {
+    match node.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(n)) => n.as_i64().map(Some).ok_or_else(|| {
+            DagBuildError::InvalidContract(format!(
+                "payload.nodes[{}].{} must be an integer",
+                idx, key
+            ))
+        }),
+        Some(Value::String(raw)) if raw.trim().is_empty() => Ok(None),
+        Some(Value::String(raw)) => raw.trim().parse::<i64>().map(Some).map_err(|err| {
+            DagBuildError::InvalidContract(format!(
+                "payload.nodes[{}].{} must be an integer: {}",
+                idx, key, err
+            ))
+        }),
+        Some(_) => Err(DagBuildError::InvalidContract(format!(
+            "payload.nodes[{}].{} must be an integer or null",
+            idx, key
+        ))),
+    }
+}
+
+fn optional_u32(node: &Value, key: &str, idx: usize) -> Result<Option<u32>, DagBuildError> {
+    match optional_i64(node, key, idx)? {
+        None => Ok(None),
+        Some(n) if n >= 0 => Ok(Some(n.min(u32::MAX as i64) as u32)),
+        Some(_) => Err(DagBuildError::InvalidContract(format!(
+            "payload.nodes[{}].{} must be non-negative",
+            idx, key
+        ))),
+    }
+}
+
+fn optional_u64(node: &Value, key: &str, idx: usize) -> Result<Option<u64>, DagBuildError> {
+    match optional_i64(node, key, idx)? {
+        None => Ok(None),
+        Some(n) if n >= 0 => Ok(Some(n as u64)),
+        Some(_) => Err(DagBuildError::InvalidContract(format!(
+            "payload.nodes[{}].{} must be non-negative",
+            idx, key
+        ))),
+    }
+}
+
+fn retry_parse_error_from_contract(
+    node: &Value,
+    idx: usize,
+) -> Result<Option<(String, String, String)>, DagBuildError> {
+    let Some(value) = node.get("retry_parse_error") else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let object = value.as_object().ok_or_else(|| {
+        DagBuildError::InvalidContract(format!(
+            "payload.nodes[{}].retry_parse_error must be an object or null",
+            idx
+        ))
+    })?;
+    let key = object
+        .get("key")
+        .and_then(Value::as_str)
+        .unwrap_or("retry-count")
+        .to_string();
+    let raw = object
+        .get("raw")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let detail = object
+        .get("detail")
+        .and_then(Value::as_str)
+        .unwrap_or("invalid retry hint")
+        .to_string();
+    Ok(Some((key, raw, detail)))
+}
+
+fn unsupported_fields_from_contract(
+    node: &Value,
+    idx: usize,
+) -> Result<Vec<(String, String)>, DagBuildError> {
+    let Some(value) = node.get("unsupported_fields") else {
+        return Ok(Vec::new());
+    };
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    let values = value.as_array().ok_or_else(|| {
+        DagBuildError::InvalidContract(format!(
+            "payload.nodes[{}].unsupported_fields must be an array",
+            idx
+        ))
+    })?;
+    values
+        .iter()
+        .enumerate()
+        .map(|(field_idx, value)| {
+            let object = value.as_object().ok_or_else(|| {
+                DagBuildError::InvalidContract(format!(
+                    "payload.nodes[{}].unsupported_fields[{}] must be an object",
+                    idx, field_idx
+                ))
+            })?;
+            let key = object
+                .get("key")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    DagBuildError::InvalidContract(format!(
+                        "payload.nodes[{}].unsupported_fields[{}].key must be a string",
+                        idx, field_idx
+                    ))
+                })?
+                .trim()
+                .trim_start_matches(':')
+                .to_string();
+            let value = object
+                .get("value")
+                .map(contract_value_to_string)
+                .unwrap_or_default();
+            Ok((key, value))
+        })
+        .collect()
+}
+
+fn contract_value_to_string(value: &Value) -> String {
+    match value {
+        Value::Null => String::new(),
+        Value::String(raw) => raw.clone(),
+        Value::Bool(raw) => raw.to_string(),
+        Value::Number(raw) => raw.to_string(),
+        Value::Array(values) => {
+            let parts: Vec<String> = values.iter().map(contract_value_to_string).collect();
+            lisp_string_list(&parts)
+        }
+        Value::Object(_) => value.to_string(),
+    }
+}
+
+fn add_unknown_enum_unsupported(
+    node: &Value,
+    key: &str,
+    unsupported_fields: &mut Vec<(String, String)>,
+    valid: impl Fn(&str) -> bool,
+) {
+    let Some(raw) = node.get(key).and_then(plan_contract_scalar_to_string) else {
+        return;
+    };
+    if raw.trim().is_empty() || valid(raw.trim()) {
+        return;
+    }
+    if !unsupported_fields
+        .iter()
+        .any(|(existing_key, existing_value)| existing_key == key && existing_value == raw.trim())
+    {
+        unsupported_fields.push((key.to_string(), raw.trim().to_string()));
+    }
+}
+
+fn plan_contract_scalar_to_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(raw) => Some(raw.clone()),
+        Value::Bool(raw) => Some(raw.to_string()),
+        Value::Number(raw) => Some(raw.to_string()),
+        _ => None,
+    }
 }
 
 /// wave-18 / task 03 — compute the set of transitive `:depends-on`

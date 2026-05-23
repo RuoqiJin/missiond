@@ -19,4 +19,6 @@ pub(super) use types::{
     MAX_RETRY_DELAY_MS,
 };
 pub(in crate::handlers::knowledge) use types::{DagNode, ParsedDag};
+#[allow(unused_imports)]
 pub(super) use validation::build_validated_dag;
+pub(super) use validation::build_validated_dag_from_contract_json;

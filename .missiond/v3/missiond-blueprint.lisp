@@ -182,17 +182,20 @@
                     "scripts/generated/v3_runtime_defaults.mjs"]
     :contract-commands [emit-contract-abi emit-plan-contract check-plan-contract]
     :envelope-fields [:schema_version :source_hash :generated_at :diagnostics :payload]
-    :payload-fields [:source_units :surfaces :functions :artifact_contracts :runtime_policies :checker_registry :plan_contract]
+    :payload-fields [:source_units :source_domains :surfaces :functions :artifact_contracts :runtime_policies :checker_registry :plan_contract]
 
     :authority-boundary
       ["missiond-lispc is the only production component allowed to assign Lisp semantics."
        "Generated V3 contract ABI source is tracked in Rust and JS/TS; ignored compiled JSON remains a runtime projection."
-       "Rust runtime hot paths consume compiled JSON/runtime config; raw Lisp fallback requires MISSIOND_V3_ALLOW_SOURCE_FALLBACK and emits blocking diagnostics otherwise."
-       "Plan execution hints are read from missiond-lispc emit-plan-contract projection, not ad-hoc Rust keyword scanners."
+       "Rust runtime hot paths consume compiled JSON/runtime config; raw Lisp source fallback is forbidden for production consumers."
+       "Plan execution hints and DAG nodes are read from missiond-lispc emit-plan-contract missiond.plan-contract.v2 projection, not ad-hoc Rust keyword scanners."
+       "compile/materialization persist plan.contract_json using missiond.plan-contract.v2 shape"
+       "plan_dag/parser/validation.rs owns typed plan-contract validation/topological ordering"
        "JS checkers consume semantic-ir/resolved compiler output for active surfaces; JS Lisp parsing is compatibility scaffolding for legacy fixtures and checker migration only."
-       "Freshness is source_hash plus source_units; mtime is not semantic authority."]
+       "Freshness is source_hash plus source_units plus source_domains; mtime is not semantic authority."]
     :forbidden-production-consumers
-      [rust-scan_keyword_pairs
+      [production-consumer-raw-parser-forbidden
+       rust-scan_keyword_pairs
        rust-ad-hoc-colon-keyword-scanner
        js-new-raw-blueprint-parser
        worker-direct-lisp-reader]
@@ -207,7 +210,7 @@
 
   (typed-subplane-contracts
     :schema "missiond.typed-subplane-contracts.v1"
-    :forms [surface contract-split domain runtime-projection policy-clause acceptance owner source]
+    :forms [surface contract-split domain runtime-projection policy-clause acceptance owner source behavior-universe behavior effect tombstone]
     :semantic-ir-facts [contract_split control_plane_domain runtime_policy checker_registry]
     :sidecar-policy "Long prose and historical notes move to .missiond/v3/evidence/blueprint-notes.lisp; active shards keep compiler-readable ids, ownership, runtime projection, checker, and source/evidence anchors."
     :checker "node scripts/check-v3-typed-sidecar-compression.mjs")
@@ -219,7 +222,7 @@
     :status compiler-active
     :rule "The root blueprint remains the compiler entrypoint. Root uses include-shard-index to expand compiler-active shards from shards/index.lisp; shard files still cannot recursively include other shards."
     :shards [request-runtime workstation-runtime control-plane-runtime memory-knowledge-runtime ops-infra v2-convergence-map pillar-flow-map
-             universe-service-runtime universe-infrastructure universe-data-residency universe-project-maturity universe-project-registry
+             universe-service-runtime universe-infrastructure universe-data-residency universe-project-maturity universe-project-registry universe-behavior-closure
              implementation-request-surfaces implementation-execution-surfaces implementation-runtime-surfaces implementation-knowledge-surfaces implementation-ops-surfaces]
     (shard request-runtime
       :path "shards/request-runtime.lisp"
@@ -256,6 +259,9 @@
       :status compiler-active)
     (shard universe-project-registry
       :path "shards/universe/project-registry.lisp"
+      :status compiler-active)
+    (shard universe-behavior-closure
+      :path "shards/universe/behavior-closure.lisp"
       :status compiler-active)
     (shard implementation-request-surfaces
       :path "shards/implementation/request-surfaces.lisp"
@@ -314,6 +320,8 @@
       :command "bash" :argv ["scripts/rustfmt-missiond.sh" "--check"] :timeout-ms 120000)
     (live-check project-ssot-universe
       :argv ["scripts/check-project-ssot-universe.mjs" "--json"] :json true :timeout-ms 60000)
+    (live-check v3-behavior-closure
+      :argv ["scripts/check-v3-behavior-closure.mjs" "--json"] :json true :timeout-ms 60000)
     (live-check infrastructure-universe
       :argv ["scripts/check-v3-infrastructure-universe-isomorphism.mjs" "--json"] :json true :timeout-ms 60000)
     (live-check data-residency-universe
@@ -322,6 +330,8 @@
       :argv ["scripts/check-project-maturity.mjs" "--min-level" "M5"] :timeout-ms 60000)
     (live-check auth-m6-depth
       :argv ["scripts/check-project-maturity.mjs" "--min-level" "M6" "--project" "auth" "--json"] :json true :timeout-ms 60000)
+    (live-check generated-v3-contracts-current
+      :argv ["scripts/project-v3-contracts.mjs" "--check" "--json"] :json true :timeout-ms 60000)
     (live-check typed-lisp-runtime-compile
       :argv ["scripts/compile-v3-runtime.mjs" "--check" "--json"] :json true :timeout-ms 60000)
     (live-check production-runtime-boundary
@@ -371,7 +381,8 @@
       :file "scripts/lib/v3_workstation_runtime.mjs"
       :needles ["DEFAULT_WORKSTATION_RUNTIME_CONFIG" "contextPackDispatchPolicy"
                 "V3_BLUEPRINT_CONFIG_ERROR" "source_units"
-                "MISSIOND_V3_ALLOW_SOURCE_FALLBACK" "compiled runtime config is required"])
+                "Raw V3 Lisp source fallback is not a production runtime path"
+                "compiled runtime config is required"])
     (runtime-file artifact-commit-outbox-helper
       :file "crates/missiond-daemon/src/handlers/knowledge/file_artifacts/commit.rs"
       :needles ["ArtifactCommitEnvelope" "operation_key" "artifact_commit_outbox_mark_complete"
@@ -398,6 +409,7 @@
              "node scripts/check-typed-lisp-compiler.mjs"
              "node scripts/check-v3-pillar-flow-schema.mjs"
              "node scripts/check-v3-v2-coverage.mjs"
+             "node scripts/check-v3-behavior-closure.mjs"
              "node scripts/check-v3-runtime-path-hygiene.mjs"
              "node scripts/check-v3-production-runtime-boundary.mjs"
              "node scripts/check-v3-semantic-checker-coverage.mjs"

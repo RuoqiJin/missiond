@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadV3SemanticFacts, semanticFactDiagnostics } from './lib/v3_semantic_facts.mjs';
+import { runSemanticRules } from './lib/v3_semantic_rules.mjs';
 
 const REQUIRED_RUNTIME_POLICIES = [
   'autopilot-policy',
@@ -45,6 +46,13 @@ function main() {
   if (facts.sourceUnits.size < 2) {
     diagnostics.push(diag('.missiond/v3/missiond-blueprint.lisp', 'compiled source_units must include root plus compiler-active shards'));
   }
+  if (facts.sourceDomains.size < 2) {
+    diagnostics.push(diag('.missiond/v3/missiond-blueprint.lisp', 'compiled source_domains must include active V3 source domains'));
+  }
+  diagnostics.push(...runSemanticRules({
+    rules: ['source-domain-hash-consistency'],
+    contract: facts.contract,
+  }));
 
   const helperSource = read(path.join(repo, 'scripts/lib/v3_semantic_facts.mjs'), diagnostics);
   const contractSource = read(path.join(repo, 'scripts/lib/v3_compiled_contract.mjs'), diagnostics);
@@ -69,6 +77,7 @@ function main() {
     contractSplits: facts.contractSplits.size,
     controlPlaneDomains: facts.controlPlaneDomains.size,
     sourceUnits: facts.sourceUnits.size,
+    sourceDomains: facts.sourceDomains.size,
     rawSemanticTokenPins,
     rawParserImports,
     diagnostics,

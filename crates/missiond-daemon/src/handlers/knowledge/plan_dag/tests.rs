@@ -57,6 +57,83 @@ fn parse_plan_dag_extracts_explicit_node_forms() {
 }
 
 #[test]
+fn build_validated_dag_from_v2_contract_projects_typed_nodes() {
+    let contract = serde_json::json!({
+        "schema_version": "missiond.plan-contract.v2",
+        "payload": {
+            "nodes": [
+                {
+                    "id": "n1",
+                    "target": "mission_execution",
+                    "objective": "alpha",
+                    "failure_policy": "continue",
+                    "retry_count": 1,
+                    "retry_delay_ms": 250
+                },
+                {
+                    "id": "n2",
+                    "target": "mission_task_delegate",
+                    "objective": "beta",
+                    "depends_on": ["n1"],
+                    "dispatch_strategy": "workstation",
+                    "target_project": "missiond",
+                    "owned_files": ["src/lib.rs"],
+                    "acceptance_commands": ["cargo test -p missiond-daemon plan_dag"],
+                    "acceptance_mode": "manual",
+                    "workstation_dispatch": true,
+                    "review_gate": "question-event",
+                    "unsupported_fields": [{"key": ":future-field", "value": "kept"}]
+                }
+            ]
+        }
+    });
+
+    let (parsed, order) = build_validated_dag_from_contract_json(&contract).expect("typed dag");
+
+    assert_eq!(order, vec!["n1", "n2"]);
+    assert_eq!(parsed.nodes.len(), 2);
+    let first = &parsed.nodes[0];
+    assert_eq!(first.id, "n1");
+    assert_eq!(first.failure_policy, "continue");
+    assert_eq!(first.retry_count, Some(1));
+    assert_eq!(first.retry_delay_ms, Some(250));
+
+    let second = &parsed.nodes[1];
+    assert_eq!(second.depends_on, vec!["n1"]);
+    assert_eq!(second.owned_files_raw.as_deref(), Some("[\"src/lib.rs\"]"));
+    assert_eq!(
+        second.acceptance_commands_raw.as_deref(),
+        Some("[\"cargo test -p missiond-daemon plan_dag\"]")
+    );
+    assert_eq!(second.acceptance_mode_raw.as_deref(), Some("manual"));
+    assert!(second.workstation_dispatch_opt_in());
+    assert_eq!(second.review_gate_kind(), ReviewGateKind::QuestionEvent);
+    assert_eq!(
+        second.unsupported_fields,
+        vec![("future-field".to_string(), "kept".to_string())]
+    );
+}
+
+#[test]
+fn build_validated_dag_rejects_legacy_plan_contract_schema() {
+    let contract = serde_json::json!({
+        "schema_version": "missiond.plan-contract.v1",
+        "projection_engine": "rust-compat",
+        "payload": {
+            "nodes": [{
+                "id": "n1",
+                "target": "mission_execution"
+            }]
+        }
+    });
+
+    let err = build_validated_dag_from_contract_json(&contract)
+        .expect_err("legacy contract schema must not enter DAG execution");
+    assert!(matches!(err, DagBuildError::InvalidContract(_)));
+    assert!(format!("{err:?}").contains("missiond.plan-contract.v2"));
+}
+
+#[test]
 fn parse_plan_dag_records_unsupported_top_forms() {
     let sexp = r#"
         (plan

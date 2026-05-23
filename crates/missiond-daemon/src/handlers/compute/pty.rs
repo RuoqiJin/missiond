@@ -392,12 +392,17 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             // raw numeric shortcut keys to ClaudeCode/Codex/Gemini.
             let resp = confirm_response_from_value(&response)?;
 
-            // Determine if this is an approval (Yes, Option(1), Option(2))
+            // Determine if this is an approval. Codex MCP approval menus use
+            // option 3 for "Always allow"; numeric shortcuts are still
+            // forbidden, but a semantic "always allow" response must be
+            // recorded as an approval so future worker turns do not get stuck
+            // behind the same MCP prompt.
             let is_approval = matches!(
                 resp,
                 missiond_core::ConfirmResponse::Yes
                     | missiond_core::ConfirmResponse::Option(1)
                     | missiond_core::ConfirmResponse::Option(2)
+                    | missiond_core::ConfirmResponse::Option(3)
             );
             // Capture "is option 2 (allowlist)" before resp is moved into pty.confirm()
             let is_allowlist_choice = matches!(resp, missiond_core::ConfirmResponse::Option(2));

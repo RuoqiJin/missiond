@@ -66,6 +66,8 @@ function main() {
       '"agy chat"',
       'Agy CLI command assembled',
       'AgyCliStateParser::new()',
+      'mcp_servers.missiond.tools.mission_compute_slot.approval_mode="approve"',
+      'mcp_servers.missiond.tools.mission_context_boot.approval_mode="approve"',
     ]);
     requireAll(diagnostics, FILES.recognition, sources.recognition, [
       'CliEngine::Agy => recognize_agy(lines)',

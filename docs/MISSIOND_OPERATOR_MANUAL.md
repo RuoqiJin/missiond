@@ -14,8 +14,8 @@ MissionD has five distinct authority lanes:
   contracts.
 - **OCaml compiler/checker**: `tools/missiond_lispc` validates typed Lisp
   semantics and emits compiled projections. Production runtime code consumes
-  `.missiond/v3/runtime/compiled/*.json`; raw source fallback is debug/test-only
-  and requires `MISSIOND_V3_ALLOW_SOURCE_FALLBACK`.
+  `.missiond/v3/runtime/compiled/*.json`; raw V3 Lisp source fallback is not a
+  production runtime path.
 - **Rust runtime**: daemon, MCP tools, EventBus, worker orchestration, shared
   memory, and provider ingestion.
 - **Board**: coordination and operator decision surface. Board notes are

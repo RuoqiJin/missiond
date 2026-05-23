@@ -30,6 +30,7 @@ import {
   compiledSurfaceIds,
   loadCompiledV3Contract,
 } from './lib/v3_compiled_contract.mjs';
+import { runSemanticRules } from './lib/v3_semantic_rules.mjs';
 
 const BLUEPRINT_PATH = '.missiond/v3/missiond-blueprint.lisp';
 const AGGREGATE_COMMAND = 'node scripts/check-v3-code-isomorphism-complete.mjs';
@@ -97,6 +98,9 @@ export const PER_SURFACE_CHECKERS = [
   // Cross-surface historical/public coverage check: V2 effective design and
   // every public MCP tool must have an explicit V3 destination.
   'scripts/check-v3-v2-coverage.mjs',
+  // Cross-surface program-level closure: code-discovered active behavior must
+  // be claimed by behavior-universe or explicitly tombstoned.
+  'scripts/check-v3-behavior-closure.mjs',
   // Cross-surface runtime artifact path hygiene: public/runtime-facing docs
   // must cite V3 runtime sidecars first and keep V2 only as legacy fallback.
   'scripts/check-v3-runtime-path-hygiene.mjs',
@@ -211,6 +215,11 @@ export function validateCompiledContract(contract, file = BLUEPRINT_PATH, {
   expectedSurfaces = compiledSurfaceIds(contract),
 } = {}) {
   const diagnostics = [];
+  diagnostics.push(...runSemanticRules({
+    rules: ['compiled-surface-completeness'],
+    contract,
+    file,
+  }));
   const surfaces = {};
   for (const surface of contract?.surfaces ?? []) {
     if (!surface.id) continue;

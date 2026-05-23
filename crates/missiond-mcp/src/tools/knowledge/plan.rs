@@ -46,6 +46,7 @@ fn build_properties() -> Value {
                 "mark",
                 "supersede",
                 "execute",
+                "backfill_contracts",
                 "record_evidence",
             ],
         ),
@@ -118,7 +119,7 @@ fn build_properties() -> Value {
         "status".into(),
         prop_enum(
             "string",
-            "[list filter | mark target] PlanStatus",
+            "[list filter | mark target | backfill_contracts filter] PlanStatus",
             &[
                 "draft",
                 "awaiting_approval",
@@ -133,8 +134,18 @@ fn build_properties() -> Value {
 
     p.insert(
         "limit".into(),
-        prop("integer", "[list] cap result count (1-500, default 50)"),
+        prop("integer", "[list] cap result count (1-500, default 50); [backfill_contracts] cap candidate scan/update count (1-1000, default 100)"),
     );
+
+    p.insert("apply".into(), prop(
+        "boolean",
+        "[backfill_contracts] default false: compile/report candidate plan.contract_json projections without DB writes. true: update invalid/legacy candidates to missiond.plan-contract.v2.",
+    ));
+
+    p.insert("include_terminal".into(), prop(
+        "boolean",
+        "[backfill_contracts] default false: when status is omitted, scan only active statuses draft/awaiting_approval/approved/executing. true includes succeeded/failed/superseded too.",
+    ));
 
     p.insert(
         "old_plan_id".into(),
@@ -1043,13 +1054,13 @@ pub fn definitions() -> Vec<ToolDefinition> {
     });
     vec![ToolDefinition::new(
         "mission_plan",
-        "plan 表 manager — 9 actions (compile/list/get/by_task/approve/mark/supersede/execute/record_evidence)。\
+        "plan 表 manager — 10 actions (compile/list/get/by_task/approve/mark/supersede/execute/backfill_contracts/record_evidence)。\
          compile 默认 compiler_mode=\"dry_run\"（不调 LLM，行为同旧版）；compiler_mode=\"sonnet\" 时是 plan-compiler actor v0：\
          读取 directive (version_chain head 或显式 directive_version) + board_task，调 Sonnet 生成 PLAN sexp，\
          校验括号 / 顶层 head / board_task 锚点，persist=true 时落库 status=awaiting_approval、\
          compiler_model=\"claude-sonnet\"、compiled_from=\"directive/<id>:<version>\" 或 \"board_task/<id>\"。\
          默认要求 directive.status ∈ {approved, compiled}；可显式 allow_unapproved=true 调试。\
-         list/get/by_task/approve/mark/supersede 为 store-backed full；\
+         list/get/by_task/approve/mark/supersede 为 store-backed full；backfill_contracts 是历史 plan.contract_json 迁移面，默认 dry-run，apply=true 才写回 missiond.plan-contract.v2；\
          execute 为 plan-runner v0：默认 execute_mode=\"bridge\" 返回 next_call descriptor（runner_status=\"bridge_only\"），\
          向后兼容；execute_mode=\"internal\" 时 MissionD 内部 dispatch 目标 handler，\
          成功后写 plan_runner_dispatch 证据并把 plan 标记 executing。\

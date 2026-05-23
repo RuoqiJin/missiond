@@ -434,7 +434,7 @@ let test_runtime_config_payload_shape () =
   in
   let payload =
     Emit_json.runtime_config_payload_json "runtime-config-fixture.lisp"
-      "fixture-hash" [] (Some root)
+      "fixture-hash" [] [] (Some root)
   in
   let envelope =
     Emit_json.compiled_envelope "missiond.compiled-runtime-config.v1"
