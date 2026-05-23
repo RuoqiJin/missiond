@@ -1404,6 +1404,23 @@ impl PTYWebSocketServer {
         })
     }
 
+    async fn put_jarvis_artifact_bounded(
+        slot: &JarvisArtifactSlot,
+        req: JarvisArtifactRequest,
+        timeout: std::time::Duration,
+    ) -> Result<JarvisArtifactResult, String> {
+        let slot = slot.clone();
+        let join = tokio::spawn(async move { Self::put_jarvis_artifact(&slot, req).await });
+        match tokio::time::timeout(timeout, join).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => Err(format!("artifact writer task failed: {error}")),
+            Err(_) => Err(format!(
+                "task-result-artifact write did not finish within {}s",
+                timeout.as_secs()
+            )),
+        }
+    }
+
     fn extract_task_result_artifact_hash(text: &str) -> Option<String> {
         let marker = "task_result_artifact:";
         let tail = text.split(marker).nth(1)?.trim();
@@ -1509,7 +1526,7 @@ impl PTYWebSocketServer {
                     }
                     let mut artifact_hash = artifact_hash;
                     if is_summary && artifact_hash.is_none() {
-                        let artifact_write = Self::put_jarvis_artifact(
+                        match Self::put_jarvis_artifact_bounded(
                             jarvis_artifact_writer,
                             JarvisArtifactRequest {
                                 kind: "task-result-artifact".to_string(),
@@ -1533,36 +1550,26 @@ impl PTYWebSocketServer {
                                     "source": "jarvis-board-summary-projection"
                                 }),
                             },
-                        );
-                        match tokio::time::timeout(
                             std::time::Duration::from_secs(8),
-                            artifact_write,
                         )
                         .await
                         {
-                            Ok(Ok(result)) => {
+                            Ok(result) => {
                                 artifact_hash = Some(result.artifact_hash);
                             }
-                            Ok(Err(error)) => {
+                            Err(error) => {
+                                let code = if error.contains("did not finish") {
+                                    "TASK_RESULT_ARTIFACT_WRITE_TIMEOUT"
+                                } else {
+                                    "TASK_RESULT_ARTIFACT_WRITE_FAILED"
+                                };
                                 let diagnostic = serde_json::json!({
                                     "phase": "workers_running",
                                     "task_id": task_id,
                                     "note_id": note.id,
                                     "error": {
-                                        "code": "TASK_RESULT_ARTIFACT_WRITE_FAILED",
+                                        "code": code,
                                         "message": error
-                                    }
-                                });
-                                Self::write_sse_event(stream, "diagnostic", &diagnostic).await?;
-                            }
-                            Err(_) => {
-                                let diagnostic = serde_json::json!({
-                                    "phase": "workers_running",
-                                    "task_id": task_id,
-                                    "note_id": note.id,
-                                    "error": {
-                                        "code": "TASK_RESULT_ARTIFACT_WRITE_TIMEOUT",
-                                        "message": "task-result-artifact write did not finish within 8s"
                                     }
                                 });
                                 Self::write_sse_event(stream, "diagnostic", &diagnostic).await?;
@@ -1607,7 +1614,7 @@ impl PTYWebSocketServer {
                                     let mut artifact_hash =
                                         Self::extract_task_result_artifact_hash(&content);
                                     if artifact_hash.is_none() {
-                                        let artifact_write = Self::put_jarvis_artifact(
+                                        match Self::put_jarvis_artifact_bounded(
                                             jarvis_artifact_writer,
                                             JarvisArtifactRequest {
                                                 kind: "task-result-artifact".to_string(),
@@ -1631,41 +1638,26 @@ impl PTYWebSocketServer {
                                                     "source": "jarvis-terminal-revalidate"
                                                 }),
                                             },
-                                        );
-                                        match tokio::time::timeout(
                                             std::time::Duration::from_secs(8),
-                                            artifact_write,
                                         )
                                         .await
                                         {
-                                            Ok(Ok(result)) => {
+                                            Ok(result) => {
                                                 artifact_hash = Some(result.artifact_hash);
                                             }
-                                            Ok(Err(error)) => {
+                                            Err(error) => {
+                                                let code = if error.contains("did not finish") {
+                                                    "TASK_RESULT_ARTIFACT_REVALIDATE_TIMEOUT"
+                                                } else {
+                                                    "TASK_RESULT_ARTIFACT_REVALIDATE_FAILED"
+                                                };
                                                 let diagnostic = serde_json::json!({
                                                     "phase": "done",
                                                     "task_id": task_id,
                                                     "note_id": note.id,
                                                     "error": {
-                                                        "code": "TASK_RESULT_ARTIFACT_REVALIDATE_FAILED",
+                                                        "code": code,
                                                         "message": error
-                                                    }
-                                                });
-                                                Self::write_sse_event(
-                                                    stream,
-                                                    "diagnostic",
-                                                    &diagnostic,
-                                                )
-                                                .await?;
-                                            }
-                                            Err(_) => {
-                                                let diagnostic = serde_json::json!({
-                                                    "phase": "done",
-                                                    "task_id": task_id,
-                                                    "note_id": note.id,
-                                                    "error": {
-                                                        "code": "TASK_RESULT_ARTIFACT_REVALIDATE_TIMEOUT",
-                                                        "message": "task-result-artifact terminal revalidate did not finish within 8s"
                                                     }
                                                 });
                                                 Self::write_sse_event(
