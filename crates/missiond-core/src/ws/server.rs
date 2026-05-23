@@ -1509,7 +1509,7 @@ impl PTYWebSocketServer {
                     }
                     let mut artifact_hash = artifact_hash;
                     if is_summary && artifact_hash.is_none() {
-                        match Self::put_jarvis_artifact(
+                        let artifact_write = Self::put_jarvis_artifact(
                             jarvis_artifact_writer,
                             JarvisArtifactRequest {
                                 kind: "task-result-artifact".to_string(),
@@ -1533,13 +1533,17 @@ impl PTYWebSocketServer {
                                     "source": "jarvis-board-summary-projection"
                                 }),
                             },
+                        );
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(8),
+                            artifact_write,
                         )
                         .await
                         {
-                            Ok(result) => {
+                            Ok(Ok(result)) => {
                                 artifact_hash = Some(result.artifact_hash);
                             }
-                            Err(error) => {
+                            Ok(Err(error)) => {
                                 let diagnostic = serde_json::json!({
                                     "phase": "workers_running",
                                     "task_id": task_id,
@@ -1547,6 +1551,18 @@ impl PTYWebSocketServer {
                                     "error": {
                                         "code": "TASK_RESULT_ARTIFACT_WRITE_FAILED",
                                         "message": error
+                                    }
+                                });
+                                Self::write_sse_event(stream, "diagnostic", &diagnostic).await?;
+                            }
+                            Err(_) => {
+                                let diagnostic = serde_json::json!({
+                                    "phase": "workers_running",
+                                    "task_id": task_id,
+                                    "note_id": note.id,
+                                    "error": {
+                                        "code": "TASK_RESULT_ARTIFACT_WRITE_TIMEOUT",
+                                        "message": "task-result-artifact write did not finish within 8s"
                                     }
                                 });
                                 Self::write_sse_event(stream, "diagnostic", &diagnostic).await?;
@@ -1578,6 +1594,26 @@ impl PTYWebSocketServer {
 
             match task.status {
                 crate::types::BoardTaskStatus::Done => {
+                    if latest_summary.is_some() && latest_artifact_hash.is_none() {
+                        let diagnostic = serde_json::json!({
+                            "phase": "done",
+                            "task_id": task_id,
+                            "error": {
+                                "code": "TASK_RESULT_ARTIFACT_REQUIRED",
+                                "message": "BoardTask is done but no task-result-artifact was durably written"
+                            },
+                            "next_action": "Inspect task-result-artifact writer before retrying; do not treat Board note as final authority."
+                        });
+                        Self::write_sse_event(stream, "diagnostic", &diagnostic).await?;
+                        Self::write_sse_openai_text(
+                            stream,
+                            chat_id,
+                            "任务已完成但 task-result-artifact 未落盘；我不会把 Board note 当作最终结果返回。请先修复结果落盘链路。",
+                            Some("stop"),
+                        )
+                        .await?;
+                        return Ok(());
+                    }
                     let final_text = latest_summary.unwrap_or_else(|| {
                         "任务已完成，但没有找到 summary note；请检查 task-result-artifact。"
                             .to_string()

@@ -94,8 +94,10 @@
          :entry [JarvisSSE BoardTaskSummaryNote provider-final task-result-artifact]
          :core ((step s1 :logic "inspect worker/Board summary notes for existing task-result-artifact hash")
                 (step s2 :logic "when only a Board summary projection exists, write a canonical task-result-artifact through shared memory before emitting result_artifact")
-                (step s3 :logic "emit TASK_RESULT_ARTIFACT_WRITE_FAILED diagnostic instead of pretending a missing artifact exists")
-                (step s4 :logic "stream final text only after the task-result artifact hash is known or the diagnostic is surfaced"))
+                (step s3 :logic "bound artifact write latency with an explicit timeout and emit TASK_RESULT_ARTIFACT_WRITE_TIMEOUT when the writer stalls")
+                (step s4 :logic "emit TASK_RESULT_ARTIFACT_WRITE_FAILED diagnostic instead of pretending a missing artifact exists")
+                (step s5 :logic "if a BoardTask is done with a summary but no artifact hash, emit TASK_RESULT_ARTIFACT_REQUIRED and fail fast instead of streaming the Board note as final text")
+                (step s6 :logic "stream final text only after the task-result artifact hash is known or the diagnostic is surfaced"))
          :egress [task-result-artifact result_artifact_event final_event diagnostic]))
     :invariants
       ["All non-exact worker dispatch must carry grounding_context_id before a provider PTY receives the prompt."
@@ -104,7 +106,8 @@
        "Autopilot must block broad ungrounded BoardTasks instead of sending them to workers for self-discovery."
        "Direct local code search is allowed only after the grounding artifact identifies code surface evidence as a required source."
        "Jarvis dispatch metadata MUST derive read_scope from the active runtime/project root (MISSIOND_PROJECT_ROOT, MISSIOND_REPO_ROOT, MISSIOND_WORKSPACE_ROOT, or current daemon cwd) and MUST NOT hardcode a developer-machine root path."
-       "Jarvis result streaming MUST use task-result-artifact as canonical completion authority; Board summary notes are converted to artifacts before client-visible result_artifact events."]
+       "Jarvis result streaming MUST use task-result-artifact as canonical completion authority; Board summary notes are converted to artifacts before client-visible result_artifact events."
+       "Jarvis result artifact writes MUST be bounded; missing or stalled artifact writes produce typed diagnostics and MUST NOT silently fall back to Board note final text."]
     :checks ["node scripts/check-v3-grounded-dispatch-isomorphism.mjs --json"])
 
   (unified-entry
