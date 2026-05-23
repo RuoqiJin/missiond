@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectConfig {
@@ -45,8 +46,9 @@ impl ProjectRegistry {
     }
 
     pub fn resolve(&self, cwd: &str) -> Option<&str> {
+        let cwd_path = Path::new(cwd);
         for (prefix, id) in &self.path_index {
-            if cwd.starts_with(prefix.as_str()) {
+            if cwd_path.starts_with(Path::new(prefix)) {
                 return Some(id.as_str());
             }
         }
@@ -121,6 +123,24 @@ mod tests {
         assert_eq!(
             registry.resolve("/repo/services/auth/src/main.rs"),
             Some("auth")
+        );
+    }
+
+    #[test]
+    fn resolve_does_not_match_sibling_by_string_prefix() {
+        let registry = ProjectRegistry::new(vec![project(
+            "missiond",
+            "/Users/rickyhq/Projects/missiond",
+            true,
+        )]);
+
+        assert_eq!(
+            registry.resolve("/Users/rickyhq/Projects/missiond/crates/missiond-core"),
+            Some("missiond")
+        );
+        assert_eq!(
+            registry.resolve("/Users/rickyhq/Projects/missiond-clean"),
+            None
         );
     }
 }

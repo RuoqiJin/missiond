@@ -755,10 +755,47 @@ async fn main() -> Result<()> {
     let slot_mgr_store = Arc::clone(&store);
     // ── Project Registry: load from DB, build path→project_id index ──
     let project_registry: missiond_core::types::SharedProjectRegistry = {
-        let projects = store.list_projects().await.unwrap_or_else(|e| {
+        let mut projects = store.list_projects().await.unwrap_or_else(|e| {
             warn!("Failed to load projects from DB: {}", e);
             vec![]
         });
+        let missiond_root = crate::helpers::missiond_project_root();
+        let missiond_blueprint = missiond_root
+            .join(".missiond")
+            .join("v3")
+            .join("missiond-blueprint.lisp");
+        if missiond_blueprint.exists() {
+            let missiond_root = missiond_root.to_string_lossy().to_string();
+            if let Some(project) = projects.iter_mut().find(|project| project.id == "missiond") {
+                if project.path != missiond_root {
+                    info!(
+                        old_path = %project.path,
+                        runtime_path = %missiond_root,
+                        "Project registry: overlaying missiond root from runtime environment"
+                    );
+                    project.path = missiond_root;
+                    project.active = true;
+                }
+            } else {
+                info!(
+                    runtime_path = %missiond_root,
+                    "Project registry: adding runtime missiond root overlay"
+                );
+                projects.push(missiond_core::types::ProjectConfig {
+                    id: "missiond".to_string(),
+                    path: missiond_root.clone(),
+                    intent_path: Some(format!("{missiond_root}/.missiond/intent.lisp")),
+                    active: true,
+                    slots: vec![],
+                    github_url: None,
+                    kind: "managed".to_string(),
+                    vault_path: None,
+                    parent_id: None,
+                    created_at: None,
+                    updated_at: None,
+                });
+            }
+        }
         info!(count = projects.len(), "Project registry loaded");
         Arc::new(tokio::sync::RwLock::new(
             missiond_core::types::ProjectRegistry::new(projects),

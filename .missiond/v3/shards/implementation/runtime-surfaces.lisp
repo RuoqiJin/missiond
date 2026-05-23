@@ -80,6 +80,7 @@
              "crates/missiond-pty/src/pty_recognition.rs"
              "crates/missiond-pty/src/manager.rs"
              "crates/missiond-core/src/types/slot.rs"
+             "crates/missiond-core/src/types/project.rs"
              "crates/missiond-daemon/src/engine/intent_engine/autopilot.rs"
              "crates/missiond-daemon/src/handlers/compute/compute_slot.rs"
              "crates/missiond-daemon/src/handlers/compute/slot.rs"

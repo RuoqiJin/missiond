@@ -12,7 +12,7 @@ Checks the V3 project-registry Lisp/code isomorphism contract:
   - mission_project stays a thin public facade.
   - project registry actions are split into registry/context/survey/vault modules.
   - intent discovery and default universe import manifest project from V3.
-  - ProjectRegistry::resolve keeps longest-prefix semantics.
+  - ProjectRegistry::resolve keeps longest path-component prefix semantics.
   - resolve_target_project_root keeps explicit project, cwd, fallback, and no-signal behavior.
 `;
 
@@ -111,7 +111,7 @@ function checkFiles(root, files) {
     'scripts/check-project-maturity.mjs',
     'project.rs is the thin mission_project facade',
     'ProjectRegistryRuntimeConfig loads V3 project-registry-policy',
-	    'ProjectRegistry::resolve owns longest-prefix project lookup',
+	    'ProjectRegistry::resolve owns longest path-component project lookup',
 	    'inactive project aliases never participate in cwd resolution',
 	    'mission_project init archives inactive path aliases before upsert',
 	    'resolve_target_project_root owns project-root spawn cwd policy',
@@ -323,10 +323,13 @@ function checkFiles(root, files) {
     'pub struct ProjectRegistry',
     '.filter(|p| p.active)',
     'path_index.sort_by',
-    'cwd.starts_with(prefix.as_str())',
+    'use std::path::Path;',
+    'let cwd_path = Path::new(cwd);',
+    'cwd_path.starts_with(Path::new(prefix))',
     'pub fn resolve(&self, cwd: &str) -> Option<&str>',
     'pub fn exclusive_slots(&self, project_id: &str) -> Vec<String>',
     'resolve_ignores_inactive_path_aliases',
+    'resolve_does_not_match_sibling_by_string_prefix',
   ]);
 
   requireAll(diagnostics, files.rootResolver, sources.rootResolver, [
@@ -439,7 +442,7 @@ function buildFixture() {
 	             "crates/missiond-mcp/src/tools/knowledge/project.rs"
 	             "scripts/check-v3-project-registry-isomorphism.mjs"
 	             "scripts/check-project-maturity.mjs"]
-      :note "project.rs is the thin mission_project facade. ProjectRegistryRuntimeConfig loads V3 project-registry-policy. ProjectRegistry::resolve owns longest-prefix project lookup; inactive project aliases never participate in cwd resolution, and mission_project init archives inactive path aliases before upsert. resolve_target_project_root owns project-root spawn cwd policy."))
+      :note "project.rs is the thin mission_project facade. ProjectRegistryRuntimeConfig loads V3 project-registry-policy. ProjectRegistry::resolve owns longest path-component project lookup; inactive project aliases never participate in cwd resolution, and mission_project init archives inactive path aliases before upsert. resolve_target_project_root owns project-root spawn cwd policy."))
   (compression-contract
     :checks ["node scripts/check-v3-project-registry-isomorphism.mjs"]))`);
 
@@ -530,10 +533,13 @@ pub struct ProjectConfig
 pub struct ProjectRegistry
 path_index.sort_by
 .filter(|p| p.active)
-cwd.starts_with(prefix.as_str())
+use std::path::Path;
+let cwd_path = Path::new(cwd);
+cwd_path.starts_with(Path::new(prefix))
 pub fn resolve(&self, cwd: &str) -> Option<&str>
 pub fn exclusive_slots(&self, project_id: &str) -> Vec<String>
 resolve_ignores_inactive_path_aliases
+resolve_does_not_match_sibling_by_string_prefix
 `);
 
   writeFixture(root, DEFAULT_FILES.rootResolver, `

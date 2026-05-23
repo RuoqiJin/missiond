@@ -41,6 +41,7 @@ const FILES = {
   slotTool: 'crates/missiond-daemon/src/handlers/compute/slot.rs',
   slotManager: 'crates/missiond-core/src/core/slot_manager.rs',
   missionControl: 'crates/missiond-core/src/core/mission_control.rs',
+  projectTypes: 'crates/missiond-core/src/types/project.rs',
   supervisor: 'crates/missiond-daemon/src/supervisor.rs',
   aggregate: 'scripts/check-v3-code-isomorphism-complete.mjs',
 };
@@ -165,6 +166,17 @@ function checkFiles(root) {
     'skip_permissions: worker.write_allowed',
     'state.mission.register_runtime_slot(slot_config)',
     'SlotManager: workstation pool registered from V3',
+    'missiond_project_root()',
+    'Project registry: overlaying missiond root from runtime environment',
+    'Project registry: adding runtime missiond root overlay',
+  ]);
+
+  requireAll(diagnostics, FILES.projectTypes, sources.projectTypes, [
+    'use std::path::Path;',
+    'let cwd_path = Path::new(cwd);',
+    'cwd_path.starts_with(Path::new(prefix))',
+    'fn resolve_does_not_match_sibling_by_string_prefix',
+    '/Users/rickyhq/Projects/missiond-clean',
   ]);
 
   requireAll(diagnostics, FILES.genericCli, sources.genericCli, [
@@ -280,6 +292,8 @@ function checkFiles(root) {
     'mission_slots MUST project activeBoardTaskId/currentTaskId and activeBoardTask',
     'Codex master-control is a resident orchestrator lane',
     'Read-only Gemini pool workers MUST project to Gemini CLI `--approval-mode plan --policy .missiond/v3/policies/gemini-readonly-policy.toml`',
+    'ProjectRegistry path resolution MUST be path-component aware rather than raw string prefix matching',
+    'Daemon startup MUST overlay the active missiond project root from MISSIOND_PROJECT_ROOT/current blueprint root',
   ]);
   requireAll(diagnostics, FILES.supervisor, sources.supervisor, [
     'fn schedule_supervisor_patrol',
@@ -369,6 +383,7 @@ function validateBlueprint(file, source, diagnostics) {
     'crates/missiond-daemon/src/engine/intent_engine/autopilot.rs',
     'crates/missiond-daemon/src/handlers/compute/compute_slot.rs',
     'crates/missiond-daemon/src/handlers/compute/slot.rs',
+    'crates/missiond-core/src/types/project.rs',
     'scripts/check-v3-workstation-pool-isomorphism.mjs',
   ]) {
     if (!codeRefs.includes(required)) {
