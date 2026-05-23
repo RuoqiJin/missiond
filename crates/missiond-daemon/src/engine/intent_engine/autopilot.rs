@@ -390,6 +390,7 @@ struct AgyArtifactCandidate {
     path: PathBuf,
     modified_at: chrono::DateTime<chrono::Utc>,
     content: String,
+    match_rank: u8,
 }
 
 const AGY_DEFAULT_ARTIFACT_ROOT_SUFFIX: &str = ".gemini/antigravity-cli/brain";
@@ -571,14 +572,42 @@ fn normalized_token_set(input: &str) -> HashSet<String> {
         .collect()
 }
 
-fn agy_artifact_matches_task(
+fn first_uuid_token(input: &str) -> Option<String> {
+    input
+        .split(|ch: char| !(ch.is_ascii_hexdigit() || ch == '-'))
+        .map(str::trim)
+        .find(|token| uuid::Uuid::parse_str(token).is_ok())
+        .map(str::to_ascii_lowercase)
+}
+
+fn agy_artifact_declared_board_task_id(content: &str) -> Option<String> {
+    content.lines().find_map(|line| {
+        let lower = line.to_ascii_lowercase();
+        let declares_current_task = lower.contains("boardtask id")
+            || lower.contains("board task id")
+            || lower.contains("boardtask_id")
+            || (lower.contains("board_task_id")
+                && !lower.contains("source_board_task_id")
+                && !lower.contains("parent_board_task_id"));
+        if declares_current_task {
+            first_uuid_token(line)
+        } else {
+            None
+        }
+    })
+}
+
+fn agy_artifact_match_rank(
     content: &str,
     file_name: &str,
     task: &missiond_core::types::BoardTask,
-) -> bool {
+) -> Option<u8> {
     let content_lower = content.to_ascii_lowercase();
+    if let Some(declared_task_id) = agy_artifact_declared_board_task_id(content) {
+        return (declared_task_id == task.id.as_str().to_ascii_lowercase()).then_some(100);
+    }
     if content_lower.contains(task.id.as_str()) {
-        return true;
+        return Some(90);
     }
     let title_lower = task.title.to_ascii_lowercase();
     let description_lower = task.description.to_ascii_lowercase();
@@ -586,10 +615,10 @@ fn agy_artifact_matches_task(
     let combined = format!("{content_lower}\n{file_lower}");
 
     if title_lower.contains("agy") && combined.contains("agy") {
-        return true;
+        return Some(20);
     }
     if title_lower.contains("antigravity") && combined.contains("antigravity") {
-        return true;
+        return Some(20);
     }
 
     let requested = normalized_token_set(&format!(
@@ -600,12 +629,21 @@ fn agy_artifact_matches_task(
     let evidence = normalized_token_set(&combined);
     let overlap = requested.intersection(&evidence).count();
     if overlap >= 3 && (combined.contains("verification") || combined.contains("findings")) {
-        return true;
+        return Some(10);
     }
 
-    description_lower.contains("agy")
+    (description_lower.contains("agy")
         && file_lower.contains("agy")
-        && (combined.contains("verification") || combined.contains("findings"))
+        && (combined.contains("verification") || combined.contains("findings")))
+    .then_some(10)
+}
+
+fn agy_artifact_matches_task(
+    content: &str,
+    file_name: &str,
+    task: &missiond_core::types::BoardTask,
+) -> bool {
+    agy_artifact_match_rank(content, file_name, task).is_some()
 }
 
 fn select_agy_artifact_completion_from_root(
@@ -655,9 +693,9 @@ fn select_agy_artifact_completion_from_root(
                 .file_name()
                 .and_then(|value| value.to_str())
                 .unwrap_or_default();
-            if !agy_artifact_matches_task(&content, file_name, task) {
+            let Some(match_rank) = agy_artifact_match_rank(&content, file_name, task) else {
                 continue;
-            }
+            };
             if !pty_summary_has_structured_artifact(&content)
                 || output_contract_close_blocker(&task.description, &content).is_some()
                 || worker_final_close_blocker(&content).is_some()
@@ -669,10 +707,15 @@ fn select_agy_artifact_completion_from_root(
                 path,
                 modified_at,
                 content,
+                match_rank,
             });
         }
     }
-    candidates.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
+    candidates.sort_by(|a, b| {
+        b.match_rank
+            .cmp(&a.match_rank)
+            .then_with(|| b.modified_at.cmp(&a.modified_at))
+    });
     let Some(candidate) = candidates.into_iter().next() else {
         return Ok(None);
     };
@@ -7810,6 +7853,53 @@ Review only.
         let completion =
             select_agy_artifact_completion_from_root(root.path(), &task).expect("select");
         assert!(completion.is_none());
+    }
+
+    #[test]
+    fn agy_artifact_completion_rejects_foreign_board_task_artifact() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let current_session = root.path().join("3d0c6fae-e59a-406a-ac07-7a1cdbea471c");
+        let old_session = root.path().join("11a0267d-6104-4e98-9f69-3da6d9f3317e");
+        std::fs::create_dir_all(&current_session).expect("current session dir");
+        std::fs::create_dir_all(&old_session).expect("old session dir");
+        let current_task_id = "fdb10f16-4a20-4f4d-90a7-4eb4593bacb8";
+        let foreign_task_id = "22673f17-1884-44e4-b628-46080282f5d1";
+        std::fs::write(
+            current_session.join("readonly_validation_report.md"),
+            format!(
+                "# Agy CLI Read-Only Station Validation Report\n\n\
+                 BoardTask ID: {current_task_id}\n\n\
+                 ## Findings\n- Current Agy validation completed.\n\n\
+                 ## Evidence\n- Current artifact names the active BoardTask.\n\n\
+                 ## Recommendations\n- Use this artifact for the current task.\n\n\
+                 ## Verification\n- No files were modified."
+            ),
+        )
+        .expect("current artifact");
+        std::fs::write(
+            old_session.join("validation_report.md"),
+            format!(
+                "# Agy CLI Read-Only Station Validation Report\n\n\
+                 BoardTask ID: {foreign_task_id}\n\n\
+                 ## Findings\n- Foreign Agy validation completed.\n\n\
+                 ## Evidence\n- This belongs to a prior BoardTask.\n\n\
+                 ## Recommendations\n- Do not use this artifact for other tasks.\n\n\
+                 ## Verification\n- No files were modified."
+            ),
+        )
+        .expect("foreign artifact");
+        let task = test_board_task_for_autopilot(
+            current_task_id,
+            "请接入并验证 agy CLI 的 PTY 识别和 read-only 工位能力。",
+            r#"{"source":"jarvis-intent-plan-gate","dispatch_metadata":{"write_policy":"read-only","output_contract":"Findings / Evidence / Recommendations / Verification"}}"#,
+        );
+
+        let completion =
+            select_agy_artifact_completion_from_root(root.path(), &task).expect("select");
+        let completion = completion.expect("completion");
+        assert!(completion.session_id.contains("3d0c6fae"));
+        assert!(completion.summary.contains(current_task_id));
+        assert!(!completion.summary.contains(foreign_task_id));
     }
 
     /// `is_delegated_worker_description` only fires on the V3 envelope

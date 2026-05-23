@@ -103,6 +103,8 @@ function main() {
       '.gemini/antigravity-cli/brain',
       'source: "agy_artifact".to_string()',
       'agy_artifact_matches_task',
+      'agy_artifact_declared_board_task_id',
+      'rejects_foreign_board_task_artifact',
       'provider-empty-final',
     ]);
     requireAll(diagnostics, FILES.main, sources.main, [

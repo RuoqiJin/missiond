@@ -383,7 +383,7 @@
     (policy completion-authority-policy
       :owns [provider_final provider_artifact task_result_artifact board_note_projection pty_diagnostic]
       :core ((step s1 :logic "prefer durable provider final over PTY")
-             (step s2 :logic "for Agy, read post-claim Antigravity brain markdown artifact before PTY fallback")
+             (step s2 :logic "for Agy, read post-claim Antigravity brain markdown artifact before PTY fallback; an explicit BoardTask ID inside the artifact is first-authority attribution and foreign BoardTask artifacts must be rejected before broad keyword matching")
              (step s3 :logic "normalize final output into task-result-artifact")
              (step s4 :logic "project concise summary to Board note and mission_execution")
              (step s5 :logic "close BoardTask only after settle window and artifact validation"))
