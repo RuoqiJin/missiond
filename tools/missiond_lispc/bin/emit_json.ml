@@ -638,6 +638,37 @@ let key_domain_typed_facts source_hash file root =
   @ scanner_policy_facts source_hash file root
   @ semantic_gate_facts source_hash file root
 
+let semantic_agent_entry_fact source_hash file node =
+  let props = keyword_props ~start:2 node in
+  let id = Option.value ~default:"<missing>" (form_id node) in
+  Printf.sprintf
+    {|{"fact_id":%s,"kind":"agent_entry","project_id":"missiond","id":%s,"schema_version":"missiond.agent-entry.v1","label":%s,"intent_keywords":%s,"primary_family":%s,"surfaces":%s,"functions":%s,"artifact_contracts":%s,"runtime_policies":%s,"behavior_kinds":%s,"checks":%s,"write_scope":%s,"must_not_touch":%s,"read_first_override":%s,"fallback":%s,"source":%s}|}
+    (json_string ("agent-entry:" ^ safe_id id))
+    (json_string id)
+    (json_opt_string_token [ ":label" ] props)
+    (json_string_list_token [ ":intent-keywords"; ":intent_keywords" ] props)
+    (json_opt_string_token [ ":primary-family"; ":primary_family" ] props)
+    (json_string_list_token [ ":surfaces" ] props)
+    (json_string_list_token [ ":functions" ] props)
+    (json_string_list_token [ ":artifact-contracts"; ":artifact_contracts" ] props)
+    (json_string_list_token [ ":runtime-policies"; ":runtime_policies" ] props)
+    (json_string_list_token [ ":behavior-kinds"; ":behavior_kinds" ] props)
+    (json_string_list_token [ ":checks" ] props)
+    (json_string_list_token [ ":write-scope"; ":write_scope" ] props)
+    (json_string_list_token [ ":must-not-touch"; ":must_not_touch" ] props)
+    (json_string_list_token
+       [ ":read-first-override"; ":read_first_override" ]
+       props)
+    (json_opt_string_token [ ":fallback" ] props)
+    (source_map_json source_hash file node)
+
+let semantic_agent_entry_facts source_hash file root =
+  match find_child root "agent-entry-index" with
+  | None -> []
+  | Some index ->
+      index |> list_forms "entry"
+      |> List.map (semantic_agent_entry_fact source_hash file)
+
 let semantic_facts source_hash file source_units root =
   let function_facts =
     match find_child root "pillar-flow-map" with
@@ -709,10 +740,13 @@ let semantic_facts source_hash file source_units root =
   let key_domain_facts =
     key_domain_typed_facts source_hash file root
   in
+  let agent_entry_facts =
+    semantic_agent_entry_facts source_hash file root
+  in
   function_facts @ surface_facts @ artifact_facts @ workflow_contract_facts
   @ workstation_facts @ runtime_policy_facts @ checker_registry_facts
   @ final_convergence_gate_facts @ source_unit_facts @ typed_subplane_facts
-  @ key_domain_facts
+  @ key_domain_facts @ agent_entry_facts
 
 let project_entry_to_json node =
   let props = keyword_props ~start:1 node in

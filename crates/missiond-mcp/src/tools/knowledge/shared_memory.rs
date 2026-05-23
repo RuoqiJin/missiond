@@ -136,7 +136,12 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "task_id": {"type": "string"},
                     "taskId": {"type": "string"},
                     "accepted_shard_id": {"type": "string"},
-                    "acceptedShardId": {"type": "string"}
+                    "acceptedShardId": {"type": "string"},
+                    "intent": {"type": "string"},
+                    "query": {"type": "string"},
+                    "entry_id": {"type": "string"},
+                    "entryId": {"type": "string"},
+                    "surface": {"type": "string"}
                 }
             }),
         ),

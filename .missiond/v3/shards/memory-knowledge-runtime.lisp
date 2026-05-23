@@ -36,7 +36,7 @@
     :metadata-required [tool_family primary_action tier danger_level intent_examples preferred_surface compatibility_tools]
     :agent-rule "When unsure, call mission_tool_directory(action=\"recommend\", intent=...) before selecting a lower-level MCP tool. Tool families are a selection/readability layer; compatibility tools remain stable for existing workers."
     :invariants
-      ["mission_tool_directory MUST expose list/recommend/lookup/explain/deprecated actions over the primary tool-family catalog."
+      ["mission_tool_directory MUST expose list/recommend/lookup/explain/deprecated/guide actions over the primary tool-family catalog."
        "Public tools MAY remain numerous, but every high-frequency tool must map to a primary family and preferred surface."
        "Deprecated/raw tools MUST return a preferredFamily/preferredSurface hint instead of relying on operator memory."
        "MCP tool-family governance must be read-only; it guides selection and must not mutate Board, KB, projects, or runtime state."])

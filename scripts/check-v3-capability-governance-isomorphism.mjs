@@ -117,7 +117,7 @@ function checkFiles(root, files) {
     'capability_usage/runtime.rs owns snapshot/report/candidates/mark/ack',
     'audit.rs owns mission_audit trace/detail/stats/export',
     'codex_ops.rs owns mission_codex_ops recent/thread/tool_stats',
-    'tool_directory.rs owns mission_tool_directory list/recommend/lookup/explain/deprecated',
+    'tool_directory.rs owns mission_tool_directory list/recommend/lookup/explain/deprecated/guide',
     'node scripts/check-v3-capability-governance-isomorphism.mjs',
   ]);
 
@@ -252,6 +252,7 @@ function checkFiles(root, files) {
     '"lookup"',
     '"explain"',
     '"deprecated"',
+    '"guide"',
   ]);
 
   requireAll(diagnostics, files.v2Source, sources.v2Source, [
@@ -305,7 +306,7 @@ function buildFixture() {
              "crates/missiond-mcp/src/tools/comm/codex_ops.rs"
              "crates/missiond-mcp/src/tools/comm/tool_directory.rs"
              "scripts/check-v3-capability-governance-isomorphism.mjs"]
-      :note "capability_usage.rs is the thin capability-governance facade; capability_usage/runtime.rs owns snapshot/report/candidates/mark/ack; audit.rs owns mission_audit trace/detail/stats/export; codex_ops.rs owns mission_codex_ops recent/thread/tool_stats; tool_directory.rs owns mission_tool_directory list/recommend/lookup/explain/deprecated."))
+      :note "capability_usage.rs is the thin capability-governance facade; capability_usage/runtime.rs owns snapshot/report/candidates/mark/ack; audit.rs owns mission_audit trace/detail/stats/export; codex_ops.rs owns mission_codex_ops recent/thread/tool_stats; tool_directory.rs owns mission_tool_directory list/recommend/lookup/explain/deprecated/guide."))
   (compression-contract
     :checks ["node scripts/check-v3-capability-governance-isomorphism.mjs"]))`,
   );
@@ -335,7 +336,7 @@ function buildFixture() {
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.toolDirectory),
-    'mission_tool_directory ToolFamily FAMILIES recommend lookup_tool deprecated mission_board mission_workflow mission_workstation mission_context mission_memory mission_universe mission_ops mission_router',
+    'mission_tool_directory ToolFamily FAMILIES recommend lookup_tool deprecated guide_tool_directory mission_board mission_workflow mission_workstation mission_context mission_memory mission_universe mission_ops mission_router',
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.mcpCapability),
@@ -351,7 +352,7 @@ function buildFixture() {
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.mcpToolDirectory),
-    'ToolDefinition::new "mission_tool_directory" "recommend" "lookup" "explain" "deprecated"',
+    'ToolDefinition::new "mission_tool_directory" "recommend" "lookup" "explain" "deprecated" "guide"',
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.v2Source),

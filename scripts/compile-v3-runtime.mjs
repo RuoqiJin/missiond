@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { runLispc } from './lib/ocaml_lispc.mjs';
+import { buildAgentSlices } from './lib/v3_agent_slices.mjs';
 import { runSemanticRules } from './lib/v3_semantic_rules.mjs';
 import { RUNTIME_DOMAIN_SPECS } from './lib/v3_runtime_domains.mjs';
 
@@ -166,20 +167,17 @@ function main() {
   if (semantic) {
     const semanticPath = path.join(outDir, 'compiled-semantic-ir.json');
     const semanticJson = JSON.parse(fs.readFileSync(semanticPath, 'utf8'));
-    const facts = semanticJson?.payload?.facts ?? [];
-    const slices = {
-      schema_version: 'missiond.compiled-agent-slices.v1',
-      source_hash: semanticJson.source_hash,
-      generated_at: null,
-      diagnostics: semanticJson.diagnostics ?? [],
-      payload: {
-        slice_policy: 'agents receive compact fact slices plus accepted shard metadata before full Lisp',
-        facts,
-      },
-    };
+    const behaviorNavigationJson = readJsonIfExists(path.join(OUT_DIR, 'compiled-behavior-navigation.json'));
+    const slices = buildAgentSlices({ semanticJson, behaviorNavigationJson });
     const slicePath = path.join(outDir, 'compiled-agent-slices.json');
     fs.writeFileSync(slicePath, `${JSON.stringify(slices, null, 2)}\n`);
-    results.push({ id: 'agent-slices', ok: true, path: slicePath, source_hash: semanticJson.source_hash });
+    results.push({
+      id: 'agent-slices',
+      ok: (slices.diagnostics ?? []).length === 0,
+      path: slicePath,
+      source_hash: semanticJson.source_hash,
+      diagnostics: slices.diagnostics ?? [],
+    });
   }
   const workflows = results.find((row) => row.id === 'workflows' && row.ok);
   if (workflows) {
@@ -230,6 +228,14 @@ function parseArgs(argv) {
 function fail(message) {
   console.error(message);
   process.exit(2);
+}
+
+function readJsonIfExists(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return null;
+  }
 }
 
 function normalizeSourceUnits(sourceUnits) {

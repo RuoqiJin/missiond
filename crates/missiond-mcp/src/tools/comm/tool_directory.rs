@@ -4,23 +4,35 @@ use serde_json::json;
 pub fn definitions() -> Vec<ToolDefinition> {
     vec![ToolDefinition::new(
         "mission_tool_directory",
-        "MissionD MCP tool directory and intent router. Use this first when unsure which MissionD tool family owns a task. Actions: list, recommend, lookup, explain, deprecated.",
+        "MissionD MCP tool directory and intent router. Use this first when unsure which MissionD tool family owns a task. Actions: list, recommend, lookup, explain, deprecated, guide.",
         json!({
             "type": "object",
             "required": ["action"],
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["list", "recommend", "lookup", "explain", "deprecated"],
-                    "description": "list=all primary families; recommend=map intent/query to a family; lookup=inspect a concrete tool; explain=family details; deprecated=compatibility/raw tools and their preferred family"
+                    "enum": ["list", "recommend", "lookup", "explain", "deprecated", "guide"],
+                    "description": "list=all primary families; recommend=map intent/query to a family; lookup=inspect a concrete tool; explain=family details; deprecated=compatibility/raw tools and their preferred family; guide=return an agent task-entry card for a modification intent"
                 },
                 "intent": {
                     "type": "string",
-                    "description": "[recommend] Natural-language objective or operator intent"
+                    "description": "[recommend|guide] Natural-language objective or operator intent"
                 },
                 "query": {
                     "type": "string",
-                    "description": "[recommend] Alias for intent"
+                    "description": "[recommend|guide] Alias for intent"
+                },
+                "entry_id": {
+                    "type": "string",
+                    "description": "[guide] Exact agent entry id such as modify-plan-execution"
+                },
+                "entryId": {
+                    "type": "string",
+                    "description": "[guide] camelCase alias for entry_id"
+                },
+                "surface": {
+                    "type": "string",
+                    "description": "[guide] Surface id such as mission_plan or autopilot-runtime"
                 },
                 "tool": {
                     "type": "string",

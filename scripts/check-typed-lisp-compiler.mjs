@@ -340,7 +340,7 @@ function main() {
       } else if (argv[0] === 'emit-semantic-ir') {
         const facts = emit.compiled?.payload?.facts ?? [];
         const factKinds = new Set(facts.map((fact) => fact.kind));
-        for (const kind of ['artifact_contract', 'surface', 'function', 'runtime_policy', 'checker_registry', 'module_source_unit']) {
+        for (const kind of ['artifact_contract', 'surface', 'function', 'runtime_policy', 'checker_registry', 'module_source_unit', 'agent_entry']) {
           if (!factKinds.has(kind)) {
             diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_SEMANTIC_IR_FACT_KIND_MISSING', `emit-semantic-ir must project ${kind} facts`));
           }
@@ -359,7 +359,7 @@ function main() {
         if (!Array.isArray(payload.surfaces) || payload.surfaces.length === 0 || !Array.isArray(payload.functions) || payload.functions.length === 0) {
           diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_CONTRACT_ABI_SURFACE_FUNCTIONS_MISSING', 'emit-contract-abi must project surfaces[] and functions[]'));
         }
-        for (const kind of ['artifact_contract', 'runtime_policy', 'checker_registry', 'module_source_unit']) {
+        for (const kind of ['artifact_contract', 'runtime_policy', 'checker_registry', 'module_source_unit', 'agent_entry']) {
           if (!factKinds.has(kind)) {
             diagnostics.push(diag('tools/missiond_lispc/bin/emit_json.ml', 'OCAML_CONTRACT_ABI_FACT_KIND_MISSING', `emit-contract-abi must project ${kind} facts`));
           }

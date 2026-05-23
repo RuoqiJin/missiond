@@ -221,7 +221,18 @@ impl SharedMemoryService {
         let task_id = string_arg(args, "taskId").or_else(|| string_arg(args, "task_id"));
         let accepted_shard_id =
             string_arg(args, "acceptedShardId").or_else(|| string_arg(args, "accepted_shard_id"));
+        let intent = string_arg(args, "intent").or_else(|| string_arg(args, "query"));
+        let entry_id = string_arg(args, "entryId").or_else(|| string_arg(args, "entry_id"));
+        let surface = string_arg(args, "surface");
         let compiled = self.read_compiled_json("compiled-semantic-ir.json").ok();
+        let agent_slices = if intent.is_some() || entry_id.is_some() || surface.is_some() {
+            self.read_compiled_json("compiled-agent-slices.json").ok()
+        } else {
+            None
+        };
+        let agent_entry = agent_slices
+            .as_ref()
+            .and_then(|compiled| select_agent_entry(compiled, entry_id, surface, intent));
         let facts = compiled
             .as_ref()
             .and_then(|value| value.pointer("/payload/facts"))
@@ -247,8 +258,10 @@ impl SharedMemoryService {
             "acceptedShardId": accepted_shard_id,
             "source": {
                 "semanticIr": compiled.as_ref().map(|v| v.pointer("/source_hash").cloned()).flatten(),
+                "agentSlices": agent_slices.as_ref().map(|v| v.pointer("/source_hash").cloned()).flatten(),
                 "artifactStore": "shared_artifacts"
             },
+            "agentEntry": agent_entry,
             "facts": facts,
             "artifacts": artifacts,
             "note": "Agents should read this slice before full Lisp. Use source_file/source_line in each fact for focused lookup."
@@ -1901,6 +1914,70 @@ fn normalize_path(path: &str) -> String {
     Path::new(path).to_string_lossy().to_string()
 }
 
+fn select_agent_entry(
+    compiled: &Value,
+    entry_id: Option<&str>,
+    surface: Option<&str>,
+    intent: Option<&str>,
+) -> Option<Value> {
+    let entries = compiled.pointer("/payload/entries")?.as_array()?;
+    if let Some(entry_id) = entry_id.filter(|value| !value.trim().is_empty()) {
+        if let Some(entry) = entries
+            .iter()
+            .find(|entry| entry.get("id").and_then(Value::as_str) == Some(entry_id))
+        {
+            return Some(entry.clone());
+        }
+    }
+    if let Some(surface) = surface.filter(|value| !value.trim().is_empty()) {
+        if let Some(entry) = entries.iter().find(|entry| {
+            entry
+                .get("surfaces")
+                .and_then(Value::as_array)
+                .is_some_and(|surfaces| surfaces.iter().any(|item| item.as_str() == Some(surface)))
+        }) {
+            return Some(entry.clone());
+        }
+    }
+    let normalized = intent.unwrap_or_default().to_lowercase();
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let score = score_agent_entry(entry, &normalized);
+            (score > 0).then_some((score, entry))
+        })
+        .max_by(|(left_score, left), (right_score, right)| {
+            left_score.cmp(right_score).then_with(|| {
+                right
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .cmp(left.get("id").and_then(Value::as_str).unwrap_or(""))
+            })
+        })
+        .map(|(_, entry)| entry.clone())
+}
+
+fn score_agent_entry(entry: &Value, normalized_intent: &str) -> i64 {
+    let mut score = 0;
+    if let Some(id) = entry.get("id").and_then(Value::as_str) {
+        if normalized_intent.contains(&id.to_lowercase()) {
+            score += 100;
+        }
+    }
+    for key in ["intentKeywords", "surfaces"] {
+        if let Some(values) = entry.get(key).and_then(Value::as_array) {
+            for value in values.iter().filter_map(Value::as_str) {
+                let normalized = value.to_lowercase();
+                if !normalized.is_empty() && normalized_intent.contains(&normalized) {
+                    score += 25 + normalized.len() as i64;
+                }
+            }
+        }
+    }
+    score
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1961,5 +2038,31 @@ mod tests {
         assert_eq!(infer_media_type("report.lisp"), "application/x-lisp");
         assert_eq!(infer_media_type("notes.md"), "text/markdown");
         assert_eq!(infer_media_type("screen.bin"), "application/octet-stream");
+    }
+
+    #[test]
+    fn context_slice_agent_entry_selects_by_intent() {
+        let compiled = json!({
+            "payload": {
+                "entries": [
+                    {
+                        "id": "modify-plan-execution",
+                        "intentKeywords": ["plan execution"],
+                        "surfaces": ["mission_plan"]
+                    },
+                    {
+                        "id": "modify-workstation-autopilot",
+                        "intentKeywords": ["autopilot"],
+                        "surfaces": ["autopilot-runtime"]
+                    }
+                ]
+            }
+        });
+        let entry = select_agent_entry(&compiled, None, None, Some("change plan execution"))
+            .expect("entry should match");
+        assert_eq!(
+            entry.get("id").and_then(Value::as_str),
+            Some("modify-plan-execution")
+        );
     }
 }

@@ -137,6 +137,9 @@ export function loadCompiledV3Contract({
   const semanticGates = normalizeTypedFacts(
     abiPayload?.semantic_gates ?? facts.filter((fact) => fact?.kind === 'semantic_gate'),
   );
+  const agentEntries = normalizeAgentEntries(
+    facts.filter((fact) => fact?.kind === 'agent_entry'),
+  );
   const contractSplits = normalizeContractSplits(
     facts.filter((fact) => fact?.kind === 'contract_split'),
   );
@@ -195,6 +198,7 @@ export function loadCompiledV3Contract({
     requestStateProjections,
     scannerPolicies,
     semanticGates,
+    agentEntries,
     contractSplits,
     controlPlaneDomains,
     workflowContracts,
@@ -304,6 +308,10 @@ export function compiledScannerPolicyMap(contract) {
 
 export function compiledSemanticGateMap(contract) {
   return compiledTypedFactMap(contract?.semanticGates);
+}
+
+export function compiledAgentEntryMap(contract) {
+  return compiledTypedFactMap(contract?.agentEntries);
 }
 
 function compiledTypedFactMap(rows) {
@@ -466,6 +474,28 @@ function normalizeTypedFacts(rows) {
       allowedContexts: stringArray(row?.allowed_contexts ?? row?.allowedContexts),
       requires: stringArray(row?.requires),
       checker: stringOrNull(row?.checker),
+      source: row?.source ?? null,
+    }))
+    .filter((row) => row.id);
+}
+
+function normalizeAgentEntries(rows) {
+  return arrayOrEmpty(rows)
+    .map((row) => ({
+      id: stringOrNull(row?.id),
+      label: stringOrNull(row?.label),
+      primaryFamily: stringOrNull(row?.primary_family ?? row?.primaryFamily),
+      intentKeywords: stringArray(row?.intent_keywords ?? row?.intentKeywords),
+      surfaces: stringArray(row?.surfaces),
+      functions: stringArray(row?.functions),
+      artifactContracts: stringArray(row?.artifact_contracts ?? row?.artifactContracts),
+      runtimePolicies: stringArray(row?.runtime_policies ?? row?.runtimePolicies),
+      behaviorKinds: stringArray(row?.behavior_kinds ?? row?.behaviorKinds),
+      checks: stringArray(row?.checks),
+      writeScope: stringArray(row?.write_scope ?? row?.writeScope),
+      mustNotTouch: stringArray(row?.must_not_touch ?? row?.mustNotTouch),
+      readFirstOverride: stringArray(row?.read_first_override ?? row?.readFirstOverride),
+      fallback: stringOrNull(row?.fallback),
       source: row?.source ?? null,
     }))
     .filter((row) => row.id);
@@ -679,6 +709,7 @@ function emptyContract({ ok, diagnostics, v3 }) {
     requestStateProjections: [],
     scannerPolicies: [],
     semanticGates: [],
+    agentEntries: [],
     contractSplits: [],
     controlPlaneDomains: [],
     workflowContracts: [],

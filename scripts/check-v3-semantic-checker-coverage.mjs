@@ -22,6 +22,7 @@ const REQUIRED_RUNTIME_POLICIES = [
 const REQUIRED_HELPER_ANCHORS = [
   'compiledRuntimePolicyMap',
   'compiledCheckerRegistryMap',
+  'compiledAgentEntryMap',
   'compiledContractSplitMap',
   'compiledControlPlaneDomainMap',
   'compiledProductionConsumerBoundaryMap',
@@ -62,6 +63,9 @@ function main() {
   if (!facts.semanticGates.has('final-convergence-semantic-facts')) {
     diagnostics.push(diag('.missiond/v3/missiond-blueprint.lisp', 'compiled semantic IR missing semantic_gate fact: final-convergence-semantic-facts'));
   }
+  if (!facts.agentEntries.has('modify-semantic-ir-ssot')) {
+    diagnostics.push(diag('.missiond/v3/shards/agent-navigation.lisp', 'compiled semantic IR missing agent_entry fact: modify-semantic-ir-ssot'));
+  }
   if (facts.sourceUnits.size < 2) {
     diagnostics.push(diag('.missiond/v3/missiond-blueprint.lisp', 'compiled source_units must include root plus compiler-active shards'));
   }
@@ -97,6 +101,7 @@ function main() {
     requestStateProjections: facts.requestStateProjections.size,
     scannerPolicies: facts.scannerPolicies.size,
     semanticGates: facts.semanticGates.size,
+    agentEntries: facts.agentEntries.size,
     contractSplits: facts.contractSplits.size,
     controlPlaneDomains: facts.controlPlaneDomains.size,
     sourceUnits: facts.sourceUnits.size,

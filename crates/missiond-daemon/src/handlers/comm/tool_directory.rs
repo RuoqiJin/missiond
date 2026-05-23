@@ -3,19 +3,25 @@
 //! This read-only surface gives agents a small set of primary tool families
 //! before they choose among the compatibility tools exposed by the MCP server.
 
+use std::fs;
+
 use anyhow::{anyhow, Result};
 use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::helpers::missiond_project_root;
 use crate::state::AppState;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Args {
     action: String,
     intent: Option<String>,
     query: Option<String>,
+    #[serde(default, alias = "entry_id")]
+    entry_id: Option<String>,
+    surface: Option<String>,
     tool: Option<String>,
     family: Option<String>,
     #[serde(default)]
@@ -35,6 +41,8 @@ struct ToolFamily {
     intent_examples: &'static [&'static str],
     keywords: &'static [&'static str],
 }
+
+const AGENT_SLICES_REL: &str = ".missiond/v3/runtime/compiled/compiled-agent-slices.json";
 
 const FAMILIES: &[ToolFamily] = &[
     ToolFamily {
@@ -364,8 +372,217 @@ pub(crate) async fn handle(_state: &AppState, _name: &str, args: Value) -> Resul
                 "limit": limit
             })))
         }
+        "guide" => Ok(ToolResult::json_pretty(&guide_tool_directory(&args))),
         other => Ok(ToolResult::error(format!("Unknown action: {other}"))),
     }
+}
+
+fn guide_tool_directory(args: &Args) -> Value {
+    guide_from_agent_slices(args, read_agent_slices())
+}
+
+fn guide_from_agent_slices(args: &Args, compiled: Result<Value>) -> Value {
+    let intent = args
+        .intent
+        .clone()
+        .or_else(|| args.query.clone())
+        .unwrap_or_default();
+    let compiled = match compiled {
+        Ok(value) => value,
+        Err(err) => {
+            return json!({
+                "schema": "missiond.tool-directory-guide.v1",
+                "ok": false,
+                "diagnostic": {
+                    "code": "AGENT_SLICES_UNAVAILABLE",
+                    "message": format!("cannot read {AGENT_SLICES_REL}: {err}"),
+                    "recovery": "Run node scripts/compile-v3-runtime.mjs --write, then retry mission_tool_directory(action=\"guide\")."
+                },
+                "intent": intent,
+                "fallbackRecommendations": recommend(&intent).iter().map(|family| render_family(*family, true)).collect::<Vec<_>>(),
+            });
+        }
+    };
+    let entries = compiled
+        .pointer("/payload/entries")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let matches = guide_matches(&entries, args, &intent);
+    let selected = matches.first().map(|(_, entry)| entry.clone());
+    let alternatives = matches
+        .iter()
+        .skip(1)
+        .take(2)
+        .map(|(score, entry)| render_guide_summary(entry, *score))
+        .collect::<Vec<_>>();
+    match selected {
+        Some(entry) => {
+            let primary_family_id = string_field(&entry, "primaryFamily")
+                .or_else(|| string_field(&entry, "primary_family"))
+                .unwrap_or("mission_tool_directory");
+            let read_first = entry.get("readFirst").cloned().unwrap_or_else(|| json!([]));
+            let write_scope = entry
+                .get("writeScope")
+                .cloned()
+                .unwrap_or_else(|| json!([]));
+            let must_not_touch = entry
+                .get("mustNotTouch")
+                .cloned()
+                .unwrap_or_else(|| json!([]));
+            let checks = entry.get("checks").cloned().unwrap_or_else(|| json!([]));
+            let authority_notes = entry
+                .get("authorityNotes")
+                .cloned()
+                .unwrap_or_else(|| json!([]));
+            let source_refs = entry
+                .get("sourceRefs")
+                .cloned()
+                .unwrap_or_else(|| json!([]));
+            json!({
+                "schema": "missiond.tool-directory-guide.v1",
+                "ok": true,
+                "intent": intent,
+                "entryId": args.entry_id.as_deref(),
+                "surface": args.surface.as_deref(),
+                "selectedEntry": entry.clone(),
+                "alternatives": alternatives,
+                "primaryFamily": find_family(primary_family_id).map(|family| render_family(family, true)),
+                "readFirst": read_first,
+                "writeScope": write_scope,
+                "mustNotTouch": must_not_touch,
+                "checks": checks,
+                "authorityNotes": authority_notes,
+                "sourceRefs": source_refs,
+                "source": {
+                    "agentSlices": AGENT_SLICES_REL,
+                    "sourceHash": compiled.get("source_hash").cloned().unwrap_or(Value::Null),
+                }
+            })
+        }
+        None => json!({
+            "schema": "missiond.tool-directory-guide.v1",
+            "ok": false,
+            "diagnostic": {
+                "code": "AGENT_ENTRY_NOT_FOUND",
+                "message": "No agent entry matched entry_id, surface, or intent.",
+                "recovery": "Call mission_tool_directory(action=\"guide\", entry_id=\"modify-semantic-ir-ssot\") for an exact card, or use action=\"recommend\" for family selection."
+            },
+            "intent": intent,
+            "entryId": args.entry_id.as_deref(),
+            "surface": args.surface.as_deref(),
+            "fallbackRecommendations": recommend(&intent).iter().map(|family| render_family(*family, true)).collect::<Vec<_>>(),
+        }),
+    }
+}
+
+fn read_agent_slices() -> Result<Value> {
+    let path = missiond_project_root().join(AGENT_SLICES_REL);
+    let text = fs::read_to_string(&path)?;
+    Ok(serde_json::from_str(&text)?)
+}
+
+fn guide_matches(entries: &[Value], args: &Args, intent: &str) -> Vec<(i64, Value)> {
+    if let Some(entry_id) = args
+        .entry_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        let exact = entries
+            .iter()
+            .filter(|entry| string_field(entry, "id") == Some(entry_id))
+            .cloned()
+            .map(|entry| (10_000, entry))
+            .collect::<Vec<_>>();
+        if !exact.is_empty() {
+            return exact;
+        }
+    }
+    if let Some(surface) = args
+        .surface
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        let surface_matches = entries
+            .iter()
+            .filter(|entry| array_contains(entry.get("surfaces"), surface))
+            .cloned()
+            .map(|entry| (5_000, entry))
+            .collect::<Vec<_>>();
+        if !surface_matches.is_empty() {
+            return surface_matches;
+        }
+    }
+    let normalized = intent.to_lowercase();
+    let mut scored = entries
+        .iter()
+        .filter_map(|entry| {
+            let score = score_entry(entry, &normalized);
+            (score > 0).then(|| (score, entry.clone()))
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by(|a, b| {
+        b.0.cmp(&a.0).then_with(|| {
+            string_field(&a.1, "id")
+                .unwrap_or("")
+                .cmp(string_field(&b.1, "id").unwrap_or(""))
+        })
+    });
+    scored.truncate(3);
+    scored
+}
+
+fn score_entry(entry: &Value, normalized_intent: &str) -> i64 {
+    let mut score = 0;
+    if let Some(id) = string_field(entry, "id") {
+        if normalized_intent.contains(&id.to_lowercase()) {
+            score += 100;
+        }
+    }
+    if let Some(label) = string_field(entry, "label") {
+        for token in label.to_lowercase().split(|ch: char| !ch.is_alphanumeric()) {
+            if token.len() >= 4 && normalized_intent.contains(token) {
+                score += 10;
+            }
+        }
+    }
+    for keyword in string_array(entry.get("intentKeywords")) {
+        let keyword = keyword.to_lowercase();
+        if normalized_intent.contains(&keyword) {
+            score += 25 + keyword.len() as i64;
+        }
+    }
+    for surface in string_array(entry.get("surfaces")) {
+        if normalized_intent.contains(&surface.to_lowercase()) {
+            score += 20;
+        }
+    }
+    score
+}
+
+fn render_guide_summary(entry: &Value, score: i64) -> Value {
+    json!({
+        "id": string_field(entry, "id"),
+        "label": string_field(entry, "label"),
+        "primaryFamily": string_field(entry, "primaryFamily"),
+        "surfaces": entry.get("surfaces").cloned().unwrap_or_else(|| json!([])),
+        "score": score,
+    })
+}
+
+fn string_field<'a>(entry: &'a Value, key: &str) -> Option<&'a str> {
+    entry.get(key).and_then(Value::as_str)
+}
+
+fn string_array(value: Option<&Value>) -> Vec<&str> {
+    value
+        .and_then(Value::as_array)
+        .map(|items| items.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default()
+}
+
+fn array_contains(value: Option<&Value>, needle: &str) -> bool {
+    string_array(value).iter().any(|item| *item == needle)
 }
 
 fn render_family(family: ToolFamily, include_compatibility: bool) -> Value {
@@ -441,5 +658,88 @@ mod tests {
     fn recommend_router_from_embedding_intent() {
         let matches = recommend("test qwen embedding and rerank through router");
         assert!(matches.iter().any(|family| family.id == "mission_router"));
+    }
+
+    #[test]
+    fn guide_by_exact_entry_id() {
+        let args = Args {
+            action: "guide".to_string(),
+            entry_id: Some("modify-plan-execution".to_string()),
+            ..Args::default()
+        };
+        let value = guide_from_agent_slices(&args, Ok(test_agent_slices()));
+        assert_eq!(
+            value.pointer("/selectedEntry/id").and_then(Value::as_str),
+            Some("modify-plan-execution")
+        );
+    }
+
+    #[test]
+    fn guide_by_intent_scores_plan_execution() {
+        let args = Args {
+            action: "guide".to_string(),
+            intent: Some("change plan execution".to_string()),
+            ..Args::default()
+        };
+        let value = guide_from_agent_slices(&args, Ok(test_agent_slices()));
+        assert_eq!(
+            value.pointer("/selectedEntry/id").and_then(Value::as_str),
+            Some("modify-plan-execution")
+        );
+    }
+
+    #[test]
+    fn guide_missing_agent_slices_returns_diagnostic() {
+        let args = Args {
+            action: "guide".to_string(),
+            intent: Some("change plan execution".to_string()),
+            ..Args::default()
+        };
+        let value = guide_from_agent_slices(&args, Err(anyhow!("missing compiled artifact")));
+        assert_eq!(
+            value.pointer("/diagnostic/code").and_then(Value::as_str),
+            Some("AGENT_SLICES_UNAVAILABLE")
+        );
+        assert!(value
+            .pointer("/fallbackRecommendations")
+            .and_then(Value::as_array)
+            .is_some_and(|items| !items.is_empty()));
+    }
+
+    fn test_agent_slices() -> Value {
+        json!({
+            "schema_version": "missiond.compiled-agent-slices.v1",
+            "source_hash": "test",
+            "payload": {
+                "entries": [
+                    {
+                        "id": "modify-plan-execution",
+                        "label": "Modify plan execution",
+                        "primaryFamily": "mission_workflow",
+                        "intentKeywords": ["plan execution", "execute plan"],
+                        "surfaces": ["mission_plan"],
+                        "readFirst": ["crates/missiond-daemon/src/handlers/knowledge/plan.rs"],
+                        "writeScope": ["crates/missiond-daemon/src/handlers/knowledge/plan/**"],
+                        "mustNotTouch": ["workstation provider spawning"],
+                        "checks": ["node scripts/check-v3-plan-execution-isomorphism.mjs"],
+                        "authorityNotes": ["Navigation only"],
+                        "sourceRefs": []
+                    },
+                    {
+                        "id": "modify-workstation-autopilot",
+                        "label": "Modify workstation autopilot",
+                        "primaryFamily": "mission_workstation",
+                        "intentKeywords": ["autopilot", "worker dispatch"],
+                        "surfaces": ["autopilot-runtime"],
+                        "readFirst": [],
+                        "writeScope": [],
+                        "mustNotTouch": [],
+                        "checks": [],
+                        "authorityNotes": [],
+                        "sourceRefs": []
+                    }
+                ]
+            }
+        })
     }
 }

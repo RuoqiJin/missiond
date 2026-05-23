@@ -66,6 +66,14 @@
       :materialization-rule "When approve_plan promotes request-local plan.lisp into a persisted Plan row, the request-local plan artifact MUST be amended with :plan_id + :version + :board_task_id so execute_plan can advance by reading plan.lisp alone; review events remain an append-only audit/fallback, not the primary ref carrier."
       :invariant "plan.intent preserves enough alignment data for trusted-agent audit")
 
+    (artifact work-order
+      :schema "missiond.work-order.v1"
+      :path ".missiond/work-orders/<work_order_id>/intent.lisp"
+      :ssot true
+      :writer missiond-work-order.start
+      :required [:work_order_id :objective :intent :plan_ref :accepted_shard_id :read_scope :write_scope :audit]
+      :invariant "External user, Board, Jarvis, Codex, and ClaudeCode code changes must be tied to a work-order before commit/merge/deploy gates accept code-like diffs.")
+
     (artifact workflow
       :schema "missiond.workflow.v1"
       :path ".missiond/workflows/<topic>.lisp"
@@ -89,6 +97,14 @@
       :required [:schema :wave :purpose :write-model :sequence]
       :entries [claim observation anchor shard-proposal conflict integration-plan]
       :invariant "multi-agent append-only context ledger: every writer owns only its entry id/seq; integration-plan is a later projection over accepted-shards and dispatch-groups, not a rewrite of prior observations")
+
+    (artifact task-result-artifact
+      :schema "missiond.task-result-artifact.v1"
+      :path "shared-memory://artifacts/task-result/<task_id>/<content_hash>"
+      :ssot true
+      :writer mission_shared_memory.task_result_put
+      :required [:task_id :project_id :summary :result_kind :content_hash :evidence_refs :created_at]
+      :invariant "Worker finals, Board notes, provider JSONL finals, and PTY snapshots are evidence/projections; client-visible task completion must read a canonical task-result-artifact.")
 
     (artifact final-report
       :schema "missiond.final-report.v1"
@@ -263,7 +279,7 @@
       :surface final_convergence
       :owner missiond-lispc
       :authority compiled-semantic-ir
-      :requires [surface function artifact_contract runtime_policy contract_split control_plane_domain source_domain checker_registry
+      :requires [surface function artifact_contract runtime_policy contract_split control_plane_domain source_domain checker_registry agent_entry
                  production_consumer_boundary request_state_projection scanner_policy semantic_gate]
       :must [verify_compiled_semantic_facts treat_text_needles_as_code_anchor_only]
       :forbidden [blueprint_needle_as_semantic_requirement]
@@ -275,7 +291,7 @@
     :root ".missiond/v3/missiond-blueprint.lisp"
     :status compiler-active
     :rule "The root blueprint remains the compiler entrypoint. Root uses include-shard-index to expand compiler-active shards from shards/index.lisp; shard files still cannot recursively include other shards."
-    :shards [request-runtime workstation-runtime control-plane-runtime memory-knowledge-runtime ops-infra v2-convergence-map pillar-flow-map
+    :shards [request-runtime workstation-runtime control-plane-runtime memory-knowledge-runtime agent-navigation ops-infra v2-convergence-map pillar-flow-map
              universe-service-runtime universe-infrastructure universe-data-residency universe-project-maturity universe-project-registry universe-behavior-closure
              implementation-request-surfaces implementation-execution-surfaces implementation-runtime-surfaces implementation-knowledge-surfaces implementation-ops-surfaces]
     (shard request-runtime
@@ -289,6 +305,9 @@
       :status compiler-active)
     (shard memory-knowledge-runtime
       :path "shards/memory-knowledge-runtime.lisp"
+      :status compiler-active)
+    (shard agent-navigation
+      :path "shards/agent-navigation.lisp"
       :status compiler-active)
     (shard ops-infra
       :path "shards/ops-infra.lisp"
@@ -341,6 +360,7 @@
     :checker "node scripts/check-v3-final-convergence.mjs"
     :required-live-checks [generated-v3-contracts-current
                            typed-lisp-runtime-compile
+                           agent-entry-slices
                            runtime-domain-projections
                            control-plane-m6-split
                            production-runtime-boundary]
@@ -393,6 +413,8 @@
       :argv ["scripts/project-v3-contracts.mjs" "--check" "--json"] :json true :timeout-ms 60000)
     (live-check typed-lisp-runtime-compile
       :argv ["scripts/compile-v3-runtime.mjs" "--check" "--json"] :json true :timeout-ms 60000)
+    (live-check agent-entry-slices
+      :argv ["scripts/check-v3-agent-entry-slices.mjs" "--json"] :json true :timeout-ms 60000)
     (live-check runtime-domain-projections
       :argv ["scripts/check-v3-runtime-domain-projections.mjs" "--json"] :json true :timeout-ms 60000)
     (live-check control-plane-m6-split
@@ -488,6 +510,7 @@
              "node scripts/check-v3-production-runtime-boundary.mjs"
              "node scripts/check-v3-runtime-domain-projections.mjs"
              "node scripts/check-v3-semantic-checker-coverage.mjs"
+             "node scripts/check-v3-agent-entry-slices.mjs"
              "node scripts/check-v3-runtime-artifact-catalog.mjs"
              "node scripts/check-v3-typed-sidecar-compression.mjs"
              "node scripts/check-v3-conversation-ingestion-isomorphism.mjs"

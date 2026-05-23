@@ -32,6 +32,13 @@
     :root-include "(include \"shards/memory-knowledge-runtime.lisp\")"
     :surfaces [memory-kb memory-provider-boundary skill-runtime conversation-ingestion capability-governance incident-governance evidence-governance-view])
 
+  (shard agent-navigation
+    :status compiler-active
+    :domain agent-navigation
+    :path "shards/agent-navigation.lisp"
+    :root-include "(include \"shards/agent-navigation.lisp\")"
+    :surfaces [agent-entry-index semantic-ir-compiler mission_tool_directory mission_context_slice])
+
   (shard ops-infra
     :status compiler-active
     :domain ops-infra
