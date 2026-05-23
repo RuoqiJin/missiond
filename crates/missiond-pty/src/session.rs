@@ -56,8 +56,8 @@ use semantic_terminal::{
 };
 
 use crate::pty_recognition::{
-    recognize_screen, CodexCliStateParser, GeminiCliUpstreamStateParser, PtyCanonicalState,
-    PtyRecognitionSnapshot,
+    recognize_screen, AgyCliStateParser, CodexCliStateParser, GeminiCliUpstreamStateParser,
+    PtyCanonicalState, PtyRecognitionSnapshot,
 };
 
 // ========== Types ==========
@@ -1050,7 +1050,7 @@ impl PTYSession {
             )),
             CliEngine::Gemini => Box::new(GeminiCliUpstreamStateParser::new()),
             CliEngine::Codex => Box::new(CodexCliStateParser::new()),
-            CliEngine::Agy => Box::new(GeminiCliUpstreamStateParser::new()),
+            CliEngine::Agy => Box::new(AgyCliStateParser::new()),
         };
         let confirm_parser: Option<Box<dyn ConfirmParser + Send + Sync>> = match engine {
             CliEngine::ClaudeCode => Some(Box::new(ClaudeCodeConfirmParser::with_patterns(

@@ -65,12 +65,14 @@ function main() {
       'CliEngine::Agy',
       '"agy chat"',
       'Agy CLI command assembled',
-      'GeminiCliUpstreamStateParser::new()',
+      'AgyCliStateParser::new()',
     ]);
     requireAll(diagnostics, FILES.recognition, sources.recognition, [
       'CliEngine::Agy => recognize_agy(lines)',
+      'pub struct AgyCliStateParser',
       'fn recognize_agy',
       'agy_idle_screen_is_idle',
+      'agy_feedback_prompt_after_answer_is_complete',
       'agy_auth_or_quota_error_is_blocked',
     ]);
     requireAll(diagnostics, FILES.genericCli, sources.genericCli, [

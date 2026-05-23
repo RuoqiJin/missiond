@@ -63,8 +63,8 @@
       :schema "missiond.agent-cli-regression-policy.v1"
       :checker "node scripts/check-v3-agent-cli-regression.mjs"
       :providers [claude-code codex agy gemini-legacy]
-      :states [idle running tool-running approval-blocked auth-unavailable billing-unavailable quota-unavailable complete]
-      :rule "Every provider lane must have command construction, PTY recognition, slot visibility, durable conversation source mapping, task-result-artifact completion, and regression fixtures before it can be promoted beyond read-only research.")
+      :states [idle running tool-running approval-blocked auth-unavailable billing-unavailable quota-unavailable complete post-answer-feedback-complete]
+      :rule "Every provider lane must have command construction, provider-specific PTY recognition, slot visibility, durable conversation source mapping, task-result-artifact completion, and regression fixtures before it can be promoted beyond read-only research. Post-answer feedback prompts (for example Agy CLI experience survey screens) are terminal UI affordances and must not keep a BoardTask running after a structured final answer.")
     (startup-slot arch_maintenance
       :engine claude-code
       :lifecycle persistent

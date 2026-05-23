@@ -476,6 +476,19 @@ fn recognize_agy(lines: &[String]) -> PtyRecognitionSnapshot {
         .with_source("provider_error_signature");
     }
 
+    if lower.contains("how's the cli experience so far")
+        || lower.contains("help us improve:")
+        || lower.contains("[1] good  [2] fine  [3] bad  [0] skip")
+    {
+        return PtyRecognitionSnapshot::new(
+            CliEngine::Agy,
+            PtyCanonicalState::Complete,
+            0.9,
+            "agy:feedback_prompt_after_complete",
+        )
+        .with_elapsed(elapsed);
+    }
+
     if lower.contains("approval request")
         || lower.contains("allow command")
         || lower.contains("requires approval")
@@ -756,6 +769,34 @@ impl StateParser for GeminiCliUpstreamStateParser {
     }
 }
 
+pub struct AgyCliStateParser {
+    meta: ParserMeta,
+}
+
+impl AgyCliStateParser {
+    pub fn new() -> Self {
+        Self {
+            meta: ParserMeta {
+                name: "agy-cli".to_string(),
+                description: "Antigravity CLI PTY parser derived from its interactive TUI surfaces"
+                    .to_string(),
+                priority: 20,
+                version: "1.0.0".to_string(),
+            },
+        }
+    }
+}
+
+impl StateParser for AgyCliStateParser {
+    fn meta(&self) -> &ParserMeta {
+        &self.meta
+    }
+
+    fn detect_state(&self, context: &ParserContext) -> Option<StateDetectionResult> {
+        snapshot_to_detection(recognize_agy(&context.last_lines))
+    }
+}
+
 fn snapshot_to_detection(snapshot: PtyRecognitionSnapshot) -> Option<StateDetectionResult> {
     let state = match snapshot.state {
         PtyCanonicalState::Idle | PtyCanonicalState::Complete => State::Idle,
@@ -994,6 +1035,20 @@ mod tests {
         ]));
         assert_eq!(result.state, PtyCanonicalState::Idle);
         assert_eq!(result.reason, "agy:composer_idle");
+    }
+
+    #[test]
+    fn agy_feedback_prompt_after_answer_is_complete() {
+        let result = recognize_agy(&lines(&[
+            "## Findings",
+            "- Agy read-only lane completed the requested review.",
+            "",
+            "How's the CLI experience so far? Help us improve:",
+            "[1] Good  [2] Fine  [3] Bad  [0] Skip",
+            "esc to cancel                                                                                    Gemini 3.5 Flash (High)",
+        ]));
+        assert_eq!(result.state, PtyCanonicalState::Complete);
+        assert_eq!(result.reason, "agy:feedback_prompt_after_complete");
     }
 
     #[test]
