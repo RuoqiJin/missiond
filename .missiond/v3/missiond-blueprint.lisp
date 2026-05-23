@@ -177,7 +177,9 @@
                    "compiled-genomes.json"]
     :generated-abi ["crates/missiond-daemon/src/context/v3_contracts/generated.rs"
                     "scripts/generated/v3_contracts.mjs"
-                    "scripts/generated/v3_contracts.d.ts"]
+                    "scripts/generated/v3_contracts.d.ts"
+                    "crates/missiond-daemon/src/context/v3_runtime_defaults/generated.rs"
+                    "scripts/generated/v3_runtime_defaults.mjs"]
     :contract-commands [emit-contract-abi emit-plan-contract check-plan-contract]
     :envelope-fields [:schema_version :source_hash :generated_at :diagnostics :payload]
     :payload-fields [:source_units :surfaces :functions :artifact_contracts :runtime_policies :checker_registry :plan_contract]
@@ -216,7 +218,9 @@
     :root ".missiond/v3/missiond-blueprint.lisp"
     :status compiler-active
     :rule "The root blueprint remains the compiler entrypoint. All compiler-active shards are flat direct includes from root; shards/index.lisp is a review manifest, not a recursive include source."
-    :shards [request-runtime workstation-runtime control-plane-runtime project-universe memory-knowledge-runtime ops-infra v2-convergence-map pillar-flow-map implementation-map]
+    :shards [request-runtime workstation-runtime control-plane-runtime memory-knowledge-runtime ops-infra v2-convergence-map pillar-flow-map
+             universe-service-runtime universe-infrastructure universe-data-residency universe-project-maturity universe-project-registry
+             implementation-request-surfaces implementation-execution-surfaces implementation-runtime-surfaces implementation-knowledge-surfaces implementation-ops-surfaces]
     (shard request-runtime
       :path "shards/request-runtime.lisp"
       :status compiler-active)
@@ -225,9 +229,6 @@
       :status compiler-active)
     (shard control-plane-runtime
       :path "shards/control-plane-runtime.lisp"
-      :status compiler-active)
-    (shard project-universe
-      :path "shards/project-universe.lisp"
       :status compiler-active)
     (shard memory-knowledge-runtime
       :path "shards/memory-knowledge-runtime.lisp"
@@ -241,8 +242,35 @@
     (shard pillar-flow-map
       :path "shards/pillar-flow-map.lisp"
       :status compiler-active)
-    (shard implementation-map
-      :path "shards/implementation-map.lisp"
+    (shard universe-service-runtime
+      :path "shards/universe/service-runtime.lisp"
+      :status compiler-active)
+    (shard universe-infrastructure
+      :path "shards/universe/infrastructure.lisp"
+      :status compiler-active)
+    (shard universe-data-residency
+      :path "shards/universe/data-residency.lisp"
+      :status compiler-active)
+    (shard universe-project-maturity
+      :path "shards/universe/project-maturity.lisp"
+      :status compiler-active)
+    (shard universe-project-registry
+      :path "shards/universe/project-registry.lisp"
+      :status compiler-active)
+    (shard implementation-request-surfaces
+      :path "shards/implementation/request-surfaces.lisp"
+      :status compiler-active)
+    (shard implementation-execution-surfaces
+      :path "shards/implementation/execution-surfaces.lisp"
+      :status compiler-active)
+    (shard implementation-runtime-surfaces
+      :path "shards/implementation/runtime-surfaces.lisp"
+      :status compiler-active)
+    (shard implementation-knowledge-surfaces
+      :path "shards/implementation/knowledge-surfaces.lisp"
+      :status compiler-active)
+    (shard implementation-ops-surfaces
+      :path "shards/implementation/ops-surfaces.lisp"
       :status compiler-active))
 
   (include "shards/request-runtime.lisp")
@@ -250,8 +278,6 @@
   (include "shards/workstation-runtime.lisp")
 
   (include "shards/control-plane-runtime.lisp")
-
-  (include "shards/project-universe.lisp")
 
   (include "shards/memory-knowledge-runtime.lisp")
 
@@ -261,7 +287,139 @@
 
   (include "shards/pillar-flow-map.lisp")
 
-  (include "shards/implementation-map.lisp")
+  (include "shards/universe/service-runtime.lisp")
+
+  (include "shards/universe/infrastructure.lisp")
+
+  (include "shards/universe/data-residency.lisp")
+
+  (include "shards/universe/project-maturity.lisp")
+
+  (include "shards/universe/project-registry.lisp")
+
+  (include "shards/implementation/request-surfaces.lisp")
+
+  (include "shards/implementation/execution-surfaces.lisp")
+
+  (include "shards/implementation/runtime-surfaces.lisp")
+
+  (include "shards/implementation/knowledge-surfaces.lisp")
+
+  (include "shards/implementation/ops-surfaces.lisp")
+
+  (final-convergence-gate
+    :schema "missiond.final-convergence-gate.v1"
+    :id "v3-final-convergence"
+    :checker "node scripts/check-v3-final-convergence.mjs"
+    :required-split-files ["crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs"
+                           "crates/missiond-daemon/src/handlers/knowledge/plan/approval_review.rs"
+                           "crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime.rs"
+                           "crates/missiond-daemon/src/handlers/knowledge/plan/task_runner_dry_run.rs"
+                           "crates/missiond-daemon/src/handlers/knowledge/plan/task_contract.rs"
+                           "crates/missiond-daemon/src/handlers/knowledge/plan_dag/runtime.rs"
+                           "crates/missiond-daemon/src/handlers/knowledge/plan_dag/claim_lease.rs"
+                           "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_surface.rs"
+                           "crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_lease.rs"
+                           "crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_audit.rs"
+                           "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/descriptor.rs"
+                           "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/brief.rs"
+                           "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/decision.rs"
+                           "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/outcome.rs"
+                           "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/runner.rs"
+                           "crates/missiond-daemon/src/handlers/knowledge/file_artifacts/commit.rs"
+                           "crates/missiond-core/src/db/artifact_commit.rs"
+                           "crates/missiond-core/src/db/pg/artifact_commit.rs"
+                           "crates/missiond-core/migrations/20260523001000_artifact_commit_outbox.sql"]
+    (live-check lisp-blueprint-compression
+      :argv ["scripts/check-lisp-blueprint-compression.mjs"] :timeout-ms 60000)
+    (live-check architecture-lisp
+      :argv ["scripts/check-architecture-lisp.mjs" "--no-structure" ".missiond/v3/missiond-blueprint.lisp"] :timeout-ms 60000)
+    (live-check v3-code-isomorphism-complete
+      :argv ["scripts/check-v3-code-isomorphism-complete.mjs" "--json"] :json true :timeout-ms 120000)
+    (live-check v2-public-coverage
+      :argv ["scripts/check-v3-v2-coverage.mjs" "--json"] :json true :timeout-ms 60000)
+    (live-check task-contract-all
+      :argv ["scripts/check-task-contract.mjs" "--all"] :timeout-ms 120000)
+    (live-check missiond-blue-green-deploy
+      :argv ["scripts/check-missiond-blue-green-deploy.mjs" "--json"] :json true :timeout-ms 60000)
+    (live-check missiond-rustfmt-convergence
+      :command "bash" :argv ["scripts/rustfmt-missiond.sh" "--check"] :timeout-ms 120000)
+    (live-check project-ssot-universe
+      :argv ["scripts/check-project-ssot-universe.mjs" "--json"] :json true :timeout-ms 60000)
+    (live-check infrastructure-universe
+      :argv ["scripts/check-v3-infrastructure-universe-isomorphism.mjs" "--json"] :json true :timeout-ms 60000)
+    (live-check data-residency-universe
+      :argv ["scripts/check-v3-data-residency-universe-isomorphism.mjs" "--json"] :json true :timeout-ms 60000)
+    (live-check project-maturity
+      :argv ["scripts/check-project-maturity.mjs" "--min-level" "M5"] :timeout-ms 60000)
+    (live-check auth-m6-depth
+      :argv ["scripts/check-project-maturity.mjs" "--min-level" "M6" "--project" "auth" "--json"] :json true :timeout-ms 60000)
+    (live-check typed-lisp-runtime-compile
+      :argv ["scripts/compile-v3-runtime.mjs" "--check" "--json"] :json true :timeout-ms 60000)
+    (live-check production-runtime-boundary
+      :argv ["scripts/check-v3-production-runtime-boundary.mjs" "--json"] :json true :timeout-ms 60000)
+    (live-check semantic-checker-coverage
+      :argv ["scripts/check-v3-semantic-checker-coverage.mjs" "--json"] :json true :timeout-ms 60000)
+    (live-check runtime-artifact-catalog
+      :argv ["scripts/check-v3-runtime-artifact-catalog.mjs" "--json"] :json true :timeout-ms 60000)
+    (live-check typed-sidecar-compression
+      :argv ["scripts/check-v3-typed-sidecar-compression.mjs" "--json"] :json true :timeout-ms 60000)
+    (runtime-check cargo-test-workspace
+      :command "cargo" :argv ["test" "--workspace"] :timeout-ms 900000)
+    (runtime-check board-build
+      :command "pnpm" :argv ["--dir" "packages/board" "build"] :timeout-ms 300000)
+    (runtime-check git-diff-check
+      :command "git" :argv ["diff" "--check"] :timeout-ms 60000)
+    (blueprint-needle v2-convergence-map :needle "(v2-convergence-map")
+    (blueprint-needle public-surface-map :needle "(public-surface-map")
+    (blueprint-needle pillar-flow-map :needle "(pillar-flow-map")
+    (blueprint-needle implementation-map :needle "(implementation-map")
+    (blueprint-needle workstation-config :needle "(workstation-config")
+    (blueprint-needle control-plane-m6-split :needle "(control-plane-m6-split")
+    (blueprint-needle control-plane-split-checker :needle "check-v3-control-plane-m6-split.mjs")
+    (blueprint-needle data-residency-universe :needle "(data-residency-universe")
+    (blueprint-needle data-residency-checker :needle "check-v3-data-residency-universe-isomorphism.mjs")
+    (blueprint-needle lisp-code-sync-loop :needle "(lisp-code-sync-loop")
+    (blueprint-needle lisp-code-sync-checker :needle "check-v3-lisp-code-sync-isomorphism.mjs")
+    (blueprint-needle context-pack-run-wave :needle "context-pack-run-wave")
+    (blueprint-needle context-pack-dispatch-policy :needle "dispatch-policy context-pack-run-wave")
+    (blueprint-needle swarm-run-resolves-project-root :needle "mission_swarm_run MUST resolve project_id to a registered project_root")
+    (blueprint-needle autopilot-overrides-cwd :needle "Autopilot ensure_pty MUST override pty_slot.cwd")
+    (blueprint-needle durable-conversation-taskid :needle "bind conversations.task_id to the active BoardTask via a bounded retry helper")
+    (blueprint-needle taskid-query-survives-slot-reuse :needle "message-anchored BoardTask id fallback")
+    (blueprint-needle runtime-v3-paths :needle ".missiond/v3/runtime/")
+    (blueprint-needle v2-historical-status :needle ":v2 \"Kept as historical")
+    (blueprint-needle entry-shape :needle ":entry [")
+    (blueprint-needle core-shape :needle ":core (")
+    (blueprint-needle egress-shape :needle ":egress [")
+    (blueprint-needle artifact-commit-outbox :needle "artifact_commit_outbox recovery")
+    (facade-budget mission_plan-facade
+      :file "crates/missiond-daemon/src/handlers/knowledge/plan.rs" :max-lines 800)
+    (facade-budget mission_execution-facade
+      :file "crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs" :max-lines 350)
+    (facade-budget workstation_dispatch-facade
+      :file "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch.rs" :max-lines 400)
+    (runtime-file workstation-runtime-loader
+      :file "scripts/lib/v3_workstation_runtime.mjs"
+      :needles ["DEFAULT_WORKSTATION_RUNTIME_CONFIG" "contextPackDispatchPolicy"
+                "V3_BLUEPRINT_CONFIG_ERROR" "source_units"
+                "MISSIOND_V3_ALLOW_SOURCE_FALLBACK" "compiled runtime config is required"])
+    (runtime-file artifact-commit-outbox-helper
+      :file "crates/missiond-daemon/src/handlers/knowledge/file_artifacts/commit.rs"
+      :needles ["ArtifactCommitEnvelope" "operation_key" "artifact_commit_outbox_mark_complete"
+                "recover_artifact_commit_outbox" "artifact sha mismatch"])
+    (runtime-file context-pack-run-wave
+      :file "scripts/context-pack-run-wave.mjs"
+      :needles ["loadWorkstationRuntimeConfigForRepo" "contextPackMaxParallel" "ensureWaveLedgers" "--apply"])
+    (runtime-file context-pack-materialize-wave
+      :file "scripts/context-pack-materialize-wave.mjs"
+      :needles ["context-pack-run-wave.mjs" "loadWorkstationRuntimeConfigForRepo" "model_profile" "timeout_secs"])
+    (runtime-file task-runner-dispatch
+      :file "scripts/task-runner-dispatch.mjs"
+      :needles ["loadWorkstationRuntimeConfigForRepo" "model_profile" "timeout_secs"])
+    (runtime-file task-runner-submit-dispatch
+      :file "scripts/task-runner-submit-dispatch.mjs"
+      :needles ["runDispatch" "runtime_projection" "model_profile" "timeout_secs"]))
 
   (compression-contract
     :v1 "Organized by .missiond/v1/manifest.lisp; root files remain compatibility paths."

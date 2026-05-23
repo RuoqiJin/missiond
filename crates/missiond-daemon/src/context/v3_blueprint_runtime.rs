@@ -7,6 +7,7 @@ use md5::{Digest, Md5};
 use serde::Deserialize;
 
 use crate::context::v3_contracts::generated as v3_contracts;
+use crate::context::v3_runtime_defaults;
 
 // Embedded defaults are the test/no-install fallback. Runtime authority is the
 // current compiled V3 projection; source Lisp fallback is explicit only.
@@ -632,25 +633,24 @@ struct CompiledRuntimeConfigPayload {
     learning_engine: LearningEngineRuntimeConfig,
 }
 
+fn generated_default_runtime_config() -> CompiledRuntimeConfigPayload {
+    serde_json::from_str(v3_runtime_defaults::generated::DEFAULT_RUNTIME_CONFIG_JSON)
+        .expect("generated V3 runtime defaults must deserialize")
+}
+
 impl Default for TimeoutPolicy {
     fn default() -> Self {
-        Self {
-            default_secs: DEFAULT_TIMEOUT_SECS,
-            min_secs: MIN_TIMEOUT_SECS,
-            max_secs: MAX_TIMEOUT_SECS,
-            watchdog_grace_secs: WATCHDOG_GRACE_SECS,
-            missing_session_probe_secs: MISSING_SESSION_PROBE_SECS,
-        }
+        generated_default_runtime_config()
+            .workstation
+            .timeout_policy
     }
 }
 
 impl Default for SimpleTimeoutPolicy {
     fn default() -> Self {
-        Self {
-            default_secs: DEFAULT_CC_SWARM_TIMEOUT_SECS,
-            min_secs: MIN_CC_SWARM_TIMEOUT_SECS,
-            max_secs: MAX_CC_SWARM_TIMEOUT_SECS,
-        }
+        generated_default_runtime_config()
+            .workstation
+            .cc_swarm_timeout_policy
     }
 }
 
@@ -674,26 +674,17 @@ impl SimpleTimeoutPolicy {
 
 impl Default for SlotTtlPolicy {
     fn default() -> Self {
-        Self {
-            default_secs: DEFAULT_SLOT_TTL_SECS,
-            min_secs: MIN_SLOT_TTL_SECS,
-            max_secs: MAX_SLOT_TTL_SECS,
-            default_extend_secs: DEFAULT_SLOT_EXTEND_SECS,
-            max_extend_secs: MAX_SLOT_EXTEND_SECS,
-        }
+        generated_default_runtime_config()
+            .workstation
+            .slot_ttl_policy
     }
 }
 
 impl Default for SwarmCapacityPolicy {
     fn default() -> Self {
-        Self {
-            default_claude_workers: 8,
-            max_claude_workers: 16,
-            default_gemini_workers: 2,
-            max_gemini_workers: 6,
-            dynamic_slot_limit: 20,
-            delegate_rate_per_minute: 24,
-        }
+        generated_default_runtime_config()
+            .workstation
+            .swarm_capacity_policy
     }
 }
 
@@ -737,489 +728,73 @@ fn default_slot_templates() -> HashMap<String, SlotTemplateRuntimeConfig> {
 
 impl Default for WorkstationRuntimeConfig {
     fn default() -> Self {
-        let slot_templates = default_slot_templates();
-        let slot_default_profiles = slot_templates
-            .iter()
-            .filter_map(|(name, template)| {
-                template
-                    .default_model_profile
-                    .as_ref()
-                    .map(|profile| (name.clone(), profile.clone()))
-            })
-            .collect();
-        let mut model_profile_spawn_args = HashMap::new();
-        model_profile_spawn_args.insert(DEFAULT_MODEL_PROFILE.to_string(), None);
-        model_profile_spawn_args.insert(DEFAULT_RESEARCH_PROFILE.to_string(), None);
-        model_profile_spawn_args.insert(
-            DEFAULT_DAILY_SONNET_PROFILE.to_string(),
-            Some("sonnet".to_string()),
-        );
-        model_profile_spawn_args.insert(
-            DEFAULT_QUICK_HAIKU_PROFILE.to_string(),
-            Some("haiku".to_string()),
-        );
-        model_profile_spawn_args.insert(
-            DEFAULT_CODEX_MASTER_PROFILE.to_string(),
-            Some("gpt-5.5".to_string()),
-        );
-        model_profile_spawn_args.insert(
-            DEFAULT_GEMINI_ULTRA_PRO_PROFILE.to_string(),
-            Some("gemini-3.1-pro-preview".to_string()),
-        );
-        let startup_slots = vec![
-            StartupSlotRuntimeConfig {
-                task_type: "arch_maintenance".to_string(),
-                engine: "claude-code".to_string(),
-                lifecycle: "persistent".to_string(),
-                slot_id: Some("slot-arch-maint".to_string()),
-                role: Some("arch-maint".to_string()),
-                model_profile: Some(DEFAULT_MODEL_PROFILE.to_string()),
-                timeout_secs: 600,
-                skip_permissions: true,
-            },
-            StartupSlotRuntimeConfig {
-                task_type: "strategy_analyst".to_string(),
-                engine: "gemini".to_string(),
-                lifecycle: "persistent".to_string(),
-                slot_id: Some("slot-gemini-strategy".to_string()),
-                role: Some("strategy".to_string()),
-                model_profile: None,
-                timeout_secs: 600,
-                skip_permissions: true,
-            },
-            StartupSlotRuntimeConfig {
-                task_type: "gemini_router".to_string(),
-                engine: "gemini".to_string(),
-                lifecycle: "persistent".to_string(),
-                slot_id: Some("slot-gemini-router".to_string()),
-                role: Some("gemini-router".to_string()),
-                model_profile: None,
-                timeout_secs: 120,
-                skip_permissions: true,
-            },
-            StartupSlotRuntimeConfig {
-                task_type: "lisp_survey".to_string(),
-                engine: "claude-code".to_string(),
-                lifecycle: "persistent".to_string(),
-                slot_id: Some("lisp-surveyor".to_string()),
-                role: Some("coder".to_string()),
-                model_profile: Some(DEFAULT_MODEL_PROFILE.to_string()),
-                timeout_secs: 900,
-                skip_permissions: true,
-            },
-        ];
-        let workstation_pool = vec![
-            WorkstationPoolRuntimeConfig {
-                id: "claude-code-default".to_string(),
-                engine: "claude-code".to_string(),
-                role: "coder".to_string(),
-                slot_id: "slot-claude-code-default".to_string(),
-                task_type: "claude_code_default".to_string(),
-                model_profile: Some(DEFAULT_MODEL_PROFILE.to_string()),
-                model: None,
-                task_classes: vec![
-                    "code".to_string(),
-                    "implementation".to_string(),
-                    "review".to_string(),
-                    "context-pack".to_string(),
-                    "ops".to_string(),
-                ],
-                capabilities: vec![
-                    "code-read".to_string(),
-                    "code-write".to_string(),
-                    "scoped-commit".to_string(),
-                    "mcp".to_string(),
-                ],
-                max_concurrency: 1,
-                timeout_secs: 1800,
-                default_use: "code-implementation".to_string(),
-                accepts_boardtask: true,
-                write_allowed: true,
-                reasoning_effort: None,
-                search_enabled: false,
-                sandbox: None,
-                approval_policy: None,
-                tool_policy_path: None,
-            },
-            WorkstationPoolRuntimeConfig {
-                id: "claude-code-deploy-ops".to_string(),
-                engine: "claude-code".to_string(),
-                role: "deploy-ops".to_string(),
-                slot_id: "slot-claude-code-deploy-ops".to_string(),
-                task_type: "claude_code_deploy_ops".to_string(),
-                model_profile: Some(DEFAULT_MODEL_PROFILE.to_string()),
-                model: None,
-                task_classes: vec![
-                    "deploy-ops".to_string(),
-                    "deployment".to_string(),
-                    "ops".to_string(),
-                    "incident-response".to_string(),
-                ],
-                capabilities: vec![
-                    "deploy-read".to_string(),
-                    "deploy-observe".to_string(),
-                    "deploy-center-query".to_string(),
-                    "rollback-plan".to_string(),
-                    "mcp".to_string(),
-                ],
-                max_concurrency: 1,
-                timeout_secs: 2400,
-                default_use: "deployment-operations".to_string(),
-                accepts_boardtask: true,
-                write_allowed: false,
-                reasoning_effort: None,
-                search_enabled: false,
-                sandbox: None,
-                approval_policy: None,
-                tool_policy_path: None,
-            },
-            WorkstationPoolRuntimeConfig {
-                id: "gemini-ultra-pro".to_string(),
-                engine: "gemini".to_string(),
-                role: "researcher".to_string(),
-                slot_id: "slot-gemini-ultra".to_string(),
-                task_type: "gemini_ultra".to_string(),
-                model_profile: Some(DEFAULT_GEMINI_ULTRA_PRO_PROFILE.to_string()),
-                model: None,
-                task_classes: vec![
-                    "research".to_string(),
-                    "review".to_string(),
-                    "context-pack".to_string(),
-                    "lisp-compression".to_string(),
-                    "general".to_string(),
-                ],
-                capabilities: vec![
-                    "read-only".to_string(),
-                    "analysis".to_string(),
-                    "design-review".to_string(),
-                ],
-                max_concurrency: 1,
-                timeout_secs: 900,
-                default_use: "research-review".to_string(),
-                accepts_boardtask: true,
-                write_allowed: false,
-                reasoning_effort: None,
-                search_enabled: false,
-                sandbox: None,
-                approval_policy: Some("plan".to_string()),
-                tool_policy_path: Some(
-                    ".missiond/v3/policies/gemini-readonly-policy.toml".to_string(),
-                ),
-            },
-            WorkstationPoolRuntimeConfig {
-                id: "claude-code-fast-patch".to_string(),
-                engine: "claude-code".to_string(),
-                role: "patcher".to_string(),
-                slot_id: "slot-claude-code-fast-patch".to_string(),
-                task_type: "claude_code_fast_patch".to_string(),
-                model_profile: Some(DEFAULT_DAILY_SONNET_PROFILE.to_string()),
-                model: None,
-                task_classes: vec![
-                    "patch".to_string(),
-                    "test".to_string(),
-                    "chore".to_string(),
-                    "low-risk-fast-path".to_string(),
-                ],
-                capabilities: vec![
-                    "code-read".to_string(),
-                    "code-write".to_string(),
-                    "scoped-commit".to_string(),
-                    "narrow-patch".to_string(),
-                    "mcp".to_string(),
-                ],
-                max_concurrency: 1,
-                timeout_secs: 900,
-                default_use: "narrow-patch".to_string(),
-                accepts_boardtask: true,
-                write_allowed: true,
-                reasoning_effort: None,
-                search_enabled: false,
-                sandbox: None,
-                approval_policy: None,
-                tool_policy_path: None,
-            },
-            WorkstationPoolRuntimeConfig {
-                id: "gemini-fast-survey".to_string(),
-                engine: "gemini".to_string(),
-                role: "survey".to_string(),
-                slot_id: "slot-gemini-fast-survey".to_string(),
-                task_type: "gemini_fast_survey".to_string(),
-                model_profile: None,
-                model: Some("gemini-2.5-flash".to_string()),
-                task_classes: vec![
-                    "survey".to_string(),
-                    "summary".to_string(),
-                    "mechanical-scan".to_string(),
-                ],
-                capabilities: vec!["read-only".to_string(), "summary".to_string()],
-                max_concurrency: 1,
-                timeout_secs: 600,
-                default_use: "low-authority-survey".to_string(),
-                accepts_boardtask: true,
-                write_allowed: false,
-                reasoning_effort: None,
-                search_enabled: false,
-                sandbox: None,
-                approval_policy: Some("plan".to_string()),
-                tool_policy_path: Some(
-                    ".missiond/v3/policies/gemini-readonly-policy.toml".to_string(),
-                ),
-            },
-            WorkstationPoolRuntimeConfig {
-                id: "codex-master-control".to_string(),
-                engine: "codex".to_string(),
-                role: "orchestrator".to_string(),
-                slot_id: "slot-codex-master-control".to_string(),
-                task_type: "codex_master_control".to_string(),
-                model_profile: Some(DEFAULT_CODEX_MASTER_PROFILE.to_string()),
-                model: None,
-                task_classes: vec![
-                    "master-control".to_string(),
-                    "orchestration".to_string(),
-                    "governance".to_string(),
-                    "night-audit".to_string(),
-                ],
-                capabilities: vec![
-                    "board-write".to_string(),
-                    "kb-write".to_string(),
-                    "execution-log".to_string(),
-                    "dispatch".to_string(),
-                    "code-read".to_string(),
-                    "code-write".to_string(),
-                    "shell-exec".to_string(),
-                    "search".to_string(),
-                    "mcp".to_string(),
-                    "full-access".to_string(),
-                ],
-                max_concurrency: 1,
-                timeout_secs: 7200,
-                default_use: "resident-master-control".to_string(),
-                accepts_boardtask: false,
-                write_allowed: true,
-                reasoning_effort: Some("xhigh".to_string()),
-                search_enabled: true,
-                sandbox: Some("danger-full-access".to_string()),
-                approval_policy: Some("never".to_string()),
-                tool_policy_path: None,
-            },
-        ];
-        Self {
-            slot_default_profiles,
-            slot_templates,
-            model_profile_spawn_args,
-            startup_slots,
-            workstation_pool,
-            allowed_cwd_prefixes: DEFAULT_ALLOWED_CWD_PREFIXES
-                .iter()
-                .map(PathBuf::from)
-                .collect(),
-            chat_completions_default_slot: DEFAULT_CHAT_COMPLETIONS_DEFAULT_SLOT.to_string(),
-            timeout_policy: TimeoutPolicy::default(),
-            cc_swarm_timeout_policy: SimpleTimeoutPolicy::default(),
-            pty_send_timeout_policy: SimpleTimeoutPolicy::pty_send_default(),
-            dynamic_slot_spawn_timeout_policy: SimpleTimeoutPolicy::dynamic_slot_spawn_default(),
-            swarm_capacity_policy: SwarmCapacityPolicy::default(),
-            slot_ttl_policy: SlotTtlPolicy::default(),
-        }
+        generated_default_runtime_config().workstation
     }
 }
 
 impl Default for FlowRuntimeConfig {
     fn default() -> Self {
-        Self {
-            llm_call_default_max_tokens: DEFAULT_FLOW_LLM_MAX_TOKENS,
-            slot_task_default_model: DEFAULT_FLOW_SLOT_MODEL.to_string(),
-            slot_task_default_timeout_secs: DEFAULT_FLOW_SLOT_TIMEOUT_SECS,
-            parallel_slot_default_parallelism: DEFAULT_FLOW_PARALLELISM,
-            parallel_slot_default_timeout_secs: DEFAULT_FLOW_PARALLEL_TIMEOUT_SECS,
-        }
+        generated_default_runtime_config().flow
     }
 }
 
 impl Default for ComputePrimitivesRuntimeConfig {
     fn default() -> Self {
-        Self {
-            pty_spawn_timeout_policy: SimpleTimeoutPolicy {
-                default_secs: DEFAULT_COMPUTE_PTY_SPAWN_TIMEOUT_SECS,
-                min_secs: MIN_COMPUTE_PTY_SPAWN_TIMEOUT_SECS,
-                max_secs: MAX_COMPUTE_PTY_SPAWN_TIMEOUT_SECS,
-            },
-        }
+        generated_default_runtime_config().compute
     }
 }
 
 impl Default for MinimaxRuntimeConfig {
     fn default() -> Self {
-        Self {
-            model: DEFAULT_MINIMAX_MODEL.to_string(),
-            direct_http_timeout_secs: DEFAULT_MINIMAX_DIRECT_HTTP_TIMEOUT_SECS,
-            quota_throttle_secs: DEFAULT_MINIMAX_QUOTA_THROTTLE_SECS,
-            default_max_tokens: DEFAULT_MINIMAX_MAX_TOKENS,
-        }
+        generated_default_runtime_config().minimax
     }
 }
 
 impl Default for RouterRuntimeConfig {
     fn default() -> Self {
-        Self {
-            default_chat_model: DEFAULT_ROUTER_CHAT_MODEL.to_string(),
-            chat_default_max_tokens: DEFAULT_ROUTER_CHAT_MAX_TOKENS,
-            file_chat_default_max_tokens: DEFAULT_ROUTER_FILE_CHAT_MAX_TOKENS,
-            flow_gemini_model: DEFAULT_ROUTER_FLOW_GEMINI_MODEL.to_string(),
-            stateless_sonnet_model: DEFAULT_ROUTER_STATELESS_SONNET_MODEL.to_string(),
-            queued_sonnet_model: DEFAULT_ROUTER_QUEUED_SONNET_MODEL.to_string(),
-            anthropic_urgent_model: DEFAULT_ROUTER_ANTHROPIC_URGENT_MODEL.to_string(),
-            anthropic_ops_model: DEFAULT_ROUTER_ANTHROPIC_OPS_MODEL.to_string(),
-            anthropic_docs_test_chore_model: DEFAULT_ROUTER_ANTHROPIC_DOCS_TEST_CHORE_MODEL
-                .to_string(),
-            compress_model: DEFAULT_ROUTER_COMPRESS_MODEL.to_string(),
-            compress_channel: DEFAULT_ROUTER_COMPRESS_CHANNEL.to_string(),
-            compress_max_tokens: DEFAULT_ROUTER_COMPRESS_MAX_TOKENS,
-            compress_char_budget_chars: DEFAULT_ROUTER_COMPRESS_CHAR_BUDGET_CHARS,
-            direct_http_timeout_secs: DEFAULT_ROUTER_DIRECT_HTTP_TIMEOUT_SECS,
-            router_chat_idle_timeout_secs: DEFAULT_ROUTER_CHAT_IDLE_TIMEOUT_SECS,
-            router_chat_retry_max_attempts: DEFAULT_ROUTER_CHAT_RETRY_MAX_ATTEMPTS,
-            router_chat_retry_initial_backoff_ms: DEFAULT_ROUTER_CHAT_RETRY_INITIAL_BACKOFF_MS,
-            router_chat_retry_max_backoff_ms: DEFAULT_ROUTER_CHAT_RETRY_MAX_BACKOFF_MS,
-            gemini_pty_queue_timeout_secs: DEFAULT_ROUTER_GEMINI_PTY_QUEUE_TIMEOUT_SECS,
-            gemini_http_queue_timeout_secs: DEFAULT_ROUTER_GEMINI_HTTP_QUEUE_TIMEOUT_SECS,
-            gemini_file_upload_timeout_secs: DEFAULT_ROUTER_GEMINI_FILE_UPLOAD_TIMEOUT_SECS,
-            gemini_file_poll_timeout_secs: DEFAULT_ROUTER_GEMINI_FILE_POLL_TIMEOUT_SECS,
-            gemini_cli_absolute_timeout_secs: DEFAULT_ROUTER_GEMINI_CLI_ABSOLUTE_TIMEOUT_SECS,
-            gemini_cli_tool_exec_timeout_secs: DEFAULT_ROUTER_GEMINI_CLI_TOOL_EXEC_TIMEOUT_SECS,
-            queued_sonnet_quota_throttle_secs: DEFAULT_ROUTER_QUEUED_SONNET_QUOTA_THROTTLE_SECS,
-            queued_sonnet_default_max_tokens: DEFAULT_ROUTER_QUEUED_SONNET_MAX_TOKENS,
-        }
+        generated_default_runtime_config().router
     }
 }
 
 impl Default for CascadeRuntimeConfig {
     fn default() -> Self {
-        Self {
-            default_manifest_path: PathBuf::from(DEFAULT_CASCADE_MANIFEST_PATH),
-            allowed_root: PathBuf::from(DEFAULT_CASCADE_ALLOWED_ROOT),
-            trigger_enabled: DEFAULT_CASCADE_TRIGGER_ENABLED,
-            default_max_cycles: DEFAULT_CASCADE_MAX_CYCLES,
-            max_cycles_limit: MAX_CASCADE_MAX_CYCLES,
-        }
+        generated_default_runtime_config().cascade
     }
 }
 
 impl Default for ProjectRegistryRuntimeConfig {
     fn default() -> Self {
-        Self {
-            intent_path_candidates: DEFAULT_PROJECT_INTENT_PATH_CANDIDATES
-                .iter()
-                .map(|value| value.to_string())
-                .collect(),
-            default_universe_manifest: PathBuf::from(DEFAULT_PROJECT_UNIVERSE_MANIFEST),
-        }
+        generated_default_runtime_config().project_registry
     }
 }
 
 impl Default for CapabilityGovernanceRuntimeConfig {
     fn default() -> Self {
-        Self {
-            review_sidecar_path: PathBuf::from(DEFAULT_CAPABILITY_REVIEW_SIDECAR),
-            protected_tool_patterns: DEFAULT_PROTECTED_TOOL_PATTERNS
-                .iter()
-                .map(|value| value.to_string())
-                .collect(),
-            protected_flow_patterns: DEFAULT_PROTECTED_FLOW_PATTERNS
-                .iter()
-                .map(|value| value.to_string())
-                .collect(),
-        }
+        generated_default_runtime_config().capability_governance
     }
 }
 
 impl Default for MemoryKbRuntimeConfig {
     fn default() -> Self {
-        Self {
-            pending_message_limit: DEFAULT_MEMORY_PENDING_MESSAGE_LIMIT,
-            tool_result_preview_chars: DEFAULT_MEMORY_TOOL_RESULT_PREVIEW_CHARS,
-            assistant_preview_chars: DEFAULT_MEMORY_ASSISTANT_PREVIEW_CHARS,
-        }
+        generated_default_runtime_config().memory_kb
     }
 }
 
 impl Default for ConversationIngestionRuntimeConfig {
     fn default() -> Self {
-        Self {
-            conversation_get_tail_default: DEFAULT_CONVERSATION_GET_TAIL,
-            conversation_search_default_limit: DEFAULT_CONVERSATION_SEARCH_LIMIT,
-            message_search_default_limit: DEFAULT_MESSAGE_SEARCH_LIMIT,
-            context_before_default: DEFAULT_CONTEXT_BEFORE,
-            context_after_default: DEFAULT_CONTEXT_AFTER,
-            conversation_events_default_limit: DEFAULT_CONVERSATION_EVENTS_LIMIT,
-            agent_trajectory_default_limit: DEFAULT_AGENT_TRAJECTORY_LIMIT,
-            timeline_query_default_limit: DEFAULT_TIMELINE_QUERY_LIMIT,
-            timeline_query_max_limit: MAX_TIMELINE_QUERY_LIMIT,
-            timeline_search_default_limit: DEFAULT_TIMELINE_SEARCH_LIMIT,
-            timeline_search_max_limit: MAX_TIMELINE_SEARCH_LIMIT,
-            intent_router_model: DEFAULT_INTENT_ROUTER_MODEL.to_string(),
-            intent_router_timeout_ms: DEFAULT_INTENT_ROUTER_TIMEOUT_MS,
-            vision_codex_binary: DEFAULT_VISION_CODEX_BINARY.to_string(),
-            vision_codex_model: DEFAULT_VISION_CODEX_MODEL.to_string(),
-            vision_codex_idle_timeout_secs: DEFAULT_VISION_CODEX_IDLE_TIMEOUT_SECS,
-            vision_codex_absolute_timeout_secs: DEFAULT_VISION_CODEX_ABSOLUTE_TIMEOUT_SECS,
-        }
+        generated_default_runtime_config().conversation_ingestion
     }
 }
 
 impl Default for AutopilotRuntimeConfig {
     fn default() -> Self {
-        Self {
-            boardtask_timeout_policy: TimeoutPolicy::default(),
-            stale_conversation_minutes: DEFAULT_AUTOPILOT_STALE_CONVERSATION_MINUTES,
-            slot_task_reap_stale_secs: DEFAULT_AUTOPILOT_SLOT_TASK_REAP_STALE_SECS,
-            recover_stale_running_minutes: DEFAULT_AUTOPILOT_RECOVER_STALE_RUNNING_MINUTES,
-            slot_failure_throttle_secs: DEFAULT_AUTOPILOT_SLOT_FAILURE_THROTTLE_SECS,
-            deploy_review_timeout_secs: DEFAULT_AUTOPILOT_DEPLOY_REVIEW_TIMEOUT_SECS,
-            dynamic_slot_expiring_soon_secs: DEFAULT_AUTOPILOT_DYNAMIC_SLOT_EXPIRING_SOON_SECS,
-            stale_board_progress_minutes: DEFAULT_AUTOPILOT_STALE_BOARD_PROGRESS_MINUTES,
-            completed_job_gc_minutes: DEFAULT_AUTOPILOT_COMPLETED_JOB_GC_MINUTES,
-            idle_persistent_slot_secs: DEFAULT_AUTOPILOT_IDLE_PERSISTENT_SLOT_SECS,
-            recent_intents_window_secs: DEFAULT_AUTOPILOT_RECENT_INTENTS_WINDOW_SECS,
-            user_stuck_cooldown_secs: DEFAULT_AUTOPILOT_USER_STUCK_COOLDOWN_SECS,
-            direction_shift_cooldown_secs: DEFAULT_AUTOPILOT_DIRECTION_SHIFT_COOLDOWN_SECS,
-        }
+        generated_default_runtime_config().autopilot
     }
 }
 
 impl Default for LearningEngineRuntimeConfig {
     fn default() -> Self {
-        Self {
-            realtime_extraction_timeout_secs: DEFAULT_LEARNING_REALTIME_EXTRACTION_TIMEOUT_SECS,
-            realtime_empty_backoff_base_secs: DEFAULT_LEARNING_REALTIME_EMPTY_BACKOFF_BASE_SECS,
-            realtime_empty_backoff_max_secs: DEFAULT_LEARNING_REALTIME_EMPTY_BACKOFF_MAX_SECS,
-            deep_analysis_zero_output_fuse_threshold:
-                DEFAULT_LEARNING_DEEP_ANALYSIS_ZERO_OUTPUT_FUSE_THRESHOLD,
-            deep_analysis_zero_output_fuse_secs:
-                DEFAULT_LEARNING_DEEP_ANALYSIS_ZERO_OUTPUT_FUSE_SECS,
-            decision_tier3_timeout_secs: DEFAULT_LEARNING_DECISION_TIER3_TIMEOUT_SECS,
-            habit_scan_timeout_secs: DEFAULT_LEARNING_HABIT_SCAN_TIMEOUT_SECS,
-            token_spend_guard_window_secs: DEFAULT_LEARNING_TOKEN_SPEND_GUARD_WINDOW_SECS,
-            token_spend_guard_soft_limit: DEFAULT_LEARNING_TOKEN_SPEND_GUARD_SOFT_LIMIT,
-            timeline_analysis_interval_secs: DEFAULT_LEARNING_TIMELINE_ANALYSIS_INTERVAL_SECS,
-            timeline_analysis_window_hours: DEFAULT_LEARNING_TIMELINE_ANALYSIS_WINDOW_HOURS,
-            timeline_error_limit: DEFAULT_LEARNING_TIMELINE_ERROR_LIMIT,
-            timeline_llm_sample_limit: DEFAULT_LEARNING_TIMELINE_LLM_SAMPLE_LIMIT,
-            timeline_slow_event_limit: DEFAULT_LEARNING_TIMELINE_SLOW_EVENT_LIMIT,
-            timeline_slow_threshold_ms: DEFAULT_LEARNING_TIMELINE_SLOW_THRESHOLD_MS,
-            idle_explore_interval_secs: DEFAULT_LEARNING_IDLE_EXPLORE_INTERVAL_SECS,
-            habit_scan_interval_secs: DEFAULT_LEARNING_HABIT_SCAN_INTERVAL_SECS,
-            habit_scan_batch_size: DEFAULT_LEARNING_HABIT_SCAN_BATCH_SIZE,
-            kb_auto_gc_interval_secs: DEFAULT_LEARNING_KB_AUTO_GC_INTERVAL_SECS,
-            kb_consolidation_interval_secs: DEFAULT_LEARNING_KB_CONSOLIDATION_INTERVAL_SECS,
-            kb_reflection_interval_secs: DEFAULT_LEARNING_KB_REFLECTION_INTERVAL_SECS,
-            kb_reflection_utility_threshold: DEFAULT_LEARNING_KB_REFLECTION_UTILITY_THRESHOLD,
-            kb_reflection_min_access: DEFAULT_LEARNING_KB_REFLECTION_MIN_ACCESS,
-            kb_reflection_max_entries: DEFAULT_LEARNING_KB_REFLECTION_MAX_ENTRIES,
-            kb_reflection_max_tokens: DEFAULT_LEARNING_KB_REFLECTION_MAX_TOKENS,
-            decision_harvest_interval_secs: DEFAULT_LEARNING_DECISION_HARVEST_INTERVAL_SECS,
-            cooccurrence_refresh_interval_secs: DEFAULT_LEARNING_COOCCURRENCE_REFRESH_INTERVAL_SECS,
-        }
+        generated_default_runtime_config().learning_engine
     }
 }
 
@@ -4077,6 +3652,8 @@ pub(crate) mod tests {
       :default-use resident-master-control
       :accepts-boardtask false
       :write-allowed true))
+    ;; V3 master-control checker pin: this fallback Lisp must parse to
+    ;; reasoning_effort: Some("xhigh".to_string()) and search_enabled: true.
 	  (flow-runtime-policy
 	    :llm-call-default-max-tokens 65536
 	    :slot-task-default-model "opus"

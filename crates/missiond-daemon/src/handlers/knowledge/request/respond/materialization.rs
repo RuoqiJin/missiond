@@ -1,4 +1,7 @@
 use super::*;
+use crate::handlers::knowledge::file_artifacts::{
+    ArtifactCommitEnvelope, ArtifactCommitEnvelopeInput,
+};
 use crate::handlers::knowledge::plan::plan_contract_json_from_sexp;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,7 +202,31 @@ pub(in crate::handlers::knowledge::request) async fn materialize_request_plan(
     let enriched_plan_text =
         enrich_materialized_plan_lisp(plan_text, &plan_ref, version, &anchor.board_task_id);
     let (artifact_projection, artifact_projection_error) = if enriched_plan_text != plan_text {
-        match atomic_write_artifact(&paths.plan, &enriched_plan_text, true) {
+        match ArtifactCommitEnvelope::commit_text(
+            state,
+            ArtifactCommitEnvelopeInput {
+                operation_key: format!("mission_request:{request_id}:plan:{plan_id}:v{version}"),
+                surface: "mission_request.materialization".to_string(),
+                request_id: Some(request_id.to_string()),
+                project_id: nonblank(args.get("project")),
+                artifact_kind: "plan".to_string(),
+                artifact_path: paths.plan.clone(),
+                content: enriched_plan_text.clone(),
+                overwrite: true,
+                db_table: Some("plans".to_string()),
+                db_row_id: Some(plan_id.to_string()),
+                event_id: None,
+                event_seq: None,
+                payload: json!({
+                    "commit_surface": "mission_request.materialization",
+                    "board_task_id": anchor.board_task_id,
+                    "plan_version": version,
+                    "sexp_hash": sexp_hash,
+                }),
+            },
+        )
+        .await
+        {
             Ok(write) => (
                 Some(PlanArtifactProjection {
                     path: write.path,

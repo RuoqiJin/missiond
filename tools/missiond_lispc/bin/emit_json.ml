@@ -440,6 +440,87 @@ let semantic_checker_registry_fact source_hash file root =
           (source_map_json source_hash file node);
       ]
 
+let final_convergence_check_json node =
+  let props = keyword_props ~start:2 node in
+  let id = Option.value ~default:"<missing>" (form_id node) in
+  let command =
+    match prop_text ":command" props with Some value -> json_string value | None -> "null"
+  in
+  json_assoc
+    [
+      ("id", json_string id);
+      ("command", command);
+      ("argv", json_string_list_token [ ":argv" ] props);
+      ("json", json_bool_token [ ":json" ] props);
+      ("timeout_ms", json_number_token [ ":timeout-ms"; ":timeout_ms" ] props);
+    ]
+
+let final_convergence_needle_json node =
+  let props = keyword_props ~start:2 node in
+  let id = Option.value ~default:"<missing>" (form_id node) in
+  json_assoc
+    [
+      ("id", json_string id);
+      ("needle", json_string_token [ ":needle" ] props);
+    ]
+
+let final_convergence_facade_budget_json node =
+  let props = keyword_props ~start:2 node in
+  let id = Option.value ~default:"<missing>" (form_id node) in
+  json_assoc
+    [
+      ("id", json_string id);
+      ("file", json_string_token [ ":file" ] props);
+      ("max_lines", json_number_token [ ":max-lines"; ":max_lines" ] props);
+    ]
+
+let final_convergence_runtime_file_json node =
+  let props = keyword_props ~start:2 node in
+  json_assoc
+    [
+      ("file", json_string_token [ ":file" ] props);
+      ("needles", json_string_list_token [ ":needles" ] props);
+    ]
+
+let final_convergence_gate_fact source_hash file root =
+  match find_child root "final-convergence-gate" with
+  | None -> []
+  | Some node ->
+      let props = keyword_props ~start:1 node in
+      let id = Option.value ~default:"v3-final-convergence" (prop_text ":id" props) in
+      let live_checks =
+        list_forms "live-check" node |> List.map final_convergence_check_json
+      in
+      let runtime_checks =
+        list_forms "runtime-check" node |> List.map final_convergence_check_json
+      in
+      let blueprint_needles =
+        list_forms "blueprint-needle" node
+        |> List.map final_convergence_needle_json
+      in
+      let facade_budgets =
+        list_forms "facade-budget" node
+        |> List.map final_convergence_facade_budget_json
+      in
+      let required_split_files = prop_text_list ":required-split-files" props in
+      let required_runtime_files =
+        list_forms "runtime-file" node
+        |> List.map final_convergence_runtime_file_json
+      in
+      [
+        Printf.sprintf
+          {|{"fact_id":%s,"kind":"final_convergence_gate","project_id":"missiond","id":%s,"live_checks":%s,"runtime_checks":%s,"blueprint_needles":%s,"facade_budgets":%s,"required_split_files":%s,"required_runtime_files":%s,"source":%s}|}
+          (json_string ("final-convergence-gate:" ^ safe_id id))
+          (json_string id)
+          (json_array live_checks)
+          (json_array runtime_checks)
+          (json_array blueprint_needles)
+          (json_array facade_budgets)
+          (json_string_list required_split_files)
+          (json_array required_runtime_files)
+          (source_map_json source_hash file node);
+      ]
+
 let semantic_contract_split_facts source_hash file surface_node =
   let props = keyword_props ~start:2 surface_node in
   let surface_id = Option.value ~default:"<missing>" (form_id surface_node) in
@@ -561,6 +642,9 @@ let semantic_facts source_hash file source_units root =
   let checker_registry_facts =
     semantic_checker_registry_fact source_hash file root
   in
+  let final_convergence_gate_facts =
+    final_convergence_gate_fact source_hash file root
+  in
   let source_unit_facts =
     source_units |> List.map semantic_source_unit_fact
   in
@@ -569,7 +653,7 @@ let semantic_facts source_hash file source_units root =
   in
   function_facts @ surface_facts @ artifact_facts @ workflow_contract_facts
   @ workstation_facts @ runtime_policy_facts @ checker_registry_facts
-  @ source_unit_facts @ typed_subplane_facts
+  @ final_convergence_gate_facts @ source_unit_facts @ typed_subplane_facts
 
 let project_entry_to_json node =
   let props = keyword_props ~start:1 node in

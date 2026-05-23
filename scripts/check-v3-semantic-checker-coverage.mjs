@@ -57,6 +57,10 @@ function main() {
   if (rawSemanticTokenPins > 0) {
     diagnostics.push(diag('scripts', `raw semantic token pins must use compiled semantic facts/helper readers; found ${rawSemanticTokenPins}`));
   }
+  const rawParserImports = countRawParserImports(repo, diagnostics);
+  if (rawParserImports > 0) {
+    diagnostics.push(diag('scripts', `V3 checkers must not import scripts/lib/missiond_lisp.mjs directly; found ${rawParserImports}`));
+  }
 
   const result = {
     ok: diagnostics.length === 0,
@@ -66,6 +70,7 @@ function main() {
     controlPlaneDomains: facts.controlPlaneDomains.size,
     sourceUnits: facts.sourceUnits.size,
     rawSemanticTokenPins,
+    rawParserImports,
     diagnostics,
   };
   if (json) console.log(JSON.stringify(result, null, 2));
@@ -81,6 +86,26 @@ function read(file, diagnostics) {
     diagnostics.push(diag(file, `cannot read: ${err.message}`));
     return '';
   }
+}
+
+function countRawParserImports(repo, diagnostics) {
+  const scriptsDir = path.join(repo, 'scripts');
+  let files;
+  try {
+    files = fs.readdirSync(scriptsDir)
+      .filter((name) => /^check-v3-.*\.mjs$/.test(name))
+      .map((name) => path.join(scriptsDir, name));
+  } catch (err) {
+    diagnostics.push(diag('scripts', `cannot scan checkers: ${err.message}`));
+    return 0;
+  }
+  let count = 0;
+  const importRe = /(?:from\s+['"]\.\/lib\/missiond_lisp\.mjs['"]|import\s*\(\s*['"]\.\/lib\/missiond_lisp\.mjs['"]\s*\))/;
+  for (const file of files) {
+    const source = read(file, diagnostics);
+    if (importRe.test(source)) count += 1;
+  }
+  return count;
 }
 
 function countRawSemanticTokenPins(repo, diagnostics) {

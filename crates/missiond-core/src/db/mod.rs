@@ -1,5 +1,6 @@
 //! Database operations for missiond.
 
+pub mod artifact_commit;
 pub mod conversation_query;
 pub(crate) mod directive;
 pub mod error;

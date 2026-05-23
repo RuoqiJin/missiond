@@ -14,13 +14,9 @@ import { spawnSync } from 'node:child_process';
 
 import { EXPECTED_SURFACES } from './check-v3-code-isomorphism-complete.mjs';
 import {
-  head,
-  isList,
-  nodeText,
-  parseLisp,
-  readKeywordProps,
-} from './lib/missiond_lisp.mjs';
-import { readBlueprintWithEvidenceSidecars } from './lib/v3_blueprint_contract_source.mjs';
+  loadCompiledV3Contract,
+  loadResolvedV3Contract,
+} from './lib/v3_compiled_contract.mjs';
 
 const CHECK_COMMAND = 'node scripts/check-v3-final-convergence.mjs';
 const BLUEPRINT_PATH = '.missiond/v3/missiond-blueprint.lisp';
@@ -345,32 +341,47 @@ function main() {
 
 export function runFinalConvergenceCheck(repoRoot, blueprintRel = BLUEPRINT_PATH, options = {}) {
   const diagnostics = [];
-  const blueprintPath = path.resolve(repoRoot, blueprintRel);
-  let blueprintSource = '';
-  try {
-    blueprintSource = readBlueprintWithEvidenceSidecars(repoRoot, blueprintRel);
-  } catch (err) {
+  const contract = loadCompiledV3Contract({
+    repoRoot,
+    blueprint: blueprintRel,
+    semanticIr: true,
+  });
+  diagnostics.push(...compiledDiagnostics(contract, blueprintRel));
+  const gate = contract.finalConvergenceGate;
+  if (!gate) {
     diagnostics.push({
       file: blueprintRel,
-      message: `cannot read V3 blueprint: ${err.message}`,
+      message: 'compiled semantic IR missing final_convergence_gate fact',
     });
   }
 
-  if (blueprintSource) {
-    diagnostics.push(...checkBlueprintClosure(blueprintSource, blueprintRel));
+  let blueprintSource = '';
+  const resolved = loadResolvedV3Contract({
+    repoRoot,
+    blueprint: blueprintRel,
+    includeEvidenceSidecar: true,
+  });
+  if (resolved.ok && resolved.resolvedSource) {
+    blueprintSource = resolved.resolvedSource;
+  } else {
+    diagnostics.push(...compiledDiagnostics(resolved, blueprintRel));
   }
-  const facades = checkFacadeBudgets(repoRoot);
+
+  if (blueprintSource && gate) {
+    diagnostics.push(...checkBlueprintClosure(blueprintSource, blueprintRel, gate, contract.checkerRegistry));
+  }
+  const facades = checkFacadeBudgets(repoRoot, gate?.facadeBudgets ?? []);
   diagnostics.push(...facades.diagnostics);
-  const splitFiles = checkRequiredFiles(repoRoot, REQUIRED_SPLIT_FILES, 'required split module missing');
+  const splitFiles = checkRequiredFiles(repoRoot, gate?.requiredSplitFiles ?? [], 'required split module missing');
   diagnostics.push(...splitFiles.diagnostics);
-  const runtimeFiles = checkRuntimeProjectionFiles(repoRoot);
+  const runtimeFiles = checkRuntimeProjectionFiles(repoRoot, gate?.requiredRuntimeFiles ?? []);
   diagnostics.push(...runtimeFiles.diagnostics);
 
-  const subchecks = LIVE_CHECKS.map((check) => runCheck(repoRoot, check));
+  const subchecks = (gate?.liveChecks ?? []).map((check) => runCheck(repoRoot, check));
   const runtimeChecks = options.staticOnly
-    ? RUNTIME_CHECKS.map((check) => ({
+    ? (gate?.runtimeChecks ?? []).map((check) => ({
         id: check.id,
-        command: `${check.command} ${check.argv.join(' ')}`,
+        command: formatCheckCommand(check),
         ok: true,
         skipped: true,
         exit_code: null,
@@ -379,7 +390,7 @@ export function runFinalConvergenceCheck(repoRoot, blueprintRel = BLUEPRINT_PATH
         stderr_tail: '',
         error: null,
       }))
-    : RUNTIME_CHECKS.map((check) => runCheck(repoRoot, check));
+    : (gate?.runtimeChecks ?? []).map((check) => runCheck(repoRoot, check));
   for (const check of subchecks) {
     if (!check.ok) {
       diagnostics.push({
@@ -445,9 +456,16 @@ export function runFinalConvergenceCheck(repoRoot, blueprintRel = BLUEPRINT_PATH
   };
 }
 
-export function checkBlueprintClosure(source, file = BLUEPRINT_PATH) {
+function compiledDiagnostics(contract, file) {
+  return (contract?.diagnostics ?? []).map((diagnostic) => ({
+    file: diagnostic.file ?? file,
+    message: diagnostic.message ?? JSON.stringify(diagnostic),
+  }));
+}
+
+export function checkBlueprintClosure(source, file = BLUEPRINT_PATH, gate = null, checkerRegistry = []) {
   const diagnostics = [];
-  for (const [id, needle] of BLUEPRINT_NEEDLES) {
+  for (const { id, needle } of gate?.blueprintNeedles ?? []) {
     if (!source.includes(needle)) {
       diagnostics.push({
         file,
@@ -456,37 +474,11 @@ export function checkBlueprintClosure(source, file = BLUEPRINT_PATH) {
     }
   }
 
-  let forms;
-  try {
-    forms = parseLisp(source, file);
-  } catch (err) {
-    diagnostics.push({
-      file,
-      message: `blueprint parse failed: ${err.message}`,
-    });
-    return diagnostics;
-  }
-  const root = forms.find((form) => isList(form) && head(form) === 'missiond-blueprint');
-  if (!root) {
-    diagnostics.push({ file, message: 'missing (missiond-blueprint ...) root' });
-    return diagnostics;
-  }
-  const compression = root.children.find(
-    (child) => isList(child) && head(child) === 'compression-contract',
-  );
-  if (!compression) {
-    diagnostics.push({ file, message: 'missing (compression-contract ...) section' });
-    return diagnostics;
-  }
-  const props = readKeywordProps(compression, { start: 1 });
-  const checks = props[':checks']?.value;
-  const checkStrings = checks && isList(checks)
-    ? checks.children.map((child) => nodeText(child)).filter((value) => value != null)
-    : [];
+  const checkStrings = (checkerRegistry ?? []).flatMap((entry) => entry.checks ?? []);
   if (!checkStrings.includes(CHECK_COMMAND)) {
     diagnostics.push({
       file,
-      message: `compression-contract :checks must include "${CHECK_COMMAND}"`,
+      message: `compiled checker registry must include "${CHECK_COMMAND}"`,
     });
   }
   return diagnostics;
@@ -532,10 +524,10 @@ function checkRequiredFiles(repoRoot, files, message) {
   return { diagnostics, files: found };
 }
 
-function checkRuntimeProjectionFiles(repoRoot) {
+function checkRuntimeProjectionFiles(repoRoot, requiredRuntimeFiles = []) {
   const diagnostics = [];
   const files = [];
-  for (const item of REQUIRED_RUNTIME_FILES) {
+  for (const item of requiredRuntimeFiles) {
     const abs = path.join(repoRoot, item.file);
     let source = '';
     try {
@@ -670,7 +662,7 @@ function runCheck(repoRoot, check) {
   }
   return {
     id: check.id,
-    command: check.command ? `${check.command} ${check.argv.join(' ')}` : `node ${check.argv.join(' ')}`,
+    command: formatCheckCommand(check),
     ok: ok && (!check.json || jsonData != null),
     exit_code: proc.status,
     json_data: jsonData,
@@ -678,6 +670,10 @@ function runCheck(repoRoot, check) {
     stderr_tail: tail(proc.stderr ?? ''),
     error,
   };
+}
+
+function formatCheckCommand(check) {
+  return check.command ? `${check.command} ${check.argv.join(' ')}` : `node ${check.argv.join(' ')}`;
 }
 
 function inferFailedStage(diagnostics, subchecks, runtimeChecks) {
@@ -824,7 +820,12 @@ function runDryFixture(opts) {
   const cases = [];
   try {
     const goodBlueprint = fixtureBlueprint({ includeFinalCheck: true });
-    const goodDiagnostics = checkBlueprintClosure(goodBlueprint, '<fixture-good>');
+    const goodDiagnostics = checkBlueprintClosure(
+      goodBlueprint,
+      '<fixture-good>',
+      fixtureGate(),
+      [{ id: 'v3-compression-contract', checks: [CHECK_COMMAND] }],
+    );
     cases.push(assertCase(
       'blueprint closure accepts all required needles and final check command',
       goodDiagnostics.length === 0,
@@ -834,6 +835,8 @@ function runDryFixture(opts) {
     const missingFinalDiagnostics = checkBlueprintClosure(
       fixtureBlueprint({ includeFinalCheck: false }),
       '<fixture-missing-final>',
+      fixtureGate(),
+      [{ id: 'v3-compression-contract', checks: ['node scripts/check-v3-code-isomorphism-complete.mjs'] }],
     );
     cases.push(assertCase(
       'blueprint closure rejects compression-contract without final check command',
@@ -903,6 +906,15 @@ function runDryFixture(opts) {
     console.error(`v3 final convergence fixtures FAILED — ${failed.length}/${cases.length}`);
   }
   process.exit(failed.length === 0 ? 0 : 1);
+}
+
+function fixtureGate() {
+  return {
+    blueprintNeedles: BLUEPRINT_NEEDLES.map(([id, needle]) => ({ id, needle })),
+    facadeBudgets: FACADE_BUDGETS,
+    requiredSplitFiles: REQUIRED_SPLIT_FILES,
+    requiredRuntimeFiles: REQUIRED_RUNTIME_FILES,
+  };
 }
 
 function assertCase(name, ok, diagnostics) {

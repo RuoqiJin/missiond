@@ -29,13 +29,32 @@ export interface CheckerRegistryEntry {
   source_line: number;
 }
 
+export interface FinalConvergenceCheck {
+  id: string;
+  command: string | null;
+  argv: readonly string[];
+  json: boolean;
+  timeoutMs: number;
+}
+
+export interface FinalConvergenceGate {
+  id: string;
+  liveChecks: readonly FinalConvergenceCheck[];
+  runtimeChecks: readonly FinalConvergenceCheck[];
+  blueprintNeedles: readonly { id: string; needle: string }[];
+  facadeBudgets: readonly { id: string; file: string; maxLines: number }[];
+  requiredSplitFiles: readonly string[];
+  requiredRuntimeFiles: readonly { file: string; needles: readonly string[] }[];
+  source: unknown;
+}
+
 export type V3SurfaceId = "autopilot-runtime" | "board-frontend" | "board-search-noise-governance" | "capability-governance" | "cascade-governance" | "codex-boot-context" | "commit-lisp-convergence-loop" | "compute-primitives" | "context-pack" | "conversation-ingestion" | "data-residency-universe" | "decision-inbox-revalidation" | "eventbridge" | "eventhub-service-boundary" | "evidence-collector" | "evidence-governance-view" | "external-work-order-gate" | "file-artifacts" | "genome-runtime" | "incident-governance" | "lisp-code-drift-policy" | "lisp-code-sync-loop" | "lisp-code-sync-storm-circuit" | "memory-kb" | "memory-provider-boundary" | "mission-shared-memory" | "mission_board" | "mission_directive" | "mission_execution-claim-lease" | "mission_execution-completion-audit" | "mission_execution-log" | "mission_plan" | "mission_request" | "mission_workflow" | "missiond-blue-green-self-update" | "nightly-evolution-loop" | "ops-infra" | "project-registry" | "resident-master-control" | "review-gate" | "router-policy" | "runtime-load-explanation" | "semantic-ir-compiler" | "skill-runtime" | "source-hygiene" | "sysinfra-control" | "task-runner-cli" | "typed-lisp-compiler" | "unified-entry-runtime" | "work-order-lifecycle" | "workstation-config" | "workstation-dispatch" | "workstation-pool";
 export type V3FunctionId = "board-frontend" | "board-search-noise-governance" | "capability-governance" | "cascade-governance" | "codex-boot-context" | "commit-lisp-convergence" | "compute-primitives" | "context-pack" | "conversation-ingestion" | "data-residency-universe" | "decision-inbox-revalidation" | "delegated-boardtask-runtime" | "directive-authoring" | "eventbridge" | "eventhub-service" | "evidence-collector" | "evidence-governance-view" | "execution-claim-lease" | "execution-completion-audit" | "execution-log" | "external-work-order-gate" | "file-artifact-writer" | "genome-runtime" | "incident-question-governance" | "knowledge-memory" | "lisp-code-drift" | "lisp-code-sync" | "memory-provider" | "mission-board" | "mission-shared-memory" | "missiond-blue-green-self-update" | "nightly-evolution" | "ops-infra" | "plan-authoring-and-runner" | "project-registry" | "request-lifecycle" | "resident-master-control" | "review-gate" | "router-policy" | "runtime-load-explanation" | "same-source-storm-circuit-breaker" | "semantic-ir-compiler" | "skill-runtime" | "source-hygiene" | "sysinfra-control" | "task-runner-lifecycle" | "typed-lisp-compiler" | "unified-entry-runtime" | "work-order-lifecycle" | "workflow-distillation" | "workstation-config" | "workstation-dispatch" | "workstation-pool";
 export type V3ArtifactContractId = "compiled-genomes" | "context-pack" | "final-report" | "intent-alignment" | "lifecycle-event" | "mission-request" | "plan" | "self-evolution-proposal" | "verification-receipt" | "workflow";
 export type V3RuntimePolicyId = "autopilot-policy" | "capability-governance-policy" | "cascade-policy" | "compute-runtime-policy" | "conversation-ingestion-policy" | "flow-runtime-policy" | "learning-engine-policy" | "memory-kb-policy" | "minimax-runtime-policy" | "project-registry-policy" | "router-runtime-policy";
 
 export const SCHEMA_VERSION: "missiond.contract-abi.v1";
-export const SOURCE_HASH: "fa392f4499e25e996c51351dabbe62c8";
+export const SOURCE_HASH: "25ae9335389e4e0c2927676133655b6f";
 export const SOURCE_UNITS: readonly SourceUnit[];
 export const SURFACE_IDS: readonly V3SurfaceId[];
 export const FUNCTION_IDS: readonly V3FunctionId[];
@@ -44,6 +63,7 @@ export const RUNTIME_POLICY_IDS: readonly V3RuntimePolicyId[];
 export const RUNTIME_POLICIES: readonly RuntimePolicyDescriptor[];
 export const CHECKER_REGISTRY: readonly CheckerRegistryEntry[];
 export const CHECKER_COMMANDS: readonly string[];
+export const FINAL_CONVERGENCE_GATE: Readonly<FinalConvergenceGate> | null;
 export const PLAN_CONTRACT: Readonly<{
   schema_version?: string;
   accepted_heads?: readonly string[];

@@ -124,7 +124,8 @@ function checkFiles(root, files, { useCompiled = true } = {}) {
   const requestSurfaceLabel = `${files.requestHandler} + ${files.requestArtifacts} + ${files.requestRespond} + ${files.requestRespondEvents} + ${files.requestRespondMaterialization} + ${files.requestRespondRouting} + ${files.requestReviewPacket}`;
   requireText(diagnostics, requestSurfaceLabel, requestSurface, 'fn enrich_intent_alignment_projection');
   requireText(diagnostics, requestSurfaceLabel, requestSurface, 'fn enrich_materialized_plan_lisp');
-  requireText(diagnostics, requestSurfaceLabel, requestSurface, 'atomic_write_artifact(&paths.plan, &enriched_plan_text, true)');
+  requireText(diagnostics, requestSurfaceLabel, requestSurface, 'ArtifactCommitEnvelope::commit_text');
+  requireText(diagnostics, requestSurfaceLabel, requestSurface, 'mission_request:{request_id}:plan:{plan_id}:v{version}');
   requireText(diagnostics, requestSurfaceLabel, requestSurface, 'respond_result.insert("plan_materialized"');
   requireText(diagnostics, files.requestRespond, sources.requestRespond, 'mod events;');
   requireText(diagnostics, files.requestRespond, sources.requestRespond, 'mod materialization;');
@@ -268,7 +269,9 @@ pub(in crate::handlers::knowledge::request) async fn ensure_request_board_task()
 pub(in crate::handlers::knowledge::request) fn enrich_materialized_plan_lisp() {}
 pub(in crate::handlers::knowledge::request) async fn materialize_request_plan() {
   PlanStatus::Draft;
-  atomic_write_artifact(&paths.plan, &enriched_plan_text, true);
+  ArtifactCommitEnvelope::commit_text(state, ArtifactCommitEnvelopeInput {
+    operation_key: format!("mission_request:{request_id}:plan:{plan_id}:v{version}"),
+  });
 }`);
   writeFixture(root, DEFAULT_FILES.requestRespondRouting, `
 pub(in crate::handlers::knowledge::request) enum RespondDecision {}

@@ -6,3 +6,4 @@ pub mod slot_env;
 pub mod topology_map;
 pub mod v3_blueprint_runtime;
 pub mod v3_contracts;
+pub mod v3_runtime_defaults;

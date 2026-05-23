@@ -13,7 +13,7 @@ import {
   nodeToStringArray,
   parseLisp,
   readKeywordProps,
-} from './lib/missiond_lisp.mjs';
+} from './lib/v3_resolved_lisp_compat.mjs';
 
 const usage = `Usage:
   node scripts/check-v3-workstation-pool-isomorphism.mjs [--json] [--dry-fixture]

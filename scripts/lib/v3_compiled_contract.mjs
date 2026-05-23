@@ -116,6 +116,9 @@ export function loadCompiledV3Contract({
   const checkerRegistry = normalizeCheckerRegistry(
     facts.filter((fact) => fact?.kind === 'checker_registry'),
   );
+  const finalConvergenceGate = normalizeFinalConvergenceGate(
+    facts.find((fact) => fact?.kind === 'final_convergence_gate'),
+  );
   const contractSplits = normalizeContractSplits(
     facts.filter((fact) => fact?.kind === 'contract_split'),
   );
@@ -162,6 +165,7 @@ export function loadCompiledV3Contract({
     artifactContracts,
     runtimePolicies,
     checkerRegistry,
+    finalConvergenceGate,
     contractSplits,
     controlPlaneDomains,
     workflowContracts,
@@ -238,6 +242,10 @@ export function compiledCheckerRegistryMap(contract) {
       .filter((entry) => entry.id)
       .map((entry) => [entry.id, entry]),
   );
+}
+
+export function compiledFinalConvergenceGate(contract) {
+  return contract?.finalConvergenceGate ?? null;
 }
 
 export function compiledContractSplitMap(contract) {
@@ -336,6 +344,48 @@ function normalizeCheckerRegistry(rows) {
     .filter((row) => row.id);
 }
 
+function normalizeFinalConvergenceGate(row) {
+  if (!row || typeof row !== 'object') return null;
+  return {
+    id: stringOrNull(row?.id) ?? 'v3-final-convergence',
+    liveChecks: normalizeGateChecks(row?.live_checks),
+    runtimeChecks: normalizeGateChecks(row?.runtime_checks),
+    blueprintNeedles: arrayOrEmpty(row?.blueprint_needles)
+      .map((entry) => ({
+        id: stringOrNull(entry?.id),
+        needle: stringOrNull(entry?.needle),
+      }))
+      .filter((entry) => entry.id && entry.needle),
+    facadeBudgets: arrayOrEmpty(row?.facade_budgets)
+      .map((entry) => ({
+        id: stringOrNull(entry?.id),
+        file: stringOrNull(entry?.file),
+        maxLines: positiveIntOrNull(entry?.max_lines ?? entry?.maxLines),
+      }))
+      .filter((entry) => entry.id && entry.file && entry.maxLines != null),
+    requiredSplitFiles: stringArray(row?.required_split_files ?? row?.requiredSplitFiles),
+    requiredRuntimeFiles: arrayOrEmpty(row?.required_runtime_files ?? row?.requiredRuntimeFiles)
+      .map((entry) => ({
+        file: stringOrNull(entry?.file),
+        needles: stringArray(entry?.needles),
+      }))
+      .filter((entry) => entry.file),
+    source: row?.source ?? null,
+  };
+}
+
+function normalizeGateChecks(rows) {
+  return arrayOrEmpty(rows)
+    .map((entry) => ({
+      id: stringOrNull(entry?.id),
+      command: stringOrNull(entry?.command),
+      argv: stringArray(entry?.argv),
+      json: entry?.json === true,
+      timeoutMs: positiveIntOrNull(entry?.timeout_ms ?? entry?.timeoutMs) ?? 60_000,
+    }))
+    .filter((entry) => entry.id && entry.argv.length > 0);
+}
+
 function normalizeContractSplits(rows) {
   return rows
     .map((row) => ({
@@ -419,6 +469,14 @@ function stringArray(value) {
     : [];
 }
 
+function arrayOrEmpty(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function positiveIntOrNull(value) {
+  return Number.isInteger(value) && value > 0 ? value : null;
+}
+
 function normalizeStatus(status) {
   return typeof status === 'string' ? status.replace(/^:/, '') : null;
 }
@@ -435,6 +493,7 @@ function emptyContract({ ok, diagnostics, v3 }) {
     artifactContracts: [],
     runtimePolicies: [],
     checkerRegistry: [],
+    finalConvergenceGate: null,
     contractSplits: [],
     controlPlaneDomains: [],
     workflowContracts: [],

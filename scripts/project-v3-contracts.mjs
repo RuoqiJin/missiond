@@ -9,22 +9,34 @@ const BLUEPRINT = '.missiond/v3/missiond-blueprint.lisp';
 const RUST_OUTPUT = 'crates/missiond-daemon/src/context/v3_contracts/generated.rs';
 const JS_OUTPUT = 'scripts/generated/v3_contracts.mjs';
 const DTS_OUTPUT = 'scripts/generated/v3_contracts.d.ts';
+const RUST_RUNTIME_DEFAULTS_OUTPUT = 'crates/missiond-daemon/src/context/v3_runtime_defaults/generated.rs';
+const JS_RUNTIME_DEFAULTS_OUTPUT = 'scripts/generated/v3_runtime_defaults.mjs';
 
 function main() {
   const opts = parseArgs(process.argv.slice(2));
   const repo = path.resolve(opts.repo);
   const blueprint = opts.blueprint;
   const contract = loadContract({ repo, blueprint });
+  const runtimeDefaults = loadRuntimeDefaults({ repo, blueprint });
   const generated = renderAll(contract, {
     blueprint,
     rustOutput: RUST_OUTPUT,
     jsOutput: JS_OUTPUT,
     dtsOutput: DTS_OUTPUT,
+    rustRuntimeDefaultsOutput: RUST_RUNTIME_DEFAULTS_OUTPUT,
+    jsRuntimeDefaultsOutput: JS_RUNTIME_DEFAULTS_OUTPUT,
+  });
+  const generatedRuntimeDefaults = renderRuntimeDefaults(runtimeDefaults, {
+    blueprint,
+    rustRuntimeDefaultsOutput: RUST_RUNTIME_DEFAULTS_OUTPUT,
+    jsRuntimeDefaultsOutput: JS_RUNTIME_DEFAULTS_OUTPUT,
   });
   const outputs = [
     { id: 'rust', rel: opts.rustOutput, text: generated.rust },
     { id: 'js', rel: opts.jsOutput, text: generated.js },
     { id: 'dts', rel: opts.dtsOutput, text: generated.dts },
+    { id: 'rust-runtime-defaults', rel: opts.rustRuntimeDefaultsOutput, text: generatedRuntimeDefaults.rust },
+    { id: 'js-runtime-defaults', rel: opts.jsRuntimeDefaultsOutput, text: generatedRuntimeDefaults.js },
   ];
 
   const diagnostics = [];
@@ -61,6 +73,7 @@ function main() {
     artifact_contracts: contract.artifactContractIds.length,
     runtime_policies: contract.runtimePolicies.length,
     checker_commands: checkerCommands(contract).length,
+    final_convergence_gate: contract.finalConvergenceGate?.id ?? null,
     diagnostics,
   };
 
@@ -81,6 +94,8 @@ function parseArgs(argv) {
     rustOutput: RUST_OUTPUT,
     jsOutput: JS_OUTPUT,
     dtsOutput: DTS_OUTPUT,
+    rustRuntimeDefaultsOutput: RUST_RUNTIME_DEFAULTS_OUTPUT,
+    jsRuntimeDefaultsOutput: JS_RUNTIME_DEFAULTS_OUTPUT,
     write: false,
     check: false,
     json: false,
@@ -100,6 +115,10 @@ function parseArgs(argv) {
     else if (arg.startsWith('--js-output=')) opts.jsOutput = arg.slice('--js-output='.length);
     else if (arg === '--dts-output') opts.dtsOutput = argv[++i] ?? fail('--dts-output requires a value');
     else if (arg.startsWith('--dts-output=')) opts.dtsOutput = arg.slice('--dts-output='.length);
+    else if (arg === '--rust-runtime-defaults-output') opts.rustRuntimeDefaultsOutput = argv[++i] ?? fail('--rust-runtime-defaults-output requires a value');
+    else if (arg.startsWith('--rust-runtime-defaults-output=')) opts.rustRuntimeDefaultsOutput = arg.slice('--rust-runtime-defaults-output='.length);
+    else if (arg === '--js-runtime-defaults-output') opts.jsRuntimeDefaultsOutput = argv[++i] ?? fail('--js-runtime-defaults-output requires a value');
+    else if (arg.startsWith('--js-runtime-defaults-output=')) opts.jsRuntimeDefaultsOutput = arg.slice('--js-runtime-defaults-output='.length);
     else if (arg === '--help' || arg === '-h') {
       console.log('Usage: node scripts/project-v3-contracts.mjs [--write|--check] [--json] [--repo <path>] [--blueprint <path>]');
       process.exit(0);
@@ -128,7 +147,21 @@ function loadContract({ repo, blueprint }) {
     artifactContractIds: uniqueSorted(facts.filter((fact) => fact?.kind === 'artifact_contract').map((fact) => fact?.id)),
     runtimePolicies: normalizeRuntimePolicies(payload.runtime_policies, facts),
     checkerRegistry: normalizeCheckerRegistry(payload.checker_registry, facts),
+    finalConvergenceGate: normalizeFinalConvergenceGate(facts.find((fact) => fact?.kind === 'final_convergence_gate')),
     planContract: payload.plan_contract ?? {},
+  };
+}
+
+function loadRuntimeDefaults({ repo, blueprint }) {
+  const result = runLispc(['emit-runtime-config', '--blueprint', blueprint], { repoRoot: repo, timeoutMs: 60_000 });
+  if (!result?.ok || !result?.compiled) {
+    const detail = (result?.diagnostics ?? []).map((d) => d.message ?? JSON.stringify(d)).join('; ');
+    fail(`missiond-lispc emit-runtime-config failed${detail ? `: ${detail}` : ''}`);
+  }
+  return {
+    schemaVersion: result.compiled.schema_version,
+    sourceHash: result.compiled.source_hash,
+    payload: result.compiled.payload ?? {},
   };
 }
 
@@ -137,6 +170,25 @@ function renderAll(contract, labels) {
     rust: renderRust(contract, labels),
     js: renderJs(contract, labels),
     dts: renderDts(contract, labels),
+  };
+}
+
+function renderRuntimeDefaults(runtimeDefaults, labels) {
+  const json = `${JSON.stringify(runtimeDefaults.payload, null, 2)}\n`;
+  return {
+    rust: `${header(labels.blueprint, labels.rustRuntimeDefaultsOutput, '//')}
+
+pub const SCHEMA_VERSION: &str = ${rustString(runtimeDefaults.schemaVersion)};
+pub const SOURCE_HASH: &str = ${rustString(runtimeDefaults.sourceHash)};
+pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = ${rustRawString(json)};
+`,
+    js: `${header(labels.blueprint, labels.jsRuntimeDefaultsOutput, '//')}
+
+export const SCHEMA_VERSION = ${JSON.stringify(runtimeDefaults.schemaVersion)};
+export const SOURCE_HASH = ${JSON.stringify(runtimeDefaults.sourceHash)};
+export const DEFAULT_RUNTIME_CONFIG = Object.freeze(${JSON.stringify(runtimeDefaults.payload, null, 2)});
+export const DEFAULT_WORKSTATION_RUNTIME_CONFIG = Object.freeze(DEFAULT_RUNTIME_CONFIG.workstation ?? {});
+`,
   };
 }
 
@@ -209,6 +261,7 @@ export const RUNTIME_POLICIES = Object.freeze(${JSON.stringify(contract.runtimeP
 export const RUNTIME_POLICY_IDS = Object.freeze(${JSON.stringify(contract.runtimePolicies.map((policy) => policy.id), null, 2)});
 export const CHECKER_REGISTRY = Object.freeze(${JSON.stringify(contract.checkerRegistry, null, 2)});
 export const CHECKER_COMMANDS = Object.freeze(${JSON.stringify(checkerCommands(contract), null, 2)});
+export const FINAL_CONVERGENCE_GATE = Object.freeze(${JSON.stringify(contract.finalConvergenceGate, null, 2)});
 export const PLAN_CONTRACT = Object.freeze(${JSON.stringify(contract.planContract, null, 2)});
 
 const SURFACE_ID_SET = new Set(SURFACE_IDS);
@@ -253,6 +306,25 @@ export interface CheckerRegistryEntry {
   source_line: number;
 }
 
+export interface FinalConvergenceCheck {
+  id: string;
+  command: string | null;
+  argv: readonly string[];
+  json: boolean;
+  timeoutMs: number;
+}
+
+export interface FinalConvergenceGate {
+  id: string;
+  liveChecks: readonly FinalConvergenceCheck[];
+  runtimeChecks: readonly FinalConvergenceCheck[];
+  blueprintNeedles: readonly { id: string; needle: string }[];
+  facadeBudgets: readonly { id: string; file: string; maxLines: number }[];
+  requiredSplitFiles: readonly string[];
+  requiredRuntimeFiles: readonly { file: string; needles: readonly string[] }[];
+  source: unknown;
+}
+
 export type V3SurfaceId = ${tsUnion(contract.surfaceIds)};
 export type V3FunctionId = ${tsUnion(contract.functionIds)};
 export type V3ArtifactContractId = ${tsUnion(contract.artifactContractIds)};
@@ -268,6 +340,7 @@ export const RUNTIME_POLICY_IDS: readonly V3RuntimePolicyId[];
 export const RUNTIME_POLICIES: readonly RuntimePolicyDescriptor[];
 export const CHECKER_REGISTRY: readonly CheckerRegistryEntry[];
 export const CHECKER_COMMANDS: readonly string[];
+export const FINAL_CONVERGENCE_GATE: Readonly<FinalConvergenceGate> | null;
 export const PLAN_CONTRACT: Readonly<{
   schema_version?: string;
   accepted_heads?: readonly string[];
@@ -325,6 +398,48 @@ function normalizeCheckerRegistry(rows, facts) {
   }))).sort((a, b) => a.id.localeCompare(b.id));
 }
 
+function normalizeFinalConvergenceGate(row) {
+  if (!row || typeof row !== 'object') return null;
+  return {
+    id: stringOrNull(row?.id) ?? 'v3-final-convergence',
+    liveChecks: normalizeGateChecks(row?.live_checks),
+    runtimeChecks: normalizeGateChecks(row?.runtime_checks),
+    blueprintNeedles: arrayOrEmpty(row?.blueprint_needles)
+      .map((entry) => ({
+        id: stringOrNull(entry?.id),
+        needle: stringOrNull(entry?.needle),
+      }))
+      .filter((entry) => entry.id && entry.needle),
+    facadeBudgets: arrayOrEmpty(row?.facade_budgets)
+      .map((entry) => ({
+        id: stringOrNull(entry?.id),
+        file: stringOrNull(entry?.file),
+        maxLines: positiveIntOrNull(entry?.max_lines),
+      }))
+      .filter((entry) => entry.id && entry.file && entry.maxLines != null),
+    requiredSplitFiles: stringArray(row?.required_split_files),
+    requiredRuntimeFiles: arrayOrEmpty(row?.required_runtime_files)
+      .map((entry) => ({
+        file: stringOrNull(entry?.file),
+        needles: stringArray(entry?.needles),
+      }))
+      .filter((entry) => entry.file),
+    source: row?.source ?? null,
+  };
+}
+
+function normalizeGateChecks(rows) {
+  return arrayOrEmpty(rows)
+    .map((entry) => ({
+      id: stringOrNull(entry?.id),
+      command: stringOrNull(entry?.command),
+      argv: stringArray(entry?.argv),
+      json: entry?.json === true,
+      timeoutMs: positiveIntOrNull(entry?.timeout_ms) ?? 60_000,
+    }))
+    .filter((entry) => entry.id && entry.argv.length > 0);
+}
+
 function checkerCommands(contract) {
   return uniqueSorted((contract.checkerRegistry ?? []).flatMap((entry) => entry.checks));
 }
@@ -352,6 +467,14 @@ function stringArray(value) {
   return Array.isArray(value)
     ? value.filter((item) => typeof item === 'string' && item.trim() !== '')
     : [];
+}
+
+function arrayOrEmpty(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function positiveIntOrNull(value) {
+  return Number.isInteger(value) && value > 0 ? value : null;
 }
 
 function numberOrZero(value) {
@@ -401,6 +524,12 @@ ${closingIndent}]`;
 
 function rustString(value) {
   return JSON.stringify(String(value));
+}
+
+function rustRawString(value) {
+  let hashes = '';
+  while (String(value).includes(`"${hashes}`)) hashes += '#';
+  return `r${hashes}"${value}"${hashes}`;
 }
 
 function rustOptionString(value) {

@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 
 // Re-export shared types (always available regardless of feature flags)
+pub use super::artifact_commit::{ArtifactCommitOutboxInput, ArtifactCommitOutboxRecord};
 pub use super::shared::BackfillPhaseStatus;
 pub use super::shared::MessageRoleBackfillCandidate;
 pub use super::shared::{AstNodeRow, AstSearchHit, AstStats, AstSyncResult, ModuleAstSummary};
@@ -1689,6 +1690,41 @@ pub trait ProjectStore: Send + Sync {
 }
 
 // ============================================================================
+// 15. ArtifactCommitStore — artifact/DB/event commit outbox
+// ============================================================================
+
+#[async_trait]
+pub trait ArtifactCommitStore: Send + Sync {
+    async fn artifact_commit_outbox_upsert_pending(
+        &self,
+        input: &ArtifactCommitOutboxInput,
+    ) -> DbResult<ArtifactCommitOutboxRecord>;
+
+    async fn artifact_commit_outbox_mark_complete(
+        &self,
+        operation_key: &str,
+        artifact_sha256: &str,
+        payload: &serde_json::Value,
+    ) -> DbResult<ArtifactCommitOutboxRecord>;
+
+    async fn artifact_commit_outbox_mark_failed(
+        &self,
+        operation_key: &str,
+        error: &str,
+    ) -> DbResult<ArtifactCommitOutboxRecord>;
+
+    async fn artifact_commit_outbox_get(
+        &self,
+        operation_key: &str,
+    ) -> DbResult<Option<ArtifactCommitOutboxRecord>>;
+
+    async fn artifact_commit_outbox_claim_recoverable(
+        &self,
+        limit: i64,
+    ) -> DbResult<Vec<ArtifactCommitOutboxRecord>>;
+}
+
+// ============================================================================
 // MissionStore — Super-trait aggregating all domain stores
 // ============================================================================
 
@@ -1706,6 +1742,7 @@ pub trait MissionStore:
     + ProjectStore
     + InfraStore
     + DirectiveLayerStore
+    + ArtifactCommitStore
     + Send
     + Sync
 {

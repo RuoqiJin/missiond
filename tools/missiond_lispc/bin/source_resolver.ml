@@ -53,6 +53,39 @@ let shard_kind forms =
   | [ form ] -> section_kind form
   | _ -> "multi-section-shard"
 
+let merge_section name forms =
+  let sections = forms |> List.filter (fun form -> is_list form name) in
+  match sections with
+  | [] | [ _ ] -> forms
+  | first :: _ ->
+      let merged_children =
+        match children first with
+        | [] -> []
+        | head :: _ ->
+            head
+            :: (sections
+               |> List.map (fun section ->
+                      match children section with _ :: tail -> tail | [] -> [])
+               |> List.flatten)
+      in
+      let merged =
+        match first with
+        | List (loc, kind, _) -> List (loc, kind, merged_children)
+        | _ -> first
+      in
+      let inserted = ref false in
+      forms
+      |> List.filter_map (fun form ->
+             if is_list form name then
+               if !inserted then None
+               else (
+                 inserted := true;
+                 Some merged)
+             else Some form)
+
+let merge_compiler_sections forms =
+  forms |> merge_section "implementation-map"
+
 let load_shard ~blueprint_dir ~included_by ~include_loc ~stack target =
   if not (valid_include_path target) then
     raise
@@ -106,6 +139,7 @@ let expand_root blueprint_file root =
                    units := unit :: !units;
                    forms)
         |> List.flatten
+        |> merge_compiler_sections
       in
       (List (loc, kind, expanded), List.rev !units)
   | _ ->

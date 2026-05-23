@@ -98,6 +98,8 @@ impl crate::db::traits::MissionStore for PgMissionStore {
 // Note: tool_call/event/retrospective merged into conversation (v0.4.23).
 // Note: vision merged into observability (v0.4.23 — Stage 2C.5).
 #[cfg(feature = "postgres")]
+mod artifact_commit;
+#[cfg(feature = "postgres")]
 mod board;
 #[cfg(feature = "postgres")]
 mod conversation;

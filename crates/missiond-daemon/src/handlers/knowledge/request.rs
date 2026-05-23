@@ -24,7 +24,9 @@ use std::fmt::Write as _;
 #[cfg(test)]
 use std::path::{Path, PathBuf};
 
-use crate::handlers::knowledge::file_artifacts::atomic_write_artifact;
+use crate::handlers::knowledge::file_artifacts::{
+    ArtifactCommitEnvelope, ArtifactCommitEnvelopeInput,
+};
 use crate::state::AppState;
 
 mod request_artifacts;
@@ -164,7 +166,29 @@ async fn action_start(state: &AppState, args: &Value) -> Result<ToolResult> {
             created_at: &created_at,
             paths: &paths,
         });
-        let request_write = match atomic_write_artifact(&paths.request, &body, overwrite) {
+        let request_write = match ArtifactCommitEnvelope::commit_text(
+            state,
+            ArtifactCommitEnvelopeInput {
+                operation_key: format!("mission_request:{request_id}:request"),
+                surface: "mission_request".to_string(),
+                request_id: Some(request_id.clone()),
+                project_id: nonblank(args.get("project")),
+                artifact_kind: "mission-request".to_string(),
+                artifact_path: paths.request.clone(),
+                content: body,
+                overwrite,
+                db_table: None,
+                db_row_id: None,
+                event_id: None,
+                event_seq: None,
+                payload: json!({
+                    "schema": REQUEST_SCHEMA,
+                    "commit_surface": "mission_request.start",
+                }),
+            },
+        )
+        .await
+        {
             Ok(outcome) => outcome,
             Err(e) => return Ok(ToolResult::structured_error(
                 ToolError::new(
@@ -178,7 +202,28 @@ async fn action_start(state: &AppState, args: &Value) -> Result<ToolResult> {
         };
 
         let event_body = build_event_lisp(&request_id, &created_at, "request_received", &message);
-        let event_write = match atomic_write_artifact(&paths.initial_event, &event_body, overwrite)
+        let event_write = match ArtifactCommitEnvelope::commit_text(
+            state,
+            ArtifactCommitEnvelopeInput {
+                operation_key: format!("mission_request:{request_id}:event:000001"),
+                surface: "mission_request".to_string(),
+                request_id: Some(request_id.clone()),
+                project_id: nonblank(args.get("project")),
+                artifact_kind: "lifecycle-event".to_string(),
+                artifact_path: paths.initial_event.clone(),
+                content: event_body,
+                overwrite,
+                db_table: None,
+                db_row_id: None,
+                event_id: Some(format!("evt-{request_id}-000001")),
+                event_seq: Some(1),
+                payload: json!({
+                    "schema": EVENT_SCHEMA,
+                    "commit_surface": "mission_request.start",
+                }),
+            },
+        )
+        .await
         {
             Ok(outcome) => outcome,
             Err(e) => return Ok(ToolResult::structured_error(

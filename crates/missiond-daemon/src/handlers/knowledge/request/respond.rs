@@ -12,7 +12,9 @@ use serde_json::{json, Value};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use crate::handlers::knowledge::file_artifacts::atomic_write_artifact;
+use crate::handlers::knowledge::file_artifacts::{
+    ArtifactCommitEnvelope, ArtifactCommitEnvelopeInput,
+};
 use crate::state::AppState;
 
 use super::request_artifacts::{
@@ -360,7 +362,30 @@ pub(super) async fn action_respond(state: &AppState, args: &Value) -> Result<Too
         blocked_reason: blocked_reason.as_deref(),
         created_at: &created_at,
     });
-    let event_write_outcome = atomic_write_artifact(&event_path, &event_body, false);
+    let event_write_outcome = ArtifactCommitEnvelope::commit_text(
+        state,
+        ArtifactCommitEnvelopeInput {
+            operation_key: format!("mission_request:{request_id}:event:{allocated_seq:06}"),
+            surface: "mission_request.respond".to_string(),
+            request_id: Some(request_id.clone()),
+            project_id: nonblank(args.get("project")),
+            artifact_kind: "lifecycle-event".to_string(),
+            artifact_path: event_path.clone(),
+            content: event_body.clone(),
+            overwrite: false,
+            db_table: None,
+            db_row_id: None,
+            event_id: Some(format!("evt-{request_id}-{allocated_seq:06}")),
+            event_seq: Some(allocated_seq as i64),
+            payload: json!({
+                "schema": EVENT_SCHEMA,
+                "decision": decision.wire(),
+                "outcome": outcome.wire(),
+                "commit_surface": "mission_request.respond",
+            }),
+        },
+    )
+    .await;
     let event_write = match event_write_outcome {
         Ok(o) => o,
         Err(e) => {

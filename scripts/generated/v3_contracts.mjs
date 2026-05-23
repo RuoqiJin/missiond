@@ -4,77 +4,133 @@
 // Do not edit by hand.
 
 export const SCHEMA_VERSION = "missiond.contract-abi.v1";
-export const SOURCE_HASH = "fa392f4499e25e996c51351dabbe62c8";
+export const SOURCE_HASH = "25ae9335389e4e0c2927676133655b6f";
 export const SOURCE_UNITS = Object.freeze([
   {
     "file": ".missiond/v3/missiond-blueprint.lisp",
     "kind": "missiond-blueprint",
     "included_by": null,
     "include_line": null,
-    "source_hash": "3d46a540de4642471c870c9634ed1072"
+    "source_hash": "b7f47a435b33dbf71d7b22989f465034"
   },
   {
     "file": ".missiond/v3/shards/request-runtime.lisp",
     "kind": "multi-section-shard",
     "included_by": ".missiond/v3/missiond-blueprint.lisp",
-    "include_line": 248,
+    "include_line": 276,
     "source_hash": "b57b01678281f3719dd9b1a5a52846a6"
   },
   {
     "file": ".missiond/v3/shards/workstation-runtime.lisp",
     "kind": "multi-section-shard",
     "included_by": ".missiond/v3/missiond-blueprint.lisp",
-    "include_line": 250,
+    "include_line": 278,
     "source_hash": "b6a3bf63b98f0d3e5b47e113823a81d3"
   },
   {
     "file": ".missiond/v3/shards/control-plane-runtime.lisp",
     "kind": "multi-section-shard",
     "included_by": ".missiond/v3/missiond-blueprint.lisp",
-    "include_line": 252,
+    "include_line": 280,
     "source_hash": "c1231d91115f19666ac99f0a03dad1fa"
-  },
-  {
-    "file": ".missiond/v3/shards/project-universe.lisp",
-    "kind": "multi-section-shard",
-    "included_by": ".missiond/v3/missiond-blueprint.lisp",
-    "include_line": 254,
-    "source_hash": "74f97a54baa2adf9b3e9239a05653c8c"
   },
   {
     "file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
     "kind": "multi-section-shard",
     "included_by": ".missiond/v3/missiond-blueprint.lisp",
-    "include_line": 256,
+    "include_line": 282,
     "source_hash": "9cd8ce05236e5996c463151f4b42af5d"
   },
   {
     "file": ".missiond/v3/shards/ops-infra.lisp",
     "kind": "ops-infra",
     "included_by": ".missiond/v3/missiond-blueprint.lisp",
-    "include_line": 258,
+    "include_line": 284,
     "source_hash": "1d22cd3453cd5e339abd345862496288"
   },
   {
     "file": ".missiond/v3/shards/v2-convergence-map.lisp",
     "kind": "v2-convergence-map",
     "included_by": ".missiond/v3/missiond-blueprint.lisp",
-    "include_line": 260,
+    "include_line": 286,
     "source_hash": "56e4bcc50ae394e946dc057bb7819ce7"
   },
   {
     "file": ".missiond/v3/shards/pillar-flow-map.lisp",
     "kind": "pillar-flow-map",
     "included_by": ".missiond/v3/missiond-blueprint.lisp",
-    "include_line": 262,
+    "include_line": 288,
     "source_hash": "2dbf0b4e536386784a6f2a2c90fad467"
   },
   {
-    "file": ".missiond/v3/shards/implementation-map.lisp",
+    "file": ".missiond/v3/shards/universe/service-runtime.lisp",
+    "kind": "multi-section-shard",
+    "included_by": ".missiond/v3/missiond-blueprint.lisp",
+    "include_line": 290,
+    "source_hash": "c1219f14bc6f768655b8c54c52dba815"
+  },
+  {
+    "file": ".missiond/v3/shards/universe/infrastructure.lisp",
+    "kind": "multi-section-shard",
+    "included_by": ".missiond/v3/missiond-blueprint.lisp",
+    "include_line": 292,
+    "source_hash": "7e8474d882fb26cfecffbb0617b292ed"
+  },
+  {
+    "file": ".missiond/v3/shards/universe/data-residency.lisp",
+    "kind": "data-residency-universe",
+    "included_by": ".missiond/v3/missiond-blueprint.lisp",
+    "include_line": 294,
+    "source_hash": "23834fd90b8b46a01f5dcfdc57044012"
+  },
+  {
+    "file": ".missiond/v3/shards/universe/project-maturity.lisp",
+    "kind": "multi-section-shard",
+    "included_by": ".missiond/v3/missiond-blueprint.lisp",
+    "include_line": 296,
+    "source_hash": "a6872b91503d5584da2050a967ffc699"
+  },
+  {
+    "file": ".missiond/v3/shards/universe/project-registry.lisp",
+    "kind": "multi-section-shard",
+    "included_by": ".missiond/v3/missiond-blueprint.lisp",
+    "include_line": 298,
+    "source_hash": "5ac95c3d0982954243f5b57a0534d51d"
+  },
+  {
+    "file": ".missiond/v3/shards/implementation/request-surfaces.lisp",
     "kind": "implementation-map",
     "included_by": ".missiond/v3/missiond-blueprint.lisp",
-    "include_line": 264,
-    "source_hash": "a5a9c61280545863199bae52fb9e4e7b"
+    "include_line": 300,
+    "source_hash": "48d9a49c39956ae892efb3c774f4dd9a"
+  },
+  {
+    "file": ".missiond/v3/shards/implementation/execution-surfaces.lisp",
+    "kind": "implementation-map",
+    "included_by": ".missiond/v3/missiond-blueprint.lisp",
+    "include_line": 302,
+    "source_hash": "8f4b7eed977a390cd9889812b3eec044"
+  },
+  {
+    "file": ".missiond/v3/shards/implementation/runtime-surfaces.lisp",
+    "kind": "implementation-map",
+    "included_by": ".missiond/v3/missiond-blueprint.lisp",
+    "include_line": 304,
+    "source_hash": "7b5c1a2a89b0b494442d4b1c7b69989e"
+  },
+  {
+    "file": ".missiond/v3/shards/implementation/knowledge-surfaces.lisp",
+    "kind": "implementation-map",
+    "included_by": ".missiond/v3/missiond-blueprint.lisp",
+    "include_line": 306,
+    "source_hash": "0ddc91ac93a5ad7655e83c7e4e8be60e"
+  },
+  {
+    "file": ".missiond/v3/shards/implementation/ops-surfaces.lisp",
+    "kind": "implementation-map",
+    "included_by": ".missiond/v3/missiond-blueprint.lisp",
+    "include_line": 308,
+    "source_hash": "a4415ad5a6fb275479d1ec33d39fb237"
   }
 ]);
 export const SURFACE_IDS = Object.freeze([
@@ -424,7 +480,7 @@ export const RUNTIME_POLICIES = Object.freeze([
     "nested_forms": [
       "UNIVERSE_MANIFEST"
     ],
-    "source_file": ".missiond/v3/shards/project-universe.lisp",
+    "source_file": ".missiond/v3/shards/universe/project-registry.lisp",
     "source_line": 1
   },
   {
@@ -543,7 +599,7 @@ export const CHECKER_REGISTRY = Object.freeze([
       "node scripts/check-v3-final-convergence.mjs"
     ],
     "source_file": ".missiond/v3/missiond-blueprint.lisp",
-    "source_line": 266
+    "source_line": 424
   }
 ]);
 export const CHECKER_COMMANDS = Object.freeze([
@@ -605,6 +661,416 @@ export const CHECKER_COMMANDS = Object.freeze([
   "node scripts/check-v3-workstation-dispatch-isomorphism.mjs",
   "node scripts/check-v3-workstation-pool-isomorphism.mjs"
 ]);
+export const FINAL_CONVERGENCE_GATE = Object.freeze({
+  "id": "v3-final-convergence",
+  "liveChecks": [
+    {
+      "id": "lisp-blueprint-compression",
+      "command": null,
+      "argv": [
+        "scripts/check-lisp-blueprint-compression.mjs"
+      ],
+      "json": false,
+      "timeoutMs": 60000
+    },
+    {
+      "id": "architecture-lisp",
+      "command": null,
+      "argv": [
+        "scripts/check-architecture-lisp.mjs",
+        "--no-structure",
+        ".missiond/v3/missiond-blueprint.lisp"
+      ],
+      "json": false,
+      "timeoutMs": 60000
+    },
+    {
+      "id": "v3-code-isomorphism-complete",
+      "command": null,
+      "argv": [
+        "scripts/check-v3-code-isomorphism-complete.mjs",
+        "--json"
+      ],
+      "json": true,
+      "timeoutMs": 120000
+    },
+    {
+      "id": "v2-public-coverage",
+      "command": null,
+      "argv": [
+        "scripts/check-v3-v2-coverage.mjs",
+        "--json"
+      ],
+      "json": true,
+      "timeoutMs": 60000
+    },
+    {
+      "id": "task-contract-all",
+      "command": null,
+      "argv": [
+        "scripts/check-task-contract.mjs",
+        "--all"
+      ],
+      "json": false,
+      "timeoutMs": 120000
+    },
+    {
+      "id": "missiond-blue-green-deploy",
+      "command": null,
+      "argv": [
+        "scripts/check-missiond-blue-green-deploy.mjs",
+        "--json"
+      ],
+      "json": true,
+      "timeoutMs": 60000
+    },
+    {
+      "id": "missiond-rustfmt-convergence",
+      "command": "bash",
+      "argv": [
+        "scripts/rustfmt-missiond.sh",
+        "--check"
+      ],
+      "json": false,
+      "timeoutMs": 120000
+    },
+    {
+      "id": "project-ssot-universe",
+      "command": null,
+      "argv": [
+        "scripts/check-project-ssot-universe.mjs",
+        "--json"
+      ],
+      "json": true,
+      "timeoutMs": 60000
+    },
+    {
+      "id": "infrastructure-universe",
+      "command": null,
+      "argv": [
+        "scripts/check-v3-infrastructure-universe-isomorphism.mjs",
+        "--json"
+      ],
+      "json": true,
+      "timeoutMs": 60000
+    },
+    {
+      "id": "data-residency-universe",
+      "command": null,
+      "argv": [
+        "scripts/check-v3-data-residency-universe-isomorphism.mjs",
+        "--json"
+      ],
+      "json": true,
+      "timeoutMs": 60000
+    },
+    {
+      "id": "project-maturity",
+      "command": null,
+      "argv": [
+        "scripts/check-project-maturity.mjs",
+        "--min-level",
+        "M5"
+      ],
+      "json": false,
+      "timeoutMs": 60000
+    },
+    {
+      "id": "auth-m6-depth",
+      "command": null,
+      "argv": [
+        "scripts/check-project-maturity.mjs",
+        "--min-level",
+        "M6",
+        "--project",
+        "auth",
+        "--json"
+      ],
+      "json": true,
+      "timeoutMs": 60000
+    },
+    {
+      "id": "typed-lisp-runtime-compile",
+      "command": null,
+      "argv": [
+        "scripts/compile-v3-runtime.mjs",
+        "--check",
+        "--json"
+      ],
+      "json": true,
+      "timeoutMs": 60000
+    },
+    {
+      "id": "production-runtime-boundary",
+      "command": null,
+      "argv": [
+        "scripts/check-v3-production-runtime-boundary.mjs",
+        "--json"
+      ],
+      "json": true,
+      "timeoutMs": 60000
+    },
+    {
+      "id": "semantic-checker-coverage",
+      "command": null,
+      "argv": [
+        "scripts/check-v3-semantic-checker-coverage.mjs",
+        "--json"
+      ],
+      "json": true,
+      "timeoutMs": 60000
+    },
+    {
+      "id": "runtime-artifact-catalog",
+      "command": null,
+      "argv": [
+        "scripts/check-v3-runtime-artifact-catalog.mjs",
+        "--json"
+      ],
+      "json": true,
+      "timeoutMs": 60000
+    },
+    {
+      "id": "typed-sidecar-compression",
+      "command": null,
+      "argv": [
+        "scripts/check-v3-typed-sidecar-compression.mjs",
+        "--json"
+      ],
+      "json": true,
+      "timeoutMs": 60000
+    }
+  ],
+  "runtimeChecks": [
+    {
+      "id": "cargo-test-workspace",
+      "command": "cargo",
+      "argv": [
+        "test",
+        "--workspace"
+      ],
+      "json": false,
+      "timeoutMs": 900000
+    },
+    {
+      "id": "board-build",
+      "command": "pnpm",
+      "argv": [
+        "--dir",
+        "packages/board",
+        "build"
+      ],
+      "json": false,
+      "timeoutMs": 300000
+    },
+    {
+      "id": "git-diff-check",
+      "command": "git",
+      "argv": [
+        "diff",
+        "--check"
+      ],
+      "json": false,
+      "timeoutMs": 60000
+    }
+  ],
+  "blueprintNeedles": [
+    {
+      "id": "v2-convergence-map",
+      "needle": "(v2-convergence-map"
+    },
+    {
+      "id": "public-surface-map",
+      "needle": "(public-surface-map"
+    },
+    {
+      "id": "pillar-flow-map",
+      "needle": "(pillar-flow-map"
+    },
+    {
+      "id": "implementation-map",
+      "needle": "(implementation-map"
+    },
+    {
+      "id": "workstation-config",
+      "needle": "(workstation-config"
+    },
+    {
+      "id": "control-plane-m6-split",
+      "needle": "(control-plane-m6-split"
+    },
+    {
+      "id": "control-plane-split-checker",
+      "needle": "check-v3-control-plane-m6-split.mjs"
+    },
+    {
+      "id": "data-residency-universe",
+      "needle": "(data-residency-universe"
+    },
+    {
+      "id": "data-residency-checker",
+      "needle": "check-v3-data-residency-universe-isomorphism.mjs"
+    },
+    {
+      "id": "lisp-code-sync-loop",
+      "needle": "(lisp-code-sync-loop"
+    },
+    {
+      "id": "lisp-code-sync-checker",
+      "needle": "check-v3-lisp-code-sync-isomorphism.mjs"
+    },
+    {
+      "id": "context-pack-run-wave",
+      "needle": "context-pack-run-wave"
+    },
+    {
+      "id": "context-pack-dispatch-policy",
+      "needle": "dispatch-policy context-pack-run-wave"
+    },
+    {
+      "id": "swarm-run-resolves-project-root",
+      "needle": "mission_swarm_run MUST resolve project_id to a registered project_root"
+    },
+    {
+      "id": "autopilot-overrides-cwd",
+      "needle": "Autopilot ensure_pty MUST override pty_slot.cwd"
+    },
+    {
+      "id": "durable-conversation-taskid",
+      "needle": "bind conversations.task_id to the active BoardTask via a bounded retry helper"
+    },
+    {
+      "id": "taskid-query-survives-slot-reuse",
+      "needle": "message-anchored BoardTask id fallback"
+    },
+    {
+      "id": "runtime-v3-paths",
+      "needle": ".missiond/v3/runtime/"
+    },
+    {
+      "id": "v2-historical-status",
+      "needle": ":v2 \"Kept as historical"
+    },
+    {
+      "id": "entry-shape",
+      "needle": ":entry ["
+    },
+    {
+      "id": "core-shape",
+      "needle": ":core ("
+    },
+    {
+      "id": "egress-shape",
+      "needle": ":egress ["
+    },
+    {
+      "id": "artifact-commit-outbox",
+      "needle": "artifact_commit_outbox recovery"
+    }
+  ],
+  "facadeBudgets": [
+    {
+      "id": "mission_plan-facade",
+      "file": "crates/missiond-daemon/src/handlers/knowledge/plan.rs",
+      "maxLines": 800
+    },
+    {
+      "id": "mission_execution-facade",
+      "file": "crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs",
+      "maxLines": 350
+    },
+    {
+      "id": "workstation_dispatch-facade",
+      "file": "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch.rs",
+      "maxLines": 400
+    }
+  ],
+  "requiredSplitFiles": [
+    "crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs",
+    "crates/missiond-daemon/src/handlers/knowledge/plan/approval_review.rs",
+    "crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime.rs",
+    "crates/missiond-daemon/src/handlers/knowledge/plan/task_runner_dry_run.rs",
+    "crates/missiond-daemon/src/handlers/knowledge/plan/task_contract.rs",
+    "crates/missiond-daemon/src/handlers/knowledge/plan_dag/runtime.rs",
+    "crates/missiond-daemon/src/handlers/knowledge/plan_dag/claim_lease.rs",
+    "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_surface.rs",
+    "crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_lease.rs",
+    "crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_audit.rs",
+    "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/descriptor.rs",
+    "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/brief.rs",
+    "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/decision.rs",
+    "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/outcome.rs",
+    "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/runner.rs",
+    "crates/missiond-daemon/src/handlers/knowledge/file_artifacts/commit.rs",
+    "crates/missiond-core/src/db/artifact_commit.rs",
+    "crates/missiond-core/src/db/pg/artifact_commit.rs",
+    "crates/missiond-core/migrations/20260523001000_artifact_commit_outbox.sql"
+  ],
+  "requiredRuntimeFiles": [
+    {
+      "file": "scripts/lib/v3_workstation_runtime.mjs",
+      "needles": [
+        "DEFAULT_WORKSTATION_RUNTIME_CONFIG",
+        "contextPackDispatchPolicy",
+        "V3_BLUEPRINT_CONFIG_ERROR",
+        "source_units",
+        "MISSIOND_V3_ALLOW_SOURCE_FALLBACK",
+        "compiled runtime config is required"
+      ]
+    },
+    {
+      "file": "crates/missiond-daemon/src/handlers/knowledge/file_artifacts/commit.rs",
+      "needles": [
+        "ArtifactCommitEnvelope",
+        "operation_key",
+        "artifact_commit_outbox_mark_complete",
+        "recover_artifact_commit_outbox",
+        "artifact sha mismatch"
+      ]
+    },
+    {
+      "file": "scripts/context-pack-run-wave.mjs",
+      "needles": [
+        "loadWorkstationRuntimeConfigForRepo",
+        "contextPackMaxParallel",
+        "ensureWaveLedgers",
+        "--apply"
+      ]
+    },
+    {
+      "file": "scripts/context-pack-materialize-wave.mjs",
+      "needles": [
+        "context-pack-run-wave.mjs",
+        "loadWorkstationRuntimeConfigForRepo",
+        "model_profile",
+        "timeout_secs"
+      ]
+    },
+    {
+      "file": "scripts/task-runner-dispatch.mjs",
+      "needles": [
+        "loadWorkstationRuntimeConfigForRepo",
+        "model_profile",
+        "timeout_secs"
+      ]
+    },
+    {
+      "file": "scripts/task-runner-submit-dispatch.mjs",
+      "needles": [
+        "runDispatch",
+        "runtime_projection",
+        "model_profile",
+        "timeout_secs"
+      ]
+    }
+  ],
+  "source": {
+    "source_file": ".missiond/v3/missiond-blueprint.lisp",
+    "source_line": 310,
+    "source_column": 3,
+    "source_hash": "25ae9335389e4e0c2927676133655b6f"
+  }
+});
 export const PLAN_CONTRACT = Object.freeze({
   "schema_version": "missiond.plan-contract.v1",
   "accepted_heads": [

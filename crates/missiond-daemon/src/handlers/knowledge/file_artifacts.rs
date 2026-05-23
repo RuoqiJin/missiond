@@ -47,18 +47,22 @@ use crate::slot_orchestrator::project_root::{resolve_target_project_root, Resolu
 use missiond_core::types::SharedProjectRegistry;
 
 mod attempt;
+mod commit;
 mod kind;
 mod write;
 
 #[cfg(test)]
 pub(crate) use attempt::AttemptOutcome;
 pub(crate) use attempt::{attempt_artifact_write, resolve_writer_project_root, WriterContext};
+pub(crate) use commit::{
+    recover_artifact_commit_outbox, ArtifactCommitEnvelope, ArtifactCommitEnvelopeInput,
+};
 pub(crate) use kind::{artifact_path, sanitize_topic_segment, ArtifactKind, WriteOutcome};
 #[cfg(test)]
 pub(crate) use kind::{artifact_path_from_spec, ArtifactSpec, ANONYMOUS_TOPIC};
-pub(crate) use write::atomic_write_artifact;
 #[cfg(test)]
-pub(crate) use write::{read_existing_metadata, unique_temp_path_in_dir};
+pub(crate) use write::unique_temp_path_in_dir;
+pub(crate) use write::{atomic_write_artifact, read_existing_metadata};
 
 #[cfg(test)]
 mod tests;

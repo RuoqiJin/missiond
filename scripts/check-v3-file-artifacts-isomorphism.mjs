@@ -11,12 +11,12 @@ const usage = `Usage:
 Checks the V3 file-artifacts Lisp/code isomorphism contract:
   - .missiond/v3/missiond-blueprint.lisp declares (surface file-artifacts ...)
     with :status "code-aligned", :code naming the file_artifacts facade plus
-    its attempt/kind/write submodules, and a :note that anchors ArtifactKind,
-    atomic_write_artifact, the request-local artifact projection contract, the
+    its attempt/commit/kind/write submodules, and a :note that anchors ArtifactKind,
+    atomic_write_artifact, ArtifactCommitEnvelope, the request-local artifact projection contract, the
     compat path / stable artifact paths (.missiond/alignment, .missiond/plans,
     .missiond/workflows), and the "no partial writes" atomicity invariant.
   - compression-contract :checks pins this checker so drift surfaces in CI.
-  - file_artifacts.rs is a thin facade over kind.rs, write.rs, and attempt.rs.
+  - file_artifacts.rs is a thin facade over kind.rs, write.rs, attempt.rs, and commit.rs.
     The combined writer surface exposes the ArtifactKind enum (IntentAlignment
     | Plan | Workflow), atomic_write_artifact, unique_temp_path_in_dir,
     attempt_artifact_write + WriterContext + AttemptOutcome, and the "partial
@@ -28,6 +28,7 @@ const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   fileArtifacts: 'crates/missiond-daemon/src/handlers/knowledge/file_artifacts.rs',
   fileArtifactsAttempt: 'crates/missiond-daemon/src/handlers/knowledge/file_artifacts/attempt.rs',
+  fileArtifactsCommit: 'crates/missiond-daemon/src/handlers/knowledge/file_artifacts/commit.rs',
   fileArtifactsKind: 'crates/missiond-daemon/src/handlers/knowledge/file_artifacts/kind.rs',
   fileArtifactsWrite: 'crates/missiond-daemon/src/handlers/knowledge/file_artifacts/write.rs',
   fileArtifactsTests: 'crates/missiond-daemon/src/handlers/knowledge/file_artifacts/tests.rs',
@@ -90,6 +91,7 @@ const BLUEPRINT_NEEDLES = [
   ':status "code-aligned"',
   'crates/missiond-daemon/src/handlers/knowledge/file_artifacts.rs',
   'crates/missiond-daemon/src/handlers/knowledge/file_artifacts/attempt.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/file_artifacts/commit.rs',
   'crates/missiond-daemon/src/handlers/knowledge/file_artifacts/kind.rs',
   'crates/missiond-daemon/src/handlers/knowledge/file_artifacts/write.rs',
   'crates/missiond-daemon/src/handlers/knowledge/file_artifacts/tests.rs',
@@ -102,6 +104,7 @@ const BLUEPRINT_NEEDLES = [
 // in the blueprint must not satisfy the contract.
 const SURFACE_NOTE_ANCHORS = [
   'ArtifactKind',
+  'ArtifactCommitEnvelope',
   'atomic_write_artifact',
   'request-local artifact projection',
   'compat path',
@@ -143,9 +146,11 @@ const FILE_ARTIFACTS_NEEDLES = [
 
 const FILE_ARTIFACTS_FACADE_NEEDLES = [
   'mod attempt;',
+  'mod commit;',
   'mod kind;',
   'mod write;',
   'pub(crate) use attempt::{',
+  'pub(crate) use commit::{',
   'pub(crate) use kind::{',
   'pub(crate) use write::{',
   '#[cfg(test)]',
@@ -187,6 +192,17 @@ const FILE_ARTIFACTS_ATTEMPT_NEEDLES = [
   'file-first writer refuses process-cwd fallback',
 ];
 
+const FILE_ARTIFACTS_COMMIT_NEEDLES = [
+  'pub(crate) struct ArtifactCommitEnvelopeInput',
+  'pub(crate) struct ArtifactCommitEnvelope',
+  'pub(crate) async fn commit_text',
+  'pub(crate) async fn recover_artifact_commit_outbox',
+  'artifact_commit_outbox_upsert_pending',
+  'artifact_commit_outbox_mark_complete',
+  'operation_key',
+  'artifact sha mismatch',
+];
+
 function checkFiles(root, files) {
   const diagnostics = [];
   const sources = {};
@@ -222,11 +238,18 @@ function checkFiles(root, files) {
     sources.fileArtifactsAttempt,
     FILE_ARTIFACTS_ATTEMPT_NEEDLES,
   );
+  requireAll(
+    diagnostics,
+    files.fileArtifactsCommit,
+    sources.fileArtifactsCommit,
+    FILE_ARTIFACTS_COMMIT_NEEDLES,
+  );
   const combinedWriterSurface = [
     sources.fileArtifacts,
     sources.fileArtifactsKind,
     sources.fileArtifactsWrite,
     sources.fileArtifactsAttempt,
+    sources.fileArtifactsCommit,
   ].join('\n');
   requireAll(diagnostics, files.fileArtifacts, combinedWriterSurface, FILE_ARTIFACTS_NEEDLES);
   requireAll(diagnostics, files.fileArtifactsTests, sources.fileArtifactsTests, [
@@ -303,6 +326,7 @@ function runFixtures(json) {
     [DEFAULT_FILES.blueprint]: buildGoodBlueprint(),
     [DEFAULT_FILES.fileArtifacts]: buildGoodFileArtifacts(),
     [DEFAULT_FILES.fileArtifactsAttempt]: buildGoodFileArtifactsAttempt(),
+    [DEFAULT_FILES.fileArtifactsCommit]: buildGoodFileArtifactsCommit(),
     [DEFAULT_FILES.fileArtifactsKind]: buildGoodFileArtifactsKind(),
     [DEFAULT_FILES.fileArtifactsWrite]: buildGoodFileArtifactsWrite(),
     [DEFAULT_FILES.fileArtifactsTests]: buildGoodFileArtifactsTests(),
@@ -477,10 +501,11 @@ function buildGoodBlueprint() {
       :status "code-aligned"
       :code ["crates/missiond-daemon/src/handlers/knowledge/file_artifacts.rs"
              "crates/missiond-daemon/src/handlers/knowledge/file_artifacts/attempt.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/file_artifacts/commit.rs"
              "crates/missiond-daemon/src/handlers/knowledge/file_artifacts/kind.rs"
              "crates/missiond-daemon/src/handlers/knowledge/file_artifacts/write.rs"
              "crates/missiond-daemon/src/handlers/knowledge/file_artifacts/tests.rs"]
-      :note "file-artifacts is the file-first SSOT writer underneath compile_directive / compile_plan / compile_workflow and the request-local artifact projection that mission_request materializes for review. file_artifacts.rs is the facade; kind.rs owns ArtifactKind plus artifact_path and the stable artifact paths (.missiond/alignment/<topic>/intent-alignment.lisp, .missiond/plans/<topic>/PLAN.lisp, .missiond/workflows/<topic>.lisp) which are the V3 compat path served when mission_request opt-in compat_write_file=true; write.rs owns atomic_write_artifact and unique_temp_path_in_dir so callers see no partial writes on crash; attempt.rs owns attempt_artifact_write, WriterContext, AttemptOutcome, and project-root resolution so the file-vs-db contract never silently rolls back a committed row when the file write fails. file_artifacts/tests.rs holds the writer regression suite outside the runtime facade."))
+      :note "file-artifacts is the file-first SSOT writer underneath compile_directive / compile_plan / compile_workflow and the request-local artifact projection that mission_request materializes for review. file_artifacts.rs is the facade; kind.rs owns ArtifactKind plus artifact_path and the stable compat path roots .missiond/alignment, .missiond/plans, and .missiond/workflows; write.rs owns atomic_write_artifact and unique_temp_path_in_dir so callers see no partial writes on crash; attempt.rs owns pure file writes; commit.rs owns ArtifactCommitEnvelope and artifact_commit_outbox recovery."))
   (compression-contract
     :checks ["node scripts/check-v3-file-artifacts-isomorphism.mjs"]))
 `;
@@ -490,10 +515,12 @@ function buildGoodFileArtifacts() {
   // Minimal facade skeleton; behavior needles live in the split modules.
   return `// fixture
 mod attempt;
+mod commit;
 mod kind;
 mod write;
 
 pub(crate) use attempt::{attempt_artifact_write, AttemptOutcome, WriterContext};
+pub(crate) use commit::{ArtifactCommitEnvelope, ArtifactCommitEnvelopeInput};
 pub(crate) use kind::{artifact_path, ArtifactKind};
 pub(crate) use write::{atomic_write_artifact, unique_temp_path_in_dir};
 
@@ -547,6 +574,22 @@ const _: &[&str] = &[
 pub(crate) async fn attempt_artifact_write() {}
 pub(crate) async fn resolve_writer_project_root() {}
 const _: &str = "file-first writer refuses process-cwd fallback";
+`;
+}
+
+function buildGoodFileArtifactsCommit() {
+  return `// fixture
+pub(crate) struct ArtifactCommitEnvelopeInput { operation_key: String }
+pub(crate) struct ArtifactCommitEnvelope;
+impl ArtifactCommitEnvelope {
+  pub(crate) async fn commit_text() {
+    artifact_commit_outbox_upsert_pending;
+    artifact_commit_outbox_mark_complete;
+    operation_key;
+  }
+}
+pub(crate) async fn recover_artifact_commit_outbox() {}
+const _: &str = "artifact sha mismatch";
 `;
 }
 

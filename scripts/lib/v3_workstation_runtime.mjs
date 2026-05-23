@@ -13,36 +13,43 @@ import {
 } from './missiond_lisp.mjs';
 import { readBlueprintResolvedSource } from './v3_blueprint_contract_source.mjs';
 import { SOURCE_HASH as V3_CONTRACT_SOURCE_HASH } from '../generated/v3_contracts.mjs';
+import { DEFAULT_WORKSTATION_RUNTIME_CONFIG } from '../generated/v3_runtime_defaults.mjs';
 
-export const DEFAULT_MODEL_PROFILE = 'coding-default-opus-4-7';
-export const DEFAULT_TIMEOUT_SECS = 1800;
-export const MIN_TIMEOUT_SECS = 60;
-export const MAX_TIMEOUT_SECS = 7200;
-export const DEFAULT_CC_SWARM_TIMEOUT_SECS = 600;
-export const MIN_CC_SWARM_TIMEOUT_SECS = 60;
-export const MAX_CC_SWARM_TIMEOUT_SECS = 7200;
-export const DEFAULT_PTY_SEND_TIMEOUT_SECS = 300;
-export const MIN_PTY_SEND_TIMEOUT_SECS = 1;
-export const MAX_PTY_SEND_TIMEOUT_SECS = 7200;
-export const DEFAULT_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS = 60;
-export const MIN_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS = 10;
-export const MAX_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS = 600;
-export const DEFAULT_CONTEXT_PACK_MAX_PARALLEL = 4;
-export const MIN_CONTEXT_PACK_MAX_PARALLEL = 1;
-export const MAX_CONTEXT_PACK_MAX_PARALLEL = 8;
-export const WATCHDOG_GRACE_SECS = 120;
-export const MISSING_SESSION_PROBE_SECS = 120;
-export const DEFAULT_SLOT_TTL_SECS = 14400;
-export const MIN_SLOT_TTL_SECS = 300;
-export const MAX_SLOT_TTL_SECS = 28800;
-export const DEFAULT_SLOT_EXTEND_SECS = 3600;
-export const MAX_SLOT_EXTEND_SECS = 3600;
-export const DEFAULT_SLOT_DEFAULT_CWD = '.';
-export const DEFAULT_SLOT_MCP_CONFIG = '.missiond/mcp-config.json';
-export const DEFAULT_ALLOWED_CWD_PREFIXES = [
-  '.',
-  '/tmp',
-];
+const GENERATED_DEFAULT_WORKSTATION = DEFAULT_WORKSTATION_RUNTIME_CONFIG;
+const GENERATED_TIMEOUT_POLICY = GENERATED_DEFAULT_WORKSTATION.timeout_policy ?? {};
+const GENERATED_CC_SWARM_TIMEOUT_POLICY = GENERATED_DEFAULT_WORKSTATION.cc_swarm_timeout_policy ?? {};
+const GENERATED_PTY_SEND_TIMEOUT_POLICY = GENERATED_DEFAULT_WORKSTATION.pty_send_timeout_policy ?? {};
+const GENERATED_DYNAMIC_SLOT_SPAWN_TIMEOUT_POLICY = GENERATED_DEFAULT_WORKSTATION.dynamic_slot_spawn_timeout_policy ?? {};
+const GENERATED_CONTEXT_PACK_DISPATCH_POLICY = GENERATED_DEFAULT_WORKSTATION.context_pack_dispatch_policy ?? {};
+const GENERATED_SLOT_TTL_POLICY = GENERATED_DEFAULT_WORKSTATION.slot_ttl_policy ?? {};
+const GENERATED_SLOT_TEMPLATES = GENERATED_DEFAULT_WORKSTATION.slot_templates ?? {};
+
+export const DEFAULT_MODEL_PROFILE = GENERATED_DEFAULT_WORKSTATION.slot_default_profiles?.coder ?? 'coding-default-opus-4-7';
+export const DEFAULT_TIMEOUT_SECS = GENERATED_TIMEOUT_POLICY.default_secs ?? 1800;
+export const MIN_TIMEOUT_SECS = GENERATED_TIMEOUT_POLICY.min_secs ?? 60;
+export const MAX_TIMEOUT_SECS = GENERATED_TIMEOUT_POLICY.max_secs ?? 7200;
+export const DEFAULT_CC_SWARM_TIMEOUT_SECS = GENERATED_CC_SWARM_TIMEOUT_POLICY.default_secs ?? 600;
+export const MIN_CC_SWARM_TIMEOUT_SECS = GENERATED_CC_SWARM_TIMEOUT_POLICY.min_secs ?? 60;
+export const MAX_CC_SWARM_TIMEOUT_SECS = GENERATED_CC_SWARM_TIMEOUT_POLICY.max_secs ?? 7200;
+export const DEFAULT_PTY_SEND_TIMEOUT_SECS = GENERATED_PTY_SEND_TIMEOUT_POLICY.default_secs ?? 300;
+export const MIN_PTY_SEND_TIMEOUT_SECS = GENERATED_PTY_SEND_TIMEOUT_POLICY.min_secs ?? 1;
+export const MAX_PTY_SEND_TIMEOUT_SECS = GENERATED_PTY_SEND_TIMEOUT_POLICY.max_secs ?? 7200;
+export const DEFAULT_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS = GENERATED_DYNAMIC_SLOT_SPAWN_TIMEOUT_POLICY.default_secs ?? 60;
+export const MIN_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS = GENERATED_DYNAMIC_SLOT_SPAWN_TIMEOUT_POLICY.min_secs ?? 10;
+export const MAX_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS = GENERATED_DYNAMIC_SLOT_SPAWN_TIMEOUT_POLICY.max_secs ?? 600;
+export const DEFAULT_CONTEXT_PACK_MAX_PARALLEL = GENERATED_CONTEXT_PACK_DISPATCH_POLICY.default_max_parallel ?? 4;
+export const MIN_CONTEXT_PACK_MAX_PARALLEL = GENERATED_CONTEXT_PACK_DISPATCH_POLICY.min_parallel ?? 1;
+export const MAX_CONTEXT_PACK_MAX_PARALLEL = GENERATED_CONTEXT_PACK_DISPATCH_POLICY.max_parallel ?? 8;
+export const WATCHDOG_GRACE_SECS = GENERATED_TIMEOUT_POLICY.watchdog_grace_secs ?? 120;
+export const MISSING_SESSION_PROBE_SECS = GENERATED_TIMEOUT_POLICY.missing_session_probe_secs ?? 120;
+export const DEFAULT_SLOT_TTL_SECS = GENERATED_SLOT_TTL_POLICY.default_secs ?? 14400;
+export const MIN_SLOT_TTL_SECS = GENERATED_SLOT_TTL_POLICY.min_secs ?? 300;
+export const MAX_SLOT_TTL_SECS = GENERATED_SLOT_TTL_POLICY.max_secs ?? 28800;
+export const DEFAULT_SLOT_EXTEND_SECS = GENERATED_SLOT_TTL_POLICY.default_extend_secs ?? 3600;
+export const MAX_SLOT_EXTEND_SECS = GENERATED_SLOT_TTL_POLICY.max_extend_secs ?? 3600;
+export const DEFAULT_SLOT_DEFAULT_CWD = GENERATED_SLOT_TEMPLATES.coder?.default_cwd ?? '.';
+export const DEFAULT_SLOT_MCP_CONFIG = GENERATED_SLOT_TEMPLATES.coder?.mcp_config ?? '.missiond/mcp-config.json';
+export const DEFAULT_ALLOWED_CWD_PREFIXES = GENERATED_DEFAULT_WORKSTATION.allowed_cwd_prefixes ?? ['.', '/tmp'];
 
 const PROFILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const COMPILED_RUNTIME_CONFIG_REL = path.join(
@@ -570,21 +577,11 @@ export function parseWorkstationRuntimeConfig(source, file = '<memory>') {
 }
 
 function defaultWorkstationRuntimeConfig(source) {
-  return new WorkstationRuntimeConfig({
-    slotDefaultProfiles: defaultSlotProfiles(),
-    slotTemplates: defaultSlotTemplates(),
-    allowedCwdPrefixes: DEFAULT_ALLOWED_CWD_PREFIXES,
-    timeoutPolicy: defaultTimeoutPolicy(),
-    ccSwarmTimeoutPolicy: defaultCcSwarmTimeoutPolicy(),
-    ptySendTimeoutPolicy: defaultPtySendTimeoutPolicy(),
-    dynamicSlotSpawnTimeoutPolicy: defaultDynamicSlotSpawnTimeoutPolicy(),
-    contextPackDispatchPolicy: defaultContextPackDispatchPolicy(),
-    slotTtlPolicy: defaultSlotTtlPolicy(),
-    source,
-    diagnostics: source === 'fallback-defaults'
-      ? ['using embedded JS workstation runtime defaults']
-      : [],
-  });
+  const config = workstationConfigFromCompiled(DEFAULT_WORKSTATION_RUNTIME_CONFIG, source);
+  if (source === 'fallback-defaults') {
+    config.diagnostics.push('using generated V3 workstation runtime defaults');
+  }
+  return config;
 }
 
 function defaultSlotTemplates() {

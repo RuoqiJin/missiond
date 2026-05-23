@@ -135,7 +135,7 @@ import {
   nodeText,
   parseLisp,
   readKeywordProps,
-} from './lib/missiond_lisp.mjs';
+} from './lib/v3_resolved_lisp_compat.mjs';
 import { readBlueprintWithEvidenceSidecars } from './lib/v3_blueprint_contract_source.mjs';
 import { callToolViaIpc } from './task-runner-submit-dispatch.mjs';
 

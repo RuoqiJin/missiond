@@ -20,7 +20,7 @@ import {
   nodeToStringArray,
   parseLisp,
   readKeywordProps,
-} from './lib/missiond_lisp.mjs';
+} from './lib/v3_resolved_lisp_compat.mjs';
 import { EXPECTED_SURFACES } from './check-v3-code-isomorphism-complete.mjs';
 import {
   compiledSurfaceIds,

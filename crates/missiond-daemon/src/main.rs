@@ -1044,6 +1044,28 @@ async fn main() -> Result<()> {
         },
     };
 
+    {
+        let state_for_outbox = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                match handlers::knowledge::file_artifacts::recover_artifact_commit_outbox(
+                    &state_for_outbox,
+                    64,
+                )
+                .await
+                {
+                    Ok(count) if count > 0 => {
+                        info!(count, "artifact commit outbox recovery completed")
+                    }
+                    Ok(_) => {}
+                    Err(e) => warn!(error = %e, "artifact commit outbox recovery failed"),
+                }
+            }
+        });
+    }
+
     // Register SlotManager task configs
     {
         let workstation_config =
