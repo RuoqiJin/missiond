@@ -430,9 +430,11 @@ fn build_cli_command(
             parts
         }
         CliEngine::Codex => {
-            // Codex CLI: interactive mode
-            // Working directory is set via CommandBuilder::cwd(), not CLI flag
-            let mut parts = "codex".to_string();
+            // Codex CLI: interactive mode. Codex has a first-class `--cd`
+            // workspace flag; pass it even though CommandBuilder::cwd() is
+            // also set, so resumed/profile state cannot drift to a stale repo.
+            let mut parts = format!("codex --cd {}", shell_quote(&cwd.display().to_string()));
+            info!(cwd = %cwd.display(), "Codex CLI: workspace root override");
             if let Some(m) = model {
                 parts.push_str(&format!(" --model {}", shell_quote(m)));
                 info!(model = %m, "Codex CLI: model override");
@@ -3096,7 +3098,8 @@ Some prose.
             Some("never"),
             None,
         );
-        assert!(cmd.contains("codex --model 'gpt-5.5'"));
+        assert!(cmd.contains("codex --cd '/tmp/project'"));
+        assert!(cmd.contains("--model 'gpt-5.5'"));
         assert!(cmd.contains("-c 'model_reasoning_effort=\"xhigh\"'"));
         assert!(cmd.contains("--search"));
         assert!(cmd.contains("--sandbox 'danger-full-access'"));

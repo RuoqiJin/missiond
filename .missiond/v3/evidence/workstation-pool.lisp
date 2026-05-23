@@ -40,7 +40,7 @@
        :sandbox danger-full-access
        :approval-policy never
        :write-policy scoped-shard
-       :runtime-rule "Ordinary Codex implementation lane. It is separate from codex-master-control and may only consume accepted exact shards with write_scope/lease/artifact requirements.")
+       :runtime-rule "Ordinary Codex implementation lane. It is separate from codex-master-control and may only consume accepted exact shards with write_scope/lease/artifact requirements. Runtime MUST launch Codex with --cd <slot project root> in addition to PTY cwd so resumed/profile state cannot drift to a stale repository.")
      (codex-review-worker
        :account current-codex-cli-login
        :model "gpt-5.5"
@@ -49,7 +49,7 @@
        :sandbox read-only
        :approval-policy never
        :write-policy read-only
-       :runtime-rule "Codex review/regression lane. It can audit designs and code but cannot replace resident master-control.")
+       :runtime-rule "Codex review/regression lane. It can audit designs and code but cannot replace resident master-control. Runtime MUST launch Codex with --cd <slot project root> in addition to PTY cwd so review evidence and slot metadata share the same repository root.")
      (claude-code-fast-patch
        :account current-claude-code-default
        :model "Sonnet only when explicitly selected"
