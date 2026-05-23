@@ -24,6 +24,10 @@ const REQUIRED_HELPER_ANCHORS = [
   'compiledCheckerRegistryMap',
   'compiledContractSplitMap',
   'compiledControlPlaneDomainMap',
+  'compiledProductionConsumerBoundaryMap',
+  'compiledRequestStateProjectionMap',
+  'compiledScannerPolicyMap',
+  'compiledSemanticGateMap',
   'loadV3SemanticFacts',
 ];
 
@@ -42,6 +46,21 @@ function main() {
   const checker = facts.checkerRegistry.get('v3-compression-contract');
   if (!checker || !checker.checks.includes('node scripts/check-v3-final-convergence.mjs')) {
     diagnostics.push(diag('.missiond/v3/missiond-blueprint.lisp', 'compiled checker registry missing final convergence command'));
+  }
+  if (!facts.productionConsumerBoundaries.has('plan-contract-runtime')) {
+    diagnostics.push(diag('.missiond/v3/missiond-blueprint.lisp', 'compiled semantic IR missing production_consumer_boundary fact: plan-contract-runtime'));
+  }
+  if (!facts.productionConsumerBoundaries.has('runtime-config-compiled-authority')) {
+    diagnostics.push(diag('.missiond/v3/missiond-blueprint.lisp', 'compiled semantic IR missing production_consumer_boundary fact: runtime-config-compiled-authority'));
+  }
+  if (!facts.requestStateProjections.has('mission-request-review')) {
+    diagnostics.push(diag('.missiond/v3/missiond-blueprint.lisp', 'compiled semantic IR missing request_state_projection fact: mission-request-review'));
+  }
+  if (!facts.scannerPolicies.has('plan-lisp-raw-scanner')) {
+    diagnostics.push(diag('.missiond/v3/missiond-blueprint.lisp', 'compiled semantic IR missing scanner_policy fact: plan-lisp-raw-scanner'));
+  }
+  if (!facts.semanticGates.has('final-convergence-semantic-facts')) {
+    diagnostics.push(diag('.missiond/v3/missiond-blueprint.lisp', 'compiled semantic IR missing semantic_gate fact: final-convergence-semantic-facts'));
   }
   if (facts.sourceUnits.size < 2) {
     diagnostics.push(diag('.missiond/v3/missiond-blueprint.lisp', 'compiled source_units must include root plus compiler-active shards'));
@@ -74,6 +93,10 @@ function main() {
     ok: diagnostics.length === 0,
     runtimePolicies: facts.runtimePolicies.size,
     checkerRegistry: facts.checkerRegistry.size,
+    productionConsumerBoundaries: facts.productionConsumerBoundaries.size,
+    requestStateProjections: facts.requestStateProjections.size,
+    scannerPolicies: facts.scannerPolicies.size,
+    semanticGates: facts.semanticGates.size,
     contractSplits: facts.contractSplits.size,
     controlPlaneDomains: facts.controlPlaneDomains.size,
     sourceUnits: facts.sourceUnits.size,

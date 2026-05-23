@@ -468,6 +468,9 @@ fn build_cli_command(
                 r#"mcp_servers.missiond.tools.mission_board_note_add.approval_mode="approve""#,
                 r#"mcp_servers.missiond.tools.mission_compute_slot.approval_mode="approve""#,
                 r#"mcp_servers.missiond.tools.mission_context_boot.approval_mode="approve""#,
+                r#"mcp_servers.missiond.tools.mission_context_slice.approval_mode="approve""#,
+                r#"mcp_servers.missiond.tools.mission_shared_memory.approval_mode="approve""#,
+                r#"mcp_servers.missiond.tools.mission_claim_status.approval_mode="approve""#,
                 r#"mcp_servers.missiond.tools.mission_conversation_query.approval_mode="approve""#,
                 r#"mcp_servers.missiond.tools.mission_slots.approval_mode="approve""#,
                 r#"mcp_servers.missiond.tools.mission_pty_status.approval_mode="approve""#,
@@ -3103,6 +3106,15 @@ Some prose.
         ));
         assert!(cmd.contains(
             "-c 'mcp_servers.missiond.tools.mission_context_boot.approval_mode=\"approve\"'"
+        ));
+        assert!(cmd.contains(
+            "-c 'mcp_servers.missiond.tools.mission_context_slice.approval_mode=\"approve\"'"
+        ));
+        assert!(cmd.contains(
+            "-c 'mcp_servers.missiond.tools.mission_shared_memory.approval_mode=\"approve\"'"
+        ));
+        assert!(cmd.contains(
+            "-c 'mcp_servers.missiond.tools.mission_claim_status.approval_mode=\"approve\"'"
         ));
     }
 

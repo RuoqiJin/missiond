@@ -115,7 +115,21 @@ async fn read_at(path: &Path) -> Value {
     }
 }
 
+type AtomicWriter = fn(&Path, &[u8]) -> Result<()>;
+
+fn production_atomic_write(path: &Path, content: &[u8]) -> Result<()> {
+    effects::atomic_write_text(GLOBAL_INSTRUCTION_EFFECT, path, content)
+}
+
 async fn edit_action(path: &Path, args: Value) -> Result<ToolResult> {
+    edit_action_with_writer(path, args, production_atomic_write).await
+}
+
+async fn edit_action_with_writer(
+    path: &Path,
+    args: Value,
+    atomic_write: AtomicWriter,
+) -> Result<ToolResult> {
     let new_content = match args.get("new_content").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
         None => {
@@ -204,7 +218,7 @@ async fn edit_action(path: &Path, args: Value) -> Result<ToolResult> {
         None
     };
 
-    effects::atomic_write_text(GLOBAL_INSTRUCTION_EFFECT, path, new_content.as_bytes())?;
+    atomic_write(path, new_content.as_bytes())?;
 
     Ok(ToolResult::json_pretty(&json!({
         "status": "written",
@@ -297,7 +311,29 @@ mod tests {
             "dry_run": dry_run,
             "allow_empty": allow_empty,
         });
-        edit_action(path, args).await
+        edit_action_with_writer(path, args, test_atomic_write).await
+    }
+
+    fn test_atomic_write(path: &Path, content: &[u8]) -> Result<()> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow!("test target path has no parent: {}", path.display()))?;
+        std::fs::create_dir_all(parent)?;
+        let tmp = parent.join(format!(
+            ".{}.test.tmp",
+            path.file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| "CLAUDE.md".to_string())
+        ));
+        if let Err(err) = std::fs::write(&tmp, content) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(err.into());
+        }
+        if let Err(err) = std::fs::rename(&tmp, path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(err.into());
+        }
+        Ok(())
     }
 
     fn extract_json(result: &ToolResult) -> Value {

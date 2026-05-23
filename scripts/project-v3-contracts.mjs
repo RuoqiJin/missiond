@@ -156,6 +156,10 @@ function loadContract({ repo, blueprint }) {
     runtimePolicies: normalizeRuntimePolicies(payload.runtime_policies, facts),
     checkerRegistry: normalizeCheckerRegistry(payload.checker_registry, facts),
     finalConvergenceGate: normalizeFinalConvergenceGate(facts.find((fact) => fact?.kind === 'final_convergence_gate')),
+    productionConsumerBoundaries: normalizeTypedFacts(payload.production_consumer_boundaries, facts, 'production_consumer_boundary'),
+    requestStateProjections: normalizeTypedFacts(payload.request_state_projections, facts, 'request_state_projection'),
+    scannerPolicies: normalizeTypedFacts(payload.scanner_policies, facts, 'scanner_policy'),
+    semanticGates: normalizeTypedFacts(payload.semantic_gates, facts, 'semantic_gate'),
     planContract: payload.plan_contract ?? {},
   };
 }
@@ -257,6 +261,10 @@ ${rustStringArrayConst('SURFACE_IDS', contract.surfaceIds)}
 ${rustStringArrayConst('FUNCTION_IDS', contract.functionIds)}
 ${rustStringArrayConst('ARTIFACT_CONTRACT_IDS', contract.artifactContractIds)}
 ${rustStringArrayConst('RUNTIME_POLICY_IDS', contract.runtimePolicies.map((policy) => policy.id))}
+${rustStringArrayConst('PRODUCTION_CONSUMER_BOUNDARY_IDS', contract.productionConsumerBoundaries.map((fact) => fact.id))}
+${rustStringArrayConst('REQUEST_STATE_PROJECTION_IDS', contract.requestStateProjections.map((fact) => fact.id))}
+${rustStringArrayConst('SCANNER_POLICY_IDS', contract.scannerPolicies.map((fact) => fact.id))}
+${rustStringArrayConst('SEMANTIC_GATE_IDS', contract.semanticGates.map((fact) => fact.id))}
 ${rustStringArrayConst('CHECKER_COMMANDS', checkerCommands(contract))}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -307,6 +315,10 @@ export const RUNTIME_POLICY_IDS = Object.freeze(${JSON.stringify(contract.runtim
 export const CHECKER_REGISTRY = Object.freeze(${JSON.stringify(contract.checkerRegistry, null, 2)});
 export const CHECKER_COMMANDS = Object.freeze(${JSON.stringify(checkerCommands(contract), null, 2)});
 export const FINAL_CONVERGENCE_GATE = Object.freeze(${JSON.stringify(contract.finalConvergenceGate, null, 2)});
+export const PRODUCTION_CONSUMER_BOUNDARIES = Object.freeze(${JSON.stringify(contract.productionConsumerBoundaries, null, 2)});
+export const REQUEST_STATE_PROJECTIONS = Object.freeze(${JSON.stringify(contract.requestStateProjections, null, 2)});
+export const SCANNER_POLICIES = Object.freeze(${JSON.stringify(contract.scannerPolicies, null, 2)});
+export const SEMANTIC_GATES = Object.freeze(${JSON.stringify(contract.semanticGates, null, 2)});
 export const PLAN_CONTRACT = Object.freeze(${JSON.stringify(contract.planContract, null, 2)});
 
 const SURFACE_ID_SET = new Set(SURFACE_IDS);
@@ -376,10 +388,31 @@ export interface FinalConvergenceGate {
   source: unknown;
 }
 
+export interface TypedSemanticFact {
+  id: string;
+  schemaVersion: string | null;
+  surface: string | null;
+  owner: string | null;
+  authority: string | null;
+  inputSchema: string | null;
+  status: string | null;
+  runtimeConsumers: readonly string[];
+  must: readonly string[];
+  forbidden: readonly string[];
+  allowedContexts: readonly string[];
+  requires: readonly string[];
+  checker: string | null;
+  source: unknown;
+}
+
 export type V3SurfaceId = ${tsUnion(contract.surfaceIds)};
 export type V3FunctionId = ${tsUnion(contract.functionIds)};
 export type V3ArtifactContractId = ${tsUnion(contract.artifactContractIds)};
 export type V3RuntimePolicyId = ${tsUnion(contract.runtimePolicies.map((policy) => policy.id))};
+export type V3ProductionConsumerBoundaryId = ${tsUnion(contract.productionConsumerBoundaries.map((fact) => fact.id))};
+export type V3RequestStateProjectionId = ${tsUnion(contract.requestStateProjections.map((fact) => fact.id))};
+export type V3ScannerPolicyId = ${tsUnion(contract.scannerPolicies.map((fact) => fact.id))};
+export type V3SemanticGateId = ${tsUnion(contract.semanticGates.map((fact) => fact.id))};
 
 export const SCHEMA_VERSION: ${JSON.stringify(contract.schemaVersion)};
 export const SOURCE_HASH: ${JSON.stringify(contract.sourceHash)};
@@ -395,6 +428,10 @@ export const RUNTIME_POLICIES: readonly RuntimePolicyDescriptor[];
 export const CHECKER_REGISTRY: readonly CheckerRegistryEntry[];
 export const CHECKER_COMMANDS: readonly string[];
 export const FINAL_CONVERGENCE_GATE: Readonly<FinalConvergenceGate> | null;
+export const PRODUCTION_CONSUMER_BOUNDARIES: readonly TypedSemanticFact[];
+export const REQUEST_STATE_PROJECTIONS: readonly TypedSemanticFact[];
+export const SCANNER_POLICIES: readonly TypedSemanticFact[];
+export const SEMANTIC_GATES: readonly TypedSemanticFact[];
 export const PLAN_CONTRACT: Readonly<{
   schema_version?: string;
   accepted_heads?: readonly string[];
@@ -499,6 +536,28 @@ function normalizeFinalConvergenceGate(row) {
   };
 }
 
+function normalizeTypedFacts(rows, facts, kind) {
+  const candidates = Array.isArray(rows) && rows.length > 0
+    ? rows
+    : facts.filter((fact) => fact?.kind === kind);
+  return uniqueById(candidates.map((row) => ({
+    id: stringOrNull(row?.id),
+    schemaVersion: stringOrNull(row?.schema_version ?? row?.schemaVersion),
+    surface: stringOrNull(row?.surface),
+    owner: stringOrNull(row?.owner),
+    authority: stringOrNull(row?.authority),
+    inputSchema: stringOrNull(row?.input_schema ?? row?.inputSchema),
+    status: stringOrNull(row?.status),
+    runtimeConsumers: stringArray(row?.runtime_consumers ?? row?.runtimeConsumers),
+    must: stringArray(row?.must),
+    forbidden: stringArray(row?.forbidden),
+    allowedContexts: stringArray(row?.allowed_contexts ?? row?.allowedContexts),
+    requires: stringArray(row?.requires),
+    checker: stringOrNull(row?.checker),
+    source: row?.source ?? null,
+  }))).sort((a, b) => a.id.localeCompare(b.id));
+}
+
 function normalizeGateChecks(rows) {
   return arrayOrEmpty(rows)
     .map((entry) => ({
@@ -593,8 +652,13 @@ ${indent}}${trailingComma ? ',' : ''}`;
 
 function rustStringArrayConst(name, values) {
   if (!values.length) return `pub const ${name}: &[&str] = &[];`;
-  const inline = `pub const ${name}: &[&str] = &[${values.map(rustString).join(', ')}];`;
+  const arrayInline = `&[${values.map(rustString).join(', ')}]`;
+  const inline = `pub const ${name}: &[&str] = ${arrayInline};`;
   if (inline.length <= 100) return inline;
+  if (arrayInline.length <= 100) {
+    return `pub const ${name}: &[&str] =
+    ${arrayInline};`;
+  }
   return `pub const ${name}: &[&str] = &[
 ${values.map((value) => `    ${rustString(value)},`).join('\n')}
 ];`;

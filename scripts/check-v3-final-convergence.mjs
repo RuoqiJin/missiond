@@ -13,9 +13,19 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 import {
+  compiledArtifactContractMap,
+  compiledCheckerRegistryMap,
+  compiledContractSplitMap,
+  compiledControlPlaneDomainMap,
+  compiledFunctionMap,
+  compiledProductionConsumerBoundaryMap,
+  compiledRequestStateProjectionMap,
+  compiledRuntimePolicyMap,
+  compiledScannerPolicyMap,
+  compiledSemanticGateMap,
+  compiledSourceDomainMap,
   compiledSurfaceIds,
   loadCompiledV3Contract,
-  loadResolvedV3Contract,
 } from './lib/v3_compiled_contract.mjs';
 import {
   REQUIRED_FINAL_LIVE_CHECK_IDS,
@@ -24,6 +34,20 @@ import {
 
 const CHECK_COMMAND = 'node scripts/check-v3-final-convergence.mjs';
 const BLUEPRINT_PATH = '.missiond/v3/missiond-blueprint.lisp';
+const REQUIRED_SEMANTIC_GATE_FACT_KINDS = Object.freeze([
+  'surface',
+  'function',
+  'artifact_contract',
+  'runtime_policy',
+  'contract_split',
+  'control_plane_domain',
+  'source_domain',
+  'checker_registry',
+  'production_consumer_boundary',
+  'request_state_projection',
+  'scanner_policy',
+  'semantic_gate',
+]);
 
 const DRY_FIXTURE_LIVE_CHECKS = [
   {
@@ -379,22 +403,7 @@ export function runFinalConvergenceCheck(repoRoot, blueprintRel = BLUEPRINT_PATH
       requiredLiveCheckIds: REQUIRED_FINAL_LIVE_CHECK_IDS,
     }));
   }
-
-  let blueprintSource = '';
-  const resolved = loadResolvedV3Contract({
-    repoRoot,
-    blueprint: blueprintRel,
-    includeEvidenceSidecar: true,
-  });
-  if (resolved.ok && resolved.resolvedSource) {
-    blueprintSource = resolved.resolvedSource;
-  } else {
-    diagnostics.push(...compiledDiagnostics(resolved, blueprintRel));
-  }
-
-  if (blueprintSource && gate) {
-    diagnostics.push(...checkBlueprintClosure(blueprintSource, blueprintRel, gate, contract.checkerRegistry));
-  }
+  diagnostics.push(...checkSemanticGateClosure(contract, blueprintRel));
   const facades = checkFacadeBudgets(repoRoot, gate?.facadeBudgets ?? []);
   diagnostics.push(...facades.diagnostics);
   const splitFiles = checkRequiredFiles(repoRoot, gate?.requiredSplitFiles ?? [], 'required split module missing');
@@ -490,21 +499,66 @@ function compiledDiagnostics(contract, file) {
 
 export function checkBlueprintClosure(source, file = BLUEPRINT_PATH, gate = null, checkerRegistry = []) {
   const diagnostics = [];
-  for (const { id, needle } of gate?.blueprintNeedles ?? []) {
-    if (!source.includes(needle)) {
-      diagnostics.push({
-        file,
-        message: `blueprint missing final convergence needle ${id}: ${needle}`,
-      });
-    }
-  }
-
   const checkStrings = (checkerRegistry ?? []).flatMap((entry) => entry.checks ?? []);
   if (!checkStrings.includes(CHECK_COMMAND)) {
     diagnostics.push({
       file,
       message: `compiled checker registry must include "${CHECK_COMMAND}"`,
     });
+  }
+  return diagnostics;
+}
+
+export function checkSemanticGateClosure(contract, file = BLUEPRINT_PATH) {
+  const diagnostics = [];
+  const checkerRegistry = compiledCheckerRegistryMap(contract);
+  const checker = checkerRegistry.get('v3-compression-contract');
+  if (!checker || !checker.checks.includes(CHECK_COMMAND)) {
+    diagnostics.push({
+      file,
+      message: `compiled checker registry must include "${CHECK_COMMAND}"`,
+    });
+  }
+
+  const semanticGate = compiledSemanticGateMap(contract).get('final-convergence-semantic-facts');
+  if (!semanticGate) {
+    diagnostics.push({
+      file,
+      message: 'compiled semantic IR missing semantic_gate fact final-convergence-semantic-facts',
+    });
+  } else {
+    const declared = new Set(semanticGate.requires ?? []);
+    for (const kind of REQUIRED_SEMANTIC_GATE_FACT_KINDS) {
+      if (!declared.has(kind)) {
+        diagnostics.push({
+          file,
+          message: `semantic final convergence gate missing required fact kind ${kind}`,
+        });
+      }
+    }
+  }
+
+  const requiredFactSets = [
+    ['surface', compiledSurfaceIds(contract)],
+    ['function', [...compiledFunctionMap(contract).keys()]],
+    ['artifact_contract', [...compiledArtifactContractMap(contract).keys()]],
+    ['runtime_policy', [...compiledRuntimePolicyMap(contract).keys()]],
+    ['contract_split', [...compiledContractSplitMap(contract).keys()]],
+    ['control_plane_domain', [...compiledControlPlaneDomainMap(contract).keys()]],
+    ['source_domain', [...compiledSourceDomainMap(contract).keys()]],
+    ['checker_registry', [...checkerRegistry.keys()]],
+    ['production_consumer_boundary', [...compiledProductionConsumerBoundaryMap(contract).keys()]],
+    ['request_state_projection', [...compiledRequestStateProjectionMap(contract).keys()]],
+    ['scanner_policy', [...compiledScannerPolicyMap(contract).keys()]],
+    ['semantic_gate', [...compiledSemanticGateMap(contract).keys()]],
+  ];
+  for (const [kind, ids] of requiredFactSets) {
+    if (!Array.isArray(ids) || ids.length === 0) {
+      diagnostics.push({
+        file,
+        message: `semantic final convergence gate requires compiled ${kind} facts`,
+      });
+    }
   }
   return diagnostics;
 }
@@ -856,7 +910,7 @@ function runDryFixture(opts) {
       [{ id: 'v3-compression-contract', checks: [CHECK_COMMAND] }],
     );
     cases.push(assertCase(
-      'blueprint closure accepts all required needles and final check command',
+      'semantic closure accepts final check command',
       goodDiagnostics.length === 0,
       goodDiagnostics,
     ));
@@ -868,7 +922,7 @@ function runDryFixture(opts) {
       [{ id: 'v3-compression-contract', checks: ['node scripts/check-v3-code-isomorphism-complete.mjs'] }],
     );
     cases.push(assertCase(
-      'blueprint closure rejects compression-contract without final check command',
+      'semantic closure rejects compression-contract without final check command',
       missingFinalDiagnostics.some((d) => d.message.includes(CHECK_COMMAND)),
       missingFinalDiagnostics,
     ));

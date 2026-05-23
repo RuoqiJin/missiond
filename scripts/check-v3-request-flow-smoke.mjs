@@ -638,6 +638,8 @@ function validateRequestHandlerSource(source, file) {
   // Pin the wire strings the handler emits so a rename in Rust is caught.
   const wireExpectations = [
     'enum ReviewState',
+    'struct RequestProjection',
+    'fn derive_request_projection',
     'fn classify_review_state',
     'fn latest_review_event_checkpoint',
     'fn allowed_responses_for',

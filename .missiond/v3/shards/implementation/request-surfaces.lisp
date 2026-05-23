@@ -230,7 +230,7 @@
       :runtime-spawn "plan_dag/runtime/spawn.rs owns DAG runtime dispatch spawn projection: running lifecycle transition, running evidence emission, task-contract context clone, AppState/Plan clone, and JoinSet dispatch task spawn."
       :runtime-success "plan_dag/runtime/success.rs owns DAG runtime successful dispatch projection: success acceptance handoff, terminal claim release, acceptance-rejected rollback, accepted NodeResult projection, rejection taint propagation, and fail-fast rejection signaling."
       :model-projection "mission_plan sonnet compiler_model labels for plan-authoring, plan-review proposals, and field-inference proposals project from router-runtime-policy queued_sonnet_model through RouterRuntimeConfig; local Rust model literals are forbidden on these production paths."
-      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold with :target, :objective, and :nodes; compile/materialization persist plan.contract_json using missiond.plan-contract.v1 shape, execute derives target_source=plan_hint from plan.contract_json, and empty legacy rows are reprojected through missiond-lispc emit-plan-contract before dispatch."
+      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold with :target, :objective, and :nodes; compile/materialization persist plan.contract_json using missiond.plan-contract.v2 shape, execute derives target_source=plan_hint from plan.contract_json, and empty legacy rows are reprojected through missiond-lispc emit-plan-contract before dispatch."
       :evidence-sidecar ".missiond/v3/evidence/blueprint-notes.lisp#note-004")
 
 (surface review-gate

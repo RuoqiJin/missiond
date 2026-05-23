@@ -21,7 +21,8 @@ function main() {
 
   requireText(BLUEPRINT, blueprint, diagnostics, [
     '(typed-subplane-contracts',
-    ':semantic-ir-facts [contract_split control_plane_domain runtime_policy checker_registry]',
+    ':semantic-ir-facts [contract_split control_plane_domain runtime_policy checker_registry',
+    'production_consumer_boundary request_state_projection scanner_policy semantic_gate',
     '.missiond/v3/evidence/blueprint-notes.lisp',
   ]);
   requireText(SIDECAR, sidecar, diagnostics, [
@@ -40,11 +41,27 @@ function main() {
   if (facts.controlPlaneDomains.size === 0) {
     diagnostics.push(diag(BLUEPRINT, 'compiled semantic IR must emit control_plane_domain facts'));
   }
+  if (facts.productionConsumerBoundaries.size === 0) {
+    diagnostics.push(diag(BLUEPRINT, 'compiled semantic IR must emit production_consumer_boundary facts'));
+  }
+  if (facts.requestStateProjections.size === 0) {
+    diagnostics.push(diag(BLUEPRINT, 'compiled semantic IR must emit request_state_projection facts'));
+  }
+  if (facts.scannerPolicies.size === 0) {
+    diagnostics.push(diag(BLUEPRINT, 'compiled semantic IR must emit scanner_policy facts'));
+  }
+  if (facts.semanticGates.size === 0) {
+    diagnostics.push(diag(BLUEPRINT, 'compiled semantic IR must emit semantic_gate facts'));
+  }
 
   const result = {
     ok: diagnostics.length === 0,
     contractSplits: facts.contractSplits.size,
     controlPlaneDomains: facts.controlPlaneDomains.size,
+    productionConsumerBoundaries: facts.productionConsumerBoundaries.size,
+    requestStateProjections: facts.requestStateProjections.size,
+    scannerPolicies: facts.scannerPolicies.size,
+    semanticGates: facts.semanticGates.size,
     diagnostics,
   };
   if (json) console.log(JSON.stringify(result, null, 2));

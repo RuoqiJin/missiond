@@ -6,10 +6,10 @@ use super::*;
 #[derive(Debug, Default, Clone)]
 pub(in crate::handlers::knowledge::plan) struct PlanInferenceInput<'a> {
     pub(in crate::handlers::knowledge::plan) plan_hints: ParsedPlanHints,
-    /// Raw `plan.sexp_text` — exposed so per-field rules that look for
-    /// hints not captured by the canonical [`ParsedPlanHints`] struct
-    /// (e.g. `:acceptance-mode`) can re-scan without widening the struct.
-    pub(in crate::handlers::knowledge::plan) plan_sexp: &'a str,
+    /// Typed `plan.contract_json` projected by missiond-lispc. Per-field
+    /// rules may read `payload.top_level` for facts that are not represented
+    /// in [`ParsedPlanHints`].
+    pub(in crate::handlers::knowledge::plan) plan_contract: Option<&'a Value>,
     pub(in crate::handlers::knowledge::plan) compiled_from: Option<&'a str>,
     pub(in crate::handlers::knowledge::plan) evidence_entries: Vec<Value>,
 }
@@ -29,8 +29,8 @@ pub(in crate::handlers::knowledge::plan) fn compute_plan_field_inference(
 ) -> PlanFieldInference {
     let mut result = PlanFieldInference::default();
     let mut sources: Vec<&'static str> = Vec::new();
-    if !is_empty_hints(&input.plan_hints) {
-        sources.push("plan_sexp");
+    if !is_empty_hints(&input.plan_hints) || plan_contract_top_level_has_signal(input) {
+        sources.push("plan_contract");
     }
     if input
         .compiled_from
@@ -72,6 +72,29 @@ pub(super) fn is_empty_hints(h: &ParsedPlanHints) -> bool {
         && h.forbidden_files_raw.is_none()
         && h.acceptance_commands_raw.is_none()
         && h.workstation_dispatch_flag.is_none()
+}
+
+fn plan_contract_top_level_has_signal(input: &PlanInferenceInput<'_>) -> bool {
+    input
+        .plan_contract
+        .and_then(|contract| contract.get("payload").and_then(|p| p.get("top_level")))
+        .and_then(Value::as_object)
+        .map(|top_level| !top_level.is_empty())
+        .unwrap_or(false)
+}
+
+fn plan_contract_top_level_string<'a>(
+    input: &'a PlanInferenceInput<'a>,
+    key: &str,
+) -> Option<&'a str> {
+    input
+        .plan_contract?
+        .get("payload")?
+        .get("top_level")?
+        .get(key)?
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
 }
 
 /// Helper: the caller's explicit string value for a field, trimmed and
@@ -138,13 +161,13 @@ pub(super) fn infer_target(
         Option<String>,
     )> = Vec::new();
 
-    // 1. PLAN.lisp hint.
+    // 1. Typed plan contract hint.
     if let Some(raw) = input.plan_hints.target.as_deref() {
         if let Some(canonical) = normalize_target(raw, input.plan_hints.flow_id.is_some()) {
             hits.push((
                 InferenceConfidence::High,
                 canonical,
-                "plan_sexp",
+                "plan_contract",
                 Some(format!(":target hint resolved to `{}`", canonical)),
             ));
         }
@@ -203,7 +226,7 @@ pub(super) fn infer_dispatch_strategy(
             hits.push((
                 InferenceConfidence::High,
                 c,
-                "plan_sexp",
+                "plan_contract",
                 Some(format!(":dispatch-strategy hint `{}`", raw)),
             ));
         }
@@ -225,7 +248,7 @@ pub(super) fn infer_dispatch_strategy(
             hits.push((
                 InferenceConfidence::Medium,
                 c,
-                "plan_sexp",
+                "plan_contract",
                 Some(format!(":parallelism hint `{}` mapped to strategy", p)),
             ));
         }
@@ -263,7 +286,7 @@ pub(super) fn infer_target_project(
             hits.push((
                 InferenceConfidence::High,
                 v.to_string(),
-                "plan_sexp",
+                "plan_contract",
                 Some(":target-project hint".to_string()),
             ));
         }
@@ -313,7 +336,7 @@ pub(super) fn infer_owned_files(
         hits.push((
             InferenceConfidence::High,
             plan_owned.clone(),
-            "plan_sexp",
+            "plan_contract",
             Some(format!(
                 ":owned-files declares {} entries",
                 plan_owned.len()
@@ -339,8 +362,8 @@ pub(super) fn infer_owned_files(
 }
 
 /// Infer `acceptance_mode`. Confidence:
-///   * `high`   — PLAN.lisp top-level `:acceptance-mode` parses to a known
-///                AcceptanceMode.
+///   * `high`   — plan.contract_json payload.top_level.acceptance_mode
+///                projects to a known AcceptanceMode.
 ///   * `medium` — evidence entry carries an `acceptance.mode` field.
 pub(super) fn infer_acceptance_mode(
     args: &Value,
@@ -355,23 +378,12 @@ pub(super) fn infer_acceptance_mode(
         Option<String>,
     )> = Vec::new();
 
-    // PLAN.lisp top-level `:acceptance-mode` — parse_plan_hints does not
-    // capture it (the wave-17 / task 03 hint lives on per-node forms).
-    // We do a focused scan here so v0 inference can spot a top-level
-    // declaration without widening the canonical hint struct.
-    if let Some(raw) = scan_keyword_pairs(input.plan_sexp)
-        .into_iter()
-        .find(|(k, _)| {
-            let lc = k.to_ascii_lowercase();
-            lc == "acceptance-mode" || lc == "acceptance_mode"
-        })
-        .map(|(_, v)| v)
-    {
+    if let Some(raw) = plan_contract_top_level_string(input, "acceptance_mode") {
         if let Some(canonical) = canonicalize_acceptance_mode(&raw) {
             hits.push((
                 InferenceConfidence::High,
                 canonical,
-                "plan_sexp",
+                "plan_contract",
                 Some(format!(":acceptance-mode hint `{}`", raw)),
             ));
         }
@@ -412,7 +424,7 @@ pub(super) fn infer_workstation_dispatch(
         hits.push((
             InferenceConfidence::High,
             true,
-            "plan_sexp",
+            "plan_contract",
             Some(":workstation-dispatch true".to_string()),
         ));
     } else if let Some(raw) = input.plan_hints.workstation_dispatch_flag.as_deref() {
@@ -422,7 +434,7 @@ pub(super) fn infer_workstation_dispatch(
             hits.push((
                 InferenceConfidence::High,
                 false,
-                "plan_sexp",
+                "plan_contract",
                 Some(":workstation-dispatch false".to_string()),
             ));
         }

@@ -67,11 +67,12 @@ use respond::routing::{
 use respond::{action_respond, read_event_texts};
 #[cfg(test)]
 use review_packet::{
-    allowed_responses_for, build_review_artifact_preview, classify_review_state, ArtifactExistence,
-    ReviewEventCheckpoint, ReviewState, REVIEW_PREVIEW_MAX_BYTES,
+    allowed_responses_for, build_review_artifact_preview, classify_review_state,
+    derive_review_packet, ArtifactExistence, ReviewEventCheckpoint, ReviewState,
+    REVIEW_PREVIEW_MAX_BYTES,
 };
 use review_packet::{
-    derive_review_packet, extract_mode_from_request_lisp, latest_review_event_checkpoint,
+    derive_request_projection, extract_mode_from_request_lisp, latest_review_event_checkpoint,
     parse_execute_requested, read_artifact_existence, ReviewPacketInputs,
 };
 
@@ -364,7 +365,8 @@ async fn action_status(state: &AppState, args: &Value) -> Result<ToolResult> {
         execute_requested: false,
         review_checkpoint: latest_review_event_checkpoint(&event_texts),
     };
-    let review_packet = derive_review_packet(&inputs, |p| std::fs::read_to_string(p).ok());
+    let review_packet = derive_request_projection(&inputs, |p| std::fs::read_to_string(p).ok())
+        .to_review_packet_json();
 
     Ok(ToolResult::json_pretty(&json!({
         "status": "ok",
@@ -448,7 +450,8 @@ fn wrap_pipeline_result(
             execute_requested,
             review_checkpoint: None,
         };
-        derive_review_packet(&inputs, |p| std::fs::read_to_string(p).ok())
+        derive_request_projection(&inputs, |p| std::fs::read_to_string(p).ok())
+            .to_review_packet_json()
     });
     let mut response = json!({
         "status": if inner_is_error { "pipeline_error" } else { "ok" },

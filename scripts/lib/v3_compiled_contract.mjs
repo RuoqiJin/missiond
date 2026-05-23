@@ -125,6 +125,18 @@ export function loadCompiledV3Contract({
   const finalConvergenceGate = normalizeFinalConvergenceGate(
     facts.find((fact) => fact?.kind === 'final_convergence_gate'),
   );
+  const productionConsumerBoundaries = normalizeTypedFacts(
+    abiPayload?.production_consumer_boundaries ?? facts.filter((fact) => fact?.kind === 'production_consumer_boundary'),
+  );
+  const requestStateProjections = normalizeTypedFacts(
+    abiPayload?.request_state_projections ?? facts.filter((fact) => fact?.kind === 'request_state_projection'),
+  );
+  const scannerPolicies = normalizeTypedFacts(
+    abiPayload?.scanner_policies ?? facts.filter((fact) => fact?.kind === 'scanner_policy'),
+  );
+  const semanticGates = normalizeTypedFacts(
+    abiPayload?.semantic_gates ?? facts.filter((fact) => fact?.kind === 'semantic_gate'),
+  );
   const contractSplits = normalizeContractSplits(
     facts.filter((fact) => fact?.kind === 'contract_split'),
   );
@@ -179,6 +191,10 @@ export function loadCompiledV3Contract({
     runtimePolicies,
     checkerRegistry,
     finalConvergenceGate,
+    productionConsumerBoundaries,
+    requestStateProjections,
+    scannerPolicies,
+    semanticGates,
     contractSplits,
     controlPlaneDomains,
     workflowContracts,
@@ -272,6 +288,30 @@ export function compiledCheckerScripts(contract, opts = {}) {
 
 export function compiledFinalConvergenceGate(contract) {
   return contract?.finalConvergenceGate ?? null;
+}
+
+export function compiledProductionConsumerBoundaryMap(contract) {
+  return compiledTypedFactMap(contract?.productionConsumerBoundaries);
+}
+
+export function compiledRequestStateProjectionMap(contract) {
+  return compiledTypedFactMap(contract?.requestStateProjections);
+}
+
+export function compiledScannerPolicyMap(contract) {
+  return compiledTypedFactMap(contract?.scannerPolicies);
+}
+
+export function compiledSemanticGateMap(contract) {
+  return compiledTypedFactMap(contract?.semanticGates);
+}
+
+function compiledTypedFactMap(rows) {
+  return new Map(
+    (rows ?? [])
+      .filter((row) => row.id)
+      .map((row) => [row.id, row]),
+  );
 }
 
 export function compiledContractSplitMap(contract) {
@@ -407,6 +447,27 @@ function normalizeFinalConvergenceGate(row) {
       .filter((entry) => entry.file),
     source: row?.source ?? null,
   };
+}
+
+function normalizeTypedFacts(rows) {
+  return arrayOrEmpty(rows)
+    .map((row) => ({
+      id: stringOrNull(row?.id),
+      schemaVersion: stringOrNull(row?.schema_version ?? row?.schemaVersion),
+      surface: stringOrNull(row?.surface),
+      owner: stringOrNull(row?.owner),
+      authority: stringOrNull(row?.authority),
+      inputSchema: stringOrNull(row?.input_schema ?? row?.inputSchema),
+      status: stringOrNull(row?.status),
+      runtimeConsumers: stringArray(row?.runtime_consumers ?? row?.runtimeConsumers),
+      must: stringArray(row?.must),
+      forbidden: stringArray(row?.forbidden),
+      allowedContexts: stringArray(row?.allowed_contexts ?? row?.allowedContexts),
+      requires: stringArray(row?.requires),
+      checker: stringOrNull(row?.checker),
+      source: row?.source ?? null,
+    }))
+    .filter((row) => row.id);
 }
 
 function normalizeGateChecks(rows) {
@@ -613,6 +674,10 @@ function emptyContract({ ok, diagnostics, v3 }) {
     runtimePolicies: [],
     checkerRegistry: [],
     finalConvergenceGate: null,
+    productionConsumerBoundaries: [],
+    requestStateProjections: [],
+    scannerPolicies: [],
+    semanticGates: [],
     contractSplits: [],
     controlPlaneDomains: [],
     workflowContracts: [],

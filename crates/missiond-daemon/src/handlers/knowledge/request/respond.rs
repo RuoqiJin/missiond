@@ -23,7 +23,7 @@ use super::request_artifacts::{
     sanitize_request_id, tool_result_payload, ProjectionStatus, RequestMode, RequestPaths,
 };
 use super::review_packet::{
-    derive_review_packet, extract_mode_from_request_lisp, latest_review_event_checkpoint,
+    derive_request_projection, extract_mode_from_request_lisp, latest_review_event_checkpoint,
     read_artifact_existence, ReviewPacketInputs,
 };
 use super::{compat_write_requested, lisp_string, EVENT_SCHEMA};
@@ -406,7 +406,7 @@ pub(super) async fn action_respond(state: &AppState, args: &Value) -> Result<Too
     let existence = read_artifact_existence(&paths);
     let mut updated_event_texts = event_texts.clone();
     updated_event_texts.push(event_body.clone());
-    let review_packet = derive_review_packet(
+    let review_packet = derive_request_projection(
         &ReviewPacketInputs {
             mode,
             paths: &paths,
@@ -417,7 +417,8 @@ pub(super) async fn action_respond(state: &AppState, args: &Value) -> Result<Too
             review_checkpoint: latest_review_event_checkpoint(&updated_event_texts),
         },
         |p| std::fs::read_to_string(p).ok(),
-    );
+    )
+    .to_review_packet_json();
 
     let next_action = next_action_for(decision, outcome);
 

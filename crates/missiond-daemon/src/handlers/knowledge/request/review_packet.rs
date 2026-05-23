@@ -7,7 +7,7 @@
 
 use missiond_core::util::safe_byte_truncate;
 use serde_json::{json, Value};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::request_artifacts::{path_json, RequestMode, RequestPaths};
 
@@ -204,7 +204,39 @@ where
     fallback.map(|s| safe_byte_truncate(s, max_bytes).to_string())
 }
 
-pub(super) fn derive_review_packet<F>(inputs: &ReviewPacketInputs<'_>, read_file: F) -> Value
+#[derive(Debug, Clone)]
+pub(super) struct RequestProjection {
+    state: ReviewState,
+    artifact_kind: &'static str,
+    artifact_path: PathBuf,
+    artifact_exists: bool,
+    artifact_preview: Option<String>,
+    prompt: &'static str,
+    allowed_responses: Vec<&'static str>,
+    next_action: &'static str,
+    execute_allowed: bool,
+}
+
+impl RequestProjection {
+    pub(super) fn to_review_packet_json(&self) -> Value {
+        json!({
+            "state": self.state.wire(),
+            "artifact_kind": self.artifact_kind,
+            "artifact_path": path_json(&self.artifact_path),
+            "artifact_exists": self.artifact_exists,
+            "artifact_preview": self.artifact_preview.clone(),
+            "prompt": self.prompt,
+            "allowed_responses": self.allowed_responses.clone(),
+            "next_action": self.next_action,
+            "execute_allowed": self.execute_allowed,
+        })
+    }
+}
+
+pub(super) fn derive_request_projection<F>(
+    inputs: &ReviewPacketInputs<'_>,
+    read_file: F,
+) -> RequestProjection
 where
     F: Fn(&Path) -> Option<String>,
 {
@@ -229,17 +261,25 @@ where
         REVIEW_PREVIEW_MAX_BYTES,
     );
     let allowed = allowed_responses_for(inputs.mode, state);
-    json!({
-        "state": state.wire(),
-        "artifact_kind": artifact_kind,
-        "artifact_path": path_json(target_path),
-        "artifact_exists": artifact_exists,
-        "artifact_preview": preview,
-        "prompt": prompt,
-        "allowed_responses": allowed,
-        "next_action": next_action,
-        "execute_allowed": execute_allowed,
-    })
+    RequestProjection {
+        state,
+        artifact_kind,
+        artifact_path: target_path.to_path_buf(),
+        artifact_exists,
+        artifact_preview: preview,
+        prompt,
+        allowed_responses: allowed,
+        next_action,
+        execute_allowed,
+    }
+}
+
+#[cfg(test)]
+pub(super) fn derive_review_packet<F>(inputs: &ReviewPacketInputs<'_>, read_file: F) -> Value
+where
+    F: Fn(&Path) -> Option<String>,
+{
+    derive_request_projection(inputs, read_file).to_review_packet_json()
 }
 
 pub(super) fn parse_execute_requested(args: &Value) -> bool {

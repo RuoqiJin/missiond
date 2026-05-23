@@ -1763,7 +1763,7 @@ fn smoke_paused_dag_resume_canonical_loop() {
     // `action_execute_resume` performs before re-dispatching the node.
     // We construct a `ParsedDag` directly (no AppState) carrying the
     // single paused-eligible node so the validator has the same view
-    // it would see in production after `build_validated_dag(plan.sexp_text)`.
+    // it would see in production after `build_validated_dag_from_contract_json`.
     let dag_node = super::super::plan_dag::DagNode {
         id: paused_node_id.into(),
         target: "mission_execution".into(),

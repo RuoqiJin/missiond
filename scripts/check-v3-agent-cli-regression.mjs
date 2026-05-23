@@ -68,6 +68,9 @@ function main() {
       'AgyCliStateParser::new()',
       'mcp_servers.missiond.tools.mission_compute_slot.approval_mode="approve"',
       'mcp_servers.missiond.tools.mission_context_boot.approval_mode="approve"',
+      'mcp_servers.missiond.tools.mission_context_slice.approval_mode="approve"',
+      'mcp_servers.missiond.tools.mission_shared_memory.approval_mode="approve"',
+      'mcp_servers.missiond.tools.mission_claim_status.approval_mode="approve"',
     ]);
     requireAll(diagnostics, FILES.recognition, sources.recognition, [
       'CliEngine::Agy => recognize_agy(lines)',

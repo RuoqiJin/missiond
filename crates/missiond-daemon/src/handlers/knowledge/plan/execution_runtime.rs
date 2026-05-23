@@ -226,7 +226,7 @@ pub(super) async fn action_execute(state: &AppState, args: &Value) -> Result<Too
         let plan_hints = parse_plan_hints_for_plan(&plan);
         let input = PlanInferenceInput {
             plan_hints,
-            plan_sexp: &plan.sexp_text,
+            plan_contract: Some(&plan.contract_json),
             compiled_from: plan.compiled_from.as_deref(),
             evidence_entries: evidence_entries.clone(),
         };

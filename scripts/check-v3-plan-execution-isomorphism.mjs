@@ -579,9 +579,11 @@ function checkFiles(root, files) {
     'push_lisp_string_field(&mut out, "target", input.target);',
     'push_lisp_string_field(&mut out, "objective", input.objective);',
     'out.push_str("  :nodes\\n");',
+    'directive.as_ref().map(|d| d.utterance_text.as_str())',
   ]);
   forbidAll(diagnostics, files.planCompileAuthoring, sources.planCompileAuthoring, [
     'SONNET_COMPILER_MODEL',
+    'scan_keyword_pairs',
   ]);
 
   requireAll(diagnostics, files.planCompileArtifact, sources.planCompileArtifact, [
@@ -721,6 +723,8 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.planFieldInferenceRules, sources.planFieldInferenceRules, [
     'pub(in crate::handlers::knowledge::plan) struct PlanInferenceInput',
+    'plan_contract: Option<&\'a Value>',
+    'fn plan_contract_top_level_string',
     'pub(in crate::handlers::knowledge::plan) fn compute_plan_field_inference',
     'pub(in crate::handlers::knowledge::plan) fn caller_str',
     'pub(in crate::handlers::knowledge::plan) fn caller_bool',
@@ -730,6 +734,10 @@ function checkFiles(root, files) {
     'pub(super) fn infer_workstation_dispatch',
     'pub(super) fn finalize_string_field',
     'pub(super) fn finalize_bool_field',
+  ]);
+  forbidAll(diagnostics, files.planFieldInferenceRules, sources.planFieldInferenceRules, [
+    'scan_keyword_pairs(input.plan_sexp)',
+    'plan_sexp:',
   ]);
 
   requireAll(diagnostics, files.planFieldInferenceLlm, sources.planFieldInferenceLlm, [
@@ -788,8 +796,8 @@ function checkFiles(root, files) {
     '"missiond.plan-contract.v2"',
     'emit_plan_contract_json_via_lispc_sync',
     'emit-plan-contract',
-    '"target" | "target-tool" | "tool"',
-    '"objective" => store_first(&mut h.objective, &value)',
+    'Test/fixture compatibility parser for legacy PLAN.lisp',
+    '#[cfg(test)]',
     'pub(crate) fn normalize_target',
     'pub(crate) fn canonicalize_strategy',
     'pub(crate) fn resolve_dispatch_strategy',
@@ -797,7 +805,6 @@ function checkFiles(root, files) {
   ]);
   forbidAll(diagnostics, files.planExecuteHints, sources.planExecuteHints, [
     'unwrap_or_else(|| parse_plan_hints(&plan.sexp_text))',
-    '"projection_engine": "rust-compat"',
     '"missiond.plan-contract.v1"',
   ]);
 
@@ -1162,7 +1169,7 @@ function checkFiles(root, files) {
   ]);
 
   requireAll(diagnostics, files.planDagParser, sources.planDagParser, [
-    'mod scanner;',
+    '#[cfg(test)]\nmod scanner;',
     'mod types;',
     'mod validation;',
     'pub(super) use scanner::parse_plan_dag;',
@@ -1259,7 +1266,9 @@ function checkFiles(root, files) {
   );
 
   requireAll(diagnostics, files.planDagParserValidation, sources.planDagParserValidation, [
+    '#[cfg(test)]',
     'pub(in crate::handlers::knowledge::plan_dag) fn build_validated_dag',
+    'pub(in crate::handlers::knowledge::plan_dag) fn build_validated_dag_from_contract_json',
     'fn kahn_topo_sort',
     'AcceptanceRequires::EvidenceKeys',
     'VALID_TARGETS.contains',
@@ -2184,10 +2193,11 @@ pub(super) fn render_dry_run_plan_sexp() {
   String::from("(plan-draft\\n");
   ":execution-readiness :dry-run-executable-scaffold";
   push_lisp_string_field(&mut out, "target", input.target);
-  push_lisp_string_field(&mut out, "objective", input.objective);
-  out.push_str("  :nodes\\n");
-}
-`);
+	  push_lisp_string_field(&mut out, "objective", input.objective);
+	  out.push_str("  :nodes\\n");
+	}
+	fn objective_source() { directive.as_ref().map(|d| d.utterance_text.as_str()); }
+	`);
   writeFixture(root, DEFAULT_FILES.planCompileArtifact, `
 pub(in crate::handlers::knowledge::plan) struct PlanFileArgs {}
 pub(in crate::handlers::knowledge::plan) fn extract_plan_file_args() {}
@@ -2329,8 +2339,11 @@ fn pluck_string() {}
 fn pluck_string_list() {}
 `);
   writeFixture(root, DEFAULT_FILES.planFieldInferenceRules, `
-pub(in crate::handlers::knowledge::plan) struct PlanInferenceInput {}
-pub(in crate::handlers::knowledge::plan) fn compute_plan_field_inference() {
+	pub(in crate::handlers::knowledge::plan) struct PlanInferenceInput<'a> {
+	  plan_contract: Option<&'a Value>,
+	}
+	fn plan_contract_top_level_string() {}
+	pub(in crate::handlers::knowledge::plan) fn compute_plan_field_inference() {
   infer_target();
   infer_dispatch_strategy();
   infer_workstation_dispatch();
@@ -2373,16 +2386,25 @@ fn enforce_persisted_apply_preflight() {}
 async fn execute_persisted_apply() {}
 fn attach_persisted_apply_block() {}
 `);
-  writeFixture(root, DEFAULT_FILES.planExecuteHints, `
-pub(crate) struct ParsedPlanHints {}
-pub(crate) struct ResolvedExec {}
-pub(crate) fn parse_plan_hints() {
-  match key.as_str() {
-    "target" | "target-tool" | "tool" => {}
-    "objective" => store_first(&mut h.objective, &value)
-  }
-}
-pub(crate) fn scan_keyword_pairs() {}
+	writeFixture(root, DEFAULT_FILES.planExecuteHints, `
+	pub(crate) struct ParsedPlanHints {}
+	pub(crate) struct ResolvedExec {}
+	pub(crate) fn parse_plan_hints_for_plan() {
+	  parse_plan_hints_from_contract_json(&plan.contract_json).unwrap_or_default();
+	}
+	pub(crate) fn parse_plan_hints_from_contract_json() {}
+	pub(crate) fn plan_contract_json_from_sexp() { emit_plan_contract_json_via_lispc_sync(); emit-plan-contract; }
+	pub(crate) fn plan_contract_json_requires_projection() { "missiond.plan-contract.v2"; }
+	fn compatibility_note() { "Test/fixture compatibility parser for legacy PLAN.lisp"; }
+	#[cfg(test)]
+	pub(crate) fn parse_plan_hints() {
+	  match key.as_str() {
+	    "target" | "target-tool" | "tool" => {}
+	    "objective" => store_first(&mut h.objective, &value)
+	  }
+	}
+	#[cfg(test)]
+	pub(crate) fn scan_keyword_pairs() {}
 pub(crate) fn normalize_target() {}
 pub(crate) fn canonicalize_strategy() {}
 pub(crate) fn resolve_dispatch_strategy() {}
@@ -2883,11 +2905,15 @@ pub(in crate::handlers::knowledge::plan_dag) async fn dispatch_node() {
 }
 `);
   writeFixture(root, DEFAULT_FILES.planDagParser, `
+#[cfg(test)]
 mod scanner;
 mod types;
 mod validation;
+#[cfg(test)]
 pub(super) use scanner::parse_plan_dag;
+#[cfg(test)]
 pub(super) use validation::build_validated_dag;
+pub(super) use validation::build_validated_dag_from_contract_json;
 pub(in crate::handlers::knowledge) use types::{DagNode, ParsedDag};
 `);
   writeFixture(root, DEFAULT_FILES.planDagParserTypes, `
@@ -2979,11 +3005,13 @@ pub(super) fn scan_keyword_pairs() {
 }
 `);
   writeFixture(root, DEFAULT_FILES.planDagParserValidation, `
+#[cfg(test)]
 pub(in crate::handlers::knowledge::plan_dag) fn build_validated_dag() {
   AcceptanceRequires::EvidenceKeys;
   VALID_TARGETS.contains(&target);
   compute_transitive_ancestors();
 }
+pub(in crate::handlers::knowledge::plan_dag) fn build_validated_dag_from_contract_json() {}
 fn compute_transitive_ancestors() {}
 fn kahn_topo_sort() {}
 `);

@@ -76,6 +76,10 @@ function main() {
       'RUNTIME_POLICIES',
       'payload_key',
       'checkerRegistry',
+      'productionConsumerBoundaries',
+      'requestStateProjections',
+      'scannerPolicies',
+      'semanticGates',
     ]);
   }
 

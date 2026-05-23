@@ -610,6 +610,57 @@ let semantic_typed_subplane_facts source_hash file root =
   in
   contract_split_facts @ control_plane_facts
 
+let semantic_typed_boundary_facts source_hash file root top_form child_form kind =
+  match find_child root top_form with
+  | None -> []
+  | Some parent ->
+      let parent_props = keyword_props ~start:1 parent in
+      let schema_version = prop_text ":schema" parent_props in
+      list_forms child_form parent
+      |> List.map (fun node ->
+             let props = keyword_props ~start:2 node in
+             let id = Option.value ~default:"<missing>" (form_id node) in
+             Printf.sprintf
+               {|{"fact_id":%s,"kind":%s,"project_id":"missiond","id":%s,"schema_version":%s,"surface":%s,"owner":%s,"authority":%s,"input_schema":%s,"status":%s,"runtime_consumers":%s,"must":%s,"forbidden":%s,"allowed_contexts":%s,"requires":%s,"checker":%s,"source":%s}|}
+               (json_string (top_form ^ ":" ^ safe_id id))
+               (json_string kind)
+               (json_string id)
+               (json_opt_string schema_version)
+               (json_opt_string_token [ ":surface" ] props)
+               (json_opt_string_token [ ":owner" ] props)
+               (json_opt_string_token [ ":authority" ] props)
+               (json_opt_string_token [ ":input-schema"; ":input_schema" ] props)
+               (json_opt_string_token [ ":status" ] props)
+               (json_string_list_token [ ":runtime-consumers"; ":runtime_consumers" ] props)
+               (json_string_list_token [ ":must" ] props)
+               (json_string_list_token [ ":forbidden" ] props)
+               (json_string_list_token [ ":allowed-contexts"; ":allowed_contexts" ] props)
+               (json_string_list_token [ ":requires" ] props)
+               (json_opt_string_token [ ":checker" ] props)
+               (source_map_json source_hash file node))
+
+let production_consumer_boundary_facts source_hash file root =
+  semantic_typed_boundary_facts source_hash file root "production-consumer-boundary"
+    "boundary" "production_consumer_boundary"
+
+let request_state_projection_facts source_hash file root =
+  semantic_typed_boundary_facts source_hash file root "request-state-projection"
+    "projection" "request_state_projection"
+
+let scanner_policy_facts source_hash file root =
+  semantic_typed_boundary_facts source_hash file root "scanner-policy" "scanner"
+    "scanner_policy"
+
+let semantic_gate_facts source_hash file root =
+  semantic_typed_boundary_facts source_hash file root "semantic-gate" "gate"
+    "semantic_gate"
+
+let key_domain_typed_facts source_hash file root =
+  production_consumer_boundary_facts source_hash file root
+  @ request_state_projection_facts source_hash file root
+  @ scanner_policy_facts source_hash file root
+  @ semantic_gate_facts source_hash file root
+
 let semantic_facts source_hash file source_units root =
   let function_facts =
     match find_child root "pillar-flow-map" with
@@ -678,9 +729,13 @@ let semantic_facts source_hash file source_units root =
   let typed_subplane_facts =
     semantic_typed_subplane_facts source_hash file root
   in
+  let key_domain_facts =
+    key_domain_typed_facts source_hash file root
+  in
   function_facts @ surface_facts @ artifact_facts @ workflow_contract_facts
   @ workstation_facts @ runtime_policy_facts @ checker_registry_facts
   @ final_convergence_gate_facts @ source_unit_facts @ typed_subplane_facts
+  @ key_domain_facts
 
 let project_entry_to_json node =
   let props = keyword_props ~start:1 node in
@@ -1378,6 +1433,26 @@ let contract_abi_payload_json blueprint source_hash source_units source_domains 
     |> Option.map (semantic_facts source_hash blueprint source_units)
     |> Option.value ~default:[]
   in
+  let production_consumer_boundaries =
+    root
+    |> Option.map (production_consumer_boundary_facts source_hash blueprint)
+    |> Option.value ~default:[]
+  in
+  let request_state_projections =
+    root
+    |> Option.map (request_state_projection_facts source_hash blueprint)
+    |> Option.value ~default:[]
+  in
+  let scanner_policies =
+    root
+    |> Option.map (scanner_policy_facts source_hash blueprint)
+    |> Option.value ~default:[]
+  in
+  let semantic_gates =
+    root
+    |> Option.map (semantic_gate_facts source_hash blueprint)
+    |> Option.value ~default:[]
+  in
   json_assoc
     [
       ("blueprint", json_string blueprint);
@@ -1388,6 +1463,10 @@ let contract_abi_payload_json blueprint source_hash source_units source_domains 
       ("surfaces", json_array surfaces);
       ("functions", json_array functions);
       ("facts", json_array facts);
+      ("production_consumer_boundaries", json_array production_consumer_boundaries);
+      ("request_state_projections", json_array request_state_projections);
+      ("scanner_policies", json_array scanner_policies);
+      ("semantic_gates", json_array semantic_gates);
       ( "runtime_policies",
         root
         |> Option.map (runtime_policy_descriptors_json source_hash blueprint)

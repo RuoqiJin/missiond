@@ -4,6 +4,7 @@ use serde_json::Value;
 
 use super::super::acceptance::{AcceptanceMode, AcceptanceRequires};
 use super::super::rollback::{RollbackCascadeMode, RollbackPolicy};
+#[cfg(test)]
 use super::scanner::parse_plan_dag;
 use super::types::{
     DagBuildError, DagNode, ParsedDag, FAILURE_POLICY_CONTINUE, FAILURE_POLICY_FAIL_FAST,
@@ -12,6 +13,7 @@ use super::types::{
 
 /// Parse and validate a PLAN.lisp body, returning a topologically-sorted node
 /// list ready for sequential dispatch.
+#[cfg(test)]
 pub(in crate::handlers::knowledge::plan_dag) fn build_validated_dag(
     sexp: &str,
 ) -> std::result::Result<(ParsedDag, Vec<String>), DagBuildError> {

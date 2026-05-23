@@ -145,6 +145,8 @@ function checkFiles(root, files, { useCompiled = true } = {}) {
   requireText(diagnostics, files.requestRespondMaterialization, sources.requestRespondMaterialization, 'pub(in crate::handlers::knowledge::request) async fn materialize_request_plan');
   requireText(diagnostics, files.requestRespondMaterialization, sources.requestRespondMaterialization, 'PlanStatus::Draft');
   requireText(diagnostics, requestSurfaceLabel, requestSurface, 'pub(super) fn derive_review_packet');
+  requireText(diagnostics, requestSurfaceLabel, requestSurface, 'pub(super) struct RequestProjection');
+  requireText(diagnostics, requestSurfaceLabel, requestSurface, 'pub(super) fn derive_request_projection');
   requireText(diagnostics, requestSurfaceLabel, requestSurface, 'pub(super) fn classify_review_state');
   requireText(diagnostics, requestSurfaceLabel, requestSurface, 'pub(super) fn latest_review_event_checkpoint');
   requireText(diagnostics, files.requestHandler, sources.requestHandler, 'mod tests;');

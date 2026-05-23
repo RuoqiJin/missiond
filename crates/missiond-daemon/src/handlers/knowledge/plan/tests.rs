@@ -743,11 +743,8 @@ fn dry_run_plan_sexp_carries_executable_target_hints() {
 #[test]
 fn dry_run_plan_objective_uses_directive_alignment_text() {
     let args = json!({});
-    let objective = derive_dry_run_plan_objective(
-        &args,
-        Some("(directive-draft :utterance \"make MissionD Lisp-driven\")"),
-        Some("btk-42"),
-    );
+    let objective =
+        derive_dry_run_plan_objective(&args, Some("make MissionD Lisp-driven"), Some("btk-42"));
     assert_eq!(objective, "make MissionD Lisp-driven");
 }
 
@@ -3443,7 +3440,7 @@ fn parse_infer_plan_fields_mode_rejects_typo() {
 fn empty_input<'a>() -> PlanInferenceInput<'a> {
     PlanInferenceInput {
         plan_hints: ParsedPlanHints::default(),
-        plan_sexp: "",
+        plan_contract: None,
         compiled_from: None,
         evidence_entries: Vec::new(),
     }
@@ -3465,7 +3462,7 @@ fn infer_target_from_plan_sexp_high_confidence() {
     hints.target = Some("mission_task_delegate".to_string());
     let input = PlanInferenceInput {
         plan_hints: hints,
-        plan_sexp: "(plan :target \"mission_task_delegate\")",
+        plan_contract: None,
         compiled_from: None,
         evidence_entries: Vec::new(),
     };
@@ -3477,8 +3474,8 @@ fn infer_target_from_plan_sexp_high_confidence() {
         .expect("target inferred");
     assert_eq!(inferred.value, json!("mission_task_delegate"));
     assert_eq!(inferred.confidence, InferenceConfidence::High);
-    assert_eq!(inferred.source, "plan_sexp");
-    assert!(r.evidence_sources.contains(&"plan_sexp"));
+    assert_eq!(inferred.source, "plan_contract");
+    assert!(r.evidence_sources.contains(&"plan_contract"));
 }
 
 #[test]
@@ -3496,7 +3493,7 @@ fn infer_owned_files_from_evidence_sidecar_medium() {
     })];
     let input = PlanInferenceInput {
         plan_hints: ParsedPlanHints::default(),
-        plan_sexp: "",
+        plan_contract: None,
         compiled_from: None,
         evidence_entries: evidence,
     };
@@ -3521,7 +3518,7 @@ fn infer_owned_files_from_plan_sexp_high_confidence() {
     hints.owned_files_raw = Some("[\"src/lib.rs\" \"src/main.rs\"]".to_string());
     let input = PlanInferenceInput {
         plan_hints: hints,
-        plan_sexp: "(plan :owned-files [\"src/lib.rs\" \"src/main.rs\"])",
+        plan_contract: None,
         compiled_from: None,
         evidence_entries: Vec::new(),
     };
@@ -3530,9 +3527,9 @@ fn infer_owned_files_from_plan_sexp_high_confidence() {
         .inferred
         .iter()
         .find(|f| f.field == "owned_files")
-        .expect("owned_files inferred from plan_sexp");
+        .expect("owned_files inferred from plan_contract");
     assert_eq!(inferred.confidence, InferenceConfidence::High);
-    assert_eq!(inferred.source, "plan_sexp");
+    assert_eq!(inferred.source, "plan_contract");
     assert_eq!(inferred.value, json!(["src/lib.rs", "src/main.rs"]));
 }
 
@@ -3546,7 +3543,7 @@ fn apply_safe_does_not_overwrite_caller_value() {
     hints.target = Some("mission_task_delegate".to_string());
     let input = PlanInferenceInput {
         plan_hints: hints,
-        plan_sexp: "(plan :target \"mission_task_delegate\")",
+        plan_contract: None,
         compiled_from: None,
         evidence_entries: Vec::new(),
     };
@@ -3579,7 +3576,7 @@ fn apply_safe_fills_missing_high_confidence_only() {
     })];
     let input = PlanInferenceInput {
         plan_hints: hints,
-        plan_sexp: "(plan :target \"mission_task_delegate\")",
+        plan_contract: None,
         compiled_from: None,
         evidence_entries: evidence,
     };
@@ -3602,7 +3599,7 @@ fn low_or_medium_confidence_never_lands_in_inferred() {
     })];
     let input = PlanInferenceInput {
         plan_hints: ParsedPlanHints::default(),
-        plan_sexp: "",
+        plan_contract: None,
         compiled_from: None,
         evidence_entries: evidence,
     };
@@ -3626,7 +3623,7 @@ fn target_project_high_confidence_when_evidence_repeats() {
     ];
     let input = PlanInferenceInput {
         plan_hints: ParsedPlanHints::default(),
-        plan_sexp: "",
+        plan_contract: None,
         compiled_from: None,
         evidence_entries: evidence,
     };
@@ -3648,7 +3645,7 @@ fn workstation_dispatch_inferred_from_plan_hint() {
     hints.workstation_dispatch_flag = Some("true".to_string());
     let input = PlanInferenceInput {
         plan_hints: hints,
-        plan_sexp: "(plan :workstation-dispatch true)",
+        plan_contract: None,
         compiled_from: None,
         evidence_entries: Vec::new(),
     };
@@ -3668,7 +3665,7 @@ fn workstation_dispatch_caller_false_creates_conflict_with_plan_true() {
     hints.workstation_dispatch_flag = Some("true".to_string());
     let input = PlanInferenceInput {
         plan_hints: hints,
-        plan_sexp: "(plan :workstation-dispatch true)",
+        plan_contract: None,
         compiled_from: None,
         evidence_entries: Vec::new(),
     };
@@ -3692,7 +3689,7 @@ fn dispatch_strategy_inferred_from_plan_hint() {
     hints.dispatch_strategy = Some("agent-team".to_string());
     let input = PlanInferenceInput {
         plan_hints: hints,
-        plan_sexp: "(plan :dispatch-strategy \"agent-team\")",
+        plan_contract: None,
         compiled_from: None,
         evidence_entries: Vec::new(),
     };
@@ -3714,7 +3711,7 @@ fn dispatch_strategy_from_parallelism_is_medium() {
     hints.parallelism = Some("agent-team".to_string());
     let input = PlanInferenceInput {
         plan_hints: hints,
-        plan_sexp: "(plan :parallelism agent-team)",
+        plan_contract: None,
         compiled_from: None,
         evidence_entries: Vec::new(),
     };
@@ -3729,13 +3726,18 @@ fn dispatch_strategy_from_parallelism_is_medium() {
 
 #[test]
 fn acceptance_mode_inferred_from_plan_top_level() {
-    // The canonical hint scanner does NOT capture `:acceptance-mode`
-    // (that lives on per-node forms in plan_dag.rs); v0 inference
-    // re-scans the raw sexp directly so a top-level declaration is
-    // still picked up.
+    // The canonical hint struct does NOT capture top-level acceptance_mode;
+    // the typed plan contract carries it under payload.top_level.
+    let contract = json!({
+        "payload": {
+            "top_level": {
+                "acceptance_mode": "inner_status"
+            }
+        }
+    });
     let input = PlanInferenceInput {
         plan_hints: ParsedPlanHints::default(),
-        plan_sexp: r#"(plan :acceptance-mode "inner_status")"#,
+        plan_contract: Some(&contract),
         compiled_from: None,
         evidence_entries: Vec::new(),
     };
@@ -3751,9 +3753,16 @@ fn acceptance_mode_inferred_from_plan_top_level() {
 
 #[test]
 fn acceptance_mode_unrecognised_raw_does_not_infer() {
+    let contract = json!({
+        "payload": {
+            "top_level": {
+                "acceptance_mode": "cosmic"
+            }
+        }
+    });
     let input = PlanInferenceInput {
         plan_hints: ParsedPlanHints::default(),
-        plan_sexp: r#"(plan :acceptance-mode "cosmic")"#,
+        plan_contract: Some(&contract),
         compiled_from: None,
         evidence_entries: Vec::new(),
     };
@@ -3833,12 +3842,12 @@ fn evidence_sources_reflect_signals_seen() {
     let evidence = vec![json!({"inner_dispatch": {"target_project": "x"}})];
     let input = PlanInferenceInput {
         plan_hints: hints,
-        plan_sexp: "(plan :target \"mission_task_delegate\")",
+        plan_contract: None,
         compiled_from: Some("directive/abc:1"),
         evidence_entries: evidence,
     };
     let r = compute_plan_field_inference(&json!({}), &input);
-    assert!(r.evidence_sources.contains(&"plan_sexp"));
+    assert!(r.evidence_sources.contains(&"plan_contract"));
     assert!(r.evidence_sources.contains(&"evidence_sidecar"));
     assert!(r.evidence_sources.contains(&"compiled_from"));
 }
@@ -3896,7 +3905,7 @@ fn compiled_from_keyword_scan_produces_medium_target() {
     // the keyword. Falls into the medium-confidence (suggested) bucket.
     let input = PlanInferenceInput {
         plan_hints: ParsedPlanHints::default(),
-        plan_sexp: "",
+        plan_contract: None,
         compiled_from: Some("directive/abc:1 — claudecode workstation"),
         evidence_entries: Vec::new(),
     };

@@ -182,7 +182,8 @@
                     "scripts/generated/v3_runtime_defaults.mjs"]
     :contract-commands [emit-contract-abi emit-plan-contract check-plan-contract]
     :envelope-fields [:schema_version :source_hash :generated_at :diagnostics :payload]
-    :payload-fields [:source_units :source_domains :surfaces :functions :artifact_contracts :runtime_policies :checker_registry :plan_contract]
+    :payload-fields [:source_units :source_domains :surfaces :functions :artifact_contracts :runtime_policies :checker_registry :plan_contract
+                     :production_consumer_boundaries :request_state_projections :scanner_policies :semantic_gates]
 
     :authority-boundary
       ["missiond-lispc is the only production component allowed to assign Lisp semantics."
@@ -210,10 +211,63 @@
 
   (typed-subplane-contracts
     :schema "missiond.typed-subplane-contracts.v1"
-    :forms [surface contract-split domain runtime-projection policy-clause acceptance owner source behavior-universe behavior effect tombstone]
-    :semantic-ir-facts [contract_split control_plane_domain runtime_policy checker_registry]
+    :forms [surface contract-split domain runtime-projection policy-clause acceptance owner source behavior-universe behavior anchor trigger effect tombstone
+            production-consumer-boundary request-state-projection scanner-policy semantic-gate]
+    :semantic-ir-facts [contract_split control_plane_domain runtime_policy checker_registry
+                        production_consumer_boundary request_state_projection scanner_policy semantic_gate]
     :sidecar-policy "Long prose and historical notes move to .missiond/v3/evidence/blueprint-notes.lisp; active shards keep compiler-readable ids, ownership, runtime projection, checker, and source/evidence anchors."
     :checker "node scripts/check-v3-typed-sidecar-compression.mjs")
+
+  (production-consumer-boundary
+    :schema "missiond.production-consumer-boundary.v1"
+    (boundary plan-contract-runtime
+      :surface mission_plan
+      :owner missiond-lispc
+      :authority compiled-contract-abi
+      :input-schema "missiond.plan-contract.v2"
+      :runtime-consumers [mission_plan_execute plan_dag_runtime plan_field_inference]
+      :must [consume_plan_contract_json reject_empty_contract reject_rust_compat_contract require_payload_nodes]
+      :forbidden [read_raw_plan_sexp_for_execution rust_scan_keyword_pairs production_lisp_scanner])
+    (boundary runtime-config-compiled-authority
+      :surface runtime_config
+      :owner missiond-lispc
+      :authority compiled-runtime-config
+      :input-schema "missiond.compiled-runtime-config.v1"
+      :runtime-consumers [rust_runtime_defaults js_runtime_defaults workstation_runtime_loader]
+      :must [consume_compiled_runtime_config validate_source_hash expose_generated_abi]
+      :forbidden [raw_blueprint_runtime_fallback direct_lisp_policy_parse]))
+
+  (request-state-projection
+    :schema "missiond.request-state-projection.v1"
+    (projection mission-request-review
+      :surface mission_request
+      :owner RequestProjection
+      :authority request-local-artifacts
+      :runtime-consumers [mission_request_status mission_request_respond]
+      :must [consume_artifact_existence consume_projection_target consume_review_events consume_execute_flag emit_review_packet]
+      :forbidden [handler_local_review_state_rebuild respond_local_review_state_rebuild]))
+
+  (scanner-policy
+    :schema "missiond.scanner-policy.v1"
+    (scanner plan-lisp-raw-scanner
+      :surface mission_plan
+      :owner compatibility-tests
+      :status test-and-migration-only
+      :allowed-contexts [unit_tests fixtures contract_backfill]
+      :must [prefer_missiond_lispc_plan_contract keep_fixture_compatibility]
+      :forbidden [mission_plan_execute plan_field_inference dry_run_plan_objective production_consumer]))
+
+  (semantic-gate
+    :schema "missiond.semantic-gate.v1"
+    (gate final-convergence-semantic-facts
+      :surface final_convergence
+      :owner missiond-lispc
+      :authority compiled-semantic-ir
+      :requires [surface function artifact_contract runtime_policy contract_split control_plane_domain source_domain checker_registry
+                 production_consumer_boundary request_state_projection scanner_policy semantic_gate]
+      :must [verify_compiled_semantic_facts treat_text_needles_as_code_anchor_only]
+      :forbidden [blueprint_needle_as_semantic_requirement]
+      :checker "node scripts/check-v3-final-convergence.mjs --json"))
 
   (blueprint-shard-index
     :schema "missiond.blueprint-shard-index.v1"

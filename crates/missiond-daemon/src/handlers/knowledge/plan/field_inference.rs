@@ -4,7 +4,7 @@ use super::*;
 // wave-18 / task 06 — autonomous PLAN field inference v0
 //
 // Conservative deterministic helper that infers a small set of PLAN DAG
-// fields when the caller / PLAN.lisp / evidence-sidecar carry enough
+// fields when the caller / typed plan contract / evidence-sidecar carry enough
 // signal. Inference is gated on the new `infer_plan_fields` knob:
 //
 //   `off`        (default) — no inference; legacy byte-shape preserved.
@@ -24,8 +24,9 @@ use super::*;
 //   acceptance_mode / workstation_dispatch.
 //
 // Sources scanned (deterministic, no LLM):
-//   1. `plan.sexp_text` — already parsed via `parse_plan_hints`. PLAN-side
-//      hints are the highest-confidence source.
+//   1. `plan.contract_json` — already projected by missiond-lispc into
+//      `missiond.plan-contract.v2`. PLAN-side hints are the highest-confidence
+//      source.
 //   2. `plan.compiled_from` — directive provenance string (e.g.
 //      "directive/<id>:<v>" or "board_task/<id>"). Read for keyword
 //      signals only (e.g. "task_delegate" / "agent-team").
@@ -140,7 +141,7 @@ pub(super) struct PlanFieldInference {
     pub(super) suggested: Vec<InferredField>,
     pub(super) conflicts: Vec<InferenceConflict>,
     /// Names of evidence sources actually consulted (e.g.
-    /// `"plan_sexp"`, `"compiled_from"`, `"evidence_sidecar"`). Surfaced
+    /// `"plan_contract"`, `"compiled_from"`, `"evidence_sidecar"`). Surfaced
     /// so observers can tell which knobs the inferer scanned without
     /// reconstructing it from the per-field `source` strings.
     pub(super) evidence_sources: Vec<&'static str>,

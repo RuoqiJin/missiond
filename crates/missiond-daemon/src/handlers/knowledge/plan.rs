@@ -110,8 +110,8 @@ pub(super) use execute_hints::parse_plan_hints;
 pub(crate) use execute_hints::{
     canonicalize_strategy, normalize_target, parse_plan_hints_for_plan,
     plan_contract_json_from_sexp, plan_contract_json_requires_projection,
-    resolve_dispatch_strategy, scan_keyword_pairs, split_lisp_string_list, ParsedPlanHints,
-    ResolvedExec, AGENT_TEAM_OBJECTIVE_HINT,
+    resolve_dispatch_strategy, split_lisp_string_list, ParsedPlanHints, ResolvedExec,
+    AGENT_TEAM_OBJECTIVE_HINT,
 };
 
 mod task_contract;

@@ -54,15 +54,36 @@ export interface FinalConvergenceGate {
   source: unknown;
 }
 
+export interface TypedSemanticFact {
+  id: string;
+  schemaVersion: string | null;
+  surface: string | null;
+  owner: string | null;
+  authority: string | null;
+  inputSchema: string | null;
+  status: string | null;
+  runtimeConsumers: readonly string[];
+  must: readonly string[];
+  forbidden: readonly string[];
+  allowedContexts: readonly string[];
+  requires: readonly string[];
+  checker: string | null;
+  source: unknown;
+}
+
 export type V3SurfaceId = "autopilot-runtime" | "board-frontend" | "board-search-noise-governance" | "capability-governance" | "cascade-governance" | "codex-boot-context" | "commit-lisp-convergence-loop" | "compute-primitives" | "context-pack" | "conversation-ingestion" | "data-residency-universe" | "decision-inbox-revalidation" | "eventbridge" | "eventhub-service-boundary" | "evidence-collector" | "evidence-governance-view" | "external-work-order-gate" | "file-artifacts" | "genome-runtime" | "incident-governance" | "lisp-code-drift-policy" | "lisp-code-sync-loop" | "lisp-code-sync-storm-circuit" | "memory-kb" | "memory-provider-boundary" | "mission-shared-memory" | "mission_board" | "mission_directive" | "mission_execution-claim-lease" | "mission_execution-completion-audit" | "mission_execution-log" | "mission_plan" | "mission_request" | "mission_workflow" | "missiond-blue-green-self-update" | "nightly-evolution-loop" | "ops-infra" | "project-registry" | "resident-master-control" | "review-gate" | "router-policy" | "runtime-load-explanation" | "semantic-ir-compiler" | "skill-runtime" | "source-hygiene" | "sysinfra-control" | "task-runner-cli" | "typed-lisp-compiler" | "unified-entry-runtime" | "work-order-lifecycle" | "workstation-config" | "workstation-dispatch" | "workstation-pool";
 export type V3FunctionId = "board-frontend" | "board-search-noise-governance" | "capability-governance" | "cascade-governance" | "codex-boot-context" | "commit-lisp-convergence" | "compute-primitives" | "context-pack" | "conversation-ingestion" | "data-residency-universe" | "decision-inbox-revalidation" | "delegated-boardtask-runtime" | "directive-authoring" | "eventbridge" | "eventhub-service" | "evidence-collector" | "evidence-governance-view" | "execution-claim-lease" | "execution-completion-audit" | "execution-log" | "external-work-order-gate" | "file-artifact-writer" | "genome-runtime" | "incident-question-governance" | "knowledge-memory" | "lisp-code-drift" | "lisp-code-sync" | "memory-provider" | "mission-board" | "mission-shared-memory" | "missiond-blue-green-self-update" | "nightly-evolution" | "ops-infra" | "plan-authoring-and-runner" | "project-registry" | "request-lifecycle" | "resident-master-control" | "review-gate" | "router-policy" | "runtime-load-explanation" | "same-source-storm-circuit-breaker" | "semantic-ir-compiler" | "skill-runtime" | "source-hygiene" | "sysinfra-control" | "task-runner-lifecycle" | "typed-lisp-compiler" | "unified-entry-runtime" | "work-order-lifecycle" | "workflow-distillation" | "workstation-config" | "workstation-dispatch" | "workstation-pool";
 export type V3ArtifactContractId = "compiled-genomes" | "context-pack" | "final-report" | "intent-alignment" | "lifecycle-event" | "mission-request" | "plan" | "self-evolution-proposal" | "verification-receipt" | "workflow";
 export type V3RuntimePolicyId = "autopilot-policy" | "capability-governance-policy" | "cascade-policy" | "compute-runtime-policy" | "conversation-ingestion-policy" | "flow-runtime-policy" | "learning-engine-policy" | "memory-kb-policy" | "minimax-runtime-policy" | "project-registry-policy" | "router-runtime-policy";
+export type V3ProductionConsumerBoundaryId = "plan-contract-runtime" | "runtime-config-compiled-authority";
+export type V3RequestStateProjectionId = "mission-request-review";
+export type V3ScannerPolicyId = "plan-lisp-raw-scanner";
+export type V3SemanticGateId = "final-convergence-semantic-facts";
 
 export const SCHEMA_VERSION: "missiond.contract-abi.v1";
-export const SOURCE_HASH: "208408c92a68b29ade49f1c125b69133";
-export const RUNTIME_CONFIG_SOURCE_HASH: "496e5b7c932e3bc95d96025df1027d73";
-export const PROJECT_UNIVERSE_SOURCE_HASH: "b5f8fe051fd445b334ec3c0e650e7c52";
+export const SOURCE_HASH: "208864f53a1e0f19e6cdb0f42c874fb3";
+export const RUNTIME_CONFIG_SOURCE_HASH: "02cc1faa324789d6f4a5ce0533ff1ac1";
+export const PROJECT_UNIVERSE_SOURCE_HASH: "f7fc04719b55b67cb0c1aa76d61cec12";
 export const SOURCE_UNITS: readonly SourceUnit[];
 export const SOURCE_DOMAINS: readonly SourceDomain[];
 export const SURFACE_IDS: readonly V3SurfaceId[];
@@ -73,6 +94,10 @@ export const RUNTIME_POLICIES: readonly RuntimePolicyDescriptor[];
 export const CHECKER_REGISTRY: readonly CheckerRegistryEntry[];
 export const CHECKER_COMMANDS: readonly string[];
 export const FINAL_CONVERGENCE_GATE: Readonly<FinalConvergenceGate> | null;
+export const PRODUCTION_CONSUMER_BOUNDARIES: readonly TypedSemanticFact[];
+export const REQUEST_STATE_PROJECTIONS: readonly TypedSemanticFact[];
+export const SCANNER_POLICIES: readonly TypedSemanticFact[];
+export const SEMANTIC_GATES: readonly TypedSemanticFact[];
 export const PLAN_CONTRACT: Readonly<{
   schema_version?: string;
   accepted_heads?: readonly string[];

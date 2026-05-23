@@ -32,8 +32,8 @@ pub(crate) struct ParsedPlanHints {
     pub(super) objective: Option<String>,
     pub(super) summary: Option<String>,
     /// wave-15 / task 05 — workstation-dispatch hint contract. Captured
-    /// here so a single PLAN.lisp scan extracts every recognised field;
-    /// the workstation_dispatch module reads them via `to_workstation_*`.
+    /// from typed plan.contract_json so the workstation_dispatch module reads
+    /// them via `to_workstation_*`.
     pub(super) scope: Option<String>,
     pub(super) commit_policy: Option<String>,
     pub(super) owned_files_raw: Option<String>,
@@ -83,7 +83,7 @@ impl ParsedPlanHints {
         }
     }
 
-    /// Project the parsed PLAN.lisp scalars into the workstation-dispatch
+    /// Project the parsed plan-contract scalars into the workstation-dispatch
     /// hint struct. Lists (`owned-files`, `forbidden-files`,
     /// `acceptance-commands`) round-trip through whitespace splitting on
     /// the captured raw value because the conservative scanner records
@@ -349,10 +349,10 @@ fn plan_contract_value_to_hint_string(value: &Value) -> Option<String> {
     }
 }
 
-/// Parse a PLAN.lisp s-expression for known runner hints. This is NOT a full
-/// Lisp interpreter; it scans `:keyword value` pairs at any depth and keeps
-/// the first occurrence per keyword. Conservative on purpose: anything that
-/// doesn't look like a simple keyword/value pair is silently skipped.
+/// Test/fixture compatibility parser for legacy PLAN.lisp s-expressions.
+/// Production execution consumes missiond-lispc `missiond.plan-contract.v2`
+/// JSON through `parse_plan_hints_for_plan`.
+#[cfg(test)]
 pub(crate) fn parse_plan_hints(sexp: &str) -> ParsedPlanHints {
     let mut h = ParsedPlanHints::default();
 
@@ -398,7 +398,8 @@ pub(crate) fn parse_plan_hints(sexp: &str) -> ParsedPlanHints {
     h
 }
 
-/// Scan a string for `:keyword value` pairs. Three value shapes are recognised:
+/// Test/fixture-only scanner for legacy `:keyword value` pairs. Three value
+/// shapes are recognised:
 ///   * double-quoted string literal — handles `\\` and `\"` escapes
 ///   * bracket / paren list — `[a "b" c]` or `(a "b" c)` round-trip as one
 ///     captured string spanning the whole bracket pair (wave-15 / task 05
@@ -406,6 +407,7 @@ pub(crate) fn parse_plan_hints(sexp: &str) -> ParsedPlanHints {
 ///   * bareword — terminates on whitespace / `(` / `)` / `[` / `]` / `"`
 /// Bare `:k` with no value and `:k :next-key` patterns are still skipped so
 /// the parser stays conservative for non-list authoring.
+#[cfg(test)]
 pub(crate) fn scan_keyword_pairs(sexp: &str) -> Vec<(String, String)> {
     let chars: Vec<char> = sexp.chars().collect();
     let n = chars.len();

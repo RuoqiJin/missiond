@@ -99,24 +99,14 @@ pub(super) fn resolve_dry_run_dispatch_strategy(args: &Value) -> Option<&'static
 
 pub(super) fn derive_dry_run_plan_objective(
     args: &Value,
-    directive_sexp: Option<&str>,
+    directive_utterance: Option<&str>,
     board_task_id: Option<&str>,
 ) -> String {
     if let Some(o) = arg_nonblank_str(args, "objective") {
         return truncate_chars(o, DERIVED_OBJECTIVE_MAX);
     }
-    if let Some(sexp) = directive_sexp {
-        for wanted in ["objective", "goal", "utterance", "summary"] {
-            if let Some((_, value)) = scan_keyword_pairs(sexp)
-                .into_iter()
-                .find(|(key, value)| key.eq_ignore_ascii_case(wanted) && !value.trim().is_empty())
-            {
-                let value = value.trim().trim_start_matches(':');
-                if !value.trim().is_empty() {
-                    return truncate_chars(value.trim(), DERIVED_OBJECTIVE_MAX);
-                }
-            }
-        }
+    if let Some(utterance) = directive_utterance.map(str::trim).filter(|s| !s.is_empty()) {
+        return truncate_chars(utterance, DERIVED_OBJECTIVE_MAX);
     }
     if let Some(task_id) = board_task_id.map(str::trim).filter(|s| !s.is_empty()) {
         return format!(
@@ -230,7 +220,7 @@ async fn action_compile_dry_run(state: &AppState, args: &Value) -> Result<ToolRe
     let dry_run_dispatch_strategy = resolve_dry_run_dispatch_strategy(args);
     let dry_run_objective = derive_dry_run_plan_objective(
         args,
-        directive.as_ref().map(|d| d.sexp_text.as_str()),
+        directive.as_ref().map(|d| d.utterance_text.as_str()),
         board_task_id,
     );
     let dry_run_sexp = render_dry_run_plan_sexp(DryRunPlanSexpInput {

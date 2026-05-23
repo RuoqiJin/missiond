@@ -4,22 +4,22 @@
 // Do not edit by hand.
 
 export const SCHEMA_VERSION = "missiond.contract-abi.v1";
-export const SOURCE_HASH = "208408c92a68b29ade49f1c125b69133";
-export const RUNTIME_CONFIG_SOURCE_HASH = "496e5b7c932e3bc95d96025df1027d73";
-export const PROJECT_UNIVERSE_SOURCE_HASH = "b5f8fe051fd445b334ec3c0e650e7c52";
+export const SOURCE_HASH = "208864f53a1e0f19e6cdb0f42c874fb3";
+export const RUNTIME_CONFIG_SOURCE_HASH = "02cc1faa324789d6f4a5ce0533ff1ac1";
+export const PROJECT_UNIVERSE_SOURCE_HASH = "f7fc04719b55b67cb0c1aa76d61cec12";
 export const SOURCE_UNITS = Object.freeze([
   {
     "file": ".missiond/v3/missiond-blueprint.lisp",
     "kind": "missiond-blueprint",
     "included_by": null,
     "include_line": null,
-    "source_hash": "8b0efcc2eaa82cf6083fa3e043371071"
+    "source_hash": "3c138f37008b26e6396e73483bf2b155"
   },
   {
     "file": ".missiond/v3/shards/index.lisp",
     "kind": "missiond-blueprint-shards",
     "included_by": ".missiond/v3/missiond-blueprint.lisp",
-    "include_line": 282,
+    "include_line": 336,
     "source_hash": "ce22fe95b34fdb48f557f792d379283e"
   },
   {
@@ -34,7 +34,7 @@ export const SOURCE_UNITS = Object.freeze([
     "kind": "multi-section-shard",
     "included_by": ".missiond/v3/shards/index.lisp",
     "include_line": 13,
-    "source_hash": "a45b2d6d5bb7e8934dc10b03e3c80f1a"
+    "source_hash": "84f3f71ac0e48fc7acb03711ec7e6b57"
   },
   {
     "file": ".missiond/v3/shards/control-plane-runtime.lisp",
@@ -111,14 +111,14 @@ export const SOURCE_UNITS = Object.freeze([
     "kind": "behavior-universe",
     "included_by": ".missiond/v3/shards/index.lisp",
     "include_line": 79,
-    "source_hash": "3723047dccec4f22a10d101e83aa16fd"
+    "source_hash": "d7cc7f3266c438a280ab0644ace899c6"
   },
   {
     "file": ".missiond/v3/shards/implementation/request-surfaces.lisp",
     "kind": "implementation-map",
     "included_by": ".missiond/v3/shards/index.lisp",
     "include_line": 85,
-    "source_hash": "48d9a49c39956ae892efb3c774f4dd9a"
+    "source_hash": "992de6e0edd89c23cd7a58dcdfb0e6d2"
   },
   {
     "file": ".missiond/v3/shards/implementation/execution-surfaces.lisp",
@@ -152,34 +152,34 @@ export const SOURCE_UNITS = Object.freeze([
 export const SOURCE_DOMAINS = Object.freeze([
   {
     "id": "blueprint-core",
-    "source_hash": "5b3158d6177fa276cf2cb48fc62480b2",
+    "source_hash": "3c30d2fd2ef8653ed5117bb75fa59d93",
     "source_units": [
       {
         "file": ".missiond/v3/missiond-blueprint.lisp",
         "kind": "missiond-blueprint",
         "included_by": null,
         "include_line": null,
-        "source_hash": "8b0efcc2eaa82cf6083fa3e043371071"
+        "source_hash": "3c138f37008b26e6396e73483bf2b155"
       },
       {
         "file": ".missiond/v3/shards/index.lisp",
         "kind": "missiond-blueprint-shards",
         "included_by": ".missiond/v3/missiond-blueprint.lisp",
-        "include_line": 282,
+        "include_line": 336,
         "source_hash": "ce22fe95b34fdb48f557f792d379283e"
       }
     ]
   },
   {
     "id": "workstation-runtime",
-    "source_hash": "1df6cd40963a48b9f3739ba8cedad7fc",
+    "source_hash": "f729a3909d691f8f68a2fd3fa20cdc4b",
     "source_units": [
       {
         "file": ".missiond/v3/shards/workstation-runtime.lisp",
         "kind": "multi-section-shard",
         "included_by": ".missiond/v3/shards/index.lisp",
         "include_line": 13,
-        "source_hash": "a45b2d6d5bb7e8934dc10b03e3c80f1a"
+        "source_hash": "84f3f71ac0e48fc7acb03711ec7e6b57"
       }
     ]
   },
@@ -231,7 +231,7 @@ export const SOURCE_DOMAINS = Object.freeze([
   },
   {
     "id": "universe",
-    "source_hash": "e52d727998d3d3c7c1dd0e84e16c5b8b",
+    "source_hash": "890f693bf1c7bf1645b681afd06dc3ca",
     "source_units": [
       {
         "file": ".missiond/v3/shards/universe/service-runtime.lisp",
@@ -273,20 +273,20 @@ export const SOURCE_DOMAINS = Object.freeze([
         "kind": "behavior-universe",
         "included_by": ".missiond/v3/shards/index.lisp",
         "include_line": 79,
-        "source_hash": "3723047dccec4f22a10d101e83aa16fd"
+        "source_hash": "d7cc7f3266c438a280ab0644ace899c6"
       }
     ]
   },
   {
     "id": "implementation-map",
-    "source_hash": "ea2c920c4829e8a814e1cdc22ce48dc8",
+    "source_hash": "21b911447ae3e440d688f3ffcd5853eb",
     "source_units": [
       {
         "file": ".missiond/v3/shards/implementation/request-surfaces.lisp",
         "kind": "implementation-map",
         "included_by": ".missiond/v3/shards/index.lisp",
         "include_line": 85,
-        "source_hash": "48d9a49c39956ae892efb3c774f4dd9a"
+        "source_hash": "992de6e0edd89c23cd7a58dcdfb0e6d2"
       },
       {
         "file": ".missiond/v3/shards/implementation/execution-surfaces.lisp",
@@ -812,7 +812,7 @@ export const CHECKER_REGISTRY = Object.freeze([
       "node scripts/check-v3-final-convergence.mjs"
     ],
     "source_file": ".missiond/v3/missiond-blueprint.lisp",
-    "source_line": 403
+    "source_line": 457
   }
 ]);
 export const CHECKER_COMMANDS = Object.freeze([
@@ -1301,11 +1301,190 @@ export const FINAL_CONVERGENCE_GATE = Object.freeze({
   ],
   "source": {
     "source_file": ".missiond/v3/missiond-blueprint.lisp",
-    "source_line": 284,
+    "source_line": 338,
     "source_column": 3,
-    "source_hash": "208408c92a68b29ade49f1c125b69133"
+    "source_hash": "208864f53a1e0f19e6cdb0f42c874fb3"
   }
 });
+export const PRODUCTION_CONSUMER_BOUNDARIES = Object.freeze([
+  {
+    "id": "plan-contract-runtime",
+    "schemaVersion": "missiond.production-consumer-boundary.v1",
+    "surface": "mission_plan",
+    "owner": "missiond-lispc",
+    "authority": "compiled-contract-abi",
+    "inputSchema": "missiond.plan-contract.v2",
+    "status": null,
+    "runtimeConsumers": [
+      "mission_plan_execute",
+      "plan_dag_runtime",
+      "plan_field_inference"
+    ],
+    "must": [
+      "consume_plan_contract_json",
+      "reject_empty_contract",
+      "reject_rust_compat_contract",
+      "require_payload_nodes"
+    ],
+    "forbidden": [
+      "read_raw_plan_sexp_for_execution",
+      "rust_scan_keyword_pairs",
+      "production_lisp_scanner"
+    ],
+    "allowedContexts": [],
+    "requires": [],
+    "checker": null,
+    "source": {
+      "source_file": ".missiond/v3/missiond-blueprint.lisp",
+      "source_line": 223,
+      "source_column": 5,
+      "source_hash": "208864f53a1e0f19e6cdb0f42c874fb3"
+    }
+  },
+  {
+    "id": "runtime-config-compiled-authority",
+    "schemaVersion": "missiond.production-consumer-boundary.v1",
+    "surface": "runtime_config",
+    "owner": "missiond-lispc",
+    "authority": "compiled-runtime-config",
+    "inputSchema": "missiond.compiled-runtime-config.v1",
+    "status": null,
+    "runtimeConsumers": [
+      "rust_runtime_defaults",
+      "js_runtime_defaults",
+      "workstation_runtime_loader"
+    ],
+    "must": [
+      "consume_compiled_runtime_config",
+      "validate_source_hash",
+      "expose_generated_abi"
+    ],
+    "forbidden": [
+      "raw_blueprint_runtime_fallback",
+      "direct_lisp_policy_parse"
+    ],
+    "allowedContexts": [],
+    "requires": [],
+    "checker": null,
+    "source": {
+      "source_file": ".missiond/v3/missiond-blueprint.lisp",
+      "source_line": 231,
+      "source_column": 5,
+      "source_hash": "208864f53a1e0f19e6cdb0f42c874fb3"
+    }
+  }
+]);
+export const REQUEST_STATE_PROJECTIONS = Object.freeze([
+  {
+    "id": "mission-request-review",
+    "schemaVersion": "missiond.request-state-projection.v1",
+    "surface": "mission_request",
+    "owner": "RequestProjection",
+    "authority": "request-local-artifacts",
+    "inputSchema": null,
+    "status": null,
+    "runtimeConsumers": [
+      "mission_request_status",
+      "mission_request_respond"
+    ],
+    "must": [
+      "consume_artifact_existence",
+      "consume_projection_target",
+      "consume_review_events",
+      "consume_execute_flag",
+      "emit_review_packet"
+    ],
+    "forbidden": [
+      "handler_local_review_state_rebuild",
+      "respond_local_review_state_rebuild"
+    ],
+    "allowedContexts": [],
+    "requires": [],
+    "checker": null,
+    "source": {
+      "source_file": ".missiond/v3/missiond-blueprint.lisp",
+      "source_line": 242,
+      "source_column": 5,
+      "source_hash": "208864f53a1e0f19e6cdb0f42c874fb3"
+    }
+  }
+]);
+export const SCANNER_POLICIES = Object.freeze([
+  {
+    "id": "plan-lisp-raw-scanner",
+    "schemaVersion": "missiond.scanner-policy.v1",
+    "surface": "mission_plan",
+    "owner": "compatibility-tests",
+    "authority": null,
+    "inputSchema": null,
+    "status": "test-and-migration-only",
+    "runtimeConsumers": [],
+    "must": [
+      "prefer_missiond_lispc_plan_contract",
+      "keep_fixture_compatibility"
+    ],
+    "forbidden": [
+      "mission_plan_execute",
+      "plan_field_inference",
+      "dry_run_plan_objective",
+      "production_consumer"
+    ],
+    "allowedContexts": [
+      "unit_tests",
+      "fixtures",
+      "contract_backfill"
+    ],
+    "requires": [],
+    "checker": null,
+    "source": {
+      "source_file": ".missiond/v3/missiond-blueprint.lisp",
+      "source_line": 252,
+      "source_column": 5,
+      "source_hash": "208864f53a1e0f19e6cdb0f42c874fb3"
+    }
+  }
+]);
+export const SEMANTIC_GATES = Object.freeze([
+  {
+    "id": "final-convergence-semantic-facts",
+    "schemaVersion": "missiond.semantic-gate.v1",
+    "surface": "final_convergence",
+    "owner": "missiond-lispc",
+    "authority": "compiled-semantic-ir",
+    "inputSchema": null,
+    "status": null,
+    "runtimeConsumers": [],
+    "must": [
+      "verify_compiled_semantic_facts",
+      "treat_text_needles_as_code_anchor_only"
+    ],
+    "forbidden": [
+      "blueprint_needle_as_semantic_requirement"
+    ],
+    "allowedContexts": [],
+    "requires": [
+      "surface",
+      "function",
+      "artifact_contract",
+      "runtime_policy",
+      "contract_split",
+      "control_plane_domain",
+      "source_domain",
+      "checker_registry",
+      "production_consumer_boundary",
+      "request_state_projection",
+      "scanner_policy",
+      "semantic_gate"
+    ],
+    "checker": "node scripts/check-v3-final-convergence.mjs --json",
+    "source": {
+      "source_file": ".missiond/v3/missiond-blueprint.lisp",
+      "source_line": 262,
+      "source_column": 5,
+      "source_hash": "208864f53a1e0f19e6cdb0f42c874fb3"
+    }
+  }
+]);
 export const PLAN_CONTRACT = Object.freeze({
   "schema_version": "missiond.plan-contract.v2",
   "accepted_heads": [

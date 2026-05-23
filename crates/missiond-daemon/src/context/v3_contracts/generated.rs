@@ -13,9 +13,9 @@ pub struct SourceUnit {
 }
 
 pub const SCHEMA_VERSION: &str = "missiond.contract-abi.v1";
-pub const SOURCE_HASH: &str = "208408c92a68b29ade49f1c125b69133";
-pub const RUNTIME_CONFIG_SOURCE_HASH: &str = "496e5b7c932e3bc95d96025df1027d73";
-pub const PROJECT_UNIVERSE_SOURCE_HASH: &str = "b5f8fe051fd445b334ec3c0e650e7c52";
+pub const SOURCE_HASH: &str = "208864f53a1e0f19e6cdb0f42c874fb3";
+pub const RUNTIME_CONFIG_SOURCE_HASH: &str = "02cc1faa324789d6f4a5ce0533ff1ac1";
+pub const PROJECT_UNIVERSE_SOURCE_HASH: &str = "f7fc04719b55b67cb0c1aa76d61cec12";
 
 pub const SOURCE_UNITS: &[SourceUnit] = &[
     SourceUnit {
@@ -23,13 +23,13 @@ pub const SOURCE_UNITS: &[SourceUnit] = &[
         kind: "missiond-blueprint",
         included_by: None,
         include_line: None,
-        source_hash: "8b0efcc2eaa82cf6083fa3e043371071",
+        source_hash: "3c138f37008b26e6396e73483bf2b155",
     },
     SourceUnit {
         file: ".missiond/v3/shards/index.lisp",
         kind: "missiond-blueprint-shards",
         included_by: Some(".missiond/v3/missiond-blueprint.lisp"),
-        include_line: Some(282u32),
+        include_line: Some(336u32),
         source_hash: "ce22fe95b34fdb48f557f792d379283e",
     },
     SourceUnit {
@@ -44,7 +44,7 @@ pub const SOURCE_UNITS: &[SourceUnit] = &[
         kind: "multi-section-shard",
         included_by: Some(".missiond/v3/shards/index.lisp"),
         include_line: Some(13u32),
-        source_hash: "a45b2d6d5bb7e8934dc10b03e3c80f1a",
+        source_hash: "84f3f71ac0e48fc7acb03711ec7e6b57",
     },
     SourceUnit {
         file: ".missiond/v3/shards/control-plane-runtime.lisp",
@@ -121,14 +121,14 @@ pub const SOURCE_UNITS: &[SourceUnit] = &[
         kind: "behavior-universe",
         included_by: Some(".missiond/v3/shards/index.lisp"),
         include_line: Some(79u32),
-        source_hash: "3723047dccec4f22a10d101e83aa16fd",
+        source_hash: "d7cc7f3266c438a280ab0644ace899c6",
     },
     SourceUnit {
         file: ".missiond/v3/shards/implementation/request-surfaces.lisp",
         kind: "implementation-map",
         included_by: Some(".missiond/v3/shards/index.lisp"),
         include_line: Some(85u32),
-        source_hash: "48d9a49c39956ae892efb3c774f4dd9a",
+        source_hash: "992de6e0edd89c23cd7a58dcdfb0e6d2",
     },
     SourceUnit {
         file: ".missiond/v3/shards/implementation/execution-surfaces.lisp",
@@ -170,33 +170,33 @@ pub struct SourceDomain {
 pub const SOURCE_DOMAINS: &[SourceDomain] = &[
     SourceDomain {
         id: "blueprint-core",
-        source_hash: "5b3158d6177fa276cf2cb48fc62480b2",
+        source_hash: "3c30d2fd2ef8653ed5117bb75fa59d93",
         source_units: &[
             SourceUnit {
                 file: ".missiond/v3/missiond-blueprint.lisp",
                 kind: "missiond-blueprint",
                 included_by: None,
                 include_line: None,
-                source_hash: "8b0efcc2eaa82cf6083fa3e043371071",
+                source_hash: "3c138f37008b26e6396e73483bf2b155",
             },
             SourceUnit {
                 file: ".missiond/v3/shards/index.lisp",
                 kind: "missiond-blueprint-shards",
                 included_by: Some(".missiond/v3/missiond-blueprint.lisp"),
-                include_line: Some(282u32),
+                include_line: Some(336u32),
                 source_hash: "ce22fe95b34fdb48f557f792d379283e",
             },
         ],
     },
     SourceDomain {
         id: "workstation-runtime",
-        source_hash: "1df6cd40963a48b9f3739ba8cedad7fc",
+        source_hash: "f729a3909d691f8f68a2fd3fa20cdc4b",
         source_units: &[SourceUnit {
             file: ".missiond/v3/shards/workstation-runtime.lisp",
             kind: "multi-section-shard",
             included_by: Some(".missiond/v3/shards/index.lisp"),
             include_line: Some(13u32),
-            source_hash: "a45b2d6d5bb7e8934dc10b03e3c80f1a",
+            source_hash: "84f3f71ac0e48fc7acb03711ec7e6b57",
         }],
     },
     SourceDomain {
@@ -243,7 +243,7 @@ pub const SOURCE_DOMAINS: &[SourceDomain] = &[
     },
     SourceDomain {
         id: "universe",
-        source_hash: "e52d727998d3d3c7c1dd0e84e16c5b8b",
+        source_hash: "890f693bf1c7bf1645b681afd06dc3ca",
         source_units: &[
             SourceUnit {
                 file: ".missiond/v3/shards/universe/service-runtime.lisp",
@@ -285,20 +285,20 @@ pub const SOURCE_DOMAINS: &[SourceDomain] = &[
                 kind: "behavior-universe",
                 included_by: Some(".missiond/v3/shards/index.lisp"),
                 include_line: Some(79u32),
-                source_hash: "3723047dccec4f22a10d101e83aa16fd",
+                source_hash: "d7cc7f3266c438a280ab0644ace899c6",
             },
         ],
     },
     SourceDomain {
         id: "implementation-map",
-        source_hash: "ea2c920c4829e8a814e1cdc22ce48dc8",
+        source_hash: "21b911447ae3e440d688f3ffcd5853eb",
         source_units: &[
             SourceUnit {
                 file: ".missiond/v3/shards/implementation/request-surfaces.lisp",
                 kind: "implementation-map",
                 included_by: Some(".missiond/v3/shards/index.lisp"),
                 include_line: Some(85u32),
-                source_hash: "48d9a49c39956ae892efb3c774f4dd9a",
+                source_hash: "992de6e0edd89c23cd7a58dcdfb0e6d2",
             },
             SourceUnit {
                 file: ".missiond/v3/shards/implementation/execution-surfaces.lisp",
@@ -489,6 +489,11 @@ pub const RUNTIME_POLICY_IDS: &[&str] = &[
     "project-registry-policy",
     "router-runtime-policy",
 ];
+pub const PRODUCTION_CONSUMER_BOUNDARY_IDS: &[&str] =
+    &["plan-contract-runtime", "runtime-config-compiled-authority"];
+pub const REQUEST_STATE_PROJECTION_IDS: &[&str] = &["mission-request-review"];
+pub const SCANNER_POLICY_IDS: &[&str] = &["plan-lisp-raw-scanner"];
+pub const SEMANTIC_GATE_IDS: &[&str] = &["final-convergence-semantic-facts"];
 pub const CHECKER_COMMANDS: &[&str] = &[
     "node scripts/check-architecture-lisp.mjs --no-structure .missiond/v3/missiond-blueprint.lisp",
     "node scripts/check-frontend-board-code-isomorphism.mjs",
