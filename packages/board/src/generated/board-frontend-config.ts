@@ -5,7 +5,7 @@
 
 import type { FlowPhase, GroupBy, TaskCategory, TaskPriority, TaskStatus } from '../types';
 
-export type BoardTabId = "jarvis" | "board" | "terminal" | "exec" | "system" | "knowledge" | "logs";
+export type BoardTabId = "jarvis" | "board" | "terminal" | "exec" | "codex" | "system" | "knowledge" | "logs";
 export type EventVersionKey = "slotVersion" | "taskVersion" | "questionVersion" | "decisionVersion" | "memoryVersion" | "deployVersion" | "engineVersion" | "timelineVersion";
 
 export interface BoardTabConfig {
@@ -75,6 +75,7 @@ export const BOARD_TABS = [
   { id: "board", label: "Board", icon: "ClipboardList" },
   { id: "terminal", label: "Terminal", icon: "MonitorUp" },
   { id: "exec", label: "Exec", icon: "Crosshair" },
+  { id: "codex", label: "Codex Loop", icon: "Repeat2" },
   { id: "system", label: "System", icon: "Gauge" },
   { id: "knowledge", label: "Knowledge", icon: "Brain" },
   { id: "logs", label: "Logs", icon: "MessageSquareText" },
@@ -317,6 +318,31 @@ export const EVENT_CUSTOM_EVENTS = [
   { event: "jarvis_task_completed", name: "jarvis-task-completed", detail: [
   "conversation_id",
   "task_id",
+] },
+  { event: "jarvis_intent_draft", name: "jarvis-intent-draft", detail: [
+  "conversation_id",
+  "grounding_context_id",
+  "intent_artifact_id",
+] },
+  { event: "jarvis_plan_draft", name: "jarvis-plan-draft", detail: [
+  "conversation_id",
+  "grounding_context_id",
+  "plan_artifact_id",
+] },
+  { event: "jarvis_confirm_required", name: "jarvis-confirm-required", detail: [
+  "conversation_id",
+  "confirmation_type",
+] },
+  { event: "jarvis_worker_status", name: "jarvis-worker-status", detail: [
+  "conversation_id",
+  "task_id",
+  "slot_id",
+  "provider",
+] },
+  { event: "jarvis_result_artifact", name: "jarvis-result-artifact", detail: [
+  "conversation_id",
+  "task_id",
+  "artifact_id",
 ] },
 ] as const satisfies readonly EventCustomEventConfig[];
 export const EVENT_PREFIX_ROUTES = [

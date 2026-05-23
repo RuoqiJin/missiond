@@ -428,6 +428,8 @@ pub(crate) struct AppState {
     pub(crate) embedding_tx: tokio::sync::mpsc::Sender<EmbeddingTask>,
     /// v2 event bus — every producer in the daemon publishes through this.
     pub(crate) bus: Arc<BusServices>,
+    /// Codex app-server protocol replay runner for fixed Plan Mode automation loops.
+    pub(crate) codex_replay: Arc<crate::engine::codex_replay::CodexReplayService>,
     /// Durable multi-agent shared memory: event stream, artifacts, write leases,
     /// and agent cursors. This supersedes direct concurrent writes to
     /// `.missiond/tasks/**/shared-memory.lisp`; those files remain a

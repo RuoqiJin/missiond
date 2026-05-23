@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import type { ElementType } from 'react';
-import { Plus, ClipboardList, Loader2, MonitorUp, Brain, MessageSquareText, Gauge, Crosshair, Sparkles } from 'lucide-react';
+import { Plus, ClipboardList, Loader2, MonitorUp, Brain, MessageSquareText, Gauge, Crosshair, Sparkles, Repeat2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
@@ -14,6 +14,7 @@ import { SystemDashboard } from './components/SystemDashboard';
 import { KnowledgeConsolidated } from './components/KnowledgeConsolidated';
 import { LogsConsolidated } from './components/LogsConsolidated';
 import { JarvisChat } from './components/JarvisChat';
+import { CodexReplayDashboard } from './components/CodexReplayDashboard';
 import { useEventStream, useConnectionState, useEventInvalidation } from './hooks/useEventStream';
 import { BOARD_TABS, DEFAULT_TAB, TAB_MIGRATION, type BoardTabId } from './generated/board-frontend-config';
 import type { SlotDef } from './types';
@@ -27,6 +28,7 @@ const TAB_ICON_MAP: Record<string, ElementType> = {
   Gauge,
   MessageSquareText,
   MonitorUp,
+  Repeat2,
   Sparkles,
 };
 const TAB_MIGRATION_LOOKUP = TAB_MIGRATION as Readonly<Record<string, BoardTabId>>;
@@ -256,7 +258,7 @@ export default function App() {
         </div>
       </div>
 
-      {/* Content — 7 tabs */}
+      {/* Content */}
       {tab === 'jarvis' ? (
         <JarvisChat />
       ) : tab === 'board' ? (
@@ -401,6 +403,8 @@ export default function App() {
         </div>
       ) : tab === 'exec' ? (
         <ExecDashboard slots={slots} tasks={tasks} />
+      ) : tab === 'codex' ? (
+        <CodexReplayDashboard />
       ) : tab === 'system' ? (
         <SystemDashboard />
       ) : tab === 'knowledge' ? (

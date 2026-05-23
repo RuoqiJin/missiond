@@ -194,8 +194,8 @@ mod sysinfra;
 
 // Domain aliases for readability
 use comm::{
-    audit, capability_usage, codex_ops, conversation, question, router_chat, timeline,
-    tool_directory,
+    audit, capability_usage, codex_ops, codex_replay, conversation, question, router_chat,
+    timeline, tool_directory,
 };
 use compute::{
     cc_tasks, compute_slot, flow_run, forge, job, minimax, process, pty, slot, task, task_delegate,
@@ -247,6 +247,7 @@ pub fn all_tools() -> Vec<ToolDefinition> {
     tools.extend(audit::definitions());
     tools.extend(capability_usage::definitions());
     tools.extend(codex_ops::definitions());
+    tools.extend(codex_replay::definitions());
     tools.extend(tool_directory::definitions());
     // sysinfra
     tools.extend(infra::definitions());

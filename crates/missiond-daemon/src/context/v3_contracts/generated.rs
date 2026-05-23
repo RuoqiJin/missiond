@@ -13,7 +13,7 @@ pub struct SourceUnit {
 }
 
 pub const SCHEMA_VERSION: &str = "missiond.contract-abi.v1";
-pub const SOURCE_HASH: &str = "63339781e029bcb73f6fea4fd8842b86";
+pub const SOURCE_HASH: &str = "1631c8dbe16363f0016a37e6f426e384";
 
 pub const SOURCE_UNITS: &[SourceUnit] = &[
     SourceUnit {
@@ -56,7 +56,7 @@ pub const SOURCE_UNITS: &[SourceUnit] = &[
         kind: "multi-section-shard",
         included_by: Some(".missiond/v3/shards/index.lisp"),
         include_line: Some(25u32),
-        source_hash: "9cd8ce05236e5996c463151f4b42af5d",
+        source_hash: "f09aab0724e6d03f6f21e581d91b3e9a",
     },
     SourceUnit {
         file: ".missiond/v3/shards/ops-infra.lisp",
@@ -70,7 +70,7 @@ pub const SOURCE_UNITS: &[SourceUnit] = &[
         kind: "v2-convergence-map",
         included_by: Some(".missiond/v3/shards/index.lisp"),
         include_line: Some(37u32),
-        source_hash: "56e4bcc50ae394e946dc057bb7819ce7",
+        source_hash: "6f56aae491d435fc2aa98260812487c2",
     },
     SourceUnit {
         file: ".missiond/v3/shards/pillar-flow-map.lisp",

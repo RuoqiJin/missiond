@@ -3,6 +3,7 @@
 //! Intent Engine:   意图→阶段路由→DAG解析→派发 (autopilot, flow, scheduler, workflow)
 //! Learning Engine: 事件监听→知识提取→决策泛化→模式分析 (decision, extraction, harvest, timeline)
 
+pub mod codex_replay;
 pub mod commit_convergence;
 pub mod flow;
 pub mod intent_engine;

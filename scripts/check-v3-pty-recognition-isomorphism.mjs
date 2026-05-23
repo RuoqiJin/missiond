@@ -90,6 +90,7 @@ function checkFiles(root, files) {
     'Codex MCP approval menus',
     'human-like keyboard navigation',
     'recognize_claude_code Blocked MUST require explicit confirmation/model-picker UI',
+    'Confirming is an active turn state, not a TextOutput::Complete boundary',
     'bypass permissions on',
     'MUST NOT trigger Blocked on Idle or completed screens',
     'ClaudeCode worker MCP reconnect MUST follow `/mcp` -> Enter -> ArrowDown until missiond -> Enter -> Enter using arrow-key keystrokes only',
@@ -157,6 +158,8 @@ function checkFiles(root, files) {
     'confirmation_navigation_sequence',
     'confirmation_navigation_uses_arrow_keys_not_numeric_shortcuts',
     'screen_is_blocked_confirmation',
+    'fn confirming_is_active_turn_not_completion_boundary',
+    'SessionState::Confirming.is_processing()',
     'reject_option_index',
     // ClaudeCode MCP arrow-key reconnect ritual SSOT — both the static
     // byte-template helper and the live runtime method must exist, plus

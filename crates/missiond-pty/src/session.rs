@@ -87,11 +87,19 @@ pub enum SessionState {
 }
 
 impl SessionState {
-    /// Check if this is a processing state (Claude is active)
+    /// Check if this is an active turn state.
+    ///
+    /// `Confirming` belongs to the same provider turn: the model is blocked on
+    /// a tool/approval menu, but the final answer has not been produced yet.
+    /// Treating it as non-processing makes `Thinking -> Confirming` emit a
+    /// premature `TextOutput::Complete` containing the approval screen.
     pub fn is_processing(&self) -> bool {
         matches!(
             self,
-            SessionState::Thinking | SessionState::ToolRunning | SessionState::Responding
+            SessionState::Thinking
+                | SessionState::ToolRunning
+                | SessionState::Responding
+                | SessionState::Confirming
         )
     }
 }
@@ -2773,6 +2781,16 @@ mod tests {
         assert!(!after_command.contains('4'));
         assert!(after_command.contains("\x1b[B"));
         assert!(after_command.ends_with("\r\r"));
+    }
+
+    #[test]
+    fn confirming_is_active_turn_not_completion_boundary() {
+        assert!(SessionState::Thinking.is_processing());
+        assert!(SessionState::ToolRunning.is_processing());
+        assert!(SessionState::Responding.is_processing());
+        assert!(SessionState::Confirming.is_processing());
+        assert!(!SessionState::Idle.is_processing());
+        assert!(!SessionState::Exited.is_processing());
     }
 
     /// Live shape from BoardTask 42b2385e: the streamed `TextOutput::Complete`

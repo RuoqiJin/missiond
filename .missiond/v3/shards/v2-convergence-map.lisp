@@ -511,7 +511,7 @@
         :v3-pillar communication
         :v3-function capability-governance
         :surface capability-governance
-        :tools [mission_capability_usage mission_audit mission_codex_ops])
+        :tools [mission_capability_usage mission_audit mission_codex_ops mission_codex_replay])
       (tool-group mcp-tool-governance-tools
         :status code-aligned
         :v2-source ".missiond/v2/intent-capability-governance.lisp :: tool-directory"

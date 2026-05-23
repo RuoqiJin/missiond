@@ -97,6 +97,7 @@
       (tab :id board :label "Board" :icon ClipboardList)
       (tab :id terminal :label "Terminal" :icon MonitorUp)
       (tab :id exec :label "Exec" :icon Crosshair)
+      (tab :id codex :label "Codex Loop" :icon Repeat2)
       (tab :id system :label "System" :icon Gauge)
       (tab :id knowledge :label "Knowledge" :icon Brain)
       (tab :id logs :label "Logs" :icon MessageSquareText)

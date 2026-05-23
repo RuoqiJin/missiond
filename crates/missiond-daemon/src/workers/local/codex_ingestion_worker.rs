@@ -523,7 +523,12 @@ async fn process_thread(
     // Ensure conversation record exists (idempotent via upsert). Preserve the
     // existing count during replay so large, chunked rollouts do not regress the
     // list view to zero before the final refresh runs.
-    let existing = state.store.get_conversation(&thread.id).await.ok().flatten();
+    let existing = state
+        .store
+        .get_conversation(&thread.id)
+        .await
+        .ok()
+        .flatten();
     let conv = build_codex_conversation(
         state,
         thread,
