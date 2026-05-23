@@ -21,6 +21,7 @@ const DEFAULT_FILES = {
   files: 'crates/missiond-daemon/src/handlers/comm/router_chat/files.rs',
   manage: 'crates/missiond-daemon/src/handlers/comm/router_chat/manage.rs',
   v3Runtime: 'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
+  v3SourceFallback: 'crates/missiond-daemon/src/context/v3_blueprint_runtime/source_fallback.rs',
   main: 'crates/missiond-daemon/src/main.rs',
   embeddingWorker: 'crates/missiond-daemon/src/workers/sonnet/embedding_worker.rs',
   geminiClient: 'crates/missiond-daemon/src/llm/gemini_client.rs',
@@ -272,7 +273,7 @@ function checkFiles(root, files) {
     'CompiledRuntimeConfigPayload',
     'load_compiled_runtime_config',
     'required_compiled_runtime_config',
-    'MISSIOND_V3_ALLOW_SOURCE_FALLBACK',
+    'source_fallback::allowed()',
     'compiled-runtime-config.json',
     'DEFAULT_ROUTER_CHAT_MODEL',
     'DEFAULT_ROUTER_FLOW_GEMINI_MODEL',
@@ -320,6 +321,15 @@ function checkFiles(root, files) {
     ':gemini-cli-absolute-timeout-secs',
     ':gemini-cli-tool-exec-timeout-secs',
     ':queued-sonnet-quota-throttle-secs',
+  ]);
+
+  requireAll(diagnostics, files.v3SourceFallback, sources.v3SourceFallback, [
+    'ALLOW_SOURCE_FALLBACK_ENV',
+    'MISSIOND_V3_ALLOW_SOURCE_FALLBACK',
+    'COMPILE_RUNTIME_ACTION',
+    'node scripts/compile-v3-runtime.mjs --json',
+    'cfg!(debug_assertions) || cfg!(test)',
+    'return false;',
   ]);
 
   requireAll(diagnostics, files.main, sources.main, [
@@ -658,7 +668,7 @@ is_file_denied /.ssh/ .env credentials.json
 
   writeFixture(root, DEFAULT_FILES.v3Runtime, `
 pub(crate) struct RouterRuntimeConfig DEFAULT_ROUTER_CHAT_MODEL DEFAULT_ROUTER_FLOW_GEMINI_MODEL
-CompiledRuntimeConfigPayload load_compiled_runtime_config required_compiled_runtime_config MISSIOND_V3_ALLOW_SOURCE_FALLBACK compiled-runtime-config.json
+CompiledRuntimeConfigPayload load_compiled_runtime_config required_compiled_runtime_config source_fallback::allowed() compiled-runtime-config.json
 DEFAULT_ROUTER_STATELESS_SONNET_MODEL DEFAULT_ROUTER_QUEUED_SONNET_MODEL DEFAULT_ROUTER_COMPRESS_MODEL
 DEFAULT_ROUTER_CHAT_IDLE_TIMEOUT_SECS router_chat_idle_timeout
 DEFAULT_ROUTER_CHAT_RETRY_MAX_ATTEMPTS DEFAULT_ROUTER_CHAT_RETRY_INITIAL_BACKOFF_MS DEFAULT_ROUTER_CHAT_RETRY_MAX_BACKOFF_MS
@@ -668,6 +678,13 @@ DEFAULT_ROUTER_ANTHROPIC_URGENT_MODEL DEFAULT_ROUTER_ANTHROPIC_OPS_MODEL DEFAULT
 anthropic_urgent_model anthropic_ops_model anthropic_docs_test_chore_model gemini_pty_queue_timeout router_chat_retry_initial_backoff router_chat_retry_max_backoff gemini_http_queue_timeout queued_sonnet_quota_throttle
 gemini_file_upload_timeout gemini_file_poll_timeout gemini_cli_absolute_timeout gemini_cli_tool_exec_timeout
 parse_router_runtime_policy find_form(source, "router-runtime-policy") direct_http_timeout :router-chat-idle-timeout-secs :router-chat-retry-max-attempts :router-chat-retry-initial-backoff-ms :router-chat-retry-max-backoff-ms :gemini-pty-queue-timeout-secs :gemini-http-queue-timeout-secs :gemini-file-upload-timeout-secs :gemini-file-poll-timeout-secs :gemini-cli-absolute-timeout-secs :gemini-cli-tool-exec-timeout-secs :queued-sonnet-quota-throttle-secs
+`);
+
+  writeFixture(root, DEFAULT_FILES.v3SourceFallback, `
+ALLOW_SOURCE_FALLBACK_ENV MISSIOND_V3_ALLOW_SOURCE_FALLBACK COMPILE_RUNTIME_ACTION
+node scripts/compile-v3-runtime.mjs --json
+cfg!(debug_assertions) || cfg!(test)
+return false;
 `);
 
   writeFixture(root, DEFAULT_FILES.main, `

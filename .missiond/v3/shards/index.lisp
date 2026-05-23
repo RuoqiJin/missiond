@@ -2,7 +2,7 @@
   :schema "missiond.blueprint-shard-index.v1"
   :root ".missiond/v3/missiond-blueprint.lisp"
   :status compiler-active-index
-  :rule "The root V3 blueprint is the compiler entrypoint. This index is a review manifest only; root direct includes are the executable shard topology, and recursive shard includes are forbidden."
+  :rule "The root V3 blueprint is the compiler entrypoint. Root include-shard-index expands this manifest's compiler-active shard paths; recursive shard includes remain forbidden."
 
   (shard request-runtime
     :status compiler-active

@@ -3,20 +3,26 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use md5::{Digest, Md5};
 use serde::Deserialize;
 
 use crate::context::v3_contracts::generated as v3_contracts;
 use crate::context::v3_runtime_defaults;
 
+mod compiled_envelope;
 mod compiled_snapshot;
+mod runtime_config_payload;
+mod source_fallback;
 
+use compiled_envelope::{
+    validate_compiled_source_units, CompiledRuntimeEnvelope, CompiledSourceUnit,
+};
 use compiled_snapshot::{compiled_runtime_schema_version, compiled_runtime_snapshot_path};
+use runtime_config_payload::{generated_default_runtime_config, CompiledRuntimeConfigPayload};
 
 // Embedded defaults are the test/no-install fallback. Runtime authority is the
 // current compiled V3 projection; source Lisp fallback is explicit only.
-const V3_ALLOW_SOURCE_FALLBACK_ENV: &str = "MISSIOND_V3_ALLOW_SOURCE_FALLBACK";
-const V3_COMPILE_RUNTIME_ACTION: &str = "node scripts/compile-v3-runtime.mjs --json";
+const V3_ALLOW_SOURCE_FALLBACK_ENV: &str = source_fallback::ALLOW_SOURCE_FALLBACK_ENV;
+const V3_COMPILE_RUNTIME_ACTION: &str = source_fallback::COMPILE_RUNTIME_ACTION;
 pub(crate) const DEFAULT_MODEL_PROFILE: &str = "coding-default-opus-4-7";
 pub(crate) const DEFAULT_TIMEOUT_SECS: i64 = 1800;
 pub(crate) const MIN_TIMEOUT_SECS: i64 = 60;
@@ -561,26 +567,6 @@ pub(crate) struct CompiledPayloadLoad<T> {
 }
 
 #[derive(Debug, Deserialize)]
-struct CompiledRuntimeEnvelope {
-    schema_version: String,
-    source_hash: String,
-    #[allow(dead_code)]
-    generated_at: Option<serde_json::Value>,
-    diagnostics: Vec<serde_json::Value>,
-    payload: serde_json::Value,
-}
-
-#[allow(dead_code)]
-#[derive(Clone, Debug, Deserialize)]
-struct CompiledSourceUnit {
-    file: String,
-    kind: String,
-    included_by: Option<String>,
-    include_line: Option<i64>,
-    source_hash: String,
-}
-
-#[derive(Debug, Deserialize)]
 struct CompiledV3Payload {
     #[serde(default)]
     source_units: Vec<CompiledSourceUnit>,
@@ -612,34 +598,6 @@ struct CompiledProjectUniversePayload {
 struct CompiledWorkflowsPayload {
     #[serde(default)]
     workflows: Vec<CompiledWorkflowEntry>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct CompiledRuntimeConfigPayload {
-    #[serde(default)]
-    source_units: Vec<CompiledSourceUnit>,
-    workstation: WorkstationRuntimeConfig,
-    flow: FlowRuntimeConfig,
-    compute: ComputePrimitivesRuntimeConfig,
-    minimax: MinimaxRuntimeConfig,
-    router: RouterRuntimeConfig,
-    cascade: CascadeRuntimeConfig,
-    #[serde(rename = "projectRegistry")]
-    project_registry: ProjectRegistryRuntimeConfig,
-    #[serde(rename = "capabilityGovernance")]
-    capability_governance: CapabilityGovernanceRuntimeConfig,
-    #[serde(rename = "memoryKb")]
-    memory_kb: MemoryKbRuntimeConfig,
-    #[serde(rename = "conversationIngestion")]
-    conversation_ingestion: ConversationIngestionRuntimeConfig,
-    autopilot: AutopilotRuntimeConfig,
-    #[serde(rename = "learningEngine")]
-    learning_engine: LearningEngineRuntimeConfig,
-}
-
-fn generated_default_runtime_config() -> CompiledRuntimeConfigPayload {
-    serde_json::from_str(v3_runtime_defaults::generated::DEFAULT_RUNTIME_CONFIG_JSON)
-        .expect("generated V3 runtime defaults must deserialize")
 }
 
 impl Default for TimeoutPolicy {
@@ -832,18 +790,7 @@ fn required_compiled_runtime_config(
 }
 
 fn v3_source_fallback_allowed() -> bool {
-    if !(cfg!(debug_assertions) || cfg!(test)) {
-        return false;
-    }
-    std::env::var(V3_ALLOW_SOURCE_FALLBACK_ENV)
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
+    source_fallback::allowed()
 }
 
 impl WorkstationRuntimeConfig {
@@ -2748,6 +2695,7 @@ fn load_compiled_v3_lisp_source_with_diagnostics(project_root: &Path) -> Compile
         &source_hash,
         &payload.source_units,
         "compiled V3 snapshot",
+        V3_COMPILE_RUNTIME_ACTION,
     );
     if !source_unit_diagnostics.is_empty() {
         return CompiledV3LispSourceLoad {
@@ -2791,70 +2739,6 @@ fn load_compiled_v3_lisp_source_with_diagnostics(project_root: &Path) -> Compile
         source: Some(source),
         diagnostics: Vec::new(),
     }
-}
-
-fn validate_compiled_source_units(
-    project_root: &Path,
-    expected_composite_hash: &str,
-    source_units: &[CompiledSourceUnit],
-    label: &str,
-) -> Vec<String> {
-    if source_units.is_empty() {
-        return vec![format!(
-            "{label} missing source_units; rerun {V3_COMPILE_RUNTIME_ACTION}"
-        )];
-    }
-
-    let mut diagnostics = Vec::new();
-    let mut unit_hashes = Vec::with_capacity(source_units.len());
-    for unit in source_units {
-        if unit.file.trim().is_empty() {
-            diagnostics.push(format!("{label} contains a source_unit with an empty file"));
-            continue;
-        }
-        let path = compiled_source_unit_path(project_root, &unit.file);
-        let actual_hash = match fs::read(&path) {
-            Ok(raw) => md5_hex(&raw),
-            Err(err) => {
-                diagnostics.push(format!(
-                    "{label} source_units reference unreadable source {}: {err}",
-                    path.display()
-                ));
-                continue;
-            }
-        };
-        if actual_hash != unit.source_hash {
-            diagnostics.push(format!(
-                "{label} source_units stale for {}: expected {}, got {}",
-                unit.file, unit.source_hash, actual_hash
-            ));
-        }
-        unit_hashes.push(unit.source_hash.clone());
-    }
-
-    if diagnostics.is_empty() {
-        let actual_composite_hash = md5_hex(unit_hashes.join("\n").as_bytes());
-        if actual_composite_hash != expected_composite_hash {
-            diagnostics.push(format!(
-                "{label} source_hash mismatch from source_units: expected {}, got {}",
-                expected_composite_hash, actual_composite_hash
-            ));
-        }
-    }
-    diagnostics
-}
-
-fn compiled_source_unit_path(project_root: &Path, file: &str) -> PathBuf {
-    let path = Path::new(file);
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        project_root.join(path)
-    }
-}
-
-fn md5_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Md5::digest(bytes))
 }
 
 fn compiled_sexp_to_lisp(node: &CompiledSexpNode) -> Option<String> {
@@ -3061,6 +2945,7 @@ fn load_compiled_runtime_config(
             &snapshot.source_hash,
             &payload.source_units,
             "compiled runtime config",
+            V3_COMPILE_RUNTIME_ACTION,
         );
         if expected_source_hash.is_none()
             && v3_contract_abi_expected(project_root)
@@ -3434,6 +3319,7 @@ fn tokenize_lisp(source: &str) -> Vec<String> {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use super::compiled_envelope::md5_hex;
     use super::*;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -3609,6 +3495,56 @@ pub(crate) mod tests {
       :max-concurrency 1
       :timeout-secs 600
       :default-use low-authority-survey
+      :accepts-boardtask true
+      :write-allowed false)
+    (worker agy-research
+      :engine agy
+      :role researcher
+      :slot-id "slot-agy-research"
+      :task-type agy_research
+      :model-profile nil
+      :model nil
+      :task-classes [research review context-pack survey]
+      :capabilities [read-only analysis design-review provider-successor]
+      :max-concurrency 1
+      :timeout-secs 900
+      :default-use agy-read-only-research
+      :accepts-boardtask true
+      :write-allowed false)
+    (worker codex-code-worker
+      :engine codex
+      :role coder
+      :slot-id "slot-codex-code-worker"
+      :task-type codex_code_worker
+      :model-profile codex-master-gpt-5-5-xhigh
+      :model nil
+      :reasoning-effort xhigh
+      :search true
+      :sandbox danger-full-access
+      :approval-policy never
+      :task-classes [code implementation design review regression-analysis]
+      :capabilities [code-read code-write scoped-commit shell-exec search]
+      :max-concurrency 1
+      :timeout-secs 1800
+      :default-use codex-code-shard
+      :accepts-boardtask true
+      :write-allowed true)
+    (worker codex-review-worker
+      :engine codex
+      :role reviewer
+      :slot-id "slot-codex-review-worker"
+      :task-type codex_review_worker
+      :model-profile codex-master-gpt-5-5-xhigh
+      :model nil
+      :reasoning-effort xhigh
+      :search true
+      :sandbox read-only
+      :approval-policy never
+      :task-classes [review architecture-review regression-analysis]
+      :capabilities [code-read design-review search]
+      :max-concurrency 1
+      :timeout-secs 1200
+      :default-use codex-review-shard
       :accepts-boardtask true
       :write-allowed false)
     (worker codex-master-control
@@ -4113,6 +4049,8 @@ pub(crate) mod tests {
   (workstation-pool
     (worker claude-code-default :engine claude-code :role coder :slot-id "slot-claude-code-default" :task-type claude_code_default :model-profile coding-default-opus-4-7 :model nil :task-classes [code] :capabilities [code-write] :max-concurrency 1 :timeout-secs 1800 :default-use code-implementation :accepts-boardtask true :write-allowed true)
     (worker gemini-ultra-pro :engine gemini :role researcher :slot-id "slot-gemini-ultra" :task-type gemini_ultra :model-profile gemini-ultra-pro-preview :model nil :approval-policy plan :tool-policy-path ".missiond/v3/policies/gemini-readonly-policy.toml" :task-classes [research] :capabilities [read-only] :max-concurrency 1 :timeout-secs 900 :default-use research-review :accepts-boardtask true :write-allowed false)
+    (worker agy-research :engine agy :role researcher :slot-id "slot-agy-research" :task-type agy_research :model-profile nil :model nil :task-classes [research] :capabilities [read-only] :max-concurrency 1 :timeout-secs 900 :default-use agy-read-only-research :accepts-boardtask true :write-allowed false)
+    (worker codex-code-worker :engine codex :role coder :slot-id "slot-codex-code-worker" :task-type codex_code_worker :model-profile codex-master-gpt-5-5-xhigh :model nil :reasoning-effort xhigh :search true :sandbox danger-full-access :approval-policy never :task-classes [code] :capabilities [code-read code-write] :max-concurrency 1 :timeout-secs 1800 :default-use codex-code-shard :accepts-boardtask true :write-allowed true)
     (worker codex-master-control :engine codex :role orchestrator :slot-id "slot-codex-master-control" :task-type codex_master_control :model-profile codex-master-gpt-5-5-xhigh :model nil :reasoning-effort xhigh :search true :sandbox danger-full-access :approval-policy never :task-classes [master-control] :capabilities [board-write kb-write execution-log dispatch code-read code-write shell-exec search mcp full-access] :max-concurrency 1 :timeout-secs 7200 :default-use resident-master-control :accepts-boardtask false :write-allowed true)))"#,
         )
         .expect_err("missing policy");
@@ -4167,6 +4105,8 @@ pub(crate) mod tests {
   (workstation-pool
     (worker claude-code-default :engine claude-code :role coder :slot-id "slot-claude-code-default" :task-type claude_code_default :model-profile coding-default-opus-4-7 :model nil :task-classes [code] :capabilities [code-write] :max-concurrency 1 :timeout-secs 1800 :default-use code-implementation :accepts-boardtask true :write-allowed true)
     (worker gemini-ultra-pro :engine gemini :role researcher :slot-id "slot-gemini-ultra" :task-type gemini_ultra :model-profile gemini-ultra-pro-preview :model nil :approval-policy plan :tool-policy-path ".missiond/v3/policies/gemini-readonly-policy.toml" :task-classes [research] :capabilities [read-only] :max-concurrency 1 :timeout-secs 900 :default-use research-review :accepts-boardtask true :write-allowed false)
+    (worker agy-research :engine agy :role researcher :slot-id "slot-agy-research" :task-type agy_research :model-profile nil :model nil :task-classes [research] :capabilities [read-only] :max-concurrency 1 :timeout-secs 900 :default-use agy-read-only-research :accepts-boardtask true :write-allowed false)
+    (worker codex-code-worker :engine codex :role coder :slot-id "slot-codex-code-worker" :task-type codex_code_worker :model-profile codex-master-gpt-5-5-xhigh :model nil :reasoning-effort xhigh :search true :sandbox danger-full-access :approval-policy never :task-classes [code] :capabilities [code-read code-write] :max-concurrency 1 :timeout-secs 1800 :default-use codex-code-shard :accepts-boardtask true :write-allowed true)
     (worker codex-master-control :engine codex :role orchestrator :slot-id "slot-codex-master-control" :task-type codex_master_control :model-profile codex-master-gpt-5-5-xhigh :model nil :reasoning-effort xhigh :search true :sandbox danger-full-access :approval-policy never :task-classes [master-control] :capabilities [board-write kb-write execution-log dispatch code-read code-write shell-exec search mcp full-access] :max-concurrency 1 :timeout-secs 7200 :default-use resident-master-control :accepts-boardtask false :write-allowed true)))
 "#;
         let err = parse_workstation_config(source).expect_err("missing ttl policy");

@@ -21,7 +21,7 @@ import {
 const CHECK_COMMAND = 'node scripts/check-v3-final-convergence.mjs';
 const BLUEPRINT_PATH = '.missiond/v3/missiond-blueprint.lisp';
 
-const LIVE_CHECKS = [
+const DRY_FIXTURE_LIVE_CHECKS = [
   {
     id: 'lisp-blueprint-compression',
     argv: ['scripts/check-lisp-blueprint-compression.mjs'],
@@ -132,7 +132,7 @@ const LIVE_CHECKS = [
   },
 ];
 
-const RUNTIME_CHECKS = [
+const DRY_FIXTURE_RUNTIME_CHECKS = [
   {
     id: 'cargo-test-workspace',
     command: 'cargo',
@@ -153,7 +153,7 @@ const RUNTIME_CHECKS = [
   },
 ];
 
-const BLUEPRINT_NEEDLES = [
+const DRY_FIXTURE_BLUEPRINT_NEEDLES = [
   ['v2-convergence-map', '(v2-convergence-map'],
   ['public-surface-map', '(public-surface-map'],
   ['pillar-flow-map', '(pillar-flow-map'],
@@ -179,7 +179,7 @@ const BLUEPRINT_NEEDLES = [
   ['function egress shape', ':egress ['],
 ];
 
-const FACADE_BUDGETS = [
+const DRY_FIXTURE_FACADE_BUDGETS = [
   {
     id: 'mission_plan facade',
     file: 'crates/missiond-daemon/src/handlers/knowledge/plan.rs',
@@ -197,7 +197,7 @@ const FACADE_BUDGETS = [
   },
 ];
 
-const REQUIRED_SPLIT_FILES = [
+const DRY_FIXTURE_REQUIRED_SPLIT_FILES = [
   'crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs',
   'crates/missiond-daemon/src/handlers/knowledge/plan/approval_review.rs',
   'crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime.rs',
@@ -215,7 +215,7 @@ const REQUIRED_SPLIT_FILES = [
   'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/runner.rs',
 ];
 
-const REQUIRED_RUNTIME_FILES = [
+const DRY_FIXTURE_REQUIRED_RUNTIME_FILES = [
   {
     file: 'scripts/lib/v3_workstation_runtime.mjs',
     needles: [
@@ -492,7 +492,7 @@ export function checkBlueprintClosure(source, file = BLUEPRINT_PATH, gate = null
   return diagnostics;
 }
 
-export function checkFacadeBudgets(repoRoot, budgets = FACADE_BUDGETS) {
+export function checkFacadeBudgets(repoRoot, budgets = []) {
   const diagnostics = [];
   const files = [];
   for (const budget of budgets) {
@@ -872,7 +872,7 @@ function runDryFixture(opts) {
       'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch.rs',
       'mod workstation_dispatch;\n'.repeat(10),
     );
-    const okFacades = checkFacadeBudgets(facadeRoot);
+    const okFacades = checkFacadeBudgets(facadeRoot, DRY_FIXTURE_FACADE_BUDGETS);
     cases.push(assertCase(
       'facade budget accepts thin facade files',
       okFacades.diagnostics.length === 0,
@@ -895,7 +895,7 @@ function runDryFixture(opts) {
       'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch.rs',
       'mod workstation_dispatch;\n'.repeat(10),
     );
-    const badFacades = checkFacadeBudgets(badRoot);
+    const badFacades = checkFacadeBudgets(badRoot, DRY_FIXTURE_FACADE_BUDGETS);
     cases.push(assertCase(
       'facade budget rejects oversized plan.rs',
       badFacades.diagnostics.some((d) => d.message.includes('above final facade budget')),
@@ -922,10 +922,10 @@ function runDryFixture(opts) {
 
 function fixtureGate() {
   return {
-    blueprintNeedles: BLUEPRINT_NEEDLES.map(([id, needle]) => ({ id, needle })),
-    facadeBudgets: FACADE_BUDGETS,
-    requiredSplitFiles: REQUIRED_SPLIT_FILES,
-    requiredRuntimeFiles: REQUIRED_RUNTIME_FILES,
+    blueprintNeedles: DRY_FIXTURE_BLUEPRINT_NEEDLES.map(([id, needle]) => ({ id, needle })),
+    facadeBudgets: DRY_FIXTURE_FACADE_BUDGETS,
+    requiredSplitFiles: DRY_FIXTURE_REQUIRED_SPLIT_FILES,
+    requiredRuntimeFiles: DRY_FIXTURE_REQUIRED_RUNTIME_FILES,
   };
 }
 

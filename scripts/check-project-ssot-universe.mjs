@@ -11,7 +11,9 @@ const usage = `Usage:
 
 Checks MissionD multi-project SSOT registry convergence:
   - OCaml typed universe projection names MissionD, Board, Forge, Part1 devtools,
-    XJP services, PCEA, plus App + external-infra projects.
+    XJP services, PCEA, plus App + external-infra projects and independent
+    app projects palm-era, chat-translator, long-image-service, and
+    wechat-publisher.
   - V3 service-runtime-universe exposes production service deployment facts.
   - project-ssot-convergence workflow exists.
   - XJP and PCEA local SSOT checkers pass; every Part1 devtools project executes
@@ -41,6 +43,10 @@ const PROJECT_CHECKERS = new Map([
   ['xiaojin-blog', ['bash', ['.missiond/check.sh']]],
   ['cuthub', ['bash', ['.missiond/check.sh']]],
   ['legacy-refactor-service', ['node', ['scripts/check-legacy-refactor-ssot.mjs', '--json']]],
+  ['palm-era', ['bash', ['.missiond/check.sh']]],
+  ['chat-translator', ['bash', ['.missiond/check.sh']]],
+  ['long-image-service', ['bash', ['.missiond/check.sh']]],
+  ['wechat-publisher', ['bash', ['.missiond/check.sh']]],
 ]);
 
 function main() {

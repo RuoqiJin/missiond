@@ -253,15 +253,17 @@ async fn poll_and_ingest(
         match process_thread(state, thread, skip_before_line).await {
             Ok(outcome) => {
                 total_ingested += outcome.ingested;
+                let complete_for_watermark =
+                    !outcome.reached_line_limit && !outcome.had_insert_error;
                 persist_codex_file_watermarks(
                     state,
                     &thread.rollout_path,
                     current_wm,
                     Some(outcome.total_lines as i64),
-                    !outcome.reached_line_limit,
+                    complete_for_watermark,
                 )
                 .await;
-                if !outcome.reached_line_limit {
+                if complete_for_watermark {
                     watermarks.insert(thread.id.clone(), current_wm);
                 }
                 record_codex_source_state(
@@ -492,6 +494,7 @@ struct ProcessedThread {
     first_timestamp: Option<String>,
     last_timestamp: Option<String>,
     reached_line_limit: bool,
+    had_insert_error: bool,
 }
 
 async fn process_thread(
@@ -513,11 +516,21 @@ async fn process_thread(
             first_timestamp: None,
             last_timestamp: None,
             reached_line_limit: false,
+            had_insert_error: false,
         });
     }
 
-    // Ensure conversation record exists (idempotent via upsert).
-    let conv = build_codex_conversation(state, thread, 0, None).await;
+    // Ensure conversation record exists (idempotent via upsert). Preserve the
+    // existing count during replay so large, chunked rollouts do not regress the
+    // list view to zero before the final refresh runs.
+    let existing = state.store.get_conversation(&thread.id).await.ok().flatten();
+    let conv = build_codex_conversation(
+        state,
+        thread,
+        existing.as_ref().map(|c| c.message_count).unwrap_or(0),
+        existing.and_then(|c| c.ended_at),
+    )
+    .await;
     if let Err(e) = state.store.upsert_conversation(&conv).await {
         warn!(
             thread_id = %&thread.id[..8.min(thread.id.len())],
@@ -537,6 +550,7 @@ async fn process_thread(
     .context("spawn_blocking join")??;
 
     let mut total = 0usize;
+    let mut had_insert_error = false;
 
     // Sanitize null bytes — Codex JSONL can contain 0x00 which PostgreSQL rejects.
     let sanitize = |s: &str| -> String { s.replace('\0', "") };
@@ -569,6 +583,7 @@ async fn process_thread(
             match state.store.insert_tool_calls_batch(chunk).await {
                 Ok(n) => total += n,
                 Err(e) => {
+                    had_insert_error = true;
                     warn!(
                         thread_id = %&thread.id[..8.min(thread.id.len())],
                         error = %e,
@@ -636,6 +651,7 @@ async fn process_thread(
                 total += ids.len();
             }
             Err(e) => {
+                had_insert_error = true;
                 warn!(
                     thread_id = %&thread.id[..8.min(thread.id.len())],
                     error = %e,
@@ -664,6 +680,7 @@ async fn process_thread(
         first_timestamp: parsed.first_timestamp,
         last_timestamp: parsed.last_timestamp,
         reached_line_limit: parsed.reached_line_limit,
+        had_insert_error,
     })
 }
 

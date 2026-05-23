@@ -217,7 +217,7 @@
     :index ".missiond/v3/shards/index.lisp"
     :root ".missiond/v3/missiond-blueprint.lisp"
     :status compiler-active
-    :rule "The root blueprint remains the compiler entrypoint. All compiler-active shards are flat direct includes from root; shards/index.lisp is a review manifest, not a recursive include source."
+    :rule "The root blueprint remains the compiler entrypoint. Root uses include-shard-index to expand compiler-active shards from shards/index.lisp; shard files still cannot recursively include other shards."
     :shards [request-runtime workstation-runtime control-plane-runtime memory-knowledge-runtime ops-infra v2-convergence-map pillar-flow-map
              universe-service-runtime universe-infrastructure universe-data-residency universe-project-maturity universe-project-registry
              implementation-request-surfaces implementation-execution-surfaces implementation-runtime-surfaces implementation-knowledge-surfaces implementation-ops-surfaces]
@@ -273,39 +273,7 @@
       :path "shards/implementation/ops-surfaces.lisp"
       :status compiler-active))
 
-  (include "shards/request-runtime.lisp")
-
-  (include "shards/workstation-runtime.lisp")
-
-  (include "shards/control-plane-runtime.lisp")
-
-  (include "shards/memory-knowledge-runtime.lisp")
-
-  (include "shards/ops-infra.lisp")
-
-  (include "shards/v2-convergence-map.lisp")
-
-  (include "shards/pillar-flow-map.lisp")
-
-  (include "shards/universe/service-runtime.lisp")
-
-  (include "shards/universe/infrastructure.lisp")
-
-  (include "shards/universe/data-residency.lisp")
-
-  (include "shards/universe/project-maturity.lisp")
-
-  (include "shards/universe/project-registry.lisp")
-
-  (include "shards/implementation/request-surfaces.lisp")
-
-  (include "shards/implementation/execution-surfaces.lisp")
-
-  (include "shards/implementation/runtime-surfaces.lisp")
-
-  (include "shards/implementation/knowledge-surfaces.lisp")
-
-  (include "shards/implementation/ops-surfaces.lisp")
+  (include-shard-index "shards/index.lisp")
 
   (final-convergence-gate
     :schema "missiond.final-convergence-gate.v1"

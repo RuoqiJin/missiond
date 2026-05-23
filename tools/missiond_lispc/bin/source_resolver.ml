@@ -26,9 +26,18 @@ let valid_include_path path =
   && (not (is_absolute path))
   && not (has_parent_segment path)
 
+let valid_shard_index_path path = path = "shards/index.lisp"
+
 let include_target = function
   | List (_, _, [ Atom (_, "include"); String (_, target) ]) -> Some target
   | List (_, _, [ Atom (_, "include"); Atom (_, target) ]) -> Some target
+  | _ -> None
+
+let include_shard_index_target = function
+  | List (_, _, [ Atom (_, "include-shard-index"); String (_, target) ]) ->
+      Some target
+  | List (_, _, [ Atom (_, "include-shard-index"); Atom (_, target) ]) ->
+      Some target
   | _ -> None
 
 let section_kind form = Option.value ~default:"<unknown>" (head form)
@@ -106,7 +115,10 @@ let load_shard ~blueprint_dir ~included_by ~include_loc ~stack target =
   | _ :: _ ->
       List.iter
         (fun form ->
-          if is_list form "include" || is_list form "missiond-blueprint" then
+          if is_list form "include"
+             || is_list form "include-shard-index"
+             || is_list form "missiond-blueprint"
+          then
             raise
               (Reader_error
                  ( loc_of form,
@@ -120,6 +132,60 @@ let load_shard ~blueprint_dir ~included_by ~include_loc ~stack target =
   | [] ->
       raise (Reader_error (include_loc, "included shard is empty: " ^ target))
 
+let compiler_active_shards index_file forms =
+  let root =
+    match find_root forms "missiond-blueprint-shards" with
+    | Some root -> root
+    | None ->
+        raise
+          (Reader_error
+             ( synthetic_loc index_file,
+               "shard index must contain a missiond-blueprint-shards root" ))
+  in
+  children root
+  |> List.filter (fun node -> is_list node "shard")
+  |> List.filter_map (fun shard ->
+         let props = keyword_props ~start:2 shard in
+         match (prop_text ":status" props, prop_text ":path" props) with
+         | Some "compiler-active", Some path -> Some (path, loc_of shard)
+         | _ -> None)
+
+let load_shard_index ~blueprint_dir ~included_by ~include_loc ~stack target =
+  if not (valid_shard_index_path target) then
+    raise
+      (Reader_error
+         ( include_loc,
+           "include-shard-index path must be exactly shards/index.lisp" ));
+  let index_file = Filename.concat blueprint_dir target in
+  if List.mem index_file stack then
+    raise
+      (Reader_error
+         ( include_loc,
+           "include cycle detected: "
+           ^ String.concat " -> " (List.rev (index_file :: stack)) ));
+  let index_source = read_file index_file in
+  let index_forms = Parser.parse_source index_file index_source in
+  let index_unit =
+    source_unit ~included_by ~include_line:include_loc.line index_file
+      index_source "missiond-blueprint-shards"
+  in
+  let loaded =
+    compiler_active_shards index_file index_forms
+    |> List.map (fun (target, shard_loc) ->
+           let forms, source, unit =
+             load_shard ~blueprint_dir ~included_by:index_file
+               ~include_loc:shard_loc ~stack:(index_file :: stack) target
+           in
+           (forms, source, unit))
+  in
+  let forms = loaded |> List.map (fun (forms, _, _) -> forms) |> List.flatten in
+  let units = index_unit :: (loaded |> List.map (fun (_, _, unit) -> unit)) in
+  if forms = [] then
+    raise
+      (Reader_error
+         (include_loc, "include-shard-index did not resolve any compiler-active shards"));
+  (forms, index_source, units)
+
 let expand_root blueprint_file root =
   let blueprint_dir = Filename.dirname blueprint_file in
   let root_loc = loc_of root in
@@ -130,7 +196,16 @@ let expand_root blueprint_file root =
         xs
         |> List.map (fun child ->
                match include_target child with
-               | None -> [ child ]
+               | None -> (
+                   match include_shard_index_target child with
+                   | None -> [ child ]
+                   | Some target ->
+                       let forms, _source, loaded_units =
+                         load_shard_index ~blueprint_dir ~included_by:blueprint_file
+                           ~include_loc:(loc_of child) ~stack:[ blueprint_file ] target
+                       in
+                       units := List.rev loaded_units @ !units;
+                       forms)
                | Some target ->
                    let forms, _source, unit =
                      load_shard ~blueprint_dir ~included_by:blueprint_file

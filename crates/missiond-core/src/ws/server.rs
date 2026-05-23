@@ -1324,6 +1324,9 @@ impl PTYWebSocketServer {
         text: &str,
         finish_reason: Option<&str>,
     ) -> anyhow::Result<()> {
+        let finish_reason_value = finish_reason
+            .map(|reason| serde_json::Value::String(reason.to_string()))
+            .unwrap_or(serde_json::Value::Null);
         let chunk = serde_json::json!({
             "id": chat_id,
             "object": "chat.completion.chunk",
@@ -1331,7 +1334,7 @@ impl PTYWebSocketServer {
             "choices": [{
                 "index": 0,
                 "delta": {"content": text},
-                "finish_reason": finish_reason.unwrap_or("stop")
+                "finish_reason": finish_reason_value
             }]
         });
         stream
@@ -1399,6 +1402,265 @@ impl PTYWebSocketServer {
                 Ok(result)
             }
         })
+    }
+
+    fn extract_task_result_artifact_hash(text: &str) -> Option<String> {
+        let marker = "task_result_artifact:";
+        let tail = text.split(marker).nth(1)?.trim();
+        let trimmed = tail
+            .trim_start_matches('`')
+            .split(|c: char| c == '`' || c.is_whitespace())
+            .next()
+            .unwrap_or("")
+            .trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }
+
+    async fn stream_jarvis_task_until_terminal(
+        db: &Arc<dyn crate::db::traits::MissionStore>,
+        stream: &mut TcpStream,
+        chat_id: &str,
+        task_id: &str,
+    ) -> anyhow::Result<()> {
+        let wait_secs = std::env::var("MISSIOND_JARVIS_TASK_WAIT_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(180);
+        let started_at = std::time::Instant::now();
+        let mut last_status = String::new();
+        let mut last_slot: Option<String> = None;
+        let mut seen_note_ids: Vec<String> = Vec::new();
+        let mut latest_summary: Option<String> = None;
+        let mut latest_artifact_hash: Option<String> = None;
+
+        loop {
+            if started_at.elapsed() > tokio::time::Duration::from_secs(wait_secs) {
+                let diagnostic = serde_json::json!({
+                    "phase": "workers_running",
+                    "task_id": task_id,
+                    "error": {"code": "JARVIS_WORKER_TIMEOUT", "message": format!("BoardTask did not reach a terminal state within {wait_secs}s")},
+                    "next_action": "Inspect the BoardTask, slot state, and task-result-artifact before retrying."
+                });
+                Self::write_sse_event(stream, "diagnostic", &diagnostic).await?;
+                Self::write_sse_openai_text(
+                    stream,
+                    chat_id,
+                    "任务尚未在等待窗口内完成，我不会伪造结果。请检查 BoardTask、工位和 task-result-artifact。",
+                    Some("stop"),
+                )
+                .await?;
+                return Ok(());
+            }
+
+            let Some(task) = db.get_board_task(task_id).await? else {
+                let diagnostic = serde_json::json!({
+                    "phase": "workers_running",
+                    "task_id": task_id,
+                    "error": {"code": "BOARD_TASK_NOT_FOUND", "message": "Created BoardTask disappeared before completion"}
+                });
+                Self::write_sse_event(stream, "diagnostic", &diagnostic).await?;
+                Self::write_sse_openai_text(
+                    stream,
+                    chat_id,
+                    "任务记录丢失，无法继续监督执行。",
+                    Some("stop"),
+                )
+                .await?;
+                return Ok(());
+            };
+
+            let status = task.status.as_str().to_string();
+            let current_slot = task
+                .claim_executor_id
+                .clone()
+                .or_else(|| task.assignee.clone());
+            if last_status != status || last_slot != current_slot {
+                let event = serde_json::json!({
+                    "task_id": task.id,
+                    "status": status,
+                    "slot_id": current_slot,
+                    "claim_executor_type": task.claim_executor_type,
+                    "phase": "workers_running",
+                });
+                Self::write_sse_event(stream, "worker_status", &event).await?;
+                if last_slot != current_slot && current_slot.is_some() {
+                    Self::write_sse_event(stream, "worker_dispatched", &event).await?;
+                }
+                last_status = status.clone();
+                last_slot = current_slot;
+            }
+
+            if let Ok(notes) = db.get_board_task_notes(task_id).await {
+                for note in notes {
+                    if seen_note_ids.iter().any(|id| id == &note.id) {
+                        continue;
+                    }
+                    seen_note_ids.push(note.id.clone());
+                    let is_summary = note.note_type.as_str() == "summary";
+                    let content = note.content.clone();
+                    let artifact_hash = Self::extract_task_result_artifact_hash(&content);
+                    if is_summary {
+                        latest_summary = Some(content.clone());
+                    }
+                    if artifact_hash.is_some() {
+                        latest_artifact_hash = artifact_hash.clone();
+                    }
+                    let max_chars = if is_summary { 12_000 } else { 1_200 };
+                    let content_preview = content.chars().take(max_chars).collect::<String>();
+                    let event = serde_json::json!({
+                        "task_id": task_id,
+                        "note_id": note.id,
+                        "note_type": note.note_type.as_str(),
+                        "author": note.author,
+                        "created_at": note.created_at,
+                        "artifact_hash": artifact_hash,
+                        "content": content_preview,
+                        "truncated": content.chars().count() > max_chars,
+                    });
+                    if is_summary || artifact_hash.is_some() {
+                        Self::write_sse_event(stream, "result_artifact", &event).await?;
+                    } else {
+                        Self::write_sse_event(stream, "worker_status", &event).await?;
+                    }
+                }
+            }
+
+            match task.status {
+                crate::types::BoardTaskStatus::Done => {
+                    let final_text = latest_summary.unwrap_or_else(|| {
+                        "任务已完成，但没有找到 summary note；请检查 task-result-artifact。"
+                            .to_string()
+                    });
+                    let final_event = serde_json::json!({
+                        "phase": "done",
+                        "task_id": task_id,
+                        "artifact_hash": latest_artifact_hash,
+                    });
+                    Self::write_sse_event(stream, "final", &final_event).await?;
+                    Self::write_sse_openai_text(stream, chat_id, &final_text, Some("stop")).await?;
+                    return Ok(());
+                }
+                crate::types::BoardTaskStatus::Failed
+                | crate::types::BoardTaskStatus::Blocked
+                | crate::types::BoardTaskStatus::Skipped => {
+                    let final_text = latest_summary.unwrap_or_else(|| {
+                        format!(
+                            "任务进入终态 `{}`，但没有可用 summary。",
+                            task.status.as_str()
+                        )
+                    });
+                    let diagnostic = serde_json::json!({
+                        "phase": task.status.as_str(),
+                        "task_id": task_id,
+                        "artifact_hash": latest_artifact_hash,
+                        "message": final_text,
+                    });
+                    Self::write_sse_event(stream, "diagnostic", &diagnostic).await?;
+                    Self::write_sse_openai_text(stream, chat_id, &final_text, Some("stop")).await?;
+                    return Ok(());
+                }
+                _ => {
+                    stream.write_all(b":\n\n").await?;
+                    stream.flush().await?;
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                }
+            }
+        }
+    }
+
+    fn derive_jarvis_dispatch_contract(
+        raw_user_text: &str,
+        grounding_context_id: &str,
+        context_pack_path: Option<&str>,
+        intent_artifact_id: &str,
+        plan_artifact_id: &str,
+    ) -> serde_json::Value {
+        let lower = raw_user_text.to_ascii_lowercase();
+        let mentions_agy = lower.contains("agy")
+            || raw_user_text.contains("反重力")
+            || lower.contains("antigravity");
+        let mentions_codex = lower.contains("codex");
+
+        let (task_class, engine_hint, pool_hint, task_kind) = if mentions_agy {
+            (
+                "research",
+                "agy",
+                "agy-research",
+                "agy-cli-readonly-validation",
+            )
+        } else if mentions_codex {
+            (
+                "review",
+                "codex",
+                "codex-review-worker",
+                "codex-worker-readonly-review",
+            )
+        } else {
+            (
+                "review",
+                "codex",
+                "codex-review-worker",
+                "jarvis-grounded-review",
+            )
+        };
+
+        serde_json::json!({
+            "schema": "missiond.jarvis-dispatch-metadata.v1",
+            "task_class": task_class,
+            "task_kind": task_kind,
+            "engine_hint": engine_hint,
+            "pool_hint": pool_hint,
+            "write_policy": "read-only",
+            "read_scope": ["/Users/jinchen/Projects/missiond"],
+            "write_scope": [],
+            "must_not_touch": ["Do not modify files", "Do not stage", "Do not commit", "Do not spawn sub-workers from inside the worker"],
+            "acceptance": [
+                "Return a structured artifact with Findings / Evidence / Recommendations / Verification",
+                "Use the grounding context and cited evidence instead of rediscovering broad context",
+                "If the requested provider/tool is unavailable, fail fast with a diagnostic"
+            ],
+            "output_contract": "Findings / Evidence / Recommendations / Verification",
+            "grounding_context_id": grounding_context_id,
+            "context_pack_path": context_pack_path,
+            "intent_artifact_id": intent_artifact_id,
+            "plan_artifact_id": plan_artifact_id,
+            "worker_may_delegate": false
+        })
+    }
+
+    fn build_jarvis_worker_prompt(
+        raw_user_text: &str,
+        dispatch_metadata: &serde_json::Value,
+    ) -> String {
+        let grounding_context_id = dispatch_metadata
+            .get("grounding_context_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let context_pack_path = dispatch_metadata
+            .get("context_pack_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let task_kind = dispatch_metadata
+            .get("task_kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("jarvis-grounded-review");
+        format!(
+            "请基于已确认的 Jarvis intent.lisp / plan.lisp 执行一个只读工位任务。\n\n\
+             用户目标：\n{}\n\n\
+             任务类型：{}\n\
+             grounding_context_id: {}\n\
+             context_pack_path: {}\n\n\
+             工作方式：\n\
+             - 这是已经过 Jarvis 意图确认和计划确认的 grounded dispatch，不要重新扮演主控。\n\
+             - 先读取 grounding/context-pack 中列出的证据；缺能力时快速失败并给 diagnostic。\n\
+             - 不要修改文件、不要 stage、不要 commit、不要在工位内部创建子任务或再派其他工位。\n\
+             - 输出必须是结构化 artifact，包含 Findings / Evidence / Recommendations / Verification 四段。",
+            raw_user_text, task_kind, grounding_context_id, context_pack_path
+        )
     }
 
     /// Handle POST /v1/chat/completions — OpenAI-compatible SSE endpoint
@@ -1837,6 +2099,20 @@ impl PTYWebSocketServer {
             } else {
                 raw_user_text.clone()
             };
+            let dispatch_metadata = Self::derive_jarvis_dispatch_contract(
+                &raw_user_text,
+                &grounding_context_id,
+                context_pack_path.as_deref(),
+                &intent_artifact_id,
+                &plan_artifact_id,
+            );
+            let prompt_template =
+                Self::build_jarvis_worker_prompt(&raw_user_text, &dispatch_metadata);
+            let context_intent = dispatch_metadata
+                .get("task_class")
+                .and_then(|v| v.as_str())
+                .unwrap_or("review")
+                .to_string();
             let meta = serde_json::json!({
                 "source": "jarvis-intent-plan-gate",
                 "conversation_id": jarvis_conv_id.as_deref().unwrap_or(""),
@@ -1844,6 +2120,7 @@ impl PTYWebSocketServer {
                 "context_pack_path": context_pack_path,
                 "intent_artifact_id": intent_artifact_id,
                 "plan_artifact_id": plan_artifact_id,
+                "dispatch_metadata": dispatch_metadata,
                 "user_message": raw_user_text,
             });
             let task_input = crate::types::CreateBoardTaskInput {
@@ -1857,13 +2134,13 @@ impl PTYWebSocketServer {
                 parent_id: None,
                 assignee: None,
                 auto_execute: Some(true),
-                prompt_template: Some(user_message.clone()),
+                prompt_template: Some(prompt_template),
                 hidden: Some(false),
                 flow_template: None,
                 depends_on: None,
                 dedupe_key: None,
                 timeout_secs: None,
-                context_intent: Some("jarvis-plan-confirmed".to_string()),
+                context_intent: Some(context_intent),
             };
             match db.create_board_task(&task_input).await {
                 Ok(task) => {
@@ -1878,8 +2155,15 @@ impl PTYWebSocketServer {
                     Self::write_sse_openai_text(
                         &mut stream,
                         &chat_id,
-                        "计划已确认，我已创建 BoardTask 并交给调度链路。后续结果会由主控通过 durable artifact 返回。",
-                        Some("stop"),
+                        "计划已确认，我已创建 BoardTask 并开始监督工位执行。",
+                        None,
+                    )
+                    .await?;
+                    Self::stream_jarvis_task_until_terminal(
+                        db,
+                        &mut stream,
+                        &chat_id,
+                        task.id.as_str(),
                     )
                     .await?;
                 }

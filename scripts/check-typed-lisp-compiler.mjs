@@ -37,6 +37,8 @@ const REQUIRED_FILES = [
   'scripts/generated/v3_contracts.d.ts',
   'crates/missiond-daemon/src/context/v3_contracts/mod.rs',
   'crates/missiond-daemon/src/context/v3_contracts/generated.rs',
+  'crates/missiond-daemon/src/context/v3_blueprint_runtime/compiled_envelope.rs',
+  'crates/missiond-daemon/src/context/v3_blueprint_runtime/source_fallback.rs',
   'scripts/check-project-domain-hardening.mjs',
   '.missiond/workflows/typed-lisp-compiler-convergence.lisp',
   '.missiond/workflows/typed-lisp-compiler-cleanup.lisp',
@@ -53,7 +55,7 @@ const REQUIRED_RUNTIME_LOADER = {
     'load_compiled_v3_lisp_source_with_diagnostics',
     'load_compiled_runtime_config',
     'required_compiled_runtime_config',
-    'MISSIOND_V3_ALLOW_SOURCE_FALLBACK',
+    'source_fallback::allowed()',
     'CompiledRuntimeConfigPayload',
     'CompiledSourceUnit',
     'validate_compiled_source_units',
@@ -71,6 +73,18 @@ const REQUIRED_RUNTIME_LOADER = {
     'v3_contracts::SOURCE_HASH',
     'contractAbi',
     'runtimeConfig',
+  ],
+};
+
+const REQUIRED_SOURCE_FALLBACK = {
+  file: 'crates/missiond-daemon/src/context/v3_blueprint_runtime/source_fallback.rs',
+  tokens: [
+    'ALLOW_SOURCE_FALLBACK_ENV',
+    'MISSIOND_V3_ALLOW_SOURCE_FALLBACK',
+    'COMPILE_RUNTIME_ACTION',
+    'node scripts/compile-v3-runtime.mjs --json',
+    'cfg!(debug_assertions) || cfg!(test)',
+    'return false;',
   ],
 };
 
@@ -200,6 +214,13 @@ function main() {
   for (const token of REQUIRED_RUNTIME_LOADER.tokens) {
     if (!runtimeLoader.includes(token)) {
       diagnostics.push(diag(REQUIRED_RUNTIME_LOADER.file, 'RUNTIME_LOADER_TOKEN_MISSING', `missing token ${JSON.stringify(token)}`));
+    }
+  }
+
+  const sourceFallback = read(REQUIRED_SOURCE_FALLBACK.file);
+  for (const token of REQUIRED_SOURCE_FALLBACK.tokens) {
+    if (!sourceFallback.includes(token)) {
+      diagnostics.push(diag(REQUIRED_SOURCE_FALLBACK.file, 'SOURCE_FALLBACK_TOKEN_MISSING', `missing token ${JSON.stringify(token)}`));
     }
   }
 

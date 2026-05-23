@@ -269,7 +269,7 @@ let parse_genome file =
   | Some root -> (source, genome_of_root file root)
   | None -> (source, { file; id = ""; schema = ""; activation = ""; organs = [] })
 
-let emit_genomes dir =
+let compiled_genomes dir =
   try
     let files = genome_files dir in
     let parsed = files |> List.map parse_genome in
@@ -287,12 +287,19 @@ let emit_genomes dir =
         (source_hash (String.concat "\n" sources))
         diagnostics payload
     in
+    (compiled, diagnostics)
+  with Sys_error msg ->
+    let d = diag dir (synthetic_loc dir) "io.error" msg in
+    let compiled =
+      compiled_envelope "missiond.compiled-genomes.v1" (source_hash "") [ d ]
+        "{}"
+    in
+    (compiled, [ d ])
+
+let emit_genomes dir =
+  let compiled, diagnostics = compiled_genomes dir in
     print_endline
       (result_json
          ~extra:[ Printf.sprintf {|"compiled":%s|} compiled ]
          (diagnostics = []) diagnostics);
     if diagnostics = [] then 0 else 1
-  with Sys_error msg ->
-    let d = diag dir (synthetic_loc dir) "io.error" msg in
-    print_endline (result_json false [ d ]);
-    1

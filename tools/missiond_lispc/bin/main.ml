@@ -21,7 +21,7 @@ let print_diagnostics diagnostics =
 
 let usage () =
   prerr_endline
-    "Usage: missiond-lispc <emit-json|emit-resolved-v3|emit-v3|emit-runtime-config|emit-semantic-ir|emit-contract-abi|emit-plan-contract|emit-universe|emit-workflows|emit-genomes|check-v3|check-plan-contract|check-workstation-config|check-workflow|check-workflow-dir|check-genome|check-genome-dir|check-project|check-project-dir|check-auth-domain|check-m6-depth|check-domain-hardening> --file <path>|--dir <path>|--blueprint <path>|--workflow-dir <path>|--genome-dir <path>";
+    "Usage: missiond-lispc <emit-json|emit-resolved-v3|emit-v3|emit-runtime-config|emit-semantic-ir|emit-contract-abi|emit-plan-contract|emit-universe|emit-workflows|emit-genomes|compile-v3-runtime|check-v3|check-plan-contract|check-workstation-config|check-workflow|check-workflow-dir|check-genome|check-genome-dir|check-project|check-project-dir|check-auth-domain|check-m6-depth|check-domain-hardening> --file <path>|--dir <path>|--blueprint <path>|--workflow-dir <path>|--genome-dir <path>";
   2
 
 let () =
@@ -64,6 +64,19 @@ let () =
       match (find_arg "--genome-dir" rest, find_arg "--dir" rest) with
       | Some dir, _ | None, Some dir -> exit (Genome_schema.emit_genomes dir)
       | None, None -> exit (usage ()))
+  | "compile-v3-runtime" :: rest ->
+      let blueprint =
+        Option.value ~default:".missiond/v3/missiond-blueprint.lisp"
+          (find_arg "--blueprint" rest)
+      in
+      let workflow_dir =
+        Option.value ~default:".missiond/workflows"
+          (find_arg "--workflow-dir" rest)
+      in
+      let genome_dir =
+        Option.value ~default:".missiond/v3/genome" (find_arg "--genome-dir" rest)
+      in
+      exit (Emit_json.compile_v3_runtime blueprint workflow_dir genome_dir)
   | "check-v3" :: rest ->
       let file = Option.value ~default:".missiond/v3/missiond-blueprint.lisp" (find_arg "--blueprint" rest) in
       let expected =

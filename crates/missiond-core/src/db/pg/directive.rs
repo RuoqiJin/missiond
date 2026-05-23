@@ -90,7 +90,7 @@ struct LispCodeSyncJobRow {
     updated_at: DateTime<Utc>,
 }
 
-const LISP_CODE_SYNC_JOB_COLS: &str = "id, project_id, root_path, changed_path, content_hash, event_kind, status, attempts, next_run_at, lease_owner, lease_expires_at, checker_ok, checker_command, checker_tail, sync_task_id, dedupe_key, storm_circuit, last_error, created_at, updated_at";
+const LISP_CODE_SYNC_JOB_COLS: &str = "job.id, job.project_id, job.root_path, job.changed_path, job.content_hash, job.event_kind, job.status, job.attempts, job.next_run_at, job.lease_owner, job.lease_expires_at, job.checker_ok, job.checker_command, job.checker_tail, job.sync_task_id, job.dedupe_key, job.storm_circuit, job.last_error, job.created_at, job.updated_at";
 
 fn lisp_code_sync_job_row_to_job(r: LispCodeSyncJobRow) -> crate::types::LispCodeSyncJob {
     crate::types::LispCodeSyncJob {

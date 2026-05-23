@@ -383,6 +383,57 @@ struct DurableProviderCompletion {
     summary: String,
 }
 
+async fn put_autopilot_task_result_artifact(
+    state: &AppState,
+    task: &missiond_core::types::BoardTask,
+    slot_id: &str,
+    durable_completion: Option<&DurableProviderCompletion>,
+    final_summary: &str,
+    duration_ms: u64,
+) -> Option<String> {
+    let provider = durable_completion
+        .map(|completion| completion.source.as_str())
+        .unwrap_or(slot_id);
+    let conversation_id = durable_completion.map(|completion| completion.session_id.as_str());
+    let project_id = task.project.as_deref().unwrap_or("missiond");
+    let payload = serde_json::json!({
+        "action": "task_result_put",
+        "task_id": task.id.as_str(),
+        "project_id": project_id,
+        "slot_id": slot_id,
+        "conversation_id": conversation_id,
+        "provider": provider,
+        "result_status": "completed",
+        "summary": final_summary,
+        "content": final_summary,
+        "json": {
+            "schema": "missiond.autopilot-task-result.v1",
+            "task_id": task.id.as_str(),
+            "slot_id": slot_id,
+            "conversation_id": conversation_id,
+            "provider": provider,
+            "duration_ms": duration_ms,
+            "summary": final_summary,
+            "description_dispatch": serde_json::from_str::<serde_json::Value>(&task.description).ok()
+        }
+    });
+    match state.shared_memory.handle_action(&payload).await {
+        Ok(result) => result
+            .get("artifact_hash")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        Err(err) => {
+            warn!(
+                task_id = %task.id,
+                slot_id,
+                error = %err,
+                "Autopilot: failed to write task-result-artifact"
+            );
+            None
+        }
+    }
+}
+
 fn timestamp_is_after_or_unknown(timestamp: &str, threshold: Option<&str>) -> bool {
     let Some(threshold) = threshold else {
         return true;
@@ -1219,7 +1270,9 @@ fn output_contract_close_blocker(task_description: &str, summary: &str) -> Optio
     if !is_delegated_worker_description(task_description) {
         return None;
     }
-    if !task_description
+    let output_contract = extract_dispatch_metadata_field(task_description, "output_contract")
+        .unwrap_or_else(|| task_description.to_string());
+    if !output_contract
         .to_ascii_lowercase()
         .contains("findings / evidence / recommendations / verification")
     {
@@ -1275,6 +1328,20 @@ fn summary_has_report_heading(summary: &str, expected: &str) -> bool {
 fn is_delegated_worker_description(task_description: &str) -> bool {
     task_description.contains("## Swarm metadata")
         || task_description.contains("## Dispatch metadata")
+        || serde_json::from_str::<serde_json::Value>(task_description)
+            .ok()
+            .and_then(|root| {
+                let object = root.as_object()?;
+                let has_dispatch = object.contains_key("dispatch_metadata")
+                    || object.contains_key("swarm_metadata");
+                let is_jarvis = object
+                    .get("source")
+                    .and_then(|value| value.as_str())
+                    .map(|source| source == "jarvis-intent-plan-gate")
+                    .unwrap_or(false);
+                Some(has_dispatch || is_jarvis)
+            })
+            .unwrap_or(false)
 }
 
 /// Pure check: does `summary` look like a structured worker artifact?
@@ -1306,14 +1373,19 @@ fn pty_summary_has_structured_artifact(summary: &str) -> bool {
 }
 
 fn delegated_task_is_read_only(task_description: &str) -> bool {
-    metadata_line_value(task_description, "write_policy")
+    extract_dispatch_metadata_field(task_description, "write_policy")
         .map(|value| value.eq_ignore_ascii_case("read-only"))
+        .or_else(|| {
+            metadata_line_value(task_description, "write_policy")
+                .map(|value| value.eq_ignore_ascii_case("read-only"))
+        })
         .unwrap_or(false)
 }
 
 fn delegated_write_scope(task_description: &str) -> Vec<String> {
-    metadata_line_value(task_description, "write_scope")
-        .map(split_metadata_list)
+    extract_dispatch_metadata_field(task_description, "write_scope")
+        .map(|value| split_metadata_list(&value))
+        .or_else(|| metadata_line_value(task_description, "write_scope").map(split_metadata_list))
         .unwrap_or_default()
 }
 
@@ -1331,7 +1403,8 @@ fn split_metadata_list(value: &str) -> Vec<String> {
     value
         .split(|ch| ch == ',' || ch == '|')
         .map(str::trim)
-        .filter(|item| !item.is_empty() && *item != "[]")
+        .map(|item| item.trim_matches('"'))
+        .filter(|item| !item.is_empty() && *item != "[]" && *item != "null")
         .map(ToString::to_string)
         .collect()
 }
@@ -2086,6 +2159,8 @@ fn class_from_str(value: &str) -> Option<&'static str> {
 }
 
 fn board_task_workstation_class(task: &missiond_core::types::BoardTask) -> &'static str {
+    let metadata_task_class = extract_dispatch_metadata_field(&task.description, "task_class")
+        .and_then(|value| class_from_str(&value));
     if task.category == "ops" {
         if matches!(
             task.context_intent.as_deref().map(str::trim),
@@ -2109,10 +2184,8 @@ fn board_task_workstation_class(task: &missiond_core::types::BoardTask) -> &'sta
             // externally-created BoardTasks (mission_board_create, scripts,
             // operator paste-in) route as `review`, `context-pack`, etc.
             // without round-tripping through `intent`.
-            if let Some(value) = extract_dispatch_metadata_field(&task.description, "task_class") {
-                if let Some(class) = class_from_str(&value) {
-                    return class;
-                }
+            if let Some(class) = metadata_task_class {
+                return class;
             }
             let title = task.title.to_ascii_lowercase();
             let description = task.description.to_ascii_lowercase();
@@ -2134,7 +2207,7 @@ fn board_task_workstation_class(task: &missiond_core::types::BoardTask) -> &'sta
         Some("review") => "review",
         Some("context-pack") => "context-pack",
         Some("lisp-compression") => "lisp-compression",
-        _ => "code",
+        _ => metadata_task_class.unwrap_or("code"),
     }
 }
 
@@ -3329,6 +3402,15 @@ async fn dispatch_board_tasks_with_config(
                             .await;
                         return;
                     }
+                    let task_result_artifact_hash = put_autopilot_task_result_artifact(
+                        state,
+                        &task,
+                        &slot_id,
+                        durable_completion.as_ref(),
+                        &final_summary,
+                        res.duration_ms,
+                    )
+                    .await;
                     let summary_for_note =
                         truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES);
                     let durable_source = durable_completion
@@ -3340,9 +3422,13 @@ async fn dispatch_board_tasks_with_config(
                             )
                         })
                         .unwrap_or_default();
+                    let artifact_suffix = task_result_artifact_hash
+                        .as_ref()
+                        .map(|hash| format!("\n\ntask_result_artifact: `{hash}`"))
+                        .unwrap_or_default();
                     let note_content = format!(
-                        "**Autopilot 执行完成** ({}ms{})\n\n{}",
-                        res.duration_ms, durable_source, summary_for_note
+                        "**Autopilot 执行完成** ({}ms{})\n\n{}{}",
+                        res.duration_ms, durable_source, summary_for_note, artifact_suffix
                     );
                     let _ = state
                         .store
@@ -3518,11 +3604,20 @@ async fn dispatch_board_tasks_with_config(
                                 meta.get("conversation_id").and_then(|v| v.as_str())
                             {
                                 if !conv_id.is_empty() {
+                                    let jarvis_result = task_result_artifact_hash
+                                        .as_ref()
+                                        .map(|hash| {
+                                            format!(
+                                                "{}\n\n(task_result_artifact: `{hash}`)",
+                                                final_summary
+                                            )
+                                        })
+                                        .unwrap_or_else(|| final_summary.clone());
                                     let _ = state
                                         .store
                                         .router_chat_append_messages(
                                             conv_id,
-                                            &[("assistant".to_string(), res.response.clone())],
+                                            &[("assistant".to_string(), jarvis_result)],
                                         )
                                         .await;
                                     let _ = state
@@ -6786,6 +6881,27 @@ Review only.
     }
 
     #[test]
+    fn workstation_class_uses_json_metadata_when_context_intent_is_legacy_jarvis() {
+        let description = serde_json::json!({
+            "source": "jarvis-intent-plan-gate",
+            "grounding_context_id": "ctx-123",
+            "dispatch_metadata": {
+                "task_class": "review",
+                "engine_hint": "codex",
+                "pool_hint": "codex-review-worker"
+            }
+        })
+        .to_string();
+        let task = make_board_task(
+            "Jarvis Codex review",
+            &description,
+            "jarvis",
+            Some("jarvis-plan-confirmed"),
+        );
+        assert_eq!(board_task_workstation_class(&task), "review");
+    }
+
+    #[test]
     fn extract_dispatch_metadata_field_drops_empty_values() {
         let description = "## Dispatch metadata\n- task_class:\n- engine_hint:   \n";
         assert!(extract_dispatch_metadata_field(description, "task_class").is_none());
@@ -6911,8 +7027,14 @@ Review only.
                 .iter()
                 .map(|worker| worker.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["claude-code-default"],
-            "code class must start from the default Opus coding lane only"
+            vec!["claude-code-default", "codex-code-worker"],
+            "code class must start from declared V3 code lanes without the fast-patch shard"
+        );
+        assert!(
+            !candidates
+                .iter()
+                .any(|worker| worker.id == "claude-code-fast-patch"),
+            "code class must not include the low-risk fast-patch shard"
         );
 
         let matching: Vec<_> = candidates
@@ -7221,6 +7343,26 @@ Review only.
         );
     }
 
+    #[test]
+    fn output_contract_close_blocker_reads_json_dispatch_contract() {
+        let description = serde_json::json!({
+            "source": "jarvis-intent-plan-gate",
+            "dispatch_metadata": {
+                "write_policy": "read-only",
+                "write_scope": [],
+                "output_contract": "Findings / Evidence / Recommendations / Verification"
+            }
+        })
+        .to_string();
+        assert!(is_delegated_worker_description(&description));
+        assert!(delegated_task_is_read_only(&description));
+        assert_eq!(delegated_write_scope(&description), Vec::<String>::new());
+        assert_eq!(
+            output_contract_close_blocker(&description, "Older summary without required sections."),
+            Some("missing-output-contract-sections")
+        );
+    }
+
     /// `is_delegated_worker_description` only fires on the V3 envelope
     /// markers — chat-style descriptions stay out of the gate.
     #[test]
@@ -7231,6 +7373,13 @@ Review only.
         ));
         assert!(is_delegated_worker_description(
             "objective\n\n## Swarm metadata\n- target_projects: a=...\n"
+        ));
+        assert!(is_delegated_worker_description(
+            &serde_json::json!({
+                "source": "jarvis-intent-plan-gate",
+                "dispatch_metadata": {"task_class": "review"}
+            })
+            .to_string()
         ));
     }
 }

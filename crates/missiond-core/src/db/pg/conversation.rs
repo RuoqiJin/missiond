@@ -104,9 +104,7 @@ impl PgMissionStore {
             message_uuid: row.get("message_uuid"),
             parent_uuid: row.get("parent_uuid"),
             model: row.get("model"),
-            timestamp: row
-                .get::<chrono::DateTime<chrono::Utc>, _>("timestamp")
-                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            timestamp: row.get("timestamp"),
             metadata: row.get("metadata"),
             tool_name: row.get("tool_name"),
             raw_role: row.get("raw_role"),
@@ -114,7 +112,13 @@ impl PgMissionStore {
             has_image: row.get::<bool, _>("has_image"),
             has_tool_use: row.get::<bool, _>("has_tool_use"),
             has_tool_result: row.get::<bool, _>("has_tool_result"),
-            token_count: row.get("token_count"),
+            token_count: row
+                .try_get::<Option<i64>, _>("token_count")
+                .or_else(|_| {
+                    row.try_get::<Option<i32>, _>("token_count")
+                        .map(|v| v.map(i64::from))
+                })
+                .unwrap_or(None),
             seq: None,
             role_display: None,
         }
@@ -703,7 +707,7 @@ impl ConversationStore for PgMissionStore {
                    SELECT 1
                    FROM conversation_messages m
                    WHERE m.session_id = c.id
-                     AND m.timestamp > COALESCE(c.realtime_forwarded_at, c.started_at)::timestamptz
+                     AND m.timestamp::timestamptz > COALESCE(c.realtime_forwarded_at, c.started_at)::timestamptz
                      AND m.role IN ('user', 'assistant')
                    LIMIT 1
                )",
@@ -725,7 +729,7 @@ impl ConversationStore for PgMissionStore {
                        AND c.slot_id NOT LIKE 'slot-diagnosis%'
                        AND c.slot_id NOT LIKE 'agent-%'
                    ))
-                   AND m.timestamp > COALESCE(c.realtime_forwarded_at, c.started_at)::timestamptz
+                   AND m.timestamp::timestamptz > COALESCE(c.realtime_forwarded_at, c.started_at)::timestamptz
                    AND m.role IN ('user', 'assistant')
                  ORDER BY m.timestamp ASC
                  LIMIT 2000
@@ -1503,8 +1507,8 @@ impl ConversationStore for PgMissionStore {
              FROM conversation_messages m
              JOIN conversations c ON c.id = m.session_id
              WHERE c.conversation_type = 'user'
-               AND m.timestamp >= $1::timestamptz
-               AND m.timestamp > COALESCE(c.memory_forwarded_at, $1)::timestamptz
+               AND m.timestamp::timestamptz >= $1::timestamptz
+               AND m.timestamp::timestamptz > COALESCE(c.memory_forwarded_at, $1)::timestamptz
                AND m.role IN ('user', 'assistant')
              ORDER BY c.started_at DESC, m.timestamp ASC, m.id ASC"
         )
@@ -1547,7 +1551,7 @@ impl ConversationStore for PgMissionStore {
              FROM conversation_messages m
              JOIN conversations c ON c.id = m.session_id
              WHERE c.conversation_type = 'user'
-               AND m.timestamp > COALESCE(c.user_voice_forwarded_at, c.started_at)::timestamptz
+               AND m.timestamp::timestamptz > COALESCE(c.user_voice_forwarded_at, c.started_at)::timestamptz
                AND m.role = 'user'
              ORDER BY m.timestamp ASC"
         )
@@ -1604,7 +1608,7 @@ impl ConversationStore for PgMissionStore {
                         m.raw_role, m.content_types, m.has_image, m.has_tool_use, m.has_tool_result, m.token_count
                  FROM conversation_messages m
                  WHERE m.session_id = c.id
-                   AND m.timestamp > COALESCE(c.realtime_forwarded_at, c.started_at)::timestamptz
+                   AND m.timestamp::timestamptz > COALESCE(c.realtime_forwarded_at, c.started_at)::timestamptz
                    AND m.role IN ('user', 'assistant', 'tool_result')
                  ORDER BY m.timestamp ASC, m.id ASC
                  LIMIT 15
@@ -2599,7 +2603,13 @@ impl ConversationStore for PgMissionStore {
                 has_image: row.get::<bool, _>("has_image"),
                 has_tool_use: row.get::<bool, _>("has_tool_use"),
                 has_tool_result: row.get::<bool, _>("has_tool_result"),
-                token_count: row.get("token_count"),
+                token_count: row
+                    .try_get::<Option<i64>, _>("token_count")
+                    .or_else(|_| {
+                        row.try_get::<Option<i32>, _>("token_count")
+                            .map(|v| v.map(i64::from))
+                    })
+                    .unwrap_or(None),
                 seq: None,
                 role_display: None,
             })

@@ -253,4 +253,52 @@
       :status external-product-service
       :checks ["node scripts/check-legacy-refactor-ssot.mjs --json"]
       :missiond-role "registered external product service; MissionD may orchestrate and observe jobs, while the service owns customer-safe refactor runtime and never exposes internal Lisp/IR/Forge artifacts to customers"
+      :surface project-registry)
+    (project :id palm-era
+      :aliases [ye-dao-ji-yuan "椰岛纪元"]
+      :kind rust-nextjs-game
+      :root "/Users/jinchen/Projects/palm-era"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/palm-era-backend-blueprint.lisp"
+      :frontend ".missiond/frontend/palm-era-frontend-blueprint.lisp"
+      :operations ".missiond/operations/palm-era-operations-blueprint.lisp"
+      :status project-ssot-owned
+      :checks ["bash .missiond/check.sh"]
+      :missiond-role "registered independent app; text island industrial management simulator with Rust authoritative simulation and Next.js dashboard"
+      :surface project-registry)
+    (project :id chat-translator
+      :aliases ["chat 翻译工具" chat-translation-tool]
+      :kind rust-nextjs-local-agent-app
+      :root "/Users/jinchen/Projects/chat-translator"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/chat-translator-backend-blueprint.lisp"
+      :frontend ".missiond/frontend/chat-translator-frontend-blueprint.lisp"
+      :operations ".missiond/operations/chat-translator-operations-blueprint.lisp"
+      :status project-ssot-owned
+      :checks ["bash .missiond/check.sh"]
+      :missiond-role "registered independent app; single-user chat translation and WeChat mirror tool with Rust backend, local sync agent, and Next.js frontend"
+      :surface project-registry)
+    (project :id long-image-service
+      :aliases [changtu "长图工具"]
+      :kind vite-express-app
+      :root "/Users/jinchen/Projects/long-image-service"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/long-image-backend-blueprint.lisp"
+      :frontend ".missiond/frontend/long-image-frontend-blueprint.lisp"
+      :operations ".missiond/operations/long-image-deployment-blueprint.lisp"
+      :status project-ssot-owned
+      :checks ["bash .missiond/check.sh"]
+      :missiond-role "registered independent app; Markdown to long-image generation service with history, membership, API rendering, and CN/global deployment boundaries"
+      :surface project-registry)
+    (project :id wechat-publisher
+      :aliases ["微信公众号文章编辑器" wechat-article-editor]
+      :kind rust-nextjs-cms
+      :root "/Users/jinchen/Projects/wechat-publisher"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/wechat-publisher-backend-blueprint.lisp"
+      :frontend ".missiond/frontend/wechat-publisher-frontend-blueprint.lisp"
+      :operations ".missiond/operations/wechat-publisher-operations-blueprint.lisp"
+      :status project-ssot-owned
+      :checks ["bash .missiond/check.sh"]
+      :missiond-role "registered independent app; WeChat Official Account article editor with Rust backend, versioned article store, and Next.js editing workspace"
       :surface project-registry))

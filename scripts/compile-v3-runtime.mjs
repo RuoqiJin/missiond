@@ -55,15 +55,32 @@ function main() {
     : opts.outDir;
   fs.mkdirSync(outDir, { recursive: true });
   const results = [];
+  const bundle = runLispc([
+    'compile-v3-runtime',
+    '--blueprint',
+    BLUEPRINT,
+    '--workflow-dir',
+    WORKFLOW_DIR,
+    '--genome-dir',
+    GENOME_DIR,
+  ]);
+  const bundleTargets = bundle?.compiled?.payload?.targets ?? {};
+  if (!bundle?.compiled || !bundleTargets || typeof bundleTargets !== 'object') {
+    results.push({
+      id: 'compile-v3-runtime-bundle',
+      ok: false,
+      diagnostics: bundle?.diagnostics ?? [],
+      stderr: bundle?.stderr ?? '',
+    });
+  }
   for (const target of targets) {
-    const result = runLispc(target.argv);
-    const compiled = result?.compiled;
-    if (!result?.ok || !compiled) {
+    const compiled = bundleTargets[target.id];
+    if (!compiled || !targetCompiledOk(compiled)) {
       results.push({
         id: target.id,
         ok: false,
-        diagnostics: result?.diagnostics ?? [],
-        stderr: result?.stderr ?? '',
+        diagnostics: compiled?.diagnostics ?? bundle?.diagnostics ?? [],
+        stderr: bundle?.stderr ?? '',
       });
       continue;
     }
@@ -196,6 +213,17 @@ function normalizeSourceUnits(sourceUnits) {
     include_line: unit?.include_line ?? null,
     source_hash: unit?.source_hash ?? null,
   })));
+}
+
+function targetCompiledOk(compiled) {
+  return compiled
+    && typeof compiled === 'object'
+    && typeof compiled.schema_version === 'string'
+    && typeof compiled.source_hash === 'string'
+    && Array.isArray(compiled.diagnostics)
+    && compiled.diagnostics.length === 0
+    && compiled.payload
+    && typeof compiled.payload === 'object';
 }
 
 main();

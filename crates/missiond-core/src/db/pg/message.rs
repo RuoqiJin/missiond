@@ -17,7 +17,7 @@ impl MessageStore for PgMissionStore {
         }
         let row: (i64,) = sqlx::query_as(
             "INSERT INTO conversation_messages (session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata, tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9, $10, $11, $12, $13, $14, $15, $16)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
              ON CONFLICT (message_uuid) DO NOTHING
              RETURNING id"
         )
@@ -58,7 +58,7 @@ impl MessageStore for PgMissionStore {
             }
             let row: Option<(i64,)> = sqlx::query_as(
                 "INSERT INTO conversation_messages (session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata, tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9, $10, $11, $12, $13, $14, $15, $16)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
                  ON CONFLICT (message_uuid) DO NOTHING
                  RETURNING id"
             )
@@ -169,7 +169,7 @@ impl MessageStore for PgMissionStore {
         after: i64,
     ) -> DbResult<Option<(String, Vec<ConversationMessage>)>> {
         // Resolve session_id + timestamp from anchor message
-        let anchor_row: Option<(String, chrono::DateTime<chrono::Utc>)> =
+        let anchor_row: Option<(String, String)> =
             sqlx::query_as("SELECT session_id, timestamp FROM conversation_messages WHERE id = $1")
                 .bind(message_id)
                 .fetch_optional(&self.pool)
@@ -299,7 +299,10 @@ impl MessageStore for PgMissionStore {
         }
         if let Some(ta) = time_after {
             param_idx += 1;
-            conditions.push(format!("m.timestamp >= ${}::timestamptz", param_idx));
+            conditions.push(format!(
+                "m.timestamp::timestamptz >= ${}::timestamptz",
+                param_idx
+            ));
             bind_values.push(ta.to_string());
         }
 
@@ -824,7 +827,7 @@ impl PgMissionStore {
                  FROM conversation_messages
                  WHERE session_id = $1
                    AND role = $2
-                   AND timestamp = $3::timestamptz
+                   AND timestamp = $3
                    AND content = $4
                    AND (message_uuid IS NULL OR message_uuid = '')
                  ORDER BY id ASC

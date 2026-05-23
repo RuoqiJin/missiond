@@ -54,7 +54,7 @@ export type V3ArtifactContractId = "compiled-genomes" | "context-pack" | "final-
 export type V3RuntimePolicyId = "autopilot-policy" | "capability-governance-policy" | "cascade-policy" | "compute-runtime-policy" | "conversation-ingestion-policy" | "flow-runtime-policy" | "learning-engine-policy" | "memory-kb-policy" | "minimax-runtime-policy" | "project-registry-policy" | "router-runtime-policy";
 
 export const SCHEMA_VERSION: "missiond.contract-abi.v1";
-export const SOURCE_HASH: "f51b090c0248a23436caf9b2000b3b57";
+export const SOURCE_HASH: "63339781e029bcb73f6fea4fd8842b86";
 export const SOURCE_UNITS: readonly SourceUnit[];
 export const SURFACE_IDS: readonly V3SurfaceId[];
 export const FUNCTION_IDS: readonly V3FunctionId[];

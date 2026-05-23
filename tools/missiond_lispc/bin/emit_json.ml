@@ -1535,6 +1535,187 @@ let plan_contract_diagnostics file forms =
                  else Hashtbl.add seen id ()));
   List.rev !diagnostics
 
+let compiled_contract_abi_for_resolved blueprint resolved =
+  let diagnostics = Schema_v3.validate blueprint [] in
+  let payload =
+    contract_abi_payload_json blueprint resolved.Source_resolver.source_hash
+      resolved.Source_resolver.source_units resolved.Source_resolver.root
+  in
+  ( compiled_envelope "missiond.contract-abi.v1" resolved.source_hash
+      diagnostics payload,
+    diagnostics )
+
+let compiled_v3_for_resolved blueprint resolved =
+  let diagnostics = Schema_v3.validate blueprint [] in
+  let forms = resolved.Source_resolver.forms in
+  let root = resolved.Source_resolver.root in
+  let surfaces =
+    root |> Option.map v3_surfaces_to_json |> Option.value ~default:[]
+  in
+  let functions =
+    root |> Option.map v3_functions_to_json |> Option.value ~default:[]
+  in
+  let payload =
+    Printf.sprintf
+      {|{"blueprint":%s,"source_units":%s,"surfaces":[%s],"functions":[%s],"forms":[%s]}|}
+      (json_string blueprint)
+      (Source_resolver.source_units_to_json resolved.source_units)
+      (String.concat "," surfaces)
+      (String.concat "," functions)
+      (forms |> List.map sexp_to_json |> String.concat ",")
+  in
+  ( compiled_envelope "missiond.compiled-v3-blueprint.v1" resolved.source_hash
+      diagnostics payload,
+    diagnostics )
+
+let compiled_runtime_config_for_resolved blueprint resolved =
+  let root = resolved.Source_resolver.root in
+  let diagnostics =
+    Schema_v3.validate blueprint []
+    @ Workstation_schema.validate blueprint
+    @
+    match root with
+    | Some root -> runtime_config_required_diagnostics blueprint root
+    | None ->
+        [
+          diag blueprint (synthetic_loc blueprint) "root.missing"
+            "missing missiond-blueprint root";
+        ]
+  in
+  let payload =
+    runtime_config_payload_json blueprint resolved.source_hash
+      resolved.source_units root
+  in
+  ( compiled_envelope "missiond.compiled-runtime-config.v1"
+      resolved.source_hash diagnostics payload,
+    diagnostics )
+
+let compiled_semantic_ir_for_resolved blueprint resolved =
+  let hash = resolved.Source_resolver.source_hash in
+  let diagnostics = Schema_v3.validate blueprint [] in
+  let facts =
+    resolved.root
+    |> Option.map (semantic_facts hash blueprint resolved.source_units)
+    |> Option.value ~default:[]
+  in
+  let payload =
+    Printf.sprintf
+      {|{"blueprint":%s,"source_units":%s,"facts":[%s],"fact_count":%d}|}
+      (json_string blueprint)
+      (Source_resolver.source_units_to_json resolved.source_units)
+      (String.concat "," facts)
+      (List.length facts)
+  in
+  (compiled_envelope "missiond.semantic-ir.v1" hash diagnostics payload, diagnostics)
+
+let compiled_universe_for_resolved blueprint resolved =
+  let forms = resolved.Source_resolver.forms in
+  let diagnostics = Project_schema.validate blueprint in
+  let root =
+    match resolved.root with
+    | Some root -> Some root
+    | None -> find_root forms "missiond-blueprint"
+  in
+  let project_registry =
+    Option.bind root (fun root -> find_child root "project-blueprint-registry")
+  in
+  let maturity_registry =
+    Option.bind root (fun root -> find_child root "project-maturity-registry")
+  in
+  let projects =
+    project_registry
+    |> Option.map (fun node ->
+           list_forms "project" node |> List.map project_entry_to_json)
+    |> Option.value ~default:[]
+  in
+  let maturities =
+    maturity_registry
+    |> Option.map (fun node ->
+           list_forms "maturity" node |> List.map maturity_entry_to_json)
+    |> Option.value ~default:[]
+  in
+  let payload =
+    Printf.sprintf
+      {|{"blueprint":%s,"project_registry_present":%s,"maturity_registry_present":%s,"projects":[%s],"maturity":[%s]}|}
+      (json_string blueprint)
+      (if project_registry <> None then "true" else "false")
+      (if maturity_registry <> None then "true" else "false")
+      (String.concat "," projects)
+      (String.concat "," maturities)
+  in
+  ( compiled_envelope "missiond.compiled-project-universe.v1"
+      resolved.source_hash diagnostics payload,
+    diagnostics )
+
+let compiled_workflows workflow_dir =
+  try
+    let files = read_sorted_files workflow_dir ".lisp" in
+    let sources = files |> List.map read_file in
+    let diagnostics = Workflow_schema.validate_dir workflow_dir in
+    let payload =
+      Printf.sprintf {|{"workflow_dir":%s,"files":[%s],"workflows":[%s]}|}
+        (json_string workflow_dir)
+        (files |> List.map json_string |> String.concat ",")
+        (files |> List.map workflow_entry_to_json |> String.concat ",")
+    in
+    let combined_hash = source_hash (String.concat "\n" sources) in
+    ( compiled_envelope "missiond.compiled-workflows.v1" combined_hash
+        diagnostics payload,
+      diagnostics )
+  with Sys_error msg ->
+    let d = diag workflow_dir (synthetic_loc workflow_dir) "io.error" msg in
+    ( compiled_envelope "missiond.compiled-workflows.v1" (source_hash "") [ d ]
+        "{}",
+      [ d ] )
+
+let compile_v3_runtime blueprint workflow_dir genome_dir =
+  try
+    let resolved = Source_resolver.resolve_blueprint_file blueprint in
+    let v3, v3_diagnostics = compiled_v3_for_resolved blueprint resolved in
+    let runtime_config, runtime_diagnostics =
+      compiled_runtime_config_for_resolved blueprint resolved
+    in
+    let semantic_ir, semantic_diagnostics =
+      compiled_semantic_ir_for_resolved blueprint resolved
+    in
+    let contract_abi, contract_diagnostics =
+      compiled_contract_abi_for_resolved blueprint resolved
+    in
+    let universe, universe_diagnostics =
+      compiled_universe_for_resolved blueprint resolved
+    in
+    let workflows, workflow_diagnostics = compiled_workflows workflow_dir in
+    let genomes, genome_diagnostics = Genome_schema.compiled_genomes genome_dir in
+    let diagnostics =
+      v3_diagnostics @ runtime_diagnostics @ semantic_diagnostics
+      @ contract_diagnostics @ universe_diagnostics @ workflow_diagnostics
+      @ genome_diagnostics
+    in
+    let payload =
+      Printf.sprintf
+        {|{"blueprint":%s,"workflow_dir":%s,"genome_dir":%s,"targets":{"v3":%s,"runtime-config":%s,"semantic-ir":%s,"contract-abi":%s,"universe":%s,"workflows":%s,"genomes":%s}}|}
+        (json_string blueprint) (json_string workflow_dir) (json_string genome_dir)
+        v3 runtime_config semantic_ir contract_abi universe workflows genomes
+    in
+    print_endline
+      (result_json
+         ~extra:[
+           Printf.sprintf {|"compiled":%s|}
+             (compiled_envelope "missiond.compile-v3-runtime-bundle.v1"
+                resolved.source_hash diagnostics payload);
+         ]
+         (diagnostics = []) diagnostics);
+    if diagnostics = [] then 0 else 1
+  with
+  | Reader_error (l, msg) ->
+      let d = diag blueprint l "parse.error" msg in
+      print_endline (result_json false [ d ]);
+      1
+  | Sys_error msg ->
+      let d = diag blueprint (synthetic_loc blueprint) "io.error" msg in
+      print_endline (result_json false [ d ]);
+      1
+
 let emit_contract_abi blueprint =
   try
     let resolved = Source_resolver.resolve_blueprint_file blueprint in

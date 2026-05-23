@@ -122,6 +122,64 @@ let test_source_resolver_include () =
           end
       | None -> failwith "resolved root missing")
 
+let test_source_resolver_include_shard_index () =
+  with_temp_dir "v3-resolver-index" (fun dir ->
+      let shards = Filename.concat dir "shards" in
+      if Sys.command ("mkdir -p " ^ Filename.quote shards) <> 0 then
+        failwith "failed to create shards dir";
+      let blueprint = Filename.concat dir "missiond-blueprint.lisp" in
+      let index = Filename.concat shards "index.lisp" in
+      let shard = Filename.concat shards "pillar-flow-map.lisp" in
+      let oc = open_out_bin blueprint in
+      output_string oc
+        {|
+(missiond-blueprint
+  (implementation-map
+    (surface typed-lisp-compiler :status code-aligned :code ["compiler.ml"]))
+  (include-shard-index "shards/index.lisp"))
+|};
+      close_out oc;
+      let oc = open_out_bin index in
+      output_string oc
+        {|
+(missiond-blueprint-shards
+  (shard ignored
+    :status review-only
+    :path "shards/ignored.lisp")
+  (shard pillar-flow-map
+    :status compiler-active
+    :path "shards/pillar-flow-map.lisp"))
+|};
+      close_out oc;
+      let oc = open_out_bin shard in
+      output_string oc
+        {|
+(pillar-flow-map
+  (pillar workflow
+    (function typed-lisp-compiler
+      :surface typed-lisp-compiler
+      :entry [check]
+      :core ((step s1 :logic "parse"))
+      :egress [diagnostics])))
+|};
+      close_out oc;
+      let resolved = Source_resolver.resolve_blueprint_file blueprint in
+      assert_true "root, index, and compiler-active shard source units are present"
+        (List.length resolved.source_units = 3);
+      let resolved_source =
+        resolved.forms |> List.map Ast.sexp_to_lisp |> String.concat "\n"
+      in
+      assert_true "resolved source contains indexed shard"
+        (contains_substring resolved_source "(pillar-flow-map");
+      match resolved.root with
+      | Some root -> (
+          match Ast.find_child root "pillar-flow-map" with
+          | Some flow ->
+              assert_true "indexed shard source file is preserved"
+                ((Ast.loc_of flow).source_file = shard)
+          | None -> failwith "indexed pillar-flow-map missing")
+      | None -> failwith "resolved root missing")
+
 let test_source_resolver_rejects_nested_include () =
   with_temp_dir "v3-resolver-nested" (fun dir ->
       let shards = Filename.concat dir "shards" in
@@ -376,7 +434,7 @@ let test_runtime_config_payload_shape () =
   in
   let payload =
     Emit_json.runtime_config_payload_json "runtime-config-fixture.lisp"
-      (Some root)
+      "fixture-hash" [] (Some root)
   in
   let envelope =
     Emit_json.compiled_envelope "missiond.compiled-runtime-config.v1"
@@ -422,6 +480,7 @@ let test_runtime_config_missing_policy_diagnostics () =
 let () =
   test_parser_locations ();
   test_source_resolver_include ();
+  test_source_resolver_include_shard_index ();
   test_source_resolver_rejects_nested_include ();
   test_v3_missing_entry ();
   test_v3_step_order ();

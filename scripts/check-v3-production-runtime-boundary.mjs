@@ -5,6 +5,7 @@ import path from 'node:path';
 
 const FILES = {
   rustRuntime: 'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
+  rustSourceFallback: 'crates/missiond-daemon/src/context/v3_blueprint_runtime/source_fallback.rs',
   jsRuntime: 'scripts/lib/v3_workstation_runtime.mjs',
   contractProjector: 'scripts/project-v3-contracts.mjs',
 };
@@ -22,11 +23,14 @@ function main() {
     requireAll(FILES.rustRuntime, sources.rustRuntime, diagnostics, [
       'required_compiled_runtime_config',
       'compiled runtime config is required',
+      'load_compiled_runtime_config',
+      'v3_contracts::SOURCE_HASH',
+      'source_fallback::allowed()',
+    ]);
+    requireAll(FILES.rustSourceFallback, sources.rustSourceFallback, diagnostics, [
       'cfg!(debug_assertions) || cfg!(test)',
       'MISSIOND_V3_ALLOW_SOURCE_FALLBACK',
       'return false;',
-      'load_compiled_runtime_config',
-      'v3_contracts::SOURCE_HASH',
     ]);
     requireAll(FILES.jsRuntime, sources.jsRuntime, diagnostics, [
       'COMPILED_RUNTIME_CONFIG_REL',
