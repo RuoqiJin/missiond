@@ -43,7 +43,8 @@ function main() {
   if (action === 'evaluate') {
     const result = evaluateQuality(parsed.json);
     writeOutput(result, parsed.json);
-    process.exit(result.ok ? 0 : 1);
+    process.exitCode = result.ok ? 0 : 1;
+    return;
   }
 
   const args = buildToolArgs(action, parsed);
@@ -52,7 +53,7 @@ function main() {
     .then((result) => {
       writeOutput(result, parsed.json);
       const ok = result?.ok ?? !result?.diagnostic;
-      process.exit(ok === false ? 1 : 0);
+      process.exitCode = ok === false ? 1 : 0;
     })
     .catch((err) => die(err.message ?? String(err)));
 }
