@@ -58,6 +58,7 @@
        :rule "Cloud credentials are secret_ref only; operational steps write redacted audit and reusable deploy workflow evidence."))
   :risk-gates
     ((gate no-broad-implementation :rule "Implementation worker cannot start without context_pack_path, accepted_shard_id, and non-empty write_scope.")
+     (gate grounding-required-before-worker :rule "Non-exact broad tasks cannot start any worker until mission_context_gather(persist=true) has produced a grounding_context_id and context_pack_path; missing grounding is a runtime block, not a prompt suggestion.")
      (gate external-work-order-submit-gate :rule "Code changes from external conversations or local workers cannot be committed/merged/deployed unless intent.lisp, plan.lisp, MissionD-Work-Order id, accepted_shard_id, and write_scope coverage verify successfully.")
      (gate no-secret-values :rule "intent.lisp, plan.lisp, Board notes, and audit.lisp may contain secret_ref only.")
      (gate board-intent-single-chain :rule "Board source and intent source share one workflow_run and one BoardTask anchor.")

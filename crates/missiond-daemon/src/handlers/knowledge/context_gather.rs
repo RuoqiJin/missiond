@@ -46,6 +46,12 @@ struct ContextGatherArgs {
     include_conversations: Option<bool>,
     #[serde(default, alias = "conversationTimeRange")]
     conversation_time_range: Option<String>,
+    #[serde(default, alias = "taskId")]
+    task_id: Option<String>,
+    #[serde(default, alias = "sourceId")]
+    source_id: Option<String>,
+    #[serde(default, deserialize_with = "crate::lenient::option_bool")]
+    persist: Option<bool>,
     #[serde(default = "default_limit")]
     limit: usize,
 }
@@ -242,20 +248,66 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         })
         .collect::<Vec<_>>();
 
-    Ok(ToolResult::json_pretty(&json!({
+    let sources_used = sources.keys().cloned().collect::<Vec<_>>();
+    let mut payload = json!({
         "ok": diagnostics.is_empty(),
         "schema": "missiond.context-gather.v1",
         "query": query,
         "project_id": args.project_id,
         "skill": args.skill,
         "infra_target": args.infra_target,
+        "task_id": args.task_id,
+        "source_id": args.source_id,
         "unknowns": args.unknowns,
+        "sources_used": sources_used,
         "sources": Value::Object(sources),
         "evidence_refs": evidence_refs,
         "unresolved": unresolved,
         "diagnostics": diagnostics,
         "next_action": "Synthesize grounded intent. If intent is confirmed, assign a plan-authoring worker to compile plan.lisp from the confirmed intent plus tool/resource inventory."
-    })))
+    });
+
+    if args.persist.unwrap_or(false) {
+        let metadata = json!({
+            "schema": "missiond.context-gather-artifact.v1",
+            "query": payload.get("query").cloned().unwrap_or(Value::Null),
+            "project_id": payload.get("project_id").cloned().unwrap_or(Value::Null),
+            "task_id": payload.get("task_id").cloned().unwrap_or(Value::Null),
+            "source_id": payload.get("source_id").cloned().unwrap_or(Value::Null),
+            "unknown_count": payload
+                .get("unknowns")
+                .and_then(Value::as_array)
+                .map(|items| items.len())
+                .unwrap_or(0),
+            "sources_used": payload.get("sources_used").cloned().unwrap_or(Value::Null),
+        });
+        let artifact = state
+            .shared_memory
+            .put_json_artifact(
+                "context-gather",
+                payload.get("project_id").and_then(Value::as_str),
+                payload.get("task_id").and_then(Value::as_str),
+                &payload,
+                metadata,
+            )
+            .await?;
+        if let Some(object) = payload.as_object_mut() {
+            if let Some(hash) = artifact.get("hash").and_then(Value::as_str) {
+                object.insert(
+                    "grounding_context_id".to_string(),
+                    Value::String(format!("context-gather:{hash}")),
+                );
+                object.insert(
+                    "context_pack_path".to_string(),
+                    Value::String(format!("shared-artifact://{hash}")),
+                );
+                object.insert("artifact_hash".to_string(), Value::String(hash.to_string()));
+            }
+            object.insert("artifact".to_string(), artifact);
+        }
+    }
+
+    Ok(ToolResult::json_pretty(&payload))
 }
 
 fn handle_context_boot(args: Value) -> Result<ToolResult> {

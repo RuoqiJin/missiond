@@ -4,7 +4,7 @@
 // Do not edit by hand.
 
 export const SCHEMA_VERSION = "missiond.contract-abi.v1";
-export const SOURCE_HASH = "25ae9335389e4e0c2927676133655b6f";
+export const SOURCE_HASH = "5efdca9d0e77e30bee2421e2a15bd149";
 export const SOURCE_UNITS = Object.freeze([
   {
     "file": ".missiond/v3/missiond-blueprint.lisp",
@@ -18,7 +18,7 @@ export const SOURCE_UNITS = Object.freeze([
     "kind": "multi-section-shard",
     "included_by": ".missiond/v3/missiond-blueprint.lisp",
     "include_line": 276,
-    "source_hash": "b57b01678281f3719dd9b1a5a52846a6"
+    "source_hash": "3515a254c162dff654af0565a3728095"
   },
   {
     "file": ".missiond/v3/shards/workstation-runtime.lisp",
@@ -1068,7 +1068,7 @@ export const FINAL_CONVERGENCE_GATE = Object.freeze({
     "source_file": ".missiond/v3/missiond-blueprint.lisp",
     "source_line": 310,
     "source_column": 3,
-    "source_hash": "25ae9335389e4e0c2927676133655b6f"
+    "source_hash": "5efdca9d0e77e30bee2421e2a15bd149"
   }
 });
 export const PLAN_CONTRACT = Object.freeze({

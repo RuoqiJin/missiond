@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use missiond_core::event::events::BoardEvent;
 use missiond_core::pty::SessionState;
 use missiond_core::types::CreateBoardTaskInput;
-use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
+use missiond_mcp::tools::{error_codes, ToolContent, ToolError, ToolResult};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -126,6 +126,14 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             &args,
             &["acceptance", "acceptance_commands", "acceptanceCommands"],
         ),
+        grounding_context_id: string_arg(&args, &["grounding_context_id", "groundingContextId"])
+            .map(str::to_string),
+        grounding_sources: string_list_arg(&args, &["grounding_sources", "groundingSources"]),
+        grounding_evidence_refs_count: args
+            .get("grounding_evidence_refs_count")
+            .or_else(|| args.get("groundingEvidenceRefsCount"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as usize,
         shared_claim_ids: Vec::new(),
         source_id: source_id.clone(),
     };
@@ -194,6 +202,27 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 "pass cwd inside the target project root so mechanic can run in a detached worktree",
             ),
         ));
+    }
+
+    let emergency_code_first =
+        bool_arg(&args, &["emergency_code_first", "emergencyCodeFirst"]).unwrap_or(false);
+    if dispatch_grounding_required(&delegation_metadata, emergency_code_first) {
+        let project_id = target_project_resolution
+            .as_ref()
+            .map(|resolution| resolution.project_id.as_str());
+        let grounding = match gather_dispatch_grounding(
+            state,
+            &args,
+            objective,
+            project_id,
+            source_id.as_deref().or(parent_id.as_deref()),
+        )
+        .await?
+        {
+            Ok(value) => value,
+            Err(error) => return Ok(error),
+        };
+        apply_grounding_to_metadata(&mut delegation_metadata, &grounding);
     }
 
     let runtime_config = match WorkstationRuntimeConfig::load_for_project_root(
@@ -714,6 +743,66 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
         .and_then(|v| v.as_i64())
         .unwrap_or(1800)
         .clamp(60, 7200);
+    let mut grounding_context_id =
+        string_arg(&args, &["grounding_context_id", "groundingContextId"]).map(str::to_string);
+    let mut grounding_sources = string_list_arg(&args, &["grounding_sources", "groundingSources"]);
+    let mut grounding_evidence_refs_count = args
+        .get("grounding_evidence_refs_count")
+        .or_else(|| args.get("groundingEvidenceRefsCount"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    let mut grounding_payload: Option<Value> = None;
+
+    if swarm_policy_requires_implement_write_scope(&write_policy) && grounding_context_id.is_none()
+    {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(
+                "SWARM_GROUNDING_CONTEXT_REQUIRED",
+                "mission_swarm_run refused implementation workers because accepted shards must reference an existing grounding_context_id",
+            )
+            .with_suggestion(
+                "run a read-only investigation/synthesis pass first, then rerun with grounding_context_id plus accepted_shard_id/write_scope",
+            ),
+        ));
+    }
+    if !dry_run
+        && !swarm_policy_requires_implement_write_scope(&write_policy)
+        && grounding_context_id.is_none()
+    {
+        let grounding = match gather_dispatch_grounding(
+            state,
+            &args,
+            &objective,
+            Some(&project_id),
+            parent_id.as_deref(),
+        )
+        .await?
+        {
+            Ok(value) => value,
+            Err(error) => return Ok(error),
+        };
+        grounding_context_id = grounding
+            .get("grounding_context_id")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        grounding_sources = grounding
+            .get("sources_used")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        grounding_evidence_refs_count = grounding
+            .get("evidence_refs")
+            .and_then(Value::as_array)
+            .map(|items| items.len())
+            .unwrap_or(0);
+        grounding_payload = Some(grounding);
+    }
 
     let mut planned = Vec::new();
     for idx in 0..max_gemini_workers {
@@ -868,6 +957,9 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
             &write_policy,
             &acceptance,
             &planned,
+            grounding_context_id.as_deref(),
+            &grounding_sources,
+            grounding_evidence_refs_count,
         )
         .await
         {
@@ -949,6 +1041,9 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
                 &write_policy,
                 &acceptance,
                 planned_task,
+                grounding_context_id.as_deref(),
+                &grounding_sources,
+                grounding_evidence_refs_count,
             );
             let input = CreateBoardTaskInput {
                 title: planned_task.title.clone(),
@@ -990,6 +1085,10 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
         "project_root": project_root,
         "target_projects": target_projects.iter().map(SwarmTargetProject::to_json).collect::<Vec<_>>(),
         "context_pack_path": context_pack_path,
+        "grounding_context_id": grounding_context_id,
+        "grounding_sources": grounding_sources,
+        "grounding_evidence_refs_count": grounding_evidence_refs_count,
+        "grounding_artifact": grounding_payload,
         "accepted_shard_id": accepted_shard_id,
         "context_pack_materialized": context_pack_materialized,
         "parent_id": parent_id,
@@ -1023,6 +1122,9 @@ async fn materialize_swarm_context_pack(
     write_policy: &str,
     acceptance: &[String],
     planned: &[SwarmPlannedTask],
+    grounding_context_id: Option<&str>,
+    grounding_sources: &[String],
+    grounding_evidence_refs_count: usize,
 ) -> Result<()> {
     let path = Path::new(path);
     if let Some(parent) = path.parent() {
@@ -1037,6 +1139,9 @@ async fn materialize_swarm_context_pack(
         write_policy,
         acceptance,
         planned,
+        grounding_context_id,
+        grounding_sources,
+        grounding_evidence_refs_count,
     );
     tokio::fs::write(path, source).await?;
     Ok(())
@@ -1051,6 +1156,9 @@ fn render_swarm_context_pack(
     write_policy: &str,
     acceptance: &[String],
     planned: &[SwarmPlannedTask],
+    grounding_context_id: Option<&str>,
+    grounding_sources: &[String],
+    grounding_evidence_refs_count: usize,
 ) -> String {
     let mut out = String::new();
     out.push_str("(swarm-context-pack\n");
@@ -1077,6 +1185,17 @@ fn render_swarm_context_pack(
         ));
     }
     out.push_str(&format!("  :write_policy {}\n", lisp_string(write_policy)));
+    if let Some(id) = grounding_context_id {
+        out.push_str(&format!("  :grounding_context_id {}\n", lisp_string(id)));
+    }
+    out.push_str(&format!(
+        "  :grounding_sources {}\n",
+        lisp_string_vector(grounding_sources)
+    ));
+    out.push_str(&format!(
+        "  :grounding_evidence_refs_count {}\n",
+        grounding_evidence_refs_count
+    ));
     out.push_str(&format!(
         "  :acceptance {}\n",
         lisp_string_vector(acceptance)
@@ -1296,6 +1415,9 @@ fn render_swarm_task_description(
     write_policy: &str,
     acceptance: &[String],
     planned: &SwarmPlannedTask,
+    grounding_context_id: Option<&str>,
+    grounding_sources: &[String],
+    grounding_evidence_refs_count: usize,
 ) -> String {
     let task_write_policy = swarm_task_effective_write_policy(write_policy, planned);
     let (interaction_preamble, completion_protocol) = if task_write_policy == "read-only" {
@@ -1314,12 +1436,19 @@ fn render_swarm_task_description(
         .unwrap_or_default();
 
     format!(
-        "{interaction_preamble}\n\nObjective:\n{objective}\n\n## Swarm metadata\n- project_id: {project_id}\n- project_root: {project_root}\n- target_projects: {}\n{parent_line}- lane: {}\n- task_class: {}\n- pool_hint: {}\n- engine_hint: {}\n- context_pack_path: {context_pack_path}\n- accepted_shard_id: {}\n- shared_claim_ids: {}\n- write_policy: {task_write_policy}\n- read_scope: {}\n- write_scope: {}\n- must_not_touch: {}\n- acceptance: {}\n\n{}",
+        "{interaction_preamble}\n\nObjective:\n{objective}\n\n## Swarm metadata\n- project_id: {project_id}\n- project_root: {project_root}\n- target_projects: {}\n{parent_line}- lane: {}\n- task_class: {}\n- pool_hint: {}\n- engine_hint: {}\n- context_pack_path: {context_pack_path}\n- grounding_context_id: {}\n- grounding_sources: {}\n- grounding_evidence_refs_count: {}\n- accepted_shard_id: {}\n- shared_claim_ids: {}\n- write_policy: {task_write_policy}\n- read_scope: {}\n- write_scope: {}\n- must_not_touch: {}\n- acceptance: {}\n\n{}",
         render_target_projects_inline(target_projects),
         planned.lane,
         planned.task_class,
         planned.pool_hint,
         planned.engine_hint,
+        grounding_context_id.unwrap_or("-"),
+        if grounding_sources.is_empty() {
+            "[]".to_string()
+        } else {
+            grounding_sources.join(", ")
+        },
+        grounding_evidence_refs_count,
         planned.accepted_shard_id.as_deref().unwrap_or("-"),
         if planned.shared_claim_ids.is_empty() {
             "[]".to_string()
@@ -1498,6 +1627,9 @@ struct DelegationMetadata {
     write_scope: Vec<String>,
     must_not_touch: Vec<String>,
     acceptance: Vec<String>,
+    grounding_context_id: Option<String>,
+    grounding_sources: Vec<String>,
+    grounding_evidence_refs_count: usize,
     shared_claim_ids: Vec<String>,
     /// Upstream BoardTask whose objective spawned this delegation. Distinct
     /// from `parent_id`: callers may chain through several master/plan layers
@@ -1687,6 +1819,152 @@ fn code_worker_requires_write_lease(intent: &str, metadata: &DelegationMetadata)
         Some("code") | Some("implementation") | Some("implement") | Some("implementer")
     );
     (intent == "code" || is_implementation_class) && !metadata.write_scope.is_empty()
+}
+
+fn exact_shard_ready(metadata: &DelegationMetadata) -> bool {
+    metadata
+        .context_pack_path
+        .as_deref()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+        && metadata
+            .accepted_shard_id
+            .as_deref()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+        && !metadata.write_scope.is_empty()
+}
+
+fn dispatch_grounding_required(metadata: &DelegationMetadata, emergency_code_first: bool) -> bool {
+    if emergency_code_first || exact_shard_ready(metadata) {
+        return false;
+    }
+    metadata
+        .grounding_context_id
+        .as_deref()
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true)
+}
+
+async fn gather_dispatch_grounding(
+    state: &AppState,
+    args: &Value,
+    objective: &str,
+    project_id: Option<&str>,
+    source_id: Option<&str>,
+) -> Result<std::result::Result<Value, ToolResult>> {
+    let unknowns = args.get("unknowns").cloned().unwrap_or_else(|| {
+        json!([
+            "What project, SSOT, skill, memory, infra, deploy, or tool facts are required before dispatching this objective?"
+        ])
+    });
+    let result = crate::handlers::knowledge::context_gather::handle(
+        state,
+        "mission_context_gather",
+        json!({
+            "query": objective,
+            "project_id": project_id,
+            "source_id": source_id,
+            "unknowns": unknowns,
+            "persist": true,
+        }),
+    )
+    .await?;
+    if result.is_error.unwrap_or(false) {
+        return Ok(Err(ToolResult::structured_error(
+            ToolError::new(
+                "GROUNDING_REQUIRED",
+                "worker dispatch refused because mission_context_gather returned an error",
+            )
+            .with_suggestion(
+                "fix the grounding source diagnostic or pass exact_shard_ready fields: accepted_shard_id, context_pack_path, and write_scope",
+            ),
+        )));
+    }
+    let Some(value) = tool_result_json(&result) else {
+        return Ok(Err(ToolResult::structured_error(
+            ToolError::new(
+                "GROUNDING_REQUIRED",
+                "worker dispatch refused because mission_context_gather did not return JSON",
+            )
+            .with_suggestion("inspect mission_context_gather and retry with explicit unknowns"),
+        )));
+    };
+    if value.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Ok(Err(ToolResult::structured_error(
+            ToolError::new(
+                "GROUNDING_REQUIRED",
+                format!(
+                    "worker dispatch refused because grounding diagnostics were returned: {}",
+                    value
+                        .get("diagnostics")
+                        .cloned()
+                        .unwrap_or(Value::Null)
+                ),
+            )
+            .with_suggestion(
+                "resolve source-specific diagnostics before dispatching a worker; do not let the worker guess missing context",
+            ),
+        )));
+    }
+    if value
+        .get("grounding_context_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_none()
+    {
+        return Ok(Err(ToolResult::structured_error(
+            ToolError::new(
+                "GROUNDING_REQUIRED",
+                "worker dispatch refused because persisted grounding did not produce grounding_context_id",
+            )
+            .with_suggestion("rerun mission_context_gather with persist=true"),
+        )));
+    }
+    Ok(Ok(value))
+}
+
+fn apply_grounding_to_metadata(metadata: &mut DelegationMetadata, grounding: &Value) {
+    if metadata.grounding_context_id.is_none() {
+        metadata.grounding_context_id = grounding
+            .get("grounding_context_id")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+    }
+    if metadata.context_pack_path.is_none() {
+        metadata.context_pack_path = grounding
+            .get("context_pack_path")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+    }
+    if metadata.grounding_sources.is_empty() {
+        metadata.grounding_sources = grounding
+            .get("sources_used")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+    if metadata.grounding_evidence_refs_count == 0 {
+        metadata.grounding_evidence_refs_count = grounding
+            .get("evidence_refs")
+            .and_then(Value::as_array)
+            .map(|items| items.len())
+            .unwrap_or(0);
+    }
+}
+
+fn tool_result_json(result: &ToolResult) -> Option<Value> {
+    let Some(ToolContent::Text { text }) = result.content.first() else {
+        return None;
+    };
+    serde_json::from_str(text).ok()
 }
 
 /// Inputs for the duplicate-code-worker dedup guard. Built from the parsed
@@ -2222,6 +2500,21 @@ fn render_delegation_metadata_block(metadata: &DelegationMetadata) -> String {
     if let Some(value) = &metadata.accepted_shard_id {
         lines.push(format!("- accepted_shard_id: {}", value));
     }
+    if let Some(value) = &metadata.grounding_context_id {
+        lines.push(format!("- grounding_context_id: {}", value));
+    }
+    if !metadata.grounding_sources.is_empty() {
+        lines.push(format!(
+            "- grounding_sources: {}",
+            metadata.grounding_sources.join(", ")
+        ));
+    }
+    if metadata.grounding_evidence_refs_count > 0 {
+        lines.push(format!(
+            "- grounding_evidence_refs_count: {}",
+            metadata.grounding_evidence_refs_count
+        ));
+    }
     if !metadata.read_scope.is_empty() {
         lines.push(format!("- read_scope: {}", metadata.read_scope.join(", ")));
     }
@@ -2614,6 +2907,9 @@ mod tests {
             must_not_touch: vec!["packages/**".to_string()],
             acceptance: vec!["cargo test -p missiond-daemon autopilot".to_string()],
             shared_claim_ids: Vec::new(),
+            grounding_context_id: Some("context-gather:test".to_string()),
+            grounding_sources: vec!["project_registry".to_string()],
+            grounding_evidence_refs_count: 1,
             source_id: None,
         };
         let block = render_delegation_metadata_block(&metadata);
@@ -2622,6 +2918,9 @@ mod tests {
             "- pool_hint: claude-code-default",
             "- engine_hint: claude-code",
             "- context_pack_path: .missiond/tasks/wave99/context-pack.lisp",
+            "- grounding_context_id: context-gather:test",
+            "- grounding_sources: project_registry",
+            "- grounding_evidence_refs_count: 1",
             "- read_scope: crates/missiond-core/src/types/board.rs",
             "- write_scope: crates/a.rs",
             "- must_not_touch: packages/**",
@@ -2881,6 +3180,9 @@ mod tests {
             "read-only",
             &[],
             &planned,
+            Some("context-gather:test"),
+            &["project_registry".to_string()],
+            1,
         );
         assert!(
             description.contains("- project_id: jarvis"),
@@ -2924,6 +3226,9 @@ mod tests {
             "lisp-first",
             &[],
             &planned,
+            Some("context-gather:test"),
+            &["project_registry".to_string()],
+            1,
         );
         assert!(
             description.contains("- write_policy: read-only"),
@@ -3013,6 +3318,9 @@ mod tests {
             "read-only",
             &[],
             &planned,
+            Some("context-gather:test"),
+            &["project_registry".to_string(), "ssot-intent".to_string()],
+            2,
         );
         assert!(
             description.contains(
@@ -3104,6 +3412,9 @@ mod tests {
             "scoped-write",
             &["node scripts/check.js".to_string()],
             &planned,
+            Some("context-gather:test"),
+            &["project_registry".to_string(), "ssot-intent".to_string()],
+            2,
         );
         assert!(
             description.contains("- parent_board_task_id: parent-task-123"),
@@ -3227,6 +3538,9 @@ mod tests {
             "scoped-write",
             &["cargo test".to_string()],
             &planned,
+            Some("context-gather:test"),
+            &["project_registry".to_string()],
+            1,
         );
         assert!(source.contains("(swarm-context-pack"));
         assert!(source.contains(":schema \"missiond.swarm-context-pack.v1\""));

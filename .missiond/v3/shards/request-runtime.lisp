@@ -43,6 +43,55 @@
        "If mission_context_gather cannot answer a source, it returns source-specific diagnostics instead of making the resident master guess."]
     :checker "node scripts/check-v3-memory-kb-isomorphism.mjs")
 
+  (grounded-dispatch-policy
+    :schema "missiond.grounded-dispatch-policy.v1"
+    :purpose "Make unknowns-first context gathering a runtime gate before broad Board/Jarvis/master tasks can reach provider PTYs; prompt hints are not sufficient."
+    :authority [mission_context_gather mission_task_delegate mission_swarm_run autopilot-runtime shared-memory task-result-artifact]
+    :bypass-policy
+      ((case exact-shard
+         :requires [exact_shard_ready accepted_shard_id context_pack_path write_scope]
+         :rule "Exact implementation shards already produced by intent/plan/workflow may dispatch without re-gathering, but must reference their accepted shard and scoped write surface.")
+       (case emergency-code-first
+         :requires [emergency_code_first visible-backfill-boardtask]
+         :rule "Emergency code-first is allowed only as an explicit exception and must create Lisp/checker/evidence backfill."))
+    :artifact
+      ((kind context-gather-artifact
+         :schema "missiond.context-gather-artifact.v1"
+         :id-field grounding_context_id
+         :storage "shared_artifacts(kind=context-gather)"
+         :fields [unknowns query project_id sources_used evidence_refs diagnostics grounded_intent_summary context_pack_path]
+         :rule "mission_context_gather(persist=true) returns grounding_context_id and context_pack_path; worker prompts receive only a small context slice, not broad KB/history preloads."))
+    :functions
+      ((function context-gather-artifact
+         :entry [mission_context_gather unknowns-inventory BoardTask source_id project_id]
+         :core ((step s1 :logic "derive query from explicit unknowns or the raw objective; never use broad historical preload as the query source")
+                (step s2 :logic "query project registry, active SSOT, active KB, skill evidence, infra/deploy facts, active Board task records, bounded conversations, and tool directory through the aggregate")
+                (step s3 :logic "return source-specific diagnostics for missing or stale authorities instead of letting the worker guess")
+                (step s4 :logic "persist the payload into shared_artifacts(kind=context-gather) and return grounding_context_id plus shared-artifact context_pack_path"))
+         :egress [grounding_context_id context_pack_path sources_used diagnostics shared_artifact])
+       (function task-delegate-grounding-gate
+         :entry [mission_task_delegate mission_swarm_run mission_plan_execute]
+         :core ((step s1 :logic "classify dispatch as exact shard, emergency code-first, or broad objective")
+                (step s2 :logic "for broad objective without grounding_context_id, synchronously call mission_context_gather(persist=true)")
+                (step s3 :logic "fail fast with GROUNDING_REQUIRED if gather returns diagnostics or no grounding_context_id")
+                (step s4 :logic "write grounding_context_id, context_pack_path, sources_used, and evidence count into BoardTask metadata and prompt slice")
+                (step s5 :logic "implementation swarm lanes still require accepted_shard_id and write_scope; gathered broad context may only create investigation/synthesis tasks"))
+         :egress [grounded-BoardTask delegation-metadata context-pack-slice GROUNDING_REQUIRED])
+       (function autopilot-grounding-gate
+         :entry [BoardTaskBeforeDispatch auto_execute task-metadata]
+         :core ((step s1 :logic "allow exact shard only when accepted_shard_id, context_pack_path, and write_scope are present")
+                (step s2 :logic "allow broad task only when grounding_context_id is present")
+                (step s3 :logic "block ungrounded broad task before PTY input and append a diagnostic Board note")
+                (step s4 :logic "never re-enable hidden context prefetch as a substitute for grounded dispatch"))
+         :egress [BoardTaskBlocked diagnostic-note no-PTY-dispatch]))
+    :invariants
+      ["All non-exact worker dispatch must carry grounding_context_id before a provider PTY receives the prompt."
+       "mission_context_gather is the only default aggregate for KB/SSOT/project/skill/infra/Board/conversation/tool facts; callers should not hand-roll partial context lookup."
+       "Grounding artifacts are durable evidence and task metadata; hidden prompt preloads are not grounding."
+       "Autopilot must block broad ungrounded BoardTasks instead of sending them to workers for self-discovery."
+       "Direct local code search is allowed only after the grounding artifact identifies code surface evidence as a required source."]
+    :checks ["node scripts/check-v3-grounded-dispatch-isomorphism.mjs --json"])
+
   (unified-entry
     :desc "request -> intent alignment -> plan -> execution -> evidence -> workflow"
     :modes

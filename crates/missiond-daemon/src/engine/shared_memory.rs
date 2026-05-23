@@ -456,6 +456,34 @@ impl SharedMemoryService {
         Ok(StoredArtifact { hash, size_bytes })
     }
 
+    pub(crate) async fn put_json_artifact(
+        &self,
+        kind: &str,
+        project_id: Option<&str>,
+        task_id: Option<&str>,
+        body: &Value,
+        metadata: Value,
+    ) -> Result<Value> {
+        let content = serde_json::to_vec(body)?;
+        let artifact = self
+            .put_artifact_bytes(
+                kind,
+                project_id,
+                task_id,
+                "application/json",
+                content,
+                metadata,
+            )
+            .await?;
+        Ok(json!({
+            "schema": "missiond.shared-artifact.v1",
+            "hash": artifact.hash,
+            "kind": kind,
+            "size_bytes": artifact.size_bytes,
+            "media_type": "application/json"
+        }))
+    }
+
     async fn artifact_get(&self, args: &Value) -> Result<Value> {
         let hash = string_arg(args, "hash").ok_or_else(|| anyhow!("hash is required"))?;
         let row = sqlx::query(

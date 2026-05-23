@@ -2092,6 +2092,75 @@ fn board_task_workstation_class(task: &missiond_core::types::BoardTask) -> &'sta
     }
 }
 
+fn dispatch_metadata_value_present(description: &str, field: &str) -> bool {
+    extract_dispatch_metadata_field(description, field)
+        .map(|value| {
+            let value = value.trim();
+            !value.is_empty() && value != "-" && value != "[]" && value != "null"
+        })
+        .unwrap_or(false)
+}
+
+fn board_task_exact_shard_ready(task: &missiond_core::types::BoardTask) -> bool {
+    dispatch_metadata_value_present(&task.description, "context_pack_path")
+        && dispatch_metadata_value_present(&task.description, "accepted_shard_id")
+        && dispatch_metadata_value_present(&task.description, "write_scope")
+}
+
+fn board_task_has_grounding_context(task: &missiond_core::types::BoardTask) -> bool {
+    dispatch_metadata_value_present(&task.description, "grounding_context_id")
+}
+
+fn autopilot_grounding_gate_reason(task: &missiond_core::types::BoardTask) -> Option<String> {
+    if !task.auto_execute || task.flow_phase.is_some() || board_task_exact_shard_ready(task) {
+        return None;
+    }
+    if board_task_has_grounding_context(task) {
+        return None;
+    }
+    Some(
+        "Autopilot refused broad dispatch without grounding_context_id. Run mission_context_gather(persist=true) or create an exact shard with context_pack_path, accepted_shard_id, and write_scope.".to_string(),
+    )
+}
+
+async fn block_task_for_grounding_required(
+    state: &AppState,
+    task: &missiond_core::types::BoardTask,
+    reason: &str,
+) {
+    let old_status = format!("{:?}", task.status);
+    let _ = state
+        .store
+        .update_board_task(
+            task.id.as_str(),
+            &missiond_core::types::UpdateBoardTaskInput {
+                status: Some("blocked".to_string()),
+                ..Default::default()
+            },
+        )
+        .await;
+    let _ = state
+        .bus
+        .publish_board(BoardEvent::StatusChanged {
+            task_id: task.id.to_string(),
+            old_status,
+            new_status: "blocked".to_string(),
+        })
+        .await;
+    let _ = state
+        .store
+        .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+            task_id: task.id.to_string(),
+            content: format!(
+                "🧭 Grounding required before worker dispatch.\n\nError code: GROUNDING_REQUIRED\n\n{}\n\nBroad worker prompts must not make the worker guess project, SSOT, skill, deploy, or memory facts.",
+                reason
+            ),
+            note_type: Some("diagnostic".to_string()),
+            author: Some("autopilot".to_string()),
+        })
+        .await;
+}
+
 #[derive(Debug, Clone)]
 struct WorkstationSlotSelection {
     slot_id: String,
@@ -2317,6 +2386,15 @@ async fn dispatch_board_tasks_with_config(
     for task in tasks {
         if is_stale_lisp_code_sync_runtime_report_task(&task) {
             resolve_stale_lisp_code_sync_runtime_report_task(state, &task).await;
+            continue;
+        }
+        if let Some(reason) = autopilot_grounding_gate_reason(&task) {
+            warn!(
+                task_id = %task.id,
+                title = %task.title,
+                "Autopilot: blocked broad task before PTY dispatch because grounding is missing"
+            );
+            block_task_for_grounding_required(state, &task, &reason).await;
             continue;
         }
 
@@ -7061,6 +7139,19 @@ async fn reap_idle_persistent_slots(state: &AppState, runtime_config: &Autopilot
         // Check if slot is alive and idle
         if !state.pty.is_available(slot_id).await {
             continue; // Not idle (thinking, responding, or not running)
+        }
+
+        // A newly spawned persistent slot can have stale JSONL-derived
+        // `slot_progress.last_activity` from an older session. Never release a
+        // process that has not itself lived through the idle timeout window.
+        if let Some(info) = state.pty.get_status(slot_id).await {
+            if let Some(started_ms) = info.started_at {
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                let alive_secs = now_ms.saturating_sub(started_ms).max(0) as u64 / 1000;
+                if alive_secs < runtime_config.idle_persistent_slot_secs {
+                    continue;
+                }
+            }
         }
 
         // Check last activity time from slot_progress

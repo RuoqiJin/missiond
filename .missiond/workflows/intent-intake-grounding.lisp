@@ -61,7 +61,8 @@
      (gate g3 :rule "Project identity must come from MissionD Universe or project SSOT; guessed paths are evidence gaps, not facts.")
      (gate g4 :rule "Skill operational facts are evidence until promoted through infra/project registry; they cannot silently override SSOT.")
      (gate g5 :rule "If user intent conflicts with prior active memory, surface supersession_scope instead of keeping both active.")
-     (gate g6 :rule "Intent investigator workers are read-only and produce structured artifacts; they do not create implementation tasks."))
+     (gate g6 :rule "Intent investigator workers are read-only and produce structured artifacts; they do not create implementation tasks.")
+     (gate g7 :rule "Broad worker dispatch requires a persisted grounding_context_id from mission_context_gather(persist=true); only exact_shard_ready tasks with accepted_shard_id, context_pack_path, and write_scope may bypass grounding."))
   :completion
     ((criterion c1 :rule "inferred_user_intent, unknowns, evidence_needed, and evidence_refs are present.")
      (criterion c2 :rule "request-local intent-alignment.lisp or equivalent work-order intent exists and is referenced by review_packet.")

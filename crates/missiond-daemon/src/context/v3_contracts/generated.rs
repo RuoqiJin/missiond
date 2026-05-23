@@ -13,7 +13,7 @@ pub struct SourceUnit {
 }
 
 pub const SCHEMA_VERSION: &str = "missiond.contract-abi.v1";
-pub const SOURCE_HASH: &str = "25ae9335389e4e0c2927676133655b6f";
+pub const SOURCE_HASH: &str = "5efdca9d0e77e30bee2421e2a15bd149";
 
 pub const SOURCE_UNITS: &[SourceUnit] = &[
     SourceUnit {
@@ -28,7 +28,7 @@ pub const SOURCE_UNITS: &[SourceUnit] = &[
         kind: "multi-section-shard",
         included_by: Some(".missiond/v3/missiond-blueprint.lisp"),
         include_line: Some(276u32),
-        source_hash: "b57b01678281f3719dd9b1a5a52846a6",
+        source_hash: "3515a254c162dff654af0565a3728095",
     },
     SourceUnit {
         file: ".missiond/v3/shards/workstation-runtime.lisp",
