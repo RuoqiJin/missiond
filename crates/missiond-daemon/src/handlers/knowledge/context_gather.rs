@@ -69,6 +69,7 @@ struct ContextBootArgs {
 const CODEX_BOOT_CONTEXT_REL: &str = ".missiond/v3/evidence/codex-boot-context.lisp";
 const CODEX_BOOT_CONTEXT_FALLBACK: &str =
     include_str!("../../../../../.missiond/v3/evidence/codex-boot-context.lisp");
+const CONTEXT_GATHER_RUNTIME_REL: &str = ".missiond/v3/runtime/context-gather";
 
 fn default_limit() -> usize {
     8
@@ -291,17 +292,29 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 metadata,
             )
             .await?;
+        let context_pack_file = if let Some(hash) = artifact.get("hash").and_then(Value::as_str) {
+            Some((
+                hash.to_string(),
+                materialize_context_pack_file(hash, &payload)?,
+            ))
+        } else {
+            None
+        };
         if let Some(object) = payload.as_object_mut() {
-            if let Some(hash) = artifact.get("hash").and_then(Value::as_str) {
+            if let Some((hash, context_pack_file)) = context_pack_file {
                 object.insert(
                     "grounding_context_id".to_string(),
-                    Value::String(format!("context-gather:{hash}")),
+                    Value::String(format!("context-gather:{}", hash)),
                 );
                 object.insert(
                     "context_pack_path".to_string(),
-                    Value::String(format!("shared-artifact://{hash}")),
+                    Value::String(format!("shared-artifact://{}", hash)),
                 );
-                object.insert("artifact_hash".to_string(), Value::String(hash.to_string()));
+                object.insert(
+                    "context_pack_file".to_string(),
+                    Value::String(context_pack_file.display().to_string()),
+                );
+                object.insert("artifact_hash".to_string(), Value::String(hash));
             }
             object.insert("artifact".to_string(), artifact);
         }
@@ -355,6 +368,33 @@ fn codex_boot_context_candidates() -> Vec<PathBuf> {
         candidates.push(cwd.join(CODEX_BOOT_CONTEXT_REL));
     }
     candidates
+}
+
+fn materialize_context_pack_file(hash: &str, payload: &Value) -> Result<PathBuf> {
+    let root = missiond_project_root();
+    let dir = root.join(CONTEXT_GATHER_RUNTIME_REL);
+    fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{hash}.json"));
+    let bytes = serde_json::to_vec_pretty(payload)?;
+    fs::write(&path, bytes)?;
+    Ok(path)
+}
+
+fn missiond_project_root() -> PathBuf {
+    for key in [
+        "MISSIOND_PROJECT_ROOT",
+        "MISSIOND_REPO_ROOT",
+        "MISSIOND_WORKSPACE_ROOT",
+        "MISSIOND_ORCHESTRATOR_ROOT",
+    ] {
+        if let Ok(value) = env::var(key) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return PathBuf::from(trimmed);
+            }
+        }
+    }
+    env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
 fn normalized_query(args: &ContextGatherArgs) -> String {

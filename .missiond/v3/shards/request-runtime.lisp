@@ -59,8 +59,8 @@
          :schema "missiond.context-gather-artifact.v1"
          :id-field grounding_context_id
          :storage "shared_artifacts(kind=context-gather)"
-         :fields [unknowns query project_id sources_used evidence_refs diagnostics grounded_intent_summary context_pack_path]
-         :rule "mission_context_gather(persist=true) returns grounding_context_id and context_pack_path; worker prompts receive only a small context slice, not broad KB/history preloads.")
+         :fields [unknowns query project_id sources_used evidence_refs diagnostics grounded_intent_summary context_pack_path context_pack_file]
+         :rule "mission_context_gather(persist=true) returns grounding_context_id, shared-artifact context_pack_path, and a bounded context_pack_file for provider CLIs that do not have MissionD MCP mounted; worker prompts receive only this small context slice, not broad KB/history preloads.")
        (kind task-result-artifact
          :schema "missiond.task-result-artifact.v1"
          :id-field artifact_hash
@@ -73,15 +73,15 @@
          :core ((step s1 :logic "derive query from explicit unknowns or the raw objective; never use broad historical preload as the query source")
                 (step s2 :logic "query project registry, active SSOT, active KB, skill evidence, infra/deploy facts, active Board task records, bounded conversations, and tool directory through the aggregate")
                 (step s3 :logic "return source-specific diagnostics for missing or stale authorities instead of letting the worker guess")
-                (step s4 :logic "persist the payload into shared_artifacts(kind=context-gather) and return grounding_context_id plus shared-artifact context_pack_path")
-                (step s5 :logic "when context_pack_path is a shared-artifact URI, Jarvis worker prompts must include the concrete mission_shared_memory(action=artifact_get, hash=...) or mission_context_slice retrieval method; opaque artifact URIs without retrieval instructions are invalid"))
-         :egress [grounding_context_id context_pack_path sources_used diagnostics shared_artifact])
+                (step s4 :logic "persist the payload into shared_artifacts(kind=context-gather), materialize a bounded runtime context_pack_file, and return both grounding_context_id and shared-artifact context_pack_path")
+                (step s5 :logic "Jarvis worker prompts must prefer context_pack_file; if unavailable, they may use mission_shared_memory(action=artifact_get, hash=...) or mission_context_slice. Opaque artifact URIs without retrieval instructions are invalid"))
+         :egress [grounding_context_id context_pack_path context_pack_file sources_used diagnostics shared_artifact])
        (function task-delegate-grounding-gate
          :entry [mission_task_delegate mission_swarm_run mission_plan_execute]
          :core ((step s1 :logic "classify dispatch as exact shard, emergency code-first, or broad objective")
                 (step s2 :logic "for broad objective without grounding_context_id, synchronously call mission_context_gather(persist=true)")
                 (step s3 :logic "fail fast with GROUNDING_REQUIRED if gather returns diagnostics or no grounding_context_id")
-                (step s4 :logic "write grounding_context_id, context_pack_path, sources_used, and evidence count into BoardTask metadata and prompt slice")
+                (step s4 :logic "write grounding_context_id, context_pack_path, context_pack_file, sources_used, and evidence count into BoardTask metadata and prompt slice")
                 (step s5 :logic "implementation swarm lanes still require accepted_shard_id and write_scope; gathered broad context may only create investigation/synthesis tasks"))
          :egress [grounded-BoardTask delegation-metadata context-pack-slice GROUNDING_REQUIRED])
        (function autopilot-grounding-gate

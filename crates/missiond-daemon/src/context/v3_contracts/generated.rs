@@ -13,9 +13,9 @@ pub struct SourceUnit {
 }
 
 pub const SCHEMA_VERSION: &str = "missiond.contract-abi.v1";
-pub const SOURCE_HASH: &str = "ec09c658367f161ffe56b2baf37c046c";
-pub const RUNTIME_CONFIG_SOURCE_HASH: &str = "7a4800c9e62ed29a9b86e71a891499ac";
-pub const PROJECT_UNIVERSE_SOURCE_HASH: &str = "7a4800c9e62ed29a9b86e71a891499ac";
+pub const SOURCE_HASH: &str = "d7bc2b27a1bced233167c8c0b20272fb";
+pub const RUNTIME_CONFIG_SOURCE_HASH: &str = "0ad764a7a487543322e62a99190205c7";
+pub const PROJECT_UNIVERSE_SOURCE_HASH: &str = "0ad764a7a487543322e62a99190205c7";
 #[rustfmt::skip]
 pub const RUNTIME_DOMAIN_FILES: &[(&str, &str)] = &[
     (
@@ -71,51 +71,51 @@ pub const RUNTIME_DOMAIN_FILES: &[(&str, &str)] = &[
 pub const RUNTIME_DOMAIN_SOURCE_HASHES: &[(&str, &str)] = &[
     (
         "workstation",
-        "7a4800c9e62ed29a9b86e71a891499ac",
+        "0ad764a7a487543322e62a99190205c7",
     ),
     (
         "flow",
-        "7a4800c9e62ed29a9b86e71a891499ac",
+        "0ad764a7a487543322e62a99190205c7",
     ),
     (
         "compute",
-        "7a4800c9e62ed29a9b86e71a891499ac",
+        "0ad764a7a487543322e62a99190205c7",
     ),
     (
         "minimax",
-        "7a4800c9e62ed29a9b86e71a891499ac",
+        "0ad764a7a487543322e62a99190205c7",
     ),
     (
         "router",
-        "7a4800c9e62ed29a9b86e71a891499ac",
+        "0ad764a7a487543322e62a99190205c7",
     ),
     (
         "cascade",
-        "7a4800c9e62ed29a9b86e71a891499ac",
+        "0ad764a7a487543322e62a99190205c7",
     ),
     (
         "project-registry",
-        "7a4800c9e62ed29a9b86e71a891499ac",
+        "0ad764a7a487543322e62a99190205c7",
     ),
     (
         "capability-governance",
-        "7a4800c9e62ed29a9b86e71a891499ac",
+        "0ad764a7a487543322e62a99190205c7",
     ),
     (
         "memory-kb",
-        "7a4800c9e62ed29a9b86e71a891499ac",
+        "0ad764a7a487543322e62a99190205c7",
     ),
     (
         "conversation-ingestion",
-        "7a4800c9e62ed29a9b86e71a891499ac",
+        "0ad764a7a487543322e62a99190205c7",
     ),
     (
         "autopilot",
-        "7a4800c9e62ed29a9b86e71a891499ac",
+        "0ad764a7a487543322e62a99190205c7",
     ),
     (
         "learning-engine",
-        "7a4800c9e62ed29a9b86e71a891499ac",
+        "0ad764a7a487543322e62a99190205c7",
     ),
 ];
 
@@ -139,7 +139,7 @@ pub const SOURCE_UNITS: &[SourceUnit] = &[
         kind: "multi-section-shard",
         included_by: Some(".missiond/v3/shards/index.lisp"),
         include_line: Some(7u32),
-        source_hash: "494ee2dc0c475b6c8e617fac8947dc62",
+        source_hash: "9bfd6347562b92f207d1e4f675afabd1",
     },
     SourceUnit {
         file: ".missiond/v3/shards/workstation-runtime.lisp",
@@ -299,14 +299,14 @@ pub const SOURCE_DOMAINS: &[SourceDomain] = &[
     },
     SourceDomain {
         id: "control-plane-runtime",
-        source_hash: "cdc6fea6c7c1dc318cc44696b766d6d4",
+        source_hash: "8bf182130af5ad4848e12c85134ce012",
         source_units: &[
             SourceUnit {
                 file: ".missiond/v3/shards/request-runtime.lisp",
                 kind: "multi-section-shard",
                 included_by: Some(".missiond/v3/shards/index.lisp"),
                 include_line: Some(7u32),
-                source_hash: "494ee2dc0c475b6c8e617fac8947dc62",
+                source_hash: "9bfd6347562b92f207d1e4f675afabd1",
             },
             SourceUnit {
                 file: ".missiond/v3/shards/control-plane-runtime.lisp",

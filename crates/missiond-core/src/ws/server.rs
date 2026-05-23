@@ -64,6 +64,8 @@ pub struct JarvisGroundingResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_pack_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_pack_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub artifact_hash: Option<String>,
     #[serde(default)]
     pub sources_used: Vec<String>,
@@ -1865,6 +1867,7 @@ impl PTYWebSocketServer {
         raw_user_text: &str,
         grounding_context_id: &str,
         context_pack_path: Option<&str>,
+        context_pack_file: Option<&str>,
         intent_artifact_id: &str,
         plan_artifact_id: &str,
         read_scope_root: &str,
@@ -1916,6 +1919,7 @@ impl PTYWebSocketServer {
             "output_contract": "Findings / Evidence / Recommendations / Verification",
             "grounding_context_id": grounding_context_id,
             "context_pack_path": context_pack_path,
+            "context_pack_file": context_pack_file,
             "intent_artifact_id": intent_artifact_id,
             "plan_artifact_id": plan_artifact_id,
             "worker_may_delegate": false
@@ -1954,6 +1958,10 @@ impl PTYWebSocketServer {
             .get("context_pack_path")
             .and_then(|v| v.as_str())
             .unwrap_or("");
+        let context_pack_file = dispatch_metadata
+            .get("context_pack_file")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let task_kind = dispatch_metadata
             .get("task_kind")
             .and_then(|v| v.as_str())
@@ -1966,17 +1974,20 @@ impl PTYWebSocketServer {
              用户目标：\n{}\n\n\
              任务类型：{}\n\
              grounding_context_id: {}\n\
-             context_pack_path: {}\n\n\
+             context_pack_path: {}\n\
+             context_pack_file: {}\n\n\
              工作方式：\n\
              - 这是已经过 Jarvis 意图确认和计划确认的 grounded dispatch，不要重新扮演主控。\n\
-             - 先读取 grounding/context-pack 中列出的证据；若 context_pack_path 是 shared-artifact://，请优先用 MissionD MCP 调 mission_shared_memory(action=\"artifact_get\", hash=\"{}\") 或 mission_context_slice 读取上下文切片。\n\
-             - 如果本工位没有 mission_shared_memory / mission_context_slice MCP 工具，不要自行大范围搜索代码；请快速失败并输出 Diagnostic / Evidence / Verification，说明 MCP unavailable。\n\
+             - 先读取 context_pack_file；这是 MissionD 为没有 MCP 的工位物化的 bounded context slice。\n\
+             - 如果 context_pack_file 不可读，且 context_pack_path 是 shared-artifact://，再用 MissionD MCP 调 mission_shared_memory(action=\"artifact_get\", hash=\"{}\") 或 mission_context_slice 读取上下文切片。\n\
+             - 如果文件和 MCP 都不可用，不要自行大范围搜索代码；请快速失败并输出 Diagnostic / Evidence / Verification，说明 context unavailable。\n\
              - 不要修改文件、不要 stage、不要 commit、不要在工位内部创建子任务或再派其他工位。\n\
              - 输出必须是结构化 artifact，包含 Findings / Evidence / Recommendations / Verification 四段。",
             raw_user_text,
             task_kind,
             grounding_context_id,
             context_pack_path,
+            context_pack_file,
             context_pack_hash
         )
     }
@@ -2300,6 +2311,7 @@ impl PTYWebSocketServer {
             };
             let grounding_context_id = grounding.grounding_context_id.clone();
             let context_pack_path = grounding.context_pack_path.clone();
+            let context_pack_file = grounding.context_pack_file.clone();
             let grounding_artifact_hash = grounding.artifact_hash.clone();
             let sources_used = grounding.sources_used.clone();
             let grounding_diagnostics = grounding.diagnostics.clone();
@@ -2307,6 +2319,7 @@ impl PTYWebSocketServer {
                 "phase": "grounding",
                 "grounding_context_id": grounding_context_id,
                 "context_pack_path": context_pack_path,
+                "context_pack_file": context_pack_file,
                 "artifact_hash": grounding_artifact_hash,
                 "sources_used": sources_used,
                 "diagnostics": grounding_diagnostics,
@@ -2317,6 +2330,7 @@ impl PTYWebSocketServer {
                 "phase": "intent_draft",
                 "grounding_context_id": grounding_context_id,
                 "context_pack_path": context_pack_path,
+                "context_pack_file": context_pack_file,
                 "understanding": "我理解这是一个需要先确认意图、再拆 plan.lisp、再派工位执行的 Jarvis 请求。",
                 "user_message_preview": raw_user_text.chars().take(240).collect::<String>(),
                 "sources_used": sources_used,
@@ -2390,6 +2404,7 @@ impl PTYWebSocketServer {
                 "phase": "plan_draft",
                 "grounding_context_id": grounding_context_id,
                 "context_pack_path": context_pack_path,
+                "context_pack_file": context_pack_file,
                 "intent_artifact_id": intent_artifact_id,
                 "steps": [
                     "确认 project_id / read_scope / skill evidence / deploy facts 等 grounding 证据",
@@ -2486,6 +2501,7 @@ impl PTYWebSocketServer {
                 &raw_user_text,
                 &grounding_context_id,
                 context_pack_path.as_deref(),
+                context_pack_file.as_deref(),
                 &intent_artifact_id,
                 &plan_artifact_id,
                 &Self::jarvis_runtime_read_scope_root(),
@@ -2502,6 +2518,7 @@ impl PTYWebSocketServer {
                 "conversation_id": jarvis_conv_id.as_deref().unwrap_or(""),
                 "grounding_context_id": grounding_context_id,
                 "context_pack_path": context_pack_path,
+                "context_pack_file": context_pack_file,
                 "intent_artifact_id": intent_artifact_id,
                 "plan_artifact_id": plan_artifact_id,
                 "dispatch_metadata": dispatch_metadata,
@@ -4697,5 +4714,24 @@ mod tests {
             &nested_payload,
             "missiond_plan_confirmed"
         ));
+    }
+
+    #[test]
+    fn jarvis_worker_prompt_prefers_materialized_context_file() {
+        let metadata = PTYWebSocketServer::derive_jarvis_dispatch_contract(
+            "请接入并验证 agy CLI",
+            "context-gather:abc",
+            Some("shared-artifact://abc"),
+            Some("/tmp/missiond/context-gather/abc.json"),
+            "intent-abc",
+            "plan-abc",
+            "/repo",
+        );
+        let prompt =
+            PTYWebSocketServer::build_jarvis_worker_prompt("请接入并验证 agy CLI", &metadata);
+        assert!(prompt.contains("context_pack_file: /tmp/missiond/context-gather/abc.json"));
+        assert!(prompt.contains("先读取 context_pack_file"));
+        assert!(prompt.contains("context unavailable"));
+        assert!(prompt.contains("mission_shared_memory(action=\"artifact_get\", hash=\"abc\")"));
     }
 }

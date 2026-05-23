@@ -1312,6 +1312,10 @@ async fn main() -> Result<()> {
                         .get("context_pack_path")
                         .and_then(Value::as_str)
                         .map(str::to_string);
+                    let context_pack_file = value
+                        .get("context_pack_file")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
                     let artifact_hash = value
                         .get("artifact_hash")
                         .and_then(Value::as_str)
@@ -1334,6 +1338,7 @@ async fn main() -> Result<()> {
                     Ok(missiond_core::JarvisGroundingResult {
                         grounding_context_id,
                         context_pack_path,
+                        context_pack_file,
                         artifact_hash,
                         sources_used,
                         diagnostics,
