@@ -168,11 +168,13 @@ fn active_running_evidence(
     let text = joined_text(lines);
     let lower = text.to_ascii_lowercase();
     let elapsed = extract_elapsed_secs(&text);
+    let current_activity = has_current_claude_activity_line(lines);
     match provider {
         CliEngine::ClaudeCode => {
             if lower.contains("esc to interrupt")
                 || lower.contains("almost done thinking")
                 || lower.contains("thinking with")
+                || current_activity
                 || has_active_claude_spinner(lines)
             {
                 let mut snapshot = PtyRecognitionSnapshot::new(
@@ -434,6 +436,7 @@ fn recognize_claude_code(lines: &[String]) -> PtyRecognitionSnapshot {
     let text = joined_text(lines);
     let lower = text.to_ascii_lowercase();
     let elapsed = extract_elapsed_secs(&text);
+    let current_activity = has_current_claude_activity_line(lines);
 
     if let Some((kind, reason)) = provider_unavailable_match(&lower) {
         return PtyRecognitionSnapshot::new(
@@ -471,9 +474,29 @@ fn recognize_claude_code(lines: &[String]) -> PtyRecognitionSnapshot {
         .with_elapsed(elapsed);
     }
 
+    if has_completion_line(lines) && has_idle_prompt(lines) {
+        return PtyRecognitionSnapshot::new(
+            CliEngine::ClaudeCode,
+            PtyCanonicalState::Complete,
+            0.86,
+            "claude_code:turn_completion_verb",
+        )
+        .with_elapsed(elapsed);
+    }
+
+    if (lower.contains("auto mode on") || has_idle_prompt(lines)) && !current_activity {
+        return PtyRecognitionSnapshot::new(
+            CliEngine::ClaudeCode,
+            PtyCanonicalState::Idle,
+            0.9,
+            "claude_code:prompt_idle",
+        );
+    }
+
     if lower.contains("esc to interrupt")
         || lower.contains("almost done thinking")
         || lower.contains("thinking with")
+        || current_activity
         || has_active_claude_spinner(lines)
     {
         let mut snapshot = PtyRecognitionSnapshot::new(
@@ -489,25 +512,6 @@ fn recognize_claude_code(lines: &[String]) -> PtyRecognitionSnapshot {
             snapshot = snapshot.with_phase("thinking");
         }
         return snapshot;
-    }
-
-    if has_completion_line(lines) && has_idle_prompt(lines) {
-        return PtyRecognitionSnapshot::new(
-            CliEngine::ClaudeCode,
-            PtyCanonicalState::Complete,
-            0.86,
-            "claude_code:turn_completion_verb",
-        )
-        .with_elapsed(elapsed);
-    }
-
-    if lower.contains("auto mode on") || has_idle_prompt(lines) {
-        return PtyRecognitionSnapshot::new(
-            CliEngine::ClaudeCode,
-            PtyCanonicalState::Idle,
-            0.9,
-            "claude_code:prompt_idle",
-        );
     }
 
     PtyRecognitionSnapshot::new(
@@ -676,6 +680,20 @@ fn has_active_claude_spinner(lines: &[String]) -> bool {
             .next()
             .is_some_and(|c| "·✻✽✶✳✢*⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".contains(c));
         starts_with_spinner && (trimmed.contains("...") || trimmed.contains('…'))
+    })
+}
+
+fn has_current_claude_activity_line(lines: &[String]) -> bool {
+    lines.iter().rev().take(6).any(|line| {
+        let trimmed = line.trim_start();
+        let starts_with_spinner = trimmed
+            .chars()
+            .next()
+            .is_some_and(|c| "·✻✽✶✳✢*⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".contains(c));
+        starts_with_spinner
+            && (trimmed.contains("esc to interrupt")
+                || trimmed.contains("almost done thinking")
+                || trimmed.contains("thinking with"))
     })
 }
 
@@ -1022,6 +1040,24 @@ mod tests {
         ]));
         assert_eq!(result.state, PtyCanonicalState::Idle);
         assert!(result.blocked_kind.is_none());
+    }
+
+    #[test]
+    fn claude_code_idle_prompt_overrides_stale_spinner_text() {
+        // Live Jarvis failure shape: Claude Code read one skill, returned to
+        // the composer prompt, but the scrollback still carried an old
+        // "Puzzling" spinner line. The prompt is the current state signal.
+        let result = recognize_claude_code(&lines(&[
+            "Reading 1 file... (ctrl+o to expand)",
+            "⎿  ~/.claude/skills/xiaojin-blog/SKILL.md",
+            "✳ Puzzling… (17s · ↓ 706 tokens)",
+            "────────────────────────────────────────",
+            "❯",
+            "────────────────────────────────────────",
+            "⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt",
+        ]));
+        assert_eq!(result.state, PtyCanonicalState::Idle);
+        assert_eq!(result.reason, "claude_code:prompt_idle");
     }
 
     #[test]

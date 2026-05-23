@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use chrono::Utc;
 use missiond_mcp::tools::{ToolError, ToolResult};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -218,6 +219,19 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 slot.config.env.as_ref(),
             )
             .await?;
+
+            // A manually spawned persistent slot must reset its orchestration
+            // activity clock immediately. Otherwise scale-to-zero can read a
+            // stale JSONL-derived `last_activity` from a previous session and
+            // release the freshly spawned Jarvis slot before the first request.
+            {
+                let mut progress = state.slot_progress.write().await;
+                let sp = progress.entry(slot_id.clone()).or_default();
+                if sp.session_id.is_empty() {
+                    sp.session_id = format!("pty-spawn:{slot_id}");
+                }
+                sp.last_activity = Some(Utc::now().to_rfc3339());
+            }
 
             Ok(ToolResult::json(&info))
         }

@@ -12,7 +12,8 @@
 
 use super::jarvis_trace::JarvisTraceStore;
 use crate::cc_tasks::{
-    CCSession, CCTask, CCTaskChangeEvent, CCTasksOverview, CCTasksWatcher, WatcherEvent,
+    CCMessageLine, CCSession, CCTask, CCTaskChangeEvent, CCTasksOverview, CCTasksWatcher,
+    WatcherEvent,
 };
 use crate::event::events::SystemEvent;
 use crate::pty::{PTYManager, SessionEvent, SessionState};
@@ -110,6 +111,8 @@ fn jarvis_system_prompt(tool_count: usize) -> String {
 [Capabilities] 你拥有完整的 MCP 工具集（MissionD {} 个 + xjp-mcp 平台工具）。当你不确定该用哪个工具时，务必先阅读你的操作手册：~/.claude/skills/jarvis-manual/SKILL.md\n\
 [Style] 像一个智能 Web 助手一样自然对话，不要向用户暴露底层终端或 PTY 细节。不要使用 AskUserQuestion 工具向用户提问——直接在回复文本中提问即可。\n\
 [CRITICAL] 禁止运行 pgrep、ps、kill 等进程诊断命令。MCP 工具由系统管理，你不需要检查进程状态。直接调用 MCP 工具即可，不要验证服务是否运行。\n\
+[CRITICAL] 不要递归扫描 /Users、整个 home、Downloads 或全盘来寻找项目。优先使用 MissionD MCP 的 project/infra/skill evidence；如果目标仓库不在当前机器，必须快速失败并说明缺口。\n\
+[CRITICAL] 对微信文章、长图、公众号排版等需要特定后台能力的任务，目标后台/API/项目能力不可用时必须快速失败并说明缺口；禁止伪造 fallback 草稿或假装已调用成功。\n\
 </system_info>",
         tool_count
     )
@@ -117,84 +120,40 @@ fn jarvis_system_prompt(tool_count: usize) -> String {
 
 // ── AIOps Webhook Parsers ──
 
-/// Clean Jarvis PTY response using UUID boundary marker.
-///
-/// The injected message has format: `{context}\n\n{user_message}\n<<<BOUNDARY_{id}>>>`
-/// PTY echoes back the entire input, then Claude's response follows.
-/// We find the LAST occurrence of the boundary marker and take everything after it.
-fn clean_jarvis_response(raw: &str, boundary_id: &str) -> String {
-    let marker = format!("<<<BOUNDARY_{}>>>", boundary_id);
+fn jarvis_sync_timeout_ms() -> u64 {
+    const DEFAULT_TIMEOUT_MS: u64 = 15 * 60 * 1000;
+    const MIN_TIMEOUT_MS: u64 = 30 * 1000;
+    const MAX_TIMEOUT_MS: u64 = 30 * 60 * 1000;
 
-    // 1. Find boundary marker — take everything after the last occurrence
-    let text = if let Some(pos) = raw.rfind(&marker) {
-        &raw[pos + marker.len()..]
-    } else {
-        // Fallback: boundary not found (PTY buffer overflow or truncation).
-        tracing::warn!(
-            boundary_id,
-            "Boundary marker not found in PTY output, using fallback"
-        );
-        raw
-    };
+    std::env::var("MISSIOND_JARVIS_SYNC_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_TIMEOUT_MS)
+        .clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS)
+}
 
-    // 2. Strip Claude Code TUI markers, tool output remnants, and status bar noise
-    let cleaned: String = text
-        .lines()
-        .filter(|line| {
-            let trimmed = line.trim();
-            // Drop Claude Code status bar lines
-            if trimmed.contains("Auto-update failed") {
-                return false;
-            }
-            if trimmed.contains("bypass permissions on") {
-                return false;
-            }
-            if trimmed.contains("Try claude doctor") {
-                return false;
-            }
-            if trimmed.contains("npm i -g @anthropic-ai") {
-                return false;
-            }
-            if trimmed.contains("switched from npm to native installer") {
-                return false;
-            }
-            if trimmed.contains("claude install") && trimmed.contains("docs.anthro") {
-                return false;
-            }
-            if trimmed.starts_with("Pasting") && trimmed.len() < 20 {
-                return false;
-            }
-            if trimmed.starts_with("▸▸") || trimmed.starts_with(">>") {
-                return false;
-            }
-            if trimmed.starts_with("✕ ") || trimmed.starts_with("✗ ") {
-                return false;
-            }
-            // Drop tool output border lines (safety net for block classifier)
-            if trimmed.starts_with('⎿') || trimmed.starts_with('│') {
-                return false;
-            }
-            // Drop tool result file path references
-            if trimmed.contains("tool-results/") {
-                return false;
-            }
-            true
-        })
-        .map(|line| {
-            let trimmed = line.trim_start();
-            if let Some(after) = trimmed.strip_prefix('⏺') {
-                after.strip_prefix(' ').unwrap_or(after)
-            } else if let Some(after) = trimmed.strip_prefix('●') {
-                after.strip_prefix(' ').unwrap_or(after)
-            } else {
-                line
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+fn jarvis_idle_without_final_grace_ms() -> u64 {
+    const DEFAULT_GRACE_MS: u64 = 30 * 1000;
+    const MIN_GRACE_MS: u64 = 10 * 1000;
+    const MAX_GRACE_MS: u64 = 10 * 60 * 1000;
 
-    // 3. Trim whitespace
-    cleaned.trim().to_string()
+    std::env::var("MISSIOND_JARVIS_IDLE_WITHOUT_FINAL_GRACE_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_GRACE_MS)
+        .clamp(MIN_GRACE_MS, MAX_GRACE_MS)
+}
+
+fn jarvis_final_settle_ms() -> u64 {
+    const DEFAULT_SETTLE_MS: u64 = 30 * 1000;
+    const MIN_SETTLE_MS: u64 = 500;
+    const MAX_SETTLE_MS: u64 = 2 * 60 * 1000;
+
+    std::env::var("MISSIOND_JARVIS_FINAL_SETTLE_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_SETTLE_MS)
+        .clamp(MIN_SETTLE_MS, MAX_SETTLE_MS)
 }
 
 /// Parse Deploy Center failure webhook into an incident.
@@ -2107,18 +2066,17 @@ impl PTYWebSocketServer {
         };
 
         // Subscribe to JSONL watcher for structured message content
-        let target_session_id: Option<String> = match db.as_ref() {
+        let mut target_session_id: Option<String> = match db.as_ref() {
             Some(db) => db.get_slot_session(&slot_id).await.ok().flatten(),
             None => None,
         };
-        let mut jsonl_rx: Option<broadcast::Receiver<WatcherEvent>> =
-            match (&cc_tasks_watcher, &target_session_id) {
-                (Some(watcher), Some(_)) => {
-                    let w = watcher.lock().await;
-                    Some(w.subscribe())
-                }
-                _ => None,
-            };
+        let mut jsonl_rx: Option<broadcast::Receiver<WatcherEvent>> = match &cc_tasks_watcher {
+            Some(watcher) => {
+                let w = watcher.lock().await;
+                Some(w.subscribe())
+            }
+            None => None,
+        };
         if target_session_id.is_some() {
             debug!(slot_id, session_id = ?target_session_id, "JSONL watcher subscribed for chat content");
         }
@@ -2127,9 +2085,11 @@ impl PTYWebSocketServer {
         let pty_for_send = Arc::clone(&pty_manager);
         let send_msg = enriched_message.clone();
         let send_slot = slot_id.to_string();
+        let send_timeout_ms = jarvis_sync_timeout_ms();
         let send_handle = tokio::spawn(async move {
-            let timeout_ms = 300_000u64; // 5 min
-            pty_for_send.send(&send_slot, &send_msg, timeout_ms).await
+            pty_for_send
+                .send(&send_slot, &send_msg, send_timeout_ms)
+                .await
         });
 
         // Forward activity events via SSE while send() is running
@@ -2141,21 +2101,64 @@ impl PTYWebSocketServer {
         let mut last_status_phase = String::new();
         let mut last_status_sent = std::time::Instant::now() - std::time::Duration::from_secs(1);
         let status_throttle = std::time::Duration::from_millis(500);
+        let idle_without_final_grace =
+            tokio::time::Duration::from_millis(jarvis_idle_without_final_grace_ms());
         // Buffer: each new assistant message REPLACES the buffer (not appends).
         // A turn produces multiple assistant messages (intermediate tool-calling ones + final response).
         // Only the last one is the actual user-facing answer.
         let mut last_assistant_text: Option<String> = None;
+        let mut past_first_thinking = false;
+        let mut had_activity = false;
+        let mut completed_by_idle = false;
+        let mut idle_without_final = false;
+        let mut last_provider_event_time = std::time::Instant::now();
+        let sent_prompt_for_match = enriched_message.clone();
+
+        let messages_match_current_turn = |messages: &[CCMessageLine]| -> bool {
+            messages.iter().any(|m| {
+                if m.message.role != "user" {
+                    return false;
+                }
+
+                let text = match &m.message.content {
+                    serde_json::Value::String(s) => Some(s.as_str()),
+                    serde_json::Value::Array(blocks) => blocks.iter().find_map(|block| {
+                        block
+                            .get("text")
+                            .and_then(|t| t.as_str())
+                            .filter(|t| !t.is_empty())
+                    }),
+                    _ => None,
+                };
+
+                match text {
+                    Some(user_text) => {
+                        user_text.contains(&sent_prompt_for_match)
+                            || sent_prompt_for_match.contains(user_text)
+                    }
+                    None => false,
+                }
+            })
+        };
 
         // Helper: extract text from JSONL messages, buffering the latest assistant text
         macro_rules! process_jsonl_messages {
             ($messages:expr) => {
                 for msg in $messages {
-                    if !seen_uuids.insert(msg.uuid.clone()) { continue; }
-                    if msg.message.role != "assistant" { continue; }
+                    if !seen_uuids.insert(msg.uuid.clone()) {
+                        continue;
+                    }
+                    if msg.message.role != "assistant" {
+                        continue;
+                    }
                     // Extract text from content (string or array of blocks)
                     let text = match &msg.message.content {
                         serde_json::Value::String(s) => {
-                            if s.is_empty() { None } else { Some(s.clone()) }
+                            if s.is_empty() {
+                                None
+                            } else {
+                                Some(s.clone())
+                            }
                         }
                         serde_json::Value::Array(blocks) => {
                             let mut texts = Vec::new();
@@ -2163,18 +2166,32 @@ impl PTYWebSocketServer {
                             for block in blocks {
                                 match block.get("type").and_then(|t| t.as_str()) {
                                     Some("text") => {
-                                        if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
-                                            if !t.is_empty() { texts.push(t.to_string()); }
+                                        if let Some(t) = block.get("text").and_then(|t| t.as_str())
+                                        {
+                                            if !t.is_empty() {
+                                                texts.push(t.to_string());
+                                            }
                                         }
                                     }
-                                    Some("tool_use") => { has_tool_use = true; }
+                                    Some("tool_use") => {
+                                        has_tool_use = true;
+                                    }
                                     _ => {}
                                 }
                             }
-                            // Skip intermediate messages that are just "let me search..." + tool calls
-                            if has_tool_use { None }
-                            else if texts.is_empty() { None }
-                            else { Some(texts.join("\n")) }
+                            // Tool-use messages invalidate any immediately preceding
+                            // assistant text candidate. Claude Code often writes
+                            // "I'll check..." as a separate assistant text record
+                            // immediately before the tool_use record. That text is
+                            // progress, not a final answer.
+                            if has_tool_use {
+                                last_assistant_text = None;
+                                None
+                            } else if texts.is_empty() {
+                                None
+                            } else {
+                                Some(texts.join("\n"))
+                            }
                         }
                         _ => None,
                     };
@@ -2197,6 +2214,7 @@ impl PTYWebSocketServer {
                 // PTY events: status, tools, confirm, exit (text content from JSONL watcher)
                 pty_event = rx.recv() => {
                     last_event_time = std::time::Instant::now();
+                    last_provider_event_time = std::time::Instant::now();
                     match pty_event {
                         Ok(SessionEvent::StatusUpdate(status)) => {
                             let phase = format!("{}", status.phase);
@@ -2223,6 +2241,7 @@ impl PTYWebSocketServer {
                             }
                             match tool_output.status {
                                 ToolStatus::Running => {
+                                    had_activity = true;
                                     tool_seq += 1;
                                     let id = format!("t{}", tool_seq);
                                     let evt = serde_json::json!({
@@ -2234,6 +2253,7 @@ impl PTYWebSocketServer {
                                     let _ = stream.flush().await;
                                 }
                                 ToolStatus::Completed => {
+                                    had_activity = true;
                                     let id = format!("t{}", tool_seq);
                                     let output = tool_output.output.as_deref().map(|o| {
                                         if o.len() > 4096 {
@@ -2253,16 +2273,26 @@ impl PTYWebSocketServer {
                         Ok(SessionEvent::StateChange { new_state, .. }) => {
                             match new_state {
                                 SessionState::Thinking => {
+                                    if !past_first_thinking {
+                                        past_first_thinking = true;
+                                    }
                                     let evt = serde_json::json!({"phase": "thinking", "text": "Thinking..."});
                                     let sse = format!("event: status\ndata: {}\n\n", evt);
                                     let _ = stream.write_all(sse.as_bytes()).await;
                                     let _ = stream.flush().await;
                                 }
                                 SessionState::ToolRunning => {
+                                    had_activity = true;
                                     let evt = serde_json::json!({"phase": "tool_running", "text": ""});
                                     let sse = format!("event: status\ndata: {}\n\n", evt);
                                     let _ = stream.write_all(sse.as_bytes()).await;
                                     let _ = stream.flush().await;
+                                }
+                                SessionState::Idle => {
+                                    if had_activity || last_assistant_text.is_some() {
+                                        completed_by_idle = true;
+                                        break;
+                                    }
                                 }
                                 _ => {}
                             }
@@ -2299,7 +2329,30 @@ impl PTYWebSocketServer {
                             let _ = stream.write_all(sse.as_bytes()).await;
                             let _ = stream.flush().await;
                         }
-                        Ok(SessionEvent::TextOutput(_)) => {} // Ignored: content comes from JSONL watcher
+                        Ok(SessionEvent::TextOutput(ref text_event)) => {
+                            use crate::TextOutputEvent;
+                            match text_event {
+                                TextOutputEvent::Stream { content, .. } => {
+                                    if past_first_thinking && !content.is_empty() {
+                                        // PTY text extraction is diagnostic only on the
+                                        // Jarvis HTTP/SSE path. Live tests showed Claude
+                                        // Code can classify pasted user prompt echo as
+                                        // assistant text. User-visible content must come
+                                        // from durable provider JSONL assistant messages.
+                                        had_activity = true;
+                                    }
+                                }
+                                TextOutputEvent::Complete { content, .. } => {
+                                    if !content.is_empty() {
+                                        // Keep as diagnostic evidence only; do not promote
+                                        // PTY screen text to final chat content, and do
+                                        // not use it as a completion signal. Claude Code
+                                        // can emit a screen "complete" before the durable
+                                        // assistant final is written to JSONL.
+                                    }
+                                }
+                            }
+                        }
                         Ok(_) => {}
                         Err(broadcast::error::RecvError::Lagged(n)) => {
                             warn!(slot_id, lagged = n, "PTY broadcast lagged");
@@ -2316,7 +2369,34 @@ impl PTYWebSocketServer {
                     }
                 } => {
                     if let Ok(WatcherEvent::NewMessages { session_id, messages, .. }) = jsonl_event {
+                        if messages_match_current_turn(&messages) {
+                            if target_session_id.as_deref() != Some(session_id.as_str()) {
+                                debug!(
+                                    slot_id,
+                                    session_id = %session_id,
+                                    previous_session_id = ?target_session_id,
+                                    "Jarvis JSONL watcher bound current turn session"
+                                );
+                                target_session_id = Some(session_id.clone());
+                            }
+                        } else if let Some(db) = db.as_ref() {
+                            if let Ok(Some(current_session_id)) = db.get_slot_session(&slot_id).await {
+                                if current_session_id == session_id
+                                    && target_session_id.as_deref() != Some(session_id.as_str())
+                                {
+                                    debug!(
+                                        slot_id,
+                                        session_id = %session_id,
+                                        previous_session_id = ?target_session_id,
+                                        "Jarvis JSONL watcher refreshed slot session binding"
+                                    );
+                                    target_session_id = Some(session_id.clone());
+                                }
+                            }
+                        }
+
                         if target_session_id.as_deref() == Some(session_id.as_str()) {
+                            last_provider_event_time = std::time::Instant::now();
                             process_jsonl_messages!(messages);
                         }
                     }
@@ -2324,6 +2404,36 @@ impl PTYWebSocketServer {
 
                 // Heartbeat timeout
                 _ = tokio::time::sleep(recv_timeout) => {
+                    if (past_first_thinking || had_activity)
+                        && last_assistant_text.is_none()
+                        && last_provider_event_time.elapsed() >= idle_without_final_grace
+                    {
+                        if let Some(status) = pty_manager.get_status(&slot_id).await {
+                            if let Ok(lines) = pty_manager.get_last_lines(&slot_id, 40).await {
+                                let snapshot = crate::pty::recognize_screen(
+                                    status.engine,
+                                    &lines,
+                                    status.state,
+                                );
+                                if matches!(
+                                    snapshot.state,
+                                    crate::pty::PtyCanonicalState::Idle
+                                        | crate::pty::PtyCanonicalState::Complete
+                                ) {
+                                    completed_by_idle = true;
+                                    idle_without_final = true;
+                                    warn!(
+                                        ?addr,
+                                        slot_id,
+                                        trace_id = %chat_id,
+                                        reason = %snapshot.reason,
+                                        "Jarvis provider returned to prompt without durable final"
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                    }
                     let _ = stream.write_all(b":\n\n").await;
                     let _ = stream.flush().await;
                     last_event_time = std::time::Instant::now();
@@ -2342,6 +2452,22 @@ impl PTYWebSocketServer {
                         messages,
                         ..
                     })) => {
+                        if messages_match_current_turn(&messages) {
+                            if target_session_id.as_deref() != Some(session_id.as_str()) {
+                                target_session_id = Some(session_id.clone());
+                            }
+                        } else if let Some(db) = db.as_ref() {
+                            if let Ok(Some(current_session_id)) =
+                                db.get_slot_session(&slot_id).await
+                            {
+                                if current_session_id == session_id
+                                    && target_session_id.as_deref() != Some(session_id.as_str())
+                                {
+                                    target_session_id = Some(session_id.clone());
+                                }
+                            }
+                        }
+
                         if target_session_id.as_deref() == Some(session_id.as_str()) {
                             process_jsonl_messages!(messages);
                         }
@@ -2354,89 +2480,185 @@ impl PTYWebSocketServer {
         }
 
         // ── send() result: emit buffered response, persist, close ──
-        match send_handle.await {
-            Ok(Ok(result)) => {
-                let duration_ms = start_time.elapsed().as_millis() as u64;
+        let send_result = if completed_by_idle && !send_handle.is_finished() {
+            let mut send_handle = send_handle;
+            tokio::select! {
+                result = &mut send_handle => Some(result),
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(2)) => {
+                    send_handle.abort();
+                    None
+                }
+            }
+        } else {
+            Some(send_handle.await)
+        };
 
-                // Use the last JSONL assistant message (the final answer), or PTY fallback
-                let final_response = if let Some(ref text) = last_assistant_text {
-                    text.clone()
+        let mut fatal_error: Option<String> = None;
+        match send_result {
+            Some(Ok(Ok(result))) => {
+                debug!(
+                    ?addr,
+                    slot_id,
+                    response_len = result.response.len(),
+                    trace_id = %chat_id,
+                    "PTY send() returned diagnostic screen response"
+                );
+            }
+            Some(Ok(Err(e))) => {
+                if last_assistant_text.is_none() {
+                    fatal_error = Some(format!("Claude Code error: {}", e));
                 } else {
-                    // No JSONL content — use PTY response with cleaning as fallback
-                    clean_jarvis_response(&result.response, "")
-                };
-                trace_store
-                    .complete_trace(&chat_id, &final_response, duration_ms)
-                    .await;
+                    warn!(?addr, slot_id, error = %e, trace_id = %chat_id, "Chat completions send() ended with error after durable output");
+                }
+            }
+            Some(Err(e)) => {
+                if last_assistant_text.is_none() {
+                    fatal_error = Some(format!("Internal error: {}", e));
+                } else {
+                    warn!(?addr, slot_id, error = %e, trace_id = %chat_id, "Chat completions send task ended after durable output");
+                }
+            }
+            None => {
+                warn!(?addr, slot_id, trace_id = %chat_id, "Chat completions closed by idle completion before send() returned");
+            }
+        }
 
-                // Persist conversation to DB
-                if let (Some(ref db), Some(ref cid)) = (&db, &jarvis_conv_id) {
-                    if !raw_user_text.is_empty() {
-                        if let Err(e) = db
-                            .jarvis_save_exchange(cid, &raw_user_text, &final_response)
-                            .await
-                        {
-                            warn!(error = %e, conv_id = %cid, "Failed to save jarvis exchange");
-                        } else if conversation_id.is_none() {
-                            let title = if raw_user_text.chars().count() > 80 {
-                                let truncated: String = raw_user_text.chars().take(77).collect();
-                                format!("{}...", truncated)
-                            } else {
-                                raw_user_text.clone()
-                            };
-                            let _ = db.jarvis_update_title(cid, &title).await;
+        if fatal_error.is_none() && last_assistant_text.is_none() {
+            if let Some(ref mut jrx) = jsonl_rx {
+                let settle_deadline = tokio::time::Instant::now()
+                    + tokio::time::Duration::from_millis(jarvis_final_settle_ms());
+                loop {
+                    if last_assistant_text.is_some() {
+                        break;
+                    }
+                    match tokio::time::timeout_at(settle_deadline, jrx.recv()).await {
+                        Ok(Ok(WatcherEvent::NewMessages {
+                            session_id,
+                            messages,
+                            ..
+                        })) => {
+                            if messages_match_current_turn(&messages) {
+                                if target_session_id.as_deref() != Some(session_id.as_str()) {
+                                    target_session_id = Some(session_id.clone());
+                                }
+                            } else if let Some(db) = db.as_ref() {
+                                if let Ok(Some(current_session_id)) =
+                                    db.get_slot_session(&slot_id).await
+                                {
+                                    if current_session_id == session_id
+                                        && target_session_id.as_deref() != Some(session_id.as_str())
+                                    {
+                                        target_session_id = Some(session_id.clone());
+                                    }
+                                }
+                            }
+
+                            if target_session_id.as_deref() == Some(session_id.as_str()) {
+                                process_jsonl_messages!(messages);
+                            }
                         }
+                        Ok(Ok(_)) => {}
+                        Ok(Err(_)) => {}
+                        Err(_) => break,
                     }
                 }
+            }
+        }
 
-                // Emit the final response as a single SSE chunk
-                if !final_response.is_empty() {
-                    let chunk = serde_json::json!({
-                        "id": &chat_id,
-                        "object": "chat.completion.chunk",
-                        "model": "jarvis-missiond",
-                        "choices": [{"index": 0, "delta": {"content": final_response}, "finish_reason": serde_json::Value::Null}]
-                    });
-                    let _ = stream
-                        .write_all(format!("data: {}\n\n", chunk).as_bytes())
-                        .await;
+        if idle_without_final && last_assistant_text.is_none() {
+            fatal_error = Some(
+                "Claude Code returned to the input prompt without producing a final answer. The request was closed to avoid an infinite iOS/Jarvis wait; please retry or inspect the worker transcript."
+                    .to_string(),
+            );
+        }
+
+        if let Some(error_message) = fatal_error {
+            trace_store
+                .error_trace(&chat_id, &error_message, None)
+                .await;
+            let err = serde_json::json!({"error": {"message": error_message}});
+            let _ = stream
+                .write_all(format!("data: {}\n\n", err).as_bytes())
+                .await;
+            let _ = stream.write_all(b"data: [DONE]\n\n").await;
+            let _ = stream.flush().await;
+            warn!(?addr, slot_id, trace_id = %chat_id, "Chat completions error");
+        } else {
+            let duration_ms = start_time.elapsed().as_millis() as u64;
+
+            // User-visible content must come from the durable JSONL assistant final.
+            // PTY screen text is diagnostic only and must never become chat content.
+            let final_response = if let Some(ref text) = last_assistant_text {
+                text.clone()
+            } else {
+                String::new()
+            };
+
+            if final_response.is_empty() {
+                let error_message =
+                    "Claude Code did not produce a durable assistant final message. PTY screen text is diagnostic only and will not be used as chat content."
+                        .to_string();
+                trace_store
+                    .error_trace(&chat_id, &error_message, None)
+                    .await;
+                let err = serde_json::json!({"error": {"message": error_message}});
+                let _ = stream
+                    .write_all(format!("data: {}\n\n", err).as_bytes())
+                    .await;
+                let _ = stream.write_all(b"data: [DONE]\n\n").await;
+                let _ = stream.flush().await;
+                warn!(?addr, slot_id, trace_id = %chat_id, "Chat completions missing durable final");
+                let _ = stream.shutdown().await;
+                return Ok(());
+            }
+            trace_store
+                .complete_trace(&chat_id, &final_response, duration_ms)
+                .await;
+
+            // Persist conversation to DB
+            if let (Some(ref db), Some(ref cid)) = (&db, &jarvis_conv_id) {
+                if !raw_user_text.is_empty() {
+                    if let Err(e) = db
+                        .jarvis_save_exchange(cid, &raw_user_text, &final_response)
+                        .await
+                    {
+                        warn!(error = %e, conv_id = %cid, "Failed to save jarvis exchange");
+                    } else if conversation_id.is_none() {
+                        let title = if raw_user_text.chars().count() > 80 {
+                            let truncated: String = raw_user_text.chars().take(77).collect();
+                            format!("{}...", truncated)
+                        } else {
+                            raw_user_text.clone()
+                        };
+                        let _ = db.jarvis_update_title(cid, &title).await;
+                    }
                 }
+            }
 
-                let stop = serde_json::json!({
+            // Emit the final response as a single SSE chunk.
+            if !final_response.is_empty() {
+                let chunk = serde_json::json!({
                     "id": &chat_id,
                     "object": "chat.completion.chunk",
                     "model": "jarvis-missiond",
-                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+                    "choices": [{"index": 0, "delta": {"content": final_response}, "finish_reason": serde_json::Value::Null}]
                 });
                 let _ = stream
-                    .write_all(format!("data: {}\n\n", stop).as_bytes())
+                    .write_all(format!("data: {}\n\n", chunk).as_bytes())
                     .await;
-                let _ = stream.write_all(b"data: [DONE]\n\n").await;
-                info!(?addr, slot_id, response_len = final_response.len(), duration_ms, trace_id = %chat_id, "Chat completions done (JSONL+PTY)");
             }
-            Ok(Err(e)) => {
-                trace_store
-                    .error_trace(&chat_id, &e.to_string(), None)
-                    .await;
-                let err =
-                    serde_json::json!({"error": {"message": format!("Claude Code error: {}", e)}});
-                let _ = stream
-                    .write_all(format!("data: {}\n\n", err).as_bytes())
-                    .await;
-                let _ = stream.write_all(b"data: [DONE]\n\n").await;
-                warn!(?addr, slot_id, error = %e, trace_id = %chat_id, "Chat completions error");
-            }
-            Err(e) => {
-                trace_store
-                    .error_trace(&chat_id, &e.to_string(), None)
-                    .await;
-                let err =
-                    serde_json::json!({"error": {"message": format!("Internal error: {}", e)}});
-                let _ = stream
-                    .write_all(format!("data: {}\n\n", err).as_bytes())
-                    .await;
-                let _ = stream.write_all(b"data: [DONE]\n\n").await;
-            }
+
+            let stop = serde_json::json!({
+                "id": &chat_id,
+                "object": "chat.completion.chunk",
+                "model": "jarvis-missiond",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+            });
+            let _ = stream
+                .write_all(format!("data: {}\n\n", stop).as_bytes())
+                .await;
+            let _ = stream.write_all(b"data: [DONE]\n\n").await;
+            info!(?addr, slot_id, response_len = final_response.len(), duration_ms, trace_id = %chat_id, "Chat completions done (JSONL+PTY)");
         }
 
         let _ = stream.shutdown().await;
