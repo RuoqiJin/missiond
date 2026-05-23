@@ -1882,6 +1882,9 @@ impl PTYWebSocketServer {
             .get("task_kind")
             .and_then(|v| v.as_str())
             .unwrap_or("jarvis-grounded-review");
+        let context_pack_hash = context_pack_path
+            .strip_prefix("shared-artifact://")
+            .unwrap_or(context_pack_path);
         format!(
             "请基于已确认的 Jarvis intent.lisp / plan.lisp 执行一个只读工位任务。\n\n\
              用户目标：\n{}\n\n\
@@ -1890,10 +1893,15 @@ impl PTYWebSocketServer {
              context_pack_path: {}\n\n\
              工作方式：\n\
              - 这是已经过 Jarvis 意图确认和计划确认的 grounded dispatch，不要重新扮演主控。\n\
-             - 先读取 grounding/context-pack 中列出的证据；缺能力时快速失败并给 diagnostic。\n\
+             - 先读取 grounding/context-pack 中列出的证据；若 context_pack_path 是 shared-artifact://，请优先用 MissionD MCP 调 mission_shared_memory(action=\"artifact_get\", hash=\"{}\") 或 mission_context_slice 读取上下文切片。\n\
+             - 如果本工位没有 mission_shared_memory / mission_context_slice MCP 工具，不要自行大范围搜索代码；请快速失败并输出 Diagnostic / Evidence / Verification，说明 MCP unavailable。\n\
              - 不要修改文件、不要 stage、不要 commit、不要在工位内部创建子任务或再派其他工位。\n\
              - 输出必须是结构化 artifact，包含 Findings / Evidence / Recommendations / Verification 四段。",
-            raw_user_text, task_kind, grounding_context_id, context_pack_path
+            raw_user_text,
+            task_kind,
+            grounding_context_id,
+            context_pack_path,
+            context_pack_hash
         )
     }
 

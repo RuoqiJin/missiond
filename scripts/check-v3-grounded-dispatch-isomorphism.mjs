@@ -165,6 +165,8 @@ const checks = [
       'std::time::Duration::from_secs(8)',
       'Self::extract_task_result_artifact_hash',
       'Self::put_jarvis_artifact',
+      'mission_shared_memory(action=\\"artifact_get\\"',
+      'mission_context_slice',
     ],
   ],
   [
@@ -183,6 +185,16 @@ const checks = [
     'aggregate registration',
     'scripts/check-v3-code-isomorphism-complete.mjs',
     ['scripts/check-v3-grounded-dispatch-isomorphism.mjs'],
+  ],
+  [
+    'autopilot empty final diagnostic',
+    'crates/missiond-daemon/src/engine/intent_engine/autopilot.rs',
+    [
+      'provider-empty-final',
+      'provider returned an empty final response after slot',
+      'status: Some("failed".to_string())',
+      'task_result_artifact:',
+    ],
   ],
 ];
 

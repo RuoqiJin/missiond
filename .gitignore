@@ -46,6 +46,7 @@ dist/
 .missiond/v3/runtime/lisp-code-sync/*.report.lisp
 .missiond/v3/runtime/jarvis-smoke/*.json
 .missiond/v3/runtime/jarvis-smoke/*.lisp
+.missiond/v3/runtime/jarvis-smoke/*.sse
 .missiond/v3/runtime/jarvis-smoke/*.report.*
 .missiond/v3/runtime/convergence-status-cache.json
 .missiond/v3/runtime/compiled/*.json

@@ -7,12 +7,14 @@
     ((shard default
        :accepted_shard_id "20260523-jarvis-intent-plan-codex-agy-shard-default"
        :read_scope ["."]
-	       :write_scope [".missiond/frontend/board-blueprint.lisp"
+       :write_scope [".gitignore"
+                     ".missiond/frontend/board-blueprint.lisp"
 	                     ".missiond/v3/evidence/blueprint-notes.lisp"
 	                     ".missiond/v3/evidence/codex-boot-context.lisp"
 	                     ".missiond/v3/evidence/workstation-pool.lisp"
 	                     ".missiond/v3/shards/implementation/knowledge-surfaces.lisp"
 	                     ".missiond/v3/shards/memory-knowledge-runtime.lisp"
+                     ".missiond/v3/shards/request-runtime.lisp"
 	                     ".missiond/v3/shards/v2-convergence-map.lisp"
 	                     ".missiond/v3/shards/implementation/runtime-surfaces.lisp"
 	                     ".missiond/v3/shards/universe/infrastructure.lisp"
@@ -56,6 +58,7 @@
 	                     "scripts/check-v3-cli-conversation-ingestion-isomorphism.mjs"
 	                     "scripts/check-v3-code-isomorphism-complete.mjs"
 	                     "scripts/check-v3-final-convergence.mjs"
+                     "scripts/check-v3-grounded-dispatch-isomorphism.mjs"
 	                     "scripts/check-v3-infrastructure-universe-isomorphism.mjs"
 	                     "scripts/check-v3-pty-recognition-isomorphism.mjs"
                      "scripts/check-v3-project-registry-isomorphism.mjs"

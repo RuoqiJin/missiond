@@ -57,6 +57,7 @@ function main() {
       'Agy is the successor research CLI lane',
       'Codex code/review worker lanes are ordinary BoardTask candidates',
       'Agy/Antigravity writes durable markdown artifacts under the provider brain store',
+      'provider-empty-final task-result-artifact diagnostic',
     ]);
     requireAll(diagnostics, FILES.workstationPoolEvidence, sources.workstationPoolEvidence, [
       'agy-research',
@@ -102,6 +103,7 @@ function main() {
       '.gemini/antigravity-cli/brain',
       'source: "agy_artifact".to_string()',
       'agy_artifact_matches_task',
+      'provider-empty-final',
     ]);
     requireAll(diagnostics, FILES.main, sources.main, [
       'GenericCliSlotManager::new',

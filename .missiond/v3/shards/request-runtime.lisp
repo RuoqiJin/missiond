@@ -73,7 +73,8 @@
          :core ((step s1 :logic "derive query from explicit unknowns or the raw objective; never use broad historical preload as the query source")
                 (step s2 :logic "query project registry, active SSOT, active KB, skill evidence, infra/deploy facts, active Board task records, bounded conversations, and tool directory through the aggregate")
                 (step s3 :logic "return source-specific diagnostics for missing or stale authorities instead of letting the worker guess")
-                (step s4 :logic "persist the payload into shared_artifacts(kind=context-gather) and return grounding_context_id plus shared-artifact context_pack_path"))
+                (step s4 :logic "persist the payload into shared_artifacts(kind=context-gather) and return grounding_context_id plus shared-artifact context_pack_path")
+                (step s5 :logic "when context_pack_path is a shared-artifact URI, Jarvis worker prompts must include the concrete mission_shared_memory(action=artifact_get, hash=...) or mission_context_slice retrieval method; opaque artifact URIs without retrieval instructions are invalid"))
          :egress [grounding_context_id context_pack_path sources_used diagnostics shared_artifact])
        (function task-delegate-grounding-gate
          :entry [mission_task_delegate mission_swarm_run mission_plan_execute]
@@ -97,7 +98,8 @@
                 (step s3 :logic "bound artifact write latency with an explicit timeout and emit TASK_RESULT_ARTIFACT_WRITE_TIMEOUT when the writer stalls")
                 (step s4 :logic "emit TASK_RESULT_ARTIFACT_WRITE_FAILED diagnostic instead of pretending a missing artifact exists")
                 (step s5 :logic "if a BoardTask is done with a summary but no artifact hash, emit TASK_RESULT_ARTIFACT_REQUIRED and fail fast instead of streaming the Board note as final text")
-                (step s6 :logic "stream final text only after the task-result artifact hash is known or the diagnostic is surfaced"))
+                (step s6 :logic "stream final text only after the task-result artifact hash is known or the diagnostic is surfaced")
+                (step s7 :logic "if the worker provider returns an empty final after its slot is idle/exited/error, write provider-empty-final as a task-result-artifact diagnostic, fail the BoardTask, and notify Jarvis instead of leaving the task running until mobile timeout"))
          :egress [task-result-artifact result_artifact_event final_event diagnostic]))
     :invariants
       ["All non-exact worker dispatch must carry grounding_context_id before a provider PTY receives the prompt."

@@ -1434,6 +1434,19 @@ fn is_probably_active_tui_summary(summary: &str) -> bool {
         || looks_like_intermediate_assistant_narration(trimmed)
 }
 
+fn terminal_slot_empty_final_requires_diagnostic(
+    summary: &str,
+    slot_state: Option<SessionState>,
+) -> bool {
+    if !summary.trim().is_empty() {
+        return false;
+    }
+    matches!(
+        slot_state,
+        None | Some(SessionState::Idle | SessionState::Exited | SessionState::Error)
+    )
+}
+
 fn worker_final_close_blocker(summary: &str) -> Option<&'static str> {
     let lower = summary.to_ascii_lowercase();
     const BLOCKING_MARKERS: [(&str, &str); 13] = [
@@ -3486,6 +3499,81 @@ async fn dispatch_board_tasks_with_config(
                         .unwrap_or_else(|| {
                             extract_worker_final_summary(&res.response, &full_prompt)
                         });
+                    let slot_state_after_send =
+                        state.pty.get_status(&slot_id).await.map(|info| info.state);
+                    if terminal_slot_empty_final_requires_diagnostic(
+                        &final_summary,
+                        slot_state_after_send,
+                    ) {
+                        warn!(
+                            task_id = %task.id,
+                            slot_id = %slot_id,
+                            duration_ms = res.duration_ms,
+                            "Autopilot: provider returned empty final after terminal slot state; failing task with diagnostic artifact"
+                        );
+                        let diagnostic_summary = format!(
+                            "Diagnostic: provider returned an empty final response after slot `{}` reached a terminal/idle state. MissionD did not receive a durable provider final or structured PTY final, so this BoardTask is failed instead of left running. Retry with a grounded context slice or inspect the provider session.",
+                            slot_id
+                        );
+                        let task_result_artifact_hash = put_autopilot_task_result_artifact(
+                            state,
+                            task,
+                            &slot_id,
+                            durable_completion.as_ref(),
+                            &diagnostic_summary,
+                            res.duration_ms,
+                        )
+                        .await;
+                        let artifact_suffix = task_result_artifact_hash
+                            .as_ref()
+                            .map(|hash| format!("\n\ntask_result_artifact: `{hash}`"))
+                            .unwrap_or_default();
+                        let _ = state
+                            .store
+                            .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+                                task_id: task.id.to_string(),
+                                content: format!(
+                                    "⚠️ **Autopilot failed close** — provider-empty-final\n\n{}{}",
+                                    truncate_safe(
+                                        &diagnostic_summary,
+                                        AUTOPILOT_SUMMARY_NOTE_MAX_BYTES
+                                    ),
+                                    artifact_suffix
+                                ),
+                                note_type: Some("summary".to_string()),
+                                author: Some("autopilot".to_string()),
+                            })
+                            .await;
+                        let _ = state
+                            .store
+                            .update_board_task(
+                                task.id.as_str(),
+                                &missiond_core::types::UpdateBoardTaskInput {
+                                    status: Some("failed".to_string()),
+                                    ..Default::default()
+                                },
+                            )
+                            .await;
+                        let _ = state
+                            .bus
+                            .publish_board(BoardEvent::StatusChanged {
+                                task_id: task.id.to_string(),
+                                old_status: format!("{:?}", task.status),
+                                new_status: "failed".to_string(),
+                            })
+                            .await;
+                        let _ = state
+                            .store
+                            .update_prompt_snapshot_outcome(task.id.as_str(), "failed")
+                            .await;
+                        notify_jarvis_failure(
+                            state,
+                            task,
+                            "provider returned an empty final response after the worker slot became idle",
+                        )
+                        .await;
+                        return;
+                    }
                     if is_probably_active_tui_summary(&final_summary) {
                         warn!(
                             task_id = %task.id,
@@ -6329,6 +6417,27 @@ Review only.
         let prompt = dispatched_prompt("task-empty");
         let summary = extract_worker_final_summary("", &prompt);
         assert_eq!(summary, "");
+    }
+
+    #[test]
+    fn terminal_slot_empty_final_requires_diagnostic_only_for_terminal_slot_state() {
+        assert!(terminal_slot_empty_final_requires_diagnostic(
+            "",
+            Some(SessionState::Idle)
+        ));
+        assert!(terminal_slot_empty_final_requires_diagnostic(
+            "   ",
+            Some(SessionState::Exited)
+        ));
+        assert!(terminal_slot_empty_final_requires_diagnostic("", None));
+        assert!(!terminal_slot_empty_final_requires_diagnostic(
+            "",
+            Some(SessionState::Thinking)
+        ));
+        assert!(!terminal_slot_empty_final_requires_diagnostic(
+            "Findings\n- ok",
+            Some(SessionState::Idle)
+        ));
     }
 
     #[test]
