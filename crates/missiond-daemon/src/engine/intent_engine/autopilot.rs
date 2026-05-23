@@ -1982,13 +1982,59 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
     dispatch_board_tasks_with_config(state, &runtime_config).await
 }
 
-/// Parse a `- field: value` line out of a `## Dispatch metadata` or
-/// `## Swarm metadata` block embedded in a BoardTask description. Returns the
-/// trimmed value when the field appears under one of those headings; falls
-/// back to scanning the whole description so externally-built BoardTasks that
-/// only use a `task_class:` line still hit. Empty values are dropped so
-/// `field:` placeholders never override the structured class.
+fn json_metadata_value_to_string(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(raw) => {
+            let value = raw.trim();
+            (!value.is_empty()).then(|| value.to_string())
+        }
+        serde_json::Value::Array(items) => {
+            if items.is_empty() {
+                None
+            } else {
+                Some(value.to_string())
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            if fields.is_empty() {
+                None
+            } else {
+                Some(value.to_string())
+            }
+        }
+        _ => Some(value.to_string()),
+    }
+}
+
+fn extract_json_dispatch_metadata_field(description: &str, field: &str) -> Option<String> {
+    let meta = serde_json::from_str::<serde_json::Value>(description).ok()?;
+    let root = meta.as_object()?;
+    if let Some(value) = root.get(field).and_then(json_metadata_value_to_string) {
+        return Some(value);
+    }
+    for nested in ["metadata", "dispatch_metadata", "swarm_metadata"] {
+        if let Some(value) = root
+            .get(nested)
+            .and_then(|value| value.as_object())
+            .and_then(|fields| fields.get(field))
+            .and_then(json_metadata_value_to_string)
+        {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// Parse dispatch metadata from a BoardTask description.
+///
+/// Supports both current Jarvis/work-order JSON metadata and legacy markdown
+/// `- field: value` lines under `## Dispatch metadata` / `## Swarm metadata`.
+/// Empty values are dropped so placeholders never override structured class.
 pub(crate) fn extract_dispatch_metadata_field(description: &str, field: &str) -> Option<String> {
+    if let Some(value) = extract_json_dispatch_metadata_field(description, field) {
+        return Some(value);
+    }
     let needle = format!("- {}:", field);
     let mut in_metadata = false;
     let mut found_outside: Option<String> = None;
@@ -6715,10 +6761,74 @@ Review only.
     }
 
     #[test]
+    fn extract_dispatch_metadata_field_reads_json_metadata() {
+        let description = serde_json::json!({
+            "source": "jarvis-intent-plan-gate",
+            "grounding_context_id": "ctx-123",
+            "context_pack_path": "/tmp/context-pack.lisp",
+            "dispatch_metadata": {
+                "task_class": "review"
+            }
+        })
+        .to_string();
+        assert_eq!(
+            extract_dispatch_metadata_field(&description, "grounding_context_id"),
+            Some("ctx-123".to_string())
+        );
+        assert_eq!(
+            extract_dispatch_metadata_field(&description, "task_class"),
+            Some("review".to_string())
+        );
+        assert_eq!(
+            extract_dispatch_metadata_field(&description, "context_pack_path"),
+            Some("/tmp/context-pack.lisp".to_string())
+        );
+    }
+
+    #[test]
     fn extract_dispatch_metadata_field_drops_empty_values() {
         let description = "## Dispatch metadata\n- task_class:\n- engine_hint:   \n";
         assert!(extract_dispatch_metadata_field(description, "task_class").is_none());
         assert!(extract_dispatch_metadata_field(description, "engine_hint").is_none());
+    }
+
+    #[test]
+    fn autopilot_grounding_gate_accepts_jarvis_grounding_json() {
+        let description = serde_json::json!({
+            "source": "jarvis-intent-plan-gate",
+            "conversation_id": "conv-123",
+            "grounding_context_id": "ctx-123",
+            "intent_artifact_id": "intent-123",
+            "plan_artifact_id": "plan-123"
+        })
+        .to_string();
+        let mut task = make_board_task("Jarvis confirmed plan", &description, "jarvis", None);
+        task.auto_execute = true;
+        assert_eq!(autopilot_grounding_gate_reason(&task), None);
+    }
+
+    #[test]
+    fn autopilot_grounding_gate_blocks_ungrounded_broad_auto_task() {
+        let mut task = make_board_task("Broad task", "Please do the broad thing.", "dev", None);
+        task.auto_execute = true;
+        assert_eq!(
+            autopilot_grounding_gate_reason(&task).as_deref(),
+            Some("Autopilot refused broad dispatch without grounding_context_id. Run mission_context_gather(persist=true) or create an exact shard with context_pack_path, accepted_shard_id, and write_scope.")
+        );
+    }
+
+    #[test]
+    fn autopilot_grounding_gate_allows_json_exact_shard() {
+        let description = serde_json::json!({
+            "context_pack_path": "/tmp/context-pack.lisp",
+            "accepted_shard_id": "shard-a1",
+            "write_scope": ["crates/missiond-core/src/ws/server.rs"]
+        })
+        .to_string();
+        let mut task = make_board_task("Exact shard", &description, "dev", None);
+        task.auto_execute = true;
+        assert!(board_task_exact_shard_ready(&task));
+        assert_eq!(autopilot_grounding_gate_reason(&task), None);
     }
 
     #[test]

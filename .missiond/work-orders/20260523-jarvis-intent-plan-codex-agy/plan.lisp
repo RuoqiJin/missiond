@@ -24,6 +24,7 @@
                      "crates/missiond-daemon/src/context/v3_contracts/generated.rs"
                      "crates/missiond-daemon/src/context/v3_runtime_defaults/generated.rs"
                      "crates/missiond-daemon/src/control_tree.rs"
+                     "crates/missiond-daemon/src/engine/intent_engine/autopilot.rs"
                      "crates/missiond-daemon/src/handlers/compute/slot.rs"
                      "crates/missiond-daemon/src/handlers/knowledge/request/respond/materialization.rs"
                      "crates/missiond-daemon/src/main.rs"
