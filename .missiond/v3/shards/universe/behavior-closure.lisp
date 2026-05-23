@@ -67,6 +67,24 @@
     :effects [])
 
   (behavior
+    :id agent-navigation-quality-subprocess
+    :kind subprocess
+    :owner agent-navigation
+    :observed ["subprocess:scripts/agent-navigation.mjs:111"]
+    :code ["scripts/agent-navigation.mjs"
+           "scripts/check-v3-agent-navigation-quality.mjs"]
+    :effects []
+    (anchor
+      :role subprocess
+      :observed "subprocess:scripts/agent-navigation.mjs:111"
+      :file "scripts/agent-navigation.mjs"
+      :symbol "evaluateQuality")
+    (trigger
+      :from-file "scripts/agent-navigation.mjs"
+      :from-symbol "evaluateQuality"
+      :calls "scripts/check-v3-agent-navigation-quality.mjs"))
+
+  (behavior
     :id global-claude-md-sync
     :kind effect
     :owner context-runtime

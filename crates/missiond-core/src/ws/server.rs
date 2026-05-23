@@ -1594,6 +1594,120 @@ impl PTYWebSocketServer {
 
             match task.status {
                 crate::types::BoardTaskStatus::Done => {
+                    if latest_summary.is_none() || latest_artifact_hash.is_none() {
+                        match db.get_board_task_notes(task_id).await {
+                            Ok(notes) => {
+                                if let Some(note) = notes
+                                    .iter()
+                                    .rev()
+                                    .find(|note| note.note_type.as_str() == "summary")
+                                {
+                                    let content = note.content.clone();
+                                    latest_summary = Some(content.clone());
+                                    let mut artifact_hash =
+                                        Self::extract_task_result_artifact_hash(&content);
+                                    if artifact_hash.is_none() {
+                                        let artifact_write = Self::put_jarvis_artifact(
+                                            jarvis_artifact_writer,
+                                            JarvisArtifactRequest {
+                                                kind: "task-result-artifact".to_string(),
+                                                project_id: Some("missiond".to_string()),
+                                                task_id: Some(task_id.to_string()),
+                                                payload: serde_json::json!({
+                                                    "schema": "missiond.jarvis-task-result.v1",
+                                                    "task_id": task_id,
+                                                    "note_id": note.id,
+                                                    "note_type": note.note_type.as_str(),
+                                                    "author": note.author,
+                                                    "summary": content.clone(),
+                                                    "result_status": "completed",
+                                                    "source": "jarvis-terminal-revalidate"
+                                                }),
+                                                metadata: serde_json::json!({
+                                                    "schema": "missiond.jarvis-task-result.v1",
+                                                    "task_id": task_id,
+                                                    "provider": note.author,
+                                                    "result_status": "completed",
+                                                    "source": "jarvis-terminal-revalidate"
+                                                }),
+                                            },
+                                        );
+                                        match tokio::time::timeout(
+                                            std::time::Duration::from_secs(8),
+                                            artifact_write,
+                                        )
+                                        .await
+                                        {
+                                            Ok(Ok(result)) => {
+                                                artifact_hash = Some(result.artifact_hash);
+                                            }
+                                            Ok(Err(error)) => {
+                                                let diagnostic = serde_json::json!({
+                                                    "phase": "done",
+                                                    "task_id": task_id,
+                                                    "note_id": note.id,
+                                                    "error": {
+                                                        "code": "TASK_RESULT_ARTIFACT_REVALIDATE_FAILED",
+                                                        "message": error
+                                                    }
+                                                });
+                                                Self::write_sse_event(
+                                                    stream,
+                                                    "diagnostic",
+                                                    &diagnostic,
+                                                )
+                                                .await?;
+                                            }
+                                            Err(_) => {
+                                                let diagnostic = serde_json::json!({
+                                                    "phase": "done",
+                                                    "task_id": task_id,
+                                                    "note_id": note.id,
+                                                    "error": {
+                                                        "code": "TASK_RESULT_ARTIFACT_REVALIDATE_TIMEOUT",
+                                                        "message": "task-result-artifact terminal revalidate did not finish within 8s"
+                                                    }
+                                                });
+                                                Self::write_sse_event(
+                                                    stream,
+                                                    "diagnostic",
+                                                    &diagnostic,
+                                                )
+                                                .await?;
+                                            }
+                                        }
+                                    }
+                                    if artifact_hash.is_some() {
+                                        latest_artifact_hash = artifact_hash.clone();
+                                    }
+                                    let event = serde_json::json!({
+                                        "task_id": task_id,
+                                        "note_id": note.id,
+                                        "note_type": note.note_type.as_str(),
+                                        "author": note.author,
+                                        "created_at": note.created_at,
+                                        "artifact_hash": artifact_hash,
+                                        "content": content.chars().take(12_000).collect::<String>(),
+                                        "truncated": content.chars().count() > 12_000,
+                                        "source": "jarvis-terminal-revalidate",
+                                    });
+                                    Self::write_sse_event(stream, "result_artifact", &event)
+                                        .await?;
+                                }
+                            }
+                            Err(error) => {
+                                let diagnostic = serde_json::json!({
+                                    "phase": "done",
+                                    "task_id": task_id,
+                                    "error": {
+                                        "code": "BOARD_TASK_NOTES_REVALIDATE_FAILED",
+                                        "message": error.to_string()
+                                    }
+                                });
+                                Self::write_sse_event(stream, "diagnostic", &diagnostic).await?;
+                            }
+                        }
+                    }
                     if latest_summary.is_some() && latest_artifact_hash.is_none() {
                         let diagnostic = serde_json::json!({
                             "phase": "done",
