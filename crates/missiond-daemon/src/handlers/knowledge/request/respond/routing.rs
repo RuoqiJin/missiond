@@ -110,8 +110,7 @@ pub(in crate::handlers::knowledge::request) fn extract_lisp_keyword_string(
 ) -> Option<String> {
     let needle = format!(":{}", key);
     let mut cursor = 0;
-    while let Some(found) = text[cursor..].find(&needle) {
-        let abs = cursor + found;
+    while let Some(abs) = find_lisp_keyword_outside_noise(text, &needle, cursor) {
         let after = &text[abs + needle.len()..];
         let trimmed = after.trim_start_matches([' ', '\t', '\r', '\n']);
         if let Some(stripped) = trimmed.strip_prefix('"') {
@@ -133,8 +132,7 @@ pub(in crate::handlers::knowledge::request) fn extract_lisp_keyword_int(
 ) -> Option<i32> {
     let needle = format!(":{}", key);
     let mut cursor = 0;
-    while let Some(found) = text[cursor..].find(&needle) {
-        let abs = cursor + found;
+    while let Some(abs) = find_lisp_keyword_outside_noise(text, &needle, cursor) {
         let after = &text[abs + needle.len()..];
         let trimmed = after.trim_start_matches([' ', '\t', '\r', '\n']);
         let digits: String = trimmed.chars().take_while(|c| c.is_ascii_digit()).collect();
@@ -142,6 +140,54 @@ pub(in crate::handlers::knowledge::request) fn extract_lisp_keyword_int(
             return Some(n);
         }
         cursor = abs + needle.len();
+    }
+    None
+}
+
+fn find_lisp_keyword_outside_noise(text: &str, needle: &str, cursor: usize) -> Option<usize> {
+    let mut in_string = false;
+    let mut escape = false;
+    let mut in_comment = false;
+    for (idx, ch) in text.char_indices() {
+        if in_comment {
+            if ch == '\n' {
+                in_comment = false;
+            }
+            continue;
+        }
+        if in_string {
+            if escape {
+                escape = false;
+                continue;
+            }
+            if ch == '\\' {
+                escape = true;
+                continue;
+            }
+            if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        if ch == ';' {
+            in_comment = true;
+            continue;
+        }
+        if ch == '"' {
+            in_string = true;
+            continue;
+        }
+        if idx < cursor || !text[idx..].starts_with(needle) {
+            continue;
+        }
+        let after = idx + needle.len();
+        let boundary = text[after..]
+            .chars()
+            .next()
+            .is_none_or(|c| c.is_whitespace() || matches!(c, '"' | '(' | ')' | '[' | ']'));
+        if boundary {
+            return Some(idx);
+        }
     }
     None
 }

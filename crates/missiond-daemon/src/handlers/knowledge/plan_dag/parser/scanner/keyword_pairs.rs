@@ -5,8 +5,16 @@ pub(super) fn scan_keyword_pairs(form: &str) -> Vec<(String, String)> {
     let mut i = 0usize;
     let mut in_string = false;
     let mut esc = false;
+    let mut in_comment = false;
     while i < n {
         let c = chars[i];
+        if in_comment {
+            if c == '\n' {
+                in_comment = false;
+            }
+            i += 1;
+            continue;
+        }
         if in_string {
             if esc {
                 esc = false;
@@ -21,6 +29,11 @@ pub(super) fn scan_keyword_pairs(form: &str) -> Vec<(String, String)> {
             if c == '"' {
                 in_string = false;
             }
+            i += 1;
+            continue;
+        }
+        if c == ';' {
+            in_comment = true;
             i += 1;
             continue;
         }
@@ -156,4 +169,27 @@ pub(super) fn scan_keyword_pairs(form: &str) -> Vec<(String, String)> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scan_keyword_pairs_ignores_strings_and_comments() {
+        let pairs = scan_keyword_pairs(
+            r#"(node
+              :description "debug :id wrong"
+              ; :id comment-wrong
+              :id "right")"#,
+        );
+        assert_eq!(
+            pairs
+                .iter()
+                .find(|(key, _)| key == "id")
+                .map(|(_, value)| value.as_str()),
+            Some("right")
+        );
+        assert!(!pairs.iter().any(|(_, value)| value == "comment-wrong"));
+    }
 }

@@ -926,6 +926,20 @@ fn extract_lisp_keyword_string_returns_none_when_missing() {
 }
 
 #[test]
+fn extract_lisp_keyword_ignores_strings_and_comments() {
+    let text = r#"(directive
+      :note "debug :directive_id \"wrong\" :version 99"
+      ; :directive_id "comment-wrong" :version 88
+      :directive_id "right"
+      :version 7)"#;
+    assert_eq!(
+        extract_lisp_keyword_string(text, "directive_id"),
+        Some("right".to_string())
+    );
+    assert_eq!(extract_lisp_keyword_int(text, "version"), Some(7));
+}
+
+#[test]
 fn extract_directive_ref_from_artifact_round_trip() {
     let text =
         "(directive :directive_id \"00000000-0000-0000-0000-000000000abc\" :directive_version 7)";
