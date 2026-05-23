@@ -3,6 +3,7 @@ open Ast
 type source_unit = {
   file : string;
   kind : string;
+  domain_id : string;
   included_by : string option;
   include_line : int option;
   source_hash : string;
@@ -49,8 +50,9 @@ let include_shard_index_target = function
 
 let section_kind form = Option.value ~default:"<unknown>" (head form)
 
-let source_unit ?included_by ?include_line file source kind =
-  { file; kind; included_by; include_line; source_hash = source_hash source }
+let source_unit ?included_by ?include_line ?(domain_id = "blueprint-core") file
+    source kind =
+  { file; kind; domain_id; included_by; include_line; source_hash = source_hash source }
 
 let source_unit_to_json unit =
   Printf.sprintf
@@ -80,56 +82,33 @@ let source_domains_to_json_for_ids domains ids =
   |> List.filter (fun domain -> List.mem domain.id ids)
   |> source_domains_to_json
 
-let source_domain_ids =
-  [
-    "blueprint-core";
-    "workstation-runtime";
-    "control-plane-runtime";
-    "memory-knowledge-runtime";
-    "ops-infra";
-    "universe";
-    "implementation-map";
-    "pillar-flow";
-    "v2-convergence";
-  ]
-
-let string_contains haystack needle =
-  let haystack_len = String.length haystack in
-  let needle_len = String.length needle in
+let valid_domain_id id =
+  let len = String.length id in
+  len > 0
+  &&
   let rec loop idx =
-    if needle_len = 0 then true
-    else if idx + needle_len > haystack_len then false
-    else if String.sub haystack idx needle_len = needle then true
-    else loop (idx + 1)
+    if idx >= len then true
+    else
+      match id.[idx] with
+      | 'a' .. 'z' | '0' .. '9' | '-' -> loop (idx + 1)
+      | _ -> false
   in
   loop 0
 
-let normalize_path_separators path =
-  String.map (fun ch -> if ch = '\\' then '/' else ch) path
-
-let domain_id_for_file file =
-  let file = normalize_path_separators file in
-  let base = Filename.basename file in
-  if base = "missiond-blueprint.lisp" || string_contains file "/shards/index.lisp"
-  then "blueprint-core"
-  else if string_contains file "/shards/universe/" then "universe"
-  else if string_contains file "/shards/implementation/" then "implementation-map"
-  else
-    match base with
-    | "workstation-runtime.lisp" -> "workstation-runtime"
-    | "control-plane-runtime.lisp" | "request-runtime.lisp" ->
-        "control-plane-runtime"
-    | "memory-knowledge-runtime.lisp" -> "memory-knowledge-runtime"
-    | "ops-infra.lisp" -> "ops-infra"
-    | "pillar-flow-map.lisp" -> "pillar-flow"
-    | "v2-convergence-map.lisp" -> "v2-convergence"
-    | _ -> "blueprint-core"
+let unique_domain_ids units =
+  let rec loop seen out = function
+    | [] -> List.rev out
+    | unit :: rest ->
+        if List.mem unit.domain_id seen then loop seen out rest
+        else loop (unit.domain_id :: seen) (unit.domain_id :: out) rest
+  in
+  loop [] [] units
 
 let source_domains_of_units units =
-  source_domain_ids
+  unique_domain_ids units
   |> List.map (fun id ->
          let source_units =
-           units |> List.filter (fun unit -> domain_id_for_file unit.file = id)
+           units |> List.filter (fun unit -> unit.domain_id = id)
          in
          let source_hash =
            source_units
@@ -177,7 +156,7 @@ let merge_section name forms =
 let merge_compiler_sections forms =
   forms |> merge_section "implementation-map"
 
-let load_shard ~blueprint_dir ~included_by ~include_loc ~stack target =
+let load_shard ~blueprint_dir ~included_by ~include_loc ~stack ~domain_id target =
   if not (valid_include_path target) then
     raise
       (Reader_error
@@ -210,7 +189,7 @@ let load_shard ~blueprint_dir ~included_by ~include_loc ~stack target =
       ( forms,
         source,
         source_unit ~included_by ~include_line:include_loc.line file source
-          (shard_kind forms) )
+          ~domain_id (shard_kind forms) )
   | [] ->
       raise (Reader_error (include_loc, "included shard is empty: " ^ target))
 
@@ -229,7 +208,22 @@ let compiler_active_shards index_file forms =
   |> List.filter_map (fun shard ->
          let props = keyword_props ~start:2 shard in
          match (prop_text ":status" props, prop_text ":path" props) with
-         | Some "compiler-active", Some path -> Some (path, loc_of shard)
+         | Some "compiler-active", Some path -> (
+             match prop_text ":domain" props with
+             | Some domain when valid_domain_id domain ->
+                 Some (path, domain, loc_of shard)
+             | Some domain ->
+                 raise
+                   (Reader_error
+                      ( loc_of shard,
+                        "compiler-active shard declares invalid :domain "
+                        ^ domain ))
+             | None ->
+                 raise
+                   (Reader_error
+                      ( loc_of shard,
+                        "compiler-active shard must declare :domain; source domains are SSOT data, not compiler path inference"
+                      )))
          | _ -> None)
 
 let load_shard_index ~blueprint_dir ~included_by ~include_loc ~stack target =
@@ -253,10 +247,11 @@ let load_shard_index ~blueprint_dir ~included_by ~include_loc ~stack target =
   in
   let loaded =
     compiler_active_shards index_file index_forms
-    |> List.map (fun (target, shard_loc) ->
+    |> List.map (fun (target, domain_id, shard_loc) ->
            let forms, source, unit =
              load_shard ~blueprint_dir ~included_by:index_file
-               ~include_loc:shard_loc ~stack:(index_file :: stack) target
+               ~include_loc:shard_loc ~stack:(index_file :: stack) ~domain_id
+               target
            in
            (forms, source, unit))
   in
@@ -291,7 +286,8 @@ let expand_root blueprint_file root =
                | Some target ->
                    let forms, _source, unit =
                      load_shard ~blueprint_dir ~included_by:blueprint_file
-                       ~include_loc:(loc_of child) ~stack:[ blueprint_file ] target
+                       ~include_loc:(loc_of child) ~stack:[ blueprint_file ]
+                       ~domain_id:"blueprint-core" target
                    in
                    units := unit :: !units;
                    forms)

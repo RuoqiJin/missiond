@@ -3,6 +3,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
 use crate::context::v3_contracts::generated as v3_contracts;
@@ -21,7 +22,9 @@ use compiled_envelope::{
 use compiled_runtime::load_compiled_runtime_snapshot;
 use compiled_runtime::{load_compiled_payload, CompiledPayloadLoad, CompiledRuntimeSnapshot};
 use compiled_snapshot::compiled_runtime_snapshot_path;
-use runtime_config_payload::{generated_default_runtime_config, CompiledRuntimeConfigPayload};
+use runtime_config_payload::{
+    generated_default_runtime_config, CompiledRuntimeConfigPayload, CompiledRuntimeDomainPayload,
+};
 
 // Embedded defaults are only for test/no-install contexts where no V3 blueprint
 // root exists. When a V3 blueprint exists, runtime authority is the compiled
@@ -774,6 +777,59 @@ fn required_compiled_runtime_config(
     )))
 }
 
+fn required_compiled_runtime_domain<T, F>(
+    project_root: Option<&str>,
+    domain: &str,
+    aggregate_select: F,
+) -> Result<Option<T>, BlueprintConfigError>
+where
+    T: Clone + DeserializeOwned,
+    F: Fn(&CompiledRuntimeConfigPayload) -> T,
+{
+    let Some(root) = resolve_blueprint_root(project_root) else {
+        return Ok(None);
+    };
+    let loaded = load_compiled_runtime_domain::<T>(&root, domain, None);
+    if loaded.diagnostics.is_empty() {
+        if let Some(payload) = loaded.payload {
+            return Ok(Some(payload.config));
+        }
+    }
+
+    let aggregate = load_compiled_runtime_config(&root, None);
+    if aggregate.diagnostics.is_empty() {
+        if let Some(payload) = aggregate.payload {
+            return Ok(Some(aggregate_select(&payload)));
+        }
+    }
+
+    let mut details = Vec::new();
+    if loaded.diagnostics.is_empty() {
+        details.push(format!("compiled runtime domain {domain} payload missing"));
+    } else {
+        details.push(format!(
+            "compiled runtime domain {domain} invalid: {}",
+            loaded.diagnostics.join("; ")
+        ));
+    }
+    if aggregate.diagnostics.is_empty() {
+        details.push("compiled runtime config fallback payload missing".to_string());
+    } else {
+        details.push(format!(
+            "compiled runtime config fallback invalid: {}",
+            aggregate.diagnostics.join("; ")
+        ));
+    }
+    Err(BlueprintConfigError::Parse(format!(
+        "MissionD V3 blueprint exists at {}; compiled runtime domain {domain} is required but unavailable or invalid: {}. Required action: {V3_COMPILE_RUNTIME_ACTION}. Raw V3 Lisp source fallback is not a production runtime path.",
+        root.join(".missiond")
+            .join("v3")
+            .join("missiond-blueprint.lisp")
+            .display(),
+        details.join("; ")
+    )))
+}
+
 impl WorkstationRuntimeConfig {
     pub(crate) fn load_for_current_dir() -> Result<Self, BlueprintConfigError> {
         let cwd = std::env::current_dir().map_err(|err| BlueprintConfigError::Read {
@@ -787,8 +843,12 @@ impl WorkstationRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        if let Some(compiled) = required_compiled_runtime_config(project_root)? {
-            return Ok(compiled.workstation);
+        if let Some(compiled) =
+            required_compiled_runtime_domain(project_root, "workstation", |payload| {
+                payload.workstation.clone()
+            })?
+        {
+            return Ok(compiled);
         }
         Ok(Self::default())
     }
@@ -999,8 +1059,10 @@ impl FlowRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        if let Some(compiled) = required_compiled_runtime_config(project_root)? {
-            return Ok(compiled.flow);
+        if let Some(compiled) =
+            required_compiled_runtime_domain(project_root, "flow", |payload| payload.flow.clone())?
+        {
+            return Ok(compiled);
         }
         Ok(Self::default())
     }
@@ -1010,8 +1072,12 @@ impl ComputePrimitivesRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        if let Some(compiled) = required_compiled_runtime_config(project_root)? {
-            return Ok(compiled.compute);
+        if let Some(compiled) =
+            required_compiled_runtime_domain(project_root, "compute", |payload| {
+                payload.compute.clone()
+            })?
+        {
+            return Ok(compiled);
         }
         Ok(Self::default())
     }
@@ -1040,8 +1106,12 @@ impl MinimaxRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        if let Some(compiled) = required_compiled_runtime_config(project_root)? {
-            return Ok(compiled.minimax);
+        if let Some(compiled) =
+            required_compiled_runtime_domain(project_root, "minimax", |payload| {
+                payload.minimax.clone()
+            })?
+        {
+            return Ok(compiled);
         }
         Ok(Self::default())
     }
@@ -1068,8 +1138,12 @@ impl RouterRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        if let Some(compiled) = required_compiled_runtime_config(project_root)? {
-            return Ok(compiled.router);
+        if let Some(compiled) =
+            required_compiled_runtime_domain(project_root, "router", |payload| {
+                payload.router.clone()
+            })?
+        {
+            return Ok(compiled);
         }
         Ok(Self::default())
     }
@@ -1132,8 +1206,12 @@ impl CascadeRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        if let Some(compiled) = required_compiled_runtime_config(project_root)? {
-            return Ok(compiled.cascade);
+        if let Some(compiled) =
+            required_compiled_runtime_domain(project_root, "cascade", |payload| {
+                payload.cascade.clone()
+            })?
+        {
+            return Ok(compiled);
         }
         Ok(Self::default())
     }
@@ -1178,8 +1256,12 @@ impl ProjectRegistryRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        if let Some(compiled) = required_compiled_runtime_config(project_root)? {
-            return Ok(compiled.project_registry);
+        if let Some(compiled) =
+            required_compiled_runtime_domain(project_root, "project-registry", |payload| {
+                payload.project_registry.clone()
+            })?
+        {
+            return Ok(compiled);
         }
         Ok(Self::default())
     }
@@ -1195,8 +1277,12 @@ impl CapabilityGovernanceRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        if let Some(compiled) = required_compiled_runtime_config(project_root)? {
-            return Ok(compiled.capability_governance);
+        if let Some(compiled) =
+            required_compiled_runtime_domain(project_root, "capability-governance", |payload| {
+                payload.capability_governance.clone()
+            })?
+        {
+            return Ok(compiled);
         }
         Ok(Self::default())
     }
@@ -1231,8 +1317,12 @@ impl MemoryKbRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        if let Some(compiled) = required_compiled_runtime_config(project_root)? {
-            return Ok(compiled.memory_kb);
+        if let Some(compiled) =
+            required_compiled_runtime_domain(project_root, "memory-kb", |payload| {
+                payload.memory_kb.clone()
+            })?
+        {
+            return Ok(compiled);
         }
         Ok(Self::default())
     }
@@ -1251,8 +1341,12 @@ impl ConversationIngestionRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        if let Some(compiled) = required_compiled_runtime_config(project_root)? {
-            return Ok(compiled.conversation_ingestion);
+        if let Some(compiled) =
+            required_compiled_runtime_domain(project_root, "conversation-ingestion", |payload| {
+                payload.conversation_ingestion.clone()
+            })?
+        {
+            return Ok(compiled);
         }
         Ok(Self::default())
     }
@@ -1295,8 +1389,12 @@ impl AutopilotRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        if let Some(compiled) = required_compiled_runtime_config(project_root)? {
-            return Ok(compiled.autopilot);
+        if let Some(compiled) =
+            required_compiled_runtime_domain(project_root, "autopilot", |payload| {
+                payload.autopilot.clone()
+            })?
+        {
+            return Ok(compiled);
         }
         Ok(Self::default())
     }
@@ -1319,8 +1417,12 @@ impl LearningEngineRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        if let Some(compiled) = required_compiled_runtime_config(project_root)? {
-            return Ok(compiled.learning_engine);
+        if let Some(compiled) =
+            required_compiled_runtime_domain(project_root, "learning-engine", |payload| {
+                payload.learning_engine.clone()
+            })?
+        {
+            return Ok(compiled);
         }
         Ok(Self::default())
     }
@@ -2876,6 +2978,87 @@ fn load_compiled_runtime_config(
     loaded
 }
 
+fn load_compiled_runtime_domain<T>(
+    project_root: &Path,
+    domain: &str,
+    expected_source_hash: Option<&str>,
+) -> CompiledPayloadLoad<CompiledRuntimeDomainPayload<T>>
+where
+    T: DeserializeOwned,
+{
+    let kind = format!("runtime-domain:{domain}");
+    let mut loaded = load_compiled_payload::<CompiledRuntimeDomainPayload<T>>(
+        project_root,
+        &kind,
+        expected_source_hash,
+    );
+    let source_unit_diagnostics = if let (Some(payload), Some(_snapshot)) =
+        (&loaded.payload, &loaded.snapshot)
+    {
+        let mut diagnostics = Vec::new();
+        if payload.domain != domain {
+            diagnostics.push(format!(
+                "compiled runtime domain {} payload.domain mismatch: expected {}, got {}",
+                domain, domain, payload.domain
+            ));
+        }
+        if payload.payload_key.is_empty() {
+            diagnostics.push(format!(
+                "compiled runtime domain {domain} missing payload_key"
+            ));
+        }
+        if payload.source_domains.is_empty() {
+            diagnostics.extend(validate_compiled_source_units(
+                project_root,
+                loaded
+                    .snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.source_hash.as_str())
+                    .unwrap_or_default(),
+                &payload.source_units,
+                &format!("compiled runtime domain {domain}"),
+                V3_COMPILE_RUNTIME_ACTION,
+            ));
+        } else {
+            diagnostics.extend(validate_compiled_source_domains(
+                project_root,
+                &payload.source_domains,
+                &format!("compiled runtime domain {domain}"),
+                V3_COMPILE_RUNTIME_ACTION,
+            ));
+        }
+        if expected_source_hash.is_none() && v3_contract_abi_expected(project_root) {
+            if let Some(expected) = runtime_domain_expected_source_hash(domain) {
+                let runtime_source_hash = source_domain_bundle_hash(&payload.source_domains);
+                if runtime_source_hash != expected {
+                    diagnostics.push(format!(
+                            "compiled runtime domain {} source_domains differ from generated V3 runtime contract: expected {}, got {}; run node scripts/project-v3-contracts.mjs --write and {}",
+                            domain,
+                            expected,
+                            runtime_source_hash,
+                            V3_COMPILE_RUNTIME_ACTION
+                        ));
+                }
+            }
+        }
+        diagnostics
+    } else {
+        Vec::new()
+    };
+    if !source_unit_diagnostics.is_empty() {
+        loaded.payload = None;
+        loaded.snapshot = None;
+        loaded.diagnostics.extend(source_unit_diagnostics);
+    }
+    loaded
+}
+
+fn runtime_domain_expected_source_hash(domain: &str) -> Option<&'static str> {
+    v3_contracts::RUNTIME_DOMAIN_SOURCE_HASHES
+        .iter()
+        .find_map(|(id, hash)| if *id == domain { Some(*hash) } else { None })
+}
+
 fn v3_contract_abi_expected(project_root: &Path) -> bool {
     project_root
         .join("scripts/project-v3-contracts.mjs")
@@ -2895,6 +3078,25 @@ pub(crate) fn compiled_runtime_projection_status(project_root: &Path) -> serde_j
         diagnostics: vec![err.to_string()],
     });
     let runtime_config = load_compiled_runtime_config(project_root, None);
+    let runtime_domains: Vec<serde_json::Value> = v3_contracts::RUNTIME_DOMAIN_FILES
+        .iter()
+        .map(|(domain, file)| {
+            let loaded = load_compiled_runtime_domain::<serde_json::Value>(
+                project_root,
+                domain,
+                None,
+            );
+            serde_json::json!({
+                "domain": domain,
+                "file": file,
+                "ok": loaded.payload.is_some() && loaded.diagnostics.is_empty(),
+                "schema": loaded.snapshot.as_ref().map(|snapshot| snapshot.schema_version.clone()),
+                "sourceHash": loaded.snapshot.as_ref().map(|snapshot| snapshot.source_hash.clone()),
+                "path": loaded.snapshot.as_ref().map(|snapshot| snapshot.path.display().to_string()),
+                "diagnostics": loaded.diagnostics,
+            })
+        })
+        .collect();
     let universe = load_compiled_project_universe(project_root, None);
     let workflow_contracts = load_compiled_workflow_contracts(project_root, None);
     let fallback_allowed = false;
@@ -2930,6 +3132,7 @@ pub(crate) fn compiled_runtime_projection_status(project_root: &Path) -> serde_j
             "requiredAction": required_action,
             "diagnostics": runtime_config.diagnostics,
         },
+        "runtimeDomains": runtime_domains,
         "contractAbi": {
             "schema": v3_contracts::SCHEMA_VERSION,
             "sourceHash": v3_contracts::SOURCE_HASH,
@@ -4548,10 +4751,14 @@ pub(crate) mod tests {
 
         let root = temp.path().to_string_lossy();
         let err = RouterRuntimeConfig::load_for_project_root(Some(root.as_ref()))
-            .expect_err("stale compiled runtime config must block source Lisp fallback");
+            .expect_err("stale compiled runtime projection must block source Lisp fallback");
         assert!(err
             .to_string()
-            .contains("compiled runtime config is required"));
+            .contains("compiled runtime domain router is required"));
+        assert!(err
+            .to_string()
+            .contains("compiled runtime config fallback invalid"));
+        assert!(err.to_string().contains("source_units stale"));
         assert!(err.to_string().contains(V3_COMPILE_RUNTIME_ACTION));
     }
 
@@ -4569,10 +4776,10 @@ pub(crate) mod tests {
 
         let root = temp.path().to_string_lossy();
         let err = RouterRuntimeConfig::load_for_project_root(Some(root.as_ref()))
-            .expect_err("missing compiled runtime config must block source Lisp fallback");
+            .expect_err("missing compiled runtime projection must block source Lisp fallback");
         assert!(err
             .to_string()
-            .contains("compiled runtime config is required"));
+            .contains("compiled runtime domain router is required"));
         assert!(err.to_string().contains(V3_COMPILE_RUNTIME_ACTION));
     }
 
@@ -4636,10 +4843,10 @@ pub(crate) mod tests {
 
         let root = temp.path().to_string_lossy();
         let err = RouterRuntimeConfig::load_for_project_root(Some(root.as_ref()))
-            .expect_err("source fallback env must not bypass compiled runtime config");
+            .expect_err("source fallback env must not bypass compiled runtime projection");
         assert!(err
             .to_string()
-            .contains("compiled runtime config is required"));
+            .contains("compiled runtime domain router is required"));
         assert!(err
             .to_string()
             .contains("Raw V3 Lisp source fallback is not a production runtime path"));

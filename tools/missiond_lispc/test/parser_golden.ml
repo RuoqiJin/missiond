@@ -148,6 +148,7 @@ let test_source_resolver_include_shard_index () =
     :path "shards/ignored.lisp")
   (shard pillar-flow-map
     :status compiler-active
+    :domain pillar-flow
     :path "shards/pillar-flow-map.lisp"))
 |};
       close_out oc;

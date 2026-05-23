@@ -60,7 +60,13 @@
          :id-field grounding_context_id
          :storage "shared_artifacts(kind=context-gather)"
          :fields [unknowns query project_id sources_used evidence_refs diagnostics grounded_intent_summary context_pack_path]
-         :rule "mission_context_gather(persist=true) returns grounding_context_id and context_pack_path; worker prompts receive only a small context slice, not broad KB/history preloads."))
+         :rule "mission_context_gather(persist=true) returns grounding_context_id and context_pack_path; worker prompts receive only a small context slice, not broad KB/history preloads.")
+       (kind task-result-artifact
+         :schema "missiond.task-result-artifact.v1"
+         :id-field artifact_hash
+         :storage "shared_artifacts(kind=task-result)"
+         :fields [task_id project_id provider result_status summary json source]
+         :rule "Jarvis, Board, and worker completion surfaces MUST normalize summary notes/provider finals into task-result-artifact before streaming result_artifact/final to clients; Board notes, PTY text, and provider finals are projections/evidence, not the canonical result."))
     :functions
       ((function context-gather-artifact
          :entry [mission_context_gather unknowns-inventory BoardTask source_id project_id]
@@ -83,13 +89,22 @@
                 (step s2 :logic "allow broad task only when grounding_context_id is present")
                 (step s3 :logic "block ungrounded broad task before PTY input and append a diagnostic Board note")
                 (step s4 :logic "never re-enable hidden context prefetch as a substitute for grounded dispatch"))
-         :egress [BoardTaskBlocked diagnostic-note no-PTY-dispatch]))
+         :egress [BoardTaskBlocked diagnostic-note no-PTY-dispatch])
+       (function jarvis-result-artifact-gate
+         :entry [JarvisSSE BoardTaskSummaryNote provider-final task-result-artifact]
+         :core ((step s1 :logic "inspect worker/Board summary notes for existing task-result-artifact hash")
+                (step s2 :logic "when only a Board summary projection exists, write a canonical task-result-artifact through shared memory before emitting result_artifact")
+                (step s3 :logic "emit TASK_RESULT_ARTIFACT_WRITE_FAILED diagnostic instead of pretending a missing artifact exists")
+                (step s4 :logic "stream final text only after the task-result artifact hash is known or the diagnostic is surfaced"))
+         :egress [task-result-artifact result_artifact_event final_event diagnostic]))
     :invariants
       ["All non-exact worker dispatch must carry grounding_context_id before a provider PTY receives the prompt."
        "mission_context_gather is the only default aggregate for KB/SSOT/project/skill/infra/Board/conversation/tool facts; callers should not hand-roll partial context lookup."
        "Grounding artifacts are durable evidence and task metadata; hidden prompt preloads are not grounding."
        "Autopilot must block broad ungrounded BoardTasks instead of sending them to workers for self-discovery."
-       "Direct local code search is allowed only after the grounding artifact identifies code surface evidence as a required source."]
+       "Direct local code search is allowed only after the grounding artifact identifies code surface evidence as a required source."
+       "Jarvis dispatch metadata MUST derive read_scope from the active runtime/project root (MISSIOND_PROJECT_ROOT, MISSIOND_REPO_ROOT, MISSIOND_WORKSPACE_ROOT, or current daemon cwd) and MUST NOT hardcode a developer-machine root path."
+       "Jarvis result streaming MUST use task-result-artifact as canonical completion authority; Board summary notes are converted to artifacts before client-visible result_artifact events."]
     :checks ["node scripts/check-v3-grounded-dispatch-isomorphism.mjs --json"])
 
   (unified-entry

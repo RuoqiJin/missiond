@@ -28,12 +28,15 @@ import {
   loadCompiledV3Contract,
 } from './lib/v3_compiled_contract.mjs';
 import {
-  REQUIRED_FINAL_LIVE_CHECK_IDS,
   runSemanticRules,
 } from './lib/v3_semantic_rules.mjs';
 
 const CHECK_COMMAND = 'node scripts/check-v3-final-convergence.mjs';
 const BLUEPRINT_PATH = '.missiond/v3/missiond-blueprint.lisp';
+const FINAL_CONVERGENCE_META_CHECKS = Object.freeze([
+  'control-plane-m6-split',
+  'check-v3-control-plane-m6-split.mjs',
+]);
 const REQUIRED_SEMANTIC_GATE_FACT_KINDS = Object.freeze([
   'surface',
   'function',
@@ -48,256 +51,6 @@ const REQUIRED_SEMANTIC_GATE_FACT_KINDS = Object.freeze([
   'scanner_policy',
   'semantic_gate',
 ]);
-
-const DRY_FIXTURE_LIVE_CHECKS = [
-  {
-    id: 'lisp-blueprint-compression',
-    argv: ['scripts/check-lisp-blueprint-compression.mjs'],
-    timeoutMs: 60_000,
-  },
-  {
-    id: 'architecture-lisp',
-    argv: [
-      'scripts/check-architecture-lisp.mjs',
-      '--no-structure',
-      BLUEPRINT_PATH,
-    ],
-    timeoutMs: 60_000,
-  },
-  {
-    id: 'v3-code-isomorphism-complete',
-    argv: ['scripts/check-v3-code-isomorphism-complete.mjs', '--json'],
-    json: true,
-    timeoutMs: 120_000,
-  },
-  {
-    id: 'v2-public-coverage',
-    argv: ['scripts/check-v3-v2-coverage.mjs', '--json'],
-    json: true,
-    timeoutMs: 60_000,
-  },
-  {
-    id: 'task-contract-all',
-    argv: ['scripts/check-task-contract.mjs', '--all'],
-    timeoutMs: 120_000,
-  },
-  {
-    id: 'missiond-blue-green-deploy',
-    argv: ['scripts/check-missiond-blue-green-deploy.mjs', '--json'],
-    json: true,
-    timeoutMs: 60_000,
-  },
-  {
-    id: 'missiond-rustfmt-convergence',
-    command: 'bash',
-    argv: ['scripts/rustfmt-missiond.sh', '--check'],
-    timeoutMs: 120_000,
-  },
-  {
-    id: 'project-ssot-universe',
-    argv: ['scripts/check-project-ssot-universe.mjs', '--json'],
-    json: true,
-    timeoutMs: 60_000,
-  },
-  {
-    id: 'infrastructure-universe',
-    argv: ['scripts/check-v3-infrastructure-universe-isomorphism.mjs', '--json'],
-    json: true,
-    timeoutMs: 60_000,
-  },
-  {
-    id: 'data-residency-universe',
-    argv: ['scripts/check-v3-data-residency-universe-isomorphism.mjs', '--json'],
-    json: true,
-    timeoutMs: 60_000,
-  },
-  {
-    id: 'project-maturity',
-    argv: ['scripts/check-project-maturity.mjs', '--min-level', 'M5'],
-    timeoutMs: 60_000,
-  },
-  {
-    id: 'auth-m6-depth',
-    argv: ['scripts/check-project-maturity.mjs', '--min-level', 'M6', '--project', 'auth', '--json'],
-    json: true,
-    timeoutMs: 60_000,
-  },
-  {
-    id: 'generated-v3-contracts-current',
-    argv: ['scripts/project-v3-contracts.mjs', '--check', '--json'],
-    json: true,
-    timeoutMs: 60_000,
-  },
-  {
-    id: 'typed-lisp-runtime-compile',
-    argv: ['scripts/compile-v3-runtime.mjs', '--check', '--json'],
-    json: true,
-    timeoutMs: 60_000,
-  },
-  {
-    id: 'production-runtime-boundary',
-    argv: ['scripts/check-v3-production-runtime-boundary.mjs', '--json'],
-    json: true,
-    timeoutMs: 60_000,
-  },
-  {
-    id: 'agent-cli-regression',
-    argv: ['scripts/check-v3-agent-cli-regression.mjs', '--json'],
-    json: true,
-    timeoutMs: 60_000,
-  },
-  {
-    id: 'semantic-checker-coverage',
-    argv: ['scripts/check-v3-semantic-checker-coverage.mjs', '--json'],
-    json: true,
-    timeoutMs: 60_000,
-  },
-  {
-    id: 'runtime-artifact-catalog',
-    argv: ['scripts/check-v3-runtime-artifact-catalog.mjs', '--json'],
-    json: true,
-    timeoutMs: 60_000,
-  },
-  {
-    id: 'typed-sidecar-compression',
-    argv: ['scripts/check-v3-typed-sidecar-compression.mjs', '--json'],
-    json: true,
-    timeoutMs: 60_000,
-  },
-];
-
-const DRY_FIXTURE_RUNTIME_CHECKS = [
-  {
-    id: 'cargo-test-workspace',
-    command: 'cargo',
-    argv: ['test', '--workspace'],
-    timeoutMs: 900_000,
-  },
-  {
-    id: 'board-build',
-    command: 'pnpm',
-    argv: ['--dir', 'packages/board', 'build'],
-    timeoutMs: 300_000,
-  },
-  {
-    id: 'git-diff-check',
-    command: 'git',
-    argv: ['diff', '--check'],
-    timeoutMs: 60_000,
-  },
-];
-
-const DRY_FIXTURE_BLUEPRINT_NEEDLES = [
-  ['v2-convergence-map', '(v2-convergence-map'],
-  ['public-surface-map', '(public-surface-map'],
-  ['pillar-flow-map', '(pillar-flow-map'],
-  ['implementation-map', '(implementation-map'],
-  ['workstation-config', '(workstation-config'],
-  ['agent-cli-regression-policy', 'check-v3-agent-cli-regression.mjs'],
-  ['control-plane-m6-split', '(control-plane-m6-split'],
-  ['control-plane split checker', 'check-v3-control-plane-m6-split.mjs'],
-  ['data-residency-universe', '(data-residency-universe'],
-  ['data-residency checker', 'check-v3-data-residency-universe-isomorphism.mjs'],
-  ['lisp-code-sync-loop', '(lisp-code-sync-loop'],
-  ['lisp-code-sync checker', 'check-v3-lisp-code-sync-isomorphism.mjs'],
-  ['context-pack-run-wave', 'context-pack-run-wave'],
-  ['context-pack dispatch policy', 'dispatch-policy context-pack-run-wave'],
-  ['swarm-run resolves project_root', 'mission_swarm_run MUST resolve project_id to a registered project_root'],
-  ['autopilot overrides cwd to BoardTask project_root', 'Autopilot ensure_pty MUST override pty_slot.cwd'],
-  ['durable conversation taskId attribution', 'bind conversations.task_id to the active BoardTask via a bounded retry helper'],
-  ['taskId query survives slot reuse', 'message-anchored BoardTask id fallback'],
-  ['runtime v3 paths', '.missiond/v3/runtime/'],
-  ['V2 historical status', ':v2 "Kept as historical'],
-  ['entry/core/egress function shape', ':entry ['],
-  ['ordered core function steps', ':core ('],
-  ['function egress shape', ':egress ['],
-];
-
-const DRY_FIXTURE_FACADE_BUDGETS = [
-  {
-    id: 'mission_plan facade',
-    file: 'crates/missiond-daemon/src/handlers/knowledge/plan.rs',
-    maxLines: 800,
-  },
-  {
-    id: 'mission_execution facade',
-    file: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs',
-    maxLines: 350,
-  },
-  {
-    id: 'workstation_dispatch facade',
-    file: 'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch.rs',
-    maxLines: 400,
-  },
-];
-
-const DRY_FIXTURE_REQUIRED_SPLIT_FILES = [
-  'crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs',
-  'crates/missiond-daemon/src/handlers/knowledge/plan/approval_review.rs',
-  'crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime.rs',
-  'crates/missiond-daemon/src/handlers/knowledge/plan/task_runner_dry_run.rs',
-  'crates/missiond-daemon/src/handlers/knowledge/plan/task_contract.rs',
-  'crates/missiond-daemon/src/handlers/knowledge/plan_dag/runtime.rs',
-  'crates/missiond-daemon/src/handlers/knowledge/plan_dag/claim_lease.rs',
-  'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_surface.rs',
-  'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_lease.rs',
-  'crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_audit.rs',
-  'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/descriptor.rs',
-  'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/brief.rs',
-  'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/decision.rs',
-  'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/outcome.rs',
-  'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/runner.rs',
-];
-
-const DRY_FIXTURE_REQUIRED_RUNTIME_FILES = [
-  {
-    file: 'scripts/lib/v3_workstation_runtime.mjs',
-    needles: [
-      'DEFAULT_MODEL_PROFILE',
-      'coding-default-opus-4-7',
-      'contextPackDispatchPolicy',
-      'V3_BLUEPRINT_CONFIG_ERROR',
-      'source_units',
-      'Raw V3 Lisp source fallback is not a production runtime path',
-      'compiled runtime config is required',
-    ],
-  },
-  {
-    file: 'scripts/context-pack-run-wave.mjs',
-    needles: [
-      'loadWorkstationRuntimeConfigForRepo',
-      'contextPackMaxParallel',
-      'ensureWaveLedgers',
-      '--apply',
-    ],
-  },
-  {
-    file: 'scripts/context-pack-materialize-wave.mjs',
-    needles: [
-      'context-pack-run-wave.mjs',
-      'loadWorkstationRuntimeConfigForRepo',
-      'model_profile',
-      'timeout_secs',
-    ],
-  },
-  {
-    file: 'scripts/task-runner-dispatch.mjs',
-    needles: [
-      'loadWorkstationRuntimeConfigForRepo',
-      'model_profile',
-      'timeout_secs',
-    ],
-  },
-  {
-    file: 'scripts/task-runner-submit-dispatch.mjs',
-    needles: [
-      'runDispatch',
-      'runtime_projection',
-      'model_profile',
-      'timeout_secs',
-    ],
-  },
-];
 
 const usage = `Usage:
   node scripts/check-v3-final-convergence.mjs [--json] [--dry-fixture]
@@ -389,19 +142,21 @@ export function runFinalConvergenceCheck(repoRoot, blueprintRel = BLUEPRINT_PATH
   });
   const compiledSurfaceCount = compiledSurfaceIds(contract).length;
   diagnostics.push(...compiledDiagnostics(contract, blueprintRel));
-  const gate = contract.finalConvergenceGate;
+  const gateLoad = loadFinalConvergenceManifest(repoRoot, contract);
+  diagnostics.push(...gateLoad.diagnostics);
+  const gate = gateLoad.gate;
   if (!gate) {
     diagnostics.push({
       file: blueprintRel,
-      message: 'compiled semantic IR missing final_convergence_gate fact',
+      message: 'compiled final convergence manifest missing final_convergence_gate payload',
     });
   } else {
     diagnostics.push(...runSemanticRules({
       rules: ['required-final-live-checks'],
       file: blueprintRel,
       gate,
-      requiredLiveCheckIds: REQUIRED_FINAL_LIVE_CHECK_IDS,
     }));
+    diagnostics.push(...checkFinalConvergenceMetaChecks(blueprintRel, gate));
   }
   diagnostics.push(...checkSemanticGateClosure(contract, blueprintRel));
   const facades = checkFacadeBudgets(repoRoot, gate?.facadeBudgets ?? []);
@@ -488,6 +243,89 @@ export function runFinalConvergenceCheck(repoRoot, blueprintRel = BLUEPRINT_PATH
     subchecks,
     runtime_checks: runtimeChecks,
   };
+}
+
+function checkFinalConvergenceMetaChecks(blueprintRel, gate) {
+  const liveCheckHaystack = JSON.stringify(gate.liveChecks ?? []);
+  return FINAL_CONVERGENCE_META_CHECKS
+    .filter((needle) => !liveCheckHaystack.includes(needle))
+    .map((needle) => ({
+      file: blueprintRel,
+      message: `final convergence live checks missing ${needle}`,
+    }));
+}
+
+function loadFinalConvergenceManifest(repoRoot, contract) {
+  const rel = '.missiond/v3/runtime/compiled/compiled-final-convergence-manifest.json';
+  const abs = path.join(repoRoot, rel);
+  try {
+    const compiled = JSON.parse(fs.readFileSync(abs, 'utf8'));
+    const diagnostics = [];
+    if (compiled?.schema_version !== 'missiond.compiled-final-convergence-manifest.v1') {
+      diagnostics.push({
+        file: rel,
+        message: `compiled final convergence manifest schema mismatch: ${JSON.stringify(compiled?.schema_version)}`,
+      });
+    }
+    if (Array.isArray(compiled?.diagnostics) && compiled.diagnostics.length > 0) {
+      diagnostics.push(...compiled.diagnostics.map((diagnostic) => ({
+        file: rel,
+        message: diagnostic?.message ?? JSON.stringify(diagnostic),
+      })));
+    }
+    return {
+      gate: normalizeFinalConvergenceManifestPayload(compiled?.payload),
+      diagnostics,
+    };
+  } catch (err) {
+    return {
+      gate: contract.finalConvergenceGate,
+      diagnostics: [{
+        file: rel,
+        message: `cannot read compiled final convergence manifest: ${err.message}`,
+      }],
+    };
+  }
+}
+
+function normalizeFinalConvergenceManifestPayload(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  return {
+    id: stringOrNull(payload?.id) ?? 'v3-final-convergence',
+    liveChecks: normalizeManifestChecks(payload?.liveChecks),
+    runtimeChecks: normalizeManifestChecks(payload?.runtimeChecks),
+    requiredLiveCheckIds: stringArray(payload?.requiredLiveCheckIds),
+    blueprintNeedles: arrayOrEmpty(payload?.blueprintNeedles)
+      .map((entry) => ({ id: stringOrNull(entry?.id), needle: stringOrNull(entry?.needle) }))
+      .filter((entry) => entry.id && entry.needle),
+    facadeBudgets: arrayOrEmpty(payload?.facadeBudgets)
+      .map((entry) => ({
+        id: stringOrNull(entry?.id),
+        file: stringOrNull(entry?.file),
+        maxLines: positiveIntOrNull(entry?.maxLines),
+      }))
+      .filter((entry) => entry.id && entry.file && entry.maxLines != null),
+    requiredSplitFiles: stringArray(payload?.requiredSplitFiles),
+    requiredRuntimeFiles: arrayOrEmpty(payload?.requiredRuntimeFiles)
+      .map((entry) => ({
+        file: stringOrNull(entry?.file),
+        needles: stringArray(entry?.needles),
+      }))
+      .filter((entry) => entry.file),
+    source: payload?.source ?? null,
+  };
+}
+
+function normalizeManifestChecks(rows) {
+  return arrayOrEmpty(rows)
+    .map((entry) => ({
+      id: stringOrNull(entry?.id),
+      command: stringOrNull(entry?.command),
+      argv: stringArray(entry?.argv),
+      json: entry?.json === true,
+      timeoutMs: positiveIntOrNull(entry?.timeoutMs) ?? 60_000,
+    }))
+    .filter((entry) => entry.id && entry.argv.length > 0);
 }
 
 function compiledDiagnostics(contract, file) {
@@ -888,6 +726,24 @@ function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function stringOrNull(value) {
+  return typeof value === 'string' && value.trim() !== '' ? value : null;
+}
+
+function stringArray(value) {
+  return Array.isArray(value)
+    ? value.filter((item) => typeof item === 'string' && item.trim() !== '')
+    : [];
+}
+
+function arrayOrEmpty(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function positiveIntOrNull(value) {
+  return Number.isInteger(value) && value > 0 ? value : null;
+}
+
 function tail(text, lines = 8) {
   if (!text) return '';
   return text.split('\n').slice(-lines).join('\n').trim();
@@ -901,12 +757,21 @@ function countLines(source) {
 function runDryFixture(opts) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'missiond-v3-final-'));
   const cases = [];
+  const gateLoad = loadFinalConvergenceManifest(path.resolve(opts.repo), {
+    finalConvergenceGate: null,
+  });
+  const fixtureGateValue = gateLoad.gate ?? {
+    facadeBudgets: [],
+    blueprintNeedles: [],
+    requiredSplitFiles: [],
+    requiredRuntimeFiles: [],
+  };
   try {
     const goodBlueprint = fixtureBlueprint({ includeFinalCheck: true });
     const goodDiagnostics = checkBlueprintClosure(
       goodBlueprint,
       '<fixture-good>',
-      fixtureGate(),
+      fixtureGateValue,
       [{ id: 'v3-compression-contract', checks: [CHECK_COMMAND] }],
     );
     cases.push(assertCase(
@@ -918,7 +783,7 @@ function runDryFixture(opts) {
     const missingFinalDiagnostics = checkBlueprintClosure(
       fixtureBlueprint({ includeFinalCheck: false }),
       '<fixture-missing-final>',
-      fixtureGate(),
+      fixtureGateValue,
       [{ id: 'v3-compression-contract', checks: ['node scripts/check-v3-code-isomorphism-complete.mjs'] }],
     );
     cases.push(assertCase(
@@ -927,23 +792,17 @@ function runDryFixture(opts) {
       missingFinalDiagnostics,
     ));
 
+    cases.push(assertCase(
+      'fixture gate loads facade budgets from compiled manifest',
+      fixtureGateValue.facadeBudgets.length > 0,
+      gateLoad.diagnostics,
+    ));
+
     const facadeRoot = path.join(tmp, 'facade-ok');
-    writeFile(
-      facadeRoot,
-      'crates/missiond-daemon/src/handlers/knowledge/plan.rs',
-      'mod plan;\n'.repeat(20),
-    );
-    writeFile(
-      facadeRoot,
-      'crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs',
-      'mod agent_execution;\n'.repeat(10),
-    );
-    writeFile(
-      facadeRoot,
-      'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch.rs',
-      'mod workstation_dispatch;\n'.repeat(10),
-    );
-    const okFacades = checkFacadeBudgets(facadeRoot, DRY_FIXTURE_FACADE_BUDGETS);
+    for (const budget of fixtureGateValue.facadeBudgets) {
+      writeFile(facadeRoot, budget.file, 'mod facade;\n'.repeat(10));
+    }
+    const okFacades = checkFacadeBudgets(facadeRoot, fixtureGateValue.facadeBudgets);
     cases.push(assertCase(
       'facade budget accepts thin facade files',
       okFacades.diagnostics.length === 0,
@@ -951,22 +810,13 @@ function runDryFixture(opts) {
     ));
 
     const badRoot = path.join(tmp, 'facade-bad');
-    writeFile(
-      badRoot,
-      'crates/missiond-daemon/src/handlers/knowledge/plan.rs',
-      'fn x() {}\n'.repeat(805),
-    );
-    writeFile(
-      badRoot,
-      'crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs',
-      'mod agent_execution;\n'.repeat(10),
-    );
-    writeFile(
-      badRoot,
-      'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch.rs',
-      'mod workstation_dispatch;\n'.repeat(10),
-    );
-    const badFacades = checkFacadeBudgets(badRoot, DRY_FIXTURE_FACADE_BUDGETS);
+    for (const budget of fixtureGateValue.facadeBudgets) {
+      const source = budget === fixtureGateValue.facadeBudgets[0]
+        ? 'fn x() {}\n'.repeat(budget.maxLines + 5)
+        : 'mod facade;\n'.repeat(10);
+      writeFile(badRoot, budget.file, source);
+    }
+    const badFacades = checkFacadeBudgets(badRoot, fixtureGateValue.facadeBudgets);
     cases.push(assertCase(
       'facade budget rejects oversized plan.rs',
       badFacades.diagnostics.some((d) => d.message.includes('above final facade budget')),
@@ -989,15 +839,6 @@ function runDryFixture(opts) {
     console.error(`v3 final convergence fixtures FAILED — ${failed.length}/${cases.length}`);
   }
   process.exit(failed.length === 0 ? 0 : 1);
-}
-
-function fixtureGate() {
-  return {
-    blueprintNeedles: DRY_FIXTURE_BLUEPRINT_NEEDLES.map(([id, needle]) => ({ id, needle })),
-    facadeBudgets: DRY_FIXTURE_FACADE_BUDGETS,
-    requiredSplitFiles: DRY_FIXTURE_REQUIRED_SPLIT_FILES,
-    requiredRuntimeFiles: DRY_FIXTURE_REQUIRED_RUNTIME_FILES,
-  };
 }
 
 function assertCase(name, ok, diagnostics) {

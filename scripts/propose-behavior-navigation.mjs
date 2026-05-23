@@ -2,6 +2,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 
 import {
   loadDeclaredBehaviorUniverse,
@@ -21,8 +22,9 @@ const NAVIGATION_RISK_KINDS = new Set([
 const usage = `Usage:
   node scripts/propose-behavior-navigation.mjs --project <id> [--json] [--write] [--root <path>] [--repo <path>]
 
-Generates editable Lisp navigation anchors from deterministic scanner output.
-Generated JSON is diagnostic only; written Lisp remains the SSOT.
+Generates deterministic navigation anchors from scanner output. For MissionD V3,
+the generated anchors are written as a compiled runtime artifact, not active
+authoring Lisp.
 `;
 
 function main() {
@@ -37,6 +39,16 @@ function main() {
   const riskItems = observed.filter(isNavigationRisk);
   const navigationForms = generateNavigationForms(opts.project, riskItems);
   const target = behaviorUniverseTarget(root, { missiondV3 });
+  const artifact = missiondV3
+    ? compiledBehaviorNavigationArtifact({
+        projectId: opts.project,
+        root,
+        target,
+        observed,
+        riskItems,
+        navigationForms,
+      })
+    : null;
   const result = {
     ok: true,
     projectId: opts.project,
@@ -48,10 +60,16 @@ function main() {
     effect_anchor_count: riskItems.filter((item) => item.kind === 'effect').length,
     declared_effect_count: declared.effects.length,
     forms: navigationForms.trimEnd(),
+    artifact,
   };
 
   if (opts.write) {
-    writeNavigationForms(target, opts.project, root, navigationForms, { missiondV3 });
+    if (missiondV3) {
+      writeCompiledBehaviorNavigation(target, artifact);
+      stripMissiondV3NavigationBlock(root);
+    } else {
+      writeNavigationForms(target, opts.project, root, navigationForms);
+    }
     result.written = true;
   } else {
     result.written = false;
@@ -105,7 +123,7 @@ function resolveProjectRoot(repo, projectId) {
 }
 
 function behaviorUniverseTarget(root, { missiondV3 }) {
-  if (missiondV3) return path.join(root, '.missiond/v3/shards/universe/behavior-closure.lisp');
+  if (missiondV3) return path.join(root, '.missiond/v3/runtime/compiled/compiled-behavior-navigation.json');
   return path.join(root, '.missiond/behavior-universe.lisp');
 }
 
@@ -173,15 +191,26 @@ function roleForKind(kind) {
   return kind;
 }
 
-function writeNavigationForms(target, projectId, root, navigationForms, { missiondV3 }) {
+function writeNavigationForms(target, projectId, root, navigationForms) {
   fs.mkdirSync(path.dirname(target), { recursive: true });
   const text = fs.existsSync(target)
     ? fs.readFileSync(target, 'utf8')
     : defaultBehaviorUniverse(projectId);
-  const nextText = missiondV3
-    ? insertOrReplaceNavigationBlock(text, navigationForms)
-    : rewriteOrInsertProjectOverlay(text, projectId, navigationForms);
+  const nextText = rewriteOrInsertProjectOverlay(text, projectId, navigationForms);
   fs.writeFileSync(target, nextText, 'utf8');
+}
+
+function writeCompiledBehaviorNavigation(target, artifact) {
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, `${JSON.stringify(artifact, null, 2)}\n`, 'utf8');
+}
+
+function stripMissiondV3NavigationBlock(root) {
+  const target = path.join(root, '.missiond/v3/shards/universe/behavior-closure.lisp');
+  if (!fs.existsSync(target)) return;
+  const text = fs.readFileSync(target, 'utf8');
+  const nextText = insertOrReplaceNavigationBlock(text, '');
+  if (nextText !== text) fs.writeFileSync(target, nextText, 'utf8');
 }
 
 function rewriteOrInsertProjectOverlay(text, projectId, navigationForms) {
@@ -202,6 +231,42 @@ function insertOrReplaceNavigationBlock(text, navigationForms) {
   const closeIndex = nextText.lastIndexOf(')');
   if (closeIndex < 0) return `${nextText.trimEnd()}\n${navigationForms}`;
   return `${nextText.slice(0, closeIndex).trimEnd()}\n\n${navigationForms}${nextText.slice(closeIndex)}`;
+}
+
+function compiledBehaviorNavigationArtifact({
+  projectId,
+  root,
+  target,
+  observed,
+  riskItems,
+  navigationForms,
+}) {
+  const anchors = riskItems.map((item) => ({
+    id: item.id,
+    kind: item.kind,
+    role: item.role ?? roleForKind(item.kind),
+    file: item.file,
+    line: item.line ?? 1,
+    symbol: item.symbol ?? null,
+    effect: item.effectHint ?? null,
+  }));
+  const payload = {
+    projectId,
+    root,
+    target,
+    observed_count: observed.length,
+    risk_count: riskItems.length,
+    anchor_count: anchors.length,
+    anchors,
+    forms: navigationForms.trimEnd(),
+  };
+  return {
+    schema_version: 'missiond.compiled-behavior-navigation.v1',
+    source_hash: crypto.createHash('md5').update(JSON.stringify(payload)).digest('hex'),
+    generated_at: null,
+    diagnostics: [],
+    payload,
+  };
 }
 
 function defaultBehaviorUniverse(projectId, navigationForms = '') {

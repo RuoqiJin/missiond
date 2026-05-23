@@ -27,6 +27,18 @@ pub(super) struct CompiledRuntimeConfigPayload {
     pub(super) learning_engine: LearningEngineRuntimeConfig,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub(super) struct CompiledRuntimeDomainPayload<T> {
+    #[serde(default)]
+    pub(super) source_units: Vec<CompiledSourceUnit>,
+    #[serde(default)]
+    pub(super) source_domains: Vec<CompiledSourceDomain>,
+    pub(super) domain: String,
+    #[serde(default)]
+    pub(super) payload_key: String,
+    pub(super) config: T,
+}
+
 pub(super) fn generated_default_runtime_config() -> CompiledRuntimeConfigPayload {
     serde_json::from_str(v3_runtime_defaults::generated::DEFAULT_RUNTIME_CONFIG_JSON)
         .expect("generated V3 runtime defaults must deserialize")

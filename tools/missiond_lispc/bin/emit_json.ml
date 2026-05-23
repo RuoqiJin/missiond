@@ -15,31 +15,6 @@ let compiled_envelope schema_version source_hash diagnostics payload =
     (diagnostics |> List.map diagnostic_to_json |> String.concat ",")
     payload
 
-let all_v3_source_domain_ids =
-  [
-    "blueprint-core";
-    "workstation-runtime";
-    "control-plane-runtime";
-    "memory-knowledge-runtime";
-    "ops-infra";
-    "universe";
-    "implementation-map";
-    "pillar-flow";
-    "v2-convergence";
-  ]
-
-let runtime_config_source_domain_ids =
-  [
-    "blueprint-core";
-    "workstation-runtime";
-    "control-plane-runtime";
-    "memory-knowledge-runtime";
-    "ops-infra";
-    "universe";
-  ]
-
-let project_universe_source_domain_ids = [ "blueprint-core"; "universe" ]
-
 let json_opt_string = function
   | Some value -> json_string value
   | None -> "null"
@@ -530,17 +505,19 @@ let final_convergence_gate_fact source_hash file root =
         |> List.map final_convergence_facade_budget_json
       in
       let required_split_files = prop_text_list ":required-split-files" props in
+      let required_live_check_ids = prop_text_list ":required-live-checks" props in
       let required_runtime_files =
         list_forms "runtime-file" node
         |> List.map final_convergence_runtime_file_json
       in
       [
         Printf.sprintf
-          {|{"fact_id":%s,"kind":"final_convergence_gate","project_id":"missiond","id":%s,"live_checks":%s,"runtime_checks":%s,"blueprint_needles":%s,"facade_budgets":%s,"required_split_files":%s,"required_runtime_files":%s,"source":%s}|}
+          {|{"fact_id":%s,"kind":"final_convergence_gate","project_id":"missiond","id":%s,"live_checks":%s,"runtime_checks":%s,"required_live_check_ids":%s,"blueprint_needles":%s,"facade_budgets":%s,"required_split_files":%s,"required_runtime_files":%s,"source":%s}|}
           (json_string ("final-convergence-gate:" ^ safe_id id))
           (json_string id)
           (json_array live_checks)
           (json_array runtime_checks)
+          (json_string_list required_live_check_ids)
           (json_array blueprint_needles)
           (json_array facade_budgets)
           (json_string_list required_split_files)
@@ -1206,9 +1183,7 @@ let runtime_config_payload_json blueprint source_hash source_units source_domain
     [
       ("blueprint", json_string blueprint);
       ("source_units", Source_resolver.source_units_to_json source_units);
-      ( "source_domains",
-        Source_resolver.source_domains_to_json_for_ids source_domains
-          runtime_config_source_domain_ids );
+      ("source_domains", Source_resolver.source_domains_to_json source_domains);
       ( "runtime_policies",
         root
         |> Option.map (runtime_policy_descriptors_json source_hash blueprint)
@@ -1457,9 +1432,7 @@ let contract_abi_payload_json blueprint source_hash source_units source_domains 
     [
       ("blueprint", json_string blueprint);
       ("source_units", Source_resolver.source_units_to_json source_units);
-      ( "source_domains",
-        Source_resolver.source_domains_to_json_for_ids source_domains
-          all_v3_source_domain_ids );
+      ("source_domains", Source_resolver.source_domains_to_json source_domains);
       ("surfaces", json_array surfaces);
       ("functions", json_array functions);
       ("facts", json_array facts);
@@ -2140,8 +2113,7 @@ let compiled_v3_for_resolved blueprint resolved =
       {|{"blueprint":%s,"source_units":%s,"source_domains":%s,"surfaces":[%s],"functions":[%s],"forms":[%s]}|}
       (json_string blueprint)
       (Source_resolver.source_units_to_json resolved.source_units)
-      (Source_resolver.source_domains_to_json_for_ids resolved.source_domains
-         all_v3_source_domain_ids)
+      (Source_resolver.source_domains_to_json resolved.source_domains)
       (String.concat "," surfaces)
       (String.concat "," functions)
       (forms |> List.map sexp_to_json |> String.concat ",")
@@ -2185,8 +2157,7 @@ let compiled_semantic_ir_for_resolved blueprint resolved =
       {|{"blueprint":%s,"source_units":%s,"source_domains":%s,"facts":[%s],"fact_count":%d}|}
       (json_string blueprint)
       (Source_resolver.source_units_to_json resolved.source_units)
-      (Source_resolver.source_domains_to_json_for_ids resolved.source_domains
-         all_v3_source_domain_ids)
+      (Source_resolver.source_domains_to_json resolved.source_domains)
       (String.concat "," facts)
       (List.length facts)
   in
@@ -2223,8 +2194,7 @@ let compiled_universe_for_resolved blueprint resolved =
       {|{"blueprint":%s,"source_units":%s,"source_domains":%s,"project_registry_present":%s,"maturity_registry_present":%s,"projects":[%s],"maturity":[%s]}|}
       (json_string blueprint)
       (Source_resolver.source_units_to_json resolved.source_units)
-      (Source_resolver.source_domains_to_json_for_ids resolved.source_domains
-         project_universe_source_domain_ids)
+      (Source_resolver.source_domains_to_json resolved.source_domains)
       (if project_registry <> None then "true" else "false")
       (if maturity_registry <> None then "true" else "false")
       (String.concat "," projects)
@@ -2395,8 +2365,7 @@ let emit_resolved_v3 blueprint =
         {|{"blueprint":%s,"source_units":%s,"source_domains":%s,"resolved_source":%s,"forms":[%s]}|}
         (json_string blueprint)
         (Source_resolver.source_units_to_json resolved.source_units)
-        (Source_resolver.source_domains_to_json_for_ids resolved.source_domains
-           all_v3_source_domain_ids)
+        (Source_resolver.source_domains_to_json resolved.source_domains)
         (json_string resolved_source)
         (resolved.forms |> List.map sexp_to_json |> String.concat ",")
     in
@@ -2436,8 +2405,7 @@ let emit_v3 blueprint =
         {|{"blueprint":%s,"source_units":%s,"source_domains":%s,"surfaces":[%s],"functions":[%s],"forms":[%s]}|}
         (json_string blueprint)
         (Source_resolver.source_units_to_json resolved.source_units)
-        (Source_resolver.source_domains_to_json_for_ids resolved.source_domains
-           all_v3_source_domain_ids)
+        (Source_resolver.source_domains_to_json resolved.source_domains)
         (String.concat "," surfaces)
         (String.concat "," functions)
         (forms |> List.map sexp_to_json |> String.concat ",")
@@ -2514,8 +2482,7 @@ let emit_semantic_ir blueprint =
         {|{"blueprint":%s,"source_units":%s,"source_domains":%s,"facts":[%s],"fact_count":%d}|}
         (json_string blueprint)
         (Source_resolver.source_units_to_json resolved.source_units)
-        (Source_resolver.source_domains_to_json_for_ids resolved.source_domains
-           all_v3_source_domain_ids)
+        (Source_resolver.source_domains_to_json resolved.source_domains)
         (String.concat "," facts)
         (List.length facts)
     in
@@ -2561,8 +2528,7 @@ let emit_universe blueprint =
       Printf.sprintf {|{"blueprint":%s,"source_units":%s,"source_domains":%s,"project_registry_present":%s,"maturity_registry_present":%s,"projects":[%s],"maturity":[%s]}|}
         (json_string blueprint)
         (Source_resolver.source_units_to_json resolved.source_units)
-        (Source_resolver.source_domains_to_json_for_ids resolved.source_domains
-           project_universe_source_domain_ids)
+        (Source_resolver.source_domains_to_json resolved.source_domains)
         (if project_registry <> None then "true" else "false")
         (if maturity_registry <> None then "true" else "false")
         (String.concat "," projects)

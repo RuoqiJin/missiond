@@ -1,23 +1,5 @@
 import crypto from 'node:crypto';
 
-export const REQUIRED_FINAL_LIVE_CHECK_IDS = Object.freeze([
-  'generated-v3-contracts-current',
-  'typed-lisp-runtime-compile',
-  'production-runtime-boundary',
-]);
-
-export const V3_SOURCE_DOMAIN_IDS = Object.freeze([
-  'blueprint-core',
-  'workstation-runtime',
-  'control-plane-runtime',
-  'memory-knowledge-runtime',
-  'ops-infra',
-  'universe',
-  'implementation-map',
-  'pillar-flow',
-  'v2-convergence',
-]);
-
 export function runSemanticRules({
   rules,
   repoRoot = process.cwd(),
@@ -26,7 +8,7 @@ export function runSemanticRules({
   gate = null,
   compiledTargets = [],
   runtimeBoundary = null,
-  requiredLiveCheckIds = REQUIRED_FINAL_LIVE_CHECK_IDS,
+  requiredLiveCheckIds = null,
 } = {}) {
   const diagnostics = [];
   for (const rule of rules ?? []) {
@@ -47,9 +29,10 @@ export function runSemanticRules({
   return diagnostics;
 }
 
-export function requiredFinalLiveChecks({ gate, file, requiredLiveCheckIds = REQUIRED_FINAL_LIVE_CHECK_IDS }) {
+export function requiredFinalLiveChecks({ gate, file, requiredLiveCheckIds = null }) {
+  const requiredIds = requiredLiveCheckIds ?? gate?.requiredLiveCheckIds ?? [];
   const liveCheckIds = new Set((gate?.liveChecks ?? []).map((check) => check.id).filter(Boolean));
-  return requiredLiveCheckIds
+  return requiredIds
     .filter((id) => !liveCheckIds.has(id))
     .map((id) => diag(file, `final convergence gate missing required live check ${id}`, 'V3_FINAL_GATE_REQUIRED_CHECK_MISSING'));
 }

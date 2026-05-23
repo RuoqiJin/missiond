@@ -98,6 +98,11 @@ export function loadDeclaredBehaviorUniverse(root, {
       universes.push(parseBehaviorUniverse(root, file, form));
     }
   }
+  if (missiondV3) {
+    const navigation = loadCompiledBehaviorNavigation(root, projectId);
+    diagnostics.push(...navigation.diagnostics);
+    universes.push(...navigation.universes);
+  }
 
   const behaviors = universes.flatMap((u) => u.behaviors);
   const effects = universes.flatMap((u) => u.effects);
@@ -237,6 +242,77 @@ export function validateBehaviorClosure(root, {
     declared,
     diagnostics,
   };
+}
+
+function loadCompiledBehaviorNavigation(root, projectId) {
+  const file = path.join(root, '.missiond/v3/runtime/compiled/compiled-behavior-navigation.json');
+  if (!fs.existsSync(file)) {
+    return {
+      universes: [],
+      diagnostics: [{
+        file,
+        line: 1,
+        column: 1,
+        code: 'BEHAVIOR_NAVIGATION_ARTIFACT_MISSING',
+        message: 'MissionD V3 behavior navigation anchors must come from compiled-behavior-navigation.json; run node scripts/propose-behavior-navigation.mjs --project missiond --write',
+      }],
+    };
+  }
+  try {
+    const compiled = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const diagnostics = [];
+    if (compiled?.schema_version !== 'missiond.compiled-behavior-navigation.v1') {
+      diagnostics.push({
+        file,
+        line: 1,
+        column: 1,
+        code: 'BEHAVIOR_NAVIGATION_SCHEMA_MISMATCH',
+        message: `unsupported behavior navigation schema ${JSON.stringify(compiled?.schema_version)}`,
+      });
+    }
+    if (Array.isArray(compiled?.diagnostics) && compiled.diagnostics.length > 0) {
+      diagnostics.push(...compiled.diagnostics.map((diagnostic) => ({
+        file,
+        line: diagnostic?.line ?? 1,
+        column: diagnostic?.column ?? 1,
+        code: diagnostic?.code ?? 'BEHAVIOR_NAVIGATION_DIAGNOSTIC',
+        message: diagnostic?.message ?? JSON.stringify(diagnostic),
+      })));
+    }
+    const forms = typeof compiled?.payload?.forms === 'string' ? compiled.payload.forms : '';
+    if (!forms.trim()) {
+      diagnostics.push({
+        file,
+        line: 1,
+        column: 1,
+        code: 'BEHAVIOR_NAVIGATION_FORMS_MISSING',
+        message: 'compiled behavior navigation artifact missing payload.forms',
+      });
+      return { universes: [], diagnostics };
+    }
+    const source = `(behavior-universe ${projectId}
+  :schema "missiond.behavior-universe.navigation.v1"
+  :project ${projectId}
+  :status generated-runtime-navigation
+  :owner navigation-gate
+${forms}
+)`;
+    const parsed = parseLisp(source, file);
+    const universes = collectForms(parsed, 'behavior-universe')
+      .map((form) => parseBehaviorUniverse(root, file, form));
+    return { universes, diagnostics };
+  } catch (err) {
+    return {
+      universes: [],
+      diagnostics: [{
+        file,
+        line: err.line ?? 1,
+        column: err.column ?? 1,
+        code: 'BEHAVIOR_NAVIGATION_ARTIFACT_ERROR',
+        message: err.message,
+      }],
+    };
+  }
 }
 
 function behaviorLispFiles(root, { missiondV3 }) {

@@ -47,6 +47,7 @@ export interface FinalConvergenceGate {
   id: string;
   liveChecks: readonly FinalConvergenceCheck[];
   runtimeChecks: readonly FinalConvergenceCheck[];
+  requiredLiveCheckIds: readonly string[];
   blueprintNeedles: readonly { id: string; needle: string }[];
   facadeBudgets: readonly { id: string; file: string; maxLines: number }[];
   requiredSplitFiles: readonly string[];
@@ -81,9 +82,11 @@ export type V3ScannerPolicyId = "plan-lisp-raw-scanner";
 export type V3SemanticGateId = "final-convergence-semantic-facts";
 
 export const SCHEMA_VERSION: "missiond.contract-abi.v1";
-export const SOURCE_HASH: "208864f53a1e0f19e6cdb0f42c874fb3";
-export const RUNTIME_CONFIG_SOURCE_HASH: "02cc1faa324789d6f4a5ce0533ff1ac1";
-export const PROJECT_UNIVERSE_SOURCE_HASH: "f7fc04719b55b67cb0c1aa76d61cec12";
+export const SOURCE_HASH: "985fde4f738fba75a72101d966cb779d";
+export const RUNTIME_CONFIG_SOURCE_HASH: "6ade42d2a3e9caedc2d5d3a1b3829f23";
+export const PROJECT_UNIVERSE_SOURCE_HASH: "6ade42d2a3e9caedc2d5d3a1b3829f23";
+export const RUNTIME_DOMAIN_FILES: Readonly<Record<string, string>>;
+export const RUNTIME_DOMAIN_SOURCE_HASHES: Readonly<Record<string, string>>;
 export const SOURCE_UNITS: readonly SourceUnit[];
 export const SOURCE_DOMAINS: readonly SourceDomain[];
 export const SURFACE_IDS: readonly V3SurfaceId[];

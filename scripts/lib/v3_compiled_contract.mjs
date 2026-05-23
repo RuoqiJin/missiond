@@ -425,6 +425,7 @@ function normalizeFinalConvergenceGate(row) {
     id: stringOrNull(row?.id) ?? 'v3-final-convergence',
     liveChecks: normalizeGateChecks(row?.live_checks),
     runtimeChecks: normalizeGateChecks(row?.runtime_checks),
+    requiredLiveCheckIds: stringArray(row?.required_live_check_ids ?? row?.requiredLiveCheckIds),
     blueprintNeedles: arrayOrEmpty(row?.blueprint_needles)
       .map((entry) => ({
         id: stringOrNull(entry?.id),

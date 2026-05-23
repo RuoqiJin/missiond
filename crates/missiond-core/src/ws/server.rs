@@ -1422,6 +1422,7 @@ impl PTYWebSocketServer {
 
     async fn stream_jarvis_task_until_terminal(
         db: &Arc<dyn crate::db::traits::MissionStore>,
+        jarvis_artifact_writer: &JarvisArtifactSlot,
         stream: &mut TcpStream,
         chat_id: &str,
         task_id: &str,
@@ -1506,6 +1507,52 @@ impl PTYWebSocketServer {
                     if is_summary {
                         latest_summary = Some(content.clone());
                     }
+                    let mut artifact_hash = artifact_hash;
+                    if is_summary && artifact_hash.is_none() {
+                        match Self::put_jarvis_artifact(
+                            jarvis_artifact_writer,
+                            JarvisArtifactRequest {
+                                kind: "task-result-artifact".to_string(),
+                                project_id: Some("missiond".to_string()),
+                                task_id: Some(task_id.to_string()),
+                                payload: serde_json::json!({
+                                    "schema": "missiond.jarvis-task-result.v1",
+                                    "task_id": task_id,
+                                    "note_id": note.id,
+                                    "note_type": note.note_type.as_str(),
+                                    "author": note.author,
+                                    "summary": content.clone(),
+                                    "result_status": "completed",
+                                    "source": "jarvis-board-summary-projection"
+                                }),
+                                metadata: serde_json::json!({
+                                    "schema": "missiond.jarvis-task-result.v1",
+                                    "task_id": task_id,
+                                    "provider": note.author,
+                                    "result_status": "completed",
+                                    "source": "jarvis-board-summary-projection"
+                                }),
+                            },
+                        )
+                        .await
+                        {
+                            Ok(result) => {
+                                artifact_hash = Some(result.artifact_hash);
+                            }
+                            Err(error) => {
+                                let diagnostic = serde_json::json!({
+                                    "phase": "workers_running",
+                                    "task_id": task_id,
+                                    "note_id": note.id,
+                                    "error": {
+                                        "code": "TASK_RESULT_ARTIFACT_WRITE_FAILED",
+                                        "message": error
+                                    }
+                                });
+                                Self::write_sse_event(stream, "diagnostic", &diagnostic).await?;
+                            }
+                        }
+                    }
                     if artifact_hash.is_some() {
                         latest_artifact_hash = artifact_hash.clone();
                     }
@@ -1578,6 +1625,7 @@ impl PTYWebSocketServer {
         context_pack_path: Option<&str>,
         intent_artifact_id: &str,
         plan_artifact_id: &str,
+        read_scope_root: &str,
     ) -> serde_json::Value {
         let lower = raw_user_text.to_ascii_lowercase();
         let mentions_agy = lower.contains("agy")
@@ -1615,7 +1663,7 @@ impl PTYWebSocketServer {
             "engine_hint": engine_hint,
             "pool_hint": pool_hint,
             "write_policy": "read-only",
-            "read_scope": ["/Users/jinchen/Projects/missiond"],
+            "read_scope": [read_scope_root],
             "write_scope": [],
             "must_not_touch": ["Do not modify files", "Do not stage", "Do not commit", "Do not spawn sub-workers from inside the worker"],
             "acceptance": [
@@ -1630,6 +1678,26 @@ impl PTYWebSocketServer {
             "plan_artifact_id": plan_artifact_id,
             "worker_may_delegate": false
         })
+    }
+
+    fn jarvis_runtime_read_scope_root() -> String {
+        for key in [
+            "MISSIOND_PROJECT_ROOT",
+            "MISSIOND_REPO_ROOT",
+            "MISSIOND_WORKSPACE_ROOT",
+        ] {
+            if let Ok(value) = std::env::var(key) {
+                let trimmed = value.trim();
+                if !trimmed.is_empty() {
+                    return trimmed.to_string();
+                }
+            }
+        }
+        std::env::current_dir()
+            .ok()
+            .map(|path| path.display().to_string())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| ".".to_string())
     }
 
     fn build_jarvis_worker_prompt(
@@ -2105,6 +2173,7 @@ impl PTYWebSocketServer {
                 context_pack_path.as_deref(),
                 &intent_artifact_id,
                 &plan_artifact_id,
+                &Self::jarvis_runtime_read_scope_root(),
             );
             let prompt_template =
                 Self::build_jarvis_worker_prompt(&raw_user_text, &dispatch_metadata);
@@ -2161,6 +2230,7 @@ impl PTYWebSocketServer {
                     .await?;
                     Self::stream_jarvis_task_until_terminal(
                         db,
+                        &jarvis_artifact_writer,
                         &mut stream,
                         &chat_id,
                         task.id.as_str(),

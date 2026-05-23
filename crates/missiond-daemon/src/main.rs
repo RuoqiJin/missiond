@@ -1310,6 +1310,68 @@ async fn main() -> Result<()> {
             Arc::new(move |req: missiond_core::JarvisArtifactRequest| {
                 let s = state_for_artifact.clone();
                 Box::pin(async move {
+                    if req.kind == "task-result-artifact" {
+                        let task_id = req
+                            .task_id
+                            .clone()
+                            .or_else(|| {
+                                req.metadata
+                                    .get("task_id")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string)
+                            })
+                            .or_else(|| {
+                                req.payload
+                                    .get("task_id")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string)
+                            })
+                            .ok_or_else(|| "task-result-artifact requires task_id".to_string())?;
+                        let provider = req
+                            .metadata
+                            .get("provider")
+                            .and_then(Value::as_str)
+                            .or_else(|| req.payload.get("author").and_then(Value::as_str))
+                            .unwrap_or("jarvis");
+                        let result_status = req
+                            .metadata
+                            .get("result_status")
+                            .and_then(Value::as_str)
+                            .or_else(|| req.payload.get("result_status").and_then(Value::as_str))
+                            .unwrap_or("completed");
+                        let summary = req
+                            .payload
+                            .get("summary")
+                            .and_then(Value::as_str)
+                            .or_else(|| req.payload.get("content").and_then(Value::as_str))
+                            .unwrap_or("");
+                        let payload = serde_json::json!({
+                            "action": "task_result_put",
+                            "task_id": task_id,
+                            "project_id": req.project_id.as_deref().unwrap_or("missiond"),
+                            "provider": provider,
+                            "result_status": result_status,
+                            "summary": summary,
+                            "json": req.payload,
+                        });
+                        let result = s
+                            .shared_memory
+                            .handle_action(&payload)
+                            .await
+                            .map_err(|err| err.to_string())?;
+                        let hash = result
+                            .get("artifact_hash")
+                            .and_then(Value::as_str)
+                            .ok_or_else(|| {
+                                "task-result-artifact writer returned no artifact_hash".to_string()
+                            })?
+                            .to_string();
+                        return Ok(missiond_core::JarvisArtifactResult {
+                            artifact_id: format!("task-result-artifact:{hash}"),
+                            artifact_hash: hash.clone(),
+                            path: format!("shared-artifact://{hash}"),
+                        });
+                    }
                     let artifact = s
                         .shared_memory
                         .put_json_artifact(

@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { runLispc } from './lib/ocaml_lispc.mjs';
 import { runSemanticRules } from './lib/v3_semantic_rules.mjs';
+import { RUNTIME_DOMAIN_SPECS } from './lib/v3_runtime_domains.mjs';
 
 const OUT_DIR = '.missiond/v3/runtime/compiled';
 const BLUEPRINT = '.missiond/v3/missiond-blueprint.lisp';
@@ -89,12 +90,47 @@ function main() {
     fs.writeFileSync(outPath, `${JSON.stringify(compiled, null, 2)}\n`);
     results.push({ id: target.id, ok: true, path: outPath, source_hash: compiled.source_hash });
   }
+  const runtimeConfig = bundleTargets['runtime-config'];
+  if (runtimeConfig && targetCompiledOk(runtimeConfig)) {
+    const domainTargets = compiledRuntimeDomainTargets(runtimeConfig);
+    for (const domainTarget of domainTargets) {
+      if (!domainTarget.ok) {
+        results.push(domainTarget);
+        continue;
+      }
+      const outPath = path.join(outDir, domainTarget.file);
+      fs.writeFileSync(outPath, `${JSON.stringify(domainTarget.compiled, null, 2)}\n`);
+      results.push({
+        id: `runtime-domain:${domainTarget.domain}`,
+        ok: true,
+        path: outPath,
+        source_hash: domainTarget.compiled.source_hash,
+      });
+    }
+  }
+  const contractAbi = bundleTargets['contract-abi'];
+  if (contractAbi && targetCompiledOk(contractAbi)) {
+    const finalManifest = compiledFinalConvergenceManifest(contractAbi);
+    const outPath = path.join(outDir, 'compiled-final-convergence-manifest.json');
+    fs.writeFileSync(outPath, `${JSON.stringify(finalManifest, null, 2)}\n`);
+    results.push({
+      id: 'final-convergence-manifest',
+      ok: finalManifest.diagnostics.length === 0,
+      path: outPath,
+      source_hash: finalManifest.source_hash,
+      diagnostics: finalManifest.diagnostics,
+    });
+  }
   const ssotRows = results.filter((row) => (
-    row.ok && ['v3', 'runtime-config', 'semantic-ir', 'contract-abi', 'universe'].includes(row.id)
+    row.ok && (
+      ['v3', 'runtime-config', 'semantic-ir', 'contract-abi', 'universe'].includes(row.id)
+      || row.id.startsWith('runtime-domain:')
+    )
   ));
   if (ssotRows.length >= 4) {
     const compiledTargets = ssotRows.map((row) => {
-      const compiledPath = path.join(outDir, targets.find((target) => target.id === row.id).file);
+      const targetFile = targets.find((target) => target.id === row.id)?.file ?? path.basename(row.path);
+      const compiledPath = path.join(outDir, targetFile);
       const compiled = JSON.parse(fs.readFileSync(compiledPath, 'utf8'));
       return {
         id: row.id,
@@ -216,6 +252,126 @@ function targetCompiledOk(compiled) {
     && compiled.diagnostics.length === 0
     && compiled.payload
     && typeof compiled.payload === 'object';
+}
+
+function compiledRuntimeDomainTargets(runtimeConfig) {
+  const payload = runtimeConfig?.payload ?? {};
+  const sourceUnits = Array.isArray(payload.source_units) ? payload.source_units : [];
+  const sourceDomains = Array.isArray(payload.source_domains) ? payload.source_domains : [];
+  return RUNTIME_DOMAIN_SPECS.map((spec) => {
+    const config = payload[spec.payloadKey];
+    if (!config || typeof config !== 'object' || Array.isArray(config)) {
+      return {
+        id: `runtime-domain:${spec.id}`,
+        ok: false,
+        domain: spec.id,
+        file: spec.file,
+        diagnostics: [{
+          message: `compiled runtime config missing payload.${spec.payloadKey}`,
+        }],
+      };
+    }
+    return {
+      id: `runtime-domain:${spec.id}`,
+      ok: true,
+      domain: spec.id,
+      file: spec.file,
+      compiled: {
+        schema_version: 'missiond.compiled-runtime-domain.v1',
+        source_hash: runtimeConfig.source_hash,
+        generated_at: null,
+        diagnostics: runtimeConfig.diagnostics ?? [],
+        payload: {
+          domain: spec.id,
+          payload_key: spec.payloadKey,
+          config,
+          runtime_policies: Array.isArray(payload.runtime_policies) ? payload.runtime_policies : [],
+          source_units: sourceUnits,
+          source_domains: sourceDomains,
+        },
+      },
+    };
+  });
+}
+
+function compiledFinalConvergenceManifest(contractAbi) {
+  const payload = contractAbi?.payload ?? {};
+  const facts = Array.isArray(payload.facts) ? payload.facts : [];
+  const gate = facts.find((fact) => fact?.kind === 'final_convergence_gate');
+  const diagnostics = [];
+  if (!gate) diagnostics.push({ message: 'contract ABI missing final_convergence_gate fact' });
+  return {
+    schema_version: 'missiond.compiled-final-convergence-manifest.v1',
+    source_hash: contractAbi.source_hash,
+    generated_at: null,
+    diagnostics,
+    payload: {
+      ...(normalizeFinalConvergenceGate(gate) ?? {}),
+      source_units: Array.isArray(payload.source_units) ? payload.source_units : [],
+      source_domains: Array.isArray(payload.source_domains) ? payload.source_domains : [],
+    },
+  };
+}
+
+function normalizeFinalConvergenceGate(row) {
+  if (!row || typeof row !== 'object') return null;
+  return {
+    id: stringOrNull(row?.id) ?? 'v3-final-convergence',
+    liveChecks: normalizeGateChecks(row?.live_checks),
+    runtimeChecks: normalizeGateChecks(row?.runtime_checks),
+    requiredLiveCheckIds: stringArray(row?.required_live_check_ids ?? row?.requiredLiveCheckIds),
+    blueprintNeedles: arrayOrEmpty(row?.blueprint_needles)
+      .map((entry) => ({
+        id: stringOrNull(entry?.id),
+        needle: stringOrNull(entry?.needle),
+      }))
+      .filter((entry) => entry.id && entry.needle),
+    facadeBudgets: arrayOrEmpty(row?.facade_budgets)
+      .map((entry) => ({
+        id: stringOrNull(entry?.id),
+        file: stringOrNull(entry?.file),
+        maxLines: positiveIntOrNull(entry?.max_lines ?? entry?.maxLines),
+      }))
+      .filter((entry) => entry.id && entry.file && entry.maxLines != null),
+    requiredSplitFiles: stringArray(row?.required_split_files ?? row?.requiredSplitFiles),
+    requiredRuntimeFiles: arrayOrEmpty(row?.required_runtime_files ?? row?.requiredRuntimeFiles)
+      .map((entry) => ({
+        file: stringOrNull(entry?.file),
+        needles: stringArray(entry?.needles),
+      }))
+      .filter((entry) => entry.file),
+    source: row?.source ?? null,
+  };
+}
+
+function normalizeGateChecks(rows) {
+  return arrayOrEmpty(rows)
+    .map((entry) => ({
+      id: stringOrNull(entry?.id),
+      command: stringOrNull(entry?.command),
+      argv: stringArray(entry?.argv),
+      json: entry?.json === true,
+      timeoutMs: positiveIntOrNull(entry?.timeout_ms ?? entry?.timeoutMs) ?? 60_000,
+    }))
+    .filter((entry) => entry.id && entry.argv.length > 0);
+}
+
+function stringArray(value) {
+  return Array.isArray(value)
+    ? value.filter((item) => typeof item === 'string' && item.trim() !== '')
+    : [];
+}
+
+function arrayOrEmpty(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function stringOrNull(value) {
+  return typeof value === 'string' && value.trim() !== '' ? value : null;
+}
+
+function positiveIntOrNull(value) {
+  return Number.isInteger(value) && value > 0 ? value : null;
 }
 
 main();

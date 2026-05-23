@@ -29,36 +29,36 @@ let () =
   match args with
   | "emit-json" :: rest -> (
       match find_arg "--file" rest with
-      | Some file -> exit (Emit_json.emit_ast file)
+      | Some file -> exit (Emit_envelope_projection.emit_ast file)
       | None -> exit (usage ()))
   | "emit-v3" :: rest ->
       let file = Option.value ~default:".missiond/v3/missiond-blueprint.lisp" (find_arg "--blueprint" rest) in
-      exit (Emit_json.emit_v3 file)
+      exit (Emit_envelope_projection.emit_v3 file)
   | "emit-resolved-v3" :: rest ->
       let file =
         Option.value ~default:".missiond/v3/missiond-blueprint.lisp"
           (find_arg "--blueprint" rest)
       in
-      exit (Emit_json.emit_resolved_v3 file)
+      exit (Emit_envelope_projection.emit_resolved_v3 file)
   | "emit-runtime-config" :: rest ->
       let file = Option.value ~default:".missiond/v3/missiond-blueprint.lisp" (find_arg "--blueprint" rest) in
-      exit (Emit_json.emit_runtime_config file)
+      exit (Emit_runtime_projection.emit_runtime_config file)
   | "emit-semantic-ir" :: rest ->
       let file = Option.value ~default:".missiond/v3/missiond-blueprint.lisp" (find_arg "--blueprint" rest) in
-      exit (Emit_json.emit_semantic_ir file)
+      exit (Emit_semantic_projection.emit_semantic_ir file)
   | "emit-contract-abi" :: rest ->
       let file = Option.value ~default:".missiond/v3/missiond-blueprint.lisp" (find_arg "--blueprint" rest) in
-      exit (Emit_json.emit_contract_abi file)
+      exit (Emit_contract_projection.emit_contract_abi file)
   | "emit-plan-contract" :: rest -> (
       match find_arg "--file" rest with
-      | Some file -> exit (Emit_json.emit_plan_contract file)
+      | Some file -> exit (Emit_plan_projection.emit_plan_contract file)
       | None -> exit (usage ()))
   | "emit-universe" :: rest ->
       let file = Option.value ~default:".missiond/v3/missiond-blueprint.lisp" (find_arg "--blueprint" rest) in
-      exit (Emit_json.emit_universe file)
+      exit (Emit_universe_projection.emit_universe file)
   | "emit-workflows" :: rest -> (
       match find_arg "--workflow-dir" rest with
-      | Some dir -> exit (Emit_json.emit_workflows dir)
+      | Some dir -> exit (Emit_workflow_projection.emit_workflows dir)
       | None -> exit (usage ()))
   | "emit-genomes" :: rest -> (
       match (find_arg "--genome-dir" rest, find_arg "--dir" rest) with
@@ -76,7 +76,9 @@ let () =
       let genome_dir =
         Option.value ~default:".missiond/v3/genome" (find_arg "--genome-dir" rest)
       in
-      exit (Emit_json.compile_v3_runtime blueprint workflow_dir genome_dir)
+      exit
+        (Emit_runtime_projection.compile_v3_runtime blueprint workflow_dir
+           genome_dir)
   | "check-v3" :: rest ->
       let file = Option.value ~default:".missiond/v3/missiond-blueprint.lisp" (find_arg "--blueprint" rest) in
       let expected =
@@ -85,7 +87,7 @@ let () =
       exit (print_diagnostics (Schema_v3.validate file expected))
   | "check-plan-contract" :: rest -> (
       match find_arg "--file" rest with
-      | Some file -> exit (Emit_json.check_plan_contract file)
+      | Some file -> exit (Emit_plan_projection.check_plan_contract file)
       | None -> exit (usage ()))
   | "check-workstation-config" :: rest ->
       let file =

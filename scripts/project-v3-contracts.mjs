@@ -5,6 +5,11 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 
 import { runLispc } from './lib/ocaml_lispc.mjs';
+import {
+  RUNTIME_DOMAIN_SPECS,
+  runtimeDomainFiles,
+  runtimeDomainSourceHashes,
+} from './lib/v3_runtime_domains.mjs';
 
 const BLUEPRINT = '.missiond/v3/missiond-blueprint.lisp';
 const RUST_OUTPUT = 'crates/missiond-daemon/src/context/v3_contracts/generated.rs';
@@ -29,6 +34,8 @@ function main() {
     jsRuntimeDefaultsOutput: JS_RUNTIME_DEFAULTS_OUTPUT,
     runtimeConfigSourceHash: runtimeDefaults.sourceDomainHash,
     projectUniverseSourceHash: projectUniverse.sourceDomainHash,
+    runtimeDomainFiles: runtimeDomainFiles(),
+    runtimeDomainSourceHashes: runtimeDomainSourceHashes(runtimeDefaults.sourceDomainHash),
   });
   const generatedRuntimeDefaults = renderRuntimeDefaults(runtimeDefaults, {
     blueprint,
@@ -77,6 +84,7 @@ function main() {
     artifact_contracts: contract.artifactContractIds.length,
     runtime_policies: contract.runtimePolicies.length,
     source_domains: contract.sourceDomains.length,
+    runtime_domains: RUNTIME_DOMAIN_SPECS.length,
     runtime_config_source_hash: runtimeDefaults.sourceDomainHash,
     project_universe_source_hash: projectUniverse.sourceDomainHash,
     checker_commands: checkerCommands(contract).length,
@@ -241,6 +249,14 @@ pub const SCHEMA_VERSION: &str = ${rustString(contract.schemaVersion)};
 pub const SOURCE_HASH: &str = ${rustString(contract.sourceHash)};
 pub const RUNTIME_CONFIG_SOURCE_HASH: &str = ${rustString(labels.runtimeConfigSourceHash)};
 pub const PROJECT_UNIVERSE_SOURCE_HASH: &str = ${rustString(labels.projectUniverseSourceHash)};
+#[rustfmt::skip]
+pub const RUNTIME_DOMAIN_FILES: &[(&str, &str)] = &[
+${Object.entries(labels.runtimeDomainFiles).map(renderRustTuple2).join('\n')}
+];
+#[rustfmt::skip]
+pub const RUNTIME_DOMAIN_SOURCE_HASHES: &[(&str, &str)] = &[
+${Object.entries(labels.runtimeDomainSourceHashes).map(renderRustTuple2).join('\n')}
+];
 
 pub const SOURCE_UNITS: &[SourceUnit] = &[
 ${contract.sourceUnits.map(renderRustSourceUnit).join('\n')}
@@ -305,6 +321,8 @@ export const SCHEMA_VERSION = ${JSON.stringify(contract.schemaVersion)};
 export const SOURCE_HASH = ${JSON.stringify(contract.sourceHash)};
 export const RUNTIME_CONFIG_SOURCE_HASH = ${JSON.stringify(labels.runtimeConfigSourceHash)};
 export const PROJECT_UNIVERSE_SOURCE_HASH = ${JSON.stringify(labels.projectUniverseSourceHash)};
+export const RUNTIME_DOMAIN_FILES = Object.freeze(${JSON.stringify(labels.runtimeDomainFiles, null, 2)});
+export const RUNTIME_DOMAIN_SOURCE_HASHES = Object.freeze(${JSON.stringify(labels.runtimeDomainSourceHashes, null, 2)});
 export const SOURCE_UNITS = Object.freeze(${JSON.stringify(contract.sourceUnits, null, 2)});
 export const SOURCE_DOMAINS = Object.freeze(${JSON.stringify(contract.sourceDomains, null, 2)});
 export const SURFACE_IDS = Object.freeze(${JSON.stringify(contract.surfaceIds, null, 2)});
@@ -381,6 +399,7 @@ export interface FinalConvergenceGate {
   id: string;
   liveChecks: readonly FinalConvergenceCheck[];
   runtimeChecks: readonly FinalConvergenceCheck[];
+  requiredLiveCheckIds: readonly string[];
   blueprintNeedles: readonly { id: string; needle: string }[];
   facadeBudgets: readonly { id: string; file: string; maxLines: number }[];
   requiredSplitFiles: readonly string[];
@@ -418,6 +437,8 @@ export const SCHEMA_VERSION: ${JSON.stringify(contract.schemaVersion)};
 export const SOURCE_HASH: ${JSON.stringify(contract.sourceHash)};
 export const RUNTIME_CONFIG_SOURCE_HASH: ${JSON.stringify(labels.runtimeConfigSourceHash)};
 export const PROJECT_UNIVERSE_SOURCE_HASH: ${JSON.stringify(labels.projectUniverseSourceHash)};
+export const RUNTIME_DOMAIN_FILES: Readonly<Record<string, string>>;
+export const RUNTIME_DOMAIN_SOURCE_HASHES: Readonly<Record<string, string>>;
 export const SOURCE_UNITS: readonly SourceUnit[];
 export const SOURCE_DOMAINS: readonly SourceDomain[];
 export const SURFACE_IDS: readonly V3SurfaceId[];
@@ -512,6 +533,7 @@ function normalizeFinalConvergenceGate(row) {
     id: stringOrNull(row?.id) ?? 'v3-final-convergence',
     liveChecks: normalizeGateChecks(row?.live_checks),
     runtimeChecks: normalizeGateChecks(row?.runtime_checks),
+    requiredLiveCheckIds: stringArray(row?.required_live_check_ids ?? row?.requiredLiveCheckIds),
     blueprintNeedles: arrayOrEmpty(row?.blueprint_needles)
       .map((entry) => ({
         id: stringOrNull(entry?.id),
@@ -613,6 +635,13 @@ function numberOrZero(value) {
 
 function renderRustSourceUnit(unit) {
   return renderRustSourceUnitWithIndent(unit, '    ', true);
+}
+
+function renderRustTuple2([left, right]) {
+  return `    (
+        ${rustString(left)},
+        ${rustString(right)},
+    ),`;
 }
 
 function renderRustSourceDomain(domain) {

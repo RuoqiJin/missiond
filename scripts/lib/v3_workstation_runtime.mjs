@@ -13,6 +13,7 @@ import {
   readKeywordProps,
 } from './missiond_lisp.mjs';
 import {
+  RUNTIME_DOMAIN_SOURCE_HASHES,
   RUNTIME_CONFIG_SOURCE_HASH as V3_RUNTIME_CONFIG_SOURCE_HASH,
   SOURCE_HASH as V3_CONTRACT_SOURCE_HASH,
 } from '../generated/v3_contracts.mjs';
@@ -61,6 +62,13 @@ const COMPILED_RUNTIME_CONFIG_REL = path.join(
   'runtime',
   'compiled',
   'compiled-runtime-config.json',
+);
+const COMPILED_WORKSTATION_RUNTIME_REL = path.join(
+  '.missiond',
+  'v3',
+  'runtime',
+  'compiled',
+  'compiled-runtime-workstation.json',
 );
 const V3_COMPILE_RUNTIME_ACTION = 'node scripts/compile-v3-runtime.mjs --json';
 
@@ -313,12 +321,14 @@ function findMissiondLispcRoot(start = process.cwd()) {
 }
 
 function loadCompiledWorkstationRuntimeConfig(repo) {
+  const domain = loadCompiledWorkstationRuntimeDomainConfig(repo);
+  if (domain.config) return domain;
   const compiledPath = path.join(repo, COMPILED_RUNTIME_CONFIG_REL);
-  const diagnostics = [];
+  const diagnostics = [...domain.diagnostics];
   if (!fs.existsSync(compiledPath)) {
     return {
       config: null,
-      diagnostics: [`compiled runtime config missing: ${compiledPath}`],
+      diagnostics: [...diagnostics, `compiled runtime config missing: ${compiledPath}`],
     };
   }
   try {
@@ -349,19 +359,66 @@ function loadCompiledWorkstationRuntimeConfig(repo) {
   }
 }
 
-function validateCompiledSourceUnits(repo, compiled, { requireGeneratedHash = true } = {}) {
+function loadCompiledWorkstationRuntimeDomainConfig(repo) {
+  const compiledPath = path.join(repo, COMPILED_WORKSTATION_RUNTIME_REL);
+  const diagnostics = [];
+  if (!fs.existsSync(compiledPath)) {
+    return {
+      config: null,
+      diagnostics: [`compiled workstation runtime domain missing: ${compiledPath}`],
+    };
+  }
+  try {
+    const compiled = JSON.parse(fs.readFileSync(compiledPath, 'utf8'));
+    if (compiled?.schema_version !== 'missiond.compiled-runtime-domain.v1') {
+      diagnostics.push(`compiled workstation runtime domain has unsupported schema_version ${JSON.stringify(compiled?.schema_version)}`);
+    }
+    if (compiled?.payload?.domain !== 'workstation') {
+      diagnostics.push(`compiled workstation runtime domain has payload.domain ${JSON.stringify(compiled?.payload?.domain)}`);
+    }
+    if (Array.isArray(compiled?.diagnostics) && compiled.diagnostics.length > 0) {
+      diagnostics.push(`compiled workstation runtime domain contains diagnostics: ${compiled.diagnostics.map((d) => d?.message ?? String(d)).join('; ')}`);
+    }
+    diagnostics.push(...validateCompiledSourceUnits(repo, compiled, {
+      label: 'compiled workstation runtime domain',
+      expectedSourceDomainHash: RUNTIME_DOMAIN_SOURCE_HASHES?.workstation ?? V3_RUNTIME_CONFIG_SOURCE_HASH,
+    }));
+    const workstation = compiled?.payload?.config;
+    if (!workstation || typeof workstation !== 'object') {
+      diagnostics.push('compiled workstation runtime domain payload.config missing');
+    }
+    if (diagnostics.length > 0) {
+      return { config: null, diagnostics };
+    }
+    return {
+      config: workstationConfigFromCompiled(workstation, compiledPath),
+      diagnostics: [],
+    };
+  } catch (err) {
+    return {
+      config: null,
+      diagnostics: [`failed to load compiled workstation runtime domain ${compiledPath}: ${err.message}`],
+    };
+  }
+}
+
+function validateCompiledSourceUnits(repo, compiled, {
+  requireGeneratedHash = true,
+  label = 'compiled runtime config',
+  expectedSourceDomainHash = V3_RUNTIME_CONFIG_SOURCE_HASH,
+} = {}) {
   const diagnostics = [];
   const sourceDomains = compiled?.payload?.source_domains;
   const sourceDomainHash = Array.isArray(sourceDomains) && sourceDomains.length > 0
     ? sourceDomainBundleHash(sourceDomains)
     : null;
-  if (requireGeneratedHash && sourceDomainHash && sourceDomainHash !== V3_RUNTIME_CONFIG_SOURCE_HASH) {
+  if (requireGeneratedHash && sourceDomainHash && sourceDomainHash !== expectedSourceDomainHash) {
     diagnostics.push(
-      `compiled runtime config source_domains differ from generated V3 runtime contract: expected ${V3_RUNTIME_CONFIG_SOURCE_HASH}, got ${sourceDomainHash}; run node scripts/project-v3-contracts.mjs --write and node scripts/compile-v3-runtime.mjs --json`,
+      `${label} source_domains differ from generated V3 runtime contract: expected ${expectedSourceDomainHash}, got ${sourceDomainHash}; run node scripts/project-v3-contracts.mjs --write and node scripts/compile-v3-runtime.mjs --json`,
     );
   } else if (requireGeneratedHash && !sourceDomainHash && compiled?.source_hash !== V3_CONTRACT_SOURCE_HASH) {
     diagnostics.push(
-      `compiled runtime config source_hash differs from generated V3 contract ABI: expected ${V3_CONTRACT_SOURCE_HASH}, got ${compiled?.source_hash ?? '<missing>'}; run node scripts/project-v3-contracts.mjs --write and node scripts/compile-v3-runtime.mjs --json`,
+      `${label} source_hash differs from generated V3 contract ABI: expected ${V3_CONTRACT_SOURCE_HASH}, got ${compiled?.source_hash ?? '<missing>'}; run node scripts/project-v3-contracts.mjs --write and node scripts/compile-v3-runtime.mjs --json`,
     );
   }
 
@@ -369,7 +426,7 @@ function validateCompiledSourceUnits(repo, compiled, { requireGeneratedHash = tr
     for (const domain of sourceDomains) {
       const id = typeof domain?.id === 'string' ? domain.id : '<missing>';
       const domainDiagnostics = validateSourceUnitArray(repo, domain?.source_units, {
-        label: `compiled runtime config source domain ${id}`,
+        label: `${label} source domain ${id}`,
         expectedCompositeHash: domain?.source_hash,
         allowEmpty: true,
       });
@@ -380,7 +437,7 @@ function validateCompiledSourceUnits(repo, compiled, { requireGeneratedHash = tr
 
   const sourceUnits = compiled?.payload?.source_units;
   diagnostics.push(...validateSourceUnitArray(repo, sourceUnits, {
-    label: 'compiled runtime config',
+    label,
     expectedCompositeHash: compiled?.source_hash,
   }));
   return diagnostics;

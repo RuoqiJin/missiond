@@ -1,7 +1,24 @@
 (library
  (name missiond_lispc_core)
  (wrapped false)
- (modules ast parser source_resolver schema_v3 workflow_schema project_schema workstation_schema genome_schema emit_json))
+ (modules
+  ast
+  parser
+  source_resolver
+  schema_v3
+  workflow_schema
+  project_schema
+  workstation_schema
+  genome_schema
+  emit_json
+  emit_projection_support
+  emit_envelope_projection
+  emit_runtime_projection
+  emit_semantic_projection
+  emit_contract_projection
+  emit_universe_projection
+  emit_plan_projection
+  emit_workflow_projection))
 
 (executable
  (name main)

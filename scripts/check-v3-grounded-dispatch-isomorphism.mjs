@@ -14,6 +14,9 @@ Checks the V3 grounded-dispatch contract:
   - mission_task_delegate and mission_swarm_run enforce grounding before broad
     dispatch and fail fast when gather cannot produce a grounded artifact.
   - Autopilot refuses ungrounded broad BoardTasks before PTY dispatch.
+  - Jarvis worker dispatch uses the runtime/project root for read_scope and
+    normalizes Board/provider finals into canonical task-result-artifacts before
+    streaming result_artifact events.
 `;
 
 let json = false;
@@ -138,9 +141,52 @@ const checks = [
     ],
   ],
   [
+    'jarvis runtime read-scope root',
+    'crates/missiond-core/src/ws/server.rs',
+    [
+      'fn jarvis_runtime_read_scope_root',
+      'MISSIOND_PROJECT_ROOT',
+      'MISSIOND_REPO_ROOT',
+      'MISSIOND_WORKSPACE_ROOT',
+      '"read_scope": [read_scope_root]',
+    ],
+  ],
+  [
+    'jarvis task-result-artifact stream projection',
+    'crates/missiond-core/src/ws/server.rs',
+    [
+      'jarvis_artifact_writer: &JarvisArtifactSlot',
+      'kind: "task-result-artifact".to_string()',
+      '"jarvis-board-summary-projection"',
+      '"TASK_RESULT_ARTIFACT_WRITE_FAILED"',
+      'Self::extract_task_result_artifact_hash',
+      'Self::put_jarvis_artifact',
+    ],
+  ],
+  [
+    'daemon task-result-artifact writer',
+    'crates/missiond-daemon/src/main.rs',
+    [
+      'if req.kind == "task-result-artifact"',
+      '"task-result-artifact requires task_id"',
+      '"action": "task_result_put"',
+      '"task-result-artifact writer returned no artifact_hash"',
+      'artifact_id: format!("task-result-artifact:{hash}")',
+      'path: format!("shared-artifact://{hash}")',
+    ],
+  ],
+  [
     'aggregate registration',
     'scripts/check-v3-code-isomorphism-complete.mjs',
     ['scripts/check-v3-grounded-dispatch-isomorphism.mjs'],
+  ],
+];
+
+const forbiddenChecks = [
+  [
+    'jarvis dispatch must not hardcode local developer root',
+    'crates/missiond-core/src/ws/server.rs',
+    ['"read_scope": ["/Users/jinchen/Projects/missiond"]'],
   ],
 ];
 
@@ -165,6 +211,31 @@ for (const [label, rel, needles] of checks) {
         file: rel,
         needle,
         message: `missing grounded-dispatch anchor: ${needle}`,
+      });
+    }
+  }
+}
+
+for (const [label, rel, forbiddenNeedles] of forbiddenChecks) {
+  const file = path.join(repoRoot, rel);
+  let text = '';
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch (error) {
+    diagnostics.push({
+      label,
+      file: rel,
+      message: `missing file: ${error.message}`,
+    });
+    continue;
+  }
+  for (const needle of forbiddenNeedles) {
+    if (text.includes(needle)) {
+      diagnostics.push({
+        label,
+        file: rel,
+        needle,
+        message: `forbidden grounded-dispatch anchor present: ${needle}`,
       });
     }
   }

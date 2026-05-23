@@ -339,6 +339,11 @@
     :schema "missiond.final-convergence-gate.v1"
     :id "v3-final-convergence"
     :checker "node scripts/check-v3-final-convergence.mjs"
+    :required-live-checks [generated-v3-contracts-current
+                           typed-lisp-runtime-compile
+                           runtime-domain-projections
+                           control-plane-m6-split
+                           production-runtime-boundary]
     :required-split-files ["crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs"
                            "crates/missiond-daemon/src/handlers/knowledge/plan/approval_review.rs"
                            "crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime.rs"
@@ -388,6 +393,10 @@
       :argv ["scripts/project-v3-contracts.mjs" "--check" "--json"] :json true :timeout-ms 60000)
     (live-check typed-lisp-runtime-compile
       :argv ["scripts/compile-v3-runtime.mjs" "--check" "--json"] :json true :timeout-ms 60000)
+    (live-check runtime-domain-projections
+      :argv ["scripts/check-v3-runtime-domain-projections.mjs" "--json"] :json true :timeout-ms 60000)
+    (live-check control-plane-m6-split
+      :argv ["scripts/check-v3-control-plane-m6-split.mjs" "--json"] :json true :timeout-ms 60000)
     (live-check production-runtime-boundary
       :argv ["scripts/check-v3-production-runtime-boundary.mjs" "--json"] :json true :timeout-ms 60000)
     (live-check semantic-checker-coverage
@@ -433,10 +442,21 @@
       :file "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch.rs" :max-lines 400)
     (runtime-file workstation-runtime-loader
       :file "scripts/lib/v3_workstation_runtime.mjs"
-      :needles ["DEFAULT_WORKSTATION_RUNTIME_CONFIG" "contextPackDispatchPolicy"
+      :needles ["DEFAULT_WORKSTATION_RUNTIME_CONFIG" "compiled-runtime-workstation.json" "contextPackDispatchPolicy"
                 "V3_BLUEPRINT_CONFIG_ERROR" "source_units"
                 "Raw V3 Lisp source fallback is not a production runtime path"
                 "compiled runtime config is required"])
+    (runtime-file runtime-domain-projection-checker
+      :file "scripts/check-v3-runtime-domain-projections.mjs"
+      :needles ["compiled-runtime-workstation.json" "missiond.compiled-runtime-domain.v1"
+                "RUNTIME_DOMAIN_FILES"])
+    (runtime-file final-convergence-manifest
+      :file ".missiond/v3/runtime/compiled/compiled-final-convergence-manifest.json"
+      :needles ["missiond.compiled-final-convergence-manifest.v1"
+                "runtime-domain-projections"])
+    (runtime-file behavior-navigation-artifact
+      :file ".missiond/v3/runtime/compiled/compiled-behavior-navigation.json"
+      :needles ["missiond.compiled-behavior-navigation.v1" "anchors"])
     (runtime-file artifact-commit-outbox-helper
       :file "crates/missiond-daemon/src/handlers/knowledge/file_artifacts/commit.rs"
       :needles ["ArtifactCommitEnvelope" "operation_key" "artifact_commit_outbox_mark_complete"
@@ -466,6 +486,7 @@
              "node scripts/check-v3-behavior-closure.mjs"
              "node scripts/check-v3-runtime-path-hygiene.mjs"
              "node scripts/check-v3-production-runtime-boundary.mjs"
+             "node scripts/check-v3-runtime-domain-projections.mjs"
              "node scripts/check-v3-semantic-checker-coverage.mjs"
              "node scripts/check-v3-runtime-artifact-catalog.mjs"
              "node scripts/check-v3-typed-sidecar-compression.mjs"
