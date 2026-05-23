@@ -15,6 +15,7 @@ const FILES = {
   recognition: 'crates/missiond-pty/src/pty_recognition.rs',
   genericCli: 'crates/missiond-daemon/src/slot_orchestrator/generic_cli.rs',
   orchestrator: 'crates/missiond-daemon/src/slot_orchestrator/mod.rs',
+  autopilot: 'crates/missiond-daemon/src/engine/intent_engine/autopilot.rs',
   main: 'crates/missiond-daemon/src/main.rs',
   runtime: 'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
   controlTree: 'crates/missiond-daemon/src/control_tree.rs',
@@ -55,11 +56,13 @@ function main() {
       'codex-review-worker',
       'Agy is the successor research CLI lane',
       'Codex code/review worker lanes are ordinary BoardTask candidates',
+      'Agy/Antigravity writes durable markdown artifacts under the provider brain store',
     ]);
     requireAll(diagnostics, FILES.workstationPoolEvidence, sources.workstationPoolEvidence, [
       'agy-research',
       'codex-code-worker',
       'codex-review-worker',
+      'MISSIOND_AGY_ARTIFACT_ROOT',
     ]);
     requireAll(diagnostics, FILES.session, sources.session, [
       'CliEngine::Agy',
@@ -90,6 +93,13 @@ function main() {
       'CliEngine::Agy => "agy_cli"',
       'chat_type_for_source',
       '"agy_cli"',
+    ]);
+    requireAll(diagnostics, FILES.autopilot, sources.autopilot, [
+      'agy_artifact_completion_for_task',
+      'MISSIOND_AGY_ARTIFACT_ROOT',
+      '.gemini/antigravity-cli/brain',
+      'source: "agy_artifact".to_string()',
+      'agy_artifact_matches_task',
     ]);
     requireAll(diagnostics, FILES.main, sources.main, [
       'GenericCliSlotManager::new',

@@ -69,7 +69,7 @@
       :checker "node scripts/check-v3-agent-cli-regression.mjs"
       :providers [claude-code codex agy gemini-legacy]
       :states [idle running tool-running approval-blocked auth-unavailable billing-unavailable quota-unavailable complete post-answer-feedback-complete]
-      :rule "Every provider lane must have command construction, provider-specific PTY recognition, slot visibility, durable conversation source mapping, task-result-artifact completion, and regression fixtures before it can be promoted beyond read-only research. Codex worker lanes must inject MissionD MCP tool approval_mode=approve command overrides for mission_compute_slot, mission_context_boot, mission_context_slice, mission_shared_memory, and mission_claim_status because --ask-for-approval never does not suppress MCP approval overlays on every host. Post-answer feedback prompts (for example Agy CLI experience survey screens) are terminal UI affordances and must not keep a BoardTask running after a structured final answer. When provider durable final is unavailable but an idle worker exposes a structured final on the PTY, Autopilot must normalize it into task-result-artifact before closing the BoardTask; PTY remains evidence input, not the final storage surface. Jarvis SSE must revalidate a terminal BoardTask by re-reading summary notes and normalizing them into task-result-artifact with a bounded writer task before emitting final; writer timeout must emit a typed diagnostic and close SSE instead of hanging after the Board already reached done. Jarvis synchronous worker supervision must also be bounded by jarvis-sync-worker-wait so a slow or stuck worker returns a typed timeout diagnostic instead of making iOS wait past the mobile request budget.")
+      :rule "Every provider lane must have command construction, provider-specific PTY recognition, slot visibility, durable conversation source mapping, task-result-artifact completion, and regression fixtures before it can be promoted beyond read-only research. Codex worker lanes must inject MissionD MCP tool approval_mode=approve command overrides for mission_compute_slot, mission_context_boot, mission_context_slice, mission_shared_memory, and mission_claim_status because --ask-for-approval never does not suppress MCP approval overlays on every host. Agy/Antigravity writes durable markdown artifacts under the provider brain store (`$HOME/.gemini/antigravity-cli/brain`, overridable by MISSIOND_AGY_ARTIFACT_ROOT); Autopilot must treat matching post-claim Agy brain artifacts as provider durable finals and normalize them into task-result-artifact before BoardTask close. Post-answer feedback prompts (for example Agy CLI experience survey screens) are terminal UI affordances and must not keep a BoardTask running after a structured final answer. When provider durable final is unavailable but an idle worker exposes a structured final on the PTY, Autopilot must normalize it into task-result-artifact before closing the BoardTask; PTY remains evidence input, not the final storage surface. Jarvis SSE must revalidate a terminal BoardTask by re-reading summary notes and normalizing them into task-result-artifact with a bounded writer task before emitting final; writer timeout must emit a typed diagnostic and close SSE instead of hanging after the Board already reached done. Jarvis synchronous worker supervision must also be bounded by jarvis-sync-worker-wait so a slow or stuck worker returns a typed timeout diagnostic instead of making iOS wait past the mobile request budget.")
     (startup-slot arch_maintenance
       :engine claude-code
       :lifecycle persistent
@@ -379,11 +379,12 @@
              (step s4 :logic "reject broad objectives in code-worker lanes before provider spawn"))
       :surface workstation-config)
     (policy completion-authority-policy
-      :owns [provider_final task_result_artifact board_note_projection pty_diagnostic]
+      :owns [provider_final provider_artifact task_result_artifact board_note_projection pty_diagnostic]
       :core ((step s1 :logic "prefer durable provider final over PTY")
-             (step s2 :logic "normalize final output into task-result-artifact")
-             (step s3 :logic "project concise summary to Board note and mission_execution")
-             (step s4 :logic "close BoardTask only after settle window and artifact validation"))
+             (step s2 :logic "for Agy, read post-claim Antigravity brain markdown artifact before PTY fallback")
+             (step s3 :logic "normalize final output into task-result-artifact")
+             (step s4 :logic "project concise summary to Board note and mission_execution")
+             (step s5 :logic "close BoardTask only after settle window and artifact validation"))
       :surface task-result-artifact)
     (policy cross-project-dispatch-policy
       :owns [project_root cwd read_scope target_project_ids external_project_worker]

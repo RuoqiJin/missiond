@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use std::collections::HashSet;
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
@@ -383,6 +384,16 @@ struct DurableProviderCompletion {
     summary: String,
 }
 
+#[derive(Debug, Clone)]
+struct AgyArtifactCandidate {
+    session_id: String,
+    path: PathBuf,
+    modified_at: chrono::DateTime<chrono::Utc>,
+    content: String,
+}
+
+const AGY_DEFAULT_ARTIFACT_ROOT_SUFFIX: &str = ".gemini/antigravity-cli/brain";
+
 async fn put_autopilot_task_result_artifact(
     state: &AppState,
     task: &missiond_core::types::BoardTask,
@@ -517,6 +528,185 @@ fn is_probably_provider_tool_invocation_message(content: &str) -> bool {
             && (trimmed.contains("command:") || trimmed.contains("description:")))
 }
 
+fn is_agy_slot(slot_id: &str) -> bool {
+    slot_id.to_ascii_lowercase().contains("agy")
+}
+
+fn agy_artifact_root() -> Option<PathBuf> {
+    std::env::var("MISSIOND_AGY_ARTIFACT_ROOT")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|home| PathBuf::from(home).join(AGY_DEFAULT_ARTIFACT_ROOT_SUFFIX))
+        })
+}
+
+fn system_time_to_utc(value: std::time::SystemTime) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::<chrono::Utc>::from(value)
+}
+
+fn agy_artifact_after_claim(
+    modified_at: chrono::DateTime<chrono::Utc>,
+    claimed_at: Option<&str>,
+) -> bool {
+    let Some(claimed_at) = claimed_at else {
+        return true;
+    };
+    let Ok(claimed_at) = chrono::DateTime::parse_from_rfc3339(claimed_at) else {
+        return true;
+    };
+    modified_at >= claimed_at.with_timezone(&chrono::Utc) - chrono::Duration::seconds(120)
+}
+
+fn normalized_token_set(input: &str) -> HashSet<String> {
+    input
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-'))
+        .map(str::trim)
+        .filter(|token| token.len() >= 3)
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
+fn agy_artifact_matches_task(
+    content: &str,
+    file_name: &str,
+    task: &missiond_core::types::BoardTask,
+) -> bool {
+    let content_lower = content.to_ascii_lowercase();
+    if content_lower.contains(task.id.as_str()) {
+        return true;
+    }
+    let title_lower = task.title.to_ascii_lowercase();
+    let description_lower = task.description.to_ascii_lowercase();
+    let file_lower = file_name.to_ascii_lowercase();
+    let combined = format!("{content_lower}\n{file_lower}");
+
+    if title_lower.contains("agy") && combined.contains("agy") {
+        return true;
+    }
+    if title_lower.contains("antigravity") && combined.contains("antigravity") {
+        return true;
+    }
+
+    let requested = normalized_token_set(&format!(
+        "{}\n{}",
+        task.title.as_str(),
+        task.description.as_str()
+    ));
+    let evidence = normalized_token_set(&combined);
+    let overlap = requested.intersection(&evidence).count();
+    if overlap >= 3 && (combined.contains("verification") || combined.contains("findings")) {
+        return true;
+    }
+
+    description_lower.contains("agy")
+        && file_lower.contains("agy")
+        && (combined.contains("verification") || combined.contains("findings"))
+}
+
+fn select_agy_artifact_completion_from_root(
+    root: &Path,
+    task: &missiond_core::types::BoardTask,
+) -> Result<Option<DurableProviderCompletion>> {
+    if !root.exists() {
+        return Ok(None);
+    }
+    let mut candidates: Vec<AgyArtifactCandidate> = Vec::new();
+    for session_entry in fs::read_dir(root)? {
+        let session_entry = match session_entry {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let session_path = session_entry.path();
+        if !session_path.is_dir() {
+            continue;
+        }
+        let session_id = session_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("agy-brain-session")
+            .to_string();
+        let Ok(files) = fs::read_dir(&session_path) else {
+            continue;
+        };
+        for file_entry in files.flatten() {
+            let path = file_entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("md") {
+                continue;
+            }
+            let Ok(metadata) = file_entry.metadata() else {
+                continue;
+            };
+            let Ok(modified) = metadata.modified() else {
+                continue;
+            };
+            let modified_at = system_time_to_utc(modified);
+            if !agy_artifact_after_claim(modified_at, task.claimed_at.as_deref()) {
+                continue;
+            }
+            let Ok(content) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let file_name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default();
+            if !agy_artifact_matches_task(&content, file_name, task) {
+                continue;
+            }
+            if !pty_summary_has_structured_artifact(&content)
+                || output_contract_close_blocker(&task.description, &content).is_some()
+                || worker_final_close_blocker(&content).is_some()
+            {
+                continue;
+            }
+            candidates.push(AgyArtifactCandidate {
+                session_id: session_id.clone(),
+                path,
+                modified_at,
+                content,
+            });
+        }
+    }
+    candidates.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
+    let Some(candidate) = candidates.into_iter().next() else {
+        return Ok(None);
+    };
+    Ok(Some(DurableProviderCompletion {
+        session_id: format!("{}:{}", candidate.session_id, candidate.path.display()),
+        source: "agy_artifact".to_string(),
+        summary: candidate.content,
+    }))
+}
+
+fn agy_artifact_completion_for_task(
+    task: &missiond_core::types::BoardTask,
+) -> Result<Option<DurableProviderCompletion>> {
+    let Some(root) = agy_artifact_root() else {
+        return Ok(None);
+    };
+    select_agy_artifact_completion_from_root(&root, task)
+}
+
+async fn bind_and_complete_slot_conversation_for_task(
+    state: &AppState,
+    slot_id: &str,
+    task_id: &str,
+) {
+    let Ok(Some(session_id)) = state.store.get_slot_session(slot_id).await else {
+        return;
+    };
+    let _ = state
+        .store
+        .set_conversation_task_id(&session_id, task_id)
+        .await;
+    let _ = state.store.complete_conversation(&session_id).await;
+}
+
 async fn durable_provider_completion_for_slot_task(
     state: &AppState,
     task: &missiond_core::types::BoardTask,
@@ -569,6 +759,13 @@ async fn durable_provider_completion_for_slot_task(
                 source: conv.source,
                 summary,
             }));
+        }
+    }
+
+    if is_agy_slot(slot_id) {
+        if let Some(completion) = agy_artifact_completion_for_task(task)? {
+            bind_and_complete_slot_conversation_for_task(state, slot_id, task.id.as_str()).await;
+            return Ok(Some(completion));
         }
     }
 
@@ -4882,6 +5079,47 @@ mod tests {
         }
     }
 
+    fn test_board_task_for_autopilot(
+        id: &str,
+        title: &str,
+        description: &str,
+    ) -> missiond_core::types::BoardTask {
+        missiond_core::types::BoardTask {
+            id: missiond_core::types::TaskId::from_trusted(id.to_string()),
+            title: title.to_string(),
+            description: description.to_string(),
+            status: missiond_core::types::BoardTaskStatus::Running,
+            priority: "medium".to_string(),
+            category: "dev".to_string(),
+            project: Some("missiond".to_string()),
+            server: None,
+            due_date: None,
+            parent_id: None,
+            assignee: Some("slot-agy-research".to_string()),
+            auto_execute: true,
+            prompt_template: None,
+            hidden: false,
+            retry_count: 0,
+            max_retries: 2,
+            order_idx: 0,
+            created_at: "2026-05-23T00:00:00Z".to_string(),
+            updated_at: "2026-05-23T00:00:00Z".to_string(),
+            claim_executor_id: Some("slot-agy-research".to_string()),
+            claim_executor_type: Some("pty_slot".to_string()),
+            claimed_at: Some("2026-05-23T00:00:00Z".to_string()),
+            flow_phase: None,
+            flow_context: None,
+            flow_template: None,
+            depends_on: Vec::new(),
+            lease_expires_at: None,
+            dedupe_key: None,
+            timeout_secs: Some(900),
+            context_intent: Some("research".to_string()),
+            trigger_source: Some("jarvis-intent-plan-gate".to_string()),
+            notes_count: 0,
+        }
+    }
+
     #[test]
     fn durable_completion_summary_note_rejects_progress_warning() {
         let note = test_note(
@@ -7416,6 +7654,53 @@ Review only.
             output_contract_close_blocker(&description, "Older summary without required sections."),
             Some("missing-output-contract-sections")
         );
+    }
+
+    #[test]
+    fn agy_artifact_completion_reads_antigravity_brain_markdown() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let session_dir = root.path().join("a09311e7-8e86-4994-8692-cec6472a2ad2");
+        std::fs::create_dir_all(&session_dir).expect("session dir");
+        let artifact_path = session_dir.join("agy_cli_readonly_validation.md");
+        std::fs::write(
+            &artifact_path,
+            "# Agy CLI Read-Only Station Validation Report\n\n\
+             ## Findings\n- Agy CLI PTY recognition was reviewed.\n\n\
+             ## Evidence\n- slot-agy-research produced a provider brain artifact.\n\n\
+             ## Recommendations\n- Keep Agy read-only until smoke passes.\n\n\
+             ## Verification\n- No files were modified.",
+        )
+        .expect("artifact");
+        let task = test_board_task_for_autopilot(
+            "task-agy-1",
+            "请接入并验证 agy CLI 的 PTY 识别和 read-only 工位能力。",
+            r#"{"source":"jarvis-intent-plan-gate","dispatch_metadata":{"write_policy":"read-only","output_contract":"Findings / Evidence / Recommendations / Verification"}}"#,
+        );
+
+        let completion =
+            select_agy_artifact_completion_from_root(root.path(), &task).expect("select");
+        let completion = completion.expect("completion");
+        assert_eq!(completion.source, "agy_artifact");
+        assert!(completion.session_id.contains("a09311e7"));
+        assert!(completion.summary.contains("## Findings"));
+        assert!(completion.summary.contains("## Verification"));
+    }
+
+    #[test]
+    fn agy_artifact_completion_rejects_unstructured_markdown() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let session_dir = root.path().join("session-1");
+        std::fs::create_dir_all(&session_dir).expect("session dir");
+        std::fs::write(session_dir.join("agy_notes.md"), "Agy looked around.").expect("artifact");
+        let task = test_board_task_for_autopilot(
+            "task-agy-2",
+            "请接入并验证 agy CLI 的 PTY 识别和 read-only 工位能力。",
+            r#"{"source":"jarvis-intent-plan-gate","dispatch_metadata":{"write_policy":"read-only","output_contract":"Findings / Evidence / Recommendations / Verification"}}"#,
+        );
+
+        let completion =
+            select_agy_artifact_completion_from_root(root.path(), &task).expect("select");
+        assert!(completion.is_none());
     }
 
     /// `is_delegated_worker_description` only fires on the V3 envelope
