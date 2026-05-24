@@ -489,14 +489,44 @@ fn latest_assistant_after_task_prompt(
     latest
 }
 
-fn latest_assistant_after_claim(
+fn assistant_candidates_after_task_prompt(
+    messages: &[missiond_core::types::ConversationMessage],
+    task_id: &str,
+    claimed_at: Option<&str>,
+) -> Vec<String> {
+    let mut seen_task_prompt = false;
+    let mut candidates: Vec<String> = Vec::new();
+    for msg in messages {
+        if !timestamp_is_after_or_unknown(&msg.timestamp, claimed_at) {
+            continue;
+        }
+        let content = msg.content.trim();
+        if content.is_empty() {
+            continue;
+        }
+        if msg.role != "assistant" && content.contains(task_id) {
+            seen_task_prompt = true;
+            candidates.clear();
+            continue;
+        }
+        if seen_task_prompt
+            && msg.role == "assistant"
+            && !is_probably_active_tui_summary(content)
+            && !is_probably_provider_tool_invocation_message(content)
+        {
+            candidates.push(content.to_string());
+        }
+    }
+    candidates
+}
+
+fn assistant_candidates_after_claim(
     messages: &[missiond_core::types::ConversationMessage],
     claimed_at: Option<&str>,
-) -> Option<String> {
+) -> Vec<String> {
     messages
         .iter()
-        .rev()
-        .find(|msg| {
+        .filter(|msg| {
             msg.role == "assistant"
                 && timestamp_is_after_or_unknown(&msg.timestamp, claimed_at)
                 && !msg.content.trim().is_empty()
@@ -504,21 +534,47 @@ fn latest_assistant_after_claim(
                 && !is_probably_provider_tool_invocation_message(msg.content.trim())
         })
         .map(|msg| msg.content.trim().to_string())
+        .collect()
+}
+
+fn task_requires_structured_output_contract(task_description: &str) -> bool {
+    extract_dispatch_metadata_field(task_description, "output_contract")
+        .unwrap_or_else(|| task_description.to_string())
+        .to_ascii_lowercase()
+        .contains("findings / evidence / recommendations / verification")
+}
+
+fn provider_summary_satisfies_task_contract(task_description: &str, summary: &str) -> bool {
+    output_contract_close_blocker(task_description, summary).is_none()
+        && worker_final_close_blocker(summary).is_none()
 }
 
 fn provider_completion_summary_for_task(
     messages: &[missiond_core::types::ConversationMessage],
     task_id: &str,
+    task_description: &str,
     claimed_at: Option<&str>,
     conversation_task_id: Option<&str>,
 ) -> Option<String> {
-    latest_assistant_after_task_prompt(messages, task_id, claimed_at).or_else(|| {
-        if conversation_task_id == Some(task_id) {
-            latest_assistant_after_claim(messages, claimed_at)
-        } else {
-            None
-        }
-    })
+    let mut candidates = assistant_candidates_after_task_prompt(messages, task_id, claimed_at);
+    if conversation_task_id == Some(task_id) {
+        candidates.extend(assistant_candidates_after_claim(messages, claimed_at));
+    }
+
+    let latest_any = candidates.last().cloned();
+    if let Some(valid) = candidates
+        .iter()
+        .rev()
+        .find(|summary| provider_summary_satisfies_task_contract(task_description, summary))
+    {
+        return Some(valid.clone());
+    }
+
+    if task_requires_structured_output_contract(task_description) {
+        None
+    } else {
+        latest_any
+    }
 }
 
 fn is_probably_provider_tool_invocation_message(content: &str) -> bool {
@@ -779,6 +835,7 @@ async fn durable_provider_completion_for_slot_task(
         let summary = provider_completion_summary_for_task(
             &messages,
             task.id.as_str(),
+            task.description.as_str(),
             task.claimed_at.as_deref(),
             conv.task_id.as_deref(),
         );
@@ -869,6 +926,34 @@ async fn close_idle_running_task_from_durable_summary(
         if let Some(completion) =
             durable_provider_completion_for_slot_task(state, &task_with_notes.task, slot_id).await?
         {
+            let artifact_hash = put_autopilot_task_result_artifact(
+                state,
+                &task_with_notes.task,
+                slot_id,
+                Some(&completion),
+                &completion.summary,
+                0,
+            )
+            .await;
+            if artifact_hash.is_none() {
+                state
+                    .store
+                    .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+                        task_id: task_id.to_string(),
+                        content: format!(
+                            "⚠️ **Autopilot blocked close** — durable provider final was observed ({} / {}), but task-result-artifact could not be written. The BoardTask remains running until the artifact writer succeeds.",
+                            completion.source, completion.session_id
+                        ),
+                        note_type: Some("note".to_string()),
+                        author: Some("autopilot".to_string()),
+                    })
+                    .await?;
+                return Ok(false);
+            }
+            let artifact_suffix = artifact_hash
+                .as_ref()
+                .map(|hash| format!("\n\ntask_result_artifact: `{hash}`"))
+                .unwrap_or_default();
             let summary_for_note =
                 truncate_safe(&completion.summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES);
             state
@@ -876,8 +961,8 @@ async fn close_idle_running_task_from_durable_summary(
                 .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
                     task_id: task_id.to_string(),
                     content: format!(
-                        "**Provider durable final observed** ({} / {})\n\n{}",
-                        completion.source, completion.session_id, summary_for_note
+                        "**Provider durable final observed** ({} / {})\n\n{}{}",
+                        completion.source, completion.session_id, summary_for_note, artifact_suffix
                     ),
                     note_type: Some("summary".to_string()),
                     author: Some("autopilot".to_string()),
@@ -5358,11 +5443,85 @@ mod tests {
             provider_completion_summary_for_task(
                 &messages,
                 "task-s3",
+                "",
                 Some("2026-05-04T06:30:00Z"),
                 Some("task-s3"),
             )
             .as_deref(),
             Some("JARVIS_S3_DATA_DONE\ncommit: `edd5c96`")
+        );
+    }
+
+    #[test]
+    fn provider_final_summary_requires_current_output_contract_for_codex_workers() {
+        let task_description = r#"
+## Dispatch metadata
+- output_contract: return a structured artifact with Findings / Evidence / Recommendations / Verification
+"#;
+        let messages = vec![
+            test_conversation_message(
+                1,
+                "user",
+                "BoardTask task-codex-1: review Codex worker lane.",
+                "2026-05-24T15:18:31Z",
+            ),
+            test_conversation_message(
+                2,
+                "assistant",
+                "I will inspect the worker lane and report back shortly.",
+                "2026-05-24T15:18:40Z",
+            ),
+            test_conversation_message(
+                3,
+                "assistant",
+                "## Findings\nCodex can operate as a read-only review lane.\n\n## Evidence\nThe PTY and rollout JSONL both contain the task id.\n\n## Recommendations\nKeep resident master separate from codex-review-worker.\n\n## Verification\nNo files were modified.",
+                "2026-05-24T15:19:05Z",
+            ),
+        ];
+
+        assert_eq!(
+            provider_completion_summary_for_task(
+                &messages,
+                "task-codex-1",
+                task_description,
+                Some("2026-05-24T15:18:30Z"),
+                Some("task-codex-1"),
+            )
+            .as_deref(),
+            Some("## Findings\nCodex can operate as a read-only review lane.\n\n## Evidence\nThe PTY and rollout JSONL both contain the task id.\n\n## Recommendations\nKeep resident master separate from codex-review-worker.\n\n## Verification\nNo files were modified.")
+        );
+    }
+
+    #[test]
+    fn provider_final_summary_ignores_stale_codex_progress_when_contract_missing() {
+        let task_description = r#"
+## Dispatch metadata
+- output_contract: return a structured artifact with Findings / Evidence / Recommendations / Verification
+"#;
+        let messages = vec![
+            test_conversation_message(
+                1,
+                "user",
+                "BoardTask task-codex-2: review Codex worker lane.",
+                "2026-05-24T15:18:31Z",
+            ),
+            test_conversation_message(
+                2,
+                "assistant",
+                "I found the repo and will continue checking.",
+                "2026-05-24T15:18:40Z",
+            ),
+        ];
+
+        assert_eq!(
+            provider_completion_summary_for_task(
+                &messages,
+                "task-codex-2",
+                task_description,
+                Some("2026-05-24T15:18:30Z"),
+                Some("task-codex-2"),
+            ),
+            None
         );
     }
 

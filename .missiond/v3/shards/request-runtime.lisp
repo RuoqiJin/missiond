@@ -61,12 +61,12 @@
          :storage "shared_artifacts(kind=context-gather)"
          :fields [unknowns query project_id sources_used evidence_refs diagnostics grounded_intent_summary context_pack_path context_pack_file]
          :rule "mission_context_gather(persist=true) returns grounding_context_id, shared-artifact context_pack_path, and a bounded context_pack_file for provider CLIs that do not have MissionD MCP mounted; worker prompts receive only this small context slice plus confirmed intent/plan artifact refs and accepted execution metadata, not broad KB/history preloads.")
-       (kind task-result-artifact
+      (kind task-result-artifact
          :schema "missiond.task-result-artifact.v1"
          :id-field artifact_hash
          :storage "shared_artifacts(kind=task-result)"
          :fields [task_id project_id provider result_status summary json source]
-         :rule "Jarvis, Board, and worker completion surfaces MUST normalize summary notes/provider finals into task-result-artifact before streaming result_artifact/final to clients; Board notes, PTY text, and provider finals are projections/evidence, not the canonical result; worker prompts MUST ask for structured Findings/Evidence/Recommendations/Verification output and MUST NOT instruct provider workers to mark the BoardTask done before artifact settlement."))
+         :rule "Jarvis, Board, and worker completion surfaces MUST normalize summary notes/provider finals into task-result-artifact before streaming result_artifact/final to clients; Board notes, PTY text, and provider finals are projections/evidence, not the canonical result; worker prompts MUST ask for structured Findings/Evidence/Recommendations/Verification output and MUST NOT instruct provider workers to mark the BoardTask done before artifact settlement. Durable provider finals for reused Codex/Claude/Agy sessions must satisfy the current BoardTask output contract before they can close or project a result artifact; stale progress/final text from an older turn is ignored until the current task artifact lands."))
     :functions
       ((function context-gather-artifact
          :entry [mission_context_gather unknowns-inventory BoardTask source_id project_id]
@@ -92,7 +92,7 @@
                 (step s3 :logic "block ungrounded broad task before PTY input and append a diagnostic Board note")
                 (step s4 :logic "never re-enable hidden context prefetch as a substitute for grounded dispatch"))
          :egress [BoardTaskBlocked diagnostic-note no-PTY-dispatch])
-       (function jarvis-result-artifact-gate
+      (function jarvis-result-artifact-gate
          :entry [JarvisSSE BoardTaskSummaryNote provider-final task-result-artifact]
          :core ((step s1 :logic "inspect worker/Board summary notes for existing task-result-artifact hash")
                 (step s2 :logic "when only a Board summary projection exists, write a canonical task-result-artifact through shared memory before emitting result_artifact")
@@ -100,7 +100,9 @@
                 (step s4 :logic "emit TASK_RESULT_ARTIFACT_WRITE_FAILED diagnostic instead of pretending a missing artifact exists")
                 (step s5 :logic "if a BoardTask is done with a summary but no artifact hash, emit TASK_RESULT_ARTIFACT_REQUIRED and fail fast instead of streaming the Board note as final text")
                 (step s6 :logic "stream final text only after the task-result artifact hash is known or the diagnostic is surfaced")
-                (step s7 :logic "if the worker provider returns an empty final after its slot is idle/exited/error, write provider-empty-final as a task-result-artifact diagnostic, fail the BoardTask, and notify Jarvis instead of leaving the task running until mobile timeout"))
+                (step s7 :logic "if the worker provider returns an empty final after its slot is idle/exited/error, write provider-empty-final as a task-result-artifact diagnostic, fail the BoardTask, and notify Jarvis instead of leaving the task running until mobile timeout")
+                (step s8 :logic "when Autopilot/watchdog observes a durable provider final for an idle running worker, it must first write task-result-artifact and include its hash in the summary note before changing the BoardTask to done")
+                (step s9 :logic "durable final selection is output-contract aware: for tasks declaring Findings/Evidence/Recommendations/Verification, provider messages missing those sections are treated as stale/progress evidence, not final results"))
          :egress [task-result-artifact result_artifact_event final_event diagnostic])
        (function jarvis-dispatch-causality
          :entry [JarvisSSE plan-confirmed BoardTask auto_execute]
