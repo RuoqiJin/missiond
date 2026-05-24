@@ -488,22 +488,25 @@ fn build_cli_command(
             parts
         }
         CliEngine::Agy => {
-            // Antigravity (`agy`) CLI: interactive chat mode. Working
+            // Antigravity (`agy`) CLI: interactive prompt mode. Working
             // directory is set through PTY cwd, not a CLI flag.
-            let parts = "agy chat".to_string();
+            let mut parts = "agy --prompt-interactive".to_string();
             if let Some(m) = model {
                 // Current agy help does not advertise a model flag. Keep the
                 // value visible in logs so model-profile drift is diagnosable.
                 info!(model = %m, "Agy CLI: model override ignored (no stable flag)");
             }
             if dangerously_skip_permissions {
-                info!("Agy CLI: permission bypass is controlled by the logged-in CLI profile");
+                parts.push_str(" --dangerously-skip-permissions");
             }
             if search_enabled {
                 info!("Agy CLI: search flag ignored (no stable flag)");
             }
             if let Some(profile) = sandbox {
-                info!(sandbox = %profile, "Agy CLI: sandbox override ignored (no stable flag)");
+                if profile != "none" {
+                    parts.push_str(" --sandbox");
+                }
+                info!(sandbox = %profile, "Agy CLI: sandbox profile value collapsed to --sandbox toggle");
             }
             if let Some(policy) = approval_policy {
                 info!(approval_policy = %policy, "Agy CLI: approval policy ignored (no stable flag)");

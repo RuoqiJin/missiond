@@ -199,7 +199,7 @@ function checkFiles(root) {
   requireAll(diagnostics, FILES.ptySession, sources.ptySession, [
     'CliEngine::Gemini',
     'CliEngine::Agy',
-    '"agy chat"',
+    '"agy --prompt-interactive"',
     '--approval-mode plan',
     '--policy',
     '--approval-mode yolo',

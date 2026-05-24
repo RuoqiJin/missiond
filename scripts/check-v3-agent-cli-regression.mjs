@@ -67,7 +67,7 @@ function main() {
     ]);
     requireAll(diagnostics, FILES.session, sources.session, [
       'CliEngine::Agy',
-      '"agy chat"',
+      '"agy --prompt-interactive"',
       'Agy CLI command assembled',
       'codex --cd',
       'Codex CLI: workspace root override',
