@@ -31,7 +31,7 @@
        :model "Antigravity default"
        :write-policy read-only
        :authority medium
-       :runtime-rule "Agy is the Gemini successor research lane. MissionD launches `agy --prompt-interactive` as a PTY, recognizes idle/running/blocked/unavailable screens, reads post-claim markdown artifacts from `$HOME/.gemini/antigravity-cli/brain` or `MISSIOND_AGY_ARTIFACT_ROOT` as provider durable finals, and keeps it read-only until provider regression smoke passes.")
+       :runtime-rule "Agy is the Gemini successor research lane. MissionD launches bare `agy` as an interactive PTY; `--prompt-interactive` is not used because current Agy requires an argument and exits before PTY attach. Runtime recognizes idle/running/blocked/unavailable screens, reads post-claim markdown artifacts from `$HOME/.gemini/antigravity-cli/brain` or `MISSIOND_AGY_ARTIFACT_ROOT` as provider durable finals, and keeps it read-only until provider regression smoke passes.")
      (codex-code-worker
        :account current-codex-cli-login
        :model "gpt-5.5"

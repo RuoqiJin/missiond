@@ -67,7 +67,7 @@ function main() {
     ]);
     requireAll(diagnostics, FILES.session, sources.session, [
       'CliEngine::Agy',
-      '"agy --prompt-interactive"',
+      '"agy".to_string()',
       'Agy CLI command assembled',
       'codex --cd',
       'Codex CLI: workspace root override',

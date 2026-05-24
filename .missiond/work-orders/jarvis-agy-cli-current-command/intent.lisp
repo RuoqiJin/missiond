@@ -1,7 +1,7 @@
 (work-order-intent
   :schema "missiond.work-order.intent.v1"
   :id "jarvis-agy-cli-current-command"
-  :objective "Fix Agy CLI launch command to match current agy prompt-interactive mode"
+  :objective "Fix Agy CLI launch command to match current bare interactive PTY mode"
   :source external-codex
   :status draft
   :unknowns []

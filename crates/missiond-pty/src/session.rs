@@ -488,9 +488,10 @@ fn build_cli_command(
             parts
         }
         CliEngine::Agy => {
-            // Antigravity (`agy`) CLI: interactive prompt mode. Working
-            // directory is set through PTY cwd, not a CLI flag.
-            let mut parts = "agy --prompt-interactive".to_string();
+            // Antigravity (`agy`) CLI: bare invocation opens the interactive
+            // TUI. `--prompt-interactive` currently requires an argument and
+            // exits before MissionD can attach the worker PTY.
+            let mut parts = "agy".to_string();
             if let Some(m) = model {
                 // Current agy help does not advertise a model flag. Keep the
                 // value visible in logs so model-profile drift is diagnosable.
