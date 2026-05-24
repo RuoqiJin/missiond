@@ -346,6 +346,28 @@ fn jarvis_confirm_bool(req: &serde_json::Value, key: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn jarvis_confirm_string(req: &serde_json::Value, key: &str) -> Option<String> {
+    fn string_at(value: &serde_json::Value, key: &str) -> Option<String> {
+        value
+            .get(key)
+            .and_then(|field| field.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    }
+
+    string_at(req, key)
+        .or_else(|| {
+            req.get("missiond_confirm")
+                .and_then(|confirm| string_at(confirm, key))
+        })
+        .or_else(|| {
+            req.get("missiond_confirm")
+                .and_then(|confirm| confirm.get("confirm_payload"))
+                .and_then(|payload| string_at(payload, key))
+        })
+}
+
 fn interaction_metadata_bool(envelope: &InteractionEnvelope, key: &str) -> bool {
     envelope
         .metadata
@@ -370,13 +392,29 @@ fn interaction_metadata_bool(envelope: &InteractionEnvelope, key: &str) -> bool 
 }
 
 fn interaction_metadata_string(envelope: &InteractionEnvelope, key: &str) -> Option<String> {
-    envelope
-        .metadata
-        .get(key)
-        .and_then(|field| field.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
+    fn string_at(value: &serde_json::Value, key: &str) -> Option<String> {
+        value
+            .get(key)
+            .and_then(|field| field.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    }
+
+    string_at(&envelope.metadata, key)
+        .or_else(|| {
+            envelope
+                .metadata
+                .get("missiond_confirm")
+                .and_then(|confirm| string_at(confirm, key))
+        })
+        .or_else(|| {
+            envelope
+                .metadata
+                .get("missiond_confirm")
+                .and_then(|confirm| confirm.get("confirm_payload"))
+                .and_then(|payload| string_at(payload, key))
+        })
 }
 
 fn extract_bearer_token(headers: &str) -> Option<String> {
@@ -467,6 +505,7 @@ fn openai_request_to_interaction_envelope(req: &serde_json::Value) -> Interactio
     if let Some(object) = metadata.as_object_mut() {
         for key in [
             "missiond_confirm",
+            "missiond_objective",
             "missiond_follow_task_id",
             "missiond_intent_confirmed",
             "missiond_plan_confirmed",
@@ -1919,10 +1958,26 @@ impl PTYWebSocketServer {
 
         let intent_confirmed = interaction_metadata_bool(&envelope, "missiond_intent_confirmed");
         let plan_confirmed = interaction_metadata_bool(&envelope, "missiond_plan_confirmed");
+        let objective_text = if intent_confirmed || plan_confirmed {
+            match interaction_metadata_string(&envelope, "missiond_objective") {
+                Some(value) => value,
+                None => {
+                    Self::fail_jarvis_gate(
+                        &mut stream,
+                        "Jarvis confirmation requires missiond_objective from the previous intent/plan payload; refusing to use the confirmation text as the task objective.".to_string(),
+                        "confirmation_objective",
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            }
+        } else {
+            raw_user_text.clone()
+        };
         let grounding = match Self::gather_jarvis_grounding(
             &jarvis_grounding,
             JarvisGroundingRequest {
-                query: raw_user_text.clone(),
+                query: objective_text.clone(),
                 conversation_id: jarvis_conv_id.clone(),
                 chat_id: chat_id.clone(),
                 unknowns: vec![
@@ -1967,7 +2022,8 @@ impl PTYWebSocketServer {
             "grounding_context_id": grounding_context_id,
             "permission_context": permission_context.clone(),
             "understanding": "我理解这是一个外部渠道请求，需要先确认 intent.lisp，再确认 plan.lisp，之后才创建 BoardTask 并派工位。",
-            "user_message_preview": raw_user_text.chars().take(240).collect::<String>(),
+            "objective": objective_text,
+            "user_message_preview": objective_text.chars().take(240).collect::<String>(),
             "sources_used": sources_used,
             "requires_confirmation": true
         });
@@ -2022,6 +2078,7 @@ impl PTYWebSocketServer {
                     "confirmation_type": "intent",
                     "confirm_payload": {
                         "missiond_intent_confirmed": true,
+                        "missiond_objective": objective_text,
                         "missiond_grounding_context_id": grounding_context_id,
                         "missiond_intent_artifact_id": intent_artifact_id,
                     }
@@ -2048,6 +2105,7 @@ impl PTYWebSocketServer {
             "context_pack_path": context_pack_path,
             "context_pack_file": context_pack_file,
             "intent_artifact_id": intent_artifact_id,
+            "objective": objective_text,
             "steps": [
                 "按 PermissionContext 和 grounding evidence 确认可执行范围",
                 "创建可追踪 BoardTask，并写入 grounding / intent / plan artifact ids",
@@ -2108,6 +2166,7 @@ impl PTYWebSocketServer {
                     "confirm_payload": {
                         "missiond_intent_confirmed": true,
                         "missiond_plan_confirmed": true,
+                        "missiond_objective": objective_text,
                         "missiond_grounding_context_id": grounding_context_id,
                         "missiond_intent_artifact_id": intent_artifact_id,
                         "missiond_plan_artifact_id": plan_artifact_id,
@@ -2144,13 +2203,13 @@ impl PTYWebSocketServer {
             return Ok(());
         };
 
-        let title = if raw_user_text.chars().count() > 80 {
-            format!("{}...", raw_user_text.chars().take(77).collect::<String>())
+        let title = if objective_text.chars().count() > 80 {
+            format!("{}...", objective_text.chars().take(77).collect::<String>())
         } else {
-            raw_user_text.clone()
+            objective_text.clone()
         };
         let dispatch_metadata = Self::derive_jarvis_dispatch_contract(
-            &raw_user_text,
+            &objective_text,
             &grounding_context_id,
             context_pack_path.as_deref(),
             context_pack_file.as_deref(),
@@ -2158,7 +2217,7 @@ impl PTYWebSocketServer {
             &plan_artifact_id,
             &Self::jarvis_runtime_read_scope_root(),
         );
-        let prompt_template = Self::build_jarvis_worker_prompt(&raw_user_text, &dispatch_metadata);
+        let prompt_template = Self::build_jarvis_worker_prompt(&objective_text, &dispatch_metadata);
         let meta = serde_json::json!({
             "source": "interaction-gateway",
             "interaction_id": interaction_id,
@@ -2171,6 +2230,7 @@ impl PTYWebSocketServer {
             "plan_artifact_id": plan_artifact_id,
             "dispatch_metadata": dispatch_metadata,
             "user_message": raw_user_text,
+            "objective": objective_text,
         });
         let context_intent = dispatch_metadata
             .get("task_class")
@@ -3744,10 +3804,27 @@ impl PTYWebSocketServer {
                     .await;
             }
 
+            let objective_text = if intent_confirmed || plan_confirmed {
+                match jarvis_confirm_string(&req, "missiond_objective") {
+                    Some(value) => value,
+                    None => {
+                        Self::fail_jarvis_gate(
+                            &mut stream,
+                            "Jarvis confirmation requires missiond_objective from the previous intent/plan payload; refusing to use the confirmation text as the task objective.".to_string(),
+                            "confirmation_objective",
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                }
+            } else {
+                raw_user_text.clone()
+            };
+
             let grounding = match Self::gather_jarvis_grounding(
                 &jarvis_grounding,
                 JarvisGroundingRequest {
-                    query: raw_user_text.clone(),
+                    query: objective_text.clone(),
                     conversation_id: jarvis_conv_id.clone(),
                     chat_id: chat_id.clone(),
                     unknowns: vec![
@@ -3789,7 +3866,8 @@ impl PTYWebSocketServer {
                 "context_pack_path": context_pack_path,
                 "context_pack_file": context_pack_file,
                 "understanding": "我理解这是一个需要先确认意图、再拆 plan.lisp、再派工位执行的 Jarvis 请求。",
-                "user_message_preview": raw_user_text.chars().take(240).collect::<String>(),
+                "objective": objective_text,
+                "user_message_preview": objective_text.chars().take(240).collect::<String>(),
                 "sources_used": sources_used,
                 "requires_confirmation": true
             });
@@ -3841,6 +3919,7 @@ impl PTYWebSocketServer {
                     "message": "请确认：我的意图理解是否正确？确认后我会生成 plan.lisp，再等你确认后创建 BoardTask 并派工位。",
                     "confirm_payload": {
                         "missiond_intent_confirmed": true,
+                        "missiond_objective": objective_text,
                         "missiond_grounding_context_id": grounding_context_id,
                         "missiond_intent_artifact_id": intent_artifact_id
                     }
@@ -3863,6 +3942,7 @@ impl PTYWebSocketServer {
                 "context_pack_path": context_pack_path,
                 "context_pack_file": context_pack_file,
                 "intent_artifact_id": intent_artifact_id,
+                "objective": objective_text,
                 "steps": [
                     "确认 project_id / read_scope / skill evidence / deploy facts 等 grounding 证据",
                     "把用户目标拆成可验收的 BoardTask / accepted shard",
@@ -3921,6 +4001,7 @@ impl PTYWebSocketServer {
                     "confirm_payload": {
                         "missiond_intent_confirmed": true,
                         "missiond_plan_confirmed": true,
+                        "missiond_objective": objective_text,
                         "missiond_grounding_context_id": grounding_context_id,
                         "missiond_intent_artifact_id": intent_artifact_id,
                         "missiond_plan_artifact_id": plan_artifact_id
@@ -3949,13 +4030,13 @@ impl PTYWebSocketServer {
                 return Ok(());
             };
 
-            let task_title: String = if raw_user_text.chars().count() > 80 {
-                format!("{}...", raw_user_text.chars().take(77).collect::<String>())
+            let task_title: String = if objective_text.chars().count() > 80 {
+                format!("{}...", objective_text.chars().take(77).collect::<String>())
             } else {
-                raw_user_text.clone()
+                objective_text.clone()
             };
             let dispatch_metadata = Self::derive_jarvis_dispatch_contract(
-                &raw_user_text,
+                &objective_text,
                 &grounding_context_id,
                 context_pack_path.as_deref(),
                 context_pack_file.as_deref(),
@@ -3964,7 +4045,7 @@ impl PTYWebSocketServer {
                 &Self::jarvis_runtime_read_scope_root(),
             );
             let prompt_template =
-                Self::build_jarvis_worker_prompt(&raw_user_text, &dispatch_metadata);
+                Self::build_jarvis_worker_prompt(&objective_text, &dispatch_metadata);
             let context_intent = dispatch_metadata
                 .get("task_class")
                 .and_then(|v| v.as_str())
@@ -3980,6 +4061,7 @@ impl PTYWebSocketServer {
                 "plan_artifact_id": plan_artifact_id,
                 "dispatch_metadata": dispatch_metadata,
                 "user_message": raw_user_text,
+                "objective": objective_text,
             });
             let task_input = crate::types::CreateBoardTaskInput {
                 title: task_title,
@@ -6256,6 +6338,20 @@ mod tests {
             &nested_payload,
             "missiond_plan_confirmed"
         ));
+        assert_eq!(
+            jarvis_confirm_string(
+                &serde_json::json!({
+                    "missiond_confirm": {
+                        "confirm_payload": {
+                            "missiond_objective": "  original objective  "
+                        }
+                    }
+                }),
+                "missiond_objective"
+            )
+            .as_deref(),
+            Some("original objective")
+        );
     }
 
     #[test]
@@ -6281,7 +6377,8 @@ mod tests {
                 "missiond_confirm": {
                     "confirm_payload": {
                         "missiond_intent_confirmed": true,
-                        "missiond_plan_confirmed": true
+                        "missiond_plan_confirmed": true,
+                        "missiond_objective": "  original interaction objective  "
                     }
                 }
             }),
@@ -6295,6 +6392,10 @@ mod tests {
             &envelope,
             "missiond_plan_confirmed"
         ));
+        assert_eq!(
+            interaction_metadata_string(&envelope, "missiond_objective").as_deref(),
+            Some("original interaction objective")
+        );
     }
 
     #[test]
@@ -6365,7 +6466,8 @@ mod tests {
             "metadata": {
                 "missiond_confirm": {
                     "confirm_payload": {
-                        "missiond_intent_confirmed": true
+                        "missiond_intent_confirmed": true,
+                        "missiond_objective": "原始目标"
                     }
                 }
             },
@@ -6388,6 +6490,10 @@ mod tests {
             &envelope,
             "missiond_intent_confirmed"
         ));
+        assert_eq!(
+            interaction_metadata_string(&envelope, "missiond_objective").as_deref(),
+            Some("原始目标")
+        );
     }
 
     #[test]

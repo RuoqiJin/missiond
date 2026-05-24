@@ -136,7 +136,8 @@
        "Jarvis public follow streams MUST emit visible worker_status heartbeat events during long-running worker supervision; transport-only SSE comments do not satisfy mobile UI observability."
        "Jarvis plan-confirmed dispatch MUST NOT wait for worker terminal state on the initial mobile/public SSE request; it creates the BoardTask, returns result_pending with follow_payload immediately, and only follow requests supervise task-result-artifact completion."
        "Agy and other provider artifact completion MUST accept numbered markdown report headings such as `## 1. Findings`, `## 2. Evidence`, `## 3. Recommendations`, and `## 4. Verification`; provider-generated numbering is formatting, not a missing output-contract section."
-       "Jarvis intent/plan confirmations MUST accept both top-level missiond_intent_confirmed/missiond_plan_confirmed fields and wrapped missiond_confirm payloads, so iOS and external clients do not need to mirror MissionD's internal JSON shape."]
+       "Jarvis intent/plan confirmations MUST accept both top-level missiond_intent_confirmed/missiond_plan_confirmed fields and wrapped missiond_confirm payloads, so iOS and external clients do not need to mirror MissionD's internal JSON shape."
+       "Jarvis intent/plan confirmation payloads MUST carry missiond_objective from the original request; confirmed dispatch must derive BoardTask title, worker prompt, and dispatch metadata from that objective, never from a later confirmation utterance such as `确认 plan`."]
     :checks ["node scripts/check-v3-grounded-dispatch-isomorphism.mjs --json"])
 
   (unified-entry
