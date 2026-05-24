@@ -11,7 +11,8 @@ const usage = `Usage:
 Checks the MissionD self-update blue-green contract:
   - V3 declares missiond-blue-green-self-update.
   - deploy-daemon.sh installs paired daemon/MCP release dirs, switches active,
-    rolls back on smoke failure, and supports safe cleanup.
+    rewrites launchd runtime roots, rolls back on smoke failure, and supports
+    safe cleanup.
 `;
 
 const FILES = {
@@ -72,6 +73,8 @@ function check(root) {
     'MISSIOND_ACTIVE_LINK',
     'MISSIOND_RELEASE_KEEP',
     'MISSIOND_BACKUP_RETENTION_DAYS',
+    'MISSIOND_LAUNCHD_PLIST',
+    'MISSIOND_LAUNCHD_PROJECT_ROOT',
     'CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"',
     'node scripts/compile-v3-runtime.mjs --json',
     'typed-lisp-runtime-compile',
@@ -90,6 +93,12 @@ function check(root) {
     'atomic_symlink_update',
     'switch_active_release',
     'rollback_to_previous',
+    'ensure_launchd_runtime_root',
+    'restart_daemon_supervisor',
+    'MISSIOND_PROJECT_ROOT',
+    'MISSIOND_ORCHESTRATOR_ROOT',
+    'launchctl bootstrap',
+    'launchd: runtime root',
     'cleanup_old_releases',
     'release_complete',
     'removed incomplete release',
@@ -136,6 +145,7 @@ function buildFixture() {
       :note "Release candidates are immutable directories under ~/.xjp-mission/releases/<release-id>; daemon and MCP entrypoints both resolve through active.")))`);
   write(root, FILES.deploy, `
 MISSIOND_INSTALL_ROOT MISSIOND_RELEASES_DIR MISSIOND_ACTIVE_LINK MISSIOND_RELEASE_KEEP MISSIOND_BACKUP_RETENTION_DAYS
+MISSIOND_LAUNCHD_PLIST MISSIOND_LAUNCHD_PROJECT_ROOT
 CARGO_INCREMENTAL="\${CARGO_INCREMENTAL:-0}"
 node scripts/compile-v3-runtime.mjs --json
 typed-lisp-runtime-compile
@@ -144,6 +154,7 @@ typed_lisp_runtime_manifest_json typed_lisp_runtime
 compiled-v3-blueprint.json compiled-runtime-config.json compiled-project-universe.json compiled-workflows.json file_sha256
 release-manifest.json "schema":"missiond.release-manifest.v1" daemon_sha256 mcp_sha256
 atomic_symlink_update switch_active_release rollback_to_previous cleanup_old_releases create_legacy_release_if_needed
+ensure_launchd_runtime_root restart_daemon_supervisor MISSIOND_PROJECT_ROOT MISSIOND_ORCHESTRATOR_ROOT launchctl bootstrap launchd: runtime root
 codesign_or_verify force-sign failed but verified linker signature
 pre-switch smoke: candidate MCP initialize
 $ACTIVE_LINK/bin/missiond

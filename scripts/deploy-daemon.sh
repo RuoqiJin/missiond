@@ -21,6 +21,8 @@
 #   MISSIOND_BACKUP_RETENTION_DAYS  old .bak/.new cleanup age, default: 7
 #   MISSIOND_SOCKET_PATH        IPC socket, default: ~/.missiond/missiond.sock
 #   MISSIOND_LAUNCHCTL_LABEL    launchd label, default: com.missiond.daemon
+#   MISSIOND_LAUNCHD_PLIST      launchd plist, default: ~/Library/LaunchAgents/$label.plist
+#   MISSIOND_LAUNCHD_PROJECT_ROOT  project root written into launchd, default: current git root
 #   MISSIOND_DEPLOY_TIMEOUT     socket readiness timeout, default: 30
 #   MISSIOND_DEPLOY_SMOKE_TIMEOUT  MCP smoke timeout, default: 30
 #   MISSIOND_APPLY_BACKUP_CLEANUP  delete old .bak/.new files when cleanup applies, default: 0
@@ -66,6 +68,7 @@ BIN_PATH="${MISSIOND_BIN_PATH:-${INSTALL_ROOT}/missiond}"
 MCP_BIN_PATH="${MISSIOND_MCP_BIN_PATH:-${INSTALL_ROOT}/mission-mcp}"
 SOCK_PATH="${MISSIOND_SOCKET_PATH:-${HOME}/.missiond/missiond.sock}"
 LABEL="${MISSIOND_LAUNCHCTL_LABEL:-com.missiond.daemon}"
+LAUNCHD_PLIST="${MISSIOND_LAUNCHD_PLIST:-${HOME}/Library/LaunchAgents/${LABEL}.plist}"
 TIMEOUT="${MISSIOND_DEPLOY_TIMEOUT:-30}"
 SMOKE_TIMEOUT="${MISSIOND_DEPLOY_SMOKE_TIMEOUT:-30}"
 RELEASE_KEEP="${MISSIOND_RELEASE_KEEP:-5}"
@@ -74,6 +77,7 @@ APPLY_BACKUP_CLEANUP="${MISSIOND_APPLY_BACKUP_CLEANUP:-0}"
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
+LAUNCHD_PROJECT_ROOT="${MISSIOND_LAUNCHD_PROJECT_ROOT:-$REPO_ROOT}"
 
 augment_managed_node_path() {
   local candidates=(
@@ -254,6 +258,64 @@ kickstart_daemon() {
   launchctl kickstart -k "gui/$(id -u)/$LABEL" 2>&1 | tail -5
 }
 
+plist_set_or_add_string() {
+  local plist="$1"
+  local key="$2"
+  local value="$3"
+  local buddy="/usr/libexec/PlistBuddy"
+  if "$buddy" -c "Print :${key}" "$plist" >/dev/null 2>&1; then
+    "$buddy" -c "Set :${key} ${value}" "$plist" >/dev/null
+  else
+    "$buddy" -c "Add :${key} string ${value}" "$plist" >/dev/null
+  fi
+}
+
+plist_set_or_add_env_string() {
+  local plist="$1"
+  local key="$2"
+  local value="$3"
+  local buddy="/usr/libexec/PlistBuddy"
+  if ! "$buddy" -c "Print :EnvironmentVariables" "$plist" >/dev/null 2>&1; then
+    "$buddy" -c "Add :EnvironmentVariables dict" "$plist" >/dev/null
+  fi
+  if "$buddy" -c "Print :EnvironmentVariables:${key}" "$plist" >/dev/null 2>&1; then
+    "$buddy" -c "Set :EnvironmentVariables:${key} ${value}" "$plist" >/dev/null
+  else
+    "$buddy" -c "Add :EnvironmentVariables:${key} string ${value}" "$plist" >/dev/null
+  fi
+}
+
+ensure_launchd_runtime_root() {
+  if [ ! -f "$LAUNCHD_PLIST" ]; then
+    log "launchd: plist not found at $LAUNCHD_PLIST; deploy will only kickstart loaded label if present"
+    return 0
+  fi
+  [ -d "$LAUNCHD_PROJECT_ROOT/.missiond/v3" ] ||
+    fail "launchd project root lacks .missiond/v3: $LAUNCHD_PROJECT_ROOT" 1
+  command -v plutil >/dev/null 2>&1 || fail "plutil not on PATH; cannot verify launchd plist" 1
+  [ -x /usr/libexec/PlistBuddy ] || fail "PlistBuddy missing; cannot update launchd plist" 1
+
+  plist_set_or_add_string "$LAUNCHD_PLIST" "WorkingDirectory" "$LAUNCHD_PROJECT_ROOT"
+  plist_set_or_add_env_string "$LAUNCHD_PLIST" "MISSIOND_PROJECT_ROOT" "$LAUNCHD_PROJECT_ROOT"
+  plist_set_or_add_env_string "$LAUNCHD_PLIST" "MISSIOND_ORCHESTRATOR_ROOT" "$LAUNCHD_PROJECT_ROOT"
+  plist_set_or_add_env_string "$LAUNCHD_PLIST" "MISSIOND_SOCKET_PATH" "$SOCK_PATH"
+  plutil -lint "$LAUNCHD_PLIST" >/dev/null
+  log "launchd: runtime root $LAUNCHD_PROJECT_ROOT written to $LAUNCHD_PLIST"
+}
+
+restart_daemon_supervisor() {
+  if [ ! -f "$LAUNCHD_PLIST" ]; then
+    kickstart_daemon
+    return $?
+  fi
+  ensure_launchd_runtime_root
+  log "launchd: reload $LABEL from $LAUNCHD_PLIST"
+  launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
+  launchctl bootout "gui/$(id -u)" "$LAUNCHD_PLIST" >/dev/null 2>&1 || true
+  launchctl bootstrap "gui/$(id -u)" "$LAUNCHD_PLIST" 2>&1 | tail -8
+  launchctl kickstart -k "gui/$(id -u)/$LABEL" 2>&1 | tail -5
+}
+
 post_switch_smoke() {
   local smoke_start resp elapsed
   if [ "$DO_SMOKE" -eq 0 ]; then
@@ -320,7 +382,7 @@ rollback_to_previous() {
   fi
   log "rollback: switching active back to $previous"
   switch_active_release "$previous"
-  kickstart_daemon >/dev/null 2>&1 || true
+  restart_daemon_supervisor >/dev/null 2>&1 || true
   return 0
 }
 
@@ -501,9 +563,9 @@ switch_active_release "$CANDIDATE_DIR"
 ensure_default_mcp_config
 
 KICKSTART_START="$(date +%s)"
-if ! kickstart_daemon; then
+if ! restart_daemon_supervisor; then
   rollback_to_previous "$PREVIOUS_ACTIVE" || true
-  fail "launchctl kickstart failed; rollback attempted" 4
+  fail "launchctl reload/kickstart failed; rollback attempted" 4
 fi
 record_timing "launchd-kickstart" "$KICKSTART_START"
 
