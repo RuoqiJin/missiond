@@ -22,6 +22,8 @@ const FILES = {
   subscribers: 'crates/missiond-daemon/src/bus/v2_subscribers.rs',
   taskDelegate: 'crates/missiond-daemon/src/handlers/compute/task_delegate.rs',
   autopilot: 'crates/missiond-daemon/src/engine/intent_engine/autopilot.rs',
+  conversation: 'crates/missiond-core/src/db/pg/conversation.rs',
+  codexWorker: 'crates/missiond-daemon/src/workers/local/codex_ingestion_worker.rs',
   flowEngine: 'crates/missiond-daemon/src/engine/intent_engine/flow_engine.rs',
   boardEvents: 'crates/missiond-daemon/src/handlers/knowledge/board/events.rs',
   boardEvent: 'crates/missiond-core/src/event/events/board.rs',
@@ -111,6 +113,8 @@ function checkFiles(root) {
 	    'bare Bash(...)-style tool-call lines',
 	    'wait_for_worker_final_settle_window',
     'durable provider-or-note evidence + idle slot diagnosis',
+    'event_msg.task_complete.last_agent_message',
+    'messages contain the BoardTask id',
 	    'paste again to expand',
 	    'MUST NOT wait for worker turn completion inside the dispatch tick',
 	    'pre-provisioned dynamic slots',
@@ -211,6 +215,7 @@ function checkFiles(root) {
     'latest_assistant_after_task_prompt',
     'provider_completion_summary_for_task',
     'provider_final_summary_prefers_current_task_prompt_anchor_in_reused_session',
+    'provider_final_summary_prefers_codex_task_complete_report_over_chinese_progress',
     'get_conversations_by_task_id',
     'get_slot_session',
     'set_conversation_task_id',
@@ -225,6 +230,19 @@ function checkFiles(root) {
     'Findings / Evidence / Recommendations / Verification',
     'output_contract_close_blocker_rejects_stale_structured_summary',
 	  ]);
+
+  requireAll(diagnostics, FILES.conversation, sources.conversation, [
+    'async fn get_conversations_by_task_id',
+    "m.content ILIKE ('%' || $1 || '%')",
+    'SELECT DISTINCT m.session_id',
+    'LIMIT 50',
+  ]);
+
+  requireAll(diagnostics, FILES.codexWorker, sources.codexWorker, [
+    '"task_complete"',
+    '"last_agent_message"',
+    'parse_jsonl_imports_task_complete_last_agent_message_as_final_assistant',
+  ]);
   forbidAll(diagnostics, FILES.autopilot, sources.autopilot, [
     'res.duration_ms, res.response',
     'send_jobs.join_next().await',
@@ -334,6 +352,7 @@ async fn x() { let ev = BoardEvent::TaskCreated { task_id, title, category }; no
     fn starts_with_guard() { let _ = r#"trimmed.starts_with("let me ")"#; }
     const INVESTIGATION_VERBS: [&str; 4] = ["i'll begin", "let me write", "let me create", "Now committing"];
     fn provider_final_summary_prefers_current_task_prompt_anchor_in_reused_session() {}
+    fn provider_final_summary_prefers_codex_task_complete_report_over_chinese_progress() {}
     fn provider_final_summary_rejects_staging_and_committing_narration() {}
     fn provider_final_summary_rejects_intermediate_create_narration() {}
     fn provider_final_summary_rejects_intermediate_writing_narration() {}
@@ -364,6 +383,17 @@ async fn x() { let ev = BoardEvent::TaskCreated { task_id, title, category }; no
     maybe_complete_delegated_execution_log();
     publish_slot(SlotEvent::TaskDispatched{});
 }`);
+  write(root, 'conversation', `
+    async fn get_conversations_by_task_id() {
+      let _ = "SELECT DISTINCT m.session_id";
+      let _ = "m.content ILIKE ('%' || $1 || '%')";
+      let _ = "LIMIT 50";
+    }`);
+  write(root, 'codexWorker', `
+    fn parse_jsonl_imports_task_complete_last_agent_message_as_final_assistant() {
+      let _ = "task_complete";
+      let _ = "last_agent_message";
+    }`);
   write(root, 'flowEngine', `
     fn is_pty_already_running_error() {}
     fn pty_already_running_error_is_retryable_preprovision_race() {}

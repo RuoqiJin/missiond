@@ -1042,6 +1042,25 @@ fn parse_jsonl(path: &Path, _thread_id: &str, skip_before_line: usize) -> Result
                             message_line_count += 1;
                         }
                     }
+                    "task_complete" => {
+                        let text = event
+                            .payload
+                            .get("last_agent_message")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| event.payload.get("message").and_then(|v| v.as_str()))
+                            .unwrap_or("")
+                            .to_string();
+                        if !text.is_empty() {
+                            messages.push(ParsedMessage {
+                                role: "assistant".to_string(),
+                                content: text,
+                                timestamp: event.timestamp,
+                                line_no: physical_line_no,
+                                source_event_hash: source_event_hash.clone(),
+                            });
+                            message_line_count += 1;
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -1217,6 +1236,34 @@ mod tests {
         assert_eq!(thread.model.as_deref(), Some("gpt-5.5"));
         assert!(!thread.provider_indexed);
         assert_eq!(codex_source_state(&thread), "sqlite-missing");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn parse_jsonl_imports_task_complete_last_agent_message_as_final_assistant() {
+        let path = std::env::temp_dir().join(format!(
+            "missiond-codex-task-complete-test-{}-{}.jsonl",
+            std::process::id(),
+            short_sha256("task-complete", 8)
+        ));
+        let task_complete = serde_json::json!({
+            "timestamp": "2026-05-24T12:17:11.949Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "task_complete",
+                "last_agent_message": "## Findings\n- done\n\n## Evidence\n- rollout\n\n## Recommendations\n- keep codex worker lane\n\n## Verification\n- no edits"
+            }
+        });
+        std::fs::write(&path, format!("{task_complete}\n")).expect("write codex fixture");
+
+        let parsed = parse_jsonl(&path, "thread-task-complete", 0).expect("parse jsonl");
+        assert_eq!(parsed.messages.len(), 1);
+        let message = &parsed.messages[0];
+        assert_eq!(message.role, "assistant");
+        assert_eq!(message.line_no, 1);
+        assert!(message.content.contains("## Findings"));
+        assert!(message.content.contains("## Verification"));
 
         let _ = std::fs::remove_file(path);
     }

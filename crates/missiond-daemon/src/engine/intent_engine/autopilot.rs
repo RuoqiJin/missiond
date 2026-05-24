@@ -5493,6 +5493,46 @@ mod tests {
     }
 
     #[test]
+    fn provider_final_summary_prefers_codex_task_complete_report_over_chinese_progress() {
+        let task_description = r#"
+## Dispatch metadata
+- output_contract: return a structured artifact with Findings / Evidence / Recommendations / Verification
+"#;
+        let messages = vec![
+            test_conversation_message(
+                1,
+                "user",
+                "BoardTask task-codex-real: 请基于已确认的 Jarvis intent.lisp / plan.lisp 执行一个只读工位任务。",
+                "2026-05-24T12:16:27Z",
+            ),
+            test_conversation_message(
+                2,
+                "assistant",
+                "我会做一次最小只读复核：确认 context pack 仍可读、抽取关键字段、确认 `codex` CLI 可用；不执行写入、不创建任务、不提交。",
+                "2026-05-24T12:16:54Z",
+            ),
+            test_conversation_message(
+                3,
+                "assistant",
+                "## Findings\n- PASS: Codex CLI 可作为本次 MissionD 普通只读审查工位执行。\n\n## Evidence\n- rollout JSONL task_complete.last_agent_message carried this final report.\n\n## Recommendations\n- Keep codex-master-control separate from codex-review-worker.\n\n## Verification\n- No files were modified.",
+                "2026-05-24T12:17:11Z",
+            ),
+        ];
+
+        assert_eq!(
+            provider_completion_summary_for_task(
+                &messages,
+                "task-codex-real",
+                task_description,
+                Some("2026-05-24T12:16:24Z"),
+                None,
+            )
+            .as_deref(),
+            Some("## Findings\n- PASS: Codex CLI 可作为本次 MissionD 普通只读审查工位执行。\n\n## Evidence\n- rollout JSONL task_complete.last_agent_message carried this final report.\n\n## Recommendations\n- Keep codex-master-control separate from codex-review-worker.\n\n## Verification\n- No files were modified.")
+        );
+    }
+
+    #[test]
     fn provider_final_summary_ignores_stale_codex_progress_when_contract_missing() {
         let task_description = r#"
 ## Dispatch metadata

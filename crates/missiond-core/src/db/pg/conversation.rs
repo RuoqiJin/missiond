@@ -1332,11 +1332,20 @@ impl ConversationStore for PgMissionStore {
     }
 
     async fn get_conversations_by_task_id(&self, task_id: &str) -> DbResult<Vec<Conversation>> {
-        let rows =
-            sqlx::query("SELECT * FROM conversations WHERE task_id = $1 ORDER BY started_at ASC")
-                .bind(task_id)
-                .fetch_all(&self.pool)
-                .await?;
+        let rows = sqlx::query(
+            "SELECT * FROM conversations
+             WHERE task_id = $1
+                OR id IN (
+                    SELECT DISTINCT m.session_id
+                    FROM conversation_messages m
+                    WHERE m.content ILIKE ('%' || $1 || '%')
+                    LIMIT 50
+                )
+             ORDER BY started_at ASC",
+        )
+        .bind(task_id)
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows.iter().map(Self::row_to_conversation).collect())
     }
 
