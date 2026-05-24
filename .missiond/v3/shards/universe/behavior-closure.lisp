@@ -85,6 +85,46 @@
       :calls "scripts/check-v3-agent-navigation-quality.mjs"))
 
   (behavior
+    :id autopilot-detached-review-and-feedback-tasks
+    :kind scheduler
+    :owner autopilot-runtime
+    :observed ["background-task:crates/missiond-daemon/src/engine/intent_engine/autopilot.rs:4136"
+               "background-task:crates/missiond-daemon/src/engine/intent_engine/autopilot.rs:4257"]
+    :code ["crates/missiond-daemon/src/engine/intent_engine/autopilot.rs"]
+    :effects []
+    (anchor
+      :role scheduler
+      :observed "background-task:crates/missiond-daemon/src/engine/intent_engine/autopilot.rs:4136"
+      :file "crates/missiond-daemon/src/engine/intent_engine/autopilot.rs"
+      :symbol "dispatch_board_tasks_with_config")
+    (anchor
+      :role scheduler
+      :observed "background-task:crates/missiond-daemon/src/engine/intent_engine/autopilot.rs:4257"
+      :file "crates/missiond-daemon/src/engine/intent_engine/autopilot.rs"
+      :symbol "dispatch_board_tasks_with_config")
+    (trigger
+      :from-file "crates/missiond-daemon/src/engine/intent_engine/autopilot.rs"
+      :from-symbol "dispatch_board_tasks"
+      :calls "tokio::spawn"))
+
+  (behavior
+    :id autopilot-runtime-isomorphism-checker-subprocess
+    :kind subprocess
+    :owner autopilot-runtime
+    :observed ["subprocess:scripts/check-v3-autopilot-runtime-isomorphism.mjs:216"]
+    :code ["scripts/check-v3-autopilot-runtime-isomorphism.mjs"]
+    :effects []
+    (anchor
+      :role subprocess
+      :observed "subprocess:scripts/check-v3-autopilot-runtime-isomorphism.mjs:216"
+      :file "scripts/check-v3-autopilot-runtime-isomorphism.mjs"
+      :symbol "delegated")
+    (trigger
+      :from-file "scripts/check-v3-autopilot-runtime-isomorphism.mjs"
+      :from-symbol "delegated"
+      :calls "static-source-needle"))
+
+  (behavior
     :id global-claude-md-sync
     :kind effect
     :owner context-runtime

@@ -812,7 +812,12 @@ async fn build_codex_conversation(
     };
     let rollout_age_secs =
         read_file_watermark(Path::new(&thread.rollout_path)).map(|wm| wm.age_secs);
-    let status = codex_thread_status(thread.archived, slot_id.is_some(), rollout_age_secs);
+    let status = codex_thread_status(
+        thread.archived,
+        slot_id.is_some(),
+        ended_at.as_deref(),
+        rollout_age_secs,
+    );
 
     missiond_core::types::Conversation {
         id: thread.id.clone(),
@@ -849,10 +854,13 @@ async fn build_codex_conversation(
 fn codex_thread_status(
     archived: bool,
     slot_bound: bool,
+    ended_at: Option<&str>,
     rollout_age_secs: Option<u64>,
 ) -> &'static str {
     if archived {
         "archived"
+    } else if ended_at.is_some() {
+        "completed"
     } else if slot_bound {
         "active"
     } else if rollout_age_secs.unwrap_or(u64::MAX) > 3600 {
@@ -1270,11 +1278,21 @@ mod tests {
 
     #[test]
     fn codex_status_distinguishes_archived_slot_and_historical_threads() {
-        assert_eq!(codex_thread_status(true, false, Some(1)), "archived");
-        assert_eq!(codex_thread_status(false, true, Some(86_400)), "active");
-        assert_eq!(codex_thread_status(false, false, Some(30)), "active");
-        assert_eq!(codex_thread_status(false, false, Some(3_601)), "completed");
-        assert_eq!(codex_thread_status(false, false, None), "completed");
+        assert_eq!(codex_thread_status(true, false, None, Some(1)), "archived");
+        assert_eq!(
+            codex_thread_status(false, true, Some("2026-05-24T12:17:11Z"), Some(30)),
+            "completed"
+        );
+        assert_eq!(
+            codex_thread_status(false, true, None, Some(86_400)),
+            "active"
+        );
+        assert_eq!(codex_thread_status(false, false, None, Some(30)), "active");
+        assert_eq!(
+            codex_thread_status(false, false, None, Some(3_601)),
+            "completed"
+        );
+        assert_eq!(codex_thread_status(false, false, None, None), "completed");
     }
 
     #[test]

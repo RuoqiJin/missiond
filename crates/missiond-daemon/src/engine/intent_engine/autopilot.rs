@@ -2361,7 +2361,12 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
                     runtime_config.boardtask_timeout_policy.watchdog_grace_secs;
 
                 match state.pty.get_status(slot_id).await {
-                    Some(info) if info.state == SessionState::Idle => {
+                    Some(info)
+                        if matches!(
+                            info.state,
+                            SessionState::Idle | SessionState::Exited | SessionState::Error
+                        ) =>
+                    {
                         if let Ok(true) = close_idle_running_task_from_durable_summary(
                             state,
                             rt.id.as_str(),
@@ -2371,10 +2376,11 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
                         {
                             continue;
                         }
-                        // Slot is idle. Only reclaim once the configured task
-                        // budget plus grace has elapsed; otherwise the slot may
-                        // simply be between the natural prompt return and the
-                        // next dispatch.
+                        // Idle/terminal slots are not actively producing output.
+                        // Only reclaim once the configured task budget plus
+                        // grace has elapsed; otherwise the slot may simply be
+                        // between the natural prompt return and the next
+                        // dispatch/reconcile pass.
                         if claimed_age < idle_threshold {
                             continue;
                         }
@@ -2382,15 +2388,16 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
                             task_id = %rt.id, slot_id, age_secs = claimed_age,
                             timeout_secs = task_timeout_secs,
                             grace_secs = watchdog_grace_secs,
-                            "Watchdog: task exceeded configured timeout/grace — slot idle, recovering"
+                            slot_state = ?info.state,
+                            "Watchdog: task exceeded configured timeout/grace — slot idle/terminal, recovering"
                         );
                         let _ = state.store.unclaim_board_task(rt.id.as_str()).await;
                         let _ = state.store.add_board_task_note(
                             &missiond_core::types::AddBoardTaskNoteInput {
                                 task_id: rt.id.to_string(),
                                 content: format!(
-                                    "🔄 **看门狗回收** — 任务超出配置 timeout/grace（claimed_age={}s, timeout={}s, grace={}s, 工位 {} 已 idle）。可能是 pty.send 在预算内自然结束、daemon 重启丢失 send()，或工位已归档结果。已 unclaim，下次 tick 重新执行。",
-                                    claimed_age, task_timeout_secs, watchdog_grace_secs, slot_id
+                                    "🔄 **看门狗回收** — 任务超出配置 timeout/grace（claimed_age={}s, timeout={}s, grace={}s, 工位 {} 状态 {:?}）。可能是 pty.send 在预算内自然结束、daemon 重启丢失 send()，或工位已归档结果。已 unclaim，下次 tick 重新执行。",
+                                    claimed_age, task_timeout_secs, watchdog_grace_secs, slot_id, info.state
                                 ),
                                 note_type: Some("note".to_string()),
                                 author: Some("watchdog".to_string()),

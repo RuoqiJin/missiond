@@ -104,6 +104,8 @@ function checkFiles(root) {
 	    ':summary-note-source',
 	    ':settle-window',
 	    ':idle-durable-summary-close',
+	    'idle-or-terminal slot diagnosis',
+	    'terminal provider slot',
 	    'await_durable_provider_completion_for_slot_task',
 	    'extract_worker_final_summary(res.response, full_prompt)',
 	    "I'll begin by reading",
@@ -112,7 +114,7 @@ function checkFiles(root) {
 	    'no space left on device',
 	    'bare Bash(...)-style tool-call lines',
 	    'wait_for_worker_final_settle_window',
-    'durable provider-or-note evidence + idle slot diagnosis',
+    'durable provider-or-note evidence + idle-or-terminal slot diagnosis',
     'event_msg.task_complete.last_agent_message',
     'messages contain the BoardTask id',
 	    'paste again to expand',
@@ -164,6 +166,8 @@ function checkFiles(root) {
 	    'fn worker_final_settle_window_ms',
     'wait_for_worker_final_settle_window().await',
     'close_idle_running_task_from_durable_summary',
+    'SessionState::Idle | SessionState::Exited | SessionState::Error',
+    'slot idle/terminal',
     'has_durable_completion_summary_after_claim',
     'reconcile_slot_provider_conversation',
     'reconcile_conversation_messages',
@@ -316,7 +320,7 @@ function buildFixture() {
 	    :close-owner
 	      (:summary-note-source "await_durable_provider_completion_for_slot_task then extract_worker_final_summary(res.response, full_prompt) capped via truncate_safe; raw res.response forbidden in note format string. Initial worker narration like I'll begin by reading, broad Let me ... progress, and retry/wakeup blocker narration such as wakeup will fire / no space left on device is not valid final evidence. Auth/quota notes bypass intentionally. The TUI capture includes echoed task contract, bare Bash(...)-style tool-call lines, tool logs, and \`paste again to expand\` collapse markers."
 	       :settle-window "wait_for_worker_final_settle_window projects the high-confidence final summary settle policy and durable-final polling."
-	       :idle-durable-summary-close "delayed active-frame tasks close from durable provider-or-note evidence + idle slot diagnosis."))
+	       :idle-durable-summary-close "delayed active-frame tasks close from durable provider-or-note evidence + idle-or-terminal slot diagnosis; terminal provider slot is not a busy state."))
   (implementation-map
     (surface autopilot-runtime
       :status "code-aligned"
