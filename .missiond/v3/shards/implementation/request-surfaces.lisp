@@ -40,6 +40,16 @@
                       "/interactions/v1/{interaction_id}/events"
                       "/jarvis/v1/chat/completions"]
       :public-tools [mission_interaction]
+      :auth-boundary (:authority auth
+                      :userinfo-endpoint "/oidc/userinfo"
+                      :endpoint-env MISSIOND_INTERACTION_AUTH_USERINFO_URL
+                      :timeout-env MISSIOND_INTERACTION_AUTH_TIMEOUT_MS
+                      :failure-code INTERACTION_AUTH_UNAVAILABLE
+                      :rule "Web/iOS/Jarvis bearer tokens must be resolved through Auth userinfo before PermissionContext is accepted. Metadata roles/tenant/application fields are hints only; MissionD must fail fast when Auth is unavailable instead of creating BoardTask side effects.")
+      :legacy-adapter (:route "/v1/chat/completions"
+                       :adapter handle_chat_completions_interaction_adapter
+                       :normalizer openai_request_to_interaction_envelope
+                       :rule "OpenAI-compatible Jarvis/iOS clients are wire-compatible only at the edge. The route must normalize into InteractionEnvelope and pass through Auth PermissionContext, grounding, intent/plan confirmation, BoardTask metadata, and task-result-artifact; it must not directly write provider PTYs.")
       :events [received authenticated permission_resolved grounding intent_draft plan_draft confirm_required board_task_created worker_status result_artifact diagnostic final]
       :note "Unified external channel entry for Web, iOS, Jarvis, WeChat bridge, and service triggers. The HTTP adapter converts every external message to InteractionEnvelope, resolves Auth-derived PermissionContext, persists grounding through mission_context_gather, writes intent/plan artifacts, requires confirmation for broad human requests, creates BoardTasks only after confirmation, and returns status/result through channel response sinks. mission_interaction is the MCP facade for receive/confirm_intent/confirm_plan/follow/status; legacy Jarvis chat remains wire-compatible but is treated as a channel adapter, not a direct PTY path.")
 

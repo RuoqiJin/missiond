@@ -55,7 +55,12 @@ requireIncludes('v3', [
   ':surface interaction-gateway',
   '/interactions/v1/messages',
   'InteractionEnvelope',
+  'handle_chat_completions_interaction_adapter',
+  'openai_request_to_interaction_envelope',
   'PermissionContext',
+  '/oidc/userinfo',
+  'MISSIOND_INTERACTION_AUTH_USERINFO_URL',
+  'INTERACTION_AUTH_UNAVAILABLE',
   'intent_draft',
   'plan_draft',
   'task-result-artifact',
@@ -67,6 +72,8 @@ requireIncludes('requestSurfaces', [
   'crates/missiond-mcp/src/tools/comm/interaction.rs',
   'crates/missiond-daemon/src/handlers/comm/interaction.rs',
   'mission_interaction',
+  'MISSIOND_INTERACTION_AUTH_USERINFO_URL',
+  'INTERACTION_AUTH_UNAVAILABLE',
 ]);
 
 requireIncludes('v2', [
@@ -95,15 +102,29 @@ requireIncludes('server', [
   'struct InteractionEnvelope',
   'handle_interaction_messages',
   'handle_interaction_events',
+  'handle_chat_completions_interaction_adapter',
+  'openai_request_to_interaction_envelope',
   'POST /interactions/v1/messages',
   'GET /interactions/v1/',
   'missiond.interaction-envelope.v1',
+  'resolve_interaction_auth',
+  'MISSIOND_INTERACTION_AUTH_USERINFO_URL',
+  'INTERACTION_AUTH_UNAVAILABLE',
+  'auth-userinfo',
   'permission_resolved',
   'intent_draft',
   'plan_draft',
   'board_task_created',
   'result_pending',
 ]);
+
+const serverText = requireFile('server');
+if (!/POST \/v1\/chat\/completions[\s\S]{0,600}handle_chat_completions_interaction_adapter/.test(serverText)) {
+  diagnostics.push({
+    file: files.server,
+    message: 'legacy /v1/chat/completions route must enter interaction-gateway adapter, not direct PTY dispatch',
+  });
+}
 
 requireIncludes('mcpTool', [
   'mission_interaction',

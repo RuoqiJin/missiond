@@ -14,6 +14,8 @@
                      ".missiond/v3/shards/v2-convergence-map.lisp"
                      ".missiond/workflows/intent-intake-grounding.lisp"
                      ".missiond/work-orders/20260524-unified-interaction-gateway/**"
+                     "Cargo.lock"
+                     "crates/missiond-core/Cargo.toml"
                      "crates/missiond-core/src/ws/server.rs"
                      "crates/missiond-daemon/src/context/v3_contracts/generated.rs"
                      "crates/missiond-daemon/src/context/v3_runtime_defaults/generated.rs"

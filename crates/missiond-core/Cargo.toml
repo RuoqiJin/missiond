@@ -76,6 +76,7 @@ tree-sitter-python = { workspace = true, optional = true }
 # WebSocket
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
+reqwest = { workspace = true }
 libc = "0.2.183"
 
 [dev-dependencies]

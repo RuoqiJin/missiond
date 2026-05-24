@@ -389,28 +389,257 @@ fn normalize_interaction_message(message: &serde_json::Value) -> String {
     }
 }
 
-fn interaction_permission_context(
+fn openai_content_to_text(content: &serde_json::Value) -> String {
+    match content {
+        serde_json::Value::String(text) => text.trim().to_string(),
+        serde_json::Value::Array(parts) => parts
+            .iter()
+            .filter_map(|part| {
+                part.get("text")
+                    .or_else(|| part.get("content"))
+                    .and_then(|value| value.as_str())
+            })
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        serde_json::Value::Object(map) => map
+            .get("text")
+            .or_else(|| map.get("content"))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string(),
+        _ => String::new(),
+    }
+}
+
+fn openai_request_user_message(req: &serde_json::Value) -> String {
+    req.get("messages")
+        .and_then(|messages| messages.as_array())
+        .and_then(|messages| {
+            messages.iter().rev().find_map(|message| {
+                let role = message.get("role").and_then(|value| value.as_str())?;
+                if role != "user" {
+                    return None;
+                }
+                let text = openai_content_to_text(message.get("content")?);
+                if text.is_empty() {
+                    None
+                } else {
+                    Some(text)
+                }
+            })
+        })
+        .unwrap_or_else(|| {
+            req.get("prompt")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .unwrap_or_default()
+                .to_string()
+        })
+}
+
+fn openai_request_to_interaction_envelope(req: &serde_json::Value) -> InteractionEnvelope {
+    let mut metadata = req
+        .get("metadata")
+        .cloned()
+        .filter(|value| value.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if let Some(object) = metadata.as_object_mut() {
+        for key in [
+            "missiond_confirm",
+            "missiond_follow_task_id",
+            "missiond_intent_confirmed",
+            "missiond_plan_confirmed",
+            "interaction_id",
+            "tenant_id",
+            "application_id",
+            "product_id",
+        ] {
+            if let Some(value) = req.get(key) {
+                object
+                    .entry(key.to_string())
+                    .or_insert_with(|| value.clone());
+            }
+        }
+        object.insert(
+            "wire_format".to_string(),
+            serde_json::json!("openai-chat-completions"),
+        );
+    }
+
+    InteractionEnvelope {
+        channel: req
+            .get("channel")
+            .and_then(|value| value.as_str())
+            .unwrap_or("jarvis")
+            .to_string(),
+        external_user_id: req
+            .get("user")
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned),
+        auth_token: req
+            .get("auth_token")
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned),
+        conversation_id: req
+            .get("conversation_id")
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned),
+        message: serde_json::Value::String(openai_request_user_message(req)),
+        attachments: Vec::new(),
+        metadata,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct InteractionAuthResolution {
+    token: Option<String>,
+    permission_context: serde_json::Value,
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+fn interaction_token(envelope: &InteractionEnvelope, headers: &str) -> Option<String> {
+    envelope
+        .auth_token
+        .as_ref()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| extract_bearer_token(headers))
+}
+
+fn json_string_field(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        value
+            .get(*key)
+            .and_then(|field| field.as_str())
+            .map(str::trim)
+            .filter(|field| !field.is_empty())
+            .map(ToOwned::to_owned)
+    })
+}
+
+fn json_string_array_field(value: &serde_json::Value, keys: &[&str]) -> Vec<String> {
+    for key in keys {
+        if let Some(field) = value.get(*key) {
+            if let Some(items) = field.as_array() {
+                return items
+                    .iter()
+                    .filter_map(|item| item.as_str())
+                    .map(str::trim)
+                    .filter(|item| !item.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect();
+            }
+            if let Some(text) = field.as_str() {
+                return text
+                    .split(|ch: char| ch == ',' || ch.is_whitespace())
+                    .map(str::trim)
+                    .filter(|item| !item.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect();
+            }
+        }
+    }
+    Vec::new()
+}
+
+fn interaction_service_token_matches(token: &str) -> bool {
+    ["MISSIOND_INTERACTION_SERVICE_TOKEN", "MISSIOND_API_TOKEN"]
+        .iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .map(|value| value.trim().to_string())
+        .any(|expected| !expected.is_empty() && expected == token)
+}
+
+fn interaction_default_capabilities(
+    channel: &str,
+    roles: &[String],
+    scopes: &[String],
+) -> Vec<String> {
+    let mut capabilities = match channel {
+        "service" => vec!["interaction:exact_workflow".to_string()],
+        "wechat" => vec![
+            "interaction:chat".to_string(),
+            "identity:binding_required".to_string(),
+        ],
+        _ => vec![
+            "interaction:chat".to_string(),
+            "interaction:intent_plan".to_string(),
+        ],
+    };
+
+    let elevated = roles.iter().any(|role| {
+        matches!(
+            role.as_str(),
+            "admin" | "system_admin" | "tenant_admin" | "missiond_operator"
+        )
+    }) || scopes.iter().any(|scope| {
+        matches!(
+            scope.as_str(),
+            "missiond.admin" | "missiond.operator" | "workflow:execute"
+        )
+    });
+    if elevated {
+        capabilities.extend([
+            "board:create".to_string(),
+            "worker:dispatch".to_string(),
+            "interaction:exact_workflow".to_string(),
+        ]);
+    }
+
+    capabilities.sort();
+    capabilities.dedup();
+    capabilities
+}
+
+fn interaction_permission_context_from_userinfo(
     envelope: &InteractionEnvelope,
-    token_present: bool,
+    userinfo: &serde_json::Value,
+    auth_endpoint: &str,
 ) -> serde_json::Value {
     let channel = envelope.channel.trim().to_ascii_lowercase();
-    let capabilities = match channel.as_str() {
-        "service" => vec!["interaction:exact_workflow"],
-        "wechat" => vec!["interaction:chat", "identity:binding_required"],
-        _ => vec!["interaction:chat", "interaction:intent_plan"],
-    };
+    let roles = json_string_array_field(userinfo, &["roles", "role", "groups", "product_groups"]);
+    let scopes = json_string_array_field(userinfo, &["scope", "scopes"]);
+    let capabilities = interaction_default_capabilities(&channel, &roles, &scopes);
     serde_json::json!({
         "schema": "missiond.permission-context.v1",
         "authority": "auth",
-        "resolution": if token_present { "bearer-token-present" } else { "binding-required-or-anonymous-denied" },
-        "user_id": envelope.external_user_id,
-        "tenant_id": envelope.metadata.get("tenant_id").and_then(|v| v.as_str()).unwrap_or("unknown"),
-        "application_id": envelope.metadata.get("application_id").and_then(|v| v.as_str()).unwrap_or("missiond"),
-        "product_id": envelope.metadata.get("product_id").and_then(|v| v.as_str()),
-        "groups": envelope.metadata.get("groups").cloned().unwrap_or_else(|| serde_json::json!([])),
-        "roles": envelope.metadata.get("roles").cloned().unwrap_or_else(|| serde_json::json!(["user"])),
+        "resolution": "auth-userinfo",
+        "auth_endpoint": auth_endpoint,
+        "user_id": json_string_field(userinfo, &["sub", "user_id"]).unwrap_or_else(|| {
+            envelope
+                .external_user_id
+                .as_deref()
+                .unwrap_or("unknown")
+                .to_string()
+        }),
+        "tenant_id": json_string_field(userinfo, &["tenant_id"]).unwrap_or_else(|| {
+            envelope.metadata.get("tenant_id").and_then(|v| v.as_str()).unwrap_or("unknown").to_string()
+        }),
+        "tenant_slug": json_string_field(userinfo, &["tenant_slug"]),
+        "application_id": json_string_field(userinfo, &["application_id", "aud"]).unwrap_or_else(|| {
+            envelope.metadata.get("application_id").and_then(|v| v.as_str()).unwrap_or("missiond").to_string()
+        }),
+        "product_id": json_string_field(userinfo, &["product_id"]).or_else(|| {
+            envelope.metadata.get("product_id").and_then(|v| v.as_str()).map(ToOwned::to_owned)
+        }),
+        "groups": json_string_array_field(userinfo, &["product_groups", "groups"]),
+        "roles": if roles.is_empty() { vec!["user".to_string()] } else { roles },
+        "scope": scopes,
         "channel": channel,
         "capabilities": capabilities,
+        "subject": {
+            "email": json_string_field(userinfo, &["email"]),
+            "email_verified": userinfo.get("email_verified").and_then(|v| v.as_bool()),
+            "name": json_string_field(userinfo, &["name"]),
+        }
     })
 }
 
@@ -419,12 +648,7 @@ fn verify_interaction_auth(
     headers: &str,
 ) -> Result<Option<String>, (u16, &'static str, serde_json::Value)> {
     let channel = envelope.channel.trim().to_ascii_lowercase();
-    let token = envelope
-        .auth_token
-        .as_ref()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .or_else(|| extract_bearer_token(headers));
+    let token = interaction_token(envelope, headers);
 
     if channel == "wechat" && token.is_none() {
         return Ok(None);
@@ -443,22 +667,193 @@ fn verify_interaction_auth(
         ));
     };
 
-    if let Ok(expected) = std::env::var("MISSIOND_API_TOKEN") {
-        if token != expected {
+    Ok(Some(token))
+}
+
+fn interaction_binding_required_context(envelope: &InteractionEnvelope) -> serde_json::Value {
+    let channel = envelope.channel.trim().to_ascii_lowercase();
+    serde_json::json!({
+        "schema": "missiond.permission-context.v1",
+        "authority": "auth",
+        "resolution": "identity-binding-required",
+        "user_id": envelope.external_user_id,
+        "tenant_id": serde_json::Value::Null,
+        "application_id": "missiond",
+        "product_id": serde_json::Value::Null,
+        "groups": [],
+        "roles": [],
+        "channel": channel,
+        "capabilities": interaction_default_capabilities(&channel, &[], &[]),
+    })
+}
+
+fn interaction_service_permission_context(envelope: &InteractionEnvelope) -> serde_json::Value {
+    let channel = envelope.channel.trim().to_ascii_lowercase();
+    serde_json::json!({
+        "schema": "missiond.permission-context.v1",
+        "authority": "auth",
+        "resolution": "service-token",
+        "user_id": envelope.external_user_id,
+        "tenant_id": envelope.metadata.get("tenant_id").and_then(|v| v.as_str()).unwrap_or("system"),
+        "application_id": envelope.metadata.get("application_id").and_then(|v| v.as_str()).unwrap_or("missiond"),
+        "product_id": envelope.metadata.get("product_id").and_then(|v| v.as_str()),
+        "groups": ["service"],
+        "roles": ["service"],
+        "channel": channel,
+        "capabilities": interaction_default_capabilities("service", &["service".to_string()], &["workflow:execute".to_string()]),
+    })
+}
+
+fn interaction_dev_permission_context(envelope: &InteractionEnvelope) -> serde_json::Value {
+    let channel = envelope.channel.trim().to_ascii_lowercase();
+    serde_json::json!({
+        "schema": "missiond.permission-context.v1",
+        "authority": "auth",
+        "resolution": "dev-skip-auth-userinfo",
+        "user_id": envelope.external_user_id,
+        "tenant_id": envelope.metadata.get("tenant_id").and_then(|v| v.as_str()).unwrap_or("dev"),
+        "application_id": envelope.metadata.get("application_id").and_then(|v| v.as_str()).unwrap_or("missiond"),
+        "product_id": envelope.metadata.get("product_id").and_then(|v| v.as_str()),
+        "groups": envelope.metadata.get("groups").cloned().unwrap_or_else(|| serde_json::json!([])),
+        "roles": envelope.metadata.get("roles").cloned().unwrap_or_else(|| serde_json::json!(["user"])),
+        "channel": channel,
+        "capabilities": interaction_default_capabilities(&channel, &[], &[]),
+    })
+}
+
+async fn resolve_interaction_auth(
+    envelope: &InteractionEnvelope,
+    headers: &str,
+) -> Result<InteractionAuthResolution, (u16, &'static str, serde_json::Value)> {
+    let token = verify_interaction_auth(envelope, headers)?;
+    let Some(token_value) = token.clone() else {
+        return Ok(InteractionAuthResolution {
+            token,
+            permission_context: interaction_binding_required_context(envelope),
+        });
+    };
+
+    if interaction_service_token_matches(&token_value) {
+        return Ok(InteractionAuthResolution {
+            token,
+            permission_context: interaction_service_permission_context(envelope),
+        });
+    }
+
+    if env_flag("MISSIOND_INTERACTION_AUTH_SKIP_INTROSPECTION") {
+        return Ok(InteractionAuthResolution {
+            token,
+            permission_context: interaction_dev_permission_context(envelope),
+        });
+    }
+
+    let auth_endpoint = std::env::var("MISSIOND_INTERACTION_AUTH_USERINFO_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "https://auth.xiaojinpro.com/oidc/userinfo".to_string());
+    let timeout_ms = std::env::var("MISSIOND_INTERACTION_AUTH_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(2500)
+        .clamp(500, 8000);
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(timeout_ms))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
             return Err((
-                401,
-                "Unauthorized",
+                503,
+                "Service Unavailable",
                 serde_json::json!({
                     "error": {
-                        "code": "INTERACTION_AUTH_INVALID",
-                        "message": "Invalid interaction auth token."
+                        "code": "INTERACTION_AUTH_UNAVAILABLE",
+                        "message": format!("Failed to initialize Auth client: {}", error)
                     }
                 }),
             ));
         }
+    };
+    let response = match client
+        .get(&auth_endpoint)
+        .bearer_auth(&token_value)
+        .header("Accept", "application/json")
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            return Err((
+                503,
+                "Service Unavailable",
+                serde_json::json!({
+                    "error": {
+                        "code": "INTERACTION_AUTH_UNAVAILABLE",
+                        "message": format!("Auth userinfo endpoint is unavailable: {}", error),
+                        "auth_endpoint": auth_endpoint
+                    }
+                }),
+            ));
+        }
+    };
+
+    let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Err((
+            status.as_u16(),
+            if status == reqwest::StatusCode::FORBIDDEN {
+                "Forbidden"
+            } else {
+                "Unauthorized"
+            },
+            serde_json::json!({
+                "error": {
+                    "code": "INTERACTION_AUTH_INVALID",
+                    "message": "Auth rejected the interaction bearer token.",
+                    "auth_endpoint": auth_endpoint
+                }
+            }),
+        ));
+    }
+    if !status.is_success() {
+        return Err((
+            503,
+            "Service Unavailable",
+            serde_json::json!({
+                "error": {
+                    "code": "INTERACTION_AUTH_UNAVAILABLE",
+                    "message": format!("Auth userinfo endpoint returned {}", status),
+                    "auth_endpoint": auth_endpoint
+                }
+            }),
+        ));
     }
 
-    Ok(Some(token))
+    let userinfo = match response.json::<serde_json::Value>().await {
+        Ok(value) => value,
+        Err(error) => {
+            return Err((
+                503,
+                "Service Unavailable",
+                serde_json::json!({
+                    "error": {
+                        "code": "INTERACTION_AUTH_UNAVAILABLE",
+                        "message": format!("Auth userinfo response was not valid JSON: {}", error),
+                        "auth_endpoint": auth_endpoint
+                    }
+                }),
+            ));
+        }
+    };
+
+    Ok(InteractionAuthResolution {
+        token,
+        permission_context: interaction_permission_context_from_userinfo(
+            envelope,
+            &userinfo,
+            &auth_endpoint,
+        ),
+    })
 }
 
 /// Parse Deploy Center failure webhook into an incident.
@@ -1268,15 +1663,76 @@ impl PTYWebSocketServer {
                 return Ok(());
             }
         };
+
+        Self::handle_interaction_envelope(
+            stream,
+            addr,
+            headers,
+            envelope,
+            jarvis_grounding,
+            jarvis_artifact_writer,
+            db,
+        )
+        .await
+    }
+
+    async fn handle_chat_completions_interaction_adapter(
+        mut stream: TcpStream,
+        addr: SocketAddr,
+        jarvis_grounding: JarvisGroundingSlot,
+        jarvis_artifact_writer: JarvisArtifactSlot,
+        db: Option<Arc<dyn crate::db::traits::MissionStore>>,
+    ) -> anyhow::Result<()> {
+        stream.set_nodelay(true)?;
+        let (headers, body) = match Self::read_http_request(&mut stream).await {
+            Ok(r) => r,
+            Err(e) => {
+                let err = serde_json::json!({"error": {"message": format!("Bad request: {}", e)}});
+                Self::send_http_error(&mut stream, 400, "Bad Request", &err.to_string()).await?;
+                return Ok(());
+            }
+        };
+        let req: serde_json::Value = match serde_json::from_str(&body) {
+            Ok(value) => value,
+            Err(e) => {
+                let err = serde_json::json!({"error": {"message": format!("Invalid JSON: {}", e)}});
+                Self::send_http_error(&mut stream, 400, "Bad Request", &err.to_string()).await?;
+                return Ok(());
+            }
+        };
+        let envelope = openai_request_to_interaction_envelope(&req);
+        Self::handle_interaction_envelope(
+            stream,
+            addr,
+            headers,
+            envelope,
+            jarvis_grounding,
+            jarvis_artifact_writer,
+            db,
+        )
+        .await
+    }
+
+    async fn handle_interaction_envelope(
+        mut stream: TcpStream,
+        addr: SocketAddr,
+        headers: String,
+        envelope: InteractionEnvelope,
+        jarvis_grounding: JarvisGroundingSlot,
+        jarvis_artifact_writer: JarvisArtifactSlot,
+        db: Option<Arc<dyn crate::db::traits::MissionStore>>,
+    ) -> anyhow::Result<()> {
+        stream.set_nodelay(true)?;
         let channel = envelope.channel.trim().to_ascii_lowercase();
-        let auth_token = match verify_interaction_auth(&envelope, &headers) {
-            Ok(token) => token,
+        let auth_resolution = match resolve_interaction_auth(&envelope, &headers).await {
+            Ok(resolution) => resolution,
             Err((status, reason, body)) => {
                 Self::send_http_error(&mut stream, status, reason, &body.to_string()).await?;
                 return Ok(());
             }
         };
-        let permission_context = interaction_permission_context(&envelope, auth_token.is_some());
+        let auth_token = auth_resolution.token;
+        let permission_context = auth_resolution.permission_context;
         let raw_user_text = normalize_interaction_message(&envelope.message);
         if raw_user_text.is_empty() {
             let err = serde_json::json!({"error": {"message": "InteractionEnvelope.message text is required"}});
@@ -1326,7 +1782,7 @@ impl PTYWebSocketServer {
             "permission_resolved",
             &serde_json::json!({
                 "interaction_id": interaction_id,
-                "permission_context": permission_context,
+                "permission_context": permission_context.clone(),
             }),
         )
         .await?;
@@ -1481,7 +1937,7 @@ impl PTYWebSocketServer {
             "channel": channel,
             "phase": "intent_draft",
             "grounding_context_id": grounding_context_id,
-            "permission_context": permission_context,
+            "permission_context": permission_context.clone(),
             "understanding": "我理解这是一个外部渠道请求，需要先确认 intent.lisp，再确认 plan.lisp，之后才创建 BoardTask 并派工位。",
             "user_message_preview": raw_user_text.chars().take(240).collect::<String>(),
             "sources_used": sources_used,
@@ -1679,7 +2135,7 @@ impl PTYWebSocketServer {
             "source": "interaction-gateway",
             "interaction_id": interaction_id,
             "channel": channel,
-            "permission_context": permission_context,
+            "permission_context": permission_context.clone(),
             "grounding_context_id": grounding_context_id,
             "context_pack_path": context_pack_path,
             "context_pack_file": context_pack_file,
@@ -4901,31 +5357,14 @@ impl PTYWebSocketServer {
             }
             // Chat completions SSE endpoint
             if request_line.starts_with("POST /v1/chat/completions") {
-                return match pty_manager {
-                    Some(pm) => {
-                        Self::handle_chat_completions(
-                            stream,
-                            addr,
-                            pm,
-                            jarvis_trace,
-                            context_enricher,
-                            jarvis_grounding,
-                            jarvis_artifact_writer,
-                            db,
-                            cc_tasks_watcher,
-                            tool_count,
-                            default_chat_slot,
-                        )
-                        .await
-                    }
-                    None => {
-                        let mut s = stream;
-                        let err =
-                            serde_json::json!({"error": {"message": "PTY manager not available"}});
-                        Self::send_http_error(&mut s, 503, "Service Unavailable", &err.to_string())
-                            .await
-                    }
-                };
+                return Self::handle_chat_completions_interaction_adapter(
+                    stream,
+                    addr,
+                    jarvis_grounding,
+                    jarvis_artifact_writer,
+                    db,
+                )
+                .await;
             }
             // Slot status API
             if request_line.starts_with("GET /api/slots") && !request_line.contains("Upgrade:") {
@@ -5768,6 +6207,79 @@ mod tests {
                 .as_deref(),
             None
         );
+    }
+
+    #[test]
+    fn interaction_permission_context_uses_auth_userinfo_claims() {
+        let envelope = InteractionEnvelope {
+            channel: "ios".to_string(),
+            external_user_id: Some("local-user".to_string()),
+            metadata: serde_json::json!({
+                "tenant_id": "metadata-tenant",
+                "roles": ["metadata-admin"]
+            }),
+            ..Default::default()
+        };
+        let ctx = interaction_permission_context_from_userinfo(
+            &envelope,
+            &serde_json::json!({
+                "sub": "auth-user",
+                "tenant_id": "auth-tenant",
+                "application_id": "auth-app",
+                "product_id": "auth-product",
+                "product_groups": ["operators"],
+                "roles": ["tenant_admin"],
+                "scope": "openid profile workflow:execute",
+                "email": "user@example.com",
+                "email_verified": true
+            }),
+            "https://auth.xiaojinpro.com/oidc/userinfo",
+        );
+        assert_eq!(ctx["resolution"], "auth-userinfo");
+        assert_eq!(ctx["user_id"], "auth-user");
+        assert_eq!(ctx["tenant_id"], "auth-tenant");
+        assert_eq!(ctx["application_id"], "auth-app");
+        assert_eq!(ctx["product_id"], "auth-product");
+        assert_eq!(ctx["groups"][0], "operators");
+        assert_eq!(ctx["subject"]["email"], "user@example.com");
+        assert!(ctx["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "worker:dispatch"));
+    }
+
+    #[test]
+    fn openai_chat_request_normalizes_to_interaction_envelope() {
+        let req = serde_json::json!({
+            "conversation_id": "conv-1",
+            "user": "ios-user",
+            "metadata": {
+                "missiond_confirm": {
+                    "confirm_payload": {
+                        "missiond_intent_confirmed": true
+                    }
+                }
+            },
+            "messages": [
+                {"role": "system", "content": "ignore"},
+                {"role": "assistant", "content": "old"},
+                {"role": "user", "content": [
+                    {"type": "text", "text": "请测试 MissionD"},
+                    {"type": "text", "text": "并返回计划"}
+                ]}
+            ]
+        });
+        let envelope = openai_request_to_interaction_envelope(&req);
+        assert_eq!(envelope.channel, "jarvis");
+        assert_eq!(envelope.external_user_id.as_deref(), Some("ios-user"));
+        assert_eq!(envelope.conversation_id.as_deref(), Some("conv-1"));
+        assert!(normalize_interaction_message(&envelope.message).contains("请测试 MissionD"));
+        assert_eq!(envelope.metadata["wire_format"], "openai-chat-completions");
+        assert!(interaction_metadata_bool(
+            &envelope,
+            "missiond_intent_confirmed"
+        ));
     }
 
     #[test]

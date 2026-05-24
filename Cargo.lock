@@ -2679,6 +2679,7 @@ dependencies = [
  "notify",
  "once_cell",
  "regex",
+ "reqwest",
  "semantic-terminal",
  "serde",
  "serde_json",
