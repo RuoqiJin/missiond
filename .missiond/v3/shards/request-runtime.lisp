@@ -117,7 +117,8 @@
                 (step s2 :logic "when a worker task is still running after the public stream budget, emit result_pending with follow_payload.missiond_follow_task_id and finish the SSE cleanly")
                 (step s3 :logic "a follow-up request carrying missiond_follow_task_id bypasses intent/plan regeneration and resumes observation of the existing BoardTask")
                 (step s4 :logic "if the followed task is already terminal, immediately revalidate task-result-artifact and stream result_artifact/final")
-                (step s5 :logic "result_pending is not a fallback answer; it is a resumable transport state and terminal_task_result remains false"))
+                (step s5 :logic "result_pending is not a fallback answer; it is a resumable transport state and terminal_task_result remains false")
+                (step s6 :logic "while supervising a still-running worker on a public/mobile follow stream, emit client-visible worker_status heartbeat events bounded by MISSIOND_JARVIS_VISIBLE_HEARTBEAT_SECS; colon SSE comments remain transport keepalive only and are not sufficient UI progress"))
          :egress [result_pending follow_payload result_followup_stream result_artifact_event final_event]))
     :invariants
       ["All non-exact worker dispatch must carry grounding_context_id before a provider PTY receives the prompt."
@@ -132,6 +133,7 @@
        "Jarvis result artifact writes MUST be bounded; missing or stalled artifact writes produce typed diagnostics and MUST NOT silently fall back to Board note final text."
        "Jarvis BoardTask and notes polling during public SSE supervision MUST be bounded by MISSIOND_JARVIS_DB_POLL_TIMEOUT_SECS; DB/EventBus stalls produce typed diagnostics or result_pending, never silent mobile/proxy hangs."
        "Jarvis public SSE streams MUST return a typed result_pending/follow_payload before mobile or reverse-proxy timeouts; follow-up requests with missiond_follow_task_id resume the existing BoardTask instead of creating a new intent or plan."
+       "Jarvis public follow streams MUST emit visible worker_status heartbeat events during long-running worker supervision; transport-only SSE comments do not satisfy mobile UI observability."
        "Jarvis plan-confirmed dispatch MUST NOT wait for worker terminal state on the initial mobile/public SSE request; it creates the BoardTask, returns result_pending with follow_payload immediately, and only follow requests supervise task-result-artifact completion."
        "Agy and other provider artifact completion MUST accept numbered markdown report headings such as `## 1. Findings`, `## 2. Evidence`, `## 3. Recommendations`, and `## 4. Verification`; provider-generated numbering is formatting, not a missing output-contract section."
        "Jarvis intent/plan confirmations MUST accept both top-level missiond_intent_confirmed/missiond_plan_confirmed fields and wrapped missiond_confirm payloads, so iOS and external clients do not need to mirror MissionD's internal JSON shape."]

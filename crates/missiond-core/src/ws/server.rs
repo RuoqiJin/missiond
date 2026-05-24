@@ -310,6 +310,24 @@ fn jarvis_db_poll_timeout_secs() -> u64 {
     )
 }
 
+fn clamp_jarvis_visible_heartbeat_secs(value: Option<u64>) -> u64 {
+    const DEFAULT_HEARTBEAT_SECS: u64 = 10;
+    const MIN_HEARTBEAT_SECS: u64 = 3;
+    const MAX_HEARTBEAT_SECS: u64 = 30;
+
+    value
+        .unwrap_or(DEFAULT_HEARTBEAT_SECS)
+        .clamp(MIN_HEARTBEAT_SECS, MAX_HEARTBEAT_SECS)
+}
+
+fn jarvis_visible_heartbeat_secs() -> u64 {
+    clamp_jarvis_visible_heartbeat_secs(
+        std::env::var("MISSIOND_JARVIS_VISIBLE_HEARTBEAT_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok()),
+    )
+}
+
 fn jarvis_confirm_bool(req: &serde_json::Value, key: &str) -> bool {
     fn bool_at<'a>(value: &'a serde_json::Value, key: &str) -> Option<bool> {
         value.get(key).and_then(|field| field.as_bool())
@@ -2747,7 +2765,9 @@ impl PTYWebSocketServer {
         let wait_secs = jarvis_task_wait_secs();
         let public_stream_budget_secs = jarvis_public_stream_budget_secs();
         let db_poll_timeout = tokio::time::Duration::from_secs(jarvis_db_poll_timeout_secs());
+        let visible_heartbeat = tokio::time::Duration::from_secs(jarvis_visible_heartbeat_secs());
         let started_at = std::time::Instant::now();
+        let mut last_visible_heartbeat = started_at;
         let mut last_status = String::new();
         let mut last_slot: Option<String> = None;
         let mut seen_note_ids: Vec<String> = Vec::new();
@@ -3185,6 +3205,25 @@ impl PTYWebSocketServer {
                         )
                         .await?;
                         return Ok(());
+                    }
+                    if last_visible_heartbeat.elapsed() >= visible_heartbeat {
+                        let elapsed_secs = started_at.elapsed().as_secs();
+                        let next_visible_heartbeat_secs = visible_heartbeat.as_secs();
+                        let heartbeat = serde_json::json!({
+                            "phase": "workers_running",
+                            "task_id": task_id,
+                            "status": task.status.as_str(),
+                            "slot_id": task.claim_executor_id.clone().or_else(|| task.assignee.clone()),
+                            "heartbeat": true,
+                            "elapsed_secs": elapsed_secs,
+                            "next_visible_heartbeat_secs": next_visible_heartbeat_secs,
+                            "terminal_task_result": false,
+                            "message": format!(
+                                "Worker task is still running after {elapsed_secs}s; MissionD is still observing durable evidence and will return result_pending before the public stream budget."
+                            )
+                        });
+                        Self::write_sse_event(stream, "worker_status", &heartbeat).await?;
+                        last_visible_heartbeat = std::time::Instant::now();
                     }
                     stream.write_all(b":\n\n").await?;
                     stream.flush().await?;
@@ -6180,6 +6219,14 @@ mod tests {
         assert_eq!(clamp_jarvis_db_poll_timeout_secs(Some(1)), 2);
         assert_eq!(clamp_jarvis_db_poll_timeout_secs(Some(12)), 12);
         assert_eq!(clamp_jarvis_db_poll_timeout_secs(Some(90)), 30);
+    }
+
+    #[test]
+    fn jarvis_visible_heartbeat_budget_is_bounded() {
+        assert_eq!(clamp_jarvis_visible_heartbeat_secs(None), 10);
+        assert_eq!(clamp_jarvis_visible_heartbeat_secs(Some(1)), 3);
+        assert_eq!(clamp_jarvis_visible_heartbeat_secs(Some(12)), 12);
+        assert_eq!(clamp_jarvis_visible_heartbeat_secs(Some(90)), 30);
     }
 
     #[test]
