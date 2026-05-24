@@ -269,6 +269,24 @@ fn jarvis_public_stream_budget_secs() -> u64 {
     )
 }
 
+fn clamp_jarvis_db_poll_timeout_secs(value: Option<u64>) -> u64 {
+    const DEFAULT_TIMEOUT_SECS: u64 = 8;
+    const MIN_TIMEOUT_SECS: u64 = 2;
+    const MAX_TIMEOUT_SECS: u64 = 30;
+
+    value
+        .unwrap_or(DEFAULT_TIMEOUT_SECS)
+        .clamp(MIN_TIMEOUT_SECS, MAX_TIMEOUT_SECS)
+}
+
+fn jarvis_db_poll_timeout_secs() -> u64 {
+    clamp_jarvis_db_poll_timeout_secs(
+        std::env::var("MISSIOND_JARVIS_DB_POLL_TIMEOUT_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok()),
+    )
+}
+
 fn jarvis_confirm_bool(req: &serde_json::Value, key: &str) -> bool {
     fn bool_at<'a>(value: &'a serde_json::Value, key: &str) -> Option<bool> {
         value.get(key).and_then(|field| field.as_bool())
@@ -1156,7 +1174,10 @@ impl PTYWebSocketServer {
     ) -> anyhow::Result<()> {
         let response = format!(
             "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            status, reason, body.len(), body
+            status,
+            reason,
+            body.len(),
+            body
         );
         stream.write_all(response.as_bytes()).await?;
         stream.shutdown().await?;
@@ -1297,7 +1318,8 @@ impl PTYWebSocketServer {
             let resp_body = serde_json::json!({"ok": true, "event_id": event_id}).to_string();
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                resp_body.len(), resp_body
+                resp_body.len(),
+                resp_body
             );
             stream.write_all(response.as_bytes()).await?;
             stream.shutdown().await?;
@@ -1342,7 +1364,8 @@ impl PTYWebSocketServer {
                 let resp_body = serde_json::json!({"ok": true, "incident_id": inc_id}).to_string();
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    resp_body.len(), resp_body
+                    resp_body.len(),
+                    resp_body
                 );
                 stream.write_all(response.as_bytes()).await?;
                 stream.shutdown().await?;
@@ -1352,7 +1375,8 @@ impl PTYWebSocketServer {
                 let resp_body = r#"{"ok":true,"action":"ignored"}"#;
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    resp_body.len(), resp_body
+                    resp_body.len(),
+                    resp_body
                 );
                 stream.write_all(response.as_bytes()).await?;
                 stream.shutdown().await?;
@@ -1502,6 +1526,7 @@ impl PTYWebSocketServer {
     ) -> anyhow::Result<()> {
         let wait_secs = jarvis_task_wait_secs();
         let public_stream_budget_secs = jarvis_public_stream_budget_secs();
+        let db_poll_timeout = tokio::time::Duration::from_secs(jarvis_db_poll_timeout_secs());
         let started_at = std::time::Instant::now();
         let mut last_status = String::new();
         let mut last_slot: Option<String> = None;
@@ -1537,7 +1562,43 @@ impl PTYWebSocketServer {
                 return Ok(());
             }
 
-            let Some(task) = db.get_board_task(task_id).await? else {
+            let task_result = match tokio::time::timeout(
+                db_poll_timeout,
+                db.get_board_task(task_id),
+            )
+            .await
+            {
+                Ok(result) => result?,
+                Err(_) => {
+                    let diagnostic = serde_json::json!({
+                        "phase": "workers_running",
+                        "task_id": task_id,
+                        "error": {
+                            "code": "BOARD_TASK_POLL_TIMEOUT",
+                            "message": format!("BoardTask polling did not finish within {}s", db_poll_timeout.as_secs())
+                        },
+                        "next_action": "Investigate MissionD DB/event wait path; do not keep the public SSE stream open silently."
+                    });
+                    Self::write_sse_event(stream, "diagnostic", &diagnostic).await?;
+                    let final_event = serde_json::json!({
+                        "phase": "poll_timeout",
+                        "task_id": task_id,
+                        "status": "poll_timeout",
+                        "terminal_task_result": false
+                    });
+                    Self::write_sse_event(stream, "final", &final_event).await?;
+                    Self::write_sse_openai_text(
+                            stream,
+                            chat_id,
+                            "任务监督链路读取 BoardTask 超时；我不会继续静默等待。请检查 MissionD DB / EventBus / worker completion 链路。",
+                            Some("stop"),
+                        )
+                        .await?;
+                    return Ok(());
+                }
+            };
+
+            let Some(task) = task_result else {
                 let diagnostic = serde_json::json!({
                     "phase": "workers_running",
                     "task_id": task_id,
@@ -1575,98 +1636,128 @@ impl PTYWebSocketServer {
                 last_slot = current_slot;
             }
 
-            if let Ok(notes) = db.get_board_task_notes(task_id).await {
-                for note in notes {
-                    if seen_note_ids.iter().any(|id| id == &note.id) {
-                        continue;
-                    }
-                    seen_note_ids.push(note.id.clone());
-                    let is_summary = note.note_type.as_str() == "summary";
-                    let content = note.content.clone();
-                    let artifact_hash = Self::extract_task_result_artifact_hash(&content);
-                    if is_summary {
-                        latest_summary = Some(content.clone());
-                    }
-                    let mut artifact_hash = artifact_hash;
-                    if is_summary && artifact_hash.is_none() {
-                        match Self::put_jarvis_artifact_bounded(
-                            jarvis_artifact_writer,
-                            JarvisArtifactRequest {
-                                kind: "task-result-artifact".to_string(),
-                                project_id: Some("missiond".to_string()),
-                                task_id: Some(task_id.to_string()),
-                                payload: serde_json::json!({
-                                    "schema": "missiond.jarvis-task-result.v1",
-                                    "task_id": task_id,
-                                    "note_id": note.id,
-                                    "note_type": note.note_type.as_str(),
-                                    "author": note.author,
-                                    "summary": content.clone(),
-                                    "result_status": "completed",
-                                    "source": "jarvis-board-summary-projection"
-                                }),
-                                metadata: serde_json::json!({
-                                    "schema": "missiond.jarvis-task-result.v1",
-                                    "task_id": task_id,
-                                    "provider": note.author,
-                                    "result_status": "completed",
-                                    "source": "jarvis-board-summary-projection"
-                                }),
-                            },
-                            std::time::Duration::from_secs(8),
-                        )
-                        .await
-                        {
-                            Ok(result) => {
-                                artifact_hash = Some(result.artifact_hash);
-                            }
-                            Err(error) => {
-                                let code = if error.contains("did not finish") {
-                                    "TASK_RESULT_ARTIFACT_WRITE_TIMEOUT"
-                                } else {
-                                    "TASK_RESULT_ARTIFACT_WRITE_FAILED"
-                                };
-                                let diagnostic = serde_json::json!({
-                                    "phase": "workers_running",
-                                    "task_id": task_id,
-                                    "note_id": note.id,
-                                    "error": {
-                                        "code": code,
-                                        "message": error
-                                    }
-                                });
-                                Self::write_sse_event(stream, "diagnostic", &diagnostic).await?;
+            match tokio::time::timeout(db_poll_timeout, db.get_board_task_notes(task_id)).await {
+                Ok(Ok(notes)) => {
+                    for note in notes {
+                        if seen_note_ids.iter().any(|id| id == &note.id) {
+                            continue;
+                        }
+                        seen_note_ids.push(note.id.clone());
+                        let is_summary = note.note_type.as_str() == "summary";
+                        let content = note.content.clone();
+                        let artifact_hash = Self::extract_task_result_artifact_hash(&content);
+                        if is_summary {
+                            latest_summary = Some(content.clone());
+                        }
+                        let mut artifact_hash = artifact_hash;
+                        if is_summary && artifact_hash.is_none() {
+                            match Self::put_jarvis_artifact_bounded(
+                                jarvis_artifact_writer,
+                                JarvisArtifactRequest {
+                                    kind: "task-result-artifact".to_string(),
+                                    project_id: Some("missiond".to_string()),
+                                    task_id: Some(task_id.to_string()),
+                                    payload: serde_json::json!({
+                                        "schema": "missiond.jarvis-task-result.v1",
+                                        "task_id": task_id,
+                                        "note_id": note.id,
+                                        "note_type": note.note_type.as_str(),
+                                        "author": note.author,
+                                        "summary": content.clone(),
+                                        "result_status": "completed",
+                                        "source": "jarvis-board-summary-projection"
+                                    }),
+                                    metadata: serde_json::json!({
+                                        "schema": "missiond.jarvis-task-result.v1",
+                                        "task_id": task_id,
+                                        "provider": note.author,
+                                        "result_status": "completed",
+                                        "source": "jarvis-board-summary-projection"
+                                    }),
+                                },
+                                std::time::Duration::from_secs(8),
+                            )
+                            .await
+                            {
+                                Ok(result) => {
+                                    artifact_hash = Some(result.artifact_hash);
+                                }
+                                Err(error) => {
+                                    let code = if error.contains("did not finish") {
+                                        "TASK_RESULT_ARTIFACT_WRITE_TIMEOUT"
+                                    } else {
+                                        "TASK_RESULT_ARTIFACT_WRITE_FAILED"
+                                    };
+                                    let diagnostic = serde_json::json!({
+                                        "phase": "workers_running",
+                                        "task_id": task_id,
+                                        "note_id": note.id,
+                                        "error": {
+                                            "code": code,
+                                            "message": error
+                                        }
+                                    });
+                                    Self::write_sse_event(stream, "diagnostic", &diagnostic)
+                                        .await?;
+                                }
                             }
                         }
+                        if artifact_hash.is_some() {
+                            latest_artifact_hash = artifact_hash.clone();
+                        }
+                        let max_chars = if is_summary { 12_000 } else { 1_200 };
+                        let content_preview = content.chars().take(max_chars).collect::<String>();
+                        let event = serde_json::json!({
+                            "task_id": task_id,
+                            "note_id": note.id,
+                            "note_type": note.note_type.as_str(),
+                            "author": note.author,
+                            "created_at": note.created_at,
+                            "artifact_hash": artifact_hash,
+                            "content": content_preview,
+                            "truncated": content.chars().count() > max_chars,
+                        });
+                        if is_summary || artifact_hash.is_some() {
+                            Self::write_sse_event(stream, "result_artifact", &event).await?;
+                        } else {
+                            Self::write_sse_event(stream, "worker_status", &event).await?;
+                        }
                     }
-                    if artifact_hash.is_some() {
-                        latest_artifact_hash = artifact_hash.clone();
-                    }
-                    let max_chars = if is_summary { 12_000 } else { 1_200 };
-                    let content_preview = content.chars().take(max_chars).collect::<String>();
-                    let event = serde_json::json!({
+                }
+                Ok(Err(error)) => {
+                    let diagnostic = serde_json::json!({
+                        "phase": "workers_running",
                         "task_id": task_id,
-                        "note_id": note.id,
-                        "note_type": note.note_type.as_str(),
-                        "author": note.author,
-                        "created_at": note.created_at,
-                        "artifact_hash": artifact_hash,
-                        "content": content_preview,
-                        "truncated": content.chars().count() > max_chars,
+                        "error": {
+                            "code": "BOARD_TASK_NOTES_POLL_FAILED",
+                            "message": error.to_string()
+                        }
                     });
-                    if is_summary || artifact_hash.is_some() {
-                        Self::write_sse_event(stream, "result_artifact", &event).await?;
-                    } else {
-                        Self::write_sse_event(stream, "worker_status", &event).await?;
-                    }
+                    Self::write_sse_event(stream, "diagnostic", &diagnostic).await?;
+                }
+                Err(_) => {
+                    let diagnostic = serde_json::json!({
+                        "phase": "workers_running",
+                        "task_id": task_id,
+                        "error": {
+                            "code": "BOARD_TASK_NOTES_POLL_TIMEOUT",
+                            "message": format!("BoardTask notes polling did not finish within {}s", db_poll_timeout.as_secs())
+                        }
+                    });
+                    Self::write_sse_event(stream, "diagnostic", &diagnostic).await?;
                 }
             }
 
             match task.status {
                 crate::types::BoardTaskStatus::Done => {
                     if latest_summary.is_none() || latest_artifact_hash.is_none() {
-                        match db.get_board_task_notes(task_id).await {
-                            Ok(notes) => {
+                        match tokio::time::timeout(
+                            db_poll_timeout,
+                            db.get_board_task_notes(task_id),
+                        )
+                        .await
+                        {
+                            Ok(Ok(notes)) => {
                                 if let Some(note) = notes
                                     .iter()
                                     .rev()
@@ -1750,7 +1841,7 @@ impl PTYWebSocketServer {
                                         .await?;
                                 }
                             }
-                            Err(error) => {
+                            Ok(Err(error)) => {
                                 let diagnostic = serde_json::json!({
                                     "phase": "done",
                                     "task_id": task_id,
@@ -1760,6 +1851,26 @@ impl PTYWebSocketServer {
                                     }
                                 });
                                 Self::write_sse_event(stream, "diagnostic", &diagnostic).await?;
+                            }
+                            Err(_) => {
+                                let diagnostic = serde_json::json!({
+                                    "phase": "done",
+                                    "task_id": task_id,
+                                    "error": {
+                                        "code": "BOARD_TASK_NOTES_REVALIDATE_TIMEOUT",
+                                        "message": format!("BoardTask is done but notes revalidation did not finish within {}s", db_poll_timeout.as_secs())
+                                    },
+                                    "next_action": "Inspect DB pool/EventBus completion path before retrying; do not keep mobile SSE waiting silently."
+                                });
+                                Self::write_sse_event(stream, "diagnostic", &diagnostic).await?;
+                                Self::write_sse_openai_text(
+                                    stream,
+                                    chat_id,
+                                    "任务已完成，但结果 notes/task-result-artifact 读取超时；我不会伪造结果。请检查结果落盘链路后重试 follow。",
+                                    Some("stop"),
+                                )
+                                .await?;
+                                return Ok(());
                             }
                         }
                     }
@@ -2302,7 +2413,10 @@ impl PTYWebSocketServer {
 
             match &system_message {
                 Some(sys) if !sys.is_empty() => {
-                    format!("[Instructions from caller — follow these for your response]\n{}\n[End instructions]\n\n{}", sys, raw_user_message)
+                    format!(
+                        "[Instructions from caller — follow these for your response]\n{}\n[End instructions]\n\n{}",
+                        sys, raw_user_message
+                    )
                 }
                 _ => raw_user_message,
             }
@@ -2724,7 +2838,8 @@ impl PTYWebSocketServer {
                 let err = serde_json::json!({"error": {"message": &error_msg}, "retry_after": 5});
                 let response = format!(
                     "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nRetry-After: 5\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    err.to_string().len(), err
+                    err.to_string().len(),
+                    err
                 );
                 stream.write_all(response.as_bytes()).await?;
                 stream.shutdown().await?;
@@ -3050,7 +3165,10 @@ impl PTYWebSocketServer {
                                                                     "tool": tool_output.tool_name,
                                                                     "params": params_json,
                                                                 });
-                                                                let sse = format!("event: tool_start\ndata: {}\n\n", evt);
+                                                                let sse = format!(
+                                                                    "event: tool_start\ndata: {}\n\n",
+                                                                    evt
+                                                                );
                                                                 let _ = stream
                                                                     .write_all(sse.as_bytes())
                                                                     .await;
@@ -4764,6 +4882,14 @@ mod tests {
         assert_eq!(clamp_jarvis_public_stream_budget_secs(Some(1)), 10);
         assert_eq!(clamp_jarvis_public_stream_budget_secs(Some(90)), 90);
         assert_eq!(clamp_jarvis_public_stream_budget_secs(Some(900)), 240);
+    }
+
+    #[test]
+    fn jarvis_db_poll_timeout_budget_is_bounded() {
+        assert_eq!(clamp_jarvis_db_poll_timeout_secs(None), 8);
+        assert_eq!(clamp_jarvis_db_poll_timeout_secs(Some(1)), 2);
+        assert_eq!(clamp_jarvis_db_poll_timeout_secs(Some(12)), 12);
+        assert_eq!(clamp_jarvis_db_poll_timeout_secs(Some(90)), 30);
     }
 
     #[test]
