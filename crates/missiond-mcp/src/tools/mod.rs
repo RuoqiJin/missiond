@@ -194,8 +194,8 @@ mod sysinfra;
 
 // Domain aliases for readability
 use comm::{
-    agent_navigation, audit, capability_usage, codex_ops, codex_replay, conversation, question,
-    router_chat, timeline, tool_directory,
+    agent_navigation, audit, capability_usage, codex_ops, codex_replay, conversation, interaction,
+    question, router_chat, timeline, tool_directory,
 };
 use compute::{
     cc_tasks, compute_slot, flow_run, forge, job, minimax, process, pty, slot, task, task_delegate,
@@ -243,6 +243,7 @@ pub fn all_tools() -> Vec<ToolDefinition> {
     tools.extend(router_chat::definitions());
     tools.extend(question::definitions());
     tools.extend(conversation::definitions());
+    tools.extend(interaction::definitions());
     tools.extend(timeline::definitions());
     tools.extend(audit::definitions());
     tools.extend(agent_navigation::definitions());
@@ -301,6 +302,7 @@ mod tests {
     fn test_get_tool() {
         assert!(get_tool("mission_task_submit").is_some());
         assert!(get_tool("mission_pty_send").is_some());
+        assert!(get_tool("mission_interaction").is_some());
         assert!(get_tool("unknown_tool").is_none());
     }
 

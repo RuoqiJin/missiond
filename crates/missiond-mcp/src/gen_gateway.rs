@@ -170,7 +170,7 @@ pub async fn dispatch_tool<H: MissiondMcp>(handler: &H, name: &str, args: Value)
         "mission_memory" => handler.handle_memory(name, args).await,
         "mission_insight" => handler.handle_insight(name, args).await,
         "mission_embedding_ops" => handler.handle_embedding(name, args).await,
-        "mission_question" => handler.handle_question(name, args).await,
+        "mission_question" | "mission_interaction" => handler.handle_question(name, args).await,
         "mission_router_chat" | "mission_router_chat_manage" => {
             handler.handle_router_chat(name, args).await
         }

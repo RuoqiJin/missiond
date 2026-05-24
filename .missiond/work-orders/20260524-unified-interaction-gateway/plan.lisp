@@ -1,0 +1,38 @@
+(work-order-plan
+  :schema "missiond.work-order.plan.v1"
+  :id "20260524-unified-interaction-gateway"
+  :intent "20260524-unified-interaction-gateway"
+  :status accepted
+  :accepted_shards
+    ((shard default
+       :accepted_shard_id "20260524-unified-interaction-gateway-shard-default"
+       :read_scope ["."]
+       :write_scope [".missiond/frontend/board-blueprint.lisp"
+                     ".missiond/v3/missiond-blueprint.lisp"
+                     ".missiond/v3/shards/implementation/request-surfaces.lisp"
+                     ".missiond/v3/shards/pillar-flow-map.lisp"
+                     ".missiond/v3/shards/v2-convergence-map.lisp"
+                     ".missiond/workflows/intent-intake-grounding.lisp"
+                     ".missiond/work-orders/20260524-unified-interaction-gateway/**"
+                     "crates/missiond-core/src/ws/server.rs"
+                     "crates/missiond-daemon/src/context/v3_contracts/generated.rs"
+                     "crates/missiond-daemon/src/context/v3_runtime_defaults/generated.rs"
+                     "crates/missiond-daemon/src/handlers/comm/mod.rs"
+                     "crates/missiond-daemon/src/handlers/comm/interaction.rs"
+                     "crates/missiond-daemon/src/handlers/mod.rs"
+                     "crates/missiond-mcp/src/gen_gateway.rs"
+                     "crates/missiond-mcp/src/tools/comm/mod.rs"
+                     "crates/missiond-mcp/src/tools/comm/interaction.rs"
+                     "crates/missiond-mcp/src/tools/mod.rs"
+                     "scripts/check-v3-interaction-gateway-isomorphism.mjs"
+                     "scripts/generated/v3_contracts.d.ts"
+                     "scripts/generated/v3_contracts.mjs"
+                     "scripts/generated/v3_runtime_defaults.mjs"]
+       :acceptance ["node scripts/check-v3-interaction-gateway-isomorphism.mjs --json"
+                    "node scripts/check-v3-grounded-dispatch-isomorphism.mjs --json"
+                    "node scripts/check-v3-workflow-isomorphism.mjs --engine=ocaml --json"
+                    "node scripts/check-v3-code-isomorphism-complete.mjs --json"
+                    "node scripts/check-v3-final-convergence.mjs --json --static-only"
+                    "cargo test -p missiond-core interaction -- --nocapture"
+                    "cargo test -p missiond-mcp test_get_tool -- --nocapture"
+                    "git diff --check"])))

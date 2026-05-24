@@ -4,6 +4,7 @@ pub(crate) mod capability_usage;
 pub(crate) mod codex_ops;
 pub(crate) mod codex_replay;
 pub(crate) mod conversation;
+pub(crate) mod interaction;
 pub(crate) mod question;
 pub(crate) mod retrospective;
 pub(crate) mod router_chat;

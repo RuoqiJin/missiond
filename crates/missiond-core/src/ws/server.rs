@@ -127,6 +127,29 @@ pub type JarvisArtifactFn = Arc<
 
 pub type JarvisArtifactSlot = Arc<tokio::sync::RwLock<Option<JarvisArtifactFn>>>;
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct InteractionEnvelope {
+    #[serde(default = "default_interaction_channel")]
+    channel: String,
+    #[serde(default)]
+    external_user_id: Option<String>,
+    #[serde(default)]
+    auth_token: Option<String>,
+    #[serde(default)]
+    conversation_id: Option<String>,
+    #[serde(default)]
+    message: serde_json::Value,
+    #[serde(default)]
+    attachments: Vec<serde_json::Value>,
+    #[serde(default)]
+    metadata: serde_json::Value,
+}
+
+fn default_interaction_channel() -> String {
+    "web".to_string()
+}
+
 /// WebSocket server options
 pub struct WSServerOptions {
     /// Server port
@@ -303,6 +326,139 @@ fn jarvis_confirm_bool(req: &serde_json::Value, key: &str) -> bool {
                 .and_then(|payload| bool_at(payload, key))
         })
         .unwrap_or(false)
+}
+
+fn interaction_metadata_bool(envelope: &InteractionEnvelope, key: &str) -> bool {
+    envelope
+        .metadata
+        .get(key)
+        .and_then(|field| field.as_bool())
+        .or_else(|| {
+            envelope
+                .metadata
+                .get("missiond_confirm")
+                .and_then(|confirm| confirm.get(key))
+                .and_then(|field| field.as_bool())
+        })
+        .or_else(|| {
+            envelope
+                .metadata
+                .get("missiond_confirm")
+                .and_then(|confirm| confirm.get("confirm_payload"))
+                .and_then(|payload| payload.get(key))
+                .and_then(|field| field.as_bool())
+        })
+        .unwrap_or(false)
+}
+
+fn interaction_metadata_string(envelope: &InteractionEnvelope, key: &str) -> Option<String> {
+    envelope
+        .metadata
+        .get(key)
+        .and_then(|field| field.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn extract_bearer_token(headers: &str) -> Option<String> {
+    headers.lines().find_map(|line| {
+        if line.to_ascii_lowercase().starts_with("authorization:") {
+            let val = line.split_once(':')?.1.trim();
+            val.strip_prefix("Bearer ")
+                .map(str::trim)
+                .filter(|token| !token.is_empty())
+                .map(ToOwned::to_owned)
+        } else {
+            None
+        }
+    })
+}
+
+fn normalize_interaction_message(message: &serde_json::Value) -> String {
+    match message {
+        serde_json::Value::String(text) => text.trim().to_string(),
+        serde_json::Value::Object(map) => map
+            .get("text")
+            .or_else(|| map.get("content"))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string(),
+        _ => String::new(),
+    }
+}
+
+fn interaction_permission_context(
+    envelope: &InteractionEnvelope,
+    token_present: bool,
+) -> serde_json::Value {
+    let channel = envelope.channel.trim().to_ascii_lowercase();
+    let capabilities = match channel.as_str() {
+        "service" => vec!["interaction:exact_workflow"],
+        "wechat" => vec!["interaction:chat", "identity:binding_required"],
+        _ => vec!["interaction:chat", "interaction:intent_plan"],
+    };
+    serde_json::json!({
+        "schema": "missiond.permission-context.v1",
+        "authority": "auth",
+        "resolution": if token_present { "bearer-token-present" } else { "binding-required-or-anonymous-denied" },
+        "user_id": envelope.external_user_id,
+        "tenant_id": envelope.metadata.get("tenant_id").and_then(|v| v.as_str()).unwrap_or("unknown"),
+        "application_id": envelope.metadata.get("application_id").and_then(|v| v.as_str()).unwrap_or("missiond"),
+        "product_id": envelope.metadata.get("product_id").and_then(|v| v.as_str()),
+        "groups": envelope.metadata.get("groups").cloned().unwrap_or_else(|| serde_json::json!([])),
+        "roles": envelope.metadata.get("roles").cloned().unwrap_or_else(|| serde_json::json!(["user"])),
+        "channel": channel,
+        "capabilities": capabilities,
+    })
+}
+
+fn verify_interaction_auth(
+    envelope: &InteractionEnvelope,
+    headers: &str,
+) -> Result<Option<String>, (u16, &'static str, serde_json::Value)> {
+    let channel = envelope.channel.trim().to_ascii_lowercase();
+    let token = envelope
+        .auth_token
+        .as_ref()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| extract_bearer_token(headers));
+
+    if channel == "wechat" && token.is_none() {
+        return Ok(None);
+    }
+
+    let Some(token) = token else {
+        return Err((
+            401,
+            "Unauthorized",
+            serde_json::json!({
+                "error": {
+                    "code": "INTERACTION_AUTH_REQUIRED",
+                    "message": "Interaction channel requires an Auth bearer token or service token."
+                }
+            }),
+        ));
+    };
+
+    if let Ok(expected) = std::env::var("MISSIOND_API_TOKEN") {
+        if token != expected {
+            return Err((
+                401,
+                "Unauthorized",
+                serde_json::json!({
+                    "error": {
+                        "code": "INTERACTION_AUTH_INVALID",
+                        "message": "Invalid interaction auth token."
+                    }
+                }),
+            ));
+        }
+    }
+
+    Ok(Some(token))
 }
 
 /// Parse Deploy Center failure webhook into an incident.
@@ -1046,6 +1202,588 @@ impl PTYWebSocketServer {
         let response = Self::http_json_response(body);
         stream.write_all(response.as_bytes()).await?;
         stream.shutdown().await?;
+        Ok(())
+    }
+
+    async fn handle_interaction_events(
+        mut stream: TcpStream,
+        request_line: &str,
+    ) -> anyhow::Result<()> {
+        let _ = Self::read_http_request(&mut stream).await;
+        let interaction_id = request_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|path| {
+                path.trim_start_matches("/interactions/v1/")
+                    .split('/')
+                    .next()
+            })
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("unknown");
+        let sse_headers = "HTTP/1.1 200 OK\r\n\
+            Content-Type: text/event-stream\r\n\
+            Cache-Control: no-cache\r\n\
+            Connection: close\r\n\
+            Access-Control-Allow-Origin: *\r\n\
+            \r\n";
+        stream.write_all(sse_headers.as_bytes()).await?;
+        Self::write_sse_event(
+            &mut stream,
+            "status",
+            &serde_json::json!({
+                "schema": "missiond.interaction-event-stream.v1",
+                "interaction_id": interaction_id,
+                "phase": "event_stream_ready",
+                "message": "Live interaction receive streams are authoritative in this release; durable replay is reached through BoardTask/result-artifact ids returned by the interaction."
+            }),
+        )
+        .await?;
+        Self::finish_sse(&mut stream).await?;
+        Ok(())
+    }
+
+    async fn handle_interaction_messages(
+        mut stream: TcpStream,
+        addr: SocketAddr,
+        jarvis_grounding: JarvisGroundingSlot,
+        jarvis_artifact_writer: JarvisArtifactSlot,
+        db: Option<Arc<dyn crate::db::traits::MissionStore>>,
+    ) -> anyhow::Result<()> {
+        stream.set_nodelay(true)?;
+        let (headers, body) = match Self::read_http_request(&mut stream).await {
+            Ok(r) => r,
+            Err(e) => {
+                let err = serde_json::json!({"error": {"message": format!("Bad request: {}", e)}});
+                Self::send_http_error(&mut stream, 400, "Bad Request", &err.to_string()).await?;
+                return Ok(());
+            }
+        };
+
+        let envelope: InteractionEnvelope = match serde_json::from_str(&body) {
+            Ok(value) => value,
+            Err(e) => {
+                let err = serde_json::json!({"error": {"message": format!("Invalid InteractionEnvelope: {}", e)}});
+                Self::send_http_error(&mut stream, 400, "Bad Request", &err.to_string()).await?;
+                return Ok(());
+            }
+        };
+        let channel = envelope.channel.trim().to_ascii_lowercase();
+        let auth_token = match verify_interaction_auth(&envelope, &headers) {
+            Ok(token) => token,
+            Err((status, reason, body)) => {
+                Self::send_http_error(&mut stream, status, reason, &body.to_string()).await?;
+                return Ok(());
+            }
+        };
+        let permission_context = interaction_permission_context(&envelope, auth_token.is_some());
+        let raw_user_text = normalize_interaction_message(&envelope.message);
+        if raw_user_text.is_empty() {
+            let err = serde_json::json!({"error": {"message": "InteractionEnvelope.message text is required"}});
+            Self::send_http_error(&mut stream, 400, "Bad Request", &err.to_string()).await?;
+            return Ok(());
+        }
+
+        let interaction_id = interaction_metadata_string(&envelope, "interaction_id")
+            .unwrap_or_else(|| format!("ix-{}", uuid::Uuid::new_v4().simple()));
+        let chat_id = format!(
+            "chatcmpl-interaction-{}",
+            chrono::Utc::now().timestamp_millis()
+        );
+        let sse_headers = "HTTP/1.1 200 OK\r\n\
+            Content-Type: text/event-stream\r\n\
+            Cache-Control: no-cache\r\n\
+            Connection: keep-alive\r\n\
+            Access-Control-Allow-Origin: *\r\n\
+            \r\n";
+        stream.write_all(sse_headers.as_bytes()).await?;
+        stream.flush().await?;
+
+        let received = serde_json::json!({
+            "schema": "missiond.interaction-envelope.v1",
+            "interaction_id": interaction_id,
+            "channel": channel,
+            "external_user_id": envelope.external_user_id,
+            "conversation_id": envelope.conversation_id,
+            "message_chars": raw_user_text.chars().count(),
+            "attachments_count": envelope.attachments.len(),
+            "remote_addr": addr.to_string(),
+        });
+        Self::write_sse_event(&mut stream, "received", &received).await?;
+        Self::write_sse_event(
+            &mut stream,
+            "authenticated",
+            &serde_json::json!({
+                "interaction_id": interaction_id,
+                "channel": channel,
+                "authenticated": auth_token.is_some(),
+                "authority": "auth",
+            }),
+        )
+        .await?;
+        Self::write_sse_event(
+            &mut stream,
+            "permission_resolved",
+            &serde_json::json!({
+                "interaction_id": interaction_id,
+                "permission_context": permission_context,
+            }),
+        )
+        .await?;
+
+        if channel == "wechat" && auth_token.is_none() {
+            Self::write_sse_event(
+                &mut stream,
+                "diagnostic",
+                &serde_json::json!({
+                    "interaction_id": interaction_id,
+                    "phase": "identity_resolution",
+                    "error": {
+                        "code": "IDENTITY_BINDING_REQUIRED",
+                        "message": "WeChat channel must bind openid/unionid to an Auth identity before MissionD can create work."
+                    }
+                }),
+            )
+            .await?;
+            Self::write_sse_event(
+                &mut stream,
+                "final",
+                &serde_json::json!({
+                    "interaction_id": interaction_id,
+                    "status": "blocked",
+                    "reason": "identity_binding_required",
+                }),
+            )
+            .await?;
+            Self::finish_sse(&mut stream).await?;
+            return Ok(());
+        }
+
+        let conversation_id = envelope.conversation_id.clone();
+        if let Some(follow_task_id) =
+            interaction_metadata_string(&envelope, "missiond_follow_task_id")
+        {
+            if let Some(ref db) = db {
+                Self::write_sse_event(
+                    &mut stream,
+                    "status",
+                    &serde_json::json!({
+                        "interaction_id": interaction_id,
+                        "phase": "result_followup",
+                        "task_id": follow_task_id,
+                    }),
+                )
+                .await?;
+                Self::stream_jarvis_task_until_terminal(
+                    db,
+                    &jarvis_artifact_writer,
+                    &mut stream,
+                    &chat_id,
+                    &follow_task_id,
+                )
+                .await?;
+            } else {
+                Self::write_sse_event(
+                    &mut stream,
+                    "diagnostic",
+                    &serde_json::json!({
+                        "interaction_id": interaction_id,
+                        "phase": "result_followup",
+                        "error": {
+                            "code": "MISSIOND_DB_UNAVAILABLE",
+                            "message": "MissionD DB unavailable; cannot follow BoardTask result."
+                        }
+                    }),
+                )
+                .await?;
+            }
+            Self::finish_sse(&mut stream).await?;
+            return Ok(());
+        }
+
+        let jarvis_conv_id = if let Some(ref db) = db {
+            match db.jarvis_get_or_create(conversation_id.as_deref()).await {
+                Ok(id) => {
+                    let _ = db
+                        .router_chat_append_messages(
+                            &id,
+                            &[("user".to_string(), raw_user_text.clone())],
+                        )
+                        .await;
+                    Some(id)
+                }
+                Err(e) => {
+                    warn!(error = %e, "Interaction gateway cannot persist conversation");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        if let Some(ref cid) = jarvis_conv_id {
+            Self::write_sse_event(
+                &mut stream,
+                "meta",
+                &serde_json::json!({
+                    "interaction_id": interaction_id,
+                    "conversation_id": cid,
+                    "chat_id": chat_id
+                }),
+            )
+            .await?;
+        }
+
+        let intent_confirmed = interaction_metadata_bool(&envelope, "missiond_intent_confirmed");
+        let plan_confirmed = interaction_metadata_bool(&envelope, "missiond_plan_confirmed");
+        let grounding = match Self::gather_jarvis_grounding(
+            &jarvis_grounding,
+            JarvisGroundingRequest {
+                query: raw_user_text.clone(),
+                conversation_id: jarvis_conv_id.clone(),
+                chat_id: chat_id.clone(),
+                unknowns: vec![
+                    format!("What does this {channel} channel user intend MissionD to do?"),
+                    "Which project registry, SSOT, skill, infra, or tool facts are required before planning?".to_string(),
+                    "What permissions and capabilities should this channel identity have?".to_string(),
+                ],
+            },
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                Self::fail_jarvis_gate(&mut stream, error, "grounding").await?;
+                return Ok(());
+            }
+        };
+        let grounding_context_id = grounding.grounding_context_id.clone();
+        let context_pack_path = grounding.context_pack_path.clone();
+        let context_pack_file = grounding.context_pack_file.clone();
+        let sources_used = grounding.sources_used.clone();
+        Self::write_sse_event(
+            &mut stream,
+            "grounding",
+            &serde_json::json!({
+                "interaction_id": interaction_id,
+                "phase": "grounding",
+                "grounding_context_id": grounding_context_id,
+                "context_pack_path": context_pack_path,
+                "context_pack_file": context_pack_file,
+                "sources_used": sources_used,
+                "diagnostics": grounding.diagnostics,
+            }),
+        )
+        .await?;
+
+        let intent_payload = serde_json::json!({
+            "schema": "missiond.interaction-intent-artifact.v1",
+            "interaction_id": interaction_id,
+            "channel": channel,
+            "phase": "intent_draft",
+            "grounding_context_id": grounding_context_id,
+            "permission_context": permission_context,
+            "understanding": "我理解这是一个外部渠道请求，需要先确认 intent.lisp，再确认 plan.lisp，之后才创建 BoardTask 并派工位。",
+            "user_message_preview": raw_user_text.chars().take(240).collect::<String>(),
+            "sources_used": sources_used,
+            "requires_confirmation": true
+        });
+        let intent_artifact = match Self::put_jarvis_artifact(
+            &jarvis_artifact_writer,
+            JarvisArtifactRequest {
+                kind: "interaction-intent-draft".to_string(),
+                project_id: None,
+                task_id: None,
+                payload: intent_payload.clone(),
+                metadata: serde_json::json!({
+                    "schema": "missiond.interaction-intent-artifact.v1",
+                    "interaction_id": interaction_id,
+                    "channel": channel,
+                    "conversation_id": jarvis_conv_id,
+                    "grounding_context_id": grounding_context_id,
+                }),
+            },
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                Self::fail_jarvis_gate(&mut stream, error, "intent_artifact").await?;
+                return Ok(());
+            }
+        };
+        let intent_artifact_id = intent_artifact.artifact_id.clone();
+        if !intent_confirmed {
+            let mut intent = intent_payload;
+            if let Some(object) = intent.as_object_mut() {
+                object.insert(
+                    "intent_artifact_id".to_string(),
+                    serde_json::Value::String(intent_artifact_id.clone()),
+                );
+                object.insert(
+                    "intent_artifact_hash".to_string(),
+                    serde_json::Value::String(intent_artifact.artifact_hash.clone()),
+                );
+                object.insert(
+                    "intent_artifact_path".to_string(),
+                    serde_json::Value::String(intent_artifact.path.clone()),
+                );
+            }
+            Self::write_sse_event(&mut stream, "intent_draft", &intent).await?;
+            Self::write_sse_event(
+                &mut stream,
+                "confirm_required",
+                &serde_json::json!({
+                    "interaction_id": interaction_id,
+                    "phase": "awaiting_intent_confirmation",
+                    "confirmation_type": "intent",
+                    "confirm_payload": {
+                        "missiond_intent_confirmed": true,
+                        "missiond_grounding_context_id": grounding_context_id,
+                        "missiond_intent_artifact_id": intent_artifact_id,
+                    }
+                }),
+            )
+            .await?;
+            Self::write_sse_openai_text(
+                &mut stream,
+                &chat_id,
+                "我已生成 intent.lisp 草案，等待你确认意图。",
+                Some("stop"),
+            )
+            .await?;
+            Self::finish_sse(&mut stream).await?;
+            return Ok(());
+        }
+
+        let plan_payload = serde_json::json!({
+            "schema": "missiond.interaction-plan-artifact.v1",
+            "interaction_id": interaction_id,
+            "channel": channel,
+            "phase": "plan_draft",
+            "grounding_context_id": grounding_context_id,
+            "context_pack_path": context_pack_path,
+            "context_pack_file": context_pack_file,
+            "intent_artifact_id": intent_artifact_id,
+            "steps": [
+                "按 PermissionContext 和 grounding evidence 确认可执行范围",
+                "创建可追踪 BoardTask，并写入 grounding / intent / plan artifact ids",
+                "由主控选择合适工位，不直接执行实现任务",
+                "等待 task-result-artifact 后通过对应 channel response sink 返回结果"
+            ],
+            "requires_confirmation": true
+        });
+        let plan_artifact = match Self::put_jarvis_artifact(
+            &jarvis_artifact_writer,
+            JarvisArtifactRequest {
+                kind: "interaction-plan-draft".to_string(),
+                project_id: None,
+                task_id: None,
+                payload: plan_payload.clone(),
+                metadata: serde_json::json!({
+                    "schema": "missiond.interaction-plan-artifact.v1",
+                    "interaction_id": interaction_id,
+                    "channel": channel,
+                    "grounding_context_id": grounding_context_id,
+                    "intent_artifact_id": intent_artifact_id,
+                }),
+            },
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                Self::fail_jarvis_gate(&mut stream, error, "plan_artifact").await?;
+                return Ok(());
+            }
+        };
+        let plan_artifact_id = plan_artifact.artifact_id.clone();
+        if !plan_confirmed {
+            let mut plan = plan_payload;
+            if let Some(object) = plan.as_object_mut() {
+                object.insert(
+                    "plan_artifact_id".to_string(),
+                    serde_json::Value::String(plan_artifact_id.clone()),
+                );
+                object.insert(
+                    "plan_artifact_hash".to_string(),
+                    serde_json::Value::String(plan_artifact.artifact_hash.clone()),
+                );
+                object.insert(
+                    "plan_artifact_path".to_string(),
+                    serde_json::Value::String(plan_artifact.path.clone()),
+                );
+            }
+            Self::write_sse_event(&mut stream, "plan_draft", &plan).await?;
+            Self::write_sse_event(
+                &mut stream,
+                "confirm_required",
+                &serde_json::json!({
+                    "interaction_id": interaction_id,
+                    "phase": "awaiting_plan_confirmation",
+                    "confirmation_type": "plan",
+                    "confirm_payload": {
+                        "missiond_intent_confirmed": true,
+                        "missiond_plan_confirmed": true,
+                        "missiond_grounding_context_id": grounding_context_id,
+                        "missiond_intent_artifact_id": intent_artifact_id,
+                        "missiond_plan_artifact_id": plan_artifact_id,
+                    }
+                }),
+            )
+            .await?;
+            Self::write_sse_openai_text(
+                &mut stream,
+                &chat_id,
+                "我已生成 plan.lisp 草案，等待你确认计划。",
+                Some("stop"),
+            )
+            .await?;
+            Self::finish_sse(&mut stream).await?;
+            return Ok(());
+        }
+
+        let Some(ref db) = db else {
+            Self::write_sse_event(
+                &mut stream,
+                "diagnostic",
+                &serde_json::json!({
+                    "interaction_id": interaction_id,
+                    "phase": "board_task_create",
+                    "error": {
+                        "code": "MISSIOND_DB_UNAVAILABLE",
+                        "message": "MissionD DB unavailable; cannot create BoardTask."
+                    }
+                }),
+            )
+            .await?;
+            Self::finish_sse(&mut stream).await?;
+            return Ok(());
+        };
+
+        let title = if raw_user_text.chars().count() > 80 {
+            format!("{}...", raw_user_text.chars().take(77).collect::<String>())
+        } else {
+            raw_user_text.clone()
+        };
+        let dispatch_metadata = Self::derive_jarvis_dispatch_contract(
+            &raw_user_text,
+            &grounding_context_id,
+            context_pack_path.as_deref(),
+            context_pack_file.as_deref(),
+            &intent_artifact_id,
+            &plan_artifact_id,
+            &Self::jarvis_runtime_read_scope_root(),
+        );
+        let prompt_template = Self::build_jarvis_worker_prompt(&raw_user_text, &dispatch_metadata);
+        let meta = serde_json::json!({
+            "source": "interaction-gateway",
+            "interaction_id": interaction_id,
+            "channel": channel,
+            "permission_context": permission_context,
+            "grounding_context_id": grounding_context_id,
+            "context_pack_path": context_pack_path,
+            "context_pack_file": context_pack_file,
+            "intent_artifact_id": intent_artifact_id,
+            "plan_artifact_id": plan_artifact_id,
+            "dispatch_metadata": dispatch_metadata,
+            "user_message": raw_user_text,
+        });
+        let context_intent = dispatch_metadata
+            .get("task_class")
+            .and_then(|v| v.as_str())
+            .unwrap_or("interaction")
+            .to_string();
+        let task_input = crate::types::CreateBoardTaskInput {
+            title,
+            description: Some(meta.to_string()),
+            priority: None,
+            category: Some("interaction".to_string()),
+            project: None,
+            server: None,
+            due_date: None,
+            parent_id: None,
+            assignee: None,
+            auto_execute: Some(true),
+            prompt_template: Some(prompt_template),
+            hidden: Some(false),
+            flow_template: None,
+            depends_on: None,
+            dedupe_key: None,
+            timeout_secs: None,
+            context_intent: Some(context_intent),
+        };
+        match db.create_board_task(&task_input).await {
+            Ok(task) => {
+                let follow_payload = serde_json::json!({
+                    "missiond_follow_task_id": task.id,
+                    "interaction_id": interaction_id,
+                    "stream": true
+                });
+                Self::write_sse_event(
+                    &mut stream,
+                    "board_task_created",
+                    &serde_json::json!({
+                        "interaction_id": interaction_id,
+                        "task_id": task.id,
+                        "title": task.title,
+                        "grounding_context_id": grounding_context_id,
+                        "intent_artifact_id": intent_artifact_id,
+                        "plan_artifact_id": plan_artifact_id,
+                    }),
+                )
+                .await?;
+                Self::write_sse_event(
+                    &mut stream,
+                    "worker_status",
+                    &serde_json::json!({
+                        "interaction_id": interaction_id,
+                        "phase": "workers_running",
+                        "task_id": task.id,
+                        "status": task.status.as_str(),
+                        "terminal_task_result": false,
+                    }),
+                )
+                .await?;
+                Self::write_sse_event(
+                    &mut stream,
+                    "final",
+                    &serde_json::json!({
+                        "interaction_id": interaction_id,
+                        "phase": "result_pending",
+                        "task_id": task.id,
+                        "terminal_task_result": false,
+                        "follow_payload": follow_payload,
+                    }),
+                )
+                .await?;
+                Self::write_sse_openai_text(
+                    &mut stream,
+                    &chat_id,
+                    &format!(
+                        "计划已确认，BoardTask 已创建。后续用 missiond_follow_task_id={} 读取 task-result-artifact。",
+                        task.id
+                    ),
+                    Some("stop"),
+                )
+                .await?;
+            }
+            Err(e) => {
+                Self::write_sse_event(
+                    &mut stream,
+                    "diagnostic",
+                    &serde_json::json!({
+                        "interaction_id": interaction_id,
+                        "phase": "board_task_create",
+                        "error": {
+                            "code": "BOARDTASK_CREATE_FAILED",
+                            "message": e.to_string()
+                        }
+                    }),
+                )
+                .await?;
+            }
+        }
+        Self::finish_sse(&mut stream).await?;
         Ok(())
     }
 
@@ -4146,6 +4884,21 @@ impl PTYWebSocketServer {
                 return Self::handle_webhook(stream, &request_line, incident_tx, system_event_tx)
                     .await;
             }
+            if request_line.starts_with("POST /interactions/v1/messages") {
+                return Self::handle_interaction_messages(
+                    stream,
+                    addr,
+                    jarvis_grounding,
+                    jarvis_artifact_writer,
+                    db,
+                )
+                .await;
+            }
+            if request_line.starts_with("GET /interactions/v1/")
+                && !request_line.contains("Upgrade:")
+            {
+                return Self::handle_interaction_events(stream, &request_line).await;
+            }
             // Chat completions SSE endpoint
             if request_line.starts_with("POST /v1/chat/completions") {
                 return match pty_manager {
@@ -4194,6 +4947,20 @@ impl PTYWebSocketServer {
                     Access-Control-Allow-Origin: *\r\n\
                     Access-Control-Allow-Methods: POST, OPTIONS\r\n\
                     Access-Control-Allow-Headers: Content-Type, Authorization, X-Slot-Id, X-Trace-Id\r\n\
+                    Access-Control-Max-Age: 86400\r\n\
+                    Content-Length: 0\r\n\
+                    Connection: close\r\n\
+                    \r\n";
+                s.write_all(response.as_bytes()).await?;
+                s.shutdown().await?;
+                return Ok(());
+            }
+            if request_line.starts_with("OPTIONS /interactions/v1/") {
+                let mut s = stream;
+                let response = "HTTP/1.1 204 No Content\r\n\
+                    Access-Control-Allow-Origin: *\r\n\
+                    Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
+                    Access-Control-Allow-Headers: Content-Type, Authorization, X-Trace-Id\r\n\
                     Access-Control-Max-Age: 86400\r\n\
                     Content-Length: 0\r\n\
                     Connection: close\r\n\
@@ -4942,6 +5709,65 @@ mod tests {
             &nested_payload,
             "missiond_plan_confirmed"
         ));
+    }
+
+    #[test]
+    fn interaction_message_normalizes_string_and_object_payloads() {
+        assert_eq!(
+            normalize_interaction_message(&serde_json::json!("  hello missiond  ")),
+            "hello missiond"
+        );
+        assert_eq!(
+            normalize_interaction_message(&serde_json::json!({"text": "  from ios  "})),
+            "from ios"
+        );
+        assert_eq!(
+            normalize_interaction_message(&serde_json::json!({"content": "from wechat"})),
+            "from wechat"
+        );
+    }
+
+    #[test]
+    fn interaction_confirmation_accepts_nested_confirm_payload() {
+        let envelope = InteractionEnvelope {
+            metadata: serde_json::json!({
+                "missiond_confirm": {
+                    "confirm_payload": {
+                        "missiond_intent_confirmed": true,
+                        "missiond_plan_confirmed": true
+                    }
+                }
+            }),
+            ..Default::default()
+        };
+        assert!(interaction_metadata_bool(
+            &envelope,
+            "missiond_intent_confirmed"
+        ));
+        assert!(interaction_metadata_bool(
+            &envelope,
+            "missiond_plan_confirmed"
+        ));
+    }
+
+    #[test]
+    fn interaction_auth_requires_token_except_wechat_binding_path() {
+        let web = InteractionEnvelope {
+            channel: "ios".to_string(),
+            ..Default::default()
+        };
+        assert!(verify_interaction_auth(&web, "POST / HTTP/1.1\r\n\r\n").is_err());
+
+        let wechat = InteractionEnvelope {
+            channel: "wechat".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            verify_interaction_auth(&wechat, "POST / HTTP/1.1\r\n\r\n")
+                .unwrap()
+                .as_deref(),
+            None
+        );
     }
 
     #[test]

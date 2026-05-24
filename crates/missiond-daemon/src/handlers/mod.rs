@@ -23,8 +23,8 @@ pub(crate) use comm::retrospective;
 
 // Domain aliases for dispatch readability
 use comm::{
-    agent_navigation, audit, capability_usage, codex_ops, codex_replay, conversation, question,
-    router_chat, timeline, tool_directory,
+    agent_navigation, audit, capability_usage, codex_ops, codex_replay, conversation, interaction,
+    question, router_chat, timeline, tool_directory,
 };
 use compute::{
     cc_tasks, compute_slot, flow_run, forge, job, minimax, process, pty, slot, task, task_delegate,
@@ -63,6 +63,7 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
         "mission_context_boot" | "mission_context_gather" => {
             context_gather::handle(state, name, args).await
         }
+        "mission_interaction" => interaction::handle(state, name, args).await,
         "mission_question"
         | "mission_decision_stats"
         | "mission_incident"

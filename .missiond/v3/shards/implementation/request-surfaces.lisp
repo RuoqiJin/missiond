@@ -28,6 +28,21 @@
       :note "unified-entry-runtime is the daemon-local substrate for F-intent-alignment-plan-execution-loop; mission_request is the user-facing review-packet/respond adapter, while unified_entry.rs is now a thin staged-runtime facade. The V3 physical split is explicit: stages.rs owns FLOW_REF plus s1_message_intake, s3_alignment_review_gate, s4_plan_authoring, s5_plan_review_gate, and s6_execution_runner; planner.rs owns plan_pipeline plus the pure directive/plan/execute argument builders; decorator.rs owns ArtifactScope, build_artifact_refs, decorate, and planner-error envelope projection; unified_entry/tests.rs owns the canonical loop, artifact-ref, pipeline-meta, and decorator regression pins so the facade stays small without losing behavior coverage. run_pipeline dispatches to run_directive_compile_stage, run_plan_compile_stage, and run_plan_execute_stage, then decorate stamps..."
       :evidence-sidecar ".missiond/v3/evidence/blueprint-notes.lisp#note-002")
 
+(surface interaction-gateway
+      :status "code-aligned"
+      :implements [interaction-gateway channel-adapter identity-resolution permission-context intent-plan-routing response-sink interaction-audit]
+      :code ["crates/missiond-core/src/ws/server.rs"
+             "crates/missiond-mcp/src/tools/comm/interaction.rs"
+             "crates/missiond-daemon/src/handlers/comm/interaction.rs"
+             "crates/missiond-mcp/src/gen_gateway.rs"
+             "scripts/check-v3-interaction-gateway-isomorphism.mjs"]
+      :public-routes ["/interactions/v1/messages"
+                      "/interactions/v1/{interaction_id}/events"
+                      "/jarvis/v1/chat/completions"]
+      :public-tools [mission_interaction]
+      :events [received authenticated permission_resolved grounding intent_draft plan_draft confirm_required board_task_created worker_status result_artifact diagnostic final]
+      :note "Unified external channel entry for Web, iOS, Jarvis, WeChat bridge, and service triggers. The HTTP adapter converts every external message to InteractionEnvelope, resolves Auth-derived PermissionContext, persists grounding through mission_context_gather, writes intent/plan artifacts, requires confirmation for broad human requests, creates BoardTasks only after confirmation, and returns status/result through channel response sinks. mission_interaction is the MCP facade for receive/confirm_intent/confirm_plan/follow/status; legacy Jarvis chat remains wire-compatible but is treated as a channel adapter, not a direct PTY path.")
+
 (surface file-artifacts
       :status "code-aligned"
       :implements [file-artifacts request-local-artifacts compat-artifact-paths]

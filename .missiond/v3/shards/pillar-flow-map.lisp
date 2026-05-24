@@ -411,6 +411,18 @@
                (step s4 :logic "consume xjp-eventhub waits/subscriptions for cross-service deploy/auth/router/timeline events")
                (step s5 :logic "fallback to local event_log wait only with visible diagnostic when xjp-eventhub is unavailable"))
         :egress [EventHubEvent local-event-spool-diagnostic mission_timeline_wait])
+      (function interaction-gateway
+        :surface interaction-gateway
+        :entry [/interactions/v1/messages /interactions/v1/{interaction_id}/events /jarvis/v1/chat/completions mission_interaction InteractionEnvelope channel-adapter]
+        :core ((step s1 :logic "normalize Web, iOS, Jarvis, WeChat bridge, and service-trigger input into missiond.interaction-envelope.v1")
+               (step s2 :logic "resolve identity through Auth: bearer JWT for Web/iOS/Jarvis, service token for external services, and wechat_openid/unionid binding for WeChat")
+               (step s3 :logic "derive PermissionContext with user_id, tenant_id, application_id, product_id, groups, roles, channel, and capabilities before any BoardTask or worker side effect")
+               (step s4 :logic "run mission_context_gather(persist=true) from explicit unknowns and bind grounding_context_id plus sources_used to the interaction")
+               (step s5 :logic "write intent_draft artifact and require user/channel confirmation for broad human requests")
+               (step s6 :logic "write plan_draft artifact and require confirmation before BoardTask creation unless the caller supplies an exact workflow/exact shard policy gate")
+               (step s7 :logic "create BoardTask metadata with interaction_id, PermissionContext, grounding_context_id, intent_artifact_id, plan_artifact_id, and dispatch contract")
+               (step s8 :logic "stream response sink events for status, BoardTask, worker, task-result-artifact, final, and typed diagnostics; PTY output remains diagnostic only"))
+        :egress [InteractionEventStream PermissionContext grounding_context_id intent_artifact plan_artifact BoardTask task-result-artifact response-sink interaction-audit])
       (function router-policy
         :surface router-policy
         :entry [mission_router_chat mission_router_chat_manage router-policy-dry-run]

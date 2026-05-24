@@ -409,6 +409,8 @@
       :argv ["scripts/check-v3-infrastructure-universe-isomorphism.mjs" "--json"] :json true :timeout-ms 60000)
     (live-check data-residency-universe
       :argv ["scripts/check-v3-data-residency-universe-isomorphism.mjs" "--json"] :json true :timeout-ms 60000)
+    (live-check interaction-gateway
+      :argv ["scripts/check-v3-interaction-gateway-isomorphism.mjs" "--json"] :json true :timeout-ms 60000)
     (live-check project-maturity
       :argv ["scripts/check-project-maturity.mjs" "--min-level" "M5"] :timeout-ms 60000)
     (live-check auth-m6-depth

@@ -4,14 +4,15 @@
   :status active
   :owner resident-master-control
   :purpose "Turn a raw user or external-app request into a grounded, reviewable intent artifact before plan or worker dispatch."
-  :authority [mission_request agent-interaction-policy work-order-lifecycle project-universe memory-access-plane skill-infra-evidence-index]
+  :authority [interaction-gateway mission_request agent-interaction-policy work-order-lifecycle project-universe memory-access-plane skill-infra-evidence-index]
   :source_plans [mission_request resident-master-control work-order-lifecycle conversation-memory-distillation]
   :match_rules
-    ((trigger :kind user-message :surface JarvisChat :when "raw user message enters resident master gateway")
+    ((trigger :kind interaction-envelope :surface interaction-gateway :when "Web, iOS, Jarvis, WeChat bridge, or service channel input enters MissionD")
+     (trigger :kind user-message :surface JarvisChat :when "raw user message enters resident master gateway")
      (trigger :kind boardtask :promptTemplate resident-master-control :when "BoardTask asks for interpreting a user objective")
      (trigger :kind external-app :shape "external intent envelope or work-order intent")
      (trigger :kind manual :tool mission_request :when "caller requests request-local intent review packet"))
-  :inputs [raw_user_message source_channel project_hint? image_refs? active_boardtask_id? prior_context_pack?]
+  :inputs [InteractionEnvelope raw_user_message source_channel auth_subject? PermissionContext project_hint? image_refs? active_boardtask_id? prior_context_pack?]
   :context_policy
     (:default-inputs [raw_user_message source_channel active_boardtask_id project_hint]
      :primary-grounding-tool mission_context_gather
@@ -24,8 +25,8 @@
      (gemini :role optional-wide-summary :write context-pack-only :code-write false))
   :steps
     ((step s1 :id capture-request
-       :question "用户原话是什么？它来自 Jarvis、Board、外部应用还是 mission_request？是否已有 project_hint、图片、文件或父 BoardTask？"
-       :core "Normalize the input into request_id/source_channel/objective/source_refs and create or reuse the BoardTask anchor.")
+       :question "用户原话是什么？它来自 Web、iOS、微信桥接、Jarvis、Board、外部应用还是 mission_request？是否已有 Auth 身份、PermissionContext、project_hint、图片、文件或父 BoardTask？"
+       :core "Normalize the input into InteractionEnvelope/request_id/source_channel/objective/source_refs. For external channels, resolve Auth identity and PermissionContext before creating or reusing a BoardTask anchor.")
      (step s2 :id intent-understanding
        :question "第一轮：用户现在想做什么？这个诉求是任务执行、架构设计、部署运维、记忆整理、项目治理，还是需要先澄清？"
        :core "Write inferred_user_intent with confidence, assumptions, non_goals, likely_project_ids, and immediate next review question.")
@@ -46,7 +47,7 @@
        :core "Draft request-local intent-alignment.lisp or work-order intent with objective, scope, assumptions, non_goals, evidence_refs, acceptance, risks, and approval state awaiting_intent_approval.")
      (step s8 :id review-packet
        :question "这个 intent 是否需要用户确认？如果是可信 Agent 快路径，哪些 policy gate 允许折叠确认？"
-       :core "Return mission_request review_packet or Board note projection that points to the request-local intent artifact. Do not compile plan or dispatch workers before confirmation unless trusted-agent policy explicitly allows folded intent.")
+       :core "Return interaction intent_draft, mission_request review_packet, or Board note projection that points to the request-local intent artifact. Human/external broad requests must emit confirm_required and must not compile plan or dispatch workers before confirmation unless trusted-agent/exact-workflow policy explicitly allows folded intent.")
      (step s9 :id plan-authoring-worker
        :question "intent.lisp 已确认后，是否需要生成 plan.lisp？如果没有现成 workflow.lisp，应由哪个计划工位读取工具目录、资源和调度能力，把 intent 编译成可验收的 accepted shards？"
        :core "After intent approval, assign a read/write-scoped plan-authoring worker or mission_request respond approve_intent path to compile plan.lisp from confirmed intent, mission_context_gather evidence, mission_tool_directory resource/tool inventory, available workstation pool, and acceptance policy. If a workflow.lisp already matches the request, bind the workflow directly and skip intent/plan authoring.")

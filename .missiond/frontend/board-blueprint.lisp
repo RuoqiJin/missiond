@@ -174,6 +174,12 @@
       (custom-event :event jarvis_confirm_required :name "jarvis-confirm-required" :detail [conversation_id confirmation_type])
       (custom-event :event jarvis_worker_status :name "jarvis-worker-status" :detail [conversation_id task_id slot_id provider])
       (custom-event :event jarvis_result_artifact :name "jarvis-result-artifact" :detail [conversation_id task_id artifact_id])
+      (custom-event :event interaction_received :name "interaction-received" :detail [interaction_id channel external_user_id])
+      (custom-event :event interaction_permission_resolved :name "interaction-permission-resolved" :detail [interaction_id channel user_id tenant_id application_id capabilities])
+      (custom-event :event interaction_intent_draft :name "interaction-intent-draft" :detail [interaction_id grounding_context_id intent_artifact_id])
+      (custom-event :event interaction_plan_draft :name "interaction-plan-draft" :detail [interaction_id grounding_context_id plan_artifact_id])
+      (custom-event :event interaction_board_task_created :name "interaction-board-task-created" :detail [interaction_id task_id])
+      (custom-event :event interaction_result_artifact :name "interaction-result-artifact" :detail [interaction_id task_id artifact_id])
       (prefix-route :prefix "narration_" :bump [timelineVersion] :delay-ms 500))
     (timeline-visuals
       :rule "Timeline event, slot, lane, session, and window visual taxonomy is Lisp data; TSX only maps icon names to components."
@@ -341,7 +347,7 @@
                (step s3 :logic "render SSOT Universe, service runtime deployment/domain/DNS capability, runtime targets, credential refs, skill evidence drift, Decision Inbox, memory review, runtime health, architecture graph, status badges, and diagnostics")
                (step s4 :logic "keep operational actions behind explicit buttons and existing route policies")
                (step s5 :logic "project constants promoted from repeated KB lookup, such as auth service path/ports and 12900kf/router target anchors, into the Universe/Infra surface instead of leaving them as loose memory")
-               (step s6 :logic "JarvisChat sends user text/images through master-chat-api to create a visible resident-master-control BoardTask; it polls mission_master_status and never writes directly to a PTY"))
+               (step s6 :logic "JarvisChat, Web, iOS, and WeChat bridge are interaction-gateway channel adapters: they render InteractionEventStream phases, confirmation prompts, BoardTask links, worker status, and task-result-artifact summaries; they never write directly to PTY"))
         :egress [knowledge-dashboard system-dashboard architecture-dashboard operational-action]))
 
     (pillar frontend-design-system

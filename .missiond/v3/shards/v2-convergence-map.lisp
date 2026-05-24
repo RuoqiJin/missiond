@@ -17,6 +17,13 @@
       :v3-function unified-entry-runtime
       :surface unified-entry-runtime
       :note "V2 unified-entry run-pipeline helper is the daemon-local bridge behind mission_request.")
+    (v2-item external-channel-interaction-gateway
+      :status code-aligned
+      :v2-source ".missiond/v2/intent.lisp :: Jarvis/web/mobile/external user entry"
+      :v3-pillar communication
+      :v3-function interaction-gateway
+      :surface interaction-gateway
+      :note "External human/service channels now normalize to InteractionEnvelope before Auth identity, permission context, grounding, intent/plan confirmation, BoardTask dispatch, task-result-artifact collection, and channel response sinks.")
     (v2-item file-first-artifacts
       :status code-aligned
       :v2-source ".missiond/v2/architecture-dsl.lisp :: l2-shard-split-plan/intent-directive-artifacts"
@@ -505,6 +512,14 @@
         :v3-function incident-question-governance
         :surface incident-governance
         :tools [mission_question mission_llm_trace mission_decision_stats mission_gemini_auth mission_incident])
+      (tool-group interaction-gateway-tools
+        :status code-aligned
+        :v2-source ".missiond/v2/intent.lisp :: Jarvis/web/mobile/external user entry"
+        :v3-pillar communication
+        :v3-function interaction-gateway
+        :surface interaction-gateway
+        :tools [mission_interaction]
+        :note "mission_interaction is the consolidated MCP facade for external channel receive/confirm/follow/status. HTTP adapters for Web/iOS/Jarvis/WeChat normalize to InteractionEnvelope and must not directly write provider PTYs or bypass grounded intent/plan gates.")
       (tool-group capability-audit-tools
         :status code-aligned
         :v2-source ".missiond/v2/intent-capability-governance.lisp"
