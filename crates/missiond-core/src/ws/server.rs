@@ -2749,16 +2749,39 @@ impl PTYWebSocketServer {
                     Self::write_sse_openai_text(
                         &mut stream,
                         &chat_id,
-                        "计划已确认，我已创建 BoardTask 并开始监督工位执行。",
+                        "计划已确认，我已创建 BoardTask；这次请求会返回 follow handle，不会等待长任务占住手机连接。",
                         None,
                     )
                     .await?;
-                    Self::stream_jarvis_task_until_terminal(
-                        db,
-                        &jarvis_artifact_writer,
+                    let follow_payload = serde_json::json!({
+                        "missiond_follow_task_id": task.id,
+                        "stream": true
+                    });
+                    let worker_status = serde_json::json!({
+                        "phase": "board_tasks_created",
+                        "task_id": task.id,
+                        "status": task.status.as_str(),
+                        "terminal_task_result": false,
+                        "follow_payload": follow_payload.clone(),
+                        "message": "BoardTask created; worker execution continues asynchronously and results must be read through follow-up supervision."
+                    });
+                    Self::write_sse_event(&mut stream, "worker_status", &worker_status).await?;
+                    let final_event = serde_json::json!({
+                        "phase": "result_pending",
+                        "task_id": task.id,
+                        "status": "result_pending",
+                        "terminal_task_result": false,
+                        "follow_payload": follow_payload
+                    });
+                    Self::write_sse_event(&mut stream, "final", &final_event).await?;
+                    Self::write_sse_openai_text(
                         &mut stream,
                         &chat_id,
-                        task.id.as_str(),
+                        &format!(
+                            "BoardTask 已创建。后续请求携带 missiond_follow_task_id={} 读取 task-result-artifact；初始手机请求不会等待长任务完成。",
+                            task.id
+                        ),
+                        Some("stop"),
                     )
                     .await?;
                 }
