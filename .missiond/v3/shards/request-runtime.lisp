@@ -66,7 +66,7 @@
          :id-field artifact_hash
          :storage "shared_artifacts(kind=task-result)"
          :fields [task_id project_id provider result_status summary json source]
-         :rule "Jarvis, Board, and worker completion surfaces MUST normalize summary notes/provider finals into task-result-artifact before streaming result_artifact/final to clients; Board notes, PTY text, and provider finals are projections/evidence, not the canonical result."))
+         :rule "Jarvis, Board, and worker completion surfaces MUST normalize summary notes/provider finals into task-result-artifact before streaming result_artifact/final to clients; Board notes, PTY text, and provider finals are projections/evidence, not the canonical result; worker prompts MUST ask for structured Findings/Evidence/Recommendations/Verification output and MUST NOT instruct provider workers to mark the BoardTask done before artifact settlement."))
     :functions
       ((function context-gather-artifact
          :entry [mission_context_gather unknowns-inventory BoardTask source_id project_id]
@@ -102,6 +102,13 @@
                 (step s6 :logic "stream final text only after the task-result artifact hash is known or the diagnostic is surfaced")
                 (step s7 :logic "if the worker provider returns an empty final after its slot is idle/exited/error, write provider-empty-final as a task-result-artifact diagnostic, fail the BoardTask, and notify Jarvis instead of leaving the task running until mobile timeout"))
          :egress [task-result-artifact result_artifact_event final_event diagnostic])
+       (function jarvis-dispatch-causality
+         :entry [JarvisSSE plan-confirmed BoardTask auto_execute]
+         :core ((step s1 :logic "after plan confirmation creates an auto_execute BoardTask, emit board_task_created with grounding/intent/plan artifact ids")
+                (step s2 :logic "immediately emit worker_dispatched with dispatch_state=pending_autopilot_claim, task_id, follow_payload, and terminal_task_result=false so mobile/Web clients can render the causal handoff before the asynchronous slot claim occurs")
+                (step s3 :logic "later follow-up supervision may emit another worker_dispatched with the concrete slot_id once Autopilot claims a slot")
+                (step s4 :logic "do not stream task completion on the initial dispatch response; return result_pending/follow_payload and require follow-up artifact validation"))
+         :egress [board_task_created worker_dispatched result_pending follow_payload])
        (function jarvis-result-followup
          :entry [JarvisSSE missiond_follow_task_id BoardTask task-result-artifact]
          :core ((step s1 :logic "public Jarvis SSE routes use MISSIOND_JARVIS_PUBLIC_STREAM_BUDGET_SECS to avoid relying on a single multi-minute mobile/proxy connection")
@@ -118,6 +125,8 @@
        "Direct local code search is allowed only after the grounding artifact identifies code surface evidence as a required source."
        "Jarvis dispatch metadata MUST derive read_scope from the active runtime/project root (MISSIOND_PROJECT_ROOT, MISSIOND_REPO_ROOT, MISSIOND_WORKSPACE_ROOT, or current daemon cwd) and MUST NOT hardcode a developer-machine root path."
        "Jarvis result streaming MUST use task-result-artifact as canonical completion authority; Board summary notes are converted to artifacts before client-visible result_artifact events."
+       "Jarvis plan-confirmed dispatch MUST emit a worker_dispatched handoff event with dispatch_state=pending_autopilot_claim before returning result_pending, even if the concrete slot is claimed asynchronously later."
+       "Worker prompts MUST NOT instruct provider workers to call mission_board_update(status=done) as the primary close path; workers return structured final output, and Autopilot/orchestrator closes only after task-result-artifact validation."
        "Jarvis result artifact writes MUST be bounded; missing or stalled artifact writes produce typed diagnostics and MUST NOT silently fall back to Board note final text."
        "Jarvis BoardTask and notes polling during public SSE supervision MUST be bounded by MISSIOND_JARVIS_DB_POLL_TIMEOUT_SECS; DB/EventBus stalls produce typed diagnostics or result_pending, never silent mobile/proxy hangs."
        "Jarvis public SSE streams MUST return a typed result_pending/follow_payload before mobile or reverse-proxy timeouts; follow-up requests with missiond_follow_task_id resume the existing BoardTask instead of creating a new intent or plan."

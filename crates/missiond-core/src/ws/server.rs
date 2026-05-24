@@ -2200,6 +2200,22 @@ impl PTYWebSocketServer {
                 .await?;
                 Self::write_sse_event(
                     &mut stream,
+                    "worker_dispatched",
+                    &serde_json::json!({
+                        "interaction_id": interaction_id,
+                        "phase": "workers_running",
+                        "task_id": task.id,
+                        "slot_id": serde_json::Value::Null,
+                        "dispatch_state": "pending_autopilot_claim",
+                        "status": task.status.as_str(),
+                        "terminal_task_result": false,
+                        "follow_payload": follow_payload.clone(),
+                        "message": "BoardTask is queued for Autopilot/provider claim; concrete slot attribution will arrive through follow-up supervision."
+                    }),
+                )
+                .await?;
+                Self::write_sse_event(
+                    &mut stream,
                     "worker_status",
                     &serde_json::json!({
                         "interaction_id": interaction_id,
@@ -3367,7 +3383,12 @@ impl PTYWebSocketServer {
              - 如果 context_pack_file 不可读，且 context_pack_path 是 shared-artifact://，再用 MissionD MCP 调 mission_shared_memory(action=\"artifact_get\", hash=\"{}\") 或 mission_context_slice 读取上下文切片。\n\
              - 如果文件和 MCP 都不可用，不要自行大范围搜索代码；请快速失败并输出 Diagnostic / Evidence / Verification，说明 context unavailable。\n\
              - 不要修改文件、不要 stage、不要 commit、不要在工位内部创建子任务或再派其他工位。\n\
-             - 输出必须是结构化 artifact，包含 Findings / Evidence / Recommendations / Verification 四段。",
+             - 输出必须是结构化 artifact，严格包含以下四个 Markdown 二级标题：\n\
+               ## Findings\n\
+               ## Evidence\n\
+               ## Recommendations\n\
+               ## Verification\n\
+             - 不要把 Board note 当作最终结果；MissionD 会在 durable final 后写 task-result-artifact 并关闭任务。",
             raw_user_text,
             task_kind,
             task_class,
@@ -3950,6 +3971,24 @@ impl PTYWebSocketServer {
                         "plan_artifact_id": plan_artifact_id,
                     });
                     Self::write_sse_event(&mut stream, "board_task_created", &event).await?;
+                    Self::write_sse_event(
+                        &mut stream,
+                        "worker_dispatched",
+                        &serde_json::json!({
+                            "phase": "workers_running",
+                            "task_id": task.id,
+                            "slot_id": serde_json::Value::Null,
+                            "dispatch_state": "pending_autopilot_claim",
+                            "status": task.status.as_str(),
+                            "terminal_task_result": false,
+                            "follow_payload": {
+                                "missiond_follow_task_id": task.id,
+                                "stream": true
+                            },
+                            "message": "BoardTask is queued for Autopilot/provider claim; concrete slot attribution will arrive through follow-up supervision."
+                        }),
+                    )
+                    .await?;
                     Self::write_sse_openai_text(
                         &mut stream,
                         &chat_id,
@@ -6339,5 +6378,11 @@ mod tests {
         assert!(prompt.contains("先读取 context_pack_file"));
         assert!(prompt.contains("context unavailable"));
         assert!(prompt.contains("mission_shared_memory(action=\"artifact_get\", hash=\"abc\")"));
+        assert!(prompt.contains("## Findings"));
+        assert!(prompt.contains("## Evidence"));
+        assert!(prompt.contains("## Recommendations"));
+        assert!(prompt.contains("## Verification"));
+        assert!(prompt.contains("task-result-artifact"));
+        assert!(!prompt.contains("mission_board_update"));
     }
 }

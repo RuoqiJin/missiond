@@ -39,7 +39,7 @@
      (step collect-results
        :action "Collect task-result-artifacts and map Board notes/provider finals/app callbacks as projections.")
      (step settle-close
-       :action "Close or backfill after durable final settle, task-result artifact validation, audit append, slot release, and Lisp/checker convergence when code changed.")
+       :action "Close or backfill after durable final settle, task-result artifact validation, audit append, slot release, and Lisp/checker convergence when code changed; provider workers do not own the primary BoardTask done transition.")
      (step promote-experience
        :question "Did this work-order expose a reusable operation that should become workflow.lisp, evidence, or a project constant?"
        :writes [workflow_promotion_candidate evidence_ref]))
@@ -63,6 +63,7 @@
      (gate no-secret-values :rule "intent.lisp, plan.lisp, Board notes, and audit.lisp may contain secret_ref only.")
      (gate board-intent-single-chain :rule "Board source and intent source share one workflow_run and one BoardTask anchor.")
      (gate result-artifact-required :rule "Done requires task-result-artifact or a documented no-output diagnostic.")
+     (gate no-provider-self-close :rule "Provider prompts may surface BoardTask id for audit, but must not instruct workers to call mission_board_update(status=done) before task-result-artifact settlement; Board notes are projections only.")
      (gate external-app-same-chain :rule "External app jobs may not bypass BoardTask, shared-memory, task-result artifact, or audit surfaces."))
   :completion
     ((criterion done :rule "BoardTask done, task-result-artifact stored, audit.lisp appended, workflow_run closed.")

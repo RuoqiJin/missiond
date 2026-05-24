@@ -2042,15 +2042,14 @@ impl Drop for OwnedSlotDispatchGuard {
     }
 }
 
-/// Append the V3 `prompt-tool-contract` board-self-close suffix.
+/// Append the V3 `prompt-tool-contract` task-id suffix.
 ///
-/// The board task id is always surfaced for audit. The self-close instruction
-/// is conditional: if `mission_board_update` / `mission_board_note_add` are
-/// attached to the slot, the worker is asked to call them; if they are not,
-/// the worker is told to return a concise final summary and Autopilot /
-/// orchestrator stays responsible for closing the BoardTask. The unconditional
-/// "你必须调用" wording is replaced so a slot without board MCP tools is no
-/// longer asked to call tools it cannot see.
+/// The board task id is always surfaced for audit, but provider workers are no
+/// longer instructed to close BoardTasks directly. Worker finals, Board notes,
+/// and provider logs are evidence/projections; Autopilot/orchestrator owns the
+/// close transition after durable final settle and task-result-artifact
+/// validation. The terminal phrase remains stable because screen summarization
+/// uses it as the prompt-echo boundary.
 fn append_board_task_id_suffix(prompt: &str, task_id: &str) -> String {
     // The advisory block sits BEFORE the Board Task ID close-task block so
     // the suffix still ends with the TAIL_ANCHOR phrase
@@ -2063,11 +2062,10 @@ fn append_board_task_id_suffix(prompt: &str, task_id: &str) -> String {
         若一次回答中需要在多个 git 仓库之间切换，请在每段输出**之前**用一行 `===<repo-name>===` 标记仓库，再执行 `git status --short`；\
         勿把仓库名放在输出之后（标签会与下一段合并）。`cd` 会重置 shell cwd，请改用 `git -C <path> status --short` 或并行 Bash 调用。\
         \n\n---\n📋 **Board Task ID**: `{}`\n\
-        任务完成时：若当前工位已挂载 `mission_board_update` / `mission_board_note_add`，\
-        请调用 `mission_board_update(id=\"{}\", status=\"done\")` 关闭任务，\
-        并用 `mission_board_note_add(taskId=\"{}\", content=\"...\", noteType=\"summary\")` 写入诊断摘要。\
-        若上述 board MCP 工具未挂载到本工位，请直接返回一段简明的最终完成摘要，由 Autopilot/orchestrator 负责关闭此 BoardTask。",
-        prompt, task_id, task_id, task_id
+        任务完成时：请直接返回结构化最终结果；如任务要求输出契约，请包含 Findings / Evidence / Recommendations / Verification。\
+        不要调用 `mission_board_update(status=\"done\")` 作为主关闭路径；如需补充说明，可写 Board note，但 Board note 只是投影。\
+        Autopilot/orchestrator 会在 durable final 和 task-result-artifact 验证后负责关闭此 BoardTask。",
+        prompt, task_id
     )
 }
 
@@ -3281,11 +3279,10 @@ async fn dispatch_board_tasks_with_config(
             full_prompt
         };
 
-        // Inject task ID + conditional self-close instruction so slot can
-        // close the task itself when board MCP tools are attached, while
-        // remaining valid for slots that lack those tools (in which case the
-        // worker returns a summary and Autopilot/orchestrator closes the
-        // BoardTask). Projects V3 prompt-tool-contract.board-self-close.
+        // Inject task ID for audit and artifact-owned completion guidance.
+        // Workers return structured final output; Autopilot/orchestrator owns
+        // BoardTask close after durable final and task-result-artifact settle.
+        // Projects V3 prompt-tool-contract.task-result-artifact authority.
         let full_prompt = append_board_task_id_suffix(&full_prompt, task.id.as_str());
 
         // Cache cited KB IDs for confidence feedback loop after task completion
@@ -5123,7 +5120,7 @@ mod tests {
         assert_eq!(p.matches("Stabilize watchdog").count(), 1);
     }
 
-    // ── Prompt-tool-contract: conditional board-tool self-close ─────────
+    // ── Prompt-tool-contract: artifact-owned close path ─────────────────
 
     #[test]
     fn append_board_task_id_suffix_surfaces_board_task_id() {
@@ -6275,11 +6272,10 @@ Review only.
     }
 
     #[test]
-    fn append_board_task_id_suffix_is_conditional_not_unconditional() {
-        // Regression guard: the previous wording said the worker MUST call
-        // mission_board_update / mission_board_note_add, which broke slots
-        // without those tools attached. New wording must be conditional and
-        // must explicitly allow returning a final summary instead.
+    fn append_board_task_id_suffix_does_not_delegate_done_to_provider() {
+        // Regression guard: provider workers may see the BoardTask id for
+        // audit, but must not be instructed to close the task before the
+        // canonical task-result-artifact is settled.
         let suffix = append_board_task_id_suffix("BODY", "task-123");
 
         // Old unconditional must-call wording is gone.
@@ -6288,25 +6284,18 @@ Review only.
             "unconditional `你必须调用` wording leaked back in: {suffix}"
         );
 
-        // New wording is conditional on tool availability.
         assert!(
-            suffix.contains("若当前工位已挂载"),
-            "missing conditional clause about tool attachment: {suffix}"
+            !suffix.contains("请调用 `mission_board_update"),
+            "provider prompt must not ask workers to close BoardTask directly: {suffix}"
         );
-        // Both board MCP tools are still mentioned by name so a slot that
-        // *does* have them knows what to call.
         assert!(suffix.contains("mission_board_update"));
-        assert!(suffix.contains("mission_board_note_add"));
-
-        // Tools-absent fallback is explicit: return a final summary, and
-        // Autopilot/orchestrator owns closing the BoardTask.
         assert!(
-            suffix.contains("若上述 board MCP 工具未挂载到本工位"),
-            "missing explicit tools-absent fallback: {suffix}"
+            suffix.contains("task-result-artifact"),
+            "canonical artifact authority missing: {suffix}"
         );
         assert!(
-            suffix.contains("最终完成摘要"),
-            "missing instruction to return a final summary: {suffix}"
+            suffix.contains("结构化最终结果"),
+            "missing instruction to return structured result: {suffix}"
         );
         assert!(
             suffix.contains("Autopilot/orchestrator"),

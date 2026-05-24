@@ -17,6 +17,9 @@ Checks the V3 grounded-dispatch contract:
   - Jarvis worker dispatch uses the runtime/project root for read_scope and
     normalizes Board/provider finals into canonical task-result-artifacts before
     streaming result_artifact events.
+  - Jarvis plan-confirmed dispatch emits a worker_dispatched/pending claim event
+    before returning result_pending, and provider prompts no longer delegate the
+    primary BoardTask done transition to workers.
 `;
 
 let json = false;
@@ -175,6 +178,8 @@ const checks = [
       'context unavailable',
       'missiond_follow_task_id',
       '"result_pending"',
+      '"worker_dispatched"',
+      '"pending_autopilot_claim"',
       '"result_followup"',
       'tokio::time::timeout(',
       'std::time::Duration::from_secs(8)',
@@ -182,6 +187,16 @@ const checks = [
       'Self::put_jarvis_artifact',
       'mission_shared_memory(action=\\"artifact_get\\"',
       'mission_context_slice',
+    ],
+  ],
+  [
+    'autopilot provider prompt close ownership',
+    'crates/missiond-daemon/src/engine/intent_engine/autopilot.rs',
+    [
+      'artifact-owned completion guidance',
+      'task-result-artifact',
+      '不要调用 `mission_board_update(status=\\"done\\")`',
+      'Autopilot/orchestrator 会在 durable final 和 task-result-artifact 验证后负责关闭此 BoardTask。',
     ],
   ],
   [
