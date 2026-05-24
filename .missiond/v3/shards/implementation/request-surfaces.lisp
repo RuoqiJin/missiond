@@ -38,7 +38,9 @@
              "scripts/check-v3-interaction-gateway-isomorphism.mjs"]
       :public-routes ["/interactions/v1/messages"
                       "/interactions/v1/{interaction_id}/events"
-                      "/jarvis/v1/chat/completions"]
+                      "/jarvis/v1/chat/completions"
+                      "/jarvis/api/readiness"
+                      "/jarvis/api/monitor/jarvis"]
       :public-tools [mission_interaction]
       :auth-boundary (:authority auth
                       :userinfo-endpoint "/oidc/userinfo"
@@ -50,6 +52,9 @@
                        :adapter handle_chat_completions_interaction_adapter
                        :normalizer openai_request_to_interaction_envelope
                        :rule "OpenAI-compatible Jarvis/iOS clients are wire-compatible only at the edge. The route must normalize into InteractionEnvelope and pass through Auth PermissionContext, grounding, intent/plan confirmation, BoardTask metadata, and task-result-artifact; it must not directly write provider PTYs.")
+      :public-prefix (:route "/jarvis"
+                      :normalizer normalize_public_jarvis_path
+                      :rule "The daemon HTTP demux must accept canonical public /jarvis/* paths and normalize them to internal routes before WebSocket handshake fallback. Public monitor/readiness/chat requests must never be misclassified as WebSocket traffic when the auth proxy preserves the /jarvis prefix.")
       :events [received authenticated permission_resolved grounding intent_draft plan_draft confirm_required board_task_created worker_status result_artifact diagnostic final]
       :note "Unified external channel entry for Web, iOS, Jarvis, WeChat bridge, and service triggers. The HTTP adapter converts every external message to InteractionEnvelope, resolves Auth-derived PermissionContext, persists grounding through mission_context_gather, writes intent/plan artifacts, requires confirmation for broad human requests, creates BoardTasks only after confirmation, and returns status/result through channel response sinks. mission_interaction is the MCP facade for receive/confirm_intent/confirm_plan/follow/status; legacy Jarvis chat remains wire-compatible but is treated as a channel adapter, not a direct PTY path.")
 

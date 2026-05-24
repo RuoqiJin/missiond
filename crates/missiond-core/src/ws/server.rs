@@ -1023,6 +1023,16 @@ enum Route<'a> {
     Invalid,
 }
 
+fn normalize_public_jarvis_path(path: &str) -> std::borrow::Cow<'_, str> {
+    if path == "/jarvis" {
+        return std::borrow::Cow::Borrowed("/");
+    }
+    if let Some(stripped) = path.strip_prefix("/jarvis/") {
+        return std::borrow::Cow::Owned(format!("/{stripped}"));
+    }
+    std::borrow::Cow::Borrowed(path)
+}
+
 fn parse_route(path: &str) -> Route<'_> {
     if path == "/tasks" {
         return Route::Tasks;
@@ -5294,13 +5304,20 @@ impl PTYWebSocketServer {
         let n = stream.peek(&mut peek_buf).await.unwrap_or(0);
         if n > 0 {
             let request_line = String::from_utf8_lossy(&peek_buf[..n]);
+            let first_line = request_line.lines().next().unwrap_or_default();
+            let mut request_parts = first_line.split_whitespace();
+            let method = request_parts.next().unwrap_or_default();
+            let path = request_parts.next().unwrap_or_default();
+            let version = request_parts.next().unwrap_or("HTTP/1.1");
+            let normalized_path = normalize_public_jarvis_path(path);
+            let normalized_request_line = format!("{method} {normalized_path} {version}");
+            let is_upgrade = request_line.to_ascii_lowercase().contains("upgrade:");
             // Health check
-            if request_line.starts_with("GET /health") && !request_line.contains("Upgrade:") {
+            if method == "GET" && normalized_path == "/health" && !is_upgrade {
                 return Self::handle_health(stream).await;
             }
             // Jarvis readiness: daemon/proxy health plus default slot availability.
-            if request_line.starts_with("GET /api/readiness") && !request_line.contains("Upgrade:")
-            {
+            if method == "GET" && normalized_path == "/api/readiness" && !is_upgrade {
                 return match pty_manager {
                     Some(pm) => Self::handle_readiness(stream, pm, default_chat_slot.clone()).await,
                     None => {
@@ -5316,9 +5333,7 @@ impl PTYWebSocketServer {
             }
             // Jarvis chain monitor: one endpoint for public proxy, daemon,
             // default slot, MCP config, release, and diagnostic files.
-            if request_line.starts_with("GET /api/monitor/jarvis")
-                && !request_line.contains("Upgrade:")
-            {
+            if method == "GET" && normalized_path == "/api/monitor/jarvis" && !is_upgrade {
                 return match pty_manager {
                     Some(pm) => {
                         Self::handle_jarvis_monitor(stream, pm, default_chat_slot.clone()).await
@@ -5336,11 +5351,17 @@ impl PTYWebSocketServer {
                 };
             }
             // AIOps webhook endpoint
-            if request_line.starts_with("POST /webhooks/") {
-                return Self::handle_webhook(stream, &request_line, incident_tx, system_event_tx)
-                    .await;
+            if method == "POST" && normalized_path.starts_with("/webhooks/") {
+                return Self::handle_webhook(
+                    stream,
+                    &normalized_request_line,
+                    incident_tx,
+                    system_event_tx,
+                )
+                .await;
             }
-            if request_line.starts_with("POST /interactions/v1/messages") {
+            // POST /interactions/v1/messages (and public /jarvis/interactions/v1/messages)
+            if method == "POST" && normalized_path == "/interactions/v1/messages" {
                 return Self::handle_interaction_messages(
                     stream,
                     addr,
@@ -5350,13 +5371,13 @@ impl PTYWebSocketServer {
                 )
                 .await;
             }
-            if request_line.starts_with("GET /interactions/v1/")
-                && !request_line.contains("Upgrade:")
-            {
-                return Self::handle_interaction_events(stream, &request_line).await;
+            // GET /interactions/v1/{interaction_id}/events
+            if method == "GET" && normalized_path.starts_with("/interactions/v1/") && !is_upgrade {
+                return Self::handle_interaction_events(stream, &normalized_request_line).await;
             }
             // Chat completions SSE endpoint
-            if request_line.starts_with("POST /v1/chat/completions") {
+            // POST /v1/chat/completions (and public /jarvis/v1/chat/completions)
+            if method == "POST" && normalized_path == "/v1/chat/completions" {
                 return Self::handle_chat_completions_interaction_adapter(
                     stream,
                     addr,
@@ -5367,7 +5388,7 @@ impl PTYWebSocketServer {
                 .await;
             }
             // Slot status API
-            if request_line.starts_with("GET /api/slots") && !request_line.contains("Upgrade:") {
+            if method == "GET" && normalized_path == "/api/slots" && !is_upgrade {
                 return match pty_manager {
                     Some(pm) => Self::handle_slot_status(stream, pm).await,
                     None => {
@@ -5380,7 +5401,7 @@ impl PTYWebSocketServer {
                 };
             }
             // CORS preflight for chat completions
-            if request_line.starts_with("OPTIONS /v1/chat/completions") {
+            if method == "OPTIONS" && normalized_path == "/v1/chat/completions" {
                 let mut s = stream;
                 let response = "HTTP/1.1 204 No Content\r\n\
                     Access-Control-Allow-Origin: *\r\n\
@@ -5394,7 +5415,7 @@ impl PTYWebSocketServer {
                 s.shutdown().await?;
                 return Ok(());
             }
-            if request_line.starts_with("OPTIONS /interactions/v1/") {
+            if method == "OPTIONS" && normalized_path.starts_with("/interactions/v1/") {
                 let mut s = stream;
                 let response = "HTTP/1.1 204 No Content\r\n\
                     Access-Control-Allow-Origin: *\r\n\
@@ -5426,6 +5447,7 @@ impl PTYWebSocketServer {
             .lock()
             .map(|p| p.clone())
             .unwrap_or_else(|_| "/".to_string());
+        let path = normalize_public_jarvis_path(&path).into_owned();
 
         match parse_route(&path) {
             Route::Tasks => {
@@ -6280,6 +6302,20 @@ mod tests {
             &envelope,
             "missiond_intent_confirmed"
         ));
+    }
+
+    #[test]
+    fn public_jarvis_prefix_normalizes_to_daemon_routes() {
+        assert_eq!(normalize_public_jarvis_path("/jarvis"), "/");
+        assert_eq!(
+            normalize_public_jarvis_path("/jarvis/api/monitor/jarvis"),
+            "/api/monitor/jarvis"
+        );
+        assert_eq!(
+            normalize_public_jarvis_path("/jarvis/v1/chat/completions"),
+            "/v1/chat/completions"
+        );
+        assert_eq!(normalize_public_jarvis_path("/api/slots"), "/api/slots");
     }
 
     #[test]

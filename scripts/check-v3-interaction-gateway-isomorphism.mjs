@@ -104,6 +104,8 @@ requireIncludes('server', [
   'handle_interaction_events',
   'handle_chat_completions_interaction_adapter',
   'openai_request_to_interaction_envelope',
+  'normalize_public_jarvis_path',
+  '/jarvis/api/monitor/jarvis',
   'POST /interactions/v1/messages',
   'GET /interactions/v1/',
   'missiond.interaction-envelope.v1',
@@ -123,6 +125,16 @@ if (!/POST \/v1\/chat\/completions[\s\S]{0,600}handle_chat_completions_interacti
   diagnostics.push({
     file: files.server,
     message: 'legacy /v1/chat/completions route must enter interaction-gateway adapter, not direct PTY dispatch',
+  });
+}
+if (
+  !serverText.includes('normalize_public_jarvis_path(path)') ||
+  !serverText.includes('normalized_path == "/v1/chat/completions"') ||
+  !serverText.includes('normalized_path == "/api/monitor/jarvis"')
+) {
+  diagnostics.push({
+    file: files.server,
+    message: 'public /jarvis/* routes must normalize before HTTP demux falls back to WebSocket handling',
   });
 }
 
