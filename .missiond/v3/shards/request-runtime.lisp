@@ -122,6 +122,7 @@
        "Jarvis BoardTask and notes polling during public SSE supervision MUST be bounded by MISSIOND_JARVIS_DB_POLL_TIMEOUT_SECS; DB/EventBus stalls produce typed diagnostics or result_pending, never silent mobile/proxy hangs."
        "Jarvis public SSE streams MUST return a typed result_pending/follow_payload before mobile or reverse-proxy timeouts; follow-up requests with missiond_follow_task_id resume the existing BoardTask instead of creating a new intent or plan."
        "Jarvis plan-confirmed dispatch MUST NOT wait for worker terminal state on the initial mobile/public SSE request; it creates the BoardTask, returns result_pending with follow_payload immediately, and only follow requests supervise task-result-artifact completion."
+       "Agy and other provider artifact completion MUST accept numbered markdown report headings such as `## 1. Findings`, `## 2. Evidence`, `## 3. Recommendations`, and `## 4. Verification`; provider-generated numbering is formatting, not a missing output-contract section."
        "Jarvis intent/plan confirmations MUST accept both top-level missiond_intent_confirmed/missiond_plan_confirmed fields and wrapped missiond_confirm payloads, so iOS and external clients do not need to mirror MissionD's internal JSON shape."]
     :checks ["node scripts/check-v3-grounded-dispatch-isomorphism.mjs --json"])
 

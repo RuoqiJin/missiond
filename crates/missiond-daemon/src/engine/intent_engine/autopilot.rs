@@ -1623,8 +1623,30 @@ fn summary_has_report_heading(summary: &str, expected: &str) -> bool {
             .trim_end_matches(':')
             .trim()
             .to_ascii_lowercase();
+        let normalized = strip_report_heading_enumeration(&normalized);
         normalized == expected || normalized.starts_with(&format!("{expected} "))
     })
+}
+
+fn strip_report_heading_enumeration(value: &str) -> &str {
+    let mut rest = value.trim_start();
+    let digit_count = rest
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .map(char::len_utf8)
+        .sum::<usize>();
+    if digit_count == 0 {
+        return rest;
+    }
+    rest = &rest[digit_count..];
+    let trimmed = rest.trim_start();
+    let mut chars = trimmed.chars();
+    match chars.next() {
+        Some('.') | Some(')') | Some('、') | Some(':') | Some('：') => {
+            chars.as_str().trim_start()
+        }
+        _ => value,
+    }
 }
 
 /// Detect a delegated worker BoardTask by its description envelope.
@@ -7780,6 +7802,15 @@ Review only.
     }
 
     #[test]
+    fn output_contract_close_blocker_accepts_numbered_declared_sections() {
+        let report = "# Agy validation\n\n## 1. Findings\n- one\n\n## 2. Evidence\n- two\n\n## 3. Recommendations\n- three\n\n## 4. Verification\n- no edits";
+        assert_eq!(
+            output_contract_close_blocker(delegated_context_pack_with_output_contract(), report),
+            None
+        );
+    }
+
+    #[test]
     fn output_contract_close_blocker_accepts_memory_review_artifact_sections() {
         let report = "## Findings\n- Count reviewed: 7\n- Count selected for active memory: 0\n\nActive Memory Candidates\nNone\n\nSSOT-Workflow Backfill Candidates\nNone\n\nNeeds Human\nNone\n\nDiscard Rationale\nThe batch is procedural noise.\n\nVerification\nI only read the assigned batch files.";
         assert_eq!(
@@ -7836,6 +7867,39 @@ Review only.
         assert!(completion.session_id.contains("a09311e7"));
         assert!(completion.summary.contains("## Findings"));
         assert!(completion.summary.contains("## Verification"));
+    }
+
+    #[test]
+    fn agy_artifact_completion_reads_numbered_antigravity_brain_markdown() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let session_dir = root.path().join("40281be3-a614-42dd-a41a-e18876630856");
+        std::fs::create_dir_all(&session_dir).expect("session dir");
+        let task_id = "98c70512-637e-4705-83ed-ba042ffff751";
+        std::fs::write(
+            session_dir.join("task_result_validation.md"),
+            format!(
+                "# Agy CLI PTY Recognition & Read-Only Workstation Validation Report\n\n\
+                 **BoardTask ID**: `{task_id}`\n\n\
+                 ## 1. Findings\n- Agy generated a current task artifact.\n\n\
+                 ## 2. Evidence\n- The artifact declares the active BoardTask ID.\n\n\
+                 ## 3. Recommendations\n- Keep Agy read-only until more smoke passes.\n\n\
+                 ## 4. Verification\n- No files were modified."
+            ),
+        )
+        .expect("artifact");
+        let task = test_board_task_for_autopilot(
+            task_id,
+            "请接入并验证 agy CLI 的 PTY 识别和 read-only 工位能力。",
+            r#"{"source":"jarvis-intent-plan-gate","dispatch_metadata":{"write_policy":"read-only","output_contract":"Findings / Evidence / Recommendations / Verification"}}"#,
+        );
+
+        let completion =
+            select_agy_artifact_completion_from_root(root.path(), &task).expect("select");
+        let completion = completion.expect("completion");
+        assert_eq!(completion.source, "agy_artifact");
+        assert!(completion.session_id.contains("40281be3"));
+        assert!(completion.summary.contains("## 1. Findings"));
+        assert!(completion.summary.contains("## 4. Verification"));
     }
 
     #[test]
