@@ -5,7 +5,10 @@ const json = args.has('--json');
 const baseUrl = stripTrailingSlash(
   process.env.JARVIS_BASE_URL || 'https://auth.xiaojinpro.com/jarvis',
 );
-const token =
+const smokeSecretRef =
+  process.env.MISSIOND_JARVIS_SMOKE_SECRET_REF ||
+  'missiond/jarvis-smoke/INTERACTION_SERVICE_TOKEN';
+let token =
   process.env.MISSIOND_JARVIS_SMOKE_TOKEN ||
   process.env.MISSIOND_INTERACTION_SERVICE_TOKEN ||
   '';
@@ -85,6 +88,32 @@ function includesAny(events, candidates) {
   return candidates.some((candidate) => names.has(candidate));
 }
 
+function parseSecretRef(ref) {
+  const text = String(ref || '').trim();
+  if (!text || !text.includes('/')) return null;
+  const parts = text.split('/').filter(Boolean);
+  if (parts.length < 2) return null;
+  const key = parts.pop();
+  return { namespace: parts.join('/'), key };
+}
+
+async function tokenFromSecretStore(ref) {
+  const parsed = parseSecretRef(ref);
+  if (!parsed) return '';
+  const { spawnSync } = await import('node:child_process');
+  const result = spawnSync(
+    'xjp',
+    ['secret', 'get', parsed.key, '--ns', parsed.namespace],
+    {
+      encoding: 'utf8',
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+  if (result.status !== 0) return '';
+  return String(result.stdout || '').trim();
+}
+
 async function postInteraction(body) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), Number(process.env.JARVIS_SMOKE_TIMEOUT_MS || 30000));
@@ -120,6 +149,9 @@ async function postInteraction(body) {
 }
 
 async function main() {
+  if (!token && process.env.MISSIOND_JARVIS_SMOKE_SECRET_REF !== '0') {
+    token = await tokenFromSecretStore(smokeSecretRef);
+  }
   if (!token) {
     const result = {
       ok: false,
@@ -127,7 +159,8 @@ async function main() {
       diagnostics: [
         {
           code: 'INTERACTION_AUTH_REQUIRED',
-          message: 'Set MISSIOND_JARVIS_SMOKE_TOKEN or MISSIOND_INTERACTION_SERVICE_TOKEN; token values are never printed.',
+          message: 'Set MISSIOND_JARVIS_SMOKE_TOKEN or MISSIOND_INTERACTION_SERVICE_TOKEN, or provision secret-store ref missiond/jarvis-smoke/INTERACTION_SERVICE_TOKEN; token values are never printed.',
+          secret_ref: smokeSecretRef,
         },
       ],
     };

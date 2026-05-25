@@ -23,6 +23,7 @@ const files = {
   server: 'crates/missiond-core/src/ws/server.rs',
   jarvisChainSmoke: 'scripts/smoke-jarvis-chain.mjs',
   jarvisInteractionSmoke: 'scripts/smoke-jarvis-interaction.mjs',
+  deployDaemon: 'scripts/deploy-daemon.sh',
   boardTypes: 'crates/missiond-core/src/types/board.rs',
   boardStore: 'crates/missiond-core/src/db/pg/board.rs',
   boardMetadataMigration: 'crates/missiond-core/migrations/20260525000000_board_task_runtime_metadata.sql',
@@ -149,9 +150,20 @@ requireIncludes('jarvisInteractionSmoke', [
   'missiond.jarvis-interaction-smoke.v1',
   'MISSIOND_JARVIS_SMOKE_TOKEN',
   'MISSIOND_INTERACTION_SERVICE_TOKEN',
+  'MISSIOND_JARVIS_SMOKE_SECRET_REF',
+  'missiond/jarvis-smoke/INTERACTION_SERVICE_TOKEN',
+  'xjp',
+  'secret',
   'intent_draft',
   'confirm_required',
   'JARVIS_CONFIRMATION_BYPASS',
+]);
+
+requireIncludes('deployDaemon', [
+  'MISSIOND_INTERACTION_SERVICE_TOKEN',
+  'MISSIOND_INTERACTION_AUTH_USERINFO_URL',
+  'MISSIOND_INTERACTION_AUTH_TIMEOUT_MS',
+  'plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_INTERACTION_SERVICE_TOKEN"',
 ]);
 
 const serverText = requireFile('server');

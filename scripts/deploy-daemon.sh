@@ -27,6 +27,10 @@
 #   MISSIOND_CLEAN_REPO_RUNTIME_CACHE  after a successful deploy, prune repo
 #                               .missiond/v3/runtime cache when external
 #                               runtime dirs are verified, default: 1
+#   MISSIOND_INTERACTION_SERVICE_TOKEN  optional service token injected from
+#                               secret-store for Jarvis/interaction smoke.
+#   MISSIOND_INTERACTION_AUTH_USERINFO_URL  optional Auth userinfo endpoint.
+#   MISSIOND_INTERACTION_AUTH_TIMEOUT_MS  optional Auth userinfo timeout.
 #   MISSIOND_DEPLOY_TIMEOUT     socket readiness timeout, default: 30
 #   MISSIOND_DEPLOY_SMOKE_TIMEOUT  MCP smoke timeout, default: 30
 #   MISSIOND_APPLY_BACKUP_CLEANUP  delete old .bak/.new files when cleanup applies, default: 0
@@ -321,6 +325,9 @@ ensure_launchd_runtime_root() {
   plist_set_or_add_env_string "$LAUNCHD_PLIST" "MISSIOND_COMPILED_RUNTIME_DIR" "$COMPILED_RUNTIME_DIR"
   plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_JARVIS_SLOT_AUTO_HEAL"
   plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_JARVIS_SLOT_AUTO_HEAL_TIMEOUT_SECS"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_INTERACTION_SERVICE_TOKEN"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_INTERACTION_AUTH_USERINFO_URL"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_INTERACTION_AUTH_TIMEOUT_MS"
   plutil -lint "$LAUNCHD_PLIST" >/dev/null
   log "launchd: runtime root $LAUNCHD_PROJECT_ROOT written to $LAUNCHD_PLIST"
   log "launchd: artifact runtime dir $RUNTIME_DIR written to $LAUNCHD_PLIST"
