@@ -51,6 +51,7 @@ if (diagnostics.length === 0) {
     'services/deploy-center/scripts/run-missiond-macmini-self-update.sh',
     'git pull --ff-only',
     'scripts/deploy-daemon.sh --debug',
+    'http://127.0.0.1:9120/internal/jarvis/slot/ensure',
     'http://127.0.0.1:9120/api/monitor/jarvis',
     'no-rsync-scp',
     'client-channel-required',

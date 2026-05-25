@@ -1591,7 +1591,7 @@ impl PTYWebSocketServer {
             "recognition": recognition,
             "auto_heal": {
                 "enabled": jarvis_slot_auto_heal_enabled(),
-                "trigger": "chat-request-only",
+                "trigger": "chat-request-or-local-ensure",
                 "timeout_secs": jarvis_slot_auto_heal_timeout_secs(),
                 "env": "MISSIOND_JARVIS_SLOT_AUTO_HEAL",
             },
@@ -1709,6 +1709,96 @@ impl PTYWebSocketServer {
         stream.write_all(response.as_bytes()).await?;
         stream.shutdown().await?;
         Ok(())
+    }
+
+    /// Local-only control surface for deploy-center post-deploy smoke.
+    ///
+    /// Public `/jarvis/*` monitor paths stay read-only. The self-update lane calls
+    /// this endpoint from Mac mini localhost after blue/green restart to restore
+    /// the default Jarvis slot before judging readiness.
+    async fn handle_jarvis_slot_ensure(
+        mut stream: TcpStream,
+        addr: SocketAddr,
+        pty_manager: Arc<PTYManager>,
+        default_slot: String,
+    ) -> anyhow::Result<()> {
+        let mut buf = vec![0u8; 4096];
+        let _ = stream.read(&mut buf).await;
+
+        if !addr.ip().is_loopback() {
+            let body = serde_json::json!({
+                "schema": "missiond.jarvis-slot-ensure.v1",
+                "overall": "forbidden",
+                "error": {
+                    "code": "JARVIS_SLOT_ENSURE_LOCAL_ONLY",
+                    "message": "Jarvis slot ensure is a localhost-only deploy smoke control surface."
+                },
+                "checked_at": chrono::Utc::now().to_rfc3339(),
+            });
+            return Self::send_http_error(&mut stream, 403, "Forbidden", &body.to_string()).await;
+        }
+
+        let before = Self::build_jarvis_readiness(&pty_manager, &default_slot).await;
+        let before_status = before
+            .get("status")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        if before_status == "ready" {
+            let body = serde_json::json!({
+                "schema": "missiond.jarvis-slot-ensure.v1",
+                "overall": "ready",
+                "default_slot": default_slot,
+                "readiness_before": before,
+                "auto_heal": {
+                    "status": "skipped",
+                    "reason": "default slot already ready"
+                },
+                "checked_at": chrono::Utc::now().to_rfc3339(),
+            });
+            let response = Self::http_json_response(body.to_string());
+            stream.write_all(response.as_bytes()).await?;
+            stream.shutdown().await?;
+            return Ok(());
+        }
+        if before_status == "busy" {
+            let body = serde_json::json!({
+                "schema": "missiond.jarvis-slot-ensure.v1",
+                "overall": "busy",
+                "default_slot": default_slot,
+                "readiness_before": before,
+                "auto_heal": {
+                    "status": "skipped",
+                    "reason": "busy slots are not restarted automatically"
+                },
+                "checked_at": chrono::Utc::now().to_rfc3339(),
+            });
+            return Self::send_http_error(&mut stream, 409, "Conflict", &body.to_string()).await;
+        }
+
+        let auto_heal = Self::maybe_auto_heal_jarvis_slot(&pty_manager, &default_slot).await;
+        let after = Self::build_jarvis_readiness(&pty_manager, &default_slot).await;
+        let after_status = after
+            .get("status")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        let ok = after_status == "ready";
+        let body = serde_json::json!({
+            "schema": "missiond.jarvis-slot-ensure.v1",
+            "overall": if ok { "ready" } else { "unavailable" },
+            "default_slot": default_slot,
+            "readiness_before": before,
+            "readiness_after": after,
+            "auto_heal": auto_heal,
+            "checked_at": chrono::Utc::now().to_rfc3339(),
+        });
+        if ok {
+            let response = Self::http_json_response(body.to_string());
+            stream.write_all(response.as_bytes()).await?;
+            stream.shutdown().await?;
+            Ok(())
+        } else {
+            Self::send_http_error(&mut stream, 503, "Service Unavailable", &body.to_string()).await
+        }
     }
 
     fn file_check(id: &str, label: &str, path: std::path::PathBuf) -> serde_json::Value {
@@ -5751,6 +5841,27 @@ impl PTYWebSocketServer {
             let normalized_path = normalize_public_jarvis_path(path);
             let normalized_request_line = format!("{method} {normalized_path} {version}");
             let is_upgrade = request_line.to_ascii_lowercase().contains("upgrade:");
+            // Local deploy-center smoke may restore the default Jarvis slot after
+            // a blue/green restart. This is intentionally not a normalized
+            // `/jarvis/*` public route.
+            if method == "POST" && path == "/internal/jarvis/slot/ensure" && !is_upgrade {
+                return match pty_manager {
+                    Some(pm) => {
+                        Self::handle_jarvis_slot_ensure(stream, addr, pm, default_chat_slot.clone())
+                            .await
+                    }
+                    None => {
+                        let mut s = stream;
+                        let err = serde_json::json!({
+                            "schema": "missiond.jarvis-slot-ensure.v1",
+                            "overall": "unavailable",
+                            "error": {"message": "PTY manager not available"}
+                        });
+                        Self::send_http_error(&mut s, 503, "Service Unavailable", &err.to_string())
+                            .await
+                    }
+                };
+            }
             // Health check
             if method == "GET" && normalized_path == "/health" && !is_upgrade {
                 return Self::handle_health(stream).await;

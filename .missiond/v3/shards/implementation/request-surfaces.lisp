@@ -38,14 +38,15 @@
              "scripts/check-v3-interaction-gateway-isomorphism.mjs"]
       :public-routes ["/interactions/v1/messages"
                       "/interactions/v1/{interaction_id}/events"
-                      "/jarvis/v1/chat/completions"
-                      "/jarvis/api/readiness"
-                      "/jarvis/api/monitor/jarvis"]
-      :smoke-scripts ["scripts/smoke-jarvis-chain.mjs"
-                      "scripts/smoke-jarvis-interaction.mjs"]
-      :slot-auto-heal (:env MISSIOND_JARVIS_SLOT_AUTO_HEAL
-                       :timeout-env MISSIOND_JARVIS_SLOT_AUTO_HEAL_TIMEOUT_SECS
-                       :rule "monitor is read-only; chat request may restart default Exited/Error slot once and must fail fast with typed diagnostic if restart fails")
+	                      "/jarvis/v1/chat/completions"
+	                      "/jarvis/api/readiness"
+	                      "/jarvis/api/monitor/jarvis"]
+	      :internal-routes ["/internal/jarvis/slot/ensure"]
+	      :smoke-scripts ["scripts/smoke-jarvis-chain.mjs"
+	                      "scripts/smoke-jarvis-interaction.mjs"]
+	      :slot-auto-heal (:env MISSIOND_JARVIS_SLOT_AUTO_HEAL
+	                       :timeout-env MISSIOND_JARVIS_SLOT_AUTO_HEAL_TIMEOUT_SECS
+	                       :rule "monitor is read-only; chat request and localhost-only /internal/jarvis/slot/ensure may restart default Exited/Error slot once and must fail fast with typed diagnostic if restart fails")
       :public-tools [mission_interaction]
       :auth-boundary (:authority auth
                       :userinfo-endpoint "/oidc/userinfo"

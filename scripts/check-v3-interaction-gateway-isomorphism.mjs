@@ -115,6 +115,8 @@ requireIncludes('server', [
   'openai_request_to_interaction_envelope',
   'normalize_public_jarvis_path',
   '/jarvis/api/monitor/jarvis',
+  '/internal/jarvis/slot/ensure',
+  'missiond.jarvis-slot-ensure.v1',
   'POST /interactions/v1/messages',
   'GET /interactions/v1/',
   'missiond.interaction-envelope.v1',
@@ -133,6 +135,7 @@ requireIncludes('server', [
   'See runtime_metadata for grounding, intent, plan',
   'jarvis_slot_auto_heal_enabled',
   'ensure_jarvis_slot_ready_for_chat',
+  'handle_jarvis_slot_ensure',
   'maybe_auto_heal_jarvis_slot',
   'JARVIS_SLOT_MANAGER_UNAVAILABLE',
   'JARVIS_SLOT_UNAVAILABLE',
@@ -177,7 +180,8 @@ if (!/POST \/v1\/chat\/completions[\s\S]{0,600}handle_chat_completions_interacti
 if (
   !serverText.includes('normalize_public_jarvis_path(path)') ||
   !serverText.includes('normalized_path == "/v1/chat/completions"') ||
-  !serverText.includes('normalized_path == "/api/monitor/jarvis"')
+  !serverText.includes('normalized_path == "/api/monitor/jarvis"') ||
+  !serverText.includes('path == "/internal/jarvis/slot/ensure"')
 ) {
   diagnostics.push({
     file: files.server,

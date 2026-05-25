@@ -14,7 +14,8 @@
              (source_sync_provider github)
              (target_root "/Users/rickyhq/Projects/missiond")
              (deploy_command "scripts/deploy-daemon.sh --debug")
-             (monitor_url "http://127.0.0.1:9120/api/monitor/jarvis"))
+	             (slot_ensure_url "http://127.0.0.1:9120/internal/jarvis/slot/ensure")
+	             (monitor_url "http://127.0.0.1:9120/api/monitor/jarvis"))
 
   :steps
     ((step s1 :id receive-client-objective
@@ -75,9 +76,11 @@
 
      (step s8 :id monitor-smoke
     :entry "deployment job succeeded"
-    :core ((step s1 :logic "smoke http://127.0.0.1:9120/health and http://127.0.0.1:9120/api/monitor/jarvis from Mac mini")
-           (step s2 :logic "public Jarvis smoke may be run by Interaction Gateway after deploy-center reports local ready")
-           (step s3 :logic "monitor must explain daemon, MCP, slot readiness, and route diagnostics; empty 502/404 is a failure"))
+	    :core ((step s1 :logic "smoke http://127.0.0.1:9120/health from Mac mini")
+	           (step s2 :logic "POST http://127.0.0.1:9120/internal/jarvis/slot/ensure to restore the default Exited/Error Jarvis slot exactly once after blue-green restart")
+	           (step s3 :logic "smoke http://127.0.0.1:9120/api/monitor/jarvis from Mac mini and require overall=ready")
+	           (step s4 :logic "public Jarvis smoke may be run by Interaction Gateway after deploy-center reports local ready")
+	           (step s5 :logic "monitor must explain daemon, MCP, slot readiness, and route diagnostics; empty 502/404 is a failure"))
     :egress "smoke_succeeded or typed diagnostic"
        :surfaces ["scripts/smoke-jarvis-chain.mjs" "scripts/smoke-jarvis-interaction.mjs"])
 
