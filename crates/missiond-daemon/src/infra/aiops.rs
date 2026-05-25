@@ -372,6 +372,7 @@ pub(crate) async fn triage_incident(
             dedupe_key: Some(dedupe_key.clone()),
             timeout_secs: None,
             context_intent: None,
+            runtime_metadata: None,
         };
 
         match state.store.create_board_task(&task_input).await {
@@ -507,6 +508,7 @@ pub(crate) async fn create_pty_remediation_task(
         dedupe_key: Some(dedupe_key.to_string()),
         timeout_secs: None,
         context_intent: None,
+        runtime_metadata: None,
     };
 
     match state.store.create_board_task(&task_input).await {
@@ -566,6 +568,7 @@ mod tests {
             timeout_secs: None,
             context_intent: None,
             trigger_source: None,
+            runtime_metadata: serde_json::json!({}),
             notes_count: 0,
         }
     }

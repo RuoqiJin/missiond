@@ -456,6 +456,7 @@ pub(crate) async fn harvest_session(state: &crate::state::AppState, session_id: 
             dedupe_key: Some(format!("skill-synthesis-{}", beacon_name)),
             timeout_secs: None,
             context_intent: None,
+            runtime_metadata: None,
         };
         match state.store.create_board_task(&input).await {
             Ok(task) => {

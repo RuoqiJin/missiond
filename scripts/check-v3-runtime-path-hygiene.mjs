@@ -40,6 +40,7 @@ const REQUIRED = {
     'New runtime work should cite v3 first',
   ],
   gitignore: [
+    '.missiond/v3/runtime/**',
     '.missiond/v3/runtime/executions/*.lisp',
     '.missiond/v3/runtime/plans/*.evidence.json',
     '.missiond/v3/runtime/capability-usage-review.json',
@@ -173,6 +174,7 @@ function buildFixture() {
     :checks ["node scripts/check-v3-runtime-path-hygiene.mjs"]))`);
   write(root, 'gitignore', `
 .missiond/v3/runtime/executions/*.lisp
+.missiond/v3/runtime/**
 .missiond/v3/runtime/plans/*.evidence.json
 .missiond/v3/runtime/capability-usage-review.json
 .missiond/v3/runtime/nightly-evolution/*.report.lisp

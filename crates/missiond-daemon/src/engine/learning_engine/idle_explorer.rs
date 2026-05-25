@@ -476,6 +476,7 @@ async fn create_explore_task(
         dedupe_key: None,
         timeout_secs: None,
         context_intent: None,
+        runtime_metadata: None,
     };
 
     match state.store.create_board_task(&input).await {

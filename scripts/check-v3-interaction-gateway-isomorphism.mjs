@@ -21,6 +21,11 @@ const files = {
   workflow: '.missiond/workflows/intent-intake-grounding.lisp',
   frontend: '.missiond/frontend/board-blueprint.lisp',
   server: 'crates/missiond-core/src/ws/server.rs',
+  boardTypes: 'crates/missiond-core/src/types/board.rs',
+  boardStore: 'crates/missiond-core/src/db/pg/board.rs',
+  boardMetadataMigration: 'crates/missiond-core/migrations/20260525000000_board_task_runtime_metadata.sql',
+  autopilot: 'crates/missiond-daemon/src/engine/intent_engine/autopilot.rs',
+  boardFrontendTypes: 'packages/board/src/types.ts',
   mcpTool: 'crates/missiond-mcp/src/tools/comm/interaction.rs',
   mcpMod: 'crates/missiond-mcp/src/tools/mod.rs',
   daemonHandler: 'crates/missiond-daemon/src/handlers/comm/interaction.rs',
@@ -118,6 +123,8 @@ requireIncludes('server', [
   'plan_draft',
   'board_task_created',
   'result_pending',
+  'runtime_metadata: Some(meta)',
+  'See runtime_metadata for grounding, intent, plan',
 ]);
 
 const serverText = requireFile('server');
@@ -137,6 +144,48 @@ if (
     message: 'public /jarvis/* routes must normalize before HTTP demux falls back to WebSocket handling',
   });
 }
+
+requireIncludes('boardTypes', [
+  'runtime_metadata: serde_json::Value',
+  'runtime_metadata: Option<serde_json::Value>',
+  'rename = "runtimeMetadata"',
+  'skip_serializing_if = "is_empty_object"',
+]);
+
+requireIncludes('boardStore', [
+  'runtime_metadata',
+  'INSERT INTO board_tasks',
+  '.bind(&task.runtime_metadata)',
+]);
+
+const boardStoreText = requireFile('boardStore');
+if (
+  !/runtime_metadata:\s*self\s*\.\s*runtime_metadata\s*\.\s*unwrap_or_else/s.test(boardStoreText)
+) {
+  diagnostics.push({
+    file: files.boardStore,
+    message: 'Board row mapping must hydrate runtime_metadata from JSONB with an empty-object fallback',
+  });
+}
+
+requireIncludes('boardMetadataMigration', [
+  'ADD COLUMN IF NOT EXISTS runtime_metadata JSONB',
+  'idx_board_tasks_runtime_metadata_gin',
+  "runtime_metadata->>'interaction_id'",
+  "runtime_metadata->>'grounding_context_id'",
+]);
+
+requireIncludes('autopilot', [
+  'fn extract_board_task_dispatch_metadata_field',
+  'json_metadata_value_to_string',
+  'extract_board_task_dispatch_metadata_field(task, "engine_hint")',
+  'extract_board_task_dispatch_metadata_field(task, "pool_hint")',
+  'extract_dispatch_metadata_field(&task.description, field)',
+]);
+
+requireIncludes('boardFrontendTypes', [
+  'runtimeMetadata?: Record<string, unknown>;',
+]);
 
 requireIncludes('mcpTool', [
   'mission_interaction',

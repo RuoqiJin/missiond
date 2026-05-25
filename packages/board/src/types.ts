@@ -66,6 +66,7 @@ export interface Task {
   flowPhase?: FlowPhase;
   dependsOn?: string[];
   leaseExpiresAt?: string;
+  runtimeMetadata?: Record<string, unknown>;
 }
 
 export interface TaskFormData {

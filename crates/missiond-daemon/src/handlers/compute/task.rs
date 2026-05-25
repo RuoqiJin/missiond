@@ -663,6 +663,7 @@ mod tests {
             timeout_secs: Some(5400),
             context_intent: Some("code".to_string()),
             trigger_source: Some("mission_task_delegate".to_string()),
+            runtime_metadata: serde_json::json!({}),
             notes_count: 0,
         }
     }

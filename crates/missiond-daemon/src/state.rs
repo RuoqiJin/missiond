@@ -572,6 +572,7 @@ pub(crate) async fn submit_task(
         timeout_secs: None,
         context_intent: None,
         trigger_source: Some("memory_hook".to_string()),
+        runtime_metadata: serde_json::json!({}),
         notes_count: 0,
     };
 

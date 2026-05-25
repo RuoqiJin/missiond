@@ -49,8 +49,8 @@ impl BoardStore for PgMissionStore {
         let depends_on_json =
             serde_json::to_string(&task.depends_on).unwrap_or_else(|_| "[]".to_string());
         sqlx::query(
-            "INSERT INTO board_tasks (id, title, description, status, priority, category, project, server, due_date, parent_id, assignee, auto_execute, prompt_template, hidden, retry_count, max_retries, order_idx, created_at, updated_at, depends_on, dedupe_key, timeout_secs, context_intent, trigger_source)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)"
+            "INSERT INTO board_tasks (id, title, description, status, priority, category, project, server, due_date, parent_id, assignee, auto_execute, prompt_template, hidden, retry_count, max_retries, order_idx, created_at, updated_at, depends_on, dedupe_key, timeout_secs, context_intent, trigger_source, runtime_metadata)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)"
         )
         .bind(task.id.as_str())
         .bind(&task.title)
@@ -76,6 +76,7 @@ impl BoardStore for PgMissionStore {
         .bind(task.timeout_secs)
         .bind(&task.context_intent)
         .bind(&task.trigger_source)
+        .bind(&task.runtime_metadata)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -167,6 +168,10 @@ impl BoardStore for PgMissionStore {
             timeout_secs: input.timeout_secs,
             context_intent: input.context_intent.clone(),
             trigger_source: None,
+            runtime_metadata: input
+                .runtime_metadata
+                .clone()
+                .unwrap_or_else(|| serde_json::json!({})),
             notes_count: 0,
         };
 
@@ -1767,6 +1772,7 @@ struct PgBoardTaskRow {
     timeout_secs: Option<i64>,
     context_intent: Option<String>,
     trigger_source: Option<String>,
+    runtime_metadata: Option<serde_json::Value>,
     notes_count: Option<i64>,
 }
 
@@ -1812,6 +1818,9 @@ impl PgBoardTaskRow {
             timeout_secs: self.timeout_secs,
             context_intent: self.context_intent,
             trigger_source: self.trigger_source,
+            runtime_metadata: self
+                .runtime_metadata
+                .unwrap_or_else(|| serde_json::json!({})),
             notes_count: self.notes_count.unwrap_or(0),
         }
     }

@@ -88,18 +88,18 @@
     :id autopilot-detached-review-and-feedback-tasks
     :kind scheduler
     :owner autopilot-runtime
-    :observed ["background-task:crates/missiond-daemon/src/engine/intent_engine/autopilot.rs:4136"
-               "background-task:crates/missiond-daemon/src/engine/intent_engine/autopilot.rs:4257"]
+    :observed ["background-task:crates/missiond-daemon/src/engine/intent_engine/autopilot.rs:4164"
+               "background-task:crates/missiond-daemon/src/engine/intent_engine/autopilot.rs:4285"]
     :code ["crates/missiond-daemon/src/engine/intent_engine/autopilot.rs"]
     :effects []
     (anchor
       :role scheduler
-      :observed "background-task:crates/missiond-daemon/src/engine/intent_engine/autopilot.rs:4136"
+      :observed "background-task:crates/missiond-daemon/src/engine/intent_engine/autopilot.rs:4164"
       :file "crates/missiond-daemon/src/engine/intent_engine/autopilot.rs"
       :symbol "dispatch_board_tasks_with_config")
     (anchor
       :role scheduler
-      :observed "background-task:crates/missiond-daemon/src/engine/intent_engine/autopilot.rs:4257"
+      :observed "background-task:crates/missiond-daemon/src/engine/intent_engine/autopilot.rs:4285"
       :file "crates/missiond-daemon/src/engine/intent_engine/autopilot.rs"
       :symbol "dispatch_board_tasks_with_config")
     (trigger

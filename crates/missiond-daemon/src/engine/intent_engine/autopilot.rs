@@ -2555,6 +2555,31 @@ pub(crate) fn extract_dispatch_metadata_field(description: &str, field: &str) ->
     found_outside
 }
 
+fn extract_board_task_dispatch_metadata_field(
+    task: &missiond_core::types::BoardTask,
+    field: &str,
+) -> Option<String> {
+    if let Some(value) = task
+        .runtime_metadata
+        .get(field)
+        .and_then(json_metadata_value_to_string)
+    {
+        return Some(value);
+    }
+    for nested in ["metadata", "dispatch_metadata", "swarm_metadata"] {
+        if let Some(value) = task
+            .runtime_metadata
+            .get(nested)
+            .and_then(|value| value.as_object())
+            .and_then(|fields| fields.get(field))
+            .and_then(json_metadata_value_to_string)
+        {
+            return Some(value);
+        }
+    }
+    extract_dispatch_metadata_field(&task.description, field)
+}
+
 /// Recognised structured task classes the workstation pool understands. Used
 /// to gate `extract_dispatch_metadata_field` results so a stray `task_class:`
 /// note never coerces the autopilot into an unknown route.
@@ -2579,7 +2604,7 @@ fn class_from_str(value: &str) -> Option<&'static str> {
 }
 
 fn board_task_workstation_class(task: &missiond_core::types::BoardTask) -> &'static str {
-    let metadata_task_class = extract_dispatch_metadata_field(&task.description, "task_class")
+    let metadata_task_class = extract_board_task_dispatch_metadata_field(task, "task_class")
         .and_then(|value| class_from_str(&value));
     if task.category == "ops" {
         if matches!(
@@ -2588,7 +2613,7 @@ fn board_task_workstation_class(task: &missiond_core::types::BoardTask) -> &'sta
         ) {
             return "deploy-ops";
         }
-        if let Some(value) = extract_dispatch_metadata_field(&task.description, "task_class") {
+        if let Some(value) = extract_board_task_dispatch_metadata_field(task, "task_class") {
             if matches!(class_from_str(&value), Some("deploy-ops" | "deployment")) {
                 return "deploy-ops";
             }
@@ -2631,8 +2656,11 @@ fn board_task_workstation_class(task: &missiond_core::types::BoardTask) -> &'sta
     }
 }
 
-fn dispatch_metadata_value_present(description: &str, field: &str) -> bool {
-    extract_dispatch_metadata_field(description, field)
+fn board_task_dispatch_metadata_value_present(
+    task: &missiond_core::types::BoardTask,
+    field: &str,
+) -> bool {
+    extract_board_task_dispatch_metadata_field(task, field)
         .map(|value| {
             let value = value.trim();
             !value.is_empty() && value != "-" && value != "[]" && value != "null"
@@ -2641,13 +2669,13 @@ fn dispatch_metadata_value_present(description: &str, field: &str) -> bool {
 }
 
 fn board_task_exact_shard_ready(task: &missiond_core::types::BoardTask) -> bool {
-    dispatch_metadata_value_present(&task.description, "context_pack_path")
-        && dispatch_metadata_value_present(&task.description, "accepted_shard_id")
-        && dispatch_metadata_value_present(&task.description, "write_scope")
+    board_task_dispatch_metadata_value_present(task, "context_pack_path")
+        && board_task_dispatch_metadata_value_present(task, "accepted_shard_id")
+        && board_task_dispatch_metadata_value_present(task, "write_scope")
 }
 
 fn board_task_has_grounding_context(task: &missiond_core::types::BoardTask) -> bool {
-    dispatch_metadata_value_present(&task.description, "grounding_context_id")
+    board_task_dispatch_metadata_value_present(task, "grounding_context_id")
 }
 
 fn autopilot_grounding_gate_reason(task: &missiond_core::types::BoardTask) -> Option<String> {
@@ -2732,8 +2760,8 @@ async fn select_workstation_pool_slot(
     excluded_roles: &[&str],
 ) -> Option<WorkstationSlotSelection> {
     let task_class = board_task_workstation_class(task);
-    let engine_hint = extract_dispatch_metadata_field(&task.description, "engine_hint");
-    let pool_hint = extract_dispatch_metadata_field(&task.description, "pool_hint");
+    let engine_hint = extract_board_task_dispatch_metadata_field(task, "engine_hint");
+    let pool_hint = extract_board_task_dispatch_metadata_field(task, "pool_hint");
     let mut candidates: Vec<&_> = workstation_config
         .boardtask_pool_candidates(task_class)
         .into_iter()
@@ -5358,6 +5386,7 @@ mod tests {
             timeout_secs: Some(900),
             context_intent: Some("research".to_string()),
             trigger_source: Some("jarvis-intent-plan-gate".to_string()),
+            runtime_metadata: serde_json::json!({}),
             notes_count: 0,
         }
     }
@@ -7398,6 +7427,7 @@ Review only.
             timeout_secs: None,
             context_intent: context_intent.map(str::to_string),
             trigger_source: None,
+            runtime_metadata: serde_json::json!({}),
             notes_count: 0,
         }
     }

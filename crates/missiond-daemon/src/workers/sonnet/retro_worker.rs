@@ -363,6 +363,7 @@ async fn create_anomaly_board_task(
         dedupe_key: Some(dedupe),
         timeout_secs: None,
         context_intent: None,
+        runtime_metadata: None,
     };
 
     match state.store.create_board_task(&input).await {

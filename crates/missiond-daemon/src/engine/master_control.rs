@@ -2339,6 +2339,7 @@ mod tests {
             timeout_secs: None,
             context_intent: None,
             trigger_source: None,
+            runtime_metadata: serde_json::json!({}),
             notes_count: 0,
         }
     }

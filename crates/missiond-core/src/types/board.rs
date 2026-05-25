@@ -272,9 +272,24 @@ pub struct BoardTask {
     /// Set by memory-hook migration (state::submit_task) so memory_scheduler can filter its queue.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trigger_source: Option<String>,
+    /// Structured runtime metadata for orchestration. Human-facing summaries stay in
+    /// `description`; dispatch gates and UI timelines should prefer this field.
+    #[serde(
+        default,
+        rename = "runtimeMetadata",
+        skip_serializing_if = "is_empty_object"
+    )]
+    pub runtime_metadata: serde_json::Value,
     /// Number of notes attached to this task (populated by list queries)
     #[serde(default, skip_serializing_if = "is_zero")]
     pub notes_count: i64,
+}
+
+fn is_empty_object(value: &serde_json::Value) -> bool {
+    value
+        .as_object()
+        .map(|fields| fields.is_empty())
+        .unwrap_or(false)
 }
 
 fn is_zero(v: &i64) -> bool {
@@ -425,6 +440,9 @@ pub struct CreateBoardTaskInput {
     /// Intent tag: code|ops|research|general (for context enhancement)
     #[serde(default, rename = "contextIntent")]
     pub context_intent: Option<String>,
+    /// Structured runtime metadata for interaction/work-order/grounding chains.
+    #[serde(default, rename = "runtimeMetadata")]
+    pub runtime_metadata: Option<serde_json::Value>,
 }
 
 /// Partial update for a board task

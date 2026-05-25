@@ -2239,7 +2239,10 @@ impl PTYWebSocketServer {
             .to_string();
         let task_input = crate::types::CreateBoardTaskInput {
             title,
-            description: Some(meta.to_string()),
+            description: Some(format!(
+                "Jarvis interaction task for conversation {}. See runtime_metadata for grounding, intent, plan, permission, and dispatch fields.",
+                conversation_id.as_deref().unwrap_or("")
+            )),
             priority: None,
             category: Some("interaction".to_string()),
             project: None,
@@ -2255,6 +2258,7 @@ impl PTYWebSocketServer {
             dedupe_key: None,
             timeout_secs: None,
             context_intent: Some(context_intent),
+            runtime_metadata: Some(meta),
         };
         match db.create_board_task(&task_input).await {
             Ok(task) => {
@@ -4065,7 +4069,10 @@ impl PTYWebSocketServer {
             });
             let task_input = crate::types::CreateBoardTaskInput {
                 title: task_title,
-                description: Some(meta.to_string()),
+                description: Some(format!(
+                    "Jarvis interaction task for conversation {}. See runtime_metadata for grounding, intent, plan, and dispatch fields.",
+                    jarvis_conv_id.as_deref().unwrap_or("")
+                )),
                 priority: None,
                 category: Some("jarvis".to_string()),
                 project: None,
@@ -4081,6 +4088,7 @@ impl PTYWebSocketServer {
                 dedupe_key: None,
                 timeout_secs: None,
                 context_intent: Some(context_intent),
+                runtime_metadata: Some(meta),
             };
             match db.create_board_task(&task_input).await {
                 Ok(task) => {
@@ -4351,7 +4359,10 @@ impl PTYWebSocketServer {
 
                 let task_input = crate::types::CreateBoardTaskInput {
                     title: task_title.clone(),
-                    description: Some(meta.to_string()),
+                    description: Some(
+                        "Legacy Jarvis direct task. See runtime_metadata for original message."
+                            .to_string(),
+                    ),
                     priority: None,
                     category: Some("jarvis".to_string()),
                     project: None,
@@ -4367,6 +4378,7 @@ impl PTYWebSocketServer {
                     dedupe_key: None,
                     timeout_secs: None,
                     context_intent: None,
+                    runtime_metadata: Some(meta),
                 };
 
                 match db.create_board_task(&task_input).await {
