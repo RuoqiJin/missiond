@@ -51,6 +51,8 @@ if (diagnostics.length === 0) {
     'services/deploy-center/scripts/run-missiond-macmini-self-update.sh',
     'git pull --ff-only',
     'scripts/deploy-daemon.sh --debug',
+    'verify generated V3 contracts instead of rewriting tracked generated files on the target',
+    'git status --short --untracked-files=no remains empty after deploy and smoke',
     'http://127.0.0.1:9120/internal/jarvis/slot/ensure',
     'http://127.0.0.1:9120/api/monitor/jarvis',
     'no-rsync-scp',

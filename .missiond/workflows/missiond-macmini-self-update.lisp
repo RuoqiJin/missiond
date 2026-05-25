@@ -70,7 +70,8 @@
     :entry "build succeeded"
     :core ((step s1 :logic "run scripts/deploy-daemon.sh --debug on Mac mini target")
            (step s2 :logic "deploy script writes release id, active/previous symlink, rollback artifact, launchd kickstart result")
-           (step s3 :logic "failure must rollback or produce rollback_required diagnostic"))
+           (step s3 :logic "deploy script must verify generated V3 contracts instead of rewriting tracked generated files on the target")
+           (step s4 :logic "failure must rollback or produce rollback_required diagnostic"))
     :egress "release id + rollback artifact + deploy-center workflow job report"
        :surfaces ["scripts/deploy-daemon.sh" "services/deploy-center/scripts/run-missiond-macmini-self-update.sh"])
 
@@ -79,8 +80,9 @@
 	    :core ((step s1 :logic "smoke http://127.0.0.1:9120/health from Mac mini")
 	           (step s2 :logic "POST http://127.0.0.1:9120/internal/jarvis/slot/ensure to restore the default Exited/Error Jarvis slot exactly once after blue-green restart")
 	           (step s3 :logic "smoke http://127.0.0.1:9120/api/monitor/jarvis from Mac mini and require overall=ready")
-	           (step s4 :logic "public Jarvis smoke may be run by Interaction Gateway after deploy-center reports local ready")
-	           (step s5 :logic "monitor must explain daemon, MCP, slot readiness, and route diagnostics; empty 502/404 is a failure"))
+	           (step s4 :logic "verify git status --short --untracked-files=no remains empty after deploy and smoke; tracked generated diffs are a deployment failure")
+	           (step s5 :logic "public Jarvis smoke may be run by Interaction Gateway after deploy-center reports local ready")
+	           (step s6 :logic "monitor must explain daemon, MCP, slot readiness, and route diagnostics; empty 502/404 is a failure"))
     :egress "smoke_succeeded or typed diagnostic"
        :surfaces ["scripts/smoke-jarvis-chain.mjs" "scripts/smoke-jarvis-interaction.mjs"])
 

@@ -561,10 +561,17 @@ elif [ "${MISSIOND_USE_SCCACHE:-0}" = "1" ]; then
 fi
 export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
 log "build: CARGO_INCREMENTAL=$CARGO_INCREMENTAL"
-log "typed-lisp: refresh V3 contract ABI"
+log "typed-lisp: verify V3 contract ABI"
 TYPED_LISP_START="$(date +%s)"
-if ! node scripts/project-v3-contracts.mjs --write 2>&1 | tail -30; then
-  fail "typed Lisp contract ABI refresh failed" 1
+if [ "${MISSIOND_DEPLOY_REFRESH_CONTRACTS:-0}" = "1" ]; then
+  log "typed-lisp: MISSIOND_DEPLOY_REFRESH_CONTRACTS=1; refreshing generated V3 contract ABI"
+  if ! node scripts/project-v3-contracts.mjs --write --json 2>&1 | tail -30; then
+    fail "typed Lisp contract ABI refresh failed" 1
+  fi
+else
+  if ! node scripts/project-v3-contracts.mjs --check --json 2>&1 | tail -30; then
+    fail "typed Lisp contract ABI verification failed; run node scripts/project-v3-contracts.mjs --write before deploy" 1
+  fi
 fi
 record_timing "typed-lisp-contract-abi" "$TYPED_LISP_START"
 log "typed-lisp: compile V3 runtime projections"

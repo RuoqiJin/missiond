@@ -76,8 +76,11 @@ function check(root) {
     'MISSIOND_LAUNCHD_PLIST',
     'MISSIOND_LAUNCHD_PROJECT_ROOT',
     'CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"',
+    'MISSIOND_DEPLOY_REFRESH_CONTRACTS',
+    'node scripts/project-v3-contracts.mjs --check --json',
     'node scripts/compile-v3-runtime.mjs --json',
     'typed-lisp-runtime-compile',
+    'typed Lisp contract ABI verification failed',
     'typed Lisp runtime compile failed',
     'typed_lisp_runtime_manifest_json',
     'typed_lisp_runtime',
@@ -147,8 +150,11 @@ function buildFixture() {
 MISSIOND_INSTALL_ROOT MISSIOND_RELEASES_DIR MISSIOND_ACTIVE_LINK MISSIOND_RELEASE_KEEP MISSIOND_BACKUP_RETENTION_DAYS
 MISSIOND_LAUNCHD_PLIST MISSIOND_LAUNCHD_PROJECT_ROOT
 CARGO_INCREMENTAL="\${CARGO_INCREMENTAL:-0}"
+MISSIOND_DEPLOY_REFRESH_CONTRACTS
+node scripts/project-v3-contracts.mjs --check --json
 node scripts/compile-v3-runtime.mjs --json
 typed-lisp-runtime-compile
+typed Lisp contract ABI verification failed
 typed Lisp runtime compile failed
 typed_lisp_runtime_manifest_json typed_lisp_runtime
 compiled-v3-blueprint.json compiled-runtime-config.json compiled-project-universe.json compiled-workflows.json file_sha256
