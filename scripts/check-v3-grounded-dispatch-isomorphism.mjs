@@ -220,6 +220,16 @@ const checks = [
     ],
   ],
   [
+    'durable final selection strips thinking blocks from candidates',
+    'crates/missiond-daemon/src/engine/intent_engine/autopilot.rs',
+    [
+      'fn visible_text_from_message',
+      'visible_text_from_message(msg)',
+      'fn settle_worker_conversation',
+      'settle_worker_conversation(state',
+    ],
+  ],
+  [
     'autopilot provider prompt close ownership',
     'crates/missiond-daemon/src/engine/intent_engine/autopilot.rs',
     [

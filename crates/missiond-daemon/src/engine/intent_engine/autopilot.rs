@@ -482,12 +482,16 @@ fn latest_assistant_after_task_prompt(
             latest = None;
             continue;
         }
-        if seen_task_prompt
-            && msg.role == "assistant"
-            && !is_probably_active_tui_summary(content)
-            && !is_probably_provider_tool_invocation_message(content)
-        {
-            latest = Some(content.to_string());
+        if seen_task_prompt && msg.role == "assistant" {
+            let visible = visible_text_from_message(msg);
+            let visible = visible.trim();
+            if visible.is_empty()
+                || is_probably_active_tui_summary(visible)
+                || is_probably_provider_tool_invocation_message(visible)
+            {
+                continue;
+            }
+            latest = Some(visible.to_string());
         }
     }
     latest
@@ -513,12 +517,16 @@ fn assistant_candidates_after_task_prompt(
             candidates.clear();
             continue;
         }
-        if seen_task_prompt
-            && msg.role == "assistant"
-            && !is_probably_active_tui_summary(content)
-            && !is_probably_provider_tool_invocation_message(content)
-        {
-            candidates.push(content.to_string());
+        if seen_task_prompt && msg.role == "assistant" {
+            let visible = visible_text_from_message(msg);
+            let visible = visible.trim();
+            if visible.is_empty()
+                || is_probably_active_tui_summary(visible)
+                || is_probably_provider_tool_invocation_message(visible)
+            {
+                continue;
+            }
+            candidates.push(visible.to_string());
         }
     }
     candidates
@@ -531,13 +539,20 @@ fn assistant_candidates_after_claim(
     messages
         .iter()
         .filter(|msg| {
-            msg.role == "assistant"
-                && timestamp_is_after_or_unknown(&msg.timestamp, claimed_at)
-                && !msg.content.trim().is_empty()
-                && !is_probably_active_tui_summary(msg.content.trim())
-                && !is_probably_provider_tool_invocation_message(msg.content.trim())
+            msg.role == "assistant" && timestamp_is_after_or_unknown(&msg.timestamp, claimed_at)
         })
-        .map(|msg| msg.content.trim().to_string())
+        .filter_map(|msg| {
+            let visible = visible_text_from_message(msg);
+            let visible = visible.trim().to_string();
+            if visible.is_empty()
+                || is_probably_active_tui_summary(&visible)
+                || is_probably_provider_tool_invocation_message(&visible)
+            {
+                None
+            } else {
+                Some(visible)
+            }
+        })
         .collect()
 }
 
@@ -587,6 +602,30 @@ fn is_probably_provider_tool_invocation_message(content: &str) -> bool {
         || trimmed.starts_with("[tool:")
         || (trimmed.starts_with("Tool:")
             && (trimmed.contains("command:") || trimmed.contains("description:")))
+}
+
+fn visible_text_from_message(msg: &missiond_core::types::ConversationMessage) -> String {
+    if let Some(raw) = msg.raw_content.as_deref() {
+        if let Ok(content) = serde_json::from_str::<serde_json::Value>(raw) {
+            if let Some(arr) = content.as_array() {
+                let texts: Vec<&str> = arr
+                    .iter()
+                    .filter_map(|item| {
+                        let t = item.get("type")?.as_str()?;
+                        if t == "text" {
+                            item.get("text")?.as_str()
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if !texts.is_empty() {
+                    return texts.join("\n");
+                }
+            }
+        }
+    }
+    msg.content.clone()
 }
 
 fn is_agy_slot(slot_id: &str) -> bool {
@@ -808,6 +847,32 @@ async fn bind_and_complete_slot_conversation_for_task(
         .set_conversation_task_id(&session_id, task_id)
         .await;
     let _ = state.store.complete_conversation(&session_id).await;
+}
+
+async fn settle_worker_conversation(
+    state: &AppState,
+    slot_id: &str,
+    task: &missiond_core::types::BoardTask,
+) {
+    let convs = state
+        .store
+        .get_conversations_by_task_id(task.id.as_str())
+        .await
+        .unwrap_or_default();
+    for conv in &convs {
+        if conv.status == "active" {
+            let _ = state.store.complete_conversation(&conv.id).await;
+        }
+    }
+    if let Ok(Some(session_id)) = state.store.get_slot_session(slot_id).await {
+        if !convs.iter().any(|c| c.id == session_id) {
+            if let Ok(Some(conv)) = state.store.get_conversation(&session_id).await {
+                if conv.status == "active" {
+                    let _ = state.store.complete_conversation(&conv.id).await;
+                }
+            }
+        }
+    }
 }
 
 async fn durable_provider_completion_for_slot_task(
@@ -4039,6 +4104,7 @@ async fn dispatch_board_tasks_with_config(
                                 .await;
                         }
                     }
+                    settle_worker_conversation(state, &slot_id, &task).await;
                     // Reset slot failure count on success
                     {
                         let mut fail_map = state.slot_fail_counts.lock().unwrap();
@@ -8213,6 +8279,162 @@ Review only.
             })
             .to_string()
         ));
+    }
+
+    fn make_msg(
+        role: &str,
+        content: &str,
+        raw_content: Option<&str>,
+        ts: &str,
+    ) -> missiond_core::types::ConversationMessage {
+        missiond_core::types::ConversationMessage {
+            id: 0,
+            session_id: "s1".to_string(),
+            role: role.to_string(),
+            content: content.to_string(),
+            raw_content: raw_content.map(str::to_string),
+            message_uuid: None,
+            parent_uuid: None,
+            model: None,
+            timestamp: ts.to_string(),
+            metadata: None,
+            tool_name: None,
+            raw_role: None,
+            content_types: None,
+            has_image: false,
+            has_tool_use: false,
+            has_tool_result: false,
+            token_count: None,
+            seq: None,
+            role_display: None,
+        }
+    }
+
+    #[test]
+    fn thinking_blocks_do_not_exclude_final_assistant_candidate() {
+        let raw_with_thinking = serde_json::json!([
+            {"type": "thinking", "thinking": "Let me check the code and verify the implementation..."},
+            {"type": "text", "text": "## Findings\nAll checks pass.\n## Evidence\nLine 42.\n## Recommendations\nNone.\n## Verification\nTests pass."}
+        ]).to_string();
+        let stored_content = "[thinking] Let me check the code and verify the implementation...\n## Findings\nAll checks pass.\n## Evidence\nLine 42.\n## Recommendations\nNone.\n## Verification\nTests pass.";
+
+        let messages = vec![
+            make_msg(
+                "worker_user",
+                "task-abc: do the thing",
+                None,
+                "2026-01-01T00:00:00Z",
+            ),
+            make_msg(
+                "assistant",
+                "Let me start investigating...\n[Tool: Read] file_path: \"/a.rs\"",
+                None,
+                "2026-01-01T00:00:01Z",
+            ),
+            make_msg("tool_result", "[tool_result]", None, "2026-01-01T00:00:02Z"),
+            make_msg(
+                "assistant",
+                stored_content,
+                Some(&raw_with_thinking),
+                "2026-01-01T00:00:03Z",
+            ),
+        ];
+
+        let candidates = assistant_candidates_after_task_prompt(&messages, "task-abc", None);
+        assert!(
+            !candidates.is_empty(),
+            "final message with thinking block must not be excluded"
+        );
+        let last = candidates.last().unwrap();
+        assert!(
+            last.contains("## Findings"),
+            "candidate should contain visible text, got: {}",
+            &last[..last.len().min(100)]
+        );
+        assert!(
+            !last.contains("[thinking]"),
+            "candidate should not contain thinking block prefix"
+        );
+    }
+
+    #[test]
+    fn visible_text_extraction_strips_thinking_and_tool_use() {
+        let raw = serde_json::json!([
+            {"type": "thinking", "thinking": "internal reasoning"},
+            {"type": "text", "text": "The actual answer"},
+            {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}
+        ])
+        .to_string();
+        let msg = make_msg(
+            "assistant",
+            "[thinking] internal reasoning\nThe actual answer\n[Tool: Bash] command: \"ls\"",
+            Some(&raw),
+            "2026-01-01T00:00:00Z",
+        );
+        let visible = visible_text_from_message(&msg);
+        assert_eq!(visible, "The actual answer");
+    }
+
+    #[test]
+    fn visible_text_falls_back_to_content_when_no_raw() {
+        let msg = make_msg(
+            "assistant",
+            "plain text response",
+            None,
+            "2026-01-01T00:00:00Z",
+        );
+        let visible = visible_text_from_message(&msg);
+        assert_eq!(visible, "plain text response");
+    }
+
+    #[test]
+    fn provider_completion_selects_end_turn_final_over_intermediate() {
+        let task_desc = serde_json::json!({
+            "source": "jarvis-intent-plan-gate",
+            "dispatch_metadata": {
+                "task_class": "review",
+                "output_contract": "Findings / Evidence / Recommendations / Verification"
+            }
+        })
+        .to_string();
+
+        let raw_intermediate = serde_json::json!([
+            {"type": "text", "text": "Let me read the file.\n[Tool: Read] file_path: \"/a.rs\""}
+        ])
+        .to_string();
+        let raw_final = serde_json::json!([
+            {"type": "thinking", "thinking": "Let me verify all the checks pass now..."},
+            {"type": "text", "text": "## Findings\nCode is correct.\n## Evidence\nTests pass.\n## Recommendations\nNone.\n## Verification\nAll green."}
+        ]).to_string();
+
+        let messages = vec![
+            make_msg("worker_user", "task-xyz: review the code", None, "2026-01-01T00:00:00Z"),
+            make_msg("assistant", "Let me read the file.\n[Tool: Read] file_path: \"/a.rs\"", Some(&raw_intermediate), "2026-01-01T00:00:01Z"),
+            make_msg("tool_result", "[tool_result]", None, "2026-01-01T00:00:02Z"),
+            make_msg(
+                "assistant",
+                "[thinking] Let me verify all the checks pass now...\n## Findings\nCode is correct.\n## Evidence\nTests pass.\n## Recommendations\nNone.\n## Verification\nAll green.",
+                Some(&raw_final),
+                "2026-01-01T00:00:03Z",
+            ),
+        ];
+
+        let summary =
+            provider_completion_summary_for_task(&messages, "task-xyz", &task_desc, None, None);
+        assert!(summary.is_some(), "should find the final structured output");
+        let summary = summary.unwrap();
+        assert!(
+            summary.contains("## Findings"),
+            "summary should have Findings heading"
+        );
+        assert!(
+            summary.contains("## Verification"),
+            "summary should have Verification heading"
+        );
+        assert!(
+            !summary.contains("[thinking]"),
+            "summary should not contain thinking block"
+        );
     }
 }
 
