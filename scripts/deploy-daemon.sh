@@ -24,6 +24,9 @@
 #   MISSIOND_LAUNCHD_PLIST      launchd plist, default: ~/Library/LaunchAgents/$label.plist
 #   MISSIOND_LAUNCHD_PROJECT_ROOT  project root written into launchd, default: current git root
 #   MISSIOND_RUNTIME_DIR        runtime artifact root, default: ~/.missiond/runtime/<repo-name>
+#   MISSIOND_CLEAN_REPO_RUNTIME_CACHE  after a successful deploy, prune repo
+#                               .missiond/v3/runtime cache when external
+#                               runtime dirs are verified, default: 1
 #   MISSIOND_DEPLOY_TIMEOUT     socket readiness timeout, default: 30
 #   MISSIOND_DEPLOY_SMOKE_TIMEOUT  MCP smoke timeout, default: 30
 #   MISSIOND_APPLY_BACKUP_CLEANUP  delete old .bak/.new files when cleanup applies, default: 0
@@ -483,6 +486,42 @@ $dir
   done
 }
 
+cleanup_repo_runtime_cache() {
+  if [ "${MISSIOND_CLEAN_REPO_RUNTIME_CACHE:-1}" != "1" ]; then
+    log "runtime-cache: repo runtime cleanup disabled by MISSIOND_CLEAN_REPO_RUNTIME_CACHE"
+    return 0
+  fi
+  local repo_runtime="$REPO_ROOT/.missiond/v3/runtime"
+  if [ "$RUNTIME_DIR" = "$repo_runtime" ] || [ "$COMPILED_RUNTIME_DIR" = "$repo_runtime/compiled" ]; then
+    log "runtime-cache: external runtime dir not configured; keep repo runtime cache"
+    return 0
+  fi
+  if [ ! -f "$COMPILED_RUNTIME_DIR/compiled-runtime-config.json" ]; then
+    log "runtime-cache: skip cleanup; compiled runtime config missing at $COMPILED_RUNTIME_DIR"
+    return 0
+  fi
+  [ -d "$repo_runtime" ] || return 0
+
+  local item
+  local cleaned=0
+  for item in \
+    "$repo_runtime/compiled" \
+    "$repo_runtime/executions" \
+    "$repo_runtime/plans" \
+    "$repo_runtime/lisp-code-sync" \
+    "$repo_runtime/nightly-evolution" \
+    "$repo_runtime/jarvis-smoke" \
+    "$repo_runtime/master-control" \
+    "$repo_runtime/capability-usage-review.json"; do
+    if [ -e "$item" ]; then
+      rm -rf "$item"
+      cleaned=$((cleaned + 1))
+      log "runtime-cache: removed repo cache $item"
+    fi
+  done
+  log "runtime-cache: cleanup complete removed=$cleaned external_runtime=$RUNTIME_DIR"
+}
+
 mkdir -p "$INSTALL_ROOT" "$RELEASES_DIR" "$(dirname "$SOCK_PATH")" "$COMPILED_RUNTIME_DIR"
 
 if [ "$CLEANUP_ONLY" -eq 1 ]; then
@@ -603,6 +642,7 @@ record_timing "post-switch-mcp-smoke" "$POST_SMOKE_START"
 
 CLEANUP_START="$(date +%s)"
 cleanup_old_releases 1
+cleanup_repo_runtime_cache
 record_timing "cleanup" "$CLEANUP_START"
 print_timing_summary
 log "deploy: done. active_release=$RELEASE_ID previous=${PREVIOUS_ACTIVE:-none}"

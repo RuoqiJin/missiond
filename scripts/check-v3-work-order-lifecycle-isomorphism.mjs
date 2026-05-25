@@ -34,7 +34,10 @@ const checks = [
       'accepted_shard_id',
       'scripts/missiond-work-order.mjs',
       '.githooks/pre-commit',
+      '.githooks/commit-msg',
       'scripts/hooks/pre-commit-missiond-work-order',
+      'scripts/hooks/commit-msg-missiond-work-order',
+      'commit-msg trailer checks',
     ],
   ],
   [
@@ -54,6 +57,7 @@ const checks = [
       'external-work-order-submit-gate',
       'missiond-work-order verify --staged',
       'missiond-work-order verify --commit <sha>',
+      'commit-msg validates the MissionD-Work-Order trailer',
       'task-result-artifact',
       'audit.lisp',
     ],
@@ -67,6 +71,9 @@ const checks = [
       ':write_scope',
       'accepted_shard_id',
       '.missiond/work-orders',
+      'pre-commit cannot inspect the final commit message trailer',
+      'staged_code_files',
+      'write_scope does not cover all changed code files',
     ],
   ],
   [
@@ -78,10 +85,25 @@ const checks = [
     ],
   ],
   [
+    '.githooks/commit-msg',
+    [
+      'commit-message gate',
+      'scripts/hooks/commit-msg-missiond-work-order',
+    ],
+  ],
+  [
     'scripts/hooks/pre-commit-missiond-work-order',
     [
       'missiond-work-order.mjs verify --staged',
       'MISSIOND_WORK_ORDER',
+    ],
+  ],
+  [
+    'scripts/hooks/commit-msg-missiond-work-order',
+    [
+      'MissionD-Work-Order',
+      'missiond-work-order.mjs verify --staged',
+      'commit message file',
     ],
   ],
   [

@@ -21,6 +21,8 @@ const files = {
   workflow: '.missiond/workflows/intent-intake-grounding.lisp',
   frontend: '.missiond/frontend/board-blueprint.lisp',
   server: 'crates/missiond-core/src/ws/server.rs',
+  jarvisChainSmoke: 'scripts/smoke-jarvis-chain.mjs',
+  jarvisInteractionSmoke: 'scripts/smoke-jarvis-interaction.mjs',
   boardTypes: 'crates/missiond-core/src/types/board.rs',
   boardStore: 'crates/missiond-core/src/db/pg/board.rs',
   boardMetadataMigration: 'crates/missiond-core/migrations/20260525000000_board_task_runtime_metadata.sql',
@@ -79,6 +81,7 @@ requireIncludes('requestSurfaces', [
   'mission_interaction',
   'MISSIOND_INTERACTION_AUTH_USERINFO_URL',
   'INTERACTION_AUTH_UNAVAILABLE',
+  'missiond/jarvis-smoke/INTERACTION_SERVICE_TOKEN',
 ]);
 
 requireIncludes('v2', [
@@ -114,6 +117,8 @@ requireIncludes('server', [
   'POST /interactions/v1/messages',
   'GET /interactions/v1/',
   'missiond.interaction-envelope.v1',
+  'MISSIOND_JARVIS_SLOT_AUTO_HEAL',
+  'MISSIOND_JARVIS_SLOT_AUTO_HEAL_TIMEOUT_SECS',
   'resolve_interaction_auth',
   'MISSIOND_INTERACTION_AUTH_USERINFO_URL',
   'INTERACTION_AUTH_UNAVAILABLE',
@@ -125,6 +130,28 @@ requireIncludes('server', [
   'result_pending',
   'runtime_metadata: Some(meta)',
   'See runtime_metadata for grounding, intent, plan',
+  'jarvis_slot_auto_heal_enabled',
+  'ensure_jarvis_slot_ready_for_chat',
+  'maybe_auto_heal_jarvis_slot',
+  'JARVIS_SLOT_MANAGER_UNAVAILABLE',
+  'JARVIS_SLOT_UNAVAILABLE',
+]);
+
+requireIncludes('jarvisChainSmoke', [
+  'missiond.jarvis-chain-smoke.v1',
+  '/api/monitor/jarvis',
+  'missiond.jarvis-chain-monitor.v1',
+  'public-entry',
+  'default-slot-readiness',
+]);
+
+requireIncludes('jarvisInteractionSmoke', [
+  'missiond.jarvis-interaction-smoke.v1',
+  'MISSIOND_JARVIS_SMOKE_TOKEN',
+  'MISSIOND_INTERACTION_SERVICE_TOKEN',
+  'intent_draft',
+  'confirm_required',
+  'JARVIS_CONFIRMATION_BYPASS',
 ]);
 
 const serverText = requireFile('server');

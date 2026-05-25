@@ -65,6 +65,8 @@ const REQUIRED = {
   deployScript: [
     'MISSIOND_RUNTIME_DIR',
     'MISSIOND_COMPILED_RUNTIME_DIR',
+    'MISSIOND_CLEAN_REPO_RUNTIME_CACHE',
+    'cleanup_repo_runtime_cache',
     'node scripts/compile-v3-runtime.mjs --json --out-dir "$COMPILED_RUNTIME_DIR"',
   ],
   daemonCompiledSnapshot: [

@@ -106,6 +106,36 @@ function extractExecutionStepDigest(task: Task | null, notes: TaskNote[], slot: 
   ];
 }
 
+function metadataValue(value: unknown): string {
+  if (value == null) return '-';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (Array.isArray(value)) return value.map(metadataValue).join(', ');
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function interactionChainRows(task: Task | null): Array<[string, string]> {
+  const meta = task?.runtimeMetadata || {};
+  const keys = [
+    'interaction_id',
+    'permission_context',
+    'grounding_context_id',
+    'intent_artifact_id',
+    'plan_artifact_id',
+    'accepted_shard_id',
+    'context_pack_path',
+    'write_scope',
+    'sources_used',
+  ];
+  return keys
+    .filter((key) => Object.prototype.hasOwnProperty.call(meta, key))
+    .map((key) => [key, metadataValue(meta[key])]);
+}
+
 export function ExecDashboard({ slots, tasks }: { slots: SlotDef[]; tasks: Task[] }) {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [selectedSlotId, setSelectedSlotId] = useState<string | null>(null);
@@ -141,6 +171,7 @@ export function ExecDashboard({ slots, tasks }: { slots: SlotDef[]; tasks: Task[
     () => extractExecutionStepDigest(selectedTask, selectedTaskNotes, selectedSlot),
     [selectedTask, selectedTaskNotes, selectedSlot],
   );
+  const chainRows = useMemo(() => interactionChainRows(selectedTask), [selectedTask]);
 
   useEffect(() => {
     if (selectedSlotId && sortedSlots.some((slot) => slot.id === selectedSlotId)) return;
@@ -240,6 +271,16 @@ export function ExecDashboard({ slots, tasks }: { slots: SlotDef[]; tasks: Task[
             <KeyValue label="fallback" value="bounded HTTP refresh only" />
             <KeyValue label="slot" value={taskSlot?.id || '-'} mono />
             <KeyValue label="slot state" value={stateLabel(taskSlot)} tone={stateTone(taskSlot)} />
+          </DiagnosticBlock>
+
+          <DiagnosticBlock icon={<GitBranch className="w-4 h-4" />} title="Interaction Chain">
+            {chainRows.length > 0 ? (
+              chainRows.map(([label, value]) => (
+                <KeyValue key={label} label={label} value={value} mono multiline />
+              ))
+            ) : (
+              <KeyValue label="metadata" value="No runtime_metadata chain recorded." />
+            )}
           </DiagnosticBlock>
 
           <DiagnosticBlock icon={<ListChecks className="w-4 h-4" />} title="Execution Step Digest">

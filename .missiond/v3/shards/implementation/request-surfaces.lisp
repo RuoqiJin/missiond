@@ -41,13 +41,20 @@
                       "/jarvis/v1/chat/completions"
                       "/jarvis/api/readiness"
                       "/jarvis/api/monitor/jarvis"]
+      :smoke-scripts ["scripts/smoke-jarvis-chain.mjs"
+                      "scripts/smoke-jarvis-interaction.mjs"]
+      :slot-auto-heal (:env MISSIOND_JARVIS_SLOT_AUTO_HEAL
+                       :timeout-env MISSIOND_JARVIS_SLOT_AUTO_HEAL_TIMEOUT_SECS
+                       :rule "monitor is read-only; chat request may restart default Exited/Error slot once and must fail fast with typed diagnostic if restart fails")
       :public-tools [mission_interaction]
       :auth-boundary (:authority auth
                       :userinfo-endpoint "/oidc/userinfo"
                       :endpoint-env MISSIOND_INTERACTION_AUTH_USERINFO_URL
+                      :service-token-env MISSIOND_INTERACTION_SERVICE_TOKEN
+                      :service-token-ref "secret-store:missiond/jarvis-smoke/INTERACTION_SERVICE_TOKEN"
                       :timeout-env MISSIOND_INTERACTION_AUTH_TIMEOUT_MS
                       :failure-code INTERACTION_AUTH_UNAVAILABLE
-                      :rule "Web/iOS/Jarvis bearer tokens must be resolved through Auth userinfo before PermissionContext is accepted. Metadata roles/tenant/application fields are hints only; MissionD must fail fast when Auth is unavailable instead of creating BoardTask side effects.")
+                      :rule "Web/iOS/Jarvis bearer tokens must be resolved through Auth userinfo before PermissionContext is accepted. Automated Jarvis smoke uses MISSIOND_INTERACTION_SERVICE_TOKEN injected from secret-store ref missiond/jarvis-smoke/INTERACTION_SERVICE_TOKEN, never a fake token or repo-stored value. Metadata roles/tenant/application fields are hints only; MissionD must fail fast when Auth is unavailable instead of creating BoardTask side effects.")
       :legacy-adapter (:route "/v1/chat/completions"
                        :adapter handle_chat_completions_interaction_adapter
                        :normalizer openai_request_to_interaction_envelope

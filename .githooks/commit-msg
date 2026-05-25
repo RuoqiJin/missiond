@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# MissionD work-order commit-message gate.
+#
+# pre-commit can validate staged files, but it cannot inspect the final commit
+# message. This hook validates the MissionD-Work-Order trailer once Git has
+# materialized the message.
+
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+exec "${repo_root}/scripts/hooks/commit-msg-missiond-work-order" "$@"

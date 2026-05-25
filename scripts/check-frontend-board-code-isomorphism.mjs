@@ -152,12 +152,12 @@ function checkRepo(repo, blueprintRel, v3Rel) {
 
   const execDashboardRel = 'packages/board/src/components/ExecDashboard.tsx';
   const execDashboard = read(repo, execDashboardRel, diagnostics);
-  for (const needle of ['fetchTaskWithNotes', 'extractExecutionStepDigest', 'Execution Step Digest']) {
+  for (const needle of ['fetchTaskWithNotes', 'extractExecutionStepDigest', 'Execution Step Digest', 'interactionChainRows', 'Interaction Chain']) {
     if (!execDashboard.includes(needle)) {
       diagnostics.push(diag(execDashboardRel, null, `Exec cockpit missing execution-step-digest anchor ${JSON.stringify(needle)}`));
     }
   }
-  for (const needle of ['execution-step-digest', 'PTY as a detail panel']) {
+  for (const needle of ['execution-step-digest', 'PTY as a detail panel', 'runtime_metadata interaction chain']) {
     if (!source.includes(needle)) {
       diagnostics.push(diag(blueprintRel, null, `frontend blueprint missing execution cockpit intent ${JSON.stringify(needle)}`));
     }
@@ -208,7 +208,7 @@ function buildFixture() {
   for (const rel of fixtureFiles) {
     fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
     const body = rel === 'packages/board/src/components/ExecDashboard.tsx'
-      ? '// fixture\nfetchTaskWithNotes\nextractExecutionStepDigest\nExecution Step Digest\n'
+      ? '// fixture\nfetchTaskWithNotes\nextractExecutionStepDigest\nExecution Step Digest\ninteractionChainRows\nInteraction Chain\n'
       : '// fixture\n';
     fs.writeFileSync(path.join(root, rel), body);
   }
@@ -219,7 +219,7 @@ function buildFixture() {
   fs.writeFileSync(path.join(root, BLUEPRINT), `(missiond-frontend-blueprint
     (pillar execution-cockpit-ui
       (function execution-cockpit
-        :core ((step s1 :logic "derive execution-step-digest")
+        :core ((step s1 :logic "derive execution-step-digest and runtime_metadata interaction chain")
                (step s2 :logic "keep PTY as a detail panel"))))
     (implementation-map ${surfaceForms.join('\n')}))`);
   fs.writeFileSync(path.join(root, V3_BLUEPRINT), `(missiond-blueprint (implementation-map (surface board-frontend :implements [board-frontend] :code [".missiond/frontend/board-blueprint.lisp" "packages/board/src/generated/board-frontend-config.ts" "scripts/project-frontend-board-config.mjs" "node scripts/check-frontend-board-code-isomorphism.mjs" "node scripts/check-frontend-board-lisp-schema.mjs" "node scripts/check-frontend-board-runtime-projection.mjs"])))`);

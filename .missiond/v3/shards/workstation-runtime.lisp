@@ -58,7 +58,9 @@
     (chat-completions-policy jarvis-api
       :default_slot "slot-claude-code-default"
       :header_override "X-Slot-Id"
-      :rule "OpenAI-compatible /v1/chat/completions routes to the explicit X-Slot-Id header when present; otherwise it uses this V3-projected default slot. Rust must not hardcode slot-jarvis. Jarvis broad requests MUST pass the strict intent/plan gate: emit intent_draft and await user confirmation, then emit plan_draft and await confirmation, then create BoardTask metadata with grounding_context_id, intent_artifact_id, and plan_artifact_id before any worker dispatch.")
+      :auto_heal_env MISSIOND_JARVIS_SLOT_AUTO_HEAL
+      :auto_heal_timeout_env MISSIOND_JARVIS_SLOT_AUTO_HEAL_TIMEOUT_SECS
+      :rule "OpenAI-compatible /v1/chat/completions routes to the explicit X-Slot-Id header when present; otherwise it uses this V3-projected default slot. Rust must not hardcode slot-jarvis. Jarvis broad requests MUST pass the strict intent/plan gate: emit intent_draft and await user confirmation, then emit plan_draft and await confirmation, then create BoardTask metadata with grounding_context_id, intent_artifact_id, and plan_artifact_id before any worker dispatch. /jarvis/api/monitor/jarvis is read-only and may report auto_heal policy, but chat requests may attempt at most one restart of an Exited/Error default slot when MISSIOND_JARVIS_SLOT_AUTO_HEAL=1; failure returns JARVIS_SLOT_UNAVAILABLE or JARVIS_SLOT_AUTO_HEAL_FAILED typed diagnostic and never falls back to direct local code search or fake output.")
     (timeout-policy jarvis-sync-worker-wait
       :default_secs 180
       :min_secs 15

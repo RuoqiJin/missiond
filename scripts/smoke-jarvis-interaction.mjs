@@ -1,0 +1,193 @@
+#!/usr/bin/env node
+
+const args = new Set(process.argv.slice(2));
+const json = args.has('--json');
+const baseUrl = stripTrailingSlash(
+  process.env.JARVIS_BASE_URL || 'https://auth.xiaojinpro.com/jarvis',
+);
+const token =
+  process.env.MISSIOND_JARVIS_SMOKE_TOKEN ||
+  process.env.MISSIOND_INTERACTION_SERVICE_TOKEN ||
+  '';
+const objective =
+  process.env.JARVIS_SMOKE_OBJECTIVE ||
+  '只读 smoke：请确认 MissionD Jarvis intent/plan gate 是否会先生成 intent draft，不要改文件、不要创建部署。';
+
+function stripTrailingSlash(value) {
+  return String(value).replace(/\/+$/, '');
+}
+
+function buildRequestBody(extra = {}) {
+  return {
+    model: 'missiond-jarvis',
+    stream: true,
+    messages: [
+      {
+        role: 'user',
+        content: objective,
+      },
+    ],
+    ...extra,
+  };
+}
+
+async function readSse(response) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  const events = [];
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let boundary;
+    while ((boundary = buffer.indexOf('\n\n')) >= 0) {
+      const raw = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      const parsed = parseSseEvent(raw);
+      if (parsed) events.push(parsed);
+    }
+  }
+  if (buffer.trim()) {
+    const parsed = parseSseEvent(buffer);
+    if (parsed) events.push(parsed);
+  }
+  return events;
+}
+
+function parseSseEvent(raw) {
+  const lines = raw.split(/\r?\n/);
+  let event = 'message';
+  const dataLines = [];
+  for (const line of lines) {
+    if (line.startsWith('event:')) event = line.slice('event:'.length).trim();
+    if (line.startsWith('data:')) dataLines.push(line.slice('data:'.length).trimStart());
+  }
+  if (dataLines.length === 0) return null;
+  const dataText = dataLines.join('\n');
+  let data = dataText;
+  if (dataText !== '[DONE]') {
+    try {
+      data = JSON.parse(dataText);
+    } catch {
+      data = dataText;
+    }
+  }
+  return { event, data };
+}
+
+function eventNames(events) {
+  return events.map((event) => event.event);
+}
+
+function includesAny(events, candidates) {
+  const names = new Set(eventNames(events));
+  return candidates.some((candidate) => names.has(candidate));
+}
+
+async function postInteraction(body) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Number(process.env.JARVIS_SMOKE_TIMEOUT_MS || 30000));
+  try {
+    const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/json',
+        accept: 'text/event-stream',
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    const contentType = response.headers.get('content-type') || '';
+    if (!response.ok) {
+      const text = await response.text();
+      return {
+        ok: false,
+        status: response.status,
+        content_type: contentType,
+        events: [],
+        body_sample: text.slice(0, 500),
+      };
+    }
+    const events = contentType.includes('text/event-stream')
+      ? await readSse(response)
+      : [{ event: 'http_body', data: await response.text() }];
+    return { ok: true, status: response.status, content_type: contentType, events };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function main() {
+  if (!token) {
+    const result = {
+      ok: false,
+      schema: 'missiond.jarvis-interaction-smoke.v1',
+      diagnostics: [
+        {
+          code: 'INTERACTION_AUTH_REQUIRED',
+          message: 'Set MISSIOND_JARVIS_SMOKE_TOKEN or MISSIOND_INTERACTION_SERVICE_TOKEN; token values are never printed.',
+        },
+      ],
+    };
+    console.error(JSON.stringify(result, null, 2));
+    process.exit(2);
+  }
+
+  const first = await postInteraction(buildRequestBody());
+  const diagnostics = [];
+  if (!first.ok) {
+    diagnostics.push({
+      code: first.status === 401 ? 'INTERACTION_AUTH_INVALID' : 'JARVIS_INTERACTION_HTTP_FAILED',
+      message: `Jarvis interaction returned HTTP ${first.status}`,
+      body_sample: first.body_sample,
+    });
+  } else {
+    const names = eventNames(first.events);
+    for (const required of ['received', 'authenticated', 'grounding', 'intent_draft', 'confirm_required']) {
+      if (!names.includes(required)) {
+        diagnostics.push({
+          code: 'JARVIS_INTERACTION_EVENT_MISSING',
+          message: `Missing expected SSE event ${required}`,
+          events: names,
+        });
+      }
+    }
+    if (includesAny(first.events, ['board_task_created', 'worker_dispatched'])) {
+      diagnostics.push({
+        code: 'JARVIS_CONFIRMATION_BYPASS',
+        message: 'Initial broad request created or dispatched work before intent/plan confirmation.',
+      });
+    }
+  }
+
+  const result = {
+    ok: diagnostics.length === 0,
+    schema: 'missiond.jarvis-interaction-smoke.v1',
+    base_url: baseUrl,
+    http_status: first.status,
+    content_type: first.content_type,
+    events: eventNames(first.events),
+    diagnostics,
+  };
+
+  if (json) {
+    console.log(JSON.stringify(result, null, 2));
+  } else if (result.ok) {
+    console.log(`Jarvis interaction smoke OK: ${result.events.join(' -> ')}`);
+  } else {
+    console.error(JSON.stringify(result, null, 2));
+  }
+  process.exit(result.ok ? 0 : 1);
+}
+
+main().catch((error) => {
+  const result = {
+    ok: false,
+    schema: 'missiond.jarvis-interaction-smoke.v1',
+    diagnostics: [{ code: 'JARVIS_INTERACTION_SMOKE_EXCEPTION', message: error.message }],
+  };
+  console.error(json ? JSON.stringify(result, null, 2) : error.stack || error.message);
+  process.exit(1);
+});

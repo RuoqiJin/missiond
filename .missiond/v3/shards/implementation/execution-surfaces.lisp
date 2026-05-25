@@ -158,11 +158,13 @@
       :implements [work-order-start work-order-staged-verify work-order-commit-verify precommit-work-order-gate ci-work-order-gate code-first-drift-backfill]
       :code ["scripts/missiond-work-order.mjs"
              ".githooks/pre-commit"
+             ".githooks/commit-msg"
              "scripts/hooks/pre-commit-missiond-work-order"
+             "scripts/hooks/commit-msg-missiond-work-order"
              ".missiond/workflows/work-order-lifecycle.lisp"
              "scripts/check-v3-work-order-lifecycle-isomorphism.mjs"]
       :acceptance ["node scripts/check-v3-work-order-lifecycle-isomorphism.mjs --json"]
-      :note "external-work-order-gate is the engineering boundary for external Codex/ClaudeCode/user-local code changes. It does not assume the agent read a prompt file: local hooks, commit trailers, and CI/deploy verification require a MissionD-Work-Order id, intent.lisp, plan.lisp, accepted_shard_id, and write_scope coverage before accepting code changes. Code-first changes that bypass the gate become visible drift backfill tasks rather than silent accepted work.")
+      :note "external-work-order-gate is the engineering boundary for external Codex/ClaudeCode/user-local code changes. It does not assume the agent read a prompt file: local hooks, commit-msg trailer checks, and CI/deploy verification require a MissionD-Work-Order id, intent.lisp, plan.lisp, accepted_shard_id, and write_scope coverage before accepting code changes. pre-commit validates only staged files plus env/id metadata because the final commit message is not available yet; commit-msg validates the MissionD-Work-Order trailer. Code-first changes that bypass the gate become visible drift backfill tasks rather than silent accepted work.")
 
 (surface task-runner-cli
       :status "code-aligned"

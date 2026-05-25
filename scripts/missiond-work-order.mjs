@@ -26,6 +26,13 @@ Code changes must be covered by .missiond/work-orders/<id>/plan.lisp :write-scop
 
 if (!action || action === '--help' || action === '-h') usage(action ? 0 : 1);
 
+class VerifyError extends Error {
+  constructor(message, details) {
+    super(message);
+    this.details = details;
+  }
+}
+
 try {
   if (action === 'start') startWorkOrder(args);
   else if (action === 'verify') verifyWorkOrder(args);
@@ -33,6 +40,9 @@ try {
   else usage();
 } catch (err) {
   console.error(`missiond work-order ${action} failed: ${err.message}`);
+  if (err.details) {
+    console.error(JSON.stringify(err.details, null, 2));
+  }
   process.exit(1);
 }
 
@@ -85,16 +95,52 @@ function verifyWorkOrder(rest) {
     return;
   }
   if (!id) {
-    throw new Error(`code changes require --id, MISSIOND_WORK_ORDER, or commit message trailer MissionD-Work-Order: <id>. Files: ${codeFiles.join(', ')}`);
+    throw new VerifyError(
+      'code changes require an explicit work-order id',
+      {
+        staged_code_files: codeFiles,
+        matched_work_order: null,
+        missing: ['MISSIOND_WORK_ORDER or --id'],
+        note: 'pre-commit cannot inspect the final commit message trailer; commit-msg validates MissionD-Work-Order after the message exists.',
+        suggested_commands: [
+          'node scripts/missiond-work-order.mjs start "describe the change"',
+          'MISSIOND_WORK_ORDER=<id> node scripts/missiond-work-order.mjs verify --staged',
+          'node scripts/missiond-work-order.mjs commit --id <id> --message "message"',
+        ],
+      },
+    );
   }
   const workOrder = loadWorkOrder(id);
   const scopes = extractWriteScopes(workOrder.planText);
   if (scopes.length === 0) {
-    throw new Error(`${workOrder.planRel} has no :write_scope entries; code files are not covered: ${codeFiles.join(', ')}`);
+    throw new VerifyError(
+      `${workOrder.planRel} has no :write_scope entries`,
+      {
+        staged_code_files: codeFiles,
+        matched_work_order: id,
+        plan: workOrder.planRel,
+        missing: ['write_scope'],
+        suggested_plan_patch:
+          ':write_scope ["path/to/file-or-directory"] ; must cover every code-like changed file',
+      },
+    );
   }
   const uncovered = codeFiles.filter((file) => !isCovered(file, scopes));
   if (uncovered.length > 0) {
-    throw new Error(`write_scope does not cover changed files: ${uncovered.join(', ')}. Scopes: ${scopes.join(', ')}`);
+    throw new VerifyError(
+      'write_scope does not cover all changed code files',
+      {
+        staged_code_files: codeFiles,
+        matched_work_order: id,
+        plan: workOrder.planRel,
+        write_scope: scopes,
+        uncovered_files: uncovered,
+        suggested_commands: [
+          `edit ${workOrder.planRel} and add the missing files/directories to :write_scope`,
+          `MISSIOND_WORK_ORDER=${id} node scripts/missiond-work-order.mjs verify --staged`,
+        ],
+      },
+    );
   }
   const result = {
     ok: true,

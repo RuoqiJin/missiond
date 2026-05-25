@@ -16,9 +16,10 @@ use crate::cc_tasks::{
     WatcherEvent,
 };
 use crate::event::events::SystemEvent;
-use crate::pty::{PTYManager, SessionEvent, SessionState};
+use crate::pty::{PTYManager, PTYSpawnOptions, SessionEvent, SessionState, Slot as PTYSlot};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -202,6 +203,7 @@ pub struct PTYWebSocketServer {
 /// Jarvis system prompt — injected before context enrichment so Claude Code
 /// knows it's running as Jarvis behind a Web Chat UI, not as a local terminal.
 /// Tool count is dynamically injected at runtime via `jarvis_system_prompt()`.
+#[allow(dead_code)]
 fn jarvis_system_prompt(tool_count: usize) -> String {
     format!(
         "<system_info>\n\
@@ -220,6 +222,7 @@ fn jarvis_system_prompt(tool_count: usize) -> String {
 
 // ── AIOps Webhook Parsers ──
 
+#[allow(dead_code)]
 fn jarvis_sync_timeout_ms() -> u64 {
     const DEFAULT_TIMEOUT_MS: u64 = 15 * 60 * 1000;
     const MIN_TIMEOUT_MS: u64 = 30 * 1000;
@@ -232,6 +235,7 @@ fn jarvis_sync_timeout_ms() -> u64 {
         .clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS)
 }
 
+#[allow(dead_code)]
 fn jarvis_idle_without_final_grace_ms() -> u64 {
     const DEFAULT_GRACE_MS: u64 = 30 * 1000;
     const MIN_GRACE_MS: u64 = 10 * 1000;
@@ -244,6 +248,7 @@ fn jarvis_idle_without_final_grace_ms() -> u64 {
         .clamp(MIN_GRACE_MS, MAX_GRACE_MS)
 }
 
+#[allow(dead_code)]
 fn jarvis_final_settle_ms() -> u64 {
     const DEFAULT_SETTLE_MS: u64 = 30 * 1000;
     const MIN_SETTLE_MS: u64 = 500;
@@ -328,6 +333,28 @@ fn jarvis_visible_heartbeat_secs() -> u64 {
     )
 }
 
+fn jarvis_slot_auto_heal_enabled() -> bool {
+    matches!(
+        std::env::var("MISSIOND_JARVIS_SLOT_AUTO_HEAL")
+            .unwrap_or_else(|_| "0".to_string())
+            .as_str(),
+        "1" | "true" | "TRUE" | "yes" | "on"
+    )
+}
+
+fn jarvis_slot_auto_heal_timeout_secs() -> u64 {
+    const DEFAULT_TIMEOUT_SECS: u64 = 45;
+    const MIN_TIMEOUT_SECS: u64 = 5;
+    const MAX_TIMEOUT_SECS: u64 = 180;
+
+    std::env::var("MISSIOND_JARVIS_SLOT_AUTO_HEAL_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_TIMEOUT_SECS)
+        .clamp(MIN_TIMEOUT_SECS, MAX_TIMEOUT_SECS)
+}
+
+#[allow(dead_code)]
 fn jarvis_confirm_bool(req: &serde_json::Value, key: &str) -> bool {
     fn bool_at<'a>(value: &'a serde_json::Value, key: &str) -> Option<bool> {
         value.get(key).and_then(|field| field.as_bool())
@@ -346,6 +373,7 @@ fn jarvis_confirm_bool(req: &serde_json::Value, key: &str) -> bool {
         .unwrap_or(false)
 }
 
+#[allow(dead_code)]
 fn jarvis_confirm_string(req: &serde_json::Value, key: &str) -> Option<String> {
     fn string_at(value: &serde_json::Value, key: &str) -> Option<String> {
         value
@@ -1405,6 +1433,101 @@ impl PTYWebSocketServer {
         Ok(())
     }
 
+    fn jarvis_slot_runtime_cwd() -> std::path::PathBuf {
+        for key in [
+            "MISSIOND_PROJECT_ROOT",
+            "MISSIOND_ORCHESTRATOR_ROOT",
+            "MISSIOND_REPO_ROOT",
+            "MISSIOND_WORKSPACE_ROOT",
+        ] {
+            if let Ok(value) = std::env::var(key) {
+                let trimmed = value.trim();
+                if !trimmed.is_empty() {
+                    return std::path::PathBuf::from(trimmed);
+                }
+            }
+        }
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    }
+
+    fn jarvis_slot_mcp_config() -> Option<std::path::PathBuf> {
+        let path = Self::mission_home().join("xjp-mcp-config.json");
+        if path.exists() {
+            Some(path)
+        } else {
+            None
+        }
+    }
+
+    async fn maybe_auto_heal_jarvis_slot(
+        pty_manager: &PTYManager,
+        slot_id: &str,
+    ) -> serde_json::Value {
+        if !jarvis_slot_auto_heal_enabled() {
+            return serde_json::json!({
+                "status": "skipped",
+                "reason": "MISSIOND_JARVIS_SLOT_AUTO_HEAL is not enabled",
+            });
+        }
+
+        let Some(info) = pty_manager.get_status(slot_id).await else {
+            return serde_json::json!({
+                "status": "failed",
+                "code": "JARVIS_SLOT_NOT_REGISTERED",
+                "reason": format!("Default slot {slot_id} is not registered; cannot auto-heal without a projected slot."),
+            });
+        };
+
+        if !matches!(info.state, SessionState::Exited | SessionState::Error) {
+            return serde_json::json!({
+                "status": "skipped",
+                "reason": format!("Slot {slot_id} is {:?}; auto-heal only restarts Exited/Error slots.", info.state),
+                "slot_state": format!("{:?}", info.state),
+            });
+        }
+
+        let cwd = Self::jarvis_slot_runtime_cwd();
+        let mut extra_env = HashMap::new();
+        extra_env.insert("MISSIOND_SLOT_ID".to_string(), slot_id.to_string());
+        extra_env.insert(
+            "MISSIOND_JARVIS_AUTO_HEAL".to_string(),
+            chrono::Utc::now().to_rfc3339(),
+        );
+        let slot = PTYSlot {
+            id: slot_id.to_string(),
+            role: info.role.clone(),
+            cwd: Some(cwd.clone()),
+            engine: info.engine,
+        };
+        let options = PTYSpawnOptions {
+            auto_restart: true,
+            wait_for_idle: true,
+            timeout_secs: Some(jarvis_slot_auto_heal_timeout_secs()),
+            mcp_config: Self::jarvis_slot_mcp_config(),
+            dangerously_skip_permissions: true,
+            extra_env,
+            ..Default::default()
+        };
+
+        match pty_manager.restart(&slot, options).await {
+            Ok(restarted) => serde_json::json!({
+                "status": "healed",
+                "slot_id": slot_id,
+                "cwd": cwd,
+                "slot_state": format!("{:?}", restarted.state),
+                "provider": format!("{:?}", restarted.engine),
+                "checked_at": chrono::Utc::now().to_rfc3339(),
+            }),
+            Err(error) => serde_json::json!({
+                "status": "failed",
+                "code": "JARVIS_SLOT_AUTO_HEAL_FAILED",
+                "slot_id": slot_id,
+                "error": error.to_string(),
+                "checked_at": chrono::Utc::now().to_rfc3339(),
+            }),
+        }
+    }
+
     async fn build_jarvis_readiness(
         pty_manager: &PTYManager,
         default_slot: &str,
@@ -1466,8 +1589,103 @@ impl PTYWebSocketServer {
             "session_running": session_running,
             "reason": reason,
             "recognition": recognition,
+            "auto_heal": {
+                "enabled": jarvis_slot_auto_heal_enabled(),
+                "trigger": "chat-request-only",
+                "timeout_secs": jarvis_slot_auto_heal_timeout_secs(),
+                "env": "MISSIOND_JARVIS_SLOT_AUTO_HEAL",
+            },
             "checked_at": chrono::Utc::now().to_rfc3339(),
         })
+    }
+
+    async fn ensure_jarvis_slot_ready_for_chat(
+        pty_manager: Option<&Arc<PTYManager>>,
+        default_slot: &str,
+    ) -> Result<serde_json::Value, serde_json::Value> {
+        let Some(pty_manager) = pty_manager else {
+            return Err(serde_json::json!({
+                "error": {
+                    "code": "JARVIS_SLOT_MANAGER_UNAVAILABLE",
+                    "message": "MissionD PTY manager is unavailable; Jarvis cannot dispatch work."
+                },
+                "auto_heal": {
+                    "status": "skipped",
+                    "reason": "PTY manager unavailable"
+                },
+                "checked_at": chrono::Utc::now().to_rfc3339(),
+            }));
+        };
+
+        let readiness = Self::build_jarvis_readiness(pty_manager, default_slot).await;
+        let status = readiness
+            .get("status")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        if status == "ready" {
+            return Ok(serde_json::json!({
+                "status": "ready",
+                "readiness": readiness,
+            }));
+        }
+        if status == "busy" {
+            return Err(serde_json::json!({
+                "error": {
+                    "code": "JARVIS_SLOT_BUSY",
+                    "message": readiness
+                        .get("reason")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("Default Jarvis slot is busy.")
+                },
+                "readiness": readiness,
+                "auto_heal": {
+                    "status": "skipped",
+                    "reason": "busy slots are not restarted automatically"
+                },
+            }));
+        }
+
+        let auto_heal = Self::maybe_auto_heal_jarvis_slot(pty_manager, default_slot).await;
+        let healed = auto_heal
+            .get("status")
+            .and_then(|value| value.as_str())
+            .map(|value| value == "healed")
+            .unwrap_or(false);
+        if healed {
+            let readiness_after_heal =
+                Self::build_jarvis_readiness(pty_manager, default_slot).await;
+            let status_after_heal = readiness_after_heal
+                .get("status")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            if status_after_heal == "ready" {
+                return Ok(serde_json::json!({
+                    "status": "ready",
+                    "readiness": readiness_after_heal,
+                    "auto_heal": auto_heal,
+                }));
+            }
+            return Err(serde_json::json!({
+                "error": {
+                    "code": "JARVIS_SLOT_AUTO_HEAL_NOT_READY",
+                    "message": "Default Jarvis slot restarted but did not become ready."
+                },
+                "readiness": readiness_after_heal,
+                "auto_heal": auto_heal,
+            }));
+        }
+
+        Err(serde_json::json!({
+            "error": {
+                "code": "JARVIS_SLOT_UNAVAILABLE",
+                "message": readiness
+                    .get("reason")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("Default Jarvis slot is unavailable.")
+            },
+            "readiness": readiness,
+            "auto_heal": auto_heal,
+        }))
     }
 
     /// HTTP API — default Jarvis slot readiness.
@@ -1758,6 +1976,8 @@ impl PTYWebSocketServer {
     async fn handle_chat_completions_interaction_adapter(
         mut stream: TcpStream,
         addr: SocketAddr,
+        pty_manager: Option<Arc<PTYManager>>,
+        default_chat_slot: String,
         jarvis_grounding: JarvisGroundingSlot,
         jarvis_artifact_writer: JarvisArtifactSlot,
         db: Option<Arc<dyn crate::db::traits::MissionStore>>,
@@ -1779,6 +1999,13 @@ impl PTYWebSocketServer {
                 return Ok(());
             }
         };
+        if let Err(err) =
+            Self::ensure_jarvis_slot_ready_for_chat(pty_manager.as_ref(), &default_chat_slot).await
+        {
+            Self::send_http_error(&mut stream, 503, "Service Unavailable", &err.to_string())
+                .await?;
+            return Ok(());
+        }
         let envelope = openai_request_to_interaction_envelope(&req);
         Self::handle_interaction_envelope(
             stream,
@@ -2366,6 +2593,7 @@ impl PTYWebSocketServer {
     /// Send an HTTP error response
     /// Extract text + images from OpenAI multimodal content array.
     /// Images (base64 data URLs) are saved to temp files; local paths are injected into the prompt.
+    #[allow(dead_code)]
     async fn extract_multimodal_content(parts: &[serde_json::Value]) -> String {
         let media_dir = std::path::Path::new("/tmp/missiond_media");
         let mut text_parts: Vec<String> = Vec::new();
@@ -2415,6 +2643,7 @@ impl PTYWebSocketServer {
 
     /// Decode a data URL (data:image/jpeg;base64,...) and save to a temp file.
     /// Returns the local file path on success.
+    #[allow(dead_code)]
     async fn save_data_url_to_file(url: &str, media_dir: &std::path::Path) -> Option<String> {
         use base64::Engine;
 
@@ -3523,6 +3752,7 @@ impl PTYWebSocketServer {
     }
 
     /// Handle POST /v1/chat/completions — OpenAI-compatible SSE endpoint
+    #[allow(dead_code)]
     async fn handle_chat_completions(
         mut stream: TcpStream,
         addr: SocketAddr,
@@ -4208,9 +4438,21 @@ impl PTYWebSocketServer {
 
         info!(?addr, slot_id, msg_len = user_message.len(), trace_id = %chat_id, "Chat completions request");
 
-        // Check slot status
-        let status = pty_manager.get_status(&slot_id).await;
-        let state = status.as_ref().map(|s| s.state.clone());
+        // Check slot status. If enabled, Jarvis may make one bounded restart
+        // attempt for the default slot; failure remains a typed diagnostic.
+        let mut status = pty_manager.get_status(&slot_id).await;
+        let mut state = status.as_ref().map(|s| s.state.clone());
+        let mut auto_heal = serde_json::json!({"status": "not_attempted"});
+        if matches!(
+            state,
+            None | Some(SessionState::Exited | SessionState::Error)
+        ) {
+            auto_heal = Self::maybe_auto_heal_jarvis_slot(&pty_manager, &slot_id).await;
+            if auto_heal.get("status").and_then(|value| value.as_str()) == Some("healed") {
+                status = pty_manager.get_status(&slot_id).await;
+                state = status.as_ref().map(|s| s.state.clone());
+            }
+        }
 
         match &state {
             None | Some(SessionState::Exited) => {
@@ -4225,7 +4467,13 @@ impl PTYWebSocketServer {
                         router_trace_id,
                     )
                     .await;
-                let err = serde_json::json!({"error": {"message": &error_msg}});
+                let err = serde_json::json!({
+                    "error": {
+                        "code": "JARVIS_SLOT_UNAVAILABLE",
+                        "message": &error_msg,
+                    },
+                    "auto_heal": auto_heal,
+                });
                 Self::send_http_error(&mut stream, 503, "Service Unavailable", &err.to_string())
                     .await?;
                 return Ok(());
@@ -4242,7 +4490,14 @@ impl PTYWebSocketServer {
                         router_trace_id,
                     )
                     .await;
-                let err = serde_json::json!({"error": {"message": &error_msg}, "retry_after": 5});
+                let err = serde_json::json!({
+                    "error": {
+                        "code": "JARVIS_SLOT_BUSY",
+                        "message": &error_msg,
+                    },
+                    "auto_heal": auto_heal,
+                    "retry_after": 5
+                });
                 let response = format!(
                     "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nRetry-After: 5\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     err.to_string().len(),
@@ -5472,15 +5727,15 @@ impl PTYWebSocketServer {
         pty_manager: Option<Arc<PTYManager>>,
         cc_tasks_watcher: Option<Arc<Mutex<CCTasksWatcher>>>,
         screenshot_broker: Option<Arc<super::ScreenshotBroker>>,
-        jarvis_trace: JarvisTraceStore,
+        _jarvis_trace: JarvisTraceStore,
         incident_tx: Option<tokio::sync::mpsc::Sender<crate::types::MissionIncident>>,
         system_event_tx: Option<tokio::sync::mpsc::Sender<SystemEvent>>,
         frontend_events_tx: Option<broadcast::Sender<String>>,
         db: Option<Arc<dyn crate::db::traits::MissionStore>>,
-        context_enricher: ContextEnricherSlot,
+        _context_enricher: ContextEnricherSlot,
         jarvis_grounding: JarvisGroundingSlot,
         jarvis_artifact_writer: JarvisArtifactSlot,
-        tool_count: usize,
+        _tool_count: usize,
         default_chat_slot: String,
     ) -> anyhow::Result<()> {
         // Peek at first bytes to detect non-WebSocket HTTP requests
@@ -5565,6 +5820,8 @@ impl PTYWebSocketServer {
                 return Self::handle_chat_completions_interaction_adapter(
                     stream,
                     addr,
+                    pty_manager.clone(),
+                    default_chat_slot.clone(),
                     jarvis_grounding,
                     jarvis_artifact_writer,
                     db,

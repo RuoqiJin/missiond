@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+msg_file="${1:-}"
+if [ -z "$msg_file" ] || [ ! -f "$msg_file" ]; then
+  echo "commit-msg-missiond-work-order: missing commit message file" >&2
+  exit 1
+fi
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+if ! git diff --cached --name-only | grep -Eq '\.(rs|ts|tsx|js|mjs|cjs|py|go|java|kt|swift|sql|toml|ya?ml|json|sh|bash|zsh)$'; then
+  exit 0
+fi
+
+work_order_id="$(grep -E '^MissionD-Work-Order:[[:space:]]*[^[:space:]]+' "$msg_file" | tail -1 | sed -E 's/^MissionD-Work-Order:[[:space:]]*//')"
+if [ -z "$work_order_id" ]; then
+  echo "MissionD work-order gate: code changes need commit trailer MissionD-Work-Order: <id>" >&2
+  echo "Tip: use scripts/missiond-work-order.mjs commit --id <id> --message \"message\"." >&2
+  exit 1
+fi
+
+node scripts/missiond-work-order.mjs verify --staged --id "$work_order_id"
