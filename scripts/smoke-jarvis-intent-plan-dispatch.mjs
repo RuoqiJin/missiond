@@ -126,13 +126,45 @@ function parseSseEvent(raw) {
 }
 
 function eventNames(response) {
-  return response.events.map((event) => event.event);
+  return response.events.map((event) => inferredEventName(event));
+}
+
+function inferredEventName(item) {
+  if (!item) return 'unknown';
+  if (item.event && item.event !== 'message') return item.event;
+  const data = item.data;
+  if (data && typeof data === 'object') {
+    if (data.schema === 'missiond.interaction-envelope.v1') return 'received';
+    if (data.authenticated === true) return 'authenticated';
+    if (data.permission_context) return 'permission_resolved';
+    if (data.phase === 'grounding' || data.grounding_context_id) return 'grounding';
+    if (data.intent_artifact_id && data.objective) return 'intent_draft';
+    if (data.plan_artifact_id && data.steps) return 'plan_draft';
+    if (data.confirm_payload) return 'confirm_required';
+    if (data.board_task_id || data.board_task_ids) return 'board_task_created';
+    if (data.status === 'workers_running' || data.phase === 'workers_running') return 'worker_status';
+  }
+  return item.event || 'message';
 }
 
 function findConfirmPayload(response) {
-  const event = response.events.find((item) => item.event === 'confirm_required');
-  if (!event || typeof event.data !== 'object' || event.data === null) return null;
-  return event.data.confirm_payload || event.data.confirmPayload || null;
+  for (const event of response.events) {
+    const data = event?.data;
+    if (data && typeof data === 'object') {
+      const payload = data.confirm_payload || data.confirmPayload;
+      if (payload && typeof payload === 'object') return payload;
+      if (typeof payload === 'string') {
+        try {
+          return JSON.parse(payload);
+        } catch {
+          return { missiond_confirm_payload_text: payload };
+        }
+      }
+    }
+    const direct = event?.confirm_payload || event?.confirmPayload;
+    if (direct && typeof direct === 'object') return direct;
+  }
+  return null;
 }
 
 function hasEvent(response, name) {

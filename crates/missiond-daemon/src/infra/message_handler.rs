@@ -241,6 +241,14 @@ async fn ingest(
             })
             .filter(|&t| t > 0);
 
+        let metadata = msg.message.stop_reason.as_ref().map(|stop_reason| {
+            serde_json::json!({
+                "provider": "claude_code",
+                "stop_reason": stop_reason,
+            })
+            .to_string()
+        });
+
         batch.push(missiond_core::types::ConversationMessage {
             id: 0,
             session_id: session_id.to_string(),
@@ -252,7 +260,7 @@ async fn ingest(
             parent_uuid: msg.parent_uuid.clone(),
             model: msg.message.model.clone(),
             timestamp: msg.timestamp.clone(),
-            metadata: None,
+            metadata,
             tool_name,
             content_types: content_types_json,
             has_image,

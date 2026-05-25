@@ -3640,10 +3640,13 @@ impl PTYWebSocketServer {
             "write code",
             "develop",
             "migrate",
+            "补齐",
             "接入",
             "实现",
             "修复",
             "重构",
+            "提交",
+            "推送",
         ];
         for verb in IMPL_VERBS {
             if lower.contains(verb) {
@@ -3680,10 +3683,20 @@ impl PTYWebSocketServer {
                     "read-only",
                     serde_json::json!([]),
                 )
-            } else if verb_class == "code" {
+            } else if verb_class == "code" && mentions_codex {
+                // Codex implementation objectives project engine_hint=codex and pool_hint=codex-code-worker.
                 (
                     "code",
                     "codex",
+                    "codex-code-worker",
+                    "codex-grounded-implementation",
+                    verb_write_policy,
+                    serde_json::json!([read_scope_root]),
+                )
+            } else if verb_class == "code" {
+                (
+                    "code",
+                    "claude_code",
                     "claude-code-default",
                     "jarvis-grounded-implementation",
                     verb_write_policy,
@@ -7010,11 +7023,31 @@ mod tests {
         );
         assert_eq!(metadata["task_class"], "code");
         assert_eq!(metadata["write_policy"], "scoped");
+        assert_eq!(metadata["engine_hint"], "claude_code");
         assert_eq!(metadata["pool_hint"], "claude-code-default");
         assert_eq!(metadata["task_kind"], "jarvis-grounded-implementation");
         let ws = metadata["write_scope"].as_array().unwrap();
         assert!(!ws.is_empty());
         assert_eq!(ws[0], "/repo");
+    }
+
+    #[test]
+    fn jarvis_dispatch_codex_implementation_uses_codex_code_worker() {
+        let metadata = PTYWebSocketServer::derive_jarvis_dispatch_contract(
+            "请让 Codex 补齐 Autopilot final 选择并提交推送",
+            "context-gather:codex",
+            Some("shared-artifact://codex"),
+            Some("/tmp/ctx.json"),
+            "intent-codex",
+            "plan-codex",
+            "/repo",
+        );
+        assert_eq!(metadata["task_class"], "code");
+        assert_eq!(metadata["write_policy"], "scoped");
+        assert_eq!(metadata["engine_hint"], "codex");
+        assert_eq!(metadata["pool_hint"], "codex-code-worker");
+        assert_eq!(metadata["task_kind"], "codex-grounded-implementation");
+        assert_eq!(metadata["write_scope"][0], "/repo");
     }
 
     #[test]

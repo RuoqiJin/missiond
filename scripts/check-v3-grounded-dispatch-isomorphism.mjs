@@ -159,10 +159,33 @@ const checks = [
     [
       'fn classify_jarvis_dispatch_verb',
       'jarvis-grounded-implementation',
+      'codex-grounded-implementation',
       '"scoped"',
       'claude-code-default',
+      'codex-code-worker',
+      'engine_hint=codex',
       '工位实现任务',
       'write_scope 范围内修改文件',
+    ],
+  ],
+  [
+    'provider final terminal turn gate',
+    'crates/missiond-daemon/src/engine/intent_engine/autopilot.rs',
+    [
+      'assistant_message_can_be_terminal_final',
+      'metadata_stop_reason',
+      'stop_reason',
+      'tool_use',
+      'provider_completion_rejects_tool_use_stop_reason_even_when_text_looks_final',
+    ],
+  ],
+  [
+    'claude stop reason preservation',
+    'crates/missiond-daemon/src/infra/message_handler.rs',
+    [
+      'stop_reason',
+      'provider',
+      'claude_code',
     ],
   ],
   [

@@ -482,7 +482,7 @@ fn latest_assistant_after_task_prompt(
             latest = None;
             continue;
         }
-        if seen_task_prompt && msg.role == "assistant" {
+        if seen_task_prompt && assistant_message_can_be_terminal_final(msg) {
             let visible = visible_text_from_message(msg);
             let visible = visible.trim();
             if visible.is_empty()
@@ -517,7 +517,7 @@ fn assistant_candidates_after_task_prompt(
             candidates.clear();
             continue;
         }
-        if seen_task_prompt && msg.role == "assistant" {
+        if seen_task_prompt && assistant_message_can_be_terminal_final(msg) {
             let visible = visible_text_from_message(msg);
             let visible = visible.trim();
             if visible.is_empty()
@@ -539,7 +539,8 @@ fn assistant_candidates_after_claim(
     messages
         .iter()
         .filter(|msg| {
-            msg.role == "assistant" && timestamp_is_after_or_unknown(&msg.timestamp, claimed_at)
+            assistant_message_can_be_terminal_final(msg)
+                && timestamp_is_after_or_unknown(&msg.timestamp, claimed_at)
         })
         .filter_map(|msg| {
             let visible = visible_text_from_message(msg);
@@ -602,6 +603,61 @@ fn is_probably_provider_tool_invocation_message(content: &str) -> bool {
         || trimmed.starts_with("[tool:")
         || (trimmed.starts_with("Tool:")
             && (trimmed.contains("command:") || trimmed.contains("description:")))
+}
+
+fn assistant_message_can_be_terminal_final(
+    msg: &missiond_core::types::ConversationMessage,
+) -> bool {
+    if msg.role != "assistant" {
+        return false;
+    }
+    if msg.has_tool_use {
+        return false;
+    }
+    if content_types_include(msg.content_types.as_deref(), "tool_use") {
+        return false;
+    }
+    if metadata_stop_reason(msg.metadata.as_deref()).as_deref() == Some("tool_use") {
+        return false;
+    }
+    if raw_content_contains_block_type(msg.raw_content.as_deref(), "tool_use") {
+        return false;
+    }
+    true
+}
+
+fn metadata_stop_reason(metadata: Option<&str>) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(metadata?).ok()?;
+    value
+        .get("stop_reason")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+fn content_types_include(content_types: Option<&str>, expected: &str) -> bool {
+    let Some(raw) = content_types else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|value| value.as_array().cloned())
+        .map(|items| items.iter().any(|item| item.as_str() == Some(expected)))
+        .unwrap_or(false)
+}
+
+fn raw_content_contains_block_type(raw_content: Option<&str>, expected: &str) -> bool {
+    let Some(raw) = raw_content else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|value| value.as_array().cloned())
+        .map(|items| {
+            items
+                .iter()
+                .any(|item| item.get("type").and_then(|t| t.as_str()) == Some(expected))
+        })
+        .unwrap_or(false)
 }
 
 fn visible_text_from_message(msg: &missiond_core::types::ConversationMessage) -> String {
@@ -8310,6 +8366,22 @@ Review only.
         }
     }
 
+    fn make_msg_with_metadata(
+        role: &str,
+        content: &str,
+        raw_content: Option<&str>,
+        metadata: Option<&str>,
+        content_types: Option<&str>,
+        has_tool_use: bool,
+        ts: &str,
+    ) -> missiond_core::types::ConversationMessage {
+        let mut msg = make_msg(role, content, raw_content, ts);
+        msg.metadata = metadata.map(str::to_string);
+        msg.content_types = content_types.map(str::to_string);
+        msg.has_tool_use = has_tool_use;
+        msg
+    }
+
     #[test]
     fn thinking_blocks_do_not_exclude_final_assistant_candidate() {
         let raw_with_thinking = serde_json::json!([
@@ -8399,7 +8471,7 @@ Review only.
         .to_string();
 
         let raw_intermediate = serde_json::json!([
-            {"type": "text", "text": "Let me read the file.\n[Tool: Read] file_path: \"/a.rs\""}
+            {"type": "text", "text": "All 4 tests pass. Let me also verify the V3 contract checks are clean."}
         ])
         .to_string();
         let raw_final = serde_json::json!([
@@ -8409,7 +8481,15 @@ Review only.
 
         let messages = vec![
             make_msg("worker_user", "task-xyz: review the code", None, "2026-01-01T00:00:00Z"),
-            make_msg("assistant", "Let me read the file.\n[Tool: Read] file_path: \"/a.rs\"", Some(&raw_intermediate), "2026-01-01T00:00:01Z"),
+            make_msg_with_metadata(
+                "assistant",
+                "All 4 tests pass. Let me also verify the V3 contract checks are clean.",
+                Some(&raw_intermediate),
+                Some(r#"{"provider":"claude_code","stop_reason":"tool_use"}"#),
+                Some(r#"["text"]"#),
+                false,
+                "2026-01-01T00:00:01Z",
+            ),
             make_msg("tool_result", "[tool_result]", None, "2026-01-01T00:00:02Z"),
             make_msg(
                 "assistant",
@@ -8434,6 +8514,41 @@ Review only.
         assert!(
             !summary.contains("[thinking]"),
             "summary should not contain thinking block"
+        );
+    }
+
+    #[test]
+    fn provider_completion_rejects_tool_use_stop_reason_even_when_text_looks_final() {
+        let task_desc = serde_json::json!({
+            "source": "jarvis-intent-plan-gate",
+            "dispatch_metadata": {
+                "task_class": "review",
+                "output_contract": "Findings / Evidence / Recommendations / Verification"
+            }
+        })
+        .to_string();
+        let raw_intermediate = serde_json::json!([
+            {"type": "text", "text": "## Findings\nLooks good.\n## Evidence\nFour tests pass.\n## Recommendations\nNow I will run one more check.\n## Verification\nPending."}
+        ])
+        .to_string();
+        let messages = vec![
+            make_msg("worker_user", "task-xyz: review the code", None, "2026-01-01T00:00:00Z"),
+            make_msg_with_metadata(
+                "assistant",
+                "## Findings\nLooks good.\n## Evidence\nFour tests pass.\n## Recommendations\nNow I will run one more check.\n## Verification\nPending.",
+                Some(&raw_intermediate),
+                Some(r#"{"provider":"claude_code","stop_reason":"tool_use"}"#),
+                Some(r#"["text"]"#),
+                false,
+                "2026-01-01T00:00:01Z",
+            ),
+        ];
+
+        let summary =
+            provider_completion_summary_for_task(&messages, "task-xyz", &task_desc, None, None);
+        assert!(
+            summary.is_none(),
+            "tool_use stop_reason must not close the task even if headings are present"
         );
     }
 }

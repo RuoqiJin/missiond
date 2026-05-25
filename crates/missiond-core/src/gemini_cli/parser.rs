@@ -371,6 +371,7 @@ fn make_cc_line(
             content,
             model,
             usage,
+            stop_reason: None,
         },
         uuid: uuid.to_string(),
         timestamp: timestamp.to_string(),

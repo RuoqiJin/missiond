@@ -397,6 +397,21 @@ async fn reconcile_file_gap(
         let raw_content = events_sync::sanitize_raw_content(&msg.message.content);
         let tool_name = events_sync::extract_tool_names_csv(&msg.message.content);
 
+        let metadata = msg.message.stop_reason.as_ref().map(|stop_reason| {
+            serde_json::json!({
+                "provider": "claude_code",
+                "stop_reason": stop_reason,
+            })
+            .to_string()
+        });
+        let content_types_json = if content_types.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&content_types).unwrap_or_default())
+        };
+        let has_tool_use = content_types.iter().any(|t| *t == "tool_use");
+        let has_tool_result_flag = content_types.iter().any(|t| *t == "tool_result");
+
         batch.push(missiond_core::types::ConversationMessage {
             id: 0,
             session_id: sid.clone(),
@@ -408,12 +423,12 @@ async fn reconcile_file_gap(
             parent_uuid: msg.parent_uuid.clone(),
             model: msg.message.model.clone(),
             timestamp: msg.timestamp.clone(),
-            metadata: None,
+            metadata,
             tool_name,
-            content_types: None,
+            content_types: content_types_json,
             has_image: false,
-            has_tool_use: false,
-            has_tool_result: false,
+            has_tool_use,
+            has_tool_result: has_tool_result_flag,
             token_count: None,
             seq: None,
             role_display: None,

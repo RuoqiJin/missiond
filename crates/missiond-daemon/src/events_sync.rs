@@ -1045,6 +1045,14 @@ pub async fn reconcile_conversation_messages(
         let raw_content = sanitize_raw_content(&msg.message.content);
 
         let tool_name = extract_tool_names_csv(&msg.message.content);
+        let metadata = msg.message.stop_reason.as_ref().map(|stop_reason| {
+            serde_json::json!({
+                "provider": "claude_code",
+                "stop_reason": stop_reason,
+            })
+            .to_string()
+        });
+
         batch.push(missiond_core::types::ConversationMessage {
             id: 0,
             session_id: sid.clone(),
@@ -1056,7 +1064,7 @@ pub async fn reconcile_conversation_messages(
             parent_uuid: msg.parent_uuid.clone(),
             model: msg.message.model.clone(),
             timestamp: msg.timestamp.clone(),
-            metadata: None,
+            metadata,
             tool_name,
             content_types: None,
             has_image: false,
