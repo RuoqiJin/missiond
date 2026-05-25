@@ -52,10 +52,10 @@
                       :endpoint-env MISSIOND_INTERACTION_AUTH_USERINFO_URL
                       :service-token-env MISSIOND_INTERACTION_SERVICE_TOKEN
                       :smoke-secret-ref-env MISSIOND_JARVIS_SMOKE_SECRET_REF
-                      :service-token-ref "secret-store:missiond/jarvis-smoke/INTERACTION_SERVICE_TOKEN"
+                      :service-token-ref "secret-store:missiond.jarvis-smoke/INTERACTION_SERVICE_TOKEN"
                       :timeout-env MISSIOND_INTERACTION_AUTH_TIMEOUT_MS
                       :failure-code INTERACTION_AUTH_UNAVAILABLE
-                      :rule "Web/iOS/Jarvis bearer tokens must be resolved through Auth userinfo before PermissionContext is accepted. Automated Jarvis smoke uses MISSIOND_INTERACTION_SERVICE_TOKEN injected from secret-store ref missiond/jarvis-smoke/INTERACTION_SERVICE_TOKEN, or scripts/smoke-jarvis-interaction.mjs reads that same ref via MISSIOND_JARVIS_SMOKE_SECRET_REF; never use a fake token or repo-stored value. Deploy persists interaction auth env keys into launchd only when supplied by the operator environment. Metadata roles/tenant/application fields are hints only; MissionD must fail fast when Auth is unavailable instead of creating BoardTask side effects.")
+                      :rule "Web/iOS/Jarvis bearer tokens must be resolved through Auth userinfo before PermissionContext is accepted. Automated Jarvis smoke uses MISSIOND_INTERACTION_SERVICE_TOKEN injected from secret-store ref missiond.jarvis-smoke/INTERACTION_SERVICE_TOKEN, or scripts/smoke-jarvis-interaction.mjs reads that same ref via MISSIOND_JARVIS_SMOKE_SECRET_REF; never use a fake token or repo-stored value. Deploy persists interaction auth env keys into launchd only when supplied by the operator environment. Metadata roles/tenant/application fields are hints only; MissionD must fail fast when Auth is unavailable instead of creating BoardTask side effects.")
       :legacy-adapter (:route "/v1/chat/completions"
                        :adapter handle_chat_completions_interaction_adapter
                        :normalizer openai_request_to_interaction_envelope

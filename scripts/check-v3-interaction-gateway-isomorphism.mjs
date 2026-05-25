@@ -82,7 +82,7 @@ requireIncludes('requestSurfaces', [
   'mission_interaction',
   'MISSIOND_INTERACTION_AUTH_USERINFO_URL',
   'INTERACTION_AUTH_UNAVAILABLE',
-  'missiond/jarvis-smoke/INTERACTION_SERVICE_TOKEN',
+  'missiond.jarvis-smoke/INTERACTION_SERVICE_TOKEN',
 ]);
 
 requireIncludes('v2', [
@@ -151,9 +151,10 @@ requireIncludes('jarvisInteractionSmoke', [
   'MISSIOND_JARVIS_SMOKE_TOKEN',
   'MISSIOND_INTERACTION_SERVICE_TOKEN',
   'MISSIOND_JARVIS_SMOKE_SECRET_REF',
-  'missiond/jarvis-smoke/INTERACTION_SERVICE_TOKEN',
+  'missiond.jarvis-smoke/INTERACTION_SERVICE_TOKEN',
   'xjp',
   'secret',
+  '--raw',
   'intent_draft',
   'confirm_required',
   'JARVIS_CONFIRMATION_BYPASS',

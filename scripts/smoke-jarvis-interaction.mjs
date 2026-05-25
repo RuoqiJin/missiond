@@ -7,7 +7,7 @@ const baseUrl = stripTrailingSlash(
 );
 const smokeSecretRef =
   process.env.MISSIOND_JARVIS_SMOKE_SECRET_REF ||
-  'missiond/jarvis-smoke/INTERACTION_SERVICE_TOKEN';
+  'missiond.jarvis-smoke/INTERACTION_SERVICE_TOKEN';
 let token =
   process.env.MISSIOND_JARVIS_SMOKE_TOKEN ||
   process.env.MISSIOND_INTERACTION_SERVICE_TOKEN ||
@@ -103,7 +103,7 @@ async function tokenFromSecretStore(ref) {
   const { spawnSync } = await import('node:child_process');
   const result = spawnSync(
     'xjp',
-    ['secret', 'get', parsed.key, '--ns', parsed.namespace],
+    ['secret', 'get', '--raw', parsed.key, '--ns', parsed.namespace],
     {
       encoding: 'utf8',
       env: process.env,
@@ -159,7 +159,7 @@ async function main() {
       diagnostics: [
         {
           code: 'INTERACTION_AUTH_REQUIRED',
-          message: 'Set MISSIOND_JARVIS_SMOKE_TOKEN or MISSIOND_INTERACTION_SERVICE_TOKEN, or provision secret-store ref missiond/jarvis-smoke/INTERACTION_SERVICE_TOKEN; token values are never printed.',
+          message: 'Set MISSIOND_JARVIS_SMOKE_TOKEN or MISSIOND_INTERACTION_SERVICE_TOKEN, or provision secret-store ref missiond.jarvis-smoke/INTERACTION_SERVICE_TOKEN; token values are never printed.',
           secret_ref: smokeSecretRef,
         },
       ],
