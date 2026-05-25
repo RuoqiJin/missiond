@@ -154,6 +154,18 @@ const checks = [
     ],
   ],
   [
+    'jarvis dispatch verb classification',
+    'crates/missiond-core/src/ws/server.rs',
+    [
+      'fn classify_jarvis_dispatch_verb',
+      'jarvis-grounded-implementation',
+      '"scoped"',
+      'claude-code-default',
+      '工位实现任务',
+      'write_scope 范围内修改文件',
+    ],
+  ],
+  [
     'jarvis runtime read-scope root',
     'crates/missiond-core/src/ws/server.rs',
     [
@@ -196,6 +208,15 @@ const checks = [
       'Self::put_jarvis_artifact',
       'mission_shared_memory(action=\\"artifact_get\\"',
       'mission_context_slice',
+    ],
+  ],
+  [
+    'autopilot task-result-artifact durable content preservation',
+    'crates/missiond-daemon/src/engine/intent_engine/autopilot.rs',
+    [
+      'let full_content = durable_completion',
+      '"content": full_content',
+      '"summary": final_summary',
     ],
   ],
   [

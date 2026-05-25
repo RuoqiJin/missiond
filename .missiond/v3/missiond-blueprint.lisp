@@ -103,8 +103,8 @@
       :path "shared-memory://artifacts/task-result/<task_id>/<content_hash>"
       :ssot true
       :writer mission_shared_memory.task_result_put
-      :required [:task_id :project_id :summary :result_kind :content_hash :evidence_refs :created_at]
-      :invariant "Worker finals, Board notes, provider JSONL finals, and PTY snapshots are evidence/projections; client-visible task completion must read a canonical task-result-artifact.")
+      :required [:task_id :project_id :summary :content :result_kind :content_hash :evidence_refs :created_at]
+      :invariant "Worker finals, Board notes, provider JSONL finals, and PTY snapshots are evidence/projections; client-visible task completion must read a canonical task-result-artifact. :content preserves the full durable worker final/response; :summary is a truncated projection for Board notes and list views.")
 
     (artifact final-report
       :schema "missiond.final-report.v1"

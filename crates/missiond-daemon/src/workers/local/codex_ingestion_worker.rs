@@ -533,7 +533,8 @@ async fn process_thread(
         state,
         thread,
         existing.as_ref().map(|c| c.message_count).unwrap_or(0),
-        existing.and_then(|c| c.ended_at),
+        existing.as_ref().and_then(|c| c.ended_at.clone()),
+        existing.as_ref().and_then(|c| c.task_id.clone()),
     )
     .await;
     if let Err(e) = state.store.upsert_conversation(&conv).await {
@@ -751,6 +752,7 @@ async fn sync_codex_thread_metadata_if_needed(state: &AppState, thread: &CodexTh
         thread,
         existing.message_count,
         existing.ended_at.clone(),
+        existing.task_id.clone(),
     )
     .await;
     if existing.status == conv.status {
@@ -771,6 +773,7 @@ async fn build_codex_conversation(
     thread: &CodexThread,
     message_count: i64,
     ended_at: Option<String>,
+    existing_task_id: Option<String>,
 ) -> missiond_core::types::Conversation {
     // BoardTask e1a5ac1f :: provider-aware classification.
     //
@@ -805,10 +808,17 @@ async fn build_codex_conversation(
     // Durable task linkage: when the slot has a running task, persist
     // its id on the conversation row so worker chains stay queryable
     // by `task_id` without relying on the in-memory
-    // `session_task_bindings` map.
+    // `session_task_bindings` map. Preserve the existing task_id when
+    // the running-task lookup returns None (completed worker sessions).
     let task_id = match slot_id.as_deref() {
-        Some(sid) => state.store.get_running_slot_task(sid).await.ok().flatten(),
-        None => None,
+        Some(sid) => state
+            .store
+            .get_running_slot_task(sid)
+            .await
+            .ok()
+            .flatten()
+            .or(existing_task_id),
+        None => existing_task_id,
     };
     let rollout_age_secs =
         read_file_watermark(Path::new(&thread.rollout_path)).map(|wm| wm.age_secs);

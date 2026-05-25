@@ -408,6 +408,9 @@ async fn put_autopilot_task_result_artifact(
         .unwrap_or(slot_id);
     let conversation_id = durable_completion.map(|completion| completion.session_id.as_str());
     let project_id = task.project.as_deref().unwrap_or("missiond");
+    let full_content = durable_completion
+        .map(|completion| completion.summary.as_str())
+        .unwrap_or(final_summary);
     let payload = serde_json::json!({
         "action": "task_result_put",
         "task_id": task.id.as_str(),
@@ -417,7 +420,7 @@ async fn put_autopilot_task_result_artifact(
         "provider": provider,
         "result_status": "completed",
         "summary": final_summary,
-        "content": final_summary,
+        "content": full_content,
         "json": {
             "schema": "missiond.autopilot-task-result.v1",
             "task_id": task.id.as_str(),
@@ -426,6 +429,7 @@ async fn put_autopilot_task_result_artifact(
             "provider": provider,
             "duration_ms": duration_ms,
             "summary": final_summary,
+            "content": full_content,
             "description_dispatch": serde_json::from_str::<serde_json::Value>(&task.description).ok()
         }
     });

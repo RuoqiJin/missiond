@@ -20,6 +20,7 @@ const FILES = {
   runtime: 'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
   controlTree: 'crates/missiond-daemon/src/control_tree.rs',
   frontendBlueprint: '.missiond/frontend/board-blueprint.lisp',
+  codexIngestion: 'crates/missiond-daemon/src/workers/local/codex_ingestion_worker.rs',
 };
 
 function read(rel, resolved = false) {
@@ -122,6 +123,12 @@ function main() {
       'Agy,',
       'Self::Agy => "agy"',
       'Self::Agy => None',
+    ]);
+    requireAll(diagnostics, FILES.codexIngestion, sources.codexIngestion, [
+      'existing_task_id: Option<String>',
+      '.or(existing_task_id)',
+      'source: "codex_cli"',
+      'refresh_conversation_message_count',
     ]);
     requireAll(diagnostics, FILES.frontendBlueprint, sources.frontendBlueprint, [
       'jarvis-intent-draft',

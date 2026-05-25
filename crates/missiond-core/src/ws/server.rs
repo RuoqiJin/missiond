@@ -3628,6 +3628,31 @@ impl PTYWebSocketServer {
         }
     }
 
+    fn classify_jarvis_dispatch_verb(text: &str) -> (&'static str, &'static str) {
+        let lower = text.to_ascii_lowercase();
+        const IMPL_VERBS: &[&str] = &[
+            "implement",
+            "fix",
+            "create",
+            "build",
+            "add",
+            "refactor",
+            "write code",
+            "develop",
+            "migrate",
+            "接入",
+            "实现",
+            "修复",
+            "重构",
+        ];
+        for verb in IMPL_VERBS {
+            if lower.contains(verb) {
+                return ("code", "scoped");
+            }
+        }
+        ("review", "read-only")
+    }
+
     fn derive_jarvis_dispatch_contract(
         raw_user_text: &str,
         grounding_context_id: &str,
@@ -3643,27 +3668,56 @@ impl PTYWebSocketServer {
             || lower.contains("antigravity");
         let mentions_codex = lower.contains("codex");
 
-        let (task_class, engine_hint, pool_hint, task_kind) = if mentions_agy {
-            (
-                "research",
-                "agy",
-                "agy-research",
-                "agy-cli-readonly-validation",
-            )
-        } else if mentions_codex {
-            (
-                "review",
-                "codex",
-                "codex-review-worker",
-                "codex-worker-readonly-review",
-            )
+        let (verb_class, verb_write_policy) = Self::classify_jarvis_dispatch_verb(raw_user_text);
+
+        let (task_class, engine_hint, pool_hint, task_kind, write_policy, write_scope) =
+            if mentions_agy {
+                (
+                    "research",
+                    "agy",
+                    "agy-research",
+                    "agy-cli-readonly-validation",
+                    "read-only",
+                    serde_json::json!([]),
+                )
+            } else if verb_class == "code" {
+                (
+                    "code",
+                    "codex",
+                    "claude-code-default",
+                    "jarvis-grounded-implementation",
+                    verb_write_policy,
+                    serde_json::json!([read_scope_root]),
+                )
+            } else if mentions_codex {
+                (
+                    "review",
+                    "codex",
+                    "codex-review-worker",
+                    "codex-worker-readonly-review",
+                    "read-only",
+                    serde_json::json!([]),
+                )
+            } else {
+                (
+                    "review",
+                    "codex",
+                    "codex-review-worker",
+                    "jarvis-grounded-review",
+                    "read-only",
+                    serde_json::json!([]),
+                )
+            };
+
+        let must_not_touch = if write_policy == "read-only" {
+            serde_json::json!([
+                "Do not modify files",
+                "Do not stage",
+                "Do not commit",
+                "Do not spawn sub-workers from inside the worker"
+            ])
         } else {
-            (
-                "review",
-                "codex",
-                "codex-review-worker",
-                "jarvis-grounded-review",
-            )
+            serde_json::json!(["Do not spawn sub-workers from inside the worker"])
         };
 
         serde_json::json!({
@@ -3672,10 +3726,10 @@ impl PTYWebSocketServer {
             "task_kind": task_kind,
             "engine_hint": engine_hint,
             "pool_hint": pool_hint,
-            "write_policy": "read-only",
+            "write_policy": write_policy,
             "read_scope": [read_scope_root],
-            "write_scope": [],
-            "must_not_touch": ["Do not modify files", "Do not stage", "Do not commit", "Do not spawn sub-workers from inside the worker"],
+            "write_scope": write_scope,
+            "must_not_touch": must_not_touch,
             "acceptance": [
                 "Return a structured artifact with Findings / Evidence / Recommendations / Verification",
                 "Use the grounding context and cited evidence instead of rediscovering broad context",
@@ -3792,52 +3846,64 @@ impl PTYWebSocketServer {
         let context_pack_hash = context_pack_path
             .strip_prefix("shared-artifact://")
             .unwrap_or(context_pack_path);
+        let task_mode_label = if write_policy == "read-only" {
+            "只读工位任务"
+        } else {
+            "工位实现任务"
+        };
+        let write_constraint = if write_policy == "read-only" {
+            "- 不要修改文件、不要 stage、不要 commit、不要在工位内部创建子任务或再派其他工位。\n"
+        } else {
+            "- 只在 write_scope 范围内修改文件；不要在工位内部创建子任务或再派其他工位。\n"
+        };
         format!(
-            "请基于已确认的 Jarvis intent.lisp / plan.lisp 执行一个只读工位任务。\n\n\
-             用户目标：\n{}\n\n\
-             任务类型：{}\n\
-             任务类别：{}\n\
-             目标工位：engine_hint={} pool_hint={}\n\
-             write_policy: {}\n\
-             read_scope: [{}]\n\
-             write_scope: [{}]\n\
-             grounding_context_id: {}\n\
-             context_pack_path: {}\n\
-             context_pack_file: {}\n\
-             intent_artifact_id: {}\n\
-             plan_artifact_id: {}\n\n\
+            "请基于已确认的 Jarvis intent.lisp / plan.lisp 执行一个{task_mode}。\n\n\
+             用户目标：\n{raw_text}\n\n\
+             任务类型：{kind}\n\
+             任务类别：{class}\n\
+             目标工位：engine_hint={engine} pool_hint={pool}\n\
+             write_policy: {wp}\n\
+             read_scope: [{rs}]\n\
+             write_scope: [{ws}]\n\
+             grounding_context_id: {gci}\n\
+             context_pack_path: {cpp}\n\
+             context_pack_file: {cpf}\n\
+             intent_artifact_id: {iai}\n\
+             plan_artifact_id: {pai}\n\n\
              已接受执行切片：\n\
              - 这个任务已经通过 Jarvis intent 确认和 plan 确认。\n\
              - 你不是主控；不要重新拆任务、不要创建 BoardTask、不要派子工位。\n\
              - 你只需要按 task_kind 和 acceptance 验证当前工位能力，并返回结构化结果。\n\
-             - acceptance:\n{}\n\n\
+             - acceptance:\n{acc}\n\n\
              工作方式：\n\
              - 这是已经过 Jarvis 意图确认和计划确认的 grounded dispatch，不要重新扮演主控。\n\
              - 先读取 context_pack_file；这是 MissionD 为没有 MCP 的工位物化的 bounded context slice。\n\
-             - 如果 context_pack_file 不可读，且 context_pack_path 是 shared-artifact://，再用 MissionD MCP 调 mission_shared_memory(action=\"artifact_get\", hash=\"{}\") 或 mission_context_slice 读取上下文切片。\n\
+             - 如果 context_pack_file 不可读，且 context_pack_path 是 shared-artifact://，再用 MissionD MCP 调 mission_shared_memory(action=\"artifact_get\", hash=\"{cph}\") 或 mission_context_slice 读取上下文切片。\n\
              - 如果文件和 MCP 都不可用，不要自行大范围搜索代码；请快速失败并输出 Diagnostic / Evidence / Verification，说明 context unavailable。\n\
-             - 不要修改文件、不要 stage、不要 commit、不要在工位内部创建子任务或再派其他工位。\n\
+             {wc}\
              - 输出必须是结构化 artifact，严格包含以下四个 Markdown 二级标题：\n\
                ## Findings\n\
                ## Evidence\n\
                ## Recommendations\n\
                ## Verification\n\
              - 不要把 Board note 当作最终结果；MissionD 会在 durable final 后写 task-result-artifact 并关闭任务。",
-            raw_user_text,
-            task_kind,
-            task_class,
-            engine_hint,
-            pool_hint,
-            write_policy,
-            read_scope,
-            write_scope,
-            grounding_context_id,
-            context_pack_path,
-            context_pack_file,
-            intent_artifact_id,
-            plan_artifact_id,
-            acceptance,
-            context_pack_hash
+            task_mode = task_mode_label,
+            raw_text = raw_user_text,
+            kind = task_kind,
+            class = task_class,
+            engine = engine_hint,
+            pool = pool_hint,
+            wp = write_policy,
+            rs = read_scope,
+            ws = write_scope,
+            gci = grounding_context_id,
+            cpp = context_pack_path,
+            cpf = context_pack_file,
+            iai = intent_artifact_id,
+            pai = plan_artifact_id,
+            acc = acceptance,
+            cph = context_pack_hash,
+            wc = write_constraint,
         )
     }
 
@@ -6929,5 +6995,61 @@ mod tests {
         assert!(prompt.contains("## Verification"));
         assert!(prompt.contains("task-result-artifact"));
         assert!(!prompt.contains("mission_board_update"));
+    }
+
+    #[test]
+    fn jarvis_dispatch_classifies_implementation_verbs_as_code() {
+        let metadata = PTYWebSocketServer::derive_jarvis_dispatch_contract(
+            "implement the new auth middleware",
+            "context-gather:xyz",
+            Some("shared-artifact://xyz"),
+            Some("/tmp/ctx.json"),
+            "intent-xyz",
+            "plan-xyz",
+            "/repo",
+        );
+        assert_eq!(metadata["task_class"], "code");
+        assert_eq!(metadata["write_policy"], "scoped");
+        assert_eq!(metadata["pool_hint"], "claude-code-default");
+        assert_eq!(metadata["task_kind"], "jarvis-grounded-implementation");
+        let ws = metadata["write_scope"].as_array().unwrap();
+        assert!(!ws.is_empty());
+        assert_eq!(ws[0], "/repo");
+    }
+
+    #[test]
+    fn jarvis_dispatch_classifies_review_verbs_as_readonly() {
+        let metadata = PTYWebSocketServer::derive_jarvis_dispatch_contract(
+            "review the deployment pipeline",
+            "context-gather:abc",
+            None,
+            None,
+            "intent-abc",
+            "plan-abc",
+            "/repo",
+        );
+        assert_eq!(metadata["task_class"], "review");
+        assert_eq!(metadata["write_policy"], "read-only");
+        assert_eq!(metadata["pool_hint"], "codex-review-worker");
+        let ws = metadata["write_scope"].as_array().unwrap();
+        assert!(ws.is_empty());
+    }
+
+    #[test]
+    fn jarvis_dispatch_implementation_prompt_uses_scoped_write_constraint() {
+        let metadata = PTYWebSocketServer::derive_jarvis_dispatch_contract(
+            "fix the broken auth flow",
+            "ctx:abc",
+            None,
+            None,
+            "i",
+            "p",
+            "/repo",
+        );
+        let prompt =
+            PTYWebSocketServer::build_jarvis_worker_prompt("fix the broken auth flow", &metadata);
+        assert!(prompt.contains("工位实现任务"));
+        assert!(prompt.contains("只在 write_scope 范围内修改文件"));
+        assert!(!prompt.contains("不要修改文件"));
     }
 }
