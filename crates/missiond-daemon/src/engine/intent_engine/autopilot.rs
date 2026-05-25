@@ -1049,7 +1049,8 @@ async fn close_idle_running_task_from_durable_summary(
     );
     if !has_durable_summary {
         if let Some(completion) =
-            durable_provider_completion_for_slot_task(state, &task_with_notes.task, slot_id).await?
+            await_durable_provider_completion_for_slot_task(state, &task_with_notes.task, slot_id)
+                .await?
         {
             let artifact_hash = put_autopilot_task_result_artifact(
                 state,
@@ -6625,6 +6626,15 @@ Review only.
         assert!(
             src.contains("await_durable_provider_completion_for_slot_task("),
             "Autopilot close path must poll durable provider final evidence after settle"
+        );
+        let idle_close_fn = src
+            .split("async fn close_idle_running_task_from_durable_summary")
+            .nth(1)
+            .and_then(|tail| tail.split("fn extract_delegated_execution_id").next())
+            .expect("close_idle_running_task_from_durable_summary body should remain present");
+        assert!(
+            idle_close_fn.contains("await_durable_provider_completion_for_slot_task("),
+            "idle watchdog close path must also wait for durable final settle before artifact write"
         );
         assert!(
             src.contains("durable_provider_completion_for_slot_task("),
