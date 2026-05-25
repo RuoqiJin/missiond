@@ -294,6 +294,15 @@ plist_set_or_add_env_string() {
   fi
 }
 
+plist_set_env_from_current_env() {
+  local plist="$1"
+  local key="$2"
+  local value="${!key:-}"
+  if [ -n "$value" ]; then
+    plist_set_or_add_env_string "$plist" "$key" "$value"
+  fi
+}
+
 ensure_launchd_runtime_root() {
   if [ ! -f "$LAUNCHD_PLIST" ]; then
     log "launchd: plist not found at $LAUNCHD_PLIST; deploy will only kickstart loaded label if present"
@@ -310,6 +319,8 @@ ensure_launchd_runtime_root() {
   plist_set_or_add_env_string "$LAUNCHD_PLIST" "MISSIOND_SOCKET_PATH" "$SOCK_PATH"
   plist_set_or_add_env_string "$LAUNCHD_PLIST" "MISSIOND_RUNTIME_DIR" "$RUNTIME_DIR"
   plist_set_or_add_env_string "$LAUNCHD_PLIST" "MISSIOND_COMPILED_RUNTIME_DIR" "$COMPILED_RUNTIME_DIR"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_JARVIS_SLOT_AUTO_HEAL"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_JARVIS_SLOT_AUTO_HEAL_TIMEOUT_SECS"
   plutil -lint "$LAUNCHD_PLIST" >/dev/null
   log "launchd: runtime root $LAUNCHD_PROJECT_ROOT written to $LAUNCHD_PLIST"
   log "launchd: artifact runtime dir $RUNTIME_DIR written to $LAUNCHD_PLIST"
