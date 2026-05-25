@@ -125,6 +125,69 @@
       :calls "static-source-needle"))
 
   (behavior
+    :id v3-code-isomorphism-aggregate-subprocess
+    :kind subprocess
+    :owner typed-lisp-compiler
+    :observed ["subprocess:scripts/check-v3-code-isomorphism-complete.mjs:175"
+               "subprocess:scripts/check-v3-code-isomorphism-complete.mjs:513"]
+    :code ["scripts/check-v3-code-isomorphism-complete.mjs"]
+    :effects []
+    (anchor
+      :role subprocess
+      :observed "subprocess:scripts/check-v3-code-isomorphism-complete.mjs:175"
+      :file "scripts/check-v3-code-isomorphism-complete.mjs"
+      :symbol "has")
+    (anchor
+      :role subprocess
+      :observed "subprocess:scripts/check-v3-code-isomorphism-complete.mjs:513"
+      :file "scripts/check-v3-code-isomorphism-complete.mjs"
+      :symbol "runPerSurfaceCheckers")
+    (trigger
+      :from-file "scripts/check-v3-code-isomorphism-complete.mjs"
+      :from-symbol "runPerSurfaceCheckers"
+      :calls "per-surface-checker-subprocess"))
+
+  (behavior
+    :id jarvis-intent-plan-dispatch-smoke-secret-read
+    :kind subprocess
+    :owner interaction-gateway
+    :observed ["subprocess:scripts/smoke-jarvis-intent-plan-dispatch.mjs:34"
+               "subprocess:scripts/smoke-jarvis-intent-plan-dispatch.mjs:35"]
+    :code ["scripts/smoke-jarvis-intent-plan-dispatch.mjs"]
+    :effects []
+    (anchor
+      :role subprocess
+      :observed "subprocess:scripts/smoke-jarvis-intent-plan-dispatch.mjs:34"
+      :file "scripts/smoke-jarvis-intent-plan-dispatch.mjs"
+      :symbol "tokenFromSecretStore")
+    (anchor
+      :role subprocess
+      :observed "subprocess:scripts/smoke-jarvis-intent-plan-dispatch.mjs:35"
+      :file "scripts/smoke-jarvis-intent-plan-dispatch.mjs"
+      :symbol "tokenFromSecretStore")
+    (trigger
+      :from-file "scripts/smoke-jarvis-intent-plan-dispatch.mjs"
+      :from-symbol "tokenFromSecretStore"
+      :calls "xjp secret get --raw"))
+
+  (behavior
+    :id jarvis-intent-plan-dispatch-smoke-timeout
+    :kind scheduler
+    :owner interaction-gateway
+    :observed ["scheduler:scripts/smoke-jarvis-intent-plan-dispatch.mjs:52"]
+    :code ["scripts/smoke-jarvis-intent-plan-dispatch.mjs"]
+    :effects []
+    (anchor
+      :role scheduler
+      :observed "scheduler:scripts/smoke-jarvis-intent-plan-dispatch.mjs:52"
+      :file "scripts/smoke-jarvis-intent-plan-dispatch.mjs"
+      :symbol "postInteraction")
+    (trigger
+      :from-file "scripts/smoke-jarvis-intent-plan-dispatch.mjs"
+      :from-symbol "postInteraction"
+      :calls "AbortController timeout for bounded Jarvis SSE smoke"))
+
+  (behavior
     :id global-claude-md-sync
     :kind effect
     :owner context-runtime

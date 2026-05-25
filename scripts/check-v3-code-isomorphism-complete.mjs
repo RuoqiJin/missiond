@@ -136,6 +136,7 @@ export const PER_SURFACE_CHECKERS = [
   'scripts/check-v3-direct-code-drift-policy.mjs',
   'scripts/check-v3-context-pack-isomorphism.mjs',
   'scripts/check-v3-grounded-dispatch-isomorphism.mjs',
+  'scripts/check-v3-macmini-self-update-lane.mjs',
   'scripts/check-v3-workstation-config-isomorphism.mjs',
   'scripts/check-v3-workstation-pool-isomorphism.mjs',
   'scripts/check-v3-control-plane-m6-split.mjs',

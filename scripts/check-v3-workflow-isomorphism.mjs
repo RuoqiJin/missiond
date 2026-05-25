@@ -57,6 +57,7 @@ const DEFAULT_FILES = {
   m6DeploymentRollout: '.missiond/workflows/m6-deployment-rollout.lisp',
   pceaDeploymentRollout: '.missiond/workflows/pcea-deployment-rollout.lisp',
   xjpNativeCodebaseRunner: '.missiond/workflows/xjp-native-codebase-runner-convergence.lisp',
+  missiondMacminiSelfUpdate: '.missiond/workflows/missiond-macmini-self-update.lisp',
   boardCleanupBatchRunner: '.missiond/workflows/board-cleanup-batch-runner.lisp',
 };
 
@@ -378,6 +379,33 @@ function checkFiles(root, files) {
     'No Cloudflare, DNS, secret, or production env mutation',
     'classify PCEA deployment as deploy-blocked-by-secret-store',
     'The rollout report captures any skill drift, manifest gap, migration/manual step gap, Secret Store claim-auth dependency failure, or deploy-agent evidence gap',
+  ]);
+
+  requireAll(diagnostics, files.missiondMacminiSelfUpdate, sources.missiondMacminiSelfUpdate, [
+    ':workflow_id missiond-macmini-self-update',
+    ':status active',
+    ':source_plans [interaction-gateway work-order-lifecycle xjp-native-codebase-runner-convergence m6-deployment-rollout]',
+    '(trigger-kind version_bump_push)',
+    '(target_id rickyhq-macmini-m4)',
+    '(executor_name macmini)',
+    '(source_sync_provider github)',
+    '(target_root "/Users/rickyhq/Projects/missiond")',
+    ':id receive-client-objective',
+    ':id draft-deployment-plan',
+    ':id create-native-workflow-run',
+    ':id macmini-fetch-source',
+    ':id verify-commit-version',
+    ':id target-build-test',
+    ':id blue-green-deploy',
+    ':id monitor-smoke',
+    ':id publish-provenance',
+    'services/deploy-center/scripts/run-missiond-macmini-self-update.sh',
+    'git pull --ff-only',
+    'scripts/deploy-daemon.sh --debug',
+    'no-rsync-scp',
+    'client-channel-required',
+    'task-result-artifact-required',
+    'rollback-artifact-required',
   ]);
 
   requireAll(diagnostics, files.boardCleanupBatchRunner, sources.boardCleanupBatchRunner, [
