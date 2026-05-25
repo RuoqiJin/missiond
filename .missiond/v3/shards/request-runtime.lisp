@@ -66,7 +66,13 @@
          :id-field artifact_hash
          :storage "shared_artifacts(kind=task-result)"
          :fields [task_id project_id provider result_status summary json source]
-         :rule "Jarvis, Board, and worker completion surfaces MUST normalize summary notes/provider finals into task-result-artifact before streaming result_artifact/final to clients; Board notes, PTY text, and provider finals are projections/evidence, not the canonical result; worker prompts MUST ask for structured Findings/Evidence/Recommendations/Verification output and MUST NOT instruct provider workers to mark the BoardTask done before artifact settlement. Durable provider finals for reused Codex/Claude/Agy sessions must satisfy the current BoardTask output contract before they can close or project a result artifact; stale progress/final text from an older turn is ignored until the current task artifact lands."))
+         :rule "Jarvis, Board, and worker completion surfaces MUST normalize summary notes/provider finals into task-result-artifact before streaming result_artifact/final to clients; Board notes, PTY text, and provider finals are projections/evidence, not the canonical result; worker prompts MUST ask for structured Findings/Evidence/Recommendations/Verification output and MUST NOT instruct provider workers to mark the BoardTask done before artifact settlement. Durable provider finals for reused Codex/Claude/Agy sessions must satisfy the current BoardTask output contract before they can close or project a result artifact; stale progress/final text from an older turn is ignored until the current task artifact lands.")
+      (kind task-result-artifact-idempotency
+         :schema "missiond.task-result-artifact-idempotency.v1"
+         :id-field artifact_hash
+         :storage "task_result_artifacts"
+         :fields [task_id slot_id conversation_id provider result_status summary artifact_hash deduped]
+         :rule "Provider settle loops, Jarvis follow-up supervision, and Board note revalidation may observe the same final more than once. task_result_put MUST check for an existing row with the same task_id, slot_id, conversation_id, provider, result_status, and summary, then return that artifact_hash with deduped=true instead of writing timestamp-only duplicate artifacts or emitting duplicate task_result_artifact.created events."))
     :functions
       ((function context-gather-artifact
          :entry [mission_context_gather unknowns-inventory BoardTask source_id project_id]

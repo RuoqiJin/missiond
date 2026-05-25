@@ -567,6 +567,39 @@ impl SharedMemoryService {
         } else {
             args.get("json").cloned().unwrap_or_else(|| json!({}))
         };
+        if let Some(row) = sqlx::query(
+            r#"
+            SELECT id, artifact_hash
+            FROM task_result_artifacts
+            WHERE task_id = $1
+              AND slot_id IS NOT DISTINCT FROM $2
+              AND conversation_id IS NOT DISTINCT FROM $3
+              AND provider IS NOT DISTINCT FROM $4
+              AND result_status = $5
+              AND summary = $6
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(task_id)
+        .bind(slot_id)
+        .bind(conversation_id)
+        .bind(provider)
+        .bind(result_status)
+        .bind(&summary)
+        .fetch_optional(&self.pool)
+        .await?
+        {
+            let id: String = row.try_get("id")?;
+            let artifact_hash: String = row.try_get("artifact_hash")?;
+            return Ok(json!({
+                "schema": "missiond.task-result-artifact.v1",
+                "ok": true,
+                "id": id,
+                "artifact_hash": artifact_hash,
+                "deduped": true
+            }));
+        }
         let body = json!({
             "schema": "missiond.task-result-artifact.v1",
             "task_id": task_id,
