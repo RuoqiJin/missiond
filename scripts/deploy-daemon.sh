@@ -520,10 +520,12 @@ cleanup_repo_runtime_cache() {
     "$repo_runtime/executions" \
     "$repo_runtime/plans" \
     "$repo_runtime/lisp-code-sync" \
-    "$repo_runtime/nightly-evolution" \
-    "$repo_runtime/jarvis-smoke" \
-    "$repo_runtime/master-control" \
-    "$repo_runtime/capability-usage-review.json"; do
+	    "$repo_runtime/nightly-evolution" \
+	    "$repo_runtime/jarvis-smoke" \
+	    "$repo_runtime/master-control" \
+	    "$repo_runtime/master-control-checkpoint.lisp" \
+	    "$repo_runtime/genome" \
+	    "$repo_runtime/capability-usage-review.json"; do
     if [ -e "$item" ]; then
       rm -rf "$item"
       cleaned=$((cleaned + 1))
