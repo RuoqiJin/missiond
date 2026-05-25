@@ -4,12 +4,27 @@ const COMPILED_RUNTIME_DIR: [&str; 4] = [".missiond", "v3", "runtime", "compiled
 
 pub(super) fn compiled_runtime_snapshot_path(project_root: &Path, kind: &str) -> Option<PathBuf> {
     let file_name = compiled_runtime_file_name(kind)?;
+    let mut path = compiled_runtime_dir(project_root);
+    path.push(file_name);
+    Some(path)
+}
+
+pub(super) fn compiled_runtime_dir(project_root: &Path) -> PathBuf {
+    if let Ok(dir) = std::env::var("MISSIOND_COMPILED_RUNTIME_DIR") {
+        if !dir.trim().is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    if let Ok(dir) = std::env::var("MISSIOND_RUNTIME_DIR") {
+        if !dir.trim().is_empty() {
+            return PathBuf::from(dir).join("compiled");
+        }
+    }
     let mut path = project_root.to_path_buf();
     for segment in COMPILED_RUNTIME_DIR {
         path.push(segment);
     }
-    path.push(file_name);
-    Some(path)
+    path
 }
 
 pub(super) fn compiled_runtime_file_name(kind: &str) -> Option<&'static str> {

@@ -168,11 +168,12 @@
                  ".missiond/v3/runtime/genome/*.json"
                  ".missiond/v3/runtime/self-evolution/*.proposal.lisp"
                  ".missiond/v3/runtime/master-control/context-packs/*.lisp"
-                 ".missiond/v3/runtime/compiled/*.json"]
-      :rule "Cold runtime artifacts are diagnostic/query targets, not authoring SSOT. They are indexed in Postgres runtime_artifacts for evidence_view/master-status lookup and excluded from broad rg/review/search unless include_runtime=true or a concrete trace/report path is requested.")
+                 ".missiond/v3/runtime/compiled/*.json"
+                 "$MISSIOND_RUNTIME_DIR/compiled/*.json"]
+      :rule "Cold runtime artifacts are diagnostic/query targets, not authoring SSOT, and are indexed in Postgres runtime_artifacts. Production deploy writes generated projections under MISSIOND_RUNTIME_DIR, defaulting to $HOME/.missiond/runtime/<repo-id>; repo .missiond/v3/runtime/** is dev compatibility only.")
     :invariants
       ["Tools that answer 'what does the SSOT say?' MUST search active-authoring first and exclude cold-runtime by default."
-       "Generated compiled JSON and runtime reports are projections/evidence; they must not be treated as editable blueprint source."
+       "Generated compiled JSON and runtime reports are projections/evidence; production runtime paths live outside git via MISSIOND_RUNTIME_DIR."
        "MissionD may query cold-runtime for trace/debug/report lookup, but that query must be explicit and visible in the context-pack."
        "runtime_artifacts retention marks/prunes diagnostic caches only; canonical task/plan evidence is indexed without automatic deletion."]
     :checker "node scripts/check-v3-runtime-path-hygiene.mjs")

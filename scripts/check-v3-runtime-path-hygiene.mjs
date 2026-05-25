@@ -22,6 +22,9 @@ const FILES = {
   mcpExecution: 'crates/missiond-mcp/src/tools/knowledge/agent_execution.rs',
   mcpPlan: 'crates/missiond-mcp/src/tools/knowledge/plan.rs',
   mcpWorkflow: 'crates/missiond-mcp/src/tools/knowledge/workflow.rs',
+  deployScript: 'scripts/deploy-daemon.sh',
+  daemonCompiledSnapshot: 'crates/missiond-daemon/src/context/v3_blueprint_runtime/compiled_snapshot.rs',
+  jarvisMonitor: 'crates/missiond-core/src/ws/server.rs',
 };
 
 const REQUIRED = {
@@ -34,6 +37,8 @@ const REQUIRED = {
     '.missiond/v3/runtime/lisp-code-sync/*.report.lisp',
     '.missiond/v3/runtime/jarvis-smoke/*.json',
     'runtime_artifacts',
+    'MISSIOND_RUNTIME_DIR',
+    '$HOME/.missiond/runtime/<repo-id>',
     'include_runtime=true',
     '.missiond/v3/runtime/capability-usage-review.json',
     'node scripts/check-v3-runtime-path-hygiene.mjs',
@@ -57,6 +62,19 @@ const REQUIRED = {
   mcpExecution: ['.missiond/v3/runtime/executions/<id>.lisp'],
   mcpPlan: ['.missiond/v3/runtime/plans/<plan_id>.evidence.json'],
   mcpWorkflow: ['.missiond/v3/runtime/plans/<plan_id>.evidence.json'],
+  deployScript: [
+    'MISSIOND_RUNTIME_DIR',
+    'MISSIOND_COMPILED_RUNTIME_DIR',
+    'node scripts/compile-v3-runtime.mjs --json --out-dir "$COMPILED_RUNTIME_DIR"',
+  ],
+  daemonCompiledSnapshot: [
+    'MISSIOND_COMPILED_RUNTIME_DIR',
+    'MISSIOND_RUNTIME_DIR',
+  ],
+  jarvisMonitor: [
+    'MISSIOND_COMPILED_RUNTIME_DIR',
+    'MISSIOND_RUNTIME_DIR',
+  ],
 };
 
 const FORBIDDEN = {
@@ -166,6 +184,8 @@ function buildFixture() {
       :paths [".missiond/v3/runtime/**"]
       :examples [".missiond/v3/runtime/lisp-code-sync/*.report.lisp"]
       :catalog runtime_artifacts
+      :runtime-root "MISSIOND_RUNTIME_DIR"
+      :default-runtime-root "$HOME/.missiond/runtime/<repo-id>"
       :rule "Cold runtime artifacts are excluded unless include_runtime=true is explicit."))
   (capability-governance-policy
     :review-sidecar ".missiond/v3/runtime/capability-usage-review.json")

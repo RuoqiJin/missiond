@@ -8,7 +8,10 @@ import { buildAgentSlices, buildProjectAgentNavigation } from './lib/v3_agent_sl
 import { runSemanticRules } from './lib/v3_semantic_rules.mjs';
 import { RUNTIME_DOMAIN_SPECS } from './lib/v3_runtime_domains.mjs';
 
-const OUT_DIR = '.missiond/v3/runtime/compiled';
+const LEGACY_REPO_OUT_DIR = '.missiond/v3/runtime/compiled';
+const OUT_DIR = process.env.MISSIOND_RUNTIME_DIR
+  ? path.join(process.env.MISSIOND_RUNTIME_DIR, 'compiled')
+  : LEGACY_REPO_OUT_DIR;
 const BLUEPRINT = '.missiond/v3/missiond-blueprint.lisp';
 const WORKFLOW_DIR = '.missiond/workflows';
 const GENOME_DIR = '.missiond/v3/genome';
@@ -167,7 +170,8 @@ function main() {
   if (semantic) {
     const semanticPath = path.join(outDir, 'compiled-semantic-ir.json');
     const semanticJson = JSON.parse(fs.readFileSync(semanticPath, 'utf8'));
-    const behaviorNavigationJson = readJsonIfExists(path.join(OUT_DIR, 'compiled-behavior-navigation.json'));
+    const behaviorNavigationJson = readJsonIfExists(path.join(outDir, 'compiled-behavior-navigation.json'))
+      ?? readJsonIfExists(path.join(LEGACY_REPO_OUT_DIR, 'compiled-behavior-navigation.json'));
     const slices = buildAgentSlices({ semanticJson, behaviorNavigationJson });
     const slicePath = path.join(outDir, 'compiled-agent-slices.json');
     fs.writeFileSync(slicePath, `${JSON.stringify(slices, null, 2)}\n`);

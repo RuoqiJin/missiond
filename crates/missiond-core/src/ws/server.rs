@@ -1555,8 +1555,20 @@ impl PTYWebSocketServer {
         let mcp_binary = std::env::var("MISSIOND_MCP_BIN_PATH")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|_| home.join("mission-mcp"));
-        let compiled_runtime =
-            std::path::PathBuf::from(".missiond/v3/runtime/compiled/compiled-runtime-config.json");
+        let compiled_runtime = std::env::var("MISSIOND_COMPILED_RUNTIME_DIR")
+            .map(|dir| std::path::PathBuf::from(dir).join("compiled-runtime-config.json"))
+            .or_else(|_| {
+                std::env::var("MISSIOND_RUNTIME_DIR").map(|dir| {
+                    std::path::PathBuf::from(dir)
+                        .join("compiled")
+                        .join("compiled-runtime-config.json")
+                })
+            })
+            .unwrap_or_else(|_| {
+                std::path::PathBuf::from(
+                    ".missiond/v3/runtime/compiled/compiled-runtime-config.json",
+                )
+            });
         let slot_log = default_slot_status
             .as_ref()
             .map(|info| info.log_file.clone())

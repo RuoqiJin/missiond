@@ -23,6 +23,7 @@
 #   MISSIOND_LAUNCHCTL_LABEL    launchd label, default: com.missiond.daemon
 #   MISSIOND_LAUNCHD_PLIST      launchd plist, default: ~/Library/LaunchAgents/$label.plist
 #   MISSIOND_LAUNCHD_PROJECT_ROOT  project root written into launchd, default: current git root
+#   MISSIOND_RUNTIME_DIR        runtime artifact root, default: ~/.missiond/runtime/<repo-name>
 #   MISSIOND_DEPLOY_TIMEOUT     socket readiness timeout, default: 30
 #   MISSIOND_DEPLOY_SMOKE_TIMEOUT  MCP smoke timeout, default: 30
 #   MISSIOND_APPLY_BACKUP_CLEANUP  delete old .bak/.new files when cleanup applies, default: 0
@@ -78,6 +79,11 @@ APPLY_BACKUP_CLEANUP="${MISSIOND_APPLY_BACKUP_CLEANUP:-0}"
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 LAUNCHD_PROJECT_ROOT="${MISSIOND_LAUNCHD_PROJECT_ROOT:-$REPO_ROOT}"
+REPO_ID="$(basename "$REPO_ROOT")"
+RUNTIME_DIR="${MISSIOND_RUNTIME_DIR:-${HOME}/.missiond/runtime/${REPO_ID}}"
+COMPILED_RUNTIME_DIR="${MISSIOND_COMPILED_RUNTIME_DIR:-${RUNTIME_DIR}/compiled}"
+export MISSIOND_RUNTIME_DIR="$RUNTIME_DIR"
+export MISSIOND_COMPILED_RUNTIME_DIR="$COMPILED_RUNTIME_DIR"
 
 augment_managed_node_path() {
   local candidates=(
@@ -299,8 +305,11 @@ ensure_launchd_runtime_root() {
   plist_set_or_add_env_string "$LAUNCHD_PLIST" "MISSIOND_PROJECT_ROOT" "$LAUNCHD_PROJECT_ROOT"
   plist_set_or_add_env_string "$LAUNCHD_PLIST" "MISSIOND_ORCHESTRATOR_ROOT" "$LAUNCHD_PROJECT_ROOT"
   plist_set_or_add_env_string "$LAUNCHD_PLIST" "MISSIOND_SOCKET_PATH" "$SOCK_PATH"
+  plist_set_or_add_env_string "$LAUNCHD_PLIST" "MISSIOND_RUNTIME_DIR" "$RUNTIME_DIR"
+  plist_set_or_add_env_string "$LAUNCHD_PLIST" "MISSIOND_COMPILED_RUNTIME_DIR" "$COMPILED_RUNTIME_DIR"
   plutil -lint "$LAUNCHD_PLIST" >/dev/null
   log "launchd: runtime root $LAUNCHD_PROJECT_ROOT written to $LAUNCHD_PLIST"
+  log "launchd: artifact runtime dir $RUNTIME_DIR written to $LAUNCHD_PLIST"
 }
 
 restart_daemon_supervisor() {
@@ -399,7 +408,10 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const compiledDir = '.missiond/v3/runtime/compiled';
+const compiledDir = process.env.MISSIOND_COMPILED_RUNTIME_DIR
+  || (process.env.MISSIOND_RUNTIME_DIR
+    ? path.join(process.env.MISSIOND_RUNTIME_DIR, 'compiled')
+    : '.missiond/v3/runtime/compiled');
 const targets = {
   v3: 'compiled-v3-blueprint.json',
   runtimeConfig: 'compiled-runtime-config.json',
@@ -471,7 +483,7 @@ $dir
   done
 }
 
-mkdir -p "$INSTALL_ROOT" "$RELEASES_DIR" "$(dirname "$SOCK_PATH")"
+mkdir -p "$INSTALL_ROOT" "$RELEASES_DIR" "$(dirname "$SOCK_PATH")" "$COMPILED_RUNTIME_DIR"
 
 if [ "$CLEANUP_ONLY" -eq 1 ]; then
   PREVIOUS_ACTIVE="$(resolve_link_target "$ACTIVE_LINK" 2>/dev/null || true)"
@@ -498,7 +510,7 @@ fi
 record_timing "typed-lisp-contract-abi" "$TYPED_LISP_START"
 log "typed-lisp: compile V3 runtime projections"
 TYPED_LISP_START="$(date +%s)"
-if ! node scripts/compile-v3-runtime.mjs --json 2>&1 | tail -30; then
+if ! node scripts/compile-v3-runtime.mjs --json --out-dir "$COMPILED_RUNTIME_DIR" 2>&1 | tail -30; then
   fail "typed Lisp runtime compile failed" 1
 fi
 record_timing "typed-lisp-runtime-compile" "$TYPED_LISP_START"
