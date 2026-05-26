@@ -85,35 +85,6 @@
       :calls "scripts/check-v3-agent-navigation-quality.mjs"))
 
   (behavior
-    :id autopilot-detached-review-and-feedback-tasks
-    :kind scheduler
-    :owner autopilot-runtime
-    :observed ["background-task:crates/missiond-daemon/src/engine/intent_engine/autopilot.rs:3802"
-               "background-task:crates/missiond-daemon/src/engine/intent_engine/autopilot.rs:4482"
-               "background-task:crates/missiond-daemon/src/engine/intent_engine/autopilot.rs:4606"]
-    :code ["crates/missiond-daemon/src/engine/intent_engine/autopilot.rs"]
-    :effects []
-    (anchor
-      :role scheduler
-      :observed "background-task:crates/missiond-daemon/src/engine/intent_engine/autopilot.rs:3802"
-      :file "crates/missiond-daemon/src/engine/intent_engine/autopilot.rs"
-      :symbol "dispatch_board_tasks_with_config")
-    (anchor
-      :role scheduler
-      :observed "background-task:crates/missiond-daemon/src/engine/intent_engine/autopilot.rs:4482"
-      :file "crates/missiond-daemon/src/engine/intent_engine/autopilot.rs"
-      :symbol "dispatch_board_tasks_with_config")
-    (anchor
-      :role scheduler
-      :observed "background-task:crates/missiond-daemon/src/engine/intent_engine/autopilot.rs:4606"
-      :file "crates/missiond-daemon/src/engine/intent_engine/autopilot.rs"
-      :symbol "dispatch_board_tasks_with_config")
-    (trigger
-      :from-file "crates/missiond-daemon/src/engine/intent_engine/autopilot.rs"
-      :from-symbol "dispatch_board_tasks"
-      :calls "tokio::spawn"))
-
-  (behavior
     :id autopilot-runtime-isomorphism-checker-subprocess
     :kind subprocess
     :owner autopilot-runtime

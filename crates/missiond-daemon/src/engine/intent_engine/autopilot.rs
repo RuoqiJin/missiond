@@ -623,6 +623,53 @@ fn provider_summary_satisfies_task_contract(task_description: &str, summary: &st
         && worker_final_close_blocker(summary).is_none()
 }
 
+fn board_task_runtime_contract_envelope(task: &missiond_core::types::BoardTask) -> String {
+    let metadata_has_dispatch = task.runtime_metadata.get("dispatch_metadata").is_some()
+        || task.runtime_metadata.get("swarm_metadata").is_some()
+        || task
+            .runtime_metadata
+            .get("source")
+            .and_then(|value| value.as_str())
+            .map(|source| source == "jarvis-intent-plan-gate" || source == "interaction-gateway")
+            .unwrap_or(false);
+    if metadata_has_dispatch {
+        task.runtime_metadata.to_string()
+    } else {
+        task.description.clone()
+    }
+}
+
+fn output_contract_close_blocker_for_task(
+    task: &missiond_core::types::BoardTask,
+    summary: &str,
+) -> Option<&'static str> {
+    output_contract_close_blocker(&board_task_runtime_contract_envelope(task), summary)
+}
+
+fn pty_only_close_blocker_for_task(
+    task: &missiond_core::types::BoardTask,
+    has_durable_provider_final: bool,
+    summary: &str,
+) -> Option<&'static str> {
+    pty_only_close_blocker(
+        &board_task_runtime_contract_envelope(task),
+        has_durable_provider_final,
+        summary,
+    )
+}
+
+fn delegated_write_close_evidence_blocker_for_task(
+    task: &missiond_core::types::BoardTask,
+    has_durable_provider_final: bool,
+    summary: &str,
+) -> Option<&'static str> {
+    delegated_write_close_evidence_blocker(
+        &board_task_runtime_contract_envelope(task),
+        has_durable_provider_final,
+        summary,
+    )
+}
+
 fn provider_completion_summary_for_task(
     messages: &[missiond_core::types::ConversationMessage],
     task_id: &str,
@@ -906,7 +953,7 @@ fn select_agy_artifact_completion_from_root(
                 continue;
             };
             if !pty_summary_has_structured_artifact(&content)
-                || output_contract_close_blocker(&task.description, &content).is_some()
+                || output_contract_close_blocker_for_task(task, &content).is_some()
                 || worker_final_close_blocker(&content).is_some()
             {
                 continue;
@@ -1014,10 +1061,11 @@ async fn durable_provider_completion_for_slot_task(
             .get_conversation_messages(&conv.id, None, 80)
             .await
             .unwrap_or_default();
+        let contract_envelope = board_task_runtime_contract_envelope(task);
         let summary = provider_completion_summary_for_task(
             &messages,
             task.id.as_str(),
-            task.description.as_str(),
+            contract_envelope.as_str(),
             task.claimed_at.as_deref(),
             conv.task_id.as_deref(),
         );
@@ -1173,10 +1221,10 @@ async fn close_idle_running_task_from_durable_summary(
             let summary = extract_worker_final_summary(&response, "");
             let has_structured_artifact = !summary.trim().is_empty()
                 && pty_summary_has_structured_artifact(&summary)
-                && output_contract_close_blocker(&task_with_notes.task.description, &summary)
+                && output_contract_close_blocker_for_task(&task_with_notes.task, &summary)
                     .is_none()
                 && worker_final_close_blocker(&summary).is_none()
-                && pty_only_close_blocker(&task_with_notes.task.description, false, &summary)
+                && pty_only_close_blocker_for_task(&task_with_notes.task, false, &summary)
                     .is_none();
             if has_structured_artifact {
                 let artifact_hash = put_autopilot_task_result_artifact(
@@ -4091,7 +4139,7 @@ async fn dispatch_board_tasks_with_config(
                         return;
                     }
                     if let Some(blocker) =
-                        output_contract_close_blocker(&task.description, &final_summary)
+                        output_contract_close_blocker_for_task(&task, &final_summary)
                     {
                         warn!(
                             task_id = %task.id,
@@ -4162,8 +4210,8 @@ async fn dispatch_board_tasks_with_config(
                             .await;
                         return;
                     }
-                    if let Some(blocker) = pty_only_close_blocker(
-                        &task.description,
+                    if let Some(blocker) = pty_only_close_blocker_for_task(
+                        &task,
                         durable_completion.is_some(),
                         &final_summary,
                     ) {
@@ -4190,8 +4238,8 @@ async fn dispatch_board_tasks_with_config(
                             .await;
                         return;
                     }
-                    if let Some(blocker) = delegated_write_close_evidence_blocker(
-                        &task.description,
+                    if let Some(blocker) = delegated_write_close_evidence_blocker_for_task(
+                        &task,
                         durable_completion.is_some(),
                         &final_summary,
                     ) {
@@ -8457,6 +8505,36 @@ Review only.
             output_contract_close_blocker(&description, "Older summary without required sections."),
             Some("missing-output-contract-sections")
         );
+    }
+
+    #[test]
+    fn output_contract_close_blocker_reads_board_runtime_metadata() {
+        let mut task = test_board_task_for_autopilot(
+            "task-runtime-contract",
+            "Runtime metadata carries the dispatch contract",
+            "Jarvis interaction task. See runtime_metadata for dispatch fields.",
+        );
+        task.runtime_metadata = serde_json::json!({
+            "source": "interaction-gateway",
+            "dispatch_metadata": {
+                "write_policy": "read-only",
+                "write_scope": [],
+                "output_contract": "Findings / Evidence / Recommendations / Verification"
+            }
+        });
+
+        assert_eq!(
+            output_contract_close_blocker_for_task(&task, "还剩最后一步是核对 PTY 状态工具。"),
+            Some("missing-output-contract-sections")
+        );
+        assert_eq!(
+            pty_only_close_blocker_for_task(&task, false, "还剩最后一步是核对 PTY 状态工具。"),
+            Some("missing-pty-final-artifact")
+        );
+
+        let report = "## Findings\n- Ready.\n\n## Evidence\n- Monitor is ready.\n\n## Recommendations\n- Keep this path.\n\n## Verification\n- No file edits.";
+        assert_eq!(output_contract_close_blocker_for_task(&task, report), None);
+        assert_eq!(pty_only_close_blocker_for_task(&task, false, report), None);
     }
 
     #[test]

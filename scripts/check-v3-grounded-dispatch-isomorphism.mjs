@@ -14,9 +14,10 @@ Checks the V3 grounded-dispatch contract:
   - mission_task_delegate and mission_swarm_run enforce grounding before broad
     dispatch and fail fast when gather cannot produce a grounded artifact.
   - Autopilot refuses ungrounded broad BoardTasks before PTY dispatch.
-  - Jarvis worker dispatch uses the runtime/project root for read_scope and
-    normalizes Board/provider finals into canonical task-result-artifacts before
-    streaming result_artifact events.
+  - Jarvis worker dispatch uses the runtime/project root for read_scope.
+    Provider/Autopilot completion writes canonical task-result-artifacts before
+    streaming result_artifact events; Jarvis follow-up must never promote Board
+    summary notes into canonical artifacts.
   - Jarvis plan-confirmed dispatch emits a worker_dispatched/pending claim event
     before returning result_pending, and provider prompts no longer delegate the
     primary BoardTask done transition to workers.
@@ -214,10 +215,6 @@ const checks = [
     'crates/missiond-core/src/ws/server.rs',
     [
       'jarvis_artifact_writer: &JarvisArtifactSlot',
-      'kind: "task-result-artifact".to_string()',
-      '"jarvis-board-summary-projection"',
-      '"TASK_RESULT_ARTIFACT_WRITE_FAILED"',
-      '"TASK_RESULT_ARTIFACT_WRITE_TIMEOUT"',
       '"TASK_RESULT_ARTIFACT_REQUIRED"',
       'MISSIOND_JARVIS_PUBLIC_STREAM_BUDGET_SECS',
       'MISSIOND_JARVIS_VISIBLE_HEARTBEAT_SECS',
@@ -237,10 +234,9 @@ const checks = [
       '"pending_autopilot_claim"',
       '"terminal_task_result": false',
       '"result_followup"',
-      'tokio::time::timeout(',
-      'std::time::Duration::from_secs(8)',
       'Self::extract_task_result_artifact_hash',
       'Self::put_jarvis_artifact',
+      'jarvis_follow_does_not_synthesize_task_result_from_board_summary',
       'mission_shared_memory(action=\\"artifact_get\\"',
       'mission_context_slice',
     ],
@@ -322,6 +318,11 @@ const forbiddenChecks = [
     'jarvis dispatch must not hardcode local developer root',
     'crates/missiond-core/src/ws/server.rs',
     ['"read_scope": ["/Users/jinchen/Projects/missiond"]'],
+  ],
+  [
+    'jarvis follow must not synthesize canonical artifacts from Board notes',
+    'crates/missiond-core/src/ws/server.rs',
+    ['"jarvis-board-summary-projection"', '"jarvis-terminal-revalidate"', 'kind: "task-result-artifact".to_string()'],
   ],
 ];
 

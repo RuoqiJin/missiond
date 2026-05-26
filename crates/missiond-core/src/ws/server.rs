@@ -3191,23 +3191,6 @@ impl PTYWebSocketServer {
         })
     }
 
-    async fn put_jarvis_artifact_bounded(
-        slot: &JarvisArtifactSlot,
-        req: JarvisArtifactRequest,
-        timeout: std::time::Duration,
-    ) -> Result<JarvisArtifactResult, String> {
-        let slot = slot.clone();
-        let join = tokio::spawn(async move { Self::put_jarvis_artifact(&slot, req).await });
-        match tokio::time::timeout(timeout, join).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(error)) => Err(format!("artifact writer task failed: {error}")),
-            Err(_) => Err(format!(
-                "task-result-artifact write did not finish within {}s",
-                timeout.as_secs()
-            )),
-        }
-    }
-
     fn extract_task_result_artifact_hash(text: &str) -> Option<String> {
         let marker = "task_result_artifact:";
         let tail = text.split(marker).nth(1)?.trim();
@@ -3226,7 +3209,7 @@ impl PTYWebSocketServer {
 
     async fn stream_jarvis_task_until_terminal(
         db: &Arc<dyn crate::db::traits::MissionStore>,
-        jarvis_artifact_writer: &JarvisArtifactSlot,
+        _jarvis_artifact_writer: &JarvisArtifactSlot,
         stream: &mut TcpStream,
         chat_id: &str,
         task_id: &str,
@@ -3366,59 +3349,7 @@ impl PTYWebSocketServer {
                         if is_summary {
                             latest_summary = Some(content.clone());
                         }
-                        let mut artifact_hash = artifact_hash;
-                        if is_summary && artifact_hash.is_none() {
-                            match Self::put_jarvis_artifact_bounded(
-                                jarvis_artifact_writer,
-                                JarvisArtifactRequest {
-                                    kind: "task-result-artifact".to_string(),
-                                    project_id: Some("missiond".to_string()),
-                                    task_id: Some(task_id.to_string()),
-                                    payload: serde_json::json!({
-                                        "schema": "missiond.jarvis-task-result.v1",
-                                        "task_id": task_id,
-                                        "note_id": note.id,
-                                        "note_type": note.note_type.as_str(),
-                                        "author": note.author,
-                                        "summary": content.clone(),
-                                        "result_status": "completed",
-                                        "source": "jarvis-board-summary-projection"
-                                    }),
-                                    metadata: serde_json::json!({
-                                        "schema": "missiond.jarvis-task-result.v1",
-                                        "task_id": task_id,
-                                        "provider": note.author,
-                                        "result_status": "completed",
-                                        "source": "jarvis-board-summary-projection"
-                                    }),
-                                },
-                                std::time::Duration::from_secs(8),
-                            )
-                            .await
-                            {
-                                Ok(result) => {
-                                    artifact_hash = Some(result.artifact_hash);
-                                }
-                                Err(error) => {
-                                    let code = if error.contains("did not finish") {
-                                        "TASK_RESULT_ARTIFACT_WRITE_TIMEOUT"
-                                    } else {
-                                        "TASK_RESULT_ARTIFACT_WRITE_FAILED"
-                                    };
-                                    let diagnostic = serde_json::json!({
-                                        "phase": "workers_running",
-                                        "task_id": task_id,
-                                        "note_id": note.id,
-                                        "error": {
-                                            "code": code,
-                                            "message": error
-                                        }
-                                    });
-                                    Self::write_sse_event(stream, "diagnostic", &diagnostic)
-                                        .await?;
-                                }
-                            }
-                        }
+                        let artifact_hash = artifact_hash;
                         if artifact_hash.is_some() {
                             latest_artifact_hash = artifact_hash.clone();
                         }
@@ -3434,7 +3365,7 @@ impl PTYWebSocketServer {
                             "content": content_preview,
                             "truncated": content.chars().count() > max_chars,
                         });
-                        if is_summary || artifact_hash.is_some() {
+                        if artifact_hash.is_some() {
                             Self::write_sse_event(stream, "result_artifact", &event).await?;
                         } else {
                             Self::write_sse_event(stream, "worker_status", &event).await?;
@@ -3482,80 +3413,24 @@ impl PTYWebSocketServer {
                                 {
                                     let content = note.content.clone();
                                     latest_summary = Some(content.clone());
-                                    let mut artifact_hash =
+                                    let artifact_hash =
                                         Self::extract_task_result_artifact_hash(&content);
-                                    if artifact_hash.is_none() {
-                                        match Self::put_jarvis_artifact_bounded(
-                                            jarvis_artifact_writer,
-                                            JarvisArtifactRequest {
-                                                kind: "task-result-artifact".to_string(),
-                                                project_id: Some("missiond".to_string()),
-                                                task_id: Some(task_id.to_string()),
-                                                payload: serde_json::json!({
-                                                    "schema": "missiond.jarvis-task-result.v1",
-                                                    "task_id": task_id,
-                                                    "note_id": note.id,
-                                                    "note_type": note.note_type.as_str(),
-                                                    "author": note.author,
-                                                    "summary": content.clone(),
-                                                    "result_status": "completed",
-                                                    "source": "jarvis-terminal-revalidate"
-                                                }),
-                                                metadata: serde_json::json!({
-                                                    "schema": "missiond.jarvis-task-result.v1",
-                                                    "task_id": task_id,
-                                                    "provider": note.author,
-                                                    "result_status": "completed",
-                                                    "source": "jarvis-terminal-revalidate"
-                                                }),
-                                            },
-                                            std::time::Duration::from_secs(8),
-                                        )
-                                        .await
-                                        {
-                                            Ok(result) => {
-                                                artifact_hash = Some(result.artifact_hash);
-                                            }
-                                            Err(error) => {
-                                                let code = if error.contains("did not finish") {
-                                                    "TASK_RESULT_ARTIFACT_REVALIDATE_TIMEOUT"
-                                                } else {
-                                                    "TASK_RESULT_ARTIFACT_REVALIDATE_FAILED"
-                                                };
-                                                let diagnostic = serde_json::json!({
-                                                    "phase": "done",
-                                                    "task_id": task_id,
-                                                    "note_id": note.id,
-                                                    "error": {
-                                                        "code": code,
-                                                        "message": error
-                                                    }
-                                                });
-                                                Self::write_sse_event(
-                                                    stream,
-                                                    "diagnostic",
-                                                    &diagnostic,
-                                                )
-                                                .await?;
-                                            }
-                                        }
-                                    }
                                     if artifact_hash.is_some() {
                                         latest_artifact_hash = artifact_hash.clone();
+                                        let event = serde_json::json!({
+                                            "task_id": task_id,
+                                            "note_id": note.id,
+                                            "note_type": note.note_type.as_str(),
+                                            "author": note.author,
+                                            "created_at": note.created_at,
+                                            "artifact_hash": artifact_hash,
+                                            "content": content.chars().take(12_000).collect::<String>(),
+                                            "truncated": content.chars().count() > 12_000,
+                                            "source": "jarvis-follow-artifact-reference",
+                                        });
+                                        Self::write_sse_event(stream, "result_artifact", &event)
+                                            .await?;
                                     }
-                                    let event = serde_json::json!({
-                                        "task_id": task_id,
-                                        "note_id": note.id,
-                                        "note_type": note.note_type.as_str(),
-                                        "author": note.author,
-                                        "created_at": note.created_at,
-                                        "artifact_hash": artifact_hash,
-                                        "content": content.chars().take(12_000).collect::<String>(),
-                                        "truncated": content.chars().count() > 12_000,
-                                        "source": "jarvis-terminal-revalidate",
-                                    });
-                                    Self::write_sse_event(stream, "result_artifact", &event)
-                                        .await?;
                                 }
                             }
                             Ok(Err(error)) => {
@@ -7138,6 +7013,28 @@ mod tests {
             "/v1/chat/completions"
         );
         assert_eq!(normalize_public_jarvis_path("/api/slots"), "/api/slots");
+    }
+
+    #[test]
+    fn jarvis_follow_does_not_synthesize_task_result_from_board_summary() {
+        let source = include_str!("./server.rs");
+        let follow_body = source
+            .split("async fn stream_jarvis_task_until_terminal")
+            .nth(1)
+            .and_then(|tail| tail.split("fn classify_jarvis_dispatch_verb").next())
+            .expect("Jarvis follow body should remain present");
+        assert!(
+            !follow_body.contains(&format!("{}{}", "jarvis-board", "-summary-projection")),
+            "Board summary notes must never be promoted to canonical task-result-artifacts"
+        );
+        assert!(
+            !follow_body.contains(&format!("kind: \"{}\".to_string()", "task-result-artifact")),
+            "Jarvis follow may read artifact hashes but must not create task-result-artifacts"
+        );
+        assert!(
+            follow_body.contains("\"TASK_RESULT_ARTIFACT_REQUIRED\""),
+            "Done-without-artifact must be surfaced as a typed diagnostic"
+        );
     }
 
     #[test]

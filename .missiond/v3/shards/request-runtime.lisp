@@ -70,7 +70,7 @@
          :id-field artifact_hash
          :storage "shared_artifacts(kind=task-result)"
          :fields [task_id project_id provider result_status summary content details raw_evidence source]
-         :rule "Jarvis, Board, and worker completion surfaces MUST normalize summary notes/provider finals into task-result-artifact before streaming result_artifact/final to clients. The canonical :content field is the cleaned terminal result only; raw PTY screens, provider transcripts, tool/progress frames, and escaped UI captures remain details/raw_evidence projections. Board notes, PTY text, and provider finals are evidence, not the canonical result. Worker prompts MUST ask for structured Findings/Evidence/Recommendations/Verification output and MUST NOT instruct provider workers to mark the BoardTask done before artifact settlement. Durable provider finals for reused Codex/Claude/Agy sessions must satisfy the current BoardTask output contract before they can close or project a result artifact; stale progress/final text from an older turn is ignored until the current task artifact lands.")
+         :rule "Jarvis, Board, and worker completion surfaces MUST write task-result-artifact before streaming result_artifact/final to clients. The canonical :content field is the cleaned terminal result only; raw PTY screens, provider transcripts, tool/progress frames, escaped UI captures, and Board summary notes remain details/raw_evidence projections. Board summary notes may reference an existing task_result_artifact hash but MUST NOT be promoted into a new canonical artifact by Jarvis follow-up supervision. Worker prompts MUST ask for structured Findings/Evidence/Recommendations/Verification output and MUST NOT instruct provider workers to mark the BoardTask done before artifact settlement. Durable provider finals for reused Codex/Claude/Agy sessions must satisfy the current BoardTask output contract from runtime_metadata.dispatch_metadata before they can close or project a result artifact; stale progress/final text from an older turn is ignored until the current task artifact lands.")
       (kind task-result-artifact-idempotency
          :schema "missiond.task-result-artifact-idempotency.v1"
          :id-field artifact_hash
@@ -105,7 +105,7 @@
       (function jarvis-result-artifact-gate
          :entry [JarvisSSE BoardTaskSummaryNote provider-final task-result-artifact]
          :core ((step s1 :logic "inspect worker/Board summary notes for existing task-result-artifact hash")
-                (step s2 :logic "when only a Board summary projection exists, write a canonical task-result-artifact through shared memory before emitting result_artifact")
+                (step s2 :logic "when only a Board summary projection exists, emit TASK_RESULT_ARTIFACT_REQUIRED or result_pending; Jarvis follow-up supervision never writes a canonical artifact from that summary")
                 (step s3 :logic "bound artifact write latency with an explicit timeout and emit TASK_RESULT_ARTIFACT_WRITE_TIMEOUT when the writer stalls")
                 (step s4 :logic "emit TASK_RESULT_ARTIFACT_WRITE_FAILED diagnostic instead of pretending a missing artifact exists")
                 (step s5 :logic "if a BoardTask is done with a summary but no artifact hash, emit TASK_RESULT_ARTIFACT_REQUIRED and fail fast instead of streaming the Board note as final text")
@@ -145,11 +145,11 @@
        "Direct local code search is allowed only after the grounding artifact identifies code surface evidence as a required source."
        "Jarvis dispatch metadata MUST derive read_scope from the active runtime/project root (MISSIOND_PROJECT_ROOT, MISSIOND_REPO_ROOT, MISSIOND_WORKSPACE_ROOT, or current daemon cwd) and MUST NOT hardcode a developer-machine root path."
        "Jarvis dispatch classification MUST let explicit read-only/no-edit constraints win over incidental implementation words such as `提交` inside `不要提交`; a task that says `只读` or `不要修改文件` MUST route as review/read-only with empty write_scope."
-       "Jarvis result streaming MUST use task-result-artifact as canonical completion authority; Board summary notes are converted to artifacts before client-visible result_artifact events."
+       "Jarvis result streaming MUST use task-result-artifact as canonical completion authority; Board summary notes are only projections carrying an existing artifact hash and MUST NOT be converted to artifacts by follow-up streams."
        "task-result-artifact content MUST be clean terminal worker output; raw PTY screen captures, provider transcript envelopes, and escaped UI/progress text are diagnostics/evidence only and cannot become canonical content."
        "Jarvis plan-confirmed dispatch MUST emit a worker_dispatched handoff event with dispatch_state=pending_autopilot_claim before returning result_pending, even if the concrete slot is claimed asynchronously later."
        "Worker prompts MUST NOT instruct provider workers to call mission_board_update(status=done) as the primary close path; workers return structured final output, and Autopilot/orchestrator closes only after task-result-artifact validation."
-       "Jarvis result artifact writes MUST be bounded; missing or stalled artifact writes produce typed diagnostics and MUST NOT silently fall back to Board note final text."
+       "Autopilot/shared-memory result artifact writes MUST be bounded; missing or stalled artifact writes produce typed diagnostics and MUST NOT silently fall back to Board note final text."
        "Jarvis BoardTask and notes polling during public SSE supervision MUST be bounded by MISSIOND_JARVIS_DB_POLL_TIMEOUT_SECS; DB/EventBus stalls produce typed diagnostics or result_pending, never silent mobile/proxy hangs."
        "Jarvis public SSE streams MUST return a typed result_pending/follow_payload before mobile or reverse-proxy timeouts; follow-up requests with missiond_follow_task_id resume the existing BoardTask instead of creating a new intent or plan."
        "Jarvis public follow streams MUST emit visible worker_status heartbeat events during long-running worker supervision; transport-only SSE comments do not satisfy mobile UI observability."
