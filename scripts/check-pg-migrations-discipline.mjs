@@ -60,10 +60,12 @@ function main() {
   const root = process.cwd();
   const diagnostics = [];
   const dir = path.join(root, MIGRATIONS_DIR);
+  const versions = new Map();
   for (const entry of fs.readdirSync(dir).sort()) {
     if (!entry.endsWith('.sql')) continue;
     const rel = path.posix.join(MIGRATIONS_DIR, entry);
     const source = fs.readFileSync(path.join(root, rel), 'utf8');
+    checkUniqueVersion(rel, versions, diagnostics);
     checkFrozenChecksum(rel, source, diagnostics);
     checkHeader(rel, source, diagnostics);
     checkForbidden(rel, source, diagnostics);
@@ -135,6 +137,30 @@ function checkFrozenChecksum(file, source, diagnostics) {
     file,
     line: 1,
     message: `frozen migration checksum changed: expected sha384 ${expected}, got ${actual}; create an additive migration instead of editing an applied migration`,
+  });
+}
+
+function checkUniqueVersion(file, versions, diagnostics) {
+  const basename = path.posix.basename(file);
+  const match = /^(\d+)_/.exec(basename);
+  if (!match) {
+    diagnostics.push({
+      file,
+      line: 1,
+      message: 'migration filename must start with numeric sqlx version prefix',
+    });
+    return;
+  }
+  const version = match[1];
+  const existing = versions.get(version);
+  if (!existing) {
+    versions.set(version, file);
+    return;
+  }
+  diagnostics.push({
+    file,
+    line: 1,
+    message: `duplicate migration version ${version}; already used by ${existing}`,
   });
 }
 

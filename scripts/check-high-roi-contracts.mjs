@@ -151,7 +151,7 @@ function main() {
       ['evidence hard gate', /EVIDENCE_REQUIRED/],
       ['task result artifact gate query', /task_result_artifacts[\s\S]*result_status/],
     ]),
-    ...checkRequiredText(root, 'crates/missiond-core/migrations/20260526000000_worker_runtime_state.sql', [
+    ...checkRequiredText(root, 'crates/missiond-core/migrations/20260526003000_worker_runtime_state.sql', [
       ['worker runtime table', /CREATE TABLE IF NOT EXISTS worker_runtime_state/],
       ['worker runtime lifecycle', /lifecycle TEXT NOT NULL/],
     ]),
