@@ -41,6 +41,8 @@ const FROZEN_SHA384 = Object.freeze({
     'cdb48608a9cdfe380c0e00078072195e0a02213e4addecf23643ad40730f8619ed3ceee184e3cc4806a1e8a614e429c9',
   'crates/missiond-core/migrations/20260523003000_codex_replay.sql':
     'e375a6d72a6a9890be7146036b6a060127c345caed5dabae69910a66379295c7ea5860d23a8f42c5eb807a9fd212c924',
+  'crates/missiond-core/migrations/20260526000000_conversation_session_management.sql':
+    '3f655d3bbc29846f7d83d2c4da4fd3ea4fe0b4633ecfc5dc6d64ab4cd5cdcf6c7a1589eb7139c93d87ca0a538cc40c1c',
 });
 
 function main() {
