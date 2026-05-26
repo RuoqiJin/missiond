@@ -2699,7 +2699,20 @@ impl PTYWebSocketServer {
                 .await?;
                 Self::write_sse_event(
                     &mut stream,
-                    "final",
+                    "dispatch_accepted",
+                    &serde_json::json!({
+                        "interaction_id": interaction_id,
+                        "phase": "board_tasks_created",
+                        "task_id": task.id,
+                        "terminal_task_result": false,
+                        "follow_payload": follow_payload.clone(),
+                        "message": "BoardTask was created and accepted for asynchronous worker dispatch; this is not a terminal task result."
+                    }),
+                )
+                .await?;
+                Self::write_sse_event(
+                    &mut stream,
+                    "result_pending",
                     &serde_json::json!({
                         "interaction_id": interaction_id,
                         "phase": "result_pending",
@@ -3239,14 +3252,18 @@ impl PTYWebSocketServer {
                     "next_action": "Inspect the BoardTask, slot state, and task-result-artifact before retrying."
                 });
                 Self::write_sse_event(stream, "diagnostic", &diagnostic).await?;
-                let final_event = serde_json::json!({
+                let pending_event = serde_json::json!({
                     "phase": "timeout",
                     "task_id": task_id,
                     "status": "worker_timeout",
                     "wait_secs": wait_secs,
-                    "terminal_task_result": false
+                    "terminal_task_result": false,
+                    "follow_payload": {
+                        "missiond_follow_task_id": task_id,
+                        "stream": true
+                    }
                 });
-                Self::write_sse_event(stream, "final", &final_event).await?;
+                Self::write_sse_event(stream, "result_pending", &pending_event).await?;
                 Self::write_sse_openai_text(
                     stream,
                     chat_id,
@@ -3275,13 +3292,17 @@ impl PTYWebSocketServer {
                         "next_action": "Investigate MissionD DB/event wait path; do not keep the public SSE stream open silently."
                     });
                     Self::write_sse_event(stream, "diagnostic", &diagnostic).await?;
-                    let final_event = serde_json::json!({
+                    let pending_event = serde_json::json!({
                         "phase": "poll_timeout",
                         "task_id": task_id,
                         "status": "poll_timeout",
-                        "terminal_task_result": false
+                        "terminal_task_result": false,
+                        "follow_payload": {
+                            "missiond_follow_task_id": task_id,
+                            "stream": true
+                        }
                     });
-                    Self::write_sse_event(stream, "final", &final_event).await?;
+                    Self::write_sse_event(stream, "result_pending", &pending_event).await?;
                     Self::write_sse_openai_text(
                             stream,
                             chat_id,
@@ -3640,7 +3661,7 @@ impl PTYWebSocketServer {
                             "message": "Worker task is still running; return a resumable pending result before the public SSE route times out."
                         });
                         Self::write_sse_event(stream, "diagnostic", &diagnostic).await?;
-                        let final_event = serde_json::json!({
+                        let pending_event = serde_json::json!({
                             "phase": "result_pending",
                             "task_id": task_id,
                             "status": "result_pending",
@@ -3648,7 +3669,7 @@ impl PTYWebSocketServer {
                             "public_stream_budget_secs": public_stream_budget_secs,
                             "follow_payload": follow_payload
                         });
-                        Self::write_sse_event(stream, "final", &final_event).await?;
+                        Self::write_sse_event(stream, "result_pending", &pending_event).await?;
                         Self::write_sse_openai_text(
                             stream,
                             chat_id,
@@ -4609,14 +4630,27 @@ impl PTYWebSocketServer {
                         "message": "BoardTask created; worker execution continues asynchronously and results must be read through follow-up supervision."
                     });
                     Self::write_sse_event(&mut stream, "worker_status", &worker_status).await?;
-                    let final_event = serde_json::json!({
+                    Self::write_sse_event(
+                        &mut stream,
+                        "dispatch_accepted",
+                        &serde_json::json!({
+                            "phase": "board_tasks_created",
+                            "task_id": task.id,
+                            "status": task.status.as_str(),
+                            "terminal_task_result": false,
+                            "follow_payload": follow_payload.clone(),
+                            "message": "BoardTask was created and accepted for asynchronous worker dispatch; this is not a terminal task result."
+                        }),
+                    )
+                    .await?;
+                    let pending_event = serde_json::json!({
                         "phase": "result_pending",
                         "task_id": task.id,
                         "status": "result_pending",
                         "terminal_task_result": false,
                         "follow_payload": follow_payload
                     });
-                    Self::write_sse_event(&mut stream, "final", &final_event).await?;
+                    Self::write_sse_event(&mut stream, "result_pending", &pending_event).await?;
                     Self::write_sse_openai_text(
                         &mut stream,
                         &chat_id,

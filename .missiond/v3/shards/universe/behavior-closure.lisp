@@ -194,6 +194,23 @@
       :calls "AbortController timeout for bounded Jarvis SSE smoke"))
 
   (behavior
+    :id stale-boardtask-final-audit-ipc-timeout
+    :kind scheduler
+    :owner interaction-gateway
+    :observed ["scheduler:scripts/audit-stale-boardtask-finals.mjs:183"]
+    :code ["scripts/audit-stale-boardtask-finals.mjs"]
+    :effects []
+    (anchor
+      :role scheduler
+      :observed "scheduler:scripts/audit-stale-boardtask-finals.mjs:183"
+      :file "scripts/audit-stale-boardtask-finals.mjs"
+      :symbol "callMissiond")
+    (trigger
+      :from-file "scripts/audit-stale-boardtask-finals.mjs"
+      :from-symbol "callMissiond"
+      :calls "bounded MissionD IPC timeout for stale-final audit"))
+
+  (behavior
     :id global-claude-md-sync
     :kind effect
     :owner context-runtime

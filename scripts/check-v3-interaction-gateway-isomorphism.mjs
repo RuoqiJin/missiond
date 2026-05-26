@@ -23,6 +23,7 @@ const files = {
   server: 'crates/missiond-core/src/ws/server.rs',
   jarvisChainSmoke: 'scripts/smoke-jarvis-chain.mjs',
   jarvisInteractionSmoke: 'scripts/smoke-jarvis-interaction.mjs',
+  jarvisIntentPlanDispatchSmoke: 'scripts/smoke-jarvis-intent-plan-dispatch.mjs',
   deployDaemon: 'scripts/deploy-daemon.sh',
   boardTypes: 'crates/missiond-core/src/types/board.rs',
   boardStore: 'crates/missiond-core/src/db/pg/board.rs',
@@ -130,7 +131,9 @@ requireIncludes('server', [
   'intent_draft',
   'plan_draft',
   'board_task_created',
+  'dispatch_accepted',
   'result_pending',
+  'terminal_task_result',
   'runtime_metadata: Some(meta)',
   'See runtime_metadata for grounding, intent, plan',
   'jarvis_slot_auto_heal_enabled',
@@ -161,6 +164,17 @@ requireIncludes('jarvisInteractionSmoke', [
   'intent_draft',
   'confirm_required',
   'JARVIS_CONFIRMATION_BYPASS',
+]);
+
+requireIncludes('jarvisIntentPlanDispatchSmoke', [
+  'missiond.jarvis-intent-plan-dispatch-smoke.v1',
+  'intent_draft',
+  'plan_draft',
+  'board_task_created',
+  'dispatch_accepted',
+  'result_pending',
+  'NON_TERMINAL_FINAL',
+  'terminal_task_result',
 ]);
 
 requireIncludes('deployDaemon', [

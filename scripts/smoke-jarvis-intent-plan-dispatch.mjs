@@ -142,6 +142,8 @@ function inferredEventName(item) {
     if (data.plan_artifact_id && data.steps) return 'plan_draft';
     if (data.confirm_payload) return 'confirm_required';
     if (data.board_task_id || data.board_task_ids) return 'board_task_created';
+    if (data.phase === 'board_tasks_created' && data.terminal_task_result === false) return 'dispatch_accepted';
+    if (data.phase === 'result_pending' || data.status === 'result_pending') return 'result_pending';
     if (data.status === 'workers_running' || data.phase === 'workers_running') return 'worker_status';
   }
   return item.event || 'message';
@@ -169,6 +171,17 @@ function findConfirmPayload(response) {
 
 function hasEvent(response, name) {
   return eventNames(response).includes(name);
+}
+
+function hasNonTerminalFinal(response) {
+  return (response?.events || []).some((event) => {
+    if (event?.event !== 'final') return false;
+    const data = event.data;
+    if (!data || typeof data !== 'object') return true;
+    if (data.terminal_task_result === false) return true;
+    if (data.phase === 'result_pending' || data.status === 'result_pending') return true;
+    return false;
+  });
 }
 
 async function main() {
@@ -227,10 +240,17 @@ async function main() {
     third = await postInteraction(buildBody({ missiond_plan_confirmed: true, missiond_confirm: { confirm_payload: planConfirm } }));
     validateHttp('dispatch', third, diagnostics);
     if (third.ok) {
-      for (const required of ['board_task_created', 'final']) {
+      for (const required of ['board_task_created']) {
         if (!hasEvent(third, required)) {
           diagnostics.push({ code: 'DISPATCH_EVENT_MISSING', message: `dispatch phase missing ${required}`, events: eventNames(third) });
         }
+      }
+      const thirdEvents = eventNames(third);
+      if (!thirdEvents.includes('dispatch_accepted') && !thirdEvents.includes('result_pending')) {
+        diagnostics.push({ code: 'DISPATCH_PENDING_EVENT_MISSING', message: 'dispatch phase must return dispatch_accepted or result_pending for non-terminal async work', events: thirdEvents });
+      }
+      if (hasNonTerminalFinal(third)) {
+        diagnostics.push({ code: 'NON_TERMINAL_FINAL', message: 'dispatch phase emitted final before a terminal task-result-artifact; use result_pending/dispatch_accepted instead', events: thirdEvents });
       }
     }
   }

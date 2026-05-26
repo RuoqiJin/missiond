@@ -309,7 +309,7 @@
         :entry [BoardTasks slots-api mission_pty_status mission_master_status eventbus-websocket ExecDashboard Terminal]
         :core ((step s1 :logic "render Exec as an orchestration cockpit rather than a second Terminal surface")
                (step s2 :logic "start from active BoardTasks, then join each task to claimExecutorId/assignee/currentTaskId/activeBoardTaskId slot evidence")
-               (step s3 :logic "show BoardTask status, dispatch/evidence/checkpoint diagnostics, latest durable conversation, EventBus wait state, and runtime_metadata interaction chain fields such as interaction_id, PermissionContext, grounding_context_id, intent_artifact_id, plan_artifact_id, accepted_shard_id, context_pack_path, write_scope, and sources_used")
+               (step s3 :logic "show BoardTask status, dispatch/evidence/checkpoint diagnostics, latest durable conversation, EventBus wait state, and runtime_metadata interaction chain fields such as interaction_id, PermissionContext, grounding_context_id, intent_artifact_id, plan_artifact_id, worker_conversation_id, provider_conversation_id, task_result_artifact_hash, accepted_shard_id, context_pack_path, write_scope, and sources_used")
                (step s4 :logic "derive execution-step-digest from BoardTask description, recent notes, slot state, and durable conversation metadata so operators can flip through the work trace without reading raw PTY")
                (step s5 :logic "embed the selected PTY as a detail panel for diagnosis only; durable provider logs and MissionD events remain completion authority")
                (step s6 :logic "surface stale/future timestamps, stopped PTY with durable conversation fallback, and missing MCP readiness as diagnostics"))

@@ -113,15 +113,17 @@
                 (step s7 :logic "if the worker provider returns an empty final after its slot is idle/exited/error, write provider-empty-final as a task-result-artifact diagnostic, fail the BoardTask, and notify Jarvis instead of leaving the task running until mobile timeout")
                 (step s8 :logic "when Autopilot/watchdog observes a durable provider final for an idle running worker, it must first write task-result-artifact and include its hash in the summary note before changing the BoardTask to done")
                 (step s9 :logic "durable final selection is output-contract aware: for tasks declaring Findings/Evidence/Recommendations/Verification, provider messages missing those sections are treated as stale/progress evidence, not final results")
-                (step s10 :logic "if daemon restart or send loss leaves an idle worker slot without durable final or task-result-artifact after watchdog_grace_secs, write a failed diagnostic artifact and fail the BoardTask instead of keeping Jarvis or Board waiting"))
+                (step s10 :logic "if daemon restart or send loss leaves an idle worker slot without durable final or task-result-artifact after watchdog_grace_secs, write a failed diagnostic artifact and fail the BoardTask instead of keeping Jarvis or Board waiting")
+                (step s11 :logic "scripts/audit-stale-boardtask-finals.mjs provides a dry-run stale-final audit that flags conversation final before BoardTask claim, terminal tasks without task-result-artifact hash, and summary projections reused as final authority"))
          :egress [task-result-artifact result_artifact_event final_event diagnostic])
        (function jarvis-dispatch-causality
          :entry [JarvisSSE plan-confirmed BoardTask auto_execute]
          :core ((step s1 :logic "after plan confirmation creates an auto_execute BoardTask, emit board_task_created with grounding/intent/plan artifact ids")
-                (step s2 :logic "immediately emit worker_dispatched with dispatch_state=pending_autopilot_claim, task_id, follow_payload, and terminal_task_result=false so mobile/Web clients can render the causal handoff before the asynchronous slot claim occurs")
-                (step s3 :logic "later follow-up supervision may emit another worker_dispatched with the concrete slot_id once Autopilot claims a slot")
-                (step s4 :logic "do not stream task completion on the initial dispatch response; return result_pending/follow_payload and require follow-up artifact validation"))
-         :egress [board_task_created worker_dispatched result_pending follow_payload])
+               (step s2 :logic "immediately emit worker_dispatched with dispatch_state=pending_autopilot_claim, task_id, follow_payload, and terminal_task_result=false so mobile/Web clients can render the causal handoff before the asynchronous slot claim occurs")
+               (step s3 :logic "later follow-up supervision may emit another worker_dispatched with the concrete slot_id once Autopilot claims a slot")
+                (step s4 :logic "do not stream task completion on the initial dispatch response; emit dispatch_accepted plus result_pending/follow_payload and require follow-up artifact validation")
+                (step s5 :logic "final is reserved for terminal task-result-artifact or terminal typed diagnostics; non-terminal asynchronous handoff MUST NOT emit final"))
+         :egress [board_task_created worker_dispatched dispatch_accepted result_pending follow_payload])
        (function jarvis-result-followup
          :entry [JarvisSSE missiond_follow_task_id BoardTask task-result-artifact]
          :core ((step s1 :logic "public Jarvis SSE routes use MISSIOND_JARVIS_PUBLIC_STREAM_BUDGET_SECS to avoid relying on a single multi-minute mobile/proxy connection")
@@ -129,7 +131,8 @@
                 (step s3 :logic "a follow-up request carrying missiond_follow_task_id bypasses intent/plan regeneration and resumes observation of the existing BoardTask")
                 (step s4 :logic "if the followed task is already terminal, immediately revalidate task-result-artifact and stream result_artifact/final")
                 (step s5 :logic "result_pending is not a fallback answer; it is a resumable transport state and terminal_task_result remains false")
-                (step s6 :logic "while supervising a still-running worker on a public/mobile follow stream, emit client-visible worker_status heartbeat events bounded by MISSIOND_JARVIS_VISIBLE_HEARTBEAT_SECS; colon SSE comments remain transport keepalive only and are not sufficient UI progress"))
+                (step s6 :logic "while supervising a still-running worker on a public/mobile follow stream, emit client-visible worker_status heartbeat events bounded by MISSIOND_JARVIS_VISIBLE_HEARTBEAT_SECS; colon SSE comments remain transport keepalive only and are not sufficient UI progress")
+                (step s7 :logic "timeout, poll_timeout, or public stream budget exhaustion emits diagnostic plus result_pending, never non-terminal final"))
          :egress [result_pending follow_payload result_followup_stream result_artifact_event final_event]))
     :invariants
       ["All non-exact worker dispatch must carry grounding_context_id before a provider PTY receives the prompt."
@@ -148,6 +151,7 @@
        "Jarvis public SSE streams MUST return a typed result_pending/follow_payload before mobile or reverse-proxy timeouts; follow-up requests with missiond_follow_task_id resume the existing BoardTask instead of creating a new intent or plan."
        "Jarvis public follow streams MUST emit visible worker_status heartbeat events during long-running worker supervision; transport-only SSE comments do not satisfy mobile UI observability."
        "Jarvis plan-confirmed dispatch MUST NOT wait for worker terminal state on the initial mobile/public SSE request; it creates the BoardTask, returns result_pending with follow_payload immediately, and only follow requests supervise task-result-artifact completion."
+       "Jarvis MUST NOT emit final for dispatch_accepted, result_pending, timeout, poll_timeout, or public stream budget exhaustion; final is terminal-only and requires task-result-artifact validation or a terminal typed diagnostic."
        "Agy and other provider artifact completion MUST accept numbered markdown report headings such as `## 1. Findings`, `## 2. Evidence`, `## 3. Recommendations`, and `## 4. Verification`; provider-generated numbering is formatting, not a missing output-contract section."
        "Jarvis intent/plan confirmations MUST accept both top-level missiond_intent_confirmed/missiond_plan_confirmed fields and wrapped missiond_confirm payloads, so iOS and external clients do not need to mirror MissionD's internal JSON shape."
        "Jarvis intent/plan confirmation payloads MUST carry missiond_objective from the original request; confirmed dispatch must derive BoardTask title, worker prompt, and dispatch metadata from that objective, never from a later confirmation utterance such as `确认 plan`."]

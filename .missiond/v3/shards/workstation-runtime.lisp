@@ -65,7 +65,7 @@
       :default_secs 180
       :min_secs 15
       :max_secs 300
-      :rule "Jarvis mobile/SSE requests may supervise a dispatched BoardTask only within this bounded synchronous wait window. If the worker has not produced durable task-result-artifact before the window expires, MissionD MUST emit JARVIS_WORKER_TIMEOUT diagnostic plus final/[DONE], keep the BoardTask observable in Board/Exec, and avoid client-side hangs or fallback answers.")
+      :rule "Jarvis mobile/SSE requests may supervise a dispatched BoardTask only within this bounded synchronous wait window. If the worker has not produced durable task-result-artifact before the window expires, MissionD MUST emit JARVIS_WORKER_TIMEOUT diagnostic plus result_pending/[DONE], keep the BoardTask observable in Board/Exec, and avoid client-side hangs, non-terminal final events, or fallback answers.")
     (agent-cli-regression-policy
       :schema "missiond.agent-cli-regression-policy.v1"
       :checker "node scripts/check-v3-agent-cli-regression.mjs"
