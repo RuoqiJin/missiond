@@ -77,6 +77,34 @@ fn default_conversation_type() -> String {
 /// ClaudeCode audits use it to distinguish "imported from a durable provider
 /// source" from "PTY placeholder", "raw file missing", or "provider index lost
 /// the rollout row".
+pub const CONVERSATION_SOURCE_CODEX_CLI: &str = "codex_cli";
+
+pub const CONVERSATION_SOURCE_STATE_CURRENT: &str = "current";
+pub const CONVERSATION_SOURCE_STATE_PROVIDER_INDEX_MISSING: &str = "provider-index-missing";
+pub const CONVERSATION_SOURCE_STATE_MISSING_STALE: &str = "missing-stale";
+pub const CONVERSATION_SOURCE_STATE_PATH_MISMATCH: &str = "path-mismatch";
+pub const CONVERSATION_SOURCE_STATE_ARCHIVED: &str = "archived";
+pub const CONVERSATION_SOURCE_STATE_PTY_PLACEHOLDER: &str = "pty-placeholder";
+
+pub const CONVERSATION_SOURCE_LABEL_CODEX_LOCAL_INDEX: &str = "codex_local_index";
+pub const LEGACY_CONVERSATION_SOURCE_STATE_SQLITE_MISSING: &str = "sqlite-missing";
+
+pub fn is_provider_index_missing_state(raw_state: &str) -> bool {
+    matches!(
+        raw_state,
+        CONVERSATION_SOURCE_STATE_PROVIDER_INDEX_MISSING
+            | LEGACY_CONVERSATION_SOURCE_STATE_SQLITE_MISSING
+    )
+}
+
+pub fn normalize_conversation_source_state(raw_state: &str) -> &str {
+    if raw_state == LEGACY_CONVERSATION_SOURCE_STATE_SQLITE_MISSING {
+        CONVERSATION_SOURCE_STATE_PROVIDER_INDEX_MISSING
+    } else {
+        raw_state
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationSourceStateInput {

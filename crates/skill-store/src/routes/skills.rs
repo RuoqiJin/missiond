@@ -46,8 +46,7 @@ async fn list_skills(
     State(state): State<AppState>,
     Query(q): Query<ListQuery>,
 ) -> AppResult<Json<Vec<SkillPublic>>> {
-    let conn = state.db.conn();
-    let skills = db::skills::list_skills_public(&*conn, q.tier, q.offset, q.limit)?;
+    let skills = db::skills::list_skills_public(state.db.pool(), q.tier, q.offset, q.limit).await?;
     Ok(Json(skills))
 }
 
@@ -55,10 +54,10 @@ async fn get_skill(
     State(state): State<AppState>,
     Path(skill_id): Path<String>,
 ) -> AppResult<Json<SkillPublic>> {
-    let conn = state.db.conn();
-    let skill = db::skills::get_skill_by_id(&*conn, &skill_id)
+    let skill = db::skills::get_skill_by_id(state.db.pool(), &skill_id)
+        .await
         .map_err(|_| AppError::NotFound(format!("Skill {skill_id} not found")))?;
-    let creator = db::users::get_user_by_id(&*conn, &skill.creator_id)?;
+    let creator = db::users::get_user_by_id(state.db.pool(), &skill.creator_id).await?;
 
     Ok(Json(SkillPublic {
         id: skill.id,
@@ -80,8 +79,7 @@ async fn create_skill(
     Json(req): Json<CreateSkillRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
     if auth.role != UserRole::Creator.as_str() && auth.role != UserRole::Admin.as_str() {
-        let conn = state.db.conn();
-        db::users::update_role(&*conn, &auth.user_id, &UserRole::Creator)?;
+        db::users::update_role(state.db.pool(), &auth.user_id, &UserRole::Creator).await?;
     }
 
     if req.name.is_empty() {
@@ -92,9 +90,8 @@ async fn create_skill(
     }
 
     let skill_id = uuid::Uuid::new_v4().to_string();
-    let conn = state.db.conn();
     let skill = db::skills::create_skill(
-        &*conn,
+        state.db.pool(),
         &skill_id,
         &auth.user_id,
         &req.name,
@@ -103,7 +100,8 @@ async fn create_skill(
         &req.input_schema,
         req.tier,
         req.price_per_use,
-    )?;
+    )
+    .await?;
 
     Ok(Json(serde_json::json!({
         "id": skill.id,
@@ -117,8 +115,7 @@ async fn list_my_skills(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> AppResult<Json<Vec<crate::models::Skill>>> {
-    let conn = state.db.conn();
-    let skills = db::skills::list_creator_skills(&*conn, &auth.user_id)?;
+    let skills = db::skills::list_creator_skills(state.db.pool(), &auth.user_id).await?;
     Ok(Json(skills))
 }
 
@@ -128,16 +125,15 @@ async fn update_skill(
     Path(skill_id): Path<String>,
     Json(req): Json<UpdateSkillRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let conn = state.db.conn();
-
-    let skill = db::skills::get_skill_by_id(&*conn, &skill_id)
+    let skill = db::skills::get_skill_by_id(state.db.pool(), &skill_id)
+        .await
         .map_err(|_| AppError::NotFound(format!("Skill {skill_id} not found")))?;
     if skill.creator_id != auth.user_id && auth.role != UserRole::Admin.as_str() {
         return Err(AppError::Forbidden("Not your skill".into()));
     }
 
     db::skills::update_skill(
-        &*conn,
+        state.db.pool(),
         &skill_id,
         req.name.as_deref(),
         req.description.as_deref(),
@@ -146,7 +142,8 @@ async fn update_skill(
         req.tier,
         req.price_per_use,
         req.is_active,
-    )?;
+    )
+    .await?;
 
     Ok(Json(serde_json::json!({ "updated": true })))
 }

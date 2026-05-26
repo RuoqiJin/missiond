@@ -809,7 +809,7 @@ async fn search_skills(state: &AppState, query: &str) -> Vec<SkillHint> {
             });
         }
 
-        // 2. FTS5
+        // 2. Postgres FTS
         if let Ok(fts_results) = state.store.skill_search_fts(query).await {
             for (rank, r) in fts_results.iter().take(20).enumerate() {
                 topic_scores.entry(r.topic.clone()).or_insert_with(|| {
@@ -944,7 +944,7 @@ async fn search_kb(state: &AppState, query: &str) -> Vec<KbHint> {
     let fut = async {
         let top_k = 10usize;
 
-        // 1. FTS5 ranked
+        // 1. Postgres FTS ranked
         let fts_ranked: Vec<(String, usize, Option<String>)> = {
             let ranked = state
                 .store

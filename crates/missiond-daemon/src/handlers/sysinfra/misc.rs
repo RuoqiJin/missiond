@@ -84,7 +84,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 
         // ===== Health =====
         "mission_health" => {
-            let agents = state.pty.get_all_status().await;
+            let slots = state.slots();
+            let control = state.control_plane();
+            let llm = state.llm();
+            let agents = slots.pty.get_all_status().await;
             let pty_status: Vec<Value> = agents
                 .iter()
                 .map(|a| {
@@ -97,7 +100,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .collect();
 
             // Memory extraction state (read from ControlTree)
-            let memory_paused = state
+            let memory_paused = control
                 .control_manager
                 .current()
                 .is_domain_paused(crate::control_tree::CtlDomain::Memory);
@@ -128,8 +131,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     // v2 bus: use AtomicBusMetrics for append counters in the future.
                     "publish_count": 0u64,
                 },
-                "gemini_mode": if state.gemini.is_cli_mode() { "cli" } else { "http" },
-                "stats": state.stats.snapshot(),
+                "gemini_mode": if llm.gemini.is_cli_mode() { "cli" } else { "http" },
+                "stats": control.stats.snapshot(),
+                "startupPreflight": state.startup_preflight.clone(),
             })))
         }
 

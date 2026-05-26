@@ -56,7 +56,7 @@ const MANUAL_OVERRIDES = new Map(Object.entries({
   'mcp-only-deploy-docker-skip-normal': ['needs-human', 'Manual pilot: deploy behavior should live in deploy-center SSOT if current.'],
   'claude-code-jsonl-role-mapping-quirks': ['active', 'Manual pilot: current provider log parsing quirk relevant to role/turn audits.'],
   'agent-update-source-priority-2026-02-21': ['needs-human', 'Manual pilot: deploy-agent source priority should be verified in deploy-agent SSOT.'],
-  'missiond-token-usage-ledger-architecture': ['historical-evidence', 'Manual pilot: SQLite-era rationale; current Postgres/event ledger should be code/SSOT-owned.'],
+  'missiond-token-usage-ledger-architecture': ['historical-evidence', 'Manual pilot: legacy local-store rationale; current Postgres/event ledger should be code/SSOT-owned.'],
   'missiond-claude-md-auto-sync': ['wrong-or-stale', 'Manual pilot: context preloading/autosync was intentionally disabled/reduced due KB noise.'],
   'jarvis-phase2-e2e-completed': ['historical-evidence', 'Manual pilot: completed milestone summary, not active guidance.'],
   'pty-screenshot-frontend-xterm-canvas': ['superseded-by-code', 'Manual pilot: current feature owned by code/frontend SSOT.'],
@@ -189,11 +189,11 @@ function classify(row) {
     };
   }
 
-  if (hasAny(text, ['sqlite']) && hasAny(text, ['missiond', 'missiondb', '锁', 'busy', 'wal'])) {
+  if (hasAny(text, ['legacy local store']) && hasAny(text, ['missiond', 'missiondb', '锁', 'busy', 'wal'])) {
     return {
       state: 'historical-evidence',
       confidence: 0.82,
-      rationale: 'SQLite-era MissionD implementation history; current backend is Postgres/event-bus governed.',
+      rationale: 'Legacy MissionD implementation history; current backend is Postgres/event-bus governed.',
       evidence_refs: ['crates/missiond-daemon/src/main.rs', 'crates/missiond-core/src/db/pg'],
     };
   }

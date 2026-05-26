@@ -2717,7 +2717,7 @@ async fn build_context(state: &AppState, keywords: &str) -> Result<String> {
     let mut parts = Vec::new();
     let mut total_len = 0;
 
-    // Search KB (FTS5, take first 3)
+    // Search KB (Postgres FTS, take first 3)
     if let Ok(entries) = state.store.kb_search(keywords, None).await {
         for entry in entries.iter().take(3) {
             let summary = truncate_str(&entry.summary, MAX_ENTRY_CHARS);

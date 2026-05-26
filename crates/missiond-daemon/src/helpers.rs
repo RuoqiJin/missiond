@@ -71,10 +71,6 @@ pub(crate) fn ipc_endpoint_from_env() -> String {
     missiond_core::ipc::default_ipc_endpoint()
 }
 
-pub(crate) fn db_path() -> PathBuf {
-    env_path("MISSION_DB_PATH").unwrap_or_else(|| default_mission_home().join("mission.db"))
-}
-
 pub(crate) fn slots_config_path() -> PathBuf {
     env_path("MISSION_SLOTS_CONFIG").unwrap_or_else(|| default_mission_home().join("slots.yaml"))
 }
@@ -94,11 +90,16 @@ pub(crate) fn ws_port() -> u16 {
         .unwrap_or(9120)
 }
 
-pub(crate) fn logs_dir(db_path: &Path) -> PathBuf {
-    db_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("logs")
+pub(crate) fn logs_dir(home: &Path) -> PathBuf {
+    home.join("logs")
+}
+
+pub(crate) fn permission_config_path(home: &Path) -> PathBuf {
+    home.join("config").join("permissions.yaml")
+}
+
+pub(crate) fn learned_permissions_path(home: &Path) -> PathBuf {
+    home.join("config").join("learned_permissions.yaml")
 }
 
 /// Ensure sensitive config files have restrictive permissions (owner-only read/write).
@@ -113,7 +114,6 @@ pub(crate) fn ensure_config_permissions(home: &Path) {
         "mcp-config.json",
         "xjp-mcp-config.json", // legacy name
         "config/permissions.yaml",
-        "mission.db",
     ];
 
     for name in &files {

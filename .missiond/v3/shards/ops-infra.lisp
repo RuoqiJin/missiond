@@ -20,10 +20,13 @@
        "Rust formatting for external or non-M6 projects MAY remain scoped through scripts/cargo-fmt-touched.sh, including staged, unstaged, and branch-diff modes."
        "The no-Rust-files path MUST exit 0 under set -euo pipefail; filters must not turn an empty grep match into a script failure."
        "MissionD primary runtime database MUST be PostgreSQL-only; the old MissionD SQLite backend, SQLite-to-Postgres migration module, and sqlite feature cfg MUST be absent from active code/build paths."
-       "SQLite references are allowed only for external provider durable sources such as Codex CLI state_5.sqlite, or for independent non-MissionD storage crates such as skill-store; they MUST NOT reintroduce a MissionD runtime database backend."]
+       "SQLite references are allowed only for the external Codex provider-local state_5.sqlite index adapter; skill-store and all MissionD-owned storage MUST use PostgreSQL."]
     :checks ["bash -n scripts/deploy-daemon.sh"
              "bash -n scripts/rustfmt-missiond.sh"
              "scripts/rustfmt-missiond.sh --check"
              "bash -n scripts/cargo-fmt-touched.sh"
              "scripts/cargo-fmt-touched.sh --check"
-             "node scripts/check-v3-ops-infra-isomorphism.mjs"])
+             "node scripts/check-v3-ops-infra-isomorphism.mjs"
+             "node scripts/check-missiond-owned-sqlite-clean.mjs"
+             "node scripts/check-v3-cli-conversation-ingestion-isomorphism.mjs"
+             "node scripts/check-high-roi-contracts.mjs"])

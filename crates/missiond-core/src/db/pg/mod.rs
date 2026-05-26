@@ -2,9 +2,8 @@
 //!
 //! Implements all 12 domain traits via sqlx + PgPool.
 //! No spawn_blocking needed — sqlx is natively async.
-//! PostgreSQL is the only MissionD runtime store; provider-local SQLite
-//! sources such as Codex CLI state_5.sqlite are ingested by workers, not used
-//! as a MissionD database backend.
+//! PostgreSQL is the only MissionD runtime store; provider-local indexes are
+//! ingested by workers, not used as a MissionD database backend.
 
 #[cfg(feature = "postgres")]
 use sqlx::PgPool;

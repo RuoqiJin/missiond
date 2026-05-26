@@ -14,8 +14,8 @@ Checks the V3 ops-infra Lisp/code isomorphism contract:
     kickstart, socket wait, bounded IPC smoke, rollback, and cleanup together.
   - rustfmt-missiond proves MissionD-owned Rust crates are formatter-converged.
   - cargo-fmt-touched remains the scoped fallback for non-M6/external projects.
-  - MissionD's runtime database is PostgreSQL-only; SQLite may appear only as
-    an external provider source such as Codex CLI state_5.sqlite.
+  - MissionD's runtime database is PostgreSQL-only; SQLite may appear only in
+    the external Codex provider-local state_5.sqlite index adapter.
 `;
 
 const DEFAULT_FILES = {
@@ -112,7 +112,7 @@ function checkFiles(root, files) {
     'rustfmt MUST run with skip_children=true',
     'MissionD primary runtime database MUST be PostgreSQL-only',
     'old MissionD SQLite backend, SQLite-to-Postgres migration module, and sqlite feature cfg MUST be absent',
-    'SQLite references are allowed only for external provider durable sources such as Codex CLI state_5.sqlite',
+    'SQLite references are allowed only for the external Codex provider-local state_5.sqlite index adapter',
     'node scripts/check-v3-ops-infra-isomorphism.mjs',
   ]);
 
@@ -208,27 +208,26 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.workspaceCargo, sources.workspaceCargo, [
     "MissionD's runtime database is PostgreSQL-only",
-    'provider-local readers (Codex CLI state_5.sqlite)',
-    'skill-store',
+    'the Codex provider-local local-index adapter',
     'rusqlite = { version = "0.31", features = ["bundled"] }',
     'sqlx = { version = "0.8"',
   ]);
 
   requireAll(diagnostics, files.daemonCargo, sources.daemonCargo, [
-    'Read-only Codex CLI provider state (~/.codex/state_5.sqlite), not MissionD DB.',
+    'Read-only Codex CLI provider-local index adapter, not MissionD DB.',
     'rusqlite = { workspace = true }',
   ]);
 
   requireAll(diagnostics, files.corePgMod, sources.corePgMod, [
     'PostgreSQL backend for MissionD',
     'PostgreSQL is the only MissionD runtime store',
-    'provider-local SQLite',
+    'provider-local indexes',
     'PgMissionStore',
   ]);
 
   requireAll(diagnostics, files.coreDbTraits, sources.coreDbTraits, [
     'Domain-specific async traits for MissionD',
-    'Provider-local SQLite sources',
+    'Provider-local indexes',
     'do not constitute a MissionD database backend',
   ]);
 
@@ -302,7 +301,7 @@ function buildFixture() {
        "Rust formatting for external or non-M6 projects MAY remain scoped through cargo-fmt-touched."
        "rustfmt MUST run with skip_children=true."
        "MissionD primary runtime database MUST be PostgreSQL-only; the old MissionD SQLite backend, SQLite-to-Postgres migration module, and sqlite feature cfg MUST be absent from active code/build paths."
-       "SQLite references are allowed only for external provider durable sources such as Codex CLI state_5.sqlite, or for independent non-MissionD storage crates such as skill-store; they MUST NOT reintroduce a MissionD runtime database backend."])
+       "SQLite references are allowed only for the external Codex provider-local state_5.sqlite index adapter; skill-store and all MissionD-owned storage MUST use PostgreSQL."])
   (implementation-map
     (surface ops-infra
       :status "code-aligned"
@@ -397,32 +396,31 @@ crate::topology_map::update_module_summaries(store, repo_name).await
 
   writeFixture(root, DEFAULT_FILES.workspaceCargo, `
 # MissionD's runtime database is PostgreSQL-only.
-# provider-local readers (Codex CLI state_5.sqlite)
-# skill-store
+# the Codex provider-local local-index adapter
 rusqlite = { version = "0.31", features = ["bundled"] }
 sqlx = { version = "0.8", features = ["postgres"] }
 `);
 
   writeFixture(root, DEFAULT_FILES.daemonCargo, `
-# Read-only Codex CLI provider state (~/.codex/state_5.sqlite), not MissionD DB.
+# Read-only Codex CLI provider-local index adapter, not MissionD DB.
 rusqlite = { workspace = true }
 `);
 
   writeFixture(root, DEFAULT_FILES.corePgMod, `
 //! PostgreSQL backend for MissionD.
 //! PostgreSQL is the only MissionD runtime store.
-//! provider-local SQLite sources are ingested by workers.
+//! provider-local indexes are ingested by workers.
 pub struct PgMissionStore;
 `);
 
   writeFixture(root, DEFAULT_FILES.coreDbTraits, `
 //! Domain-specific async traits for MissionD's PostgreSQL-backed store.
-//! Provider-local SQLite sources do not constitute a MissionD database backend.
+//! Provider-local indexes do not constitute a MissionD database backend.
 `);
 
   writeFixture(root, DEFAULT_FILES.codexIngestionWorker, `
 //! Codex Ingestion Worker
-const CODEX_DB_RELATIVE: &str = ".codex/state_5.sqlite";
+const CODEX_LOCAL_INDEX_RELATIVE: &str = ".codex/state_5.sqlite";
 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
 `);
 

@@ -1,7 +1,6 @@
 use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::models::ExecStatus;
-use rusqlite::Connection;
 use std::sync::Arc;
 
 pub struct BillingService {
@@ -14,14 +13,14 @@ impl BillingService {
     }
 
     /// Check if user has available quota. Returns (can_proceed, is_quota_based)
-    pub fn check_quota(&self, conn: &Connection, user_id: &str) -> AppResult<QuotaCheck> {
-        let sub = db::subscriptions::get_active_subscription(conn, user_id)?;
+    pub async fn check_quota(&self, pool: &sqlx::PgPool, user_id: &str) -> AppResult<QuotaCheck> {
+        let sub = db::subscriptions::get_active_subscription(pool, user_id).await?;
 
         let sub = match sub {
             Some(s) => s,
             None => {
                 // No subscription — check if user has balance for pay-per-use
-                let user = db::users::get_user_by_id(conn, user_id)?;
+                let user = db::users::get_user_by_id(pool, user_id).await?;
                 if user.balance > 0.0 {
                     return Ok(QuotaCheck::PayPerUse {
                         balance: user.balance,
@@ -31,13 +30,14 @@ impl BillingService {
             }
         };
 
-        let plan = db::subscriptions::get_plan(conn, &sub.plan_id)?;
+        let plan = db::subscriptions::get_plan(pool, &sub.plan_id).await?;
         let (used, extra) = db::subscriptions::get_or_create_quota(
-            conn,
+            pool,
             user_id,
             &sub.current_period_start,
             &sub.current_period_end,
-        )?;
+        )
+        .await?;
 
         let total = plan.monthly_quota + extra;
         if used < total {
@@ -48,7 +48,7 @@ impl BillingService {
             })
         } else {
             // Quota exhausted — fall back to balance
-            let user = db::users::get_user_by_id(conn, user_id)?;
+            let user = db::users::get_user_by_id(pool, user_id).await?;
             if user.balance > 0.0 {
                 Ok(QuotaCheck::PayPerUse {
                     balance: user.balance,
@@ -60,9 +60,9 @@ impl BillingService {
     }
 
     /// Record a completed execution and handle billing
-    pub fn record_execution(
+    pub async fn record_execution(
         &self,
-        conn: &Connection,
+        pool: &sqlx::PgPool,
         execution_id: &str,
         user_id: &str,
         skill_id: &str,
@@ -80,20 +80,20 @@ impl BillingService {
                 // Quota-based: no direct cost, just increment usage
                 cost = 0.0;
                 creator_revenue = 0.0;
-                db::subscriptions::increment_usage(conn, user_id, period_start)?;
+                db::subscriptions::increment_usage(pool, user_id, period_start).await?;
             }
             QuotaCheck::PayPerUse { .. } => {
                 // Pay-per-use: charge from balance
                 cost = price_per_use;
                 creator_revenue = price_per_use * (1.0 - self.platform_cut);
                 if *status == ExecStatus::Success {
-                    db::users::update_balance(conn, user_id, -cost)?;
+                    db::users::update_balance(pool, user_id, -cost).await?;
                 }
             }
         }
 
         db::executions::record_execution(
-            conn,
+            pool,
             execution_id,
             user_id,
             skill_id,
@@ -102,10 +102,11 @@ impl BillingService {
             output_tokens,
             cost,
             creator_revenue,
-        )?;
+        )
+        .await?;
 
         if *status == ExecStatus::Success {
-            db::skills::increment_invoke_count(conn, skill_id)?;
+            db::skills::increment_invoke_count(pool, skill_id).await?;
         }
 
         Ok(())
@@ -134,34 +135,39 @@ impl QuotaCheck {
 }
 
 /// Settle creator revenues (called by cron job)
-pub fn settle_creator_revenues(db: &Arc<crate::db::Database>) -> AppResult<i64> {
-    let conn = db.conn();
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM revenue_ledger WHERE settled = 0",
-        [],
-        |r| r.get(0),
-    )?;
+pub async fn settle_creator_revenues(db: &Arc<crate::db::Database>) -> AppResult<i64> {
+    let pool = db.pool();
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::bigint FROM revenue_ledger WHERE settled = false")
+            .fetch_one(pool)
+            .await?;
 
     if count == 0 {
         return Ok(0);
     }
 
-    conn.execute_batch(
+    let mut tx = pool.begin().await?;
+    sqlx::query(
         "UPDATE users SET balance = balance + (
             SELECT COALESCE(SUM(rl.amount), 0)
             FROM revenue_ledger rl
             JOIN executions e ON rl.execution_id = e.id
             JOIN skills s ON e.skill_id = s.id
-            WHERE s.creator_id = users.id AND rl.settled = 0
+            WHERE s.creator_id = users.id AND rl.settled = false
         ) WHERE id IN (
             SELECT DISTINCT s.creator_id
             FROM revenue_ledger rl
             JOIN executions e ON rl.execution_id = e.id
             JOIN skills s ON e.skill_id = s.id
-            WHERE rl.settled = 0
-        );
-        UPDATE revenue_ledger SET settled = 1 WHERE settled = 0;",
-    )?;
+            WHERE rl.settled = false
+        )",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("UPDATE revenue_ledger SET settled = true WHERE settled = false")
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
 
     tracing::info!("Settled {count} revenue entries");
     Ok(count)

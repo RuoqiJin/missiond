@@ -9,7 +9,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         // ===== mission_kb_query =====
         ToolDefinition::new(
             "mission_kb_query",
-            "知识库查询(统一入口)。search: FTS5+Embedding 混合 RRF; get: 按 key 精确查询; list: 列出条目",
+            "知识库查询(统一入口)。search: Postgres FTS+Embedding 混合 RRF; get: 按 key 精确查询; list: 列出条目",
             json!({
                 "type": "object",
                 "properties": {

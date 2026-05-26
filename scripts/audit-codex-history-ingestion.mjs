@@ -7,7 +7,10 @@ import path from 'node:path';
 const args = process.argv.slice(2);
 const json = args.includes('--json');
 const db = valueArg('--db', process.env.MISSION_PG_DATABASE || 'missiond');
-const codexDb = valueArg('--codex-db', path.join(os.homedir(), '.codex/state_5.sqlite'));
+const codexLocalIndex = valueArg(
+  '--codex-local-index',
+  valueArg('--codex-db', path.join(os.homedir(), '.codex/state_5.sqlite')),
+);
 
 function run(cmd, argv, opts = {}) {
   const result = spawnSync(cmd, argv, {
@@ -21,9 +24,9 @@ function run(cmd, argv, opts = {}) {
   return result.stdout;
 }
 
-function sqliteJson(sql) {
-  if (!fs.existsSync(codexDb)) return [];
-  const out = run('sqlite3', ['-json', codexDb, sql]).trim();
+function codexLocalIndexJson(sql) {
+  if (!fs.existsSync(codexLocalIndex)) return [];
+  const out = run('sqlite3', ['-json', codexLocalIndex, sql]).trim();
   return out ? JSON.parse(out) : [];
 }
 
@@ -46,7 +49,7 @@ function valueArg(name, fallback) {
   return args[idx + 1];
 }
 
-const rawThreads = sqliteJson(`
+const rawThreads = codexLocalIndexJson(`
 SELECT id, archived, rollout_path, created_at, updated_at, cwd, model, title
 FROM threads
 ORDER BY updated_at DESC;
@@ -112,7 +115,7 @@ const rawRolloutsMissingInMissionD = rolloutMetas
     cwd: m.cwd,
     source_state: sourceStateById.get(m.id)?.raw_state || null,
   }));
-const rawOnlyNotInSqlite = rolloutMetas
+const rawOnlyNotInProviderIndex = rolloutMetas
   .filter((m) => !rawById.has(m.id))
   .map((m) => ({
     id: m.id,
@@ -145,14 +148,14 @@ const result = {
     && archivedStateDrift.length === 0
     && messageDuplicateGroups.length === 0
     && nullUuidMessages === 0,
-  codexDb,
+  codexLocalIndex,
   missionDb: db,
   raw: {
     threads: rawThreads.length,
     archivedThreads: rawThreads.filter((t) => Number(t.archived) === 1).length,
     rolloutJsonlFiles,
     rolloutSessionsWithMeta: rolloutMetas.length,
-    rawOnlyNotInSqlite: rawOnlyNotInSqlite.length,
+    rawOnlyNotInProviderIndex: rawOnlyNotInProviderIndex.length,
     rawRolloutsMissingInMissionD: rawRolloutsMissingInMissionD.length,
     missingRolloutFiles: missingRolloutFiles.length,
   },
@@ -165,7 +168,7 @@ const result = {
   },
   missingInMissionD,
   rawRolloutsMissingInMissionD: rawRolloutsMissingInMissionD.slice(0, 50),
-  rawOnlyNotInSqlite: rawOnlyNotInSqlite.slice(0, 50),
+  rawOnlyNotInProviderIndex: rawOnlyNotInProviderIndex.slice(0, 50),
   extraInMissionD,
   archivedStateDrift,
   duplicateUuidGroups: messageDuplicateGroups,
@@ -176,9 +179,9 @@ if (json) {
   console.log(JSON.stringify(result, null, 2));
 } else {
   console.log(`Codex history ingestion audit: ${result.ok ? 'OK' : 'NEEDS ATTENTION'}`);
-  console.log(`- raw sqlite threads: ${result.raw.threads} (${result.raw.archivedThreads} archived)`);
-  console.log(`- rollout JSONL files: ${result.raw.rolloutJsonlFiles}; session_meta ids: ${result.raw.rolloutSessionsWithMeta}; raw-only not in sqlite: ${result.raw.rawOnlyNotInSqlite}`);
-  console.log(`- missing rollout files referenced by sqlite: ${result.raw.missingRolloutFiles}`);
+  console.log(`- provider-local index threads: ${result.raw.threads} (${result.raw.archivedThreads} archived)`);
+  console.log(`- rollout JSONL files: ${result.raw.rolloutJsonlFiles}; session_meta ids: ${result.raw.rolloutSessionsWithMeta}; raw-only not in provider index: ${result.raw.rawOnlyNotInProviderIndex}`);
+  console.log(`- missing rollout files referenced by provider index: ${result.raw.missingRolloutFiles}`);
   console.log(`- MissionD codex conversations: ${result.missiond.conversations} (${result.missiond.placeholderConversations} PTY placeholders)`);
   console.log(`- MissionD codex source-state rows: ${result.missiond.sourceStateRows}`);
   console.log(`- missing in MissionD: ${result.missingInMissionD.length}`);

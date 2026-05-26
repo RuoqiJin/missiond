@@ -41,8 +41,8 @@ serde_yaml = "0.9"
 
 # Database
 # MissionD's runtime database is PostgreSQL-only. rusqlite remains only for
-# provider-local readers (Codex CLI state_5.sqlite) and independent crates such
-# as skill-store; it must not reintroduce a MissionD DB backend.
+# the Codex provider-local local-index adapter; it must not reintroduce a
+# MissionD DB backend.
 rusqlite = { version = "0.31", features = ["bundled"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "chrono", "uuid", "json", "migrate", "macros"], default-features = false }
 

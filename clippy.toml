@@ -1,7 +1,7 @@
 # M1 Step 6: Prevent regression to direct MissionDB access in daemon layer.
-# All new code must use state.store (trait-based) instead of mission.db().
+# All new code must use state.store (trait-based) instead of direct MissionControl storage access.
 disallowed-methods = [
     # Covers both the re-export path and the definition path
-    { path = "missiond_core::MissionControl::db", reason = "Use state.store trait methods instead of mission.db(). See docs/designs/sqlite-to-postgresql-migration.md" },
-    { path = "missiond_core::core::mission_control::MissionControl::db", reason = "Use state.store trait methods instead of mission.db(). See docs/designs/sqlite-to-postgresql-migration.md" },
+    { path = "missiond_core::MissionControl::db", reason = "Use state.store trait methods instead of direct MissionControl storage access." },
+    { path = "missiond_core::core::mission_control::MissionControl::db", reason = "Use state.store trait methods instead of direct MissionControl storage access." },
 ]

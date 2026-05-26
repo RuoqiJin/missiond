@@ -16,6 +16,7 @@ import { LogsConsolidated } from './components/LogsConsolidated';
 import { JarvisChat } from './components/JarvisChat';
 import { CodexReplayDashboard } from './components/CodexReplayDashboard';
 import { AgentNavigationDashboard } from './components/AgentNavigationDashboard';
+import { OperationsOverview } from './components/OperationsOverview';
 import { useEventStream, useConnectionState, useEventInvalidation } from './hooks/useEventStream';
 import { BOARD_TABS, DEFAULT_TAB, TAB_MIGRATION, type BoardTabId } from './generated/board-frontend-config';
 import type { SlotDef } from './types';
@@ -264,7 +265,10 @@ export default function App() {
       {tab === 'jarvis' ? (
         <JarvisChat />
       ) : tab === 'board' ? (
-        <BoardConsolidated />
+        <>
+          <OperationsOverview />
+          <BoardConsolidated />
+        </>
       ) : tab === 'navigator' ? (
         <AgentNavigationDashboard />
       ) : tab === 'terminal' ? (

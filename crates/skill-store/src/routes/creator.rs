@@ -15,7 +15,6 @@ async fn stats(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> AppResult<Json<db::executions::CreatorStats>> {
-    let conn = state.db.conn();
-    let stats = db::executions::get_creator_stats(&*conn, &auth.user_id)?;
+    let stats = db::executions::get_creator_stats(state.db.pool(), &auth.user_id).await?;
     Ok(Json(stats))
 }

@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { useEventStreamStore } from '../eventStream';
 
 /**
@@ -31,4 +32,33 @@ export function useEventInvalidation(
  */
 export function useConnectionState() {
   return useEventStreamStore((s) => s.connectionState);
+}
+
+/**
+ * Get EventBus WebSocket health details for operator-facing diagnostics.
+ */
+export function useEventHealth() {
+  const refreshEventHealth = useEventStreamStore((s) => s.refreshEventHealth);
+  useEffect(() => {
+    refreshEventHealth();
+    const timer = window.setInterval(refreshEventHealth, 5_000);
+    return () => window.clearInterval(timer);
+  }, [refreshEventHealth]);
+
+  return useEventStreamStore(
+    useShallow((s) => ({
+      connectionState: s.connectionState,
+      lastSeq: s.lastSeq,
+      reconnectAttempts: s.reconnectAttempts,
+      lastMessageAt: s.lastMessageAt,
+      lastError: s.lastError,
+      lastResyncAt: s.lastResyncAt,
+      lastResyncReason: s.lastResyncReason,
+      malformedCount: s.malformedCount,
+      status: s.eventHealthStatus,
+      severity: s.eventHealthSeverity,
+      isStale: s.eventHealthIsStale,
+      ageMs: s.eventHealthAgeMs,
+    })),
+  );
 }

@@ -265,13 +265,6 @@ export class DaemonManager {
   }
 
   /**
-   * Get the database path
-   */
-  getDbPath(): string {
-    return path.join(this.configDir, "mission.db");
-  }
-
-  /**
    * Get the slots configuration path
    */
   getSlotsConfigPath(): string {

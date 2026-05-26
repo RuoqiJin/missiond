@@ -6,7 +6,9 @@ use std::time::Duration;
 use missiond_core::event::events::{BoardEvent, IncidentEvent, QuestionEvent, SlotEvent};
 use missiond_core::event::subscription::{CursorFlush, StartFrom, SubscriptionOpts};
 use missiond_core::event::DomainEvent;
-use missiond_core::types::{BoardTask, BoardTaskStatus, CreateBoardTaskInput};
+use missiond_core::types::{
+    BoardTask, BoardTaskStatus, CreateBoardTaskInput, CONVERSATION_SOURCE_LABEL_CODEX_LOCAL_INDEX,
+};
 use missiond_core::{PTYSlot, PTYSpawnOptions, SessionState};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -826,14 +828,14 @@ pub(crate) async fn ensure_code_drift_backfill_task_for_state(
         context_intent: Some("code".to_string()),
         ..Default::default()
     };
-    let task = state.store.create_board_task(&input).await?;
+    let task = state.storage().store.create_board_task(&input).await?;
     let ev = BoardEvent::TaskCreated {
         task_id: task.id.to_string(),
         title: task.title.clone(),
         category: task.category.clone(),
     };
     notify_board_event_direct(&ev);
-    let _ = state.bus.publish_board(ev).await;
+    let _ = state.storage().bus.publish_board(ev).await;
     Ok(Some(task.id.to_string()))
 }
 
@@ -1543,6 +1545,9 @@ fn master_control_turns_enabled() -> bool {
 }
 
 pub(crate) async fn mission_master_status(state: &AppState) -> Value {
+    let slots = state.slots();
+    let storage = state.storage();
+    let control = state.control_plane();
     let config = WorkstationRuntimeConfig::load_for_current_dir().ok();
     let worker = config.as_ref().and_then(|config| {
         config
@@ -1553,8 +1558,8 @@ pub(crate) async fn mission_master_status(state: &AppState) -> Value {
     let slot_id = worker
         .map(|worker| worker.slot_id.as_str())
         .unwrap_or(MASTER_SLOT_ID);
-    let pty_status = state.pty.get_status(slot_id).await;
-    let mission_slot_record = state
+    let pty_status = slots.pty.get_status(slot_id).await;
+    let mission_slot_record = slots
         .mission
         .list_slots()
         .into_iter()
@@ -1571,8 +1576,8 @@ pub(crate) async fn mission_master_status(state: &AppState) -> Value {
     let commit_convergence = crate::engine::commit_convergence::status_snapshot().await;
     let lisp_code_sync = crate::engine::lisp_code_sync::status_snapshot_for_state(state).await;
     let nightly_evolution = crate::engine::nightly_evolution::status_snapshot().await;
-    let shared_memory = state.shared_memory.status_snapshot().await;
-    let daemon_stats = state.stats.snapshot();
+    let shared_memory = storage.shared_memory.status_snapshot().await;
+    let daemon_stats = control.stats.snapshot();
     let runtime_load_explanation = runtime_load_explanation(
         &daemon_stats,
         &lisp_code_sync,
@@ -1653,7 +1658,12 @@ pub(crate) async fn mission_master_status(state: &AppState) -> Value {
                 .map(|text| text.chars().take(1600).collect::<String>()),
         },
         "authority": {
-            "primary": ["provider_jsonl", "codex_sqlite", "claude_jsonl", "gemini_chat_file"],
+            "primary": [
+                "provider_jsonl",
+                CONVERSATION_SOURCE_LABEL_CODEX_LOCAL_INDEX,
+                "claude_jsonl",
+                "gemini_chat_file"
+            ],
             "secondary": ["missiond_event_bus", "board_task_lifecycle", "mission_execution"],
             "diagnostic": ["pty_recognition_snapshot"]
         }

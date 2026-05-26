@@ -26,7 +26,7 @@ pub struct KnowledgeEntry {
     /// Goals (feature/project) → aspirational. State (ops/debug) → current status.
     #[serde(default = "default_kb_type")]
     pub kb_type: String,
-    /// FTS5 snippet with highlighted hit context (search results only)
+    /// Postgres FTS snippet with highlighted hit context (search results only)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_snippet: Option<String>,
     /// Working Memory scope: None=global KB, Some(task_id)=scratchpad for that task.

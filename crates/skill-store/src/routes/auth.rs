@@ -37,31 +37,37 @@ async fn register(
     let user_id = uuid::Uuid::new_v4().to_string();
 
     let user = {
-        let conn = state.db.conn();
-        db::users::create_user(&*conn, &user_id, &req.username, &req.email, &password_hash)
-            .map_err(|e| {
-                if e.to_string().contains("UNIQUE") {
-                    AppError::BadRequest("Username or email already exists".into())
-                } else {
-                    AppError::Database(e)
-                }
-            })?
+        db::users::create_user(
+            state.db.pool(),
+            &user_id,
+            &req.username,
+            &req.email,
+            &password_hash,
+        )
+        .await
+        .map_err(|e| {
+            if e.to_string().contains("duplicate key") || e.to_string().contains("unique") {
+                AppError::BadRequest("Username or email already exists".into())
+            } else {
+                AppError::Database(e)
+            }
+        })?
     };
 
     // Auto-assign free plan
     {
-        let conn = state.db.conn();
         let sub_id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now();
         let period_end = now + chrono::Duration::days(30);
         db::subscriptions::create_subscription(
-            &*conn,
+            state.db.pool(),
             &sub_id,
             &user_id,
             "plan-free",
             &now.format("%Y-%m-%d").to_string(),
             &period_end.format("%Y-%m-%d").to_string(),
-        )?;
+        )
+        .await?;
     }
 
     let token = create_token(&user.id, user.role.as_str(), &state.jwt_secret)
@@ -75,8 +81,8 @@ async fn login(
     Json(req): Json<LoginRequest>,
 ) -> AppResult<Json<AuthResponse>> {
     let user = {
-        let conn = state.db.conn();
-        db::users::get_user_by_email(&*conn, &req.email)
+        db::users::get_user_by_email(state.db.pool(), &req.email)
+            .await
             .map_err(|_| AppError::Unauthorized("Invalid email or password".into()))?
     };
 
@@ -89,9 +95,8 @@ async fn login(
 }
 
 async fn me(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<serde_json::Value>> {
-    let conn = state.db.conn();
-    let user = db::users::get_user_by_id(&*conn, &auth.user_id)?;
-    let quota = db::subscriptions::get_quota_info(&*conn, &auth.user_id)?;
+    let user = db::users::get_user_by_id(state.db.pool(), &auth.user_id).await?;
+    let quota = db::subscriptions::get_quota_info(state.db.pool(), &auth.user_id).await?;
 
     Ok(Json(serde_json::json!({
         "user": user,

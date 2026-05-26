@@ -1,8 +1,8 @@
 use crate::models::{Skill, SkillPublic};
-use rusqlite::{params, Connection};
+use sqlx::{PgPool, Postgres, QueryBuilder, Row};
 
-pub fn create_skill(
-    conn: &Connection,
+pub async fn create_skill(
+    pool: &PgPool,
     id: &str,
     creator_id: &str,
     name: &str,
@@ -11,73 +11,74 @@ pub fn create_skill(
     input_schema: &serde_json::Value,
     tier: i32,
     price_per_use: f64,
-) -> Result<Skill, rusqlite::Error> {
-    let schema_str = serde_json::to_string(input_schema).unwrap_or_default();
-    conn.execute(
+) -> Result<Skill, sqlx::Error> {
+    sqlx::query(
         "INSERT INTO skills (id, creator_id, name, description, prompt_template, input_schema, tier, price_per_use)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        params![id, creator_id, name, description, prompt_template, schema_str, tier, price_per_use],
-    )?;
-    get_skill_by_id(conn, id)
-}
-
-pub fn get_skill_by_id(conn: &Connection, id: &str) -> Result<Skill, rusqlite::Error> {
-    conn.query_row(
-        "SELECT id, creator_id, name, description, prompt_template, input_schema, tier, price_per_use, is_active, invoke_count, created_at, updated_at
-         FROM skills WHERE id = ?1",
-        [id],
-        row_to_skill,
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
+    .bind(id)
+    .bind(creator_id)
+    .bind(name)
+    .bind(description)
+    .bind(prompt_template)
+    .bind(input_schema)
+    .bind(tier)
+    .bind(price_per_use)
+    .execute(pool)
+    .await?;
+    get_skill_by_id(pool, id).await
 }
 
-pub fn list_skills_public(
-    conn: &Connection,
+pub async fn get_skill_by_id(pool: &PgPool, id: &str) -> Result<Skill, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT id, creator_id, name, description, prompt_template, input_schema, tier, price_per_use, is_active, invoke_count, created_at, updated_at
+         FROM skills WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await?;
+    row_to_skill(&row)
+}
+
+pub async fn list_skills_public(
+    pool: &PgPool,
     tier_max: i32,
     offset: i64,
     limit: i64,
-) -> Result<Vec<SkillPublic>, rusqlite::Error> {
-    let mut stmt = conn.prepare(
-        "SELECT s.id, s.creator_id, u.username, s.name, s.description, s.input_schema, s.tier, s.price_per_use, s.invoke_count, s.created_at
+) -> Result<Vec<SkillPublic>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT s.id, s.creator_id, u.username AS creator_name, s.name, s.description, s.input_schema, s.tier, s.price_per_use, s.invoke_count, s.created_at
          FROM skills s JOIN users u ON s.creator_id = u.id
-         WHERE s.is_active = 1 AND s.tier <= ?1
+         WHERE s.is_active = true AND s.tier <= $1
          ORDER BY s.invoke_count DESC
-         LIMIT ?2 OFFSET ?3",
-    )?;
+         LIMIT $2 OFFSET $3",
+    )
+    .bind(tier_max)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await?;
 
-    let rows = stmt.query_map(params![tier_max, limit, offset], |row| {
-        let schema_str: String = row.get(5)?;
-        Ok(SkillPublic {
-            id: row.get(0)?,
-            creator_id: row.get(1)?,
-            creator_name: row.get(2)?,
-            name: row.get(3)?,
-            description: row.get(4)?,
-            input_schema: serde_json::from_str(&schema_str).unwrap_or_default(),
-            tier: row.get(6)?,
-            price_per_use: row.get(7)?,
-            invoke_count: row.get(8)?,
-            created_at: row.get(9)?,
-        })
-    })?;
-
-    rows.collect()
+    rows.iter().map(row_to_skill_public).collect()
 }
 
-pub fn list_creator_skills(
-    conn: &Connection,
+pub async fn list_creator_skills(
+    pool: &PgPool,
     creator_id: &str,
-) -> Result<Vec<Skill>, rusqlite::Error> {
-    let mut stmt = conn.prepare(
+) -> Result<Vec<Skill>, sqlx::Error> {
+    let rows = sqlx::query(
         "SELECT id, creator_id, name, description, prompt_template, input_schema, tier, price_per_use, is_active, invoke_count, created_at, updated_at
-         FROM skills WHERE creator_id = ?1 ORDER BY created_at DESC",
-    )?;
+         FROM skills WHERE creator_id = $1 ORDER BY created_at DESC",
+    )
+    .bind(creator_id)
+    .fetch_all(pool)
+    .await?;
 
-    let rows = stmt.query_map([creator_id], row_to_skill)?;
-    rows.collect()
+    rows.iter().map(row_to_skill).collect()
 }
 
-pub fn update_skill(
-    conn: &Connection,
+pub async fn update_skill(
+    pool: &PgPool,
     id: &str,
     name: Option<&str>,
     description: Option<&str>,
@@ -86,70 +87,72 @@ pub fn update_skill(
     tier: Option<i32>,
     price_per_use: Option<f64>,
     is_active: Option<bool>,
-) -> Result<(), rusqlite::Error> {
-    let mut sets = vec!["updated_at = datetime('now')".to_string()];
-    let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![];
+) -> Result<(), sqlx::Error> {
+    let mut builder = QueryBuilder::<Postgres>::new("UPDATE skills SET updated_at = now()");
 
     if let Some(v) = name {
-        sets.push(format!("name = ?{}", values.len() + 1));
-        values.push(Box::new(v.to_string()));
+        builder.push(", name = ").push_bind(v);
     }
     if let Some(v) = description {
-        sets.push(format!("description = ?{}", values.len() + 1));
-        values.push(Box::new(v.to_string()));
+        builder.push(", description = ").push_bind(v);
     }
     if let Some(v) = prompt_template {
-        sets.push(format!("prompt_template = ?{}", values.len() + 1));
-        values.push(Box::new(v.to_string()));
+        builder.push(", prompt_template = ").push_bind(v);
     }
     if let Some(v) = input_schema {
-        sets.push(format!("input_schema = ?{}", values.len() + 1));
-        values.push(Box::new(serde_json::to_string(v).unwrap_or_default()));
+        builder.push(", input_schema = ").push_bind(v);
     }
     if let Some(v) = tier {
-        sets.push(format!("tier = ?{}", values.len() + 1));
-        values.push(Box::new(v));
+        builder.push(", tier = ").push_bind(v);
     }
     if let Some(v) = price_per_use {
-        sets.push(format!("price_per_use = ?{}", values.len() + 1));
-        values.push(Box::new(v));
+        builder.push(", price_per_use = ").push_bind(v);
     }
     if let Some(v) = is_active {
-        sets.push(format!("is_active = ?{}", values.len() + 1));
-        values.push(Box::new(v as i32));
+        builder.push(", is_active = ").push_bind(v);
     }
 
-    let idx = values.len() + 1;
-    values.push(Box::new(id.to_string()));
-
-    let sql = format!("UPDATE skills SET {} WHERE id = ?{}", sets.join(", "), idx);
-    let params: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|v| v.as_ref()).collect();
-    conn.execute(&sql, params.as_slice())?;
+    builder.push(" WHERE id = ").push_bind(id);
+    builder.build().execute(pool).await?;
     Ok(())
 }
 
-pub fn increment_invoke_count(conn: &Connection, skill_id: &str) -> Result<(), rusqlite::Error> {
-    conn.execute(
-        "UPDATE skills SET invoke_count = invoke_count + 1 WHERE id = ?1",
-        [skill_id],
-    )?;
+pub async fn increment_invoke_count(pool: &PgPool, skill_id: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE skills SET invoke_count = invoke_count + 1 WHERE id = $1")
+        .bind(skill_id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
-fn row_to_skill(row: &rusqlite::Row) -> Result<Skill, rusqlite::Error> {
-    let schema_str: String = row.get(5)?;
+fn row_to_skill(row: &sqlx::postgres::PgRow) -> Result<Skill, sqlx::Error> {
     Ok(Skill {
-        id: row.get(0)?,
-        creator_id: row.get(1)?,
-        name: row.get(2)?,
-        description: row.get(3)?,
-        prompt_template: row.get(4)?,
-        input_schema: serde_json::from_str(&schema_str).unwrap_or_default(),
-        tier: row.get(6)?,
-        price_per_use: row.get(7)?,
-        is_active: row.get::<_, i32>(8)? != 0,
-        invoke_count: row.get(9)?,
-        created_at: row.get(10)?,
-        updated_at: row.get(11)?,
+        id: row.try_get("id")?,
+        creator_id: row.try_get("creator_id")?,
+        name: row.try_get("name")?,
+        description: row.try_get("description")?,
+        prompt_template: row.try_get("prompt_template")?,
+        input_schema: row.try_get("input_schema")?,
+        tier: row.try_get("tier")?,
+        price_per_use: row.try_get("price_per_use")?,
+        is_active: row.try_get("is_active")?,
+        invoke_count: row.try_get("invoke_count")?,
+        created_at: crate::db::ts_string(row, "created_at")?,
+        updated_at: crate::db::ts_string(row, "updated_at")?,
+    })
+}
+
+fn row_to_skill_public(row: &sqlx::postgres::PgRow) -> Result<SkillPublic, sqlx::Error> {
+    Ok(SkillPublic {
+        id: row.try_get("id")?,
+        creator_id: row.try_get("creator_id")?,
+        creator_name: row.try_get("creator_name")?,
+        name: row.try_get("name")?,
+        description: row.try_get("description")?,
+        input_schema: row.try_get("input_schema")?,
+        tier: row.try_get("tier")?,
+        price_per_use: row.try_get("price_per_use")?,
+        invoke_count: row.try_get("invoke_count")?,
+        created_at: crate::db::ts_string(row, "created_at")?,
     })
 }

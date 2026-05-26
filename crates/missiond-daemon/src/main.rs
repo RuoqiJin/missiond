@@ -25,6 +25,7 @@ mod permission_extract;
 mod slot_dispatch;
 mod slot_orchestrator;
 mod state;
+mod startup_preflight;
 mod supervisor;
 
 // ── Re-exports for backward-compatible `use crate::xxx` paths ──
@@ -388,28 +389,37 @@ async fn main() -> Result<()> {
     #[cfg(unix)]
     ensure_config_permissions(&home);
 
-    let db_path = db_path();
     let slots_path = slots_config_path();
-    if !slots_path.exists() {
+    let logs_dir = logs_dir(&home);
+    let permission_config_path = permission_config_path(&home);
+    let learned_permissions_path = learned_permissions_path(&home);
+    let mission_pg_url = pg_url();
+    let startup_preflight =
+        startup_preflight::run_startup_preflight(&startup_preflight::StartupPreflightInput {
+            project_root: missiond_project_root.clone(),
+            slots_config: slots_path.clone(),
+            permission_config: permission_config_path.clone(),
+            learned_permissions: learned_permissions_path.clone(),
+            logs_dir: logs_dir.clone(),
+            blueprint_path: missiond_blueprint_path(),
+            mission_pg_url: mission_pg_url.clone(),
+            codex_local_index: startup_preflight::default_codex_local_index_path(),
+        });
+    if !startup_preflight.ok {
         return Err(anyhow!(
-            "Slots config not found: {} (set MISSION_SLOTS_CONFIG or create slots.yaml)",
-            slots_path.display()
+            "Startup preflight failed: {}",
+            startup_preflight::fatal_messages(&startup_preflight).join("; ")
         ));
     }
-
-    let logs_dir = logs_dir(&db_path);
-    let permission_config_path = db_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("config")
-        .join("permissions.yaml");
-    let learned_permissions_path = db_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("learned_permissions.db");
+    if startup_preflight.warning_count > 0 {
+        warn!(
+            warnings = startup_preflight.warning_count,
+            "Startup preflight completed with warnings"
+        );
+    }
     let learned = match LearnedPermissions::new(&learned_permissions_path) {
         Ok(lp) => {
-            info!(path = %learned_permissions_path.with_extension("yaml").display(), "Learned permissions YAML ready");
+            info!(path = %learned_permissions_path.display(), "Learned permissions YAML ready");
             Some(Arc::new(lp))
         }
         Err(e) => {
@@ -423,9 +433,8 @@ async fn main() -> Result<()> {
     ));
 
     let mission = Arc::new(MissionControl::new(MissionControlOptions {
-        db_path: None,
         slots_config_path: slots_path.clone(),
-        permission_config_path: None,
+        permission_config_path: Some(permission_config_path.clone()),
         logs_dir: Some(logs_dir.clone()),
         default_mode: None,
     })?);
@@ -457,13 +466,13 @@ async fn main() -> Result<()> {
         })
     };
 
-    // Preserve the PG pool for the v2 event bus bootstrap (Phase 6). The
+    // Preserve the PG pool for subsystems that need SQLx primitives. The
     // dynamic `MissionStore` trait object doesn't expose the pool directly.
-    #[cfg(feature = "postgres")]
-    let mut pg_pool_for_bus: Option<sqlx::PgPool> = None;
-
-    let store: Arc<dyn missiond_core::db::traits::MissionStore> = {
-        let url = pg_url().ok_or_else(|| {
+    let (store, pg_pool_for_bus): (
+        Arc<dyn missiond_core::db::traits::MissionStore>,
+        sqlx::PgPool,
+    ) = {
+        let url = mission_pg_url.clone().ok_or_else(|| {
             anyhow!("MISSION_PG_URL required. PostgreSQL is the only supported backend.")
         })?;
         info!(url = %url, "Connecting to PostgreSQL...");
@@ -473,8 +482,8 @@ async fn main() -> Result<()> {
         pg_store.fix_identity_sequences().await;
         info!("PostgreSQL store ready");
         let _ = db_stats_callback; // PG mode: latency tracked by sqlx instrumentation
-        pg_pool_for_bus = Some(pg_store.pool().clone());
-        Arc::new(pg_store)
+        let pool = pg_store.pool().clone();
+        (Arc::new(pg_store), pool)
     };
 
     // Startup: clean orphan slot_tasks from previous daemon instance
@@ -663,7 +672,7 @@ async fn main() -> Result<()> {
     info!(count = skills_index.list().len(), "Skill index loaded");
     let skills = SharedSkillIndex::new(skills_index);
 
-    // Skill Engine: ingest SKILL.md files into DB for FTS5 search
+    // Skill Engine: ingest SKILL.md files into DB for Postgres FTS search
     // (deferred to after store creation — needs async trait access)
 
     // Warm PTY session UUID cache from store
@@ -733,10 +742,7 @@ async fn main() -> Result<()> {
     // is in scope.
     #[cfg(feature = "postgres")]
     let bus_services = {
-        let pool = pg_pool_for_bus
-            .as_ref()
-            .ok_or_else(|| anyhow!("v2 event bus requires the PG pool; postgres feature missing"))?
-            .clone();
+        let pool = pg_pool_for_bus.clone();
         bus::BusServices::bootstrap(pool, &control_manager_arc)
             .await
             .map_err(|e| anyhow!("BusServices::bootstrap failed: {}", e))?
@@ -803,10 +809,7 @@ async fn main() -> Result<()> {
     };
 
     let shared_memory = {
-        let pool = pg_pool_for_bus
-            .as_ref()
-            .ok_or_else(|| anyhow!("shared memory requires the PG pool; postgres feature missing"))?
-            .clone();
+        let pool = pg_pool_for_bus.clone();
         let missiond_root = std::env::current_dir().unwrap_or_else(|_| home.clone());
         Arc::new(engine::shared_memory::SharedMemoryService::new(
             pool,
@@ -817,10 +820,7 @@ async fn main() -> Result<()> {
     };
 
     let codex_replay = {
-        let pool = pg_pool_for_bus
-            .as_ref()
-            .ok_or_else(|| anyhow!("codex replay requires the PG pool; postgres feature missing"))?
-            .clone();
+        let pool = pg_pool_for_bus.clone();
         Arc::new(engine::codex_replay::CodexReplayService::new(
             pool,
             Arc::clone(&bus_services),
@@ -838,7 +838,206 @@ async fn main() -> Result<()> {
         tokio::sync::RwLock<Vec<(String, String, String, tokio::time::Instant)>>,
     > = Arc::new(tokio::sync::RwLock::new(Vec::new()));
 
+    let http_client = reqwest::Client::builder()
+        .pool_max_idle_per_host(10)
+        .timeout(std::time::Duration::from_secs(180))
+        .build()
+        .expect("Failed to build HTTP client");
+    let gemini = {
+        let router_runtime_config =
+            context::v3_blueprint_runtime::RouterRuntimeConfig::load_for_current_dir()
+                .map_err(|e| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", e))?;
+        let llm_yaml = default_mission_home().join("llm.yaml");
+        if llm_yaml.exists() {
+            if let Ok(content) = std::fs::read_to_string(&llm_yaml) {
+                if let Ok(config) = serde_yaml::from_str::<embedding_worker::LlmConfig>(&content) {
+                    if config.provider == "gemini-cli" {
+                        let cli_cfg = config.gemini_cli.unwrap_or_default();
+                        let cli_model = cli_cfg.resolved_model(&router_runtime_config);
+                        info!(binary = %cli_cfg.binary, model = %cli_model, "LLM provider: gemini-cli (PTY transport)");
+                        let initial_count = gemini_cli::resolve_apikey_pool().len();
+                        info!(
+                            count = initial_count,
+                            "Gemini API key pool: {} keys (hot-reload enabled)", initial_count
+                        );
+                        let api_key_pool = std::sync::Arc::new(gemini_cli::ApiKeyPool::new());
+                        let pty_cwd = std::env::current_dir()
+                            .unwrap_or_else(|_| std::path::PathBuf::from("/"));
+                        let gemini_driver_for_transport = llm::gemini_driver::GeminiPtyDriver::new(
+                            pty_for_gemini_transport,
+                            store.clone(),
+                            pty_session_uuids_arc.clone(),
+                            project_registry.clone(),
+                            learned.clone(),
+                        );
+                        let pty_transport =
+                            std::sync::Arc::new(llm::gemini_pty::GeminiPtyTransport::new(
+                                gemini_driver_for_transport,
+                                "slot-gemini-router".to_string(),
+                                pty_cwd,
+                            ));
+                        info!(
+                            "Gemini PTY transport initialized (via GeminiPtyDriver → PTYManager)"
+                        );
+                        gemini_client::GeminiClient::with_cli(
+                            gemini_cli::GeminiCli::new(
+                                cli_cfg.binary,
+                                cli_model,
+                                std::time::Duration::from_secs(cli_cfg.timeout),
+                                Some(api_key_pool),
+                            )
+                            .with_router_runtime_config(&router_runtime_config)
+                            .with_pty(pty_transport),
+                        )
+                        .with_router_runtime_config(&router_runtime_config)
+                        .with_bus(Arc::clone(&bus_services))
+                    } else {
+                        info!(provider = %config.provider, "LLM provider: HTTP router");
+                        gemini_client::GeminiClient::new()
+                            .with_router_runtime_config(&router_runtime_config)
+                            .with_bus(Arc::clone(&bus_services))
+                    }
+                } else {
+                    gemini_client::GeminiClient::new()
+                        .with_router_runtime_config(&router_runtime_config)
+                        .with_bus(Arc::clone(&bus_services))
+                }
+            } else {
+                gemini_client::GeminiClient::new()
+                    .with_router_runtime_config(&router_runtime_config)
+                    .with_bus(Arc::clone(&bus_services))
+            }
+        } else {
+            gemini_client::GeminiClient::new()
+                .with_router_runtime_config(&router_runtime_config)
+                .with_bus(Arc::clone(&bus_services))
+        }
+    };
+    let minimax = {
+        let gw = minimax_gateway::create_minimax_gateway()?;
+        if let Some((handle, gateway)) = gw {
+            let gateway = gateway.with_bus(Arc::clone(&bus_services));
+            info!("MinimaxGateway initialized");
+            tokio::spawn(gateway.run());
+            Some(handle)
+        } else {
+            warn!("MinimaxGateway: API key not found, gateway disabled");
+            None
+        }
+    };
+    let sonnet = {
+        let (handle, gateway) = sonnet_gateway::create_sonnet_gateway()?;
+        let gateway = gateway.with_bus(Arc::clone(&bus_services));
+        info!("SonnetGateway initialized");
+        tokio::spawn(gateway.run());
+        Some(handle)
+    };
+    let prompts_store = Arc::new(prompts::PromptStore::load());
+    let strategy_notify = Arc::new(tokio::sync::Notify::new());
+    let retro_notify = Arc::new(tokio::sync::Notify::new());
+    let worker_registry = Arc::new(workers::WorkerRegistry::new());
+    let slot_dispatch_guard = Arc::new(slot_dispatch::SlotDispatchGuard::new());
+    let board_dispatch_notify = Arc::new(tokio::sync::Notify::new());
+    let slot_manager = {
+        let cc_mgr = Arc::new(slot_orchestrator::ClaudeCodeSlotManager::new(
+            slot_mgr_pty,
+            slot_mgr_store,
+            pty_session_uuids_arc.clone(),
+            project_registry.clone(),
+            learned.clone(),
+        ));
+        let gemini_driver_for_slots = llm::gemini_driver::GeminiPtyDriver::new(
+            slot_mgr_pty2,
+            slot_mgr_store2.clone(),
+            pty_session_uuids_arc.clone(),
+            project_registry.clone(),
+            learned.clone(),
+        );
+        let gemini_mgr = Arc::new(slot_orchestrator::GeminiCliSlotManager::new(
+            gemini_driver_for_slots,
+            slot_mgr_store2,
+        ));
+        let codex_mgr = Arc::new(slot_orchestrator::GenericCliSlotManager::new(
+            missiond_core::types::CliEngine::Codex,
+            slot_mgr_pty3,
+            slot_mgr_store3,
+            pty_session_uuids_arc.clone(),
+            project_registry.clone(),
+            learned.clone(),
+        ));
+        let agy_mgr = Arc::new(slot_orchestrator::GenericCliSlotManager::new(
+            missiond_core::types::CliEngine::Agy,
+            slot_mgr_pty4,
+            slot_mgr_store4,
+            pty_session_uuids_arc.clone(),
+            project_registry.clone(),
+            learned.clone(),
+        ));
+        Arc::new(slot_orchestrator::AgentSlotManager::new(
+            vec![
+                (
+                    missiond_core::types::CliEngine::ClaudeCode,
+                    cc_mgr as Arc<dyn slot_orchestrator::EngineSlotManager>,
+                ),
+                (
+                    missiond_core::types::CliEngine::Gemini,
+                    gemini_mgr as Arc<dyn slot_orchestrator::EngineSlotManager>,
+                ),
+                (
+                    missiond_core::types::CliEngine::Codex,
+                    codex_mgr as Arc<dyn slot_orchestrator::EngineSlotManager>,
+                ),
+                (
+                    missiond_core::types::CliEngine::Agy,
+                    agy_mgr as Arc<dyn slot_orchestrator::EngineSlotManager>,
+                ),
+            ],
+            Arc::clone(&control_manager_arc),
+        ))
+    };
+
     let state = AppState {
+        runtime_paths: state::RuntimePaths {
+            home: home.clone(),
+            project_root: missiond_project_root.clone(),
+            slots_config: slots_path.clone(),
+            permission_config: permission_config_path.clone(),
+            learned_permissions: learned_permissions_path.clone(),
+            logs_dir: logs_dir.clone(),
+        },
+        storage_ctx: state::StorageContext {
+            store: store.clone(),
+            bus: Arc::clone(&bus_services),
+            shared_memory: Arc::clone(&shared_memory),
+            codex_replay: Arc::clone(&codex_replay),
+        },
+        slot_ctx: state::SlotContext {
+            mission: Arc::clone(&mission),
+            pty: Arc::clone(&pty),
+            slot_manager: Arc::clone(&slot_manager),
+            slot_dispatch: Arc::clone(&slot_dispatch_guard),
+            pty_session_uuids: pty_session_uuids_arc.clone(),
+        },
+        worker_ctx: state::WorkerContextState {
+            registry: Arc::clone(&worker_registry),
+            board_dispatch_notify: Arc::clone(&board_dispatch_notify),
+            strategy_notify: Arc::clone(&strategy_notify),
+            retro_notify: Arc::clone(&retro_notify),
+        },
+        llm_ctx: state::LlmContext {
+            http_client: http_client.clone(),
+            gemini: gemini.clone(),
+            minimax: minimax.clone(),
+            sonnet: sonnet.clone(),
+            prompts: Arc::clone(&prompts_store),
+        },
+        control_ctx: state::ControlPlaneContext {
+            permission: Arc::clone(&permission),
+            control_manager: Arc::clone(&control_manager_arc),
+            project_registry: project_registry.clone(),
+            stats: Arc::clone(&daemon_stats),
+        },
+        startup_preflight: startup_preflight.clone(),
         mission,
         store: store.clone(),
         permission,
@@ -929,104 +1128,10 @@ async fn main() -> Result<()> {
         jarvis_trace: ws_server.jarvis_trace_store().clone(),
         slot_last_responses: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         slot_progress: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-        http_client: reqwest::Client::builder()
-            .pool_max_idle_per_host(10)
-            .timeout(std::time::Duration::from_secs(180))
-            .build()
-            .expect("Failed to build HTTP client"),
-        gemini: {
-            let router_runtime_config =
-                context::v3_blueprint_runtime::RouterRuntimeConfig::load_for_current_dir()
-                    .map_err(|e| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", e))?;
-            // Check llm.yaml for provider config
-            let llm_yaml = default_mission_home().join("llm.yaml");
-            if llm_yaml.exists() {
-                if let Ok(content) = std::fs::read_to_string(&llm_yaml) {
-                    if let Ok(config) =
-                        serde_yaml::from_str::<embedding_worker::LlmConfig>(&content)
-                    {
-                        if config.provider == "gemini-cli" {
-                            let cli_cfg = config.gemini_cli.unwrap_or_default();
-                            let cli_model = cli_cfg.resolved_model(&router_runtime_config);
-                            info!(binary = %cli_cfg.binary, model = %cli_model, "LLM provider: gemini-cli (PTY transport)");
-                            let initial_count = gemini_cli::resolve_apikey_pool().len();
-                            info!(
-                                count = initial_count,
-                                "Gemini API key pool: {} keys (hot-reload enabled)", initial_count
-                            );
-                            let api_key_pool = std::sync::Arc::new(gemini_cli::ApiKeyPool::new());
-                            let pty_cwd = std::env::current_dir()
-                                .unwrap_or_else(|_| std::path::PathBuf::from("/"));
-                            let gemini_driver_for_transport =
-                                llm::gemini_driver::GeminiPtyDriver::new(
-                                    pty_for_gemini_transport,
-                                    store.clone(),
-                                    pty_session_uuids_arc.clone(),
-                                    project_registry.clone(),
-                                    learned.clone(),
-                                );
-                            let pty_transport =
-                                std::sync::Arc::new(llm::gemini_pty::GeminiPtyTransport::new(
-                                    gemini_driver_for_transport,
-                                    "slot-gemini-router".to_string(),
-                                    pty_cwd,
-                                ));
-                            info!(
-                                "Gemini PTY transport initialized (via GeminiPtyDriver → PTYManager)"
-                            );
-                            gemini_client::GeminiClient::with_cli(
-                                gemini_cli::GeminiCli::new(
-                                    cli_cfg.binary,
-                                    cli_model,
-                                    std::time::Duration::from_secs(cli_cfg.timeout),
-                                    Some(api_key_pool),
-                                )
-                                .with_router_runtime_config(&router_runtime_config)
-                                .with_pty(pty_transport),
-                            )
-                            .with_router_runtime_config(&router_runtime_config)
-                            .with_bus(Arc::clone(&bus_services))
-                        } else {
-                            info!(provider = %config.provider, "LLM provider: HTTP router");
-                            gemini_client::GeminiClient::new()
-                                .with_router_runtime_config(&router_runtime_config)
-                                .with_bus(Arc::clone(&bus_services))
-                        }
-                    } else {
-                        gemini_client::GeminiClient::new()
-                            .with_router_runtime_config(&router_runtime_config)
-                            .with_bus(Arc::clone(&bus_services))
-                    }
-                } else {
-                    gemini_client::GeminiClient::new()
-                        .with_router_runtime_config(&router_runtime_config)
-                        .with_bus(Arc::clone(&bus_services))
-                }
-            } else {
-                gemini_client::GeminiClient::new()
-                    .with_router_runtime_config(&router_runtime_config)
-                    .with_bus(Arc::clone(&bus_services))
-            }
-        },
-        minimax: {
-            let gw = minimax_gateway::create_minimax_gateway()?;
-            if let Some((handle, gateway)) = gw {
-                let gateway = gateway.with_bus(Arc::clone(&bus_services));
-                info!("MinimaxGateway initialized");
-                tokio::spawn(gateway.run());
-                Some(handle)
-            } else {
-                warn!("MinimaxGateway: API key not found, gateway disabled");
-                None
-            }
-        },
-        sonnet: {
-            let (handle, gateway) = sonnet_gateway::create_sonnet_gateway()?;
-            let gateway = gateway.with_bus(Arc::clone(&bus_services));
-            info!("SonnetGateway initialized");
-            tokio::spawn(gateway.run());
-            Some(handle)
-        },
+        http_client,
+        gemini,
+        minimax,
+        sonnet,
         xjp_mcp: Arc::new(McpProcessClient::new(
             default_mission_home().join("xjp-mcp-config.json"),
         )),
@@ -1049,74 +1154,18 @@ async fn main() -> Result<()> {
         codex_replay,
         shared_memory,
         stats: Arc::clone(&daemon_stats),
-        prompts: Arc::new(prompts::PromptStore::load()),
-        strategy_notify: Arc::new(tokio::sync::Notify::new()),
-        retro_notify: Arc::new(tokio::sync::Notify::new()),
+        prompts: Arc::clone(&prompts_store),
+        strategy_notify: Arc::clone(&strategy_notify),
+        retro_notify: Arc::clone(&retro_notify),
         ast_sync_tx,
         ast_embedding_cache: missiond_core::embedding::new_cache(),
         last_msg_span: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        worker_registry: Arc::new(workers::WorkerRegistry::new()),
+        worker_registry: Arc::clone(&worker_registry),
         control_manager: Arc::clone(&control_manager_arc),
         project_registry: project_registry.clone(),
-        slot_dispatch: Arc::new(slot_dispatch::SlotDispatchGuard::new()),
-        board_dispatch_notify: Arc::new(tokio::sync::Notify::new()),
-        slot_manager: {
-            let cc_mgr = Arc::new(slot_orchestrator::ClaudeCodeSlotManager::new(
-                slot_mgr_pty,
-                slot_mgr_store,
-                pty_session_uuids_arc.clone(),
-                project_registry.clone(),
-                learned.clone(),
-            ));
-            let gemini_driver_for_slots = llm::gemini_driver::GeminiPtyDriver::new(
-                slot_mgr_pty2,
-                slot_mgr_store2.clone(),
-                pty_session_uuids_arc.clone(),
-                project_registry.clone(),
-                learned.clone(),
-            );
-            let gemini_mgr = Arc::new(slot_orchestrator::GeminiCliSlotManager::new(
-                gemini_driver_for_slots,
-                slot_mgr_store2,
-            ));
-            let codex_mgr = Arc::new(slot_orchestrator::GenericCliSlotManager::new(
-                missiond_core::types::CliEngine::Codex,
-                slot_mgr_pty3,
-                slot_mgr_store3,
-                pty_session_uuids_arc.clone(),
-                project_registry.clone(),
-                learned.clone(),
-            ));
-            let agy_mgr = Arc::new(slot_orchestrator::GenericCliSlotManager::new(
-                missiond_core::types::CliEngine::Agy,
-                slot_mgr_pty4,
-                slot_mgr_store4,
-                pty_session_uuids_arc.clone(),
-                project_registry.clone(),
-                learned.clone(),
-            ));
-            Arc::new(slot_orchestrator::AgentSlotManager::new(
-                vec![
-                    (
-                        missiond_core::types::CliEngine::ClaudeCode,
-                        cc_mgr as Arc<dyn slot_orchestrator::EngineSlotManager>,
-                    ),
-                    (
-                        missiond_core::types::CliEngine::Gemini,
-                        gemini_mgr as Arc<dyn slot_orchestrator::EngineSlotManager>,
-                    ),
-                    (
-                        missiond_core::types::CliEngine::Codex,
-                        codex_mgr as Arc<dyn slot_orchestrator::EngineSlotManager>,
-                    ),
-                    (
-                        missiond_core::types::CliEngine::Agy,
-                        agy_mgr as Arc<dyn slot_orchestrator::EngineSlotManager>,
-                    ),
-                ],
-                Arc::clone(&control_manager_arc),
-            ))
-        },
+        slot_dispatch: Arc::clone(&slot_dispatch_guard),
+        board_dispatch_notify: Arc::clone(&board_dispatch_notify),
+        slot_manager: Arc::clone(&slot_manager),
         gemini_watch_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         gemini_watch_handle: Arc::new(tokio::sync::Mutex::new(None)),
         gemini_watch_attempts: Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -1783,10 +1832,7 @@ async fn main() -> Result<()> {
     // --- Phase 8: WS bridge — tail event_log and push v1-compatible JSON ---
     // to `frontend_events_tx`, preserving the browser WS wire contract.
     {
-        let pool = pg_pool_for_bus
-            .as_ref()
-            .ok_or_else(|| anyhow!("ws bridge requires the PG pool"))?
-            .clone();
+        let pool = pg_pool_for_bus.clone();
         let blob = bus_services.blob_store.clone();
         let _bridge =
             bus::spawn_ws_bridge(pool, blob, frontend_events_tx.clone(), shutdown_rx.clone());
@@ -1794,10 +1840,7 @@ async fn main() -> Result<()> {
 
     // --- Phase 8: Retention + orphan-subscription cleanup daily cron ---
     {
-        let pool = pg_pool_for_bus
-            .as_ref()
-            .ok_or_else(|| anyhow!("retention cron requires the PG pool"))?
-            .clone();
+        let pool = pg_pool_for_bus.clone();
         let _cron = bus::spawn_retention_cron(Arc::clone(&bus_services), pool, shutdown_rx.clone());
     }
 
@@ -2018,7 +2061,7 @@ async fn main() -> Result<()> {
         shutdown_rx.clone(),
     );
 
-    // Codex ingestion worker — polls ~/.codex/state_5.sqlite for Codex operation logs
+    // Codex ingestion worker — reads Codex's provider-local thread index
     workers::spawn_worker(
         workers::local::codex_ingestion_worker::CodexIngestionWorker,
         Arc::new(state.clone()),

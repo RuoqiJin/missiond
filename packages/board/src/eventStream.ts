@@ -9,8 +9,11 @@ import {
 } from './generated/board-frontend-config';
 
 const WS_PORT = parseInt(process.env.NEXT_PUBLIC_WS_PORT || '9120', 10);
+export const EVENT_HEALTH_STALE_AFTER_MS = 30_000;
 
 type ConnectionState = 'connecting' | 'connected' | 'disconnected';
+export type EventHealthStatus = 'ok' | 'stale' | 'connecting' | 'disconnected' | 'error';
+export type EventHealthSeverity = 'good' | 'warn' | 'bad';
 
 export interface FrontendEvent {
   type: string;
@@ -29,6 +32,15 @@ interface EventStreamState {
   connectionState: ConnectionState;
   lastSeq: number;
   reconnectAttempts: number;
+  lastMessageAt: number | null;
+  lastError: string | null;
+  lastResyncAt: number | null;
+  lastResyncReason: string | null;
+  malformedCount: number;
+  eventHealthStatus: EventHealthStatus;
+  eventHealthSeverity: EventHealthSeverity;
+  eventHealthIsStale: boolean;
+  eventHealthAgeMs: number | null;
 
   // Push snapshots (used directly, no HTTP refetch)
   healthSnapshot: HealthSnapshot | null;
@@ -46,6 +58,7 @@ interface EventStreamState {
   // Actions
   connect: () => void;
   disconnect: () => void;
+  refreshEventHealth: () => void;
 }
 
 // Debounce timers for version bumps
@@ -70,6 +83,27 @@ function bumpKeys(
   for (const key of keys) debouncedBump(set, key, delayMs);
 }
 
+function deriveEventHealth(state: Pick<EventStreamState, 'connectionState' | 'lastMessageAt' | 'lastError'>): Pick<
+  EventStreamState,
+  'eventHealthStatus' | 'eventHealthSeverity' | 'eventHealthIsStale' | 'eventHealthAgeMs'
+> {
+  const ageMs = state.lastMessageAt ? Math.max(0, Date.now() - state.lastMessageAt) : null;
+  const isStale = state.connectionState === 'connected' && ageMs !== null && ageMs > EVENT_HEALTH_STALE_AFTER_MS;
+  if (state.connectionState === 'disconnected') {
+    return { eventHealthStatus: 'disconnected', eventHealthSeverity: 'bad', eventHealthIsStale: isStale, eventHealthAgeMs: ageMs };
+  }
+  if (state.connectionState === 'connecting') {
+    return { eventHealthStatus: 'connecting', eventHealthSeverity: 'warn', eventHealthIsStale: isStale, eventHealthAgeMs: ageMs };
+  }
+  if (state.lastError) {
+    return { eventHealthStatus: 'error', eventHealthSeverity: 'bad', eventHealthIsStale: isStale, eventHealthAgeMs: ageMs };
+  }
+  if (isStale) {
+    return { eventHealthStatus: 'stale', eventHealthSeverity: 'warn', eventHealthIsStale: true, eventHealthAgeMs: ageMs };
+  }
+  return { eventHealthStatus: 'ok', eventHealthSeverity: 'good', eventHealthIsStale: false, eventHealthAgeMs: ageMs };
+}
+
 function dispatchConfiguredCustomEvent(event: FrontendEvent) {
   const config = EVENT_CUSTOM_EVENTS.find((item) => item.event === event.type);
   if (!config) return false;
@@ -88,6 +122,10 @@ function handleEvent(
   set(() => ({ lastSeq: event.seq }));
 
   if (event.type === 'resync') {
+    set(() => ({
+      lastResyncAt: Date.now(),
+      lastResyncReason: typeof event.payload?.reason === 'string' ? event.payload.reason : 'resync',
+    }));
     bumpKeys(set, RESYNC_VERSION_KEYS, 0);
     return;
   }
@@ -117,6 +155,15 @@ export const useEventStreamStore = create<EventStreamState>()((set, get) => ({
   connectionState: 'disconnected',
   lastSeq: 0,
   reconnectAttempts: 0,
+  lastMessageAt: null,
+  lastError: null,
+  lastResyncAt: null,
+  lastResyncReason: null,
+  malformedCount: 0,
+  eventHealthStatus: 'disconnected',
+  eventHealthSeverity: 'bad',
+  eventHealthIsStale: false,
+  eventHealthAgeMs: null,
 
   healthSnapshot: null,
 
@@ -136,13 +183,17 @@ export const useEventStreamStore = create<EventStreamState>()((set, get) => ({
 
     const wsHost = process.env.NEXT_PUBLIC_WS_HOST || (typeof window !== 'undefined' ? window.location.hostname : 'localhost');
     const ws = new WebSocket(`ws://${wsHost}:${WS_PORT}/events`);
-    set({ ws, connectionState: 'connecting' });
+    set({ ws, connectionState: 'connecting', lastError: null });
+    get().refreshEventHealth();
 
     ws.onopen = () => {
-      set({ connectionState: 'connected', reconnectAttempts: 0 });
+      set({ connectionState: 'connected', reconnectAttempts: 0, lastError: null });
+      get().refreshEventHealth();
     };
 
     ws.onmessage = (e) => {
+      set({ lastMessageAt: Date.now() });
+      get().refreshEventHealth();
       try {
         const event: FrontendEvent = JSON.parse(e.data);
         if (event.type === 'connected') {
@@ -161,20 +212,30 @@ export const useEventStreamStore = create<EventStreamState>()((set, get) => ({
         }
         if (event.type === 'too_far_behind') {
           // Gap too large — bump all versions to trigger full HTTP refresh
-          handleEvent({ type: 'resync', ts: event.ts, seq: event.seq } as FrontendEvent, set);
+          handleEvent({
+            type: 'resync',
+            ts: event.ts,
+            seq: event.seq,
+            payload: { reason: 'too_far_behind' },
+          } as FrontendEvent, set);
           set({ lastSeq: event.seq });
           return;
         }
         // Dedup: skip events we've already seen
         if (event.seq > 0 && event.seq <= get().lastSeq) return;
         handleEvent(event, set);
-      } catch {
-        // Ignore malformed messages
+      } catch (err) {
+        set((s) => ({
+          malformedCount: s.malformedCount + 1,
+          lastError: err instanceof Error ? err.message : 'malformed websocket message',
+        }));
+        get().refreshEventHealth();
       }
     };
 
     ws.onclose = () => {
-      set({ ws: null, connectionState: 'disconnected' });
+      set({ ws: null, connectionState: 'disconnected', lastError: 'websocket closed' });
+      get().refreshEventHealth();
       // Exponential backoff reconnect: 1s, 2s, 4s, 8s, 16s cap
       const attempts = get().reconnectAttempts;
       const delay = Math.min(1000 * Math.pow(2, attempts), 16000);
@@ -186,6 +247,8 @@ export const useEventStreamStore = create<EventStreamState>()((set, get) => ({
 
     ws.onerror = () => {
       // onclose will fire after onerror
+      set({ lastError: 'websocket error' });
+      get().refreshEventHealth();
     };
   },
 
@@ -194,6 +257,11 @@ export const useEventStreamStore = create<EventStreamState>()((set, get) => ({
     if (ws) {
       ws.close();
       set({ ws: null, connectionState: 'disconnected' });
+      get().refreshEventHealth();
     }
+  },
+
+  refreshEventHealth: () => {
+    set((state) => deriveEventHealth(state));
   },
 }));

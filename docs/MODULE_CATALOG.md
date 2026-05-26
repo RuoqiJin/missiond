@@ -50,7 +50,7 @@
 └─────────────────────────────────────────────────────┘
 ```
 
-**数据流方向**：Board → MCP → Daemon → Core → SQLite/PTY
+**数据流方向**：Board → MCP → Daemon → Core → PostgreSQL/PTY
 **事件流方向**：PTY/DB → EventBus → WebSocket → Board 实时更新
 
 ---
@@ -159,7 +159,7 @@
 
 | 文件 | 职责 |
 |------|------|
-| `db/mod.rs` | 数据库初始化 — SQLite 连接管理、表结构定义、事务处理 |
+| `db/mod.rs` | 数据库初始化 — PostgreSQL 连接管理、表结构定义、事务处理 |
 | `db/task.rs` | 任务表 — Task 的增删改查、状态更新、按角色查询 |
 | `db/slot.rs` | 工位表 — 工位配置和状态持久化 |
 | `db/board.rs` | Board 表 — Board 任务操作（创建/更新/列表/按状态分类查询） |

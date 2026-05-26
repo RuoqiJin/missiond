@@ -17,8 +17,7 @@ pub fn routes() -> Router<AppState> {
 }
 
 async fn list_plans(State(state): State<AppState>) -> AppResult<Json<Vec<Plan>>> {
-    let conn = state.db.conn();
-    let plans = db::subscriptions::list_plans(&*conn)?;
+    let plans = db::subscriptions::list_plans(state.db.pool()).await?;
     Ok(Json(plans))
 }
 
@@ -27,20 +26,19 @@ async fn subscribe(
     auth: AuthUser,
     Json(req): Json<SubscribeRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let conn = state.db.conn();
-
-    let plan = db::subscriptions::get_plan(&*conn, &req.plan_id)
+    let plan = db::subscriptions::get_plan(state.db.pool(), &req.plan_id)
+        .await
         .map_err(|_| AppError::NotFound(format!("Plan {} not found", req.plan_id)))?;
 
     if plan.price > 0.0 {
-        let user = db::users::get_user_by_id(&*conn, &auth.user_id)?;
+        let user = db::users::get_user_by_id(state.db.pool(), &auth.user_id).await?;
         if user.balance < plan.price {
             return Err(AppError::BadRequest(format!(
                 "Insufficient balance. Need {:.2}, have {:.2}",
                 plan.price, user.balance
             )));
         }
-        db::users::update_balance(&*conn, &auth.user_id, -plan.price)?;
+        db::users::update_balance(state.db.pool(), &auth.user_id, -plan.price).await?;
     }
 
     let sub_id = uuid::Uuid::new_v4().to_string();
@@ -48,13 +46,14 @@ async fn subscribe(
     let period_end = now + chrono::Duration::days(30);
 
     db::subscriptions::create_subscription(
-        &*conn,
+        state.db.pool(),
         &sub_id,
         &auth.user_id,
         &req.plan_id,
         &now.format("%Y-%m-%d").to_string(),
         &period_end.format("%Y-%m-%d").to_string(),
-    )?;
+    )
+    .await?;
 
     Ok(Json(serde_json::json!({
         "subscriptionId": sub_id,
@@ -72,16 +71,17 @@ async fn top_up(
         return Err(AppError::BadRequest("Amount must be positive".into()));
     }
 
-    let conn = state.db.conn();
-    let sub = db::subscriptions::get_active_subscription(&*conn, &auth.user_id)?
+    let sub = db::subscriptions::get_active_subscription(state.db.pool(), &auth.user_id)
+        .await?
         .ok_or_else(|| AppError::BadRequest("No active subscription".into()))?;
 
     db::subscriptions::add_extra_quota(
-        &*conn,
+        state.db.pool(),
         &auth.user_id,
         &sub.current_period_start,
         req.amount,
-    )?;
+    )
+    .await?;
 
     Ok(Json(serde_json::json!({
         "added": req.amount,
@@ -93,7 +93,6 @@ async fn get_quota(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> AppResult<Json<Option<QuotaInfo>>> {
-    let conn = state.db.conn();
-    let quota = db::subscriptions::get_quota_info(&*conn, &auth.user_id)?;
+    let quota = db::subscriptions::get_quota_info(state.db.pool(), &auth.user_id).await?;
     Ok(Json(quota))
 }

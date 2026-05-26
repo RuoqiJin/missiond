@@ -29,8 +29,6 @@ impl ExecutionMode {
 
 /// Options for creating MissionControl
 pub struct MissionControlOptions {
-    /// Legacy path used only to derive local logs/config defaults when supplied.
-    pub db_path: Option<PathBuf>,
     /// Slots configuration file path
     pub slots_config_path: PathBuf,
     /// Permission configuration file path (optional)
@@ -58,30 +56,19 @@ pub struct MissionControl {
 impl MissionControl {
     /// Create a new MissionControl coordinator.
     pub fn new(options: MissionControlOptions) -> Result<Self> {
-        // Logs directory
-        let logs_dir = options.logs_dir.unwrap_or_else(|| {
-            options
-                .db_path
-                .as_ref()
-                .and_then(|p| p.parent())
-                .unwrap_or_else(|| Path::new("."))
-                .join("logs")
-        });
+        let mission_home = crate::ipc::default_mission_home();
+        let logs_dir = options
+            .logs_dir
+            .unwrap_or_else(|| mission_home.join("logs"));
 
         let default_mode = options.default_mode.unwrap_or(ExecutionMode::Batch);
 
         let slot_manager = SlotManager::new();
 
         // Load permission config
-        let permission_config_path = options.permission_config_path.unwrap_or_else(|| {
-            options
-                .db_path
-                .as_ref()
-                .and_then(|p| p.parent())
-                .unwrap_or_else(|| Path::new("."))
-                .join("config")
-                .join("permissions.yaml")
-        });
+        let permission_config_path = options
+            .permission_config_path
+            .unwrap_or_else(|| mission_home.join("config").join("permissions.yaml"));
         let permission_policy = PermissionPolicy::new(&permission_config_path);
 
         let slots_config_path = options.slots_config_path.clone();

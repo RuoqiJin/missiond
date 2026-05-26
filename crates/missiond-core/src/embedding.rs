@@ -6,7 +6,7 @@
 //! - Future: OllamaProvider (Qwen3-Embedding-0.6B), VoyageProvider, etc.
 //!
 //! Feature-gated: `embeddings` enables FastEmbed backend,
-//! otherwise provides a no-op implementation that falls back to FTS5 only.
+//! otherwise provides a no-op implementation that falls back to Postgres FTS only.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -76,7 +76,7 @@ pub fn rrf_score(fts_rank: Option<usize>, vec_rank: Option<usize>, k: usize) -> 
     fts + vec
 }
 
-/// Result of hybrid search combining FTS5 and vector search
+/// Result of hybrid search combining Postgres FTS and vector search
 #[derive(Debug, Clone)]
 pub struct HybridSearchResult {
     pub id: String,
@@ -86,7 +86,7 @@ pub struct HybridSearchResult {
     pub rrf_score: f64,
 }
 
-/// Perform hybrid search: merge FTS5 ranked results with cosine similarity on cached vectors.
+/// Perform hybrid search: merge Postgres FTS ranked results with cosine similarity on cached vectors.
 /// Returns results sorted by RRF score descending.
 pub fn hybrid_search(
     query_embedding: &[f32],

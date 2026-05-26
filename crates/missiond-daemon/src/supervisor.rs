@@ -340,7 +340,7 @@ pub(crate) async fn schedule_supervisor_patrol(state: &AppState) {
          ## 巡检任务\n\
          1. 对状态为 Running 或 Thinking 的工位，用 mission_pty_screen 查看最近输出\n\
          2. 检查是否存在以下异常：\n\
-            - 直接用 sqlite3/bash 操作 mission.db（严重！立即 mission_kill）\n\
+            - 绕过 MCP 直接用 bash/DB CLI 查询或修改 MissionD runtime store（严重！立即 mission_kill）\n\
             - MCP 工具连续报错或不可用\n\
             - 长时间无输出或陷入循环\n\
             - 工位偏离任务目标\n\

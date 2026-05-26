@@ -307,6 +307,7 @@ async fn read_convergence_status_cache(path: &std::path::Path) -> Option<Value> 
 
 fn convergence_repo_root(state: &AppState) -> PathBuf {
     state
+        .slots()
         .mission
         .list_slots()
         .into_iter()
@@ -328,7 +329,9 @@ fn tail_text(text: &str, lines: usize) -> String {
 }
 
 async fn projected_mission_slots(state: &AppState) -> Vec<Value> {
-    let slots = state.mission.list_slots();
+    let slot_ctx = state.slots();
+    let storage = state.storage();
+    let slots = slot_ctx.mission.list_slots();
     let Ok(config) = WorkstationRuntimeConfig::load_for_current_dir() else {
         return slots
             .into_iter()
@@ -352,7 +355,7 @@ async fn projected_mission_slots(state: &AppState) -> Vec<Value> {
         .filter(|slot| !is_stopped_legacy_sonnet_residual(slot, &v3_slot_ids))
         .collect();
 
-    let running_board_tasks = state
+    let running_board_tasks = storage
         .store
         .list_board_tasks(Some("running"), true)
         .await
@@ -366,10 +369,10 @@ async fn projected_mission_slots(state: &AppState) -> Vec<Value> {
             value["currentTaskId"] = json!(task.id.as_str());
             value["activeBoardTask"] = active_board_task_summary_json(task);
         }
-        if let Ok(Some(slot_task_id)) = state.store.get_running_slot_task(&slot.config.id).await {
+        if let Ok(Some(slot_task_id)) = storage.store.get_running_slot_task(&slot.config.id).await {
             value["currentSlotTaskId"] = json!(slot_task_id);
         }
-        if let Some(info) = state.pty.get_status(&slot.config.id).await {
+        if let Some(info) = slot_ctx.pty.get_status(&slot.config.id).await {
             value["ptyState"] = json!(serde_json::to_value(&info.state)
                 .ok()
                 .and_then(|v| v.as_str().map(ToString::to_string))
@@ -382,9 +385,9 @@ async fn projected_mission_slots(state: &AppState) -> Vec<Value> {
         }
 
         let mut latest_is_codex_placeholder = false;
-        if let Ok(Some(session_id)) = state.store.get_slot_session(&slot.config.id).await {
+        if let Ok(Some(session_id)) = storage.store.get_slot_session(&slot.config.id).await {
             value["sessionId"] = json!(session_id);
-            if let Ok(Some(conv)) = state.store.get_conversation(&session_id).await {
+            if let Ok(Some(conv)) = storage.store.get_conversation(&session_id).await {
                 if conversation_source_matches_engine(slot.config.engine, &conv.source) {
                     latest_is_codex_placeholder = slot.config.engine == CliEngine::Codex
                         && conv.message_count == 0
@@ -469,6 +472,7 @@ async fn latest_provider_conversation_for_slot(
 ) -> Option<Conversation> {
     let source = canonical_source_for_engine(slot.config.engine);
     let conversations = state
+        .storage()
         .store
         .list_conversations(None, 10, None, None, None, None, Some(source))
         .await
@@ -544,7 +548,7 @@ fn handle_pause(state: &AppState, args: Value) -> Result<ToolResult> {
             Ok(ToolResult::text("▶️ 全局暂停已解除。工位恢复正常工作。"))
         }
         _ => {
-            let paused = state.control_manager.current().global_paused;
+            let paused = state.control_plane().control_manager.current().global_paused;
             let since = state.global_paused_at.load(Ordering::Relaxed);
             let msg = if paused {
                 format!(

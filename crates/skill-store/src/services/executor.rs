@@ -39,15 +39,16 @@ impl SkillExecutor {
 
         // Step 1: Load skill & check quota
         let (skill, quota_check) = {
-            let conn = self.db.conn();
-            let skill = db::skills::get_skill_by_id(&*conn, skill_id)
+            let pool = self.db.pool();
+            let skill = db::skills::get_skill_by_id(pool, skill_id)
+                .await
                 .map_err(|_| AppError::NotFound(format!("Skill {skill_id} not found")))?;
 
             if !skill.is_active {
                 return Err(AppError::NotFound("Skill is inactive".into()));
             }
 
-            let quota_check = self.billing.check_quota(&*conn, user_id)?;
+            let quota_check = self.billing.check_quota(pool, user_id).await?;
 
             // Verify tier access
             if skill.tier > quota_check.max_tier() {
@@ -79,18 +80,20 @@ impl SkillExecutor {
             Ok(Ok(())) => {} // Safe
             Ok(Err(e)) => {
                 // Blocked — record and return
-                let conn = self.db.conn();
-                let _ = self.billing.record_execution(
-                    &*conn,
-                    &execution_id,
-                    user_id,
-                    skill_id,
-                    &ExecStatus::BlockedInjection,
-                    0,
-                    0,
-                    skill.price_per_use,
-                    &quota_check,
-                );
+                let _ = self
+                    .billing
+                    .record_execution(
+                        self.db.pool(),
+                        &execution_id,
+                        user_id,
+                        skill_id,
+                        &ExecStatus::BlockedInjection,
+                        0,
+                        0,
+                        skill.price_per_use,
+                        &quota_check,
+                    )
+                    .await;
                 return Err(AppError::InjectionBlocked(e.to_string()));
             }
             Err(e) => {
@@ -107,39 +110,42 @@ impl SkillExecutor {
             .map_err(|e| AppError::LlmError(e.to_string()))?;
 
         // Step 6: Output defense
-        if let Err(e) = self
+        if let Err(_e) = self
             .defense
             .check_output(&llm_result.content, &skill.prompt_template)
         {
-            let conn = self.db.conn();
-            let _ = self.billing.record_execution(
-                &*conn,
-                &execution_id,
-                user_id,
-                skill_id,
-                &ExecStatus::BlockedLeak,
-                llm_result.input_tokens,
-                llm_result.output_tokens,
-                skill.price_per_use,
-                &quota_check,
-            );
+            let _ = self
+                .billing
+                .record_execution(
+                    self.db.pool(),
+                    &execution_id,
+                    user_id,
+                    skill_id,
+                    &ExecStatus::BlockedLeak,
+                    llm_result.input_tokens,
+                    llm_result.output_tokens,
+                    skill.price_per_use,
+                    &quota_check,
+                )
+                .await;
             return Err(AppError::LeakBlocked);
         }
 
         // Step 7: Record execution & billing
         {
-            let conn = self.db.conn();
-            self.billing.record_execution(
-                &*conn,
-                &execution_id,
-                user_id,
-                skill_id,
-                &ExecStatus::Success,
-                llm_result.input_tokens,
-                llm_result.output_tokens,
-                skill.price_per_use,
-                &quota_check,
-            )?;
+            self.billing
+                .record_execution(
+                    self.db.pool(),
+                    &execution_id,
+                    user_id,
+                    skill_id,
+                    &ExecStatus::Success,
+                    llm_result.input_tokens,
+                    llm_result.output_tokens,
+                    skill.price_per_use,
+                    &quota_check,
+                )
+                .await?;
         }
 
         Ok(InvokeResult {

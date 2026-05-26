@@ -760,7 +760,7 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
             }
             ranked.truncate(top_k);
 
-            // 4. Enrich with snippets (FTS5 native) or llmSummary fallback
+            // 4. Enrich with snippets (Postgres FTS native) or llmSummary fallback
             let mut results = Vec::new();
             for (sid, _rrf, fts_r, _vec_r, sim) in &ranked {
                 let conv = state.store.get_conversation(sid).await.ok().flatten();

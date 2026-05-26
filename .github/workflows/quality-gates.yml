@@ -1,0 +1,65 @@
+name: Quality Gates
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  missiond-quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check storage contract
+        run: |
+          node scripts/check-v3-ops-infra-isomorphism.mjs --json
+          node scripts/check-missiond-owned-sqlite-clean.mjs --json
+          node scripts/check-v3-cli-conversation-ingestion-isomorphism.mjs --json
+          node scripts/check-high-roi-contracts.mjs --json
+
+      - name: Ensure skill-store uses Postgres only
+        run: |
+          set +e
+          cargo tree -p skill-store -i rusqlite > /tmp/skill-store-rusqlite.txt 2>&1
+          status=$?
+          set -e
+          cat /tmp/skill-store-rusqlite.txt
+          if [ "$status" -eq 0 ] && grep -q '^skill-store ' /tmp/skill-store-rusqlite.txt; then
+            echo "skill-store must not depend on rusqlite"
+            exit 1
+          fi
+
+      - name: Cargo check
+        run: cargo check -p missiond-daemon -p missiond-core -p skill-store
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.10.0
+
+      - name: Install Board dependencies
+        run: pnpm --dir packages/board install --frozen-lockfile
+
+      - name: Board typecheck
+        run: pnpm --dir packages/board typecheck
+
+      - name: Board build
+        run: pnpm --dir packages/board build

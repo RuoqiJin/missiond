@@ -1,7 +1,7 @@
 //! Code Prefetch Engine — AST hybrid search + token-budgeted context injection.
 //!
 //! Part of P3: Holographic Context Engine.
-//! Searches AST nodes via FTS5 + embedding vector (RRF merge),
+//! Searches AST nodes via Postgres FTS + embedding vector (RRF merge),
 //! applies structural weights, MMR diversity, cross-file association,
 //! and renders XML `<code_context>` block for autopilot prompt injection.
 
@@ -154,7 +154,7 @@ async fn code_prefetch_inner(state: &AppState, query: &str) -> Option<String> {
         }
     }
 
-    // Stage 1: FTS5 ranked IDs
+    // Stage 1: Postgres FTS ranked IDs
     let fts_ranked = state
         .store
         .ast_search_ranked(query, PRIMARY_TOP_K * 3)
@@ -165,8 +165,8 @@ async fn code_prefetch_inner(state: &AppState, query: &str) -> Option<String> {
     // Check embedding health via relative coverage ratio, not absolute count
     let ast_cache_len = state.ast_embedding_cache.read().await.len();
     let fts_total = fts_ranked.len();
-    // Use FTS5 total as proxy for indexed nodes (avoids extra DB query in hot path).
-    // If cache has vectors for a decent fraction of what FTS5 knows about, vectors are useful.
+    // Use Postgres FTS total as proxy for indexed nodes (avoids extra DB query in hot path).
+    // If cache has vectors for a decent fraction of what Postgres FTS knows about, vectors are useful.
     let embedding_healthy = ast_cache_len > 0
         && (fts_total == 0 || ast_cache_len as f64 / fts_total.max(1) as f64 > 0.5);
 

@@ -51,7 +51,7 @@ async-trait.workspace = true
 dashmap = "6.1.0"
 libc = "0.2.183"
 forge-core = { path = "../../../jarvis-forge/crates/forge-core" }
-# Read-only Codex CLI provider state (~/.codex/state_5.sqlite), not MissionD DB.
+# Read-only Codex CLI provider-local index adapter, not MissionD DB.
 rusqlite = { workspace = true }
 sqlx = { workspace = true }
 

@@ -100,13 +100,13 @@
        (step s7 :logic "delegate Claude/Gemini/Codex workers through BoardTask/Autopilot only; never bypass durable event/Board state")
        (step s8 :logic "return decision, reasoning_summary, unknowns, inferred_user_intent, intent_memory_candidate, evidence_needed, delegation_plan?, and next_question_or_action, then write checkpoint + Board note + execution companion log after every decision boundary"))
 	    :evidence-authority
-	      ((tier t1 :source [provider-jsonl codex-sqlite claude-jsonl gemini-chat-file] :use "durable final/progress facts")
+	      ((tier t1 :source [provider-jsonl codex-local-index claude-jsonl gemini-chat-file] :use "durable final/progress facts")
 	       (tier t2 :source [missiond-event-bus BoardTask-lifecycle mission_execution] :use "causal workflow state")
 	       (tier t3 :source [provider-aware-pty-recognition screen-buffer] :use "diagnostic state only; never sole completion authority"))
 	    :pty-retention
 	      (:ttl-days 1
 	       :scope [screen-buffer screenshots pty-log-files slot-last-responses]
-	       :rule "PTY content is transient diagnostic evidence only. MissionD keeps provider JSONL/Codex sqlite/Gemini chat files as durable logs, but PTY screen buffers, screenshots, pty-*.log files, and slot_last_responses MUST be treated as short-lived cache with a one-day retention window. Retention cleanup MUST be able to write a delete manifest so applied file/database removal remains reviewable and reversible by evidence.")
+	       :rule "PTY content is transient diagnostic evidence only. MissionD keeps provider JSONL/Codex provider-local index/Gemini chat files as durable logs, but PTY screen buffers, screenshots, pty-*.log files, and slot_last_responses MUST be treated as short-lived cache with a one-day retention window. Retention cleanup MUST be able to write a delete manifest so applied file/database removal remains reviewable and reversible by evidence.")
 	    :settle-policy
 	      "A worker can be closed only after durable final event or high-confidence final summary plus settle window; idle PTY alone is insufficient because provider SSE/final JSONL can lag the prompt returning."
     (master-checkpoint
@@ -176,7 +176,7 @@
       :core
         ((step s1 :logic "load checkpoint event cursor, delegated task ids, blocked reason, and resume plan")
          (step s2 :logic "on daemon-startup, if no queued event survived, recover the latest open/running MissionD BoardTask whose title starts with project SSOT convergence or M6 SSOT convergence, or whose description references project SSOT convergence workflow, and rehydrate it as the active objective")
-         (step s3 :logic "reconcile Board open tasks against provider JSONL/Codex sqlite/Gemini chat files")
+         (step s3 :logic "reconcile Board open tasks against provider JSONL/Codex provider-local index/Gemini chat files")
          (step s4 :logic "resume or requeue only from durable evidence; PTY recognition is diagnostic")
          (step s5 :logic "never auto-hide, skip, delete, or mutate historical Board cleanup candidates; legacy ops cleanup remains user-directed"))
       :egress [mission_master_status.service BoardTask-note])

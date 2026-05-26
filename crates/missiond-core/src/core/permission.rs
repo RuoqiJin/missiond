@@ -637,7 +637,7 @@ mod tests {
     fn test_static_deny_blocks_learned_allow() {
         let dir = tempdir().unwrap();
         let config_path = dir.path().join("permissions.yaml");
-        let db_path = dir.path().join("learned.db");
+        let learned_path = dir.path().join("learned_permissions.yaml");
 
         // Static role denies dangerous_tool
         let config = PermissionConfig {
@@ -660,7 +660,7 @@ mod tests {
         let content = serde_yaml::to_string(&config).unwrap();
         fs::write(&config_path, content).unwrap();
 
-        let learned = Arc::new(super::super::LearnedPermissions::new(&db_path).unwrap());
+        let learned = Arc::new(super::super::LearnedPermissions::new(&learned_path).unwrap());
         // Learned slot-level allow for dangerous_tool
         learned
             .learn("slot", "slot-1", "dangerous_tool", "allow", None)

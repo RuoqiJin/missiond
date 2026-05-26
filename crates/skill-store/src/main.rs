@@ -40,9 +40,12 @@ async fn main() -> anyhow::Result<()> {
     let config = config::Config::load()?;
     tracing::info!("Starting Skill Store on {}", config.bind);
 
-    // Database
-    let database = Arc::new(db::Database::new(&config.db_path)?);
-    tracing::info!("Database initialized at {:?}", config.db_path);
+    let database_url = config
+        .database_url
+        .as_deref()
+        .expect("Config::load validates database_url");
+    let database = Arc::new(db::Database::connect(database_url).await?);
+    tracing::info!("PostgreSQL database initialized");
 
     // LLM proxy
     let llm = LlmProxy::new(config.llm.providers.clone());
@@ -77,7 +80,7 @@ async fn main() -> anyhow::Result<()> {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
         loop {
             interval.tick().await;
-            match services::billing::settle_creator_revenues(&db_for_cron) {
+            match services::billing::settle_creator_revenues(&db_for_cron).await {
                 Ok(n) if n > 0 => tracing::info!("Settled {n} revenue entries"),
                 Err(e) => tracing::error!("Revenue settlement error: {e}"),
                 _ => {}

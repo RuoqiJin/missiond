@@ -83,11 +83,9 @@ impl LearnedPermissions {
             .unwrap_or(false)
     }
 
-    /// Load from YAML file (or create empty if not found).
+    /// Load from a YAML file (or create empty if not found).
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let source_path = path.as_ref();
-        // YAML path: same location, .yaml extension
-        let yaml_path = source_path.with_extension("yaml");
+        let yaml_path = path.as_ref().to_path_buf();
 
         let mut entries = HashMap::new();
         let mut max_id = 0i64;
@@ -407,8 +405,8 @@ mod tests {
     #[test]
     fn test_learn_and_check() {
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("test.yaml");
-        let lp = LearnedPermissions::new(&db_path).unwrap();
+        let yaml_path = dir.path().join("test.yaml");
+        let lp = LearnedPermissions::new(&yaml_path).unwrap();
 
         lp.learn("role", "worker", "read_file", "allow", None)
             .unwrap();
@@ -430,7 +428,7 @@ mod tests {
         );
 
         // Verify YAML file exists
-        assert!(db_path.exists());
+        assert!(yaml_path.exists());
     }
 
     #[test]

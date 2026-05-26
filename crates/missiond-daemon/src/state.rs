@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use missiond_core::db::traits::MissionStore;
@@ -70,6 +71,64 @@ impl SharedSkillIndex {
     fn write(&self) -> std::sync::RwLockWriteGuard<'_, SkillIndex> {
         self.inner.write().unwrap_or_else(|err| err.into_inner())
     }
+}
+
+#[derive(Clone)]
+#[allow(dead_code)]
+pub(crate) struct RuntimePaths {
+    pub(crate) home: PathBuf,
+    pub(crate) project_root: PathBuf,
+    pub(crate) slots_config: PathBuf,
+    pub(crate) permission_config: PathBuf,
+    pub(crate) learned_permissions: PathBuf,
+    pub(crate) logs_dir: PathBuf,
+}
+
+#[derive(Clone)]
+#[allow(dead_code)]
+pub(crate) struct StorageContext {
+    pub(crate) store: Arc<dyn MissionStore>,
+    pub(crate) bus: Arc<BusServices>,
+    pub(crate) shared_memory: Arc<crate::engine::shared_memory::SharedMemoryService>,
+    pub(crate) codex_replay: Arc<crate::engine::codex_replay::CodexReplayService>,
+}
+
+#[derive(Clone)]
+#[allow(dead_code)]
+pub(crate) struct SlotContext {
+    pub(crate) mission: Arc<MissionControl>,
+    pub(crate) pty: Arc<PTYManager>,
+    pub(crate) slot_manager: Arc<AgentSlotManager>,
+    pub(crate) slot_dispatch: Arc<SlotDispatchGuard>,
+    pub(crate) pty_session_uuids: Arc<tokio::sync::RwLock<HashSet<String>>>,
+}
+
+#[derive(Clone)]
+#[allow(dead_code)]
+pub(crate) struct WorkerContextState {
+    pub(crate) registry: Arc<WorkerRegistry>,
+    pub(crate) board_dispatch_notify: Arc<tokio::sync::Notify>,
+    pub(crate) strategy_notify: Arc<tokio::sync::Notify>,
+    pub(crate) retro_notify: Arc<tokio::sync::Notify>,
+}
+
+#[derive(Clone)]
+#[allow(dead_code)]
+pub(crate) struct LlmContext {
+    pub(crate) http_client: reqwest::Client,
+    pub(crate) gemini: GeminiClient,
+    pub(crate) minimax: Option<MinimaxHandle>,
+    pub(crate) sonnet: Option<SonnetHandle>,
+    pub(crate) prompts: Arc<PromptStore>,
+}
+
+#[derive(Clone)]
+#[allow(dead_code)]
+pub(crate) struct ControlPlaneContext {
+    pub(crate) permission: Arc<PermissionPolicy>,
+    pub(crate) control_manager: Arc<ControlManager>,
+    pub(crate) project_registry: SharedProjectRegistry,
+    pub(crate) stats: Arc<DaemonStats>,
 }
 
 /// Extraction phase state machine. Replaces rigid 120s cooldown with
@@ -353,6 +412,13 @@ pub(crate) struct SessionTaskBinding {
 
 #[derive(Clone)]
 pub(crate) struct AppState {
+    pub(crate) runtime_paths: RuntimePaths,
+    pub(crate) storage_ctx: StorageContext,
+    pub(crate) slot_ctx: SlotContext,
+    pub(crate) worker_ctx: WorkerContextState,
+    pub(crate) llm_ctx: LlmContext,
+    pub(crate) control_ctx: ControlPlaneContext,
+    pub(crate) startup_preflight: crate::startup_preflight::StartupPreflightReport,
     pub(crate) mission: Arc<MissionControl>,
     /// Trait-based PostgreSQL DB access.
     pub(crate) store: Arc<dyn MissionStore>,
@@ -504,6 +570,33 @@ pub(crate) struct AppState {
     /// `conversation_logger` writes to this (replacing the old
     /// `cursor_ack_tx` MPSC) and the watcher persists by reading drains.
     pub(crate) conversation_cursor_map: Arc<tokio::sync::Mutex<HashMap<String, u64>>>,
+}
+
+#[allow(dead_code)]
+impl AppState {
+    pub(crate) fn runtime_paths(&self) -> &RuntimePaths {
+        &self.runtime_paths
+    }
+
+    pub(crate) fn storage(&self) -> &StorageContext {
+        &self.storage_ctx
+    }
+
+    pub(crate) fn slots(&self) -> &SlotContext {
+        &self.slot_ctx
+    }
+
+    pub(crate) fn workers(&self) -> &WorkerContextState {
+        &self.worker_ctx
+    }
+
+    pub(crate) fn llm(&self) -> &LlmContext {
+        &self.llm_ctx
+    }
+
+    pub(crate) fn control_plane(&self) -> &ControlPlaneContext {
+        &self.control_ctx
+    }
 }
 
 /// v0.5.0: Memory-hook task submission.

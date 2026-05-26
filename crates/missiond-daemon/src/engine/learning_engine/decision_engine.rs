@@ -369,20 +369,20 @@ pub(crate) async fn process_pending_master_questions(state: &AppState) {
     }
 }
 
-/// Tier 1: Hybrid KB search (FTS5 + semantic vectors via RRF fusion)
+/// Tier 1: Hybrid KB search (Postgres FTS + semantic vectors via RRF fusion)
 ///
 /// When embedding service is available:
-///   Path A: FTS5 → Top 20 (with rank)
+///   Path A: Postgres FTS → Top 20 (with rank)
 ///   Path B: Cosine similarity on in-memory vectors → Top 20
 ///   Merge via RRF (k=60), hit if cosine > 0.60 AND rrf above threshold
 ///
-/// Fallback (embedding unavailable): FTS5 + keyword overlap ≥ 30%
+/// Fallback (embedding unavailable): Postgres FTS + keyword overlap ≥ 30%
 pub(crate) async fn decision_tier1_kb(
     state: &AppState,
     question: &missiond_core::types::AgentQuestion,
 ) -> Result<TierResult> {
     let tier_start = std::time::Instant::now();
-    // Path A: FTS5 search with ranked results
+    // Path A: Postgres FTS search with ranked results
     let fts_results = state
         .store
         .kb_search_ranked(&question.question, Some("policy:decision"), 20)

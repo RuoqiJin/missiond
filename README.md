@@ -344,7 +344,7 @@ mission.close();
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MISSIOND_HOME` | `~/.missiond` | Config directory |
-| `MISSION_DB_PATH` | `$MISSIOND_HOME/mission.db` | SQLite database |
+| `MISSION_PG_URL` | required | PostgreSQL runtime database URL |
 | `MISSION_SLOTS_CONFIG` | `$MISSIOND_HOME/slots.yaml` | Slot definitions |
 | `MISSION_IPC_ENDPOINT` | Unix socket / TCP (Windows) | IPC endpoint |
 | `MISSION_WS_PORT` | `9120` | WebSocket port |

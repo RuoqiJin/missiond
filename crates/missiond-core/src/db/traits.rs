@@ -2,8 +2,7 @@
 //!
 //! Domain-specific async traits for MissionD's PostgreSQL-backed store.
 //!
-//! Provider-local SQLite sources, such as Codex CLI's state_5.sqlite, are read
-//! by ingestion workers and do not constitute a MissionD database backend.
+//! Provider-local indexes are read by ingestion workers and do not constitute a MissionD database backend.
 
 use super::error::DbResult;
 use crate::types::*;

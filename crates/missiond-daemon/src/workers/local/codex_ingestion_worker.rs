@@ -1,6 +1,7 @@
 //! Codex Ingestion Worker — background poller for OpenAI Codex operation logs.
 //!
-//! Polls `~/.codex/state_5.sqlite` threads table every 30s for new/updated threads.
+//! Polls Codex's provider-local `~/.codex/state_5.sqlite` thread index every
+//! 30s for new/updated threads.
 //! Reads corresponding JSONL rollout files, extracts tool calls (function_call +
 //! function_call_output pairs), and writes them to MissionD's conversations +
 //! tool_calls tables via the Store trait.
@@ -22,6 +23,11 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use chrono::DateTime;
+use missiond_core::types::{
+    is_provider_index_missing_state, CONVERSATION_SOURCE_CODEX_CLI,
+    CONVERSATION_SOURCE_STATE_ARCHIVED, CONVERSATION_SOURCE_STATE_CURRENT,
+    CONVERSATION_SOURCE_STATE_MISSING_STALE, CONVERSATION_SOURCE_STATE_PROVIDER_INDEX_MISSING,
+};
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -37,8 +43,9 @@ const POLL_INTERVAL_SECS: u64 = 10;
 /// Initial delay before first run.
 const STARTUP_DELAY_SECS: u64 = 15;
 
-/// Codex SQLite database path relative to home.
-const CODEX_DB_RELATIVE: &str = ".codex/state_5.sqlite";
+/// Codex provider-local thread index path relative to home. This is an
+/// external OpenAI Codex store, opened read-only, not a MissionD database.
+const CODEX_LOCAL_INDEX_RELATIVE: &str = ".codex/state_5.sqlite";
 
 /// Codex rollout corpus roots relative to home.
 const CODEX_SESSIONS_RELATIVE: &str = ".codex/sessions";
@@ -77,7 +84,7 @@ struct FileWatermark {
     age_secs: u64,
 }
 
-/// Minimal thread row from Codex's SQLite.
+/// Minimal thread row from Codex's provider-local thread index.
 #[derive(Debug)]
 struct CodexThread {
     id: String,
@@ -126,10 +133,10 @@ impl BackgroundWorker for CodexIngestionWorker {
     }
 
     async fn run(self, state: Arc<AppState>, mut ctx: WorkerContext) {
-        let db_path = match codex_db_path() {
+        let local_index_path = match codex_local_index_path() {
             Some(p) if p.exists() => p,
             _ => {
-                info!("Codex ingestion: ~/.codex/state_5.sqlite not found, worker idle");
+                info!("Codex ingestion: provider-local Codex thread index not found, worker idle");
                 // Park forever — no Codex installation detected
                 std::future::pending::<()>().await;
                 return;
@@ -137,7 +144,7 @@ impl BackgroundWorker for CodexIngestionWorker {
         };
 
         info!(
-            db = %db_path.display(),
+            index = %local_index_path.display(),
             "Codex ingestion worker started (poll interval: {POLL_INTERVAL_SECS}s)"
         );
 
@@ -152,7 +159,7 @@ impl BackgroundWorker for CodexIngestionWorker {
         loop {
             ctx.wait_if_paused().await;
 
-            match poll_and_ingest(&state, &db_path, &mut watermarks).await {
+            match poll_and_ingest(&state, &local_index_path, &mut watermarks).await {
                 Ok(ingested) => {
                     if ingested > 0 {
                         ctx.record_success();
@@ -172,25 +179,28 @@ impl BackgroundWorker for CodexIngestionWorker {
 
 // ── Core logic ──
 
-fn codex_db_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(CODEX_DB_RELATIVE))
+fn codex_local_index_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(CODEX_LOCAL_INDEX_RELATIVE))
 }
 
-/// One poll cycle: read Codex SQLite → find updated threads → parse JSONL → write to MissionD.
+/// One poll cycle: read Codex provider-local index → find updated threads →
+/// parse JSONL → write to MissionD.
 async fn poll_and_ingest(
     state: &AppState,
-    db_path: &Path,
+    local_index_path: &Path,
     watermarks: &mut HashMap<String, FileWatermark>,
 ) -> Result<usize> {
-    // Open Codex's SQLite in read-only mode (non-blocking for Codex).
-    let db_path_owned = db_path.to_path_buf();
-    let threads =
-        tokio::task::spawn_blocking(move || read_codex_threads_with_raw_rollouts(&db_path_owned))
-            .await
-            .context("spawn_blocking join")??;
+    // Open Codex's provider-local index in read-only mode (non-blocking for Codex).
+    let local_index_path_owned = local_index_path.to_path_buf();
+    let threads = tokio::task::spawn_blocking(move || {
+        read_codex_threads_with_raw_rollouts(&local_index_path_owned)
+    })
+    .await
+    .context("spawn_blocking join")??;
 
     let mut total_ingested = 0usize;
     let persisted_watermarks = state
+        .storage()
         .store
         .get_all_reconcile_watermarks()
         .await
@@ -202,14 +212,22 @@ async fn poll_and_ingest(
         let current_wm = match read_file_watermark(&rollout_path) {
             Some(wm) => wm,
             None => {
-                record_codex_source_state(state, thread, "missing-stale", None, None).await;
+                record_codex_source_state(
+                    state,
+                    thread,
+                    CONVERSATION_SOURCE_STATE_MISSING_STALE,
+                    None,
+                    None,
+                )
+                .await;
                 continue;
             }
         };
 
         // Codex thread metadata (archive state, model, cwd, branch) lives in
-        // SQLite and can change even when the rollout JSONL is unchanged. Keep
-        // that source-state synced before any watermark shortcut skips parsing.
+        // the provider-local index and can change even when the rollout JSONL
+        // is unchanged. Keep that source-state synced before any watermark
+        // shortcut skips parsing.
         sync_codex_thread_metadata_if_needed(state, thread).await;
 
         // Skip if file hasn't grown or been touched since last poll.
@@ -317,24 +335,25 @@ fn read_file_watermark(path: &Path) -> Option<FileWatermark> {
     })
 }
 
-/// Read all Codex sqlite threads plus durable rollout JSONL files that Codex
-/// sqlite no longer references. The raw rollout file's `session_meta.payload.id`
-/// remains the canonical conversation id.
-fn read_codex_threads_with_raw_rollouts(db_path: &Path) -> Result<Vec<CodexThread>> {
-    let mut threads = read_codex_threads(db_path)?;
+/// Read all Codex provider-local indexed threads plus durable rollout JSONL
+/// files that the index no longer references. The raw rollout file's
+/// `session_meta.payload.id` remains the canonical conversation id.
+fn read_codex_threads_with_raw_rollouts(local_index_path: &Path) -> Result<Vec<CodexThread>> {
+    let mut threads = read_codex_threads(local_index_path)?;
     let indexed_paths: HashSet<String> = threads.iter().map(|t| t.rollout_path.clone()).collect();
     let raw_threads = discover_raw_codex_threads(&indexed_paths)?;
     threads.extend(raw_threads);
     Ok(threads)
 }
 
-/// Read all threads from Codex SQLite (blocking — runs on spawn_blocking).
-fn read_codex_threads(db_path: &Path) -> Result<Vec<CodexThread>> {
+/// Read all threads from Codex's provider-local thread index (blocking — runs
+/// on spawn_blocking).
+fn read_codex_threads(local_index_path: &Path) -> Result<Vec<CodexThread>> {
     let conn = rusqlite::Connection::open_with_flags(
-        db_path,
+        local_index_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
-    .context("open codex sqlite")?;
+    .context("open Codex provider-local index")?;
 
     let mut stmt = conn.prepare(CODEX_THREADS_QUERY)?;
 
@@ -537,7 +556,7 @@ async fn process_thread(
         existing.as_ref().and_then(|c| c.task_id.clone()),
     )
     .await;
-    if let Err(e) = state.store.upsert_conversation(&conv).await {
+    if let Err(e) = state.storage().store.upsert_conversation(&conv).await {
         warn!(
             thread_id = %&thread.id[..8.min(thread.id.len())],
             error = %e,
@@ -586,7 +605,7 @@ async fn process_thread(
             .collect();
 
         for chunk in records.chunks(TOOL_CALL_BATCH_SIZE) {
-            match state.store.insert_tool_calls_batch(chunk).await {
+            match state.storage().store.insert_tool_calls_batch(chunk).await {
                 Ok(n) => total += n,
                 Err(e) => {
                     had_insert_error = true;
@@ -645,7 +664,12 @@ async fn process_thread(
             })
             .collect();
 
-        match state.store.insert_conversation_messages_batch(&msgs).await {
+        match state
+            .storage()
+            .store
+            .insert_conversation_messages_batch(&msgs)
+            .await
+        {
             Ok(ids) => {
                 if !ids.is_empty() {
                     debug!(
@@ -699,7 +723,7 @@ async fn record_codex_source_state(
 ) {
     let input = missiond_core::types::ConversationSourceStateInput {
         conversation_id: thread.id.clone(),
-        source: "codex_cli".to_string(),
+        source: CONVERSATION_SOURCE_CODEX_CLI.to_string(),
         raw_path: Some(thread.rollout_path.clone()),
         raw_state: raw_state.to_string(),
         raw_first_seen_at: outcome.and_then(|o| o.first_timestamp.clone()),
@@ -709,7 +733,12 @@ async fn record_codex_source_state(
         raw_hash: current_wm.map(|wm| codex_file_fingerprint(wm)),
         reason: Some(codex_source_state_reason(thread, raw_state).to_string()),
     };
-    if let Err(e) = state.store.upsert_conversation_source_state(&input).await {
+    if let Err(e) = state
+        .storage()
+        .store
+        .upsert_conversation_source_state(&input)
+        .await
+    {
         debug!(
             thread_id = %&thread.id[..8.min(thread.id.len())],
             raw_state,
@@ -721,28 +750,34 @@ async fn record_codex_source_state(
 
 fn codex_source_state(thread: &CodexThread) -> &'static str {
     if !thread.provider_indexed {
-        "sqlite-missing"
+        CONVERSATION_SOURCE_STATE_PROVIDER_INDEX_MISSING
     } else if thread.archived {
-        "archived"
+        CONVERSATION_SOURCE_STATE_ARCHIVED
     } else {
-        "current"
+        CONVERSATION_SOURCE_STATE_CURRENT
     }
 }
 
 fn codex_source_state_reason(thread: &CodexThread, raw_state: &str) -> &'static str {
+    if is_provider_index_missing_state(raw_state) {
+        return "rollout JSONL has session_meta but Codex provider-local thread index has no matching thread row";
+    }
     match raw_state {
-        "sqlite-missing" => {
-            "rollout JSONL has session_meta but Codex state_5.sqlite has no matching thread row"
+        CONVERSATION_SOURCE_STATE_MISSING_STALE => {
+            "Codex provider-local thread index references a rollout path that is missing on disk"
         }
-        "missing-stale" => "Codex state_5.sqlite references a rollout path that is missing on disk",
-        "archived" => "Codex sqlite marks this thread archived; keep as historical source state",
-        _ if thread.provider_indexed => "Codex sqlite thread and rollout JSONL are both visible",
+        CONVERSATION_SOURCE_STATE_ARCHIVED => {
+            "Codex provider-local index marks this thread archived; keep as historical source state"
+        }
+        _ if thread.provider_indexed => {
+            "Codex provider-local thread index and rollout JSONL are both visible"
+        }
         _ => "Codex rollout source state recorded by background ingestion",
     }
 }
 
 async fn sync_codex_thread_metadata_if_needed(state: &AppState, thread: &CodexThread) {
-    let existing = match state.store.get_conversation(&thread.id).await {
+    let existing = match state.storage().store.get_conversation(&thread.id).await {
         Ok(Some(conv)) => conv,
         _ => return,
     };
@@ -758,7 +793,7 @@ async fn sync_codex_thread_metadata_if_needed(state: &AppState, thread: &CodexTh
     if existing.status == conv.status {
         return;
     }
-    if let Err(e) = state.store.upsert_conversation(&conv).await {
+    if let Err(e) = state.storage().store.upsert_conversation(&conv).await {
         warn!(
             thread_id = %&thread.id[..8.min(thread.id.len())],
             error = %e,
@@ -792,13 +827,14 @@ async fn build_codex_conversation(
     // them up via the existing reconcile path rather than bulk DB
     // mutation.
     let slot_id = state
+        .storage()
         .store
         .get_slot_for_session(&thread.id)
         .await
         .unwrap_or(None);
     let slot_category = slot_id
         .as_deref()
-        .and_then(|id| state.mission.get_slot_category(id));
+        .and_then(|id| state.slots().mission.get_slot_category(id));
     let conversation_type = missiond_core::db::conversation_query::classify_conversation_type(
         slot_category.as_deref(),
         slot_id.as_deref(),
@@ -812,6 +848,7 @@ async fn build_codex_conversation(
     // the running-task lookup returns None (completed worker sessions).
     let task_id = match slot_id.as_deref() {
         Some(sid) => state
+            .storage()
             .store
             .get_running_slot_task(sid)
             .await
@@ -833,7 +870,7 @@ async fn build_codex_conversation(
         id: thread.id.clone(),
         project: Some(thread.cwd.clone()),
         project_id: {
-            let registry = state.project_registry.read().await;
+            let registry = state.control_plane().project_registry.read().await;
             registry.resolve(&thread.cwd).map(|s| s.to_string())
         },
         slot_id: slot_id.clone(),
@@ -1237,7 +1274,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_rollout_meta_imports_session_missing_from_sqlite() {
+    fn raw_rollout_meta_imports_session_missing_from_provider_index() {
         let path = std::env::temp_dir().join(format!(
             "missiond-codex-rollout-test-{}-{}.jsonl",
             std::process::id(),
@@ -1253,9 +1290,40 @@ mod tests {
         assert_eq!(thread.cwd, "/tmp/project");
         assert_eq!(thread.model.as_deref(), Some("gpt-5.5"));
         assert!(!thread.provider_indexed);
-        assert_eq!(codex_source_state(&thread), "sqlite-missing");
+        assert_eq!(
+            codex_source_state(&thread),
+            CONVERSATION_SOURCE_STATE_PROVIDER_INDEX_MISSING
+        );
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn codex_source_state_legacy_sqlite_missing_is_read_compatible_only() {
+        let thread = CodexThread {
+            id: "raw-thread-legacy".to_string(),
+            rollout_path: "/tmp/raw-thread-legacy.jsonl".to_string(),
+            created_at: 0,
+            updated_at: 0,
+            archived: false,
+            provider_indexed: false,
+            cwd: "/tmp".to_string(),
+            model: None,
+            title: String::new(),
+            git_branch: None,
+        };
+
+        assert_eq!(
+            codex_source_state(&thread),
+            CONVERSATION_SOURCE_STATE_PROVIDER_INDEX_MISSING
+        );
+        assert_eq!(
+            codex_source_state_reason(
+                &thread,
+                missiond_core::types::LEGACY_CONVERSATION_SOURCE_STATE_SQLITE_MISSING,
+            ),
+            codex_source_state_reason(&thread, CONVERSATION_SOURCE_STATE_PROVIDER_INDEX_MISSING)
+        );
     }
 
     #[test]

@@ -126,8 +126,8 @@ function checkFiles(root, files) {
     'Codex CLI background ingestion MUST persist rollout size/mtime/line/complete watermarks',
     'Codex CLI ingestion MUST also discover raw rollout JSONL',
     'session_meta.payload.id is the canonical conversation id',
-    'raw-only imported rows MUST be recorded in conversation_source_state as sqlite-missing',
-    'Codex CLI conversation_source_state MUST distinguish current, sqlite-missing, missing-stale, path-mismatch, archived, and pty-placeholder evidence',
+    'raw-only imported rows MUST be recorded in conversation_source_state as provider-index-missing',
+    'Codex CLI conversation_source_state MUST distinguish current, provider-index-missing, missing-stale, path-mismatch, archived, and pty-placeholder evidence',
     'Gemini request-log persistence MUST only consume Gemini provider LlmEvent variants',
     'non-Gemini LlmEvent replay MUST NOT pollute gemini_requests',
     'a 50k safety limit is per poll page, never a permanent history truncation',
@@ -424,7 +424,7 @@ function checkFiles(root, files) {
   ]);
 
   requireAll(diagnostics, files.codexIngestion, sources.codexIngestion, [
-    'source: "codex_cli".to_string()',
+    'source: CONVERSATION_SOURCE_CODEX_CLI.to_string()',
     'chat_type: Some("codex_cli".to_string())',
     'message_uuid: Some(codex_message_uuid(&thread.id, m))',
     'line_no',
@@ -446,7 +446,7 @@ function checkFiles(root, files) {
     'persist_codex_file_watermarks',
     'reached_line_limit',
     'record_codex_source_state',
-    'sqlite-missing',
+    'CONVERSATION_SOURCE_STATE_PROVIDER_INDEX_MISSING',
     'upsert_conversation_source_state',
     'skip_before_line',
     'codex_message_uuid_is_non_null_and_stable',
@@ -479,9 +479,9 @@ function checkFiles(root, files) {
   ]);
 
   requireAll(diagnostics, files.codexHistoryAudit, sources.codexHistoryAudit, [
-    'raw sqlite threads',
+    'provider-local index threads',
     'rolloutSessionsWithMeta',
-    'rawOnlyNotInSqlite',
+    'rawOnlyNotInProviderIndex',
     'rawRolloutsMissingInMissionD',
     'readSessionMeta',
     '.codex/archived_sessions',

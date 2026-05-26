@@ -12,7 +12,7 @@ AI Agent 寻路地图。每个 YAML 文件描述一个项目的架构骨架。
 
 | 项目 | 文件 | 技术栈 | 描述 |
 |------|------|--------|------|
-| MissionD | [missiond.yaml](missiond.yaml) | Rust + Tokio + SQLite | Claude Code 多实例编排 |
+| MissionD | [missiond.yaml](missiond.yaml) | Rust + Tokio + PostgreSQL | Claude Code 多实例编排 |
 | CutHub | [cuthub.yaml](cuthub.yaml) | Next.js 16 + React 19 | 视频编辑协作平台 |
 | XJP Backend | [xjp-backend.yaml](xjp-backend.yaml) | Rust + Axum + PostgreSQL | 微服务后端核心 |
 
@@ -30,7 +30,7 @@ graph TB
         MCP[MCP Server<br/>stdio JSON-RPC]
         Daemon[Daemon<br/>状态管理 + handler]
         PTY[PTY Manager<br/>多 Claude 实例]
-        KB[Knowledge Base<br/>SQLite + 向量]
+        KB[Knowledge Base<br/>PostgreSQL + 向量]
         EventBus[EventBus<br/>事件总线]
     end
 
@@ -87,7 +87,7 @@ sequenceDiagram
     participant MCP as MCP Server
     participant D as Daemon
     participant H as Handler
-    participant DB as SQLite
+    participant DB as PostgreSQL
 
     CC->>MCP: JSON-RPC tool call
     MCP->>D: IPC request

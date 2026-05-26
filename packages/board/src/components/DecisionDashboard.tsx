@@ -196,7 +196,7 @@ function HybridSearchPanel({ step }: { step: TierStep }) {
           <Badge variant="outline" className={cn('text-[8px] px-1 py-0 h-3',
             step.method === 'hybrid' ? 'border-emerald-700 text-emerald-600' : 'border-neutral-700 text-neutral-600'
           )}>
-            {step.method === 'hybrid' ? '混合搜索' : 'FTS5'}
+            {step.method === 'hybrid' ? '混合搜索' : '全文检索'}
           </Badge>
         )}
       </div>
@@ -208,7 +208,7 @@ function HybridSearchPanel({ step }: { step: TierStep }) {
       )}
       <div className="flex items-center gap-3 text-[9px] mt-1">
         {step.fts_rank != null && (
-          <span className="text-blue-500 font-mono">FTS5 #{step.fts_rank + 1}</span>
+          <span className="text-blue-500 font-mono">Postgres FTS #{step.fts_rank + 1}</span>
         )}
         {step.vec_rank != null && (
           <span className="text-purple-500 font-mono">Vec #{step.vec_rank + 1}</span>

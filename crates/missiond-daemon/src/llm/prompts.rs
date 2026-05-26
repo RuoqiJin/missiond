@@ -73,7 +73,7 @@ mod defaults {
 
 ⚠️ 异常处理（重要）:
 如果 MCP 工具调用失败、超时或不可用:
-- 不要尝试用 Bash/sqlite3 等替代方案访问数据库
+- 不要尝试用 Bash/DB CLI 等替代方案绕过 MCP 访问 MissionD 数据
 - 不要自行查找或修改文件系统中的 .db 文件
 - 直接输出: <slot_anomaly type=\"mcp_unavailable\" tool=\"工具名\" error=\"错误描述\"/>
 - 然后停止工作，等待 orchestrator 恢复
