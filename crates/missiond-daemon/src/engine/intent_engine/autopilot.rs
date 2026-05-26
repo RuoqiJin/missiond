@@ -2936,19 +2936,26 @@ struct WorkstationSlotSelection {
     reroute_reason: Option<String>,
 }
 
+fn dispatch_hint_eq(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right)
+        || left
+            .replace('_', "-")
+            .eq_ignore_ascii_case(&right.replace('_', "-"))
+}
+
 fn workstation_worker_matches_dispatch_hints(
     worker: &crate::context::v3_blueprint_runtime::WorkstationPoolRuntimeConfig,
     engine_hint: Option<&str>,
     pool_hint: Option<&str>,
 ) -> bool {
     let engine_match = engine_hint
-        .map(|hint| worker.engine.eq_ignore_ascii_case(hint))
+        .map(|hint| dispatch_hint_eq(&worker.engine, hint))
         .unwrap_or(true);
     let pool_match = pool_hint
         .map(|hint| {
-            worker.id.eq_ignore_ascii_case(hint)
-                || worker.role.eq_ignore_ascii_case(hint)
-                || worker.slot_id.eq_ignore_ascii_case(hint)
+            dispatch_hint_eq(&worker.id, hint)
+                || dispatch_hint_eq(&worker.role, hint)
+                || dispatch_hint_eq(&worker.slot_id, hint)
         })
         .unwrap_or(true);
     engine_match && pool_match
@@ -3017,14 +3024,14 @@ async fn select_workstation_pool_slot(
         candidates.sort_by_key(|worker| {
             let engine_match = engine_hint
                 .as_deref()
-                .map(|hint| worker.engine.eq_ignore_ascii_case(hint))
+                .map(|hint| dispatch_hint_eq(&worker.engine, hint))
                 .unwrap_or(true);
             let pool_match = pool_hint
                 .as_deref()
                 .map(|hint| {
-                    worker.id.eq_ignore_ascii_case(hint)
-                        || worker.role.eq_ignore_ascii_case(hint)
-                        || worker.slot_id.eq_ignore_ascii_case(hint)
+                    dispatch_hint_eq(&worker.id, hint)
+                        || dispatch_hint_eq(&worker.role, hint)
+                        || dispatch_hint_eq(&worker.slot_id, hint)
                 })
                 .unwrap_or(true);
             // 0 = both match (best), 1 = pool only, 2 = engine only, 3 = neither.
@@ -3052,14 +3059,14 @@ async fn select_workstation_pool_slot(
         let pick = || {
             let engine_match = engine_hint
                 .as_deref()
-                .map(|hint| worker.engine.eq_ignore_ascii_case(hint))
+                .map(|hint| dispatch_hint_eq(&worker.engine, hint))
                 .unwrap_or(true);
             let pool_match = pool_hint
                 .as_deref()
                 .map(|hint| {
-                    worker.id.eq_ignore_ascii_case(hint)
-                        || worker.role.eq_ignore_ascii_case(hint)
-                        || worker.slot_id.eq_ignore_ascii_case(hint)
+                    dispatch_hint_eq(&worker.id, hint)
+                        || dispatch_hint_eq(&worker.role, hint)
+                        || dispatch_hint_eq(&worker.slot_id, hint)
                 })
                 .unwrap_or(true);
             let reroute_reason = if !engine_match || !pool_match {
@@ -7932,6 +7939,27 @@ Review only.
             vec!["claude-code-default"],
             "explicit engine/pool hints must be resolved against the full V3 pool"
         );
+    }
+
+    #[test]
+    fn dispatch_hint_matching_normalizes_underscore_and_hyphen() {
+        let cfg = WorkstationRuntimeConfig::default();
+        let worker = cfg
+            .workstation_pool()
+            .iter()
+            .find(|worker| worker.id == "claude-code-default")
+            .expect("default ClaudeCode worker exists");
+
+        assert!(workstation_worker_matches_dispatch_hints(
+            worker,
+            Some("claude_code"),
+            Some("claude_code_default")
+        ));
+        assert!(workstation_worker_matches_dispatch_hints(
+            worker,
+            Some("CLAUDE_CODE"),
+            Some("CLAUDE-CODE-DEFAULT")
+        ));
     }
 
     #[test]
