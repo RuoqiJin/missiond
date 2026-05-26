@@ -15,6 +15,7 @@ const FILES = {
   api: 'packages/board/src/api.ts',
   store: 'packages/board/src/store.ts',
   tasksRoute: 'packages/board/src/app/api/tasks/route.ts',
+  boardClient: 'packages/board/src/lib/missiondBoardClient.ts',
   slotsRoute: 'packages/board/src/app/api/slots/route.ts',
   masterStatusRoute: 'packages/board/src/app/api/master/status/route.ts',
   taskDialog: 'packages/board/src/components/TaskDialog.tsx',
@@ -175,8 +176,16 @@ function checkRepo(repo) {
     'BOARD_TASK_FIELD_MAP',
     'mapToFrontend',
     'mapToBackend',
-    "callTool('mission_board_create'",
-    "callTool('mission_board_update'",
+    'boardClient.create',
+    'boardClient.update',
+  ]);
+
+  requireText(diagnostics, FILES.boardClient, src.boardClient, [
+    'BOARD_TASK_ACTIONS',
+    'callBoardTool',
+    'callTool(BOARD_TOOL_BY_ACTION[action]',
+    "'create'",
+    "'update'",
   ]);
 
   requireText(diagnostics, FILES.slotsRoute, src.slotsRoute, [

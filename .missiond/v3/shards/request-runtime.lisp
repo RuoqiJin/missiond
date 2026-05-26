@@ -7,7 +7,7 @@
       ((source runtime-environment
          :tool mission_context_gather
          :scope deployed-runtime-authority
-         :rule "For deployed MissionD, mission_context_gather always includes runtime_environment: MISSIOND_RUNTIME_DIR, MISSIOND_COMPILED_RUNTIME_DIR, repo_runtime_dir, and the rule that repo .missiond/v3/runtime/** is dev/cold evidence only.")
+         :rule "For deployed MissionD, mission_context_gather always includes runtime_environment: MISSIOND_RUNTIME_DIR, MISSIOND_COMPILED_RUNTIME_DIR, repo_runtime_dir, canonical Jarvis monitor endpoints, and the rule that repo .missiond/v3/runtime/** is dev/cold evidence only.")
        (source active-board-task-records
          :tool mission_board_query
          :scope active
@@ -134,7 +134,8 @@
     :invariants
       ["All non-exact worker dispatch must carry grounding_context_id before a provider PTY receives the prompt."
        "mission_context_gather is the only default aggregate for runtime_environment/KB/SSOT/project/skill/infra/Board/conversation/tool facts; callers should not hand-roll partial context lookup."
-       "Workers reviewing deployed MissionD runtime state MUST use runtime_environment and monitor paths before inspecting repo .missiond/v3/runtime/**; repo runtime files are dev/cold evidence only."
+       "Workers reviewing deployed MissionD runtime state MUST use runtime_environment.monitor_endpoints.canonical_local_http or canonical_public_https before inspecting repo .missiond/v3/runtime/**; repo runtime files are dev/cold evidence only."
+       "Workers MUST NOT guess Jarvis monitor ports or use unix-socket probes unless a dedicated diagnostic explicitly asks for low-level socket testing."
        "Grounding artifacts are durable evidence and task metadata; hidden prompt preloads are not grounding."
        "Autopilot must block broad ungrounded BoardTasks instead of sending them to workers for self-discovery."
        "Direct local code search is allowed only after the grounding artifact identifies code surface evidence as a required source."

@@ -405,6 +405,13 @@ fn runtime_environment_payload() -> Value {
         "compiled_runtime_dir": compiled_runtime_dir.display().to_string(),
         "repo_runtime_dir": repo_runtime_dir.display().to_string(),
         "repo_runtime_authority": "dev-cold-evidence-only",
+        "monitor_endpoints": {
+            "canonical_local_http": "http://127.0.0.1:9120/api/monitor/jarvis",
+            "canonical_public_https": "https://auth.xiaojinpro.com/jarvis/api/monitor/jarvis",
+            "public_path": "/jarvis/api/monitor/jarvis",
+            "daemon_path": "/api/monitor/jarvis",
+            "rule": "Use these endpoints for Jarvis chain readiness. Do not guess ports or probe unix-socket paths unless a dedicated diagnostic asks for it."
+        },
         "compiled_runtime_config": {
             "path": compiled_runtime_config.display().to_string(),
             "exists": compiled_runtime_config.exists()
@@ -415,7 +422,7 @@ fn runtime_environment_payload() -> Value {
             "MISSIOND_RUNTIME_DIR": env::var("MISSIOND_RUNTIME_DIR").is_ok(),
             "MISSIOND_COMPILED_RUNTIME_DIR": env::var("MISSIOND_COMPILED_RUNTIME_DIR").is_ok()
         },
-        "diagnostic": "If runtime files appear missing in the repository, check this runtime_environment source and /jarvis/api/monitor/jarvis before reporting a deployed runtime failure."
+        "diagnostic": "If runtime files appear missing in the repository, check this runtime_environment source and monitor_endpoints.canonical_local_http or monitor_endpoints.canonical_public_https before reporting a deployed runtime failure."
     })
 }
 

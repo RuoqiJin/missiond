@@ -264,7 +264,7 @@ function checkFiles(root) {
   requireAll(diagnostics, FILES.boardEvents, sources.boardEvents, [
     'publish_board_created',
     'BoardEvent::TaskCreated',
-    'bus.publish_board(ev).await',
+    'bus.publish_board_event(ev).await',
   ]);
   requireAll(diagnostics, FILES.boardEvent, sources.boardEvent, [
     'pub enum BoardEvent',

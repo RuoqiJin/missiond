@@ -377,7 +377,7 @@ function check(s, diagnostics) {
   ]);
   requireAll(diagnostics, FILES.boardEvents, s.boardEvents, [
     'notify_board_event_direct(&ev)',
-    'bus.publish_board(ev)',
+    'bus.publish_board_event(ev).await',
   ]);
   requireAll(diagnostics, FILES.boardNote, s.boardNote, [
     'is_master_control_note',

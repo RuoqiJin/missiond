@@ -88,18 +88,24 @@
     :id autopilot-detached-review-and-feedback-tasks
     :kind scheduler
     :owner autopilot-runtime
-    :observed ["background-task:crates/missiond-daemon/src/engine/intent_engine/autopilot.rs:4164"
-               "background-task:crates/missiond-daemon/src/engine/intent_engine/autopilot.rs:4285"]
+    :observed ["background-task:crates/missiond-daemon/src/engine/intent_engine/autopilot.rs:3696"
+               "background-task:crates/missiond-daemon/src/engine/intent_engine/autopilot.rs:4376"
+               "background-task:crates/missiond-daemon/src/engine/intent_engine/autopilot.rs:4500"]
     :code ["crates/missiond-daemon/src/engine/intent_engine/autopilot.rs"]
     :effects []
     (anchor
       :role scheduler
-      :observed "background-task:crates/missiond-daemon/src/engine/intent_engine/autopilot.rs:4164"
+      :observed "background-task:crates/missiond-daemon/src/engine/intent_engine/autopilot.rs:3696"
       :file "crates/missiond-daemon/src/engine/intent_engine/autopilot.rs"
       :symbol "dispatch_board_tasks_with_config")
     (anchor
       :role scheduler
-      :observed "background-task:crates/missiond-daemon/src/engine/intent_engine/autopilot.rs:4285"
+      :observed "background-task:crates/missiond-daemon/src/engine/intent_engine/autopilot.rs:4376"
+      :file "crates/missiond-daemon/src/engine/intent_engine/autopilot.rs"
+      :symbol "dispatch_board_tasks_with_config")
+    (anchor
+      :role scheduler
+      :observed "background-task:crates/missiond-daemon/src/engine/intent_engine/autopilot.rs:4500"
       :file "crates/missiond-daemon/src/engine/intent_engine/autopilot.rs"
       :symbol "dispatch_board_tasks_with_config")
     (trigger
@@ -128,18 +134,18 @@
     :id v3-code-isomorphism-aggregate-subprocess
     :kind subprocess
     :owner typed-lisp-compiler
-    :observed ["subprocess:scripts/check-v3-code-isomorphism-complete.mjs:175"
-               "subprocess:scripts/check-v3-code-isomorphism-complete.mjs:513"]
+    :observed ["subprocess:scripts/check-v3-code-isomorphism-complete.mjs:179"
+               "subprocess:scripts/check-v3-code-isomorphism-complete.mjs:517"]
     :code ["scripts/check-v3-code-isomorphism-complete.mjs"]
     :effects []
     (anchor
       :role subprocess
-      :observed "subprocess:scripts/check-v3-code-isomorphism-complete.mjs:175"
+      :observed "subprocess:scripts/check-v3-code-isomorphism-complete.mjs:179"
       :file "scripts/check-v3-code-isomorphism-complete.mjs"
       :symbol "has")
     (anchor
       :role subprocess
-      :observed "subprocess:scripts/check-v3-code-isomorphism-complete.mjs:513"
+      :observed "subprocess:scripts/check-v3-code-isomorphism-complete.mjs:517"
       :file "scripts/check-v3-code-isomorphism-complete.mjs"
       :symbol "runPerSurfaceCheckers")
     (trigger

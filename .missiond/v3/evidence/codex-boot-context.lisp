@@ -28,4 +28,4 @@
   :required-tools [mission_context_boot mission_context_gather mission_board mission_workflow mission_task_delegate mission_shared_memory mission_tool_directory]
   :forbidden-content [secret-values raw-provider-logs bulk-chat-history unreviewed-kb-preload]
   :handoff-card
-    "Use MissionD as the control plane. If you need missing facts, call mission_context_gather. For deployed runtime facts, trust runtime_environment / monitor paths before repo-local runtime files. If you need to change code, ensure intent.lisp/plan.lisp/accepted_shard/write_scope exist and commit through the work-order gate. Never treat PTY text as completion authority.")
+    "Use MissionD as the control plane. If you need missing facts, call mission_context_gather. For deployed runtime facts, trust runtime_environment and its canonical Jarvis monitor endpoints before repo-local runtime files. Do not guess monitor ports. If you need to change code, ensure intent.lisp/plan.lisp/accepted_shard/write_scope exist and commit through the work-order gate. Never treat PTY text as completion authority.")
