@@ -1598,8 +1598,10 @@ fn find_structured_report_anchor(input: &str) -> Option<usize> {
 fn normalize_report_heading_line(line: &str) -> String {
     let normalized = line
         .trim()
+        .trim_start_matches('•')
         .trim_start_matches('⏺')
         .trim_start_matches('●')
+        .trim()
         .trim_start_matches('#')
         .trim_start_matches('*')
         .trim()
@@ -1986,6 +1988,10 @@ fn memory_review_summary_satisfies_output_contract(summary: &str) -> bool {
 fn summary_has_report_heading(summary: &str, expected: &str) -> bool {
     summary.lines().any(|line| {
         let normalized = line
+            .trim()
+            .trim_start_matches('•')
+            .trim_start_matches('⏺')
+            .trim_start_matches('●')
             .trim()
             .trim_start_matches('#')
             .trim_start_matches('*')
@@ -2662,6 +2668,21 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
                             continue;
                         }
                         if claimed_age >= watchdog_grace_secs {
+                            // A provider TUI can become idle a few seconds before
+                            // its final report is fully rendered to the PTY screen
+                            // or reconciled into durable conversation storage.
+                            // Before failing the task, give the normal settle
+                            // window one last chance and re-read the live screen.
+                            wait_for_worker_final_settle_window().await;
+                            if let Ok(true) = close_idle_running_task_from_durable_summary(
+                                state,
+                                rt.id.as_str(),
+                                slot_id,
+                            )
+                            .await
+                            {
+                                continue;
+                            }
                             let diagnostic_summary = format!(
                                 "Diagnostic: BoardTask `{}` is still running, but worker slot `{}` is {:?} and MissionD could not find a durable provider final, structured PTY final, or task-result-artifact after {}s. MissionD failed this task instead of leaving it running indefinitely; retry with a fresh grounded shard or inspect the provider transcript.",
                                 rt.id,
@@ -8485,6 +8506,23 @@ Review only.
     }
 
     #[test]
+    fn output_contract_close_blocker_accepts_codex_bullet_markdown_sections() {
+        let report = "• ## Findings\n- one\n\n• ## Evidence\n- two\n\n• ## Recommendations\n- three\n\n• ## Verification\n- no edits";
+        assert_eq!(
+            output_contract_close_blocker(delegated_context_pack_with_output_contract(), report),
+            None
+        );
+        assert_eq!(
+            pty_only_close_blocker(
+                delegated_dispatch_description(),
+                /* has_durable_provider_final */ false,
+                report,
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn output_contract_close_blocker_accepts_memory_review_artifact_sections() {
         let report = "## Findings\n- Count reviewed: 7\n- Count selected for active memory: 0\n\nActive Memory Candidates\nNone\n\nSSOT-Workflow Backfill Candidates\nNone\n\nNeeds Human\nNone\n\nDiscard Rationale\nThe batch is procedural noise.\n\nVerification\nI only read the assigned batch files.";
         assert_eq!(
@@ -8555,6 +8593,48 @@ Review only.
             .expect("fresh PTY screen should be selected");
         assert!(selected.contains("## Findings"));
         assert!(!selected.contains("还剩最后一步"));
+    }
+
+    #[test]
+    fn extract_worker_final_summary_anchors_on_codex_bullet_findings() {
+        let prompt = dispatched_prompt("task-codex-bullet");
+        let response = format!(
+            "{}\n\n\
+             Reading context pack and runtime diagnostics...\n\
+             Bash(mission_timeline action=wait)\n\
+             ⎿ ok\n\n\
+             • ## Findings\n\
+             1. default slot 已恢复，但 deploy 归因证据不完整。\n\n\
+             • ## Evidence\n\
+             - /jarvis monitor returned ready.\n\n\
+             • ## Recommendations\n\
+             - Add deploy slot recovery provenance.\n\n\
+             • ## Verification\n\
+             - No files were modified.\n\n\
+             ─ Worked for 7m 55s ─",
+            prompt
+        );
+        let summary = extract_worker_final_summary(&response, &prompt);
+        assert!(
+            summary.starts_with("• ## Findings"),
+            "canonical final should start at bullet-prefixed Findings block: {summary}"
+        );
+        assert!(
+            !summary.contains("Reading context pack"),
+            "progress narration leaked: {summary}"
+        );
+        assert!(
+            !summary.contains("Bash("),
+            "tool invocation leaked: {summary}"
+        );
+        assert!(
+            pty_summary_has_structured_artifact(&summary),
+            "bullet-prefixed final should count as structured artifact: {summary}"
+        );
+        assert_eq!(
+            output_contract_close_blocker(delegated_context_pack_with_output_contract(), &summary),
+            None
+        );
     }
 
     #[test]
