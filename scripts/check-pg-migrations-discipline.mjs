@@ -39,6 +39,8 @@ const ALLOW_MARKER = 'missiond-allow-destructive-migration';
 const FROZEN_SHA384 = Object.freeze({
   'crates/missiond-core/migrations/20260318000000_init.sql':
     'cdb48608a9cdfe380c0e00078072195e0a02213e4addecf23643ad40730f8619ed3ceee184e3cc4806a1e8a614e429c9',
+  'crates/missiond-core/migrations/20260523003000_codex_replay.sql':
+    'e375a6d72a6a9890be7146036b6a060127c345caed5dabae69910a66379295c7ea5860d23a8f42c5eb807a9fd212c924',
 });
 
 function main() {

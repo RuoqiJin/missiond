@@ -1,7 +1,7 @@
 -- Codex replay control plane.
 --
 -- Stores MissionD-owned automation state for protocol-level Codex app-server
--- replay runs. Codex provider-local local-index/jsonl files remain Codex-owned logs;
+-- replay runs. Codex provider-local sqlite/jsonl files remain Codex-owned logs;
 -- this table set is the PostgreSQL source of truth for the replay runner.
 
 CREATE TABLE IF NOT EXISTS codex_replay_campaigns (
