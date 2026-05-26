@@ -66,6 +66,12 @@ pub enum WatcherEvent {
     /// New system events detected in a JSONL file (progress, system, queue-operation, etc.)
     NewEvents {
         session_id: String,
+        project_path: String,
+        jsonl_path: String,
+        /// Origin CLI for the JSONL event stream. Claude Code events are the
+        /// current producer, but the field keeps event ingestion aligned with
+        /// message ingestion as more provider watchers share this type.
+        source: String,
         events: Vec<serde_json::Value>,
     },
 }
@@ -643,6 +649,9 @@ impl CCTasksWatcher {
                                 if !events.is_empty() {
                                     let _ = event_tx.send(WatcherEvent::NewEvents {
                                         session_id: session_id.clone(),
+                                        project_path: project_path.clone(),
+                                        jsonl_path: file_path_str.clone(),
+                                        source: "claude_code".to_string(),
                                         events,
                                     });
                                 }
@@ -720,6 +729,9 @@ impl CCTasksWatcher {
                 if !events.is_empty() {
                     let _ = event_tx.send(WatcherEvent::NewEvents {
                         session_id: session.session_id.clone(),
+                        project_path: session.project_path.clone(),
+                        jsonl_path: file_path_str.clone(),
+                        source: "claude_code".to_string(),
                         events,
                     });
                 }

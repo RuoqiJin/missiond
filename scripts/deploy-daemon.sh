@@ -31,6 +31,11 @@
 #                               secret-store for Jarvis/interaction smoke.
 #   MISSIOND_INTERACTION_AUTH_USERINFO_URL  optional Auth userinfo endpoint.
 #   MISSIOND_INTERACTION_AUTH_TIMEOUT_MS  optional Auth userinfo timeout.
+#   MISSIOND_DEPLOY_ENSURE_JARVIS_SLOT  1/0/auto. In auto mode, call the
+#                               localhost-only Jarvis slot ensure endpoint
+#                               after restart when launchd/current env enables
+#                               MISSIOND_JARVIS_SLOT_AUTO_HEAL. Default: auto.
+#   MISSION_WS_PORT             daemon HTTP/WebSocket port, default: 9120.
 #   MISSIOND_DEPLOY_TIMEOUT     socket readiness timeout, default: 30
 #   MISSIOND_DEPLOY_SMOKE_TIMEOUT  MCP smoke timeout, default: 30
 #   MISSIOND_APPLY_BACKUP_CLEANUP  delete old .bak/.new files when cleanup applies, default: 0
@@ -79,6 +84,8 @@ LABEL="${MISSIOND_LAUNCHCTL_LABEL:-com.missiond.daemon}"
 LAUNCHD_PLIST="${MISSIOND_LAUNCHD_PLIST:-${HOME}/Library/LaunchAgents/${LABEL}.plist}"
 TIMEOUT="${MISSIOND_DEPLOY_TIMEOUT:-30}"
 SMOKE_TIMEOUT="${MISSIOND_DEPLOY_SMOKE_TIMEOUT:-30}"
+MISSIOND_DEPLOY_ENSURE_JARVIS_SLOT="${MISSIOND_DEPLOY_ENSURE_JARVIS_SLOT:-auto}"
+MISSION_WS_PORT="${MISSION_WS_PORT:-9120}"
 RELEASE_KEEP="${MISSIOND_RELEASE_KEEP:-5}"
 BACKUP_RETENTION_DAYS="${MISSIOND_BACKUP_RETENTION_DAYS:-7}"
 APPLY_BACKUP_CLEANUP="${MISSIOND_APPLY_BACKUP_CLEANUP:-0}"
@@ -416,6 +423,58 @@ post_switch_smoke() {
   return 1
 }
 
+truthy_env_value() {
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+should_ensure_jarvis_slot() {
+  case "$(printf '%s' "$MISSIOND_DEPLOY_ENSURE_JARVIS_SLOT" | tr '[:upper:]' '[:lower:]')" in
+    0|false|no|off) return 1 ;;
+    1|true|yes|on) return 0 ;;
+    auto|"")
+      if truthy_env_value "${MISSIOND_JARVIS_SLOT_AUTO_HEAL:-}"; then
+        return 0
+      fi
+      local plist_auto_heal
+      plist_auto_heal="$(plist_read_string "$LAUNCHD_PLIST" "EnvironmentVariables:MISSIOND_JARVIS_SLOT_AUTO_HEAL" || true)"
+      truthy_env_value "$plist_auto_heal"
+      return $?
+      ;;
+    *) fail "unsupported MISSIOND_DEPLOY_ENSURE_JARVIS_SLOT=$MISSIOND_DEPLOY_ENSURE_JARVIS_SLOT" 1 ;;
+  esac
+}
+
+post_switch_jarvis_slot_ensure() {
+  if ! should_ensure_jarvis_slot; then
+    log "jarvis-slot: ensure skipped (MISSIOND_DEPLOY_ENSURE_JARVIS_SLOT=$MISSIOND_DEPLOY_ENSURE_JARVIS_SLOT)"
+    return 0
+  fi
+  command -v curl >/dev/null 2>&1 || fail "curl not on PATH; cannot run Jarvis slot ensure smoke" 6
+  local url body status elapsed start
+  url="http://127.0.0.1:${MISSION_WS_PORT}/internal/jarvis/slot/ensure"
+  log "jarvis-slot: ensure $url"
+  start="$(date +%s)"
+  while true; do
+    body="$(curl -m 20 -sS -X POST -w $'\n%{http_code}' "$url" 2>&1 || true)"
+    status="$(printf '%s\n' "$body" | tail -1)"
+    body="$(printf '%s\n' "$body" | sed '$d')"
+    if [ "$status" = "200" ] && printf '%s' "$body" | grep -q '"overall":"ready"'; then
+      log "jarvis-slot: default slot ready"
+      return 0
+    fi
+    elapsed=$(( $(date +%s) - start ))
+    [ "$elapsed" -lt "$SMOKE_TIMEOUT" ] || break
+    log "jarvis-slot: not ready yet status=${status:-unknown}; retrying..."
+    sleep 2
+  done
+  log "jarvis-slot: ensure failed -- response below"
+  printf '%s\n' "$body" | sed 's/^/[jarvis-slot] /' >&2
+  return 1
+}
+
 create_legacy_release_if_needed() {
   local previous
   if previous="$(resolve_link_target "$ACTIVE_LINK" 2>/dev/null)"; then
@@ -744,6 +803,13 @@ if ! post_switch_smoke; then
   fail "smoke check failed; rollback attempted" 6
 fi
 record_timing "post-switch-mcp-smoke" "$POST_SMOKE_START"
+
+JARVIS_SLOT_START="$(date +%s)"
+if ! post_switch_jarvis_slot_ensure; then
+  rollback_with_smoke "$PREVIOUS_ACTIVE" || true
+  fail "Jarvis default slot ensure failed; rollback attempted" 6
+fi
+record_timing "post-switch-jarvis-slot-ensure" "$JARVIS_SLOT_START"
 
 CLEANUP_START="$(date +%s)"
 cleanup_old_releases 1

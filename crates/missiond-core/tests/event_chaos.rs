@@ -256,8 +256,8 @@ async fn chaos_5_slow_subscriber_lag() {
     let mut slow_rx = topic.subscribe();
 
     // Fill the broadcast channel well beyond capacity (TOPIC_BUFFER_SIZE
-    // is 1024 as of Phase 3 DC015).
-    for i in 1..=2000 {
+    // is 8192 as of the client-channel runtime-closure hardening).
+    for i in 1..=10000 {
         bus.append(
             board(i),
             AppendOpts {

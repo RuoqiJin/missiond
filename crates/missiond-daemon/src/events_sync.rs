@@ -436,6 +436,9 @@ pub fn extract_tool_results_from_user(content: &Value) -> Vec<(String, String, S
 /// Handle NewEvents from JSONL watcher: progress, system, queue-operation, file-history-snapshot.
 /// - agent_progress → conversation_messages with agent_* roles
 /// - everything else → conversation_events table
+///
+/// Historical backfill callers use this context-free variant only after the
+/// parent conversation set has already been loaded from `conversations`.
 pub async fn handle_new_events(state: &AppState, session_id: String, events: Vec<Value>) {
     let mut conv_events: Vec<missiond_core::types::ConversationEvent> = Vec::new();
     let mut agent_messages: Vec<missiond_core::types::ConversationMessage> = Vec::new();
@@ -707,6 +710,76 @@ pub async fn handle_new_events(state: &AppState, session_id: String, events: Vec
             }
             _ => {}
         }
+    }
+}
+
+/// Hot-path event ingestion must be parent-first. Claude JSONL can emit
+/// progress/system events before the first parseable message batch reaches
+/// `conversation_messages`; inserting those events directly violates the
+/// `conversation_events.session_id -> conversations.id` FK. The watcher now
+/// carries enough source context for us to ensure the parent row here.
+pub async fn handle_new_events_with_context(
+    state: &AppState,
+    session_id: String,
+    project_path: String,
+    jsonl_path: String,
+    source: String,
+    events: Vec<Value>,
+) {
+    ensure_parent_conversation_for_events(state, &session_id, &project_path, &jsonl_path, &source)
+        .await;
+    handle_new_events(state, session_id, events).await;
+}
+
+async fn ensure_parent_conversation_for_events(
+    state: &AppState,
+    session_id: &str,
+    project_path: &str,
+    jsonl_path: &str,
+    source: &str,
+) {
+    let canonical_source = match source {
+        "claude_cli" | "pty_jsonl" => "claude_code",
+        other => other,
+    };
+    let is_pty = state.pty_session_uuids.read().await.contains(session_id);
+    let slot_id = if is_pty {
+        state
+            .store
+            .get_slot_for_session(session_id)
+            .await
+            .unwrap_or(None)
+    } else {
+        None
+    };
+    let conversation_type = missiond_core::db::derive_conversation_type(
+        slot_id
+            .as_deref()
+            .and_then(|id| state.mission.get_slot_category(id))
+            .as_deref(),
+        slot_id.as_deref(),
+        session_id,
+        canonical_source,
+    );
+    let parent_session_id = missiond_core::db::extract_parent_session_id(jsonl_path);
+    if let Err(error) = state
+        .store
+        .ensure_conversation_exists(
+            session_id,
+            project_path,
+            jsonl_path,
+            "active",
+            &conversation_type,
+            parent_session_id.as_deref(),
+            None,
+        )
+        .await
+    {
+        warn!(
+            session = %session_id,
+            error = %error,
+            "Failed to ensure parent conversation before event ingestion"
+        );
     }
 }
 

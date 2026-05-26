@@ -179,7 +179,8 @@
        "Timeline analysis read windows, event limits, and slow-request threshold MUST project from learning-engine-policy."
        "KB reflection low-utility threshold, minimum access count, max entries, and max_tokens MUST project from learning-engine-policy."
        "Timeline projection SQL MUST cast string-bound since/until parameters as ::timestamptz when comparing against event_log.ts so PG never raises 'operator does not exist: timestamp with time zone >= text' from Timeline Analyst, mission_timeline, or stratified queries."
-       "Timeline Analyst MUST check the Gemini provider gate before collecting timeline evidence or calling Gemini; when the gate is closed it MUST advance the cadence marker and skip without warning spam or repeated LLM attempts."])
+       "Timeline Analyst MUST check the Gemini provider gate before collecting timeline evidence or calling Gemini; when the gate is closed it MUST advance the cadence marker and skip without warning spam or repeated LLM attempts."
+       "Timeline Analyst MUST advance its cadence marker on provider/config/upstream failures as well as success, so missing LLM credentials or transient provider errors cannot retry every learning tick and pollute runtime logs."])
 
   (conversation-ingestion-policy
     :desc "Lisp-owned read-model window and limit defaults for conversation, event, and timeline query surfaces."

@@ -73,14 +73,28 @@ async fn run_loop(
                     .insert(jsonl_path, read_end_offset);
                 ctx.record_success();
             }
-            Ok(WatcherEvent::NewEvents { session_id, events }) => {
+            Ok(WatcherEvent::NewEvents {
+                session_id,
+                project_path,
+                jsonl_path,
+                source,
+                events,
+            }) => {
                 ctx.begin_task(
                     Some(format!("worker:conversation_logger:events:{session_id}")),
                     None,
                     Some(300),
                 );
                 ctx.progress(format!("syncing {} events", events.len()));
-                events_sync::handle_new_events(s, session_id, events).await;
+                events_sync::handle_new_events_with_context(
+                    s,
+                    session_id,
+                    project_path,
+                    jsonl_path,
+                    source,
+                    events,
+                )
+                .await;
                 ctx.record_success();
             }
             Ok(WatcherEvent::SessionInactive(session)) => {

@@ -29,7 +29,7 @@
       :functions [eventhub-service-boundary eventhub-envelope-contract local-event-spool outbound-event-relay eventhub-subscription-contract eventhub-wait-contract eventhub-dead-letter-replay eventhub-missiond-adapter]
       :runtime-projection [xjp-eventhub local-event-spool EventHubClient mission_timeline.wait ExternalServiceEvent]
       :checker ["node scripts/check-v3-service-extraction-isomorphism.mjs" "node scripts/check-v3-eventbridge-isomorphism.mjs" "node scripts/check-v3-control-plane-m6-split.mjs"]
-      :refactor-rule "MissionD local EventBus remains the low-latency agent/Board/slot/workflow control bus. xjp-eventhub is the durable cross-service event backbone; MissionD syncs selected local events through an outbound spool and can continue local orchestration when xjp-eventhub is offline.")
+      :refactor-rule "MissionD local EventBus remains the low-latency agent/Board/slot/workflow control bus. xjp-eventhub is the durable cross-service event backbone; MissionD syncs selected local events through an outbound spool and can continue local orchestration when xjp-eventhub is offline. Local per-topic fanout buffer MUST absorb normal startup catchup bursts (8192 events per domain as of client-channel runtime closure); slow subscribers still rewind through bootstrap with visible lag diagnostics instead of stalling publishers.")
     (domain project-universe-plane
       :owner project-registry
       :source [project-registry-policy project-identity-contract registry-authority-map project-maturity-model project-maturity-registry project-blueprint-registry service-runtime-universe data-residency-universe]

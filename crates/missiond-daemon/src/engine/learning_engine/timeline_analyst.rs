@@ -61,9 +61,18 @@ pub(crate) async fn check_timeline_analysis(state: &AppState) {
                 .await;
         }
         Err(e) => {
+            // The tick runs every 60s, while the analyst cadence is intentionally
+            // much longer. A missing/invalid LLM credential or transient upstream
+            // failure should be visible once, not become a minute-by-minute retry
+            // loop that burns logs and worker attention.
+            let _ = state
+                .store
+                .daemon_state_set("last_timeline_analysis_at", now)
+                .await;
             warn!(
                 error = %e,
-                "Timeline Analyst: analysis failed, will retry next tick"
+                retry_after_secs = config.timeline_analysis_interval_secs,
+                "Timeline Analyst: analysis failed; cadence marker advanced"
             );
         }
     }
