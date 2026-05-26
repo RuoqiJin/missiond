@@ -2,9 +2,13 @@
     :schema "missiond.grounding-search-aggregate.v1"
     :purpose "Provide one high-frequency fact-gathering entry before intent.lisp, plan.lisp, Board triage, deploy decisions, or worker delegation so operators do not have to remember every retrieval surface."
     :primary-tool mission_context_gather
-    :default-sources [project-registry ssot-intent active-kb skill-operational-evidence infra-evidence active-board-task-records bounded-conversation-logs]
+    :default-sources [runtime-environment project-registry ssot-intent active-kb skill-operational-evidence infra-evidence active-board-task-records bounded-conversation-logs]
     :source-policy
-      ((source active-board-task-records
+      ((source runtime-environment
+         :tool mission_context_gather
+         :scope deployed-runtime-authority
+         :rule "For deployed MissionD, mission_context_gather always includes runtime_environment: MISSIOND_RUNTIME_DIR, MISSIOND_COMPILED_RUNTIME_DIR, repo_runtime_dir, and the rule that repo .missiond/v3/runtime/** is dev/cold evidence only.")
+       (source active-board-task-records
          :tool mission_board_query
          :scope active
          :rule "Task records are retrieval evidence and must be searchable through FTS/embedding, but broad historical/done Board backlog is excluded unless include_historical=true.")
@@ -37,7 +41,7 @@
                 (step s3 :logic "make active task records searchable by mission_context_gather without preloading full Board backlog"))
          :egress [fts-document embedding-document retrieval-evidence-ref]))
     :invariants
-      ["mission_context_gather MUST aggregate KB, active SSOT, project registry, skill operational evidence, infra evidence, active Board task records, and bounded conversation logs."
+      ["mission_context_gather MUST aggregate runtime_environment, KB, active SSOT, project registry, skill operational evidence, infra evidence, active Board task records, and bounded conversation logs."
        "Board/task/workflow records are searchable retrieval evidence, not active long-term memory unless promoted by an explicit review workflow."
        "Conversation logs are searched by query and bounded window; they are not default prompt preloads."
        "If mission_context_gather cannot answer a source, it returns source-specific diagnostics instead of making the resident master guess."]
@@ -59,7 +63,7 @@
          :schema "missiond.context-gather-artifact.v1"
          :id-field grounding_context_id
          :storage "shared_artifacts(kind=context-gather)"
-         :fields [unknowns query project_id sources_used evidence_refs diagnostics grounded_intent_summary context_pack_path context_pack_file]
+         :fields [unknowns query project_id sources_used evidence_refs diagnostics grounded_intent_summary runtime_environment context_pack_path context_pack_file]
          :rule "mission_context_gather(persist=true) returns grounding_context_id, shared-artifact context_pack_path, and a bounded context_pack_file for provider CLIs that do not have MissionD MCP mounted; worker prompts receive only this small context slice plus confirmed intent/plan artifact refs and accepted execution metadata, not broad KB/history preloads.")
       (kind task-result-artifact
          :schema "missiond.task-result-artifact.v1"
@@ -77,9 +81,9 @@
       ((function context-gather-artifact
          :entry [mission_context_gather unknowns-inventory BoardTask source_id project_id]
          :core ((step s1 :logic "derive query from explicit unknowns or the raw objective; never use broad historical preload as the query source")
-                (step s2 :logic "query project registry, active SSOT, active KB, skill evidence, infra/deploy facts, active Board task records, bounded conversations, and tool directory through the aggregate")
+                (step s2 :logic "query runtime_environment, project registry, active SSOT, active KB, skill evidence, infra/deploy facts, active Board task records, bounded conversations, and tool directory through the aggregate")
                 (step s3 :logic "return source-specific diagnostics for missing or stale authorities instead of letting the worker guess")
-                (step s4 :logic "persist the payload into shared_artifacts(kind=context-gather), materialize a bounded runtime context_pack_file, and return both grounding_context_id and shared-artifact context_pack_path")
+                (step s4 :logic "persist the payload into shared_artifacts(kind=context-gather), materialize a bounded context_pack_file under MISSIOND_RUNTIME_DIR/context-gather when deployed, and return both grounding_context_id and shared-artifact context_pack_path")
                 (step s5 :logic "Jarvis worker prompts must prefer context_pack_file; if unavailable, they may use mission_shared_memory(action=artifact_get, hash=...) or mission_context_slice. Opaque artifact URIs without retrieval instructions are invalid")
                 (step s6 :logic "Jarvis worker prompts must include target engine/pool, write_policy, read/write scope, confirmed intent_artifact_id, confirmed plan_artifact_id, and a compact accepted execution slice for no-MCP workers"))
          :egress [grounding_context_id context_pack_path context_pack_file sources_used diagnostics shared_artifact])
@@ -129,7 +133,8 @@
          :egress [result_pending follow_payload result_followup_stream result_artifact_event final_event]))
     :invariants
       ["All non-exact worker dispatch must carry grounding_context_id before a provider PTY receives the prompt."
-       "mission_context_gather is the only default aggregate for KB/SSOT/project/skill/infra/Board/conversation/tool facts; callers should not hand-roll partial context lookup."
+       "mission_context_gather is the only default aggregate for runtime_environment/KB/SSOT/project/skill/infra/Board/conversation/tool facts; callers should not hand-roll partial context lookup."
+       "Workers reviewing deployed MissionD runtime state MUST use runtime_environment and monitor paths before inspecting repo .missiond/v3/runtime/**; repo runtime files are dev/cold evidence only."
        "Grounding artifacts are durable evidence and task metadata; hidden prompt preloads are not grounding."
        "Autopilot must block broad ungrounded BoardTasks instead of sending them to workers for self-discovery."
        "Direct local code search is allowed only after the grounding artifact identifies code surface evidence as a required source."

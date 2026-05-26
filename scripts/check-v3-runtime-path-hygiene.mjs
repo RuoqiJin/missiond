@@ -25,6 +25,9 @@ const FILES = {
   deployScript: 'scripts/deploy-daemon.sh',
   daemonCompiledSnapshot: 'crates/missiond-daemon/src/context/v3_blueprint_runtime/compiled_snapshot.rs',
   jarvisMonitor: 'crates/missiond-core/src/ws/server.rs',
+  contextGather: 'crates/missiond-daemon/src/handlers/knowledge/context_gather.rs',
+  bootContext: '.missiond/v3/evidence/codex-boot-context.lisp',
+  requestRuntime: '.missiond/v3/shards/request-runtime.lisp',
 };
 
 const REQUIRED = {
@@ -78,6 +81,24 @@ const REQUIRED = {
   jarvisMonitor: [
     'MISSIOND_COMPILED_RUNTIME_DIR',
     'MISSIOND_RUNTIME_DIR',
+  ],
+  contextGather: [
+    'runtime_environment',
+    'MISSIOND_RUNTIME_DIR',
+    'MISSIOND_COMPILED_RUNTIME_DIR',
+    'Repo .missiond/v3/runtime/** is dev/cold evidence only',
+    'context_gather_runtime_dir',
+  ],
+  bootContext: [
+    'runtime artifacts live under MISSIOND_RUNTIME_DIR and MISSIOND_COMPILED_RUNTIME_DIR',
+    'repo .missiond/v3/runtime/** is dev/cold evidence only',
+    'runtime_environment',
+  ],
+  requestRuntime: [
+    'runtime-environment',
+    'runtime_environment',
+    'MISSIOND_RUNTIME_DIR/context-gather',
+    'repo .missiond/v3/runtime/** is dev/cold evidence only',
   ],
 };
 
@@ -186,7 +207,8 @@ function buildFixture() {
     (tier warm-evidence :paths [".missiond/v3/evidence/*.lisp"])
     (tier cold-runtime
       :paths [".missiond/v3/runtime/**"]
-      :examples [".missiond/v3/runtime/lisp-code-sync/*.report.lisp"]
+      :examples [".missiond/v3/runtime/lisp-code-sync/*.report.lisp"
+                 ".missiond/v3/runtime/jarvis-smoke/*.json"]
       :catalog runtime_artifacts
       :runtime-root "MISSIOND_RUNTIME_DIR"
       :default-runtime-root "$HOME/.missiond/runtime/<repo-id>"
@@ -216,6 +238,35 @@ function buildFixture() {
 record_evidence writes canonical <project>/.missiond/v3/runtime/plans/<plan_id>.evidence.json`);
   write(root, 'mcpWorkflow', `
 distill uses .missiond/v3/runtime/plans/<plan_id>.evidence.json; legacy .missiond/v2/plans/<plan_id>.evidence.json fallback`);
+  write(root, 'jarvisMonitor', `
+MISSIOND_COMPILED_RUNTIME_DIR
+MISSIOND_RUNTIME_DIR`);
+  write(root, 'daemonCompiledSnapshot', `
+MISSIOND_COMPILED_RUNTIME_DIR
+MISSIOND_RUNTIME_DIR`);
+  write(root, 'deployScript', `
+MISSIOND_RUNTIME_DIR
+MISSIOND_COMPILED_RUNTIME_DIR
+MISSIOND_CLEAN_REPO_RUNTIME_CACHE
+cleanup_repo_runtime_cache
+master-control-checkpoint.lisp
+$repo_runtime/genome
+node scripts/compile-v3-runtime.mjs --json --out-dir "$COMPILED_RUNTIME_DIR"`);
+  write(root, 'contextGather', `
+runtime_environment
+MISSIOND_RUNTIME_DIR
+MISSIOND_COMPILED_RUNTIME_DIR
+Repo .missiond/v3/runtime/** is dev/cold evidence only
+context_gather_runtime_dir`);
+  write(root, 'bootContext', `
+runtime artifacts live under MISSIOND_RUNTIME_DIR and MISSIOND_COMPILED_RUNTIME_DIR
+repo .missiond/v3/runtime/** is dev/cold evidence only
+runtime_environment`);
+  write(root, 'requestRuntime', `
+runtime-environment
+runtime_environment
+MISSIOND_RUNTIME_DIR/context-gather
+repo .missiond/v3/runtime/** is dev/cold evidence only`);
   return root;
 }
 

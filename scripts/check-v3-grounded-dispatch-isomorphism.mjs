@@ -268,8 +268,8 @@ const checks = [
     [
       'if req.kind == "task-result-artifact"',
       '"task-result-artifact requires task_id"',
-      '"action": "task_result_put"',
-      '"task-result-artifact writer returned no artifact_hash"',
+      'TaskCompletionEvidenceWriter::new',
+      '.write_bounded(',
       'artifact_id: format!("task-result-artifact:{hash}")',
       'path: format!("shared-artifact://{hash}")',
     ],

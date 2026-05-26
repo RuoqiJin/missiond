@@ -91,6 +91,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     let limit = args.limit.clamp(1, 25);
     let mut sources = serde_json::Map::new();
     let mut diagnostics = Vec::new();
+    sources.insert(
+        "runtime_environment".to_string(),
+        runtime_environment_payload(),
+    );
 
     if args.include_project.unwrap_or(true) {
         let payload = if let Some(project_id) = args.project_id.as_deref() {
@@ -250,6 +254,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         .collect::<Vec<_>>();
 
     let sources_used = sources.keys().cloned().collect::<Vec<_>>();
+    let runtime_environment = sources
+        .get("runtime_environment")
+        .cloned()
+        .unwrap_or(Value::Null);
     let mut payload = json!({
         "ok": diagnostics.is_empty(),
         "schema": "missiond.context-gather.v1",
@@ -261,6 +269,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "source_id": args.source_id,
         "unknowns": args.unknowns,
         "sources_used": sources_used,
+        "runtime_environment": runtime_environment,
         "sources": Value::Object(sources),
         "evidence_refs": evidence_refs,
         "unresolved": unresolved,
@@ -371,13 +380,76 @@ fn codex_boot_context_candidates() -> Vec<PathBuf> {
 }
 
 fn materialize_context_pack_file(hash: &str, payload: &Value) -> Result<PathBuf> {
-    let root = missiond_project_root();
-    let dir = root.join(CONTEXT_GATHER_RUNTIME_REL);
+    let dir = context_gather_runtime_dir();
     fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{hash}.json"));
     let bytes = serde_json::to_vec_pretty(payload)?;
     fs::write(&path, bytes)?;
     Ok(path)
+}
+
+fn runtime_environment_payload() -> Value {
+    let project_root = missiond_project_root();
+    let runtime_dir = missiond_runtime_dir(&project_root);
+    let compiled_runtime_dir = missiond_compiled_runtime_dir(&runtime_dir);
+    let repo_runtime_dir = project_root.join(".missiond/v3/runtime");
+    let compiled_runtime_config = compiled_runtime_dir.join("compiled-runtime-config.json");
+
+    json!({
+        "schema": "missiond.runtime-environment-context.v1",
+        "authority": "runtime-env-and-monitor",
+        "rule": "For deployed MissionD, runtime artifacts are authoritative under MISSIOND_RUNTIME_DIR and MISSIOND_COMPILED_RUNTIME_DIR. Repo .missiond/v3/runtime/** is dev/cold evidence only and must not be used to declare deployed compiled projections missing.",
+        "project_root": project_root.display().to_string(),
+        "orchestrator_root": env::var("MISSIOND_ORCHESTRATOR_ROOT").ok(),
+        "runtime_dir": runtime_dir.display().to_string(),
+        "compiled_runtime_dir": compiled_runtime_dir.display().to_string(),
+        "repo_runtime_dir": repo_runtime_dir.display().to_string(),
+        "repo_runtime_authority": "dev-cold-evidence-only",
+        "compiled_runtime_config": {
+            "path": compiled_runtime_config.display().to_string(),
+            "exists": compiled_runtime_config.exists()
+        },
+        "env_presence": {
+            "MISSIOND_PROJECT_ROOT": env::var("MISSIOND_PROJECT_ROOT").is_ok(),
+            "MISSIOND_ORCHESTRATOR_ROOT": env::var("MISSIOND_ORCHESTRATOR_ROOT").is_ok(),
+            "MISSIOND_RUNTIME_DIR": env::var("MISSIOND_RUNTIME_DIR").is_ok(),
+            "MISSIOND_COMPILED_RUNTIME_DIR": env::var("MISSIOND_COMPILED_RUNTIME_DIR").is_ok()
+        },
+        "diagnostic": "If runtime files appear missing in the repository, check this runtime_environment source and /jarvis/api/monitor/jarvis before reporting a deployed runtime failure."
+    })
+}
+
+fn context_gather_runtime_dir() -> PathBuf {
+    let project_root = missiond_project_root();
+    let runtime_dir = missiond_runtime_dir(&project_root);
+    if env::var("MISSIOND_RUNTIME_DIR")
+        .ok()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return runtime_dir.join("context-gather");
+    }
+    project_root.join(CONTEXT_GATHER_RUNTIME_REL)
+}
+
+fn missiond_runtime_dir(project_root: &std::path::Path) -> PathBuf {
+    if let Ok(value) = env::var("MISSIOND_RUNTIME_DIR") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    project_root.join(".missiond/v3/runtime")
+}
+
+fn missiond_compiled_runtime_dir(runtime_dir: &std::path::Path) -> PathBuf {
+    if let Ok(value) = env::var("MISSIOND_COMPILED_RUNTIME_DIR") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    runtime_dir.join("compiled")
 }
 
 fn missiond_project_root() -> PathBuf {
