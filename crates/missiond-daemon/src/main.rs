@@ -1487,7 +1487,7 @@ async fn main() -> Result<()> {
                                     provider: provider.to_string(),
                                     result_status: result_status.to_string(),
                                     summary: summary.to_string(),
-                                    content: None,
+                                    content: Some(summary.to_string()),
                                     json: req.payload.clone(),
                                     accepted_shard_id: None,
                                 },

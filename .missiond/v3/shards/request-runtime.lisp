@@ -69,8 +69,8 @@
          :schema "missiond.task-result-artifact.v1"
          :id-field artifact_hash
          :storage "shared_artifacts(kind=task-result)"
-         :fields [task_id project_id provider result_status summary json source]
-         :rule "Jarvis, Board, and worker completion surfaces MUST normalize summary notes/provider finals into task-result-artifact before streaming result_artifact/final to clients; Board notes, PTY text, and provider finals are projections/evidence, not the canonical result; worker prompts MUST ask for structured Findings/Evidence/Recommendations/Verification output and MUST NOT instruct provider workers to mark the BoardTask done before artifact settlement. Durable provider finals for reused Codex/Claude/Agy sessions must satisfy the current BoardTask output contract before they can close or project a result artifact; stale progress/final text from an older turn is ignored until the current task artifact lands.")
+         :fields [task_id project_id provider result_status summary content details raw_evidence source]
+         :rule "Jarvis, Board, and worker completion surfaces MUST normalize summary notes/provider finals into task-result-artifact before streaming result_artifact/final to clients. The canonical :content field is the cleaned terminal result only; raw PTY screens, provider transcripts, tool/progress frames, and escaped UI captures remain details/raw_evidence projections. Board notes, PTY text, and provider finals are evidence, not the canonical result. Worker prompts MUST ask for structured Findings/Evidence/Recommendations/Verification output and MUST NOT instruct provider workers to mark the BoardTask done before artifact settlement. Durable provider finals for reused Codex/Claude/Agy sessions must satisfy the current BoardTask output contract before they can close or project a result artifact; stale progress/final text from an older turn is ignored until the current task artifact lands.")
       (kind task-result-artifact-idempotency
          :schema "missiond.task-result-artifact-idempotency.v1"
          :id-field artifact_hash
@@ -113,8 +113,9 @@
                 (step s7 :logic "if the worker provider returns an empty final after its slot is idle/exited/error, write provider-empty-final as a task-result-artifact diagnostic, fail the BoardTask, and notify Jarvis instead of leaving the task running until mobile timeout")
                 (step s8 :logic "when Autopilot/watchdog observes a durable provider final for an idle running worker, it must first write task-result-artifact and include its hash in the summary note before changing the BoardTask to done")
                 (step s9 :logic "durable final selection is output-contract aware: for tasks declaring Findings/Evidence/Recommendations/Verification, provider messages missing those sections are treated as stale/progress evidence, not final results")
-                (step s10 :logic "if daemon restart or send loss leaves an idle worker slot without durable final or task-result-artifact after watchdog_grace_secs, write a failed diagnostic artifact and fail the BoardTask instead of keeping Jarvis or Board waiting")
-                (step s11 :logic "scripts/audit-stale-boardtask-finals.mjs provides a dry-run stale-final audit that flags conversation final before BoardTask claim, terminal tasks without task-result-artifact hash, and summary projections reused as final authority"))
+                (step s10 :logic "Autopilot PTY extraction must focus the last structured final block such as Findings/Evidence/Recommendations/Verification, Summary, or Final Report, then strip tool/progress/status lines before writing canonical artifact content")
+                (step s11 :logic "if daemon restart or send loss leaves an idle worker slot without durable final or task-result-artifact after watchdog_grace_secs, write a failed diagnostic artifact and fail the BoardTask instead of keeping Jarvis or Board waiting")
+                (step s12 :logic "scripts/audit-stale-boardtask-finals.mjs provides a dry-run stale-final audit that flags conversation final before BoardTask claim, terminal tasks without task-result-artifact hash, and summary projections reused as final authority"))
          :egress [task-result-artifact result_artifact_event final_event diagnostic])
        (function jarvis-dispatch-causality
          :entry [JarvisSSE plan-confirmed BoardTask auto_execute]
@@ -144,6 +145,7 @@
        "Direct local code search is allowed only after the grounding artifact identifies code surface evidence as a required source."
        "Jarvis dispatch metadata MUST derive read_scope from the active runtime/project root (MISSIOND_PROJECT_ROOT, MISSIOND_REPO_ROOT, MISSIOND_WORKSPACE_ROOT, or current daemon cwd) and MUST NOT hardcode a developer-machine root path."
        "Jarvis result streaming MUST use task-result-artifact as canonical completion authority; Board summary notes are converted to artifacts before client-visible result_artifact events."
+       "task-result-artifact content MUST be clean terminal worker output; raw PTY screen captures, provider transcript envelopes, and escaped UI/progress text are diagnostics/evidence only and cannot become canonical content."
        "Jarvis plan-confirmed dispatch MUST emit a worker_dispatched handoff event with dispatch_state=pending_autopilot_claim before returning result_pending, even if the concrete slot is claimed asynchronously later."
        "Worker prompts MUST NOT instruct provider workers to call mission_board_update(status=done) as the primary close path; workers return structured final output, and Autopilot/orchestrator closes only after task-result-artifact validation."
        "Jarvis result artifact writes MUST be bounded; missing or stalled artifact writes produce typed diagnostics and MUST NOT silently fall back to Board note final text."

@@ -253,12 +253,14 @@ const checks = [
     ],
   ],
   [
-    'autopilot task-result-artifact durable content preservation',
+    'autopilot task-result-artifact canonical content normalization',
     'crates/missiond-daemon/src/engine/intent_engine/autopilot.rs',
     [
-      'let full_content = durable_completion',
-      '"content": full_content',
+      'let raw_evidence = durable_completion',
+      '"content": final_summary',
+      '"raw_evidence": raw_evidence',
       '"summary": final_summary',
+      'extract_worker_final_summary_prefers_findings_contract_block',
     ],
   ],
   [

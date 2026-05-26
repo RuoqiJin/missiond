@@ -461,7 +461,7 @@ async fn put_autopilot_task_result_artifact(
         .unwrap_or(slot_id);
     let conversation_id = durable_completion.map(|completion| completion.session_id.as_str());
     let project_id = task.project.as_deref().unwrap_or("missiond");
-    let full_content = durable_completion
+    let raw_evidence = durable_completion
         .map(|completion| completion.summary.as_str())
         .unwrap_or(final_summary);
     let writer = TaskCompletionEvidenceWriter::new(state.storage().shared_memory.clone());
@@ -473,7 +473,7 @@ async fn put_autopilot_task_result_artifact(
         provider: provider.to_string(),
         result_status: result_status.to_string(),
         summary: final_summary.to_string(),
-        content: Some(full_content.to_string()),
+        content: Some(final_summary.to_string()),
         json: serde_json::json!({
             "schema": "missiond.autopilot-task-result.v1",
             "task_id": task.id.as_str(),
@@ -483,7 +483,9 @@ async fn put_autopilot_task_result_artifact(
             "result_status": result_status,
             "duration_ms": duration_ms,
             "summary": final_summary,
-            "content": full_content,
+            "content": final_summary,
+            "raw_evidence": raw_evidence,
+            "raw_evidence_kind": if durable_completion.is_some() { "provider_final" } else { "pty_screen" },
             "description_dispatch": serde_json::from_str::<serde_json::Value>(&task.description).ok()
         }),
         accepted_shard_id: None,
@@ -1450,7 +1452,7 @@ fn strip_prompt_echo<'a>(response: &'a str, _dispatched_prompt: &str) -> &'a str
 /// (whichever ends up later in the response wins) so a final closeout phrase
 /// that comes after an earlier mid-investigation `Summary` mention still wins.
 fn focus_final_summary_region(input: &str) -> &str {
-    const HEADING_ANCHORS: [&str; 12] = [
+    const HEADING_ANCHORS: [&str; 20] = [
         "\n⏺ Smoke Summary",
         "\n⏺ Final Summary",
         "\n⏺ Summary",
@@ -1467,6 +1469,14 @@ fn focus_final_summary_region(input: &str) -> &str {
         "\n# Summary",
         "\n## Final",
         "\n# Smoke Summary",
+        "\n⏺ Findings",
+        "\nFindings",
+        "\n## Findings",
+        "\n# Findings",
+        "\n⏺ Evidence",
+        "\nEvidence",
+        "\n## Evidence",
+        "\n# Evidence",
     ];
     const PHRASE_ANCHORS: [&str; 4] = [
         "diagnostic summary for the BoardTask:",
@@ -1495,6 +1505,10 @@ fn focus_final_summary_region(input: &str) -> &str {
         }
     }
 
+    if let Some(idx) = find_structured_report_anchor(input) {
+        best = Some(idx);
+    }
+
     if best.is_none() {
         if let Some(idx) = find_fix_verification_anchor(input) {
             best = Some(idx);
@@ -1505,6 +1519,40 @@ fn focus_final_summary_region(input: &str) -> &str {
         Some(idx) => &input[idx..],
         None => input,
     }
+}
+
+fn find_structured_report_anchor(input: &str) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    let mut offset = 0;
+    for line in input.split_inclusive('\n') {
+        let line_start = offset;
+        let normalized = normalize_report_heading_line(line);
+        if normalized == "findings" || normalized.starts_with("findings ") {
+            let rest = &input[line_start..];
+            if summary_has_report_heading(rest, "evidence")
+                && summary_has_report_heading(rest, "recommendations")
+                && summary_has_report_heading(rest, "verification")
+            {
+                best = Some(line_start);
+            }
+        }
+        offset += line.len();
+    }
+    best
+}
+
+fn normalize_report_heading_line(line: &str) -> String {
+    let normalized = line
+        .trim()
+        .trim_start_matches('⏺')
+        .trim_start_matches('●')
+        .trim_start_matches('#')
+        .trim_start_matches('*')
+        .trim()
+        .trim_end_matches(':')
+        .trim()
+        .to_ascii_lowercase();
+    strip_report_heading_enumeration(&normalized).to_string()
 }
 
 /// Locate the start of the LAST `Fix:` line whose companion `Verification:`
@@ -6971,6 +7019,50 @@ Review only.
         );
         assert!(summary.contains("Implemented deterministic summary extraction."));
         assert!(summary.contains("Tests and V3 checker pass."));
+    }
+
+    #[test]
+    fn extract_worker_final_summary_prefers_findings_contract_block() {
+        // Client-channel worker finals often use the explicit
+        // Findings/Evidence/Recommendations/Verification contract without a
+        // Summary heading. The canonical task-result-artifact must start at
+        // that contract block, not at the earlier PTY progress transcript.
+        let prompt = dispatched_prompt("task-findings-contract");
+        let response = format!(
+            "{}\n\n\
+             ⏺ Good, I'll verify the slot and collect monitor JSON first.\n\
+             Bash(curl -sS http://127.0.0.1:9120/api/monitor/jarvis)\n\
+               | python3 -m json.tool\n\
+             ⎿ {{\"overall\":\"ready\",\"checks\":{{}}}}\n\n\
+             Findings\n\
+             - Hook materialization is healthy.\n\n\
+             Evidence\n\
+             - /Users/rickyhq/.claude/hooks/missiond-session-register.sh exists.\n\n\
+             Recommendations\n\
+             - Keep hook materialization in slot startup.\n\n\
+             Verification\n\
+             - monitor overall=ready.",
+            prompt
+        );
+        let summary = extract_worker_final_summary(&response, &prompt);
+        assert!(
+            summary.starts_with("Findings"),
+            "canonical final should start at Findings block: {summary}"
+        );
+        assert!(
+            !summary.contains("Good, I'll verify"),
+            "PTY progress narration leaked: {summary}"
+        );
+        assert!(
+            !summary.contains("Bash(curl"),
+            "tool command leaked: {summary}"
+        );
+        assert!(
+            !summary.contains("\"overall\""),
+            "tool output JSON leaked: {summary}"
+        );
+        assert!(summary.contains("Hook materialization is healthy."));
+        assert!(summary.contains("Verification"));
     }
 
     #[test]

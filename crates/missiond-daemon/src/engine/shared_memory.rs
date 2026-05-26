@@ -688,13 +688,16 @@ impl SharedMemoryService {
         let summary = string_arg(args, "summary")
             .map(str::to_string)
             .unwrap_or_else(|| summary_from_result_payload(args));
+        let details = args.get("json").cloned().unwrap_or_else(|| json!({}));
         let content = if let Some(s) = string_arg(args, "content") {
-            json!({
-                "content": s,
-            })
+            Value::String(s.to_string())
         } else {
-            args.get("json").cloned().unwrap_or_else(|| json!({}))
+            details.clone()
         };
+        let raw_evidence = details
+            .get("raw_evidence")
+            .cloned()
+            .or_else(|| details.get("rawEvidence").cloned());
         if let Some(row) = sqlx::query(
             r#"
             SELECT id, artifact_hash
@@ -738,6 +741,8 @@ impl SharedMemoryService {
             "result_status": result_status,
             "summary": summary,
             "content": content,
+            "details": details,
+            "raw_evidence": raw_evidence,
             "created_at": Utc::now().to_rfc3339()
         });
         let metadata = json!({
@@ -2043,7 +2048,13 @@ fn artifact_row_json(row: sqlx::postgres::PgRow, include_content: bool) -> Value
         "created_at": created_at.to_rfc3339()
     });
     if include_content {
-        value["content"] = json!(String::from_utf8_lossy(&bytes).to_string());
+        let content = String::from_utf8_lossy(&bytes).to_string();
+        value["content"] = json!(content);
+        if row.get::<String, _>("media_type") == "application/json" {
+            if let Ok(parsed) = serde_json::from_slice::<Value>(&bytes) {
+                value["json"] = parsed;
+            }
+        }
     }
     value
 }

@@ -104,7 +104,7 @@
       :ssot true
       :writer mission_shared_memory.task_result_put
       :required [:task_id :project_id :summary :content :result_kind :content_hash :evidence_refs :created_at]
-      :invariant "Worker finals, Board notes, provider JSONL finals, and PTY snapshots are evidence/projections; client-visible task completion must read a canonical task-result-artifact. :content preserves the full durable worker final/response; :summary is a truncated projection for Board notes and list views.")
+      :invariant "Worker finals, Board notes, provider JSONL finals, and PTY snapshots are evidence/projections; client-visible task completion must read a canonical task-result-artifact. :content is the normalized terminal worker result only, suitable for Jarvis/iOS display and memory distillation; raw PTY screens, provider transcripts, and pre-final progress remain raw_evidence/details projections and MUST NOT be stored as canonical content. :summary is a bounded projection for Board notes and list views.")
 
     (artifact final-report
       :schema "missiond.final-report.v1"
