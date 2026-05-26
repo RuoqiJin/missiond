@@ -21,6 +21,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -3813,6 +3814,7 @@ impl PTYWebSocketServer {
         } else {
             serde_json::json!(["Do not spawn sub-workers from inside the worker"])
         };
+        let read_scope = Self::jarvis_dispatch_read_scope(read_scope_root, context_pack_file);
 
         serde_json::json!({
             "schema": "missiond.jarvis-dispatch-metadata.v1",
@@ -3821,7 +3823,7 @@ impl PTYWebSocketServer {
             "engine_hint": engine_hint,
             "pool_hint": pool_hint,
             "write_policy": write_policy,
-            "read_scope": [read_scope_root],
+            "read_scope": read_scope,
             "write_scope": write_scope,
             "must_not_touch": must_not_touch,
             "acceptance": [
@@ -3837,6 +3839,40 @@ impl PTYWebSocketServer {
             "plan_artifact_id": plan_artifact_id,
             "worker_may_delegate": false
         })
+    }
+
+    fn jarvis_dispatch_read_scope(
+        read_scope_root: &str,
+        context_pack_file: Option<&str>,
+    ) -> Vec<String> {
+        let root = read_scope_root.trim();
+        let mut scopes = Vec::new();
+        if !root.is_empty() {
+            scopes.push(root.to_string());
+        }
+        let Some(context_pack_file) = context_pack_file.map(str::trim).filter(|s| !s.is_empty())
+        else {
+            return scopes;
+        };
+        let context_path = Path::new(context_pack_file);
+        let context_scope = context_path.parent().unwrap_or(context_path);
+        let context_scope_display = context_scope.display().to_string();
+        if !context_scope_display.is_empty()
+            && !Self::path_is_within_scope(context_scope, root)
+            && !scopes.iter().any(|scope| scope == &context_scope_display)
+        {
+            scopes.push(context_scope_display);
+        }
+        scopes
+    }
+
+    fn path_is_within_scope(path: &Path, scope: &str) -> bool {
+        let scope = scope.trim();
+        if scope.is_empty() {
+            return false;
+        }
+        let scope_path = Path::new(scope);
+        path == scope_path || path.starts_with(scope_path)
     }
 
     fn jarvis_runtime_read_scope_root() -> String {
@@ -7102,6 +7138,22 @@ mod tests {
         assert!(prompt.contains("## Verification"));
         assert!(prompt.contains("task-result-artifact"));
         assert!(!prompt.contains("mission_board_update"));
+    }
+
+    #[test]
+    fn jarvis_dispatch_context_pack_parent_enters_read_scope() {
+        let metadata = PTYWebSocketServer::derive_jarvis_dispatch_contract(
+            "请接入并验证 agy CLI",
+            "context-gather:abc",
+            Some("shared-artifact://abc"),
+            Some("/tmp/missiond/context-gather/abc.json"),
+            "intent-abc",
+            "plan-abc",
+            "/repo",
+        );
+        let read_scope = metadata["read_scope"].as_array().unwrap();
+        assert_eq!(read_scope[0], "/repo");
+        assert_eq!(read_scope[1], "/tmp/missiond/context-gather");
     }
 
     #[test]

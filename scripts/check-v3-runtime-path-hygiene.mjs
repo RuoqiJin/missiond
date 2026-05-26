@@ -98,7 +98,9 @@ const REQUIRED = {
     'canonical_public_https',
     'https://auth.xiaojinpro.com/jarvis/api/monitor/jarvis',
     'Repo .missiond/v3/runtime/** is dev/cold evidence only',
+    'context-gather-worker',
     'context_gather_runtime_dir',
+    'context_gather_worker_visible_dir',
     'context_capsule_runtime_dir',
   ],
   masterControl: [
@@ -300,7 +302,9 @@ MISSIOND_RUNTIME_DIR
 MISSIOND_COMPILED_RUNTIME_DIR
 context-capsules
 Repo .missiond/v3/runtime/** is dev/cold evidence only
+context-gather-worker
 context_gather_runtime_dir
+context_gather_worker_visible_dir
 context_capsule_runtime_dir`);
   write(root, 'masterControl', `
 MISSIOND_RUNTIME_DIR

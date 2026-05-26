@@ -506,7 +506,23 @@ fn recognize_agy(lines: &[String]) -> PtyRecognitionSnapshot {
             "agy:approval_or_mcp_recovery",
         )
         .with_blocked_kind("approval")
-        .with_elapsed(elapsed);
+        .with_elapsed(elapsed)
+        .with_source("tui_source_signature");
+    }
+
+    if lower.contains("file access")
+        || lower.contains("allow access to this file")
+        || lower.contains("reason: outside workspace")
+    {
+        return PtyRecognitionSnapshot::new(
+            CliEngine::Agy,
+            PtyCanonicalState::Blocked,
+            0.9,
+            "agy:file_access_approval",
+        )
+        .with_blocked_kind("approval")
+        .with_elapsed(elapsed)
+        .with_source("tui_source_signature");
     }
 
     if lower.contains("working")
@@ -1061,6 +1077,27 @@ mod tests {
         assert_eq!(result.state, PtyCanonicalState::Blocked);
         assert_eq!(result.source, "screen_final");
         assert_eq!(result.blocked_kind.as_deref(), Some("usage_limit"));
+    }
+
+    #[test]
+    fn agy_file_access_prompt_is_blocked_confirmation() {
+        let result = recognize_screen(
+            CliEngine::Agy,
+            &lines(&[
+                "File access",
+                "Read: /Users/rickyhq/.missiond/runtime/missiond/context-gather/abc.json",
+                "Reason: outside workspace",
+                "Allow access to this file?",
+                "> 1. Yes, allow access",
+                "  2. Yes, and always allow non-workspace access",
+                "  3. No, deny access",
+            ]),
+            SessionState::Thinking,
+        );
+        assert_eq!(result.state, PtyCanonicalState::Blocked);
+        assert_eq!(result.reason, "agy:file_access_approval");
+        assert_eq!(result.source, "tui_source_signature");
+        assert_eq!(result.blocked_kind.as_deref(), Some("approval"));
     }
 
     #[test]

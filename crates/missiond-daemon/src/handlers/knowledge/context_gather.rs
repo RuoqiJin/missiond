@@ -2,7 +2,10 @@ use anyhow::Result;
 use missiond_mcp::tools::{ToolContent, ToolResult};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::{env, fs, path::PathBuf};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 use crate::handlers::comm::conversation;
 use crate::handlers::sysinfra::infra;
@@ -70,6 +73,7 @@ const CODEX_BOOT_CONTEXT_REL: &str = ".missiond/v3/evidence/codex-boot-context.l
 const CODEX_BOOT_CONTEXT_FALLBACK: &str =
     include_str!("../../../../../.missiond/v3/evidence/codex-boot-context.lisp");
 const CONTEXT_GATHER_RUNTIME_REL: &str = ".missiond/v3/runtime/context-gather";
+const CONTEXT_GATHER_WORKER_VISIBLE_REL: &str = ".missiond/v3/runtime/context-gather-worker";
 
 fn default_limit() -> usize {
     8
@@ -338,7 +342,11 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 );
                 object.insert(
                     "context_pack_file".to_string(),
-                    Value::String(context_pack_file.display().to_string()),
+                    Value::String(context_pack_file.worker_path.display().to_string()),
+                );
+                object.insert(
+                    "canonical_context_pack_file".to_string(),
+                    Value::String(context_pack_file.canonical_path.display().to_string()),
                 );
                 object.insert("artifact_hash".to_string(), Value::String(hash.clone()));
             }
@@ -408,6 +416,12 @@ fn codex_boot_context_candidates() -> Vec<PathBuf> {
 
 const CONTEXT_CAPSULE_RUNTIME_REL: &str = ".missiond/v3/runtime/context-capsules";
 
+#[derive(Debug)]
+struct MaterializedContextPack {
+    canonical_path: PathBuf,
+    worker_path: PathBuf,
+}
+
 fn materialize_context_capsule(hash: &str, lisp_content: &str) -> Result<PathBuf> {
     let dir = context_capsule_runtime_dir();
     fs::create_dir_all(&dir)?;
@@ -416,13 +430,27 @@ fn materialize_context_capsule(hash: &str, lisp_content: &str) -> Result<PathBuf
     Ok(path)
 }
 
-fn materialize_context_pack_file(hash: &str, payload: &Value) -> Result<PathBuf> {
-    let dir = context_gather_runtime_dir();
-    fs::create_dir_all(&dir)?;
-    let path = dir.join(format!("{hash}.json"));
+fn materialize_context_pack_file(hash: &str, payload: &Value) -> Result<MaterializedContextPack> {
     let bytes = serde_json::to_vec_pretty(payload)?;
-    fs::write(&path, bytes)?;
-    Ok(path)
+    let canonical_dir = context_gather_runtime_dir();
+    fs::create_dir_all(&canonical_dir)?;
+    let canonical_path = canonical_dir.join(format!("{hash}.json"));
+    fs::write(&canonical_path, &bytes)?;
+
+    let worker_path = if context_gather_uses_external_runtime() {
+        let worker_dir = context_gather_worker_visible_dir();
+        fs::create_dir_all(&worker_dir)?;
+        let worker_path = worker_dir.join(format!("{hash}.json"));
+        fs::write(&worker_path, &bytes)?;
+        worker_path
+    } else {
+        canonical_path.clone()
+    };
+
+    Ok(MaterializedContextPack {
+        canonical_path,
+        worker_path,
+    })
 }
 
 fn runtime_environment_payload() -> Value {
@@ -435,13 +463,14 @@ fn runtime_environment_payload() -> Value {
     json!({
         "schema": "missiond.runtime-environment-context.v1",
         "authority": "runtime-env-and-monitor",
-        "rule": "For deployed MissionD, runtime artifacts are authoritative under MISSIOND_RUNTIME_DIR and MISSIOND_COMPILED_RUNTIME_DIR. Repo .missiond/v3/runtime/** is dev/cold evidence only and must not be used to declare deployed compiled projections missing.",
+        "rule": "For deployed MissionD, runtime artifacts are authoritative under MISSIOND_RUNTIME_DIR and MISSIOND_COMPILED_RUNTIME_DIR. Repo .missiond/v3/runtime/** is dev/cold evidence only and must not be used to declare deployed compiled projections missing. A bounded worker-readable mirror under .missiond/v3/runtime/context-gather-worker/** may be written for provider CLIs that cannot read outside their workspace; it is an ignored projection, not the canonical artifact.",
         "project_root": project_root.display().to_string(),
         "orchestrator_root": env::var("MISSIOND_ORCHESTRATOR_ROOT").ok(),
         "runtime_dir": runtime_dir.display().to_string(),
         "compiled_runtime_dir": compiled_runtime_dir.display().to_string(),
         "repo_runtime_dir": repo_runtime_dir.display().to_string(),
         "repo_runtime_authority": "dev-cold-evidence-only",
+        "context_pack_worker_visible_dir": context_gather_worker_visible_dir().display().to_string(),
         "monitor_endpoints": {
             "canonical_local_http": "http://127.0.0.1:9120/api/monitor/jarvis",
             "canonical_public_https": "https://auth.xiaojinpro.com/jarvis/api/monitor/jarvis",
@@ -476,6 +505,17 @@ fn context_gather_runtime_dir() -> PathBuf {
     project_root.join(CONTEXT_GATHER_RUNTIME_REL)
 }
 
+fn context_gather_worker_visible_dir() -> PathBuf {
+    missiond_project_root().join(CONTEXT_GATHER_WORKER_VISIBLE_REL)
+}
+
+fn context_gather_uses_external_runtime() -> bool {
+    env::var("MISSIOND_RUNTIME_DIR")
+        .ok()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
 fn context_capsule_runtime_dir() -> PathBuf {
     let project_root = missiond_project_root();
     let runtime_dir = missiond_runtime_dir(&project_root);
@@ -489,7 +529,7 @@ fn context_capsule_runtime_dir() -> PathBuf {
     project_root.join(CONTEXT_CAPSULE_RUNTIME_REL)
 }
 
-fn missiond_runtime_dir(project_root: &std::path::Path) -> PathBuf {
+fn missiond_runtime_dir(project_root: &Path) -> PathBuf {
     if let Ok(value) = env::var("MISSIOND_RUNTIME_DIR") {
         let trimmed = value.trim();
         if !trimmed.is_empty() {
@@ -499,7 +539,7 @@ fn missiond_runtime_dir(project_root: &std::path::Path) -> PathBuf {
     project_root.join(".missiond/v3/runtime")
 }
 
-fn missiond_compiled_runtime_dir(runtime_dir: &std::path::Path) -> PathBuf {
+fn missiond_compiled_runtime_dir(runtime_dir: &Path) -> PathBuf {
     if let Ok(value) = env::var("MISSIOND_COMPILED_RUNTIME_DIR") {
         let trimmed = value.trim();
         if !trimmed.is_empty() {

@@ -87,6 +87,8 @@ function main() {
       'agy_idle_screen_is_idle',
       'agy_feedback_prompt_after_answer_is_complete',
       'agy_auth_or_quota_error_is_blocked',
+      'agy_file_access_prompt_is_blocked_confirmation',
+      'agy:file_access_approval',
     ]);
     requireAll(diagnostics, FILES.genericCli, sources.genericCli, [
       'GenericCliSlotManager',

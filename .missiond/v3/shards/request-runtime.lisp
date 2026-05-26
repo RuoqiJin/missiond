@@ -7,7 +7,7 @@
       ((source runtime-environment
          :tool mission_context_gather
          :scope deployed-runtime-authority
-         :rule "For deployed MissionD, mission_context_gather always includes runtime_environment: MISSIOND_RUNTIME_DIR, MISSIOND_COMPILED_RUNTIME_DIR, repo_runtime_dir, canonical Jarvis monitor endpoints, and the rule that repo .missiond/v3/runtime/** is dev/cold evidence only.")
+         :rule "For deployed MissionD, mission_context_gather always includes runtime_environment: MISSIOND_RUNTIME_DIR, MISSIOND_COMPILED_RUNTIME_DIR, repo_runtime_dir, canonical Jarvis monitor endpoints, the rule that repo .missiond/v3/runtime/** is dev/cold evidence only, and the context-gather-worker ignored mirror rule for provider CLIs that cannot read outside their workspace.")
        (source active-board-task-records
          :tool mission_board_query
          :scope active
@@ -63,8 +63,8 @@
          :schema "missiond.context-gather-artifact.v1"
          :id-field grounding_context_id
          :storage "shared_artifacts(kind=context-gather)"
-         :fields [unknowns query project_id sources_used evidence_refs diagnostics grounded_intent_summary runtime_environment context_pack_path context_pack_file]
-         :rule "mission_context_gather(persist=true) returns grounding_context_id, shared-artifact context_pack_path, and a bounded context_pack_file for provider CLIs that do not have MissionD MCP mounted; worker prompts receive only this small context slice plus confirmed intent/plan artifact refs and accepted execution metadata, not broad KB/history preloads.")
+         :fields [unknowns query project_id sources_used evidence_refs diagnostics grounded_intent_summary runtime_environment context_pack_path context_pack_file canonical_context_pack_file]
+         :rule "mission_context_gather(persist=true) returns grounding_context_id, shared-artifact context_pack_path, canonical_context_pack_file under MISSIOND_RUNTIME_DIR, and a bounded worker-readable context_pack_file mirror under ignored .missiond/v3/runtime/context-gather-worker/** for provider CLIs that do not have MissionD MCP mounted; worker prompts receive only this small context slice plus confirmed intent/plan artifact refs and accepted execution metadata, not broad KB/history preloads.")
       (kind task-result-artifact
          :schema "missiond.task-result-artifact.v1"
          :id-field artifact_hash
@@ -83,10 +83,10 @@
          :core ((step s1 :logic "derive query from explicit unknowns or the raw objective; never use broad historical preload as the query source")
                 (step s2 :logic "query runtime_environment, project registry, active SSOT, active KB, skill evidence, infra/deploy facts, active Board task records, bounded conversations, and tool directory through the aggregate")
                 (step s3 :logic "return source-specific diagnostics for missing or stale authorities instead of letting the worker guess")
-                (step s4 :logic "persist the payload into shared_artifacts(kind=context-gather), materialize a bounded context_pack_file under MISSIOND_RUNTIME_DIR/context-gather when deployed, and return both grounding_context_id and shared-artifact context_pack_path")
+                (step s4 :logic "persist the payload into shared_artifacts(kind=context-gather), materialize the canonical context pack under MISSIOND_RUNTIME_DIR/context-gather when deployed, materialize a worker-readable ignored mirror under .missiond/v3/runtime/context-gather-worker for workspace-confined provider CLIs, and return grounding_context_id plus shared-artifact context_pack_path")
                 (step s5 :logic "Jarvis worker prompts must prefer context_pack_file; if unavailable, they may use mission_shared_memory(action=artifact_get, hash=...) or mission_context_slice. Opaque artifact URIs without retrieval instructions are invalid")
                 (step s6 :logic "Jarvis worker prompts must include target engine/pool, write_policy, read/write scope, confirmed intent_artifact_id, confirmed plan_artifact_id, and a compact accepted execution slice for no-MCP workers"))
-         :egress [grounding_context_id context_pack_path context_pack_file sources_used diagnostics shared_artifact])
+         :egress [grounding_context_id context_pack_path context_pack_file canonical_context_pack_file sources_used diagnostics shared_artifact])
        (function task-delegate-grounding-gate
          :entry [mission_task_delegate mission_swarm_run mission_plan_execute]
          :core ((step s1 :logic "classify dispatch as exact shard, emergency code-first, or broad objective")
@@ -137,7 +137,7 @@
     :invariants
       ["All non-exact worker dispatch must carry grounding_context_id before a provider PTY receives the prompt."
        "mission_context_gather is the only default aggregate for runtime_environment/KB/SSOT/project/skill/infra/Board/conversation/tool facts; callers should not hand-roll partial context lookup."
-       "Workers reviewing deployed MissionD runtime state MUST use runtime_environment.monitor_endpoints.canonical_local_http or canonical_public_https before inspecting repo .missiond/v3/runtime/**; repo runtime files are dev/cold evidence only."
+       "Workers reviewing deployed MissionD runtime state MUST use runtime_environment.monitor_endpoints.canonical_local_http or canonical_public_https before inspecting repo .missiond/v3/runtime/**; repo runtime files are dev/cold evidence only except bounded context-gather-worker mirrors passed explicitly as worker-readable context slices."
        "Workers MUST NOT guess Jarvis monitor ports or use unix-socket probes unless a dedicated diagnostic explicitly asks for low-level socket testing."
        "Grounding artifacts are durable evidence and task metadata; hidden prompt preloads are not grounding."
        "Autopilot must block broad ungrounded BoardTasks instead of sending them to workers for self-discovery."
