@@ -309,8 +309,25 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         } else {
             None
         };
+        let isolation = super::context_capsule::CapsuleIsolation {
+            user_id: args.source_id.as_deref(),
+            tenant_id: None,
+            application_id: args.project_id.as_deref(),
+            channel: "cli",
+        };
+        let (capsule_lisp, capsule_hash) = super::context_capsule::generate_lisp_capsule(
+            &isolation,
+            &payload,
+            None,
+            None,
+            args.task_id.as_deref(),
+            None,
+            None,
+        );
+        let capsule_path = materialize_context_capsule(&capsule_hash, &capsule_lisp);
+
         if let Some(object) = payload.as_object_mut() {
-            if let Some((hash, context_pack_file)) = context_pack_file {
+            if let Some((hash, context_pack_file)) = context_pack_file.as_ref() {
                 object.insert(
                     "grounding_context_id".to_string(),
                     Value::String(format!("context-gather:{}", hash)),
@@ -323,9 +340,19 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     "context_pack_file".to_string(),
                     Value::String(context_pack_file.display().to_string()),
                 );
-                object.insert("artifact_hash".to_string(), Value::String(hash));
+                object.insert("artifact_hash".to_string(), Value::String(hash.clone()));
             }
             object.insert("artifact".to_string(), artifact);
+            object.insert(
+                "context_capsule_hash".to_string(),
+                Value::String(capsule_hash),
+            );
+            if let Ok(path) = capsule_path {
+                object.insert(
+                    "context_capsule_file".to_string(),
+                    Value::String(path.display().to_string()),
+                );
+            }
         }
     }
 
@@ -377,6 +404,16 @@ fn codex_boot_context_candidates() -> Vec<PathBuf> {
         candidates.push(cwd.join(CODEX_BOOT_CONTEXT_REL));
     }
     candidates
+}
+
+const CONTEXT_CAPSULE_RUNTIME_REL: &str = ".missiond/v3/runtime/context-capsules";
+
+fn materialize_context_capsule(hash: &str, lisp_content: &str) -> Result<PathBuf> {
+    let dir = context_capsule_runtime_dir();
+    fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{hash}.lisp"));
+    fs::write(&path, lisp_content)?;
+    Ok(path)
 }
 
 fn materialize_context_pack_file(hash: &str, payload: &Value) -> Result<PathBuf> {
@@ -437,6 +474,19 @@ fn context_gather_runtime_dir() -> PathBuf {
         return runtime_dir.join("context-gather");
     }
     project_root.join(CONTEXT_GATHER_RUNTIME_REL)
+}
+
+fn context_capsule_runtime_dir() -> PathBuf {
+    let project_root = missiond_project_root();
+    let runtime_dir = missiond_runtime_dir(&project_root);
+    if env::var("MISSIOND_RUNTIME_DIR")
+        .ok()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return runtime_dir.join("context-capsules");
+    }
+    project_root.join(CONTEXT_CAPSULE_RUNTIME_REL)
 }
 
 fn missiond_runtime_dir(project_root: &std::path::Path) -> PathBuf {

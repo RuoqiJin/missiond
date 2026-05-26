@@ -61,6 +61,27 @@ pub trait ConversationStore: Send + Sync {
     async fn get_child_conversations(&self, parent_session_id: &str)
         -> DbResult<Vec<Conversation>>;
 
+    /// Resolve an active session by multi-tenant isolation dimensions and optional topic.
+    /// Returns the most recently updated active session matching the isolation scope,
+    /// enabling session-less entry (clients don't need to create conversations explicitly).
+    async fn resolve_active_session(
+        &self,
+        user_id: Option<&str>,
+        tenant_id: Option<&str>,
+        application_id: Option<&str>,
+        channel: Option<&str>,
+        topic_id: Option<&str>,
+    ) -> DbResult<Option<Conversation>>;
+
+    /// Bind a context capsule hash and optional topic to an existing conversation.
+    async fn bind_context_capsule(
+        &self,
+        session_id: &str,
+        context_capsule_hash: &str,
+        topic_id: Option<&str>,
+        topic_label: Option<&str>,
+    ) -> DbResult<()>;
+
     /// Fix orphan subagent parent links by re-extracting parent_session_id from jsonl_path.
     /// Returns count of fixed rows.
     async fn fix_orphan_parent_links(&self, session_ids: &[String]) -> DbResult<usize>;

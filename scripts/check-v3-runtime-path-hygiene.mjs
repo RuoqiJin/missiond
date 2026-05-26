@@ -91,6 +91,7 @@ const REQUIRED = {
     'runtime_environment',
     'MISSIOND_RUNTIME_DIR',
     'MISSIOND_COMPILED_RUNTIME_DIR',
+    'context-capsules',
     'monitor_endpoints',
     'canonical_local_http',
     'http://127.0.0.1:9120/api/monitor/jarvis',
@@ -98,6 +99,7 @@ const REQUIRED = {
     'https://auth.xiaojinpro.com/jarvis/api/monitor/jarvis',
     'Repo .missiond/v3/runtime/** is dev/cold evidence only',
     'context_gather_runtime_dir',
+    'context_capsule_runtime_dir',
   ],
   masterControl: [
     'MISSIOND_RUNTIME_DIR',
@@ -296,8 +298,10 @@ node scripts/compile-v3-runtime.mjs --json --out-dir "$COMPILED_RUNTIME_DIR"`);
 runtime_environment
 MISSIOND_RUNTIME_DIR
 MISSIOND_COMPILED_RUNTIME_DIR
+context-capsules
 Repo .missiond/v3/runtime/** is dev/cold evidence only
-context_gather_runtime_dir`);
+context_gather_runtime_dir
+context_capsule_runtime_dir`);
   write(root, 'masterControl', `
 MISSIOND_RUNTIME_DIR
 missiond_runtime_dir_from_env

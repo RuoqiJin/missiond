@@ -338,3 +338,55 @@
        "ClaudeCode worker MCP reconnect MUST follow `/mcp` -> Enter -> ArrowDown until missiond -> Enter -> Enter using arrow-key keystrokes only; numeric shortcut selection is forbidden because Claude Code's MCP picker numeric shortcuts have shifted between releases. The keystroke sequence is the SSOT and missiond-pty Session::mcp_reconnect_sequence MUST project from it."
        "When a ClaudeCode worker advertises supports_mcp=true but its mounted tool list does not include any mission_* tool after slot ready, master_control MUST file a durable claude_code_mcp_missing incident so the resident master is woken; if the /mcp arrow-key reconnect ritual does not surface mission_* tools within the policy budget, a follow-up claude_code_mcp_reconnect_failed incident is required, never a silent retry loop."]
     :checker "node scripts/check-v3-pty-recognition-isomorphism.mjs")
+
+  (conversation-session-management
+    :desc "Multi-tenant conversation session isolation, automatic topic threading, session-less entry, and context capsule binding."
+    :schema "missiond.conversation-session-management.v1"
+
+    (isolation-dimensions
+      :desc "Every conversation session carries four Auth-derived isolation dimensions. Queries MUST filter by the caller's resolved isolation scope."
+      :columns [user_id tenant_id application_id channel]
+      :user_id    "Auth-resolved user identifier from xjp-auth OAuth2/OIDC; nullable for legacy CLI-only sessions."
+      :tenant_id  "Auth-resolved tenant/organization; nullable for single-tenant local CLI."
+      :application_id "Application context identifier (e.g. jarvis, cuthub, pcea); nullable for direct CLI."
+      :channel    "Communication channel: cli, api, jarvis_sse, jarvis_mobile, openclaw, webhook; defaults to cli."
+      :default-channel "cli"
+      :migration "20260526000000_conversation_session_management.sql")
+
+    (topic-threading
+      :desc "Automatic topic splitting, association, and continuation within a tenant-scoped session stream."
+      :columns [topic_id topic_label]
+      :topic_id   "Deterministic topic thread identifier; conversations sharing a topic_id form a logical thread."
+      :topic_label "LLM-generated human-readable topic label for display and search."
+      :auto-split-rule "When context_gather detects semantic drift from the current topic (cosine similarity below topic_split_threshold), a new topic_id is minted and bound to the conversation."
+      :continuation-rule "When a new interaction's query is semantically close to an existing topic (above topic_continue_threshold), the resolver binds the interaction to that topic_id for session continuation."
+      :topic_split_threshold 0.35
+      :topic_continue_threshold 0.70)
+
+    (session-less-entry
+      :desc "Clients are not required to create a new conversation before interacting. The system auto-resolves or creates sessions."
+      :resolve-order [active-topic-match active-session-for-slot new-session]
+      :rule "mission_context_gather and Jarvis chat surfaces MUST resolve an existing session by (user_id, tenant_id, application_id, channel, topic_id) before creating a new conversation row."
+      :session-ttl-hours 24
+      :max-active-sessions-per-user 10)
+
+    (context-capsule
+      :desc "Compressed Lisp context capsule generated per interaction from SSOT, KB, project registry, skill evidence, infra/deploy facts, and related history."
+      :schema "missiond.context-capsule.v1"
+      :columns [context_capsule_hash]
+      :context_capsule_hash "SHA-256 hash linking to the materialized context-gather artifact in shared_memory."
+      :binding-targets [intent_alignment plan board_task task_result_artifact]
+      :generation-rule "Every grounded interaction MUST generate a context capsule via context_gather(persist=true) and bind the resulting hash to the conversation row and any associated BoardTask runtime_metadata."
+      :capsule-format "lisp-sexp"
+      :capsule-layers [L0-isolation L1-ssot-snapshot L2-active-kb L3-project-registry L4-skill-evidence L5-infra-facts L6-related-history L7-topic-context])
+
+    :invariants
+      ["conversations table MUST carry user_id, tenant_id, application_id, channel, topic_id, topic_label, context_capsule_hash columns after migration 20260526000000."
+       "mission_conversation_query list/search actions MUST accept and enforce user_id, tenant_id, application_id, channel filters when provided."
+       "Session-less entry resolution MUST prefer active topic matches over creating new sessions; only when no active topic match exists should a new conversation be created."
+       "Context capsule generation MUST be idempotent: the same (query, isolation scope, timestamp window) produces the same capsule hash."
+       "Topic auto-split MUST NOT fire for worker/meta/system conversation types; only user and codex_chat sessions participate in topic threading."
+       "Context capsule binding to BoardTask MUST use runtime_metadata.context_capsule_hash, not a separate column, to avoid schema sprawl on the board_tasks table."
+       "Conversation isolation filters MUST be additive: omitting a dimension returns all values for that dimension within the caller's permission scope."
+       "Legacy CLI sessions without Auth context MUST default to user_id=NULL, tenant_id=NULL, application_id=NULL, channel=cli and remain queryable."]
+    :checker "node scripts/check-v3-conversation-session-management.mjs")

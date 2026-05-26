@@ -105,6 +105,13 @@ pub(crate) async fn register_slot_session(
         embedding_provider: None,
         session_timeline: None,
         timeline_built_at: None,
+        user_id: None,
+        tenant_id: None,
+        application_id: None,
+        channel: "cli".to_string(),
+        topic_id: None,
+        topic_label: None,
+        context_capsule_hash: None,
     };
 
     if let Err(e) = store.upsert_conversation(&conv).await {

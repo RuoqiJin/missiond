@@ -535,6 +535,7 @@
              "node scripts/check-v3-conversation-ingestion-isomorphism.mjs"
              "node scripts/check-v3-cli-conversation-ingestion-isomorphism.mjs"
              "node scripts/check-v3-pty-recognition-isomorphism.mjs"
+             "node scripts/check-v3-conversation-session-management.mjs"
              "node scripts/check-v3-capability-governance-isomorphism.mjs"
              "node scripts/check-v3-mechanic-boundary-isomorphism.mjs"
              "node scripts/check-v3-compute-primitives-isomorphism.mjs"

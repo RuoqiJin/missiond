@@ -165,6 +165,13 @@ async fn ingest(
             embedding_provider: None,
             session_timeline: None,
             timeline_built_at: None,
+            user_id: None,
+            tenant_id: None,
+            application_id: None,
+            channel: "cli".to_string(),
+            topic_id: None,
+            topic_label: None,
+            context_capsule_hash: None,
         };
         if let Err(e) = state.store.upsert_conversation(&conv).await {
             error!(session = %session_id, error = %e, "Failed to create conversation");
@@ -792,6 +799,13 @@ pub(crate) async fn handle_pty_text_complete(
             embedding_provider: None,
             session_timeline: None,
             timeline_built_at: None,
+            user_id: None,
+            tenant_id: None,
+            application_id: None,
+            channel: "cli".to_string(),
+            topic_id: None,
+            topic_label: None,
+            context_capsule_hash: None,
         };
         if let Err(e) = state.store.upsert_conversation(&conv).await {
             error!(slot = %slot_id, error = %e, "Failed to create PTY conversation");

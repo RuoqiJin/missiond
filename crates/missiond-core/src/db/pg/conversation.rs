@@ -89,6 +89,13 @@ impl PgMissionStore {
             embedding_provider: row.get("embedding_provider"),
             session_timeline: row.get("session_timeline"),
             timeline_built_at: row.get("timeline_built_at"),
+            user_id: row.try_get("user_id").unwrap_or(None),
+            tenant_id: row.try_get("tenant_id").unwrap_or(None),
+            application_id: row.try_get("application_id").unwrap_or(None),
+            channel: row.try_get("channel").unwrap_or_else(|_| "cli".to_string()),
+            topic_id: row.try_get("topic_id").unwrap_or(None),
+            topic_label: row.try_get("topic_label").unwrap_or(None),
+            context_capsule_hash: row.try_get("context_capsule_hash").unwrap_or(None),
         }
     }
 
@@ -187,8 +194,8 @@ impl ConversationStore for PgMissionStore {
 
     async fn upsert_conversation(&self, conv: &Conversation) -> DbResult<()> {
         sqlx::query(
-            "INSERT INTO conversations (id, project, slot_id, source, model, git_branch, jsonl_path, parent_session_id, task_id, message_count, started_at, ended_at, status, analyzed_at, conversation_type, project_id, chat_type)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+            "INSERT INTO conversations (id, project, slot_id, source, model, git_branch, jsonl_path, parent_session_id, task_id, message_count, started_at, ended_at, status, analyzed_at, conversation_type, project_id, chat_type, user_id, tenant_id, application_id, channel, topic_id, topic_label, context_capsule_hash)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
              ON CONFLICT (id) DO UPDATE SET
                 slot_id = COALESCE($3, conversations.slot_id),
                 source = $4,
@@ -201,7 +208,14 @@ impl ConversationStore for PgMissionStore {
                 parent_session_id = COALESCE(conversations.parent_session_id, $8),
                 conversation_type = COALESCE($15, conversations.conversation_type),
                 project_id = COALESCE($16, conversations.project_id),
-                chat_type = COALESCE($17, conversations.chat_type)"
+                chat_type = COALESCE($17, conversations.chat_type),
+                user_id = COALESCE($18, conversations.user_id),
+                tenant_id = COALESCE($19, conversations.tenant_id),
+                application_id = COALESCE($20, conversations.application_id),
+                channel = COALESCE($21, conversations.channel),
+                topic_id = COALESCE($22, conversations.topic_id),
+                topic_label = COALESCE($23, conversations.topic_label),
+                context_capsule_hash = COALESCE($24, conversations.context_capsule_hash)"
         )
         .bind(&conv.id)
         .bind(&conv.project)
@@ -220,6 +234,13 @@ impl ConversationStore for PgMissionStore {
         .bind(&conv.conversation_type)
         .bind(&conv.project_id)
         .bind(&conv.chat_type)
+        .bind(&conv.user_id)
+        .bind(&conv.tenant_id)
+        .bind(&conv.application_id)
+        .bind(&conv.channel)
+        .bind(&conv.topic_id)
+        .bind(&conv.topic_label)
+        .bind(&conv.context_capsule_hash)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -472,6 +493,84 @@ impl ConversationStore for PgMissionStore {
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.iter().map(Self::row_to_conversation).collect())
+    }
+
+    async fn resolve_active_session(
+        &self,
+        user_id: Option<&str>,
+        tenant_id: Option<&str>,
+        application_id: Option<&str>,
+        channel: Option<&str>,
+        topic_id: Option<&str>,
+    ) -> DbResult<Option<Conversation>> {
+        let mut sql = String::from(
+            "SELECT * FROM conversations WHERE status = 'active' AND conversation_type IN ('user', 'codex_chat')",
+        );
+        let mut param_idx = 1u32;
+        let mut binds: Vec<Option<String>> = Vec::new();
+
+        if let Some(uid) = user_id {
+            sql.push_str(&format!(" AND user_id = ${param_idx}"));
+            param_idx += 1;
+            binds.push(Some(uid.to_string()));
+        }
+
+        if let Some(tid) = tenant_id {
+            sql.push_str(&format!(" AND tenant_id = ${param_idx}"));
+            param_idx += 1;
+            binds.push(Some(tid.to_string()));
+        }
+
+        if let Some(aid) = application_id {
+            sql.push_str(&format!(" AND application_id = ${param_idx}"));
+            param_idx += 1;
+            binds.push(Some(aid.to_string()));
+        }
+
+        if let Some(ch) = channel {
+            sql.push_str(&format!(" AND channel = ${param_idx}"));
+            param_idx += 1;
+            binds.push(Some(ch.to_string()));
+        }
+
+        if let Some(tid) = topic_id {
+            sql.push_str(&format!(" AND topic_id = ${param_idx}"));
+            param_idx += 1;
+            binds.push(Some(tid.to_string()));
+        }
+        let _ = param_idx;
+
+        sql.push_str(" ORDER BY updated_at DESC NULLS LAST, started_at DESC LIMIT 1");
+
+        let mut q = sqlx::query(&sql);
+        for b in &binds {
+            q = q.bind(b.as_deref());
+        }
+        let row = q.fetch_optional(&self.pool).await?;
+        Ok(row.as_ref().map(Self::row_to_conversation))
+    }
+
+    async fn bind_context_capsule(
+        &self,
+        session_id: &str,
+        context_capsule_hash: &str,
+        topic_id: Option<&str>,
+        topic_label: Option<&str>,
+    ) -> DbResult<()> {
+        sqlx::query(
+            "UPDATE conversations SET
+                context_capsule_hash = $2,
+                topic_id = COALESCE($3, topic_id),
+                topic_label = COALESCE($4, topic_label)
+             WHERE id = $1",
+        )
+        .bind(session_id)
+        .bind(context_capsule_hash)
+        .bind(topic_id)
+        .bind(topic_label)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     async fn fix_orphan_parent_links(&self, session_ids: &[String]) -> DbResult<usize> {

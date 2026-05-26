@@ -64,6 +64,33 @@ pub struct Conversation {
     /// Timestamp when timeline was built (CAS guard against duplicate builds)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeline_built_at: Option<String>,
+
+    // -- Session management (migration 20260526000000) --
+    /// Auth-resolved user identifier
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    /// Auth-resolved tenant/organization
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
+    /// Application context identifier (jarvis, cuthub, pcea, etc.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub application_id: Option<String>,
+    /// Communication channel: cli, api, jarvis_sse, jarvis_mobile, openclaw, webhook
+    #[serde(default = "default_channel")]
+    pub channel: String,
+    /// Topic thread identifier for automatic topic splitting/continuation
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_id: Option<String>,
+    /// LLM-generated human-readable topic label
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_label: Option<String>,
+    /// SHA-256 hash linking to the materialized context capsule artifact
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_capsule_hash: Option<String>,
+}
+
+fn default_channel() -> String {
+    "cli".to_string()
 }
 
 fn default_conversation_type() -> String {
