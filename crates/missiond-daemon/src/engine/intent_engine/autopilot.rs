@@ -670,6 +670,15 @@ fn delegated_write_close_evidence_blocker_for_task(
     )
 }
 
+fn choose_idle_watchdog_pty_response(
+    cached_response: Option<String>,
+    live_screen_response: Option<String>,
+) -> Option<String> {
+    live_screen_response
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| cached_response.filter(|value| !value.trim().is_empty()))
+}
+
 fn provider_completion_summary_for_task(
     messages: &[missiond_core::types::ConversationMessage],
     task_id: &str,
@@ -1206,16 +1215,13 @@ async fn close_idle_running_task_from_durable_summary(
     if !has_durable_summary {
         let pty_response = {
             let cached = state.slot_last_responses.read().await.get(slot_id).cloned();
-            match cached {
-                Some(value) if !value.trim().is_empty() => Some(value),
-                _ => state
-                    .pty
-                    .get_last_lines(slot_id, 160)
-                    .await
-                    .ok()
-                    .map(|lines| lines.join("\n"))
-                    .filter(|value| !value.trim().is_empty()),
-            }
+            let live_screen = state
+                .pty
+                .get_last_lines(slot_id, 220)
+                .await
+                .ok()
+                .map(|lines| lines.join("\n"));
+            choose_idle_watchdog_pty_response(cached, live_screen)
         };
         if let Some(response) = pty_response {
             let summary = extract_worker_final_summary(&response, "");
@@ -8535,6 +8541,20 @@ Review only.
         let report = "## Findings\n- Ready.\n\n## Evidence\n- Monitor is ready.\n\n## Recommendations\n- Keep this path.\n\n## Verification\n- No file edits.";
         assert_eq!(output_contract_close_blocker_for_task(&task, report), None);
         assert_eq!(pty_only_close_blocker_for_task(&task, false, report), None);
+    }
+
+    #[test]
+    fn idle_watchdog_prefers_fresh_pty_screen_over_stale_cached_progress() {
+        let cached = Some("还剩最后一步是核对 PTY 状态工具。".to_string());
+        let live = Some(
+            "## Findings\n- Done.\n\n## Evidence\n- Fresh screen has final.\n\n## Recommendations\n- Prefer fresh screen.\n\n## Verification\n- No edits."
+                .to_string(),
+        );
+
+        let selected = choose_idle_watchdog_pty_response(cached, live)
+            .expect("fresh PTY screen should be selected");
+        assert!(selected.contains("## Findings"));
+        assert!(!selected.contains("还剩最后一步"));
     }
 
     #[test]

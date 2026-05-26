@@ -133,7 +133,8 @@
                 (step s4 :logic "if the followed task is already terminal, immediately revalidate task-result-artifact and stream result_artifact/final")
                 (step s5 :logic "result_pending is not a fallback answer; it is a resumable transport state and terminal_task_result remains false")
                 (step s6 :logic "while supervising a still-running worker on a public/mobile follow stream, emit client-visible worker_status heartbeat events bounded by MISSIOND_JARVIS_VISIBLE_HEARTBEAT_SECS; colon SSE comments remain transport keepalive only and are not sufficient UI progress")
-                (step s7 :logic "timeout, poll_timeout, or public stream budget exhaustion emits diagnostic plus result_pending, never non-terminal final"))
+                (step s7 :logic "timeout, poll_timeout, or public stream budget exhaustion emits diagnostic plus result_pending, never non-terminal final")
+                (step s8 :logic "when an idle-slot watchdog has no durable provider final, it must read the fresh PTY screen before using cached pty.send responses, because cached responses can be stale progress frames"))
          :egress [result_pending follow_payload result_followup_stream result_artifact_event final_event]))
     :invariants
       ["All non-exact worker dispatch must carry grounding_context_id before a provider PTY receives the prompt."
@@ -146,6 +147,7 @@
        "Jarvis dispatch metadata MUST derive read_scope from the active runtime/project root (MISSIOND_PROJECT_ROOT, MISSIOND_REPO_ROOT, MISSIOND_WORKSPACE_ROOT, or current daemon cwd) and MUST NOT hardcode a developer-machine root path."
        "Jarvis dispatch classification MUST let explicit read-only/no-edit constraints win over incidental implementation words such as `提交` inside `不要提交`; a task that says `只读` or `不要修改文件` MUST route as review/read-only with empty write_scope."
        "Jarvis result streaming MUST use task-result-artifact as canonical completion authority; Board summary notes are only projections carrying an existing artifact hash and MUST NOT be converted to artifacts by follow-up streams."
+       "Idle-slot watchdog PTY extraction MUST prefer the current live screen over slot_last_responses; slot_last_responses are fallback only because they may hold stale progress captured before the provider printed its final answer."
        "task-result-artifact content MUST be clean terminal worker output; raw PTY screen captures, provider transcript envelopes, and escaped UI/progress text are diagnostics/evidence only and cannot become canonical content."
        "Jarvis plan-confirmed dispatch MUST emit a worker_dispatched handoff event with dispatch_state=pending_autopilot_claim before returning result_pending, even if the concrete slot is claimed asynchronously later."
        "Worker prompts MUST NOT instruct provider workers to call mission_board_update(status=done) as the primary close path; workers return structured final output, and Autopilot/orchestrator closes only after task-result-artifact validation."
