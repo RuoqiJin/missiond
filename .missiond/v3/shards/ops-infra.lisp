@@ -11,6 +11,7 @@
        "Deploy scripts MUST emit timing for cargo-build, release-copy, codesign, pre-switch smoke, kickstart, socket wait, post-switch smoke, and cleanup so iteration bottlenecks are observable."
        "Dev-only fast deploy may select debug profile and sccache through explicit operator flags/env, but must preserve release manifest, active symlink, smoke, and rollback semantics unless smoke is explicitly disabled."
        "Managed-node blue-green deploy MUST rewrite launchd WorkingDirectory, MISSIOND_PROJECT_ROOT, and MISSIOND_ORCHESTRATOR_ROOT to the active Git/codebase project root before restarting; kickstart alone is not sufficient because launchd caches stale plist roots such as old clean checkout directories."
+       "Blue-green rollback MUST restore launchd WorkingDirectory, MISSIOND_PROJECT_ROOT, MISSIOND_RUNTIME_DIR, and MISSIOND_COMPILED_RUNTIME_DIR captured before the switch; binary-only rollback can strand an old daemon on a new compiled-runtime hash."
        "AST repository-wide startup full sync MUST be opt-in through MISSIOND_AST_FULL_SYNC_ON_STARTUP; routine blue-green restarts stay event-driven and must not rewrite topology KB when no stale code files were synced."
        "Deploy scripts MUST NOT write git state or delete the launchd-owned socket; rollback may restore only the installed binary and restart the launchd job."
        "M6 MissionD formatting MUST be converged: scripts/rustfmt-missiond.sh --check is the repository-owned Rust formatter gate for crates/**."
@@ -20,6 +21,7 @@
        "Rust formatting for external or non-M6 projects MAY remain scoped through scripts/cargo-fmt-touched.sh, including staged, unstaged, and branch-diff modes."
        "The no-Rust-files path MUST exit 0 under set -euo pipefail; filters must not turn an empty grep match into a script failure."
        "MissionD primary runtime database MUST be PostgreSQL-only; the old MissionD SQLite backend, SQLite-to-Postgres migration module, and sqlite feature cfg MUST be absent from active code/build paths."
+       "Applied Postgres migration files are immutable, including comments; any schema or documentation change after application MUST use an additive migration or evidence note, because sqlx validates full-file migration checksums on daemon startup."
        "SQLite references are allowed only for the external Codex provider-local state_5.sqlite index adapter; skill-store and all MissionD-owned storage MUST use PostgreSQL."]
     :checks ["bash -n scripts/deploy-daemon.sh"
              "bash -n scripts/rustfmt-missiond.sh"
@@ -27,6 +29,7 @@
              "bash -n scripts/cargo-fmt-touched.sh"
              "scripts/cargo-fmt-touched.sh --check"
              "node scripts/check-v3-ops-infra-isomorphism.mjs"
+             "node scripts/check-pg-migrations-discipline.mjs"
              "node scripts/check-missiond-owned-sqlite-clean.mjs"
              "node scripts/check-v3-cli-conversation-ingestion-isomorphism.mjs"
              "node scripts/check-high-roi-contracts.mjs"])

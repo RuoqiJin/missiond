@@ -82,6 +82,9 @@ SMOKE_TIMEOUT="${MISSIOND_DEPLOY_SMOKE_TIMEOUT:-30}"
 RELEASE_KEEP="${MISSIOND_RELEASE_KEEP:-5}"
 BACKUP_RETENTION_DAYS="${MISSIOND_BACKUP_RETENTION_DAYS:-7}"
 APPLY_BACKUP_CLEANUP="${MISSIOND_APPLY_BACKUP_CLEANUP:-0}"
+PREVIOUS_LAUNCHD_PROJECT_ROOT=""
+PREVIOUS_RUNTIME_DIR=""
+PREVIOUS_COMPILED_RUNTIME_DIR=""
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
@@ -342,7 +345,35 @@ ensure_launchd_runtime_root() {
   log "launchd: artifact runtime dir $RUNTIME_DIR written to $LAUNCHD_PLIST"
 }
 
-restart_daemon_supervisor() {
+plist_read_string() {
+  local plist="$1"
+  local key="$2"
+  local buddy="/usr/libexec/PlistBuddy"
+  [ -f "$plist" ] || return 1
+  [ -x "$buddy" ] || return 1
+  "$buddy" -c "Print :${key}" "$plist" 2>/dev/null || return 1
+}
+
+capture_launchd_runtime_state() {
+  PREVIOUS_LAUNCHD_PROJECT_ROOT="$(plist_read_string "$LAUNCHD_PLIST" "WorkingDirectory" || true)"
+  PREVIOUS_RUNTIME_DIR="$(plist_read_string "$LAUNCHD_PLIST" "EnvironmentVariables:MISSIOND_RUNTIME_DIR" || true)"
+  PREVIOUS_COMPILED_RUNTIME_DIR="$(plist_read_string "$LAUNCHD_PLIST" "EnvironmentVariables:MISSIOND_COMPILED_RUNTIME_DIR" || true)"
+  [ -n "$PREVIOUS_LAUNCHD_PROJECT_ROOT" ] || PREVIOUS_LAUNCHD_PROJECT_ROOT="$LAUNCHD_PROJECT_ROOT"
+  [ -n "$PREVIOUS_RUNTIME_DIR" ] || PREVIOUS_RUNTIME_DIR="$RUNTIME_DIR"
+  [ -n "$PREVIOUS_COMPILED_RUNTIME_DIR" ] || PREVIOUS_COMPILED_RUNTIME_DIR="$COMPILED_RUNTIME_DIR"
+  log "launchd: captured previous runtime root $PREVIOUS_LAUNCHD_PROJECT_ROOT"
+  log "launchd: captured previous artifact runtime dir $PREVIOUS_RUNTIME_DIR"
+}
+
+restart_daemon_supervisor_for_runtime() {
+  local project_root="$1"
+  local runtime_dir="$2"
+  local compiled_runtime_dir="$3"
+  LAUNCHD_PROJECT_ROOT="$project_root"
+  RUNTIME_DIR="$runtime_dir"
+  COMPILED_RUNTIME_DIR="$compiled_runtime_dir"
+  export MISSIOND_RUNTIME_DIR="$RUNTIME_DIR"
+  export MISSIOND_COMPILED_RUNTIME_DIR="$COMPILED_RUNTIME_DIR"
   if [ ! -f "$LAUNCHD_PLIST" ]; then
     kickstart_daemon
     return $?
@@ -353,6 +384,10 @@ restart_daemon_supervisor() {
   launchctl bootout "gui/$(id -u)" "$LAUNCHD_PLIST" >/dev/null 2>&1 || true
   launchctl bootstrap "gui/$(id -u)" "$LAUNCHD_PLIST" 2>&1 | tail -8
   launchctl kickstart -k "gui/$(id -u)/$LABEL" 2>&1 | tail -5
+}
+
+restart_daemon_supervisor() {
+  restart_daemon_supervisor_for_runtime "$LAUNCHD_PROJECT_ROOT" "$RUNTIME_DIR" "$COMPILED_RUNTIME_DIR"
 }
 
 post_switch_smoke() {
@@ -421,7 +456,12 @@ rollback_to_previous() {
   fi
   log "rollback: switching active back to $previous"
   switch_active_release "$previous"
-  restart_daemon_supervisor >/dev/null 2>&1 || true
+  if [ -n "$PREVIOUS_LAUNCHD_PROJECT_ROOT" ] && [ -n "$PREVIOUS_RUNTIME_DIR" ] && [ -n "$PREVIOUS_COMPILED_RUNTIME_DIR" ]; then
+    log "rollback: restoring launchd runtime root $PREVIOUS_LAUNCHD_PROJECT_ROOT"
+    restart_daemon_supervisor_for_runtime "$PREVIOUS_LAUNCHD_PROJECT_ROOT" "$PREVIOUS_RUNTIME_DIR" "$PREVIOUS_COMPILED_RUNTIME_DIR" >/dev/null 2>&1 || true
+  else
+    restart_daemon_supervisor >/dev/null 2>&1 || true
+  fi
   return 0
 }
 
@@ -639,6 +679,7 @@ fi
 
 RELEASE_START="$(date +%s)"
 PREVIOUS_ACTIVE="$(create_legacy_release_if_needed || true)"
+capture_launchd_runtime_state
 GIT_SHA="$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
 RELEASE_ID="${MISSIOND_RELEASE_ID:-$(date -u +%Y%m%dT%H%M%SZ)-${GIT_SHA}-${PROFILE}}"
 CANDIDATE_DIR="$RELEASES_DIR/$RELEASE_ID"
@@ -660,7 +701,7 @@ xattr -d com.apple.quarantine "$CANDIDATE_DIR/bin/missiond" 2>/dev/null || true
 xattr -d com.apple.quarantine "$CANDIDATE_DIR/bin/mission-mcp" 2>/dev/null || true
 
 cat > "$CANDIDATE_DIR/release-manifest.json" <<EOF
-{"schema":"missiond.release-manifest.v1","release_id":"$RELEASE_ID","profile":"$PROFILE","git_sha":"$GIT_SHA","daemon_sha256":"$NEW_HASH","mcp_sha256":"$NEW_MCP_HASH","typed_lisp_runtime":$TYPED_LISP_RUNTIME_MANIFEST,"created_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","source":"scripts/deploy-daemon.sh"}
+{"schema":"missiond.release-manifest.v1","release_id":"$RELEASE_ID","profile":"$PROFILE","git_sha":"$GIT_SHA","daemon_sha256":"$NEW_HASH","mcp_sha256":"$NEW_MCP_HASH","typed_lisp_runtime":$TYPED_LISP_RUNTIME_MANIFEST,"launchd_project_root":"$LAUNCHD_PROJECT_ROOT","runtime_dir":"$RUNTIME_DIR","compiled_runtime_dir":"$COMPILED_RUNTIME_DIR","created_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","source":"scripts/deploy-daemon.sh"}
 EOF
 log "candidate: $CANDIDATE_DIR"
 

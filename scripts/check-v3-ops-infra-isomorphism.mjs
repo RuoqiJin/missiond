@@ -98,6 +98,7 @@ function checkFiles(root, files) {
     'build -> candidate release -> manifest -> active symlink -> launchctl kickstart -> socket wait -> IPC smoke',
     'Active daemon and MCP entrypoints MUST resolve through ~/.xjp-mission/active',
     'Blue-green rollback MUST switch active back to the previous release',
+    'Blue-green rollback MUST restore launchd WorkingDirectory, MISSIOND_PROJECT_ROOT, MISSIOND_RUNTIME_DIR, and MISSIOND_COMPILED_RUNTIME_DIR captured before the switch',
     'Release cleanup MUST keep active, previous, and newest retained releases',
     'IPC smoke MUST retry after socket readiness and then rollback on failure',
     'Deploy smoke timeout MUST be configurable through MISSIOND_DEPLOY_SMOKE_TIMEOUT',
@@ -111,9 +112,11 @@ function checkFiles(root, files) {
     'Rust formatting for external or non-M6 projects MAY remain scoped',
     'rustfmt MUST run with skip_children=true',
     'MissionD primary runtime database MUST be PostgreSQL-only',
+    'Applied Postgres migration files are immutable, including comments',
     'old MissionD SQLite backend, SQLite-to-Postgres migration module, and sqlite feature cfg MUST be absent',
     'SQLite references are allowed only for the external Codex provider-local state_5.sqlite index adapter',
     'node scripts/check-v3-ops-infra-isomorphism.mjs',
+    'node scripts/check-pg-migrations-discipline.mjs',
   ]);
 
   requireAll(diagnostics, files.deployDaemon, sources.deployDaemon, [
@@ -129,6 +132,9 @@ function checkFiles(root, files) {
     'MISSIOND_RELEASES_DIR',
     'MISSIOND_ACTIVE_LINK',
     'MISSIOND_RELEASE_KEEP',
+    'PREVIOUS_LAUNCHD_PROJECT_ROOT',
+    'PREVIOUS_RUNTIME_DIR',
+    'PREVIOUS_COMPILED_RUNTIME_DIR',
     'MISSIOND_BACKUP_RETENTION_DAYS',
     'MISSIOND_BIN_PATH',
     'MISSIOND_MCP_BIN_PATH',
@@ -143,8 +149,13 @@ function checkFiles(root, files) {
     'print_timing_summary',
     'RUSTC_WRAPPER',
     'release-manifest.json',
+    '"launchd_project_root"',
+    '"runtime_dir"',
+    '"compiled_runtime_dir"',
     'atomic_symlink_update',
     'switch_active_release',
+    'capture_launchd_runtime_state',
+    'restart_daemon_supervisor_for_runtime',
     'rollback_to_previous',
     'cleanup_old_releases',
     'create_legacy_release_if_needed',
@@ -298,6 +309,7 @@ function buildFixture() {
       ["Daemon redeploy MUST stay one command: build -> candidate release -> manifest -> active symlink -> launchctl kickstart -> socket wait -> IPC smoke."
        "Active daemon and MCP entrypoints MUST resolve through ~/.xjp-mission/active."
        "Blue-green rollback MUST switch active back to the previous release."
+       "Blue-green rollback MUST restore launchd WorkingDirectory, MISSIOND_PROJECT_ROOT, MISSIOND_RUNTIME_DIR, and MISSIOND_COMPILED_RUNTIME_DIR captured before the switch."
        "Release cleanup MUST keep active, previous, and newest retained releases."
        "IPC smoke MUST retry after socket readiness and then rollback on failure."
        "Deploy smoke timeout MUST be configurable through MISSIOND_DEPLOY_SMOKE_TIMEOUT."
@@ -311,6 +323,7 @@ function buildFixture() {
        "Rust formatting for external or non-M6 projects MAY remain scoped through cargo-fmt-touched."
        "rustfmt MUST run with skip_children=true."
        "MissionD primary runtime database MUST be PostgreSQL-only; the old MissionD SQLite backend, SQLite-to-Postgres migration module, and sqlite feature cfg MUST be absent from active code/build paths."
+       "Applied Postgres migration files are immutable, including comments; any schema or documentation change after application MUST use an additive migration or evidence note."
        "SQLite references are allowed only for the external Codex provider-local state_5.sqlite index adapter; skill-store and all MissionD-owned storage MUST use PostgreSQL."])
   (implementation-map
     (surface ops-infra
@@ -326,12 +339,14 @@ function buildFixture() {
              "scripts/check-v3-ops-infra-isomorphism.mjs"]
       :note "fixture"))
   (compression-contract
-    :checks ["node scripts/check-v3-ops-infra-isomorphism.mjs"]))`);
+    :checks ["node scripts/check-v3-ops-infra-isomorphism.mjs"
+             "node scripts/check-pg-migrations-discipline.mjs"]))`);
 
   writeFixture(root, DEFAULT_FILES.deployDaemon, `
 scripts/deploy-daemon.sh                  # build + blue-green deploy + smoke
 --build-only --no-smoke --debug --fast --cleanup-only --apply-cleanup
 MISSIOND_INSTALL_ROOT MISSIOND_RELEASES_DIR MISSIOND_ACTIVE_LINK MISSIOND_RELEASE_KEEP MISSIOND_BACKUP_RETENTION_DAYS
+PREVIOUS_LAUNCHD_PROJECT_ROOT PREVIOUS_RUNTIME_DIR PREVIOUS_COMPILED_RUNTIME_DIR
 MISSIOND_BIN_PATH MISSIOND_MCP_BIN_PATH MISSIOND_SOCKET_PATH MISSIOND_LAUNCHCTL_LABEL MISSIOND_DEPLOY_TIMEOUT MISSIOND_DEPLOY_SMOKE_TIMEOUT
 MISSIOND_USE_SCCACHE
 set -euo pipefail
@@ -341,8 +356,13 @@ record_timing "cargo-build"
 print_timing_summary
 RUSTC_WRAPPER
 release-manifest.json
+"launchd_project_root"
+"runtime_dir"
+"compiled_runtime_dir"
 atomic_symlink_update
 switch_active_release
+capture_launchd_runtime_state
+restart_daemon_supervisor_for_runtime
 rollback_to_previous
 cleanup_old_releases
 create_legacy_release_if_needed

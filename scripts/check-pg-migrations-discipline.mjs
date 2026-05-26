@@ -2,12 +2,14 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 
 const usage = `Usage:
   node scripts/check-pg-migrations-discipline.mjs [--json]
 
 Checks MissionD Postgres migration discipline:
 - migrations are Postgres-only active contracts
+- already-applied frozen migrations keep their exact sqlx checksum
 - SQLite/path DB semantics are not introduced
 - destructive drops require an explicit missiond-allow-destructive-migration marker
 `;
@@ -34,6 +36,10 @@ const FORBIDDEN = [
 
 const DESTRUCTIVE = /\bDROP\s+(TABLE|COLUMN|INDEX|SCHEMA)\b|\bTRUNCATE\s+TABLE\b|\bALTER\s+TABLE\b[^;]*\bDROP\b/i;
 const ALLOW_MARKER = 'missiond-allow-destructive-migration';
+const FROZEN_SHA384 = Object.freeze({
+  'crates/missiond-core/migrations/20260318000000_init.sql':
+    'cdb48608a9cdfe380c0e00078072195e0a02213e4addecf23643ad40730f8619ed3ceee184e3cc4806a1e8a614e429c9',
+});
 
 function main() {
   const args = process.argv.slice(2);
@@ -54,6 +60,7 @@ function main() {
     if (!entry.endsWith('.sql')) continue;
     const rel = path.posix.join(MIGRATIONS_DIR, entry);
     const source = fs.readFileSync(path.join(root, rel), 'utf8');
+    checkFrozenChecksum(rel, source, diagnostics);
     checkHeader(rel, source, diagnostics);
     checkForbidden(rel, source, diagnostics);
     checkDestructive(rel, source, diagnostics);
@@ -83,6 +90,7 @@ function checkHeader(file, source, diagnostics) {
 
 function checkForbidden(file, source, diagnostics) {
   if (SQLITE_TOKEN_ALLOW.has(file)) return;
+  if (frozenChecksumMatches(file, source)) return;
   const lines = source.split(/\r?\n/);
   lines.forEach((line, index) => {
     for (const [name, regex] of FORBIDDEN) {
@@ -91,6 +99,12 @@ function checkForbidden(file, source, diagnostics) {
       }
     }
   });
+}
+
+function frozenChecksumMatches(file, source) {
+  const expected = FROZEN_SHA384[file];
+  if (!expected) return false;
+  return crypto.createHash('sha384').update(source).digest('hex') === expected;
 }
 
 function checkDestructive(file, source, diagnostics) {
@@ -105,6 +119,18 @@ function checkDestructive(file, source, diagnostics) {
     file,
     line: 1,
     message: `destructive migration requires -- ${ALLOW_MARKER}: <reason>`,
+  });
+}
+
+function checkFrozenChecksum(file, source, diagnostics) {
+  const expected = FROZEN_SHA384[file];
+  if (!expected) return;
+  const actual = crypto.createHash('sha384').update(source).digest('hex');
+  if (actual === expected) return;
+  diagnostics.push({
+    file,
+    line: 1,
+    message: `frozen migration checksum changed: expected sha384 ${expected}, got ${actual}; create an additive migration instead of editing an applied migration`,
   });
 }
 

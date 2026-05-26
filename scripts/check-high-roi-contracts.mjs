@@ -167,6 +167,8 @@ function main() {
     ...checkRequiredText(root, 'scripts/check-pg-migrations-discipline.mjs', [
       ['pg migration checker', /check-pg-migrations-discipline/],
       ['destructive migration marker', /missiond-allow-destructive-migration/],
+      ['frozen migration checksum map', /FROZEN_SHA384/],
+      ['frozen init migration checksum', /cdb48608a9cdfe380c0e00078072195e0a02213e4addecf23643ad40730f8619ed3ceee184e3cc4806a1e8a614e429c9/],
     ]),
     ...checkForbiddenText(root, 'crates/missiond-daemon/src/handlers/compute/worker.rs', [
       ['direct worker registry access', /state\.worker_registry/],

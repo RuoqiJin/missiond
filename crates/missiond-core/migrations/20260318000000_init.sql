@@ -1,4 +1,4 @@
--- MissionD PostgreSQL Schema
+-- MissionD PostgreSQL Schema (M2: 1:1 translation from SQLite)
 -- Extensions
 CREATE EXTENSION IF NOT EXISTS vector;      -- pgvector for embeddings
 CREATE EXTENSION IF NOT EXISTS pg_trgm;     -- trigram for Chinese/code search
@@ -175,7 +175,7 @@ CREATE TABLE IF NOT EXISTS knowledge (
     scope_task_id TEXT,
     utility_score DOUBLE PRECISION NOT NULL DEFAULT 0.5,
     needs_re_extraction INTEGER NOT NULL DEFAULT 0,
-    -- FTS: tsvector column for Postgres full-text search
+    -- FTS: tsvector column replaces FTS5 virtual table
     fts_doc tsvector GENERATED ALWAYS AS (
         to_tsvector('simple', coalesce(key, '') || ' ' || coalesce(summary, '') || ' ' || coalesce(detail, '') || ' ' || coalesce(category, ''))
     ) STORED,
@@ -326,7 +326,7 @@ CREATE INDEX IF NOT EXISTS idx_conv_msg_tool_name ON conversation_messages(tool_
 CREATE INDEX IF NOT EXISTS idx_conv_msg_fts ON conversation_messages USING GIN(fts_content);
 CREATE INDEX IF NOT EXISTS idx_conv_msg_trgm ON conversation_messages USING GIN(content gin_trgm_ops);
 
--- Message count trigger
+-- Message count trigger (replaces SQLite trg_msg_count_insert)
 CREATE OR REPLACE FUNCTION trg_msg_count_fn() RETURNS trigger AS $$
 BEGIN
     UPDATE conversations
