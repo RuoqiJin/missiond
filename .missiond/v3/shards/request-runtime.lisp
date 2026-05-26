@@ -108,7 +108,8 @@
                 (step s6 :logic "stream final text only after the task-result artifact hash is known or the diagnostic is surfaced")
                 (step s7 :logic "if the worker provider returns an empty final after its slot is idle/exited/error, write provider-empty-final as a task-result-artifact diagnostic, fail the BoardTask, and notify Jarvis instead of leaving the task running until mobile timeout")
                 (step s8 :logic "when Autopilot/watchdog observes a durable provider final for an idle running worker, it must first write task-result-artifact and include its hash in the summary note before changing the BoardTask to done")
-                (step s9 :logic "durable final selection is output-contract aware: for tasks declaring Findings/Evidence/Recommendations/Verification, provider messages missing those sections are treated as stale/progress evidence, not final results"))
+                (step s9 :logic "durable final selection is output-contract aware: for tasks declaring Findings/Evidence/Recommendations/Verification, provider messages missing those sections are treated as stale/progress evidence, not final results")
+                (step s10 :logic "if daemon restart or send loss leaves an idle worker slot without durable final or task-result-artifact after watchdog_grace_secs, write a failed diagnostic artifact and fail the BoardTask instead of keeping Jarvis or Board waiting"))
          :egress [task-result-artifact result_artifact_event final_event diagnostic])
        (function jarvis-dispatch-causality
          :entry [JarvisSSE plan-confirmed BoardTask auto_execute]

@@ -405,6 +405,7 @@ async fn put_autopilot_task_result_artifact(
     slot_id: &str,
     durable_completion: Option<&DurableProviderCompletion>,
     final_summary: &str,
+    result_status: &str,
     duration_ms: u64,
 ) -> Option<String> {
     let provider = durable_completion
@@ -422,7 +423,7 @@ async fn put_autopilot_task_result_artifact(
         slot_id: Some(slot_id.to_string()),
         conversation_id: conversation_id.map(str::to_string),
         provider: provider.to_string(),
-        result_status: "completed".to_string(),
+        result_status: result_status.to_string(),
         summary: final_summary.to_string(),
         content: Some(full_content.to_string()),
         json: serde_json::json!({
@@ -431,6 +432,7 @@ async fn put_autopilot_task_result_artifact(
             "slot_id": slot_id,
             "conversation_id": conversation_id,
             "provider": provider,
+            "result_status": result_status,
             "duration_ms": duration_ms,
             "summary": final_summary,
             "content": full_content,
@@ -1060,6 +1062,7 @@ async fn close_idle_running_task_from_durable_summary(
                 slot_id,
                 Some(&completion),
                 &completion.summary,
+                "completed",
                 0,
             )
             .await;
@@ -1129,6 +1132,7 @@ async fn close_idle_running_task_from_durable_summary(
                     slot_id,
                     None,
                     &summary,
+                    "completed",
                     0,
                 )
                 .await;
@@ -2504,6 +2508,76 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
                         {
                             continue;
                         }
+                        if claimed_age >= watchdog_grace_secs {
+                            let diagnostic_summary = format!(
+                                "Diagnostic: BoardTask `{}` is still running, but worker slot `{}` is {:?} and MissionD could not find a durable provider final, structured PTY final, or task-result-artifact after {}s. MissionD failed this task instead of leaving it running indefinitely; retry with a fresh grounded shard or inspect the provider transcript.",
+                                rt.id,
+                                slot_id,
+                                info.state,
+                                claimed_age
+                            );
+                            let artifact_hash = put_autopilot_task_result_artifact(
+                                state,
+                                rt,
+                                slot_id,
+                                None,
+                                &diagnostic_summary,
+                                "failed",
+                                0,
+                            )
+                            .await;
+                            let artifact_suffix = artifact_hash
+                                .as_ref()
+                                .map(|hash| format!("\n\ntask_result_artifact: `{hash}`"))
+                                .unwrap_or_default();
+                            let _ = state
+                                .store
+                                .add_board_task_note(
+                                    &missiond_core::types::AddBoardTaskNoteInput {
+                                        task_id: rt.id.to_string(),
+                                        content: format!(
+                                            "⚠️ **Autopilot failed close** — idle slot without durable final\n\n{}{}",
+                                            truncate_safe(
+                                                &diagnostic_summary,
+                                                AUTOPILOT_SUMMARY_NOTE_MAX_BYTES
+                                            ),
+                                            artifact_suffix
+                                        ),
+                                        note_type: Some("summary".to_string()),
+                                        author: Some("autopilot".to_string()),
+                                    },
+                                )
+                                .await;
+                            let _ = state
+                                .store
+                                .update_board_task(
+                                    rt.id.as_str(),
+                                    &missiond_core::types::UpdateBoardTaskInput {
+                                        status: Some("failed".to_string()),
+                                        ..Default::default()
+                                    },
+                                )
+                                .await;
+                            let _ = state
+                                .bus
+                                .publish_board(BoardEvent::StatusChanged {
+                                    task_id: rt.id.to_string(),
+                                    old_status: format!("{:?}", rt.status),
+                                    new_status: "failed".to_string(),
+                                })
+                                .await;
+                            let _ = state
+                                .store
+                                .update_prompt_snapshot_outcome(rt.id.as_str(), "failed")
+                                .await;
+                            notify_jarvis_failure(
+                                state,
+                                rt,
+                                "worker slot became idle without durable final or task-result-artifact",
+                            )
+                            .await;
+                            continue;
+                        }
                         // Idle/terminal slots are not actively producing output.
                         // Only reclaim once the configured task budget plus
                         // grace has elapsed; otherwise the slot may simply be
@@ -3838,6 +3912,7 @@ async fn dispatch_board_tasks_with_config(
                             &slot_id,
                             durable_completion.as_ref(),
                             &diagnostic_summary,
+                            "failed",
                             res.duration_ms,
                         )
                         .await;
@@ -4065,6 +4140,7 @@ async fn dispatch_board_tasks_with_config(
                         &slot_id,
                         durable_completion.as_ref(),
                         &final_summary,
+                        "completed",
                         res.duration_ms,
                     )
                     .await;

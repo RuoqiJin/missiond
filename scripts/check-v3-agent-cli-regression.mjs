@@ -59,6 +59,7 @@ function main() {
       'Codex code/review worker lanes are ordinary BoardTask candidates',
       'Agy/Antigravity writes durable markdown artifacts under the provider brain store',
       'provider-empty-final task-result-artifact diagnostic',
+      'idle worker slot without durable final',
     ]);
     requireAll(diagnostics, FILES.workstationPoolEvidence, sources.workstationPoolEvidence, [
       'agy-research',
@@ -107,6 +108,8 @@ function main() {
       'agy_artifact_declared_board_task_id',
       'rejects_foreign_board_task_artifact',
       'provider-empty-final',
+      'worker slot became idle without durable final or task-result-artifact',
+      'idle slot without durable final',
     ]);
     requireAll(diagnostics, FILES.main, sources.main, [
       'GenericCliSlotManager::new',

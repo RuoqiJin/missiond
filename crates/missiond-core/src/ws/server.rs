@@ -1411,13 +1411,44 @@ impl PTYWebSocketServer {
     async fn handle_slot_status(
         mut stream: TcpStream,
         pty_manager: Arc<PTYManager>,
+        db: Option<Arc<dyn crate::db::traits::MissionStore>>,
     ) -> anyhow::Result<()> {
         // Consume the request
         let mut buf = vec![0u8; 4096];
         let _ = stream.read(&mut buf).await;
 
         let all_status = pty_manager.get_all_status().await;
-        let body = serde_json::to_string(&all_status).unwrap_or_else(|_| "[]".to_string());
+        let mut status_values: Vec<serde_json::Value> = all_status
+            .iter()
+            .filter_map(|status| serde_json::to_value(status).ok())
+            .collect();
+        if let Some(db) = db.as_ref() {
+            match db.list_board_tasks(Some("running"), true).await {
+                Ok(running_tasks) => {
+                    for value in &mut status_values {
+                        let slot_id = value
+                            .get("slotId")
+                            .or_else(|| value.get("slot_id"))
+                            .and_then(|slot_id| slot_id.as_str())
+                            .map(str::to_string);
+                        let Some(slot_id) = slot_id else {
+                            continue;
+                        };
+                        if let Some(task) =
+                            Self::active_board_task_for_slot_status(&running_tasks, &slot_id)
+                        {
+                            value["activeBoardTaskId"] = serde_json::json!(task.id.as_str());
+                            value["currentTaskId"] = serde_json::json!(task.id.as_str());
+                            value["activeBoardTask"] = Self::board_task_status_summary_json(task);
+                        }
+                    }
+                }
+                Err(err) => {
+                    warn!(error = %err, "failed to enrich /api/slots with running BoardTask bindings");
+                }
+            }
+        }
+        let body = serde_json::to_string(&status_values).unwrap_or_else(|_| "[]".to_string());
         let response = format!(
             "HTTP/1.1 200 OK\r\n\
              Content-Type: application/json\r\n\
@@ -1431,6 +1462,35 @@ impl PTYWebSocketServer {
         stream.write_all(response.as_bytes()).await?;
         stream.shutdown().await?;
         Ok(())
+    }
+
+    fn active_board_task_for_slot_status<'a>(
+        running_tasks: &'a [crate::types::BoardTask],
+        slot_id: &str,
+    ) -> Option<&'a crate::types::BoardTask> {
+        running_tasks
+            .iter()
+            .filter(|task| {
+                task.assignee.as_deref() == Some(slot_id)
+                    || (task.claim_executor_type.as_deref() == Some("pty_slot")
+                        && task.claim_executor_id.as_deref() == Some(slot_id))
+            })
+            .max_by(|a, b| a.updated_at.cmp(&b.updated_at))
+    }
+
+    fn board_task_status_summary_json(task: &crate::types::BoardTask) -> serde_json::Value {
+        serde_json::json!({
+            "id": task.id.as_str(),
+            "title": task.title.as_str(),
+            "status": task.status.as_str(),
+            "project": task.project.as_deref(),
+            "category": task.category.as_str(),
+            "parentId": task.parent_id.as_ref().map(|id| id.as_str()),
+            "assignee": task.assignee.as_deref(),
+            "claimExecutorId": task.claim_executor_id.as_deref(),
+            "claimExecutorType": task.claim_executor_type.as_deref(),
+            "updatedAt": task.updated_at.as_str(),
+        })
     }
 
     fn jarvis_slot_runtime_cwd() -> std::path::PathBuf {
@@ -6021,7 +6081,7 @@ impl PTYWebSocketServer {
             // Slot status API
             if method == "GET" && normalized_path == "/api/slots" && !is_upgrade {
                 return match pty_manager {
-                    Some(pm) => Self::handle_slot_status(stream, pm).await,
+                    Some(pm) => Self::handle_slot_status(stream, pm, db.clone()).await,
                     None => {
                         let mut s = stream;
                         let err =

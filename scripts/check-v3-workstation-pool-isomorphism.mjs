@@ -39,6 +39,7 @@ const FILES = {
   autopilot: 'crates/missiond-daemon/src/engine/intent_engine/autopilot.rs',
   computeSlot: 'crates/missiond-daemon/src/handlers/compute/compute_slot.rs',
   slotTool: 'crates/missiond-daemon/src/handlers/compute/slot.rs',
+  wsServer: 'crates/missiond-core/src/ws/server.rs',
   slotManager: 'crates/missiond-core/src/core/slot_manager.rs',
   missionControl: 'crates/missiond-core/src/core/mission_control.rs',
   projectTypes: 'crates/missiond-core/src/types/project.rs',
@@ -279,6 +280,15 @@ function checkFiles(root) {
     'model.contains("sonnet")',
     'v3_slot_ids.contains(&slot.config.id)',
   ]);
+  requireAll(diagnostics, FILES.wsServer, sources.wsServer, [
+    'fn handle_slot_status',
+    'list_board_tasks(Some("running"), true)',
+    'fn active_board_task_for_slot_status',
+    'fn board_task_status_summary_json',
+    '"activeBoardTaskId"',
+    '"currentTaskId"',
+    '"activeBoardTask"',
+  ]);
 
   requireAll(diagnostics, FILES.slotManager, sources.slotManager, [
     'pub fn register_runtime_slot(&self, mut config: SlotConfig)',
@@ -292,7 +302,7 @@ function checkFiles(root) {
     'Supervisor patrol (slot-supervisor) is gated on V3 workstation-pool / runtime-config registration',
     'V3 workstation-pool (plus startup-slots) is authoritative for dispatchable slots',
     'mission_compute_slot list status MUST derive from PTYManager',
-    'mission_slots MUST project activeBoardTaskId/currentTaskId and activeBoardTask',
+    'mission_slots and /api/slots MUST project activeBoardTaskId/currentTaskId and activeBoardTask',
     'Codex master-control is a resident orchestrator lane',
     'Read-only Gemini pool workers MUST project to Gemini CLI `--approval-mode plan --policy .missiond/v3/policies/gemini-readonly-policy.toml`',
     'ProjectRegistry path resolution MUST be path-component aware rather than raw string prefix matching',
@@ -691,7 +701,7 @@ function buildFixture() {
     :invariants ["Supervisor patrol (slot-supervisor) is gated on V3 workstation-pool / runtime-config registration"
                  "V3 workstation-pool (plus startup-slots) is authoritative for dispatchable slots"
                  "mission_compute_slot list status MUST derive from PTYManager"
-                 "mission_slots MUST project activeBoardTaskId/currentTaskId and activeBoardTask"
+                 "mission_slots and /api/slots MUST project activeBoardTaskId/currentTaskId and activeBoardTask"
                  "Codex master-control is a resident orchestrator lane"
                  "Read-only Gemini pool workers MUST project to Gemini CLI \`--approval-mode plan --policy .missiond/v3/policies/gemini-readonly-policy.toml\`"]
     :checker "node scripts/check-v3-workstation-pool-isomorphism.mjs")
@@ -787,6 +797,12 @@ get_running_slot_task(&slot.config.id);
 fn is_stopped_legacy_sonnet_residual() {}
 model.contains("sonnet");
 v3_slot_ids.contains(&slot.config.id);`);
+  write(root, 'wsServer', `
+async fn handle_slot_status() {}
+list_board_tasks(Some("running"), true);
+fn active_board_task_for_slot_status() {}
+fn board_task_status_summary_json() {}
+"activeBoardTaskId"; "currentTaskId"; "activeBoardTask";`);
   write(root, 'slotManager', `
 pub fn register_runtime_slot(&self, mut config: SlotConfig) {}
 "Runtime slot registered";`);

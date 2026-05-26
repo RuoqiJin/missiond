@@ -87,7 +87,7 @@
              "crates/missiond-core/src/core/slot_manager.rs"
              "scripts/check-v3-workstation-pool-isomorphism.mjs"]
       :evidence ".missiond/v3/evidence/workstation-pool.lisp"
-      :note "workstation-pool is the compact V3 compute-account SSOT. It declares ClaudeCode Opus/Sonnet lanes, Gemini legacy read-only lanes, Agy successor research lanes, Codex code/review worker lanes, and the non-shard Codex master lane; runtime projection feeds SlotManager, PTYSpawnOptions, Autopilot routing, mission_compute_slot list, and mission_slots legacy-Sonnet filtering. mission_slots MUST project activeBoardTaskId/currentTaskId and activeBoardTask by joining running BoardTasks on assignee or pty_slot claim so the Board cockpit can show what each visible PTY is actually doing."
+      :note "workstation-pool is the compact V3 compute-account SSOT. It declares ClaudeCode Opus/Sonnet lanes, Gemini legacy read-only lanes, Agy successor research lanes, Codex code/review worker lanes, and the non-shard Codex master lane; runtime projection feeds SlotManager, PTYSpawnOptions, Autopilot routing, mission_compute_slot list, mission_slots legacy-Sonnet filtering, and public /api/slots slot telemetry. mission_slots and /api/slots MUST project activeBoardTaskId/currentTaskId and activeBoardTask by joining running BoardTasks on assignee or pty_slot claim so the Board cockpit and Terminal tab can show what each visible PTY is actually doing."
       :evidence-sidecar ".missiond/v3/evidence/workstation-pool.lisp")
 
 (surface resident-master-control
