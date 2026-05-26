@@ -19,6 +19,7 @@ use crate::gemini_client::GeminiClient;
 use crate::mcp_client::McpProcessClient;
 use crate::minimax_gateway::MinimaxHandle;
 use crate::prompts::PromptStore;
+use crate::runtime_actors::{ExtractionLaneHandle, ExtractionLaneKind, SlotActorHandle};
 use crate::slot_dispatch::SlotDispatchGuard;
 use crate::slot_orchestrator::AgentSlotManager;
 use crate::sonnet_gateway::SonnetHandle;
@@ -706,6 +707,10 @@ impl AppState {
         }
     }
 
+    pub(crate) fn slot_actor(&self, slot_id: impl Into<String>) -> SlotActorHandle {
+        SlotActorHandle::new(slot_id, Arc::clone(&self.pty))
+    }
+
     pub(crate) fn worker_plane(&self) -> WorkerPlane {
         WorkerPlane {
             registry: Arc::clone(&self.worker_registry),
@@ -729,6 +734,22 @@ impl AppState {
             bus: Arc::clone(&self.bus),
             worker_registry: Arc::clone(&self.worker_registry),
         }
+    }
+
+    pub(crate) fn fast_extraction_lane(&self) -> ExtractionLaneHandle {
+        ExtractionLaneHandle::new(
+            ExtractionLaneKind::Fast,
+            Arc::clone(&self.extraction_state),
+            Arc::clone(&self.memory_slot_busy_since),
+        )
+    }
+
+    pub(crate) fn slow_extraction_lane(&self) -> ExtractionLaneHandle {
+        ExtractionLaneHandle::new(
+            ExtractionLaneKind::Slow,
+            Arc::clone(&self.slow_extraction_state),
+            Arc::clone(&self.slow_slot_busy_since),
+        )
     }
 }
 

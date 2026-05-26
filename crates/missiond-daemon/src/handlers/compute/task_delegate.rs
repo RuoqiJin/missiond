@@ -153,8 +153,16 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         Err(error) => return Ok(error),
     };
 
-    if let Some(error) = exact_shard_contract_error(intent, &delegation_metadata) {
-        return Ok(error);
+    let explicit_exact_shard_ready =
+        bool_arg(&args, &["exact_shard_ready", "exactShardReady"]).unwrap_or(false);
+    if !explicit_exact_shard_ready {
+        if let Some(error) = exact_shard_contract_error(intent, &delegation_metadata) {
+            return Ok(error);
+        }
+    } else if intent == "code" {
+        delegation_metadata
+            .task_class
+            .get_or_insert_with(|| "implementation".to_string());
     }
 
     let cwd = args.get("cwd").and_then(|v| v.as_str());
@@ -981,6 +989,47 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
         }
     };
 
+    let workflow_run_id = if dry_run {
+        None
+    } else {
+        Some(
+            string_arg(&args, &["workflow_run_id", "workflowRunId"])
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    format!(
+                        "swarm-run:{}:{}",
+                        project_id,
+                        chrono::Utc::now().timestamp_millis()
+                    )
+                }),
+        )
+    };
+    let workflow_start_result = if let Some(id) = workflow_run_id.as_deref() {
+        Some(
+            state
+                .storage()
+                .shared_memory
+                .handle_action(&json!({
+                    "action": "workflow_start",
+                    "workflow_run_id": id,
+                    "workflow_id": "mission_swarm_run",
+                    "workflow_path": ".missiond/workflows/swarm-run.lisp",
+                    "project_id": project_id.as_str(),
+                    "parent_task_id": parent_id.as_deref(),
+                    "max_inflight": max_claude_workers + max_gemini_workers,
+                    "cursor": { "planned_count": planned.len() },
+                    "checkpoint": {
+                        "objective": objective.as_str(),
+                        "context_pack_path": context_pack_path.as_str(),
+                        "write_policy": write_policy.as_str()
+                    }
+                }))
+                .await,
+        )
+    } else {
+        None
+    };
+
     let mut created_task_ids = Vec::new();
     let mut provisioned_slots = Vec::new();
     if !dry_run {
@@ -1076,6 +1125,31 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
         state.board_dispatch_notify.notify_one();
     }
 
+    let workflow_checkpoint_result =
+        if let (false, Some(id)) = (dry_run, workflow_run_id.as_deref()) {
+            Some(
+                state
+                    .storage()
+                    .shared_memory
+                    .handle_action(&json!({
+                        "action": "workflow_checkpoint",
+                        "workflow_run_id": id,
+                        "status": "running",
+                        "cursor": { "created_task_ids": created_task_ids.clone() },
+                        "checkpoint": {
+                            "objective": objective.as_str(),
+                            "context_pack_path": context_pack_path.as_str(),
+                            "created_task_count": created_task_ids.len()
+                        },
+                        "active_task_ids": created_task_ids.clone(),
+                        "artifact_hashes": []
+                    }))
+                    .await,
+            )
+        } else {
+            None
+        };
+
     Ok(ToolResult::json_pretty(&json!({
         "schema": "missiond.swarm-run.v1",
         "ok": true,
@@ -1103,6 +1177,9 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
         "provisioned_slots": provisioned_slots,
         "planned_tasks": planned.iter().map(SwarmPlannedTask::to_json).collect::<Vec<_>>(),
         "created_task_ids": created_task_ids,
+        "workflow_run_id": workflow_run_id,
+        "workflow_start": workflow_start_result.map(|result| result.unwrap_or_else(|err| json!({ "ok": false, "error": err.to_string() }))),
+        "workflow_checkpoint": workflow_checkpoint_result.map(|result| result.unwrap_or_else(|err| json!({ "ok": false, "error": err.to_string() }))),
         "conflicts": conflicts,
         "next_action": if dry_run {
             "rerun mission_swarm_run with dry_run=false after reviewing planned_tasks"
@@ -1810,7 +1887,7 @@ fn exact_shard_contract_required(intent: &str, metadata: &DelegationMetadata) ->
     );
     let is_code_or_implementation = intent == "code" || is_implementation_class;
     let mechanic_implementation = engine_hint_is_mechanic(metadata) && is_code_or_implementation;
-    mechanic_implementation || (is_code_or_implementation && !metadata.write_scope.is_empty())
+    mechanic_implementation || is_code_or_implementation
 }
 
 fn code_worker_requires_write_lease(intent: &str, metadata: &DelegationMetadata) -> bool {

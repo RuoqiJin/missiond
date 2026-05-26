@@ -31,9 +31,10 @@ async fn board_get(state: &AppState, args: Value) -> Result<ToolResult> {
         return Ok(ToolResult::error("Either 'id' or 'ids' is required"));
     };
     let single_mode = args.get("ids").is_none() && args.get("id").is_some();
+    let storage = state.storage_plane();
     if include_children || ids.len() > 1 {
-        let results = state
-            .store
+        let results = storage
+            .ports
             .get_board_tasks_with_context(&ids, include_children)
             .await
             .map_err(|e| anyhow!("DB error: {}", e))?;
@@ -46,8 +47,8 @@ async fn board_get(state: &AppState, args: Value) -> Result<ToolResult> {
             Ok(ToolResult::json_pretty(&results))
         }
     } else {
-        let task = state
-            .store
+        let task = storage
+            .ports
             .get_board_task_with_notes(&ids[0])
             .await
             .map_err(|e| anyhow!("DB error: {}", e))?;
@@ -72,6 +73,7 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
             .unwrap_or("list")
             .to_string()
     };
+    let storage = state.storage_plane();
     match action.as_str() {
         "list" => {
             let BoardListArgs {
@@ -83,8 +85,8 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                 include_hidden: None,
                 project: None,
             });
-            let mut tasks = state
-                .store
+            let mut tasks = storage
+                .ports
                 .list_board_tasks(status.as_deref(), include_hidden.unwrap_or(false))
                 .await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
@@ -98,8 +100,8 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
         "search" => {
             let input: missiond_core::types::BoardSearchInput =
                 serde_json::from_value(args).unwrap_or_default();
-            let result = state
-                .store
+            let result = storage
+                .ports
                 .search_board_tasks(&input)
                 .await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
@@ -111,16 +113,16 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                 since: Option<String>,
             }
             let a: SummaryArgs = serde_json::from_value(args)?;
-            let summary = state
-                .store
+            let summary = storage
+                .ports
                 .board_summary(a.since.as_deref())
                 .await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             Ok(ToolResult::json_pretty(&summary))
         }
         "clear_done" => {
-            let deleted = state
-                .store
+            let deleted = storage
+                .ports
                 .clear_done_board_tasks()
                 .await
                 .map_err(|e| anyhow!("DB error: {}", e))?;

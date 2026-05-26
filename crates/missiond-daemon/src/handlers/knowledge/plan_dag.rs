@@ -100,7 +100,7 @@
 //! observability path.
 
 use anyhow::Result;
-use missiond_mcp::tools::ToolResult;
+use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
 use serde_json::{json, Value};
 #[cfg(test)]
 pub(super) use std::collections::HashMap;
@@ -109,6 +109,7 @@ use crate::state::AppState;
 use missiond_core::types::Plan;
 
 use super::agent_execution::scopes_overlap_pure;
+use super::plan::plan_contract_json_requires_projection;
 #[cfg(test)]
 use super::plan::tool_result_payload;
 
@@ -207,6 +208,21 @@ pub(super) async fn action_execute_dag_v1(
         .unwrap_or(false);
     let max_parallel_nodes = parse_max_parallel_nodes(args);
 
+    if plan_contract_json_requires_projection(&plan.contract_json) {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(
+                error_codes::INVALID_PARAM,
+                format!(
+                    "PLAN_CONTRACT_REQUIRED: plan `{}` requires persisted missiond.plan-contract.v2 contract_json before production DAG execution",
+                    plan.id
+                ),
+            )
+            .with_suggestion(
+                "run missiond-lispc emit-plan-contract or mission_plan(action=\"backfill_contracts\", apply=true); production execute path does not build a DAG from sexp_text",
+            ),
+        ));
+    }
+
     // wave-17 / task 05 — validate the finalize knobs up-front so a typo
     // (`distill_mode="sonet"`) or an invalid combo (`distill_on_success=true`
     // without `finalize_plan=true`) fails fast rather than after the DAG
@@ -300,6 +316,34 @@ pub(super) async fn action_execute_dag_v1(
         return Ok(ToolResult::json_pretty(&payload));
     }
 
+    let workflow_run_id = args
+        .get("workflow_run_id")
+        .or_else(|| args.get("workflowRunId"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("plan-dag:{}", plan.id));
+    let workflow_start_result = state
+        .storage()
+        .shared_memory
+        .handle_action(&json!({
+            "action": "workflow_start",
+            "workflow_run_id": workflow_run_id.as_str(),
+            "workflow_id": "mission_plan_execute",
+            "workflow_path": ".missiond/workflows/plan-dag-runtime.lisp",
+            "project_id": args.get("project_id").or_else(|| args.get("projectId")).and_then(Value::as_str),
+            "parent_task_id": plan.board_task_id,
+            "max_inflight": max_parallel_nodes,
+            "cursor": { "topological_order": order.clone() },
+            "checkpoint": {
+                "plan_id": plan.id,
+                "stage": "starting",
+                "scheduler_mode": "dag_v1"
+            },
+            "active_task_ids": order.clone()
+        }))
+        .await;
+
     let outcome = execute_with_concurrency(
         state,
         args,
@@ -314,6 +358,30 @@ pub(super) async fn action_execute_dag_v1(
     let evidence_path = outcome.evidence_path.clone();
     let evidence_error = outcome.evidence_error.clone();
     let bus_publish_warnings = outcome.bus_publish_warnings.clone();
+    let workflow_final_status = match aggregate_status {
+        "succeeded" | "success" => "done",
+        "failed" | "failure" => "failed",
+        "paused" | "blocked" => "blocked",
+        _ => "running",
+    };
+    let workflow_checkpoint_result = state
+        .storage()
+        .shared_memory
+        .handle_action(&json!({
+            "action": "workflow_checkpoint",
+            "workflow_run_id": workflow_run_id.as_str(),
+            "status": workflow_final_status,
+            "cursor": { "topological_order": order.clone() },
+            "checkpoint": {
+                "plan_id": plan.id,
+                "aggregate_status": aggregate_status,
+                "evidence_path": evidence_path,
+                "scheduler_mode": "dag_v1"
+            },
+            "active_task_ids": [],
+            "artifact_hashes": []
+        }))
+        .await;
     let plan_status_update = match outcome.target_plan_status() {
         Some(target) => match state.store.plan_update_status(plan.id, target).await {
             Ok(_) => Ok(target.as_str().to_string()),
@@ -372,7 +440,16 @@ pub(super) async fn action_execute_dag_v1(
         "claimer_name": claimer_name,
         "enforce_claims": enforce_claims,
         "evidence_path": evidence_path,
+        "workflow_run_id": workflow_run_id,
     });
+    match workflow_start_result {
+        Ok(value) => payload["workflow_start"] = value,
+        Err(err) => payload["workflow_start_error"] = json!(err.to_string()),
+    }
+    match workflow_checkpoint_result {
+        Ok(value) => payload["workflow_checkpoint"] = value,
+        Err(err) => payload["workflow_checkpoint_error"] = json!(err.to_string()),
+    }
     let (plan_status_after, plan_status_update_error) = match &plan_status_update {
         Ok(s) => {
             payload["plan_status"] = json!(s);

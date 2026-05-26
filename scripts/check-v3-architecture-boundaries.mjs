@@ -56,6 +56,7 @@ function main() {
     checkGeneratedAbi(repo, diagnostics);
     checkEventBusBoundary(repo, diagnostics);
     checkImplementationScaffolds(repo, diagnostics);
+    checkPlaneMigrationUsage(repo, diagnostics);
     checkToolAndBoardSchema(repo, diagnostics);
     checkCrateSplitBoundary(repo, diagnostics);
   }
@@ -185,19 +186,24 @@ function checkImplementationScaffolds(repo, diagnostics) {
     'trait SlotLeaseRepo',
     'trait ConversationFinalRepo',
     'trait EventLogRepo',
+    'trait BoardEventPublisher',
     'struct StorePorts',
   ]);
   requireFileAnchors(repo, REQUIRED_FILES.runtimeActors, diagnostics, [
     'enum SlotActorCommand',
     'enum ExtractionLaneCommand',
+    'struct SlotActorHandle',
+    'struct ExtractionLaneHandle',
     'struct SlotActorSnapshot',
     'struct ExtractionLaneSnapshot',
+    'fn from_state',
   ]);
   requireFileAnchors(repo, REQUIRED_FILES.autopilotWorkflow, diagnostics, [
     'struct AutopilotScheduler',
     'struct BoardTaskDispatcher',
     'struct DispatchRunActor',
     'struct MaintenanceRunner',
+    'failure_policy_for_send_error',
     'TaskResultArtifact',
   ]);
   requireFileAnchors(repo, 'crates/missiond-daemon/src/state.rs', diagnostics, [
@@ -205,7 +211,41 @@ function checkImplementationScaffolds(repo, diagnostics) {
     'struct EventPlane',
     'fn storage_plane(&self)',
     'fn event_plane(&self)',
+    'fn slot_actor(&self',
+    'fn fast_extraction_lane(&self)',
+    'fn slow_extraction_lane(&self)',
   ]);
+  requireFileAnchors(repo, 'crates/missiond-daemon/src/engine/intent_engine/autopilot.rs', diagnostics, [
+    'DispatchRunActor::new',
+    'DispatchRunActor::failure_policy_for_send_error',
+  ]);
+  requireFileAnchors(repo, 'crates/missiond-daemon/src/handlers/sysinfra/misc.rs', diagnostics, [
+    'state.slot_actor',
+    'slotActors',
+    'fast_extraction_lane().snapshot()',
+    'slow_extraction_lane().snapshot()',
+  ]);
+}
+
+function checkPlaneMigrationUsage(repo, diagnostics) {
+  const migratedBoardHandlers = [
+    'crates/missiond-daemon/src/handlers/knowledge/board/create.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/board/update.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/board/query.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/board/note.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/board/claim.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/board/delete.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/board/retry.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/board/events.rs',
+  ];
+  for (const rel of migratedBoardHandlers) {
+    const source = read(repo, rel, diagnostics);
+    if (/state\.(store|bus)\b/.test(source)) {
+      diagnostics.push(diag(rel, 'migrated Board handler must use storage/event planes instead of direct AppState store/bus fields'));
+    }
+  }
+  requireFileAnchors(repo, 'crates/missiond-daemon/src/handlers/knowledge/board/create.rs', diagnostics, ['state.storage_plane()']);
+  requireFileAnchors(repo, 'crates/missiond-daemon/src/handlers/knowledge/board/events.rs', diagnostics, ['state.event_plane().bus']);
 }
 
 function checkToolAndBoardSchema(repo, diagnostics) {
@@ -225,15 +265,26 @@ function checkToolAndBoardSchema(repo, diagnostics) {
     'mapToFrontend',
     'mapToBackend',
   ]);
+  const directBoardToolCalls = grepSourceFiles(path.join(repo, 'packages/board/src/app/api'), /callTool\s*\(\s*['"`]mission_board_/, ['.ts', '.tsx'])
+    .map((file) => repoRelative(repo, file));
+  for (const rel of directBoardToolCalls) {
+    diagnostics.push(diag(rel, 'Board API routes must use generated typed boardClient instead of direct mission_board_* callTool'));
+  }
 }
 
 function checkCrateSplitBoundary(repo, diagnostics) {
-  requireFileAnchors(repo, 'Cargo.toml', diagnostics, ['"crates/missiond-domain"']);
+  requireFileAnchors(repo, 'Cargo.toml', diagnostics, [
+    '"crates/missiond-domain"',
+    'missiond-domain = { version = "0.1.0", path = "crates/missiond-domain" }',
+  ]);
+  requireFileAnchors(repo, 'crates/missiond-daemon/Cargo.toml', diagnostics, ['missiond-domain = { workspace = true }']);
   requireFileAnchors(repo, REQUIRED_FILES.domainCrate, diagnostics, [
     'pub mod architecture',
     'pub mod ids',
+    'impl_transparent_id',
     'MISSIOND_CORE_COMPAT_FACADE',
   ]);
+  requireFileAnchors(repo, REQUIRED_FILES.autopilotWorkflow, diagnostics, ['missiond_domain::ids']);
 }
 
 function requireFileAnchors(repo, rel, diagnostics, anchors) {
@@ -259,9 +310,13 @@ function read(repo, rel, diagnostics) {
 }
 
 function grepFiles(root, re) {
+  return grepSourceFiles(root, re, ['.rs']);
+}
+
+function grepSourceFiles(root, re, exts) {
   const out = [];
   for (const file of walk(root)) {
-    if (!file.endsWith('.rs')) continue;
+    if (!exts.some((ext) => file.endsWith(ext))) continue;
     const source = fs.readFileSync(file, 'utf8');
     if (re.test(source)) out.push(file);
   }

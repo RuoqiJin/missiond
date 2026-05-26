@@ -5,11 +5,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
+use super::autopilot_workflow::{DispatchRunActor, DispatchRunFailurePolicy};
 use crate::claude_md_sync::sync_claude_md;
 use crate::context::v3_blueprint_runtime::{
     AutopilotRuntimeConfig, RouterRuntimeConfig, WorkstationRuntimeConfig,
 };
 use crate::engine::learning_engine;
+use crate::engine::task_completion_evidence::{
+    TaskCompletionEvidenceInput, TaskCompletionEvidenceWriter,
+};
 use crate::flow_engine::{ensure_autopilot_pty, execute_flow_task};
 use crate::handlers::knowledge::agent_execution;
 use crate::llm_gateway::determine_llm_env;
@@ -411,17 +415,17 @@ async fn put_autopilot_task_result_artifact(
     let full_content = durable_completion
         .map(|completion| completion.summary.as_str())
         .unwrap_or(final_summary);
-    let payload = serde_json::json!({
-        "action": "task_result_put",
-        "task_id": task.id.as_str(),
-        "project_id": project_id,
-        "slot_id": slot_id,
-        "conversation_id": conversation_id,
-        "provider": provider,
-        "result_status": "completed",
-        "summary": final_summary,
-        "content": full_content,
-        "json": {
+    let writer = TaskCompletionEvidenceWriter::new(state.storage().shared_memory.clone());
+    let input = TaskCompletionEvidenceInput {
+        task_id: task.id.as_str().to_string(),
+        project_id: Some(project_id.to_string()),
+        slot_id: Some(slot_id.to_string()),
+        conversation_id: conversation_id.map(str::to_string),
+        provider: provider.to_string(),
+        result_status: "completed".to_string(),
+        summary: final_summary.to_string(),
+        content: Some(full_content.to_string()),
+        json: serde_json::json!({
             "schema": "missiond.autopilot-task-result.v1",
             "task_id": task.id.as_str(),
             "slot_id": slot_id,
@@ -431,13 +435,11 @@ async fn put_autopilot_task_result_artifact(
             "summary": final_summary,
             "content": full_content,
             "description_dispatch": serde_json::from_str::<serde_json::Value>(&task.description).ok()
-        }
-    });
-    match state.shared_memory.handle_action(&payload).await {
-        Ok(result) => result
-            .get("artifact_hash")
-            .and_then(|value| value.as_str())
-            .map(str::to_string),
+        }),
+        accepted_shard_id: None,
+    };
+    match writer.write_bounded(input).await {
+        Ok(result) => Some(result.artifact_hash),
         Err(err) => {
             warn!(
                 task_id = %task.id,
@@ -3623,6 +3625,13 @@ async fn dispatch_board_tasks_with_config(
             let task: &missiond_core::types::BoardTask = &send_task;
             let slot_id: String = send_slot_id;
             let full_prompt: String = send_full_prompt;
+            let dispatch_run = DispatchRunActor::new(task.id.as_str(), slot_id.as_str());
+            debug!(
+                run_id = %dispatch_run.run_id,
+                task_id = %dispatch_run.task_id,
+                slot_id = %dispatch_run.slot_id,
+                "Autopilot: dispatch run actor started"
+            );
             match state.pty.send(&slot_id, &full_prompt, timeout_ms).await {
                 Ok(res) => {
                     // Check for auth errors in successful PTY response
@@ -4317,7 +4326,10 @@ async fn dispatch_board_tasks_with_config(
                 Err(e) => {
                     // Use {:#} to print full anyhow error chain (prevents .context() from hiding inner message)
                     let err_msg = format!("{:#}", e);
-                    let is_transient = err_msg.contains("Cannot send message in state:");
+                    let send_failure_policy =
+                        DispatchRunActor::failure_policy_for_send_error(&err_msg);
+                    let is_transient =
+                        send_failure_policy == DispatchRunFailurePolicy::ReleaseClaim;
 
                     if is_transient {
                         // Slot not ready — transient failure, just unclaim without penalty

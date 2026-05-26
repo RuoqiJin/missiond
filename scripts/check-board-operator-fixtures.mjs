@@ -49,8 +49,27 @@ const callTool = createFakeOperatorOverviewHarness({
       gate: { status: 'blocked', missing: 1 },
     },
     operatorTrends: {
-      points: [{ sampledAt: '2026-05-26T00:00:00Z', eventDispatchLag: 150 }],
-      windows: { '24h': { eventDispatchLagMax: 150, evidenceMissingMax: 1 } },
+      points: [{ sampledAt: '2026-05-26T00:00:00Z', eventDispatchLag: 150, workflowBlocked: 1 }],
+      windows: { '24h': { eventDispatchLagMax: 150, evidenceMissingMax: 1, workflowBlockedMax: 1 } },
+    },
+    workflowRuns: {
+      running: 1,
+      blocked: 1,
+      failed: 0,
+      stale: 1,
+      items: [
+        {
+          id: 'workflow-1',
+          workflow_id: 'mission_swarm_run',
+          status: 'blocked',
+          recoverable: true,
+          checkpointExcerpt: 'waiting for operator',
+          cursor: {},
+          checkpoint: {},
+          active_task_ids: [],
+          artifact_hashes: [],
+        },
+      ],
     },
     startupPreflight: { checks: [] },
   },
@@ -84,6 +103,15 @@ if (!overview.runbook.some((item) => item.action?.id?.startsWith('worker_resume:
 }
 if (!overview.runbook.some((item) => item.source === 'evidence' && item.action?.id === 'open_evidence')) {
   diagnostics.push('evidence runbook item must include evidence action');
+}
+if (overview.workflowRuns?.blocked !== 1 || overview.trends?.windows?.['24h']?.workflowBlockedMax !== 1) {
+  diagnostics.push('workflowRuns summary and trend projection must be exposed');
+}
+if (!overview.runbook.some((item) => item.action?.id === 'workflow_blocked_inspect')) {
+  diagnostics.push('workflow runbook item must include blocked workflow inspection action');
+}
+if (!overview.runbook.some((item) => item.action?.id?.startsWith('workflow_resume:'))) {
+  diagnostics.push('recoverable blocked workflow must include confirmable resume action');
 }
 
 if (diagnostics.length) {

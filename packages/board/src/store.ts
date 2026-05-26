@@ -14,10 +14,28 @@ function getDescendantIds(tasks: Task[], parentId: string): string[] {
   return ids;
 }
 
+function syncErrorMessage(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  const jsonStart = raw.indexOf('{');
+  if (jsonStart >= 0) {
+    try {
+      const body = JSON.parse(raw.slice(jsonStart)) as { code?: string; taskId?: string; message?: string; suggestedAction?: string };
+      if (body.code === 'EVIDENCE_REQUIRED') {
+        return `${body.message ?? 'Completion evidence is required.'} Suggested action: ${body.suggestedAction ?? 'mission_shared_memory(action="task_result_put", ...)'}`;
+      }
+      if (body.message) return body.message;
+    } catch {
+      // Fall through to the raw transport error.
+    }
+  }
+  return raw;
+}
+
 interface TaskCenterState {
   tasks: Task[];
   isLoading: boolean;
   isSynced: boolean;
+  lastError: string | null;
   filters: TaskFiltersState;
   groupBy: GroupBy;
   showDone: boolean;
@@ -34,6 +52,7 @@ interface TaskCenterState {
   toggleTask: (id: string) => void;
   reorderTask: (taskId: string, newIndex: number) => void;
   clearDoneTasks: () => void;
+  clearLastError: () => void;
 
   setFilters: (filters: Partial<TaskFiltersState>) => void;
   setGroupBy: (groupBy: GroupBy) => void;
@@ -53,6 +72,7 @@ export const useTaskCenterStore = create<TaskCenterState>()(
     tasks: [],
     isLoading: false,
     isSynced: false,
+    lastError: null,
     filters: { search: '', category: 'all', priority: 'all', status: 'active' },
     groupBy: 'category',
     showDone: false,
@@ -65,9 +85,10 @@ export const useTaskCenterStore = create<TaskCenterState>()(
       set({ isLoading: true });
       try {
         const tasks = await api.fetchTasks();
-        set({ tasks, isSynced: true });
+        set({ tasks, isSynced: true, lastError: null });
       } catch (err) {
         console.error('[TaskCenter] Failed to fetch:', err);
+        set({ lastError: syncErrorMessage(err), isSynced: false });
       } finally {
         set({ isLoading: false });
       }
@@ -92,11 +113,11 @@ export const useTaskCenterStore = create<TaskCenterState>()(
 
       api.createTask({ title, description: BOARD_TASK_DEFAULTS.description, priority: BOARD_TASK_DEFAULTS.priority, category: BOARD_TASK_DEFAULTS.category })
         .then((saved) => {
-          set({ tasks: get().tasks.map((t) => (t.id === tempId ? saved : t)) });
+          set({ tasks: get().tasks.map((t) => (t.id === tempId ? saved : t)), lastError: null });
         })
         .catch((err) => {
           console.error('[TaskCenter] quickAdd sync failed:', err);
-          set({ tasks: get().tasks.filter((t) => t.id !== tempId), isSynced: false });
+          set({ tasks: get().tasks.filter((t) => t.id !== tempId), isSynced: false, lastError: syncErrorMessage(err) });
         });
     },
 
@@ -132,11 +153,11 @@ export const useTaskCenterStore = create<TaskCenterState>()(
         parentId,
       })
         .then((saved) => {
-          set({ tasks: get().tasks.map((t) => (t.id === tempId ? saved : t)) });
+          set({ tasks: get().tasks.map((t) => (t.id === tempId ? saved : t)), lastError: null });
         })
         .catch((err) => {
           console.error('[TaskCenter] quickAddSub sync failed:', err);
-          set({ tasks: get().tasks.filter((t) => t.id !== tempId), isSynced: false });
+          set({ tasks: get().tasks.filter((t) => t.id !== tempId), isSynced: false, lastError: syncErrorMessage(err) });
         });
     },
 
@@ -161,11 +182,11 @@ export const useTaskCenterStore = create<TaskCenterState>()(
 
       api.createTask({ ...data, description: data.description || BOARD_TASK_DEFAULTS.description, parentId })
         .then((saved) => {
-          set({ tasks: get().tasks.map((t) => (t.id === tempId ? saved : t)) });
+          set({ tasks: get().tasks.map((t) => (t.id === tempId ? saved : t)), lastError: null });
         })
         .catch((err) => {
           console.error('[TaskCenter] addTask sync failed:', err);
-          set({ tasks: get().tasks.filter((t) => t.id !== tempId), isSynced: false });
+          set({ tasks: get().tasks.filter((t) => t.id !== tempId), isSynced: false, lastError: syncErrorMessage(err) });
         });
     },
 
@@ -182,11 +203,11 @@ export const useTaskCenterStore = create<TaskCenterState>()(
 
       api.updateTask(id, data)
         .then((saved) => {
-          set({ tasks: get().tasks.map((t) => (t.id === id ? saved : t)) });
+          set({ tasks: get().tasks.map((t) => (t.id === id ? saved : t)), lastError: null });
         })
         .catch((err) => {
           console.error('[TaskCenter] updateTask sync failed:', err);
-          set({ tasks: get().tasks.map((t) => (t.id === id ? previousTask : t)), isSynced: false });
+          set({ tasks: get().tasks.map((t) => (t.id === id ? previousTask : t)), isSynced: false, lastError: syncErrorMessage(err) });
         });
     },
 
@@ -203,7 +224,7 @@ export const useTaskCenterStore = create<TaskCenterState>()(
       api.deleteTask(id)
         .catch((err) => {
           console.error('[TaskCenter] deleteTask sync failed:', err);
-          set({ tasks: previousTasks, isSynced: false });
+          set({ tasks: previousTasks, isSynced: false, lastError: syncErrorMessage(err) });
         });
     },
 
@@ -220,11 +241,11 @@ export const useTaskCenterStore = create<TaskCenterState>()(
 
       api.toggleTask(id)
         .then((saved) => {
-          set({ tasks: get().tasks.map((t) => (t.id === id ? saved : t)) });
+          set({ tasks: get().tasks.map((t) => (t.id === id ? saved : t)), lastError: null });
         })
         .catch((err) => {
           console.error('[TaskCenter] toggleTask sync failed:', err);
-          set({ tasks: get().tasks.map((t) => (t.id === id ? previousTask : t)), isSynced: false });
+          set({ tasks: get().tasks.map((t) => (t.id === id ? previousTask : t)), isSynced: false, lastError: syncErrorMessage(err) });
         });
     },
 
@@ -256,7 +277,7 @@ export const useTaskCenterStore = create<TaskCenterState>()(
         )
       ).catch((err) => {
         console.error('[TaskCenter] reorderTask sync failed:', err);
-        set({ tasks: previousTasks, isSynced: false });
+        set({ tasks: previousTasks, isSynced: false, lastError: syncErrorMessage(err) });
       });
     },
 
@@ -278,13 +299,14 @@ export const useTaskCenterStore = create<TaskCenterState>()(
       });
       api.updateTask(id, { status: newStatus } as never)
         .then((saved) => {
-          set({ tasks: get().tasks.map((t) => (t.id === id ? saved : t)) });
+          set({ tasks: get().tasks.map((t) => (t.id === id ? saved : t)), lastError: null });
         })
         .catch((err) => {
           console.error('[TaskCenter] skipTask sync failed:', err);
-          set({ tasks: get().tasks.map((t) => (t.id === id ? previousTask : t)), isSynced: false });
+          set({ tasks: get().tasks.map((t) => (t.id === id ? previousTask : t)), isSynced: false, lastError: syncErrorMessage(err) });
         });
     },
+    clearLastError: () => set({ lastError: null }),
     openAddDialog: (parentId) => set({ isDialogOpen: true, editingTask: null, _addDialogParentId: parentId }),
     openEditDialog: (task) => set({ isDialogOpen: true, editingTask: task, _addDialogParentId: undefined }),
     closeDialog: () => set({ isDialogOpen: false, editingTask: null, _addDialogParentId: undefined }),
@@ -295,7 +317,7 @@ export const useTaskCenterStore = create<TaskCenterState>()(
       api.clearDoneTasks()
         .catch((err) => {
           console.error('[TaskCenter] clearDoneTasks sync failed:', err);
-          set({ tasks: previousTasks, isSynced: false });
+          set({ tasks: previousTasks, isSynced: false, lastError: syncErrorMessage(err) });
         });
     },
   }))

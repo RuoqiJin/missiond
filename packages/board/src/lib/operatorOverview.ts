@@ -120,6 +120,20 @@ function evidenceSummary(tasks: AnyRecord[], health: AnyRecord | null) {
   };
 }
 
+function workflowRunsSummary(health: AnyRecord | null) {
+  const workflowRuns = record(health?.workflowRuns ?? health?.workflow_runs);
+  const items = arrayOfRecords(workflowRuns.items);
+  return {
+    running: num(workflowRuns.running),
+    blocked: num(workflowRuns.blocked),
+    failed: num(workflowRuns.failed),
+    stale: num(workflowRuns.stale),
+    oldestUpdatedAgeSecs: num(workflowRuns.oldestUpdatedAgeSecs ?? workflowRuns.oldest_updated_age_secs),
+    degraded: Boolean(workflowRuns.degraded),
+    items: items.slice(0, 8),
+  };
+}
+
 function errorMessage(value: unknown): string {
   return value instanceof Error ? value.message : String(value);
 }
@@ -140,6 +154,7 @@ function buildRunbook(input: {
   health: AnyRecord | null;
   eventBus: AnyRecord;
   evidence: ReturnType<typeof evidenceSummary>;
+  workflowRuns: ReturnType<typeof workflowRunsSummary>;
   pendingQuestions: number;
 }) {
   const items: OperatorRunbookItem[] = [];
@@ -246,6 +261,51 @@ function buildRunbook(input: {
     });
   }
 
+  if (input.workflowRuns.blocked > 0 || input.workflowRuns.failed > 0 || input.workflowRuns.stale > 0 || input.workflowRuns.degraded) {
+    const first = input.workflowRuns.items[0] ?? {};
+    const workflowRunId = str(first.id);
+    items.push({
+      severity: input.workflowRuns.failed > 0 ? 'bad' : 'warn',
+      title: 'Workflow runs need attention',
+      cause: `blocked=${input.workflowRuns.blocked}, failed=${input.workflowRuns.failed}, stale=${input.workflowRuns.stale}`,
+      nextAction: 'Inspect blocked workflow checkpoints and resume only when the parent task context is still valid.',
+      source: 'workflowRuns',
+      command: 'mission_shared_memory(action="workflow_status", status="blocked")',
+      action: {
+        id: 'workflow_blocked_inspect',
+        label: 'Inspect',
+        kind: 'mcp',
+        tool: 'mission_shared_memory',
+        args: { action: 'workflow_status', status: 'blocked', limit: 20 },
+      },
+    });
+    if (workflowRunId && first.recoverable === true && str(first.status) === 'blocked') {
+      items.push({
+        severity: 'warn',
+        title: `Workflow ${workflowRunId.slice(0, 8)} can be resumed`,
+        cause: str(first.checkpointExcerpt ?? first.checkpoint) || 'blocked workflow run has resumable identity',
+        nextAction: 'Confirm that the parent task and checkpoint are still valid, then mark the run running for the runtime to pick up.',
+        source: 'workflowRuns',
+        action: {
+          id: `workflow_resume:${workflowRunId}`,
+          label: 'Resume',
+          kind: 'mcp',
+          tool: 'mission_shared_memory',
+          args: {
+            action: 'workflow_checkpoint',
+            workflow_run_id: workflowRunId,
+            status: 'running',
+            cursor: first.cursor ?? {},
+            checkpoint: { ...(record(first.checkpoint)), operator_resume: true },
+            active_task_ids: first.active_task_ids ?? [],
+            artifact_hashes: first.artifact_hashes ?? [],
+          },
+          requiresConfirm: true,
+        },
+      });
+    }
+  }
+
   if (input.pendingQuestions > 0) {
     items.push({
       severity: 'info',
@@ -332,6 +392,7 @@ export async function buildOperatorOverview(callTool: OperatorOverviewCallTool) 
   const runningSlots = slots.filter((slot) => slot.running);
   const eventBus = record(health?.eventBus ?? health?.event_bus);
   const evidence = evidenceSummary(tasks, health);
+  const workflowRuns = workflowRunsSummary(health);
   const trends = record(health?.operatorTrends ?? health?.operator_trends);
 
   return {
@@ -364,6 +425,7 @@ export async function buildOperatorOverview(callTool: OperatorOverviewCallTool) 
       tasks: blockedTasks.slice(0, 5).map(taskSummary),
     },
     evidence,
+    workflowRuns,
     eventBus,
     trends,
     eventHealth: {
@@ -375,6 +437,7 @@ export async function buildOperatorOverview(callTool: OperatorOverviewCallTool) 
       health,
       eventBus,
       evidence,
+      workflowRuns,
       pendingQuestions: pendingQuestions.length,
     }),
     generatedAt: new Date().toISOString(),

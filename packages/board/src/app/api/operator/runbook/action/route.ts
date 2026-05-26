@@ -23,6 +23,7 @@ export async function POST(req: Request) {
     const inferredTool = targetTool
       ?? (actionId.startsWith('worker_') ? 'mission_worker' : undefined)
       ?? (actionId.startsWith('dlq_') || actionId === 'event_bus_health' ? 'mission_event_bus' : undefined)
+      ?? (actionId.startsWith('workflow_') ? 'mission_shared_memory' : undefined)
       ?? (actionId === 'open_evidence' ? 'mission_shared_memory' : undefined)
       ?? (actionId === 'startup_health' ? 'mission_health' : undefined);
     const finalTool = inferredTool ?? mcpTool;
@@ -36,6 +37,9 @@ export async function POST(req: Request) {
         return NextResponse.json({ ok: false, error: 'dlq_replay requires confirm=true' }, { status: 400 });
       }
       finalArgs.confirm = true;
+    }
+    if (actionId.startsWith('workflow_resume') && body.confirm !== true) {
+      return NextResponse.json({ ok: false, error: 'workflow_resume requires confirm=true' }, { status: 400 });
     }
     const result = await callTool(finalTool, finalArgs);
     return NextResponse.json({ ok: true, result });

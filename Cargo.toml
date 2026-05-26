@@ -109,6 +109,7 @@ tree-sitter-python = "0.23"
 
 # Internal crates
 missiond-shared = { version = "0.1.0", path = "crates/missiond-shared" }
+missiond-domain = { version = "0.1.0", path = "crates/missiond-domain" }
 missiond-kernel = { version = "0.1.0", path = "crates/missiond-kernel" }
 missiond-genome = { version = "0.1.0", path = "crates/missiond-genome" }
 missiond-organism-runtime = { version = "0.1.0", path = "crates/missiond-organism-runtime" }

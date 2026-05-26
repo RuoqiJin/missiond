@@ -6,14 +6,21 @@
 
 use std::sync::Arc;
 
+use anyhow::Result as AnyResult;
 use async_trait::async_trait;
 use missiond_core::db::error::DbResult;
 use missiond_core::db::traits::MissionStore;
 use missiond_core::db::TimelineRow;
+use missiond_core::event::events::BoardEvent;
+use missiond_core::event::log::{AppendAck, AppendError};
 use missiond_core::types::{
-    AddBoardTaskNoteInput, BoardTask, BoardTaskNote, BoardTaskWithNotes, Conversation,
-    CreateBoardTaskInput, DependencyStatus, TaskId, UpdateBoardTaskInput,
+    AddBoardTaskNoteInput, BoardSearchInput, BoardSearchResult, BoardTask, BoardTaskNote,
+    BoardTaskWithContext, BoardTaskWithNotes, Conversation, CreateBoardTaskInput, DependencyStatus,
+    TaskId, UpdateBoardTaskInput,
 };
+use serde_json::Value;
+
+use crate::bus::BusServices;
 
 #[derive(Clone)]
 pub(crate) struct StorePorts {
@@ -35,11 +42,31 @@ impl StorePorts {
 pub(crate) trait BoardTaskRepo: Send + Sync {
     async fn create_board_task(&self, input: &CreateBoardTaskInput) -> DbResult<BoardTask>;
     async fn get_board_task(&self, id: &str) -> DbResult<Option<BoardTask>>;
+    async fn list_board_tasks(
+        &self,
+        status: Option<&str>,
+        include_hidden: bool,
+    ) -> DbResult<Vec<BoardTask>>;
     async fn update_board_task(
         &self,
         id: &str,
         update: &UpdateBoardTaskInput,
     ) -> DbResult<Option<BoardTask>>;
+    async fn delete_board_task(&self, id: &str) -> DbResult<i64>;
+    async fn toggle_board_task(&self, id: &str) -> DbResult<Option<BoardTask>>;
+    async fn clear_done_board_tasks(&self) -> DbResult<i64>;
+    async fn retry_board_task(
+        &self,
+        task_id: &str,
+        reset_downstream: bool,
+    ) -> DbResult<Vec<String>>;
+    async fn search_board_tasks(&self, input: &BoardSearchInput) -> DbResult<BoardSearchResult>;
+    async fn board_summary(&self, since: Option<&str>) -> DbResult<serde_json::Value>;
+    async fn get_board_tasks_with_context(
+        &self,
+        ids: &[String],
+        include_children: bool,
+    ) -> DbResult<Vec<BoardTaskWithContext>>;
     async fn get_board_task_with_notes(&self, id: &str) -> DbResult<Option<BoardTaskWithNotes>>;
     async fn list_autopilot_tasks(&self) -> DbResult<Vec<BoardTask>>;
     async fn list_running_autopilot_tasks(&self) -> DbResult<Vec<BoardTask>>;
@@ -57,12 +84,58 @@ impl BoardTaskRepo for StorePorts {
         self.store.get_board_task(id).await
     }
 
+    async fn list_board_tasks(
+        &self,
+        status: Option<&str>,
+        include_hidden: bool,
+    ) -> DbResult<Vec<BoardTask>> {
+        self.store.list_board_tasks(status, include_hidden).await
+    }
+
     async fn update_board_task(
         &self,
         id: &str,
         update: &UpdateBoardTaskInput,
     ) -> DbResult<Option<BoardTask>> {
         self.store.update_board_task(id, update).await
+    }
+
+    async fn delete_board_task(&self, id: &str) -> DbResult<i64> {
+        self.store.delete_board_task(id).await
+    }
+
+    async fn toggle_board_task(&self, id: &str) -> DbResult<Option<BoardTask>> {
+        self.store.toggle_board_task(id).await
+    }
+
+    async fn clear_done_board_tasks(&self) -> DbResult<i64> {
+        self.store.clear_done_board_tasks().await
+    }
+
+    async fn retry_board_task(
+        &self,
+        task_id: &str,
+        reset_downstream: bool,
+    ) -> DbResult<Vec<String>> {
+        self.store.retry_board_task(task_id, reset_downstream).await
+    }
+
+    async fn search_board_tasks(&self, input: &BoardSearchInput) -> DbResult<BoardSearchResult> {
+        self.store.search_board_tasks(input).await
+    }
+
+    async fn board_summary(&self, since: Option<&str>) -> DbResult<serde_json::Value> {
+        self.store.board_summary(since).await
+    }
+
+    async fn get_board_tasks_with_context(
+        &self,
+        ids: &[String],
+        include_children: bool,
+    ) -> DbResult<Vec<BoardTaskWithContext>> {
+        self.store
+            .get_board_tasks_with_context(ids, include_children)
+            .await
     }
 
     async fn get_board_task_with_notes(&self, id: &str) -> DbResult<Option<BoardTaskWithNotes>> {
@@ -178,6 +251,45 @@ impl EventLogRepo for StorePorts {
 
     async fn query_timeline_by_trace(&self, trace_id: &str) -> DbResult<Vec<TimelineRow>> {
         self.store.query_timeline_by_trace(trace_id).await
+    }
+}
+
+#[async_trait]
+#[allow(dead_code)]
+pub(crate) trait TaskEvidencePort: Send + Sync {
+    async fn put_task_completion_evidence(&self, input: Value) -> AnyResult<Value>;
+    async fn task_evidence_summary(&self, task_id: Option<&str>, limit: i64) -> AnyResult<Value>;
+}
+
+#[async_trait]
+#[allow(dead_code)]
+pub(crate) trait WorkflowRunPort: Send + Sync {
+    async fn workflow_start(&self, input: Value) -> AnyResult<Value>;
+    async fn workflow_checkpoint(&self, input: Value) -> AnyResult<Value>;
+    async fn workflow_runs_summary(&self, limit: i64) -> AnyResult<Value>;
+}
+
+#[async_trait]
+#[allow(dead_code)]
+pub(crate) trait BoardCompletionPort: Send + Sync {
+    async fn mark_done_with_evidence_gate(&self, task_id: &str, update: Value) -> AnyResult<Value>;
+}
+
+#[async_trait]
+#[allow(dead_code)]
+pub(crate) trait SlotStatusPort: Send + Sync {
+    async fn slot_status(&self, slot_id: &str) -> AnyResult<Value>;
+}
+
+#[async_trait]
+pub(crate) trait BoardEventPublisher: Send + Sync {
+    async fn publish_board_event(&self, event: BoardEvent) -> Result<AppendAck, AppendError>;
+}
+
+#[async_trait]
+impl BoardEventPublisher for BusServices {
+    async fn publish_board_event(&self, event: BoardEvent) -> Result<AppendAck, AppendError> {
+        self.publish_board(event).await
     }
 }
 

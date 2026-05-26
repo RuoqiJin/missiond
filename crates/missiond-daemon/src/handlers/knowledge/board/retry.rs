@@ -14,24 +14,25 @@ fn default_true() -> bool {
 
 pub(super) async fn handle_retry(state: &AppState, args: Value) -> Result<ToolResult> {
     let args: RetryArgs = serde_json::from_value(args)?;
+    let storage = state.storage_plane();
 
     // Verify task exists.
-    let task = state
-        .store
+    let task = storage
+        .ports
         .get_board_task(&args.task_id)
         .await
         .map_err(|e| anyhow!("DB error: {}", e))?
         .ok_or_else(|| anyhow!("Task not found: {}", args.task_id))?;
 
-    let reset_ids = state
-        .store
+    let reset_ids = storage
+        .ports
         .retry_board_task(task.id.as_str(), args.reset_downstream)
         .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
 
     // Write note.
-    let _ = state
-        .store
+    let _ = storage
+        .ports
         .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
             task_id: task.id.to_string(),
             content: format!(

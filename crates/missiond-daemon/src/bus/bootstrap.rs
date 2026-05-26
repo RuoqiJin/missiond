@@ -276,6 +276,7 @@ impl BusServices {
         &self,
         workers: serde_json::Value,
         evidence: serde_json::Value,
+        workflow_runs: serde_json::Value,
         pending_questions: i64,
     ) {
         let event_bus = self.health_snapshot().await;
@@ -310,18 +311,32 @@ impl BusServices {
             .get("missing")
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
+        let workflow_blocked = workflow_runs
+            .get("blocked")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let workflow_failed = workflow_runs
+            .get("failed")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let workflow_stale = workflow_runs
+            .get("stale")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
         let snapshot = serde_json::json!({
             "workers": workers,
             "eventBus": event_bus,
             "evidence": evidence,
+            "workflowRuns": workflow_runs,
             "pendingQuestions": pending_questions,
         });
         let _ = sqlx::query(
             r#"
             INSERT INTO operator_health_samples
               (worker_failed, worker_stale, event_dispatch_lag, dlq_count,
-               evidence_missing, pending_questions, snapshot)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+               evidence_missing, pending_questions, workflow_blocked, workflow_failed,
+               workflow_stale, snapshot)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             "#,
         )
         .bind(worker_failed)
@@ -330,6 +345,9 @@ impl BusServices {
         .bind(dlq_count)
         .bind(evidence_missing)
         .bind(pending_questions)
+        .bind(workflow_blocked)
+        .bind(workflow_failed)
+        .bind(workflow_stale)
         .bind(snapshot)
         .execute(&self.pg_pool)
         .await;
@@ -344,7 +362,8 @@ impl BusServices {
         let rows = sqlx::query(
             r#"
             SELECT sampled_at, worker_failed, worker_stale, event_dispatch_lag,
-                   dlq_count, evidence_missing, pending_questions
+                   dlq_count, evidence_missing, pending_questions,
+                   workflow_blocked, workflow_failed, workflow_stale
             FROM operator_health_samples
             WHERE sampled_at >= now() - interval '24 hours'
             ORDER BY sampled_at DESC
@@ -369,6 +388,9 @@ impl BusServices {
                     "dlqCount": row.try_get::<i64, _>("dlq_count").unwrap_or(0),
                     "evidenceMissing": row.try_get::<i64, _>("evidence_missing").unwrap_or(0),
                     "pendingQuestions": row.try_get::<i64, _>("pending_questions").unwrap_or(0),
+                    "workflowBlocked": row.try_get::<i64, _>("workflow_blocked").unwrap_or(0),
+                    "workflowFailed": row.try_get::<i64, _>("workflow_failed").unwrap_or(0),
+                    "workflowStale": row.try_get::<i64, _>("workflow_stale").unwrap_or(0),
                 })
             })
             .collect::<Vec<_>>();
@@ -403,7 +425,10 @@ impl BusServices {
                     "workerFailedMax": max_for("workerFailed", 3600),
                     "workerStaleMax": max_for("workerStale", 3600),
                     "evidenceMissingMax": max_for("evidenceMissing", 3600),
-                    "pendingQuestionsMax": max_for("pendingQuestions", 3600)
+                    "pendingQuestionsMax": max_for("pendingQuestions", 3600),
+                    "workflowBlockedMax": max_for("workflowBlocked", 3600),
+                    "workflowFailedMax": max_for("workflowFailed", 3600),
+                    "workflowStaleMax": max_for("workflowStale", 3600)
                 },
                 "24h": {
                     "eventDispatchLagMax": max_for("eventDispatchLag", 24 * 3600),
@@ -411,7 +436,10 @@ impl BusServices {
                     "workerFailedMax": max_for("workerFailed", 24 * 3600),
                     "workerStaleMax": max_for("workerStale", 24 * 3600),
                     "evidenceMissingMax": max_for("evidenceMissing", 24 * 3600),
-                    "pendingQuestionsMax": max_for("pendingQuestions", 24 * 3600)
+                    "pendingQuestionsMax": max_for("pendingQuestions", 24 * 3600),
+                    "workflowBlockedMax": max_for("workflowBlocked", 24 * 3600),
+                    "workflowFailedMax": max_for("workflowFailed", 24 * 3600),
+                    "workflowStaleMax": max_for("workflowStale", 24 * 3600)
                 }
             }
         })

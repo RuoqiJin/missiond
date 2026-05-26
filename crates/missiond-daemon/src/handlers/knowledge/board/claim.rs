@@ -17,8 +17,9 @@ pub(super) async fn handle_claim(state: &AppState, args: Value) -> Result<ToolRe
         .or_else(current_session_id)
         .unwrap_or_else(|| "claude-code-session".to_string());
     let executor_id = executor_id.as_str();
-    match state
-        .store
+    let storage = state.storage_plane();
+    match storage
+        .ports
         .claim_board_task(task_id, executor_id, executor_type)
         .await
     {
@@ -29,12 +30,13 @@ pub(super) async fn handle_claim(state: &AppState, args: Value) -> Result<ToolRe
                 slot_id: executor_id.to_string(),
             };
             crate::engine::master_control::notify_board_event_direct(&ev);
-            let _ = state.bus.publish_board(ev).await;
+            let event_plane = state.event_plane();
+            let _ = event_plane.bus.publish_board_event(ev).await;
             Ok(ToolResult::json_pretty(&task))
         }
         Ok(None) => {
             // Check why it failed: task not found vs already claimed.
-            match state.store.get_board_task(task_id).await {
+            match storage.ports.get_board_task(task_id).await {
                 Ok(Some(existing)) => {
                     let msg = if let Some(ref claimer) = existing.claim_executor_id {
                         format!(

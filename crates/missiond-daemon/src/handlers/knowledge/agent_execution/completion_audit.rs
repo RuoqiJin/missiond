@@ -3,6 +3,9 @@ use missiond_core::event::events::ExecutionEvent;
 use missiond_mcp::tools::ToolResult;
 use serde_json::Value;
 
+use crate::engine::task_completion_evidence::{
+    TaskCompletionEvidenceInput, TaskCompletionEvidenceWriter,
+};
 use crate::state::AppState;
 
 use super::completion_entry::{render_completion_entry, CompletionEntryFields};
@@ -186,6 +189,59 @@ pub(super) async fn action_complete(state: &AppState, args: &Value) -> Result<To
         &id,
         &mut response,
     );
+
+    if let Some(task_id) = args
+        .get("task_id")
+        .or_else(|| args.get("taskId"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        let result_status = if matches!(
+            task_run_verifier_status
+                .as_deref()
+                .or(verifier_status.as_deref()),
+            Some("fail" | "failed" | "blocked" | "skipped")
+        ) {
+            task_run_verifier_status
+                .as_deref()
+                .or(verifier_status.as_deref())
+                .unwrap_or("failed")
+                .to_string()
+        } else {
+            "completed".to_string()
+        };
+        let writer = TaskCompletionEvidenceWriter::new(state.storage().shared_memory.clone());
+        let artifact = writer
+            .write_bounded(TaskCompletionEvidenceInput {
+                task_id: task_id.to_string(),
+                project_id: project_or_target_project(args).map(str::to_string),
+                slot_id: None,
+                conversation_id: Some(execution_id.to_string()),
+                provider: agent.to_string(),
+                result_status,
+                summary: summary.to_string(),
+                content: Some(format!(
+                    "summary:\n{}\n\ndeliverables:\n{}\n\nverification:\n{}",
+                    summary, deliverables, verification
+                )),
+                json: response.clone(),
+                accepted_shard_id: args
+                    .get("accepted_shard_id")
+                    .or_else(|| args.get("acceptedShardId"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            })
+            .await;
+        match artifact {
+            Ok(result) => {
+                response["task_result_artifact_hash"] = Value::String(result.artifact_hash);
+                response["task_result_artifact"] = result.response;
+            }
+            Err(err) => {
+                response["task_result_artifact_error"] = Value::String(err.to_string());
+            }
+        }
+    }
 
     Ok(ToolResult::json_pretty(&response))
 }

@@ -59,7 +59,7 @@ async fn require_task_completion_evidence(store: &PgMissionStore, task_id: &str)
         Ok(())
     } else {
         Err(DbError::Constraint(format!(
-            "EVIDENCE_REQUIRED: BoardTask {task_id} cannot be marked done until mission_shared_memory(action=\"task_result_put\", task_id=\"{task_id}\", result_status=\"completed\", ...) records a canonical task-result artifact"
+            "EVIDENCE_REQUIRED: task_id={task_id}: BoardTask cannot be marked done until mission_shared_memory(action=\"task_result_put\", task_id=\"{task_id}\", result_status=\"completed\", ...) records a canonical task-result artifact"
         )))
     }
 }

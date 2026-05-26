@@ -148,26 +148,49 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     })
                 })
                 .collect();
+            let mut slot_actor_snapshots = Vec::new();
+            for agent in &agents {
+                slot_actor_snapshots.push(state.slot_actor(agent.slot_id.clone()).snapshot().await);
+            }
 
             // Memory extraction state (read from ControlTree)
             let memory_paused = control
                 .control_manager
                 .current()
                 .is_domain_paused(crate::control_tree::CtlDomain::Memory);
-            let fast_lane = {
-                let es = state.extraction_state.read().await;
-                json!({ "phase": format!("{:?}", es.phase), "type": es.active_type })
-            };
-            let slow_lane = {
-                let es = state.slow_extraction_state.read().await;
-                json!({ "phase": format!("{:?}", es.phase), "type": es.active_type })
-            };
+            let fast_lane_snapshot = state.fast_extraction_lane().snapshot().await;
+            let slow_lane_snapshot = state.slow_extraction_lane().snapshot().await;
+            let fast_lane = json!({
+                "lane": fast_lane_snapshot.lane,
+                "phase": format!("{:?}", fast_lane_snapshot.phase),
+                "type": fast_lane_snapshot.active_type,
+                "currentTaskId": fast_lane_snapshot.current_task_id,
+                "pendingBatchId": fast_lane_snapshot.pending_batch_id,
+                "busySince": fast_lane_snapshot.busy_since,
+                "nextProbeAfter": fast_lane_snapshot.next_probe_after,
+                "currentOutputCount": fast_lane_snapshot.current_output_count,
+            });
+            let slow_lane = json!({
+                "lane": slow_lane_snapshot.lane,
+                "phase": format!("{:?}", slow_lane_snapshot.phase),
+                "type": slow_lane_snapshot.active_type,
+                "currentTaskId": slow_lane_snapshot.current_task_id,
+                "pendingBatchId": slow_lane_snapshot.pending_batch_id,
+                "busySince": slow_lane_snapshot.busy_since,
+                "nextProbeAfter": slow_lane_snapshot.next_probe_after,
+                "currentOutputCount": slow_lane_snapshot.current_output_count,
+            });
             let event_bus = state.storage().bus.health_snapshot().await;
             let workers = state.workers().registry.list_all();
             let evidence = state
                 .storage()
                 .shared_memory
                 .evidence_health_summary(20)
+                .await;
+            let workflow_runs = state
+                .storage()
+                .shared_memory
+                .workflow_runs_summary(20)
                 .await;
             let operator_trends = state.storage().bus.operator_trends().await;
 
@@ -176,6 +199,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 "ipc": "connected",
                 "wsPort": ws_port(),
                 "pty": pty_status,
+                "slotActors": slot_actor_snapshots,
                 "uptime_epoch": std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
@@ -189,6 +213,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 "eventBus": event_bus,
                 "workers": workers,
                 "evidence": evidence,
+                "workflowRuns": workflow_runs,
                 "operatorTrends": operator_trends,
                 "gemini_mode": if llm.gemini.is_cli_mode() { "cli" } else { "http" },
                 "stats": control.stats.snapshot(),

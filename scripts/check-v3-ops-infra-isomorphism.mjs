@@ -153,6 +153,8 @@ function checkFiles(root, files) {
     'launchctl kickstart -k "gui/$(id -u)/$LABEL"',
     'lsof "$SOCK_PATH"',
     'run_mcp_initialize_smoke()',
+    'validate_default_mcp_config',
+    'node -e',
     'command -v timeout',
     'command -v gtimeout',
     "perl -e 'alarm shift @ARGV; exec @ARGV'",
@@ -160,8 +162,16 @@ function checkFiles(root, files) {
     'SMOKE_TIMEOUT="${MISSIOND_DEPLOY_SMOKE_TIMEOUT:-30}"',
     'IPC not ready yet; retrying',
     'active_release=$RELEASE_ID',
+    'rollback_with_smoke',
+    'rollback-smoke',
     'rollback attempted',
   ]);
+  if ((sources.deployDaemon.match(/^\{"mcpServers"/gm) || []).length > 1) {
+    diagnostics.push({
+      file: files.deployDaemon,
+      message: 'default MCP config heredoc must not emit duplicate JSON objects',
+    });
+  }
 
   requireAll(diagnostics, files.cargoFmtTouched, sources.cargoFmtTouched, [
     'scripts/cargo-fmt-touched.sh --check',
@@ -341,6 +351,8 @@ codesign_or_verify "$CANDIDATE_DIR/bin/mission-mcp"
 launchctl kickstart -k "gui/$(id -u)/$LABEL"
 lsof "$SOCK_PATH"
 run_mcp_initialize_smoke()
+validate_default_mcp_config
+node -e
 command -v timeout
 command -v gtimeout
 perl -e 'alarm shift @ARGV; exec @ARGV'
@@ -348,6 +360,8 @@ smoke_start="$(date +%s)"
 SMOKE_TIMEOUT="\${MISSIOND_DEPLOY_SMOKE_TIMEOUT:-30}"
 IPC not ready yet; retrying
 active_release=$RELEASE_ID
+rollback_with_smoke
+rollback-smoke
 rollback attempted
 `);
 

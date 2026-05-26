@@ -1,10 +1,9 @@
-use std::sync::Arc;
-
 use anyhow::{anyhow, Result};
 use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
+use crate::app_ports::{BoardEventPublisher, BoardTaskRepo, SlotLeaseRepo};
 use crate::decision_harvest::harvest_decisions_for_task;
 use crate::lenient;
 use crate::llm::gemini_client::current_session_id;

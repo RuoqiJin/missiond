@@ -15,6 +15,8 @@ pub mod architecture {
 }
 
 pub mod ids {
+    use std::fmt;
+
     use serde::{Deserialize, Serialize};
 
     #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -28,6 +30,48 @@ pub mod ids {
     #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
     #[serde(transparent)]
     pub struct WorkflowRunId(pub String);
+
+    macro_rules! impl_transparent_id {
+        ($ty:ident) => {
+            impl $ty {
+                pub fn new(value: impl Into<String>) -> Self {
+                    Self(value.into())
+                }
+
+                pub fn as_str(&self) -> &str {
+                    self.0.as_str()
+                }
+            }
+
+            impl From<String> for $ty {
+                fn from(value: String) -> Self {
+                    Self(value)
+                }
+            }
+
+            impl From<&str> for $ty {
+                fn from(value: &str) -> Self {
+                    Self(value.to_string())
+                }
+            }
+
+            impl AsRef<str> for $ty {
+                fn as_ref(&self) -> &str {
+                    self.as_str()
+                }
+            }
+
+            impl fmt::Display for $ty {
+                fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    f.write_str(self.as_str())
+                }
+            }
+        };
+    }
+
+    impl_transparent_id!(BoardTaskId);
+    impl_transparent_id!(SlotId);
+    impl_transparent_id!(WorkflowRunId);
 }
 
 #[cfg(test)]

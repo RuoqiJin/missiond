@@ -28,7 +28,7 @@ fn require_usable_plan_contract_json(plan: &Plan) -> Option<ToolResult> {
         ToolError::new(
             error_codes::INVALID_PARAM,
             format!(
-                "plan `{}` requires a persisted missiond.plan-contract.v2 projection before execution",
+                "PLAN_CONTRACT_REQUIRED: plan `{}` requires a persisted missiond.plan-contract.v2 projection before execution",
                 plan.id
             ),
         )

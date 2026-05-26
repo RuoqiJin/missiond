@@ -48,6 +48,7 @@ async fn handle_batch_update(state: &AppState, args: Value) -> Result<ToolResult
             Ok(update) => update,
             Err(err) => return Ok(super::invalid_board_args("mission_board_update", err)),
         };
+    let storage = state.storage_plane();
     if is_marking_done {
         if let Some(blocked) = guard_done_close_against_code_drift(state).await? {
             return Ok(blocked);
@@ -57,8 +58,8 @@ async fn handle_batch_update(state: &AppState, args: Value) -> Result<ToolResult
     let (mut success_count, mut fail_count) = (0u32, 0u32);
     for id in &ids {
         let old_status = if is_status_change {
-            state
-                .store
+            storage
+                .ports
                 .get_board_task(id)
                 .await
                 .ok()
@@ -67,7 +68,7 @@ async fn handle_batch_update(state: &AppState, args: Value) -> Result<ToolResult
         } else {
             None
         };
-        match state.store.update_board_task(id, &update_template).await {
+        match storage.ports.update_board_task(id, &update_template).await {
             Ok(Some(t)) => {
                 if let Some(old) = old_status {
                     super::publish_board_status_changed(state, &t, &old);
@@ -105,8 +106,9 @@ async fn handle_toggle(state: &AppState, args: Value) -> Result<ToolResult> {
         Ok(args) => args,
         Err(err) => return Ok(super::invalid_board_args("mission_board_toggle", err)),
     };
-    let Some(existing) = state
-        .store
+    let storage = state.storage_plane();
+    let Some(existing) = storage
+        .ports
         .get_board_task(&id)
         .await
         .map_err(|e| anyhow!("DB error: {}", e))?
@@ -119,8 +121,8 @@ async fn handle_toggle(state: &AppState, args: Value) -> Result<ToolResult> {
         }
     }
     let old_status = format!("{:?}", existing.status);
-    let task = state
-        .store
+    let task = storage
+        .ports
         .toggle_board_task(&id)
         .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
@@ -172,9 +174,10 @@ async fn handle_single_update(state: &AppState, args: Value) -> Result<ToolResul
             return Ok(invalid_status_result(status));
         }
     }
+    let storage = state.storage_plane();
     let old_status = if is_status_change {
-        state
-            .store
+        storage
+            .ports
             .get_board_task(&id)
             .await
             .ok()
@@ -188,7 +191,7 @@ async fn handle_single_update(state: &AppState, args: Value) -> Result<ToolResul
         Ok(update) => update,
         Err(err) => return Ok(super::invalid_board_args("mission_board_update", err)),
     };
-    let task = match state.store.update_board_task(&id, &update).await {
+    let task = match storage.ports.update_board_task(&id, &update).await {
         Ok(task) => task,
         Err(err) => return Ok(super::board_store_error("mission_board_update", err)),
     };

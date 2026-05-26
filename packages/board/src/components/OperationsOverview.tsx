@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { Activity, AlertTriangle, ClipboardCheck, Radio, RefreshCw, Server, Wifi } from 'lucide-react';
+import { Activity, AlertTriangle, ClipboardCheck, GitBranch, Radio, RefreshCw, Server, Wifi } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useEventHealth, useEventInvalidation } from '../hooks/useEventStream';
 
@@ -73,6 +73,15 @@ interface OperatorOverview {
     completed: number;
     verified: number;
     missing: number;
+    degraded: boolean;
+    items: Array<Record<string, unknown>>;
+  };
+  workflowRuns: {
+    running: number;
+    blocked: number;
+    failed: number;
+    stale: number;
+    oldestUpdatedAgeSecs: number;
     degraded: boolean;
     items: Array<Record<string, unknown>>;
   };
@@ -190,6 +199,8 @@ export function OperationsOverview() {
   const eventLag = num(eventBus.dispatchLag);
   const lagMax24h = num(trend24h.eventDispatchLagMax);
   const evidenceGapMax24h = num(trend24h.evidenceMissingMax);
+  const workflowBlockedMax24h = num(trend24h.workflowBlockedMax);
+  const workflowRuns = overview?.workflowRuns;
   const eventTone = eventHealth.severity === 'good'
     ? 'text-emerald-300'
     : eventHealth.severity === 'warn'
@@ -306,6 +317,34 @@ export function OperationsOverview() {
         </div>
 
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
+          <div className="min-w-0 rounded-md border border-neutral-800 bg-neutral-950/70 p-3">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-xs font-medium text-neutral-300">
+                <GitBranch className="h-4 w-4 text-violet-300" />
+                Workflow Runs
+              </div>
+              <span className={cn('font-mono text-[11px]', (workflowRuns?.blocked || workflowRuns?.failed || workflowRuns?.stale) ? 'text-amber-300' : 'text-neutral-500')}>
+                {workflowRuns?.running ?? 0} running
+              </span>
+            </div>
+            <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-neutral-500">
+              <span>blocked</span><span className={cn('text-right font-mono text-neutral-300', (workflowRuns?.blocked ?? 0) > 0 && 'text-amber-300')}>{workflowRuns?.blocked ?? 0}</span>
+              <span>failed</span><span className={cn('text-right font-mono text-neutral-300', (workflowRuns?.failed ?? 0) > 0 && 'text-red-300')}>{workflowRuns?.failed ?? 0}</span>
+              <span>stale</span><span className={cn('text-right font-mono text-neutral-300', (workflowRuns?.stale ?? 0) > 0 && 'text-amber-300')}>{workflowRuns?.stale ?? 0}</span>
+              <span>oldest</span><span className="text-right font-mono text-neutral-300">{workflowRuns ? formatAgeMs(workflowRuns.oldestUpdatedAgeSecs * 1000) : '—'}</span>
+              <span>24h blocked</span><span className={cn('text-right font-mono text-neutral-300', workflowBlockedMax24h > 0 && 'text-amber-300')}>{workflowBlockedMax24h}</span>
+            </div>
+            <div className="mt-2 space-y-1">
+              {(workflowRuns?.items ?? []).slice(0, 2).map((item, index) => (
+                <div key={`${text(item.id, 'workflow')}-${index}`} className="grid min-w-0 grid-cols-[1fr_auto] gap-2 text-[11px]">
+                  <span className="min-w-0 truncate text-neutral-300">{text(item.workflow_id ?? item.id, 'workflow')}</span>
+                  <span className={cn('font-mono', text(item.status) === 'failed' ? 'text-red-300' : text(item.status) === 'blocked' ? 'text-amber-300' : 'text-emerald-300')}>{text(item.status)}</span>
+                  <span className="col-span-2 min-w-0 truncate text-neutral-600">{text(item.parent_task_id ?? item.checkpointExcerpt)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
           <div className="min-w-0 rounded-md border border-neutral-800 bg-neutral-950/70 p-3">
             <div className="mb-2 flex items-center gap-2 text-xs font-medium text-neutral-300">
               <AlertTriangle className="h-4 w-4 text-amber-400" />

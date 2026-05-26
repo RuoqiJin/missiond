@@ -66,6 +66,9 @@ impl SharedMemoryService {
             "workflow_start" | "start_workflow" => self.workflow_start(args).await,
             "workflow_checkpoint" | "checkpoint_workflow" => self.workflow_checkpoint(args).await,
             "workflow_status" | "get_workflow_status" => self.workflow_status(args).await,
+            "workflow_summary" | "workflow_runs_summary" => {
+                Ok(self.workflow_runs_summary(bounded_limit(args)).await)
+            }
             "runtime_artifact_index" | "index_runtime_artifact" => {
                 self.runtime_artifact_index(args).await
             }
@@ -193,6 +196,117 @@ impl SharedMemoryService {
                     "items": []
                 })
             })
+    }
+
+    pub(crate) async fn workflow_runs_summary(&self, limit: i64) -> Value {
+        let limit = limit.clamp(1, 100);
+        let stale_after_secs: i64 = 15 * 60;
+        let counts = sqlx::query(
+            r#"
+            SELECT
+              COUNT(*) FILTER (WHERE status = 'running') AS running,
+              COUNT(*) FILTER (WHERE status = 'blocked') AS blocked,
+              COUNT(*) FILTER (WHERE status = 'failed') AS failed,
+              COUNT(*) FILTER (
+                WHERE status IN ('running','blocked')
+                  AND updated_at < now() - ($1::bigint * interval '1 second')
+              ) AS stale,
+              COALESCE(
+                EXTRACT(EPOCH FROM (now() - (MIN(updated_at) FILTER (WHERE status IN ('running','blocked'))))),
+                0
+              )::bigint AS oldest_updated_age_secs
+            FROM workflow_runs
+            "#,
+        )
+        .bind(stale_after_secs)
+        .fetch_optional(&self.pool)
+        .await;
+        let rows = sqlx::query(
+            r#"
+            SELECT id, workflow_id, workflow_path, project_id, parent_task_id, status,
+                   cursor, checkpoint, max_inflight, active_task_ids, artifact_hashes,
+                   started_at, updated_at, finished_at,
+                   EXTRACT(EPOCH FROM (now() - updated_at))::bigint AS updated_age_secs
+            FROM workflow_runs
+            WHERE status IN ('running','blocked','failed')
+            ORDER BY
+              CASE status WHEN 'blocked' THEN 0 WHEN 'failed' THEN 1 ELSE 2 END,
+              updated_at ASC
+            LIMIT $1
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await;
+
+        match (counts, rows) {
+            (Ok(counts), Ok(rows)) => {
+                let (running, blocked, failed, stale, oldest_updated_age_secs) =
+                    counts.map_or((0, 0, 0, 0, 0), |row| {
+                        (
+                            row.try_get::<i64, _>("running").unwrap_or(0),
+                            row.try_get::<i64, _>("blocked").unwrap_or(0),
+                            row.try_get::<i64, _>("failed").unwrap_or(0),
+                            row.try_get::<i64, _>("stale").unwrap_or(0),
+                            row.try_get::<i64, _>("oldest_updated_age_secs")
+                                .unwrap_or(0),
+                        )
+                    });
+                json!({
+                    "schema": "missiond.workflow-runs-summary.v1",
+                    "running": running,
+                    "blocked": blocked,
+                    "failed": failed,
+                    "stale": stale,
+                    "staleAfterSecs": stale_after_secs,
+                    "oldestUpdatedAgeSecs": oldest_updated_age_secs,
+                    "items": rows.into_iter().map(workflow_run_summary_row_json).collect::<Vec<_>>()
+                })
+            }
+            (counts_result, rows_result) => {
+                let err = counts_result
+                    .err()
+                    .map(|err| err.to_string())
+                    .or_else(|| rows_result.err().map(|err| err.to_string()))
+                    .unwrap_or_else(|| "workflow_runs summary unavailable".to_string());
+                json!({
+                    "schema": "missiond.workflow-runs-summary.v1",
+                    "degraded": true,
+                    "error": err,
+                    "running": 0,
+                    "blocked": 0,
+                    "failed": 0,
+                    "stale": 0,
+                    "items": []
+                })
+            }
+        }
+    }
+
+    pub(crate) async fn startup_recover_workflow_runs(&self) -> Result<Value> {
+        let rows = sqlx::query(
+            r#"
+            UPDATE workflow_runs
+            SET status = 'blocked',
+                checkpoint = checkpoint || jsonb_build_object(
+                  'blocked_reason', 'startup recovery requires workflow_id, workflow_path, and parent_task_id',
+                  'blocked_at', now()
+                ),
+                updated_at = now()
+            WHERE status = 'running'
+              AND (workflow_id IS NULL OR workflow_path IS NULL OR parent_task_id IS NULL)
+            RETURNING id, workflow_id, workflow_path, project_id, parent_task_id, status,
+                      cursor, checkpoint, max_inflight, active_task_ids, artifact_hashes,
+                      started_at, updated_at, finished_at
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(json!({
+            "schema": "missiond.workflow-startup-recovery.v1",
+            "blockedUnrecoverable": rows.len(),
+            "items": rows.into_iter().map(workflow_run_row_json).collect::<Vec<_>>()
+        }))
     }
 
     pub(crate) async fn claim_status(&self, args: &Value) -> Result<Value> {
@@ -2121,6 +2235,54 @@ fn workflow_run_row_json(row: sqlx::postgres::PgRow) -> Value {
         "updated_at": updated_at.to_rfc3339(),
         "finished_at": finished_at.map(|dt| dt.to_rfc3339())
     })
+}
+
+fn workflow_run_summary_row_json(row: sqlx::postgres::PgRow) -> Value {
+    let started_at: DateTime<Utc> = row.get("started_at");
+    let updated_at: DateTime<Utc> = row.get("updated_at");
+    let finished_at: Option<DateTime<Utc>> = row.try_get("finished_at").ok().flatten();
+    let workflow_id = row
+        .try_get::<Option<String>, _>("workflow_id")
+        .ok()
+        .flatten();
+    let workflow_path = row
+        .try_get::<Option<String>, _>("workflow_path")
+        .ok()
+        .flatten();
+    let parent_task_id = row
+        .try_get::<Option<String>, _>("parent_task_id")
+        .ok()
+        .flatten();
+    let recoverable = workflow_id.is_some() && workflow_path.is_some() && parent_task_id.is_some();
+    let checkpoint = row.get::<Value, _>("checkpoint");
+    json!({
+        "id": row.get::<String, _>("id"),
+        "workflow_id": workflow_id,
+        "workflow_path": workflow_path,
+        "project_id": row.try_get::<Option<String>, _>("project_id").ok().flatten(),
+        "parent_task_id": parent_task_id,
+        "status": row.get::<String, _>("status"),
+        "cursor": row.get::<Value, _>("cursor"),
+        "checkpoint": checkpoint,
+        "checkpointExcerpt": workflow_checkpoint_excerpt(&checkpoint),
+        "max_inflight": row.get::<i32, _>("max_inflight"),
+        "active_task_ids": row.get::<Value, _>("active_task_ids"),
+        "artifact_hashes": row.get::<Value, _>("artifact_hashes"),
+        "started_at": started_at.to_rfc3339(),
+        "updated_at": updated_at.to_rfc3339(),
+        "finished_at": finished_at.map(|dt| dt.to_rfc3339()),
+        "updatedAgeSecs": row.try_get::<i64, _>("updated_age_secs").unwrap_or(0),
+        "recoverable": recoverable
+    })
+}
+
+fn workflow_checkpoint_excerpt(checkpoint: &Value) -> String {
+    let mut text = checkpoint.to_string();
+    if text.len() > 240 {
+        text.truncate(240);
+        text.push_str("...");
+    }
+    text
 }
 
 #[allow(dead_code)]

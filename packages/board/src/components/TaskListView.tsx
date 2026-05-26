@@ -12,7 +12,7 @@ import {
   type DragEndEvent,
 } from '@dnd-kit/core';
 import { SortableContext, verticalListSortingStrategy, sortableKeyboardCoordinates } from '@dnd-kit/sortable';
-import { ChevronDown, ChevronRight, CheckCircle2, Trash2, EyeOff, SkipForward } from 'lucide-react';
+import { AlertTriangle, ChevronDown, ChevronRight, CheckCircle2, Trash2, EyeOff, SkipForward, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useTaskCenterStore } from '../store';
 import { CATEGORY_CONFIG, PRIORITY_CONFIG } from '../constants';
@@ -172,6 +172,8 @@ export function TaskListView() {
   const showSkipped = useTaskCenterStore((s) => s.showSkipped);
   const setShowSkipped = useTaskCenterStore((s) => s.setShowSkipped);
   const clearDoneTasks = useTaskCenterStore((s) => s.clearDoneTasks);
+  const lastError = useTaskCenterStore((s) => s.lastError);
+  const clearLastError = useTaskCenterStore((s) => s.clearLastError);
 
   const [activeTask, setActiveTask] = useState<Task | null>(null);
   const [expandedSet, setExpandedSet] = useState<Set<string>>(new Set());
@@ -281,6 +283,19 @@ export function TaskListView() {
     >
       <SortableContext items={allRootIds} strategy={verticalListSortingStrategy}>
         <div className="space-y-0.5">
+          {lastError && (
+            <div className="mx-3 mb-3 flex items-start gap-2 rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-none text-amber-300" />
+              <div className="min-w-0 flex-1 break-words">{lastError}</div>
+              <button
+                onClick={clearLastError}
+                className="rounded p-0.5 text-amber-200 hover:bg-amber-400/10 hover:text-amber-100"
+                title="Dismiss"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          )}
           {groups.map((group) => (
             <div key={group.key}>
               {group.label && (

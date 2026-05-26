@@ -213,6 +213,7 @@ ensure_default_mcp_config() {
   local config_path="$INSTALL_ROOT/xjp-mcp-config.json"
   if [ -f "$config_path" ]; then
     log "mcp-config: keep existing $config_path"
+    validate_default_mcp_config "$config_path"
     return 0
   fi
   mkdir -p "$INSTALL_ROOT"
@@ -220,7 +221,15 @@ ensure_default_mcp_config() {
 {"mcpServers":{"missiond":{"command":"$MCP_BIN_PATH","args":[],"env":{"MISSIOND_SOCKET_PATH":"$SOCK_PATH"}}}}
 EOF
   chmod 600 "$config_path"
+  validate_default_mcp_config "$config_path"
   log "mcp-config: created default MissionD MCP config $config_path"
+}
+
+validate_default_mcp_config() {
+  local config_path="$1"
+  node -e 'const fs=require("node:fs"); const p=process.argv[1]; const data=fs.readFileSync(p,"utf8"); JSON.parse(data); if ((data.match(/"mcpServers"/g)||[]).length !== 1) throw new Error("duplicate mcpServers JSON object");' "$config_path" ||
+    fail "mcp-config JSON validation failed: $config_path" 1
+  log "mcp-config: JSON validation OK $config_path"
 }
 
 run_mcp_initialize_smoke() {
@@ -414,6 +423,33 @@ rollback_to_previous() {
   switch_active_release "$previous"
   restart_daemon_supervisor >/dev/null 2>&1 || true
   return 0
+}
+
+rollback_with_smoke() {
+  local previous="$1"
+  local start resp
+  start="$(date +%s)"
+  if ! rollback_to_previous "$previous"; then
+    record_timing "rollback-switch" "$start"
+    log "rollback-smoke: skipped because rollback switch failed"
+    return 1
+  fi
+  record_timing "rollback-switch" "$start"
+  if [ "$DO_SMOKE" -eq 0 ]; then
+    log "rollback-smoke: skipped by --no-smoke"
+    return 0
+  fi
+  start="$(date +%s)"
+  resp="$(run_mcp_initialize_smoke "$MCP_BIN_PATH" 2>&1 | tail -3 || true)"
+  if echo "$resp" | grep -q '"protocolVersion"'; then
+    record_timing "rollback-smoke" "$start"
+    log "rollback-smoke: active MCP responded OK after rollback"
+    return 0
+  fi
+  record_timing "rollback-smoke" "$start"
+  log "rollback-smoke: active MCP failed after rollback -- stderr tail below"
+  echo "$resp" | sed 's/^/[rollback-smoke] /' >&2
+  return 1
 }
 
 release_complete() {
@@ -642,14 +678,14 @@ ensure_default_mcp_config
 
 KICKSTART_START="$(date +%s)"
 if ! restart_daemon_supervisor; then
-  rollback_to_previous "$PREVIOUS_ACTIVE" || true
+  rollback_with_smoke "$PREVIOUS_ACTIVE" || true
   fail "launchctl reload/kickstart failed; rollback attempted" 4
 fi
 record_timing "launchd-kickstart" "$KICKSTART_START"
 
 SOCKET_WAIT_START="$(date +%s)"
 if ! wait_for_socket; then
-  rollback_to_previous "$PREVIOUS_ACTIVE" || true
+  rollback_with_smoke "$PREVIOUS_ACTIVE" || true
   fail "socket not ready after ${TIMEOUT}s; rollback attempted" 5
 fi
 record_timing "socket-wait" "$SOCKET_WAIT_START"
@@ -662,7 +698,7 @@ fi
 
 POST_SMOKE_START="$(date +%s)"
 if ! post_switch_smoke; then
-  rollback_to_previous "$PREVIOUS_ACTIVE" || true
+  rollback_with_smoke "$PREVIOUS_ACTIVE" || true
   fail "smoke check failed; rollback attempted" 6
 fi
 record_timing "post-switch-mcp-smoke" "$POST_SMOKE_START"

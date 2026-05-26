@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { randomUUID } from 'crypto';
 import { callTool } from '@/lib/missiond';
+import { boardClient } from '@/lib/missiondBoardClient';
 
 type ChatPart = string | Array<{ type?: string; text?: string; image_url?: { url?: string } }>;
 
@@ -66,7 +67,7 @@ export async function POST(req: NextRequest) {
       '执行要求：resident Codex master 先按 .missiond/workflows/intent-intake-grounding.lisp 处理：第一轮理解用户想做什么；第二轮优先用 mission_context_gather 聚合 KB/SSOT/project registry/skill evidence/infra evidence 查询确认用户指的对象；第三轮生成或复用 request-local intent-alignment.lisp / work-order intent 给用户/主控确认。确认后若没有匹配 workflow.lisp，再由计划工位读取工具目录和资源能力生成 plan.lisp accepted shards；确认前不要编 plan 或派实现工位；PTY 只作为诊断。',
     ].filter(Boolean).join('\n');
 
-    const task = await callTool('mission_board_create', {
+    const task = await boardClient.create({
       title: titleFromText(text, imageCount),
       description,
       category: 'infra',

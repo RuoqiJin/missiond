@@ -15,7 +15,8 @@ pub(super) async fn handle_create(state: &AppState, args: Value) -> Result<ToolR
             .with_suggestion("supply a concise title and put long details in description"),
         ));
     }
-    let mut task = match state.store.create_board_task(&input).await {
+    let storage = state.storage_plane();
+    let mut task = match storage.ports.create_board_task(&input).await {
         Ok(task) => task,
         Err(err) => return Ok(super::board_store_error("mission_board_create", err)),
     };
@@ -25,8 +26,8 @@ pub(super) async fn handle_create(state: &AppState, args: Value) -> Result<ToolR
         let flow_phase = "investigate".to_string();
         let flow_ctx = serde_json::to_string(&missiond_core::types::FlowContext::default())
             .unwrap_or_else(|_| "{}".to_string());
-        let updated = match state
-            .store
+        let updated = match storage
+            .ports
             .update_board_task(
                 task.id.as_str(),
                 &missiond_core::types::UpdateBoardTaskInput {

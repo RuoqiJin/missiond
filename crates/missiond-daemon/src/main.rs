@@ -1215,6 +1215,27 @@ async fn main() -> Result<()> {
         },
     };
 
+    match state
+        .storage()
+        .shared_memory
+        .startup_recover_workflow_runs()
+        .await
+    {
+        Ok(summary) => {
+            let blocked = summary
+                .get("blockedUnrecoverable")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if blocked > 0 {
+                warn!(
+                    blocked_unrecoverable = blocked,
+                    "workflow_run startup recovery blocked runs that lack resumable identity"
+                );
+            }
+        }
+        Err(err) => warn!(error = %err, "workflow_run startup recovery scan failed"),
+    }
+
     {
         let state_for_outbox = state.clone();
         tokio::spawn(async move {
@@ -1409,8 +1430,8 @@ async fn main() -> Result<()> {
         *jarvis_grounding_slot.write().await = Some(grounder);
 
         let state_for_artifact = state.clone();
-        let artifact_writer: missiond_core::JarvisArtifactFn =
-            Arc::new(move |req: missiond_core::JarvisArtifactRequest| {
+        let artifact_writer: missiond_core::JarvisArtifactFn = Arc::new(
+            move |req: missiond_core::JarvisArtifactRequest| {
                 let s = state_for_artifact.clone();
                 Box::pin(async move {
                     if req.kind == "task-result-artifact" {
@@ -1448,27 +1469,32 @@ async fn main() -> Result<()> {
                             .and_then(Value::as_str)
                             .or_else(|| req.payload.get("content").and_then(Value::as_str))
                             .unwrap_or("");
-                        let payload = serde_json::json!({
-                            "action": "task_result_put",
-                            "task_id": task_id,
-                            "project_id": req.project_id.as_deref().unwrap_or("missiond"),
-                            "provider": provider,
-                            "result_status": result_status,
-                            "summary": summary,
-                            "json": req.payload,
-                        });
-                        let result = s
-                            .shared_memory
-                            .handle_action(&payload)
+                        let writer =
+                            crate::engine::task_completion_evidence::TaskCompletionEvidenceWriter::new(
+                                s.storage().shared_memory.clone(),
+                            );
+                        let result = writer
+                            .write_bounded(
+                                crate::engine::task_completion_evidence::TaskCompletionEvidenceInput {
+                                    task_id: task_id.clone(),
+                                    project_id: Some(
+                                        req.project_id
+                                            .clone()
+                                            .unwrap_or_else(|| "missiond".to_string()),
+                                    ),
+                                    slot_id: None,
+                                    conversation_id: None,
+                                    provider: provider.to_string(),
+                                    result_status: result_status.to_string(),
+                                    summary: summary.to_string(),
+                                    content: None,
+                                    json: req.payload.clone(),
+                                    accepted_shard_id: None,
+                                },
+                            )
                             .await
                             .map_err(|err| err.to_string())?;
-                        let hash = result
-                            .get("artifact_hash")
-                            .and_then(Value::as_str)
-                            .ok_or_else(|| {
-                                "task-result-artifact writer returned no artifact_hash".to_string()
-                            })?
-                            .to_string();
+                        let hash = result.artifact_hash;
                         return Ok(missiond_core::JarvisArtifactResult {
                             artifact_id: format!("task-result-artifact:{hash}"),
                             artifact_hash: hash.clone(),
@@ -1497,7 +1523,8 @@ async fn main() -> Result<()> {
                         path: format!("shared-artifact://{hash}"),
                     })
                 })
-            });
+            },
+        );
         *jarvis_artifact_writer_slot.write().await = Some(artifact_writer);
         info!("Jarvis grounded intent/plan runtime activated");
     }
@@ -1877,6 +1904,11 @@ async fn main() -> Result<()> {
                     .shared_memory
                     .evidence_health_summary(20)
                     .await;
+                let workflow_runs = sample_state
+                    .storage()
+                    .shared_memory
+                    .workflow_runs_summary(20)
+                    .await;
                 let pending_questions = sample_state
                     .storage()
                     .store
@@ -1887,7 +1919,12 @@ async fn main() -> Result<()> {
                 sample_state
                     .storage()
                     .bus
-                    .record_operator_health_sample(workers, evidence, pending_questions)
+                    .record_operator_health_sample(
+                        workers,
+                        evidence,
+                        workflow_runs,
+                        pending_questions,
+                    )
                     .await;
             }
         });

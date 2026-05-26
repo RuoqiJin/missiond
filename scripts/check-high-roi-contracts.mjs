@@ -13,6 +13,8 @@ Checks high-ROI MissionD repair contracts:
 - mission_health exposes startupPreflight
 - worker lifecycle and evidence/event health operator contracts stay wired
 - executable runbook actions, operator trends, and real bus metrics stay wired
+- completion evidence writer, workflow_run adoption, compiled ABI boundary,
+  workstation exact-shard validation, and rollback-smoke deploy discipline stay wired
 `;
 
 const SOURCE_STATE_LABELS = [
@@ -50,12 +52,16 @@ function main() {
       ['runbook generator', /buildRunbook/],
       ['runbook executable action', /action:\s*\{/],
       ['operator trends projection', /operatorTrends/],
+      ['workflow runs projection', /workflowRuns/],
+      ['workflow blocked runbook action', /workflow_blocked_inspect/],
+      ['workflow resume runbook action', /workflow_resume:/],
       ['fake MCP harness', /createFakeOperatorOverviewHarness/],
     ]),
     ...checkRequiredText(root, 'packages/board/src/app/api/operator/runbook/action/route.ts', [
       ['runbook action route', /export\s+async\s+function\s+POST/],
       ['runbook action allowlist', /ALLOWED_TOOLS/],
       ['DLQ replay confirm gate', /dlq_replay[\s\S]*confirm=true|confirm.*dlq_replay/s],
+      ['workflow resume confirm gate', /workflow_resume[\s\S]*confirm=true|confirm.*workflow_resume/s],
     ]),
     ...checkRequiredText(root, 'packages/board/src/eventStream.ts', [
       ['stale threshold', /EVENT_HEALTH_STALE_AFTER_MS/],
@@ -68,6 +74,7 @@ function main() {
       ['workers health field', /workers/],
       ['evidence health field', /evidence/],
       ['operator trends health field', /operatorTrends/],
+      ['workflow runs health field', /workflowRuns/],
       ['mission_event_bus tool', /mission_event_bus/],
     ]),
     ...checkRequiredText(root, 'crates/missiond-daemon/src/workers/registry.rs', [
@@ -84,8 +91,40 @@ function main() {
       ['DLQ health', /dead_letter_queue/],
       ['ws bridge health', /wsBridge/],
       ['operator trends store', /operator_health_samples/],
+      ['workflow trend counters', /workflow_blocked[\s\S]*workflow_failed[\s\S]*workflow_stale/],
       ['DLQ action list', /dlq_list/],
       ['DLQ action replay', /dlq_replay/],
+    ]),
+    ...checkRequiredText(root, 'crates/missiond-daemon/src/engine/task_completion_evidence.rs', [
+      ['completion evidence writer', /struct\s+TaskCompletionEvidenceWriter/],
+      ['evidence write failed code', /EVIDENCE_WRITE_FAILED/],
+      ['evidence write timeout code', /EVIDENCE_WRITE_TIMEOUT/],
+      ['shared memory task result put', /task_result_put/],
+    ]),
+    ...checkRequiredText(root, 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_audit.rs', [
+      ['mission_execution completion writes evidence', /TaskCompletionEvidenceWriter[\s\S]*task_result_artifact/],
+    ]),
+    ...checkRequiredText(root, 'crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs', [
+      ['plan execute contract required', /PLAN_CONTRACT_REQUIRED/],
+      ['plan dag workflow start', /workflow_start[\s\S]*mission_plan_execute/],
+      ['plan dag workflow checkpoint', /workflow_checkpoint[\s\S]*aggregate_status/],
+    ]),
+    ...checkRequiredText(root, 'crates/missiond-daemon/src/handlers/compute/task_delegate.rs', [
+      ['swarm workflow start', /workflow_start[\s\S]*mission_swarm_run/],
+      ['swarm workflow checkpoint', /workflow_checkpoint[\s\S]*created_task_ids/],
+      ['exact shard ready override', /exact_shard_ready/],
+      ['implementation exact shard requirement', /mission_task_delegate refused an implementation worker without write_scope/],
+    ]),
+    ...checkRequiredText(root, 'crates/missiond-daemon/src/app_ports.rs', [
+      ['task evidence port', /trait\s+TaskEvidencePort/],
+      ['workflow run port', /trait\s+WorkflowRunPort/],
+      ['board completion port', /trait\s+BoardCompletionPort/],
+      ['slot status port', /trait\s+SlotStatusPort/],
+    ]),
+    ...checkRequiredText(root, 'scripts/deploy-daemon.sh', [
+      ['default mcp config JSON validation', /validate_default_mcp_config/],
+      ['rollback smoke timing', /rollback-smoke/],
+      ['rollback smoke wrapper', /rollback_with_smoke/],
     ]),
     ...checkRequiredText(root, 'crates/missiond-core/src/event/pipeline/step3_commit/log_writer.rs', [
       ['log writer metrics field', /metrics:\s*Arc<dyn BusMetrics>/],
@@ -105,6 +144,8 @@ function main() {
       ['task evidence summary schema', /missiond\.task-evidence-summary\.v1/],
       ['task evidence summary action', /task_evidence_summary/],
       ['task evidence gate summary', /requiredForDone/],
+      ['workflow runs summary', /workflow_runs_summary/],
+      ['workflow startup recovery', /startup_recover_workflow_runs/],
     ]),
     ...checkRequiredText(root, 'crates/missiond-core/src/db/pg/board.rs', [
       ['evidence hard gate', /EVIDENCE_REQUIRED/],
@@ -121,6 +162,7 @@ function main() {
     ...checkRequiredText(root, 'scripts/check-board-operator-fixtures.mjs', [
       ['board operator fixture checker', /createFakeOperatorOverviewHarness/],
       ['runbook action assertion', /worker_resume:/],
+      ['workflow runbook assertion', /workflow_blocked_inspect/],
     ]),
     ...checkRequiredText(root, 'scripts/check-pg-migrations-discipline.mjs', [
       ['pg migration checker', /check-pg-migrations-discipline/],

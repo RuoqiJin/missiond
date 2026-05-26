@@ -63,12 +63,13 @@ pub(super) async fn handle_note_add(state: &AppState, args: Value) -> Result<Too
         note_type: args.note_type,
         author: args.author,
     };
-    let note = match state.store.add_board_task_note(&input).await {
+    let storage = state.storage_plane();
+    let note = match storage.ports.add_board_task_note(&input).await {
         Ok(note) => note,
         Err(err) => return Ok(super::board_store_error("mission_board_note_add", err)),
     };
     // Refresh binding: session is actively updating this task.
-    if let Ok(Some(task)) = state.store.get_board_task(&task_id).await {
+    if let Ok(Some(task)) = storage.ports.get_board_task(&task_id).await {
         super::record_session_task_binding(state, task.id.as_str(), &task.title);
     }
     let ev = BoardEvent::NoteAdded {
@@ -79,7 +80,8 @@ pub(super) async fn handle_note_add(state: &AppState, args: Value) -> Result<Too
     if !is_master_control_note {
         crate::engine::master_control::notify_board_event_direct(&ev);
     }
-    let _ = state.bus.publish_board(ev).await;
+    let event_plane = state.event_plane();
+    let _ = event_plane.bus.publish_board_event(ev).await;
     Ok(note_add_response(&note))
 }
 

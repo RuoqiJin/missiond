@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { callTool } from '@/lib/missiond';
+import { boardClient } from '@/lib/missiondBoardClient';
 
 interface BoardTask {
   id: string;
@@ -28,7 +29,7 @@ interface BoardTask {
 export async function GET() {
   try {
     // Fetch all board tasks (we'll filter client-side for deploy category)
-    const allTasks = (await callTool('mission_board_list', { includeHidden: true })) as BoardTask[];
+    const allTasks = (await boardClient.list({ includeHidden: true })) as BoardTask[];
     const deployTasks = allTasks.filter((t) => t.category === 'deploy');
 
     // Sort by updatedAt descending (most recent first)

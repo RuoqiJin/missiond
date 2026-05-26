@@ -8,9 +8,9 @@ pub(super) fn publish_board_created(state: &AppState, task: &missiond_core::type
         category: task.category.clone(),
     };
     crate::engine::master_control::notify_board_event_direct(&ev);
-    let bus = Arc::clone(&state.bus);
+    let bus = state.event_plane().bus;
     tokio::spawn(async move {
-        let _ = bus.publish_board(ev).await;
+        let _ = bus.publish_board_event(ev).await;
     });
 }
 
@@ -22,9 +22,9 @@ pub(super) fn publish_board_update(state: &AppState, task: &missiond_core::types
         category: task.category.clone(),
     };
     crate::engine::master_control::notify_board_event_direct(&ev);
-    let bus = Arc::clone(&state.bus);
+    let bus = state.event_plane().bus;
     tokio::spawn(async move {
-        let _ = bus.publish_board(ev).await;
+        let _ = bus.publish_board_event(ev).await;
     });
 }
 
@@ -40,8 +40,8 @@ pub(super) fn publish_board_status_changed(
         new_status: format!("{:?}", task.status),
     };
     crate::engine::master_control::notify_board_event_direct(&ev);
-    let bus = Arc::clone(&state.bus);
+    let bus = state.event_plane().bus;
     tokio::spawn(async move {
-        let _ = bus.publish_board(ev).await;
+        let _ = bus.publish_board_event(ev).await;
     });
 }

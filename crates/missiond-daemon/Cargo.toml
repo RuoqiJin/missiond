@@ -39,6 +39,7 @@ notify = { workspace = true }
 
 thiserror = { workspace = true }
 missiond-core = { workspace = true }
+missiond-domain = { workspace = true }
 missiond-kernel = { workspace = true }
 missiond-organism-runtime = { workspace = true }
 missiond-mcp = { workspace = true }

@@ -22,6 +22,35 @@ function mapToBackend(data: Record<string, unknown>): Record<string, unknown> {
   return out;
 }
 
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function evidenceErrorResponse(err: unknown) {
+  const message = errorText(err);
+  if (!message.includes('EVIDENCE_REQUIRED')) return null;
+  const taskId = message.match(/task_id=([^\s:]+)/)?.[1]
+    ?? message.match(/BoardTask\s+([^\s]+)/)?.[1]
+    ?? '';
+  const body = {
+    code: 'EVIDENCE_REQUIRED',
+    taskId,
+    message: taskId
+      ? `Task ${taskId} cannot be marked done until canonical completion evidence exists.`
+      : 'Task cannot be marked done until canonical completion evidence exists.',
+    suggestedAction: taskId
+      ? `mission_shared_memory(action="task_result_put", task_id="${taskId}", result_status="completed", ...)`
+      : 'mission_shared_memory(action="task_result_put", task_id=..., result_status="completed", ...)',
+    error: message,
+  };
+  return NextResponse.json(body, { status: 409 });
+}
+
+function taskApiError(err: unknown) {
+  return evidenceErrorResponse(err)
+    ?? NextResponse.json({ error: errorText(err) }, { status: 502 });
+}
+
 export async function GET(req: NextRequest) {
   try {
     const id = req.nextUrl.searchParams.get('id');
@@ -39,7 +68,7 @@ export async function GET(req: NextRequest) {
     const tasks = await boardClient.list(args) as Record<string, unknown>[];
     return NextResponse.json(tasks.map(mapToFrontend));
   } catch (err) {
-    return NextResponse.json({ error: String(err) }, { status: 502 });
+    return taskApiError(err);
   }
 }
 
@@ -85,7 +114,7 @@ export async function POST(req: NextRequest) {
     const task = await boardClient.create(backendData);
     return NextResponse.json(mapToFrontend(task as Record<string, unknown>));
   } catch (err) {
-    return NextResponse.json({ error: String(err) }, { status: 502 });
+    return taskApiError(err);
   }
 }
 
@@ -98,7 +127,7 @@ export async function PATCH(req: NextRequest) {
     const task = await boardClient.update(id, backendData);
     return NextResponse.json(mapToFrontend(task as Record<string, unknown>));
   } catch (err) {
-    return NextResponse.json({ error: String(err) }, { status: 502 });
+    return taskApiError(err);
   }
 }
 
@@ -109,6 +138,6 @@ export async function DELETE(req: NextRequest) {
     const result = await boardClient.delete(id);
     return NextResponse.json(result);
   } catch (err) {
-    return NextResponse.json({ error: String(err) }, { status: 502 });
+    return taskApiError(err);
   }
 }
