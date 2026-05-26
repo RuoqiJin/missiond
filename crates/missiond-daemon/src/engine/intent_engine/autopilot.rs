@@ -322,7 +322,21 @@ async fn rebind_slot_conversation_for_dispatch(state: &AppState, slot_id: &str, 
         Ok(Some(uuid)) => uuid,
         _ => return,
     };
-    if let Ok(Some(conv)) = state.store.get_conversation(&session_uuid).await {
+    let Ok(Some(conv)) = state.store.get_conversation(&session_uuid).await else {
+        return;
+    };
+    if !conversation_is_open_for_dispatch(&conv) {
+        warn!(
+            slot_id,
+            task_id,
+            session_id = %session_uuid,
+            status = %conv.status,
+            ended_at = ?conv.ended_at,
+            "Autopilot: skipped dispatch-time conversation rebind for completed historical slot session"
+        );
+        return;
+    }
+    {
         if let Some(existing) = conv
             .task_id
             .as_deref()
@@ -351,6 +365,40 @@ async fn rebind_slot_conversation_for_dispatch(state: &AppState, slot_id: &str, 
             "Autopilot: dispatch-time conversation rebind failed"
         );
     }
+}
+
+fn conversation_is_open_for_dispatch(conv: &missiond_core::types::Conversation) -> bool {
+    conv.status == "active"
+        && conv
+            .ended_at
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
+}
+
+fn conversation_ended_before_claim(
+    conv: &missiond_core::types::Conversation,
+    claimed_at: Option<&str>,
+) -> bool {
+    let Some(claimed_at) = claimed_at else {
+        return false;
+    };
+    let Some(ended_at) = conv
+        .ended_at
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    else {
+        return false;
+    };
+    let Ok(claimed_at) = chrono::DateTime::parse_from_rfc3339(claimed_at) else {
+        return false;
+    };
+    let Ok(ended_at) = chrono::DateTime::parse_from_rfc3339(ended_at) else {
+        return false;
+    };
+    ended_at < claimed_at
 }
 
 fn is_durable_completion_summary_note(note: &missiond_core::types::BoardTaskNote) -> bool {
@@ -945,11 +993,14 @@ async fn durable_provider_completion_for_slot_task(
         .get_conversations_by_task_id(task.id.as_str())
         .await
         .unwrap_or_default();
+    candidates.retain(|conv| !conversation_ended_before_claim(conv, task.claimed_at.as_deref()));
 
     if let Ok(Some(session_id)) = state.store.get_slot_session(slot_id).await {
         if !candidates.iter().any(|conv| conv.id == session_id) {
             if let Some(conv) = state.store.get_conversation(&session_id).await? {
-                candidates.push(conv);
+                if !conversation_ended_before_claim(&conv, task.claimed_at.as_deref()) {
+                    candidates.push(conv);
+                }
             }
         }
     }
@@ -8675,6 +8726,86 @@ Review only.
         assert!(
             summary.is_none(),
             "tool_use stop_reason must not close the task even if headings are present"
+        );
+    }
+
+    fn make_conversation_for_binding_test(
+        id: &str,
+        status: &str,
+        ended_at: Option<&str>,
+    ) -> missiond_core::types::Conversation {
+        missiond_core::types::Conversation {
+            id: id.to_string(),
+            project: Some("/tmp/project".to_string()),
+            project_id: Some("missiond".to_string()),
+            slot_id: Some("slot-claude-code-default".to_string()),
+            source: "claude_code".to_string(),
+            model: None,
+            git_branch: None,
+            jsonl_path: None,
+            parent_session_id: None,
+            task_id: None,
+            message_count: 0,
+            started_at: "2026-05-26T08:00:00Z".to_string(),
+            ended_at: ended_at.map(str::to_string),
+            status: status.to_string(),
+            analyzed_at: None,
+            analysis_version: 0,
+            analysis_retries: 0,
+            deep_analyzed_message_id: 0,
+            chat_type: None,
+            conversation_type: "worker".to_string(),
+            updated_at: None,
+            llm_summary: None,
+            embedding_provider: None,
+            session_timeline: None,
+            timeline_built_at: None,
+        }
+    }
+
+    #[test]
+    fn dispatch_rebind_skips_completed_conversation() {
+        let completed = make_conversation_for_binding_test(
+            "old-session",
+            "completed",
+            Some("2026-05-26T09:01:00Z"),
+        );
+        let active = make_conversation_for_binding_test("new-session", "active", None);
+        assert!(
+            !conversation_is_open_for_dispatch(&completed),
+            "completed historical slot session must not be rebound to a new task"
+        );
+        assert!(
+            conversation_is_open_for_dispatch(&active),
+            "active current slot session remains eligible for dispatch binding"
+        );
+    }
+
+    #[test]
+    fn conversation_ended_before_claim_rejects_stale_final() {
+        let old = make_conversation_for_binding_test(
+            "old-session",
+            "completed",
+            Some("2026-05-26T09:01:00Z"),
+        );
+        let current = make_conversation_for_binding_test(
+            "current-session",
+            "completed",
+            Some("2026-05-26T09:10:00Z"),
+        );
+        let active = make_conversation_for_binding_test("active-session", "active", None);
+
+        assert!(
+            conversation_ended_before_claim(&old, Some("2026-05-26T09:08:00Z")),
+            "old durable final ended before a new BoardTask claim must be ignored"
+        );
+        assert!(
+            !conversation_ended_before_claim(&current, Some("2026-05-26T09:08:00Z")),
+            "conversation ending after the claim remains a valid completion candidate"
+        );
+        assert!(
+            !conversation_ended_before_claim(&active, Some("2026-05-26T09:08:00Z")),
+            "active conversation without ended_at remains eligible while final is settling"
         );
     }
 }
