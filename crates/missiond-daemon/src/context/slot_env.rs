@@ -5,6 +5,9 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use tracing::{debug, info, warn};
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 // @beacon: slot
 pub(crate) async fn build_slot_tracking_env(
     slot_id: &str,
@@ -53,6 +56,63 @@ pub(crate) async fn build_slot_tracking_env(
 
 const SESSION_REGISTER_HOOK: &str = "bash ~/.claude/hooks/missiond-session-register.sh";
 const CONTEXT_INJECT_HOOK: &str = "bash ~/.claude/hooks/missiond-context-inject-v2.sh";
+const SESSION_REGISTER_HOOK_FILE: &str = "missiond-session-register.sh";
+const CONTEXT_INJECT_HOOK_FILE: &str = "missiond-context-inject-v2.sh";
+const SESSION_REGISTER_HOOK_SCRIPT: &str = r#"#!/usr/bin/env bash
+set -euo pipefail
+
+session_file="${MISSIOND_SESSION_FILE:-}"
+if [ -z "$session_file" ]; then
+  exit 0
+fi
+
+payload="$(cat || true)"
+session_id="${CLAUDE_SESSION_ID:-}"
+
+if [ -z "$session_id" ] && command -v python3 >/dev/null 2>&1; then
+  session_id="$(MISSIOND_HOOK_PAYLOAD="$payload" python3 - <<'PY' 2>/dev/null || true
+import json
+import os
+from pathlib import Path
+
+payload = os.environ.get("MISSIOND_HOOK_PAYLOAD", "")
+data = {}
+if payload.strip():
+    try:
+        data = json.loads(payload)
+    except Exception:
+        data = {}
+for key in ("session_id", "sessionId", "conversation_id", "conversationId"):
+    value = data.get(key)
+    if isinstance(value, str) and value.strip():
+        print(value.strip())
+        raise SystemExit(0)
+for key in ("transcript_path", "transcriptPath"):
+    value = data.get(key)
+    if isinstance(value, str) and value.strip():
+        name = Path(value).name
+        if name.endswith(".jsonl"):
+            name = name[:-6]
+        if name:
+            print(name)
+            raise SystemExit(0)
+PY
+)"
+fi
+
+if [ -n "$session_id" ]; then
+  mkdir -p "$(dirname "$session_file")"
+  printf '%s\n' "$session_id" > "$session_file"
+fi
+"#;
+const CONTEXT_INJECT_HOOK_SCRIPT: &str = r#"#!/usr/bin/env bash
+set -euo pipefail
+
+# MissionD context prefetch is opt-in and fail-open. The durable interaction
+# gateway now provides grounded context slices; this hook exists only so legacy
+# project-local Claude settings never point at a missing executable.
+exit 0
+"#;
 
 fn claude_user_prompt_context_hook_enabled() -> bool {
     matches!(
@@ -93,6 +153,17 @@ fn sync_slot_hooks_inner(cwd: &Path) -> Result<bool> {
 }
 
 fn sync_slot_hooks_inner_with_context_hook(cwd: &Path, context_hook_enabled: bool) -> Result<bool> {
+    let hooks_dir = default_claude_hooks_dir()?;
+    sync_slot_hooks_inner_with_context_hook_and_hooks_dir(cwd, context_hook_enabled, &hooks_dir)
+}
+
+fn sync_slot_hooks_inner_with_context_hook_and_hooks_dir(
+    cwd: &Path,
+    context_hook_enabled: bool,
+    hooks_dir: &Path,
+) -> Result<bool> {
+    let mut changed = ensure_claude_home_hooks(hooks_dir)?;
+
     let claude_dir = cwd.join(".claude");
     std::fs::create_dir_all(&claude_dir)
         .with_context(|| format!("create_dir_all {}", claude_dir.display()))?;
@@ -120,7 +191,6 @@ fn sync_slot_hooks_inner_with_context_hook(cwd: &Path, context_hook_enabled: boo
         root = json!({});
     }
 
-    let mut changed = false;
     changed |= ensure_hook_command(
         &mut root,
         "SessionStart",
@@ -150,6 +220,63 @@ fn sync_slot_hooks_inner_with_context_hook(cwd: &Path, context_hook_enabled: boo
         .with_context(|| format!("rename {} -> {}", tmp.display(), settings_path.display()))?;
 
     Ok(true)
+}
+
+fn default_claude_hooks_dir() -> Result<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .context("HOME is required to materialize Claude hook scripts")?;
+    Ok(home.join(".claude").join("hooks"))
+}
+
+fn ensure_claude_home_hooks(hooks_dir: &Path) -> Result<bool> {
+    std::fs::create_dir_all(hooks_dir)
+        .with_context(|| format!("create_dir_all {}", hooks_dir.display()))?;
+    let mut changed = false;
+    changed |= write_hook_script_if_changed(
+        &hooks_dir.join(SESSION_REGISTER_HOOK_FILE),
+        SESSION_REGISTER_HOOK_SCRIPT,
+    )?;
+    changed |= write_hook_script_if_changed(
+        &hooks_dir.join(CONTEXT_INJECT_HOOK_FILE),
+        CONTEXT_INJECT_HOOK_SCRIPT,
+    )?;
+    Ok(changed)
+}
+
+fn write_hook_script_if_changed(path: &Path, content: &str) -> Result<bool> {
+    let existing = std::fs::read_to_string(path).ok();
+    if existing.as_deref() == Some(content) {
+        ensure_executable(path)?;
+        return Ok(false);
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, content).with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| {
+        format!(
+            "rename materialized Claude hook {} -> {}",
+            tmp.display(),
+            path.display()
+        )
+    })?;
+    ensure_executable(path)?;
+    Ok(true)
+}
+
+fn ensure_executable(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let mut permissions = std::fs::metadata(path)
+            .with_context(|| format!("metadata {}", path.display()))?
+            .permissions();
+        let mode = permissions.mode();
+        if mode & 0o111 != 0o111 {
+            permissions.set_mode(mode | 0o755);
+            std::fs::set_permissions(path, permissions)
+                .with_context(|| format!("chmod +x {}", path.display()))?;
+        }
+    }
+    Ok(())
 }
 
 fn ensure_hook_command(
@@ -547,7 +674,16 @@ pub(crate) async fn capture_slot_session_uuid(
 mod tests {
     use super::*;
     use missiond_core::types::TaskId;
-    use tempfile::tempdir;
+    use tempfile::{tempdir, TempDir};
+
+    fn sync_test_hooks(dir: &TempDir, context_hook_enabled: bool) -> Result<bool> {
+        let hooks_dir = dir.path().join("home").join(".claude").join("hooks");
+        sync_slot_hooks_inner_with_context_hook_and_hooks_dir(
+            dir.path(),
+            context_hook_enabled,
+            &hooks_dir,
+        )
+    }
 
     fn board_task_for_slot(id: &str, slot_id: Option<&str>, status: BoardTaskStatus) -> BoardTask {
         BoardTask {
@@ -618,9 +754,17 @@ mod tests {
     fn sync_slot_hooks_creates_project_local_hooks() {
         let dir = tempdir().unwrap();
 
-        let changed = sync_slot_hooks_inner(dir.path()).unwrap();
+        let changed = sync_test_hooks(&dir, false).unwrap();
 
         assert!(changed);
+        assert!(dir
+            .path()
+            .join("home/.claude/hooks/missiond-session-register.sh")
+            .exists());
+        assert!(dir
+            .path()
+            .join("home/.claude/hooks/missiond-context-inject-v2.sh")
+            .exists());
         let content =
             std::fs::read_to_string(dir.path().join(".claude/settings.local.json")).unwrap();
         let v: Value = serde_json::from_str(&content).unwrap();
@@ -637,7 +781,7 @@ mod tests {
     fn sync_slot_hooks_can_opt_in_user_prompt_context_hook() {
         let dir = tempdir().unwrap();
 
-        let changed = sync_slot_hooks_inner_with_context_hook(dir.path(), true).unwrap();
+        let changed = sync_test_hooks(&dir, true).unwrap();
 
         assert!(changed);
         let content =
@@ -674,7 +818,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(sync_slot_hooks_inner(dir.path()).unwrap());
+        assert!(sync_test_hooks(&dir, false).unwrap());
         let content =
             std::fs::read_to_string(dir.path().join(".claude/settings.local.json")).unwrap();
         let v: Value = serde_json::from_str(&content).unwrap();
@@ -714,8 +858,8 @@ mod tests {
         )
         .unwrap();
 
-        assert!(sync_slot_hooks_inner(dir.path()).unwrap());
-        assert!(!sync_slot_hooks_inner(dir.path()).unwrap());
+        assert!(sync_test_hooks(&dir, false).unwrap());
+        assert!(!sync_test_hooks(&dir, false).unwrap());
 
         let content =
             std::fs::read_to_string(dir.path().join(".claude/settings.local.json")).unwrap();

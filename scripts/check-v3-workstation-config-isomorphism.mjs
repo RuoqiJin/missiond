@@ -469,6 +469,10 @@ function checkFiles(root, files, { useOcaml = false } = {}) {
     'MISSION_IPC_ENDPOINT',
     'build_slot_tracking_env',
     'sync_slot_hooks_to_local_settings',
+    'ensure_claude_home_hooks',
+    'write_hook_script_if_changed',
+    'SESSION_REGISTER_HOOK_SCRIPT',
+    'CONTEXT_INJECT_HOOK_SCRIPT',
     'settings.local.json',
     'SESSION_REGISTER_HOOK',
     'CONTEXT_INJECT_HOOK',
@@ -862,9 +866,11 @@ cfg!(debug_assertions) || cfg!(test)
 return false;
 `);
   writeFixture(root, DEFAULT_FILES.slotEnv, `
-const A = 'MISSION_IPC_ENDPOINT settings.local.json SESSION_REGISTER_HOOK CONTEXT_INJECT_HOOK MISSIOND_CLAUDE_CONTEXT_PREFETCH SessionStart UserPromptSubmit missiond-session-register.sh missiond-context-inject-v2.sh';
+const A = 'MISSION_IPC_ENDPOINT settings.local.json SESSION_REGISTER_HOOK CONTEXT_INJECT_HOOK MISSIOND_CLAUDE_CONTEXT_PREFETCH SessionStart UserPromptSubmit missiond-session-register.sh missiond-context-inject-v2.sh ensure_claude_home_hooks write_hook_script_if_changed SESSION_REGISTER_HOOK_SCRIPT CONTEXT_INJECT_HOOK_SCRIPT';
 fn build_slot_tracking_env() {}
 fn sync_slot_hooks_to_local_settings() {}
+fn ensure_claude_home_hooks() {}
+fn write_hook_script_if_changed() {}
 fn remove_hook_command() {}
 fn sync_slot_hooks_removes_user_prompt_context_hook_by_default() {}
 fn sync_slot_hooks_can_opt_in_user_prompt_context_hook() {}`);
