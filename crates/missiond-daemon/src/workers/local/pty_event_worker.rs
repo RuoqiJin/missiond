@@ -35,9 +35,10 @@ impl super::BackgroundWorker for PtyEventWorker {
         "pty_events"
     }
 
-    async fn run(self, state: Arc<AppState>, _ctx: super::WorkerContext) {
+    async fn run(self, state: Arc<AppState>, mut ctx: super::WorkerContext) {
         let mut rx = self.pty_rx;
         loop {
+            ctx.wait_if_paused().await;
             match rx.recv().await {
                 Ok(missiond_core::ManagerEvent::TextComplete {
                     slot_id,
@@ -45,6 +46,12 @@ impl super::BackgroundWorker for PtyEventWorker {
                     content,
                     timestamp,
                 }) => {
+                    ctx.begin_task(
+                        Some(format!("worker:pty_events:text:{slot_id}")),
+                        Some(slot_id.clone()),
+                        Some(300),
+                    );
+                    ctx.progress("handling PTY text completion");
                     if !content.is_empty() {
                         state
                             .slot_last_responses
@@ -53,30 +60,59 @@ impl super::BackgroundWorker for PtyEventWorker {
                             .insert(slot_id.clone(), content.clone());
                     }
                     handle_pty_text_complete(&state, slot_id, turn_id, content, timestamp).await;
+                    ctx.record_success();
                 }
                 Ok(missiond_core::ManagerEvent::Exited { slot_id, exit_code }) => {
+                    ctx.begin_task(
+                        Some(format!("worker:pty_events:exit:{slot_id}")),
+                        Some(slot_id.clone()),
+                        Some(120),
+                    );
+                    ctx.progress("handling PTY exit");
                     handle_exited(&state, &slot_id, exit_code).await;
+                    ctx.record_success();
                 }
                 Ok(missiond_core::ManagerEvent::StateChange {
                     ref slot_id,
                     new_state,
                     prev_state,
                 }) => {
+                    ctx.begin_task(
+                        Some(format!("worker:pty_events:state:{slot_id}")),
+                        Some(slot_id.clone()),
+                        Some(120),
+                    );
+                    ctx.progress("handling PTY state change");
                     handle_state_change(&state, slot_id, new_state, prev_state).await;
+                    ctx.record_success();
                 }
                 Ok(missiond_core::ManagerEvent::ConfirmRequired {
                     slot_id,
                     prompt: _,
                     tool_info,
                 }) => {
+                    ctx.begin_task(
+                        Some(format!("worker:pty_events:confirm:{slot_id}")),
+                        Some(slot_id.clone()),
+                        Some(120),
+                    );
+                    ctx.progress("handling PTY confirmation request");
                     handle_confirm_required(&state, &slot_id, tool_info).await;
+                    ctx.record_success();
                 }
                 Ok(missiond_core::ManagerEvent::McpToolError {
                     slot_id,
                     tool_name,
                     error,
                 }) => {
+                    ctx.begin_task(
+                        Some(format!("worker:pty_events:mcp-error:{slot_id}")),
+                        Some(slot_id.clone()),
+                        Some(120),
+                    );
+                    ctx.progress(format!("handling MCP tool error from {tool_name}"));
                     handle_mcp_tool_error(&state, &slot_id, &tool_name, &error);
+                    ctx.record_success();
                 }
                 Ok(missiond_core::ManagerEvent::Spawned { .. }) => {}
                 Ok(missiond_core::ManagerEvent::MessageSent {
@@ -84,7 +120,13 @@ impl super::BackgroundWorker for PtyEventWorker {
                     project_path,
                     prompt,
                 }) => {
+                    ctx.begin_task(
+                        Some(format!("worker:pty_events:message-sent:{slot_id}")),
+                        Some(slot_id.clone()),
+                        Some(120),
+                    );
                     if let Some(path) = project_path {
+                        ctx.progress("recording PTY spawn expectation");
                         state.pending_slot_spawns.write().await.push((
                             path,
                             slot_id.clone(),
@@ -96,8 +138,10 @@ impl super::BackgroundWorker for PtyEventWorker {
                             "Issued expectation ticket on message sent"
                         );
                     }
+                    ctx.record_success();
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
+                    ctx.retrying(format!("PTY event stream lagged by {n} events"));
                     warn!(skipped = n, "PTY logger lagged");
                 }
                 Err(_) => {}

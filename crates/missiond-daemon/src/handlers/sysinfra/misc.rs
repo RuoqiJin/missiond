@@ -23,7 +23,7 @@ struct InboxArgs {
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     match name {
         // ===== Info =====
-        "mission_slots" => Ok(ToolResult::json(&state.mission.list_slots())),
+        "mission_slots" => Ok(ToolResult::json(&state.slots().mission.list_slots())),
         "mission_inbox" => {
             let InboxArgs { unread_only, limit } =
                 serde_json::from_value(args).unwrap_or(InboxArgs {
@@ -31,6 +31,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     limit: None,
                 });
             let messages = state
+                .storage()
                 .store
                 .get_inbox_messages(unread_only.unwrap_or(true), limit.unwrap_or(10) as i64)
                 .await?;
@@ -65,7 +66,11 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     Ok(ToolResult::text("▶️ 全局暂停已解除。工位恢复正常工作。"))
                 }
                 _ => {
-                    let paused = state.control_manager.current().global_paused;
+                    let paused = state
+                        .control_plane()
+                        .control_manager
+                        .current()
+                        .global_paused;
                     let since = state.global_paused_at.load(Ordering::Relaxed);
                     let msg = if paused {
                         format!(
@@ -79,6 +84,51 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     };
                     Ok(ToolResult::text(msg))
                 }
+            }
+        }
+
+        "mission_event_bus" => {
+            let action = args
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("health");
+            match action {
+                "health" => {
+                    let snapshot = state.storage().bus.health_snapshot().await;
+                    Ok(ToolResult::json(&snapshot))
+                }
+                "dlq_list" => {
+                    let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(20);
+                    Ok(ToolResult::json(
+                        &state.storage().bus.dlq_list(limit).await?,
+                    ))
+                }
+                "dlq_ack" => {
+                    let id = args
+                        .get("id")
+                        .and_then(|v| v.as_i64())
+                        .ok_or_else(|| anyhow!("id is required for dlq_ack"))?;
+                    Ok(ToolResult::json(&state.storage().bus.dlq_ack(id).await?))
+                }
+                "dlq_replay" => {
+                    let id = args
+                        .get("id")
+                        .and_then(|v| v.as_i64())
+                        .ok_or_else(|| anyhow!("id is required for dlq_replay"))?;
+                    let confirmed = args
+                        .get("confirm")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    if !confirmed {
+                        return Ok(ToolResult::error(
+                            "dlq_replay requires confirm=true because it rewinds the subscription cursor",
+                        ));
+                    }
+                    Ok(ToolResult::json(&state.storage().bus.dlq_replay(id).await?))
+                }
+                other => Ok(ToolResult::error(format!(
+                    "Unknown mission_event_bus action: {other}"
+                ))),
             }
         }
 
@@ -119,6 +169,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .shared_memory
                 .evidence_health_summary(20)
                 .await;
+            let operator_trends = state.storage().bus.operator_trends().await;
 
             Ok(ToolResult::json(&serde_json::json!({
                 "status": "ok",
@@ -138,6 +189,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 "eventBus": event_bus,
                 "workers": workers,
                 "evidence": evidence,
+                "operatorTrends": operator_trends,
                 "gemini_mode": if llm.gemini.is_cli_mode() { "cli" } else { "http" },
                 "stats": control.stats.snapshot(),
                 "startupPreflight": state.startup_preflight.clone(),
@@ -261,7 +313,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 note_type: Some("progress".to_string()),
                 author: Some("flow-engine".to_string()),
             };
-            let _ = state.store.add_board_task_note(&note_input).await;
+            let _ = state.storage().store.add_board_task_note(&note_input).await;
 
             // Hard intercept: Plan → Execute transition requires risk review
             if phase == missiond_core::types::EngineeringPhase::Plan {
@@ -288,7 +340,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     options: None,
                     decision_type: Some("risk".to_string()),
                 };
-                match state.store.create_agent_question(&q_input).await {
+                match state.storage().store.create_agent_question(&q_input).await {
                     Ok(q) => {
                         info!(task_id = %task.id, question_id = %q.id, "Hard intercept: Plan→Execute risk review created");
                         let _ = state
@@ -325,7 +377,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     options: None,
                     decision_type: Some("implementation".to_string()),
                 };
-                match state.store.create_agent_question(&q_input).await {
+                match state.storage().store.create_agent_question(&q_input).await {
                     Ok(q) => {
                         info!(task_id = %task.id, question_id = %q.id, "Soft intercept: created master decision question");
                         let _ = state

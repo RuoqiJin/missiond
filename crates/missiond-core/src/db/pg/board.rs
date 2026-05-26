@@ -41,6 +41,30 @@ async fn resolve_existing_board_task_id(
 }
 
 #[cfg(feature = "postgres")]
+async fn require_task_completion_evidence(store: &PgMissionStore, task_id: &str) -> DbResult<()> {
+    let has_evidence = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+          SELECT 1
+          FROM task_result_artifacts
+          WHERE task_id = $1
+            AND lower(result_status) IN ('completed', 'complete', 'verified', 'pass', 'passed')
+        )
+        "#,
+    )
+    .bind(task_id)
+    .fetch_one(&store.pool)
+    .await?;
+    if has_evidence {
+        Ok(())
+    } else {
+        Err(DbError::Constraint(format!(
+            "EVIDENCE_REQUIRED: BoardTask {task_id} cannot be marked done until mission_shared_memory(action=\"task_result_put\", task_id=\"{task_id}\", result_status=\"completed\", ...) records a canonical task-result artifact"
+        )))
+    }
+}
+
+#[cfg(feature = "postgres")]
 #[async_trait]
 impl BoardStore for PgMissionStore {
     // ========== board.rs: task CRUD ==========
@@ -261,6 +285,13 @@ impl BoardStore for PgMissionStore {
             None => return Ok(None),
         };
         let now = chrono::Utc::now().to_rfc3339();
+        if update
+            .status
+            .as_deref()
+            .is_some_and(|status| status.eq_ignore_ascii_case("done"))
+        {
+            require_task_completion_evidence(self, &full_id).await?;
+        }
 
         // Build dynamic SET clause with numbered params
         let mut set_parts: Vec<String> = Vec::new();

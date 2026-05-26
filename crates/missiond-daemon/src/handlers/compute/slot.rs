@@ -548,7 +548,11 @@ fn handle_pause(state: &AppState, args: Value) -> Result<ToolResult> {
             Ok(ToolResult::text("▶️ 全局暂停已解除。工位恢复正常工作。"))
         }
         _ => {
-            let paused = state.control_plane().control_manager.current().global_paused;
+            let paused = state
+                .control_plane()
+                .control_manager
+                .current()
+                .global_paused;
             let since = state.global_paused_at.load(Ordering::Relaxed);
             let msg = if paused {
                 format!(

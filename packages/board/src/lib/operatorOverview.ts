@@ -14,6 +14,14 @@ export type OperatorRunbookItem = {
   nextAction: string;
   source: string;
   command?: string;
+  action?: {
+    id: string;
+    label: string;
+    kind: 'refresh' | 'mcp' | 'navigate';
+    tool?: string;
+    args?: Record<string, unknown>;
+    requiresConfirm?: boolean;
+  };
 };
 
 export type OperatorOverviewCallTool = (
@@ -142,6 +150,11 @@ function buildRunbook(input: {
       cause: error.slotId ? `${error.slotId}: ${error.message}` : error.message,
       nextAction: 'Check the MCP tool response and daemon logs for this source.',
       source: error.source,
+      action: {
+        id: 'refresh_overview',
+        label: 'Refresh',
+        kind: 'refresh',
+      },
     });
   }
 
@@ -154,6 +167,14 @@ function buildRunbook(input: {
         nextAction: 'Inspect mission_worker list and the worker-specific daemon logs before restarting the worker.',
         source: 'worker',
         command: 'mission_worker(action="list")',
+        action: {
+          id: `worker_resume:${worker.name || 'unknown'}`,
+          label: 'Resume',
+          kind: 'mcp',
+          tool: 'mission_worker',
+          args: { action: 'control', target: worker.name, control_action: 'resume' },
+          requiresConfirm: worker.lifecycle === 'failed',
+        },
       });
     } else if (worker.lifecycle === 'blocked') {
       items.push({
@@ -162,6 +183,13 @@ function buildRunbook(input: {
         cause: String(worker.status ?? 'blocked'),
         nextAction: 'Resolve the referenced blocker or pending operator question.',
         source: 'worker',
+        action: {
+          id: `worker_list:${worker.name || 'unknown'}`,
+          label: 'Inspect',
+          kind: 'mcp',
+          tool: 'mission_worker',
+          args: { action: 'list' },
+        },
       });
     }
   }
@@ -174,6 +202,13 @@ function buildRunbook(input: {
       cause: `${dlqCount} event(s) are in dead_letter_queue.`,
       nextAction: 'Inspect the affected subscription and replay or acknowledge the failed event.',
       source: 'eventBus',
+      action: {
+        id: 'dlq_list',
+        label: 'Inspect DLQ',
+        kind: 'mcp',
+        tool: 'mission_event_bus',
+        args: { action: 'dlq_list', limit: 20 },
+      },
     });
   }
 
@@ -184,6 +219,13 @@ function buildRunbook(input: {
       cause: `dispatchLag=${num(input.eventBus.dispatchLag)}, lagged=${num(input.eventBus.lagged)}`,
       nextAction: 'Check slow subscriptions and dispatcher logs before scaling worker consumers.',
       source: 'eventBus',
+      action: {
+        id: 'event_bus_health',
+        label: 'Inspect',
+        kind: 'mcp',
+        tool: 'mission_event_bus',
+        args: { action: 'health' },
+      },
     });
   }
 
@@ -194,6 +236,13 @@ function buildRunbook(input: {
       cause: `${input.evidence.missing} completed task(s) lack verified task-result artifacts.`,
       nextAction: 'Open the evidence items and attach or regenerate canonical task result artifacts.',
       source: 'evidence',
+      action: {
+        id: 'open_evidence',
+        label: 'Open Evidence',
+        kind: 'mcp',
+        tool: 'mission_shared_memory',
+        args: { action: 'task_evidence_summary', limit: 20 },
+      },
     });
   }
 
@@ -204,6 +253,12 @@ function buildRunbook(input: {
       cause: `${input.pendingQuestions} question(s) are waiting for input.`,
       nextAction: 'Answer or route the pending questions to unblock workers.',
       source: 'questions',
+      action: {
+        id: 'open_questions',
+        label: 'Open Questions',
+        kind: 'navigate',
+        args: { href: '#questions' },
+      },
     });
   }
 
@@ -216,6 +271,13 @@ function buildRunbook(input: {
       cause: str(check.message ?? check.detail ?? check.status),
       nextAction: 'Fix the reported startup dependency, then restart the daemon if the check is fatal.',
       source: 'startupPreflight',
+      action: {
+        id: 'startup_health',
+        label: 'Inspect Health',
+        kind: 'mcp',
+        tool: 'mission_health',
+        args: {},
+      },
     });
   }
 
@@ -270,6 +332,7 @@ export async function buildOperatorOverview(callTool: OperatorOverviewCallTool) 
   const runningSlots = slots.filter((slot) => slot.running);
   const eventBus = record(health?.eventBus ?? health?.event_bus);
   const evidence = evidenceSummary(tasks, health);
+  const trends = record(health?.operatorTrends ?? health?.operator_trends);
 
   return {
     partial: errors.length > 0,
@@ -302,6 +365,7 @@ export async function buildOperatorOverview(callTool: OperatorOverviewCallTool) 
     },
     evidence,
     eventBus,
+    trends,
     eventHealth: {
       backend: health,
     },
@@ -322,7 +386,12 @@ export function createFakeOperatorOverviewHarness(fixtures: Record<string, unkno
     if (name === 'mission_pty_status') {
       const slotId = typeof args?.slotId === 'string' ? args.slotId : '';
       const statuses = record(fixtures.mission_pty_status);
-      if (slotId in statuses) return statuses[slotId];
+      if (slotId in statuses) {
+        const value = statuses[slotId];
+        const maybeError = record(value).__error;
+        if (typeof maybeError === 'string') throw new Error(maybeError);
+        return value;
+      }
     }
     if (name in fixtures) return fixtures[name];
     throw new Error(`fake MCP fixture missing: ${name}`);

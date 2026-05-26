@@ -67,7 +67,11 @@ pub(crate) fn run_startup_preflight(input: &StartupPreflightInput) -> StartupPre
         &input.learned_permissions,
     );
     check_directory(&mut report, "logs_dir", &input.logs_dir);
-    check_blueprint(&mut report, &input.project_root, input.blueprint_path.as_deref());
+    check_blueprint(
+        &mut report,
+        &input.project_root,
+        input.blueprint_path.as_deref(),
+    );
     check_codex_local_index(&mut report, input.codex_local_index.as_deref());
 
     report.ok = report.fatal_count == 0;
@@ -94,8 +98,16 @@ pub(crate) fn fatal_messages(report: &StartupPreflightReport) -> Vec<String> {
 }
 
 fn check_mission_pg_url(report: &mut StartupPreflightReport, mission_pg_url: Option<&str>) {
-    match mission_pg_url.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(_) => push_ok(report, "mission_pg_url", None, "MISSION_PG_URL is configured"),
+    match mission_pg_url
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(_) => push_ok(
+            report,
+            "mission_pg_url",
+            None,
+            "MISSION_PG_URL is configured",
+        ),
         None => push_fatal(
             report,
             "mission_pg_url",
@@ -135,7 +147,10 @@ fn check_optional_file(report: &mut StartupPreflightReport, name: &str, path: &P
 }
 
 fn check_parent_dir(report: &mut StartupPreflightReport, name: &str, path: &Path) {
-    match path.parent().and_then(|parent| std::fs::metadata(parent).ok()) {
+    match path
+        .parent()
+        .and_then(|parent| std::fs::metadata(parent).ok())
+    {
         Some(meta) if meta.is_dir() => push_ok(report, name, Some(path), "parent directory exists"),
         _ => push_warning(report, name, Some(path), "parent directory is absent"),
     }
@@ -144,7 +159,12 @@ fn check_parent_dir(report: &mut StartupPreflightReport, name: &str, path: &Path
 fn check_directory(report: &mut StartupPreflightReport, name: &str, path: &Path) {
     match std::fs::metadata(path) {
         Ok(meta) if meta.is_dir() => push_ok(report, name, Some(path), "directory exists"),
-        Ok(_) => push_warning(report, name, Some(path), "path exists but is not a directory"),
+        Ok(_) => push_warning(
+            report,
+            name,
+            Some(path),
+            "path exists but is not a directory",
+        ),
         Err(err) => push_warning(
             report,
             name,
@@ -300,7 +320,10 @@ mod tests {
         std::fs::create_dir_all(&logs).unwrap();
         std::fs::create_dir_all(root.join(".missiond").join("v3")).unwrap();
         let slots = root.join("slots.yaml");
-        let blueprint = root.join(".missiond").join("v3").join("missiond-blueprint.lisp");
+        let blueprint = root
+            .join(".missiond")
+            .join("v3")
+            .join("missiond-blueprint.lisp");
         std::fs::write(&slots, "slots: []\n").unwrap();
         std::fs::write(&blueprint, "(missiond)\n").unwrap();
 

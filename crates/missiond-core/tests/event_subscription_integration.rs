@@ -94,7 +94,13 @@ async fn subscribe_from_earliest_sees_all_persisted_events() {
     let dispatcher_ref = dispatcher.clone();
     let tail_task = tokio::spawn(async move {
         dispatcher_ref
-            .run(tail_source, blob.clone(), NeverPaused, shutdown_rx)
+            .run(
+                tail_source,
+                blob.clone(),
+                NeverPaused,
+                shutdown_rx,
+                Arc::new(missiond_core::event::metrics::NoopMetrics),
+            )
             .await
     });
 

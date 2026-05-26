@@ -104,6 +104,10 @@ export const PER_SURFACE_CHECKERS = [
   // Cross-surface runtime artifact path hygiene: public/runtime-facing docs
   // must cite V3 runtime sidecars first and keep V2 only as legacy fallback.
   'scripts/check-v3-runtime-path-hygiene.mjs',
+  // Cross-surface architecture boundary check: SSOT source-unit authority,
+  // EventBus v2 producer policy, narrow app ports, typed Board client, and
+  // staged crate-split scaffolds.
+  'scripts/check-v3-architecture-boundaries.mjs',
   'scripts/check-v3-request-lisp-isomorphism.mjs',
   'scripts/check-v3-unified-entry-isomorphism.mjs',
   'scripts/check-v3-file-artifacts-isomorphism.mjs',

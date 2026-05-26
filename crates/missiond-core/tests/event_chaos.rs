@@ -150,8 +150,17 @@ async fn chaos_3_dispatcher_panic() {
     let blob: Arc<dyn BlobStore> = Arc::new(InMemoryBlobStore::new());
     let source: Arc<dyn TailSource> = Arc::new(BrokenSource);
 
-    let task =
-        tokio::spawn(async move { dispatcher.run(source, blob, NeverPaused, shutdown_rx).await });
+    let task = tokio::spawn(async move {
+        dispatcher
+            .run(
+                source,
+                blob,
+                NeverPaused,
+                shutdown_rx,
+                Arc::new(missiond_core::event::metrics::NoopMetrics),
+            )
+            .await
+    });
 
     let result = timeout(Duration::from_secs(1), task)
         .await

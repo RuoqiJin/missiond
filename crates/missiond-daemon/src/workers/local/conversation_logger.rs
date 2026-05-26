@@ -28,14 +28,19 @@ impl super::BackgroundWorker for ConversationLoggerWorker {
         "conversation_logger"
     }
 
-    async fn run(self, state: Arc<AppState>, _ctx: super::WorkerContext) {
+    async fn run(self, state: Arc<AppState>, mut ctx: super::WorkerContext) {
         let mut rx = self.conv_logger_rx;
-        run_loop(&state, &mut rx).await;
+        run_loop(&state, &mut rx, &mut ctx).await;
     }
 }
 
-async fn run_loop(s: &AppState, rx: &mut broadcast::Receiver<WatcherEvent>) {
+async fn run_loop(
+    s: &AppState,
+    rx: &mut broadcast::Receiver<WatcherEvent>,
+    ctx: &mut super::WorkerContext,
+) {
     loop {
+        ctx.wait_if_paused().await;
         match rx.recv().await {
             Ok(WatcherEvent::NewMessages {
                 session_id,
@@ -45,6 +50,12 @@ async fn run_loop(s: &AppState, rx: &mut broadcast::Receiver<WatcherEvent>) {
                 read_end_offset,
                 source,
             }) => {
+                ctx.begin_task(
+                    Some(format!("worker:conversation_logger:messages:{session_id}")),
+                    None,
+                    Some(300),
+                );
+                ctx.progress(format!("ingesting {} new messages", messages.len()));
                 handle_new_messages_event(
                     s,
                     session_id,
@@ -60,20 +71,40 @@ async fn run_loop(s: &AppState, rx: &mut broadcast::Receiver<WatcherEvent>) {
                     .lock()
                     .await
                     .insert(jsonl_path, read_end_offset);
+                ctx.record_success();
             }
             Ok(WatcherEvent::NewEvents { session_id, events }) => {
+                ctx.begin_task(
+                    Some(format!("worker:conversation_logger:events:{session_id}")),
+                    None,
+                    Some(300),
+                );
+                ctx.progress(format!("syncing {} events", events.len()));
                 events_sync::handle_new_events(s, session_id, events).await;
+                ctx.record_success();
             }
             Ok(WatcherEvent::SessionInactive(session)) => {
+                ctx.begin_task(
+                    Some(format!(
+                        "worker:conversation_logger:inactive:{}",
+                        session.session_id
+                    )),
+                    None,
+                    Some(300),
+                );
+                ctx.progress("handling inactive session");
                 handle_session_inactive(s, &session.session_id).await;
+                ctx.record_success();
             }
             Ok(_) => {}
             Err(broadcast::error::RecvError::Lagged(n)) => {
+                ctx.retrying(format!("watcher lagged by {n} events"));
                 warn!(
                     skipped = n,
                     "Conversation logger lagged — triggering reconciliation"
                 );
                 reconcile(s).await;
+                ctx.record_success();
             }
             Err(_) => {}
         }

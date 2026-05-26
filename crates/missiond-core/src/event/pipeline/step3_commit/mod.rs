@@ -42,4 +42,7 @@ pub mod seq_authority;
 // Internals stay namespaced inside each sub-module.
 pub use backpressure::{PendingAppend, APPEND_CHANNEL_CAPACITY, BATCH_DEADLINE, BATCH_MAX};
 pub use handle::LogWriterHandle;
-pub use log_writer::{new_log_writer, spawn_log_writer, LogWriter};
+pub use log_writer::{
+    new_log_writer, new_log_writer_with_metrics, spawn_log_writer, spawn_log_writer_with_metrics,
+    LogWriter,
+};

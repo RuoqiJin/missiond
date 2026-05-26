@@ -13,6 +13,7 @@ mod llm;
 mod workers;
 
 // ── Root-level modules ──
+mod app_ports;
 mod bus;
 #[allow(dead_code)]
 mod control_tree;
@@ -22,6 +23,7 @@ mod helpers;
 mod lenient;
 mod organism;
 mod permission_extract;
+mod runtime_actors;
 mod slot_dispatch;
 mod slot_orchestrator;
 mod startup_preflight;
@@ -1860,6 +1862,37 @@ async fn main() -> Result<()> {
         let _cron = bus::spawn_retention_cron(Arc::clone(&bus_services), pool, shutdown_rx.clone());
     }
 
+    // Operator health sampler — compact trend read model for Board.
+    {
+        let sample_state = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                let workers = serde_json::to_value(sample_state.workers().registry.list_all())
+                    .unwrap_or_else(|_| serde_json::json!([]));
+                let evidence = sample_state
+                    .storage()
+                    .shared_memory
+                    .evidence_health_summary(20)
+                    .await;
+                let pending_questions = sample_state
+                    .storage()
+                    .store
+                    .list_agent_questions(Some("pending"), None, Some(1000))
+                    .await
+                    .map(|items| items.len() as i64)
+                    .unwrap_or(0);
+                sample_state
+                    .storage()
+                    .bus
+                    .record_operator_health_sample(workers, evidence, pending_questions)
+                    .await;
+            }
+        });
+    }
+
     // --- AST Sync Worker (P2 HCE) ---
     // BackgroundWorker: unified lifecycle + ControlTree pause/resume
     workers::spawn_worker(
@@ -1919,6 +1952,7 @@ async fn main() -> Result<()> {
                 }
                 let snap = stats.snapshot();
                 let memory_paused = s
+                    .control_plane()
                     .control_manager
                     .current()
                     .is_domain_paused(crate::control_tree::CtlDomain::Memory);

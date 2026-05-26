@@ -24,6 +24,7 @@ use missiond_core::event::events::{
     QuestionEvent, SessionEndStatus, SessionEvent, SlotEvent, SystemEvent, TaskEvent, WorkerEvent,
 };
 use missiond_core::event::log::{spawn_log_writer, AppendOpts, Log};
+use missiond_core::event::metrics::NoopMetrics;
 use missiond_core::event::{Domain, DomainEvent};
 use missiond_core::types::{IncidentSeverity, IncidentSource, MissionIncident};
 use tokio::sync::watch;
@@ -83,7 +84,13 @@ async fn dispatcher_fans_out_to_all_12_domain_topics() {
     let dispatcher_clone = dispatcher.clone();
     let task = tokio::spawn(async move {
         dispatcher_clone
-            .run(source, blob, NeverPaused, shutdown_rx)
+            .run(
+                source,
+                blob,
+                NeverPaused,
+                shutdown_rx,
+                Arc::new(NoopMetrics),
+            )
             .await
     });
 
@@ -290,7 +297,13 @@ async fn dispatcher_preserves_seq_order_across_one_domain() {
     let dispatcher_clone = dispatcher.clone();
     let task = tokio::spawn(async move {
         dispatcher_clone
-            .run(source, blob, NeverPaused, shutdown_rx)
+            .run(
+                source,
+                blob,
+                NeverPaused,
+                shutdown_rx,
+                Arc::new(NoopMetrics),
+            )
             .await
     });
 

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { callTool } from '@/lib/missiond';
 import { BOARD_TASK_FIELD_MAP } from '@/generated/board-frontend-config';
+import { boardClient } from '@/lib/missiondBoardClient';
 
 function mapToFrontend(task: Record<string, unknown>): Record<string, unknown> {
   const out = { ...task };
@@ -27,7 +27,7 @@ export async function GET(req: NextRequest) {
     const id = req.nextUrl.searchParams.get('id');
     if (id) {
       // Get single task with notes
-      const task = await callTool('mission_board_get', { id });
+      const task = await boardClient.get(id);
       if (!task) return NextResponse.json({ error: 'Not found' }, { status: 404 });
       const mapped = task as Record<string, unknown>;
       const { notes, ...rest } = mapped;
@@ -36,7 +36,7 @@ export async function GET(req: NextRequest) {
     const status = req.nextUrl.searchParams.get('status') || undefined;
     const args: Record<string, unknown> = { includeHidden: true };
     if (status) args.status = status;
-    const tasks = await callTool('mission_board_list', args) as Record<string, unknown>[];
+    const tasks = await boardClient.list(args) as Record<string, unknown>[];
     return NextResponse.json(tasks.map(mapToFrontend));
   } catch (err) {
     return NextResponse.json({ error: String(err) }, { status: 502 });
@@ -49,18 +49,18 @@ export async function POST(req: NextRequest) {
     const id = req.nextUrl.searchParams.get('id');
 
     if (action === 'toggle' && id) {
-      const result = await callTool('mission_board_toggle', { id });
+      const result = await boardClient.toggle(id);
       return NextResponse.json(mapToFrontend(result as Record<string, unknown>));
     }
 
     if (action === 'add-note' && id) {
       const body = await req.json();
-      const note = await callTool('mission_board_note_add', { taskId: id, content: body.content, noteType: body.noteType, author: body.author });
+      const note = await boardClient.addNote(id, { content: body.content, noteType: body.noteType, author: body.author });
       return NextResponse.json(note);
     }
 
     if (action === 'clear-done') {
-      const allTasks = await callTool('mission_board_list', { includeHidden: true }) as Record<string, unknown>[];
+      const allTasks = await boardClient.list({ includeHidden: true }) as Record<string, unknown>[];
       const doneTasks = allTasks.filter(t => t.status === 'done');
 
       // Only delete done tasks whose entire subtree is also done/skipped
@@ -75,14 +75,14 @@ export async function POST(req: NextRequest) {
 
       const safeTasks = doneTasks.filter(t => !hasActiveDescendant(t.id as string));
       for (const task of safeTasks) {
-        await callTool('mission_board_delete', { id: task.id });
+        await boardClient.delete(task.id as string);
       }
       return NextResponse.json({ deleted: safeTasks.length, skipped: doneTasks.length - safeTasks.length });
     }
 
     const body = await req.json();
     const backendData = mapToBackend(body);
-    const task = await callTool('mission_board_create', backendData);
+    const task = await boardClient.create(backendData);
     return NextResponse.json(mapToFrontend(task as Record<string, unknown>));
   } catch (err) {
     return NextResponse.json({ error: String(err) }, { status: 502 });
@@ -95,7 +95,7 @@ export async function PATCH(req: NextRequest) {
     if (!id) return NextResponse.json({ error: 'Missing id' }, { status: 400 });
     const body = await req.json();
     const backendData = mapToBackend(body);
-    const task = await callTool('mission_board_update', { id, ...backendData });
+    const task = await boardClient.update(id, backendData);
     return NextResponse.json(mapToFrontend(task as Record<string, unknown>));
   } catch (err) {
     return NextResponse.json({ error: String(err) }, { status: 502 });
@@ -106,7 +106,7 @@ export async function DELETE(req: NextRequest) {
   try {
     const id = req.nextUrl.searchParams.get('id');
     if (!id) return NextResponse.json({ error: 'Missing id' }, { status: 400 });
-    const result = await callTool('mission_board_delete', { id });
+    const result = await boardClient.delete(id);
     return NextResponse.json(result);
   } catch (err) {
     return NextResponse.json({ error: String(err) }, { status: 502 });

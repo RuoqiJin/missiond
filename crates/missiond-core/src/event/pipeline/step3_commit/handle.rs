@@ -35,6 +35,7 @@ use crate::event::domain::Domain;
 use crate::event::event_trait::DomainEvent;
 use crate::event::log::reader::{LogReader, LoggedEvent};
 use crate::event::log::{AppendAck, AppendError, AppendOpts, Log, LogError, Seq};
+use crate::event::metrics::BusMetrics;
 use crate::event::pipeline::step1_guard::check_causation;
 
 use super::backpressure::PendingAppend;
@@ -49,6 +50,7 @@ pub struct LogWriterHandle {
     /// owns real seq assignment in Phase 3 — here we just hand out a
     /// process-local, monotonic counter so producers don't get `Seq(0)`.
     pub(super) volatile_counter: Arc<AtomicI64>,
+    pub(super) metrics: Arc<dyn BusMetrics>,
 }
 
 impl LogWriterHandle {
@@ -65,22 +67,28 @@ impl Log for LogWriterHandle {
     where
         E: DomainEvent,
     {
-        // Frozen lisp §4.4 causation-loop-guard — enforced at both the PG
-        // writer and the InMemoryLog so behavior is uniform.
-        check_causation(&opts)?;
-
         let kind: &'static str = event.kind();
         let domain: Domain = E::domain();
+        // Frozen lisp §4.4 causation-loop-guard — enforced at both the PG
+        // writer and the InMemoryLog so behavior is uniform.
+        if let Err(err) = check_causation(&opts) {
+            self.metrics.record_reject(domain, "causation");
+            return Err(err);
+        }
         let payload_bytes = serde_json::to_vec(&event)?;
         let payload_inline_eligible = payload_bytes.len() <= CLAIM_CHECK_THRESHOLD;
 
         // Ephemeral fast-path — no DB round-trip, no channel send.
         if opts.ephemeral {
             let next = self.volatile_counter.fetch_sub(1, Ordering::Relaxed);
+            self.metrics
+                .record_append(domain, true, payload_bytes.len());
             return Ok(AppendAck::Volatile { seq: Seq(next) });
         }
+        let payload_len = payload_bytes.len();
 
         let producer_id = if opts.producer_id.is_empty() {
+            self.metrics.record_reject(domain, "empty_producer_id");
             return Err(AppendError::Other("producer_id must not be empty".into()));
         } else {
             opts.producer_id
@@ -105,17 +113,26 @@ impl Log for LogWriterHandle {
 
         match self.tx.try_send(pending) {
             Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(_)) => return Err(AppendError::Backpressure),
-            Err(mpsc::error::TrySendError::Closed(_)) => {
+            Err(mpsc::error::TrySendError::Full(pending)) => {
+                self.metrics
+                    .record_append(pending.domain, false, pending.payload_bytes.len());
+                return Err(AppendError::Backpressure);
+            }
+            Err(mpsc::error::TrySendError::Closed(pending)) => {
+                self.metrics
+                    .record_append(pending.domain, false, pending.payload_bytes.len());
                 return Err(AppendError::LogUnavailable("writer task shut down".into()));
             }
         }
 
         match ack_rx.await {
             Ok(r) => r,
-            Err(_) => Err(AppendError::LogUnavailable(
-                "writer ack channel dropped".into(),
-            )),
+            Err(_) => {
+                self.metrics.record_append(domain, false, payload_len);
+                Err(AppendError::LogUnavailable(
+                    "writer ack channel dropped".into(),
+                ))
+            }
         }
     }
 

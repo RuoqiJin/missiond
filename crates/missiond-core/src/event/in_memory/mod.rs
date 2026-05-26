@@ -135,9 +135,13 @@ impl InMemoryBus {
         let dispatcher = self.dispatcher.clone();
         let gate = ArcControlGate::new(self.control_gate.clone());
         let blob: Arc<dyn BlobStore> = self.blob_store.clone();
+        let metrics: Arc<dyn BusMetrics> = self.metrics.clone();
 
-        let join =
-            tokio::spawn(async move { dispatcher.run(tail_source, blob, gate, shutdown_rx).await });
+        let join = tokio::spawn(async move {
+            dispatcher
+                .run(tail_source, blob, gate, shutdown_rx, metrics)
+                .await
+        });
 
         InMemoryBusHandle {
             shutdown_tx,

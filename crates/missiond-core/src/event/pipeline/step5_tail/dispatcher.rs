@@ -37,6 +37,7 @@ use tokio::time::timeout;
 use crate::event::blob_store::BlobStore;
 use crate::event::log::reader::LoggedEvent;
 use crate::event::log::Seq;
+use crate::event::metrics::BusMetrics;
 use crate::event::pipeline::step6_gate::ControlGate;
 use crate::event::pipeline::step7_fanout::registry::TopicRegistry;
 
@@ -56,6 +57,7 @@ pub async fn run_tail<G>(
     last_dispatched_seq: Arc<AtomicI64>,
     control: G,
     mut shutdown: watch::Receiver<bool>,
+    bus_metrics: Arc<dyn BusMetrics>,
 ) -> Result<DispatchMetrics, DispatchError>
 where
     G: ControlGate + Clone + 'static,
@@ -78,7 +80,13 @@ where
         let was_full = batch.len() == TAIL_BATCH_LIMIT;
 
         for logged in batch {
-            dispatch_one(&registry, &control, &logged, &mut metrics);
+            dispatch_one(
+                &registry,
+                &control,
+                &logged,
+                &mut metrics,
+                bus_metrics.as_ref(),
+            );
             last_dispatched_seq.store(logged.seq.0, Ordering::Release);
             metrics.last_seq = logged.seq.0;
         }
@@ -116,10 +124,12 @@ fn dispatch_one(
     control: &impl ControlGate,
     logged: &LoggedEvent,
     metrics: &mut DispatchMetrics,
+    bus_metrics: &dyn BusMetrics,
 ) {
     // Control-gate check first. Paused ⇒ drop + advance cursor.
     if control.is_domain_paused(logged.domain) {
         metrics.rows_dropped_paused += 1;
+        bus_metrics.record_control_gate_dropped(logged.domain);
         tracing::debug!(
             seq = logged.seq.0,
             domain = logged.domain.as_str(),
@@ -141,9 +151,11 @@ fn dispatch_one(
     match topic.fanout_json(&logged.payload) {
         Ok(()) => {
             metrics.rows_fanned_out += 1;
+            bus_metrics.record_topic_depth(logged.domain, topic.receiver_count());
         }
         Err(e) => {
             metrics.rows_dropped_deserialize += 1;
+            bus_metrics.record_reject(logged.domain, "payload_deserialize");
             tracing::warn!(
                 seq = logged.seq.0,
                 domain = logged.domain.as_str(),

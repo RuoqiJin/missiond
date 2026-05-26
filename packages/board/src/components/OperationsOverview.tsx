@@ -77,6 +77,10 @@ interface OperatorOverview {
     items: Array<Record<string, unknown>>;
   };
   eventBus: Record<string, unknown>;
+  trends: {
+    points?: Array<Record<string, unknown>>;
+    windows?: Record<string, Record<string, unknown>>;
+  };
   runbook: Array<{
     severity: 'info' | 'warn' | 'bad';
     title: string;
@@ -84,6 +88,14 @@ interface OperatorOverview {
     nextAction: string;
     source: string;
     command?: string;
+    action?: {
+      id: string;
+      label: string;
+      kind: 'refresh' | 'mcp' | 'navigate';
+      tool?: string;
+      args?: Record<string, unknown>;
+      requiresConfirm?: boolean;
+    };
   }>;
   generatedAt: string;
 }
@@ -134,6 +146,8 @@ function Stat({ label, value, tone }: { label: string; value: number; tone?: 'wa
 export function OperationsOverview() {
   const [overview, setOverview] = useState<OperatorOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [actionVersion, setActionVersion] = useState(0);
   const eventHealth = useEventHealth();
   const taskVersion = useEventInvalidation('task');
   const slotVersion = useEventInvalidation('slot');
@@ -158,7 +172,7 @@ export function OperationsOverview() {
     return () => {
       cancelled = true;
     };
-  }, [taskVersion, slotVersion, questionVersion, engineVersion]);
+  }, [taskVersion, slotVersion, questionVersion, engineVersion, actionVersion]);
 
   const currentObjective = useMemo(() => {
     const task = overview?.tasks.runningItems[0];
@@ -171,8 +185,11 @@ export function OperationsOverview() {
   const blockedTasks = overview?.blockers.tasks ?? [];
   const runbook = overview?.runbook ?? [];
   const eventBus = overview?.eventBus ?? {};
+  const trend24h = overview?.trends?.windows?.['24h'] ?? {};
   const eventDlq = num((eventBus.dlq as Record<string, unknown> | undefined)?.count);
   const eventLag = num(eventBus.dispatchLag);
+  const lagMax24h = num(trend24h.eventDispatchLagMax);
+  const evidenceGapMax24h = num(trend24h.evidenceMissingMax);
   const eventTone = eventHealth.severity === 'good'
     ? 'text-emerald-300'
     : eventHealth.severity === 'warn'
@@ -181,6 +198,33 @@ export function OperationsOverview() {
   const degradedSummary = overview?.partial
     ? overview.errors.slice(0, 2).map((item) => `${item.source}${item.slotId ? `:${item.slotId}` : ''}`).join(', ')
     : null;
+  const runRunbookAction = async (item: OperatorOverview['runbook'][number]) => {
+    const action = item.action;
+    if (!action) return;
+    setActionError(null);
+    if (action.kind === 'refresh') {
+      setActionVersion((value) => value + 1);
+      return;
+    }
+    if (action.kind === 'navigate') {
+      const href = typeof action.args?.href === 'string' ? action.args.href : '#';
+      window.location.hash = href.replace(/^#/, '');
+      return;
+    }
+    if (action.requiresConfirm && !window.confirm(`Run ${action.label}?`)) return;
+    try {
+      const res = await fetch('/api/operator/runbook/action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ actionId: action.id, tool: action.tool, args: action.args, confirm: Boolean(action.requiresConfirm) }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok || body?.ok === false) throw new Error(body?.error ?? `HTTP ${res.status}`);
+      setActionVersion((value) => value + 1);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    }
+  };
 
   return (
     <section className="px-4 pb-2 pt-1 sm:px-8">
@@ -288,7 +332,9 @@ export function OperationsOverview() {
               <span>reconnects</span><span className="text-right font-mono text-neutral-300">{eventHealth.reconnectAttempts}</span>
               <span>malformed</span><span className="text-right font-mono text-neutral-300">{eventHealth.malformedCount}</span>
               <span>bus lag</span><span className={cn('text-right font-mono text-neutral-300', eventLag > 100 && 'text-amber-300')}>{eventLag}</span>
+              <span>24h max</span><span className={cn('text-right font-mono text-neutral-300', lagMax24h > 100 && 'text-amber-300')}>{lagMax24h}</span>
               <span>dlq</span><span className={cn('text-right font-mono text-neutral-300', eventDlq > 0 && 'text-amber-300')}>{eventDlq}</span>
+              <span>evidence max</span><span className={cn('text-right font-mono text-neutral-300', evidenceGapMax24h > 0 && 'text-amber-300')}>{evidenceGapMax24h}</span>
               <span className="flex items-center gap-1"><RefreshCw className="h-3 w-3" /> resync</span><span className="truncate text-right font-mono text-neutral-300">{eventHealth.lastResyncReason ?? '—'}</span>
               <span className="flex items-center gap-1"><Radio className="h-3 w-3" /> error</span><span className="truncate text-right font-mono text-neutral-300">{eventHealth.lastError ?? error ?? '—'}</span>
             </div>
@@ -303,6 +349,7 @@ export function OperationsOverview() {
             </div>
             <span className="font-mono text-[11px] text-neutral-500">{runbook.length}</span>
           </div>
+          {actionError ? <div className="mb-2 text-[11px] text-red-300">{actionError}</div> : null}
           <div className="grid gap-2 lg:grid-cols-2">
             {runbook.length ? runbook.slice(0, 4).map((item, index) => (
               <div key={`${item.source}-${index}`} className="min-w-0 border-l border-neutral-800 pl-3 text-xs">
@@ -310,7 +357,18 @@ export function OperationsOverview() {
                   {item.title}
                 </div>
                 <div className="mt-1 min-w-0 truncate text-neutral-500">{item.cause}</div>
-                <div className="mt-1 min-w-0 truncate text-neutral-400">{item.nextAction}</div>
+                <div className="mt-1 flex min-w-0 items-center justify-between gap-2">
+                  <span className="min-w-0 truncate text-neutral-400">{item.nextAction}</span>
+                  {item.action ? (
+                    <button
+                      type="button"
+                      onClick={() => runRunbookAction(item)}
+                      className="shrink-0 rounded-sm border border-neutral-700 px-2 py-1 text-[11px] text-neutral-200 hover:border-neutral-500 hover:bg-neutral-900"
+                    >
+                      {item.action.label}
+                    </button>
+                  ) : null}
+                </div>
               </div>
             )) : <div className="text-xs text-neutral-600">No runbook actions</div>}
           </div>

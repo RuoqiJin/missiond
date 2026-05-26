@@ -20,7 +20,7 @@ impl super::BackgroundWorker for GeminiLoggerWorker {
         "gemini_logger"
     }
 
-    async fn run(self, state: Arc<AppState>, _ctx: super::WorkerContext) {
+    async fn run(self, state: Arc<AppState>, mut ctx: super::WorkerContext) {
         // Startup cleanup: remove logs older than 7 days
         if let Ok(deleted) = state.store.gemini_log_cleanup(7).await {
             if deleted > 0 {
@@ -41,11 +41,15 @@ impl super::BackgroundWorker for GeminiLoggerWorker {
         };
 
         loop {
+            ctx.wait_if_paused().await;
             let Some(ack) = sub.next().await else {
                 info!("Gemini log subscriber: subscription closed");
                 break;
             };
+            ctx.begin_event("llm", ack.seq().0, None);
+            ctx.progress("persisting LLM event log");
             handle_event(&state, ack.event()).await;
+            ctx.record_success();
             ack.ack().await;
         }
     }

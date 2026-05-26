@@ -68,6 +68,7 @@ use tokio::sync::watch;
 use super::blob_store::BlobStore;
 use super::event_trait::DomainEvent;
 use super::log::Seq;
+use super::metrics::BusMetrics;
 
 /// The runtime dispatcher handle.
 ///
@@ -108,6 +109,7 @@ impl Dispatcher {
         blob_store: Arc<dyn BlobStore>,
         control: G,
         shutdown: watch::Receiver<bool>,
+        metrics: Arc<dyn BusMetrics>,
     ) -> Result<DispatchMetrics, DispatchError>
     where
         G: ControlGate + Clone + 'static,
@@ -119,6 +121,7 @@ impl Dispatcher {
             self.last_dispatched_seq,
             control,
             shutdown,
+            metrics,
         )
         .await
     }

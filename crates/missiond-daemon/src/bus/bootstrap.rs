@@ -39,10 +39,11 @@ use missiond_core::event::{
         WorkerEvent,
     },
     log::{
-        writer::spawn_log_writer, AppendAck, AppendError, AppendOpts, Log, LogWriterHandle, Seq,
+        writer::spawn_log_writer_with_metrics, AppendAck, AppendError, AppendOpts, Log,
+        LogWriterHandle, Seq,
     },
     metrics::{
-        emitter::ObservabilityAppender, spawn_bus_metrics_emitter, AtomicBusMetrics,
+        emitter::ObservabilityAppender, spawn_bus_metrics_emitter, AtomicBusMetrics, BusMetrics,
         BusMetricsEmitterHandle,
     },
     subscription::{
@@ -52,6 +53,7 @@ use missiond_core::event::{
     DomainEvent,
 };
 use sqlx::PgPool;
+use sqlx::Row;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
@@ -139,8 +141,13 @@ impl BusServices {
         // Blob store (Postgres-backed per DC006).
         let blob_store: Arc<dyn BlobStore> = Arc::new(PgBlobStore::new(pool.clone()));
 
+        // Metrics collector — shared by LogWriter, dispatcher, subscriptions,
+        // health snapshots, and the periodic Observability emitter.
+        let metrics = Arc::new(AtomicBusMetrics::new());
+
         // Log writer: one task drains the append channel.
-        let log_handle = spawn_log_writer(pool.clone(), blob_store.clone());
+        let log_handle =
+            spawn_log_writer_with_metrics(pool.clone(), blob_store.clone(), metrics.clone());
         let log = Arc::new(log_handle);
 
         // Cursor store — used by Phase 4 subscribers (Phase 7 will wire them).
@@ -149,11 +156,6 @@ impl BusServices {
         // Dead-letter queue sink — Phase 7 subscribers route retry-exhausted
         // failures here instead of blocking the subscription forever.
         let dlq: Arc<dyn DlqSink> = Arc::new(PgDlqSink::new(pool.clone()));
-
-        // Metrics collector — stays NoopMetrics-equivalent until we wire
-        // counters inside the LogWriter; AtomicBusMetrics is cheap enough
-        // to always instantiate.
-        let metrics = Arc::new(AtomicBusMetrics::new());
 
         // Dispatcher — registers every domain in `Domain::ALL` up front so
         // `topic::<T>()` never panics. The domain set started at 12 and is
@@ -193,12 +195,14 @@ impl BusServices {
     }
 
     pub async fn health_snapshot(&self) -> serde_json::Value {
-        let metrics = self.metrics.snapshot();
         let head_seq = sqlx::query_scalar::<_, Option<i64>>("SELECT MAX(seq) FROM event_log")
             .fetch_one(&self.pg_pool)
             .await
             .unwrap_or(None)
             .unwrap_or(0);
+        let last_dispatched_seq = self.dispatcher.last_dispatched_seq().0;
+        self.metrics
+            .record_dispatch_lag(head_seq.saturating_sub(last_dispatched_seq));
         let dlq_count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM dead_letter_queue")
             .fetch_one(&self.pg_pool)
             .await
@@ -229,6 +233,18 @@ impl BusServices {
             })
         })
         .collect::<Vec<_>>();
+        for sub in &subscriptions {
+            if let (Some(name), Some(lag)) = (
+                sub.get("subscriptionName").and_then(|v| v.as_str()),
+                sub.get("lag").and_then(|v| v.as_i64()),
+            ) {
+                self.metrics.record_subscription_lag(name, lag);
+                if lag > 1000 {
+                    self.metrics.record_slow_consumer(name);
+                }
+            }
+        }
+        let metrics = self.metrics.snapshot();
         serde_json::json!({
             "publish_count": metrics.append_ok,
             "published": metrics.append_ok,
@@ -242,6 +258,7 @@ impl BusServices {
             "controlGateDropped": metrics.control_gate_dropped,
             "estimatedBacklog": metrics.dispatch_lag.max(0),
             "headSeq": head_seq,
+            "lastDispatchedSeq": last_dispatched_seq,
             "dlq": {
                 "count": dlq_count,
             },
@@ -253,6 +270,241 @@ impl BusServices {
             "perSubscriptionLag": metrics.per_sub_lag,
             "wsBridge": self.ws_bridge_health.snapshot(),
         })
+    }
+
+    pub async fn record_operator_health_sample(
+        &self,
+        workers: serde_json::Value,
+        evidence: serde_json::Value,
+        pending_questions: i64,
+    ) {
+        let event_bus = self.health_snapshot().await;
+        let worker_items = workers.as_array().cloned().unwrap_or_default();
+        let worker_failed = worker_items
+            .iter()
+            .filter(|worker| {
+                worker
+                    .pointer("/health/lifecycle")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| s == "failed")
+            })
+            .count() as i64;
+        let worker_stale = worker_items
+            .iter()
+            .filter(|worker| {
+                worker
+                    .pointer("/health/stale")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+            })
+            .count() as i64;
+        let event_dispatch_lag = event_bus
+            .get("dispatchLag")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let dlq_count = event_bus
+            .pointer("/dlq/count")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let evidence_missing = evidence
+            .get("missing")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let snapshot = serde_json::json!({
+            "workers": workers,
+            "eventBus": event_bus,
+            "evidence": evidence,
+            "pendingQuestions": pending_questions,
+        });
+        let _ = sqlx::query(
+            r#"
+            INSERT INTO operator_health_samples
+              (worker_failed, worker_stale, event_dispatch_lag, dlq_count,
+               evidence_missing, pending_questions, snapshot)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            "#,
+        )
+        .bind(worker_failed)
+        .bind(worker_stale)
+        .bind(event_dispatch_lag)
+        .bind(dlq_count)
+        .bind(evidence_missing)
+        .bind(pending_questions)
+        .bind(snapshot)
+        .execute(&self.pg_pool)
+        .await;
+        let _ = sqlx::query(
+            "DELETE FROM operator_health_samples WHERE sampled_at < now() - interval '7 days'",
+        )
+        .execute(&self.pg_pool)
+        .await;
+    }
+
+    pub async fn operator_trends(&self) -> serde_json::Value {
+        let rows = sqlx::query(
+            r#"
+            SELECT sampled_at, worker_failed, worker_stale, event_dispatch_lag,
+                   dlq_count, evidence_missing, pending_questions
+            FROM operator_health_samples
+            WHERE sampled_at >= now() - interval '24 hours'
+            ORDER BY sampled_at DESC
+            LIMIT 60
+            "#,
+        )
+        .fetch_all(&self.pg_pool)
+        .await
+        .unwrap_or_default();
+        let mut points = rows
+            .into_iter()
+            .map(|row| {
+                let sampled_at = row
+                    .try_get::<chrono::DateTime<chrono::Utc>, _>("sampled_at")
+                    .ok()
+                    .map(|dt| dt.to_rfc3339());
+                serde_json::json!({
+                    "sampledAt": sampled_at,
+                    "workerFailed": row.try_get::<i64, _>("worker_failed").unwrap_or(0),
+                    "workerStale": row.try_get::<i64, _>("worker_stale").unwrap_or(0),
+                    "eventDispatchLag": row.try_get::<i64, _>("event_dispatch_lag").unwrap_or(0),
+                    "dlqCount": row.try_get::<i64, _>("dlq_count").unwrap_or(0),
+                    "evidenceMissing": row.try_get::<i64, _>("evidence_missing").unwrap_or(0),
+                    "pendingQuestions": row.try_get::<i64, _>("pending_questions").unwrap_or(0),
+                })
+            })
+            .collect::<Vec<_>>();
+        points.reverse();
+        let max_for = |field: &str, since_secs: i64| -> i64 {
+            let now = chrono::Utc::now();
+            points
+                .iter()
+                .filter(|point| {
+                    point
+                        .get("sampledAt")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        .map(|dt| {
+                            now.signed_duration_since(dt.with_timezone(&chrono::Utc))
+                                .num_seconds()
+                                <= since_secs
+                        })
+                        .unwrap_or(false)
+                })
+                .filter_map(|point| point.get(field).and_then(|v| v.as_i64()))
+                .max()
+                .unwrap_or(0)
+        };
+        serde_json::json!({
+            "schema": "missiond.operator-health-trends.v1",
+            "points": points,
+            "windows": {
+                "1h": {
+                    "eventDispatchLagMax": max_for("eventDispatchLag", 3600),
+                    "dlqMax": max_for("dlqCount", 3600),
+                    "workerFailedMax": max_for("workerFailed", 3600),
+                    "workerStaleMax": max_for("workerStale", 3600),
+                    "evidenceMissingMax": max_for("evidenceMissing", 3600),
+                    "pendingQuestionsMax": max_for("pendingQuestions", 3600)
+                },
+                "24h": {
+                    "eventDispatchLagMax": max_for("eventDispatchLag", 24 * 3600),
+                    "dlqMax": max_for("dlqCount", 24 * 3600),
+                    "workerFailedMax": max_for("workerFailed", 24 * 3600),
+                    "workerStaleMax": max_for("workerStale", 24 * 3600),
+                    "evidenceMissingMax": max_for("evidenceMissing", 24 * 3600),
+                    "pendingQuestionsMax": max_for("pendingQuestions", 24 * 3600)
+                }
+            }
+        })
+    }
+
+    pub async fn dlq_list(&self, limit: i64) -> Result<serde_json::Value> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, subscription_name, event_seq, failure_reason,
+                   payload_snapshot, created_at
+            FROM dead_letter_queue
+            ORDER BY created_at DESC
+            LIMIT $1
+            "#,
+        )
+        .bind(limit.clamp(1, 100))
+        .fetch_all(&self.pg_pool)
+        .await?;
+        Ok(serde_json::json!({
+            "schema": "missiond.event-bus-dlq.v1",
+            "items": rows.into_iter().map(|row| {
+                let created_at = row
+                    .try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
+                    .ok()
+                    .map(|dt| dt.to_rfc3339());
+                serde_json::json!({
+                    "id": row.try_get::<i64, _>("id").unwrap_or_default(),
+                    "subscriptionName": row.try_get::<String, _>("subscription_name").unwrap_or_default(),
+                    "eventSeq": row.try_get::<i64, _>("event_seq").unwrap_or_default(),
+                    "failureReason": row.try_get::<String, _>("failure_reason").unwrap_or_default(),
+                    "payloadSnapshot": row.try_get::<Option<serde_json::Value>, _>("payload_snapshot").ok().flatten(),
+                    "createdAt": created_at,
+                })
+            }).collect::<Vec<_>>()
+        }))
+    }
+
+    pub async fn dlq_ack(&self, id: i64) -> Result<serde_json::Value> {
+        let deleted = sqlx::query("DELETE FROM dead_letter_queue WHERE id = $1")
+            .bind(id)
+            .execute(&self.pg_pool)
+            .await?
+            .rows_affected();
+        Ok(serde_json::json!({
+            "schema": "missiond.event-bus-dlq-action.v1",
+            "action": "dlq_ack",
+            "id": id,
+            "ok": deleted > 0,
+            "deleted": deleted,
+        }))
+    }
+
+    pub async fn dlq_replay(&self, id: i64) -> Result<serde_json::Value> {
+        let row =
+            sqlx::query("SELECT subscription_name, event_seq FROM dead_letter_queue WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.pg_pool)
+                .await?;
+        let Some(row) = row else {
+            return Ok(serde_json::json!({
+                "schema": "missiond.event-bus-dlq-action.v1",
+                "action": "dlq_replay",
+                "id": id,
+                "ok": false,
+                "error": "not-found",
+            }));
+        };
+        let subscription_name = row.try_get::<String, _>("subscription_name")?;
+        let event_seq = row.try_get::<i64, _>("event_seq")?;
+        let replay_cursor = event_seq.saturating_sub(1);
+        let updated = sqlx::query(
+            r#"
+            UPDATE event_subscriptions
+            SET last_acked_seq = LEAST(last_acked_seq, $2), last_seen_at = now()
+            WHERE subscription_name = $1
+            "#,
+        )
+        .bind(&subscription_name)
+        .bind(replay_cursor)
+        .execute(&self.pg_pool)
+        .await?
+        .rows_affected();
+        let _ = self.dlq_ack(id).await?;
+        Ok(serde_json::json!({
+            "schema": "missiond.event-bus-dlq-action.v1",
+            "action": "dlq_replay",
+            "id": id,
+            "ok": updated > 0,
+            "subscriptionName": subscription_name,
+            "eventSeq": event_seq,
+            "cursor": replay_cursor,
+            "updated": updated,
+        }))
     }
 
     /// Start the dispatcher tail loop and the metrics emitter. Returns a
@@ -271,8 +523,12 @@ impl BusServices {
         let tail_source = self.tail_source.clone();
         let blob = self.blob_store.clone();
         let gate = self.control_gate.clone();
-        let dispatcher_join =
-            tokio::spawn(async move { dispatcher.run(tail_source, blob, gate, shutdown_rx).await });
+        let metrics = self.metrics.clone();
+        let dispatcher_join = tokio::spawn(async move {
+            dispatcher
+                .run(tail_source, blob, gate, shutdown_rx, metrics)
+                .await
+        });
 
         // Metrics emitter — needs an ObservabilityAppender.
         let appender: Arc<dyn ObservabilityAppender> = Arc::new(LogObservabilityAdapter {

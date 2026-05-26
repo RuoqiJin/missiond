@@ -270,6 +270,8 @@ impl super::BackgroundWorker for VisionWorker {
 
         loop {
             ctx.wait_if_paused().await;
+            ctx.begin_poll(Some((IDLE_INTERVAL_SECS * 3) as i64));
+            ctx.progress("querying unprocessed image messages");
             // Find unprocessed image messages
             let pending = match state
                 .store
@@ -278,6 +280,7 @@ impl super::BackgroundWorker for VisionWorker {
             {
                 Ok(p) => p,
                 Err(e) => {
+                    ctx.record_failure();
                     warn!(error = %e, "Vision worker: DB query failed");
                     tokio::time::sleep(Duration::from_secs(IDLE_INTERVAL_SECS)).await;
                     continue;
@@ -286,11 +289,13 @@ impl super::BackgroundWorker for VisionWorker {
 
             if pending.is_empty() {
                 attempt_counts.clear();
+                ctx.complete("no pending image messages");
                 tokio::time::sleep(Duration::from_secs(IDLE_INTERVAL_SECS)).await;
                 continue;
             }
 
             let batch_size = pending.len();
+            ctx.progress(format!("processing {batch_size} image messages"));
             let mut processed = 0;
             for (msg_id, session_id) in pending {
                 let attempts = attempt_counts.entry(msg_id).or_insert(0);
@@ -323,6 +328,9 @@ impl super::BackgroundWorker for VisionWorker {
 
             if processed > 0 {
                 info!(processed, batch_size, "Vision worker: batch completed");
+                ctx.record_success();
+            } else {
+                ctx.retrying("image batch produced no successful results");
             }
 
             // Short sleep between batches if there were items (might be more)

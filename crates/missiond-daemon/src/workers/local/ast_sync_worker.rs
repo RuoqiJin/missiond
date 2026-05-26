@@ -79,9 +79,16 @@ impl BackgroundWorker for AstSyncWorker {
                     old_hash,
                     new_hash,
                 } => {
+                    ctx.begin_task(
+                        Some(format!("worker:ast_sync_worker:commit:{repo_name}")),
+                        None,
+                        Some(900),
+                    );
+                    ctx.progress(format!("coalescing AST commit sync for {repo_name}"));
                     let (final_old, final_new) =
                         coalesce_commits(&mut self.rx, &repo_path, &repo_name, old_hash, new_hash)
                             .await;
+                    ctx.progress(format!("processing AST commit sync for {repo_name}"));
                     process_commit_sync(
                         store.as_ref(),
                         &repo_path,
@@ -91,18 +98,32 @@ impl BackgroundWorker for AstSyncWorker {
                         &embedding_tx,
                     )
                     .await;
+                    ctx.record_success();
                 }
                 AstSyncTask::FullSync {
                     repo_path,
                     repo_name,
                 } => {
+                    ctx.begin_task(
+                        Some(format!("worker:ast_sync_worker:full:{repo_name}")),
+                        None,
+                        Some(3600),
+                    );
+                    ctx.progress(format!("processing AST full sync for {repo_name}"));
                     process_full_sync(store.as_ref(), &repo_path, &repo_name, &embedding_tx).await;
+                    ctx.record_success();
                 }
                 AstSyncTask::FileSync {
                     repo_path,
                     repo_name,
                     file_path,
                 } => {
+                    ctx.begin_task(
+                        Some(format!("worker:ast_sync_worker:file:{repo_name}")),
+                        None,
+                        Some(900),
+                    );
+                    ctx.progress(format!("processing AST file sync for {repo_name}"));
                     process_file_sync(
                         store.as_ref(),
                         &repo_path,
@@ -111,6 +132,7 @@ impl BackgroundWorker for AstSyncWorker {
                         &embedding_tx,
                     )
                     .await;
+                    ctx.record_success();
                 }
             }
         }

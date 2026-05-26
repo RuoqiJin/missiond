@@ -32,6 +32,50 @@ impl ToolDefinition {
     }
 }
 
+/// Compatibility metadata for a public tool name.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCompatibility {
+    Primary,
+    LegacyAlias,
+}
+
+/// Generated-tool catalog projection used by architecture checks and clients
+/// that need stable family metadata without parsing handler match arms.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolCatalogEntry {
+    pub name: String,
+    pub primary_family: String,
+    pub compatibility: ToolCompatibility,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deprecated_by: Option<String>,
+}
+
+impl ToolCatalogEntry {
+    pub fn primary(name: impl Into<String>, primary_family: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            primary_family: primary_family.into(),
+            compatibility: ToolCompatibility::Primary,
+            deprecated_by: None,
+        }
+    }
+
+    pub fn legacy_alias(
+        name: impl Into<String>,
+        primary_family: impl Into<String>,
+        deprecated_by: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            primary_family: primary_family.into(),
+            compatibility: ToolCompatibility::LegacyAlias,
+            deprecated_by: Some(deprecated_by.into()),
+        }
+    }
+}
+
 /// Permission rule for role/slot
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PermissionRule {
@@ -265,6 +309,163 @@ pub fn get_tool(name: &str) -> Option<ToolDefinition> {
     all_tools().into_iter().find(|t| t.name == name)
 }
 
+/// Return the preferred MissionD tool family for a tool or alias.
+pub fn primary_tool_family(name: &str) -> &'static str {
+    match name {
+        n if n.starts_with("mission_board_") => "mission_board",
+        n if n.starts_with("mission_task_")
+            || matches!(
+                n,
+                "mission_submit"
+                    | "mission_ask"
+                    | "mission_status"
+                    | "mission_cancel"
+                    | "mission_task"
+                    | "mission_task_ack"
+                    | "mission_task_track"
+            ) =>
+        {
+            "mission_task"
+        }
+        n if n.starts_with("mission_kb_") || n == "mission_code_search" => "mission_kb",
+        n if n.starts_with("mission_pty_")
+            || matches!(
+                n,
+                "mission_spawn" | "mission_kill" | "mission_restart" | "mission_agents"
+            ) =>
+        {
+            "mission_pty"
+        }
+        n if n.starts_with("mission_question_")
+            || n.starts_with("mission_incident_")
+            || matches!(
+                n,
+                "mission_question"
+                    | "mission_decision_stats"
+                    | "mission_incident"
+                    | "mission_llm_trace"
+                    | "mission_jarvis_logs"
+                    | "mission_jarvis_trace"
+                    | "mission_gemini_trace"
+                    | "mission_gemini_stats"
+                    | "mission_gemini_content"
+                    | "mission_gemini_watch"
+            ) =>
+        {
+            "mission_question"
+        }
+        n if n.starts_with("mission_conversation_") || n == "mission_message_search" => {
+            "mission_conversation"
+        }
+        n if n.starts_with("mission_timeline_") || n == "mission_timeline" => "mission_timeline",
+        n if n.starts_with("mission_memory_") || n == "mission_memory" => "mission_memory",
+        n if n.starts_with("mission_skill_") => "mission_skill",
+        n if n.starts_with("mission_infra_")
+            || matches!(n, "mission_reachability" | "mission_os_diagnose") =>
+        {
+            "mission_infra"
+        }
+        n if n.starts_with("mission_permission_") => "mission_permission",
+        n if n.starts_with("mission_cc_") => "mission_cc",
+        n if n.starts_with("mission_router_chat") => "mission_router_chat",
+        n if n.starts_with("mission_audit_") || n == "mission_audit" => "mission_audit",
+        n if n.starts_with("mission_retrospective") => "mission_retrospective",
+        n if n.starts_with("mission_worker") || n == "mission_workers" => "mission_worker",
+        n if n.starts_with("mission_sys_") || n == "mission_daemon_update" => "mission_system",
+        _ => "other",
+    }
+}
+
+pub fn legacy_tool_aliases() -> Vec<ToolCatalogEntry> {
+    vec![
+        ToolCatalogEntry::legacy_alias("mission_submit", "mission_task", "mission_task_submit"),
+        ToolCatalogEntry::legacy_alias("mission_ask", "mission_task", "mission_task_submit"),
+        ToolCatalogEntry::legacy_alias("mission_status", "mission_task", "mission_task_query"),
+        ToolCatalogEntry::legacy_alias("mission_cancel", "mission_task", "mission_task_cancel"),
+        ToolCatalogEntry::legacy_alias("mission_task", "mission_task", "mission_task_query"),
+        ToolCatalogEntry::legacy_alias("mission_task_ack", "mission_task", "mission_task_query"),
+        ToolCatalogEntry::legacy_alias("mission_task_track", "mission_task", "mission_task_query"),
+        ToolCatalogEntry::legacy_alias("mission_spawn", "mission_pty", "mission_pty_spawn"),
+        ToolCatalogEntry::legacy_alias("mission_kill", "mission_pty", "mission_pty_signal"),
+        ToolCatalogEntry::legacy_alias("mission_restart", "mission_pty", "mission_pty_spawn"),
+        ToolCatalogEntry::legacy_alias("mission_agents", "mission_pty", "mission_slots"),
+        ToolCatalogEntry::legacy_alias(
+            "mission_board_list",
+            "mission_board",
+            "mission_board_query",
+        ),
+        ToolCatalogEntry::legacy_alias("mission_board_get", "mission_board", "mission_board_query"),
+        ToolCatalogEntry::legacy_alias(
+            "mission_board_search",
+            "mission_board",
+            "mission_board_query",
+        ),
+        ToolCatalogEntry::legacy_alias(
+            "mission_board_summary",
+            "mission_board",
+            "mission_board_query",
+        ),
+        ToolCatalogEntry::legacy_alias(
+            "mission_board_clear_done",
+            "mission_board",
+            "mission_board_query",
+        ),
+        ToolCatalogEntry::legacy_alias(
+            "mission_board_toggle",
+            "mission_board",
+            "mission_board_update",
+        ),
+        ToolCatalogEntry::legacy_alias("mission_workers", "mission_worker", "mission_worker"),
+        ToolCatalogEntry::legacy_alias(
+            "mission_worker_control",
+            "mission_worker",
+            "mission_worker",
+        ),
+        ToolCatalogEntry::legacy_alias(
+            "mission_jarvis_logs",
+            "mission_question",
+            "mission_llm_trace",
+        ),
+        ToolCatalogEntry::legacy_alias(
+            "mission_jarvis_trace",
+            "mission_question",
+            "mission_llm_trace",
+        ),
+        ToolCatalogEntry::legacy_alias(
+            "mission_gemini_trace",
+            "mission_question",
+            "mission_llm_trace",
+        ),
+        ToolCatalogEntry::legacy_alias(
+            "mission_gemini_stats",
+            "mission_question",
+            "mission_llm_trace",
+        ),
+        ToolCatalogEntry::legacy_alias(
+            "mission_gemini_content",
+            "mission_question",
+            "mission_llm_trace",
+        ),
+        ToolCatalogEntry::legacy_alias(
+            "mission_gemini_watch",
+            "mission_question",
+            "mission_gemini_auth",
+        ),
+    ]
+}
+
+pub fn tool_catalog() -> Vec<ToolCatalogEntry> {
+    let mut entries = all_tools()
+        .into_iter()
+        .map(|tool| {
+            let family = primary_tool_family(&tool.name);
+            ToolCatalogEntry::primary(tool.name, family)
+        })
+        .collect::<Vec<_>>();
+    entries.extend(legacy_tool_aliases());
+    entries
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,6 +505,37 @@ mod tests {
         assert!(get_tool("mission_pty_send").is_some());
         assert!(get_tool("mission_interaction").is_some());
         assert!(get_tool("unknown_tool").is_none());
+    }
+
+    #[test]
+    fn tool_catalog_carries_legacy_alias_metadata() {
+        let catalog = tool_catalog();
+        let aliases: HashSet<_> = catalog
+            .iter()
+            .filter(|entry| entry.compatibility == ToolCompatibility::LegacyAlias)
+            .map(|entry| entry.name.as_str())
+            .collect();
+        for alias in [
+            "mission_submit",
+            "mission_board_list",
+            "mission_board_get",
+            "mission_board_toggle",
+            "mission_jarvis_trace",
+        ] {
+            assert!(
+                aliases.contains(alias),
+                "missing legacy alias metadata for {alias}"
+            );
+        }
+        let board_get = catalog
+            .iter()
+            .find(|entry| entry.name == "mission_board_get")
+            .expect("mission_board_get alias metadata");
+        assert_eq!(board_get.primary_family, "mission_board");
+        assert_eq!(
+            board_get.deprecated_by.as_deref(),
+            Some("mission_board_query")
+        );
     }
 
     #[test]

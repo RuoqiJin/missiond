@@ -61,7 +61,7 @@ async fn handle_control(state: &AppState, args: Value) -> Result<ToolResult> {
 
     // Status: return full tree
     if action == "status" {
-        let tree = state.control_manager.current();
+        let tree = state.control_plane().control_manager.current();
         return Ok(ToolResult::json_pretty(&tree.status_summary()));
     }
 
@@ -76,7 +76,10 @@ async fn handle_control(state: &AppState, args: Value) -> Result<ToolResult> {
         }
     };
 
-    let mgr = &state.control_manager;
+    let control = state.control_plane();
+    let slots_ctx = state.slots();
+    let workers = state.workers();
+    let mgr = &control.control_manager;
 
     match target_type {
         "global" => {
@@ -128,7 +131,7 @@ async fn handle_control(state: &AppState, args: Value) -> Result<ToolResult> {
             }
             mgr.set_worker(target_name, paused);
             // Also set legacy per-worker state
-            if let Some(h) = state.worker_registry.get(target_name) {
+            if let Some(h) = workers.registry.get(target_name) {
                 h.set_state(if paused {
                     WorkerState::Paused
                 } else {
@@ -145,17 +148,17 @@ async fn handle_control(state: &AppState, args: Value) -> Result<ToolResult> {
             mgr.set_slot_role(target_name, paused);
             // Phase 2: actively kill running PTY sessions for this role
             if paused {
-                let slots = state.mission.list_slots();
+                let slots = slots_ctx.mission.list_slots();
                 for slot in slots {
                     if slot.config.role == target_name {
-                        if let Some(info) = state.pty.get_status(&slot.config.id).await {
+                        if let Some(info) = slots_ctx.pty.get_status(&slot.config.id).await {
                             if info.state != missiond_core::SessionState::Exited {
                                 tracing::info!(
                                     slot_id = %slot.config.id,
                                     role = target_name,
                                     "ControlTree: killing PTY for paused slot_role"
                                 );
-                                let _ = state.pty.kill(&slot.config.id).await;
+                                let _ = slots_ctx.pty.kill(&slot.config.id).await;
                             }
                         }
                     }
@@ -179,7 +182,7 @@ async fn handle_control(state: &AppState, args: Value) -> Result<ToolResult> {
     }
 
     // Return updated state tree
-    let tree = state.control_manager.current();
+    let tree = state.control_plane().control_manager.current();
     Ok(ToolResult::json_pretty(&serde_json::json!({
         "action": action,
         "target_type": target_type,
@@ -221,11 +224,13 @@ fn worker_control(state: &AppState, args: Value) -> Result<ToolResult> {
         };
     }
 
-    let handle = match state.worker_registry.get(&args.target) {
+    let workers = state.workers();
+    let handle = match workers.registry.get(&args.target) {
         Some(h) => h,
         None => {
             let known: Vec<_> = state
-                .worker_registry
+                .workers()
+                .registry
                 .list_all()
                 .iter()
                 .map(|w| w.name.clone())
@@ -295,7 +300,7 @@ fn codex_gate_control(state: &AppState, action: &str) -> Result<ToolResult> {
     match action {
         "pause" | "disable" => {
             set_codex_disabled(true);
-            if let Some(h) = state.worker_registry.get("vision_worker") {
+            if let Some(h) = state.workers().registry.get("vision_worker") {
                 h.set_state(WorkerState::Paused);
             }
             Ok(ToolResult::text(
@@ -305,7 +310,7 @@ fn codex_gate_control(state: &AppState, action: &str) -> Result<ToolResult> {
         }
         "resume" | "enable" => {
             set_codex_disabled(false);
-            if let Some(h) = state.worker_registry.get("vision_worker") {
+            if let Some(h) = state.workers().registry.get("vision_worker") {
                 h.set_state(WorkerState::Running);
             }
             Ok(ToolResult::text(
@@ -315,7 +320,8 @@ fn codex_gate_control(state: &AppState, action: &str) -> Result<ToolResult> {
         "status" => {
             let disabled = crate::codex_cli::is_codex_disabled();
             let vision_state = state
-                .worker_registry
+                .workers()
+                .registry
                 .get("vision_worker")
                 .map(|h| format!("{:?}", h.current_state()));
             Ok(ToolResult::json_pretty(&serde_json::json!({

@@ -93,6 +93,7 @@ mod tests {
     use crate::event::events::{BoardEvent, MemoryEvent, ObservabilityEvent, SlotEvent};
     use crate::event::log::reader::LoggedEvent;
     use crate::event::log::Seq;
+    use crate::event::metrics::NoopMetrics;
     use crate::event::pipeline::step6_gate::ControlGate;
     use async_trait::async_trait;
     use chrono::Utc;
@@ -203,7 +204,13 @@ mod tests {
         let dispatcher_handle = dispatcher.clone();
         let task = tokio::spawn(async move {
             dispatcher_handle
-                .run(source, blob, NeverPaused, shutdown_rx)
+                .run(
+                    source,
+                    blob,
+                    NeverPaused,
+                    shutdown_rx,
+                    Arc::new(NoopMetrics),
+                )
                 .await
         });
 
@@ -260,7 +267,13 @@ mod tests {
         let dispatcher_handle = dispatcher.clone();
         let task = tokio::spawn(async move {
             dispatcher_handle
-                .run(source, blob, NeverPaused, shutdown_rx)
+                .run(
+                    source,
+                    blob,
+                    NeverPaused,
+                    shutdown_rx,
+                    Arc::new(NoopMetrics),
+                )
                 .await
         });
 
@@ -326,7 +339,13 @@ mod tests {
         let dispatcher_handle = dispatcher.clone();
         let task = tokio::spawn(async move {
             dispatcher_handle
-                .run(source, blob, MemoryPaused, shutdown_rx)
+                .run(
+                    source,
+                    blob,
+                    MemoryPaused,
+                    shutdown_rx,
+                    Arc::new(NoopMetrics),
+                )
                 .await
         });
 
@@ -390,7 +409,7 @@ mod tests {
         let dispatcher_handle = dispatcher.clone();
         let task = tokio::spawn(async move {
             dispatcher_handle
-                .run(source, blob, AllPaused, shutdown_rx)
+                .run(source, blob, AllPaused, shutdown_rx, Arc::new(NoopMetrics))
                 .await
         });
 
@@ -428,7 +447,13 @@ mod tests {
         let dispatcher_handle = dispatcher.clone();
         let task = tokio::spawn(async move {
             dispatcher_handle
-                .run(source, blob, NeverPaused, shutdown_rx)
+                .run(
+                    source,
+                    blob,
+                    NeverPaused,
+                    shutdown_rx,
+                    Arc::new(NoopMetrics),
+                )
                 .await
         });
 
@@ -490,7 +515,16 @@ mod tests {
         let reg2 = registry.clone();
         let cur2 = cursor.clone();
         let task = tokio::spawn(async move {
-            run_tail(source, blob, reg2, cur2, NeverPaused, shutdown_rx).await
+            run_tail(
+                source,
+                blob,
+                reg2,
+                cur2,
+                NeverPaused,
+                shutdown_rx,
+                Arc::new(crate::event::metrics::NoopMetrics),
+            )
+            .await
         });
 
         // Wait for cursor to reach 2.
@@ -535,10 +569,17 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let source: Arc<dyn TailSource> = Arc::new(mock);
         let blob = dummy_blob_store();
-        let task =
-            tokio::spawn(
-                async move { dispatcher.run(source, blob, NeverPaused, shutdown_rx).await },
-            );
+        let task = tokio::spawn(async move {
+            dispatcher
+                .run(
+                    source,
+                    blob,
+                    NeverPaused,
+                    shutdown_rx,
+                    Arc::new(crate::event::metrics::NoopMetrics),
+                )
+                .await
+        });
 
         for _ in 0..50 {
             if cursor_ref.last_dispatched_seq() == Seq(1) {
@@ -573,7 +614,15 @@ mod tests {
         let blob = dummy_blob_store();
         let source: Arc<dyn TailSource> = Arc::new(Broken);
 
-        let result = dispatcher.run(source, blob, NeverPaused, shutdown_rx).await;
+        let result = dispatcher
+            .run(
+                source,
+                blob,
+                NeverPaused,
+                shutdown_rx,
+                Arc::new(crate::event::metrics::NoopMetrics),
+            )
+            .await;
         match result {
             Err(DispatchError::Tail(_)) => {}
             other => panic!("expected Tail error, got {other:?}"),
@@ -614,7 +663,13 @@ mod tests {
         let dispatcher_handle = dispatcher.clone();
         let task = tokio::spawn(async move {
             dispatcher_handle
-                .run(source, blob, NeverPaused, shutdown_rx)
+                .run(
+                    source,
+                    blob,
+                    NeverPaused,
+                    shutdown_rx,
+                    Arc::new(NoopMetrics),
+                )
                 .await
         });
 

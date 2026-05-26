@@ -21,4 +21,7 @@ pub use gen_gateway::{
 };
 
 // Tool types
-pub use tools::{all_tools, get_tool, ToolContent, ToolDefinition, ToolResult};
+pub use tools::{
+    all_tools, get_tool, legacy_tool_aliases, primary_tool_family, tool_catalog, ToolCatalogEntry,
+    ToolCompatibility, ToolContent, ToolDefinition, ToolResult,
+};

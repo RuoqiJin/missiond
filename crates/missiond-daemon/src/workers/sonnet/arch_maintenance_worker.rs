@@ -79,10 +79,13 @@ impl BackgroundWorker for ArchMaintenanceWorker {
                 ack.ack().await;
                 continue;
             };
+            ctx.begin_event("system", ack.seq().0, slot_id.clone());
+            ctx.progress(format!("processing contextual commit {commit_hash}"));
 
             // Self-trigger filter: skip commits made by this worker
             if summary.starts_with(ARCH_COMMIT_PREFIX) {
                 debug!(branch = %branch, "arch_maintenance: skipping own commit");
+                ctx.complete("skipped own commit");
                 ack.ack().await;
                 continue;
             }
@@ -124,6 +127,7 @@ impl BackgroundWorker for ArchMaintenanceWorker {
                     repo_path = %repo_path,
                     "arch_maintenance: could not derive repo name from slot cwd"
                 );
+                ctx.block("repo-name-missing");
                 processing.remove(&branch);
                 ack.ack().await;
                 continue;
@@ -135,6 +139,7 @@ impl BackgroundWorker for ArchMaintenanceWorker {
                     ctx.record_success();
                 }
                 Ok(false) => {
+                    ctx.complete("no architecture change");
                     debug!(branch = %branch, "arch_maintenance: NO_CHANGE");
                 }
                 Err(e) => {

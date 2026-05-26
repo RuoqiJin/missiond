@@ -32,6 +32,7 @@ use tokio::time::timeout;
 use crate::event::blob_store::BlobStore;
 use crate::event::log::reader::LogReader;
 use crate::event::log::{AppendAck, AppendError, Seq};
+use crate::event::metrics::{BusMetrics, NoopMetrics};
 
 use super::backend::{BackendError, InsertRow, WriterBackend};
 use super::backpressure::{PendingAppend, APPEND_CHANNEL_CAPACITY, BATCH_DEADLINE, BATCH_MAX};
@@ -43,6 +44,7 @@ pub struct LogWriter {
     rx: mpsc::Receiver<PendingAppend>,
     backend: Box<dyn WriterBackend>,
     blob_store: Arc<dyn BlobStore>,
+    metrics: Arc<dyn BusMetrics>,
     /// Once `true` the writer refuses new batches permanently.
     failed: bool,
 }
@@ -52,11 +54,21 @@ pub(crate) fn new_with_backend(
     backend: Box<dyn WriterBackend>,
     blob_store: Arc<dyn BlobStore>,
 ) -> (LogWriter, LogWriterHandle) {
+    new_with_backend_and_metrics(backend, blob_store, Arc::new(NoopMetrics))
+}
+
+/// Boot the writer with an explicit backend and metrics collector.
+pub(crate) fn new_with_backend_and_metrics(
+    backend: Box<dyn WriterBackend>,
+    blob_store: Arc<dyn BlobStore>,
+    metrics: Arc<dyn BusMetrics>,
+) -> (LogWriter, LogWriterHandle) {
     let (tx, rx) = mpsc::channel(APPEND_CHANNEL_CAPACITY);
     let writer = LogWriter {
         rx,
         backend,
         blob_store,
+        metrics: metrics.clone(),
         failed: false,
     };
     let handle = LogWriterHandle {
@@ -64,6 +76,7 @@ pub(crate) fn new_with_backend(
         #[cfg(feature = "postgres")]
         reader: None,
         volatile_counter: Arc::new(AtomicI64::new(-1)),
+        metrics,
     };
     (writer, handle)
 }
@@ -74,9 +87,18 @@ pub fn new_log_writer(
     pool: sqlx::PgPool,
     blob_store: Arc<dyn BlobStore>,
 ) -> (LogWriter, LogWriterHandle) {
+    new_log_writer_with_metrics(pool, blob_store, Arc::new(NoopMetrics))
+}
+
+#[cfg(feature = "postgres")]
+pub fn new_log_writer_with_metrics(
+    pool: sqlx::PgPool,
+    blob_store: Arc<dyn BlobStore>,
+    metrics: Arc<dyn BusMetrics>,
+) -> (LogWriter, LogWriterHandle) {
     let backend: Box<dyn WriterBackend> =
         Box::new(super::pg_backend::PgWriterBackend { pool: pool.clone() });
-    let (writer, mut handle) = new_with_backend(backend, blob_store.clone());
+    let (writer, mut handle) = new_with_backend_and_metrics(backend, blob_store.clone(), metrics);
     handle.reader = Some(LogReader::new(pool, blob_store));
     (writer, handle)
 }
@@ -94,7 +116,16 @@ pub fn new_log_writer(
 /// producer-side handle.
 #[cfg(feature = "postgres")]
 pub fn spawn_log_writer(pool: sqlx::PgPool, blob_store: Arc<dyn BlobStore>) -> LogWriterHandle {
-    let (writer, handle) = new_log_writer(pool, blob_store);
+    spawn_log_writer_with_metrics(pool, blob_store, Arc::new(NoopMetrics))
+}
+
+#[cfg(feature = "postgres")]
+pub fn spawn_log_writer_with_metrics(
+    pool: sqlx::PgPool,
+    blob_store: Arc<dyn BlobStore>,
+    metrics: Arc<dyn BusMetrics>,
+) -> LogWriterHandle {
+    let (writer, handle) = new_log_writer_with_metrics(pool, blob_store, metrics);
     tokio::spawn(writer.run());
     handle
 }
@@ -141,6 +172,7 @@ impl LogWriter {
         // Failed state short-circuits: drop any new batch immediately.
         if self.failed {
             for p in batch.drain(..) {
+                self.metrics.record_append(p.domain, false, 0);
                 let _ = p.ack.send(Err(AppendError::LogUnavailable(
                     "log writer in failed state".into(),
                 )));
@@ -250,6 +282,8 @@ impl LogWriter {
             Ok(seqs) if blob_error_set.is_empty() => {
                 // Happy path: seqs align 1:1 with the original batch.
                 for (p, seq) in batch.drain(..).zip(seqs.into_iter()) {
+                    self.metrics
+                        .record_append(p.domain, true, p.payload_bytes.len());
                     let _ = p.ack.send(Ok(AppendAck::Committed { seq, durable: true }));
                 }
             }
@@ -260,12 +294,18 @@ impl LogWriter {
                 let mut seq_iter = seqs.into_iter();
                 for (i, p) in batch.drain(..).enumerate() {
                     if blob_error_set.contains(&i) {
+                        self.metrics
+                            .record_append(p.domain, false, p.payload_bytes.len());
                         let _ = p.ack.send(Err(AppendError::Other(
                             "blob upload failed; row not inserted".into(),
                         )));
                     } else if let Some(seq) = seq_iter.next() {
+                        self.metrics
+                            .record_append(p.domain, true, p.payload_bytes.len());
                         let _ = p.ack.send(Ok(AppendAck::Committed { seq, durable: true }));
                     } else {
+                        self.metrics
+                            .record_append(p.domain, false, p.payload_bytes.len());
                         let _ = p.ack.send(Err(AppendError::Other(
                             "seq vector shorter than row set".into(),
                         )));
@@ -292,11 +332,22 @@ impl LogWriter {
                             "dedup collision reported but row has no key".into(),
                         )),
                     };
+                    self.metrics.record_append(
+                        p.domain,
+                        result.is_ok(),
+                        if result.is_ok() {
+                            p.payload_bytes.len()
+                        } else {
+                            0
+                        },
+                    );
                     let _ = p.ack.send(result);
                 }
             }
             Err(BackendError::Transient(msg)) | Err(BackendError::Fatal(msg)) => {
                 for p in batch.drain(..) {
+                    self.metrics
+                        .record_append(p.domain, false, p.payload_bytes.len());
                     let _ = p.ack.send(Err(AppendError::LogUnavailable(msg.clone())));
                 }
             }
@@ -432,6 +483,29 @@ mod tests {
             }
             other => panic!("expected Committed, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn append_records_metrics() {
+        let backend = Box::new(MockBackend::new());
+        let metrics = Arc::new(crate::event::metrics::AtomicBusMetrics::new());
+        let (writer, handle) =
+            new_with_backend_and_metrics(backend, make_blob_store(), metrics.clone());
+        tokio::spawn(writer.run());
+
+        let opts = AppendOpts {
+            producer_id: "metrics-test".into(),
+            ..Default::default()
+        };
+        handle
+            .append(small_event("t-metrics"), opts)
+            .await
+            .expect("append");
+
+        let snap = metrics.snapshot();
+        assert_eq!(snap.append_ok, 1);
+        assert_eq!(snap.append_fail, 0);
+        assert!(snap.append_bytes > 0);
     }
 
     #[tokio::test]

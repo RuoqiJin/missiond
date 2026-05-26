@@ -77,6 +77,14 @@ pub(super) fn board_store_error(tool: &str, err: missiond_core::db::error::DbErr
             error_codes::NOT_FOUND,
             "verify the BoardTask id; short ids are accepted only when they resolve uniquely",
         ),
+        missiond_core::db::error::DbError::Constraint(message)
+            if message.contains("EVIDENCE_REQUIRED") =>
+        {
+            (
+                error_codes::INVALID_PARAM,
+                "record canonical evidence first with mission_shared_memory(action=\"task_result_put\", task_id=..., result_status=\"completed\", ...), then mark the BoardTask done",
+            )
+        }
         missiond_core::db::error::DbError::Constraint(_) => (
             error_codes::INVALID_PARAM,
             "check field values and retry with a smaller, schema-valid payload",

@@ -525,6 +525,7 @@
              "node scripts/check-v3-runtime-path-hygiene.mjs"
              "node scripts/check-v3-production-runtime-boundary.mjs"
              "node scripts/check-v3-runtime-domain-projections.mjs"
+             "node scripts/check-v3-architecture-boundaries.mjs"
              "node scripts/check-v3-semantic-checker-coverage.mjs"
              "node scripts/check-v3-agent-entry-slices.mjs"
              "node scripts/check-v3-agent-navigation-quality.mjs"

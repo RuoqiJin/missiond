@@ -2739,6 +2739,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "missiond-domain"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "missiond-genome"
 version = "0.1.0"
 dependencies = [

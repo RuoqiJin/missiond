@@ -54,6 +54,8 @@ impl BackgroundWorker for ReconcileWorker {
         loop {
             interval.tick().await;
             ctx.wait_if_paused().await;
+            ctx.begin_poll(Some(INTERVAL_SECS as i64));
+            ctx.progress("running reconciliation scan");
             run_reconciliation(&state).await;
             ctx.record_success();
         }

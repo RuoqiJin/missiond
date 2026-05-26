@@ -11,6 +11,7 @@ use tokio::sync::Mutex;
 
 use missiond_core::types::SharedProjectRegistry;
 
+use crate::app_ports::StorePorts;
 use crate::bus::BusServices;
 use crate::control_tree::ControlManager;
 use crate::daemon_stats::DaemonStats;
@@ -131,6 +132,56 @@ pub(crate) struct ControlPlaneContext {
     pub(crate) stats: Arc<DaemonStats>,
 }
 
+#[derive(Clone)]
+#[allow(dead_code)]
+pub(crate) struct StoragePlane {
+    pub(crate) store: Arc<dyn MissionStore>,
+    pub(crate) ports: StorePorts,
+    pub(crate) shared_memory: Arc<crate::engine::shared_memory::SharedMemoryService>,
+    pub(crate) codex_replay: Arc<crate::engine::codex_replay::CodexReplayService>,
+}
+
+#[derive(Clone)]
+#[allow(dead_code)]
+pub(crate) struct EventPlane {
+    pub(crate) bus: Arc<BusServices>,
+}
+
+#[derive(Clone)]
+#[allow(dead_code)]
+pub(crate) struct SlotPlane {
+    pub(crate) mission: Arc<MissionControl>,
+    pub(crate) pty: Arc<PTYManager>,
+    pub(crate) slot_manager: Arc<AgentSlotManager>,
+    pub(crate) slot_dispatch: Arc<SlotDispatchGuard>,
+    pub(crate) pty_session_uuids: Arc<tokio::sync::RwLock<HashSet<String>>>,
+}
+
+#[derive(Clone)]
+#[allow(dead_code)]
+pub(crate) struct WorkerPlane {
+    pub(crate) registry: Arc<WorkerRegistry>,
+    pub(crate) board_dispatch_notify: Arc<tokio::sync::Notify>,
+    pub(crate) strategy_notify: Arc<tokio::sync::Notify>,
+    pub(crate) retro_notify: Arc<tokio::sync::Notify>,
+}
+
+#[derive(Clone)]
+#[allow(dead_code)]
+pub(crate) struct KnowledgePlane {
+    pub(crate) skills: SharedSkillIndex,
+    pub(crate) shared_memory: Arc<crate::engine::shared_memory::SharedMemoryService>,
+    pub(crate) project_registry: SharedProjectRegistry,
+}
+
+#[derive(Clone)]
+#[allow(dead_code)]
+pub(crate) struct ObservabilityPlane {
+    pub(crate) stats: Arc<DaemonStats>,
+    pub(crate) bus: Arc<BusServices>,
+    pub(crate) worker_registry: Arc<WorkerRegistry>,
+}
+
 pub(crate) struct AppStateContextBundle {
     pub(crate) runtime_paths: RuntimePaths,
     pub(crate) storage_ctx: StorageContext,
@@ -165,7 +216,7 @@ impl AppStateBuilder {
 
 /// Extraction phase state machine. Replaces rigid 120s cooldown with
 /// event-driven completion detection.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub(crate) enum ExtractionPhase {
     /// Ready for next extraction trigger.
     Idle,
@@ -628,6 +679,56 @@ impl AppState {
 
     pub(crate) fn control_plane(&self) -> &ControlPlaneContext {
         &self.control_ctx
+    }
+
+    pub(crate) fn storage_plane(&self) -> StoragePlane {
+        StoragePlane {
+            store: Arc::clone(&self.store),
+            ports: StorePorts::new(Arc::clone(&self.store)),
+            shared_memory: Arc::clone(&self.shared_memory),
+            codex_replay: Arc::clone(&self.codex_replay),
+        }
+    }
+
+    pub(crate) fn event_plane(&self) -> EventPlane {
+        EventPlane {
+            bus: Arc::clone(&self.bus),
+        }
+    }
+
+    pub(crate) fn slot_plane(&self) -> SlotPlane {
+        SlotPlane {
+            mission: Arc::clone(&self.mission),
+            pty: Arc::clone(&self.pty),
+            slot_manager: Arc::clone(&self.slot_manager),
+            slot_dispatch: Arc::clone(&self.slot_dispatch),
+            pty_session_uuids: Arc::clone(&self.pty_session_uuids),
+        }
+    }
+
+    pub(crate) fn worker_plane(&self) -> WorkerPlane {
+        WorkerPlane {
+            registry: Arc::clone(&self.worker_registry),
+            board_dispatch_notify: Arc::clone(&self.board_dispatch_notify),
+            strategy_notify: Arc::clone(&self.strategy_notify),
+            retro_notify: Arc::clone(&self.retro_notify),
+        }
+    }
+
+    pub(crate) fn knowledge_plane(&self) -> KnowledgePlane {
+        KnowledgePlane {
+            skills: self.skills.clone(),
+            shared_memory: Arc::clone(&self.shared_memory),
+            project_registry: self.project_registry.clone(),
+        }
+    }
+
+    pub(crate) fn observability_plane(&self) -> ObservabilityPlane {
+        ObservabilityPlane {
+            stats: Arc::clone(&self.stats),
+            bus: Arc::clone(&self.bus),
+            worker_registry: Arc::clone(&self.worker_registry),
+        }
     }
 }
 

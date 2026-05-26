@@ -4,6 +4,7 @@
 //!       + memory_scheduler (slot dispatcher) + workflow_executor (skill MCP runner)
 
 pub mod autopilot;
+pub mod autopilot_workflow;
 pub mod flow_engine;
 pub mod memory_scheduler;
 pub mod workflow_executor;

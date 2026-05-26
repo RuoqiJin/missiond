@@ -42,7 +42,8 @@ pub mod writer {
     };
     pub use crate::event::pipeline::step3_commit::handle::LogWriterHandle;
     pub use crate::event::pipeline::step3_commit::log_writer::{
-        new_log_writer, spawn_log_writer, LogWriter,
+        new_log_writer, new_log_writer_with_metrics, spawn_log_writer,
+        spawn_log_writer_with_metrics, LogWriter,
     };
 }
 

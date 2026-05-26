@@ -71,10 +71,13 @@ impl BackgroundWorker for LispSurveyWorker {
                 ack.ack().await;
                 continue;
             };
+            ctx.begin_event("system", ack.seq().0, slot_id.clone());
+            ctx.progress(format!("surveying commit {commit_hash}"));
 
             // Self-trigger filter
             if summary.starts_with(SURVEY_COMMIT_PREFIX) {
                 debug!("lisp_survey: skipping own commit");
+                ctx.complete("skipped own commit");
                 ack.ack().await;
                 continue;
             }
@@ -87,6 +90,7 @@ impl BackgroundWorker for LispSurveyWorker {
                         slot_id = ?slot_id,
                         "lisp_survey: cannot resolve project for slot"
                     );
+                    ctx.block("project-unresolved");
                     ack.ack().await;
                     continue;
                 }
@@ -100,6 +104,7 @@ impl BackgroundWorker for LispSurveyWorker {
                         project = %project_id,
                         "lisp_survey: project has no intent.lisp, skipping"
                     );
+                    ctx.complete("no intent.lisp");
                     ack.ack().await;
                     continue;
                 }
@@ -110,6 +115,7 @@ impl BackgroundWorker for LispSurveyWorker {
             if let Some(last) = debounce.get(&project_id) {
                 if now.duration_since(*last) < Duration::from_secs(DEBOUNCE_SECS) {
                     debug!(project = %project_id, "lisp_survey: debounced");
+                    ctx.complete("debounced");
                     ack.ack().await;
                     continue;
                 }
@@ -118,6 +124,7 @@ impl BackgroundWorker for LispSurveyWorker {
             // Concurrency guard
             if processing.contains(&project_id) {
                 debug!(project = %project_id, "lisp_survey: already processing");
+                ctx.retrying("project already processing");
                 ack.ack().await;
                 continue;
             }

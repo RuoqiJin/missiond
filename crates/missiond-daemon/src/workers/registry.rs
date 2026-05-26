@@ -475,6 +475,18 @@ impl WorkerContext {
         self.handle.persist_snapshot();
     }
 
+    pub fn begin_poll(&self, lease_secs: Option<i64>) {
+        self.begin_task(Some(format!("worker:{}:poll", self.name)), None, lease_secs);
+    }
+
+    pub fn begin_event(&self, domain: impl AsRef<str>, seq: i64, slot_id: Option<String>) {
+        self.begin_task(
+            Some(format!("event:{}:{seq}", domain.as_ref())),
+            slot_id,
+            Some(300),
+        );
+    }
+
     pub fn progress(&self, status: impl Into<String>) {
         let now = now_epoch();
         {

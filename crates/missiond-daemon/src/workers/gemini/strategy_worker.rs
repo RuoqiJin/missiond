@@ -844,7 +844,10 @@ impl BackgroundWorker for StrategyWorker {
         loop {
             self.notify.notified().await;
             ctx.wait_if_paused().await;
+            ctx.begin_poll(Some(900));
+            ctx.progress("running pending strategy analysis");
             run_pending_analysis(&state).await;
+            ctx.record_success();
         }
     }
 }

@@ -133,14 +133,23 @@ impl BackgroundWorker for CodexIngestionWorker {
     }
 
     async fn run(self, state: Arc<AppState>, mut ctx: WorkerContext) {
-        let local_index_path = match codex_local_index_path() {
-            Some(p) if p.exists() => p,
-            _ => {
-                info!("Codex ingestion: provider-local Codex thread index not found, worker idle");
-                // Park forever — no Codex installation detected
-                std::future::pending::<()>().await;
-                return;
+        let local_index_path = loop {
+            match codex_local_index_path() {
+                Some(p) if p.exists() => break p,
+                Some(p) => {
+                    ctx.block(CONVERSATION_SOURCE_STATE_PROVIDER_INDEX_MISSING);
+                    info!(
+                        index = %p.display(),
+                        "Codex ingestion: provider-local Codex thread index not found, retrying"
+                    );
+                }
+                None => {
+                    ctx.block(CONVERSATION_SOURCE_STATE_PROVIDER_INDEX_MISSING);
+                    info!("Codex ingestion: home directory not available, retrying");
+                }
             }
+            tokio::time::sleep(Duration::from_secs(POLL_INTERVAL_SECS)).await;
+            ctx.wait_if_paused().await;
         };
 
         info!(
@@ -158,12 +167,17 @@ impl BackgroundWorker for CodexIngestionWorker {
 
         loop {
             ctx.wait_if_paused().await;
+            ctx.begin_poll(Some((POLL_INTERVAL_SECS * 3) as i64));
+            ctx.progress("polling provider-local Codex index");
 
             match poll_and_ingest(&state, &local_index_path, &mut watermarks).await {
                 Ok(ingested) => {
+                    ctx.progress(format!("ingested {ingested} tool calls"));
                     if ingested > 0 {
                         ctx.record_success();
                         info!(tool_calls = ingested, "Codex ingestion: batch completed");
+                    } else {
+                        ctx.complete("no Codex changes");
                     }
                 }
                 Err(e) => {

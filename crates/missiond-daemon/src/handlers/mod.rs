@@ -97,6 +97,7 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
             system::handle(state, name, args).await
         }
         "mission_power_control" => power::handle(state, name, args).await,
+        "mission_event_bus" => misc::handle(state, name, args).await,
         "mission_global_instruction" => global_instruction::handle(state, name, args).await,
         "mission_compute_slot" => compute_slot::handle(state, name, args).await,
         "mission_task_delegate" | "mission_swarm_run" => {

@@ -1,0 +1,17 @@
+[package]
+name = "missiond-domain"
+description = "Pure MissionD domain contracts for the staged core split"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

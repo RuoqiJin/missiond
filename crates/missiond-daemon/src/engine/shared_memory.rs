@@ -786,6 +786,7 @@ impl SharedMemoryService {
                     "resultStatus": null,
                     "summary": "",
                     "verifierStatus": null,
+                    "gateStatus": "blocked",
                     "updatedAt": null
                 }));
             }
@@ -813,6 +814,11 @@ impl SharedMemoryService {
         Ok(json!({
             "schema": "missiond.task-evidence-summary.v1",
             "degraded": false,
+            "gate": {
+                "requiredForDone": true,
+                "status": if missing == 0 { "ok" } else { "blocked" },
+                "missing": missing,
+            },
             "artifacts": total_artifacts,
             "tasksWithEvidence": tasks_with_evidence,
             "completed": completed,
@@ -1994,6 +2000,7 @@ fn task_evidence_summary_row_json(row: sqlx::postgres::PgRow) -> Value {
         "resultStatus": result_status,
         "summary": row.get::<String, _>("summary"),
         "verifierStatus": null,
+        "gateStatus": if complete { "ok" } else { "blocked" },
         "complete": complete,
         "missingReasons": if complete {
             Vec::<String>::new()

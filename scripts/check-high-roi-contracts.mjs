@@ -12,6 +12,7 @@ Checks high-ROI MissionD repair contracts:
 - Board Event Health exposes stale-derived status
 - mission_health exposes startupPreflight
 - worker lifecycle and evidence/event health operator contracts stay wired
+- executable runbook actions, operator trends, and real bus metrics stay wired
 `;
 
 const SOURCE_STATE_LABELS = [
@@ -47,7 +48,14 @@ function main() {
       ['error source', /source:\s*['"]slotStatus['"]/],
       ['workers overview', /mission_worker[\s\S]*action:\s*['"]list['"]/],
       ['runbook generator', /buildRunbook/],
+      ['runbook executable action', /action:\s*\{/],
+      ['operator trends projection', /operatorTrends/],
       ['fake MCP harness', /createFakeOperatorOverviewHarness/],
+    ]),
+    ...checkRequiredText(root, 'packages/board/src/app/api/operator/runbook/action/route.ts', [
+      ['runbook action route', /export\s+async\s+function\s+POST/],
+      ['runbook action allowlist', /ALLOWED_TOOLS/],
+      ['DLQ replay confirm gate', /dlq_replay[\s\S]*confirm=true|confirm.*dlq_replay/s],
     ]),
     ...checkRequiredText(root, 'packages/board/src/eventStream.ts', [
       ['stale threshold', /EVENT_HEALTH_STALE_AFTER_MS/],
@@ -59,29 +67,75 @@ function main() {
       ['eventBus health field', /eventBus/],
       ['workers health field', /workers/],
       ['evidence health field', /evidence/],
+      ['operator trends health field', /operatorTrends/],
+      ['mission_event_bus tool', /mission_event_bus/],
     ]),
     ...checkRequiredText(root, 'crates/missiond-daemon/src/workers/registry.rs', [
       ['worker lifecycle enum', /enum\s+WorkerLifecycleState/],
       ['worker health snapshot', /struct\s+WorkerHealthSnapshot/],
       ['worker heartbeat method', /pub\s+fn\s+heartbeat/],
+      ['worker poll lifecycle helper', /pub\s+fn\s+begin_poll/],
+      ['worker event lifecycle helper', /pub\s+fn\s+begin_event/],
       ['worker stale reason', /stale_reason/],
     ]),
+    ...checkWorkerLifecycleUse(root),
     ...checkRequiredText(root, 'crates/missiond-daemon/src/bus/bootstrap.rs', [
       ['bus health snapshot', /health_snapshot/],
       ['DLQ health', /dead_letter_queue/],
       ['ws bridge health', /wsBridge/],
+      ['operator trends store', /operator_health_samples/],
+      ['DLQ action list', /dlq_list/],
+      ['DLQ action replay', /dlq_replay/],
+    ]),
+    ...checkRequiredText(root, 'crates/missiond-core/src/event/pipeline/step3_commit/log_writer.rs', [
+      ['log writer metrics field', /metrics:\s*Arc<dyn BusMetrics>/],
+      ['log writer records append', /record_append/],
+      ['metrics spawn constructor', /spawn_log_writer_with_metrics/],
+    ]),
+    ...checkRequiredText(root, 'crates/missiond-core/src/event/pipeline/step3_commit/handle.rs', [
+      ['append handle records reject', /record_reject/],
+      ['append handle records ephemeral', /opts\.ephemeral[\s\S]*record_append/],
+    ]),
+    ...checkRequiredText(root, 'crates/missiond-core/src/event/pipeline/step5_tail/dispatcher.rs', [
+      ['dispatcher metrics argument', /bus_metrics:\s*Arc<dyn BusMetrics>/],
+      ['dispatcher dropped metric', /record_control_gate_dropped/],
+      ['dispatcher topic depth metric', /record_topic_depth/],
     ]),
     ...checkRequiredText(root, 'crates/missiond-daemon/src/engine/shared_memory.rs', [
       ['task evidence summary schema', /missiond\.task-evidence-summary\.v1/],
       ['task evidence summary action', /task_evidence_summary/],
+      ['task evidence gate summary', /requiredForDone/],
+    ]),
+    ...checkRequiredText(root, 'crates/missiond-core/src/db/pg/board.rs', [
+      ['evidence hard gate', /EVIDENCE_REQUIRED/],
+      ['task result artifact gate query', /task_result_artifacts[\s\S]*result_status/],
     ]),
     ...checkRequiredText(root, 'crates/missiond-core/migrations/20260526000000_worker_runtime_state.sql', [
       ['worker runtime table', /CREATE TABLE IF NOT EXISTS worker_runtime_state/],
       ['worker runtime lifecycle', /lifecycle TEXT NOT NULL/],
     ]),
+    ...checkRequiredText(root, 'crates/missiond-core/migrations/20260526001000_operator_health_samples.sql', [
+      ['operator health samples table', /CREATE TABLE IF NOT EXISTS operator_health_samples/],
+      ['evidence completion partial index', /idx_task_result_artifacts_completed_gate/],
+    ]),
+    ...checkRequiredText(root, 'scripts/check-board-operator-fixtures.mjs', [
+      ['board operator fixture checker', /createFakeOperatorOverviewHarness/],
+      ['runbook action assertion', /worker_resume:/],
+    ]),
     ...checkRequiredText(root, 'scripts/check-pg-migrations-discipline.mjs', [
       ['pg migration checker', /check-pg-migrations-discipline/],
       ['destructive migration marker', /missiond-allow-destructive-migration/],
+    ]),
+    ...checkForbiddenText(root, 'crates/missiond-daemon/src/handlers/compute/worker.rs', [
+      ['direct worker registry access', /state\.worker_registry/],
+      ['direct control manager access', /state\.control_manager/],
+      ['direct pty access', /state\.pty/],
+      ['direct mission access', /state\.mission/],
+    ]),
+    ...checkForbiddenText(root, 'crates/missiond-daemon/src/handlers/sysinfra/misc.rs', [
+      ['direct store access', /state\.store/],
+      ['direct control manager access', /state\.control_manager/],
+      ['direct mission access', /state\.mission/],
     ]),
   ];
 
@@ -97,6 +151,24 @@ function main() {
     console.error(`MissionD high-ROI contract check FAILED -- ${diagnostics.length} diagnostic(s)`);
   }
   process.exit(result.ok ? 0 : 1);
+}
+
+function checkWorkerLifecycleUse(root) {
+  const workerRoot = path.join(root, 'crates/missiond-daemon/src/workers');
+  const diagnostics = [];
+  for (const rel of walk(workerRoot, root)) {
+    if (!rel.endsWith('.rs') || rel.endsWith('/registry.rs')) continue;
+    const source = fs.readFileSync(path.join(root, rel), 'utf8');
+    if (!/impl\s+(super::)?BackgroundWorker|impl\s+BackgroundWorker/.test(source)) continue;
+    if (!/begin_(task|poll|event)\s*\(/.test(source)) {
+      diagnostics.push({
+        file: rel,
+        line: 1,
+        message: 'BackgroundWorker must report real lifecycle via begin_task/begin_poll/begin_event',
+      });
+    }
+  }
+  return diagnostics;
 }
 
 function checkSourceStateConstants(root) {
@@ -130,6 +202,24 @@ function checkRequiredText(root, rel, expectations) {
   return expectations
     .filter(([, pattern]) => !pattern.test(source))
     .map(([name]) => ({ file: rel, line: 1, message: `missing ${name} contract` }));
+}
+
+function checkForbiddenText(root, rel, expectations) {
+  const abs = path.join(root, rel);
+  if (!fs.existsSync(abs)) {
+    return [{ file: rel, line: 1, message: 'required contract file is missing' }];
+  }
+  const source = fs.readFileSync(abs, 'utf8');
+  const lines = source.split(/\r?\n/);
+  const diagnostics = [];
+  for (const [name, pattern] of expectations) {
+    lines.forEach((line, index) => {
+      if (pattern.test(line)) {
+        diagnostics.push({ file: rel, line: index + 1, message: `forbidden ${name}; use AppState context accessors` });
+      }
+    });
+  }
+  return diagnostics;
 }
 
 function walk(dir, root) {

@@ -391,8 +391,13 @@ impl BackgroundWorker for RetroWorker {
         loop {
             self.notify.notified().await;
             ctx.wait_if_paused().await;
+            ctx.begin_poll(Some(900));
+            ctx.progress("processing pending retrospectives");
             if let Err(e) = process_pending(&state).await {
+                ctx.record_failure();
                 warn!(error = %e, "retro_worker: analysis failed");
+            } else {
+                ctx.record_success();
             }
         }
     }

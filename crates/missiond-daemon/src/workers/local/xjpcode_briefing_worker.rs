@@ -29,6 +29,8 @@ impl BackgroundWorker for XjpcodeBriefingWorker {
         loop {
             ticker.tick().await;
             ctx.wait_if_paused().await;
+            ctx.begin_poll(Some(180));
+            ctx.progress("generating briefing");
             match generate_and_write(&state).await {
                 Ok(_) => ctx.record_success(),
                 Err(e) => {

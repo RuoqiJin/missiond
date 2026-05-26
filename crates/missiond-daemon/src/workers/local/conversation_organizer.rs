@@ -63,14 +63,20 @@ async fn run_organizer(state: Arc<AppState>, mut ctx: WorkerContext) {
             ack_opt = sub.next() => {
                 let Some(ack) = ack_opt else { break; };
                 if let MessageEvent::Logged { session_id, .. } = ack.event() {
+                    ctx.begin_event("message", ack.seq().0, None);
                     debug!(session_id = %session_id, "Organizer: received MessageEvent::Logged");
+                    ctx.progress(format!("queued message session {session_id}"));
                     dirty.insert(session_id.clone());
+                    ctx.complete("session queued for organization");
                 }
                 ack.ack().await;
             }
             _ = tick.tick(), if !dirty.is_empty() => {
                 let batch: Vec<String> = dirty.drain().collect();
+                ctx.begin_poll(Some(300));
+                ctx.progress(format!("organizing {} sessions", batch.len()));
                 organize(&state, &batch).await;
+                ctx.record_success();
             }
         }
     }

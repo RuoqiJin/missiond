@@ -59,6 +59,8 @@ impl BackgroundWorker for GeminiReconcileWorker {
         loop {
             interval.tick().await;
             ctx.wait_if_paused().await;
+            ctx.begin_poll(Some(INTERVAL_SECS as i64));
+            ctx.progress("running Gemini reconciliation scan");
             run_gemini_reconciliation(&state, false).await;
             ctx.record_success();
         }

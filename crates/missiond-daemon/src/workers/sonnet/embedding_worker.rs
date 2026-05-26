@@ -1054,6 +1054,32 @@ impl super::BackgroundWorker for EmbeddingLoopWorker {
                 .as_ref()
                 .map(|svc| svc.provider_id().to_string())
                 .unwrap_or_else(|| missiond_core::embedding::FASTEMBED_PROVIDER_ID.to_string());
+            let task_label = match &task {
+                EmbeddingTask::ProcessSession(session_id) => {
+                    format!("session:{session_id}")
+                }
+                EmbeddingTask::ProcessTurns { session_id } => {
+                    format!("turns:{session_id}")
+                }
+                EmbeddingTask::ProcessKBEntry(id) => format!("kb:{id}"),
+                EmbeddingTask::ProcessSkillTopic(topic) => format!("skill:{topic}"),
+                EmbeddingTask::BackfillAll => "backfill:all".to_string(),
+                EmbeddingTask::RunBackfillPhase { phase, cursor } => {
+                    format!("backfill:{}:{cursor}", phase.as_str())
+                }
+                EmbeddingTask::ProcessAstBatch(node_ids) => {
+                    format!("ast-batch:{}", node_ids.len())
+                }
+                EmbeddingTask::ProcessMessage { message_id, .. } => {
+                    format!("message:{message_id}")
+                }
+            };
+            ctx.begin_task(
+                Some(format!("worker:embedding:{task_label}")),
+                None,
+                Some(1800),
+            );
+            ctx.progress(format!("processing embedding task {task_label}"));
 
             match task {
                 EmbeddingTask::ProcessSession(session_id) => {
@@ -1231,6 +1257,7 @@ impl super::BackgroundWorker for EmbeddingLoopWorker {
                     backfill_run_phase(&state, &provider_id, phase, cursor).await;
                 }
             }
+            ctx.record_success();
         }
         warn!("Embedding worker channel closed");
     }

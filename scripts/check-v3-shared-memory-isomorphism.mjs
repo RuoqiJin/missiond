@@ -183,7 +183,7 @@ const NEEDLES = [
   ['engine module registration', 'crates/missiond-daemon/src/engine/mod.rs', 'pub mod shared_memory;'],
 
   // Master-control status projection.
-  ['master_control status snapshot call', 'crates/missiond-daemon/src/engine/master_control.rs', 'state.shared_memory.status_snapshot()'],
+  ['master_control status snapshot call', 'crates/missiond-daemon/src/engine/master_control.rs', 'storage.shared_memory.status_snapshot()'],
   ['master_control sharedMemory key', 'crates/missiond-daemon/src/engine/master_control.rs', '"sharedMemory"'],
 
   // Handler dispatcher (knowledge facade) and routing.
