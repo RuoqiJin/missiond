@@ -115,9 +115,9 @@
         ((step s1 :logic "read latest event cursor, queue counters, blocked reason, MCP readiness, and current objective")
          (step s2 :logic "record daemon restart/startup context for checkpoint visibility without calling notify or incrementing queued control events")
          (step s3 :logic "resolve checkpoint root from the V3-projected master slot project_root/cwd; never infer it from daemon process current_dir")
-         (step s4 :logic "render master-control-checkpoint.lisp under .missiond/v3/runtime; last-control-prompt is nil for heartbeat/startup ticks and present only when a control turn is dispatchable")
+         (step s4 :logic "render master-control-checkpoint.lisp under MISSIOND_RUNTIME_DIR when deployed, with repo .missiond/v3/runtime kept only as dev fallback; last-control-prompt is nil for heartbeat/startup ticks and present only when a control turn is dispatchable")
 	         (step s5 :logic "store active_objective_id, phase, context_pack_path, delegated_task_ids, blocked_reason, last_verified_commit, and resume_instruction"))
-	      :egress [".missiond/v3/runtime/master-control-checkpoint.lisp" "mission_master_status.checkpoint" "mission_convergence_status.runtime_status.checkpoint"]
+	      :egress ["$MISSIOND_RUNTIME_DIR/master-control-checkpoint.lisp" ".missiond/v3/runtime/master-control-checkpoint.lisp" "mission_master_status.checkpoint" "mission_convergence_status.runtime_status.checkpoint"]
       :surfaces ["crates/missiond-daemon/src/engine/master_control.rs::write_startup_checkpoint_for_slot"
                  "crates/missiond-daemon/src/engine/master_control.rs::render_checkpoint"])
     (master-event-subscriber

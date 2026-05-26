@@ -109,7 +109,7 @@
         :entry [missiond-lispc.check-genome missiond-lispc.check-genome-dir missiond-lispc.emit-genomes missiond-kernel.AtomRegistry missiond-organism-runtime.AutopilotCell AutopilotOrganRuntime]
         :core ((step s1 :logic "parse genome Lisp into typed genome/organ/tissue/molecule projections and emit compiled-genomes JSON")
                (step s2 :logic "validate tissue receptors, allowed atoms/effects, activation, and runtime budgets before daemon hot paths can consume them")
-               (step s3 :logic "run Autopilot Organ in shadow mode by comparing Cell effects against legacy board/slot wakeup helpers")
+               (step s3 :logic "run Autopilot Organ in shadow mode by comparing Cell effects against legacy board/slot wakeup helpers and write activation/shadow snapshots under MISSIOND_RUNTIME_DIR when deployed")
                (step s4 :logic "enable active mode only after checker, unit, integration, and shadow parity receipts pass")
                (step s5 :logic "quarantine shadow mismatches or active runtime errors by falling back to legacy Autopilot behavior and publishing IncidentEvent::Reported"))
         :egress [compiled-genomes AutopilotOrgan shadow-report activation-snapshot quarantine-incident])

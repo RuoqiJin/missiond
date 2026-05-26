@@ -602,6 +602,7 @@ cleanup_repo_runtime_cache() {
     "$repo_runtime/compiled" \
     "$repo_runtime/executions" \
     "$repo_runtime/plans" \
+    "$repo_runtime/context-gather" \
     "$repo_runtime/lisp-code-sync" \
 	    "$repo_runtime/nightly-evolution" \
 	    "$repo_runtime/jarvis-smoke" \

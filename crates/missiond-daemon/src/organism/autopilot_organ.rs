@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -17,14 +17,14 @@ use tracing::{debug, warn};
 
 use crate::state::AppState;
 
-const SHADOW_PATH: &str = ".missiond/v3/runtime/genome/autopilot-shadow.json";
-const ACTIVATION_PATH: &str = ".missiond/v3/runtime/genome/activation.json";
+const SHADOW_RELATIVE_PATH: &str = "genome/autopilot-shadow.json";
+const ACTIVATION_RELATIVE_PATH: &str = "genome/activation.json";
 
 pub(crate) fn autopilot_genome_mode() -> ActivationMode {
     if std::env::var("MISSIOND_GENOME_AUTOPILOT_MODE").is_ok() {
         return activation_from_env();
     }
-    std::fs::read_to_string(ACTIVATION_PATH)
+    std::fs::read_to_string(autopilot_runtime_path(ACTIVATION_RELATIVE_PATH))
         .ok()
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
         .and_then(|json| {
@@ -208,7 +208,7 @@ async fn record_shadow_result(
 
 async fn append_shadow_record(entry: serde_json::Value) -> Result<()> {
     tokio::task::spawn_blocking(move || {
-        let path = PathBuf::from(SHADOW_PATH);
+        let path = autopilot_runtime_path(SHADOW_RELATIVE_PATH);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -232,16 +232,19 @@ async fn record_activation_snapshot(mode: ActivationMode) {
         "mode": mode.as_str(),
         "updated_at": Utc::now().to_rfc3339(),
         "rollback_behavior": "legacy-direct-path",
-        "snapshot_path": ACTIVATION_PATH,
+        "snapshot_path": autopilot_runtime_path(ACTIVATION_RELATIVE_PATH)
+            .display()
+            .to_string(),
     });
-    if let Err(error) = write_json_file(ACTIVATION_PATH, entry).await {
+    if let Err(error) =
+        write_json_file(autopilot_runtime_path(ACTIVATION_RELATIVE_PATH), entry).await
+    {
         warn!(error = %error, "failed to record autopilot activation snapshot");
     }
 }
 
-async fn write_json_file(path: &'static str, payload: serde_json::Value) -> Result<()> {
+async fn write_json_file(path: PathBuf, payload: serde_json::Value) -> Result<()> {
     tokio::task::spawn_blocking(move || {
-        let path = PathBuf::from(path);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -253,6 +256,20 @@ async fn write_json_file(path: &'static str, payload: serde_json::Value) -> Resu
     })
     .await
     .map_err(|err| anyhow!(err))?
+}
+
+fn autopilot_runtime_path(relative: impl AsRef<Path>) -> PathBuf {
+    missiond_runtime_dir().join(relative)
+}
+
+fn missiond_runtime_dir() -> PathBuf {
+    if let Ok(value) = std::env::var("MISSIOND_RUNTIME_DIR") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    PathBuf::from(".missiond/v3/runtime")
 }
 
 async fn report_runtime_error(state: &AppState, source: &str, error: &RuntimeError) {

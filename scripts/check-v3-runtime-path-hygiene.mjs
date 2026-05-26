@@ -26,8 +26,12 @@ const FILES = {
   daemonCompiledSnapshot: 'crates/missiond-daemon/src/context/v3_blueprint_runtime/compiled_snapshot.rs',
   jarvisMonitor: 'crates/missiond-core/src/ws/server.rs',
   contextGather: 'crates/missiond-daemon/src/handlers/knowledge/context_gather.rs',
+  masterControl: 'crates/missiond-daemon/src/engine/master_control.rs',
+  autopilotOrgan: 'crates/missiond-daemon/src/organism/autopilot_organ.rs',
   bootContext: '.missiond/v3/evidence/codex-boot-context.lisp',
   requestRuntime: '.missiond/v3/shards/request-runtime.lisp',
+  controlPlaneRuntime: '.missiond/v3/shards/control-plane-runtime.lisp',
+  genomeRuntime: '.missiond/v3/shards/implementation/runtime-surfaces.lisp',
 };
 
 const REQUIRED = {
@@ -71,6 +75,7 @@ const REQUIRED = {
     'MISSIOND_CLEAN_REPO_RUNTIME_CACHE',
     'cleanup_repo_runtime_cache',
     'master-control-checkpoint.lisp',
+    '$repo_runtime/context-gather',
     '$repo_runtime/genome',
     'node scripts/compile-v3-runtime.mjs --json --out-dir "$COMPILED_RUNTIME_DIR"',
   ],
@@ -94,6 +99,19 @@ const REQUIRED = {
     'Repo .missiond/v3/runtime/** is dev/cold evidence only',
     'context_gather_runtime_dir',
   ],
+  masterControl: [
+    'MISSIOND_RUNTIME_DIR',
+    'missiond_runtime_dir_from_env',
+    'CHECKPOINT_RUNTIME_PATH',
+    'MASTER_CONTEXT_PACK_RUNTIME_DIR',
+  ],
+  autopilotOrgan: [
+    'MISSIOND_RUNTIME_DIR',
+    'missiond_runtime_dir',
+    'autopilot_runtime_path',
+    'SHADOW_RELATIVE_PATH',
+    'ACTIVATION_RELATIVE_PATH',
+  ],
   bootContext: [
     'runtime artifacts live under MISSIOND_RUNTIME_DIR and MISSIOND_COMPILED_RUNTIME_DIR',
     'repo .missiond/v3/runtime/** is dev/cold evidence only',
@@ -109,6 +127,14 @@ const REQUIRED = {
     'canonical_public_https',
     'repo .missiond/v3/runtime/** is dev/cold evidence only',
   ],
+  controlPlaneRuntime: [
+    '$MISSIOND_RUNTIME_DIR/master-control-checkpoint.lisp',
+    'repo .missiond/v3/runtime kept only as dev fallback',
+  ],
+  genomeRuntime: [
+    'MISSIOND_RUNTIME_DIR/genome',
+    'repo .missiond/v3/runtime/genome is dev/cold evidence only',
+  ],
 };
 
 const FORBIDDEN = {
@@ -123,6 +149,10 @@ const FORBIDDEN = {
     'distill uses it to locate `.missiond/v2/plans/<plan_id>.evidence.json`',
     'appends ONE chain-record evidence row to `<project_root>/.missiond/v2/plans/<plan_id>.evidence.json`',
     'evidence row 到 `<project_root>/.missiond/v2/plans/<plan_id>.evidence.json`',
+  ],
+  autopilotOrgan: [
+    'const SHADOW_PATH: &str = ".missiond/v3/runtime/genome/autopilot-shadow.json"',
+    'const ACTIVATION_PATH: &str = ".missiond/v3/runtime/genome/activation.json"',
   ],
 };
 
@@ -259,6 +289,7 @@ MISSIOND_COMPILED_RUNTIME_DIR
 MISSIOND_CLEAN_REPO_RUNTIME_CACHE
 cleanup_repo_runtime_cache
 master-control-checkpoint.lisp
+$repo_runtime/context-gather
 $repo_runtime/genome
 node scripts/compile-v3-runtime.mjs --json --out-dir "$COMPILED_RUNTIME_DIR"`);
   write(root, 'contextGather', `
@@ -267,6 +298,17 @@ MISSIOND_RUNTIME_DIR
 MISSIOND_COMPILED_RUNTIME_DIR
 Repo .missiond/v3/runtime/** is dev/cold evidence only
 context_gather_runtime_dir`);
+  write(root, 'masterControl', `
+MISSIOND_RUNTIME_DIR
+missiond_runtime_dir_from_env
+CHECKPOINT_RUNTIME_PATH
+MASTER_CONTEXT_PACK_RUNTIME_DIR`);
+  write(root, 'autopilotOrgan', `
+MISSIOND_RUNTIME_DIR
+missiond_runtime_dir
+autopilot_runtime_path
+SHADOW_RELATIVE_PATH
+ACTIVATION_RELATIVE_PATH`);
   write(root, 'bootContext', `
 runtime artifacts live under MISSIOND_RUNTIME_DIR and MISSIOND_COMPILED_RUNTIME_DIR
 repo .missiond/v3/runtime/** is dev/cold evidence only
@@ -276,6 +318,12 @@ runtime-environment
 runtime_environment
 MISSIOND_RUNTIME_DIR/context-gather
 repo .missiond/v3/runtime/** is dev/cold evidence only`);
+  write(root, 'controlPlaneRuntime', `
+$MISSIOND_RUNTIME_DIR/master-control-checkpoint.lisp
+repo .missiond/v3/runtime kept only as dev fallback`);
+  write(root, 'genomeRuntime', `
+MISSIOND_RUNTIME_DIR/genome
+repo .missiond/v3/runtime/genome is dev/cold evidence only`);
   return root;
 }
 

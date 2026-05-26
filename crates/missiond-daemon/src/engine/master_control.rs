@@ -28,6 +28,8 @@ const MASTER_WORKER_LEGACY_AUTHOR_IDS: &[&str] = &["resident-codex-master", "res
 pub(crate) const MASTER_SLOT_ID: &str = "slot-codex-master-control";
 pub(crate) const CHECKPOINT_RELATIVE_PATH: &str =
     ".missiond/v3/runtime/master-control-checkpoint.lisp";
+const CHECKPOINT_RUNTIME_PATH: &str = "master-control-checkpoint.lisp";
+const MASTER_CONTEXT_PACK_RUNTIME_DIR: &str = "master-control/context-packs";
 const MASTER_SLOT_READY_TIMEOUT_SECS: u64 = 180;
 const MASTER_ACTIVE_OBJECTIVE_HEARTBEAT_SECS: i64 = 900;
 const MASTER_EVENT_SUBSCRIBER_CONSUMER: &str = "master_event_subscriber";
@@ -1166,6 +1168,9 @@ pub(crate) async fn write_startup_checkpoint_for_slot(
 }
 
 pub(crate) fn checkpoint_path_for_root(root: &Path) -> PathBuf {
+    if let Some(runtime_dir) = missiond_runtime_dir_from_env() {
+        return runtime_dir.join(CHECKPOINT_RUNTIME_PATH);
+    }
     root.join(CHECKPOINT_RELATIVE_PATH)
 }
 
@@ -1527,11 +1532,25 @@ fn sanitize_lisp_path_component(value: &str) -> String {
 }
 
 fn master_context_pack_path_for_objective(project_root: &Path, id: &str) -> String {
-    let relative = PathBuf::from(format!(
-        ".missiond/v3/runtime/master-control/context-packs/{}.lisp",
-        sanitize_lisp_path_component(id)
-    ));
-    project_root.join(relative).to_string_lossy().to_string()
+    let filename = format!("{}.lisp", sanitize_lisp_path_component(id));
+    let path = if let Some(runtime_dir) = missiond_runtime_dir_from_env() {
+        runtime_dir
+            .join(MASTER_CONTEXT_PACK_RUNTIME_DIR)
+            .join(filename)
+    } else {
+        project_root
+            .join(".missiond/v3/runtime/master-control/context-packs")
+            .join(filename)
+    };
+    path.to_string_lossy().to_string()
+}
+
+fn missiond_runtime_dir_from_env() -> Option<PathBuf> {
+    std::env::var("MISSIOND_RUNTIME_DIR")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 fn master_control_turns_enabled() -> bool {
@@ -2282,12 +2301,20 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_path_uses_v3_runtime_directory() {
+    fn checkpoint_path_uses_v3_runtime_directory_when_no_external_runtime_is_configured() {
         let path = checkpoint_path_for_root(Path::new("/tmp/project"));
-        assert_eq!(
-            path,
-            PathBuf::from("/tmp/project/.missiond/v3/runtime/master-control-checkpoint.lisp")
-        );
+        if std::env::var("MISSIOND_RUNTIME_DIR")
+            .ok()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+        {
+            assert!(path.ends_with("master-control-checkpoint.lisp"));
+        } else {
+            assert_eq!(
+                path,
+                PathBuf::from("/tmp/project/.missiond/v3/runtime/master-control-checkpoint.lisp")
+            );
+        }
     }
 
     #[tokio::test]
