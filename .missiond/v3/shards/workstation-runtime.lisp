@@ -576,6 +576,7 @@
        "mission_compute_slot action=list must expose workstation_pool with runtime slot presence and idle/busy/stopped status."
        "Supervisor patrol (slot-supervisor) is gated on V3 workstation-pool / runtime-config registration; absent a supervisor worker entry the patrol stays inert and MUST NOT call ensure_memory_slot_by_id, so the legacy 'Memory slot not configured in slots.yaml' warning cannot fire."
        "V3 workstation-pool (plus startup-slots) is authoritative for dispatchable slots; mission_compute_slot list MUST tag any static slot whose id is not in the V3 projection as legacy=true and dispatchable=false (or split it into legacy_static_slots) so retired Sonnet entries (autopilot/topology-guardian/extraction-worker/delta-validator/...) cannot resurface as candidates."
+       "All generated or compatibility CliEngine enums MUST cover the canonical provider set ClaudeCode, Gemini, Codex, and Agy, with hyphen/underscore input normalization at API boundaries; no stale two-variant ClaudeCode/ClaudeMd enum may be used as dispatch authority."
        "mission_compute_slot list status MUST derive from PTYManager (state.pty.get_status) for every slot it surfaces, so it cannot contradict mission_pty_status for V3 pool slots; the SlotManager session_id field is only a fallback when no PTY status exists, and it MUST NOT report 'running' when no PTY is attached."]
     :checker "node scripts/check-v3-workstation-pool-isomorphism.mjs")
 

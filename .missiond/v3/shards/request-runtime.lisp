@@ -144,6 +144,7 @@
        "Autopilot must block broad ungrounded BoardTasks instead of sending them to workers for self-discovery."
        "Direct local code search is allowed only after the grounding artifact identifies code surface evidence as a required source."
        "Jarvis dispatch metadata MUST derive read_scope from the active runtime/project root (MISSIOND_PROJECT_ROOT, MISSIOND_REPO_ROOT, MISSIOND_WORKSPACE_ROOT, or current daemon cwd) and MUST NOT hardcode a developer-machine root path."
+       "Jarvis dispatch classification MUST let explicit read-only/no-edit constraints win over incidental implementation words such as `提交` inside `不要提交`; a task that says `只读` or `不要修改文件` MUST route as review/read-only with empty write_scope."
        "Jarvis result streaming MUST use task-result-artifact as canonical completion authority; Board summary notes are converted to artifacts before client-visible result_artifact events."
        "task-result-artifact content MUST be clean terminal worker output; raw PTY screen captures, provider transcript envelopes, and escaped UI/progress text are diagnostics/evidence only and cannot become canonical content."
        "Jarvis plan-confirmed dispatch MUST emit a worker_dispatched handoff event with dispatch_state=pending_autopilot_claim before returning result_pending, even if the concrete slot is claimed asynchronously later."

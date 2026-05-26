@@ -3712,6 +3712,35 @@ impl PTYWebSocketServer {
 
     fn classify_jarvis_dispatch_verb(text: &str) -> (&'static str, &'static str) {
         let lower = text.to_ascii_lowercase();
+        const READ_ONLY_MARKERS: &[&str] = &[
+            "read-only",
+            "readonly",
+            "no file edits",
+            "no file changes",
+            "do not modify",
+            "do not edit",
+            "不要修改",
+            "不要改文件",
+            "不修改文件",
+            "不改文件",
+            "不要写文件",
+            "不写文件",
+            "只读",
+        ];
+        if READ_ONLY_MARKERS
+            .iter()
+            .any(|marker| lower.contains(marker))
+        {
+            return ("review", "read-only");
+        }
+        let action_text = lower
+            .replace("do not commit", "")
+            .replace("don't commit", "")
+            .replace("no commit", "")
+            .replace("不要提交", "")
+            .replace("不提交", "")
+            .replace("不要推送", "")
+            .replace("不推送", "");
         const IMPL_VERBS: &[&str] = &[
             "implement",
             "fix",
@@ -3731,7 +3760,7 @@ impl PTYWebSocketServer {
             "推送",
         ];
         for verb in IMPL_VERBS {
-            if lower.contains(verb) {
+            if action_text.contains(verb) {
                 return ("code", "scoped");
             }
         }
@@ -7212,6 +7241,46 @@ mod tests {
         assert_eq!(metadata["pool_hint"], "codex-review-worker");
         let ws = metadata["write_scope"].as_array().unwrap();
         assert!(ws.is_empty());
+    }
+
+    #[test]
+    fn jarvis_dispatch_readonly_constraints_override_commit_words() {
+        let metadata = PTYWebSocketServer::derive_jarvis_dispatch_contract(
+            "只读验证任务：请报告 Mac mini MissionD 状态。不要修改文件，不要提交。",
+            "context-gather:readonly",
+            Some("shared-artifact://readonly"),
+            Some("/tmp/ctx.json"),
+            "intent-readonly",
+            "plan-readonly",
+            "/repo",
+        );
+        assert_eq!(metadata["task_class"], "review");
+        assert_eq!(metadata["write_policy"], "read-only");
+        assert_eq!(metadata["engine_hint"], "codex");
+        assert_eq!(metadata["pool_hint"], "codex-review-worker");
+        let ws = metadata["write_scope"].as_array().unwrap();
+        assert!(ws.is_empty());
+        let must_not_touch = metadata["must_not_touch"].as_array().unwrap();
+        assert!(must_not_touch
+            .iter()
+            .any(|item| item.as_str() == Some("Do not modify files")));
+    }
+
+    #[test]
+    fn jarvis_dispatch_no_commit_alone_does_not_hide_implementation_intent() {
+        let metadata = PTYWebSocketServer::derive_jarvis_dispatch_contract(
+            "请实现这个小修复，但不要提交。",
+            "context-gather:code",
+            Some("shared-artifact://code"),
+            Some("/tmp/ctx.json"),
+            "intent-code",
+            "plan-code",
+            "/repo",
+        );
+        assert_eq!(metadata["task_class"], "code");
+        assert_eq!(metadata["write_policy"], "scoped");
+        assert_eq!(metadata["pool_hint"], "claude-code-default");
+        assert_eq!(metadata["write_scope"][0], "/repo");
     }
 
     #[test]

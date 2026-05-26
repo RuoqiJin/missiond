@@ -322,10 +322,13 @@ pub enum DependencyStatus {}
 
 /// CLI engine for PTY slots
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Copy)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum CliEngine {
     ClaudeCode,
     ClaudeMd,
+    Gemini,
+    Codex,
+    Agy,
 }
 
 impl CliEngine {
@@ -333,13 +336,19 @@ impl CliEngine {
         match self {
             Self::ClaudeCode => "claude_code",
             Self::ClaudeMd => "claude_md",
+            Self::Gemini => "gemini",
+            Self::Codex => "codex",
+            Self::Agy => "agy",
         }
     }
 
     pub fn from_str(s: &str) -> Option<Self> {
-        match s {
+        match s.replace('-', "_").as_str() {
             "claude_code" => Some(Self::ClaudeCode),
             "claude_md" => Some(Self::ClaudeMd),
+            "gemini" | "gemini_cli" => Some(Self::Gemini),
+            "codex" | "codex_cli" => Some(Self::Codex),
+            "agy" | "agy_cli" => Some(Self::Agy),
             _ => None,
         }
     }

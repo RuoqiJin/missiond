@@ -19,6 +19,7 @@ const FILES = {
   main: 'crates/missiond-daemon/src/main.rs',
   runtime: 'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
   controlTree: 'crates/missiond-daemon/src/control_tree.rs',
+  genTypes: 'crates/missiond-core/src/types/gen_types.rs',
   frontendBlueprint: '.missiond/frontend/board-blueprint.lisp',
   codexIngestion: 'crates/missiond-daemon/src/workers/local/codex_ingestion_worker.rs',
 };
@@ -60,6 +61,7 @@ function main() {
       'Agy/Antigravity writes durable markdown artifacts under the provider brain store',
       'provider-empty-final task-result-artifact diagnostic',
       'idle worker slot without durable final',
+      'All generated or compatibility CliEngine enums MUST cover the canonical provider set',
     ]);
     requireAll(diagnostics, FILES.workstationPoolEvidence, sources.workstationPoolEvidence, [
       'agy-research',
@@ -128,6 +130,17 @@ function main() {
       'Agy,',
       'Self::Agy => "agy"',
       'Self::Agy => None',
+    ]);
+    requireAll(diagnostics, FILES.genTypes, sources.genTypes, [
+      'pub enum CliEngine',
+      'ClaudeCode',
+      'Gemini',
+      'Codex',
+      'Agy',
+      's.replace',
+      '"gemini_cli"',
+      '"codex_cli"',
+      '"agy_cli"',
     ]);
     requireAll(diagnostics, FILES.codexIngestion, sources.codexIngestion, [
       'existing_task_id: Option<String>',
