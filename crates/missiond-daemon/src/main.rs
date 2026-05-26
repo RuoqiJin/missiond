@@ -24,8 +24,8 @@ mod organism;
 mod permission_extract;
 mod slot_dispatch;
 mod slot_orchestrator;
-mod state;
 mod startup_preflight;
+mod state;
 mod supervisor;
 
 // ── Re-exports for backward-compatible `use crate::xxx` paths ──
@@ -936,6 +936,7 @@ async fn main() -> Result<()> {
     let strategy_notify = Arc::new(tokio::sync::Notify::new());
     let retro_notify = Arc::new(tokio::sync::Notify::new());
     let worker_registry = Arc::new(workers::WorkerRegistry::new());
+    worker_registry.attach_persistence(pg_pool_for_bus.clone());
     let slot_dispatch_guard = Arc::new(slot_dispatch::SlotDispatchGuard::new());
     let board_dispatch_notify = Arc::new(tokio::sync::Notify::new());
     let slot_manager = {
@@ -996,8 +997,8 @@ async fn main() -> Result<()> {
         ))
     };
 
-    let state = AppState {
-        runtime_paths: state::RuntimePaths {
+    let contexts = state::AppStateBuilder::contexts(
+        state::RuntimePaths {
             home: home.clone(),
             project_root: missiond_project_root.clone(),
             slots_config: slots_path.clone(),
@@ -1005,38 +1006,47 @@ async fn main() -> Result<()> {
             learned_permissions: learned_permissions_path.clone(),
             logs_dir: logs_dir.clone(),
         },
-        storage_ctx: state::StorageContext {
+        state::StorageContext {
             store: store.clone(),
             bus: Arc::clone(&bus_services),
             shared_memory: Arc::clone(&shared_memory),
             codex_replay: Arc::clone(&codex_replay),
         },
-        slot_ctx: state::SlotContext {
+        state::SlotContext {
             mission: Arc::clone(&mission),
             pty: Arc::clone(&pty),
             slot_manager: Arc::clone(&slot_manager),
             slot_dispatch: Arc::clone(&slot_dispatch_guard),
             pty_session_uuids: pty_session_uuids_arc.clone(),
         },
-        worker_ctx: state::WorkerContextState {
+        state::WorkerContextState {
             registry: Arc::clone(&worker_registry),
             board_dispatch_notify: Arc::clone(&board_dispatch_notify),
             strategy_notify: Arc::clone(&strategy_notify),
             retro_notify: Arc::clone(&retro_notify),
         },
-        llm_ctx: state::LlmContext {
+        state::LlmContext {
             http_client: http_client.clone(),
             gemini: gemini.clone(),
             minimax: minimax.clone(),
             sonnet: sonnet.clone(),
             prompts: Arc::clone(&prompts_store),
         },
-        control_ctx: state::ControlPlaneContext {
+        state::ControlPlaneContext {
             permission: Arc::clone(&permission),
             control_manager: Arc::clone(&control_manager_arc),
             project_registry: project_registry.clone(),
             stats: Arc::clone(&daemon_stats),
         },
+    );
+
+    let state = AppState {
+        runtime_paths: contexts.runtime_paths,
+        storage_ctx: contexts.storage_ctx,
+        slot_ctx: contexts.slot_ctx,
+        worker_ctx: contexts.worker_ctx,
+        llm_ctx: contexts.llm_ctx,
+        control_ctx: contexts.control_ctx,
         startup_preflight: startup_preflight.clone(),
         mission,
         store: store.clone(),
@@ -1834,8 +1844,14 @@ async fn main() -> Result<()> {
     {
         let pool = pg_pool_for_bus.clone();
         let blob = bus_services.blob_store.clone();
-        let _bridge =
-            bus::spawn_ws_bridge(pool, blob, frontend_events_tx.clone(), shutdown_rx.clone());
+        let health = bus_services.ws_bridge_health.clone();
+        let _bridge = bus::spawn_ws_bridge(
+            pool,
+            blob,
+            frontend_events_tx.clone(),
+            shutdown_rx.clone(),
+            health,
+        );
     }
 
     // --- Phase 8: Retention + orphan-subscription cleanup daily cron ---

@@ -72,6 +72,7 @@ const ALLOW_SQLITE_TOKEN_FILES = new Set([
   'scripts/check-v3-ops-infra-isomorphism.mjs',
   'scripts/check-missiond-owned-sqlite-clean.mjs',
   'scripts/check-high-roi-contracts.mjs',
+  'scripts/check-pg-migrations-discipline.mjs',
   '.missiond/v3/shards/ops-infra.lisp',
   '.github/workflows/quality-gates.yml',
 ]);
@@ -204,6 +205,9 @@ function checkFile(root, rel, diagnostics) {
 
 function isAllowedForbiddenPattern(rel, line, name) {
   if (rel === 'scripts/check-missiond-owned-sqlite-clean.mjs') {
+    return true;
+  }
+  if (rel === 'scripts/check-pg-migrations-discipline.mjs') {
     return true;
   }
   if (name === 'skill-store SQLite wording' && rel === '.missiond/v3/shards/ops-infra.lisp') {

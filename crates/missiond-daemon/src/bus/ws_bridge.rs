@@ -31,7 +31,7 @@
 
 #![cfg(feature = "postgres")]
 
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -50,6 +50,40 @@ const WS_BRIDGE_BATCH_LIMIT: usize = 256;
 /// Sleep between empty polls. Same as the dispatcher's poll interval.
 const WS_BRIDGE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
+#[derive(Debug, Default)]
+pub struct WsBridgeHealth {
+    cursor: AtomicI64,
+    last_emit_at: AtomicI64,
+    last_error_at: AtomicI64,
+    read_errors: AtomicU64,
+    send_errors: AtomicU64,
+    last_batch_size: AtomicU64,
+}
+
+impl WsBridgeHealth {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn snapshot(&self) -> serde_json::Value {
+        serde_json::json!({
+            "cursor": self.cursor.load(Ordering::Relaxed),
+            "lastEmitAt": self.last_emit_at.load(Ordering::Relaxed),
+            "lastErrorAt": self.last_error_at.load(Ordering::Relaxed),
+            "readErrors": self.read_errors.load(Ordering::Relaxed),
+            "sendErrors": self.send_errors.load(Ordering::Relaxed),
+            "lastBatchSize": self.last_batch_size.load(Ordering::Relaxed),
+        })
+    }
+}
+
+fn now_epoch() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
 /// Spawn the WS bridge task. Returns a join handle that completes when
 /// `shutdown` fires.
 pub(crate) fn spawn_ws_bridge(
@@ -57,6 +91,7 @@ pub(crate) fn spawn_ws_bridge(
     blob_store: Arc<dyn BlobStore>,
     ws_tx: broadcast::Sender<String>,
     mut shutdown: watch::Receiver<bool>,
+    health: Arc<WsBridgeHealth>,
 ) -> tokio::task::JoinHandle<()> {
     let tail: Arc<dyn TailSource> = Arc::new(PgTailSource::new(pool, blob_store));
     let cursor = Arc::new(AtomicI64::new(0));
@@ -71,19 +106,29 @@ pub(crate) fn spawn_ws_bridge(
             let batch = match tail.read_all_from(after, WS_BRIDGE_BATCH_LIMIT).await {
                 Ok(b) => b,
                 Err(e) => {
+                    health.last_error_at.store(now_epoch(), Ordering::Relaxed);
+                    health.read_errors.fetch_add(1, Ordering::Relaxed);
                     warn!(error = %e, "ws bridge: tail read failed");
                     tokio::time::sleep(WS_BRIDGE_POLL_INTERVAL).await;
                     continue;
                 }
             };
             let was_full = batch.len() == WS_BRIDGE_BATCH_LIMIT;
+            health
+                .last_batch_size
+                .store(batch.len() as u64, Ordering::Relaxed);
 
             for logged in batch {
                 let json_str = v2_logged_to_v1_wire_format(&logged);
                 // `send` returns Err when there are no receivers; that's
                 // normal (no WS clients connected) and not an error.
-                let _ = ws_tx.send(json_str);
+                if ws_tx.send(json_str).is_err() {
+                    health.send_errors.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    health.last_emit_at.store(now_epoch(), Ordering::Relaxed);
+                }
                 cursor.store(logged.seq.0, Ordering::Release);
+                health.cursor.store(logged.seq.0, Ordering::Relaxed);
             }
 
             if !was_full {

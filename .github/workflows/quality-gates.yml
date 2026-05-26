@@ -29,6 +29,7 @@ jobs:
           node scripts/check-missiond-owned-sqlite-clean.mjs --json
           node scripts/check-v3-cli-conversation-ingestion-isomorphism.mjs --json
           node scripts/check-high-roi-contracts.mjs --json
+          node scripts/check-pg-migrations-discipline.mjs --json
 
       - name: Ensure skill-store uses Postgres only
         run: |

@@ -112,6 +112,13 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 let es = state.slow_extraction_state.read().await;
                 json!({ "phase": format!("{:?}", es.phase), "type": es.active_type })
             };
+            let event_bus = state.storage().bus.health_snapshot().await;
+            let workers = state.workers().registry.list_all();
+            let evidence = state
+                .storage()
+                .shared_memory
+                .evidence_health_summary(20)
+                .await;
 
             Ok(ToolResult::json(&serde_json::json!({
                 "status": "ok",
@@ -127,10 +134,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     "fast_lane": fast_lane,
                     "slow_lane": slow_lane,
                 },
-                "event_bus": {
-                    // v2 bus: use AtomicBusMetrics for append counters in the future.
-                    "publish_count": 0u64,
-                },
+                "event_bus": event_bus,
+                "eventBus": event_bus,
+                "workers": workers,
+                "evidence": evidence,
                 "gemini_mode": if llm.gemini.is_cli_mode() { "cli" } else { "http" },
                 "stats": control.stats.snapshot(),
                 "startupPreflight": state.startup_preflight.clone(),

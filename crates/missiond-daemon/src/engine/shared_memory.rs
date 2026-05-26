@@ -62,6 +62,7 @@ impl SharedMemoryService {
             "artifact_get" | "get_artifact" => self.artifact_get(args).await,
             "task_result_put" | "put_task_result" => self.task_result_put(args).await,
             "task_result_get" | "get_task_result" => self.task_result_get(args).await,
+            "task_evidence_summary" | "evidence_summary" => self.task_evidence_summary(args).await,
             "workflow_start" | "start_workflow" => self.workflow_start(args).await,
             "workflow_checkpoint" | "checkpoint_workflow" => self.workflow_checkpoint(args).await,
             "workflow_status" | "get_workflow_status" => self.workflow_status(args).await,
@@ -179,6 +180,19 @@ impl SharedMemoryService {
             "activeWorkflowRuns": active_workflow_runs,
             "cursorLag": cursor_lag
         })
+    }
+
+    pub(crate) async fn evidence_health_summary(&self, limit: i64) -> Value {
+        self.task_evidence_summary(&json!({ "limit": limit }))
+            .await
+            .unwrap_or_else(|err| {
+                json!({
+                    "schema": "missiond.task-evidence-summary.v1",
+                    "degraded": true,
+                    "error": err.to_string(),
+                    "items": []
+                })
+            })
     }
 
     pub(crate) async fn claim_status(&self, args: &Value) -> Result<Value> {
@@ -705,6 +719,105 @@ impl SharedMemoryService {
         Ok(json!({
             "schema": "missiond.task-result-artifacts.v1",
             "results": rows.into_iter().map(task_result_row_json).collect::<Vec<_>>()
+        }))
+    }
+
+    async fn task_evidence_summary(&self, args: &Value) -> Result<Value> {
+        let task_ids = args
+            .get("task_ids")
+            .or_else(|| args.get("taskIds"))
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let limit = bounded_limit(args);
+        let rows = if task_ids.is_empty() {
+            sqlx::query(
+                r#"
+                SELECT DISTINCT ON (task_id)
+                       task_id, artifact_hash, project_id, slot_id, conversation_id,
+                       provider, result_status, summary, created_at
+                FROM task_result_artifacts
+                ORDER BY task_id, created_at DESC
+                LIMIT $1
+                "#,
+            )
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                r#"
+                SELECT DISTINCT ON (task_id)
+                       task_id, artifact_hash, project_id, slot_id, conversation_id,
+                       provider, result_status, summary, created_at
+                FROM task_result_artifacts
+                WHERE task_id = ANY($1)
+                ORDER BY task_id, created_at DESC
+                LIMIT $2
+                "#,
+            )
+            .bind(&task_ids)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+        };
+        let mut items = rows
+            .into_iter()
+            .map(task_evidence_summary_row_json)
+            .collect::<Vec<_>>();
+        if !task_ids.is_empty() {
+            let found = items
+                .iter()
+                .filter_map(|item| item.get("taskId").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect::<std::collections::HashSet<_>>();
+            for task_id in task_ids.iter().filter(|id| !found.contains(id.as_str())) {
+                items.push(json!({
+                    "taskId": task_id,
+                    "complete": false,
+                    "missingReasons": ["task-result-artifact-missing"],
+                    "artifactHash": null,
+                    "resultStatus": null,
+                    "summary": "",
+                    "verifierStatus": null,
+                    "updatedAt": null
+                }));
+            }
+        }
+        let total_artifacts =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM task_result_artifacts")
+                .fetch_one(&self.pool)
+                .await
+                .unwrap_or(0);
+        let tasks_with_evidence = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(DISTINCT task_id) FROM task_result_artifacts",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(0);
+        let completed = items
+            .iter()
+            .filter(|item| {
+                item.get("complete")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            })
+            .count();
+        let missing = items.len().saturating_sub(completed);
+        Ok(json!({
+            "schema": "missiond.task-evidence-summary.v1",
+            "degraded": false,
+            "artifacts": total_artifacts,
+            "tasksWithEvidence": tasks_with_evidence,
+            "completed": completed,
+            "missing": missing,
+            "items": items,
         }))
     }
 
@@ -1859,6 +1972,35 @@ fn task_result_row_json(row: sqlx::postgres::PgRow) -> Value {
         "result_status": row.get::<String, _>("result_status"),
         "summary": row.get::<String, _>("summary"),
         "created_at": created_at.to_rfc3339()
+    })
+}
+
+fn task_evidence_summary_row_json(row: sqlx::postgres::PgRow) -> Value {
+    let created_at: DateTime<Utc> = row.get("created_at");
+    let result_status = row
+        .try_get::<String, _>("result_status")
+        .unwrap_or_else(|_| "unknown".to_string());
+    let complete = matches!(
+        result_status.as_str(),
+        "completed" | "complete" | "verified" | "pass" | "passed"
+    );
+    json!({
+        "taskId": row.get::<String, _>("task_id"),
+        "artifactHash": row.get::<String, _>("artifact_hash"),
+        "projectId": row.try_get::<Option<String>, _>("project_id").ok().flatten(),
+        "slotId": row.try_get::<Option<String>, _>("slot_id").ok().flatten(),
+        "conversationId": row.try_get::<Option<String>, _>("conversation_id").ok().flatten(),
+        "provider": row.try_get::<Option<String>, _>("provider").ok().flatten(),
+        "resultStatus": result_status,
+        "summary": row.get::<String, _>("summary"),
+        "verifierStatus": null,
+        "complete": complete,
+        "missingReasons": if complete {
+            Vec::<String>::new()
+        } else {
+            vec!["result-status-not-complete".to_string()]
+        },
+        "updatedAt": created_at.to_rfc3339()
     })
 }
 

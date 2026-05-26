@@ -189,7 +189,7 @@ async fn handle_control(state: &AppState, args: Value) -> Result<ToolResult> {
 }
 
 fn list_workers(state: &AppState) -> Result<ToolResult> {
-    let workers = state.worker_registry.list_all();
+    let workers = state.workers().registry.list_all();
     let gate_status = llm_gate::all_status();
     Ok(ToolResult::json_pretty(&serde_json::json!({
         "workers": workers,

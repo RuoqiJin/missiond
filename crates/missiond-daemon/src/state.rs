@@ -131,6 +131,38 @@ pub(crate) struct ControlPlaneContext {
     pub(crate) stats: Arc<DaemonStats>,
 }
 
+pub(crate) struct AppStateContextBundle {
+    pub(crate) runtime_paths: RuntimePaths,
+    pub(crate) storage_ctx: StorageContext,
+    pub(crate) slot_ctx: SlotContext,
+    pub(crate) worker_ctx: WorkerContextState,
+    pub(crate) llm_ctx: LlmContext,
+    pub(crate) control_ctx: ControlPlaneContext,
+}
+
+pub(crate) struct AppStateBuilder;
+
+impl AppStateBuilder {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn contexts(
+        runtime_paths: RuntimePaths,
+        storage_ctx: StorageContext,
+        slot_ctx: SlotContext,
+        worker_ctx: WorkerContextState,
+        llm_ctx: LlmContext,
+        control_ctx: ControlPlaneContext,
+    ) -> AppStateContextBundle {
+        AppStateContextBundle {
+            runtime_paths,
+            storage_ctx,
+            slot_ctx,
+            worker_ctx,
+            llm_ctx,
+            control_ctx,
+        }
+    }
+}
+
 /// Extraction phase state machine. Replaces rigid 120s cooldown with
 /// event-driven completion detection.
 #[derive(Debug, Clone, Copy, PartialEq)]

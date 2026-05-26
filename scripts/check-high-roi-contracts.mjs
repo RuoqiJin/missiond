@@ -11,6 +11,7 @@ Checks high-ROI MissionD repair contracts:
 - operator overview reports partial/errors diagnostics
 - Board Event Health exposes stale-derived status
 - mission_health exposes startupPreflight
+- worker lifecycle and evidence/event health operator contracts stay wired
 `;
 
 const SOURCE_STATE_LABELS = [
@@ -40,10 +41,13 @@ function main() {
   const root = process.cwd();
   const diagnostics = [
     ...checkSourceStateConstants(root),
-    ...checkRequiredText(root, 'packages/board/src/app/api/operator/overview/route.ts', [
+    ...checkRequiredText(root, 'packages/board/src/lib/operatorOverview.ts', [
       ['partial', /partial:\s*errors\.length\s*>\s*0/],
       ['errors array', /errors:\s*OverviewError\[\]/],
       ['error source', /source:\s*['"]slotStatus['"]/],
+      ['workers overview', /mission_worker[\s\S]*action:\s*['"]list['"]/],
+      ['runbook generator', /buildRunbook/],
+      ['fake MCP harness', /createFakeOperatorOverviewHarness/],
     ]),
     ...checkRequiredText(root, 'packages/board/src/eventStream.ts', [
       ['stale threshold', /EVENT_HEALTH_STALE_AFTER_MS/],
@@ -52,6 +56,32 @@ function main() {
     ]),
     ...checkRequiredText(root, 'crates/missiond-daemon/src/handlers/sysinfra/misc.rs', [
       ['startupPreflight health field', /startupPreflight/],
+      ['eventBus health field', /eventBus/],
+      ['workers health field', /workers/],
+      ['evidence health field', /evidence/],
+    ]),
+    ...checkRequiredText(root, 'crates/missiond-daemon/src/workers/registry.rs', [
+      ['worker lifecycle enum', /enum\s+WorkerLifecycleState/],
+      ['worker health snapshot', /struct\s+WorkerHealthSnapshot/],
+      ['worker heartbeat method', /pub\s+fn\s+heartbeat/],
+      ['worker stale reason', /stale_reason/],
+    ]),
+    ...checkRequiredText(root, 'crates/missiond-daemon/src/bus/bootstrap.rs', [
+      ['bus health snapshot', /health_snapshot/],
+      ['DLQ health', /dead_letter_queue/],
+      ['ws bridge health', /wsBridge/],
+    ]),
+    ...checkRequiredText(root, 'crates/missiond-daemon/src/engine/shared_memory.rs', [
+      ['task evidence summary schema', /missiond\.task-evidence-summary\.v1/],
+      ['task evidence summary action', /task_evidence_summary/],
+    ]),
+    ...checkRequiredText(root, 'crates/missiond-core/migrations/20260526000000_worker_runtime_state.sql', [
+      ['worker runtime table', /CREATE TABLE IF NOT EXISTS worker_runtime_state/],
+      ['worker runtime lifecycle', /lifecycle TEXT NOT NULL/],
+    ]),
+    ...checkRequiredText(root, 'scripts/check-pg-migrations-discipline.mjs', [
+      ['pg migration checker', /check-pg-migrations-discipline/],
+      ['destructive migration marker', /missiond-allow-destructive-migration/],
     ]),
   ];
 

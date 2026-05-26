@@ -57,6 +57,7 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::bus::control_gate_adapter::ControlTreeGate;
+use crate::bus::ws_bridge::WsBridgeHealth;
 use crate::control_tree::ControlManager;
 use crate::handlers::knowledge::evidence_collector::EventRefResolver;
 
@@ -78,6 +79,7 @@ pub struct BusServices {
     /// DB pool — kept around for retention / orphan-cleanup wiring in Phase 8.
     #[allow(dead_code)]
     pg_pool: PgPool,
+    pub ws_bridge_health: Arc<WsBridgeHealth>,
     /// wave-16 / task 07 — passive in-memory cache of recently-published
     /// `ExecutionEvent::PlanNodeStateChanged` ids, keyed by deterministic
     /// correlation tuple. Populated by `spawn_event_ref_cache_sub` so
@@ -173,6 +175,7 @@ impl BusServices {
         // `bus::v2_subscribers::start_v2_subscribers` (it needs the
         // shutdown receiver from main.rs).
         let event_ref_resolver = Arc::new(EventRefResolver::new());
+        let ws_bridge_health = Arc::new(WsBridgeHealth::new());
 
         Ok(Arc::new(Self {
             log,
@@ -184,8 +187,72 @@ impl BusServices {
             dlq,
             tail_source,
             pg_pool: pool,
+            ws_bridge_health,
             event_ref_resolver,
         }))
+    }
+
+    pub async fn health_snapshot(&self) -> serde_json::Value {
+        let metrics = self.metrics.snapshot();
+        let head_seq = sqlx::query_scalar::<_, Option<i64>>("SELECT MAX(seq) FROM event_log")
+            .fetch_one(&self.pg_pool)
+            .await
+            .unwrap_or(None)
+            .unwrap_or(0);
+        let dlq_count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM dead_letter_queue")
+            .fetch_one(&self.pg_pool)
+            .await
+            .unwrap_or(0);
+        let subscriptions = sqlx::query(
+            r#"
+            SELECT subscription_name, consumer_name, domain, last_acked_seq, last_seen_at,
+                   GREATEST($1::bigint - last_acked_seq, 0) AS lag
+            FROM event_subscriptions
+            ORDER BY lag DESC, subscription_name ASC
+            LIMIT 20
+            "#,
+        )
+        .bind(head_seq)
+        .fetch_all(&self.pg_pool)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|row| {
+            use sqlx::Row;
+            serde_json::json!({
+                "subscriptionName": row.try_get::<String, _>("subscription_name").unwrap_or_default(),
+                "consumerName": row.try_get::<String, _>("consumer_name").unwrap_or_default(),
+                "domain": row.try_get::<String, _>("domain").unwrap_or_default(),
+                "lastAckedSeq": row.try_get::<i64, _>("last_acked_seq").unwrap_or(0),
+                "lastSeenAt": row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_seen_at").ok().flatten().map(|dt| dt.to_rfc3339()),
+                "lag": row.try_get::<i64, _>("lag").unwrap_or(0),
+            })
+        })
+        .collect::<Vec<_>>();
+        serde_json::json!({
+            "publish_count": metrics.append_ok,
+            "published": metrics.append_ok,
+            "appendOk": metrics.append_ok,
+            "appendFail": metrics.append_fail,
+            "appendBytes": metrics.append_bytes,
+            "reject": metrics.reject,
+            "dispatchLag": metrics.dispatch_lag,
+            "lagged": metrics.lagged,
+            "slowConsumer": metrics.slow_consumer,
+            "controlGateDropped": metrics.control_gate_dropped,
+            "estimatedBacklog": metrics.dispatch_lag.max(0),
+            "headSeq": head_seq,
+            "dlq": {
+                "count": dlq_count,
+            },
+            "subscriptions": subscriptions,
+            "perDomainAppend": metrics.per_domain_append.into_iter().map(|(domain, value)| (domain.as_str().to_string(), value)).collect::<std::collections::HashMap<_, _>>(),
+            "perDomainReject": metrics.per_domain_reject.into_iter().map(|(domain, value)| (domain.as_str().to_string(), value)).collect::<std::collections::HashMap<_, _>>(),
+            "perDomainDropped": metrics.per_domain_dropped.into_iter().map(|(domain, value)| (domain.as_str().to_string(), value)).collect::<std::collections::HashMap<_, _>>(),
+            "perDomainTopicDepth": metrics.per_domain_topic_depth.into_iter().map(|(domain, value)| (domain.as_str().to_string(), value)).collect::<std::collections::HashMap<_, _>>(),
+            "perSubscriptionLag": metrics.per_sub_lag,
+            "wsBridge": self.ws_bridge_health.snapshot(),
+        })
     }
 
     /// Start the dispatcher tail loop and the metrics emitter. Returns a
