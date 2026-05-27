@@ -5,6 +5,7 @@
 
 pub mod codex_replay;
 pub mod commit_convergence;
+pub mod control_plane_kernel;
 pub mod flow;
 pub mod intent_engine;
 pub mod learning_engine;

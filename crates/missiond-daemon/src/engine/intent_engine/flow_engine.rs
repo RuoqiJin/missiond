@@ -208,16 +208,30 @@ pub(crate) async fn execute_flow_task(
     match phase {
         // === Done phase: mark task complete ===
         missiond_core::types::EngineeringPhase::Done => {
-            let _ = state
-                .store
-                .update_board_task(
-                    task.id.as_str(),
-                    &missiond_core::types::UpdateBoardTaskInput {
-                        status: Some("done".to_string()),
-                        ..Default::default()
+            crate::engine::control_plane_kernel::ControlPlaneKernel::new(state)
+                .complete_system_task(
+                    crate::engine::control_plane_kernel::SystemTaskCompletionInput {
+                        task_id: task.id.to_string(),
+                        project_id: task.project.clone(),
+                        producer_id: "flow_engine".to_string(),
+                        summary: "Flow Engine completed all phases.".to_string(),
+                        content: Some("Flow Engine reached the Done phase.".to_string()),
+                        raw_evidence: serde_json::json!({
+                            "kind": "engineering_flow_phase",
+                            "phase": "done",
+                            "task_id": task.id.to_string()
+                        }),
+                        evidence_refs: vec![serde_json::json!({
+                            "kind": "engineering_flow_phase",
+                            "phase": "done"
+                        })],
+                        result_status: "completed".to_string(),
+                        metadata: serde_json::json!({
+                            "flow_phase": "done"
+                        }),
                     },
                 )
-                .await;
+                .await?;
             let _ = state
                 .store
                 .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {

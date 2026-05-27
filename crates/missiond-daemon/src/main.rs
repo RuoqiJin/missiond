@@ -1490,6 +1490,17 @@ async fn main() -> Result<()> {
                                     content: Some(summary.to_string()),
                                     json: req.payload.clone(),
                                     accepted_shard_id: None,
+                                    producer: Some(serde_json::json!({
+                                        "kind": "system",
+                                        "id": "jarvis-artifact-request",
+                                        "source": "artifact_request"
+                                    })),
+                                    raw_evidence: Some(req.payload.clone()),
+                                    evidence_refs: Some(serde_json::json!([{
+                                        "kind": "artifact_request_payload",
+                                        "task_id": task_id
+                                    }])),
+                                    created_at: Some(chrono::Utc::now().to_rfc3339()),
                                 },
                             )
                             .await

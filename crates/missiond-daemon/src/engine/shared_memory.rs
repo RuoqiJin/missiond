@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Duration, Utc};
 use missiond_core::db::traits::MissionStore;
-use missiond_core::event::events::{BoardEvent, SlotEvent, SystemEvent};
+use missiond_core::event::events::{BoardEvent, SlotEvent, SystemEvent, TaskEvent};
 use missiond_core::types::{AddBoardTaskNoteInput, UpdateBoardTaskInput};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -274,6 +274,21 @@ impl SharedMemoryService {
             })
             .await?,
         );
+        grant_ids.push(
+            self.insert_capability_grant(CapabilityGrantInput {
+                subject_kind,
+                subject_id,
+                operation: "spawn",
+                scope_kind: "task",
+                scope_key: task_id,
+                project_id,
+                task_id: Some(task_id),
+                issuer,
+                evidence_requirement: Some("runtime_metadata_sandbox_profile"),
+                details: json!({"source": "mission_task_delegate"}),
+            })
+            .await?,
+        );
         Ok(grant_ids)
     }
 
@@ -301,6 +316,34 @@ impl SharedMemoryService {
         .execute(&self.pool)
         .await?;
         Ok(id)
+    }
+
+    pub(crate) async fn audit_capability_bypass(
+        &self,
+        subject_kind: &str,
+        subject_id: &str,
+        operation: &str,
+        scope_kind: &str,
+        scope_key: &str,
+        reason: &str,
+        details: Value,
+    ) -> Result<()> {
+        self.audit_capability(
+            None,
+            Some(subject_kind),
+            Some(subject_id),
+            operation,
+            scope_kind,
+            scope_key,
+            "allowed",
+            None,
+            json!({
+                "reason": reason,
+                "bypass": true,
+                "details": details
+            }),
+        )
+        .await
     }
 
     async fn capability_grant_from_args(&self, args: &Value) -> Result<Value> {
@@ -385,6 +428,19 @@ impl SharedMemoryService {
                     .unwrap_or_else(|| json!({})),
             )
             .await?;
+        if event_kind == "attempt.started" {
+            let contract = self.task_runtime_contract(task_id).await?;
+            if let Some(project_root) = contract
+                .project_root
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                let changed_paths = git_status_changed_paths(project_root).unwrap_or_default();
+                self.record_worktree_manifest(task_id, project_root, "pre", &changed_paths)
+                    .await?;
+            }
+        }
         let event = self
             .append_event(&json!({
                 "stream_id": "execution-control-plane",
@@ -470,6 +526,52 @@ impl SharedMemoryService {
             "ok": true,
             "id": id
         }))
+    }
+
+    pub(crate) async fn recommended_model_for_task_class(
+        &self,
+        task_class: &str,
+    ) -> Result<Option<Value>> {
+        let row = sqlx::query(
+            r#"
+            SELECT provider,
+                   model,
+                   COUNT(*)::bigint AS samples,
+                   AVG(CASE WHEN outcome IN ('completed','success','accepted') THEN 1.0 ELSE 0.0 END) AS success_rate,
+                   AVG(NULLIF(latency_ms, 0)) AS avg_latency_ms,
+                   AVG(NULLIF(total_tokens, 0)) AS avg_total_tokens,
+                   AVG(NULLIF(cost_micros, 0)) AS avg_cost_micros
+            FROM model_route_outcomes
+            WHERE task_class = $1
+              AND model IS NOT NULL
+              AND model <> 'unknown'
+              AND created_at > now() - interval '14 days'
+            GROUP BY provider, model
+            HAVING COUNT(*) >= 5
+            ORDER BY
+              AVG(CASE WHEN outcome IN ('completed','success','accepted') THEN 1.0 ELSE 0.0 END) DESC,
+              COALESCE(AVG(NULLIF(latency_ms, 0)), 999999999) ASC,
+              COALESCE(AVG(NULLIF(total_tokens, 0)), 999999999) ASC,
+              COALESCE(AVG(NULLIF(cost_micros, 0)), 999999999) ASC
+            LIMIT 1
+            "#,
+        )
+        .bind(task_class)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        Ok(Some(json!({
+            "schema": "missiond.model-route-recommendation.v1",
+            "provider": row.try_get::<String, _>("provider")?,
+            "model": row.try_get::<String, _>("model")?,
+            "samples": row.try_get::<i64, _>("samples")?,
+            "success_rate": row.try_get::<Option<f64>, _>("success_rate")?,
+            "avg_latency_ms": row.try_get::<Option<f64>, _>("avg_latency_ms")?,
+            "avg_total_tokens": row.try_get::<Option<f64>, _>("avg_total_tokens")?,
+            "avg_cost_micros": row.try_get::<Option<f64>, _>("avg_cost_micros")?
+        })))
     }
 
     async fn ensure_job_for_task(
@@ -1621,6 +1723,22 @@ impl SharedMemoryService {
         );
         let has_explicit_evidence =
             task_result_has_explicit_evidence(args, &details, raw_evidence.as_ref());
+        let producer = args
+            .get("producer")
+            .cloned()
+            .or_else(|| details.get("producer").cloned())
+            .unwrap_or_else(|| {
+                json!({
+                    "kind": "worker-completion-producer",
+                    "provider": provider,
+                    "slot_id": slot_id,
+                    "conversation_id": conversation_id
+                })
+            });
+        let created_at = string_arg(args, "created_at")
+            .or_else(|| string_arg(args, "createdAt"))
+            .map(str::to_string)
+            .unwrap_or_else(|| Utc::now().to_rfc3339());
         let runtime_contract = self.task_runtime_contract(&task_id).await?;
         self.require_capability(&task_id, "write", "task", &task_id)
             .await?;
@@ -1697,12 +1815,7 @@ impl SharedMemoryService {
             "slot_id": slot_id,
             "conversation_id": conversation_id,
             "provider": provider,
-            "producer": {
-                "kind": "worker-completion-producer",
-                "provider": provider,
-                "slot_id": slot_id,
-                "conversation_id": conversation_id
-            },
+            "producer": producer,
             "result_status": result_status,
             "result_kind": result_status,
             "summary": summary,
@@ -1710,7 +1823,7 @@ impl SharedMemoryService {
             "details": details,
             "evidence_refs": evidence_refs,
             "raw_evidence": raw_evidence,
-            "created_at": Utc::now().to_rfc3339()
+            "created_at": created_at
         });
         let metadata = json!({
             "schema": "missiond.task-result-artifact.v1",
@@ -2905,6 +3018,14 @@ impl SharedMemoryService {
                 };
                 crate::engine::master_control::notify_board_event_direct(&ev);
                 let _ = self.bus.publish_board(ev).await;
+                if task.status == missiond_core::types::BoardTaskStatus::Done {
+                    let _ = self
+                        .bus
+                        .publish_task(TaskEvent::Completed {
+                            task_id: task.id.to_string(),
+                        })
+                        .await;
+                }
             } else {
                 let ev = BoardEvent::Updated {
                     task_id: task.id.to_string(),

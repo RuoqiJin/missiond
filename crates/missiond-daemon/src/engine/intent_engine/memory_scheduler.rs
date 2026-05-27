@@ -6,6 +6,7 @@ use crate::state::AppState;
 use crate::state::MEMORY_SLOT_ID;
 use missiond_core::PTYSpawnOptions;
 use missiond_core::SessionState;
+use serde_json::json;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
@@ -444,6 +445,9 @@ pub(crate) async fn reap_stale_submit_tasks(state: &AppState) {
 
         let result_msg = truncate_result(&result_msg);
         close_memory_task(state, task, new_status, &result_msg).await;
+        if new_status == "done" {
+            continue;
+        }
         let kb_status = new_status;
         if let Ok(true) = state
             .store
@@ -505,6 +509,31 @@ async fn close_memory_task(
     new_status: &str,
     result_text: &str,
 ) {
+    if new_status == "done" {
+        let _ = crate::engine::control_plane_kernel::ControlPlaneKernel::new(state)
+            .record_observation(
+                task.id.as_str(),
+                "memory-hook",
+                json!({
+                    "schema": "missiond.memory-hook-observation.v1",
+                    "status_candidate": "done",
+                    "summary": result_text,
+                    "authority": "observation-only",
+                    "note": "memory scheduler cannot close BoardTask without canonical task_result_artifact + worker_settle"
+                }),
+            )
+            .await;
+        let _ = state
+            .store
+            .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+                task_id: task.id.as_str().to_string(),
+                content: result_text.to_string(),
+                note_type: Some("summary".to_string()),
+                author: Some("memory-hook".to_string()),
+            })
+            .await;
+        return;
+    }
     let _ = state
         .store
         .update_board_task(
@@ -585,32 +614,22 @@ async fn apply_board_progress_result(state: &AppState, json_text: &str) {
         info!(task_id = %tp.task_id, is_done = tp.is_done, confidence = tp.confidence,
             "Board progress note written (auto-extract)");
 
-        // Auto-mark done only with high confidence + CAS: verify task still Running
-        // Gemini ARB: prevents overwriting Cancelled/Blocked status set during extraction delay
+        // PTY/provider progress is an observation only. The control plane may
+        // settle the task only after a canonical task_result_artifact exists.
         if tp.is_done && tp.confidence >= 0.8 {
-            let still_running = state
-                .store
-                .get_board_task(&tp.task_id)
-                .await
-                .ok()
-                .flatten()
-                .map(|t| t.status == missiond_core::types::BoardTaskStatus::Running)
-                .unwrap_or(false);
-            if still_running {
-                let _ = state
-                    .store
-                    .update_board_task(
-                        &tp.task_id,
-                        &missiond_core::types::UpdateBoardTaskInput {
-                            status: Some("done".to_string()),
-                            ..Default::default()
-                        },
-                    )
-                    .await;
-                info!(task_id = %tp.task_id, confidence = tp.confidence, "Board task auto-marked done");
-            } else {
-                debug!(task_id = %tp.task_id, "Board task no longer running, skipping auto-done");
-            }
+            let _ = crate::engine::control_plane_kernel::ControlPlaneKernel::new(state)
+                .record_observation(
+                    &tp.task_id,
+                    "memory_scheduler",
+                    json!({
+                        "schema": "missiond.task-progress-observation.v1",
+                        "is_done": tp.is_done,
+                        "confidence": tp.confidence,
+                        "summary": tp.summary
+                    }),
+                )
+                .await;
+            debug!(task_id = %tp.task_id, confidence = tp.confidence, "Board task completion observation recorded; canonical artifact still required");
         }
     }
 }

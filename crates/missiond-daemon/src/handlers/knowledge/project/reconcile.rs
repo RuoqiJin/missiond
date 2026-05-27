@@ -6,22 +6,28 @@ use std::path::Path;
 use crate::state::AppState;
 
 pub(super) async fn handle_reconcile(state: &AppState, args: Value) -> Result<ToolResult> {
-    let deploy_center_root = args
-        .get("deployCenterRoot")
-        .and_then(|v| v.as_str())
-        .unwrap_or(
-            "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/deploy-center",
-        );
-    let forge_root = args
-        .get("forgeRoot")
-        .and_then(|v| v.as_str())
-        .unwrap_or("/Users/jinchen/Projects/jarvis-forge");
-
     let projects = state
         .store
         .list_projects()
         .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
+
+    let deploy_center_root = args
+        .get("deployCenterRoot")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .or_else(|| std::env::var("DEPLOY_CENTER_ROOT").ok())
+        .or_else(|| registered_project_root(&projects, "deploy-center"))
+        .unwrap_or_else(|| "$MISSION_HOME/projects/deploy-center".to_string());
+    let forge_root = args
+        .get("forgeRoot")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .or_else(|| std::env::var("JARVIS_FORGE_ROOT").ok())
+        .or_else(|| registered_project_root(&projects, "jarvis-forge"))
+        .unwrap_or_else(|| "$MISSION_HOME/projects/jarvis-forge".to_string());
+    let deploy_center_root = deploy_center_root.as_str();
+    let forge_root = forge_root.as_str();
 
     let mut drift = Vec::new();
     let infra_server_count = state.infra.read().map(|i| i.servers.len()).unwrap_or(0);
@@ -205,6 +211,16 @@ struct ProjectMatch {
     root_matches: bool,
     path_exists: bool,
     actual_roots: Vec<String>,
+}
+
+fn registered_project_root(
+    projects: &[missiond_core::types::ProjectConfig],
+    id: &str,
+) -> Option<String> {
+    projects
+        .iter()
+        .find(|project| project.id == id && project.active)
+        .map(|project| project.path.clone())
 }
 
 fn project_match(

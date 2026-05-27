@@ -385,21 +385,39 @@ async fn incident_close(state: &AppState, args: Value) -> Result<ToolResult> {
             })));
         }
 
-        let update = missiond_core::types::UpdateBoardTaskInput {
-            status: Some("done".to_string()),
-            ..Default::default()
-        };
-        let updated = state
-            .store
-            .update_board_task(task.id.as_str(), &update)
-            .await
-            .map_err(|e| anyhow!("DB error: {}", e))?;
         let note = format!(
             "✅ Incident closed by {} ({}): {}",
             actor,
             chrono::Utc::now().format("%Y-%m-%d %H:%M UTC"),
             reason
         );
+        crate::engine::control_plane_kernel::ControlPlaneKernel::new(state)
+            .complete_system_task(
+                crate::engine::control_plane_kernel::SystemTaskCompletionInput {
+                    task_id: task.id.to_string(),
+                    project_id: task.project.clone(),
+                    producer_id: "incident_close".to_string(),
+                    summary: format!("Incident {} closed: {}", row.id, reason),
+                    content: Some(note.clone()),
+                    raw_evidence: json!({
+                        "kind": "incident_close",
+                        "incident_id": row.id,
+                        "reason": reason,
+                        "actor": actor
+                    }),
+                    evidence_refs: vec![json!({
+                        "kind": "mission_incident",
+                        "incident_id": row.id
+                    })],
+                    result_status: "completed".to_string(),
+                    metadata: json!({
+                        "incident_id": row.id,
+                        "source": "incident_close"
+                    }),
+                },
+            )
+            .await
+            .map_err(|e| anyhow!("control-plane settle failed: {}", e))?;
         let _ = state
             .store
             .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
@@ -409,9 +427,7 @@ async fn incident_close(state: &AppState, args: Value) -> Result<ToolResult> {
                 author: Some(format!("aiops:{}", actor)),
             })
             .await;
-        if updated.is_some() {
-            closed_task_id = Some(task.id.to_string());
-        }
+        closed_task_id = Some(task.id.to_string());
     }
 
     let _ = state

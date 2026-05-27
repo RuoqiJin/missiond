@@ -432,38 +432,21 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         .unwrap_or_default();
 
     // 2. If no idle slot, try auto-provision dynamic slot
-    let (assignee, provisioned) = if !assignee.is_empty() {
-        (assignee, false)
+    let (mut assignee, mut provisioned, should_auto_provision_slot) = if !assignee.is_empty() {
+        (assignee, false, false)
     } else if mechanic_config.is_some() {
-        (String::new(), false)
+        (String::new(), false, false)
     } else if prefer_gemini_researcher {
         // V3: never auto-provision a dynamic Claude slot for research while a
         // gemini researcher slot is registered. Queue unassigned so the
         // autopilot can route the BoardTask to the gemini slot once idle.
-        (String::new(), false)
+        (String::new(), false, false)
     } else if template == "ops" {
         // Phase 6.2: Guard uses template, not intent — prevents intent escape
         // Queue without assignee; autopilot will pick up when a slot frees
-        (String::new(), false)
+        (String::new(), false, false)
     } else {
-        match auto_provision_slot(
-            state,
-            template,
-            objective,
-            &runtime_config,
-            cwd,
-            model_arg.as_deref(),
-            effective_model_profile,
-            Some(delegate_sandbox_profile),
-        )
-        .await
-        {
-            Ok(id) => (id, true),
-            Err(e) => {
-                tracing::warn!("Auto-provision failed, queueing without assignee: {}", e);
-                (String::new(), false)
-            }
-        }
+        (String::new(), false, true)
     };
     // guard is dropped here (if Some) → auto-releases slot dispatch lock
 
@@ -581,6 +564,40 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             },
         )
         .await;
+    if should_auto_provision_slot {
+        match auto_provision_slot(
+            state,
+            template,
+            objective,
+            &runtime_config,
+            cwd,
+            model_arg.as_deref(),
+            effective_model_profile,
+            Some(delegate_sandbox_profile),
+            Some(&task_id),
+            Some(&capability_grant_ids),
+        )
+        .await
+        {
+            Ok(id) => {
+                assignee = id;
+                provisioned = true;
+                let _ = state
+                    .store
+                    .update_board_task(
+                        &task_id,
+                        &missiond_core::types::UpdateBoardTaskInput {
+                            assignee: Some(assignee.clone()),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+            }
+            Err(e) => {
+                tracing::warn!("Auto-provision failed, queueing without assignee: {}", e);
+            }
+        }
+    }
 
     // 5. Emit the canonical event-bus cause. The Autopilot subscriber
     // converts BoardEvent::TaskCreated into board_dispatch_notify, so
@@ -1107,50 +1124,9 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
                 &target_projects,
                 planned_task,
             );
-            let mut assignee: Option<String> = None;
-            if auto_provision_slots && planned_task.engine_hint == "claude-code" {
-                match auto_provision_slot(
-                    state,
-                    "coder",
-                    &planned_task.title,
-                    &runtime_config,
-                    Some(&task_project_root),
-                    None,
-                    Some("coding-default-opus-4-7"),
-                    Some(sandbox_profile_for_worker(
-                        Some(&planned_task.engine_hint),
-                        !planned_task.write_scope.is_empty(),
-                    )),
-                )
-                .await
-                {
-                    Ok(slot_id) => {
-                        assignee = Some(slot_id.clone());
-                        provisioned_slots.push(json!({
-                            "task_title": planned_task.title,
-                            "slot_id": slot_id,
-                            "engine_hint": planned_task.engine_hint,
-                            "pool_hint": planned_task.pool_hint,
-                            "status": "spawn_pending",
-                        }));
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            project_id = %project_id,
-                            title = %planned_task.title,
-                            error = %err,
-                            "mission_swarm_run: Claude dynamic slot auto-provision failed; child task will queue unassigned"
-                        );
-                        provisioned_slots.push(json!({
-                            "task_title": planned_task.title,
-                            "engine_hint": planned_task.engine_hint,
-                            "pool_hint": planned_task.pool_hint,
-                            "status": "provision_failed",
-                            "error": err.to_string(),
-                        }));
-                    }
-                }
-            }
+            let assignee: Option<String> = None;
+            let should_auto_provision_child =
+                auto_provision_slots && planned_task.engine_hint == "claude-code";
             let description = render_swarm_task_description(
                 &objective,
                 &task_project_id,
@@ -1232,6 +1208,59 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
                     },
                 )
                 .await;
+            if should_auto_provision_child {
+                match auto_provision_slot(
+                    state,
+                    "coder",
+                    &planned_task.title,
+                    &runtime_config,
+                    Some(&task_project_root),
+                    None,
+                    Some("coding-default-opus-4-7"),
+                    Some(sandbox_profile),
+                    Some(&task_id),
+                    Some(&capability_grant_ids),
+                )
+                .await
+                {
+                    Ok(slot_id) => {
+                        let _ = state
+                            .store
+                            .update_board_task(
+                                &task_id,
+                                &missiond_core::types::UpdateBoardTaskInput {
+                                    assignee: Some(slot_id.clone()),
+                                    ..Default::default()
+                                },
+                            )
+                            .await;
+                        provisioned_slots.push(json!({
+                            "task_title": planned_task.title,
+                            "task_id": task_id,
+                            "slot_id": slot_id,
+                            "engine_hint": planned_task.engine_hint,
+                            "pool_hint": planned_task.pool_hint,
+                            "status": "spawn_pending",
+                        }));
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            project_id = %project_id,
+                            title = %planned_task.title,
+                            error = %err,
+                            "mission_swarm_run: Claude dynamic slot auto-provision failed; child task will queue unassigned"
+                        );
+                        provisioned_slots.push(json!({
+                            "task_title": planned_task.title,
+                            "task_id": task_id,
+                            "engine_hint": planned_task.engine_hint,
+                            "pool_hint": planned_task.pool_hint,
+                            "status": "provision_failed",
+                            "error": err.to_string(),
+                        }));
+                    }
+                }
+            }
             let ev = BoardEvent::TaskCreated {
                 task_id: task_id.clone(),
                 title: input.title.clone(),
@@ -2420,24 +2449,6 @@ fn scope_is_absolute(scope: &str) -> bool {
     scope.starts_with('/') || scope.starts_with("~/")
 }
 
-/// Parse the `- write_scope:` line emitted by `render_delegation_metadata_block`
-/// out of a BoardTask description so we can read back what scope the existing
-/// code worker reserved. Conservative: missing line → empty list.
-#[cfg(test)]
-fn parse_write_scope_from_description(description: &str) -> Vec<String> {
-    description
-        .lines()
-        .find_map(|line| {
-            line.trim().strip_prefix("- write_scope:").map(|tail| {
-                tail.split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect::<Vec<_>>()
-            })
-        })
-        .unwrap_or_default()
-}
-
 fn metadata_string_list(value: Option<&Value>) -> Vec<String> {
     match value {
         Some(Value::Array(values)) => values
@@ -2501,20 +2512,6 @@ fn board_task_references_source(task: &missiond_core::types::BoardTask, source_i
         }
     }
     false
-}
-
-/// Look for a `:source_board_task_id` / `:source_id` reference inside a
-/// BoardTask description. Used when the dedup caller anchors on a source
-/// chain rather than on the structured `parent_id` column.
-#[cfg(test)]
-fn description_references_source(description: &str, source_id: &str) -> bool {
-    description.lines().any(|line| {
-        let trimmed = line.trim();
-        let matches_label = trimmed.starts_with("- source_board_task_id:")
-            || trimmed.starts_with("- source_id:")
-            || trimmed.starts_with("- parent_board_task_id:");
-        matches_label && trimmed.contains(source_id)
-    })
 }
 
 /// Cross-product of requested vs existing write scopes; returns every pair
@@ -2726,6 +2723,8 @@ async fn auto_provision_slot(
     model: Option<&str>,
     model_profile: Option<&str>,
     sandbox_profile: Option<&str>,
+    task_id: Option<&str>,
+    capability_grant_ids: Option<&[String]>,
 ) -> Result<String> {
     // Check quota
     let active = state
@@ -2756,6 +2755,8 @@ async fn auto_provision_slot(
         model,
         model_profile,
         sandbox_profile,
+        task_id,
+        capability_grant_ids,
     );
 
     // Delegate to existing compute_slot handler
@@ -2871,10 +2872,9 @@ fn default_swarm_context_pack_path(missiond_root: Option<&Path>) -> String {
 /// V3 resident-master-control :: master-delegation projection.
 ///
 /// `mission_task_delegate` is the common BoardTask entry used by Codex master,
-/// context-pack-run-wave, and direct MCP callers. Structured metadata is kept
-/// visible in the durable BoardTask description so Autopilot/worker prompts can
-/// carry context-pack path, write scope, must-not-touch, acceptance, model, and
-/// timeout without relying on out-of-band PTY text.
+/// context-pack-run-wave, and direct MCP callers. Metadata is kept visible in
+/// the durable BoardTask description only as a prompt projection; runtime
+/// control reads the structured `runtime_metadata` written beside it.
 fn render_delegation_metadata_block(metadata: &DelegationMetadata) -> String {
     let mut lines = Vec::new();
     if let Some(value) = &metadata.task_class {
@@ -3026,8 +3026,89 @@ fn spawn_mechanic_repair(
             ),
         };
 
-        let settle = shared_memory
-            .handle_action(&json!({
+        let artifact_hash = if status == "done" {
+            let mut artifact_details = match content.clone() {
+                Value::Object(map) => Value::Object(map),
+                other => json!({ "result": other }),
+            };
+            let mechanic_exit_code = artifact_details
+                .get("exit_code")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            if let Some(obj) = artifact_details.as_object_mut() {
+                obj.entry("changed_paths".to_string())
+                    .or_insert_with(|| json!(run.metadata.write_scope));
+                obj.entry("verification".to_string()).or_insert_with(|| {
+                    json!({
+                        "status": "passed",
+                        "source": "mechanic-exit-code",
+                        "exit_code": mechanic_exit_code
+                    })
+                });
+            }
+            let created_at = chrono::Utc::now().to_rfc3339();
+            match shared_memory
+                .handle_action(&json!({
+                    "action": "task_result_put",
+                    "task_id": run.task_id,
+                    "project_id": run.project_id,
+                    "provider": "mechanic",
+                    "result_status": "completed",
+                    "summary": summary,
+                    "content": summary,
+                    "json": artifact_details,
+                    "accepted_shard_id": run.metadata.accepted_shard_id,
+                    "producer": {
+                        "kind": "mechanic-subprocess",
+                        "id": "mechanic",
+                        "created_at": created_at
+                    },
+                    "raw_evidence": {
+                        "kind": "mechanic-run",
+                        "mode": run.config.mode.as_str(),
+                        "target": run.config.target,
+                        "project_root": run.project_root
+                    },
+                    "evidence_refs": [{
+                        "kind": "mechanic-run",
+                        "task_id": run.task_id,
+                        "created_at": created_at
+                    }],
+                    "created_at": created_at
+                }))
+                .await
+            {
+                Ok(value) => value
+                    .get("artifact_hash")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                Err(err) => {
+                    tracing::warn!(
+                        task_id = %run.task_id,
+                        error = %err,
+                        "mechanic repair task_result_put failed; refusing done settle"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        if status == "done" && artifact_hash.is_none() {
+            for claim_id in &run.metadata.shared_claim_ids {
+                let release = shared_memory
+                    .handle_action(&json!({
+                        "action": "release",
+                        "claim_id": claim_id,
+                    }))
+                    .await;
+                if let Err(err) = release {
+                    tracing::warn!(task_id = %run.task_id, claim_id = %claim_id, error = %err, "mechanic repair claim release failed");
+                }
+            }
+            return;
+        }
+        let mut settle_args = json!({
                 "action": "worker_settle",
                 "task_id": run.task_id,
                 "project_id": run.project_id,
@@ -3036,8 +3117,11 @@ fn spawn_mechanic_repair(
                 "summary": summary,
                 "accepted_shard_id": run.metadata.accepted_shard_id,
                 "json": content,
-            }))
-            .await;
+        });
+        if let Some(hash) = artifact_hash {
+            settle_args["artifact_hash"] = Value::String(hash);
+        }
+        let settle = shared_memory.handle_action(&settle_args).await;
         if let Err(err) = settle {
             tracing::warn!(task_id = %run.task_id, error = %err, "mechanic repair worker_settle failed");
         }
@@ -3168,6 +3252,8 @@ fn build_compute_slot_create_args(
     model: Option<&str>,
     model_profile: Option<&str>,
     sandbox_profile: Option<&str>,
+    task_id: Option<&str>,
+    capability_grant_ids: Option<&[String]>,
 ) -> Value {
     let mut create_args = json!({
         "action": "create",
@@ -3187,6 +3273,12 @@ fn build_compute_slot_create_args(
     }
     if let Some(sandbox) = sandbox_profile {
         create_args["sandbox"] = Value::String(sandbox.to_string());
+    }
+    if let Some(task_id) = task_id {
+        create_args["task_id"] = Value::String(task_id.to_string());
+    }
+    if let Some(grant_ids) = capability_grant_ids {
+        create_args["capability_grant_ids"] = json!(grant_ids);
     }
     create_args
 }
@@ -3218,8 +3310,17 @@ mod tests {
 
     #[test]
     fn create_args_always_suppresses_initial_prompt() {
-        let args =
-            build_compute_slot_create_args("coder", "ship the fix", 3600, None, None, None, None);
+        let args = build_compute_slot_create_args(
+            "coder",
+            "ship the fix",
+            3600,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         assert_eq!(args["suppress_initial_prompt"], json!(true));
     }
 
@@ -3239,6 +3340,8 @@ mod tests {
             "researcher",
             "investigate",
             7200,
+            None,
+            None,
             None,
             None,
             None,
@@ -3284,17 +3387,22 @@ mod tests {
             Some("sonnet"),
             Some("daily-sonnet"),
             Some("workspace-write"),
+            Some("task-1"),
+            Some(&["grant-1".to_string(), "grant-2".to_string()]),
         );
         assert_eq!(args["cwd"], json!("/Users/jinchen/Projects/missiond"));
         assert_eq!(args["model"], json!("sonnet"));
         assert_eq!(args["model_profile"], json!("daily-sonnet"));
         assert_eq!(args["sandbox"], json!("workspace-write"));
+        assert_eq!(args["task_id"], json!("task-1"));
+        assert_eq!(args["capability_grant_ids"], json!(["grant-1", "grant-2"]));
         assert_eq!(args["suppress_initial_prompt"], json!(true));
     }
 
     #[test]
     fn create_args_omit_optional_fields_when_absent() {
-        let args = build_compute_slot_create_args("coder", "x", 3600, None, None, None, None);
+        let args =
+            build_compute_slot_create_args("coder", "x", 3600, None, None, None, None, None, None);
         assert!(args.get("cwd").is_none());
         assert!(args.get("model").is_none());
         assert!(args.get("model_profile").is_none());
@@ -4109,24 +4217,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn parse_write_scope_extracts_csv_metadata_line() {
-        let desc = "Some objective\n\n## Dispatch metadata\n\
-                    - task_class: code\n\
-                    - write_scope: crates/foo.rs, crates/bar/**\n\
-                    - must_not_touch: target/**";
-        assert_eq!(
-            parse_write_scope_from_description(desc),
-            vec!["crates/foo.rs".to_string(), "crates/bar/**".to_string()],
-        );
-    }
-
-    #[test]
-    fn parse_write_scope_returns_empty_when_label_missing() {
-        let desc = "Some objective without metadata";
-        assert!(parse_write_scope_from_description(desc).is_empty());
-    }
-
     fn board_task_fixture(
         description: &str,
         runtime_metadata: Value,
@@ -4207,21 +4297,6 @@ mod tests {
     }
 
     #[test]
-    fn description_references_source_matches_canonical_labels() {
-        let desc = "objective\n\n## Dispatch metadata\n- source_board_task_id: 31a99a30";
-        assert!(description_references_source(desc, "31a99a30"));
-        let parent_only = "objective\n\n## Parent linkage\n- parent_board_task_id: parent-1";
-        assert!(description_references_source(parent_only, "parent-1"));
-        let alt_label = "objective\n- source_id: src-9";
-        assert!(description_references_source(alt_label, "src-9"));
-        let other = "objective\n- write_scope: src-9";
-        assert!(
-            !description_references_source(other, "src-9"),
-            "matches must be anchored to a parent/source label, not arbitrary lines"
-        );
-    }
-
-    #[test]
     fn compute_scope_overlap_reports_each_pair() {
         let requested = vec!["crates/auth".to_string(), "crates/router".to_string()];
         let existing = vec!["crates/auth/routes.rs".to_string(), "docs/**".to_string()];
@@ -4289,11 +4364,8 @@ mod tests {
         );
     }
 
-    /// Pins the metadata block contract for source-id readback: the dedup
-    /// scanner relies on the rendered description carrying
-    /// `- source_board_task_id: <id>` so a downstream `mission_task_delegate`
-    /// call can detect the source linkage even when the structured
-    /// `parent_id` column is unset (e.g. multi-hop master/plan chains).
+    /// Pins the worker-facing prompt projection. Runtime dedup reads
+    /// `runtime_metadata`; this text remains only for operator/worker context.
     #[test]
     fn delegation_metadata_block_renders_source_id_for_dedup_readback() {
         let metadata = DelegationMetadata {
@@ -4305,9 +4377,8 @@ mod tests {
         let block = render_delegation_metadata_block(&metadata);
         assert!(
             block.contains("- source_board_task_id: source-9"),
-            "metadata block must surface source_board_task_id so dedup readback works:\n{block}"
+            "metadata block should keep source context visible in prompt projection:\n{block}"
         );
-        assert!(description_references_source(&block, "source-9"));
     }
 
     #[test]

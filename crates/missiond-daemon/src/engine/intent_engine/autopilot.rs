@@ -506,6 +506,184 @@ async fn observe_autopilot_task_result_candidate(
     artifact_hash
 }
 
+async fn materialize_read_only_task_result_artifact_from_durable_final(
+    state: &AppState,
+    task: &missiond_core::types::BoardTask,
+    slot_id: &str,
+    durable_completion: Option<&DurableProviderCompletion>,
+    final_summary: &str,
+    result_status: &str,
+) -> Option<String> {
+    let completion = durable_completion?;
+    if !board_task_is_read_only_result_task(task) {
+        return None;
+    }
+    let final_summary = final_summary.trim();
+    if final_summary.is_empty() {
+        return None;
+    }
+    if let Err(err) = ensure_task_result_control_capabilities(state, task).await {
+        warn!(
+            task_id = %task.id,
+            slot_id,
+            error = %err,
+            "Autopilot: failed to ensure task-result control capabilities before materializing artifact"
+        );
+        return None;
+    }
+    let project_id = task.project.as_deref().unwrap_or("missiond").to_string();
+    let accepted_shard_id = board_task_runtime_metadata_string(task, "accepted_shard_id")
+        .or_else(|| board_task_runtime_metadata_string(task, "acceptedShardId"));
+    let summary = truncate_safe(final_summary, 4_000);
+    let writer = crate::engine::task_completion_evidence::TaskCompletionEvidenceWriter::new(
+        state.storage().shared_memory.clone(),
+    );
+    match writer
+        .write_bounded(
+            crate::engine::task_completion_evidence::TaskCompletionEvidenceInput {
+                task_id: task.id.to_string(),
+                project_id: Some(project_id),
+                slot_id: Some(slot_id.to_string()),
+                conversation_id: Some(completion.session_id.clone()),
+                provider: completion.source.clone(),
+                result_status: result_status.to_string(),
+                summary: summary.to_string(),
+                content: Some(final_summary.to_string()),
+                json: serde_json::json!({
+                    "schema": "missiond.autopilot-materialized-task-result.v1",
+                    "source": "durable_provider_final",
+                    "slot_id": slot_id,
+                    "conversation_id": completion.session_id.clone(),
+                    "provider": completion.source.clone(),
+                    "raw_evidence": final_summary,
+                    "content": final_summary,
+                    "evidence_refs": [
+                        {
+                            "kind": "provider_conversation",
+                            "conversation_id": completion.session_id.clone(),
+                            "provider": completion.source.clone()
+                        },
+                        {
+                            "kind": "board_task",
+                            "task_id": task.id.as_str()
+                        }
+                    ]
+                }),
+                accepted_shard_id,
+                producer: Some(serde_json::json!({
+                    "kind": "autopilot_materializer",
+                    "source": "durable_provider_final",
+                    "slot_id": slot_id,
+                    "conversation_id": completion.session_id.clone(),
+                    "provider": completion.source.clone()
+                })),
+                raw_evidence: Some(serde_json::json!({
+                    "kind": "durable_provider_final",
+                    "summary": final_summary,
+                    "conversation_id": completion.session_id.clone(),
+                    "provider": completion.source.clone()
+                })),
+                evidence_refs: Some(serde_json::json!([
+                    {
+                        "kind": "provider_conversation",
+                        "conversation_id": completion.session_id.clone(),
+                        "provider": completion.source.clone()
+                    },
+                    {
+                        "kind": "board_task",
+                        "task_id": task.id.as_str()
+                    }
+                ])),
+                created_at: Some(chrono::Utc::now().to_rfc3339()),
+            },
+        )
+        .await
+    {
+        Ok(result) => {
+            info!(
+                task_id = %task.id,
+                slot_id,
+                artifact_hash = %result.artifact_hash,
+                "Autopilot: materialized canonical task_result_artifact from durable read-only provider final"
+            );
+            Some(result.artifact_hash)
+        }
+        Err(err) => {
+            warn!(
+                task_id = %task.id,
+                slot_id,
+                error = %err,
+                "Autopilot: failed to materialize canonical task_result_artifact from durable provider final"
+            );
+            None
+        }
+    }
+}
+
+async fn ensure_task_result_control_capabilities(
+    state: &AppState,
+    task: &missiond_core::types::BoardTask,
+) -> Result<()> {
+    let check = state
+        .storage()
+        .shared_memory
+        .handle_action(&serde_json::json!({
+            "action": "capability_check",
+            "task_id": task.id.as_str(),
+            "operation": "write",
+            "scope_kind": "task",
+            "scope_key": task.id.as_str()
+        }))
+        .await;
+    if check.is_ok() {
+        return Ok(());
+    }
+    let read_scope = board_task_runtime_metadata_string_list(task, "read_scope");
+    let write_scope = board_task_runtime_metadata_string_list(task, "write_scope");
+    let must_not_touch = board_task_runtime_metadata_string_list(task, "must_not_touch");
+    let grant_ids = state
+        .storage()
+        .shared_memory
+        .grant_task_capabilities(
+            task.project.as_deref(),
+            task.id.as_str(),
+            "task",
+            task.id.as_str(),
+            &read_scope,
+            &write_scope,
+            &must_not_touch,
+            "autopilot-task-result-materializer",
+        )
+        .await?;
+    let mut runtime_metadata = task.runtime_metadata.clone();
+    if let Some(fields) = runtime_metadata.as_object_mut() {
+        fields.insert(
+            "capability_grant_ids".to_string(),
+            serde_json::json!(grant_ids),
+        );
+        if let Some(dispatch) = fields
+            .get_mut("dispatch_metadata")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            dispatch.insert(
+                "capability_grant_ids".to_string(),
+                serde_json::json!(grant_ids),
+            );
+        }
+    }
+    let _ = state
+        .store
+        .update_board_task(
+            task.id.as_str(),
+            &missiond_core::types::UpdateBoardTaskInput {
+                runtime_metadata: Some(runtime_metadata),
+                ..Default::default()
+            },
+        )
+        .await;
+    Ok(())
+}
+
 async fn completed_task_result_artifact_hash_for_task(
     state: &AppState,
     task: &missiond_core::types::BoardTask,
@@ -730,15 +908,15 @@ fn assistant_candidates_after_claim(
         .collect()
 }
 
-fn task_requires_structured_output_contract(task_description: &str) -> bool {
-    extract_dispatch_metadata_field(task_description, "output_contract")
-        .unwrap_or_else(|| task_description.to_string())
+fn task_requires_structured_output_contract(runtime_contract: &str) -> bool {
+    extract_runtime_contract_field(runtime_contract, "output_contract")
+        .unwrap_or_else(|| runtime_contract.to_string())
         .to_ascii_lowercase()
         .contains("findings / evidence / recommendations / verification")
 }
 
-fn provider_summary_satisfies_task_contract(task_description: &str, summary: &str) -> bool {
-    output_contract_close_blocker(task_description, summary).is_none()
+fn provider_summary_satisfies_task_contract(runtime_contract: &str, summary: &str) -> bool {
+    output_contract_close_blocker(runtime_contract, summary).is_none()
         && worker_final_close_blocker(summary).is_none()
 }
 
@@ -771,6 +949,47 @@ fn board_task_runtime_metadata_string(
         None
     }
     find(&task.runtime_metadata, key)
+}
+
+fn board_task_runtime_metadata_string_list(
+    task: &missiond_core::types::BoardTask,
+    key: &str,
+) -> Vec<String> {
+    fn collect(value: &serde_json::Value, key: &str, out: &mut Vec<String>) {
+        if let Some(items) = value.get(key).and_then(|v| v.as_array()) {
+            for item in items {
+                if let Some(text) = item.as_str().map(str::trim).filter(|v| !v.is_empty()) {
+                    out.push(text.to_string());
+                }
+            }
+        }
+        if let Some(text) = value.get(key).and_then(|v| v.as_str()) {
+            let text = text.trim();
+            if !text.is_empty() {
+                out.push(text.to_string());
+            }
+        }
+        for nested in [
+            "dispatch_metadata",
+            "metadata",
+            "context_refs",
+            "grounding_refs",
+            "source",
+        ] {
+            if let Some(child) = value.get(nested) {
+                collect(child, key, out);
+            }
+        }
+    }
+    let mut values = Vec::new();
+    collect(&task.runtime_metadata, key, &mut values);
+    values.sort();
+    values.dedup();
+    values
+}
+
+fn board_task_is_read_only_result_task(task: &missiond_core::types::BoardTask) -> bool {
+    board_task_runtime_metadata_string_list(task, "write_scope").is_empty()
 }
 
 fn board_task_runtime_conversation_id(task: &missiond_core::types::BoardTask) -> Option<String> {
@@ -2051,14 +2270,14 @@ fn worker_final_close_blocker(summary: &str) -> Option<&'static str> {
 }
 
 fn delegated_write_close_evidence_blocker(
-    task_description: &str,
+    runtime_contract: &str,
     has_durable_provider_final: bool,
     summary: &str,
 ) -> Option<&'static str> {
-    if delegated_task_is_read_only(task_description) {
+    if delegated_task_is_read_only(runtime_contract) {
         return None;
     }
-    if delegated_write_scope(task_description).is_empty() {
+    if delegated_write_scope(runtime_contract).is_empty() {
         return None;
     }
     if !has_durable_provider_final {
@@ -2090,14 +2309,14 @@ fn delegated_write_close_evidence_blocker(
 ///
 /// Pure helper so the gate can be unit-tested without an `AppState`.
 fn pty_only_close_blocker(
-    task_description: &str,
+    runtime_contract: &str,
     has_durable_provider_final: bool,
     summary: &str,
 ) -> Option<&'static str> {
     if has_durable_provider_final {
         return None;
     }
-    if !is_delegated_worker_description(task_description) {
+    if !is_runtime_worker_contract(runtime_contract) {
         return None;
     }
     if pty_summary_has_structured_artifact(summary) {
@@ -2112,12 +2331,12 @@ fn pty_only_close_blocker(
 /// dispatch-time rebind but before the current task's final lands. Generic
 /// acceptance words such as "changed files" are not enough for those tasks; the
 /// close summary must satisfy the declared sections.
-fn output_contract_close_blocker(task_description: &str, summary: &str) -> Option<&'static str> {
-    if !is_delegated_worker_description(task_description) {
+fn output_contract_close_blocker(runtime_contract: &str, summary: &str) -> Option<&'static str> {
+    if !is_runtime_worker_contract(runtime_contract) {
         return None;
     }
-    let output_contract = extract_dispatch_metadata_field(task_description, "output_contract")
-        .unwrap_or_else(|| task_description.to_string());
+    let output_contract = extract_runtime_contract_field(runtime_contract, "output_contract")
+        .unwrap_or_else(|| runtime_contract.to_string());
     if !output_contract
         .to_ascii_lowercase()
         .contains("findings / evidence / recommendations / verification")
@@ -2251,29 +2470,36 @@ fn strip_report_heading_enumeration(value: &str) -> &str {
     }
 }
 
-/// Detect a delegated worker BoardTask by its description envelope.
-/// `mission_task_delegate` injects `## Dispatch metadata`; `mission_swarm_run`
-/// injects `## Swarm metadata`. Either marker is the V3 envelope guarantee
-/// that this task is a worker dispatch with a write_policy / read_scope /
-/// acceptance contract — and therefore should produce a structured artifact
-/// rather than a single-sentence chat answer.
-fn is_delegated_worker_description(task_description: &str) -> bool {
-    task_description.contains("## Swarm metadata")
-        || task_description.contains("## Dispatch metadata")
-        || serde_json::from_str::<serde_json::Value>(task_description)
-            .ok()
-            .and_then(|root| {
-                let object = root.as_object()?;
-                let has_dispatch = object.contains_key("dispatch_metadata")
-                    || object.contains_key("swarm_metadata");
-                let is_jarvis = object
-                    .get("source")
-                    .and_then(|value| value.as_str())
-                    .map(|source| source == "jarvis-intent-plan-gate")
-                    .unwrap_or(false);
-                Some(has_dispatch || is_jarvis)
-            })
-            .unwrap_or(false)
+/// Detect a runtime worker contract from structured runtime_metadata only.
+fn is_runtime_worker_contract(runtime_contract: &str) -> bool {
+    let from_metadata = serde_json::from_str::<serde_json::Value>(runtime_contract)
+        .ok()
+        .and_then(|root| {
+            let object = root.as_object()?;
+            let has_dispatch = object.contains_key("dispatch_metadata")
+                || object.contains_key("swarm_metadata")
+                || object.contains_key("task_contract_id")
+                || object.contains_key("accepted_shard_id");
+            let is_jarvis = object
+                .get("source")
+                .and_then(|value| value.as_str())
+                .map(|source| source == "jarvis-intent-plan-gate")
+                .unwrap_or(false);
+            Some(has_dispatch || is_jarvis)
+        })
+        .unwrap_or(false);
+    if from_metadata {
+        return true;
+    }
+    #[cfg(test)]
+    {
+        return runtime_contract.contains("## Swarm metadata")
+            || runtime_contract.contains("## Dispatch metadata");
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
 }
 
 /// Pure check: does `summary` look like a structured worker artifact?
@@ -2342,34 +2568,26 @@ fn contains_worker_prompt_contract_echo(summary: &str) -> bool {
     EXACT_MARKERS.iter().any(|marker| summary.contains(marker))
 }
 
-fn delegated_task_is_read_only(task_description: &str) -> bool {
-    extract_dispatch_metadata_field(task_description, "write_policy")
+fn delegated_task_is_read_only(runtime_contract: &str) -> bool {
+    extract_runtime_contract_field(runtime_contract, "write_policy")
         .map(|value| value.eq_ignore_ascii_case("read-only"))
-        .or_else(|| {
-            metadata_line_value(task_description, "write_policy")
-                .map(|value| value.eq_ignore_ascii_case("read-only"))
-        })
         .unwrap_or(false)
 }
 
-fn delegated_write_scope(task_description: &str) -> Vec<String> {
-    extract_dispatch_metadata_field(task_description, "write_scope")
+fn delegated_write_scope(runtime_contract: &str) -> Vec<String> {
+    extract_runtime_contract_field(runtime_contract, "write_scope")
         .map(|value| split_metadata_list(&value))
-        .or_else(|| metadata_line_value(task_description, "write_scope").map(split_metadata_list))
         .unwrap_or_default()
 }
 
-fn metadata_line_value<'a>(task_description: &'a str, key: &str) -> Option<&'a str> {
-    let prefix = format!("- {key}:");
-    task_description.lines().find_map(|line| {
-        line.trim()
-            .strip_prefix(&prefix)
-            .map(str::trim)
-            .filter(|value| !value.is_empty() && *value != "[]")
-    })
-}
-
 fn split_metadata_list(value: &str) -> Vec<String> {
+    if let Ok(items) = serde_json::from_str::<Vec<String>>(value) {
+        return items
+            .into_iter()
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty())
+            .collect();
+    }
     value
         .split(|ch| ch == ',' || ch == '|')
         .map(str::trim)
@@ -3102,59 +3320,34 @@ fn json_metadata_value_to_string(value: &serde_json::Value) -> Option<String> {
     }
 }
 
-fn extract_json_dispatch_metadata_field(description: &str, field: &str) -> Option<String> {
-    let meta = serde_json::from_str::<serde_json::Value>(description).ok()?;
-    let root = meta.as_object()?;
-    if let Some(value) = root.get(field).and_then(json_metadata_value_to_string) {
-        return Some(value);
-    }
-    for nested in ["metadata", "dispatch_metadata", "swarm_metadata"] {
-        if let Some(value) = root
-            .get(nested)
-            .and_then(|value| value.as_object())
-            .and_then(|fields| fields.get(field))
-            .and_then(json_metadata_value_to_string)
-        {
+fn extract_runtime_contract_field(runtime_contract: &str, field: &str) -> Option<String> {
+    if let Some(root) = serde_json::from_str::<serde_json::Value>(runtime_contract)
+        .ok()
+        .and_then(|meta| meta.as_object().cloned())
+    {
+        if let Some(value) = root.get(field).and_then(json_metadata_value_to_string) {
             return Some(value);
         }
-    }
-    None
-}
-
-/// Parse dispatch metadata from a BoardTask description.
-///
-/// Supports both current Jarvis/work-order JSON metadata and legacy markdown
-/// `- field: value` lines under `## Dispatch metadata` / `## Swarm metadata`.
-/// Empty values are dropped so placeholders never override structured class.
-pub(crate) fn extract_dispatch_metadata_field(description: &str, field: &str) -> Option<String> {
-    if let Some(value) = extract_json_dispatch_metadata_field(description, field) {
-        return Some(value);
-    }
-    let needle = format!("- {}:", field);
-    let mut in_metadata = false;
-    let mut found_outside: Option<String> = None;
-    for line in description.lines() {
-        let trimmed = line.trim_start();
-        if let Some(rest) = trimmed.strip_prefix("## ") {
-            let lowered = rest.to_ascii_lowercase();
-            in_metadata =
-                lowered.starts_with("dispatch metadata") || lowered.starts_with("swarm metadata");
-            continue;
-        }
-        if let Some(value) = trimmed.strip_prefix(needle.as_str()) {
-            let value = value.trim().trim_end_matches(',').trim().to_string();
-            if value.is_empty() {
-                continue;
-            }
-            if in_metadata {
+        for nested in [
+            "metadata",
+            "dispatch_metadata",
+            "swarm_metadata",
+            "context_refs",
+            "grounding_refs",
+            "source",
+        ] {
+            if let Some(value) = root
+                .get(nested)
+                .and_then(|value| value.as_object())
+                .and_then(|fields| fields.get(field))
+                .and_then(json_metadata_value_to_string)
+            {
                 return Some(value);
             }
-            if found_outside.is_none() {
-                found_outside = Some(value);
-            }
         }
     }
-    found_outside
+    let _ = field;
+    None
 }
 
 fn extract_board_task_dispatch_metadata_field(
@@ -3183,8 +3376,8 @@ fn extract_board_task_dispatch_metadata_field(
 }
 
 /// Recognised structured task classes the workstation pool understands. Used
-/// to gate `extract_dispatch_metadata_field` results so a stray `task_class:`
-/// note never coerces the autopilot into an unknown route.
+/// to gate runtime metadata results so a stray `task_class:` note never
+/// coerces the autopilot into an unknown route.
 const KNOWN_TASK_CLASSES: &[&str] = &[
     "research",
     "general",
@@ -4407,7 +4600,7 @@ async fn dispatch_board_tasks_with_config(
                             "Autopilot: provider/PTY text produced observation diagnostics; canonical artifact remains the only close authority"
                         );
                     }
-                    let task_result_artifact_hash = observe_autopilot_task_result_candidate(
+                    let mut task_result_artifact_hash = observe_autopilot_task_result_candidate(
                         state,
                         &task,
                         &slot_id,
@@ -4417,6 +4610,18 @@ async fn dispatch_board_tasks_with_config(
                         res.duration_ms,
                     )
                     .await;
+                    if task_result_artifact_hash.is_none() && observation_diagnostics.is_empty() {
+                        task_result_artifact_hash =
+                            materialize_read_only_task_result_artifact_from_durable_final(
+                                state,
+                                &task,
+                                &slot_id,
+                                durable_completion.as_ref(),
+                                &final_summary,
+                                "completed",
+                            )
+                            .await;
+                    }
                     if task_result_artifact_hash.is_none() {
                         let diagnostic_suffix = if observation_diagnostics.is_empty() {
                             String::new()
@@ -6650,16 +6855,20 @@ mod tests {
 
     #[test]
     fn write_scope_close_requires_durable_provider_final() {
-        let description = "\
-Implement the shard.
-
-## Swarm metadata
-- write_policy: write
-- write_scope: services/auth/.missiond/backend/auth.lisp
-- acceptance: node scripts/check-service-ssot.mjs auth --json";
+        let runtime_contract = serde_json::json!({
+            "schema": "missiond.runtime-task-contract.v1",
+            "source": "mission_task_delegate",
+            "task_contract_id": "task-contract-test",
+            "dispatch_metadata": {
+                "write_policy": "write",
+                "write_scope": ["services/auth/.missiond/backend/auth.lisp"],
+                "acceptance": "node scripts/check-service-ssot.mjs auth --json"
+            }
+        })
+        .to_string();
         assert_eq!(
             delegated_write_close_evidence_blocker(
-                description,
+                &runtime_contract,
                 false,
                 "Verification: check-service-ssot passed."
             ),
@@ -6669,7 +6878,18 @@ Implement the shard.
 
     #[test]
     fn write_scope_close_requires_acceptance_evidence() {
-        let description = "\
+        let runtime_contract = serde_json::json!({
+            "schema": "missiond.runtime-task-contract.v1",
+            "source": "mission_task_delegate",
+            "task_contract_id": "task-contract-test",
+            "dispatch_metadata": {
+                "write_policy": "write",
+                "write_scope": ["services/auth/.missiond/backend/auth.lisp"],
+                "acceptance": "node scripts/check-service-ssot.mjs auth --json"
+            }
+        })
+        .to_string();
+        let description_projection = "\
 Implement the shard.
 
 ## Swarm metadata
@@ -6677,12 +6897,17 @@ Implement the shard.
 - write_scope: services/auth/.missiond/backend/auth.lisp
 - acceptance: node scripts/check-service-ssot.mjs auth --json";
         assert_eq!(
-            delegated_write_close_evidence_blocker(description, true, "Done."),
+            delegated_write_close_evidence_blocker(description_projection, true, "Done."),
+            None,
+            "BoardTask.description is a prompt projection and must not drive write-close diagnostics"
+        );
+        assert_eq!(
+            delegated_write_close_evidence_blocker(&runtime_contract, true, "Done."),
             Some("missing-acceptance-evidence")
         );
         assert_eq!(
             delegated_write_close_evidence_blocker(
-                description,
+                &runtime_contract,
                 true,
                 "Changed files: services/auth/.missiond/backend/auth.lisp\nVerification: node scripts/check-service-ssot.mjs auth --json passed."
             ),
@@ -6690,7 +6915,7 @@ Implement the shard.
         );
         assert_eq!(
             delegated_write_close_evidence_blocker(
-                description,
+                &runtime_contract,
                 true,
                 "Both gates green. Run the JSON evidence-only gate to capture full evidence/structural snapshot, then verify git status shows only the intended changes."
             ),
@@ -6698,7 +6923,7 @@ Implement the shard.
         );
         assert_eq!(
             delegated_write_close_evidence_blocker(
-                description,
+                &runtime_contract,
                 true,
                 "Clean — must-not-touch paths are untouched. Final M10 evidence-only gate confirmation:"
             ),
@@ -6706,7 +6931,7 @@ Implement the shard.
         );
         assert_eq!(
             delegated_write_close_evidence_blocker(
-                description,
+                &runtime_contract,
                 true,
                 "Acceptance commands passed. check.sh passed and the M10 evidence-only gate passed."
             ),
@@ -8185,26 +8410,8 @@ Review only.
     }
 
     #[test]
-    fn extract_dispatch_metadata_field_finds_value_under_dispatch_block() {
-        let description =
-            "blah\n## Dispatch metadata\n- task_class: review\n- engine_hint: claude-code\n";
-        assert_eq!(
-            extract_dispatch_metadata_field(description, "task_class"),
-            Some("review".to_string())
-        );
-        assert_eq!(
-            extract_dispatch_metadata_field(description, "engine_hint"),
-            Some("claude-code".to_string())
-        );
-        assert_eq!(
-            extract_dispatch_metadata_field(description, "pool_hint"),
-            None
-        );
-    }
-
-    #[test]
-    fn extract_dispatch_metadata_field_reads_json_metadata() {
-        let description = serde_json::json!({
+    fn extract_runtime_contract_field_reads_json_metadata() {
+        let runtime_contract = serde_json::json!({
             "source": "jarvis-intent-plan-gate",
             "grounding_context_id": "ctx-123",
             "context_pack_path": "/tmp/context-pack.lisp",
@@ -8214,15 +8421,15 @@ Review only.
         })
         .to_string();
         assert_eq!(
-            extract_dispatch_metadata_field(&description, "grounding_context_id"),
+            extract_runtime_contract_field(&runtime_contract, "grounding_context_id"),
             Some("ctx-123".to_string())
         );
         assert_eq!(
-            extract_dispatch_metadata_field(&description, "task_class"),
+            extract_runtime_contract_field(&runtime_contract, "task_class"),
             Some("review".to_string())
         );
         assert_eq!(
-            extract_dispatch_metadata_field(&description, "context_pack_path"),
+            extract_runtime_contract_field(&runtime_contract, "context_pack_path"),
             Some("/tmp/context-pack.lisp".to_string())
         );
     }
@@ -8246,13 +8453,6 @@ Review only.
             }),
         );
         assert_eq!(board_task_workstation_class(&task), "review");
-    }
-
-    #[test]
-    fn extract_dispatch_metadata_field_drops_empty_values() {
-        let description = "## Dispatch metadata\n- task_class:\n- engine_hint:   \n";
-        assert!(extract_dispatch_metadata_field(description, "task_class").is_none());
-        assert!(extract_dispatch_metadata_field(description, "engine_hint").is_none());
     }
 
     #[test]
@@ -8815,7 +9015,7 @@ Verification
             }
         })
         .to_string();
-        assert!(is_delegated_worker_description(&description));
+        assert!(is_runtime_worker_contract(&description));
         assert!(delegated_task_is_read_only(&description));
         assert_eq!(delegated_write_scope(&description), Vec::<String>::new());
         assert_eq!(
@@ -8852,6 +9052,38 @@ Verification
         let report = "## Findings\n- Ready.\n\n## Evidence\n- Monitor is ready.\n\n## Recommendations\n- Keep this path.\n\n## Verification\n- No file edits.";
         assert_eq!(output_contract_close_blocker_for_task(&task, report), None);
         assert_eq!(pty_only_close_blocker_for_task(&task, false, report), None);
+    }
+
+    #[test]
+    fn readonly_result_task_detects_nested_empty_write_scope() {
+        let mut task = make_board_task("Review", "Prompt projection only.", "dev", None);
+        set_test_dispatch_metadata(
+            &mut task,
+            serde_json::json!({
+                "task_class": "review",
+                "read_scope": ["/Users/rickyhq/Projects/missiond"],
+                "write_scope": [],
+                "must_not_touch": ["**/*"]
+            }),
+        );
+        assert!(board_task_is_read_only_result_task(&task));
+        assert_eq!(
+            board_task_runtime_metadata_string_list(&task, "read_scope"),
+            vec!["/Users/rickyhq/Projects/missiond".to_string()]
+        );
+    }
+
+    #[test]
+    fn readonly_result_task_rejects_any_nested_write_scope() {
+        let mut task = make_board_task("Patch", "Prompt projection only.", "dev", None);
+        set_test_dispatch_metadata(
+            &mut task,
+            serde_json::json!({
+                "task_class": "code",
+                "write_scope": ["crates/missiond-daemon/src/engine/intent_engine/autopilot.rs"]
+            }),
+        );
+        assert!(!board_task_is_read_only_result_task(&task));
     }
 
     #[test]
@@ -9037,18 +9269,18 @@ Verification
         assert!(!completion.summary.contains(foreign_task_id));
     }
 
-    /// `is_delegated_worker_description` only fires on the V3 envelope
+    /// Runtime worker detection only fires on the V3 envelope
     /// markers — chat-style descriptions stay out of the gate.
     #[test]
     fn delegated_worker_detector_ignores_chat_descriptions() {
-        assert!(!is_delegated_worker_description("just a chat note"));
-        assert!(is_delegated_worker_description(
+        assert!(!is_runtime_worker_contract("just a chat note"));
+        assert!(is_runtime_worker_contract(
             "objective\n\n## Dispatch metadata\n- task_class: code"
         ));
-        assert!(is_delegated_worker_description(
+        assert!(is_runtime_worker_contract(
             "objective\n\n## Swarm metadata\n- target_projects: a=...\n"
         ));
-        assert!(is_delegated_worker_description(
+        assert!(is_runtime_worker_contract(
             &serde_json::json!({
                 "source": "jarvis-intent-plan-gate",
                 "dispatch_metadata": {"task_class": "review"}

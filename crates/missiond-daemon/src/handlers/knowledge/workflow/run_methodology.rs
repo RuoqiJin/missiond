@@ -166,11 +166,41 @@ pub(super) async fn action_run_methodology(state: &AppState, args: &Value) -> Re
                     &task_id,
                     &missiond_core::types::UpdateBoardTaskInput {
                         flow_phase: Some("completed".to_string()),
-                        status: Some("done".to_string()),
                         ..Default::default()
                     },
                 )
                 .await;
+            crate::engine::control_plane_kernel::ControlPlaneKernel::new(state)
+                .complete_system_task(
+                    crate::engine::control_plane_kernel::SystemTaskCompletionInput {
+                        task_id: task_id.clone(),
+                        project_id: None,
+                        producer_id: "workflow_run_methodology".to_string(),
+                        summary: format!("Workflow methodology `{}` completed.", flow.id),
+                        content: Some(format!(
+                            "Workflow methodology `{}` completed through the flow runner.",
+                            flow.id
+                        )),
+                        raw_evidence: json!({
+                            "kind": "workflow_methodology_run",
+                            "flow_id": flow.id,
+                            "workflow_id": record_intent.workflow_id,
+                            "cost_usd": record_intent.cost_usd
+                        }),
+                        evidence_refs: vec![json!({
+                            "kind": "workflow_methodology_run",
+                            "flow_id": flow.id
+                        })],
+                        result_status: "completed".to_string(),
+                        metadata: json!({
+                            "flow_id": flow.id,
+                            "workflow_id": record_intent.workflow_id,
+                            "cost_usd": record_intent.cost_usd
+                        }),
+                    },
+                )
+                .await
+                .map_err(|err| anyhow!("control-plane settle failed: {}", err))?;
             if let Some(workflow_id) = record_intent.workflow_id {
                 state
                     .store

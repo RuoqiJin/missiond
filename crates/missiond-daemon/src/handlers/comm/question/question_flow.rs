@@ -1,12 +1,10 @@
 use anyhow::{anyhow, Result};
-use missiond_core::event::events::{BoardEvent, QuestionEvent, TaskEvent};
-use missiond_core::types::{
-    AddBoardTaskNoteInput, AgentQuestion, AgentQuestionStatus, UpdateBoardTaskInput,
-};
+use missiond_core::event::events::{QuestionEvent, TaskEvent};
+use missiond_core::types::{AddBoardTaskNoteInput, AgentQuestion, AgentQuestionStatus};
 use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
-use serde_json::Value;
-use tracing::info;
+use serde_json::{json, Value};
+use tracing::{info, warn};
 
 use crate::state::AppState;
 
@@ -317,30 +315,43 @@ async fn close_stale_lisp_code_sync_linked_task(
         .store
         .add_board_task_note(&AddBoardTaskNoteInput {
             task_id: task_id.to_string(),
-            content: note,
+            content: note.clone(),
             note_type: Some("summary".to_string()),
             author: Some("decision-inbox-revalidation".to_string()),
         })
         .await;
-    let _ = state
-        .store
-        .update_board_task(
-            task_id,
-            &UpdateBoardTaskInput {
-                status: Some("done".to_string()),
-                auto_execute: Some(false),
-                ..Default::default()
+    if let Err(err) = crate::engine::control_plane_kernel::ControlPlaneKernel::new(state)
+        .complete_system_task(
+            crate::engine::control_plane_kernel::SystemTaskCompletionInput {
+                task_id: task_id.to_string(),
+                project_id: None,
+                producer_id: "decision_inbox_revalidation".to_string(),
+                summary: format!(
+                    "Linked decision {} was resolved by runtime revalidation.",
+                    question.id
+                ),
+                content: Some(note),
+                raw_evidence: json!({
+                    "kind": "decision_inbox_revalidation",
+                    "question_id": question.id,
+                    "answer": answer,
+                    "old_status": old_status
+                }),
+                evidence_refs: vec![json!({
+                    "kind": "agent_question",
+                    "question_id": question.id
+                })],
+                result_status: "completed".to_string(),
+                metadata: json!({
+                    "question_id": question.id,
+                    "source": "decision_inbox_revalidation"
+                }),
             },
         )
-        .await;
-    let _ = state
-        .bus
-        .publish_board(BoardEvent::StatusChanged {
-            task_id: task_id.to_string(),
-            old_status,
-            new_status: "done".to_string(),
-        })
-        .await;
+        .await
+    {
+        warn!(task_id, error = %err, "decision revalidation failed to settle linked BoardTask");
+    }
 }
 
 fn is_lisp_code_sync_stale_decision_candidate(question: &AgentQuestion) -> bool {

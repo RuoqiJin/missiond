@@ -622,12 +622,13 @@ impl BoardStore for PgMissionStore {
 
     async fn toggle_board_task(&self, id: &str) -> DbResult<Option<BoardTask>> {
         if let Some(task) = self.get_board_task(id).await? {
-            let new_status = match task.status {
-                BoardTaskStatus::Done => "open",
-                _ => "done",
-            };
+            if task.status != BoardTaskStatus::Done {
+                return Err(DbError::EvidenceRequired {
+                    task_id: task.id.to_string(),
+                });
+            }
             let update = UpdateBoardTaskInput {
-                status: Some(new_status.to_string()),
+                status: Some("open".to_string()),
                 ..Default::default()
             };
             self.update_board_task(id, &update).await
@@ -679,11 +680,7 @@ impl BoardStore for PgMissionStore {
         .await?;
 
         if let Some((id,)) = task_id {
-            let update = UpdateBoardTaskInput {
-                status: Some("done".to_string()),
-                ..Default::default()
-            };
-            self.update_board_task(&id, &update).await
+            Err(DbError::EvidenceRequired { task_id: id })
         } else {
             Ok(None)
         }

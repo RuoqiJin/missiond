@@ -79,8 +79,46 @@ pub(crate) async fn health_scan(state: &AppState) {
 
         if healthy {
             // Recovery: auto-close the open alert task if one exists
-            match state.store.close_task_by_dedupe_key(&dedupe_key).await {
+            match state.store.find_open_task_by_dedupe_key(&dedupe_key).await {
                 Ok(Some(task)) => {
+                    let settle =
+                        crate::engine::control_plane_kernel::ControlPlaneKernel::new(state)
+                            .complete_system_task(
+                                crate::engine::control_plane_kernel::SystemTaskCompletionInput {
+                                    task_id: task.id.to_string(),
+                                    project_id: task.project.clone(),
+                                    producer_id: "aiops_health_scan".to_string(),
+                                    summary: format!(
+                                        "{} recovered after health check.",
+                                        server_name
+                                    ),
+                                    content: Some(format!(
+                                        "Server {} ({}) recovered; health endpoint {} is healthy.",
+                                        server_name, server_id, endpoint
+                                    )),
+                                    raw_evidence: json!({
+                                        "kind": "health_scan_recovery",
+                                        "server_id": server_id,
+                                        "server_name": server_name,
+                                        "endpoint": endpoint,
+                                        "healthy": healthy
+                                    }),
+                                    evidence_refs: vec![json!({
+                                        "kind": "health_scan",
+                                        "server_id": server_id
+                                    })],
+                                    result_status: "completed".to_string(),
+                                    metadata: json!({
+                                        "server_id": server_id,
+                                        "source": "aiops_health_scan"
+                                    }),
+                                },
+                            )
+                            .await;
+                    if let Err(err) = settle {
+                        warn!(error = %err, task_id = %task.id, "AIOps: failed to settle recovery task");
+                        continue;
+                    }
                     // Add recovery note
                     let _ = state
                         .store

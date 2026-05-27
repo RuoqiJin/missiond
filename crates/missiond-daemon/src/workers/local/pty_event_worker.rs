@@ -486,14 +486,17 @@ async fn handle_submit_task_closure(s: &AppState, slot_id: &str) {
         } else {
             result_text
         };
-        let _ = s
-            .store
-            .update_board_task(
+        let _ = crate::engine::control_plane_kernel::ControlPlaneKernel::new(s)
+            .record_observation(
                 task.id.as_str(),
-                &missiond_core::types::UpdateBoardTaskInput {
-                    status: Some("done".to_string()),
-                    ..Default::default()
-                },
+                "pty_event_worker",
+                serde_json::json!({
+                    "schema": "missiond.pty-completion-observation.v1",
+                    "slot_id": slot_id,
+                    "jsonl_confirmed": jsonl_confirmed,
+                    "elapsed_ms": elapsed,
+                    "summary": result_text
+                }),
             )
             .await;
         // Append the result as a board_task note for audit trail (replaces TaskUpdate.result).

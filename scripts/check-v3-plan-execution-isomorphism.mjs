@@ -542,8 +542,8 @@ function checkFiles(root, files) {
       'struct DuplicateCodeWorker',
       'fn dedup_applies',
       'async fn find_overlapping_active_code_worker',
-      'fn parse_write_scope_from_description',
-      'fn description_references_source',
+      'fn board_task_write_scope',
+      'fn board_task_references_source',
       'fn compute_scope_overlap',
       'async fn attach_duplicate_delegation_note',
       'fn build_duplicate_code_worker_refusal',
@@ -2160,8 +2160,8 @@ struct DuplicateCodeCheck<'a> {}
 struct DuplicateCodeWorker {}
 fn dedup_applies() {}
 async fn find_overlapping_active_code_worker() {}
-fn parse_write_scope_from_description() {}
-fn description_references_source() {}
+fn board_task_write_scope() {}
+fn board_task_references_source() {}
 fn compute_scope_overlap() {}
 async fn attach_duplicate_delegation_note() {}
 fn build_duplicate_code_worker_refusal() {

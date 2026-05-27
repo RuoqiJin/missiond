@@ -307,13 +307,27 @@ async fn execute_daemon_action(
             extract_tool_text(&result)
         }
         "close_flow" => {
-            state
-                .store
-                .update_board_task(
-                    task_id,
-                    &missiond_core::types::UpdateBoardTaskInput {
-                        status: Some("done".to_string()),
-                        ..Default::default()
+            crate::engine::control_plane_kernel::ControlPlaneKernel::new(state)
+                .complete_system_task(
+                    crate::engine::control_plane_kernel::SystemTaskCompletionInput {
+                        task_id: task_id.to_string(),
+                        project_id: None,
+                        producer_id: "flow_daemon_action".to_string(),
+                        summary: "Flow daemon action requested completion.".to_string(),
+                        content: Some("Flow daemon action completed.".to_string()),
+                        raw_evidence: serde_json::json!({
+                            "kind": "flow_daemon_action",
+                            "action": "close_flow",
+                            "task_id": task_id
+                        }),
+                        evidence_refs: vec![serde_json::json!({
+                            "kind": "flow_daemon_action",
+                            "action": "close_flow"
+                        })],
+                        result_status: "completed".to_string(),
+                        metadata: serde_json::json!({
+                            "daemon_action": "close_flow"
+                        }),
                     },
                 )
                 .await?;

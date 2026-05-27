@@ -7,6 +7,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tracing::{error, info};
 
+use crate::engine::control_plane_kernel::{ControlPlaneKernel, SystemTaskCompletionInput};
 use crate::engine::flow::loader;
 use crate::slot_orchestrator::project_root::{
     resolve_target_project_root, ResolutionError, ResolutionSource,
@@ -150,11 +151,45 @@ async fn action_run(state: &AppState, args: &Value) -> Result<ToolResult> {
                     &task_id,
                     &missiond_core::types::UpdateBoardTaskInput {
                         flow_phase: Some("completed".to_string()),
-                        status: Some("done".to_string()),
                         ..Default::default()
                     },
                 )
                 .await;
+            ControlPlaneKernel::new(state)
+                .complete_system_task(SystemTaskCompletionInput {
+                    task_id: task_id.clone(),
+                    project_id: args
+                        .get("project_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    producer_id: "flow_run".to_string(),
+                    summary: format!("Flow `{}` completed.", flow.id),
+                    content: Some(format!(
+                        "Flow `{}` completed with {} completed node(s).",
+                        flow.id,
+                        ctx.completed_nodes.len()
+                    )),
+                    raw_evidence: json!({
+                        "kind": "flow_run",
+                        "flow_id": flow.id,
+                        "completed_nodes": ctx.completed_nodes,
+                        "flow_source": loaded.source.as_str(),
+                        "flow_path": loaded.path.display().to_string(),
+                        "project_root": project.root_display()
+                    }),
+                    evidence_refs: vec![json!({
+                        "kind": "flow_run",
+                        "flow_id": flow.id
+                    })],
+                    result_status: "completed".to_string(),
+                    metadata: json!({
+                        "flow_id": flow.id,
+                        "flow_source": loaded.source.as_str(),
+                        "flow_path": loaded.path.display().to_string()
+                    }),
+                })
+                .await
+                .map_err(|err| anyhow!("control-plane settle failed: {}", err))?;
             Ok(ToolResult::json_pretty(&json!({
                 "task_id": task_id,
                 "flow_id": flow.id,

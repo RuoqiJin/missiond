@@ -39,11 +39,39 @@ pub(super) async fn handle_chat(state: &AppState, args: Value) -> Result<ToolRes
         .get("context")
         .and_then(|v| v.as_str())
         .unwrap_or("none");
-    let model = params
+    let route_task_class = params
+        .get("task_class")
+        .or_else(|| params.get("taskClass"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(context_mode)
+        .to_string();
+    let explicit_model = params
         .get("model")
         .and_then(|v| v.as_str())
-        .map(str::to_string)
+        .map(str::to_string);
+    let mut model = explicit_model
+        .clone()
         .unwrap_or_else(|| router_config.default_chat_model.clone());
+    let mut route_recommendation = None;
+    if explicit_model.is_none() {
+        match state
+            .shared_memory
+            .recommended_model_for_task_class(&route_task_class)
+            .await
+        {
+            Ok(Some(recommendation)) => {
+                if let Some(recommended_model) = recommendation.get("model").and_then(Value::as_str)
+                {
+                    model = recommended_model.to_string();
+                    route_recommendation = Some(recommendation);
+                }
+            }
+            Ok(None) => {}
+            Err(err) => {
+                warn!(error = %err, task_class = %route_task_class, "router chat model outcome scoring unavailable; using compiled policy default")
+            }
+        }
+    }
     let has_files = params
         .get("files")
         .and_then(|v| v.as_array())
@@ -531,11 +559,6 @@ pub(super) async fn handle_chat(state: &AppState, args: Value) -> Result<ToolRes
     let input_tokens = usage_token(usage.as_ref(), &["prompt_tokens", "input_tokens"]);
     let output_tokens = usage_token(usage.as_ref(), &["completion_tokens", "output_tokens"]);
     let total_tokens = usage_token(usage.as_ref(), &["total_tokens"]);
-    let route_task_class = params
-        .get("task_class")
-        .or_else(|| params.get("taskClass"))
-        .and_then(|v| v.as_str())
-        .unwrap_or(context_mode);
     let provider = if multimodal_use_direct_api && !multimodal_files.is_empty() {
         "gemini-direct"
     } else if state.gemini.is_cli_mode() {
@@ -552,7 +575,7 @@ pub(super) async fn handle_chat(state: &AppState, args: Value) -> Result<ToolRes
             "task_id": task_id.as_deref(),
             "provider": provider,
             "model": resp_model,
-            "task_class": route_task_class,
+            "task_class": route_task_class.as_str(),
             "latency_ms": latency_ms,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
@@ -562,7 +585,11 @@ pub(super) async fn handle_chat(state: &AppState, args: Value) -> Result<ToolRes
                 "has_files": has_files,
                 "search": search_enabled,
                 "retry_count": retry_diagnostics.len(),
-                "context_mode": context_mode
+                "context_mode": context_mode,
+                "route_decision": {
+                    "source": if route_recommendation.is_some() { "model_route_outcomes" } else { "compiled_policy" },
+                    "recommendation": route_recommendation.clone()
+                }
             }
         }))
         .await
@@ -585,6 +612,11 @@ pub(super) async fn handle_chat(state: &AppState, args: Value) -> Result<ToolRes
         "model": resp_model,
         "response": content,
         "usage": usage,
+        "route_decision": {
+            "task_class": route_task_class,
+            "source": if route_recommendation.is_some() { "model_route_outcomes" } else { "compiled_policy" },
+            "recommendation": route_recommendation
+        }
     });
     if let Some(tc) = tool_calls_owned {
         resp["tool_calls"] = tc;

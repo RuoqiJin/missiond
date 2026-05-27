@@ -16,9 +16,11 @@ Checks the hard-cut control-plane kernel contract:
 const FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   migration: 'crates/missiond-core/migrations/20260527000000_control_plane_kernel.sql',
+  controlPlaneKernel: 'crates/missiond-daemon/src/engine/control_plane_kernel.rs',
   sharedMemory: 'crates/missiond-daemon/src/engine/shared_memory.rs',
   autopilot: 'crates/missiond-daemon/src/engine/intent_engine/autopilot.rs',
   taskDelegate: 'crates/missiond-daemon/src/handlers/compute/task_delegate.rs',
+  computeSlot: 'crates/missiond-daemon/src/handlers/compute/compute_slot.rs',
   spawner: 'crates/missiond-daemon/src/slot_orchestrator/spawner.rs',
   boardStore: 'crates/missiond-core/src/db/pg/board.rs',
   boardTypes: 'crates/missiond-core/src/types/board.rs',
@@ -125,6 +127,7 @@ function checkFiles(root, files) {
     'struct CapabilityGrantInput',
     'struct TaskRuntimeContract',
     'pub(crate) async fn grant_task_capabilities',
+    'pub(crate) async fn audit_capability_bypass',
     '"job_event" | "record_job_event"',
     'INSERT INTO capability_grants',
     'INSERT INTO capability_audit_events',
@@ -134,6 +137,7 @@ function checkFiles(root, files) {
     'async fn verify_completion_scope',
     'self.require_capability(&task_id, "write", "task", &task_id)',
     'self.require_capability(task_id, "settle", "task", task_id)',
+    'operation: "spawn"',
     'worker_settle(done) for task {task_id} requires artifact_hash',
     'artifact_hash {artifact_hash} is not a completed task-result-artifact for task {task_id}',
     '"artifact.accepted"',
@@ -146,6 +150,20 @@ function checkFiles(root, files) {
     'FOR UPDATE',
     'INSERT INTO work_leases',
     '"code": CLAIM_CONFLICT_CODE',
+  ]);
+
+  requireAll(diagnostics, files.controlPlaneKernel, sources.controlPlaneKernel, [
+    'pub(crate) struct ControlPlaneKernel',
+    'pub(crate) async fn record_observation',
+    'pub(crate) async fn write_completion_artifact',
+    'pub(crate) async fn settle_task',
+    'pub(crate) async fn claim_lease',
+    'pub(crate) async fn require_capability',
+    'pub(crate) async fn project_board_view',
+    'pub(crate) async fn complete_system_task',
+    'TaskCompletionEvidenceWriter::new',
+    '"action": "worker_settle"',
+    '"artifact_hash": artifact_hash',
   ]);
 
   requireAll(diagnostics, files.autopilot, sources.autopilot, [
@@ -167,14 +185,26 @@ function checkFiles(root, files) {
     'capability_grant_ids',
     'sandbox_profile',
     'task_contract_id',
+    'Some(&task_id)',
+    'Some(&capability_grant_ids)',
     'runtime_metadata: Some(runtime_metadata.clone())',
     'runtime_metadata: Some(runtime_metadata)',
     'control_state": "runtime_metadata"',
     'fn enrich_runtime_metadata_with_control_facts',
     'fn sandbox_profile_for_worker',
-    '#[cfg(test)]\nfn parse_write_scope_from_description',
-    '#[cfg(test)]\nfn description_references_source',
     'board_task_source_reference_uses_runtime_metadata_without_description_fallback',
+  ]);
+  rejectAll(diagnostics, files.taskDelegate, sources.taskDelegate, [
+    'fn parse_write_scope_from_description',
+    'fn description_references_source',
+  ]);
+
+  requireAll(diagnostics, files.computeSlot, sources.computeSlot, [
+    'ControlPlaneKernel::new(state)',
+    '.require_capability(task_id, "spawn", "task", task_id)',
+    'mission_compute_slot(create) requires task_id with active spawn capability',
+    'audit_capability_bypass',
+    'error_codes::CAPABILITY_DENIED',
   ]);
 
   requireAll(diagnostics, files.spawner, sources.spawner, [

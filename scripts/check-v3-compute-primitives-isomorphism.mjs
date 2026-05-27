@@ -222,8 +222,8 @@ function checkFiles(root, files) {
     'mission_flow_run',
     'create_board_task',
     'status: Some("running".to_string())',
-    'status: Some("done".to_string())',
-    'status: Some("failed".to_string())',
+    'ControlPlaneKernel::new',
+    'complete_system_task',
     'resolve_project_root',
     'load_flow_from_path_with_project',
   ]);
@@ -552,7 +552,7 @@ function buildFixture() {
   fs.appendFileSync(path.join(root, DEFAULT_FILES.job), ' "poll" "list" "cancel" AsyncJobStatus::Running');
   fs.appendFileSync(
     path.join(root, DEFAULT_FILES.flowRun),
-    ' create_board_task status: Some("running".to_string()) status: Some("done".to_string()) status: Some("failed".to_string()) resolve_project_root load_flow_from_path_with_project',
+    ' create_board_task status: Some("running".to_string()) ControlPlaneKernel::new complete_system_task resolve_project_root load_flow_from_path_with_project',
   );
   fs.appendFileSync(
     path.join(root, DEFAULT_FILES.flowMod),

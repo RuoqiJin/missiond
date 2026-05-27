@@ -1,7 +1,7 @@
 use anyhow::Result;
 use missiond_core::event::events::ExecutionEvent;
 use missiond_mcp::tools::ToolResult;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::engine::task_completion_evidence::{
     TaskCompletionEvidenceInput, TaskCompletionEvidenceWriter,
@@ -230,6 +230,17 @@ pub(super) async fn action_complete(state: &AppState, args: &Value) -> Result<To
                     .or_else(|| args.get("acceptedShardId"))
                     .and_then(Value::as_str)
                     .map(str::to_string),
+                producer: Some(json!({
+                    "kind": "agent_execution_completion",
+                    "agent": agent,
+                    "execution_id": execution_id
+                })),
+                raw_evidence: Some(response.clone()),
+                evidence_refs: Some(json!([{
+                    "kind": "mission_execution_completion",
+                    "execution_id": execution_id
+                }])),
+                created_at: Some(chrono::Utc::now().to_rfc3339()),
             })
             .await;
         match artifact {

@@ -31,6 +31,10 @@ pub(crate) struct TaskCompletionEvidenceInput {
     pub content: Option<String>,
     pub json: Value,
     pub accepted_shard_id: Option<String>,
+    pub producer: Option<Value>,
+    pub raw_evidence: Option<Value>,
+    pub evidence_refs: Option<Value>,
+    pub created_at: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +99,18 @@ impl TaskCompletionEvidenceWriter {
 
 impl TaskCompletionEvidenceInput {
     fn into_payload(self) -> Value {
+        let raw_evidence = self.raw_evidence.unwrap_or_else(|| {
+            json!({
+                "kind": "task_completion_evidence_input",
+                "payload": self.json.clone()
+            })
+        });
+        let evidence_refs = self.evidence_refs.unwrap_or_else(|| {
+            json!([{
+                "kind": "task_completion_evidence_input",
+                "storage": "inline_raw_evidence"
+            }])
+        });
         json!({
             "action": "task_result_put",
             "task_id": self.task_id,
@@ -106,7 +122,11 @@ impl TaskCompletionEvidenceInput {
             "summary": self.summary,
             "content": self.content,
             "json": self.json,
-            "accepted_shard_id": self.accepted_shard_id
+            "accepted_shard_id": self.accepted_shard_id,
+            "producer": self.producer,
+            "raw_evidence": raw_evidence,
+            "evidence_refs": evidence_refs,
+            "created_at": self.created_at
         })
     }
 }

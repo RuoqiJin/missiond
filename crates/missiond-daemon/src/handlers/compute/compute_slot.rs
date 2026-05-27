@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
+use crate::engine::control_plane_kernel::ControlPlaneKernel;
 use crate::state::AppState;
 
 const CODING_DEFAULT_PROFILE: &str = "coding-default-opus-4-7";
@@ -99,6 +100,22 @@ fn string_arg<'a>(args: &'a Value, keys: &[&str]) -> Option<&'a str> {
         .filter(|s| !s.is_empty())
 }
 
+fn bool_arg(args: &Value, keys: &[&str]) -> Option<bool> {
+    keys.iter().find_map(|key| {
+        let value = args.get(*key)?;
+        if let Some(value) = value.as_bool() {
+            return Some(value);
+        }
+        value
+            .as_str()
+            .and_then(|text| match text.trim().to_ascii_lowercase().as_str() {
+                "true" | "1" | "yes" | "on" => Some(true),
+                "false" | "0" | "no" | "off" => Some(false),
+                _ => None,
+            })
+    })
+}
+
 fn available_templates_suggestion(config: &WorkstationRuntimeConfig) -> String {
     format!(
         "Available templates: {}",
@@ -172,6 +189,62 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
             ));
         }
     };
+    let objective = args.get("objective").and_then(|v| v.as_str());
+    let task_id = string_arg(args, &["task_id", "taskId"]).map(str::to_string);
+    if let Some(task_id) = task_id.as_deref() {
+        if let Err(err) = ControlPlaneKernel::new(state)
+            .require_capability(task_id, "spawn", "task", task_id)
+            .await
+        {
+            return Ok(ToolResult::structured_error(control_plane_tool_error(
+                err,
+                "spawn dynamic workers through mission_task_delegate so the BoardTask carries active spawn capability and sandbox metadata",
+            )));
+        }
+    } else if !bool_arg(
+        args,
+        &[
+            "confirm",
+            "operator_confirm",
+            "operatorConfirm",
+            "operator_confirmed",
+            "operatorConfirmed",
+        ],
+    )
+    .unwrap_or(false)
+    {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(
+                error_codes::CAPABILITY_DENIED,
+                "mission_compute_slot(create) requires task_id with active spawn capability, or an explicit operator confirm bypass",
+            )
+            .with_details(json!({
+                "operation": "spawn",
+                "scope_kind": "task",
+                "required": "task_id"
+            }))
+            .with_suggestion(
+                "use mission_task_delegate for ordinary workers; only pass confirm=true for operator-managed diagnostic slots",
+            ),
+        ));
+    } else {
+        state
+            .shared_memory
+            .audit_capability_bypass(
+                "operator",
+                "mission_compute_slot",
+                "spawn",
+                "task",
+                "operator-confirmed-dynamic-slot",
+                "operator confirmed mission_compute_slot(create) without task-bound spawn grant",
+                json!({
+                    "template": template_name,
+                    "objective": objective,
+                }),
+            )
+            .await
+            .map_err(|e| anyhow!("capability audit error: {}", e))?;
+    }
     // Check slot limit
     let active_count = state
         .store
@@ -228,7 +301,6 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
         ));
     }
 
-    let objective = args.get("objective").and_then(|v| v.as_str());
     let explicit_initial_prompt =
         string_arg(args, &["initial_prompt", "initialPrompt"]).map(str::to_string);
 
@@ -529,6 +601,22 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
             "status_detail": "spawn_pending",
         }),
     ))
+}
+
+fn control_plane_tool_error(err: anyhow::Error, fallback_suggestion: &str) -> ToolError {
+    if let Some(control) =
+        err.downcast_ref::<crate::engine::shared_memory::StructuredControlError>()
+    {
+        let mut tool_error = ToolError::new(control.code, control.message.clone())
+            .with_details(control.details.clone());
+        if let Some(suggestion) = &control.suggestion {
+            tool_error = tool_error.with_suggestion(suggestion.clone());
+        } else {
+            tool_error = tool_error.with_suggestion(fallback_suggestion);
+        }
+        return tool_error;
+    }
+    ToolError::new(error_codes::DB_ERROR, err.to_string()).with_suggestion(fallback_suggestion)
 }
 
 async fn terminate_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
