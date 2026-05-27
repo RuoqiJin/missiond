@@ -36,8 +36,8 @@
 #                               after restart when launchd/current env enables
 #                               MISSIOND_JARVIS_SLOT_AUTO_HEAL. Default: auto.
 #   MISSION_WS_PORT             daemon HTTP/WebSocket port, default: 9120.
-#   MISSIOND_DEPLOY_TIMEOUT     socket readiness timeout, default: 30
-#   MISSIOND_DEPLOY_SMOKE_TIMEOUT  MCP smoke timeout, default: 30
+#   MISSIOND_DEPLOY_TIMEOUT     socket readiness timeout, default: 90
+#   MISSIOND_DEPLOY_SMOKE_TIMEOUT  MCP smoke timeout, default: 45
 #   MISSIOND_APPLY_BACKUP_CLEANUP  delete old .bak/.new files when cleanup applies, default: 0
 #   MISSIOND_USE_SCCACHE        when 1 and sccache exists, export RUSTC_WRAPPER=sccache
 #   CARGO_INCREMENTAL           defaults to 0 for deploy builds to avoid filling
@@ -82,8 +82,8 @@ MCP_BIN_PATH="${MISSIOND_MCP_BIN_PATH:-${INSTALL_ROOT}/mission-mcp}"
 SOCK_PATH="${MISSIOND_SOCKET_PATH:-${HOME}/.missiond/missiond.sock}"
 LABEL="${MISSIOND_LAUNCHCTL_LABEL:-com.missiond.daemon}"
 LAUNCHD_PLIST="${MISSIOND_LAUNCHD_PLIST:-${HOME}/Library/LaunchAgents/${LABEL}.plist}"
-TIMEOUT="${MISSIOND_DEPLOY_TIMEOUT:-30}"
-SMOKE_TIMEOUT="${MISSIOND_DEPLOY_SMOKE_TIMEOUT:-30}"
+TIMEOUT="${MISSIOND_DEPLOY_TIMEOUT:-90}"
+SMOKE_TIMEOUT="${MISSIOND_DEPLOY_SMOKE_TIMEOUT:-45}"
 MISSIOND_DEPLOY_ENSURE_JARVIS_SLOT="${MISSIOND_DEPLOY_ENSURE_JARVIS_SLOT:-auto}"
 MISSION_WS_PORT="${MISSION_WS_PORT:-9120}"
 RELEASE_KEEP="${MISSIOND_RELEASE_KEEP:-5}"

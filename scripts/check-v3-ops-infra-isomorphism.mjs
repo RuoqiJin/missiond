@@ -170,7 +170,7 @@ function checkFiles(root, files) {
     'command -v gtimeout',
     "perl -e 'alarm shift @ARGV; exec @ARGV'",
     'smoke_start="$(date +%s)"',
-    'SMOKE_TIMEOUT="${MISSIOND_DEPLOY_SMOKE_TIMEOUT:-30}"',
+    'SMOKE_TIMEOUT="${MISSIOND_DEPLOY_SMOKE_TIMEOUT:-45}"',
     'IPC not ready yet; retrying',
     'active_release=$RELEASE_ID',
     'rollback_with_smoke',
@@ -377,7 +377,7 @@ command -v timeout
 command -v gtimeout
 perl -e 'alarm shift @ARGV; exec @ARGV'
 smoke_start="$(date +%s)"
-SMOKE_TIMEOUT="\${MISSIOND_DEPLOY_SMOKE_TIMEOUT:-30}"
+SMOKE_TIMEOUT="\${MISSIOND_DEPLOY_SMOKE_TIMEOUT:-45}"
 IPC not ready yet; retrying
 active_release=$RELEASE_ID
 rollback_with_smoke
