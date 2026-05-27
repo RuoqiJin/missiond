@@ -33,6 +33,7 @@ const FILES = {
   boardStoreTs: 'packages/board/src/store.ts',
   verifierRouterMigration: 'crates/missiond-core/migrations/20260527001000_runtime_verifier_router_outcomes.sql',
   capabilityGrantOperationMigration: 'crates/missiond-core/migrations/20260527002000_capability_grants_spawn_operation.sql',
+  kernelReverseMigration: 'crates/missiond-core/migrations/20260527003000_kernel_reverse_convergence.sql',
   backfillRuntimeMetadata: 'scripts/backfill-board-runtime-metadata.mjs',
 };
 
@@ -93,13 +94,14 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.blueprint, sources.blueprint, [
     '(control-plane-kernel',
     ':schema "missiond.control-plane-kernel.v1"',
-    ':facts [task_result_artifacts event_log jobs job_attempts work_leases capability_grants capability_audit_events review_gates board_task_views]',
+    ':facts [task_contracts task_result_artifacts event_log jobs job_attempts work_leases capability_grants capability_audit_events review_gates board_task_views]',
     ':runtime-abi-fields [completion_artifact_schema job_state_machine capability_policy sandbox_policy projection_policy]',
     ':hard-cutover true',
     'BoardTask description, Board notes, PTY screens, TUI summaries, and provider prose are projection/observation inputs only.',
-    'Missing runtime_metadata on a control-plane task returns RUNTIME_METADATA_REQUIRED',
-    'task_result_put and worker_settle MUST pass capability checks for task settle',
-    'Worker spawn MUST project sandbox_profile from capability/write_scope facts',
+    'Runtime control paths MUST read task_contracts, subject-bound capability_grants, work_leases, jobs/job_attempts, event_log, and task_result_artifacts',
+    'Missing task_contracts on a control-plane task returns TASK_CONTRACT_REQUIRED',
+    'task_result_put and worker_settle MUST pass exact grant_id + subject_kind + subject_id + operation + scope + task_id capability checks',
+    'Worker spawn MUST carry a task-bound spawn grant',
     'ProjectionEngine updates board_task_views and Board-facing status from typed events/state',
     ':checker "scripts/check-v3-control-plane-kernel-isomorphism.mjs"',
     'node scripts/check-v3-control-plane-kernel-isomorphism.mjs',
@@ -126,25 +128,44 @@ function checkFiles(root, files) {
     "'read', 'write', 'claim', 'settle', 'delegate', 'deploy', 'network', 'spawn'",
   ]);
 
+  requireAll(diagnostics, files.kernelReverseMigration, sources.kernelReverseMigration, [
+    'DROP CONSTRAINT IF EXISTS capability_grants_subject_kind_check',
+    "'worker', 'conversation', 'task', 'system', 'operator', 'daemon'",
+    'CREATE TABLE IF NOT EXISTS task_contracts',
+    'ADD COLUMN IF NOT EXISTS heartbeat_at',
+    'ADD COLUMN IF NOT EXISTS attempt_id',
+    'producer_subject_kind',
+    'capability_grant_id',
+    'DROP VIEW IF EXISTS completion_artifacts',
+    'CREATE VIEW completion_artifacts AS',
+  ]);
+
   requireAll(diagnostics, files.sharedMemory, sources.sharedMemory, [
     'const EVIDENCE_REQUIRED_CODE: &str = "EVIDENCE_REQUIRED";',
     'const COMPLETION_ARTIFACT_INVALID_CODE: &str = "COMPLETION_ARTIFACT_INVALID";',
     'const CAPABILITY_DENIED_CODE: &str = "CAPABILITY_DENIED";',
     'const RUNTIME_METADATA_REQUIRED_CODE: &str = "RUNTIME_METADATA_REQUIRED";',
+    'const TASK_CONTRACT_REQUIRED_CODE: &str = "TASK_CONTRACT_REQUIRED";',
     'const WRITE_SCOPE_VIOLATION_CODE: &str = "WRITE_SCOPE_VIOLATION";',
     'struct CapabilityGrantInput',
+    'pub(crate) struct CapabilityCheckRequest',
     'struct TaskRuntimeContract',
+    'upsert_task_contract_from_metadata',
     'pub(crate) async fn grant_task_capabilities',
     'pub(crate) async fn audit_capability_bypass',
     '"job_event" | "record_job_event"',
     'INSERT INTO capability_grants',
     'INSERT INTO capability_audit_events',
+    'INSERT INTO task_contracts',
     'INSERT INTO board_task_views',
     'async fn require_capability',
     'async fn task_runtime_contract',
+    'FROM task_contracts',
+    'no exact active subject-bound capability grant',
     'async fn verify_completion_scope',
-    'self.require_capability(&task_id, "write", "task", &task_id)',
-    'self.require_capability(task_id, "settle", "task", task_id)',
+    'operation: "write".to_string()',
+    'operation: "settle".to_string()',
+    'attempt_id',
     'operation: "spawn"',
     'worker_settle(done) for task {task_id} requires artifact_hash',
     'artifact_hash {artifact_hash} is not a completed task-result-artifact for task {task_id}',
@@ -157,6 +178,7 @@ function checkFiles(root, files) {
     'SELECT pg_advisory_xact_lock(hashtextextended($1::text || \':\' || $2::text, 0))',
     'FOR UPDATE',
     'INSERT INTO work_leases',
+    'FROM work_leases',
     '"code": CLAIM_CONFLICT_CODE',
   ]);
 
@@ -169,8 +191,12 @@ function checkFiles(root, files) {
     'pub(crate) async fn require_capability',
     'pub(crate) async fn project_board_view',
     'pub(crate) async fn complete_system_task',
+    'CapabilityCheckRequest',
+    'record_job_event_typed',
+    'settle_worker_typed',
+    'claim_lease_typed',
+    'upsert_task_contract_from_metadata',
     'TaskCompletionEvidenceWriter::new',
-    '"action": "worker_settle"',
     '"artifact_hash": artifact_hash',
   ]);
 
@@ -183,6 +209,8 @@ function checkFiles(root, files) {
     'no canonical completed task_result_artifact exists yet',
     '"action": "job_event"',
     '"action": "worker_settle"',
+    'autopilot_readonly_ok',
+    'observed_readonly_completion',
   ]);
   rejectAll(diagnostics, files.autopilot, sources.autopilot, [
     '"action": "task_result_put"',
@@ -196,8 +224,8 @@ function checkFiles(root, files) {
     'Some(&task_id)',
     'Some(&capability_grant_ids)',
     'runtime_metadata: Some(runtime_metadata.clone())',
-    'runtime_metadata: Some(runtime_metadata)',
-    'control_state": "runtime_metadata"',
+    'control_state": "task_contracts"',
+    'upsert_task_contract_from_metadata',
     'fn enrich_runtime_metadata_with_control_facts',
     'fn sandbox_profile_for_worker',
     'board_task_source_reference_uses_runtime_metadata_without_description_fallback',
@@ -208,8 +236,9 @@ function checkFiles(root, files) {
   ]);
 
   requireAll(diagnostics, files.computeSlot, sources.computeSlot, [
-    'ControlPlaneKernel::new(state)',
-    '.require_capability(task_id, "spawn", "task", task_id)',
+    'CapabilityCheckRequest',
+    'operation: "spawn".to_string()',
+    'capability_grant_id',
     'mission_compute_slot(create) requires task_id with active spawn capability',
     'audit_capability_bypass',
     'error_codes::CAPABILITY_DENIED',
@@ -241,6 +270,12 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.verifierRouterMigration, sources.verifierRouterMigration, [
     'CREATE TABLE IF NOT EXISTS worktree_manifests',
     'CREATE TABLE IF NOT EXISTS model_route_outcomes',
+    'prompt_tokens',
+    'completion_tokens',
+    'cost_usd',
+    'decision JSONB',
+    'outcome JSONB',
+    'status TEXT',
     'idx_worktree_manifests_attempt_phase',
     'idx_model_route_outcomes_model',
   ]);
@@ -266,6 +301,7 @@ function checkFiles(root, files) {
       'COMPLETION_ARTIFACT_INVALID',
       'CAPABILITY_DENIED',
       'RUNTIME_METADATA_REQUIRED',
+      'TASK_CONTRACT_REQUIRED',
       'SANDBOX_POLICY_UNSUPPORTED',
       'WRITE_SCOPE_VIOLATION',
     ]);

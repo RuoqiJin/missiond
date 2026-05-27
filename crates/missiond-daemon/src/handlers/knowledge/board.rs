@@ -100,6 +100,10 @@ pub(super) fn board_store_error(tool: &str, err: missiond_core::db::error::DbErr
             error_codes::RUNTIME_METADATA_REQUIRED,
             "migrate/backfill the BoardTask runtime_metadata before using it as a control-plane task",
         ),
+        missiond_core::db::error::DbError::TaskContractRequired { .. } => (
+            error_codes::TASK_CONTRACT_REQUIRED,
+            "run the task contract backfill before using this legacy BoardTask as a control-plane task",
+        ),
         missiond_core::db::error::DbError::SandboxPolicyUnsupported { .. } => (
             error_codes::SANDBOX_POLICY_UNSUPPORTED,
             "route the task to a worker engine with an enforceable sandbox profile or reduce the task to read-only",
@@ -107,6 +111,10 @@ pub(super) fn board_store_error(tool: &str, err: missiond_core::db::error::DbErr
         missiond_core::db::error::DbError::WriteScopeViolation { .. } => (
             error_codes::WRITE_SCOPE_VIOLATION,
             "move the change back inside write_scope, remove forbidden path changes, then produce a new completion artifact",
+        ),
+        missiond_core::db::error::DbError::FeatureDisabled { .. } => (
+            error_codes::FEATURE_DISABLED,
+            "enable the matching MissionD feature gate explicitly or use the kernel core path",
         ),
         missiond_core::db::error::DbError::Constraint(_) => (
             error_codes::INVALID_PARAM,

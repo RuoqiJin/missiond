@@ -4,7 +4,7 @@
 // Do not edit by hand.
 
 export const SCHEMA_VERSION = "missiond.compiled-runtime-config.v1";
-export const SOURCE_HASH = "02db887e9bb006380aa9dd6420b48711";
+export const SOURCE_HASH = "efc65da2628f741dc19440b48413b2e7";
 export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
   "blueprint": ".missiond/v3/missiond-blueprint.lisp",
   "source_units": [
@@ -13,7 +13,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
       "kind": "missiond-blueprint",
       "included_by": null,
       "include_line": null,
-      "source_hash": "7923625151f450c4bdc24ad439361eed"
+      "source_hash": "d15ddf2b5607ca9d03da711ac3dcd09f"
     },
     {
       "file": ".missiond/v3/shards/index.lisp",
@@ -41,7 +41,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
       "kind": "multi-section-shard",
       "included_by": ".missiond/v3/shards/index.lisp",
       "include_line": 21,
-      "source_hash": "28bfd51074e885f2603cfae9a06cb926"
+      "source_hash": "77061293cdb1d0d80eddb682084f525d"
     },
     {
       "file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
@@ -159,14 +159,14 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
   "source_domains": [
     {
       "id": "blueprint-core",
-      "source_hash": "14d4bfd1bb8811acec461b7abcd45440",
+      "source_hash": "16a54acdd8ecb42b7af9905cdd78cad5",
       "source_units": [
         {
           "file": ".missiond/v3/missiond-blueprint.lisp",
           "kind": "missiond-blueprint",
           "included_by": null,
           "include_line": null,
-          "source_hash": "7923625151f450c4bdc24ad439361eed"
+          "source_hash": "d15ddf2b5607ca9d03da711ac3dcd09f"
         },
         {
           "file": ".missiond/v3/shards/index.lisp",
@@ -179,7 +179,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
     },
     {
       "id": "control-plane-runtime",
-      "source_hash": "68121808d7f2b6a975f4195230ddccb3",
+      "source_hash": "8e90d568bb6aec5622ab4ce2c7a5bf45",
       "source_units": [
         {
           "file": ".missiond/v3/shards/request-runtime.lisp",
@@ -193,7 +193,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
           "kind": "multi-section-shard",
           "included_by": ".missiond/v3/shards/index.lisp",
           "include_line": 21,
-          "source_hash": "28bfd51074e885f2603cfae9a06cb926"
+          "source_hash": "77061293cdb1d0d80eddb682084f525d"
         }
       ]
     },
@@ -393,7 +393,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 323,
         "source_column": 3,
-        "source_hash": "02db887e9bb006380aa9dd6420b48711"
+        "source_hash": "efc65da2628f741dc19440b48413b2e7"
       }
     },
     {
@@ -418,7 +418,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 344,
         "source_column": 3,
-        "source_hash": "02db887e9bb006380aa9dd6420b48711"
+        "source_hash": "efc65da2628f741dc19440b48413b2e7"
       }
     },
     {
@@ -440,7 +440,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 357,
         "source_column": 3,
-        "source_hash": "02db887e9bb006380aa9dd6420b48711"
+        "source_hash": "efc65da2628f741dc19440b48413b2e7"
       }
     },
     {
@@ -459,7 +459,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 369,
         "source_column": 3,
-        "source_hash": "02db887e9bb006380aa9dd6420b48711"
+        "source_hash": "efc65da2628f741dc19440b48413b2e7"
       }
     },
     {
@@ -480,7 +480,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 379,
         "source_column": 3,
-        "source_hash": "02db887e9bb006380aa9dd6420b48711"
+        "source_hash": "efc65da2628f741dc19440b48413b2e7"
       }
     },
     {
@@ -523,7 +523,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 390,
         "source_column": 3,
-        "source_hash": "02db887e9bb006380aa9dd6420b48711"
+        "source_hash": "efc65da2628f741dc19440b48413b2e7"
       }
     },
     {
@@ -545,7 +545,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
         "source_file": ".missiond/v3/shards/universe/project-registry.lisp",
         "source_line": 1,
         "source_column": 1,
-        "source_hash": "02db887e9bb006380aa9dd6420b48711"
+        "source_hash": "efc65da2628f741dc19440b48413b2e7"
       }
     },
     {
@@ -565,7 +565,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 1,
         "source_column": 3,
-        "source_hash": "02db887e9bb006380aa9dd6420b48711"
+        "source_hash": "efc65da2628f741dc19440b48413b2e7"
       }
     },
     {
@@ -592,7 +592,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 118,
         "source_column": 3,
-        "source_hash": "02db887e9bb006380aa9dd6420b48711"
+        "source_hash": "efc65da2628f741dc19440b48413b2e7"
       }
     },
     {
@@ -629,7 +629,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 185,
         "source_column": 3,
-        "source_hash": "02db887e9bb006380aa9dd6420b48711"
+        "source_hash": "efc65da2628f741dc19440b48413b2e7"
       }
     },
     {
@@ -673,7 +673,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 141,
         "source_column": 3,
-        "source_hash": "02db887e9bb006380aa9dd6420b48711"
+        "source_hash": "efc65da2628f741dc19440b48413b2e7"
       }
     }
   ],
@@ -1231,6 +1231,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
     "schema": "missiond.control-plane-kernel.v1",
     "authority": "postgres-typed-runtime-facts",
     "facts": [
+      "task_contracts",
       "task_result_artifacts",
       "event_log",
       "jobs",
@@ -1251,10 +1252,10 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
     "hard_cutover": true,
     "rules": [
       "BoardTask description, Board notes, PTY screens, TUI summaries, and provider prose are projection/observation inputs only.",
-      "Runtime control paths MUST read BoardTask.runtime_metadata, capability_grants, work_leases, jobs/job_attempts, event_log, and task_result_artifacts.",
-      "Missing runtime_metadata on a control-plane task returns RUNTIME_METADATA_REQUIRED; MissionD must not parse Markdown descriptions to recover control fields.",
-      "task_result_put and worker_settle MUST pass capability checks for task settle; write-scoped completed artifacts also require verification and changed-path evidence.",
-      "Worker spawn MUST project sandbox_profile from capability/write_scope facts; unsupported engine/scope combinations return SANDBOX_POLICY_UNSUPPORTED or CAPABILITY_DENIED.",
+      "Runtime control paths MUST read task_contracts, subject-bound capability_grants, work_leases, jobs/job_attempts, event_log, and task_result_artifacts; BoardTask.runtime_metadata is a UI/cache projection only.",
+      "Missing task_contracts on a control-plane task returns TASK_CONTRACT_REQUIRED; MissionD must not parse Markdown descriptions or BoardTask.runtime_metadata to recover canonical control fields.",
+      "task_result_put and worker_settle MUST pass exact grant_id + subject_kind + subject_id + operation + scope + task_id capability checks; write-scoped completed artifacts also require current attempt_id plus verification and changed-path evidence.",
+      "Worker spawn MUST carry a task-bound spawn grant and project sandbox_profile from task_contracts/capability facts; unsupported engine/scope combinations return SANDBOX_POLICY_UNSUPPORTED or CAPABILITY_DENIED.",
       "ProjectionEngine updates board_task_views and Board-facing status from typed events/state, not from note text or PTY/provider final prose."
     ],
     "state_machine": [],

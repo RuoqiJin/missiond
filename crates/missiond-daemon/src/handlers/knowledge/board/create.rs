@@ -38,6 +38,25 @@ pub(super) async fn handle_create(state: &AppState, args: Value) -> Result<ToolR
             Err(err) => return Ok(super::board_store_error("mission_board_create grants", err)),
         }
     }
+    if let Err(err) = state
+        .shared_memory
+        .upsert_task_contract_from_metadata(
+            task.id.as_str(),
+            task.project.as_deref(),
+            &task.runtime_metadata,
+        )
+        .await
+    {
+        return Ok(ToolResult::structured_error(
+            missiond_mcp::tools::ToolError::new(
+                missiond_mcp::tools::error_codes::DB_ERROR,
+                format!("mission_board_create task contract failed: {err}"),
+            )
+            .with_suggestion(
+                "retry after migrations are applied; task_contracts is required for control-plane tasks",
+            ),
+        ));
+    }
 
     // If flowTemplate is set, initialize flow fields.
     if input.flow_template.is_some() {

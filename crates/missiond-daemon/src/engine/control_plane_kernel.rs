@@ -2,6 +2,7 @@ use anyhow::{anyhow, Result};
 use chrono::Utc;
 use serde_json::{json, Value};
 
+use crate::engine::shared_memory::{CapabilityCheckRequest, ClaimRequest};
 use crate::engine::task_completion_evidence::{
     TaskCompletionEvidenceInput, TaskCompletionEvidenceWriter,
 };
@@ -37,13 +38,7 @@ impl<'a> ControlPlaneKernel<'a> {
     ) -> Result<Value> {
         self.state
             .shared_memory
-            .handle_action(&json!({
-                "action": "job_event",
-                "task_id": task_id,
-                "agent_id": producer_id,
-                "event_kind": "observation.recorded",
-                "payload": payload
-            }))
+            .record_job_event_typed(task_id, None, producer_id, "observation.recorded", payload)
             .await
     }
 
@@ -66,13 +61,15 @@ impl<'a> ControlPlaneKernel<'a> {
     ) -> Result<Value> {
         self.state
             .shared_memory
-            .handle_action(&json!({
-                "action": "worker_settle",
+            .settle_worker_typed(json!({
                 "task_id": task_id,
                 "status": "done",
                 "artifact_hash": artifact_hash,
                 "summary": summary,
-                "slot_id": producer_id
+                "slot_id": producer_id,
+                "subject_kind": "system",
+                "subject_id": producer_id,
+                "confirm": true
             }))
             .await
     }
@@ -86,16 +83,17 @@ impl<'a> ControlPlaneKernel<'a> {
     ) -> Result<Value> {
         self.state
             .shared_memory
-            .handle_action(&json!({
-                "action": "claim",
-                "task_id": task_id,
-                "owner_id": owner_id,
-                "scope_kind": scope_kind,
-                "scope_key": scope_key,
-                "metadata": {
+            .claim_lease_typed(ClaimRequest {
+                project_id: None,
+                task_id: Some(task_id.to_string()),
+                owner_id: owner_id.to_string(),
+                scope_kind: scope_kind.to_string(),
+                scope_key: scope_key.to_string(),
+                lease_secs: 1800,
+                metadata: json!({
                     "source": "control-plane-kernel"
-                }
-            }))
+                }),
+            })
             .await
     }
 
@@ -106,16 +104,31 @@ impl<'a> ControlPlaneKernel<'a> {
         scope_kind: &str,
         scope_key: &str,
     ) -> Result<Value> {
-        self.state
+        let grant_id = self
+            .state
             .shared_memory
-            .handle_action(&json!({
-                "action": "capability_check",
-                "task_id": task_id,
-                "operation": operation,
-                "scope_kind": scope_kind,
-                "scope_key": scope_key
-            }))
-            .await
+            .require_capability(CapabilityCheckRequest {
+                grant_id: None,
+                subject_kind: "system".to_string(),
+                subject_id: "control-plane-kernel".to_string(),
+                operation: operation.to_string(),
+                scope_kind: scope_kind.to_string(),
+                scope_key: scope_key.to_string(),
+                task_id: Some(task_id.to_string()),
+                allow_system_bypass: true,
+                bypass_reason: Some("internal control-plane kernel authority".to_string()),
+                details: json!({}),
+            })
+            .await?;
+        Ok(json!({
+            "schema": "missiond.capability-check.v1",
+            "ok": true,
+            "grant_id": grant_id,
+            "task_id": task_id,
+            "operation": operation,
+            "scope_kind": scope_kind,
+            "scope_key": scope_key
+        }))
     }
 
     pub(crate) async fn project_board_view(
@@ -126,16 +139,17 @@ impl<'a> ControlPlaneKernel<'a> {
     ) -> Result<Value> {
         self.state
             .shared_memory
-            .handle_action(&json!({
-                "action": "job_event",
-                "task_id": task_id,
-                "event_kind": "observation.recorded",
-                "payload": {
+            .record_job_event_typed(
+                task_id,
+                None,
+                "control-plane-kernel",
+                "observation.recorded",
+                json!({
                     "schema": "missiond.board-task-view-projection-request.v1",
                     "projected_status": projected_status,
                     "projection": payload
-                }
-            }))
+                }),
+            )
             .await
     }
 
@@ -155,12 +169,14 @@ impl<'a> ControlPlaneKernel<'a> {
             .or_else(|| task.project.clone())
             .unwrap_or_else(|| "missiond".to_string());
         let task_id = input.task_id.clone();
-        let mut runtime_metadata = task.runtime_metadata.clone();
-        if runtime_metadata
+        let runtime_metadata = if task
+            .runtime_metadata
             .as_object()
-            .is_none_or(|obj| obj.is_empty())
+            .is_some_and(|obj| !obj.is_empty())
         {
-            runtime_metadata = json!({
+            task.runtime_metadata.clone()
+        } else {
+            json!({
                 "schema": "missiond.runtime-task-metadata.v1",
                 "source": "control-plane-kernel",
                 "task_contract_id": format!("board-task:{task_id}"),
@@ -170,45 +186,17 @@ impl<'a> ControlPlaneKernel<'a> {
                     "read_scope": [],
                     "write_scope": [],
                     "must_not_touch": [],
-                    "control_state": "runtime_metadata"
-                }
-            });
-        }
-        let capability_grant_ids = self
-            .state
-            .shared_memory
-            .grant_task_capabilities(
-                Some(project_id.as_str()),
-                input.task_id.as_str(),
-                "system",
-                input.producer_id.as_str(),
-                &[],
-                &[],
-                &[],
-                "control-plane-kernel",
-            )
-            .await?;
-        runtime_metadata["capability_grant_ids"] = json!(capability_grant_ids.clone());
-        runtime_metadata["sandbox_profile"] = json!("system-no-sandbox");
-        if let Some(dispatch) = runtime_metadata
-            .get_mut("dispatch_metadata")
-            .and_then(Value::as_object_mut)
-        {
-            dispatch.insert(
-                "capability_grant_ids".to_string(),
-                json!(capability_grant_ids),
-            );
-            dispatch.insert("sandbox_profile".to_string(), json!("system-no-sandbox"));
-        }
-        let _ = self
-            .state
-            .store
-            .update_board_task(
-                &input.task_id,
-                &missiond_core::types::UpdateBoardTaskInput {
-                    runtime_metadata: Some(runtime_metadata),
-                    ..Default::default()
+                    "control_state": "task_contracts"
                 },
+                "sandbox_profile": "system-no-sandbox"
+            })
+        };
+        self.state
+            .shared_memory
+            .upsert_task_contract_from_metadata(
+                input.task_id.as_str(),
+                Some(project_id.as_str()),
+                &runtime_metadata,
             )
             .await?;
 
@@ -237,6 +225,11 @@ impl<'a> ControlPlaneKernel<'a> {
                     .or_else(|| Some(input.summary.clone())),
                 json: input.metadata.clone(),
                 accepted_shard_id: None,
+                attempt_id: None,
+                capability_grant_id: None,
+                subject_kind: Some("system".to_string()),
+                subject_id: Some(input.producer_id.clone()),
+                confirm: Some(true),
                 producer: Some(json!({
                     "kind": "system",
                     "id": input.producer_id,

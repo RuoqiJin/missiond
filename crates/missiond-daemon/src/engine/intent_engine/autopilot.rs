@@ -522,12 +522,45 @@ async fn materialize_read_only_task_result_artifact_from_durable_final(
     if final_summary.is_empty() {
         return None;
     }
-    if let Err(err) = ensure_task_result_control_capabilities(state, task).await {
+    let materialization_policy = state
+        .storage()
+        .shared_memory
+        .task_completion_materialization_policy(task.id.as_str())
+        .await
+        .ok()
+        .flatten();
+    if materialization_policy.as_deref() != Some("autopilot_readonly_ok") {
+        info!(
+            task_id = %task.id,
+            slot_id,
+            "Autopilot read-only provider final recorded as observation only; completion materialization policy is not autopilot_readonly_ok"
+        );
+        return None;
+    }
+    if let Err(err) = state
+        .storage()
+        .shared_memory
+        .audit_capability_bypass(
+            "system",
+            "autopilot-readonly-materializer",
+            "write",
+            "task",
+            task.id.as_str(),
+            "explicit autopilot_readonly_ok materialization policy",
+            serde_json::json!({
+                "task_id": task.id.as_str(),
+                "policy": materialization_policy,
+                "slot_id": slot_id,
+                "conversation_id": completion.session_id
+            }),
+        )
+        .await
+    {
         warn!(
             task_id = %task.id,
             slot_id,
             error = %err,
-            "Autopilot: failed to ensure task-result control capabilities before materializing artifact"
+            "Autopilot: failed to audit read-only materialization authority"
         );
         return None;
     }
@@ -551,6 +584,8 @@ async fn materialize_read_only_task_result_artifact_from_durable_final(
                 content: Some(final_summary.to_string()),
                 json: serde_json::json!({
                     "schema": "missiond.autopilot-materialized-task-result.v1",
+                    "result_kind": "observed_readonly_completion",
+                    "completion_materialization_policy": "autopilot_readonly_ok",
                     "source": "durable_provider_final",
                     "slot_id": slot_id,
                     "conversation_id": completion.session_id.clone(),
@@ -570,6 +605,11 @@ async fn materialize_read_only_task_result_artifact_from_durable_final(
                     ]
                 }),
                 accepted_shard_id,
+                attempt_id: None,
+                capability_grant_id: None,
+                subject_kind: Some("system".to_string()),
+                subject_id: Some("autopilot-readonly-materializer".to_string()),
+                confirm: Some(true),
                 producer: Some(serde_json::json!({
                     "kind": "autopilot_materializer",
                     "source": "durable_provider_final",
@@ -620,6 +660,7 @@ async fn materialize_read_only_task_result_artifact_from_durable_final(
     }
 }
 
+#[allow(dead_code)]
 async fn ensure_task_result_control_capabilities(
     state: &AppState,
     task: &missiond_core::types::BoardTask,

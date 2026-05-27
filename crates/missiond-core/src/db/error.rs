@@ -43,11 +43,17 @@ pub enum DbError {
     #[error("RUNTIME_METADATA_REQUIRED: task_id={task_id}: runtime_metadata is required for control-plane decisions")]
     RuntimeMetadataRequired { task_id: String },
 
+    #[error("TASK_CONTRACT_REQUIRED: task_id={task_id}: task_contracts row is required for control-plane decisions")]
+    TaskContractRequired { task_id: String },
+
     #[error("SANDBOX_POLICY_UNSUPPORTED: {reason}")]
     SandboxPolicyUnsupported { reason: String },
 
     #[error("WRITE_SCOPE_VIOLATION: task_id={task_id}: {reason}")]
     WriteScopeViolation { task_id: String, reason: String },
+
+    #[error("FEATURE_DISABLED: {feature}")]
+    FeatureDisabled { feature: String },
 
     #[error("{0}")]
     Other(String),

@@ -1490,6 +1490,11 @@ async fn main() -> Result<()> {
                                     content: Some(summary.to_string()),
                                     json: req.payload.clone(),
                                     accepted_shard_id: None,
+                                    attempt_id: None,
+                                    capability_grant_id: None,
+                                    subject_kind: Some("system".to_string()),
+                                    subject_id: Some("jarvis-artifact-request".to_string()),
+                                    confirm: Some(true),
                                     producer: Some(serde_json::json!({
                                         "kind": "system",
                                         "id": "jarvis-artifact-request",

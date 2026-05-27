@@ -564,6 +564,17 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             },
         )
         .await;
+    state
+        .shared_memory
+        .upsert_task_contract_from_metadata(
+            &task_id,
+            target_project_resolution
+                .as_ref()
+                .map(|resolution| resolution.project_id.as_str()),
+            &runtime_metadata,
+        )
+        .await
+        .map_err(|e| anyhow!("task contract error: {}", e))?;
     if should_auto_provision_slot {
         match auto_provision_slot(
             state,
@@ -1203,11 +1214,20 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
                 .update_board_task(
                     &task_id,
                     &missiond_core::types::UpdateBoardTaskInput {
-                        runtime_metadata: Some(runtime_metadata),
+                        runtime_metadata: Some(runtime_metadata.clone()),
                         ..Default::default()
                     },
                 )
                 .await;
+            state
+                .shared_memory
+                .upsert_task_contract_from_metadata(
+                    &task_id,
+                    Some(&task_project_id),
+                    &runtime_metadata,
+                )
+                .await
+                .map_err(|e| anyhow!("task contract error: {}", e))?;
             if should_auto_provision_child {
                 match auto_provision_slot(
                     state,
@@ -1741,7 +1761,7 @@ fn swarm_task_runtime_metadata(
             "must_not_touch": planned.must_not_touch,
             "acceptance": acceptance,
             "authority": {
-                "control_state": "runtime_metadata",
+                "control_state": "task_contracts",
                 "description": "prompt_projection"
             }
         }
@@ -1936,7 +1956,7 @@ fn delegation_runtime_metadata(
             "project_id": project_id,
             "project_root": project_root,
             "authority": {
-                "control_state": "runtime_metadata",
+                "control_state": "task_contracts",
                 "description": "prompt_projection"
             }
         }

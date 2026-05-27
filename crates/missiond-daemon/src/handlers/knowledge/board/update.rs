@@ -317,7 +317,10 @@ async fn handle_batch_done_settle(
                 "task_id": id,
                 "status": "done",
                 "artifact_hash": artifact_hash,
-                "summary": "mission_board_update batch requested typed completion settle."
+                "summary": "mission_board_update batch requested typed completion settle.",
+                "subject_kind": "operator",
+                "subject_id": "mission_board_update",
+                "confirm": true
             }))
             .await
         {
@@ -363,7 +366,10 @@ async fn settle_done_via_shared_memory(
             "task_id": task_id,
             "status": "done",
             "artifact_hash": artifact_hash,
-            "summary": summary
+            "summary": summary,
+            "subject_kind": "operator",
+            "subject_id": "mission_board_update",
+            "confirm": true
         }))
         .await
     {

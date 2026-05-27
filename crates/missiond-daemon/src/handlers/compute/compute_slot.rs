@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
-use crate::engine::control_plane_kernel::ControlPlaneKernel;
+use crate::engine::shared_memory::CapabilityCheckRequest;
 use crate::state::AppState;
 
 const CODING_DEFAULT_PROFILE: &str = "coding-default-opus-4-7";
@@ -192,8 +192,39 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
     let objective = args.get("objective").and_then(|v| v.as_str());
     let task_id = string_arg(args, &["task_id", "taskId"]).map(str::to_string);
     if let Some(task_id) = task_id.as_deref() {
-        if let Err(err) = ControlPlaneKernel::new(state)
-            .require_capability(task_id, "spawn", "task", task_id)
+        let grant_id = string_arg(
+            args,
+            &[
+                "grant_id",
+                "grantId",
+                "capability_grant_id",
+                "capabilityGrantId",
+            ],
+        )
+        .map(str::to_string)
+        .or_else(|| {
+            args.get("capability_grant_ids")
+                .or_else(|| args.get("capabilityGrantIds"))
+                .and_then(Value::as_array)
+                .and_then(|values| values.iter().rev().find_map(Value::as_str))
+                .map(str::to_string)
+        });
+        let subject_kind = string_arg(args, &["subject_kind", "subjectKind"]).unwrap_or("task");
+        let subject_id = string_arg(args, &["subject_id", "subjectId"]).unwrap_or(task_id);
+        if let Err(err) = state
+            .shared_memory
+            .require_capability(CapabilityCheckRequest {
+                grant_id,
+                subject_kind: subject_kind.to_string(),
+                subject_id: subject_id.to_string(),
+                operation: "spawn".to_string(),
+                scope_kind: "task".to_string(),
+                scope_key: task_id.to_string(),
+                task_id: Some(task_id.to_string()),
+                allow_system_bypass: false,
+                bypass_reason: None,
+                details: json!({"source": "mission_compute_slot.create"}),
+            })
             .await
         {
             return Ok(ToolResult::structured_error(control_plane_tool_error(

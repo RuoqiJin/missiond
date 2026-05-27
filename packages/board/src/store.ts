@@ -33,6 +33,12 @@ function syncErrorMessage(err: unknown): string {
     if (code === 'RUNTIME_METADATA_REQUIRED') {
       return body.message ?? body.reason ?? 'Runtime metadata is required before this task can drive control-plane state.';
     }
+    if (code === 'TASK_CONTRACT_REQUIRED') {
+      return body.message ?? body.reason ?? 'Task contract backfill is required before this task can drive control-plane state.';
+    }
+    if (code === 'FEATURE_DISABLED') {
+      return body.message ?? body.reason ?? 'This MissionD feature is disabled; use the kernel core path or enable it explicitly.';
+    }
     if (body.message || body.reason) return body.message ?? body.reason ?? '';
   }
   return err instanceof Error ? err.message : String(err);

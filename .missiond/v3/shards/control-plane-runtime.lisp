@@ -417,7 +417,7 @@
     :queued-sonnet-default-max-tokens 1024
     :invariants
       ["RouterRuntimeConfig MUST load router-runtime-policy from .missiond/v3/missiond-blueprint.lisp and fail with V3_BLUEPRINT_CONFIG_ERROR for real MissionD projects whose V3 blueprint or policy block is missing."
-       "mission_router_chat default model and max_tokens MUST project from router-runtime-policy; when model_route_outcomes has enough matching task_class samples the router may choose the best-scoring observed model by success, latency, token, and cost signals; explicit caller model/max_tokens still wins."
+       "mission_router_chat default model and max_tokens MUST project from router-runtime-policy; model_route_outcomes is a non-core optional feature and may influence scoring only when route learning is explicitly enabled and enough matching task_class samples exist, otherwise router selection falls back to compiled policy; explicit caller model/max_tokens still wins."
        "mission_router_chat default idle_timeout MUST project from router-runtime-policy router-chat-idle-timeout-secs; explicit caller idle_timeout still wins."
        "mission_router_chat transient retry max attempts and bounded exponential backoff MUST project from router-runtime-policy; hard failures remain structured errors, and successful calls that retried MUST include retry diagnostics."
        "mission_router_chat_manage history lookup and compression model/channel/token/char budgets MUST project from router-runtime-policy."

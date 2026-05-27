@@ -25,7 +25,10 @@ const COMPLETION_ARTIFACT_INVALID_CODE: &str = "COMPLETION_ARTIFACT_INVALID";
 const COMPLETION_ARTIFACT_WRITE_FAILED_CODE: &str = "COMPLETION_ARTIFACT_WRITE_FAILED";
 const CAPABILITY_DENIED_CODE: &str = "CAPABILITY_DENIED";
 const RUNTIME_METADATA_REQUIRED_CODE: &str = "RUNTIME_METADATA_REQUIRED";
+const TASK_CONTRACT_REQUIRED_CODE: &str = "TASK_CONTRACT_REQUIRED";
 const WRITE_SCOPE_VIOLATION_CODE: &str = "WRITE_SCOPE_VIOLATION";
+#[allow(dead_code)]
+const FEATURE_DISABLED_CODE: &str = "FEATURE_DISABLED";
 
 #[derive(Debug, Clone)]
 pub(crate) struct StructuredControlError {
@@ -110,14 +113,31 @@ struct CapabilityGrantInput<'a> {
     details: Value,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct CapabilityCheckRequest {
+    pub grant_id: Option<String>,
+    pub subject_kind: String,
+    pub subject_id: String,
+    pub operation: String,
+    pub scope_kind: String,
+    pub scope_key: String,
+    pub task_id: Option<String>,
+    pub allow_system_bypass: bool,
+    pub bypass_reason: Option<String>,
+    pub details: Value,
+}
+
 #[derive(Debug, Clone, Default)]
 struct TaskRuntimeContract {
     project_id: Option<String>,
     project_root: Option<String>,
+    task_contract_id: Option<String>,
+    read_scope: Vec<String>,
     write_scope: Vec<String>,
     must_not_touch: Vec<String>,
     capability_grant_ids: Vec<String>,
     sandbox_profile: Option<String>,
+    completion_materialization_policy: Option<String>,
 }
 
 impl SharedMemoryService {
@@ -178,6 +198,32 @@ impl SharedMemoryService {
             "cursor" => self.cursor(args).await,
             other => Err(anyhow!("unknown shared memory action: {other}")),
         }
+    }
+
+    pub(crate) async fn record_job_event_typed(
+        &self,
+        task_id: &str,
+        project_id: Option<&str>,
+        agent_id: &str,
+        event_kind: &str,
+        payload: Value,
+    ) -> Result<Value> {
+        self.job_event_from_args(&json!({
+            "task_id": task_id,
+            "project_id": project_id,
+            "agent_id": agent_id,
+            "event_kind": event_kind,
+            "payload": payload
+        }))
+        .await
+    }
+
+    pub(crate) async fn settle_worker_typed(&self, args: Value) -> Result<Value> {
+        self.worker_settle(&args).await
+    }
+
+    pub(crate) async fn claim_lease_typed(&self, req: ClaimRequest) -> Result<Value> {
+        self.claim(req).await
     }
 
     pub(crate) async fn grant_task_capabilities(
@@ -292,6 +338,122 @@ impl SharedMemoryService {
         Ok(grant_ids)
     }
 
+    pub(crate) async fn upsert_task_contract_from_metadata(
+        &self,
+        task_id: &str,
+        project_id: Option<&str>,
+        runtime_metadata: &Value,
+    ) -> Result<String> {
+        let dispatch = runtime_metadata
+            .get("dispatch_metadata")
+            .or_else(|| runtime_metadata.get("swarm_metadata"))
+            .or_else(|| runtime_metadata.get("metadata"))
+            .unwrap_or(runtime_metadata);
+        let task_contract_id = metadata_string_value_any(runtime_metadata.get("task_contract_id"))
+            .or_else(|| metadata_string_value_any(dispatch.get("task_contract_id")))
+            .unwrap_or_else(|| format!("board-task:{task_id}"));
+        let project_id = metadata_string_value_any(dispatch.get("project_id")).or_else(|| {
+            project_id
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        });
+        let read_scope = first_non_empty_metadata_list(&[
+            runtime_metadata.get("read_scope"),
+            dispatch.get("read_scope"),
+        ]);
+        let write_scope = first_non_empty_metadata_list(&[
+            runtime_metadata.get("write_scope"),
+            dispatch.get("write_scope"),
+        ]);
+        let must_not_touch = first_non_empty_metadata_list(&[
+            runtime_metadata.get("must_not_touch"),
+            dispatch.get("must_not_touch"),
+        ]);
+        let capability_grant_ids =
+            metadata_string_list_any(runtime_metadata.get("capability_grant_ids"))
+                .into_iter()
+                .chain(metadata_string_list_any(
+                    dispatch.get("capability_grant_ids"),
+                ))
+                .collect::<Vec<_>>();
+        let sandbox_profile = metadata_string_value_any(runtime_metadata.get("sandbox_profile"))
+            .or_else(|| metadata_string_value_any(dispatch.get("sandbox_profile")));
+        let completion_materialization_policy =
+            metadata_string_value_any(runtime_metadata.get("completion_materialization_policy"))
+                .or_else(|| {
+                    metadata_string_value_any(dispatch.get("completion_materialization_policy"))
+                });
+        let grounding_refs = runtime_metadata
+            .get("grounding_refs")
+            .or_else(|| dispatch.get("grounding_refs"))
+            .cloned()
+            .unwrap_or_else(|| json!([]));
+        let context_refs = runtime_metadata
+            .get("context_refs")
+            .or_else(|| dispatch.get("context_refs"))
+            .cloned()
+            .unwrap_or_else(|| json!([]));
+        let id = format!("task-contract:{task_id}");
+        sqlx::query(
+            r#"
+            INSERT INTO task_contracts
+              (id, task_id, project_id, task_contract_id, dispatch_metadata,
+               read_scope, write_scope, must_not_touch, capability_grant_ids,
+               sandbox_profile, completion_materialization_policy, grounding_refs,
+               context_refs)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+            ON CONFLICT (task_id)
+            DO UPDATE SET project_id = EXCLUDED.project_id,
+                          task_contract_id = EXCLUDED.task_contract_id,
+                          dispatch_metadata = EXCLUDED.dispatch_metadata,
+                          read_scope = EXCLUDED.read_scope,
+                          write_scope = EXCLUDED.write_scope,
+                          must_not_touch = EXCLUDED.must_not_touch,
+                          capability_grant_ids = EXCLUDED.capability_grant_ids,
+                          sandbox_profile = EXCLUDED.sandbox_profile,
+                          completion_materialization_policy = EXCLUDED.completion_materialization_policy,
+                          grounding_refs = EXCLUDED.grounding_refs,
+                          context_refs = EXCLUDED.context_refs,
+                          updated_at = now()
+            "#,
+        )
+        .bind(&id)
+        .bind(task_id)
+        .bind(project_id.as_deref())
+        .bind(&task_contract_id)
+        .bind(dispatch.clone())
+        .bind(json!(read_scope))
+        .bind(json!(write_scope))
+        .bind(json!(must_not_touch))
+        .bind(json!(capability_grant_ids))
+        .bind(sandbox_profile.as_deref())
+        .bind(completion_materialization_policy.as_deref())
+        .bind(grounding_refs)
+        .bind(context_refs)
+        .execute(&self.pool)
+        .await?;
+        Ok(task_contract_id)
+    }
+
+    pub(crate) async fn task_completion_materialization_policy(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<String>> {
+        let row = sqlx::query(
+            "SELECT completion_materialization_policy FROM task_contracts WHERE task_id = $1",
+        )
+        .bind(task_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row
+            .and_then(|row| {
+                row.try_get::<Option<String>, _>("completion_materialization_policy")
+                    .ok()
+            })
+            .flatten())
+    }
+
     async fn insert_capability_grant(&self, input: CapabilityGrantInput<'_>) -> Result<String> {
         let id = Uuid::new_v4().to_string();
         sqlx::query(
@@ -397,12 +559,35 @@ impl SharedMemoryService {
         let scope_key = string_arg(args, "scope_key")
             .or_else(|| string_arg(args, "scopeKey"))
             .unwrap_or(task_id);
-        self.require_capability(task_id, operation, scope_kind, scope_key)
+        let grant_id = self
+            .require_capability(CapabilityCheckRequest {
+                grant_id: string_arg(args, "grant_id")
+                    .or_else(|| string_arg(args, "grantId"))
+                    .or_else(|| string_arg(args, "capability_grant_id"))
+                    .or_else(|| string_arg(args, "capabilityGrantId"))
+                    .map(str::to_string),
+                subject_kind: string_arg(args, "subject_kind")
+                    .or_else(|| string_arg(args, "subjectKind"))
+                    .unwrap_or("task")
+                    .to_string(),
+                subject_id: string_arg(args, "subject_id")
+                    .or_else(|| string_arg(args, "subjectId"))
+                    .unwrap_or(task_id)
+                    .to_string(),
+                operation: operation.to_string(),
+                scope_kind: scope_kind.to_string(),
+                scope_key: scope_key.to_string(),
+                task_id: Some(task_id.to_string()),
+                allow_system_bypass: system_or_operator_bypass_allowed(args),
+                bypass_reason: Some("mission_shared_memory capability_check bypass".to_string()),
+                details: args.get("details").cloned().unwrap_or_else(|| json!({})),
+            })
             .await?;
         Ok(json!({
             "schema": "missiond.capability-check.v1",
             "ok": true,
             "task_id": task_id,
+            "grant_id": grant_id,
             "operation": operation,
             "scope_kind": scope_kind,
             "scope_key": scope_key
@@ -428,7 +613,43 @@ impl SharedMemoryService {
                     .unwrap_or_else(|| json!({})),
             )
             .await?;
+        let mut attempt_id_result: Option<String> = None;
         if event_kind == "attempt.started" {
+            let attempt_id = string_arg(args, "attempt_id")
+                .or_else(|| string_arg(args, "attemptId"))
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("attempt:{task_id}:{}", Utc::now().timestamp_millis()));
+            let worker_id = string_arg(args, "worker_id")
+                .or_else(|| string_arg(args, "workerId"))
+                .or_else(|| string_arg(args, "agent_id"))
+                .or_else(|| string_arg(args, "agentId"));
+            let conversation_id =
+                string_arg(args, "conversation_id").or_else(|| string_arg(args, "conversationId"));
+            sqlx::query(
+                r#"
+                INSERT INTO job_attempts
+                  (id, job_id, worker_id, conversation_id, state, started_at, details)
+                VALUES ($1,$2,$3,$4,'started',now(),$5)
+                ON CONFLICT (id)
+                DO UPDATE SET state = 'started',
+                              started_at = COALESCE(job_attempts.started_at, now()),
+                              details = EXCLUDED.details
+                "#,
+            )
+            .bind(&attempt_id)
+            .bind(&job_id)
+            .bind(worker_id)
+            .bind(conversation_id)
+            .bind(args.get("payload").cloned().unwrap_or_else(|| json!({})))
+            .execute(&self.pool)
+            .await?;
+            sqlx::query(
+                "UPDATE jobs SET current_attempt_id = $2, state = 'running', updated_at = now() WHERE id = $1",
+            )
+            .bind(&job_id)
+            .bind(&attempt_id)
+            .execute(&self.pool)
+            .await?;
             let contract = self.task_runtime_contract(task_id).await?;
             if let Some(project_root) = contract
                 .project_root
@@ -437,9 +658,18 @@ impl SharedMemoryService {
                 .filter(|value| !value.is_empty())
             {
                 let changed_paths = git_status_changed_paths(project_root).unwrap_or_default();
-                self.record_worktree_manifest(task_id, project_root, "pre", &changed_paths)
-                    .await?;
+                self.record_worktree_manifest(
+                    task_id,
+                    contract.project_id.as_deref().or(project_id),
+                    Some(job_id.as_str()),
+                    Some(attempt_id.as_str()),
+                    project_root,
+                    "pre",
+                    &changed_paths,
+                )
+                .await?;
             }
+            attempt_id_result = Some(attempt_id);
         }
         let event = self
             .append_event(&json!({
@@ -456,6 +686,7 @@ impl SharedMemoryService {
             "schema": "missiond.job-event.v1",
             "ok": true,
             "job_id": job_id,
+            "attempt_id": attempt_id_result,
             "state": state,
             "event": event
         }))
@@ -463,6 +694,7 @@ impl SharedMemoryService {
 
     async fn model_route_outcome_put(&self, args: &Value) -> Result<Value> {
         let id = format!("route-outcome:{}", Uuid::new_v4());
+        let request_id = string_arg(args, "request_id").or_else(|| string_arg(args, "requestId"));
         let project_id = string_arg(args, "project_id").or_else(|| string_arg(args, "projectId"));
         let task_id = string_arg(args, "task_id").or_else(|| string_arg(args, "taskId"));
         let provider = string_arg(args, "provider").unwrap_or("router_chat");
@@ -470,55 +702,95 @@ impl SharedMemoryService {
         let task_class = string_arg(args, "task_class")
             .or_else(|| string_arg(args, "taskClass"))
             .unwrap_or("router_chat");
-        let outcome = string_arg(args, "outcome").unwrap_or("completed");
+        let outcome_value = args
+            .get("outcome")
+            .cloned()
+            .unwrap_or_else(|| json!({"finish_reason": "completed"}));
+        let outcome_text = outcome_value
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| {
+                outcome_value
+                    .get("finish_reason")
+                    .or_else(|| outcome_value.get("status"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| "recorded".to_string());
+        let outcome = if outcome_value.is_string() {
+            json!({ "finish_reason": outcome_text })
+        } else {
+            outcome_value
+        };
+        let status = route_outcome_status(&outcome_text);
         let artifact_hash =
             string_arg(args, "artifact_hash").or_else(|| string_arg(args, "artifactHash"));
-        let job_id = string_arg(args, "job_id").or_else(|| string_arg(args, "jobId"));
+        let route = string_arg(args, "route");
+        let decision = args.get("decision").cloned().unwrap_or_else(|| {
+            args.get("metadata")
+                .and_then(|value| value.get("route_decision"))
+                .cloned()
+                .unwrap_or_else(|| json!({}))
+        });
+        let job_state = string_arg(args, "job_state").or_else(|| string_arg(args, "jobState"));
         let latency_ms = args
             .get("latency_ms")
             .or_else(|| args.get("latencyMs"))
             .and_then(Value::as_i64);
-        let input_tokens = args
-            .get("input_tokens")
+        let prompt_tokens = args
+            .get("prompt_tokens")
+            .or_else(|| args.get("promptTokens"))
+            .or_else(|| args.get("input_tokens"))
             .or_else(|| args.get("inputTokens"))
             .and_then(Value::as_i64);
-        let output_tokens = args
-            .get("output_tokens")
+        let completion_tokens = args
+            .get("completion_tokens")
+            .or_else(|| args.get("completionTokens"))
+            .or_else(|| args.get("output_tokens"))
             .or_else(|| args.get("outputTokens"))
             .and_then(Value::as_i64);
         let total_tokens = args
             .get("total_tokens")
             .or_else(|| args.get("totalTokens"))
             .and_then(Value::as_i64);
-        let cost_micros = args
-            .get("cost_micros")
-            .or_else(|| args.get("costMicros"))
-            .and_then(Value::as_i64);
-        let metadata = args.get("metadata").cloned().unwrap_or_else(|| json!({}));
+        let cost_usd = args
+            .get("cost_usd")
+            .or_else(|| args.get("costUsd"))
+            .and_then(Value::as_f64)
+            .or_else(|| {
+                args.get("cost_micros")
+                    .or_else(|| args.get("costMicros"))
+                    .and_then(Value::as_i64)
+                    .map(|micros| micros as f64 / 1_000_000.0)
+            });
         sqlx::query(
             r#"
             INSERT INTO model_route_outcomes
-              (id, project_id, task_id, provider, model, task_class, latency_ms,
-               input_tokens, output_tokens, total_tokens, cost_micros,
-               artifact_hash, job_id, outcome, metadata)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+              (id, request_id, project_id, task_id, provider, model, task_class,
+               route, decision, outcome, latency_ms, prompt_tokens,
+               completion_tokens, total_tokens, cost_usd, artifact_hash, job_state,
+               status)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
             "#,
         )
         .bind(&id)
+        .bind(request_id)
         .bind(project_id)
         .bind(task_id)
         .bind(provider)
         .bind(model)
         .bind(task_class)
-        .bind(latency_ms)
-        .bind(input_tokens)
-        .bind(output_tokens)
-        .bind(total_tokens)
-        .bind(cost_micros)
-        .bind(artifact_hash)
-        .bind(job_id)
+        .bind(route)
+        .bind(decision)
         .bind(outcome)
-        .bind(metadata)
+        .bind(latency_ms)
+        .bind(prompt_tokens)
+        .bind(completion_tokens)
+        .bind(total_tokens)
+        .bind(cost_usd)
+        .bind(artifact_hash)
+        .bind(job_state)
+        .bind(status)
         .execute(&self.pool)
         .await?;
         Ok(json!({
@@ -532,27 +804,31 @@ impl SharedMemoryService {
         &self,
         task_class: &str,
     ) -> Result<Option<Value>> {
+        if !runtime_feature_enabled("MISSIOND_ROUTE_LEARNING_ENABLE") {
+            return Ok(None);
+        }
         let row = sqlx::query(
             r#"
             SELECT provider,
                    model,
                    COUNT(*)::bigint AS samples,
-                   AVG(CASE WHEN outcome IN ('completed','success','accepted') THEN 1.0 ELSE 0.0 END) AS success_rate,
+                   AVG(CASE WHEN status = 'succeeded' THEN 1.0 ELSE 0.0 END) AS success_rate,
                    AVG(NULLIF(latency_ms, 0)) AS avg_latency_ms,
                    AVG(NULLIF(total_tokens, 0)) AS avg_total_tokens,
-                   AVG(NULLIF(cost_micros, 0)) AS avg_cost_micros
+                   AVG(NULLIF(cost_usd, 0)) AS avg_cost_usd
             FROM model_route_outcomes
             WHERE task_class = $1
               AND model IS NOT NULL
               AND model <> 'unknown'
+              AND status IN ('recorded', 'succeeded', 'failed', 'blocked')
               AND created_at > now() - interval '14 days'
             GROUP BY provider, model
             HAVING COUNT(*) >= 5
             ORDER BY
-              AVG(CASE WHEN outcome IN ('completed','success','accepted') THEN 1.0 ELSE 0.0 END) DESC,
+              AVG(CASE WHEN status = 'succeeded' THEN 1.0 ELSE 0.0 END) DESC,
               COALESCE(AVG(NULLIF(latency_ms, 0)), 999999999) ASC,
               COALESCE(AVG(NULLIF(total_tokens, 0)), 999999999) ASC,
-              COALESCE(AVG(NULLIF(cost_micros, 0)), 999999999) ASC
+              COALESCE(AVG(NULLIF(cost_usd, 0)), 999999999) ASC
             LIMIT 1
             "#,
         )
@@ -570,7 +846,7 @@ impl SharedMemoryService {
             "success_rate": row.try_get::<Option<f64>, _>("success_rate")?,
             "avg_latency_ms": row.try_get::<Option<f64>, _>("avg_latency_ms")?,
             "avg_total_tokens": row.try_get::<Option<f64>, _>("avg_total_tokens")?,
-            "avg_cost_micros": row.try_get::<Option<f64>, _>("avg_cost_micros")?
+            "avg_cost_usd": row.try_get::<Option<f64>, _>("avg_cost_usd")?
         })))
     }
 
@@ -682,118 +958,164 @@ impl SharedMemoryService {
         Ok(())
     }
 
-    async fn require_capability(
-        &self,
-        task_id: &str,
-        operation: &str,
-        scope_kind: &str,
-        scope_key: &str,
-    ) -> Result<String> {
-        let grant = sqlx::query(
-            r#"
-            SELECT id
-            FROM capability_grants
-            WHERE task_id = $1
-              AND operation = $2
-              AND scope_kind = $3
-              AND scope_key = $4
-              AND status = 'active'
-              AND (expires_at IS NULL OR expires_at > now())
-            ORDER BY created_at DESC
-            LIMIT 1
-            "#,
-        )
-        .bind(task_id)
-        .bind(operation)
-        .bind(scope_kind)
-        .bind(scope_key)
-        .fetch_optional(&self.pool)
-        .await?;
-        if let Some(row) = grant {
-            let grant_id: String = row.try_get("id")?;
+    pub(crate) async fn require_capability(&self, req: CapabilityCheckRequest) -> Result<String> {
+        if let Some(grant_id) = req.grant_id.as_deref() {
+            let grant = sqlx::query(
+                r#"
+                SELECT id
+                FROM capability_grants
+                WHERE id = $1
+                  AND subject_kind = $2
+                  AND subject_id = $3
+                  AND operation = $4
+                  AND scope_kind = $5
+                  AND scope_key = $6
+                  AND task_id IS NOT DISTINCT FROM $7
+                  AND status = 'active'
+                  AND consumed_at IS NULL
+                  AND (expires_at IS NULL OR expires_at > now())
+                LIMIT 1
+                "#,
+            )
+            .bind(grant_id)
+            .bind(req.subject_kind.as_str())
+            .bind(req.subject_id.as_str())
+            .bind(req.operation.as_str())
+            .bind(req.scope_kind.as_str())
+            .bind(req.scope_key.as_str())
+            .bind(req.task_id.as_deref())
+            .fetch_optional(&self.pool)
+            .await?;
+            if let Some(row) = grant {
+                let grant_id: String = row.try_get("id")?;
+                self.audit_capability(
+                    Some(&grant_id),
+                    Some(req.subject_kind.as_str()),
+                    Some(req.subject_id.as_str()),
+                    req.operation.as_str(),
+                    req.scope_kind.as_str(),
+                    req.scope_key.as_str(),
+                    "allowed",
+                    None,
+                    json!({
+                        "task_id": req.task_id,
+                        "exact_grant": true,
+                        "details": req.details
+                    }),
+                )
+                .await?;
+                return Ok(grant_id);
+            }
+        } else if req.allow_system_bypass
+            && matches!(req.subject_kind.as_str(), "system" | "operator" | "daemon")
+        {
+            let synthetic = format!("bypass:{}:{}", req.subject_kind, req.operation);
             self.audit_capability(
-                Some(&grant_id),
-                Some("task"),
-                Some(task_id),
-                operation,
-                scope_kind,
-                scope_key,
+                None,
+                Some(req.subject_kind.as_str()),
+                Some(req.subject_id.as_str()),
+                req.operation.as_str(),
+                req.scope_kind.as_str(),
+                req.scope_key.as_str(),
                 "allowed",
                 None,
-                json!({}),
+                json!({
+                    "task_id": req.task_id,
+                    "bypass": true,
+                    "reason": req
+                        .bypass_reason
+                        .as_deref()
+                        .unwrap_or("confirmed control-plane system/operator bypass"),
+                    "details": req.details.clone()
+                }),
             )
             .await?;
-            return Ok(grant_id);
+            return Ok(synthetic);
         }
+
         self.audit_capability(
-            None,
-            Some("task"),
-            Some(task_id),
-            operation,
-            scope_kind,
-            scope_key,
+            req.grant_id.as_deref(),
+            Some(req.subject_kind.as_str()),
+            Some(req.subject_id.as_str()),
+            req.operation.as_str(),
+            req.scope_kind.as_str(),
+            req.scope_key.as_str(),
             "denied",
             Some(CAPABILITY_DENIED_CODE),
             json!({
-                "reason": "no active capability grant",
-                "task_id": task_id
+                "reason": "no exact active subject-bound capability grant",
+                "task_id": req.task_id.clone(),
+                "grant_id": req.grant_id.clone(),
+                "subject_kind": req.subject_kind,
+                "subject_id": req.subject_id,
+                "details": req.details.clone()
             }),
         )
         .await?;
         Err(control_error_details(
             CAPABILITY_DENIED_CODE,
-            format!("task {task_id} lacks active capability for {operation} on {scope_kind}:{scope_key}"),
+            format!(
+                "subject {}:{} lacks exact active grant for {} on {}:{}",
+                req.subject_kind, req.subject_id, req.operation, req.scope_kind, req.scope_key
+            ),
             json!({
-                "task_id": task_id,
-                "operation": operation,
-                "scope_kind": scope_kind,
-                "scope_key": scope_key
+                "task_id": req.task_id.clone(),
+                "grant_id": req.grant_id.clone(),
+                "subject_kind": req.subject_kind,
+                "subject_id": req.subject_id,
+                "operation": req.operation,
+                "scope_kind": req.scope_kind,
+                "scope_key": req.scope_key,
+                "required": "grant_id + subject_kind + subject_id + operation + scope_kind + scope_key + task_id"
             }),
         ))
     }
 
     async fn task_runtime_contract(&self, task_id: &str) -> Result<TaskRuntimeContract> {
-        let Some(task) = self.store.get_board_task(task_id).await? else {
+        let row = sqlx::query(
+            r#"
+            SELECT project_id, task_contract_id, dispatch_metadata, read_scope,
+                   write_scope, must_not_touch, capability_grant_ids,
+                   sandbox_profile, completion_materialization_policy
+            FROM task_contracts
+            WHERE task_id = $1
+            "#,
+        )
+        .bind(task_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
             return Err(control_error_details(
-                RUNTIME_METADATA_REQUIRED_CODE,
-                format!("BoardTask {task_id} is required for runtime_metadata-backed control"),
-                json!({ "task_id": task_id }),
+                TASK_CONTRACT_REQUIRED_CODE,
+                format!("task {task_id} has no canonical task_contracts row; legacy BoardTask.description/runtime_metadata fallback is disabled"),
+                json!({
+                    "task_id": task_id,
+                    "required": "task_contracts",
+                    "legacy_fallback": false
+                }),
             ));
         };
-        if task
-            .runtime_metadata
-            .as_object()
-            .is_none_or(|obj| obj.is_empty())
-        {
-            return Err(control_error_details(
-                RUNTIME_METADATA_REQUIRED_CODE,
-                format!("BoardTask {task_id} has no runtime_metadata; legacy description fallback is disabled"),
-                json!({ "task_id": task_id }),
-            ));
-        }
-        let dispatch = task
-            .runtime_metadata
-            .get("dispatch_metadata")
-            .or_else(|| task.runtime_metadata.get("swarm_metadata"))
-            .or_else(|| task.runtime_metadata.get("metadata"))
-            .unwrap_or(&task.runtime_metadata);
-        let capability_grant_ids =
-            metadata_string_list_any(task.runtime_metadata.get("capability_grant_ids"))
-                .into_iter()
-                .chain(metadata_string_list_any(
-                    dispatch.get("capability_grant_ids"),
-                ))
-                .collect::<Vec<_>>();
-        let sandbox_profile =
-            metadata_string_value_any(task.runtime_metadata.get("sandbox_profile"))
-                .or_else(|| metadata_string_value_any(dispatch.get("sandbox_profile")));
+        let dispatch: Value = row
+            .try_get("dispatch_metadata")
+            .unwrap_or_else(|_| json!({}));
+        let project_id = row
+            .try_get::<Option<String>, _>("project_id")?
+            .or_else(|| metadata_string_value_any(dispatch.get("project_id")));
         Ok(TaskRuntimeContract {
-            project_id: metadata_string_value_any(dispatch.get("project_id")).or(task.project),
+            project_id,
             project_root: metadata_string_value_any(dispatch.get("project_root")),
-            write_scope: metadata_string_list_any(dispatch.get("write_scope")),
-            must_not_touch: metadata_string_list_any(dispatch.get("must_not_touch")),
-            capability_grant_ids,
-            sandbox_profile,
+            task_contract_id: row.try_get::<Option<String>, _>("task_contract_id")?,
+            read_scope: metadata_string_list_any(Some(&row.try_get::<Value, _>("read_scope")?)),
+            write_scope: metadata_string_list_any(Some(&row.try_get::<Value, _>("write_scope")?)),
+            must_not_touch: metadata_string_list_any(Some(
+                &row.try_get::<Value, _>("must_not_touch")?,
+            )),
+            capability_grant_ids: metadata_string_list_any(Some(
+                &row.try_get::<Value, _>("capability_grant_ids")?,
+            )),
+            sandbox_profile: row.try_get::<Option<String>, _>("sandbox_profile")?,
+            completion_materialization_policy: row
+                .try_get::<Option<String>, _>("completion_materialization_policy")?,
         })
     }
 
@@ -939,8 +1261,17 @@ impl SharedMemoryService {
                 }),
             )
         })?;
+        let (job_id, attempt_id) = self.current_job_attempt_for_task(task_id).await?;
         let _ = self
-            .record_worktree_manifest(task_id, project_root, "post", &actual_changed_paths)
+            .record_worktree_manifest(
+                task_id,
+                contract.project_id.as_deref(),
+                job_id.as_deref(),
+                attempt_id.as_deref(),
+                project_root,
+                "post",
+                &actual_changed_paths,
+            )
             .await;
         if actual_changed_paths.is_empty() {
             return Ok(());
@@ -1018,27 +1349,38 @@ impl SharedMemoryService {
     async fn record_worktree_manifest(
         &self,
         task_id: &str,
+        project_id: Option<&str>,
+        job_id: Option<&str>,
+        attempt_id: Option<&str>,
         project_root: &str,
         phase: &str,
         changed_paths: &[String],
     ) -> Result<()> {
+        let head = git_head(project_root).ok();
+        let dirty = !changed_paths.is_empty();
         let manifest = json!({
             "schema": "missiond.worktree-manifest.v1",
             "source": "post-run-verifier",
             "changed_paths": changed_paths,
+            "head": head,
+            "dirty": dirty,
         });
         sqlx::query(
             r#"
             INSERT INTO worktree_manifests
-              (id, task_id, project_root, phase, manifest, changed_paths)
-            VALUES ($1,$2,$3,$4,$5,$6)
+              (id, job_id, attempt_id, task_id, project_id, project_root, phase,
+               manifest, changed_paths)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
             "#,
         )
         .bind(format!(
             "manifest:{task_id}:{phase}:{}",
             Utc::now().timestamp_millis()
         ))
+        .bind(job_id)
+        .bind(attempt_id)
         .bind(task_id)
+        .bind(project_id)
         .bind(project_root)
         .bind(phase)
         .bind(manifest)
@@ -1046,6 +1388,26 @@ impl SharedMemoryService {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    async fn current_job_attempt_for_task(
+        &self,
+        task_id: &str,
+    ) -> Result<(Option<String>, Option<String>)> {
+        let row = sqlx::query("SELECT id, current_attempt_id FROM jobs WHERE task_id = $1")
+            .bind(task_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row
+            .map(|row| {
+                (
+                    row.try_get::<String, _>("id").ok(),
+                    row.try_get::<Option<String>, _>("current_attempt_id")
+                        .ok()
+                        .flatten(),
+                )
+            })
+            .unwrap_or((None, None)))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1092,13 +1454,13 @@ impl SharedMemoryService {
     pub(crate) async fn status_snapshot(&self) -> Value {
         let expired_stale_claims = self.expire_stale_claims().await.unwrap_or(0);
         let active_claims = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM shared_claims WHERE status = 'active' AND lease_expires_at >= now()",
+            "SELECT COUNT(*) FROM work_leases WHERE status = 'active' AND lease_expires_at >= now()",
         )
         .fetch_one(&self.pool)
         .await
         .unwrap_or(0);
         let stale_claims = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM shared_claims WHERE status = 'active' AND lease_expires_at < now()",
+            "SELECT COUNT(*) FROM work_leases WHERE status = 'active' AND lease_expires_at < now()",
         )
         .fetch_one(&self.pool)
         .await
@@ -1315,9 +1677,9 @@ impl SharedMemoryService {
 
         let rows = sqlx::query(
             r#"
-            SELECT id, project_id, task_id, owner_id, scope_kind, scope_key, status,
+            SELECT id, project_id, task_id, holder_id AS owner_id, scope_kind, scope_key, status,
                    acquired_at, lease_expires_at, released_at, heartbeat_at, metadata
-            FROM shared_claims
+            FROM work_leases
             WHERE ($1::text IS NULL OR project_id = $1)
               AND ($2::text IS NULL OR scope_kind = $2)
               AND ($3::text IS NULL OR scope_key = $3)
@@ -1740,7 +2102,77 @@ impl SharedMemoryService {
             .map(str::to_string)
             .unwrap_or_else(|| Utc::now().to_rfc3339());
         let runtime_contract = self.task_runtime_contract(&task_id).await?;
-        self.require_capability(&task_id, "write", "task", &task_id)
+        let attempt_id = string_arg(args, "attempt_id")
+            .or_else(|| string_arg(args, "attemptId"))
+            .map(str::to_string);
+        if is_completed_result_status(&result_status) && !runtime_contract.write_scope.is_empty() {
+            let Some(attempt_id) = attempt_id.as_deref() else {
+                return Err(control_error_details(
+                    CAPABILITY_DENIED_CODE,
+                    format!("task_result_put for write-scoped task {task_id} requires current attempt_id"),
+                    json!({
+                        "task_id": task_id,
+                        "required": "attempt_id",
+                        "write_scope": runtime_contract.write_scope.clone()
+                    }),
+                ));
+            };
+            let (_job_id, current_attempt_id) = self.current_job_attempt_for_task(&task_id).await?;
+            if current_attempt_id.as_deref() != Some(attempt_id) {
+                return Err(control_error_details(
+                    CAPABILITY_DENIED_CODE,
+                    format!(
+                        "task_result_put attempt_id {attempt_id} is not current for task {task_id}"
+                    ),
+                    json!({
+                        "task_id": task_id,
+                        "attempt_id": attempt_id,
+                        "current_attempt_id": current_attempt_id
+                    }),
+                ));
+            }
+        }
+        let subject_kind = string_arg(args, "subject_kind")
+            .or_else(|| string_arg(args, "subjectKind"))
+            .unwrap_or_else(|| {
+                if slot_id.is_some() {
+                    "worker"
+                } else if conversation_id.is_some() {
+                    "conversation"
+                } else {
+                    "task"
+                }
+            })
+            .to_string();
+        let subject_id = string_arg(args, "subject_id")
+            .or_else(|| string_arg(args, "subjectId"))
+            .map(str::to_string)
+            .or_else(|| slot_id.clone())
+            .or_else(|| conversation_id.clone())
+            .unwrap_or_else(|| task_id.clone());
+        let requested_grant_id = string_arg(args, "grant_id")
+            .or_else(|| string_arg(args, "grantId"))
+            .or_else(|| string_arg(args, "capability_grant_id"))
+            .or_else(|| string_arg(args, "capabilityGrantId"))
+            .map(str::to_string);
+        let capability_grant_id = self
+            .require_capability(CapabilityCheckRequest {
+                grant_id: requested_grant_id.clone(),
+                subject_kind: subject_kind.clone(),
+                subject_id: subject_id.clone(),
+                operation: "write".to_string(),
+                scope_kind: "task".to_string(),
+                scope_key: task_id.clone(),
+                task_id: Some(task_id.clone()),
+                allow_system_bypass: system_or_operator_bypass_allowed(args),
+                bypass_reason: Some("task_result_put system/operator authority".to_string()),
+                details: json!({
+                    "provider": provider,
+                    "attempt_id": attempt_id.clone(),
+                    "task_contract_id": runtime_contract.task_contract_id.clone(),
+                    "runtime_contract_grants": runtime_contract.capability_grant_ids.clone()
+                }),
+            })
             .await?;
         if is_completed_result_status(&result_status) {
             self.verify_completion_scope(&task_id, args, &details, &runtime_contract)
@@ -1816,6 +2248,10 @@ impl SharedMemoryService {
             "conversation_id": conversation_id,
             "provider": provider,
             "producer": producer,
+            "producer_subject_kind": subject_kind,
+            "producer_subject_id": subject_id,
+            "capability_grant_id": requested_grant_id,
+            "attempt_id": attempt_id,
             "result_status": result_status,
             "result_kind": result_status,
             "summary": summary,
@@ -1833,6 +2269,10 @@ impl SharedMemoryService {
             "conversation_id": conversation_id,
             "provider": provider,
             "result_status": result_status,
+            "producer_subject_kind": subject_kind,
+            "producer_subject_id": subject_id,
+            "capability_grant_id": requested_grant_id,
+            "attempt_id": attempt_id,
             "accepted_shard_id": string_arg(args, "accepted_shard_id").or_else(|| string_arg(args, "acceptedShardId"))
         });
         let artifact = self
@@ -1847,14 +2287,21 @@ impl SharedMemoryService {
             .await?;
 
         let id = Uuid::new_v4().to_string();
+        let (job_id, _current_attempt_id) = self.current_job_attempt_for_task(&task_id).await?;
         sqlx::query(
             r#"
             INSERT INTO task_result_artifacts
               (id, artifact_hash, project_id, task_id, slot_id, conversation_id,
-               provider, result_status, summary)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+               provider, result_status, summary, job_id, attempt_id,
+               producer_subject_kind, producer_subject_id, capability_grant_id)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
             ON CONFLICT(task_id, artifact_hash)
-            DO UPDATE SET summary = EXCLUDED.summary
+            DO UPDATE SET summary = EXCLUDED.summary,
+                          job_id = COALESCE(EXCLUDED.job_id, task_result_artifacts.job_id),
+                          attempt_id = COALESCE(EXCLUDED.attempt_id, task_result_artifacts.attempt_id),
+                          producer_subject_kind = COALESCE(EXCLUDED.producer_subject_kind, task_result_artifacts.producer_subject_kind),
+                          producer_subject_id = COALESCE(EXCLUDED.producer_subject_id, task_result_artifacts.producer_subject_id),
+                          capability_grant_id = COALESCE(EXCLUDED.capability_grant_id, task_result_artifacts.capability_grant_id)
             "#,
         )
         .bind(&id)
@@ -1866,6 +2313,15 @@ impl SharedMemoryService {
         .bind(&provider)
         .bind(&result_status)
         .bind(&summary)
+        .bind(job_id.as_deref())
+        .bind(attempt_id.as_deref())
+        .bind(subject_kind.as_str())
+        .bind(subject_id.as_str())
+        .bind(if capability_grant_id.starts_with("bypass:") {
+            None
+        } else {
+            Some(capability_grant_id.as_str())
+        })
         .execute(&self.pool)
         .await?;
 
@@ -2507,9 +2963,82 @@ impl SharedMemoryService {
                 }),
             ));
         }
-        let _runtime_contract = self.task_runtime_contract(task_id).await?;
-        self.require_capability(task_id, "settle", "task", task_id)
-            .await?;
+        let runtime_contract = self.task_runtime_contract(task_id).await?;
+        let requested_grant_id = string_arg(args, "grant_id")
+            .or_else(|| string_arg(args, "grantId"))
+            .or_else(|| string_arg(args, "capability_grant_id"))
+            .or_else(|| string_arg(args, "capabilityGrantId"))
+            .map(str::to_string);
+        let subject_kind = string_arg(args, "subject_kind")
+            .or_else(|| string_arg(args, "subjectKind"))
+            .unwrap_or_else(|| {
+                if slot_id.is_some() {
+                    "worker"
+                } else if conversation_id.is_some() {
+                    "conversation"
+                } else {
+                    "task"
+                }
+            })
+            .to_string();
+        let subject_id = string_arg(args, "subject_id")
+            .or_else(|| string_arg(args, "subjectId"))
+            .map(str::to_string)
+            .or_else(|| slot_id.map(str::to_string))
+            .or_else(|| conversation_id.map(str::to_string))
+            .unwrap_or_else(|| task_id.to_string());
+        self.require_capability(CapabilityCheckRequest {
+            grant_id: requested_grant_id.clone(),
+            subject_kind: subject_kind.clone(),
+            subject_id: subject_id.clone(),
+            operation: "settle".to_string(),
+            scope_kind: "task".to_string(),
+            scope_key: task_id.to_string(),
+            task_id: Some(task_id.to_string()),
+            allow_system_bypass: system_or_operator_bypass_allowed(args),
+            bypass_reason: Some("worker_settle system/operator authority".to_string()),
+            details: json!({
+                "artifact_hash": artifact_hash_owned.clone(),
+                "task_contract_id": runtime_contract.task_contract_id.clone(),
+                "runtime_contract_grants": runtime_contract.capability_grant_ids.clone()
+            }),
+        })
+        .await?;
+        if target_status.eq_ignore_ascii_case("done") && !runtime_contract.write_scope.is_empty() {
+            let artifact_hash = artifact_hash_owned.as_deref().ok_or_else(|| {
+                control_error_details(
+                    EVIDENCE_REQUIRED_CODE,
+                    format!("worker_settle(done) for write-scoped task {task_id} requires artifact_hash"),
+                    json!({"task_id": task_id, "required": "artifact_hash"}),
+                )
+            })?;
+            let attempt_id =
+                string_arg(args, "attempt_id").or_else(|| string_arg(args, "attemptId"));
+            let artifact_attempt_id = sqlx::query_scalar::<_, Option<String>>(
+                "SELECT attempt_id FROM task_result_artifacts WHERE task_id = $1 AND artifact_hash = $2",
+            )
+            .bind(task_id)
+            .bind(artifact_hash)
+            .fetch_optional(&self.pool)
+            .await?
+            .flatten();
+            let (_job_id, current_attempt_id) = self.current_job_attempt_for_task(task_id).await?;
+            if artifact_attempt_id.as_deref() != current_attempt_id.as_deref()
+                || attempt_id.is_some_and(|value| Some(value) != current_attempt_id.as_deref())
+            {
+                return Err(control_error_details(
+                    EVIDENCE_REQUIRED_CODE,
+                    format!("worker_settle(done) artifact attempt does not match current attempt for task {task_id}"),
+                    json!({
+                        "task_id": task_id,
+                        "artifact_hash": artifact_hash,
+                        "artifact_attempt_id": artifact_attempt_id,
+                        "current_attempt_id": current_attempt_id,
+                        "provided_attempt_id": attempt_id
+                    }),
+                ));
+            }
+        }
 
         let conversation_rows = self
             .mark_worker_conversation_completed(task_id, conversation_id, slot_id)
@@ -2592,6 +3121,33 @@ impl SharedMemoryService {
                 .unwrap_or(DEFAULT_LEASE_SECS),
             metadata: args.get("metadata").cloned().unwrap_or_else(|| json!({})),
         };
+        if let Some(task_id) = req.task_id.as_deref() {
+            self.require_capability(CapabilityCheckRequest {
+                grant_id: string_arg(args, "grant_id")
+                    .or_else(|| string_arg(args, "grantId"))
+                    .or_else(|| string_arg(args, "capability_grant_id"))
+                    .or_else(|| string_arg(args, "capabilityGrantId"))
+                    .map(str::to_string),
+                subject_kind: string_arg(args, "subject_kind")
+                    .or_else(|| string_arg(args, "subjectKind"))
+                    .unwrap_or("worker")
+                    .to_string(),
+                subject_id: string_arg(args, "subject_id")
+                    .or_else(|| string_arg(args, "subjectId"))
+                    .unwrap_or(req.owner_id.as_str())
+                    .to_string(),
+                operation: "claim".to_string(),
+                scope_kind: req.scope_kind.clone(),
+                scope_key: req.scope_key.clone(),
+                task_id: Some(task_id.to_string()),
+                allow_system_bypass: system_or_operator_bypass_allowed(args),
+                bypass_reason: Some(
+                    "mission_shared_memory claim system/operator authority".to_string(),
+                ),
+                details: req.metadata.clone(),
+            })
+            .await?;
+        }
         self.claim(req).await
     }
 
@@ -2599,6 +3155,20 @@ impl SharedMemoryService {
         let mut tx = self.pool.begin().await?;
         sqlx::query(
             "SELECT pg_advisory_xact_lock(hashtextextended($1::text || ':' || $2::text, 0))",
+        )
+        .bind(&req.scope_kind)
+        .bind(&req.scope_key)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"
+            UPDATE work_leases
+            SET status = 'expired'
+            WHERE status = 'active'
+              AND scope_kind = $1
+              AND scope_key = $2
+              AND lease_expires_at < now()
+            "#,
         )
         .bind(&req.scope_kind)
         .bind(&req.scope_key)
@@ -2620,9 +3190,9 @@ impl SharedMemoryService {
         .await?;
         let active = sqlx::query(
             r#"
-            SELECT id, project_id, task_id, owner_id, scope_kind, scope_key, status,
+            SELECT id, project_id, task_id, holder_id AS owner_id, scope_kind, scope_key, status,
                    acquired_at, lease_expires_at, released_at, heartbeat_at, metadata
-            FROM shared_claims
+            FROM work_leases
             WHERE status = 'active'
               AND scope_kind = $1
               AND scope_key = $2
@@ -2653,11 +3223,11 @@ impl SharedMemoryService {
         let lease_expires_at = Utc::now() + Duration::seconds(lease_secs);
         let row = sqlx::query(
             r#"
-            INSERT INTO shared_claims
-              (id, project_id, task_id, owner_id, scope_kind, scope_key, status,
+            INSERT INTO work_leases
+              (id, project_id, task_id, holder_id, holder_kind, scope_kind, scope_key, status,
                lease_expires_at, heartbeat_at, metadata)
-            VALUES ($1,$2,$3,$4,$5,$6,'active',$7,now(),$8)
-            RETURNING id, project_id, task_id, owner_id, scope_kind, scope_key, status,
+            VALUES ($1,$2,$3,$4,'worker',$5,$6,'active',$7,now(),$8)
+            RETURNING id, project_id, task_id, holder_id AS owner_id, scope_kind, scope_key, status,
                       acquired_at, lease_expires_at, released_at, heartbeat_at, metadata
             "#,
         )
@@ -2673,12 +3243,28 @@ impl SharedMemoryService {
         .await?;
         sqlx::query(
             r#"
-            INSERT INTO work_leases
-              (id, project_id, task_id, holder_id, holder_kind, scope_kind, scope_key,
-               lease_expires_at, metadata)
-            VALUES ($1,$2,$3,$4,'worker',$5,$6,$7,$8)
-            ON CONFLICT (scope_kind, scope_key) WHERE status = 'active'
-            DO NOTHING
+            UPDATE shared_claims
+            SET status = 'expired'
+            WHERE status = 'active'
+              AND scope_kind = $1
+              AND scope_key = $2
+            "#,
+        )
+        .bind(req.scope_kind.as_str())
+        .bind(req.scope_key.as_str())
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO shared_claims
+              (id, project_id, task_id, owner_id, scope_kind, scope_key, status,
+               lease_expires_at, heartbeat_at, metadata)
+            VALUES ($1,$2,$3,$4,$5,$6,'active',$7,now(),$8)
+            ON CONFLICT (id)
+            DO UPDATE SET status = EXCLUDED.status,
+                          lease_expires_at = EXCLUDED.lease_expires_at,
+                          heartbeat_at = EXCLUDED.heartbeat_at,
+                          metadata = EXCLUDED.metadata
             "#,
         )
         .bind(&id)
@@ -2705,13 +3291,54 @@ impl SharedMemoryService {
             .or_else(|| string_arg(args, "id"))
             .ok_or_else(|| anyhow!("claim_id is required"))?;
         let owner_id = string_arg(args, "owner_id").or_else(|| string_arg(args, "ownerId"));
+        if let Some(lease) = sqlx::query(
+            "SELECT task_id, holder_id, scope_kind, scope_key, metadata FROM work_leases WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        {
+            if let Some(task_id) = lease.try_get::<Option<String>, _>("task_id")? {
+                let holder_id: String = lease.try_get("holder_id")?;
+                let scope_kind: String = lease.try_get("scope_kind")?;
+                let scope_key: String = lease.try_get("scope_key")?;
+                self.require_capability(CapabilityCheckRequest {
+                    grant_id: string_arg(args, "grant_id")
+                        .or_else(|| string_arg(args, "grantId"))
+                        .or_else(|| string_arg(args, "capability_grant_id"))
+                        .or_else(|| string_arg(args, "capabilityGrantId"))
+                        .map(str::to_string),
+                    subject_kind: string_arg(args, "subject_kind")
+                        .or_else(|| string_arg(args, "subjectKind"))
+                        .unwrap_or("worker")
+                        .to_string(),
+                    subject_id: string_arg(args, "subject_id")
+                        .or_else(|| string_arg(args, "subjectId"))
+                        .or(owner_id)
+                        .unwrap_or(holder_id.as_str())
+                        .to_string(),
+                    operation: "claim".to_string(),
+                    scope_kind,
+                    scope_key,
+                    task_id: Some(task_id),
+                    allow_system_bypass: system_or_operator_bypass_allowed(args),
+                    bypass_reason: Some(
+                        "mission_shared_memory release system/operator authority".to_string(),
+                    ),
+                    details: lease
+                        .try_get::<Value, _>("metadata")
+                        .unwrap_or_else(|_| json!({})),
+                })
+                .await?;
+            }
+        }
         let row = sqlx::query(
             r#"
-            UPDATE shared_claims
+            UPDATE work_leases
             SET status = 'released', released_at = now()
             WHERE id = $1
-              AND ($2::text IS NULL OR owner_id = $2)
-            RETURNING id, project_id, task_id, owner_id, scope_kind, scope_key, status,
+              AND ($2::text IS NULL OR holder_id = $2)
+            RETURNING id, project_id, task_id, holder_id AS owner_id, scope_kind, scope_key, status,
                       acquired_at, lease_expires_at, released_at, heartbeat_at, metadata
             "#,
         )
@@ -2719,6 +3346,20 @@ impl SharedMemoryService {
         .bind(owner_id)
         .fetch_optional(&self.pool)
         .await?;
+        if row.is_some() {
+            let _ = sqlx::query(
+                r#"
+                UPDATE shared_claims
+                SET status = 'released', released_at = now()
+                WHERE id = $1
+                  AND ($2::text IS NULL OR owner_id = $2)
+                "#,
+            )
+            .bind(id)
+            .bind(owner_id)
+            .execute(&self.pool)
+            .await;
+        }
         Ok(json!({
             "schema": "missiond.shared-claim-release.v1",
             "ok": row.is_some(),
@@ -2739,14 +3380,55 @@ impl SharedMemoryService {
             .unwrap_or(DEFAULT_LEASE_SECS)
             .clamp(30, MAX_LEASE_SECS);
         let lease_expires_at = Utc::now() + Duration::seconds(lease_secs);
+        if let Some(lease) = sqlx::query(
+            "SELECT task_id, holder_id, scope_kind, scope_key, metadata FROM work_leases WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        {
+            if let Some(task_id) = lease.try_get::<Option<String>, _>("task_id")? {
+                let holder_id: String = lease.try_get("holder_id")?;
+                let scope_kind: String = lease.try_get("scope_kind")?;
+                let scope_key: String = lease.try_get("scope_key")?;
+                self.require_capability(CapabilityCheckRequest {
+                    grant_id: string_arg(args, "grant_id")
+                        .or_else(|| string_arg(args, "grantId"))
+                        .or_else(|| string_arg(args, "capability_grant_id"))
+                        .or_else(|| string_arg(args, "capabilityGrantId"))
+                        .map(str::to_string),
+                    subject_kind: string_arg(args, "subject_kind")
+                        .or_else(|| string_arg(args, "subjectKind"))
+                        .unwrap_or("worker")
+                        .to_string(),
+                    subject_id: string_arg(args, "subject_id")
+                        .or_else(|| string_arg(args, "subjectId"))
+                        .or(owner_id)
+                        .unwrap_or(holder_id.as_str())
+                        .to_string(),
+                    operation: "claim".to_string(),
+                    scope_kind,
+                    scope_key,
+                    task_id: Some(task_id),
+                    allow_system_bypass: system_or_operator_bypass_allowed(args),
+                    bypass_reason: Some(
+                        "mission_shared_memory heartbeat system/operator authority".to_string(),
+                    ),
+                    details: lease
+                        .try_get::<Value, _>("metadata")
+                        .unwrap_or_else(|_| json!({})),
+                })
+                .await?;
+            }
+        }
         let row = sqlx::query(
             r#"
-            UPDATE shared_claims
+            UPDATE work_leases
             SET lease_expires_at = $3, heartbeat_at = now()
             WHERE id = $1
               AND status = 'active'
-              AND ($2::text IS NULL OR owner_id = $2)
-            RETURNING id, project_id, task_id, owner_id, scope_kind, scope_key, status,
+              AND ($2::text IS NULL OR holder_id = $2)
+            RETURNING id, project_id, task_id, holder_id AS owner_id, scope_kind, scope_key, status,
                       acquired_at, lease_expires_at, released_at, heartbeat_at, metadata
             "#,
         )
@@ -2755,6 +3437,22 @@ impl SharedMemoryService {
         .bind(lease_expires_at)
         .fetch_optional(&self.pool)
         .await?;
+        if row.is_some() {
+            let _ = sqlx::query(
+                r#"
+                UPDATE shared_claims
+                SET lease_expires_at = $3, heartbeat_at = now()
+                WHERE id = $1
+                  AND status = 'active'
+                  AND ($2::text IS NULL OR owner_id = $2)
+                "#,
+            )
+            .bind(id)
+            .bind(owner_id)
+            .bind(lease_expires_at)
+            .execute(&self.pool)
+            .await;
+        }
         Ok(json!({
             "schema": "missiond.shared-claim-heartbeat.v1",
             "ok": row.is_some(),
@@ -2803,6 +3501,11 @@ impl SharedMemoryService {
 
     async fn expire_stale_claims(&self) -> Result<u64> {
         let result = sqlx::query(
+            "UPDATE work_leases SET status = 'expired' WHERE status = 'active' AND lease_expires_at < now()",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
             "UPDATE shared_claims SET status = 'expired' WHERE status = 'active' AND lease_expires_at < now()",
         )
         .execute(&self.pool)
@@ -2858,6 +3561,19 @@ impl SharedMemoryService {
 
     async fn release_claims_for_task(&self, task_id: &str, owner_id: Option<&str>) -> Result<u64> {
         let result = sqlx::query(
+            r#"
+            UPDATE work_leases
+            SET status = 'released', released_at = now()
+            WHERE status = 'active'
+              AND task_id = $1
+              AND ($2::text IS NULL OR holder_id = $2)
+            "#,
+        )
+        .bind(task_id)
+        .bind(owner_id)
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
             r#"
             UPDATE shared_claims
             SET status = 'released', released_at = now()
@@ -3337,11 +4053,79 @@ fn metadata_string_list_any(value: Option<&Value>) -> Vec<String> {
     }
 }
 
+fn first_non_empty_metadata_list(values: &[Option<&Value>]) -> Vec<String> {
+    values
+        .iter()
+        .find_map(|value| {
+            let values = metadata_string_list_any(*value);
+            if values.is_empty() {
+                None
+            } else {
+                Some(values)
+            }
+        })
+        .unwrap_or_default()
+}
+
 fn metadata_string_value_any(value: Option<&Value>) -> Option<String> {
     match value {
         Some(Value::String(value)) if !value.trim().is_empty() => Some(value.trim().to_string()),
         Some(Value::Number(value)) => Some(value.to_string()),
         _ => None,
+    }
+}
+
+fn bool_arg_any(args: &Value, keys: &[&str]) -> bool {
+    keys.iter().any(|key| {
+        let Some(value) = args.get(*key) else {
+            return false;
+        };
+        value.as_bool().unwrap_or_else(|| {
+            value.as_str().is_some_and(|text| {
+                matches!(
+                    text.trim().to_ascii_lowercase().as_str(),
+                    "true" | "1" | "yes" | "on"
+                )
+            })
+        })
+    })
+}
+
+fn system_or_operator_bypass_allowed(args: &Value) -> bool {
+    let subject_kind = string_arg(args, "subject_kind")
+        .or_else(|| string_arg(args, "subjectKind"))
+        .unwrap_or("");
+    matches!(subject_kind, "system" | "daemon")
+        || (subject_kind == "operator"
+            && bool_arg_any(
+                args,
+                &[
+                    "confirm",
+                    "operator_confirm",
+                    "operatorConfirm",
+                    "operator_confirmed",
+                    "operatorConfirmed",
+                ],
+            ))
+}
+
+fn runtime_feature_enabled(env_key: &str) -> bool {
+    std::env::var(env_key)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn route_outcome_status(outcome: &str) -> &'static str {
+    match outcome.trim().to_ascii_lowercase().as_str() {
+        "completed" | "complete" | "success" | "succeeded" | "accepted" | "stop" => "succeeded",
+        "blocked" | "cancelled" | "canceled" => "blocked",
+        "failed" | "failure" | "error" | "errored" | "length" | "max_tokens" => "failed",
+        _ => "recorded",
     }
 }
 
@@ -3420,6 +4204,19 @@ fn git_status_changed_paths(project_root: &str) -> Result<Vec<String>> {
     paths.sort();
     paths.dedup();
     Ok(paths)
+}
+
+fn git_head(project_root: &str) -> Result<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(project_root)
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!("git rev-parse HEAD failed: {}", stderr.trim()));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn push_changed_path(paths: &mut Vec<String>, path: &str) {

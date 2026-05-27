@@ -230,6 +230,21 @@ pub(super) async fn action_complete(state: &AppState, args: &Value) -> Result<To
                     .or_else(|| args.get("acceptedShardId"))
                     .and_then(Value::as_str)
                     .map(str::to_string),
+                attempt_id: args
+                    .get("attempt_id")
+                    .or_else(|| args.get("attemptId"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                capability_grant_id: args
+                    .get("capability_grant_id")
+                    .or_else(|| args.get("capabilityGrantId"))
+                    .or_else(|| args.get("grant_id"))
+                    .or_else(|| args.get("grantId"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                subject_kind: Some("system".to_string()),
+                subject_id: Some("agent-execution-completion-audit".to_string()),
+                confirm: Some(true),
                 producer: Some(json!({
                     "kind": "agent_execution_completion",
                     "agent": agent,
