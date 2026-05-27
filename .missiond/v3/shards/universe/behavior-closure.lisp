@@ -146,7 +146,8 @@
     :kind scheduler
     :owner interaction-gateway
     :observed ["scheduler:scripts/smoke-jarvis-intent-plan-dispatch.mjs:53"
-               "scheduler:scripts/smoke-jarvis-intent-plan-dispatch.mjs:259"]
+               "scheduler:scripts/smoke-jarvis-intent-plan-dispatch.mjs:243"
+               "scheduler:scripts/smoke-jarvis-intent-plan-dispatch.mjs:267"]
     :code ["scripts/smoke-jarvis-intent-plan-dispatch.mjs"]
     :effects []
     (anchor
@@ -156,7 +157,12 @@
       :symbol "postInteraction")
     (anchor
       :role scheduler
-      :observed "scheduler:scripts/smoke-jarvis-intent-plan-dispatch.mjs:259"
+      :observed "scheduler:scripts/smoke-jarvis-intent-plan-dispatch.mjs:243"
+      :file "scripts/smoke-jarvis-intent-plan-dispatch.mjs"
+      :symbol "followTaskUntilTerminal")
+    (anchor
+      :role scheduler
+      :observed "scheduler:scripts/smoke-jarvis-intent-plan-dispatch.mjs:267"
       :file "scripts/smoke-jarvis-intent-plan-dispatch.mjs"
       :symbol "followTaskUntilTerminal")
     (trigger

@@ -235,9 +235,17 @@ async function followTaskUntilTerminal(taskId, diagnostics) {
       missiond_follow_task_id: taskId,
       missiond_follow: { task_id: taskId, stream: true },
     }));
-    validateHttp(`follow-${attempt}`, response, diagnostics);
     attempts.push(summarize(response));
-    if (!response.ok) return { attempts, terminal: false };
+    if (!response.ok) {
+      if (isRetryableFollowTransport(response) && attempt < maxAttempts) {
+        attempts[attempts.length - 1].retryable_transport = true;
+        attempts[attempts.length - 1].body_sample = response.body_sample;
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        continue;
+      }
+      validateHttp(`follow-${attempt}`, response, diagnostics);
+      return { attempts, terminal: false };
+    }
     if (hasNonTerminalFinal(response)) {
       diagnostics.push({
         code: 'FOLLOW_NON_TERMINAL_FINAL',
@@ -266,6 +274,17 @@ async function followTaskUntilTerminal(taskId, diagnostics) {
     attempts,
   });
   return { attempts, terminal: false };
+}
+
+function isRetryableFollowTransport(response) {
+  if (!response || response.ok) return false;
+  if (![502, 503, 504].includes(Number(response.status))) return false;
+  const sample = String(response.body_sample || '').toLowerCase();
+  return sample.includes('client_waking')
+    || sample.includes('client waking')
+    || sample.includes('retry in')
+    || sample.includes('temporarily unavailable')
+    || sample.includes('upstream request timeout');
 }
 
 async function main() {
