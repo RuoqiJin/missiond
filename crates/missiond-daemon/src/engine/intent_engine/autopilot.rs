@@ -854,14 +854,13 @@ async fn materialize_and_settle_readonly_durable_completion(
     if summary.is_empty() {
         return Ok(false);
     }
-    let artifact_hash = observe_autopilot_task_result_candidate(
+    let artifact_hash = materialize_read_only_task_result_artifact_from_durable_final(
         state,
         task,
         slot_id,
         Some(durable_completion),
         summary,
         "completed",
-        0,
     )
     .await;
     let Some(artifact_hash) = artifact_hash else {
