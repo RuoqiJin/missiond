@@ -6,7 +6,7 @@
        "Active daemon and MCP entrypoints MUST resolve through ~/.xjp-mission/active."
        "Blue-green rollback MUST switch active back to the previous release."
        "Release cleanup MUST keep active, previous, and newest retained releases."
-       "IPC smoke MUST retry after socket readiness and then rollback on failure; socket-bound is not enough evidence that the MCP initialize path is ready."
+       "Socket readiness MUST be proven by bounded MCP initialize smoke; socket-bound or lsof evidence is diagnostic-only and must not trigger a rollback before MCP initialize has been tried."
        "Deploy smoke timeout MUST be configurable through MISSIOND_DEPLOY_SMOKE_TIMEOUT so local launchd cold-start races do not force code edits."
        "Deploy scripts MUST emit timing for cargo-build, release-copy, codesign, pre-switch smoke, kickstart, socket wait, post-switch smoke, and cleanup so iteration bottlenecks are observable."
        "Dev-only fast deploy may select debug profile and sccache through explicit operator flags/env, but must preserve release manifest, active symlink, smoke, and rollback semantics unless smoke is explicitly disabled."

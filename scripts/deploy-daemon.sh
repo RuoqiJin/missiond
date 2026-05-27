@@ -265,16 +265,25 @@ EOF
 
 wait_for_socket() {
   log "wait: socket $SOCK_PATH (timeout ${TIMEOUT}s)"
-  local start elapsed
+  local start elapsed resp
   start="$(date +%s)"
   while true; do
-    if [ -S "$SOCK_PATH" ] && lsof "$SOCK_PATH" 2>/dev/null | grep -q missiond; then
-      elapsed=$(( $(date +%s) - start ))
-      log "ready: socket bound after ${elapsed}s"
-      return 0
+    if [ -S "$SOCK_PATH" ]; then
+      resp="$(run_mcp_initialize_smoke "$MCP_BIN_PATH" 2>&1 | tail -3 || true)"
+      if echo "$resp" | grep -q '"protocolVersion"'; then
+        elapsed=$(( $(date +%s) - start ))
+        log "ready: IPC initialize succeeded after ${elapsed}s"
+        return 0
+      fi
+      echo "$resp" | sed 's/^/[wait-smoke] /' >&2
+      log "wait: socket exists but IPC initialize is not ready yet"
+    else
+      log "wait: socket file not present yet"
     fi
     elapsed=$(( $(date +%s) - start ))
     if [ "$elapsed" -ge "$TIMEOUT" ]; then
+      elapsed=$(( $(date +%s) - start ))
+      log "wait: socket/IPC readiness timed out after ${elapsed}s"
       return 1
     fi
     sleep 1
