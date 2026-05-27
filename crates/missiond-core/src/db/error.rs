@@ -15,6 +15,40 @@ pub enum DbError {
     #[error("constraint: {0}")]
     Constraint(String),
 
+    #[error("EVIDENCE_REQUIRED: task_id={task_id}: BoardTask cannot be marked done until a canonical completed task-result artifact exists")]
+    EvidenceRequired { task_id: String },
+
+    #[error("COMPLETION_ARTIFACT_INVALID: {reason}")]
+    CompletionArtifactInvalid {
+        task_id: Option<String>,
+        reason: String,
+    },
+
+    #[error("CLAIM_CONFLICT: {scope_kind}:{scope_key} is already held")]
+    ClaimConflict {
+        scope_kind: String,
+        scope_key: String,
+        holder: Option<String>,
+        lease_expires_at: Option<String>,
+    },
+
+    #[error("CAPABILITY_DENIED: operation={operation} scope={scope_kind}:{scope_key}")]
+    CapabilityDenied {
+        operation: String,
+        scope_kind: String,
+        scope_key: String,
+        reason: String,
+    },
+
+    #[error("RUNTIME_METADATA_REQUIRED: task_id={task_id}: runtime_metadata is required for control-plane decisions")]
+    RuntimeMetadataRequired { task_id: String },
+
+    #[error("SANDBOX_POLICY_UNSUPPORTED: {reason}")]
+    SandboxPolicyUnsupported { reason: String },
+
+    #[error("WRITE_SCOPE_VIOLATION: task_id={task_id}: {reason}")]
+    WriteScopeViolation { task_id: String, reason: String },
+
     #[error("{0}")]
     Other(String),
 }

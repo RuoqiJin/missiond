@@ -3639,6 +3639,46 @@ impl PTYWebSocketServer {
         {
             return ("review", "read-only");
         }
+        const INVESTIGATION_FIRST_MARKERS: &[&str] = &[
+            "investigate",
+            "survey",
+            "review",
+            "research",
+            "design",
+            "plan",
+            "调查",
+            "审视",
+            "研究",
+            "分析",
+            "设计",
+            "规划",
+            "方案",
+        ];
+        const CODE_NOW_MARKERS: &[&str] = &[
+            "implement now",
+            "fix now",
+            "do it now",
+            "exact shard",
+            "accepted_shard",
+            "accepted shard",
+            "立刻实现",
+            "立即实现",
+            "现在实现",
+            "直接实现",
+            "立刻修复",
+            "立即修复",
+            "现在修复",
+            "直接修复",
+            "代码补丁",
+            "改代码",
+        ];
+        if INVESTIGATION_FIRST_MARKERS
+            .iter()
+            .any(|marker| lower.contains(marker))
+            && !CODE_NOW_MARKERS.iter().any(|marker| lower.contains(marker))
+        {
+            return ("review", "read-only");
+        }
         let action_text = lower
             .replace("do not commit", "")
             .replace("don't commit", "")
@@ -3938,6 +3978,7 @@ impl PTYWebSocketServer {
              已接受执行切片：\n\
              - 这个任务已经通过 Jarvis intent 确认和 plan 确认。\n\
              - 你不是主控；不要重新拆任务、不要创建 BoardTask、不要派子工位。\n\
+             - 禁止调用 ClaudeCode 内部 Task/Explore/TaskCreate/TaskUpdate/TaskList/TaskOutput 类子代理工具；如果这些工具出现在可用工具列表中，也不要使用。\n\
              - 你只需要按 task_kind 和 acceptance 验证当前工位能力，并返回结构化结果。\n\
              - acceptance:\n{acc}\n\n\
              工作方式：\n\
@@ -7164,6 +7205,7 @@ mod tests {
         assert!(prompt.contains("先读取 context_pack_file"));
         assert!(prompt.contains("context unavailable"));
         assert!(prompt.contains("mission_shared_memory(action=\"artifact_get\", hash=\"abc\")"));
+        assert!(prompt.contains("Task/Explore/TaskCreate/TaskUpdate/TaskList/TaskOutput"));
         assert!(prompt.contains("## Findings"));
         assert!(prompt.contains("## Evidence"));
         assert!(prompt.contains("## Recommendations"));
@@ -7241,6 +7283,25 @@ mod tests {
         );
         assert_eq!(metadata["task_class"], "review");
         assert_eq!(metadata["write_policy"], "read-only");
+        assert_eq!(metadata["pool_hint"], "codex-review-worker");
+        let ws = metadata["write_scope"].as_array().unwrap();
+        assert!(ws.is_empty());
+    }
+
+    #[test]
+    fn jarvis_dispatch_investigation_plan_stays_readonly_even_with_followup_fix_words() {
+        let metadata = PTYWebSocketServer::derive_jarvis_dispatch_contract(
+            "请调查当前实现并设计系统级实施方案，尽可能补齐缺失的 SSOT/checker/runtime 小闭环。",
+            "context-gather:survey",
+            Some("shared-artifact://survey"),
+            Some("/tmp/ctx.json"),
+            "intent-survey",
+            "plan-survey",
+            "/repo",
+        );
+        assert_eq!(metadata["task_class"], "review");
+        assert_eq!(metadata["write_policy"], "read-only");
+        assert_eq!(metadata["engine_hint"], "codex");
         assert_eq!(metadata["pool_hint"], "codex-review-worker");
         let ws = metadata["write_scope"].as_array().unwrap();
         assert!(ws.is_empty());

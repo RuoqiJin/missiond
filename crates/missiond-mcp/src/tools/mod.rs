@@ -183,10 +183,17 @@ impl ToolResult {
 /// Structured error with machine-readable code and AI-actionable suggestion.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolError {
+    /// Stable error code, preferred by new clients.
+    pub code: String,
+    /// Human-readable message, preferred by new clients.
+    pub message: String,
     /// Machine-readable error code (e.g. "SLOT_NOT_FOUND", "INVALID_ACTION")
     pub error_code: String,
     /// Human-readable reason
     pub reason: String,
+    /// Structured diagnostics for recovery and UI rendering.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<Value>,
     /// AI-actionable suggestion for recovery
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suggestion: Option<String>,
@@ -197,12 +204,22 @@ pub struct ToolError {
 
 impl ToolError {
     pub fn new(code: impl Into<String>, reason: impl Into<String>) -> Self {
+        let code = code.into();
+        let reason = reason.into();
         ToolError {
-            error_code: code.into(),
-            reason: reason.into(),
+            code: code.clone(),
+            message: reason.clone(),
+            error_code: code,
+            reason,
+            details: None,
             suggestion: None,
             trace_id: None,
         }
+    }
+
+    pub fn with_details(mut self, details: Value) -> Self {
+        self.details = Some(details);
+        self
     }
 
     pub fn with_suggestion(mut self, suggestion: impl Into<String>) -> Self {
@@ -229,6 +246,14 @@ pub mod error_codes {
     pub const SPAWN_FAILED: &str = "SPAWN_FAILED";
     pub const DB_ERROR: &str = "DB_ERROR";
     pub const EXTERNAL_ERROR: &str = "EXTERNAL_ERROR";
+    pub const EVIDENCE_REQUIRED: &str = "EVIDENCE_REQUIRED";
+    pub const CLAIM_CONFLICT: &str = "CLAIM_CONFLICT";
+    pub const COMPLETION_ARTIFACT_INVALID: &str = "COMPLETION_ARTIFACT_INVALID";
+    pub const COMPLETION_ARTIFACT_WRITE_FAILED: &str = "COMPLETION_ARTIFACT_WRITE_FAILED";
+    pub const CAPABILITY_DENIED: &str = "CAPABILITY_DENIED";
+    pub const RUNTIME_METADATA_REQUIRED: &str = "RUNTIME_METADATA_REQUIRED";
+    pub const SANDBOX_POLICY_UNSUPPORTED: &str = "SANDBOX_POLICY_UNSUPPORTED";
+    pub const WRITE_SCOPE_VIOLATION: &str = "WRITE_SCOPE_VIOLATION";
 }
 
 mod comm;

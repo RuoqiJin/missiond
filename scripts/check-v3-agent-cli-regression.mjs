@@ -59,8 +59,8 @@ function main() {
       'Agy is the successor research CLI lane',
       'Codex code/review worker lanes are ordinary BoardTask candidates',
       'Agy/Antigravity writes durable markdown artifacts under the provider brain store',
-      'provider-empty-final task-result-artifact diagnostic',
-      'idle worker slot without durable final',
+      'provider-empty-final as a task-result-candidate observation only',
+      'idle worker slot without canonical artifact',
       'All generated or compatibility CliEngine enums MUST cover the canonical provider set',
     ]);
     requireAll(diagnostics, FILES.workstationPoolEvidence, sources.workstationPoolEvidence, [
@@ -112,8 +112,9 @@ function main() {
       'agy_artifact_declared_board_task_id',
       'rejects_foreign_board_task_artifact',
       'provider-empty-final',
-      'worker slot became idle without durable final or task-result-artifact',
-      'idle slot without durable final',
+      'idle slot without canonical artifact',
+      'no terminal state written',
+      'schema": "missiond.task-result-candidate.v1"',
     ]);
     requireAll(diagnostics, FILES.main, sources.main, [
       'GenericCliSlotManager::new',

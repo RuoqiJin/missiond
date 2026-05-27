@@ -4,6 +4,7 @@ const args = new Set(process.argv.slice(2));
 const json = args.has('--json');
 const allowCreate = args.has('--allow-create') || process.env.JARVIS_DISPATCH_ALLOW_CREATE === '1';
 const followToFinal = args.has('--follow') || process.env.JARVIS_DISPATCH_FOLLOW === '1';
+const followTaskOnly = String(process.env.JARVIS_FOLLOW_TASK_ID || '').trim();
 const baseUrl = stripTrailingSlash(process.env.JARVIS_BASE_URL || 'https://auth.xiaojinpro.com/jarvis');
 const smokeSecretRef =
   process.env.MISSIOND_JARVIS_SMOKE_SECRET_REF ||
@@ -282,6 +283,7 @@ function isRetryableFollowTransport(response) {
   const sample = String(response.body_sample || '').toLowerCase();
   return sample.includes('client_waking')
     || sample.includes('client waking')
+    || sample.includes('request timeout')
     || sample.includes('retry in')
     || sample.includes('temporarily unavailable')
     || sample.includes('upstream request timeout');
@@ -301,6 +303,19 @@ async function main() {
         secret_ref: smokeSecretRef,
       }],
     }, 2);
+  }
+
+  if (followTaskOnly) {
+    const diagnostics = [];
+    const follow = await followTaskUntilTerminal(followTaskOnly, diagnostics);
+    return finish({
+      ok: diagnostics.length === 0 && follow.terminal,
+      schema: 'missiond.jarvis-intent-plan-dispatch-smoke.v1',
+      mode: 'follow-only',
+      task_id: followTaskOnly,
+      follow,
+      diagnostics,
+    }, diagnostics.length === 0 && follow.terminal ? 0 : 1);
   }
 
   const diagnostics = [];

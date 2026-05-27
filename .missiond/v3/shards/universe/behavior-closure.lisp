@@ -88,12 +88,12 @@
     :id autopilot-runtime-isomorphism-checker-subprocess
     :kind subprocess
     :owner autopilot-runtime
-    :observed ["subprocess:scripts/check-v3-autopilot-runtime-isomorphism.mjs:216"]
+    :observed ["subprocess:scripts/check-v3-autopilot-runtime-isomorphism.mjs:218"]
     :code ["scripts/check-v3-autopilot-runtime-isomorphism.mjs"]
     :effects []
     (anchor
       :role subprocess
-      :observed "subprocess:scripts/check-v3-autopilot-runtime-isomorphism.mjs:216"
+      :observed "subprocess:scripts/check-v3-autopilot-runtime-isomorphism.mjs:218"
       :file "scripts/check-v3-autopilot-runtime-isomorphism.mjs"
       :symbol "delegated")
     (trigger
@@ -145,24 +145,24 @@
     :id jarvis-intent-plan-dispatch-smoke-timeout
     :kind scheduler
     :owner interaction-gateway
-    :observed ["scheduler:scripts/smoke-jarvis-intent-plan-dispatch.mjs:53"
-               "scheduler:scripts/smoke-jarvis-intent-plan-dispatch.mjs:243"
-               "scheduler:scripts/smoke-jarvis-intent-plan-dispatch.mjs:267"]
+    :observed ["scheduler:scripts/smoke-jarvis-intent-plan-dispatch.mjs:54"
+               "scheduler:scripts/smoke-jarvis-intent-plan-dispatch.mjs:244"
+               "scheduler:scripts/smoke-jarvis-intent-plan-dispatch.mjs:268"]
     :code ["scripts/smoke-jarvis-intent-plan-dispatch.mjs"]
     :effects []
     (anchor
       :role scheduler
-      :observed "scheduler:scripts/smoke-jarvis-intent-plan-dispatch.mjs:53"
+      :observed "scheduler:scripts/smoke-jarvis-intent-plan-dispatch.mjs:54"
       :file "scripts/smoke-jarvis-intent-plan-dispatch.mjs"
       :symbol "postInteraction")
     (anchor
       :role scheduler
-      :observed "scheduler:scripts/smoke-jarvis-intent-plan-dispatch.mjs:243"
+      :observed "scheduler:scripts/smoke-jarvis-intent-plan-dispatch.mjs:244"
       :file "scripts/smoke-jarvis-intent-plan-dispatch.mjs"
       :symbol "followTaskUntilTerminal")
     (anchor
       :role scheduler
-      :observed "scheduler:scripts/smoke-jarvis-intent-plan-dispatch.mjs:267"
+      :observed "scheduler:scripts/smoke-jarvis-intent-plan-dispatch.mjs:268"
       :file "scripts/smoke-jarvis-intent-plan-dispatch.mjs"
       :symbol "followTaskUntilTerminal")
     (trigger

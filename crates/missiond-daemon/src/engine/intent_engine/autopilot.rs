@@ -11,11 +11,7 @@ use crate::context::v3_blueprint_runtime::{
     AutopilotRuntimeConfig, RouterRuntimeConfig, WorkstationRuntimeConfig,
 };
 use crate::engine::learning_engine;
-use crate::engine::task_completion_evidence::{
-    TaskCompletionEvidenceInput, TaskCompletionEvidenceWriter,
-};
 use crate::flow_engine::{ensure_autopilot_pty, execute_flow_task};
-use crate::handlers::knowledge::agent_execution;
 use crate::llm_gateway::determine_llm_env;
 use crate::memory_scheduler::ensure_memory_slot_by_id;
 use crate::memory_scheduler::{dispatch_queued_submit_tasks, reap_stale_submit_tasks};
@@ -31,7 +27,6 @@ use missiond_core::event::events::{
     BoardEvent, IncidentEvent, SessionEvent, SlotEvent, SystemEvent,
 };
 use missiond_core::SessionState;
-use missiond_mcp::tools::{ToolContent, ToolResult};
 
 // @beacon: orchestration
 
@@ -221,7 +216,7 @@ async fn resolve_stale_lisp_code_sync_runtime_report_task(
     state: &AppState,
     task: &missiond_core::types::BoardTask,
 ) {
-    let note = "✅ resolved_by_runtime_fix / stale_evidence — this BoardTask points at a lisp-code-sync runtime report under `.missiond/v3/runtime/lisp-code-sync/**`. Runtime reports are cold evidence, not editable SSOT source; the watcher now ignores runtime output and report GC bounds the directory. Autopilot therefore closed this stale self-loop task before dispatch instead of spending another worker slot.";
+    let note = "⚠️ stale_evidence observation — this BoardTask points at a lisp-code-sync runtime report under `.missiond/v3/runtime/lisp-code-sync/**`. Runtime reports are cold evidence, not editable SSOT source; the watcher ignores runtime output and report GC bounds the directory. Autopilot recorded this as an observation only; terminal status still requires a canonical task_result_artifact plus typed settle.";
     let _ = state
         .store
         .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
@@ -232,28 +227,25 @@ async fn resolve_stale_lisp_code_sync_runtime_report_task(
         })
         .await;
     let _ = state
-        .store
-        .update_board_task(
-            task.id.as_str(),
-            &missiond_core::types::UpdateBoardTaskInput {
-                status: Some("done".to_string()),
-                auto_execute: Some(false),
-                ..Default::default()
-            },
-        )
-        .await;
-    let _ = state
-        .bus
-        .publish_board(BoardEvent::StatusChanged {
-            task_id: task.id.to_string(),
-            old_status: format!("{:?}", task.status),
-            new_status: "done".to_string(),
-        })
+        .storage()
+        .shared_memory
+        .handle_action(&serde_json::json!({
+            "action": "job_event",
+            "task_id": task.id.as_str(),
+            "project_id": task.project.as_deref().unwrap_or("missiond"),
+            "event_kind": "observation.recorded",
+            "agent_id": "autopilot",
+            "payload": {
+                "schema": "missiond.autopilot-stale-runtime-report-observation.v1",
+                "reason": "stale_lisp_code_sync_runtime_report",
+                "summary": note
+            }
+        }))
         .await;
     info!(
         task_id = %task.id,
         title = %task.title,
-        "Autopilot: closed stale lisp-code-sync runtime report task before dispatch"
+        "Autopilot: recorded stale lisp-code-sync runtime report observation before dispatch"
     );
 }
 
@@ -401,6 +393,7 @@ fn conversation_ended_before_claim(
     ended_at < claimed_at
 }
 
+#[cfg(test)]
 fn is_durable_completion_summary_note(note: &missiond_core::types::BoardTaskNote) -> bool {
     if note.note_type != missiond_core::types::BoardNoteType::Summary {
         return false;
@@ -411,6 +404,7 @@ fn is_durable_completion_summary_note(note: &missiond_core::types::BoardTaskNote
         && !content.contains("Autopilot 未关闭任务")
 }
 
+#[cfg(test)]
 fn has_durable_completion_summary_after_claim(
     notes: &[missiond_core::types::BoardTaskNote],
     claimed_at: Option<&str>,
@@ -447,7 +441,7 @@ struct AgyArtifactCandidate {
 
 const AGY_DEFAULT_ARTIFACT_ROOT_SUFFIX: &str = ".gemini/antigravity-cli/brain";
 
-async fn put_autopilot_task_result_artifact(
+async fn observe_autopilot_task_result_candidate(
     state: &AppState,
     task: &missiond_core::types::BoardTask,
     slot_id: &str,
@@ -464,44 +458,139 @@ async fn put_autopilot_task_result_artifact(
     let raw_evidence = durable_completion
         .map(|completion| completion.summary.as_str())
         .unwrap_or(final_summary);
-    let writer = TaskCompletionEvidenceWriter::new(state.storage().shared_memory.clone());
-    let input = TaskCompletionEvidenceInput {
-        task_id: task.id.as_str().to_string(),
-        project_id: Some(project_id.to_string()),
-        slot_id: Some(slot_id.to_string()),
-        conversation_id: conversation_id.map(str::to_string),
-        provider: provider.to_string(),
-        result_status: result_status.to_string(),
-        summary: final_summary.to_string(),
-        content: Some(final_summary.to_string()),
-        json: serde_json::json!({
-            "schema": "missiond.autopilot-task-result.v1",
+    let candidate_hash = task_result_artifact_hash_from_text(final_summary);
+    let _ = state
+        .storage()
+        .shared_memory
+        .handle_action(&serde_json::json!({
+            "action": "job_event",
             "task_id": task.id.as_str(),
-            "slot_id": slot_id,
-            "conversation_id": conversation_id,
-            "provider": provider,
-            "result_status": result_status,
-            "duration_ms": duration_ms,
-            "summary": final_summary,
-            "content": final_summary,
-            "raw_evidence": raw_evidence,
-            "raw_evidence_kind": if durable_completion.is_some() { "provider_final" } else { "pty_screen" },
-            "description_dispatch": serde_json::from_str::<serde_json::Value>(&task.description).ok()
-        }),
-        accepted_shard_id: None,
-    };
-    match writer.write_bounded(input).await {
-        Ok(result) => Some(result.artifact_hash),
-        Err(err) => {
+            "project_id": project_id,
+            "event_kind": "observation.recorded",
+            "agent_id": "autopilot",
+            "payload": {
+                "schema": "missiond.task-result-candidate.v1",
+                "source": "autopilot",
+                "source_kind": if durable_completion.is_some() { "provider_final" } else { "pty_screen" },
+                "slot_id": slot_id,
+                "conversation_id": conversation_id,
+                "provider": provider,
+                "requested_result_status": result_status,
+                "duration_ms": duration_ms,
+                "summary": final_summary,
+                "raw_evidence": raw_evidence,
+                "candidate_artifact_hash": candidate_hash
+            }
+        }))
+        .await
+        .map_err(|err| {
             warn!(
                 task_id = %task.id,
                 slot_id,
                 error = %err,
-                "Autopilot: failed to write task-result-artifact"
+                "Autopilot: failed to record task-result candidate observation"
             );
-            None
-        }
+            err
+        })
+        .ok();
+
+    let artifact_hash =
+        completed_task_result_artifact_hash_for_task(state, task, candidate_hash.as_deref()).await;
+    if artifact_hash.is_none() {
+        info!(
+            task_id = %task.id,
+            slot_id,
+            "Autopilot recorded completion candidate; waiting for worker-authored task_result_artifact"
+        );
     }
+    artifact_hash
+}
+
+async fn completed_task_result_artifact_hash_for_task(
+    state: &AppState,
+    task: &missiond_core::types::BoardTask,
+    candidate_hash: Option<&str>,
+) -> Option<String> {
+    let mut args = serde_json::json!({
+        "action": "task_result_get",
+        "task_id": task.id.as_str(),
+        "limit": 10
+    });
+    if let Some(hash) = candidate_hash.filter(|hash| !hash.trim().is_empty()) {
+        args["hash"] = serde_json::json!(hash);
+    }
+    let value = state
+        .storage()
+        .shared_memory
+        .handle_action(&args)
+        .await
+        .ok()?;
+    value
+        .get("results")
+        .and_then(|v| v.as_array())
+        .and_then(|rows| {
+            rows.iter().find_map(|row| {
+                let row_task_id = row.get("task_id").and_then(|v| v.as_str())?;
+                if row_task_id != task.id.as_str() {
+                    return None;
+                }
+                let status = row.get("result_status").and_then(|v| v.as_str());
+                if !task_result_status_is_completed(status) {
+                    return None;
+                }
+                row.get("artifact_hash")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
+        })
+}
+
+fn task_result_status_is_completed(status: Option<&str>) -> bool {
+    matches!(
+        status
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("completed" | "complete" | "verified" | "pass" | "passed")
+    )
+}
+
+async fn settle_autopilot_done_with_artifact(
+    state: &AppState,
+    task: &missiond_core::types::BoardTask,
+    slot_id: &str,
+    artifact_hash: &str,
+    summary: &str,
+) -> Result<()> {
+    state
+        .storage()
+        .shared_memory
+        .handle_action(&serde_json::json!({
+            "action": "worker_settle",
+            "task_id": task.id.as_str(),
+            "project_id": task.project.as_deref().unwrap_or("missiond"),
+            "slot_id": slot_id,
+            "status": "done",
+            "artifact_hash": artifact_hash,
+            "summary": summary,
+        }))
+        .await?;
+    Ok(())
+}
+
+fn task_result_artifact_hash_from_text(text: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let idx = line.find("task_result_artifact:")?;
+        let hash = line[idx + "task_result_artifact:".len()..]
+            .trim()
+            .trim_matches('`')
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_matches('`')
+            .trim();
+        (!hash.is_empty()).then(|| hash.to_string())
+    })
 }
 
 fn timestamp_is_after_or_unknown(timestamp: &str, threshold: Option<&str>) -> bool {
@@ -1157,16 +1246,14 @@ async fn close_idle_running_task_from_durable_summary(
     if task_with_notes.task.status != missiond_core::types::BoardTaskStatus::Running {
         return Ok(false);
     }
-    let mut has_durable_summary = has_durable_completion_summary_after_claim(
-        &task_with_notes.notes,
-        task_with_notes.task.claimed_at.as_deref(),
-    );
+    let mut has_durable_summary = false;
+    let mut close_artifact_hash: Option<String> = None;
     if !has_durable_summary {
         if let Some(completion) =
             await_durable_provider_completion_for_slot_task(state, &task_with_notes.task, slot_id)
                 .await?
         {
-            let artifact_hash = put_autopilot_task_result_artifact(
+            let artifact_hash = observe_autopilot_task_result_candidate(
                 state,
                 &task_with_notes.task,
                 slot_id,
@@ -1182,7 +1269,7 @@ async fn close_idle_running_task_from_durable_summary(
                     .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
                         task_id: task_id.to_string(),
                         content: format!(
-                            "⚠️ **Autopilot blocked close** — durable provider final was observed ({} / {}), but task-result-artifact could not be written. The BoardTask remains running until the artifact writer succeeds.",
+                            "⚠️ **Autopilot blocked close** — durable provider final was observed ({} / {}), but no canonical completed task_result_artifact exists yet. The BoardTask remains running until the worker writes the artifact.",
                             completion.source, completion.session_id
                         ),
                         note_type: Some("note".to_string()),
@@ -1195,6 +1282,7 @@ async fn close_idle_running_task_from_durable_summary(
                 .as_ref()
                 .map(|hash| format!("\n\ntask_result_artifact: `{hash}`"))
                 .unwrap_or_default();
+            close_artifact_hash = artifact_hash;
             let summary_for_note =
                 truncate_safe(&completion.summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES);
             state
@@ -1233,7 +1321,7 @@ async fn close_idle_running_task_from_durable_summary(
                 && pty_only_close_blocker_for_task(&task_with_notes.task, false, &summary)
                     .is_none();
             if has_structured_artifact {
-                let artifact_hash = put_autopilot_task_result_artifact(
+                let artifact_hash = observe_autopilot_task_result_candidate(
                     state,
                     &task_with_notes.task,
                     slot_id,
@@ -1243,10 +1331,26 @@ async fn close_idle_running_task_from_durable_summary(
                     0,
                 )
                 .await;
+                if artifact_hash.is_none() {
+                    state
+                        .store
+                        .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+                            task_id: task_id.to_string(),
+                            content: format!(
+                                "⚠️ **Autopilot blocked close** — structured PTY final was observed on {}, but no canonical completed task_result_artifact exists yet. The BoardTask remains running until the worker writes the artifact.",
+                                slot_id
+                            ),
+                            note_type: Some("note".to_string()),
+                            author: Some("autopilot".to_string()),
+                        })
+                        .await?;
+                    return Ok(false);
+                }
                 let artifact_suffix = artifact_hash
                     .as_ref()
                     .map(|hash| format!("\n\ntask_result_artifact: `{hash}`"))
                     .unwrap_or_default();
+                close_artifact_hash = artifact_hash;
                 state
                     .store
                     .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
@@ -1281,24 +1385,19 @@ async fn close_idle_running_task_from_durable_summary(
             author: Some("autopilot".to_string()),
         })
         .await?;
-    state
-        .store
-        .update_board_task(
-            task_id,
-            &missiond_core::types::UpdateBoardTaskInput {
-                status: Some("done".to_string()),
-                ..Default::default()
-            },
+    let artifact_hash = close_artifact_hash.ok_or_else(|| {
+        anyhow!(
+            "EVIDENCE_REQUIRED: task_id={task_id}: canonical completed task_result_artifact hash required"
         )
-        .await?;
-    let _ = state
-        .bus
-        .publish_board(BoardEvent::StatusChanged {
-            task_id: task_id.to_string(),
-            old_status: format!("{:?}", task_with_notes.task.status),
-            new_status: "done".to_string(),
-        })
-        .await;
+    })?;
+    settle_autopilot_done_with_artifact(
+        state,
+        &task_with_notes.task,
+        slot_id,
+        &artifact_hash,
+        "Durable completion observed by Autopilot idle watchdog.",
+    )
+    .await?;
     info!(
         task_id,
         slot_id, "Autopilot: closed idle running task from durable completion summary note"
@@ -1322,20 +1421,6 @@ fn extract_between(source: &str, prefix: &str, suffix: &str) -> Option<String> {
     } else {
         Some(value.to_string())
     }
-}
-
-fn tool_result_json_value(result: &ToolResult) -> Option<serde_json::Value> {
-    result.content.iter().find_map(|content| match content {
-        ToolContent::Text { text } => serde_json::from_str(text).ok(),
-    })
-}
-
-fn execution_status_has_completion(status: &serde_json::Value) -> bool {
-    status
-        .get("completed_phases")
-        .and_then(|v| v.as_array())
-        .map(|items| !items.is_empty())
-        .unwrap_or(false)
 }
 
 async fn project_id_for_execution_log(
@@ -1374,50 +1459,24 @@ async fn maybe_complete_delegated_execution_log(
         return Ok(false);
     };
     let project_id = project_id_for_execution_log(state, task, &execution_id).await;
-
-    let mut status_args = serde_json::json!({
-        "action": "status",
-        "execution_id": execution_id,
-    });
-    if let Some(project) = &project_id {
-        status_args["project"] = serde_json::json!(project);
-    }
-
-    let status_result = agent_execution::handle(state, "mission_execution", status_args).await?;
-    if status_result.is_error.unwrap_or(false) {
-        return Ok(false);
-    }
-    if tool_result_json_value(&status_result)
-        .map(|v| execution_status_has_completion(&v))
-        .unwrap_or(false)
-    {
-        return Ok(false);
-    }
-
-    let mut complete_args = serde_json::json!({
-        "action": "complete",
-        "execution_id": execution_id,
-        "phase": "delegated-boardtask",
-        "agent_name": "autopilot-orchestrator",
-        "summary": truncate_safe(worker_response, 500),
-        "deliverables": format!(
-            "BoardTask {} completed through Autopilot; orchestrator synthesized the mission_execution completion because the worker returned a final summary instead of calling the MCP tool.",
-            task.id
-        ),
-        "verification": format!(
-            "Autopilot observed pty.send completion after {}ms and stored the worker final summary as the BoardTask completion note.",
-            duration_ms
-        ),
-        "commit_status": "not-required",
-        "enforce_scoped_commit": true,
-    });
-    if let Some(project) = &project_id {
-        complete_args["project"] = serde_json::json!(project);
-    }
-
-    let complete_result =
-        agent_execution::handle(state, "mission_execution", complete_args).await?;
-    Ok(!complete_result.is_error.unwrap_or(false))
+    let _ = state
+        .storage()
+        .shared_memory
+        .handle_action(&serde_json::json!({
+            "action": "job_event",
+            "task_id": task.id.as_str(),
+            "project_id": project_id.as_deref().unwrap_or_else(|| task.project.as_deref().unwrap_or("missiond")),
+            "event_kind": "observation.recorded",
+            "agent_id": "autopilot",
+            "payload": {
+                "schema": "missiond.delegated-execution-log-candidate.v1",
+                "execution_id": execution_id,
+                "duration_ms": duration_ms,
+                "summary": truncate_safe(worker_response, 500)
+            }
+        }))
+        .await;
+    Ok(false)
 }
 
 /// Maximum byte length of the worker final summary written into the
@@ -2751,13 +2810,13 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
                                 continue;
                             }
                             let diagnostic_summary = format!(
-                                "Diagnostic: BoardTask `{}` is still running, but worker slot `{}` is {:?} and MissionD could not find a durable provider final, structured PTY final, or task-result-artifact after {}s. MissionD failed this task instead of leaving it running indefinitely; retry with a fresh grounded shard or inspect the provider transcript.",
+                                "Diagnostic: BoardTask `{}` is still running, but worker slot `{}` is {:?} and MissionD could not find a canonical task_result_artifact after {}s. Autopilot recorded an observation only; terminal status still requires typed settle.",
                                 rt.id,
                                 slot_id,
                                 info.state,
                                 claimed_age
                             );
-                            let artifact_hash = put_autopilot_task_result_artifact(
+                            let _ = observe_autopilot_task_result_candidate(
                                 state,
                                 rt,
                                 slot_id,
@@ -2767,57 +2826,23 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
                                 0,
                             )
                             .await;
-                            let artifact_suffix = artifact_hash
-                                .as_ref()
-                                .map(|hash| format!("\n\ntask_result_artifact: `{hash}`"))
-                                .unwrap_or_default();
                             let _ = state
                                 .store
                                 .add_board_task_note(
                                     &missiond_core::types::AddBoardTaskNoteInput {
                                         task_id: rt.id.to_string(),
                                         content: format!(
-                                            "⚠️ **Autopilot failed close** — idle slot without durable final\n\n{}{}",
+                                            "⚠️ **Autopilot observation** — idle slot without canonical artifact; no terminal state written\n\n{}",
                                             truncate_safe(
                                                 &diagnostic_summary,
                                                 AUTOPILOT_SUMMARY_NOTE_MAX_BYTES
-                                            ),
-                                            artifact_suffix
+                                            )
                                         ),
                                         note_type: Some("summary".to_string()),
                                         author: Some("autopilot".to_string()),
                                     },
                                 )
                                 .await;
-                            let _ = state
-                                .store
-                                .update_board_task(
-                                    rt.id.as_str(),
-                                    &missiond_core::types::UpdateBoardTaskInput {
-                                        status: Some("failed".to_string()),
-                                        ..Default::default()
-                                    },
-                                )
-                                .await;
-                            let _ = state
-                                .bus
-                                .publish_board(BoardEvent::StatusChanged {
-                                    task_id: rt.id.to_string(),
-                                    old_status: format!("{:?}", rt.status),
-                                    new_status: "failed".to_string(),
-                                })
-                                .await;
-                            let _ = state
-                                .store
-                                .update_prompt_snapshot_outcome(rt.id.as_str(), "failed")
-                                .await;
-                            notify_jarvis_failure(
-                                state,
-                                rt,
-                                "worker slot became idle without durable final or task-result-artifact",
-                            )
-                            .await;
-                            continue;
                         }
                         // Idle/terminal slots are not actively producing output.
                         // Only reclaim once the configured task budget plus
@@ -4148,13 +4173,13 @@ async fn dispatch_board_tasks_with_config(
                             task_id = %task.id,
                             slot_id = %slot_id,
                             duration_ms = res.duration_ms,
-                            "Autopilot: provider returned empty final after terminal slot state; failing task with diagnostic artifact"
+                            "Autopilot: provider returned empty final after terminal slot state; recording observation only"
                         );
                         let diagnostic_summary = format!(
-                            "Diagnostic: provider returned an empty final response after slot `{}` reached a terminal/idle state. MissionD did not receive a durable provider final or structured PTY final, so this BoardTask is failed instead of left running. Retry with a grounded context slice or inspect the provider session.",
+                            "Diagnostic: provider returned an empty final response after slot `{}` reached a terminal/idle state. MissionD did not receive a canonical task_result_artifact, so Autopilot recorded an observation and left the BoardTask non-terminal.",
                             slot_id
                         );
-                        let task_result_artifact_hash = put_autopilot_task_result_artifact(
+                        let _task_result_artifact_hash = observe_autopilot_task_result_candidate(
                             state,
                             task,
                             &slot_id,
@@ -4164,54 +4189,21 @@ async fn dispatch_board_tasks_with_config(
                             res.duration_ms,
                         )
                         .await;
-                        let artifact_suffix = task_result_artifact_hash
-                            .as_ref()
-                            .map(|hash| format!("\n\ntask_result_artifact: `{hash}`"))
-                            .unwrap_or_default();
                         let _ = state
                             .store
                             .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
                                 task_id: task.id.to_string(),
                                 content: format!(
-                                    "⚠️ **Autopilot failed close** — provider-empty-final\n\n{}{}",
+                                    "⚠️ **Autopilot observation** — provider-empty-final; no terminal state written\n\n{}",
                                     truncate_safe(
                                         &diagnostic_summary,
                                         AUTOPILOT_SUMMARY_NOTE_MAX_BYTES
-                                    ),
-                                    artifact_suffix
+                                    )
                                 ),
                                 note_type: Some("summary".to_string()),
                                 author: Some("autopilot".to_string()),
                             })
                             .await;
-                        let _ = state
-                            .store
-                            .update_board_task(
-                                task.id.as_str(),
-                                &missiond_core::types::UpdateBoardTaskInput {
-                                    status: Some("failed".to_string()),
-                                    ..Default::default()
-                                },
-                            )
-                            .await;
-                        let _ = state
-                            .bus
-                            .publish_board(BoardEvent::StatusChanged {
-                                task_id: task.id.to_string(),
-                                old_status: format!("{:?}", task.status),
-                                new_status: "failed".to_string(),
-                            })
-                            .await;
-                        let _ = state
-                            .store
-                            .update_prompt_snapshot_outcome(task.id.as_str(), "failed")
-                            .await;
-                        notify_jarvis_failure(
-                            state,
-                            task,
-                            "provider returned an empty final response after the worker slot became idle",
-                        )
-                        .await;
                         return;
                     }
                     if is_probably_active_tui_summary(&final_summary) {
@@ -4267,7 +4259,7 @@ async fn dispatch_board_tasks_with_config(
                             "Autopilot: worker final reports a blocking commit/tool failure; preserving task for recovery"
                         );
                         let note = format!(
-                            "⚠️ **Autopilot blocked close** — worker final indicates `{}`. The BoardTask stays blocked so a supervisor/worker can recover instead of recording a false done state.\n\n{}",
+                            "⚠️ **Autopilot blocked close** — worker final indicates `{}`. This was recorded as an observation only; the BoardTask stays non-terminal until typed settle receives canonical evidence.\n\n{}",
                             blocker,
                             truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES),
                         );
@@ -4279,28 +4271,6 @@ async fn dispatch_board_tasks_with_config(
                                 note_type: Some("note".to_string()),
                                 author: Some("autopilot".to_string()),
                             })
-                            .await;
-                        let _ = state
-                            .store
-                            .update_board_task(
-                                task.id.as_str(),
-                                &missiond_core::types::UpdateBoardTaskInput {
-                                    status: Some("blocked".to_string()),
-                                    ..Default::default()
-                                },
-                            )
-                            .await;
-                        let _ = state
-                            .bus
-                            .publish_board(BoardEvent::StatusChanged {
-                                task_id: task.id.to_string(),
-                                old_status: format!("{:?}", task.status),
-                                new_status: "blocked".to_string(),
-                            })
-                            .await;
-                        let _ = state
-                            .store
-                            .update_prompt_snapshot_outcome(task.id.as_str(), "blocked")
                             .await;
                         return;
                     }
@@ -4345,7 +4315,7 @@ async fn dispatch_board_tasks_with_config(
                             "Autopilot: write-scope task lacks durable completion/acceptance evidence; preserving task for recovery"
                         );
                         let note = format!(
-                            "⚠️ **Autopilot blocked close** — write-scope task is missing `{}`. The BoardTask stays blocked so a supervisor/worker can recover instead of recording a false done state.\n\n{}",
+                            "⚠️ **Autopilot blocked close** — write-scope task is missing `{}`. This was recorded as an observation only; the BoardTask stays non-terminal until typed settle receives canonical evidence.\n\n{}",
                             blocker,
                             truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES),
                         );
@@ -4358,31 +4328,9 @@ async fn dispatch_board_tasks_with_config(
                                 author: Some("autopilot".to_string()),
                             })
                             .await;
-                        let _ = state
-                            .store
-                            .update_board_task(
-                                task.id.as_str(),
-                                &missiond_core::types::UpdateBoardTaskInput {
-                                    status: Some("blocked".to_string()),
-                                    ..Default::default()
-                                },
-                            )
-                            .await;
-                        let _ = state
-                            .bus
-                            .publish_board(BoardEvent::StatusChanged {
-                                task_id: task.id.to_string(),
-                                old_status: format!("{:?}", task.status),
-                                new_status: "blocked".to_string(),
-                            })
-                            .await;
-                        let _ = state
-                            .store
-                            .update_prompt_snapshot_outcome(task.id.as_str(), "blocked")
-                            .await;
                         return;
                     }
-                    let task_result_artifact_hash = put_autopilot_task_result_artifact(
+                    let task_result_artifact_hash = observe_autopilot_task_result_candidate(
                         state,
                         &task,
                         &slot_id,
@@ -4392,6 +4340,21 @@ async fn dispatch_board_tasks_with_config(
                         res.duration_ms,
                     )
                     .await;
+                    if task_result_artifact_hash.is_none() {
+                        let _ = state
+                            .store
+                            .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+                                task_id: task.id.to_string(),
+                                content: format!(
+                                    "⚠️ **Autopilot blocked close** — final summary was observed, but no canonical completed task_result_artifact exists yet. The BoardTask remains running until the worker writes the artifact.\n\n{}",
+                                    truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES)
+                                ),
+                                note_type: Some("note".to_string()),
+                                author: Some("autopilot".to_string()),
+                            })
+                            .await;
+                        return;
+                    }
                     let summary_for_note =
                         truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES);
                     let durable_source = durable_completion
@@ -4468,24 +4431,25 @@ async fn dispatch_board_tasks_with_config(
                         }
                         DispatchCloseAction::OwnerClosesAsDone => {
                             // Normal case: running → done. Autopilot is the close owner.
-                            let _ = state
-                                .store
-                                .update_board_task(
-                                    task.id.as_str(),
-                                    &missiond_core::types::UpdateBoardTaskInput {
-                                        status: Some("done".to_string()),
-                                        ..Default::default()
-                                    },
+                            if let Some(hash) = task_result_artifact_hash.as_deref() {
+                                if let Err(err) = settle_autopilot_done_with_artifact(
+                                    state,
+                                    &task,
+                                    &slot_id,
+                                    hash,
+                                    &summary_for_note,
                                 )
-                                .await;
-                            let _ = state
-                                .bus
-                                .publish_board(BoardEvent::StatusChanged {
-                                    task_id: task.id.to_string(),
-                                    old_status: format!("{:?}", task.status),
-                                    new_status: "done".to_string(),
-                                })
-                                .await;
+                                .await
+                                {
+                                    warn!(
+                                        task_id = %task.id,
+                                        artifact_hash = hash,
+                                        error = %err,
+                                        "Autopilot: worker_settle(done) refused task close"
+                                    );
+                                    return;
+                                }
+                            }
                             info!(task_id = %task.id, duration_ms = res.duration_ms, "Autopilot: task completed");
                             // Record outcome for Skill auto-verification replay
                             let _ = state
@@ -5629,6 +5593,21 @@ mod tests {
             cfg.boardtask_timeout_policy.missing_session_probe_secs
                 < idle_watchdog_threshold_secs(&cfg, Some(cfg.boardtask_timeout_policy.max_secs))
         );
+    }
+
+    #[test]
+    fn task_result_artifact_hash_parser_reads_projection_note() {
+        assert_eq!(
+            task_result_artifact_hash_from_text("summary\n\ntask_result_artifact: `abc123`")
+                .as_deref(),
+            Some("abc123")
+        );
+        assert_eq!(
+            task_result_artifact_hash_from_text("summary\n\ntask_result_artifact: def456")
+                .as_deref(),
+            Some("def456")
+        );
+        assert!(task_result_artifact_hash_from_text("summary only").is_none());
     }
 
     // ── Prompt-tool-contract: objective dedupe ──────────────────────────

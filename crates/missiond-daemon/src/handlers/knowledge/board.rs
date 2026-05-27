@@ -76,14 +76,36 @@ pub(super) fn board_store_error(tool: &str, err: missiond_core::db::error::DbErr
             error_codes::NOT_FOUND,
             "verify the BoardTask id; short ids are accepted only when they resolve uniquely",
         ),
-        missiond_core::db::error::DbError::Constraint(message)
-            if message.contains("EVIDENCE_REQUIRED") =>
-        {
+        missiond_core::db::error::DbError::EvidenceRequired { .. } => {
             (
-                error_codes::INVALID_PARAM,
+                error_codes::EVIDENCE_REQUIRED,
                 "record canonical evidence first with mission_shared_memory(action=\"task_result_put\", task_id=..., result_status=\"completed\", ...), then mark the BoardTask done",
             )
         }
+        missiond_core::db::error::DbError::CompletionArtifactInvalid { .. } => (
+            error_codes::COMPLETION_ARTIFACT_INVALID,
+            "rewrite the task-result-artifact with the required structured fields before closing the task",
+        ),
+        missiond_core::db::error::DbError::ClaimConflict { .. } => (
+            error_codes::CLAIM_CONFLICT,
+            "inspect the conflicting claim/lease, wait for expiry, release stale ownership, or split the scope",
+        ),
+        missiond_core::db::error::DbError::CapabilityDenied { .. } => (
+            error_codes::CAPABILITY_DENIED,
+            "retry through a delegated BoardTask that carries active capability grants for this operation and scope",
+        ),
+        missiond_core::db::error::DbError::RuntimeMetadataRequired { .. } => (
+            error_codes::RUNTIME_METADATA_REQUIRED,
+            "migrate/backfill the BoardTask runtime_metadata before using it as a control-plane task",
+        ),
+        missiond_core::db::error::DbError::SandboxPolicyUnsupported { .. } => (
+            error_codes::SANDBOX_POLICY_UNSUPPORTED,
+            "route the task to a worker engine with an enforceable sandbox profile or reduce the task to read-only",
+        ),
+        missiond_core::db::error::DbError::WriteScopeViolation { .. } => (
+            error_codes::WRITE_SCOPE_VIOLATION,
+            "move the change back inside write_scope, remove forbidden path changes, then produce a new completion artifact",
+        ),
         missiond_core::db::error::DbError::Constraint(_) => (
             error_codes::INVALID_PARAM,
             "check field values and retry with a smaller, schema-valid payload",

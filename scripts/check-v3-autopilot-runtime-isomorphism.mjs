@@ -104,7 +104,7 @@ function checkFiles(root) {
 	    ':summary-note-source',
 	    ':settle-window',
 	    ':idle-durable-summary-close',
-	    'idle-or-terminal slot diagnosis',
+	    'canonical artifact lookup fails',
 	    'terminal provider slot',
 	    'await_durable_provider_completion_for_slot_task',
 	    'extract_worker_final_summary(res.response, full_prompt)',
@@ -114,7 +114,7 @@ function checkFiles(root) {
 	    'no space left on device',
 	    'bare Bash(...)-style tool-call lines',
 	    'wait_for_worker_final_settle_window',
-    'durable provider-or-note evidence + idle-or-terminal slot diagnosis',
+    'may settle only after an existing canonical completed task-result-artifact hash passes worker_settle',
     'event_msg.task_complete.last_agent_message',
     'messages contain the BoardTask id',
 	    'paste again to expand',
@@ -168,7 +168,9 @@ function checkFiles(root) {
     'close_idle_running_task_from_durable_summary',
     'SessionState::Idle | SessionState::Exited | SessionState::Error',
     'slot idle/terminal',
-    'has_durable_completion_summary_after_claim',
+    'observe_autopilot_task_result_candidate',
+    '"schema": "missiond.task-result-candidate.v1"',
+    'completed_task_result_artifact_hash_for_task',
     'reconcile_slot_provider_conversation',
     'reconcile_conversation_messages',
     'durable_provider_completion_for_slot_task',
@@ -224,7 +226,6 @@ function checkFiles(root) {
     'get_slot_session',
     'set_conversation_task_id',
     'Provider durable final observed',
-    'is_durable_completion_summary_note',
     'get_board_task_with_notes',
     'extract_worker_final_summary(&res.response, &full_prompt)',
 	    'truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES)',
@@ -320,7 +321,7 @@ function buildFixture() {
 	    :close-owner
 	      (:summary-note-source "await_durable_provider_completion_for_slot_task then extract_worker_final_summary(res.response, full_prompt) capped via truncate_safe; raw res.response forbidden in note format string. Initial worker narration like I'll begin by reading, broad Let me ... progress, and retry/wakeup blocker narration such as wakeup will fire / no space left on device is not valid final evidence. Auth/quota notes bypass intentionally. The TUI capture includes echoed task contract, bare Bash(...)-style tool-call lines, tool logs, and \`paste again to expand\` collapse markers."
 	       :settle-window "wait_for_worker_final_settle_window projects the high-confidence final summary settle policy and durable-final polling."
-	       :idle-durable-summary-close "delayed active-frame tasks close from durable provider-or-note evidence + idle-or-terminal slot diagnosis; terminal provider slot is not a busy state."))
+	       :idle-durable-summary-close "delayed active-frame tasks may settle only after an existing canonical completed task-result-artifact hash passes worker_settle; terminal provider slot is not a busy state."))
   (implementation-map
     (surface autopilot-runtime
       :status "code-aligned"
@@ -344,8 +345,8 @@ async fn x() { let ev = BoardEvent::TaskCreated { task_id, title, category }; no
 	const AUTOPILOT_FINAL_SETTLE_WINDOW_MS_DEFAULT: u64 = 5000;
 	fn worker_final_settle_window_ms() -> u64 { AUTOPILOT_FINAL_SETTLE_WINDOW_MS_DEFAULT }
 		fn extract_worker_final_summary(_r: &str, _p: &str) -> String { String::new() }
-		fn is_durable_completion_summary_note() {}
-		fn has_durable_completion_summary_after_claim() {}
+		fn observe_autopilot_task_result_candidate() { let _ = "\"schema\": \"missiond.task-result-candidate.v1\""; }
+		fn completed_task_result_artifact_hash_for_task() {}
     fn latest_assistant_after_task_prompt() {}
     fn provider_completion_summary_for_task() {}
     fn is_probably_provider_tool_invocation_message() {}

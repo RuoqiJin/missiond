@@ -23,6 +23,14 @@ pub mod error_codes {
     pub const IPC_TIMEOUT: &str = "IPC_TIMEOUT";
     pub const SPAWN_FAILED: &str = "SPAWN_FAILED";
     pub const DB_ERROR: &str = "DB_ERROR";
+    pub const EVIDENCE_REQUIRED: &str = "EVIDENCE_REQUIRED";
+    pub const CLAIM_CONFLICT: &str = "CLAIM_CONFLICT";
+    pub const COMPLETION_ARTIFACT_INVALID: &str = "COMPLETION_ARTIFACT_INVALID";
+    pub const COMPLETION_ARTIFACT_WRITE_FAILED: &str = "COMPLETION_ARTIFACT_WRITE_FAILED";
+    pub const CAPABILITY_DENIED: &str = "CAPABILITY_DENIED";
+    pub const RUNTIME_METADATA_REQUIRED: &str = "RUNTIME_METADATA_REQUIRED";
+    pub const SANDBOX_POLICY_UNSUPPORTED: &str = "SANDBOX_POLICY_UNSUPPORTED";
+    pub const WRITE_SCOPE_VIOLATION: &str = "WRITE_SCOPE_VIOLATION";
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,7 +1,7 @@
 (implementation-map
 (surface mission-shared-memory
       :status "code-aligned"
-      :implements [shared-events shared-artifacts shared-claims agent-cursors context-slices evidence-governance-view task-delegate-write-lease swarm-write-lease]
+      :implements [shared-events shared-artifacts shared-claims agent-cursors context-slices evidence-governance-view task-delegate-write-lease swarm-write-lease capability-grants capability-audit-events jobs job-attempts work-leases board-task-views]
       :code ["crates/missiond-core/migrations/20260508000000_shared_memory.sql"
              "crates/missiond-daemon/src/engine/shared_memory.rs"
              "crates/missiond-daemon/src/state.rs"
@@ -14,7 +14,7 @@
              "crates/missiond-mcp/src/tools/mod.rs"
              "scripts/check-v3-shared-memory-isomorphism.mjs"
              ".missiond/workflows/semantic-ir-shared-memory-convergence.lisp"]
-      :note "MissionD shared memory is the Rust/Postgres durable coordination substrate for concurrent agents. EventBus wakes and observes; shared_events/shared_artifacts/shared_claims/agent_cursors hold the coordination truth. Investigation workers write artifacts without claims; implementation workers must have an accepted shard and write-scope lease. mission_shared_memory(action=evidence_view) projects the unified Memory/KB + Logs/Timeline/Conversation model: task_result_artifacts are canonical worker outputs, conversations are provider/user turn read models, event_log/shared_events are causality, KB is reviewed long-term knowledge, and BoardTask state is coordination projection. Legacy shared-memory.lisp ledgers remain compatibility projections, not concurrent write authority.")
+      :note "MissionD shared memory is the Rust/Postgres durable coordination substrate. shared_events/shared_artifacts/shared_claims/agent_cursors plus jobs/job_attempts/work_leases/capability_grants/capability_audit_events/board_task_views hold typed runtime truth. Implementation workers need accepted shard, runtime_metadata, active capability grants, sandbox_profile, and write-scope lease. shared_claims acquisition is DB-atomic per (scope_kind, scope_key): expire stale claims, SELECT FOR UPDATE, then insert while holding a transaction advisory lock plus active-scope DB constraint. Conflicts return typed CLAIM_CONFLICT, never prose parsing. evidence_view projects Memory/KB + Logs/Timeline/Conversation; task_result_artifacts are canonical worker outputs, while BoardTask state is a coordination projection.")
 
 (surface evidence-governance-view
       :status "code-aligned"
@@ -25,7 +25,7 @@
              ".missiond/v3/missiond-blueprint.lisp"]
       :acceptance ["node scripts/check-v3-shared-memory-isomorphism.mjs --json"
                    "node scripts/check-v3-pillar-flow-schema.mjs --engine=ocaml --json"]
-      :note "evidence-governance-view is the unified read surface that prevents Memory/KB, Logs, Timeline, Conversation, and Board from competing as result authorities. It is served through mission_shared_memory(action=evidence_view), but it remains a distinct SSOT surface so pillar-flow keeps a single function-to-surface mapping.")
+      :note "evidence-governance-view is the unified read surface that prevents Memory/KB, Logs, Timeline, Conversation, and Board from competing as result authorities. It is served through mission_shared_memory(action=evidence_view), but it remains a distinct SSOT surface so pillar-flow keeps a single function-to-surface mapping. task_result_put validates structured producer/result/evidence fields and capability grants; completed write-scoped artifacts require verification plus changed-path evidence. worker_settle(done) requires an existing completed task-result-artifact hash. Board notes, BoardTask descriptions, PTY screens, and provider finals remain projections/evidence and MUST NOT be parsed to drive terminal state.")
 
 (surface context-pack
       :status "code-aligned"
@@ -225,7 +225,7 @@
              "crates/missiond-daemon/src/handlers/comm/tool_directory.rs"
              "crates/missiond-daemon/src/handlers/comm/agent_navigation.rs"
              "scripts/check-v3-capability-governance-isomorphism.mjs"]
-      :note "Runtime-projected V3 destination for capability usage, audit, Codex ops, and MCP tool-family governance surfaces. capability_usage.rs is the thin capability-governance facade; capability_usage/runtime.rs owns snapshot/report/candidates/mark/ack, six source lanes, semantic hint merge review, protected source/target policy, review sidecar persistence, and non-blocking observability emissions; context/v3_blueprint_runtime.rs projects capability-governance-policy review sidecar path plus protected source/target lists into mission_capability_usage runtime; audit.rs owns mission_audit trace/detail/stats/export plus legacy mission_audit_* compatibility; codex_ops.rs owns mission_codex_ops recent/thread/tool_stats over codex_cli conversations; tool_directory.rs owns read-only mission_tool_directory list/recommend/lookup/explain/deprecated/guide so agents can select primary families and task entry cards before raw compatibility tools; agent_navigation.rs owns mission_agent_navigation catalog/review/feedback/suggest_entries and may append only the agent-navigation review sidecar.")
+      :note "Runtime-projected V3 destination for capability usage, audit, Codex ops, MCP tool-family governance, and the control-plane capability ledger. capability_usage/runtime.rs owns snapshot/report/candidates/mark/ack, source lanes, semantic hint review, protected source/target policy, review sidecar persistence, and observability. Runtime authority is capability_grants/capability_audit_events, created by mission_task_delegate/mission_swarm_run and enforced by task_result_put, worker_settle, Board claim/update, and sandbox spawn gates; tool-name allowlists are compatibility projections only. audit.rs owns mission_audit; codex_ops.rs owns mission_codex_ops; tool_directory.rs is read-only; agent_navigation.rs may append only the agent-navigation review sidecar.")
 
 (surface skill-runtime
       :status "code-aligned"

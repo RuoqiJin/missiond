@@ -114,6 +114,8 @@ function main() {
       ['swarm workflow checkpoint', /workflow_checkpoint[\s\S]*created_task_ids/],
       ['exact shard ready override', /exact_shard_ready/],
       ['implementation exact shard requirement', /mission_task_delegate refused an implementation worker without write_scope/],
+      ['delegation runtime metadata authority', /runtime_metadata[\s\S]*control_state[\s\S]*prompt_projection/],
+      ['dedup prefers runtime metadata write scope', /board_task_write_scope[\s\S]*runtime_metadata/],
     ]),
     ...checkRequiredText(root, 'crates/missiond-daemon/src/app_ports.rs', [
       ['task evidence port', /trait\s+TaskEvidencePort/],
@@ -146,10 +148,20 @@ function main() {
       ['task evidence gate summary', /requiredForDone/],
       ['workflow runs summary', /workflow_runs_summary/],
       ['workflow startup recovery', /startup_recover_workflow_runs/],
+      ['task result artifact structured validation', /validate_task_result_artifact_payload/],
+      ['worker settle done requires artifact', /worker_settle\(done\)[\s\S]*requires artifact_hash/],
+      ['shared claim advisory transaction lock', /pg_advisory_xact_lock[\s\S]*FOR UPDATE/],
     ]),
     ...checkRequiredText(root, 'crates/missiond-core/src/db/pg/board.rs', [
-      ['evidence hard gate', /EVIDENCE_REQUIRED/],
+      ['evidence hard gate', /DbError::EvidenceRequired/],
       ['task result artifact gate query', /task_result_artifacts[\s\S]*result_status/],
+    ]),
+    ...checkRequiredText(root, 'packages/board/src/lib/missiond.ts', [
+      ['structured MissionD error class', /class\s+MissiondError/],
+      ['tool isError throws structured body', /result\.isError[\s\S]*MissiondError/],
+    ]),
+    ...checkRequiredText(root, 'packages/board/src/store.ts', [
+      ['board sync reads error code directly', /body\.code\s*\?\?[\s\S]*body\.error_code/],
     ]),
     ...checkRequiredText(root, 'crates/missiond-core/migrations/20260526003000_worker_runtime_state.sql', [
       ['worker runtime table', /CREATE TABLE IF NOT EXISTS worker_runtime_state/],

@@ -486,6 +486,14 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     } else {
         "dev"
     };
+    let runtime_metadata = delegation_runtime_metadata(
+        &delegation_metadata,
+        target_project_resolution
+            .as_ref()
+            .map(|resolution| resolution.project_id.as_str()),
+        target_project_root.as_deref(),
+        parent_id.as_deref(),
+    );
     let input = CreateBoardTaskInput {
         title: truncate_title(objective),
         description: Some(description),
@@ -508,6 +516,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         timeout_secs: Some(timeout_secs),
         context_intent: Some(intent.to_string()),
         parent_id: parent_id.clone(),
+        runtime_metadata: Some(runtime_metadata.clone()),
         ..Default::default()
     };
 
@@ -517,6 +526,42 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
     let task_id = task.id.to_string();
+    let sandbox_profile = sandbox_profile_for_worker(
+        delegation_metadata.engine_hint.as_deref(),
+        !delegation_metadata.write_scope.is_empty(),
+    );
+    let capability_grant_ids = state
+        .shared_memory
+        .grant_task_capabilities(
+            target_project_resolution
+                .as_ref()
+                .map(|resolution| resolution.project_id.as_str()),
+            &task_id,
+            "task",
+            &task_id,
+            &delegation_metadata.read_scope,
+            &delegation_metadata.write_scope,
+            &delegation_metadata.must_not_touch,
+            "mission_task_delegate",
+        )
+        .await
+        .map_err(|e| anyhow!("capability grant error: {}", e))?;
+    let runtime_metadata = enrich_runtime_metadata_with_control_facts(
+        runtime_metadata,
+        &task_id,
+        &capability_grant_ids,
+        sandbox_profile,
+    );
+    let _ = state
+        .store
+        .update_board_task(
+            &task_id,
+            &missiond_core::types::UpdateBoardTaskInput {
+                runtime_metadata: Some(runtime_metadata.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
 
     // 5. Emit the canonical event-bus cause. The Autopilot subscriber
     // converts BoardEvent::TaskCreated into board_dispatch_notify, so
@@ -571,6 +616,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "write_scope": delegation_metadata.write_scope,
         "must_not_touch": delegation_metadata.must_not_touch,
         "acceptance": delegation_metadata.acceptance,
+        "capability_grant_ids": capability_grant_ids,
+        "sandbox_profile": sandbox_profile,
+        "task_contract_id": format!("board-task:{task_id}"),
         "shared_claim_ids": delegation_metadata.shared_claim_ids,
         "mechanic": mechanic_config.as_ref().map(MechanicRunConfig::to_json),
         "provisioned_new_slot": provisioned,
@@ -1094,17 +1142,31 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
                 &grounding_sources,
                 grounding_evidence_refs_count,
             );
+            let runtime_metadata = swarm_task_runtime_metadata(
+                &task_project_id,
+                &task_project_root,
+                &target_projects,
+                &context_pack_path,
+                parent_id.as_deref(),
+                &write_policy,
+                &acceptance,
+                planned_task,
+                grounding_context_id.as_deref(),
+                &grounding_sources,
+                grounding_evidence_refs_count,
+            );
             let input = CreateBoardTaskInput {
                 title: planned_task.title.clone(),
                 description: Some(description),
                 priority: Some("medium".to_string()),
                 category: Some("dev".to_string()),
-                project: Some(task_project_id),
+                project: Some(task_project_id.clone()),
                 auto_execute: Some(true),
                 assignee,
                 parent_id: parent_id.clone(),
                 timeout_secs: Some(timeout_secs),
                 context_intent: Some(planned_task.intent.clone()),
+                runtime_metadata: Some(runtime_metadata.clone()),
                 ..Default::default()
             };
             let task = state
@@ -1113,6 +1175,40 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
                 .await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             let task_id = task.id.to_string();
+            let sandbox_profile = sandbox_profile_for_worker(
+                Some(&planned_task.engine_hint),
+                !planned_task.write_scope.is_empty(),
+            );
+            let capability_grant_ids = state
+                .shared_memory
+                .grant_task_capabilities(
+                    Some(&task_project_id),
+                    &task_id,
+                    "task",
+                    &task_id,
+                    &planned_task.read_scope,
+                    &planned_task.write_scope,
+                    &planned_task.must_not_touch,
+                    "mission_swarm_run",
+                )
+                .await
+                .map_err(|e| anyhow!("capability grant error: {}", e))?;
+            let runtime_metadata = enrich_runtime_metadata_with_control_facts(
+                runtime_metadata,
+                &task_id,
+                &capability_grant_ids,
+                sandbox_profile,
+            );
+            let _ = state
+                .store
+                .update_board_task(
+                    &task_id,
+                    &missiond_core::types::UpdateBoardTaskInput {
+                        runtime_metadata: Some(runtime_metadata),
+                        ..Default::default()
+                    },
+                )
+                .await;
             let ev = BoardEvent::TaskCreated {
                 task_id: task_id.clone(),
                 title: input.title.clone(),
@@ -1556,6 +1652,50 @@ fn render_swarm_task_description(
     )
 }
 
+fn swarm_task_runtime_metadata(
+    project_id: &str,
+    project_root: &str,
+    target_projects: &[SwarmTargetProject],
+    context_pack_path: &str,
+    parent_id: Option<&str>,
+    write_policy: &str,
+    acceptance: &[String],
+    planned: &SwarmPlannedTask,
+    grounding_context_id: Option<&str>,
+    grounding_sources: &[String],
+    grounding_evidence_refs_count: usize,
+) -> Value {
+    json!({
+        "schema": "missiond.board-task-runtime-metadata.v1",
+        "source": "mission_swarm_run",
+        "swarm_metadata": {
+            "project_id": project_id,
+            "project_root": project_root,
+            "target_projects": target_projects.iter().map(SwarmTargetProject::to_json).collect::<Vec<_>>(),
+            "parent_board_task_id": parent_id,
+            "lane": planned.lane,
+            "task_class": planned.task_class,
+            "pool_hint": planned.pool_hint,
+            "engine_hint": planned.engine_hint,
+            "context_pack_path": context_pack_path,
+            "grounding_context_id": grounding_context_id,
+            "grounding_sources": grounding_sources,
+            "grounding_evidence_refs_count": grounding_evidence_refs_count,
+            "accepted_shard_id": planned.accepted_shard_id,
+            "shared_claim_ids": planned.shared_claim_ids,
+            "write_policy": swarm_task_effective_write_policy(write_policy, planned),
+            "read_scope": planned.read_scope,
+            "write_scope": planned.write_scope,
+            "must_not_touch": planned.must_not_touch,
+            "acceptance": acceptance,
+            "authority": {
+                "control_state": "runtime_metadata",
+                "description": "prompt_projection"
+            }
+        }
+    })
+}
+
 fn swarm_task_effective_write_policy<'a>(
     global_write_policy: &'a str,
     planned: &SwarmPlannedTask,
@@ -1714,6 +1854,83 @@ struct DelegationMetadata {
     /// original anchor visible so dedup can refuse a second concurrent code
     /// worker even when the immediate parent shifts.
     source_id: Option<String>,
+}
+
+fn delegation_runtime_metadata(
+    metadata: &DelegationMetadata,
+    project_id: Option<&str>,
+    project_root: Option<&str>,
+    parent_id: Option<&str>,
+) -> Value {
+    json!({
+        "schema": "missiond.board-task-runtime-metadata.v1",
+        "source": "mission_task_delegate",
+        "dispatch_metadata": {
+            "task_class": metadata.task_class,
+            "pool_hint": metadata.pool_hint,
+            "engine_hint": metadata.engine_hint,
+            "context_pack_path": metadata.context_pack_path,
+            "accepted_shard_id": metadata.accepted_shard_id,
+            "read_scope": metadata.read_scope,
+            "write_scope": metadata.write_scope,
+            "must_not_touch": metadata.must_not_touch,
+            "acceptance": metadata.acceptance,
+            "grounding_context_id": metadata.grounding_context_id,
+            "grounding_sources": metadata.grounding_sources,
+            "grounding_evidence_refs_count": metadata.grounding_evidence_refs_count,
+            "shared_claim_ids": metadata.shared_claim_ids,
+            "source_board_task_id": metadata.source_id,
+            "parent_board_task_id": parent_id,
+            "project_id": project_id,
+            "project_root": project_root,
+            "authority": {
+                "control_state": "runtime_metadata",
+                "description": "prompt_projection"
+            }
+        }
+    })
+}
+
+fn sandbox_profile_for_worker(engine_hint: Option<&str>, write_enabled: bool) -> &'static str {
+    let engine = engine_hint.unwrap_or("claude-code").to_ascii_lowercase();
+    if !write_enabled {
+        return "read-only";
+    }
+    if engine.contains("codex") {
+        "workspace-write"
+    } else if engine.contains("gemini") {
+        "plan-policy-write"
+    } else if engine.contains("agy") {
+        "unsupported-write"
+    } else {
+        "workspace-write-policy"
+    }
+}
+
+fn enrich_runtime_metadata_with_control_facts(
+    mut metadata: Value,
+    task_id: &str,
+    capability_grant_ids: &[String],
+    sandbox_profile: &str,
+) -> Value {
+    metadata["task_contract_id"] = json!(format!("board-task:{task_id}"));
+    metadata["capability_grant_ids"] = json!(capability_grant_ids);
+    metadata["sandbox_profile"] = json!(sandbox_profile);
+    if let Some(dispatch) = metadata
+        .get_mut("dispatch_metadata")
+        .and_then(Value::as_object_mut)
+    {
+        dispatch.insert(
+            "task_contract_id".to_string(),
+            json!(format!("board-task:{task_id}")),
+        );
+        dispatch.insert(
+            "capability_grant_ids".to_string(),
+            json!(capability_grant_ids),
+        );
+        dispatch.insert("sandbox_profile".to_string(), json!(sandbox_profile));
+    }
+    metadata
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2114,13 +2331,13 @@ async fn find_overlapping_active_code_worker(
             _ => false,
         };
         let source_match = match check.source_id {
-            Some(src) => description_references_source(&task.description, src),
+            Some(src) => board_task_references_source(&task, src),
             None => false,
         };
         if !(parent_match || source_match) {
             continue;
         }
-        let candidate_scope = parse_write_scope_from_description(&task.description);
+        let candidate_scope = board_task_write_scope(&task);
         if candidate_scope.is_empty() {
             continue;
         }
@@ -2183,6 +2400,7 @@ fn scope_is_absolute(scope: &str) -> bool {
 /// Parse the `- write_scope:` line emitted by `render_delegation_metadata_block`
 /// out of a BoardTask description so we can read back what scope the existing
 /// code worker reserved. Conservative: missing line → empty list.
+#[cfg(test)]
 fn parse_write_scope_from_description(description: &str) -> Vec<String> {
     description
         .lines()
@@ -2197,9 +2415,75 @@ fn parse_write_scope_from_description(description: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn metadata_string_list(value: Option<&Value>) -> Vec<String> {
+    match value {
+        Some(Value::Array(values)) => values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect(),
+        Some(Value::String(value)) => value
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && *value != "[]")
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn board_task_write_scope(task: &missiond_core::types::BoardTask) -> Vec<String> {
+    for key in ["write_scope", "writeScope"] {
+        let top = metadata_string_list(task.runtime_metadata.get(key));
+        if !top.is_empty() {
+            return top;
+        }
+    }
+    for nested in ["dispatch_metadata", "swarm_metadata", "metadata"] {
+        if let Some(fields) = task.runtime_metadata.get(nested).and_then(Value::as_object) {
+            for key in ["write_scope", "writeScope"] {
+                let values = metadata_string_list(fields.get(key));
+                if !values.is_empty() {
+                    return values;
+                }
+            }
+        }
+    }
+    Vec::new()
+}
+
+fn metadata_string_value(value: Option<&Value>) -> Option<String> {
+    match value {
+        Some(Value::String(value)) if !value.trim().is_empty() => Some(value.trim().to_string()),
+        Some(Value::Number(value)) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn board_task_references_source(task: &missiond_core::types::BoardTask, source_id: &str) -> bool {
+    for key in ["source_board_task_id", "source_id", "parent_board_task_id"] {
+        if metadata_string_value(task.runtime_metadata.get(key)).as_deref() == Some(source_id) {
+            return true;
+        }
+    }
+    for nested in ["dispatch_metadata", "swarm_metadata", "metadata"] {
+        if let Some(fields) = task.runtime_metadata.get(nested).and_then(Value::as_object) {
+            for key in ["source_board_task_id", "source_id", "parent_board_task_id"] {
+                if metadata_string_value(fields.get(key)).as_deref() == Some(source_id) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Look for a `:source_board_task_id` / `:source_id` reference inside a
 /// BoardTask description. Used when the dedup caller anchors on a source
 /// chain rather than on the structured `parent_id` column.
+#[cfg(test)]
 fn description_references_source(description: &str, source_id: &str) -> bool {
     description.lines().any(|line| {
         let trimmed = line.trim();
@@ -3796,6 +4080,85 @@ mod tests {
     fn parse_write_scope_returns_empty_when_label_missing() {
         let desc = "Some objective without metadata";
         assert!(parse_write_scope_from_description(desc).is_empty());
+    }
+
+    fn board_task_fixture(
+        description: &str,
+        runtime_metadata: Value,
+    ) -> missiond_core::types::BoardTask {
+        missiond_core::types::BoardTask {
+            id: missiond_core::types::TaskId::from_trusted("task-1".to_string()),
+            title: "Task".to_string(),
+            description: description.to_string(),
+            status: missiond_core::types::BoardTaskStatus::Running,
+            priority: "medium".to_string(),
+            category: "dev".to_string(),
+            project: Some("missiond".to_string()),
+            server: None,
+            due_date: None,
+            parent_id: None,
+            assignee: None,
+            auto_execute: true,
+            prompt_template: None,
+            hidden: false,
+            retry_count: 0,
+            max_retries: 2,
+            order_idx: 0,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            claim_executor_id: None,
+            claim_executor_type: None,
+            claimed_at: None,
+            flow_phase: None,
+            flow_context: None,
+            flow_template: None,
+            depends_on: Vec::new(),
+            lease_expires_at: None,
+            dedupe_key: None,
+            timeout_secs: None,
+            context_intent: Some("code".to_string()),
+            trigger_source: None,
+            runtime_metadata,
+            notes_count: 0,
+        }
+    }
+
+    #[test]
+    fn board_task_write_scope_prefers_runtime_metadata_over_description() {
+        let task = board_task_fixture(
+            "objective\n\n## Dispatch metadata\n- write_scope: legacy.rs",
+            json!({
+                "dispatch_metadata": {
+                    "write_scope": ["src/runtime.rs", "src/control.rs"]
+                }
+            }),
+        );
+        assert_eq!(
+            board_task_write_scope(&task),
+            vec!["src/runtime.rs".to_string(), "src/control.rs".to_string()],
+        );
+    }
+
+    #[test]
+    fn board_task_source_reference_uses_runtime_metadata_without_description_fallback() {
+        let metadata_task = board_task_fixture(
+            "objective",
+            json!({
+                "dispatch_metadata": {
+                    "source_board_task_id": "source-1"
+                }
+            }),
+        );
+        assert!(board_task_references_source(&metadata_task, "source-1"));
+
+        let legacy_task = board_task_fixture(
+            "objective\n\n## Dispatch metadata\n- source_board_task_id: legacy-source",
+            json!({}),
+        );
+        assert!(
+            !board_task_references_source(&legacy_task, "legacy-source"),
+            "hard cutover forbids parsing BoardTask description as control metadata"
+        );
     }
 
     #[test]

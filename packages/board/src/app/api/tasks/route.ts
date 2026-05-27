@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { BOARD_TASK_FIELD_MAP } from '@/generated/board-frontend-config';
 import { boardClient } from '@/lib/missiondBoardClient';
+import { MissiondError } from '@/lib/missiond';
 
 function mapToFrontend(task: Record<string, unknown>): Record<string, unknown> {
   const out = { ...task };
@@ -27,12 +28,18 @@ function errorText(err: unknown): string {
 }
 
 function evidenceErrorResponse(err: unknown) {
-  const message = errorText(err);
-  if (!message.includes('EVIDENCE_REQUIRED')) return null;
-  const taskId = message.match(/task_id=([^\s:]+)/)?.[1]
-    ?? message.match(/BoardTask\s+([^\s]+)/)?.[1]
-    ?? '';
-  const body = {
+  const missiondBody = err instanceof MissiondError ? err.body : null;
+  const code = missiondBody?.code ?? missiondBody?.error_code;
+  const message = missiondBody?.message ?? missiondBody?.reason ?? errorText(err);
+  if (code !== 'EVIDENCE_REQUIRED') return null;
+  const taskId = typeof missiondBody?.taskId === 'string'
+    ? missiondBody.taskId
+    : typeof missiondBody?.details === 'object' && missiondBody.details !== null
+      && 'task_id' in missiondBody.details
+      && typeof (missiondBody.details as { task_id?: unknown }).task_id === 'string'
+        ? (missiondBody.details as { task_id: string }).task_id
+        : '';
+  const responseBody = {
     code: 'EVIDENCE_REQUIRED',
     taskId,
     message: taskId
@@ -43,7 +50,7 @@ function evidenceErrorResponse(err: unknown) {
       : 'mission_shared_memory(action="task_result_put", task_id=..., result_status="completed", ...)',
     error: message,
   };
-  return NextResponse.json(body, { status: 409 });
+  return NextResponse.json(responseBody, { status: 409 });
 }
 
 function taskApiError(err: unknown) {

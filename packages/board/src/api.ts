@@ -7,7 +7,13 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    throw new Error(`Tasks API ${res.status}: ${body}`);
+    try {
+      const parsed = JSON.parse(body);
+      throw parsed;
+    } catch (err) {
+      if (err && typeof err === 'object' && 'code' in err) throw err;
+      throw new Error(`Tasks API ${res.status}: ${body}`);
+    }
   }
   return res.json();
 }

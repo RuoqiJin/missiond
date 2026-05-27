@@ -17,6 +17,36 @@ function resolveSocketPath(): string {
 
 const SOCKET_PATH = resolveSocketPath();
 
+export type MissiondErrorBody = {
+  code?: string;
+  error_code?: string;
+  message?: string;
+  reason?: string;
+  suggestion?: string;
+  suggestedAction?: string;
+  details?: unknown;
+  [key: string]: unknown;
+};
+
+export class MissiondError extends Error {
+  body: MissiondErrorBody;
+  code?: string;
+
+  constructor(body: MissiondErrorBody) {
+    super(body.message ?? body.reason ?? body.error_code ?? body.code ?? 'MissionD error');
+    this.name = 'MissiondError';
+    this.body = body;
+    this.code = body.code ?? body.error_code;
+  }
+}
+
+function normalizeErrorBody(error: MissiondErrorBody): MissiondErrorBody {
+  const code = error.code ?? error.error_code;
+  const message = error.message ?? error.reason;
+  const suggestedAction = error.suggestedAction ?? error.suggestion;
+  return { ...error, code, message, suggestedAction };
+}
+
 export async function callMissiond(method: string, params: Record<string, unknown>): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(SOCKET_PATH, () => {
@@ -30,7 +60,7 @@ export async function callMissiond(method: string, params: Record<string, unknow
       try {
         const resp = JSON.parse(data.trim());
         if (resp.error) {
-          reject(new Error(resp.error.message || JSON.stringify(resp.error)));
+          reject(new MissiondError(normalizeErrorBody(resp.error)));
         } else {
           resolve(resp.result);
         }
@@ -53,8 +83,16 @@ export async function callTool(name: string, args: Record<string, unknown> = {})
 
   const result = await callMissiond('tools/call', { name, arguments: args }) as {
     content?: Array<{ text?: string }>;
+    isError?: boolean;
+    is_error?: boolean;
   };
   const text = result?.content?.[0]?.text;
-  if (text) return JSON.parse(text);
+  if (text) {
+    const body = JSON.parse(text);
+    if (result.isError || result.is_error) {
+      throw new MissiondError(normalizeErrorBody(body));
+    }
+    return body;
+  }
   return result;
 }

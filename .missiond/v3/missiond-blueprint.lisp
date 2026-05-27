@@ -103,8 +103,8 @@
       :path "shared-memory://artifacts/task-result/<task_id>/<content_hash>"
       :ssot true
       :writer mission_shared_memory.task_result_put
-      :required [:task_id :project_id :summary :content :result_kind :content_hash :evidence_refs :created_at]
-      :invariant "Worker finals, Board notes, provider JSONL finals, and PTY snapshots are evidence/projections; client-visible task completion must read a canonical task-result-artifact written by the completion authority before the BoardTask is closed. Board summary notes may carry a task_result_artifact hash as a projection, but Jarvis follow-up streams MUST NOT synthesize canonical artifacts from summary notes. :content is the normalized terminal worker result only, suitable for Jarvis/iOS display and memory distillation; raw PTY screens, provider transcripts, and pre-final progress remain raw_evidence/details projections and MUST NOT be stored as canonical content. :summary is a bounded projection for Board notes and list views.")
+      :required [:task_id :project_id :summary :content :result_status :result_kind :producer :content_hash :evidence_refs :created_at]
+      :invariant "Hard cutover: Worker finals, Board notes, provider JSONL finals, and PTY snapshots are evidence/projections only; client-visible task completion and BoardTask status=done MUST read a canonical completed task-result-artifact written by the completion authority before closing. worker_settle(done) MUST carry an artifact_hash for an existing canonical completed artifact; it MUST NOT synthesize one from Board notes, PTY screen text, provider prose, or Markdown description fallback. task_result_put validates producer/result/evidence fields and, for completed write-scoped work, requires verification plus changed-path evidence. Board summary notes may carry a task_result_artifact hash as projection, but Jarvis follow-up streams MUST NOT synthesize canonical artifacts from summary notes. :content is the normalized terminal worker result only, suitable for Jarvis/iOS display and memory distillation; raw PTY screens, provider transcripts, and pre-final progress remain raw_evidence/details projections and MUST NOT be canonical content. :summary is a bounded projection for Board notes and list views. Structured errors for this contract use EVIDENCE_REQUIRED, COMPLETION_ARTIFACT_INVALID, COMPLETION_ARTIFACT_WRITE_FAILED, CAPABILITY_DENIED, RUNTIME_METADATA_REQUIRED, and WRITE_SCOPE_VIOLATION.")
 
     (artifact final-report
       :schema "missiond.final-report.v1"
@@ -227,6 +227,33 @@
                  "node scripts/project-v3-contracts.mjs --check --json"
                  "node scripts/compile-v3-runtime.mjs --json"])
     :non-goal "Do not add a second governance layer for the compiler plane; this contract plus typed compiler checks are the boundary.")
+
+  (control-plane-kernel
+    :schema "missiond.control-plane-kernel.v1"
+    :authority "postgres-typed-runtime-facts"
+    :facts [task_result_artifacts event_log jobs job_attempts work_leases capability_grants capability_audit_events review_gates board_task_views]
+    :runtime-abi-fields [completion_artifact_schema job_state_machine capability_policy sandbox_policy projection_policy]
+    :hard-cutover true
+    :note "capability_usage.rs is the thin capability-governance facade; capability_usage/runtime.rs owns snapshot/report/candidates/mark/ack; audit.rs owns mission_audit trace/detail/stats/export; codex_ops.rs owns mission_codex_ops recent/thread/tool_stats; tool_directory.rs owns read-only mission_tool_directory list/recommend/lookup/explain/deprecated/guide; agent_navigation.rs owns mission_agent_navigation catalog/review/feedback/suggest_entries."
+    :rules ["BoardTask description, Board notes, PTY screens, TUI summaries, and provider prose are projection/observation inputs only."
+            "Runtime control paths MUST read BoardTask.runtime_metadata, capability_grants, work_leases, jobs/job_attempts, event_log, and task_result_artifacts."
+            "Missing runtime_metadata on a control-plane task returns RUNTIME_METADATA_REQUIRED; MissionD must not parse Markdown descriptions to recover control fields."
+            "task_result_put and worker_settle MUST pass capability checks for task settle; write-scoped completed artifacts also require verification and changed-path evidence."
+            "Worker spawn MUST project sandbox_profile from capability/write_scope facts; unsupported engine/scope combinations return SANDBOX_POLICY_UNSUPPORTED or CAPABILITY_DENIED."
+            "ProjectionEngine updates board_task_views and Board-facing status from typed events/state, not from note text or PTY/provider final prose."]
+    :state-machine [(job.created created)
+                    (job.claimed claimed)
+                    (attempt.started running)
+                    (observation.recorded running)
+                    (artifact.accepted running)
+                    (settle.requested running)
+                    (job.completed completed)
+                    (job.blocked blocked)
+                    (job.failed failed)
+                    (lease.expired blocked)
+                    (capability.denied blocked)]
+    :db-migration "crates/missiond-core/migrations/20260527000000_control_plane_kernel.sql"
+    :checker "scripts/check-v3-control-plane-kernel-isomorphism.mjs")
 
   (typed-subplane-contracts
     :schema "missiond.typed-subplane-contracts.v1"
@@ -559,10 +586,11 @@
              "node scripts/check-v3-incident-governance-isomorphism.mjs"
              "node scripts/check-v3-source-hygiene-isomorphism.mjs"
              "node scripts/check-v3-context-pack-isomorphism.mjs"
-             "node scripts/check-v3-workstation-config-isomorphism.mjs"
-             "node scripts/check-v3-workstation-pool-isomorphism.mjs"
-             "node scripts/check-v3-control-plane-m6-split.mjs"
-             "node scripts/check-v3-master-control-isomorphism.mjs"
+	             "node scripts/check-v3-workstation-config-isomorphism.mjs"
+	             "node scripts/check-v3-workstation-pool-isomorphism.mjs"
+	             "node scripts/check-v3-control-plane-m6-split.mjs"
+	             "node scripts/check-v3-control-plane-kernel-isomorphism.mjs"
+	             "node scripts/check-v3-master-control-isomorphism.mjs"
              "node scripts/check-v3-direct-code-drift-policy.mjs"
              "node scripts/check-v3-genome-runtime-isomorphism.mjs"
              "node scripts/check-v3-autopilot-genome-isomorphism.mjs"

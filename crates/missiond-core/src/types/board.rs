@@ -495,6 +495,10 @@ pub struct UpdateBoardTaskInput {
     /// DAG dependency: IDs of tasks that must complete before this task (raw, resolved on write)
     #[serde(default, rename = "dependsOn")]
     pub depends_on: Option<Vec<String>>,
+    /// Structured runtime metadata. Runtime control-plane paths read this,
+    /// never the Markdown description.
+    #[serde(default, rename = "runtimeMetadata")]
+    pub runtime_metadata: Option<serde_json::Value>,
 }
 
 // ============ Board Task Notes ============

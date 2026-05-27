@@ -111,6 +111,7 @@ pub async fn spawn_tracked_slot(
         }
     }
     let pty_slot = &pty_slot_owned;
+    enforce_spawn_sandbox_policy(pty_slot, &mut options)?;
 
     // 0b. Inject learned permissions into <project_root>/.claude/settings.local.json
     //     so Claude Code picks up any earlier "don't ask again" decisions.
@@ -201,6 +202,72 @@ pub async fn spawn_tracked_slot(
     }
 
     Ok(spawn_result)
+}
+
+fn enforce_spawn_sandbox_policy(pty_slot: &PTYSlot, options: &mut PTYSpawnOptions) -> Result<()> {
+    use missiond_core::CliEngine;
+
+    let role = pty_slot.role.to_ascii_lowercase();
+    let privileged_role = role.contains("orchestrator")
+        || role.contains("master")
+        || role.contains("supervisor")
+        || role.contains("deploy");
+    match pty_slot.engine {
+        CliEngine::Codex => {
+            if options.sandbox.as_deref() == Some("danger-full-access") && !privileged_role {
+                warn!(
+                    slot_id = %pty_slot.id,
+                    role = %pty_slot.role,
+                    "spawn sandbox policy: downgrading Codex worker from danger-full-access to workspace-write"
+                );
+                options.sandbox = Some("workspace-write".to_string());
+                options
+                    .approval_policy
+                    .get_or_insert_with(|| "never".to_string());
+            }
+            if options.sandbox.is_none() && !privileged_role {
+                options.sandbox = Some("read-only".to_string());
+            }
+        }
+        CliEngine::Gemini => {
+            if options.dangerously_skip_permissions && !privileged_role {
+                warn!(
+                    slot_id = %pty_slot.id,
+                    role = %pty_slot.role,
+                    "spawn sandbox policy: refusing Gemini yolo permissions for non-privileged worker"
+                );
+                options.dangerously_skip_permissions = false;
+                options.approval_policy = Some("plan".to_string());
+            }
+            options
+                .approval_policy
+                .get_or_insert_with(|| "plan".to_string());
+        }
+        CliEngine::ClaudeCode => {
+            let explicit_allow = options
+                .extra_env
+                .get("MISSIOND_ALLOW_BROAD_SKIP_PERMISSIONS")
+                .is_some_and(|value| value == "true");
+            if options.dangerously_skip_permissions && !privileged_role && !explicit_allow {
+                warn!(
+                    slot_id = %pty_slot.id,
+                    role = %pty_slot.role,
+                    "spawn sandbox policy: disabling Claude Code broad skip-permissions without an explicit capability override"
+                );
+                options.dangerously_skip_permissions = false;
+            }
+        }
+        CliEngine::Agy => {
+            let sandbox = options.sandbox.as_deref().unwrap_or("read-only");
+            if !matches!(sandbox, "read-only" | "none") && !privileged_role {
+                return Err(anyhow!(
+                    "SANDBOX_POLICY_UNSUPPORTED: Agy write sandbox is not enforceable for non-privileged worker {}",
+                    pty_slot.id
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

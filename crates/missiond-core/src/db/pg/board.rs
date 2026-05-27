@@ -6,6 +6,7 @@ use crate::db::error::{DbError, DbResult};
 use crate::db::traits::BoardStore;
 use crate::types::*;
 use async_trait::async_trait;
+use sqlx::Row;
 
 const MAX_BOARD_TASK_DESCRIPTION_BYTES: usize = 50_000;
 
@@ -58,9 +59,9 @@ async fn require_task_completion_evidence(store: &PgMissionStore, task_id: &str)
     if has_evidence {
         Ok(())
     } else {
-        Err(DbError::Constraint(format!(
-            "EVIDENCE_REQUIRED: task_id={task_id}: BoardTask cannot be marked done until mission_shared_memory(action=\"task_result_put\", task_id=\"{task_id}\", result_status=\"completed\", ...) records a canonical task-result artifact"
-        )))
+        Err(DbError::EvidenceRequired {
+            task_id: task_id.to_string(),
+        })
     }
 }
 
@@ -463,6 +464,13 @@ impl BoardStore for PgMissionStore {
             set_parts.push(format!("order_idx = ${}", param_idx));
         }
 
+        // Handle runtime_metadata (JSONB). This is the control-plane contract;
+        // descriptions are prompt projections only.
+        if update.runtime_metadata.is_some() {
+            param_idx += 1;
+            set_parts.push(format!("runtime_metadata = ${}", param_idx));
+        }
+
         // Auto-clear claim when status changes away from 'running'
         let mut clear_claim = false;
         if let Some(ref status_str) = update.status {
@@ -496,6 +504,9 @@ impl BoardStore for PgMissionStore {
             query = query.bind(v);
         }
         if let Some(v) = update.order_idx {
+            query = query.bind(v);
+        }
+        if let Some(ref v) = update.runtime_metadata {
             query = query.bind(v);
         }
         query = query.bind(&full_id);
@@ -811,23 +822,98 @@ impl BoardStore for PgMissionStore {
             Some(fid) => fid,
             None => return Ok(None),
         };
-        let now = chrono::Utc::now().to_rfc3339();
-        let result = sqlx::query(
-            "UPDATE board_tasks
-             SET claim_executor_id = $1, claim_executor_type = $2, claimed_at = $3,
-                 status = 'running', updated_at = $3
-             WHERE id = $4 AND status = 'open' AND claim_executor_id IS NULL",
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
+            .bind(format!("board-task-claim:{full_id}"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            r#"
+            UPDATE board_tasks
+            SET claim_executor_id = NULL,
+                claim_executor_type = NULL,
+                claimed_at = NULL,
+                lease_expires_at = NULL,
+                status = CASE WHEN status = 'running' THEN 'open' ELSE status END,
+                updated_at = $2
+            WHERE id = $1
+              AND claim_executor_id IS NOT NULL
+              AND lease_expires_at IS NOT NULL
+              AND NULLIF(lease_expires_at, '')::timestamptz < now()
+            "#,
+        )
+        .bind(&full_id)
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(&mut *tx)
+        .await?;
+        let existing = sqlx::query(
+            r#"
+            SELECT claim_executor_id, claim_executor_type, lease_expires_at, status
+            FROM board_tasks
+            WHERE id = $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(&full_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(existing) = existing else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        let existing_status: String = existing.try_get("status")?;
+        let existing_holder: Option<String> = existing.try_get("claim_executor_id")?;
+        if existing_status != "open" || existing_holder.is_some() {
+            let holder = existing_holder.or_else(|| existing.try_get("claim_executor_type").ok());
+            let lease_expires_at: Option<String> = existing.try_get("lease_expires_at")?;
+            tx.commit().await?;
+            return Err(DbError::ClaimConflict {
+                scope_kind: "board_task".to_string(),
+                scope_key: full_id,
+                holder,
+                lease_expires_at,
+            });
+        }
+        let now = chrono::Utc::now();
+        let now_s = now.to_rfc3339();
+        let lease_expires_at = (now + chrono::Duration::minutes(30)).to_rfc3339();
+        sqlx::query(
+            r#"
+            UPDATE board_tasks
+            SET claim_executor_id = $1,
+                claim_executor_type = $2,
+                claimed_at = $3,
+                lease_expires_at = $4,
+                status = 'running',
+                updated_at = $3
+            WHERE id = $5
+            "#,
         )
         .bind(executor_id)
         .bind(executor_type)
-        .bind(&now)
+        .bind(&now_s)
+        .bind(&lease_expires_at)
         .bind(&full_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
-
-        if result.rows_affected() == 0 {
-            return Ok(None);
-        }
+        sqlx::query(
+            r#"
+            INSERT INTO work_leases
+              (id, task_id, holder_id, holder_kind, scope_kind, scope_key,
+               lease_expires_at, metadata)
+            VALUES ($1,$2,$3,$4,'board_task',$2,$5,'{}'::jsonb)
+            ON CONFLICT DO NOTHING
+            "#,
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(&full_id)
+        .bind(executor_id)
+        .bind(executor_type)
+        .bind(&lease_expires_at)
+        .execute(&mut *tx)
+        .await
+        .ok();
+        tx.commit().await?;
         self.get_board_task(&full_id).await
     }
 

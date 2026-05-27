@@ -15,20 +15,27 @@ function getDescendantIds(tasks: Task[], parentId: string): string[] {
 }
 
 function syncErrorMessage(err: unknown): string {
-  const raw = err instanceof Error ? err.message : String(err);
-  const jsonStart = raw.indexOf('{');
-  if (jsonStart >= 0) {
-    try {
-      const body = JSON.parse(raw.slice(jsonStart)) as { code?: string; taskId?: string; message?: string; suggestedAction?: string };
-      if (body.code === 'EVIDENCE_REQUIRED') {
-        return `${body.message ?? 'Completion evidence is required.'} Suggested action: ${body.suggestedAction ?? 'mission_shared_memory(action="task_result_put", ...)'}`;
-      }
-      if (body.message) return body.message;
-    } catch {
-      // Fall through to the raw transport error.
+  if (err && typeof err === 'object') {
+    const body = err as { code?: string; message?: string; suggestedAction?: string; error_code?: string; reason?: string; suggestion?: string };
+    const code = body.code ?? body.error_code;
+    if (code === 'EVIDENCE_REQUIRED') {
+      return `${body.message ?? body.reason ?? 'Completion evidence is required.'} Suggested action: ${body.suggestedAction ?? body.suggestion ?? 'mission_shared_memory(action="task_result_put", ...)'}`;
     }
+    if (code === 'CLAIM_CONFLICT') {
+      return body.message ?? body.reason ?? 'Claim conflict: another worker already owns this scope.';
+    }
+    if (code === 'CAPABILITY_DENIED') {
+      return body.message ?? body.reason ?? 'Capability denied: this task does not carry an active grant for the requested operation.';
+    }
+    if (code === 'WRITE_SCOPE_VIOLATION') {
+      return body.message ?? body.reason ?? 'Write scope violation: changes escaped the delegated write_scope or touched a forbidden path.';
+    }
+    if (code === 'RUNTIME_METADATA_REQUIRED') {
+      return body.message ?? body.reason ?? 'Runtime metadata is required before this task can drive control-plane state.';
+    }
+    if (body.message || body.reason) return body.message ?? body.reason ?? '';
   }
-  return raw;
+  return err instanceof Error ? err.message : String(err);
 }
 
 interface TaskCenterState {

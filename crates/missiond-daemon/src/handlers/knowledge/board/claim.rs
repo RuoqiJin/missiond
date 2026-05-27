@@ -50,11 +50,26 @@ pub(super) async fn handle_claim(state: &AppState, args: Value) -> Result<ToolRe
                             existing.status.as_str()
                         )
                     };
-                    Ok(ToolResult::error(msg))
+                    Ok(ToolResult::structured_error(
+                        ToolError::new(error_codes::CLAIM_CONFLICT, msg)
+                            .with_details(serde_json::json!({
+                                "scope_kind": "board_task",
+                                "scope_key": task_id,
+                                "holder": existing.claim_executor_id,
+                                "lease_expires_at": existing.lease_expires_at,
+                                "status": existing.status.as_str()
+                            }))
+                            .with_suggestion(
+                                "inspect the task claim, wait for lease expiry, release stale ownership, or choose a different task",
+                            ),
+                    ))
                 }
-                _ => Ok(ToolResult::error("Task not found")),
+                _ => Ok(ToolResult::structured_error(ToolError::new(
+                    error_codes::NOT_FOUND,
+                    "Task not found",
+                ))),
             }
         }
-        Err(e) => Ok(ToolResult::error(format!("DB error: {}", e))),
+        Err(e) => Ok(super::board_store_error("mission_board_claim", e)),
     }
 }

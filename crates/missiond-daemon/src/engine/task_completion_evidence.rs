@@ -8,7 +8,7 @@ use crate::engine::shared_memory::SharedMemoryService;
 
 #[allow(dead_code)]
 pub(crate) const EVIDENCE_REQUIRED: &str = "EVIDENCE_REQUIRED";
-pub(crate) const EVIDENCE_WRITE_FAILED: &str = "EVIDENCE_WRITE_FAILED";
+pub(crate) const EVIDENCE_WRITE_FAILED: &str = "COMPLETION_ARTIFACT_WRITE_FAILED";
 pub(crate) const EVIDENCE_WRITE_TIMEOUT: &str = "EVIDENCE_WRITE_TIMEOUT";
 
 const DEFAULT_EVIDENCE_WRITE_TIMEOUT: Duration = Duration::from_secs(20);

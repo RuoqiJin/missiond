@@ -61,6 +61,8 @@ const checks = [
       'visible worker_status heartbeat',
       'before default-slot readiness checks',
       'busy worker slot during follow is a progress state',
+      'broad investigation/design/planning objectives as review/read-only',
+      'Task/Explore/TaskCreate/TaskUpdate/TaskList/TaskOutput',
       'Web/iOS clients and smoke tests MUST automatically follow',
       'missiond_confirm',
       'missiond_objective',
@@ -167,6 +169,8 @@ const checks = [
     [
       'fn classify_jarvis_dispatch_verb',
       'READ_ONLY_MARKERS',
+      'INVESTIGATION_FIRST_MARKERS',
+      'CODE_NOW_MARKERS',
       'no file changes',
       '不要修改',
       '不要提交',
@@ -179,6 +183,7 @@ const checks = [
       'engine_hint=codex',
       '工位实现任务',
       'write_scope 范围内修改文件',
+      'Task/Explore/TaskCreate/TaskUpdate/TaskList/TaskOutput',
     ],
   ],
   [
@@ -255,8 +260,10 @@ const checks = [
     'scripts/smoke-jarvis-intent-plan-dispatch.mjs',
     [
       'JARVIS_DISPATCH_FOLLOW',
+      'JARVIS_FOLLOW_TASK_ID',
       'findFollowTaskId',
       'followTaskUntilTerminal',
+      'request timeout',
       'FOLLOW_TERMINAL_RESULT_MISSING',
       'FOLLOW_FINAL_WITHOUT_RESULT_ARTIFACT',
     ],
@@ -274,13 +281,16 @@ const checks = [
     ],
   ],
   [
-    'autopilot task-result-artifact canonical content normalization',
+    'autopilot task-result candidate observation',
     'crates/missiond-daemon/src/engine/intent_engine/autopilot.rs',
     [
+      'observe_autopilot_task_result_candidate',
+      '"schema": "missiond.task-result-candidate.v1"',
       'let raw_evidence = durable_completion',
-      '"content": final_summary',
       '"raw_evidence": raw_evidence',
       '"summary": final_summary',
+      'completed_task_result_artifact_hash_for_task',
+      'settle_autopilot_done_with_artifact',
       'extract_worker_final_summary_prefers_findings_contract_block',
       'contains_worker_prompt_contract_echo',
       'echoed-worker-prompt-contract',
@@ -330,8 +340,8 @@ const checks = [
     [
       'provider-empty-final',
       'provider returned an empty final response after slot',
-      'status: Some("failed".to_string())',
-      'task_result_artifact:',
+      'recording observation only',
+      'no terminal state written',
     ],
   ],
 ];
