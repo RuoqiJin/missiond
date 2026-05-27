@@ -1,4 +1,5 @@
 -- Keep capability_grants.operation aligned with the control-plane runtime.
+-- missiond-allow-destructive-migration: replaces a CHECK constraint with a wider compatible constraint; no data is dropped.
 --
 -- 20260527000000 created the table before spawn capability was enforced by
 -- mission_compute_slot and task delegation. Existing databases need the check

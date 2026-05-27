@@ -107,7 +107,7 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.migration, sources.migration, [
     'CREATE TABLE IF NOT EXISTS capability_grants',
-    "'read', 'write', 'claim', 'settle', 'delegate', 'deploy', 'network', 'spawn'",
+    "'read', 'write', 'claim', 'settle', 'delegate', 'deploy', 'network'",
     'CREATE TABLE IF NOT EXISTS capability_audit_events',
     'CREATE TABLE IF NOT EXISTS jobs',
     'CREATE TABLE IF NOT EXISTS job_attempts',
@@ -118,6 +118,12 @@ function checkFiles(root, files) {
     'uq_work_leases_active_scope',
     'uq_shared_claims_active_scope',
     "WHERE status = 'active'",
+  ]);
+
+  requireAll(diagnostics, files.capabilityGrantOperationMigration, sources.capabilityGrantOperationMigration, [
+    'DROP CONSTRAINT IF EXISTS capability_grants_operation_check',
+    'ADD CONSTRAINT capability_grants_operation_check',
+    "'read', 'write', 'claim', 'settle', 'delegate', 'deploy', 'network', 'spawn'",
   ]);
 
   requireAll(diagnostics, files.sharedMemory, sources.sharedMemory, [
