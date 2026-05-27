@@ -397,6 +397,28 @@ fn jarvis_confirm_string(req: &serde_json::Value, key: &str) -> Option<String> {
         })
 }
 
+fn openai_request_follow_task_id(req: &serde_json::Value) -> Option<String> {
+    fn string_field(value: &serde_json::Value, key: &str) -> Option<String> {
+        value
+            .get(key)
+            .and_then(|field| field.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    }
+
+    fn follow_id_from(value: &serde_json::Value) -> Option<String> {
+        string_field(value, "missiond_follow_task_id").or_else(|| {
+            value.get("missiond_follow").and_then(|follow| {
+                string_field(follow, "missiond_follow_task_id")
+                    .or_else(|| string_field(follow, "task_id"))
+            })
+        })
+    }
+
+    follow_id_from(req).or_else(|| req.get("metadata").and_then(follow_id_from))
+}
+
 fn interaction_metadata_bool(envelope: &InteractionEnvelope, key: &str) -> bool {
     envelope
         .metadata
@@ -548,6 +570,11 @@ fn openai_request_to_interaction_envelope(req: &serde_json::Value) -> Interactio
                     .entry(key.to_string())
                     .or_insert_with(|| value.clone());
             }
+        }
+        if let Some(follow_task_id) = openai_request_follow_task_id(req) {
+            object
+                .entry("missiond_follow_task_id".to_string())
+                .or_insert_with(|| serde_json::Value::String(follow_task_id));
         }
         object.insert(
             "wire_format".to_string(),
@@ -2150,12 +2177,16 @@ impl PTYWebSocketServer {
                 return Ok(());
             }
         };
-        if let Err(err) =
-            Self::ensure_jarvis_slot_ready_for_chat(pty_manager.as_ref(), &default_chat_slot).await
-        {
-            Self::send_http_error(&mut stream, 503, "Service Unavailable", &err.to_string())
-                .await?;
-            return Ok(());
+        let follow_task_id = openai_request_follow_task_id(&req);
+        if follow_task_id.is_none() {
+            if let Err(err) =
+                Self::ensure_jarvis_slot_ready_for_chat(pty_manager.as_ref(), &default_chat_slot)
+                    .await
+            {
+                Self::send_http_error(&mut stream, 503, "Service Unavailable", &err.to_string())
+                    .await?;
+                return Ok(());
+            }
         }
         let envelope = openai_request_to_interaction_envelope(&req);
         Self::handle_interaction_envelope(
@@ -6900,6 +6931,36 @@ mod tests {
     }
 
     #[test]
+    fn jarvis_follow_request_is_detected_before_slot_readiness() {
+        let top_level = serde_json::json!({
+            "missiond_follow_task_id": " task-1 ",
+            "messages": [{"role": "user", "content": "follow"}]
+        });
+        assert_eq!(
+            openai_request_follow_task_id(&top_level).as_deref(),
+            Some("task-1")
+        );
+
+        let nested = serde_json::json!({
+            "missiond_follow": {"task_id": " task-2 "},
+            "messages": [{"role": "user", "content": "follow"}]
+        });
+        assert_eq!(
+            openai_request_follow_task_id(&nested).as_deref(),
+            Some("task-2")
+        );
+
+        let metadata = serde_json::json!({
+            "metadata": {"missiond_follow": {"missiond_follow_task_id": "task-3"}},
+            "messages": [{"role": "user", "content": "follow"}]
+        });
+        assert_eq!(
+            openai_request_follow_task_id(&metadata).as_deref(),
+            Some("task-3")
+        );
+    }
+
+    #[test]
     fn interaction_message_normalizes_string_and_object_payloads() {
         assert_eq!(
             normalize_interaction_message(&serde_json::json!("  hello missiond  ")),
@@ -7008,6 +7069,7 @@ mod tests {
         let req = serde_json::json!({
             "conversation_id": "conv-1",
             "user": "ios-user",
+            "missiond_follow": {"task_id": "follow-task-1"},
             "metadata": {
                 "missiond_confirm": {
                     "confirm_payload": {
@@ -7038,6 +7100,10 @@ mod tests {
         assert_eq!(
             interaction_metadata_string(&envelope, "missiond_objective").as_deref(),
             Some("原始目标")
+        );
+        assert_eq!(
+            interaction_metadata_string(&envelope, "missiond_follow_task_id").as_deref(),
+            Some("follow-task-1")
         );
     }
 

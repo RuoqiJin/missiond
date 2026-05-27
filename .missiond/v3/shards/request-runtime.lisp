@@ -131,6 +131,7 @@
          :core ((step s1 :logic "public Jarvis follow routes use MISSIOND_JARVIS_PUBLIC_STREAM_BUDGET_SECS as a short-poll budget, below edge/tunnel request timeouts, so mobile/proxy clients never wait on a single long-held connection")
                 (step s2 :logic "when a worker task is still running after the short public stream budget, emit result_pending with follow_payload.missiond_follow_task_id and finish the SSE cleanly")
                 (step s3 :logic "a follow-up request carrying missiond_follow_task_id bypasses intent/plan regeneration and resumes observation of the existing BoardTask")
+                (step s3b :logic "OpenAI-compatible /jarvis/v1/chat/completions adapters MUST detect missiond_follow_task_id before default-slot readiness checks; a busy worker slot during follow is a progress state, not JARVIS_SLOT_BUSY")
                 (step s4 :logic "if the followed task is already terminal, immediately revalidate task-result-artifact and stream result_artifact/final")
                 (step s5 :logic "result_pending is not a fallback answer; it is a resumable transport state and terminal_task_result remains false")
                 (step s6 :logic "while supervising a still-running worker on a public/mobile follow stream, emit client-visible worker_status heartbeat events bounded by MISSIOND_JARVIS_VISIBLE_HEARTBEAT_SECS; colon SSE comments remain transport keepalive only and are not sufficient UI progress")
