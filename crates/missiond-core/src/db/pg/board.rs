@@ -23,6 +23,63 @@ fn compact_board_task_description(raw: &str) -> String {
     format!("{}...(truncated from {} bytes)", &raw[..end], raw.len())
 }
 
+fn board_create_runtime_metadata(
+    task_id: &TaskId,
+    input: &CreateBoardTaskInput,
+) -> serde_json::Value {
+    let mut metadata = input
+        .runtime_metadata
+        .clone()
+        .filter(|value| value.as_object().is_some_and(|fields| !fields.is_empty()))
+        .unwrap_or_else(|| serde_json::json!({}));
+    if !metadata.is_object() {
+        metadata = serde_json::json!({});
+    }
+    let fields = metadata.as_object_mut().expect("metadata object");
+    fields
+        .entry("schema".to_string())
+        .or_insert_with(|| serde_json::json!("missiond.board-task-runtime-metadata.v1"));
+    fields
+        .entry("source".to_string())
+        .or_insert_with(|| serde_json::json!("mission_board_create"));
+    fields
+        .entry("control_state".to_string())
+        .or_insert_with(|| serde_json::json!("runtime_metadata"));
+    fields
+        .entry("task_contract_id".to_string())
+        .or_insert_with(|| serde_json::json!(format!("board-task:{}", task_id.as_str())));
+    fields
+        .entry("dispatch_metadata".to_string())
+        .or_insert_with(|| {
+            serde_json::json!({
+                "task_class": input
+                    .context_intent
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or(input.category.as_deref().unwrap_or("general"))
+            })
+        });
+    fields
+        .entry("read_scope".to_string())
+        .or_insert_with(|| serde_json::json!([]));
+    fields
+        .entry("write_scope".to_string())
+        .or_insert_with(|| serde_json::json!([]));
+    fields
+        .entry("must_not_touch".to_string())
+        .or_insert_with(|| serde_json::json!([]));
+    fields
+        .entry("capability_grant_ids".to_string())
+        .or_insert_with(|| serde_json::json!([]));
+    fields
+        .entry("sandbox_profile".to_string())
+        .or_insert_with(|| serde_json::json!("read-only"));
+    fields
+        .entry("projection_policy".to_string())
+        .or_insert_with(|| serde_json::json!("description_notes_are_projection_only"));
+    metadata
+}
+
 #[cfg(feature = "postgres")]
 async fn resolve_existing_board_task_id(
     store: &PgMissionStore,
@@ -42,18 +99,29 @@ async fn resolve_existing_board_task_id(
 }
 
 #[cfg(feature = "postgres")]
-async fn require_task_completion_evidence(store: &PgMissionStore, task_id: &str) -> DbResult<()> {
+async fn require_task_completion_evidence(
+    store: &PgMissionStore,
+    task_id: &str,
+    artifact_hash: Option<&str>,
+) -> DbResult<()> {
+    let Some(artifact_hash) = artifact_hash.map(str::trim).filter(|hash| !hash.is_empty()) else {
+        return Err(DbError::EvidenceRequired {
+            task_id: task_id.to_string(),
+        });
+    };
     let has_evidence = sqlx::query_scalar::<_, bool>(
         r#"
         SELECT EXISTS (
           SELECT 1
           FROM task_result_artifacts
           WHERE task_id = $1
+            AND artifact_hash = $2
             AND lower(result_status) IN ('completed', 'complete', 'verified', 'pass', 'passed')
         )
         "#,
     )
     .bind(task_id)
+    .bind(artifact_hash)
     .fetch_one(&store.pool)
     .await?;
     if has_evidence {
@@ -155,6 +223,7 @@ impl BoardStore for PgMissionStore {
             }
         }
 
+        let runtime_metadata = board_create_runtime_metadata(&id, input);
         let task = BoardTask {
             id,
             title: input.title.clone(),
@@ -193,10 +262,7 @@ impl BoardStore for PgMissionStore {
             timeout_secs: input.timeout_secs,
             context_intent: input.context_intent.clone(),
             trigger_source: None,
-            runtime_metadata: input
-                .runtime_metadata
-                .clone()
-                .unwrap_or_else(|| serde_json::json!({})),
+            runtime_metadata,
             notes_count: 0,
         };
 
@@ -291,7 +357,8 @@ impl BoardStore for PgMissionStore {
             .as_deref()
             .is_some_and(|status| status.eq_ignore_ascii_case("done"))
         {
-            require_task_completion_evidence(self, &full_id).await?;
+            require_task_completion_evidence(self, &full_id, update.artifact_hash.as_deref())
+                .await?;
         }
 
         // Build dynamic SET clause with numbered params

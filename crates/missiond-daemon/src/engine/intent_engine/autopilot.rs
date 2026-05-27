@@ -578,6 +578,36 @@ async fn settle_autopilot_done_with_artifact(
     Ok(())
 }
 
+async fn settle_autopilot_done_from_existing_artifact(
+    state: &AppState,
+    task: &missiond_core::types::BoardTask,
+    slot_id: &str,
+    summary: &str,
+    source: &str,
+) -> Result<bool> {
+    let Some(artifact_hash) = completed_task_result_artifact_hash_for_task(state, task, None).await
+    else {
+        return Ok(false);
+    };
+    let summary_for_note = truncate_safe(summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES);
+    let note = format!(
+        "**Canonical artifact already accepted** ({source})\n\n{}\
+         \n\ntask_result_artifact: `{artifact_hash}`",
+        summary_for_note
+    );
+    let _ = state
+        .store
+        .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+            task_id: task.id.to_string(),
+            content: note,
+            note_type: Some("summary".to_string()),
+            author: Some("autopilot".to_string()),
+        })
+        .await;
+    settle_autopilot_done_with_artifact(state, task, slot_id, &artifact_hash, summary).await?;
+    Ok(true)
+}
+
 fn task_result_artifact_hash_from_text(text: &str) -> Option<String> {
     text.lines().find_map(|line| {
         let idx = line.find("task_result_artifact:")?;
@@ -713,19 +743,39 @@ fn provider_summary_satisfies_task_contract(task_description: &str, summary: &st
 }
 
 fn board_task_runtime_contract_envelope(task: &missiond_core::types::BoardTask) -> String {
-    let metadata_has_dispatch = task.runtime_metadata.get("dispatch_metadata").is_some()
-        || task.runtime_metadata.get("swarm_metadata").is_some()
-        || task
-            .runtime_metadata
-            .get("source")
-            .and_then(|value| value.as_str())
-            .map(|source| source == "jarvis-intent-plan-gate" || source == "interaction-gateway")
-            .unwrap_or(false);
-    if metadata_has_dispatch {
-        task.runtime_metadata.to_string()
-    } else {
-        task.description.clone()
+    task.runtime_metadata.to_string()
+}
+
+fn board_task_runtime_metadata_string(
+    task: &missiond_core::types::BoardTask,
+    key: &str,
+) -> Option<String> {
+    fn find(value: &serde_json::Value, key: &str) -> Option<String> {
+        if let Some(raw) = value.get(key).and_then(|v| v.as_str()) {
+            let raw = raw.trim();
+            if !raw.is_empty() {
+                return Some(raw.to_string());
+            }
+        }
+        for nested in [
+            "dispatch_metadata",
+            "metadata",
+            "context_refs",
+            "grounding_refs",
+            "source",
+        ] {
+            if let Some(found) = value.get(nested).and_then(|child| find(child, key)) {
+                return Some(found);
+            }
+        }
+        None
     }
+    find(&task.runtime_metadata, key)
+}
+
+fn board_task_runtime_conversation_id(task: &missiond_core::types::BoardTask) -> Option<String> {
+    board_task_runtime_metadata_string(task, "conversation_id")
+        .or_else(|| board_task_runtime_metadata_string(task, "conversationId"))
 }
 
 fn output_contract_close_blocker_for_task(
@@ -1246,6 +1296,22 @@ async fn close_idle_running_task_from_durable_summary(
     if task_with_notes.task.status != missiond_core::types::BoardTaskStatus::Running {
         return Ok(false);
     }
+    if settle_autopilot_done_from_existing_artifact(
+        state,
+        &task_with_notes.task,
+        slot_id,
+        "Canonical completed task_result_artifact exists; idle watchdog used typed settle and treated PTY/provider text as observation only.",
+        "idle-watchdog",
+    )
+    .await?
+    {
+        info!(
+            task_id,
+            slot_id,
+            "Autopilot: closed idle running task from existing canonical artifact"
+        );
+        return Ok(true);
+    }
     let mut has_durable_summary = false;
     let mut close_artifact_hash: Option<String> = None;
     if !has_durable_summary {
@@ -1269,7 +1335,7 @@ async fn close_idle_running_task_from_durable_summary(
                     .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
                         task_id: task_id.to_string(),
                         content: format!(
-                            "⚠️ **Autopilot blocked close** — durable provider final was observed ({} / {}), but no canonical completed task_result_artifact exists yet. The BoardTask remains running until the worker writes the artifact.",
+                            "⚠️ **Autopilot observation** — durable provider final was observed ({} / {}), but no canonical completed task_result_artifact exists yet. The BoardTask remains running until the worker writes the artifact.",
                             completion.source, completion.session_id
                         ),
                         note_type: Some("note".to_string()),
@@ -1313,14 +1379,16 @@ async fn close_idle_running_task_from_durable_summary(
         };
         if let Some(response) = pty_response {
             let summary = extract_worker_final_summary(&response, "");
-            let has_structured_artifact = !summary.trim().is_empty()
-                && pty_summary_has_structured_artifact(&summary)
-                && output_contract_close_blocker_for_task(&task_with_notes.task, &summary)
-                    .is_none()
-                && worker_final_close_blocker(&summary).is_none()
-                && pty_only_close_blocker_for_task(&task_with_notes.task, false, &summary)
-                    .is_none();
-            if has_structured_artifact {
+            if !summary.trim().is_empty() {
+                let diagnostic_blockers: Vec<String> = [
+                    output_contract_close_blocker_for_task(&task_with_notes.task, &summary),
+                    worker_final_close_blocker(&summary),
+                    pty_only_close_blocker_for_task(&task_with_notes.task, false, &summary),
+                ]
+                .into_iter()
+                .flatten()
+                .map(str::to_string)
+                .collect();
                 let artifact_hash = observe_autopilot_task_result_candidate(
                     state,
                     &task_with_notes.task,
@@ -1332,13 +1400,21 @@ async fn close_idle_running_task_from_durable_summary(
                 )
                 .await;
                 if artifact_hash.is_none() {
+                    let diagnostic_suffix = if diagnostic_blockers.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            "\n\nObservation diagnostics: {}",
+                            diagnostic_blockers.join(", ")
+                        )
+                    };
                     state
                         .store
                         .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
                             task_id: task_id.to_string(),
                             content: format!(
-                                "⚠️ **Autopilot blocked close** — structured PTY final was observed on {}, but no canonical completed task_result_artifact exists yet. The BoardTask remains running until the worker writes the artifact.",
-                                slot_id
+                                "⚠️ **Autopilot observation** — PTY text was recorded from {}, but no canonical completed task_result_artifact exists yet. The BoardTask remains running until the worker writes the artifact.{}",
+                                slot_id, diagnostic_suffix
                             ),
                             note_type: Some("note".to_string()),
                             author: Some("autopilot".to_string()),
@@ -2040,28 +2116,34 @@ fn output_contract_close_blocker(task_description: &str, summary: &str) -> Optio
     if !is_delegated_worker_description(task_description) {
         return None;
     }
-    if contains_worker_prompt_contract_echo(summary) {
-        return Some("echoed-worker-prompt-contract");
-    }
     let output_contract = extract_dispatch_metadata_field(task_description, "output_contract")
         .unwrap_or_else(|| task_description.to_string());
     if !output_contract
         .to_ascii_lowercase()
         .contains("findings / evidence / recommendations / verification")
     {
+        if contains_worker_prompt_contract_echo(summary) {
+            return Some("echoed-worker-prompt-contract");
+        }
         return None;
     }
-    const REQUIRED: [&str; 4] = ["findings", "evidence", "recommendations", "verification"];
-    if REQUIRED
-        .iter()
-        .all(|heading| summary_has_report_heading(summary, heading))
-    {
+    if summary_satisfies_declared_output_contract(summary) {
         return None;
     }
     if memory_review_summary_satisfies_output_contract(summary) {
         return None;
     }
+    if contains_worker_prompt_contract_echo(summary) {
+        return Some("echoed-worker-prompt-contract");
+    }
     Some("missing-output-contract-sections")
+}
+
+fn summary_satisfies_declared_output_contract(summary: &str) -> bool {
+    const REQUIRED: [&str; 4] = ["findings", "evidence", "recommendations", "verification"];
+    REQUIRED
+        .iter()
+        .all(|heading| summary_has_nonempty_report_section(summary, heading))
 }
 
 fn memory_review_summary_satisfies_output_contract(summary: &str) -> bool {
@@ -2078,23 +2160,74 @@ fn memory_review_summary_satisfies_output_contract(summary: &str) -> bool {
     has_candidate_block && has_rationale
 }
 
+fn summary_has_nonempty_report_section(summary: &str, expected: &str) -> bool {
+    let mut in_section = false;
+    for line in summary.lines() {
+        if summary_line_matches_report_heading(line, expected) {
+            in_section = true;
+            continue;
+        }
+        if in_section && summary_line_is_any_report_heading(line) {
+            return false;
+        }
+        if in_section && report_section_content_line(line) {
+            return true;
+        }
+    }
+    false
+}
+
 fn summary_has_report_heading(summary: &str, expected: &str) -> bool {
-    summary.lines().any(|line| {
-        let normalized = line
-            .trim()
-            .trim_start_matches('•')
-            .trim_start_matches('⏺')
-            .trim_start_matches('●')
-            .trim()
-            .trim_start_matches('#')
-            .trim_start_matches('*')
-            .trim()
-            .trim_end_matches(':')
-            .trim()
-            .to_ascii_lowercase();
-        let normalized = strip_report_heading_enumeration(&normalized);
-        normalized == expected || normalized.starts_with(&format!("{expected} "))
-    })
+    summary
+        .lines()
+        .any(|line| summary_line_matches_report_heading(line, expected))
+}
+
+fn summary_line_matches_report_heading(line: &str, expected: &str) -> bool {
+    let normalized = normalized_report_heading(line);
+    normalized == expected || normalized.starts_with(&format!("{expected} "))
+}
+
+fn summary_line_is_any_report_heading(line: &str) -> bool {
+    const HEADINGS: [&str; 10] = [
+        "findings",
+        "evidence",
+        "recommendations",
+        "verification",
+        "summary",
+        "active memory candidates",
+        "ssot-workflow backfill candidates",
+        "needs human",
+        "discard rationale",
+        "next shards",
+    ];
+    HEADINGS
+        .iter()
+        .any(|heading| summary_line_matches_report_heading(line, heading))
+}
+
+fn normalized_report_heading(line: &str) -> String {
+    let normalized = line
+        .trim()
+        .trim_start_matches('•')
+        .trim_start_matches('⏺')
+        .trim_start_matches('●')
+        .trim()
+        .trim_start_matches('#')
+        .trim_start_matches('*')
+        .trim()
+        .trim_end_matches(':')
+        .trim()
+        .to_ascii_lowercase();
+    strip_report_heading_enumeration(&normalized).to_string()
+}
+
+fn report_section_content_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.chars().all(|ch| ch == '-' || ch == '─') {
+        return false;
+    }
+    !contains_worker_prompt_contract_echo(trimmed)
 }
 
 fn strip_report_heading_enumeration(value: &str) -> &str {
@@ -2148,6 +2281,11 @@ fn is_delegated_worker_description(task_description: &str) -> bool {
 /// the existing acceptance-evidence markers. Match is case-insensitive on the
 /// heading body so `# Findings`, `## Findings`, `Findings:` all qualify.
 fn pty_summary_has_structured_artifact(summary: &str) -> bool {
+    if summary_satisfies_declared_output_contract(summary)
+        || memory_review_summary_satisfies_output_contract(summary)
+    {
+        return true;
+    }
     if contains_worker_prompt_contract_echo(summary) {
         return false;
     }
@@ -2187,8 +2325,8 @@ fn contains_worker_prompt_contract_echo(summary: &str) -> bool {
         "completion protocol",
         "do not paste raw kb json",
         "do not paste full logs",
-        "task-result-artifact 验证后",
         "负责关闭此 boardtask",
+        "autopilot/orchestrator 会在 durable final 和 task-result-artifact 验证后负责关闭此 boardtask",
     ];
     if CASE_INSENSITIVE_MARKERS
         .iter()
@@ -2584,7 +2722,7 @@ fn should_clear_stale_dynamic_assignee(
 }
 
 /// Notify Jarvis conversation when an async task fails.
-/// Extracts conversation_id from task metadata, writes error message, and emits event.
+/// Reads conversation_id from runtime_metadata, writes error message, and emits event.
 async fn notify_jarvis_failure(
     state: &AppState,
     task: &missiond_core::types::BoardTask,
@@ -2593,24 +2731,20 @@ async fn notify_jarvis_failure(
     if task.category != "jarvis" {
         return;
     }
-    if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&task.description) {
-        if let Some(conv_id) = meta.get("conversation_id").and_then(|v| v.as_str()) {
-            if !conv_id.is_empty() {
-                let error_msg = format!("❌ 后台任务执行失败：{}", reason);
-                let _ = state
-                    .store
-                    .router_chat_append_messages(conv_id, &[("assistant".to_string(), error_msg)])
-                    .await;
-                let _ = state
-                    .bus
-                    .publish_session(SessionEvent::JarvisTaskCompleted {
-                        conversation_id: conv_id.to_string(),
-                        task_id: task.id.to_string(),
-                    })
-                    .await;
-                warn!(task_id = %task.id, conv_id = %conv_id, "Jarvis async: failure notification sent");
-            }
-        }
+    if let Some(conv_id) = board_task_runtime_conversation_id(task) {
+        let error_msg = format!("❌ 后台任务执行失败：{}", reason);
+        let _ = state
+            .store
+            .router_chat_append_messages(&conv_id, &[("assistant".to_string(), error_msg)])
+            .await;
+        let _ = state
+            .bus
+            .publish_session(SessionEvent::JarvisTaskCompleted {
+                conversation_id: conv_id.clone(),
+                task_id: task.id.to_string(),
+            })
+            .await;
+        warn!(task_id = %task.id, conv_id = %conv_id, "Jarvis async: failure notification sent");
     }
 }
 
@@ -3045,7 +3179,7 @@ fn extract_board_task_dispatch_metadata_field(
             return Some(value);
         }
     }
-    extract_dispatch_metadata_field(&task.description, field)
+    None
 }
 
 /// Recognised structured task classes the workstation pool understands. Used
@@ -3100,19 +3234,7 @@ fn board_task_workstation_class(task: &missiond_core::types::BoardTask) -> &'sta
             if let Some(class) = metadata_task_class {
                 return class;
             }
-            let title = task.title.to_ascii_lowercase();
-            let description = task.description.to_ascii_lowercase();
-            if title.contains("read-only")
-                || description.contains("read-only")
-                || title.contains("survey")
-                || description.contains("survey")
-                || title.contains("investigate")
-                || description.contains("investigate")
-            {
-                "research"
-            } else {
-                "code"
-            }
+            "code"
         }
         Some("ops") => "ops",
         Some("deploy-ops") => "deploy-ops",
@@ -3147,6 +3269,16 @@ fn board_task_has_grounding_context(task: &missiond_core::types::BoardTask) -> b
 }
 
 fn autopilot_grounding_gate_reason(task: &missiond_core::types::BoardTask) -> Option<String> {
+    if task.auto_execute
+        && task
+            .runtime_metadata
+            .as_object()
+            .is_none_or(|fields| fields.is_empty())
+    {
+        return Some(
+            "RUNTIME_METADATA_REQUIRED: Autopilot refused dispatch because BoardTask.runtime_metadata is missing; run the backfill tool or recreate the task through mission_task_delegate/mission_board_create.".to_string(),
+        );
+    }
     if !task.auto_execute || task.flow_phase.is_some() || board_task_exact_shard_ready(task) {
         return None;
     }
@@ -4163,6 +4295,30 @@ async fn dispatch_board_tasks_with_config(
                         .unwrap_or_else(|| {
                             extract_worker_final_summary(&res.response, &full_prompt)
                         });
+                    if settle_autopilot_done_from_existing_artifact(
+                        state,
+                        &task,
+                        &slot_id,
+                        &final_summary,
+                        "post-send-existing-artifact",
+                    )
+                    .await
+                    .unwrap_or_else(|err| {
+                        warn!(
+                            task_id = %task.id,
+                            slot_id = %slot_id,
+                            error = %err,
+                            "Autopilot: existing canonical artifact settle failed"
+                        );
+                        false
+                    }) {
+                        settle_worker_conversation(state, &slot_id, &task).await;
+                        let _ = state
+                            .store
+                            .update_prompt_snapshot_outcome(task.id.as_str(), "success")
+                            .await;
+                        return;
+                    }
                     let slot_state_after_send =
                         state.pty.get_status(&slot_id).await.map(|info| info.state);
                     if terminal_slot_empty_final_requires_diagnostic(
@@ -4224,111 +4380,32 @@ async fn dispatch_board_tasks_with_config(
                         .await;
                         return;
                     }
-                    if let Some(blocker) =
-                        output_contract_close_blocker_for_task(&task, &final_summary)
-                    {
+                    let observation_diagnostics: Vec<String> = [
+                        output_contract_close_blocker_for_task(&task, &final_summary),
+                        worker_final_close_blocker(&final_summary),
+                        pty_only_close_blocker_for_task(
+                            &task,
+                            durable_completion.is_some(),
+                            &final_summary,
+                        ),
+                        delegated_write_close_evidence_blocker_for_task(
+                            &task,
+                            durable_completion.is_some(),
+                            &final_summary,
+                        ),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .map(str::to_string)
+                    .collect();
+                    if !observation_diagnostics.is_empty() {
                         warn!(
                             task_id = %task.id,
                             slot_id = %slot_id,
                             duration_ms = res.duration_ms,
-                            blocker,
-                            "Autopilot: completion summary does not satisfy worker output contract; preserving task"
+                            diagnostics = ?observation_diagnostics,
+                            "Autopilot: provider/PTY text produced observation diagnostics; canonical artifact remains the only close authority"
                         );
-                        let note = format!(
-                            "⚠️ **Autopilot blocked close** — worker summary is missing `{}`. The BoardTask stays running so the next settle/recovery pass can capture the current task's structured artifact instead of a stale provider-session summary.\n\n{}",
-                            blocker,
-                            truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES),
-                        );
-                        let _ = state
-                            .store
-                            .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
-                                task_id: task.id.to_string(),
-                                content: note,
-                                note_type: Some("note".to_string()),
-                                author: Some("autopilot".to_string()),
-                            })
-                            .await;
-                        return;
-                    }
-                    if let Some(blocker) = worker_final_close_blocker(&final_summary) {
-                        warn!(
-                            task_id = %task.id,
-                            slot_id = %slot_id,
-                            duration_ms = res.duration_ms,
-                            blocker,
-                            "Autopilot: worker final reports a blocking commit/tool failure; preserving task for recovery"
-                        );
-                        let note = format!(
-                            "⚠️ **Autopilot blocked close** — worker final indicates `{}`. This was recorded as an observation only; the BoardTask stays non-terminal until typed settle receives canonical evidence.\n\n{}",
-                            blocker,
-                            truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES),
-                        );
-                        let _ = state
-                            .store
-                            .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
-                                task_id: task.id.to_string(),
-                                content: note,
-                                note_type: Some("note".to_string()),
-                                author: Some("autopilot".to_string()),
-                            })
-                            .await;
-                        return;
-                    }
-                    if let Some(blocker) = pty_only_close_blocker_for_task(
-                        &task,
-                        durable_completion.is_some(),
-                        &final_summary,
-                    ) {
-                        warn!(
-                            task_id = %task.id,
-                            slot_id = %slot_id,
-                            duration_ms = res.duration_ms,
-                            blocker,
-                            "Autopilot: PTY-only completion lacks structured artifact; preserving task until provider final settles"
-                        );
-                        let note = format!(
-                            "⚠️ **Autopilot blocked close** — PTY-only summary missing `{}`. Final artifact not durable yet (no provider JSONL/SSE final after settle window). The BoardTask stays running so the watchdog/next tick can re-extract once the provider log lands.\n\n{}",
-                            blocker,
-                            truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES),
-                        );
-                        let _ = state
-                            .store
-                            .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
-                                task_id: task.id.to_string(),
-                                content: note,
-                                note_type: Some("note".to_string()),
-                                author: Some("autopilot".to_string()),
-                            })
-                            .await;
-                        return;
-                    }
-                    if let Some(blocker) = delegated_write_close_evidence_blocker_for_task(
-                        &task,
-                        durable_completion.is_some(),
-                        &final_summary,
-                    ) {
-                        warn!(
-                            task_id = %task.id,
-                            slot_id = %slot_id,
-                            duration_ms = res.duration_ms,
-                            blocker,
-                            "Autopilot: write-scope task lacks durable completion/acceptance evidence; preserving task for recovery"
-                        );
-                        let note = format!(
-                            "⚠️ **Autopilot blocked close** — write-scope task is missing `{}`. This was recorded as an observation only; the BoardTask stays non-terminal until typed settle receives canonical evidence.\n\n{}",
-                            blocker,
-                            truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES),
-                        );
-                        let _ = state
-                            .store
-                            .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
-                                task_id: task.id.to_string(),
-                                content: note,
-                                note_type: Some("note".to_string()),
-                                author: Some("autopilot".to_string()),
-                            })
-                            .await;
-                        return;
                     }
                     let task_result_artifact_hash = observe_autopilot_task_result_candidate(
                         state,
@@ -4341,13 +4418,22 @@ async fn dispatch_board_tasks_with_config(
                     )
                     .await;
                     if task_result_artifact_hash.is_none() {
+                        let diagnostic_suffix = if observation_diagnostics.is_empty() {
+                            String::new()
+                        } else {
+                            format!(
+                                "\n\nObservation diagnostics: {}",
+                                observation_diagnostics.join(", ")
+                            )
+                        };
                         let _ = state
                             .store
                             .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
                                 task_id: task.id.to_string(),
                                 content: format!(
-                                    "⚠️ **Autopilot blocked close** — final summary was observed, but no canonical completed task_result_artifact exists yet. The BoardTask remains running until the worker writes the artifact.\n\n{}",
-                                    truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES)
+                                    "⚠️ **Autopilot observation** — final text was recorded, but no canonical completed task_result_artifact exists yet. The BoardTask remains running until the worker writes the artifact.\n\n{}{}",
+                                    truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES),
+                                    diagnostic_suffix
                                 ),
                                 note_type: Some("note".to_string()),
                                 author: Some("autopilot".to_string()),
@@ -4543,39 +4629,28 @@ async fn dispatch_board_tasks_with_config(
 
                     // Jarvis task post-completion: append result to conversation
                     if task.category == "jarvis" {
-                        if let Ok(meta) =
-                            serde_json::from_str::<serde_json::Value>(&task.description)
-                        {
-                            if let Some(conv_id) =
-                                meta.get("conversation_id").and_then(|v| v.as_str())
-                            {
-                                if !conv_id.is_empty() {
-                                    let jarvis_result = task_result_artifact_hash
-                                        .as_ref()
-                                        .map(|hash| {
-                                            format!(
-                                                "{}\n\n(task_result_artifact: `{hash}`)",
-                                                final_summary
-                                            )
-                                        })
-                                        .unwrap_or_else(|| final_summary.clone());
-                                    let _ = state
-                                        .store
-                                        .router_chat_append_messages(
-                                            conv_id,
-                                            &[("assistant".to_string(), jarvis_result)],
-                                        )
-                                        .await;
-                                    let _ = state
-                                        .bus
-                                        .publish_session(SessionEvent::JarvisTaskCompleted {
-                                            conversation_id: conv_id.to_string(),
-                                            task_id: task.id.to_string(),
-                                        })
-                                        .await;
-                                    info!(task_id = %task.id, conv_id = %conv_id, "Jarvis async: result appended to conversation");
-                                }
-                            }
+                        if let Some(conv_id) = board_task_runtime_conversation_id(task) {
+                            let jarvis_result = task_result_artifact_hash
+                                .as_ref()
+                                .map(|hash| {
+                                    format!("{}\n\n(task_result_artifact: `{hash}`)", final_summary)
+                                })
+                                .unwrap_or_else(|| final_summary.clone());
+                            let _ = state
+                                .store
+                                .router_chat_append_messages(
+                                    &conv_id,
+                                    &[("assistant".to_string(), jarvis_result)],
+                                )
+                                .await;
+                            let _ = state
+                                .bus
+                                .publish_session(SessionEvent::JarvisTaskCompleted {
+                                    conversation_id: conv_id.clone(),
+                                    task_id: task.id.to_string(),
+                                })
+                                .await;
+                            info!(task_id = %task.id, conv_id = %conv_id, "Jarvis async: result appended to conversation");
                         }
                     }
 
@@ -7965,9 +8040,37 @@ Review only.
             timeout_secs: None,
             context_intent: context_intent.map(str::to_string),
             trigger_source: None,
-            runtime_metadata: serde_json::json!({}),
+            runtime_metadata: serde_json::json!({
+                "schema": "missiond.board-task-runtime-metadata.v1",
+                "source": "test",
+                "task_contract_id": "board-task:task-test",
+                "dispatch_metadata": {},
+                "read_scope": [],
+                "write_scope": [],
+                "must_not_touch": [],
+                "capability_grant_ids": [],
+                "sandbox_profile": "read-only"
+            }),
             notes_count: 0,
         }
+    }
+
+    fn set_test_dispatch_metadata(
+        task: &mut missiond_core::types::BoardTask,
+        dispatch_metadata: serde_json::Value,
+    ) {
+        let mut runtime_metadata = task
+            .runtime_metadata
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        if let Some(fields) = dispatch_metadata.as_object() {
+            for (key, value) in fields {
+                runtime_metadata.insert(key.clone(), value.clone());
+            }
+        }
+        runtime_metadata.insert("dispatch_metadata".to_string(), dispatch_metadata);
+        task.runtime_metadata = serde_json::Value::Object(runtime_metadata);
     }
 
     #[test]
@@ -7999,18 +8102,26 @@ Review only.
     }
 
     /// Pins BoardTask 2b685fcf finding (1): externally-created BoardTasks
-    /// that ship a `## Dispatch metadata` block with `task_class: review`
+    /// that ship runtime_metadata with `task_class: review`
     /// must route to the `review` workstation pool — not silently fall back
     /// to `code` because `context_intent` was left at the "general" default.
     #[test]
-    fn workstation_class_picks_up_review_from_dispatch_metadata() {
-        let description = "Read /Users/jinchen/Projects/...\n\n\
-             ## Dispatch metadata\n\
-             - task_class: review\n\
-             - pool_hint: claude-code-default\n\
-             - engine_hint: claude-code\n\
-             - acceptance: read SSOT | git status proves no edits";
-        let task = make_board_task("Auth KB cleanup eval", description, "dev", Some("general"));
+    fn workstation_class_picks_up_review_from_runtime_metadata() {
+        let mut task = make_board_task(
+            "Auth KB cleanup eval",
+            "Prompt projection only.",
+            "dev",
+            Some("general"),
+        );
+        set_test_dispatch_metadata(
+            &mut task,
+            serde_json::json!({
+                "task_class": "review",
+                "pool_hint": "claude-code-default",
+                "engine_hint": "claude-code",
+                "acceptance": "read SSOT | git status proves no edits"
+            }),
+        );
         assert_eq!(board_task_workstation_class(&task), "review");
     }
 
@@ -8034,36 +8145,42 @@ Review only.
     /// (older BoardTasks pre-context-intent migration).
     #[test]
     fn workstation_class_picks_up_review_when_context_intent_missing() {
-        let description = "## Dispatch metadata\n- task_class: review\n";
-        let task = make_board_task("Eval", description, "dev", None);
+        let mut task = make_board_task("Eval", "Prompt projection only.", "dev", None);
+        set_test_dispatch_metadata(&mut task, serde_json::json!({"task_class": "review"}));
         assert_eq!(board_task_workstation_class(&task), "review");
     }
 
-    /// `## Swarm metadata` blocks (mission_swarm_run output) must be honored
-    /// the same way as `## Dispatch metadata`.
+    /// `mission_swarm_run` output must write equivalent runtime_metadata.
     #[test]
-    fn workstation_class_picks_up_class_from_swarm_metadata_block() {
-        let description = "objective\n\n## Swarm metadata\n- task_class: context-pack\n";
-        let task = make_board_task("Survey", description, "dev", None);
+    fn workstation_class_picks_up_class_from_runtime_metadata() {
+        let mut task = make_board_task("Survey", "Prompt projection only.", "dev", None);
+        set_test_dispatch_metadata(&mut task, serde_json::json!({"task_class": "context-pack"}));
         assert_eq!(board_task_workstation_class(&task), "context-pack");
     }
 
     /// An unknown task_class value must NOT coerce routing — fall back to
-    /// the title/description heuristic instead.
+    /// the runtime default instead of parsing BoardTask prose.
     #[test]
     fn workstation_class_ignores_unknown_dispatch_metadata_class() {
-        let description = "## Dispatch metadata\n- task_class: not-a-real-class\n";
-        let task = make_board_task("Investigate something", description, "dev", None);
-        // "investigate" keyword in title → research fallback applies.
-        assert_eq!(board_task_workstation_class(&task), "research");
+        let mut task = make_board_task(
+            "Investigate something",
+            "Prompt projection only.",
+            "dev",
+            None,
+        );
+        set_test_dispatch_metadata(
+            &mut task,
+            serde_json::json!({"task_class": "not-a-real-class"}),
+        );
+        assert_eq!(board_task_workstation_class(&task), "code");
     }
 
     /// Sanity: explicit `context_intent` still wins. The metadata-block scan
     /// only kicks in when context_intent is the default "general"/missing.
     #[test]
     fn workstation_class_explicit_context_intent_overrides_metadata_block() {
-        let description = "## Dispatch metadata\n- task_class: review\n";
-        let task = make_board_task("Eval", description, "dev", Some("code"));
+        let mut task = make_board_task("Eval", "Prompt projection only.", "dev", Some("code"));
+        set_test_dispatch_metadata(&mut task, serde_json::json!({"task_class": "review"}));
         assert_eq!(board_task_workstation_class(&task), "code");
     }
 
@@ -8112,21 +8229,21 @@ Review only.
 
     #[test]
     fn workstation_class_uses_json_metadata_when_context_intent_is_legacy_jarvis() {
-        let description = serde_json::json!({
-            "source": "jarvis-intent-plan-gate",
-            "grounding_context_id": "ctx-123",
-            "dispatch_metadata": {
-                "task_class": "review",
-                "engine_hint": "codex",
-                "pool_hint": "codex-review-worker"
-            }
-        })
-        .to_string();
-        let task = make_board_task(
+        let mut task = make_board_task(
             "Jarvis Codex review",
-            &description,
+            "Prompt projection only.",
             "jarvis",
             Some("jarvis-plan-confirmed"),
+        );
+        set_test_dispatch_metadata(
+            &mut task,
+            serde_json::json!({
+                "task_class": "review",
+                "engine_hint": "codex",
+                "pool_hint": "codex-review-worker",
+                "source": "jarvis-intent-plan-gate",
+                "grounding_context_id": "ctx-123"
+            }),
         );
         assert_eq!(board_task_workstation_class(&task), "review");
     }
@@ -8140,15 +8257,22 @@ Review only.
 
     #[test]
     fn autopilot_grounding_gate_accepts_jarvis_grounding_json() {
-        let description = serde_json::json!({
-            "source": "jarvis-intent-plan-gate",
-            "conversation_id": "conv-123",
-            "grounding_context_id": "ctx-123",
-            "intent_artifact_id": "intent-123",
-            "plan_artifact_id": "plan-123"
-        })
-        .to_string();
-        let mut task = make_board_task("Jarvis confirmed plan", &description, "jarvis", None);
+        let mut task = make_board_task(
+            "Jarvis confirmed plan",
+            "Prompt projection only.",
+            "jarvis",
+            None,
+        );
+        set_test_dispatch_metadata(
+            &mut task,
+            serde_json::json!({
+                "source": "jarvis-intent-plan-gate",
+                "conversation_id": "conv-123",
+                "grounding_context_id": "ctx-123",
+                "intent_artifact_id": "intent-123",
+                "plan_artifact_id": "plan-123"
+            }),
+        );
         task.auto_execute = true;
         assert_eq!(autopilot_grounding_gate_reason(&task), None);
     }
@@ -8164,14 +8288,27 @@ Review only.
     }
 
     #[test]
+    fn autopilot_grounding_gate_requires_runtime_metadata() {
+        let mut task = make_board_task("Broad task", "Please do the broad thing.", "dev", None);
+        task.runtime_metadata = serde_json::json!({});
+        task.auto_execute = true;
+        assert_eq!(
+            autopilot_grounding_gate_reason(&task).as_deref(),
+            Some("RUNTIME_METADATA_REQUIRED: Autopilot refused dispatch because BoardTask.runtime_metadata is missing; run the backfill tool or recreate the task through mission_task_delegate/mission_board_create.")
+        );
+    }
+
+    #[test]
     fn autopilot_grounding_gate_allows_json_exact_shard() {
-        let description = serde_json::json!({
-            "context_pack_path": "/tmp/context-pack.lisp",
-            "accepted_shard_id": "shard-a1",
-            "write_scope": ["crates/missiond-core/src/ws/server.rs"]
-        })
-        .to_string();
-        let mut task = make_board_task("Exact shard", &description, "dev", None);
+        let mut task = make_board_task("Exact shard", "Prompt projection only.", "dev", None);
+        set_test_dispatch_metadata(
+            &mut task,
+            serde_json::json!({
+                "context_pack_path": "/tmp/context-pack.lisp",
+                "accepted_shard_id": "shard-a1",
+                "write_scope": ["crates/missiond-core/src/ws/server.rs"]
+            }),
+        );
         task.auto_execute = true;
         assert!(board_task_exact_shard_ready(&task));
         assert_eq!(autopilot_grounding_gate_reason(&task), None);
@@ -8627,6 +8764,23 @@ Verification
     #[test]
     fn output_contract_close_blocker_accepts_codex_bullet_markdown_sections() {
         let report = "• ## Findings\n- one\n\n• ## Evidence\n- two\n\n• ## Recommendations\n- three\n\n• ## Verification\n- no edits";
+        assert_eq!(
+            output_contract_close_blocker(delegated_context_pack_with_output_contract(), report),
+            None
+        );
+        assert_eq!(
+            pty_only_close_blocker(
+                delegated_dispatch_description(),
+                /* has_durable_provider_final */ false,
+                report,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn output_contract_allows_artifact_authority_discussion_inside_real_report() {
+        let report = "## Findings\n- Artifact-first close is correctly enforced.\n\n## Evidence\n- The worker final mentions task-result-artifact 验证后 as a runtime rule, not as an echoed prompt.\n\n## Recommendations\n- Keep Board notes as projection only.\n\n## Verification\n- Read-only task; no files changed.";
         assert_eq!(
             output_contract_close_blocker(delegated_context_pack_with_output_contract(), report),
             None

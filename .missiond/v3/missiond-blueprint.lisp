@@ -193,6 +193,7 @@
                    "compiled-contract-abi.json"
                    "compiled-project-universe.json"
                    "compiled-workflows.json"
+                   "compiled-runtime-control-plane-kernel.json"
                    "compiled-genomes.json"]
     :generated-abi ["crates/missiond-daemon/src/context/v3_contracts/generated.rs"
                     "scripts/generated/v3_contracts.mjs"

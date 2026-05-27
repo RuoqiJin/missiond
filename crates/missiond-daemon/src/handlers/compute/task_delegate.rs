@@ -152,6 +152,27 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         Ok(config) => config,
         Err(error) => return Ok(error),
     };
+    let delegate_sandbox_profile = sandbox_profile_for_worker(
+        delegation_metadata.engine_hint.as_deref(),
+        !delegation_metadata.write_scope.is_empty(),
+    );
+    if matches!(
+        delegate_sandbox_profile,
+        "unsupported-write" | "plan-policy-write"
+    ) {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(
+                error_codes::SANDBOX_POLICY_UNSUPPORTED,
+                format!(
+                    "mission_task_delegate refused write-scoped task for engine {:?}: no enforceable path write sandbox",
+                    delegation_metadata.engine_hint
+                ),
+            )
+            .with_suggestion(
+                "route write-scoped work to Codex/ClaudeCode with explicit write_scope, or rerun as read-only",
+            ),
+        ));
+    }
 
     let explicit_exact_shard_ready =
         bool_arg(&args, &["exact_shard_ready", "exactShardReady"]).unwrap_or(false);
@@ -433,6 +454,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             cwd,
             model_arg.as_deref(),
             effective_model_profile,
+            Some(delegate_sandbox_profile),
         )
         .await
         {
@@ -526,10 +548,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
     let task_id = task.id.to_string();
-    let sandbox_profile = sandbox_profile_for_worker(
-        delegation_metadata.engine_hint.as_deref(),
-        !delegation_metadata.write_scope.is_empty(),
-    );
+    let sandbox_profile = delegate_sandbox_profile;
     let capability_grant_ids = state
         .shared_memory
         .grant_task_capabilities(
@@ -1098,6 +1117,10 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
                     Some(&task_project_root),
                     None,
                     Some("coding-default-opus-4-7"),
+                    Some(sandbox_profile_for_worker(
+                        Some(&planned_task.engine_hint),
+                        !planned_task.write_scope.is_empty(),
+                    )),
                 )
                 .await
                 {
@@ -2702,6 +2725,7 @@ async fn auto_provision_slot(
     cwd: Option<&str>,
     model: Option<&str>,
     model_profile: Option<&str>,
+    sandbox_profile: Option<&str>,
 ) -> Result<String> {
     // Check quota
     let active = state
@@ -2724,8 +2748,15 @@ async fn auto_provision_slot(
     // execution-ownership :: delegated-boardtask. The slot is provisioned
     // idle (suppress_initial_prompt=true) so Autopilot remains the sole
     // task-prompt owner once the queued BoardTask is dispatched.
-    let create_args =
-        build_compute_slot_create_args(template, objective, ttl, cwd, model, model_profile);
+    let create_args = build_compute_slot_create_args(
+        template,
+        objective,
+        ttl,
+        cwd,
+        model,
+        model_profile,
+        sandbox_profile,
+    );
 
     // Delegate to existing compute_slot handler
     let result = super::compute_slot::handle(state, "mission_compute_slot", create_args).await?;
@@ -3136,6 +3167,7 @@ fn build_compute_slot_create_args(
     cwd: Option<&str>,
     model: Option<&str>,
     model_profile: Option<&str>,
+    sandbox_profile: Option<&str>,
 ) -> Value {
     let mut create_args = json!({
         "action": "create",
@@ -3152,6 +3184,9 @@ fn build_compute_slot_create_args(
     }
     if let Some(profile_val) = model_profile {
         create_args["model_profile"] = Value::String(profile_val.to_string());
+    }
+    if let Some(sandbox) = sandbox_profile {
+        create_args["sandbox"] = Value::String(sandbox.to_string());
     }
     create_args
 }
@@ -3183,7 +3218,8 @@ mod tests {
 
     #[test]
     fn create_args_always_suppresses_initial_prompt() {
-        let args = build_compute_slot_create_args("coder", "ship the fix", 3600, None, None, None);
+        let args =
+            build_compute_slot_create_args("coder", "ship the fix", 3600, None, None, None, None);
         assert_eq!(args["suppress_initial_prompt"], json!(true));
     }
 
@@ -3199,8 +3235,15 @@ mod tests {
 
     #[test]
     fn create_args_carry_template_objective_and_ttl() {
-        let args =
-            build_compute_slot_create_args("researcher", "investigate", 7200, None, None, None);
+        let args = build_compute_slot_create_args(
+            "researcher",
+            "investigate",
+            7200,
+            None,
+            None,
+            None,
+            None,
+        );
         assert_eq!(args["action"], json!("create"));
         assert_eq!(args["template"], json!("researcher"));
         assert_eq!(args["objective"], json!("investigate"));
@@ -3240,16 +3283,18 @@ mod tests {
             Some("/Users/jinchen/Projects/missiond"),
             Some("sonnet"),
             Some("daily-sonnet"),
+            Some("workspace-write"),
         );
         assert_eq!(args["cwd"], json!("/Users/jinchen/Projects/missiond"));
         assert_eq!(args["model"], json!("sonnet"));
         assert_eq!(args["model_profile"], json!("daily-sonnet"));
+        assert_eq!(args["sandbox"], json!("workspace-write"));
         assert_eq!(args["suppress_initial_prompt"], json!(true));
     }
 
     #[test]
     fn create_args_omit_optional_fields_when_absent() {
-        let args = build_compute_slot_create_args("coder", "x", 3600, None, None, None);
+        let args = build_compute_slot_create_args("coder", "x", 3600, None, None, None, None);
         assert!(args.get("cwd").is_none());
         assert!(args.get("model").is_none());
         assert!(args.get("model_profile").is_none());

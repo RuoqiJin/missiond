@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -168,6 +169,9 @@ impl SharedMemoryService {
             "capability_grant" | "grant_capability" => self.capability_grant_from_args(args).await,
             "capability_check" | "check_capability" => self.capability_check_from_args(args).await,
             "job_event" | "record_job_event" => self.job_event_from_args(args).await,
+            "model_route_outcome_put" | "record_model_route_outcome" => {
+                self.model_route_outcome_put(args).await
+            }
             "claim" => self.claim_from_args(args).await,
             "release" => self.release(args).await,
             "heartbeat" => self.heartbeat(args).await,
@@ -225,6 +229,21 @@ impl SharedMemoryService {
                 .await?,
             );
         }
+        grant_ids.push(
+            self.insert_capability_grant(CapabilityGrantInput {
+                subject_kind,
+                subject_id,
+                operation: "write",
+                scope_kind: "task",
+                scope_key: task_id,
+                project_id,
+                task_id: Some(task_id),
+                issuer,
+                evidence_requirement: Some("canonical_task_result_artifact"),
+                details: json!({"source": "mission_task_delegate"}),
+            })
+            .await?,
+        );
         grant_ids.push(
             self.insert_capability_grant(CapabilityGrantInput {
                 subject_kind,
@@ -383,6 +402,73 @@ impl SharedMemoryService {
             "job_id": job_id,
             "state": state,
             "event": event
+        }))
+    }
+
+    async fn model_route_outcome_put(&self, args: &Value) -> Result<Value> {
+        let id = format!("route-outcome:{}", Uuid::new_v4());
+        let project_id = string_arg(args, "project_id").or_else(|| string_arg(args, "projectId"));
+        let task_id = string_arg(args, "task_id").or_else(|| string_arg(args, "taskId"));
+        let provider = string_arg(args, "provider").unwrap_or("router_chat");
+        let model = string_arg(args, "model").unwrap_or("unknown");
+        let task_class = string_arg(args, "task_class")
+            .or_else(|| string_arg(args, "taskClass"))
+            .unwrap_or("router_chat");
+        let outcome = string_arg(args, "outcome").unwrap_or("completed");
+        let artifact_hash =
+            string_arg(args, "artifact_hash").or_else(|| string_arg(args, "artifactHash"));
+        let job_id = string_arg(args, "job_id").or_else(|| string_arg(args, "jobId"));
+        let latency_ms = args
+            .get("latency_ms")
+            .or_else(|| args.get("latencyMs"))
+            .and_then(Value::as_i64);
+        let input_tokens = args
+            .get("input_tokens")
+            .or_else(|| args.get("inputTokens"))
+            .and_then(Value::as_i64);
+        let output_tokens = args
+            .get("output_tokens")
+            .or_else(|| args.get("outputTokens"))
+            .and_then(Value::as_i64);
+        let total_tokens = args
+            .get("total_tokens")
+            .or_else(|| args.get("totalTokens"))
+            .and_then(Value::as_i64);
+        let cost_micros = args
+            .get("cost_micros")
+            .or_else(|| args.get("costMicros"))
+            .and_then(Value::as_i64);
+        let metadata = args.get("metadata").cloned().unwrap_or_else(|| json!({}));
+        sqlx::query(
+            r#"
+            INSERT INTO model_route_outcomes
+              (id, project_id, task_id, provider, model, task_class, latency_ms,
+               input_tokens, output_tokens, total_tokens, cost_micros,
+               artifact_hash, job_id, outcome, metadata)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+            "#,
+        )
+        .bind(&id)
+        .bind(project_id)
+        .bind(task_id)
+        .bind(provider)
+        .bind(model)
+        .bind(task_class)
+        .bind(latency_ms)
+        .bind(input_tokens)
+        .bind(output_tokens)
+        .bind(total_tokens)
+        .bind(cost_micros)
+        .bind(artifact_hash)
+        .bind(job_id)
+        .bind(outcome)
+        .bind(metadata)
+        .execute(&self.pool)
+        .await?;
+        Ok(json!({
+            "schema": "missiond.model-route-outcome.v1",
+            "ok": true,
+            "id": id
         }))
     }
 
@@ -685,17 +771,178 @@ impl SharedMemoryService {
             }
         }
         if !violations.is_empty() {
+            let details = json!({
+                "task_id": task_id,
+                "violations": violations,
+                "write_scope": contract.write_scope,
+                "must_not_touch": contract.must_not_touch
+            });
+            let _ = self
+                .record_control_plane_event(
+                    contract.project_id.as_deref(),
+                    task_id,
+                    "capability.denied",
+                    "post-run-verifier",
+                    json!({
+                        "code": WRITE_SCOPE_VIOLATION_CODE,
+                        "details": details
+                    }),
+                    Some("blocked"),
+                    None,
+                )
+                .await;
             return Err(control_error_details(
                 WRITE_SCOPE_VIOLATION_CODE,
                 format!("task {task_id} changed files outside its write_scope"),
-                json!({
-                    "task_id": task_id,
-                    "violations": violations,
-                    "write_scope": contract.write_scope,
-                    "must_not_touch": contract.must_not_touch
-                }),
+                details,
             ));
         }
+        self.verify_actual_worktree_changes(task_id, &changed_paths, contract)
+            .await?;
+        Ok(())
+    }
+
+    async fn verify_actual_worktree_changes(
+        &self,
+        task_id: &str,
+        reported_changed_paths: &[String],
+        contract: &TaskRuntimeContract,
+    ) -> Result<()> {
+        if contract.write_scope.is_empty() {
+            return Ok(());
+        }
+        let Some(project_root) = contract
+            .project_root
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Err(control_error_details(
+                COMPLETION_ARTIFACT_INVALID_CODE,
+                format!("task {task_id} completed write-scoped work without project_root metadata"),
+                json!({
+                    "task_id": task_id,
+                    "required": "runtime_metadata.dispatch_metadata.project_root",
+                }),
+            ));
+        };
+        let actual_changed_paths = git_status_changed_paths(project_root).map_err(|err| {
+            control_error_details(
+                COMPLETION_ARTIFACT_INVALID_CODE,
+                format!("task {task_id} post-run verifier failed: {err}"),
+                json!({
+                    "task_id": task_id,
+                    "project_root": project_root,
+                    "verifier": "git status --porcelain=v1"
+                }),
+            )
+        })?;
+        let _ = self
+            .record_worktree_manifest(task_id, project_root, "post", &actual_changed_paths)
+            .await;
+        if actual_changed_paths.is_empty() {
+            return Ok(());
+        }
+        let mut violations = Vec::new();
+        for path in &actual_changed_paths {
+            if contract
+                .must_not_touch
+                .iter()
+                .any(|scope| scope_matches_path(scope, path))
+            {
+                violations.push(json!({
+                    "path": path,
+                    "reason": "actual_must_not_touch",
+                    "scope": contract.must_not_touch
+                }));
+                continue;
+            }
+            if !contract
+                .write_scope
+                .iter()
+                .any(|scope| scope_matches_path(scope, path))
+            {
+                violations.push(json!({
+                    "path": path,
+                    "reason": "actual_outside_write_scope",
+                    "scope": contract.write_scope
+                }));
+                continue;
+            }
+            if !reported_changed_paths
+                .iter()
+                .any(|reported| scope_matches_path(reported, path))
+            {
+                violations.push(json!({
+                    "path": path,
+                    "reason": "actual_path_not_reported_by_artifact",
+                    "reported_changed_paths": reported_changed_paths
+                }));
+            }
+        }
+        if violations.is_empty() {
+            return Ok(());
+        }
+        let details = json!({
+            "task_id": task_id,
+            "project_root": project_root,
+            "actual_changed_paths": actual_changed_paths,
+            "reported_changed_paths": reported_changed_paths,
+            "violations": violations,
+            "write_scope": contract.write_scope,
+            "must_not_touch": contract.must_not_touch
+        });
+        let _ = self
+            .record_control_plane_event(
+                contract.project_id.as_deref(),
+                task_id,
+                "capability.denied",
+                "post-run-verifier",
+                json!({
+                    "code": WRITE_SCOPE_VIOLATION_CODE,
+                    "details": details
+                }),
+                Some("blocked"),
+                None,
+            )
+            .await;
+        Err(control_error_details(
+            WRITE_SCOPE_VIOLATION_CODE,
+            format!("task {task_id} actual worktree changes violate write_scope"),
+            details,
+        ))
+    }
+
+    async fn record_worktree_manifest(
+        &self,
+        task_id: &str,
+        project_root: &str,
+        phase: &str,
+        changed_paths: &[String],
+    ) -> Result<()> {
+        let manifest = json!({
+            "schema": "missiond.worktree-manifest.v1",
+            "source": "post-run-verifier",
+            "changed_paths": changed_paths,
+        });
+        sqlx::query(
+            r#"
+            INSERT INTO worktree_manifests
+              (id, task_id, project_root, phase, manifest, changed_paths)
+            VALUES ($1,$2,$3,$4,$5,$6)
+            "#,
+        )
+        .bind(format!(
+            "manifest:{task_id}:{phase}:{}",
+            Utc::now().timestamp_millis()
+        ))
+        .bind(task_id)
+        .bind(project_root)
+        .bind(phase)
+        .bind(manifest)
+        .bind(json!(changed_paths))
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -1354,10 +1601,16 @@ impl SharedMemoryService {
         } else {
             details.clone()
         };
-        let raw_evidence = details
+        let raw_evidence = args
             .get("raw_evidence")
             .cloned()
-            .or_else(|| details.get("rawEvidence").cloned());
+            .or_else(|| args.get("rawEvidence").cloned())
+            .or_else(|| {
+                details
+                    .get("raw_evidence")
+                    .cloned()
+                    .or_else(|| details.get("rawEvidence").cloned())
+            });
         let evidence_refs = task_result_evidence_refs(
             args,
             &details,
@@ -1366,8 +1619,10 @@ impl SharedMemoryService {
             slot_id.as_deref(),
             conversation_id.as_deref(),
         );
+        let has_explicit_evidence =
+            task_result_has_explicit_evidence(args, &details, raw_evidence.as_ref());
         let runtime_contract = self.task_runtime_contract(&task_id).await?;
-        self.require_capability(&task_id, "settle", "task", &task_id)
+        self.require_capability(&task_id, "write", "task", &task_id)
             .await?;
         if is_completed_result_status(&result_status) {
             self.verify_completion_scope(&task_id, args, &details, &runtime_contract)
@@ -1381,6 +1636,7 @@ impl SharedMemoryService {
             &summary,
             &content,
             &evidence_refs,
+            has_explicit_evidence,
         )?;
         if let Some(row) = sqlx::query(
             r#"
@@ -2572,6 +2828,7 @@ impl SharedMemoryService {
             .await?;
         let update = UpdateBoardTaskInput {
             status: Some(target_status.to_string()),
+            artifact_hash: artifact_hash.map(str::to_string),
             ..Default::default()
         };
         let updated = self.store.update_board_task(task_id, &update).await?;
@@ -2856,6 +3113,20 @@ fn task_result_evidence_refs(
     refs
 }
 
+fn task_result_has_explicit_evidence(
+    args: &Value,
+    details: &Value,
+    raw_evidence: Option<&Value>,
+) -> bool {
+    let has_refs = ["evidence_refs", "evidenceRefs"].iter().any(|key| {
+        args.get(*key)
+            .or_else(|| details.get(*key))
+            .and_then(Value::as_array)
+            .is_some_and(|values| !values.is_empty())
+    });
+    has_refs || raw_evidence.is_some()
+}
+
 fn validate_task_result_artifact_payload(
     task_id: &str,
     project_id: &str,
@@ -2864,6 +3135,7 @@ fn validate_task_result_artifact_payload(
     summary: &str,
     content: &Value,
     evidence_refs: &[Value],
+    has_explicit_evidence: bool,
 ) -> Result<()> {
     let invalid = |reason: String| {
         control_error_details(
@@ -2907,8 +3179,10 @@ fn validate_task_result_artifact_payload(
     if content_empty {
         return Err(invalid("content is required".to_string()));
     }
-    if evidence_refs.is_empty() {
-        return Err(invalid("evidence_refs must be non-empty".to_string()));
+    if evidence_refs.is_empty() || !has_explicit_evidence {
+        return Err(invalid(
+            "evidence_refs or raw_evidence must be explicitly provided".to_string(),
+        ));
     }
     Ok(())
 }
@@ -2993,6 +3267,45 @@ fn verification_evidence_present(args: &Value, details: &Value) -> bool {
                         .is_some_and(|kind| kind.contains("verification"))
                 })
             })
+}
+
+fn git_status_changed_paths(project_root: &str) -> Result<Vec<String>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(project_root)
+        .args(["status", "--porcelain=v1"])
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!("git status failed: {}", stderr.trim()));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut paths = Vec::new();
+    for line in stdout.lines() {
+        if line.len() < 4 {
+            continue;
+        }
+        let payload = line[3..].trim();
+        if payload.is_empty() {
+            continue;
+        }
+        if let Some((old_path, new_path)) = payload.split_once(" -> ") {
+            push_changed_path(&mut paths, old_path);
+            push_changed_path(&mut paths, new_path);
+        } else {
+            push_changed_path(&mut paths, payload);
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+fn push_changed_path(paths: &mut Vec<String>, path: &str) {
+    let normalized = path.trim().trim_matches('"').trim_start_matches("./");
+    if !normalized.is_empty() {
+        paths.push(normalized.to_string());
+    }
 }
 
 fn is_completed_result_status(status: &str) -> bool {
@@ -3547,6 +3860,7 @@ mod tests {
             "summary",
             &json!({}),
             &[json!({"kind": "provider_conversation"})],
+            true,
         )
         .expect_err("empty content must be rejected");
         assert!(err.to_string().starts_with("COMPLETION_ARTIFACT_INVALID"));

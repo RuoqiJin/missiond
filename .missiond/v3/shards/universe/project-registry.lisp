@@ -1,7 +1,7 @@
 (project-registry-policy
     :desc "Lisp-owned project registry defaults for intent discovery and universe import."
     :intent-path-candidates [".missiond/intent.lisp" ".jarvis/intent.lisp" "intent.lisp"]
-    :default-universe-manifest "/Users/jinchen/Projects/universe.intent.lisp"
+    :default-universe-manifest "$MISSIOND_PROJECTS_DIR/universe.intent.lisp"
     :env-overrides [UNIVERSE_MANIFEST]
     :invariants
       ["mission_project init/import_universe/survey MUST project intent-path candidates from project-registry-policy."

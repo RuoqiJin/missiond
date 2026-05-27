@@ -1208,6 +1208,58 @@ let autopilot_runtime_config_json root =
           ("direction_shift_cooldown_secs", json_number_token [ ":direction-shift-cooldown-secs" ] props);
         ]
 
+let control_plane_kernel_runtime_config_json root =
+  match Option.bind root (fun root -> find_child root "control-plane-kernel") with
+  | None -> "{}"
+  | Some node ->
+      let props = keyword_props ~start:1 node in
+      json_assoc
+        [
+          ("schema", json_string_token [ ":schema" ] props);
+          ("authority", json_string_token [ ":authority" ] props);
+          ("facts", json_string_list_token [ ":facts" ] props);
+          ("runtime_abi_fields", json_string_list_token [ ":runtime-abi-fields" ] props);
+          ("hard_cutover", json_bool_token [ ":hard-cutover" ] props);
+          ("rules", json_string_list_token [ ":rules" ] props);
+          ("state_machine", json_string_list_token [ ":state-machine" ] props);
+          ("db_migration", json_string_token [ ":db-migration" ] props);
+          ("checker", json_string_token [ ":checker" ] props);
+          ( "completion_artifact_schema",
+            json_assoc
+              [
+                ("schema", json_string "missiond.task-result-artifact.v1");
+                ("storage", json_string "task_result_artifacts");
+                ("required_artifact_hash_for_done", "true");
+              ] );
+          ( "job_state_machine",
+            json_assoc
+              [
+                ("events", json_string_list_token [ ":state-machine" ] props);
+                ("terminal_states", json_string_list [ "completed"; "blocked"; "failed"; "skipped" ]);
+              ] );
+          ( "capability_policy",
+            json_assoc
+              [
+                ("artifact_write", json_string "write:task");
+                ("settle_done", json_string "settle:task");
+                ("claim", json_string "claim:*");
+              ] );
+          ( "sandbox_policy",
+            json_assoc
+              [
+                ("default", json_string "fail-closed");
+                ("codex_write", json_string "workspace-write");
+                ("read_only", json_string "read-only");
+              ] );
+          ( "projection_policy",
+            json_assoc
+              [
+                ("board_task", json_string "projection");
+                ("notes", json_string "projection");
+                ("pty_provider_text", json_string "observation");
+              ] );
+        ]
+
 let learning_engine_runtime_config_json root =
   match policy_props root "learning-engine-policy" with
   | None -> "{}"
@@ -1264,6 +1316,7 @@ let runtime_config_payload_json blueprint source_hash source_units source_domain
       ("memoryKb", memory_kb_runtime_config_json root);
       ("conversationIngestion", conversation_ingestion_runtime_config_json root);
       ("autopilot", autopilot_runtime_config_json root);
+      ("controlPlaneKernel", control_plane_kernel_runtime_config_json root);
       ("learningEngine", learning_engine_runtime_config_json root);
     ]
 

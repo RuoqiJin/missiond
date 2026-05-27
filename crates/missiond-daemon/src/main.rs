@@ -296,7 +296,7 @@ fn workstation_pool_slot_config(
         mcp_config,
         lifecycle: Some(missiond_core::types::Lifecycle::Persistent),
         auto_start: None,
-        dangerously_skip_permissions: Some(worker.write_allowed),
+        dangerously_skip_permissions: Some(false),
         model: workstation_pool_model(worker, config)?,
         model_profile: worker.model_profile.clone(),
         reasoning_effort: worker.reasoning_effort.clone(),
@@ -1322,7 +1322,7 @@ async fn main() -> Result<()> {
                         tool_policy_path: worker.tool_policy_path.clone().map(Into::into),
                         timeout: std::time::Duration::from_secs(worker.timeout_secs),
                         cwd: missiond_project_root.clone(),
-                        skip_permissions: worker.write_allowed,
+                        skip_permissions: false,
                     })
                     .await?;
             }

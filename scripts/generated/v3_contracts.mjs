@@ -4,9 +4,9 @@
 // Do not edit by hand.
 
 export const SCHEMA_VERSION = "missiond.contract-abi.v1";
-export const SOURCE_HASH = "316ce1c3bdaf09487a639ac125241948";
-export const RUNTIME_CONFIG_SOURCE_HASH = "db2388f5c069f1f16525b12af269a762";
-export const PROJECT_UNIVERSE_SOURCE_HASH = "db2388f5c069f1f16525b12af269a762";
+export const SOURCE_HASH = "b9d5cd20bea0838673b27fe1f3e498dc";
+export const RUNTIME_CONFIG_SOURCE_HASH = "0ac6f6e971b86321ff63d55c9f72215a";
+export const PROJECT_UNIVERSE_SOURCE_HASH = "0ac6f6e971b86321ff63d55c9f72215a";
 export const RUNTIME_DOMAIN_FILES = Object.freeze({
   "workstation": "compiled-runtime-workstation.json",
   "flow": "compiled-runtime-flow.json",
@@ -19,21 +19,23 @@ export const RUNTIME_DOMAIN_FILES = Object.freeze({
   "memory-kb": "compiled-runtime-memory-kb.json",
   "conversation-ingestion": "compiled-runtime-conversation-ingestion.json",
   "autopilot": "compiled-runtime-autopilot.json",
+  "control-plane-kernel": "compiled-runtime-control-plane-kernel.json",
   "learning-engine": "compiled-runtime-learning-engine.json"
 });
 export const RUNTIME_DOMAIN_SOURCE_HASHES = Object.freeze({
-  "workstation": "db2388f5c069f1f16525b12af269a762",
-  "flow": "db2388f5c069f1f16525b12af269a762",
-  "compute": "db2388f5c069f1f16525b12af269a762",
-  "minimax": "db2388f5c069f1f16525b12af269a762",
-  "router": "db2388f5c069f1f16525b12af269a762",
-  "cascade": "db2388f5c069f1f16525b12af269a762",
-  "project-registry": "db2388f5c069f1f16525b12af269a762",
-  "capability-governance": "db2388f5c069f1f16525b12af269a762",
-  "memory-kb": "db2388f5c069f1f16525b12af269a762",
-  "conversation-ingestion": "db2388f5c069f1f16525b12af269a762",
-  "autopilot": "db2388f5c069f1f16525b12af269a762",
-  "learning-engine": "db2388f5c069f1f16525b12af269a762"
+  "workstation": "0ac6f6e971b86321ff63d55c9f72215a",
+  "flow": "0ac6f6e971b86321ff63d55c9f72215a",
+  "compute": "0ac6f6e971b86321ff63d55c9f72215a",
+  "minimax": "0ac6f6e971b86321ff63d55c9f72215a",
+  "router": "0ac6f6e971b86321ff63d55c9f72215a",
+  "cascade": "0ac6f6e971b86321ff63d55c9f72215a",
+  "project-registry": "0ac6f6e971b86321ff63d55c9f72215a",
+  "capability-governance": "0ac6f6e971b86321ff63d55c9f72215a",
+  "memory-kb": "0ac6f6e971b86321ff63d55c9f72215a",
+  "conversation-ingestion": "0ac6f6e971b86321ff63d55c9f72215a",
+  "autopilot": "0ac6f6e971b86321ff63d55c9f72215a",
+  "control-plane-kernel": "0ac6f6e971b86321ff63d55c9f72215a",
+  "learning-engine": "0ac6f6e971b86321ff63d55c9f72215a"
 });
 export const SOURCE_UNITS = Object.freeze([
   {
@@ -41,13 +43,13 @@ export const SOURCE_UNITS = Object.freeze([
     "kind": "missiond-blueprint",
     "included_by": null,
     "include_line": null,
-    "source_hash": "c560718d3c1f6c875456edcf37dd16aa"
+    "source_hash": "7923625151f450c4bdc24ad439361eed"
   },
   {
     "file": ".missiond/v3/shards/index.lisp",
     "kind": "missiond-blueprint-shards",
     "included_by": ".missiond/v3/missiond-blueprint.lisp",
-    "include_line": 385,
+    "include_line": 386,
     "source_hash": "8882108e8391f000fe8717dc67c1c03f"
   },
   {
@@ -62,14 +64,14 @@ export const SOURCE_UNITS = Object.freeze([
     "kind": "multi-section-shard",
     "included_by": ".missiond/v3/shards/index.lisp",
     "include_line": 14,
-    "source_hash": "fdbc768044cc5b839ff841d069515a8d"
+    "source_hash": "9946f2d27f7639e0728445688dd52715"
   },
   {
     "file": ".missiond/v3/shards/control-plane-runtime.lisp",
     "kind": "multi-section-shard",
     "included_by": ".missiond/v3/shards/index.lisp",
     "include_line": 21,
-    "source_hash": "229209815a57a3bed6478889eaf9bc9f"
+    "source_hash": "2601e6050d9a080c5dc58196fdc0ad0c"
   },
   {
     "file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
@@ -139,7 +141,7 @@ export const SOURCE_UNITS = Object.freeze([
     "kind": "multi-section-shard",
     "included_by": ".missiond/v3/shards/index.lisp",
     "include_line": 91,
-    "source_hash": "8c565d4f104ac8e28ecf4c8122e42c98"
+    "source_hash": "bb22ca57ddb65e22d30d2eaa71d7cc29"
   },
   {
     "file": ".missiond/v3/shards/universe/behavior-closure.lisp",
@@ -187,27 +189,27 @@ export const SOURCE_UNITS = Object.freeze([
 export const SOURCE_DOMAINS = Object.freeze([
   {
     "id": "blueprint-core",
-    "source_hash": "f60052ec2680e8f901cd21fb51de0c6c",
+    "source_hash": "14d4bfd1bb8811acec461b7abcd45440",
     "source_units": [
       {
         "file": ".missiond/v3/missiond-blueprint.lisp",
         "kind": "missiond-blueprint",
         "included_by": null,
         "include_line": null,
-        "source_hash": "c560718d3c1f6c875456edcf37dd16aa"
+        "source_hash": "7923625151f450c4bdc24ad439361eed"
       },
       {
         "file": ".missiond/v3/shards/index.lisp",
         "kind": "missiond-blueprint-shards",
         "included_by": ".missiond/v3/missiond-blueprint.lisp",
-        "include_line": 385,
+        "include_line": 386,
         "source_hash": "8882108e8391f000fe8717dc67c1c03f"
       }
     ]
   },
   {
     "id": "control-plane-runtime",
-    "source_hash": "5bb513623eeef318523b6048caabd857",
+    "source_hash": "0af0b3fc39329d6039830d40ed9e7e88",
     "source_units": [
       {
         "file": ".missiond/v3/shards/request-runtime.lisp",
@@ -221,20 +223,20 @@ export const SOURCE_DOMAINS = Object.freeze([
         "kind": "multi-section-shard",
         "included_by": ".missiond/v3/shards/index.lisp",
         "include_line": 21,
-        "source_hash": "229209815a57a3bed6478889eaf9bc9f"
+        "source_hash": "2601e6050d9a080c5dc58196fdc0ad0c"
       }
     ]
   },
   {
     "id": "workstation-runtime",
-    "source_hash": "282a13abc5e634d47783fa6f1dda7110",
+    "source_hash": "f6aab7117e3c338b4d14149d1f3ec17c",
     "source_units": [
       {
         "file": ".missiond/v3/shards/workstation-runtime.lisp",
         "kind": "multi-section-shard",
         "included_by": ".missiond/v3/shards/index.lisp",
         "include_line": 14,
-        "source_hash": "fdbc768044cc5b839ff841d069515a8d"
+        "source_hash": "9946f2d27f7639e0728445688dd52715"
       }
     ]
   },
@@ -305,7 +307,7 @@ export const SOURCE_DOMAINS = Object.freeze([
   },
   {
     "id": "universe",
-    "source_hash": "6601779fa17d143c1287e0fa9272547d",
+    "source_hash": "b1cf628d1d9d44f4b289945ee45fa12c",
     "source_units": [
       {
         "file": ".missiond/v3/shards/universe/service-runtime.lisp",
@@ -340,7 +342,7 @@ export const SOURCE_DOMAINS = Object.freeze([
         "kind": "multi-section-shard",
         "included_by": ".missiond/v3/shards/index.lisp",
         "include_line": 91,
-        "source_hash": "8c565d4f104ac8e28ecf4c8122e42c98"
+        "source_hash": "bb22ca57ddb65e22d30d2eaa71d7cc29"
       },
       {
         "file": ".missiond/v3/shards/universe/behavior-closure.lisp",
@@ -871,7 +873,7 @@ export const CHECKER_REGISTRY = Object.freeze([
       "node scripts/check-v3-final-convergence.mjs"
     ],
     "source_file": ".missiond/v3/missiond-blueprint.lisp",
-    "source_line": 542
+    "source_line": 543
   }
 ]);
 export const CHECKER_COMMANDS = Object.freeze([
@@ -1469,9 +1471,9 @@ export const FINAL_CONVERGENCE_GATE = Object.freeze({
   ],
   "source": {
     "source_file": ".missiond/v3/missiond-blueprint.lisp",
-    "source_line": 387,
+    "source_line": 388,
     "source_column": 3,
-    "source_hash": "316ce1c3bdaf09487a639ac125241948"
+    "source_hash": "b9d5cd20bea0838673b27fe1f3e498dc"
   }
 });
 export const PRODUCTION_CONSUMER_BOUNDARIES = Object.freeze([
@@ -1504,9 +1506,9 @@ export const PRODUCTION_CONSUMER_BOUNDARIES = Object.freeze([
     "checker": null,
     "source": {
       "source_file": ".missiond/v3/missiond-blueprint.lisp",
-      "source_line": 269,
+      "source_line": 270,
       "source_column": 5,
-      "source_hash": "316ce1c3bdaf09487a639ac125241948"
+      "source_hash": "b9d5cd20bea0838673b27fe1f3e498dc"
     }
   },
   {
@@ -1536,9 +1538,9 @@ export const PRODUCTION_CONSUMER_BOUNDARIES = Object.freeze([
     "checker": null,
     "source": {
       "source_file": ".missiond/v3/missiond-blueprint.lisp",
-      "source_line": 277,
+      "source_line": 278,
       "source_column": 5,
-      "source_hash": "316ce1c3bdaf09487a639ac125241948"
+      "source_hash": "b9d5cd20bea0838673b27fe1f3e498dc"
     }
   }
 ]);
@@ -1571,9 +1573,9 @@ export const REQUEST_STATE_PROJECTIONS = Object.freeze([
     "checker": null,
     "source": {
       "source_file": ".missiond/v3/missiond-blueprint.lisp",
-      "source_line": 288,
+      "source_line": 289,
       "source_column": 5,
-      "source_hash": "316ce1c3bdaf09487a639ac125241948"
+      "source_hash": "b9d5cd20bea0838673b27fe1f3e498dc"
     }
   }
 ]);
@@ -1606,9 +1608,9 @@ export const SCANNER_POLICIES = Object.freeze([
     "checker": null,
     "source": {
       "source_file": ".missiond/v3/missiond-blueprint.lisp",
-      "source_line": 298,
+      "source_line": 299,
       "source_column": 5,
-      "source_hash": "316ce1c3bdaf09487a639ac125241948"
+      "source_hash": "b9d5cd20bea0838673b27fe1f3e498dc"
     }
   }
 ]);
@@ -1649,9 +1651,9 @@ export const SEMANTIC_GATES = Object.freeze([
     "checker": "node scripts/check-v3-final-convergence.mjs --json",
     "source": {
       "source_file": ".missiond/v3/missiond-blueprint.lisp",
-      "source_line": 308,
+      "source_line": 309,
       "source_column": 5,
-      "source_hash": "316ce1c3bdaf09487a639ac125241948"
+      "source_hash": "b9d5cd20bea0838673b27fe1f3e498dc"
     }
   }
 ]);

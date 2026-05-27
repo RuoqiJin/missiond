@@ -113,6 +113,33 @@ async fn test_pg_board_store() {
         status: Some("done".into()),
         ..Default::default()
     };
+    let missing_evidence = store.update_board_task(task.id.as_str(), &update).await;
+    assert!(missing_evidence.is_err());
+    sqlx::query(
+        "INSERT INTO shared_artifacts (hash, kind, media_type, bytes, size_bytes) VALUES ($1,$2,$3,$4,$5)",
+    )
+    .bind("sha256:test")
+    .bind("task-result-artifact")
+    .bind("application/json")
+    .bind(Vec::<u8>::new())
+    .bind(0_i64)
+    .execute(store.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_result_artifacts (id, artifact_hash, task_id, result_status, summary) VALUES ($1,$2,$3,'completed','ok')",
+    )
+    .bind("artifact-row-test")
+    .bind("sha256:test")
+    .bind(task.id.as_str())
+    .execute(store.pool())
+    .await
+    .unwrap();
+    let update = UpdateBoardTaskInput {
+        status: Some("done".into()),
+        artifact_hash: Some("sha256:test".into()),
+        ..Default::default()
+    };
     let updated = store
         .update_board_task(task.id.as_str(), &update)
         .await

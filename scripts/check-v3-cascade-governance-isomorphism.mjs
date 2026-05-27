@@ -88,8 +88,8 @@ function checkFiles(root, files) {
     '(v2-item cascade-universe-governance',
     ':status runtime-projected',
     '(cascade-policy',
-    ':default-manifest "/Users/jinchen/Projects/universe.intent.lisp"',
-    ':allowed-root "/Users/jinchen/Projects"',
+    ':default-manifest "$MISSIOND_PROJECTS_DIR/universe.intent.lisp"',
+    ':allowed-root "$MISSIOND_PROJECTS_DIR"',
     ':trigger-enabled true',
     ':default-max-cycles 3',
     ':max-cycles-limit 12',
@@ -236,8 +236,8 @@ function buildFixture() {
     (v2-item cascade-universe-governance
       :status runtime-projected))
   (cascade-policy
-    :default-manifest "/Users/jinchen/Projects/universe.intent.lisp"
-    :allowed-root "/Users/jinchen/Projects"
+    :default-manifest "$MISSIOND_PROJECTS_DIR/universe.intent.lisp"
+    :allowed-root "$MISSIOND_PROJECTS_DIR"
     :trigger-enabled true
     :default-max-cycles 3
     :max-cycles-limit 12)

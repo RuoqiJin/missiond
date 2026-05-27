@@ -29,6 +29,8 @@ const FILES = {
   sharedHandler: 'crates/missiond-daemon/src/handlers/knowledge/shared_memory.rs',
   boardRoute: 'packages/board/src/app/api/tasks/route.ts',
   boardStoreTs: 'packages/board/src/store.ts',
+  verifierRouterMigration: 'crates/missiond-core/migrations/20260527001000_runtime_verifier_router_outcomes.sql',
+  backfillRuntimeMetadata: 'scripts/backfill-board-runtime-metadata.mjs',
 };
 
 function main() {
@@ -130,7 +132,8 @@ function checkFiles(root, files) {
     'async fn require_capability',
     'async fn task_runtime_contract',
     'async fn verify_completion_scope',
-    'self.require_capability(&task_id, "settle", "task", &task_id)',
+    'self.require_capability(&task_id, "write", "task", &task_id)',
+    'self.require_capability(task_id, "settle", "task", task_id)',
     'worker_settle(done) for task {task_id} requires artifact_hash',
     'artifact_hash {artifact_hash} is not a completed task-result-artifact for task {task_id}',
     '"artifact.accepted"',
@@ -148,6 +151,8 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.autopilot, sources.autopilot, [
     'missiond.task-result-candidate.v1',
     'completed_task_result_artifact_hash_for_task',
+    'settle_autopilot_done_from_existing_artifact',
+    'canonical artifact remains the only close authority',
     'canonical completed task_result_artifact hash required',
     'no canonical completed task_result_artifact exists yet',
     '"action": "job_event"',
@@ -182,6 +187,7 @@ function checkFiles(root, files) {
   ]);
 
   requireAll(diagnostics, files.boardStore, sources.boardStore, [
+    'artifact_hash = $2',
     'runtime_metadata = $',
     'SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))',
     'FOR UPDATE',
@@ -191,6 +197,22 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.boardTypes, sources.boardTypes, [
     'pub runtime_metadata: Option<serde_json::Value>',
+    'pub artifact_hash: Option<String>',
+  ]);
+
+  requireAll(diagnostics, files.verifierRouterMigration, sources.verifierRouterMigration, [
+    'CREATE TABLE IF NOT EXISTS worktree_manifests',
+    'CREATE TABLE IF NOT EXISTS model_route_outcomes',
+    'idx_worktree_manifests_attempt_phase',
+    'idx_model_route_outcomes_model',
+  ]);
+
+  requireAll(diagnostics, files.backfillRuntimeMetadata, sources.backfillRuntimeMetadata, [
+    'backfill-board-runtime-metadata',
+    '--apply',
+    'runtime_metadata',
+    'capability_grants',
+    'parseLegacyDescription',
   ]);
 
   for (const fileKey of ['dbError', 'mcpTools', 'mcpGateway', 'boardHandler']) {

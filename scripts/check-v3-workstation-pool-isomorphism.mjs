@@ -160,11 +160,11 @@ function checkFiles(root) {
     'async fn register_and_init_runtime_slot',
     'state.pty.init_slot(&pty_slot).await',
     'for worker in workstation_config.workstation_pool()',
-    'dangerously_skip_permissions: Some(worker.write_allowed)',
+    'dangerously_skip_permissions: Some(false)',
     'tool_policy_path: worker.tool_policy_path.clone()',
     'reasoning_effort: worker.reasoning_effort.clone()',
     'search_enabled: worker.search_enabled',
-    'skip_permissions: worker.write_allowed',
+    'skip_permissions: false',
     'state.mission.register_runtime_slot(slot_config)',
     'SlotManager: workstation pool registered from V3',
     'missiond_project_root()',
@@ -228,7 +228,7 @@ function checkFiles(root) {
     'json_metadata_value_to_string',
     'extract_board_task_dispatch_metadata_field(task, "engine_hint")',
     'extract_board_task_dispatch_metadata_field(task, "pool_hint")',
-    'extract_dispatch_metadata_field(&task.description, field)',
+    'task.runtime_metadata',
     'fn dispatch_hint_eq',
     ".replace('_', \"-\")",
     'fn workstation_worker_matches_dispatch_hints',
@@ -255,6 +255,9 @@ function checkFiles(root) {
     'Autopilot: selected V3 workstation-pool slot',
     'ensure_autopilot_pty(state, &task, &slot_id, task_env).await',
     'state.store.unclaim_board_task(task.id.as_str()).await',
+  ]);
+  forbidAll(diagnostics, FILES.autopilot, sources.autopilot, [
+    'extract_dispatch_metadata_field(&task.description, field)',
   ]);
 
   requireAll(diagnostics, FILES.computeSlot, sources.computeSlot, [
@@ -370,6 +373,7 @@ function validateBlueprint(file, source, diagnostics) {
     slotId: 'slot-codex-code-worker',
     taskType: 'codex_code_worker',
     writeAllowed: true,
+    sandbox: 'workspace-write',
     taskClasses: ['code', 'design', 'review', 'regression-analysis'],
   });
   validateCodexWorker(file, byId.get('codex-review-worker'), diagnostics, {
@@ -425,7 +429,7 @@ function validateCodexWorker(file, worker, diagnostics, expected) {
   requirePropText(diagnostics, file, props, ':task-type', expected.taskType);
   requirePropText(diagnostics, file, props, ':model-profile', 'codex-master-gpt-5-5-xhigh');
   requirePropText(diagnostics, file, props, ':reasoning-effort', 'xhigh');
-  requirePropText(diagnostics, file, props, ':sandbox', expected.sandbox ?? 'danger-full-access');
+  requirePropText(diagnostics, file, props, ':sandbox', expected.sandbox ?? 'workspace-write');
   requirePropText(diagnostics, file, props, ':approval-policy', 'never');
   requirePropBool(diagnostics, file, props, ':search', true);
   requirePropBool(diagnostics, file, props, ':accepts-boardtask', true);
@@ -756,9 +760,9 @@ fn startup_slot_config() {}
 fn workstation_pool_slot_config() {}
 reasoning_effort: worker.reasoning_effort.clone();
 search_enabled: Some(worker.search_enabled).filter;
-dangerously_skip_permissions: Some(worker.write_allowed);
+dangerously_skip_permissions: Some(false);
 tool_policy_path: worker.tool_policy_path.clone();
-skip_permissions: worker.write_allowed;
+skip_permissions: false;
 async fn register_and_init_runtime_slot() { state.pty.init_slot(&pty_slot).await; state.mission.register_runtime_slot(slot_config); }
 for worker in workstation_config.workstation_pool() {}
 "SlotManager: workstation pool registered from V3";`);

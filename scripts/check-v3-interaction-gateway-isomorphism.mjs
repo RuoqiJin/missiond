@@ -237,13 +237,19 @@ requireIncludes('boardMetadataMigration', [
   "runtime_metadata->>'grounding_context_id'",
 ]);
 
-requireIncludes('autopilot', [
+const autopilotText = requireIncludes('autopilot', [
   'fn extract_board_task_dispatch_metadata_field',
   'json_metadata_value_to_string',
   'extract_board_task_dispatch_metadata_field(task, "engine_hint")',
   'extract_board_task_dispatch_metadata_field(task, "pool_hint")',
-  'extract_dispatch_metadata_field(&task.description, field)',
+  'task.runtime_metadata',
 ]);
+if (autopilotText.includes('extract_dispatch_metadata_field(&task.description, field)')) {
+  diagnostics.push({
+    file: files.autopilot,
+    message: 'runtime control must not parse BoardTask.description for dispatch metadata',
+  });
+}
 
 requireIncludes('boardFrontendTypes', [
   'runtimeMetadata?: Record<string, unknown>;',

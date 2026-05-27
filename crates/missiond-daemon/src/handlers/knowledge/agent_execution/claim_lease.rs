@@ -64,42 +64,38 @@ pub(super) async fn action_claim(state: &AppState, args: &Value) -> Result<ToolR
         .unwrap_or(DEFAULT_LEASE_SECS)
         .clamp(60, MAX_LEASE_SECS);
 
+    let db_claim = state
+        .shared_memory
+        .handle_action(&json!({
+            "action": "claim",
+            "task_id": execution_id,
+            "owner_id": claimer,
+            "scope_kind": "owned-files",
+            "scope_key": scope,
+            "lease_secs": lease_secs,
+            "metadata": {
+                "source": "mission_execution.claim",
+                "phase": phase
+            }
+        }))
+        .await?;
+    if db_claim.get("ok").and_then(Value::as_bool) == Some(false) {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(
+                "CLAIM_CONFLICT",
+                format!("scope `{scope}` is already held by an active DB work lease"),
+            )
+            .with_details(db_claim)
+            .with_suggestion("wait for lease expiry, release stale ownership, or narrow the scope"),
+        ));
+    }
+
     let root = resolve_project_root(state, project_or_target_project(args)).await?;
     let path = companion_path(&root, execution_id);
     let mut file = read_log_file(&path)?;
-
-    // Conflict check: any active claim with overlapping scope.
-    let now = Utc::now();
-    let claims = parse_claims(&file);
-    for c in &claims {
-        if c.status != "active" {
-            continue;
-        }
-        // Treat lease-expired claims as soft-released for conflict purposes
-        // (still surfaced in audit as stale).
-        if let Some(exp) = c.lease_expires_at.as_deref().and_then(parse_iso) {
-            if exp < now {
-                continue;
-            }
-        }
-        if scopes_overlap(&c.scope, scope) {
-            return Ok(ToolResult::structured_error(
-                ToolError::new(
-                    "CLAIM_CONFLICT",
-                    format!(
-                        "scope `{}` overlaps active claim {} held by `{}` over `{}`",
-                        scope, c.id, c.claimer, c.scope
-                    ),
-                )
-                .with_suggestion(
-                    "wait for release/heartbeat expiry, narrow scope, or contact the claimer",
-                ),
-            ));
-        }
-    }
-
     let claim_id = allocate_id(&mut file, Counter::Claim)?;
     let acquired = now_iso();
+    let now = Utc::now();
     let expires =
         (now + chrono::Duration::seconds(lease_secs)).to_rfc3339_opts(SecondsFormat::Secs, true);
     let entry = format!(

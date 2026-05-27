@@ -79,7 +79,11 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "hidden": {"type": "boolean"},
                     "flowPhase": {"type": "string", "enum": ["investigate", "consult_gemini_1", "plan", "consult_gemini_2", "execute", "finalize", "done"]},
                     "flowTemplate": {"type": "string"},
-                    "dependsOn": {"type": "array"}
+                    "dependsOn": {"type": "array"},
+                    "artifactHash": {"type": "string", "description": "Required when status=done; exact canonical completed task-result-artifact hash"},
+                    "artifact_hash": {"type": "string", "description": "Alias for artifactHash"},
+                    "artifactHashes": {"type": "object", "description": "Batch status=done map of task id to exact canonical artifact hash"},
+                    "artifact_hashes": {"type": "object", "description": "Alias for artifactHashes"}
                 }
             }),
         ),

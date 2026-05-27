@@ -108,7 +108,7 @@
 	       :scope [screen-buffer screenshots pty-log-files slot-last-responses]
 	       :rule "PTY content is transient diagnostic evidence only. MissionD keeps provider JSONL/Codex provider-local index/Gemini chat files as durable logs, but PTY screen buffers, screenshots, pty-*.log files, and slot_last_responses MUST be treated as short-lived cache with a one-day retention window. Retention cleanup MUST be able to write a delete manifest so applied file/database removal remains reviewable and reversible by evidence.")
 	    :settle-policy
-	      "A worker can be closed only after durable final event or high-confidence final summary plus settle window; idle PTY alone is insufficient because provider SSE/final JSONL can lag the prompt returning."
+	      "A worker can be closed only through canonical task_result_artifact acceptance plus typed worker_settle artifact_hash; durable provider finals, high-confidence summaries, settle windows, and idle PTY state are observation/candidate evidence only."
     (master-checkpoint
       :entry [daemon-startup event-wakeup periodic-heartbeat daemon-restart-before-exit]
       :core
@@ -343,8 +343,8 @@
 
   (cascade-policy
     :desc "Lisp-owned universe cascade runtime policy; env vars and caller args are explicit overrides, not hidden defaults."
-    :default-manifest "/Users/jinchen/Projects/universe.intent.lisp"
-    :allowed-root "/Users/jinchen/Projects"
+    :default-manifest "$MISSIOND_PROJECTS_DIR/universe.intent.lisp"
+    :allowed-root "$MISSIOND_PROJECTS_DIR"
     :trigger-enabled true
     :default-max-cycles 3
     :max-cycles-limit 12

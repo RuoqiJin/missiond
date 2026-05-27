@@ -94,7 +94,7 @@ function checkFiles(root, files) {
     ':status runtime-projected',
     '(project-registry-policy',
     ':intent-path-candidates [".missiond/intent.lisp" ".jarvis/intent.lisp" "intent.lisp"]',
-    ':default-universe-manifest "/Users/jinchen/Projects/universe.intent.lisp"',
+    ':default-universe-manifest "$MISSIOND_PROJECTS_DIR/universe.intent.lisp"',
     '(surface project-registry',
     ':status "code-aligned"',
     'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
@@ -392,7 +392,7 @@ function buildFixture() {
       :status runtime-projected))
 	  (project-registry-policy
 	    :intent-path-candidates [".missiond/intent.lisp" ".jarvis/intent.lisp" "intent.lisp"]
-	    :default-universe-manifest "/Users/jinchen/Projects/universe.intent.lisp")
+	    :default-universe-manifest "$MISSIOND_PROJECTS_DIR/universe.intent.lisp")
 	  (project-maturity-model
 	    :schema "missiond.project-maturity-model.v2"
 	    :gate "scripts/check-project-maturity.mjs --min-level M5 and scripts/check-project-maturity.mjs --min-level M6"

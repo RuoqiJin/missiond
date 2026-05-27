@@ -108,7 +108,7 @@ fn available_templates_suggestion(config: &WorkstationRuntimeConfig) -> String {
 
 fn allowed_cwd_prefixes_suggestion(config: &WorkstationRuntimeConfig) -> String {
     let prefixes: Vec<String> = config
-        .allowed_cwd_prefixes()
+        .resolved_allowed_cwd_prefixes()
         .iter()
         .map(|prefix| prefix.display().to_string())
         .collect();
@@ -193,10 +193,11 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
     }
 
     // Validate cwd
+    let default_cwd = workstation_config.resolve_runtime_path_string(template.default_cwd.as_str());
     let cwd = args
         .get("cwd")
         .and_then(|v| v.as_str())
-        .unwrap_or(template.default_cwd.as_str());
+        .unwrap_or(default_cwd.as_str());
     let canonical_cwd = match std::fs::canonicalize(cwd) {
         Ok(p) => p.to_string_lossy().to_string(),
         Err(_) => {
@@ -209,7 +210,7 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
 
     let canonical_path = std::path::Path::new(&canonical_cwd);
     let cwd_allowed_by_policy = workstation_config
-        .allowed_cwd_prefixes()
+        .resolved_allowed_cwd_prefixes()
         .iter()
         .any(|prefix| canonical_path.starts_with(prefix));
     let cwd_allowed_by_registry = {

@@ -46,6 +46,7 @@ pub(super) fn compiled_runtime_file_name(kind: &str) -> Option<&'static str> {
             Some("compiled-runtime-conversation-ingestion.json")
         }
         "runtime-domain:autopilot" => Some("compiled-runtime-autopilot.json"),
+        "runtime-domain:control-plane-kernel" => Some("compiled-runtime-control-plane-kernel.json"),
         "runtime-domain:learning-engine" => Some("compiled-runtime-learning-engine.json"),
         "universe" => Some("compiled-project-universe.json"),
         "workflows" => Some("compiled-workflows.json"),

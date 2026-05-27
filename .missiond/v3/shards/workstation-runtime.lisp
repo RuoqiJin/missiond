@@ -24,7 +24,7 @@
       :spawn-model-arg "gpt-5.5"
       :reasoning-effort xhigh
       :search true
-      :sandbox danger-full-access
+      :sandbox workspace-write
       :approval-policy never
       :rule "Resident master control uses Codex GPT-5.5 with xhigh reasoning and full local sandbox access. It remains an audited orchestrator: every direct mutation must leave Board/KB/checkpoint evidence, while ordinary implementation still prefers delegated workers.")
     (model-profile daily-sonnet
@@ -40,21 +40,21 @@
       :description "Dynamic coder slot (ephemeral)"
       :default-model-profile coding-default-opus-4-7
       :mcp-config "$MISSION_HOME/xjp-mcp-config.json"
-      :default-cwd "/Users/jinchen/Projects")
+      :default-cwd "$MISSIOND_PROJECTS_DIR")
     (slot-template researcher
       :role coder
       :description "Dynamic researcher slot (read-only analysis)"
       :default-model-profile research-default
       :mcp-config "$MISSION_HOME/xjp-mcp-config.json"
-      :default-cwd "/Users/jinchen/Projects")
+      :default-cwd "$MISSIOND_PROJECTS_DIR")
     (slot-template ops
       :role operator
       :description "Dynamic ops slot (ephemeral)"
       :default-model-profile daily-sonnet
       :mcp-config "$MISSION_HOME/xjp-mcp-config.json"
-      :default-cwd "/Users/jinchen/Projects")
+      :default-cwd "$MISSIOND_PROJECTS_DIR")
     (cwd-policy dynamic-slot
-      :allowed-prefixes ["/Users/jinchen/Projects" "/Users/jinchen/Downloads" "/Users/jinchen/Documents" "/tmp"])
+      :allowed-prefixes ["$MISSIOND_PROJECTS_DIR" "$MISSIOND_DOWNLOADS_DIR" "$MISSIOND_DOCUMENTS_DIR" "/tmp"])
     (chat-completions-policy jarvis-api
       :default_slot "slot-claude-code-default"
       :header_override "X-Slot-Id"
@@ -79,7 +79,7 @@
       :role arch-maint
       :model_profile coding-default-opus-4-7
       :timeout_secs 600
-      :skip_permissions true)
+      :skip_permissions false)
     (startup-slot strategy_analyst
       :engine gemini
       :lifecycle persistent
@@ -87,7 +87,7 @@
       :role strategy
       :model_profile nil
       :timeout_secs 600
-      :skip_permissions true)
+      :skip_permissions false)
     (startup-slot gemini_router
       :engine gemini
       :lifecycle persistent
@@ -95,7 +95,7 @@
       :role gemini-router
       :model_profile nil
       :timeout_secs 120
-      :skip_permissions true)
+      :skip_permissions false)
     (startup-slot lisp_survey
       :engine claude-code
       :lifecycle persistent
@@ -103,7 +103,7 @@
       :role coder
       :model_profile coding-default-opus-4-7
       :timeout_secs 900
-      :skip_permissions true)
+      :skip_permissions false)
     (timeout-policy boardtask-dispatch
       :default_secs 1800
       :min_secs 60
@@ -299,7 +299,7 @@
 	       "Autopilot ensure_pty MUST treat `PTY session already running` from spawn_tracked_slot as a pre-provisioned dynamic-slot race: wait briefly for Idle and reuse the PTY instead of recording a spawn failure note or incrementing BoardTask retry. If the session remains non-idle, it is a retryable busy condition and the task must be unclaimed for a later tick."
 	       "Autopilot/flow-engine BoardTask dispatch MUST bind conversations.task_id to the active BoardTask via a bounded retry helper at dispatch time (5 attempts at 200 ms) and MUST re-bind after the worker final settle window to cover provider JSONL/session-discovery races; completion-time durable_provider_completion_for_slot_task remains a fallback. The dispatch site may overwrite conversations.task_id only for the slot's currently active, not-ended provider conversation; it MUST NOT rebind a completed historical conversation left in slot_sessions from a previous prompt. The conservative `conversation_task_binding_update_allowed` predicate is reserved for the post-completion durable backfill path (set only when unbound or already matching); pre-dispatch binding logs any displaced task id for audit but skips completed sessions. Durable final selection MUST also reject provider conversations whose ended_at is earlier than the BoardTask claimed_at, even if a stale conversations.task_id pointer was already corrupted. Historical attribution lives in durable messages (mission_conversation_query(taskId=...) MUST also recover provider conversations whose durable messages contain the BoardTask id), so a stale conversations.task_id pointer is unnecessary and previously caused mission_conversation_query(taskId=<new>) to return the prior task's conversation (BoardTask 31e5449c-e315-4003-ad59-c3eebd5eb837 evidence: slot-claude-code-default returned the 5599b07a conversation when queried by 738c96f5; Jarvis smoke f0708d99... later exposed stale final d15c186c... closing a new task)."
        "Autopilot dispatch MUST enforce a single-running-BoardTask-per-slot invariant: before claim_board_task, scan running tasks for any other BoardTask whose claim_executor_type=pty_slot and claim_executor_id matches the incoming slot id, and unclaim each one with a durable note. A queued task with assignee=slot but no claim_executor_id is NOT considered running on the slot and MUST NOT be unclaimed by this guard. The display layer (handlers/compute/slot.rs `active_board_task_for_slot`) projects the slot's running task from this single-claim invariant, so two tasks can never appear running on the same slot for the same dispatch tick."
-       "Autopilot close path MUST gate PTY-only completion (durable provider final unavailable after settle) for delegated worker BoardTasks (description carries `## Swarm metadata` or `## Dispatch metadata`). pty_only_close_blocker requires the PTY summary to contain a structured artifact marker (Findings / Evidence / Recommendations / Verification / Summary heading / acceptance evidence) before close; otherwise the BoardTask stays running so the watchdog/next tick can re-extract once the provider log lands. If the worker description declares output_contract Findings / Evidence / Recommendations / Verification, output_contract_close_blocker applies even when a durable provider summary exists, because a reused provider session may expose an older task's accepted summary before the current task's final artifact lands. Workflow-specific structured artifacts may satisfy the same contract when they carry Findings + Verification plus explicit candidate/rationale sections; memory-review-batch-runner accepts Active Memory Candidates / SSOT-Workflow Backfill Candidates / Needs Human / Discard Rationale as the Evidence/Recommendations equivalent. Repro evidence: BoardTask 31e5449c-e315-4003-ad59-c3eebd5eb837 child tasks a5ebf6c4..., 5599b07a..., b5be6eed... had Board summary notes that captured an intermediate assistant sentence while the structured artifact landed only in Claude JSONL after settle; BoardTask 7b5f3174... briefly picked a prior M10 overlay summary before the current context-pack's Findings/Evidence/Recommendations/Verification report arrived; memory review child e1ea8d06... produced valid memory-review sections but was repeatedly blocked as missing-output-contract-sections until the contract admitted workflow-specific artifact headings."
+       "Autopilot PTY/provider close classifiers are diagnostic observation producers only. Delegated worker BoardTasks carry dispatch/output contracts in runtime_metadata, never Markdown description; pty_only_close_blocker and output_contract_close_blocker may tag task_result_candidate quality, but they cannot produce terminal BoardTask state. The only close path is canonical task_result_artifact lookup followed by capability-checked worker_settle with the exact artifact_hash. Repro evidence from BoardTask 31e5449c..., 7b5f3174..., and memory review e1ea8d06... remains covered as observation-quality filtering rather than completion authority."
        "Autopilot durable final acceptance evidence MUST recognize provider final summaries that say gates green/pass, checks pass, checker passed, check.sh passed, acceptance commands passed, or final M10 evidence-only gate confirmation, not just legacy words like verified/passed/changed files. Repro evidence: M10 child tasks 5ecb01cd..., d699c9c7..., 66aed32d..., ae72b0ec..., and f6c5475d... produced durable ClaudeCode finals with gate/checker completion language but were incorrectly blocked as missing-acceptance-evidence."
        "mission_swarm_run callers (resident master, autopilot, ad-hoc operators) MUST pass multi-project objectives via target_project_ids/targetProjectIds/target_projects/targetProjects structurally; project lists embedded only in the objective prose are ignored by the tool because the schema does not parse natural language. The MCP schema MUST expose target_project_ids and aliases as an array property of mission_swarm_run so MCP clients can pass it without guessing naming conventions. Failure mode (BoardTask 31e5449c regression): when only project_id was supplied and the objective text named multiple registered projects in prose, target_projects collapsed to project_id only and the swarm could not fan out across the universe."
 	       "Autopilot MUST treat explicit engine_hint/pool_hint as hard constraints when the V3 workstation-pool declares at least one matching worker: resolve matching workers against the full workstation-pool before task_class fallback can narrow candidates away; dispatch hint matching MUST normalize underscore and hyphen spelling so claude_code and claude-code are equivalent and do not create false reroute notes; if that worker is busy or stopped, the task waits instead of silently spending a different provider. Fallback to a non-matching worker is allowed only when no declared worker satisfies the hint at all, and that fallback MUST record a durable reroute_reason as a BoardTask note before dispatching so the operator can see why the requested engine/pool was not used. Autopilot close-owner MUST block task close when a worker final says it could not write the requested deliverable because of plan/read-only mode."
@@ -314,8 +314,9 @@
        "Dynamic slot TTL and per-request extension budget MUST project from workstation-config ttl-policy dynamic-slot (create default 14400s, clamped 300..28800; extend default/max 3600s) — direct mission_compute_slot create/extend and delegated task_delegate auto-provision must not hardcode the TTL window"
        "Smart watchdog idle-recovery threshold MUST equal the projected pty.send budget plus a small grace (default 120s); only the no-PTY-session branch may reclaim sooner so a missing process can never wedge the slot"
        "Autopilot BoardTask claim lease MUST equal the smart-watchdog idle-recovery threshold (projected pty.send budget plus grace); the legacy fixed 20-minute lease is forbidden because it lets the watchdog reclaim a slot whose claim is still legitimately ticking inside the declared timeout"
-       "Autopilot summary-note source MUST prefer durable provider final evidence after wait_for_worker_final_settle_window(), per-session reconcile, and a bounded await_durable_provider_completion_for_slot_task poll. Inside durable provider evidence, provider_completion_summary_for_task MUST prefer latest_assistant_after_task_prompt for the current BoardTask before any conversation.task_id latest-after-claim fallback, because a single provider session may execute multiple sequential BoardTasks and later rebinds must not let an older final leak into the current task. Codex rollout ingestion MUST import event_msg.task_complete.last_agent_message as an assistant final, and durable conversation discovery MUST recover provider conversations whose messages contain the BoardTask id, not only conversations.task_id rows, because Codex worker slots may expose a placeholder pty-slot conversation while the real rollout JSONL lands in a separate codex_chat session. ClaudeCode ingestion MUST preserve provider stop_reason in conversation metadata, and durable assistant messages with stop_reason=tool_use, has_tool_use=true, content_types including tool_use, or raw_content containing a tool_use block are never terminal finals even if their visible text contains Findings/Evidence/Recommendations/Verification. Durable assistant messages that are tool invocations, survey/progress narration such as 'Checking ...', 'Surveying ...', 'Reading ...', 'Inspecting ...', 'Reviewing ...', 'Looking at ...', or 'Gathering ...', initial worker-intent narration such as 'I'll execute...' / 'I'll begin by reading...' / 'Acknowledged... I will redo...' / 'Let me start/re-verify...', intermediate investigation narration such as 'Let me ...' / 'Let me inspect/check/read/verify/confirm/corroborate/write/create/examine...' / 'Now I'll ...' / 'Now I will ...', mutation-progress narration such as 'Now committing...' / 'staging and committing...' / 'Writing the ... now', or retry/wakeup blocker narration such as 'wakeup will fire' / 'scheduled to retry' / 'wait for that retry' / 'ENOSPC' / 'no space left on device' are observation/candidate evidence only, not terminal control inputs. Raw res.response is forbidden in the **Autopilot 执行完成** note format string and in any mission_execution completion summary; fallback extract_worker_final_summary(res.response, full_prompt) is allowed only after durable evidence is unavailable and MUST strip bare Bash(...)-style tool-call lines, ●/⎿ tool logs, echoed task contract, and `[Pasted text +N lines, paste again to expand]` collapse markers. Auth-error and quota-exhausted diagnostic notes intentionally bypass this path and keep the raw response so on-call sees the verbatim platform error"
-       "Autopilot close path MUST call wait_for_worker_final_settle_window() after pty.send completion and before summary-note / mission_execution / BoardTask done writes, then poll durable provider evidence for one additional bounded settle budget before using the PTY fallback. PTY idle alone is diagnostic, while pty.send completion plus durable evidence or sanitized fallback is the high-confidence final summary path."
+	       "Autopilot summary-note source is a projection of canonical task_result_artifact data. wait_for_worker_final_settle_window(), per-session reconcile, await_durable_provider_completion_for_slot_task, provider_completion_summary_for_task, and fallback extract_worker_final_summary(res.response, full_prompt) may only record observation/candidate evidence; they must not decide terminal state. Raw res.response remains forbidden in the **Autopilot 执行完成** note format string and mission_execution completion summaries; fallback extraction must strip bare Bash(...)-style tool-call lines, tool logs, echoed task contracts, and `[Pasted text +N lines, paste again to expand]` collapse markers before writing candidate evidence. Auth-error and quota-exhausted diagnostic notes intentionally bypass this projection path and keep raw platform errors for on-call visibility."
+	       "Autopilot final-summary filtering MUST reject common progress narration and retry-noise markers such as `I'll begin by reading`, `Let me ...`, `wakeup will fire`, and `no space left on device`; EventBus task completion payloads such as event_msg.task_complete.last_agent_message are observation inputs only and still require canonical task-result-artifact settlement."
+       "Autopilot close path MUST call wait_for_worker_final_settle_window() after pty.send completion only as an observation collection budget. PTY idle, pty.send completion, durable provider evidence, and sanitized fallback summaries are task_result_candidate inputs; BoardTask done still requires canonical task_result_artifact hash plus worker_settle."
        "If pty.send returns an active/progress frame but the provider later records a durable final assistant message in claude-jsonl/codex-local-index/gemini-chat-file, or the master/worker later writes a BoardTask summary note, and the claimed slot is idle/exited/error, Autopilot watchdog may record a task_result_candidate observation and may settle only after an existing canonical completed task-result-artifact hash passes worker_settle; it MUST NOT wait for PTY idle, provider prose, or Board notes to become terminal authority. A terminal provider slot (Exited/Error) is not a busy state; after canonical artifact lookup fails, it may be unclaimed by the same watchdog recovery policy instead of wedging the task indefinitely."]
     (prompt-tool-contract autopilot-claudecode-prompt
       :applies-to [coder researcher ops]
@@ -516,7 +517,7 @@
       :model nil
       :reasoning-effort xhigh
       :search true
-      :sandbox danger-full-access
+      :sandbox workspace-write
       :approval-policy never
       :task-classes [code implementation design review regression-analysis]
       :capabilities [code-read code-write scoped-commit shell-exec search]
@@ -570,8 +571,8 @@
        "Gemini Ultra Pro is the high-language read-only investigation lane using gemini-3.1-pro-preview; Gemini fast survey is explicitly low-authority mechanical scan/summary work."
        "Agy is the successor research CLI lane. It starts as read-only until PTY recognition, durable-log mapping, and task-result-artifact smoke prove it can safely take implementation shards."
        "Gemini is initially read-only: research, review, context-pack, and Lisp compression advice may route there; scoped write/commit work stays on Claude until a separate Gemini write smoke passes."
-       "Codex code/review worker lanes are ordinary BoardTask candidates and are separate from codex-master-control; the resident master cannot consume ordinary shard work."
-       "Read-only Gemini pool workers MUST project to Gemini CLI `--approval-mode plan --policy .missiond/v3/policies/gemini-readonly-policy.toml`; workstation-pool registration MUST NOT set dangerously_skip_permissions/YOLO for any worker with :write-allowed false, and the policy MUST deny subagent delegation and write/shell tools."
+       "Codex code/review worker lanes are ordinary BoardTask candidates and are separate from codex-master-control; codex-code-worker uses workspace-write rather than danger-full-access, codex-review-worker uses read-only, and the resident master cannot consume ordinary shard work."
+       "Read-only Gemini pool workers MUST project to Gemini CLI `--approval-mode plan --policy .missiond/v3/policies/gemini-readonly-policy.toml`; workstation-pool registration MUST NOT set dangerously_skip_permissions/YOLO for ordinary BoardTask workers, regardless of write_allowed, and the policy MUST deny subagent delegation and write/shell tools."
        "Autopilot unassigned BoardTasks select from workstation-pool by task class before considering any legacy slot; old slots.yaml Sonnet entries are not generic coding candidates."
        "mission_compute_slot action=list must expose workstation_pool with runtime slot presence and idle/busy/stopped status."
        "Supervisor patrol (slot-supervisor) is gated on V3 workstation-pool / runtime-config registration; absent a supervisor worker entry the patrol stays inert and MUST NOT call ensure_memory_slot_by_id, so the legacy 'Memory slot not configured in slots.yaml' warning cannot fire."

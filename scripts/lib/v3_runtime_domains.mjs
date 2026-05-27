@@ -10,6 +10,7 @@ export const RUNTIME_DOMAIN_SPECS = Object.freeze([
   { id: 'memory-kb', payloadKey: 'memoryKb', file: 'compiled-runtime-memory-kb.json' },
   { id: 'conversation-ingestion', payloadKey: 'conversationIngestion', file: 'compiled-runtime-conversation-ingestion.json' },
   { id: 'autopilot', payloadKey: 'autopilot', file: 'compiled-runtime-autopilot.json' },
+  { id: 'control-plane-kernel', payloadKey: 'controlPlaneKernel', file: 'compiled-runtime-control-plane-kernel.json' },
   { id: 'learning-engine', payloadKey: 'learningEngine', file: 'compiled-runtime-learning-engine.json' },
 ]);
 

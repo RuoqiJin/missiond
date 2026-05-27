@@ -4,7 +4,7 @@
 // Do not edit by hand.
 
 pub const SCHEMA_VERSION: &str = "missiond.compiled-runtime-config.v1";
-pub const SOURCE_HASH: &str = "316ce1c3bdaf09487a639ac125241948";
+pub const SOURCE_HASH: &str = "b9d5cd20bea0838673b27fe1f3e498dc";
 pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
   "blueprint": ".missiond/v3/missiond-blueprint.lisp",
   "source_units": [
@@ -13,13 +13,13 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
       "kind": "missiond-blueprint",
       "included_by": null,
       "include_line": null,
-      "source_hash": "c560718d3c1f6c875456edcf37dd16aa"
+      "source_hash": "7923625151f450c4bdc24ad439361eed"
     },
     {
       "file": ".missiond/v3/shards/index.lisp",
       "kind": "missiond-blueprint-shards",
       "included_by": ".missiond/v3/missiond-blueprint.lisp",
-      "include_line": 385,
+      "include_line": 386,
       "source_hash": "8882108e8391f000fe8717dc67c1c03f"
     },
     {
@@ -34,14 +34,14 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
       "kind": "multi-section-shard",
       "included_by": ".missiond/v3/shards/index.lisp",
       "include_line": 14,
-      "source_hash": "fdbc768044cc5b839ff841d069515a8d"
+      "source_hash": "9946f2d27f7639e0728445688dd52715"
     },
     {
       "file": ".missiond/v3/shards/control-plane-runtime.lisp",
       "kind": "multi-section-shard",
       "included_by": ".missiond/v3/shards/index.lisp",
       "include_line": 21,
-      "source_hash": "229209815a57a3bed6478889eaf9bc9f"
+      "source_hash": "2601e6050d9a080c5dc58196fdc0ad0c"
     },
     {
       "file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
@@ -111,7 +111,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
       "kind": "multi-section-shard",
       "included_by": ".missiond/v3/shards/index.lisp",
       "include_line": 91,
-      "source_hash": "8c565d4f104ac8e28ecf4c8122e42c98"
+      "source_hash": "bb22ca57ddb65e22d30d2eaa71d7cc29"
     },
     {
       "file": ".missiond/v3/shards/universe/behavior-closure.lisp",
@@ -159,27 +159,27 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
   "source_domains": [
     {
       "id": "blueprint-core",
-      "source_hash": "f60052ec2680e8f901cd21fb51de0c6c",
+      "source_hash": "14d4bfd1bb8811acec461b7abcd45440",
       "source_units": [
         {
           "file": ".missiond/v3/missiond-blueprint.lisp",
           "kind": "missiond-blueprint",
           "included_by": null,
           "include_line": null,
-          "source_hash": "c560718d3c1f6c875456edcf37dd16aa"
+          "source_hash": "7923625151f450c4bdc24ad439361eed"
         },
         {
           "file": ".missiond/v3/shards/index.lisp",
           "kind": "missiond-blueprint-shards",
           "included_by": ".missiond/v3/missiond-blueprint.lisp",
-          "include_line": 385,
+          "include_line": 386,
           "source_hash": "8882108e8391f000fe8717dc67c1c03f"
         }
       ]
     },
     {
       "id": "control-plane-runtime",
-      "source_hash": "5bb513623eeef318523b6048caabd857",
+      "source_hash": "0af0b3fc39329d6039830d40ed9e7e88",
       "source_units": [
         {
           "file": ".missiond/v3/shards/request-runtime.lisp",
@@ -193,20 +193,20 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
           "kind": "multi-section-shard",
           "included_by": ".missiond/v3/shards/index.lisp",
           "include_line": 21,
-          "source_hash": "229209815a57a3bed6478889eaf9bc9f"
+          "source_hash": "2601e6050d9a080c5dc58196fdc0ad0c"
         }
       ]
     },
     {
       "id": "workstation-runtime",
-      "source_hash": "282a13abc5e634d47783fa6f1dda7110",
+      "source_hash": "f6aab7117e3c338b4d14149d1f3ec17c",
       "source_units": [
         {
           "file": ".missiond/v3/shards/workstation-runtime.lisp",
           "kind": "multi-section-shard",
           "included_by": ".missiond/v3/shards/index.lisp",
           "include_line": 14,
-          "source_hash": "fdbc768044cc5b839ff841d069515a8d"
+          "source_hash": "9946f2d27f7639e0728445688dd52715"
         }
       ]
     },
@@ -277,7 +277,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
     },
     {
       "id": "universe",
-      "source_hash": "6601779fa17d143c1287e0fa9272547d",
+      "source_hash": "b1cf628d1d9d44f4b289945ee45fa12c",
       "source_units": [
         {
           "file": ".missiond/v3/shards/universe/service-runtime.lisp",
@@ -312,7 +312,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
           "kind": "multi-section-shard",
           "included_by": ".missiond/v3/shards/index.lisp",
           "include_line": 91,
-          "source_hash": "8c565d4f104ac8e28ecf4c8122e42c98"
+          "source_hash": "bb22ca57ddb65e22d30d2eaa71d7cc29"
         },
         {
           "file": ".missiond/v3/shards/universe/behavior-closure.lisp",
@@ -393,7 +393,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 323,
         "source_column": 3,
-        "source_hash": "316ce1c3bdaf09487a639ac125241948"
+        "source_hash": "b9d5cd20bea0838673b27fe1f3e498dc"
       }
     },
     {
@@ -418,7 +418,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 344,
         "source_column": 3,
-        "source_hash": "316ce1c3bdaf09487a639ac125241948"
+        "source_hash": "b9d5cd20bea0838673b27fe1f3e498dc"
       }
     },
     {
@@ -440,7 +440,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 357,
         "source_column": 3,
-        "source_hash": "316ce1c3bdaf09487a639ac125241948"
+        "source_hash": "b9d5cd20bea0838673b27fe1f3e498dc"
       }
     },
     {
@@ -459,7 +459,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 369,
         "source_column": 3,
-        "source_hash": "316ce1c3bdaf09487a639ac125241948"
+        "source_hash": "b9d5cd20bea0838673b27fe1f3e498dc"
       }
     },
     {
@@ -480,7 +480,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 379,
         "source_column": 3,
-        "source_hash": "316ce1c3bdaf09487a639ac125241948"
+        "source_hash": "b9d5cd20bea0838673b27fe1f3e498dc"
       }
     },
     {
@@ -523,7 +523,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 390,
         "source_column": 3,
-        "source_hash": "316ce1c3bdaf09487a639ac125241948"
+        "source_hash": "b9d5cd20bea0838673b27fe1f3e498dc"
       }
     },
     {
@@ -545,7 +545,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/universe/project-registry.lisp",
         "source_line": 1,
         "source_column": 1,
-        "source_hash": "316ce1c3bdaf09487a639ac125241948"
+        "source_hash": "b9d5cd20bea0838673b27fe1f3e498dc"
       }
     },
     {
@@ -565,7 +565,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 1,
         "source_column": 3,
-        "source_hash": "316ce1c3bdaf09487a639ac125241948"
+        "source_hash": "b9d5cd20bea0838673b27fe1f3e498dc"
       }
     },
     {
@@ -592,7 +592,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 118,
         "source_column": 3,
-        "source_hash": "316ce1c3bdaf09487a639ac125241948"
+        "source_hash": "b9d5cd20bea0838673b27fe1f3e498dc"
       }
     },
     {
@@ -629,7 +629,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 185,
         "source_column": 3,
-        "source_hash": "316ce1c3bdaf09487a639ac125241948"
+        "source_hash": "b9d5cd20bea0838673b27fe1f3e498dc"
       }
     },
     {
@@ -673,7 +673,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 141,
         "source_column": 3,
-        "source_hash": "316ce1c3bdaf09487a639ac125241948"
+        "source_hash": "b9d5cd20bea0838673b27fe1f3e498dc"
       }
     }
   ],
@@ -690,7 +690,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "description": "Dynamic coder slot (ephemeral)",
         "default_model_profile": "coding-default-opus-4-7",
         "mcp_config": "$MISSION_HOME/xjp-mcp-config.json",
-        "default_cwd": "/Users/jinchen/Projects"
+        "default_cwd": "$MISSIOND_PROJECTS_DIR"
       },
       "researcher": {
         "name": "researcher",
@@ -698,7 +698,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "description": "Dynamic researcher slot (read-only analysis)",
         "default_model_profile": "research-default",
         "mcp_config": "$MISSION_HOME/xjp-mcp-config.json",
-        "default_cwd": "/Users/jinchen/Projects"
+        "default_cwd": "$MISSIOND_PROJECTS_DIR"
       },
       "ops": {
         "name": "ops",
@@ -706,7 +706,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "description": "Dynamic ops slot (ephemeral)",
         "default_model_profile": "daily-sonnet",
         "mcp_config": "$MISSION_HOME/xjp-mcp-config.json",
-        "default_cwd": "/Users/jinchen/Projects"
+        "default_cwd": "$MISSIOND_PROJECTS_DIR"
       }
     },
     "model_profile_spawn_args": {
@@ -726,7 +726,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "role": "arch-maint",
         "model_profile": "coding-default-opus-4-7",
         "timeout_secs": 600,
-        "skip_permissions": true
+        "skip_permissions": false
       },
       {
         "task_type": "strategy_analyst",
@@ -736,7 +736,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "role": "strategy",
         "model_profile": null,
         "timeout_secs": 600,
-        "skip_permissions": true
+        "skip_permissions": false
       },
       {
         "task_type": "gemini_router",
@@ -746,7 +746,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "role": "gemini-router",
         "model_profile": null,
         "timeout_secs": 120,
-        "skip_permissions": true
+        "skip_permissions": false
       },
       {
         "task_type": "lisp_survey",
@@ -756,7 +756,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "role": "coder",
         "model_profile": "coding-default-opus-4-7",
         "timeout_secs": 900,
-        "skip_permissions": true
+        "skip_permissions": false
       }
     ],
     "workstation_pool": [
@@ -975,7 +975,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "write_allowed": true,
         "reasoning_effort": "xhigh",
         "search_enabled": true,
-        "sandbox": "danger-full-access",
+        "sandbox": "workspace-write",
         "approval_policy": "never",
         "tool_policy_path": null
       },
@@ -1047,9 +1047,9 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
       }
     ],
     "allowed_cwd_prefixes": [
-      "/Users/jinchen/Projects",
-      "/Users/jinchen/Downloads",
-      "/Users/jinchen/Documents",
+      "$MISSIOND_PROJECTS_DIR",
+      "$MISSIOND_DOWNLOADS_DIR",
+      "$MISSIOND_DOCUMENTS_DIR",
       "/tmp"
     ],
     "chat_completions_default_slot": "slot-claude-code-default",
@@ -1145,8 +1145,8 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
     "queued_sonnet_default_max_tokens": 1024
   },
   "cascade": {
-    "default_manifest_path": "/Users/jinchen/Projects/universe.intent.lisp",
-    "allowed_root": "/Users/jinchen/Projects",
+    "default_manifest_path": "$MISSIOND_PROJECTS_DIR/universe.intent.lisp",
+    "allowed_root": "$MISSIOND_PROJECTS_DIR",
     "trigger_enabled": true,
     "default_max_cycles": 3,
     "max_cycles_limit": 12
@@ -1157,7 +1157,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
       ".jarvis/intent.lisp",
       "intent.lisp"
     ],
-    "default_universe_manifest": "/Users/jinchen/Projects/universe.intent.lisp"
+    "default_universe_manifest": "$MISSIOND_PROJECTS_DIR/universe.intent.lisp"
   },
   "capabilityGovernance": {
     "review_sidecar_path": ".missiond/v3/runtime/capability-usage-review.json",
@@ -1226,6 +1226,69 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
     "recent_intents_window_secs": 1800,
     "user_stuck_cooldown_secs": 1800,
     "direction_shift_cooldown_secs": 3600
+  },
+  "controlPlaneKernel": {
+    "schema": "missiond.control-plane-kernel.v1",
+    "authority": "postgres-typed-runtime-facts",
+    "facts": [
+      "task_result_artifacts",
+      "event_log",
+      "jobs",
+      "job_attempts",
+      "work_leases",
+      "capability_grants",
+      "capability_audit_events",
+      "review_gates",
+      "board_task_views"
+    ],
+    "runtime_abi_fields": [
+      "completion_artifact_schema",
+      "job_state_machine",
+      "capability_policy",
+      "sandbox_policy",
+      "projection_policy"
+    ],
+    "hard_cutover": true,
+    "rules": [
+      "BoardTask description, Board notes, PTY screens, TUI summaries, and provider prose are projection/observation inputs only.",
+      "Runtime control paths MUST read BoardTask.runtime_metadata, capability_grants, work_leases, jobs/job_attempts, event_log, and task_result_artifacts.",
+      "Missing runtime_metadata on a control-plane task returns RUNTIME_METADATA_REQUIRED; MissionD must not parse Markdown descriptions to recover control fields.",
+      "task_result_put and worker_settle MUST pass capability checks for task settle; write-scoped completed artifacts also require verification and changed-path evidence.",
+      "Worker spawn MUST project sandbox_profile from capability/write_scope facts; unsupported engine/scope combinations return SANDBOX_POLICY_UNSUPPORTED or CAPABILITY_DENIED.",
+      "ProjectionEngine updates board_task_views and Board-facing status from typed events/state, not from note text or PTY/provider final prose."
+    ],
+    "state_machine": [],
+    "db_migration": "crates/missiond-core/migrations/20260527000000_control_plane_kernel.sql",
+    "checker": "scripts/check-v3-control-plane-kernel-isomorphism.mjs",
+    "completion_artifact_schema": {
+      "schema": "missiond.task-result-artifact.v1",
+      "storage": "task_result_artifacts",
+      "required_artifact_hash_for_done": true
+    },
+    "job_state_machine": {
+      "events": [],
+      "terminal_states": [
+        "completed",
+        "blocked",
+        "failed",
+        "skipped"
+      ]
+    },
+    "capability_policy": {
+      "artifact_write": "write:task",
+      "settle_done": "settle:task",
+      "claim": "claim:*"
+    },
+    "sandbox_policy": {
+      "default": "fail-closed",
+      "codex_write": "workspace-write",
+      "read_only": "read-only"
+    },
+    "projection_policy": {
+      "board_task": "projection",
+      "notes": "projection",
+      "pty_provider_text": "observation"
+    }
   },
   "learningEngine": {
     "realtime_extraction_timeout_secs": 300,

@@ -1553,7 +1553,7 @@
 
       (tool mission_board_update
         :desc "更新任务 (单个 id 或批量 ids)"
-        :optional ["id" "ids" "title" "description" "status" "priority" "category" "project" "server" "dueDate" "parentId" "assignee" "autoExecute" "promptTemplate" "hidden" "flowPhase" "flowTemplate" "dependsOn"]
+        :optional ["id" "ids" "title" "description" "status" "priority" "category" "project" "server" "dueDate" "parentId" "assignee" "autoExecute" "promptTemplate" "hidden" "flowPhase" "flowTemplate" "dependsOn" "artifactHash" "artifactHashes"]
         :flow-phases ["investigate" "consult_gemini_1" "plan" "consult_gemini_2" "execute" "finalize" "done"]
         (ingress
           :schema "single update requires id; batch requires ids; toggle legacy path maps to status transition"
@@ -1561,7 +1561,7 @@
         (logic-core
           (step s1 "detect batch mode via ids or legacy mission_board_batch_update")
           (step s2 "for status changes, read old_status before update")
-          (step s3 "update_board_task per id or toggle_board_task legacy path")
+          (step s3 "status=done requires exact artifactHash and routes through mission_shared_memory worker_settle; other fields update_board_task per id")
           (step s4 "publish BoardEvent::StatusChanged if status changed, else BoardEvent::Updated")
           (step s5 "if marking done, spawn harvest_decisions_for_task")
           (step s6 "record session-task binding for single update"))

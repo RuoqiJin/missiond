@@ -43,6 +43,8 @@ pub(super) fn normalize_board_args(args: Value) -> Value {
     copy_alias(&mut map, "contextIntent", &["context_intent"]);
     copy_alias(&mut map, "dueDate", &["due_date"]);
     copy_alias(&mut map, "order_idx", &["orderIdx"]);
+    copy_alias(&mut map, "artifactHash", &["artifact_hash"]);
+    copy_alias(&mut map, "artifactHashes", &["artifact_hashes"]);
     Value::Object(map)
 }
 

@@ -167,9 +167,9 @@ function checkFiles(root, files, { useOcaml = false } = {}) {
     '(chat-completions-policy jarvis-api',
     ':default_slot "slot-claude-code-default"',
     ':header_override "X-Slot-Id"',
-    ':allowed-prefixes ["/Users/jinchen/Projects" "/Users/jinchen/Downloads" "/Users/jinchen/Documents" "/tmp"]',
+    ':allowed-prefixes ["$MISSIOND_PROJECTS_DIR" "$MISSIOND_DOWNLOADS_DIR" "$MISSIOND_DOCUMENTS_DIR" "/tmp"]',
     ':description "Dynamic coder slot (ephemeral)"',
-    ':default-cwd "/Users/jinchen/Projects"',
+    ':default-cwd "$MISSIOND_PROJECTS_DIR"',
     'model_profile=coding-default-opus-4-7 both mean no CLI --model override',
     'mission_compute_slot model_profile resolution MUST use workstation-config model-profile spawn-model-arg',
     'task_delegate must pass model/model_profile through to compute_slot',
@@ -271,7 +271,7 @@ function checkFiles(root, files, { useOcaml = false } = {}) {
     'const ALLOWED_CWD_PREFIXES',
     'TemplateConfig {',
     'timeout_secs: Some(60)',
-    '"/Users/jinchen/.xjp-mission/xjp-mcp-config.json"',
+    '"$MISSION_HOME/xjp-mcp-config.json"',
   ]);
 
   requireAll(diagnostics, files.main, sources.main, [
@@ -560,7 +560,7 @@ function checkFiles(root, files, { useOcaml = false } = {}) {
     'fn extract_delegated_execution_id',
     'fn maybe_complete_delegated_execution_log',
     'fn worker_final_close_blocker',
-    'Autopilot blocked close',
+    'Autopilot observation',
     'status: Some("blocked".to_string())',
     'provider_final_summary_rejects_retrying_once_progress',
     'worker_final_close_blocker_detects_commit_failures',
@@ -658,10 +658,10 @@ function buildFixture() {
       :role coder
       :description "Dynamic coder slot (ephemeral)"
       :default-model-profile coding-default-opus-4-7
-      :mcp-config "/Users/jinchen/.xjp-mission/xjp-mcp-config.json"
-      :default-cwd "/Users/jinchen/Projects")
+      :mcp-config "$MISSION_HOME/xjp-mcp-config.json"
+      :default-cwd "$MISSIOND_PROJECTS_DIR")
     (cwd-policy dynamic-slot
-      :allowed-prefixes ["/Users/jinchen/Projects" "/Users/jinchen/Downloads" "/Users/jinchen/Documents" "/tmp"])
+      :allowed-prefixes ["$MISSIOND_PROJECTS_DIR" "$MISSIOND_DOWNLOADS_DIR" "$MISSIOND_DOCUMENTS_DIR" "/tmp"])
     (chat-completions-policy jarvis-api
       :default_slot "slot-claude-code-default"
       :header_override "X-Slot-Id")
@@ -672,7 +672,7 @@ function buildFixture() {
       :role arch-maint
       :model_profile coding-default-opus-4-7
       :timeout_secs 600
-      :skip_permissions true)
+      :skip_permissions false)
     (startup-slot lisp_survey
       :engine claude-code
       :lifecycle persistent
@@ -680,7 +680,7 @@ function buildFixture() {
       :role coder
       :model_profile coding-default-opus-4-7
       :timeout_secs 900
-      :skip_permissions true)
+      :skip_permissions false)
     (timeout-policy boardtask-dispatch
       :default_secs 1800
       :min_secs 60
@@ -923,7 +923,7 @@ fn decide_close_action() {}
 fn extract_delegated_execution_id() {}
 fn maybe_complete_delegated_execution_log() {}
 fn worker_final_close_blocker() {}
-let _ = "Autopilot blocked close";
+let _ = "Autopilot observation";
 let _ = "status: Some(\"blocked\".to_string())";
 provider_final_summary_rejects_retrying_once_progress();
 worker_final_close_blocker_detects_commit_failures();

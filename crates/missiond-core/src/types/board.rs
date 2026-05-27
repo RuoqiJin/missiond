@@ -499,6 +499,15 @@ pub struct UpdateBoardTaskInput {
     /// never the Markdown description.
     #[serde(default, rename = "runtimeMetadata")]
     pub runtime_metadata: Option<serde_json::Value>,
+    /// Non-persistent completion authority reference. Required when status is
+    /// set to done; DB/Rust handlers validate it against task_result_artifacts.
+    #[serde(
+        default,
+        rename = "artifactHash",
+        alias = "artifact_hash",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub artifact_hash: Option<String>,
 }
 
 // ============ Board Task Notes ============

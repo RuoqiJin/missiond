@@ -865,6 +865,17 @@ impl WorkstationRuntimeConfig {
         &self.allowed_cwd_prefixes
     }
 
+    pub(crate) fn resolved_allowed_cwd_prefixes(&self) -> Vec<PathBuf> {
+        self.allowed_cwd_prefixes
+            .iter()
+            .map(|prefix| expand_runtime_path_template(prefix))
+            .collect()
+    }
+
+    pub(crate) fn resolve_runtime_path_string(&self, value: &str) -> String {
+        expand_runtime_path_template_string(value)
+    }
+
     pub(crate) fn chat_completions_default_slot(&self) -> &str {
         &self.chat_completions_default_slot
     }
@@ -1219,13 +1230,13 @@ impl CascadeRuntimeConfig {
     pub(crate) fn env_or_default_manifest_path(&self) -> PathBuf {
         std::env::var("UNIVERSE_MANIFEST")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| self.default_manifest_path.clone())
+            .unwrap_or_else(|_| expand_runtime_path_template(&self.default_manifest_path))
     }
 
     pub(crate) fn env_or_allowed_root(&self) -> PathBuf {
         std::env::var("UNIVERSE_ROOT")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| self.allowed_root.clone())
+            .unwrap_or_else(|_| expand_runtime_path_template(&self.allowed_root))
     }
 
     pub(crate) fn env_or_trigger_enabled(&self) -> bool {
@@ -1269,7 +1280,7 @@ impl ProjectRegistryRuntimeConfig {
     pub(crate) fn env_or_default_universe_manifest(&self) -> PathBuf {
         std::env::var("UNIVERSE_MANIFEST")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| self.default_universe_manifest.clone())
+            .unwrap_or_else(|_| expand_runtime_path_template(&self.default_universe_manifest))
     }
 }
 
@@ -2488,6 +2499,99 @@ fn optional_non_nil_keyword(tokens: &[String], key: &str) -> Option<String> {
     })
 }
 
+fn env_path_value(var: &str) -> Option<PathBuf> {
+    std::env::var(var)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn home_dir() -> Option<PathBuf> {
+    env_path_value("HOME")
+}
+
+fn path_string(path: PathBuf) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+fn missiond_projects_dir() -> PathBuf {
+    if let Some(path) = env_path_value("MISSIOND_PROJECTS_DIR") {
+        return path;
+    }
+    if let Some(root) = env_path_value("MISSIOND_PROJECT_ROOT")
+        .or_else(|| env_path_value("MISSIOND_ORCHESTRATOR_ROOT"))
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|cwd| nearest_missiond_root(&cwd))
+        })
+    {
+        if let Some(parent) = root.parent() {
+            return parent.to_path_buf();
+        }
+        return root;
+    }
+    home_dir()
+        .map(|home| home.join("Projects"))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn missiond_runtime_dir() -> PathBuf {
+    env_path_value("MISSIOND_RUNTIME_DIR")
+        .unwrap_or_else(|| crate::helpers::default_mission_home().join("runtime"))
+}
+
+fn missiond_compiled_runtime_dir() -> PathBuf {
+    env_path_value("MISSIOND_COMPILED_RUNTIME_DIR")
+        .unwrap_or_else(|| missiond_runtime_dir().join("compiled"))
+}
+
+fn runtime_path_template_value(var: &str) -> Option<String> {
+    match var {
+        "MISSION_HOME" => Some(path_string(crate::helpers::default_mission_home())),
+        "MISSIOND_PROJECT_ROOT" => Some(path_string(crate::helpers::missiond_project_root())),
+        "MISSIOND_PROJECTS_DIR" => Some(path_string(missiond_projects_dir())),
+        "MISSIOND_DOWNLOADS_DIR" => home_dir().map(|home| path_string(home.join("Downloads"))),
+        "MISSIOND_DOCUMENTS_DIR" => home_dir().map(|home| path_string(home.join("Documents"))),
+        "MISSIOND_RUNTIME_DIR" => Some(path_string(missiond_runtime_dir())),
+        "MISSIOND_COMPILED_RUNTIME_DIR" => Some(path_string(missiond_compiled_runtime_dir())),
+        _ => env_path_value(var).map(path_string),
+    }
+}
+
+fn expand_runtime_path_template_string(value: &str) -> String {
+    let mut expanded = value.to_string();
+    for var in [
+        "MISSION_HOME",
+        "MISSIOND_PROJECT_ROOT",
+        "MISSIOND_PROJECTS_DIR",
+        "MISSIOND_DOWNLOADS_DIR",
+        "MISSIOND_DOCUMENTS_DIR",
+        "MISSIOND_RUNTIME_DIR",
+        "MISSIOND_COMPILED_RUNTIME_DIR",
+    ] {
+        if let Some(replacement) = runtime_path_template_value(var) {
+            expanded = expanded.replace(&format!("${{{var}}}"), &replacement);
+            expanded = expanded.replace(&format!("${var}"), &replacement);
+        }
+    }
+    if expanded == "~" {
+        if let Some(home) = home_dir() {
+            return path_string(home);
+        }
+    } else if let Some(rest) = expanded.strip_prefix("~/") {
+        if let Some(home) = home_dir() {
+            return path_string(home.join(rest));
+        }
+    }
+    expanded
+}
+
+fn expand_runtime_path_template(path: &Path) -> PathBuf {
+    PathBuf::from(expand_runtime_path_template_string(&path.to_string_lossy()))
+}
+
 fn normalize_model_profile_name(value: &str) -> String {
     value.trim().to_ascii_lowercase().replace('_', "-")
 }
@@ -3372,11 +3476,11 @@ pub(crate) mod tests {
     (model-profile coding-default-opus-4-7 :spawn-model-arg nil)
     (model-profile daily-sonnet :spawn-model-arg "sonnet")
     (model-profile quick-haiku :spawn-model-arg "haiku")
-    (slot-template coder :role coder :description "Dynamic coder slot (ephemeral)" :default-model-profile coding-default-opus-4-7 :mcp-config "/Users/jinchen/.xjp-mission/xjp-mcp-config.json" :default-cwd "/Users/jinchen/Projects")
-    (slot-template researcher :role coder :description "Dynamic researcher slot (read-only analysis)" :default-model-profile coding-default-opus-4-7 :mcp-config "/Users/jinchen/.xjp-mission/xjp-mcp-config.json" :default-cwd "/Users/jinchen/Projects")
-    (slot-template ops :role operator :description "Dynamic ops slot (ephemeral)" :default-model-profile daily-sonnet :mcp-config "/Users/jinchen/.xjp-mission/xjp-mcp-config.json" :default-cwd "/Users/jinchen/Projects")
+    (slot-template coder :role coder :description "Dynamic coder slot (ephemeral)" :default-model-profile coding-default-opus-4-7 :mcp-config "$MISSION_HOME/xjp-mcp-config.json" :default-cwd "$MISSIOND_PROJECTS_DIR")
+    (slot-template researcher :role coder :description "Dynamic researcher slot (read-only analysis)" :default-model-profile coding-default-opus-4-7 :mcp-config "$MISSION_HOME/xjp-mcp-config.json" :default-cwd "$MISSIOND_PROJECTS_DIR")
+    (slot-template ops :role operator :description "Dynamic ops slot (ephemeral)" :default-model-profile daily-sonnet :mcp-config "$MISSION_HOME/xjp-mcp-config.json" :default-cwd "$MISSIOND_PROJECTS_DIR")
     (cwd-policy dynamic-slot
-      :allowed-prefixes ["/Users/jinchen/Projects" "/Users/jinchen/Downloads" "/Users/jinchen/Documents" "/tmp"])
+      :allowed-prefixes ["$MISSIOND_PROJECTS_DIR" "$MISSIOND_DOWNLOADS_DIR" "$MISSIOND_DOCUMENTS_DIR" "/tmp"])
     (chat-completions-policy jarvis-api
       :default_slot "slot-claude-code-default"
       :header_override "X-Slot-Id")
@@ -3604,14 +3708,14 @@ pub(crate) mod tests {
     :queued-sonnet-quota-throttle-secs 30
     :queued-sonnet-default-max-tokens 1024)
 	  (cascade-policy
-	    :default-manifest "/Users/jinchen/Projects/universe.intent.lisp"
-	    :allowed-root "/Users/jinchen/Projects"
+	    :default-manifest "$MISSIOND_PROJECTS_DIR/universe.intent.lisp"
+	    :allowed-root "$MISSIOND_PROJECTS_DIR"
     :trigger-enabled true
     :default-max-cycles 3
     :max-cycles-limit 12)
   (project-registry-policy
     :intent-path-candidates [".missiond/intent.lisp" ".jarvis/intent.lisp" "intent.lisp"]
-    :default-universe-manifest "/Users/jinchen/Projects/universe.intent.lisp")
+    :default-universe-manifest "$MISSIOND_PROJECTS_DIR/universe.intent.lisp")
   (capability-governance-policy
     :review-sidecar ".missiond/v3/runtime/capability-usage-review.json"
     :protected-tool-patterns ["mission_execution" "mission_intent" "mission_forge_" "mission_sys_" "mission_daemon_update" "mission_health" "mission_power_control" "mission_kb_ops" "mission_audit" "mission_pty_signal" "mission_pty_confirm" "mission_incident"]
@@ -3707,10 +3811,10 @@ pub(crate) mod tests {
         );
         let coder_template = cfg.slot_template("coder").expect("coder template");
         assert_eq!(coder_template.role, "coder");
-        assert_eq!(coder_template.default_cwd, "/Users/jinchen/Projects");
+        assert_eq!(coder_template.default_cwd, "$MISSIOND_PROJECTS_DIR");
         assert_eq!(
             coder_template.mcp_config.as_deref(),
-            Some("/Users/jinchen/.xjp-mission/xjp-mcp-config.json")
+            Some("$MISSION_HOME/xjp-mcp-config.json")
         );
         assert_eq!(
             cfg.available_slot_template_names(),
@@ -3719,9 +3823,9 @@ pub(crate) mod tests {
         assert_eq!(
             cfg.allowed_cwd_prefixes(),
             &[
-                PathBuf::from("/Users/jinchen/Projects"),
-                PathBuf::from("/Users/jinchen/Downloads"),
-                PathBuf::from("/Users/jinchen/Documents"),
+                PathBuf::from("$MISSIOND_PROJECTS_DIR"),
+                PathBuf::from("$MISSIOND_DOWNLOADS_DIR"),
+                PathBuf::from("$MISSIOND_DOCUMENTS_DIR"),
                 PathBuf::from("/tmp")
             ]
         );
@@ -4036,8 +4140,8 @@ pub(crate) mod tests {
         let err = parse_workstation_config(
             r#"(missiond-blueprint
   (workstation-config
-    (slot-template coder :role coder :description "Dynamic coder slot (ephemeral)" :default-model-profile coding-default-opus-4-7 :default-cwd "/Users/jinchen/Projects")
-    (cwd-policy dynamic-slot :allowed-prefixes ["/Users/jinchen/Projects"])
+    (slot-template coder :role coder :description "Dynamic coder slot (ephemeral)" :default-model-profile coding-default-opus-4-7 :default-cwd "$MISSIOND_PROJECTS_DIR")
+    (cwd-policy dynamic-slot :allowed-prefixes ["$MISSIOND_PROJECTS_DIR"])
     (chat-completions-policy jarvis-api :default_slot "slot-claude-code-default" :header_override "X-Slot-Id"))
   (workstation-pool
     (worker claude-code-default :engine claude-code :role coder :slot-id "slot-claude-code-default" :task-type claude_code_default :model-profile coding-default-opus-4-7 :model nil :task-classes [code] :capabilities [code-write] :max-concurrency 1 :timeout-secs 1800 :default-use code-implementation :accepts-boardtask true :write-allowed true)
@@ -4067,8 +4171,8 @@ pub(crate) mod tests {
         let source = r#"
 (missiond-blueprint
   (workstation-config
-    (slot-template coder :role coder :description "Dynamic coder slot (ephemeral)" :default-model-profile coding-default-opus-4-7 :default-cwd "/Users/jinchen/Projects")
-    (cwd-policy dynamic-slot :allowed-prefixes ["/Users/jinchen/Projects"])
+    (slot-template coder :role coder :description "Dynamic coder slot (ephemeral)" :default-model-profile coding-default-opus-4-7 :default-cwd "$MISSIOND_PROJECTS_DIR")
+    (cwd-policy dynamic-slot :allowed-prefixes ["$MISSIOND_PROJECTS_DIR"])
     (chat-completions-policy jarvis-api :default_slot "slot-claude-code-default" :header_override "X-Slot-Id")
     (timeout-policy boardtask-dispatch
       :default_secs 1800
@@ -4121,9 +4225,9 @@ pub(crate) mod tests {
         let cfg = parse_cascade_policy(BLUEPRINT).expect("parse cascade policy");
         assert_eq!(
             cfg.default_manifest_path,
-            PathBuf::from("/Users/jinchen/Projects/universe.intent.lisp")
+            PathBuf::from("$MISSIOND_PROJECTS_DIR/universe.intent.lisp")
         );
-        assert_eq!(cfg.allowed_root, PathBuf::from("/Users/jinchen/Projects"));
+        assert_eq!(cfg.allowed_root, PathBuf::from("$MISSIOND_PROJECTS_DIR"));
         assert!(cfg.trigger_enabled);
         assert_eq!(cfg.default_max_cycles, 3);
         assert_eq!(cfg.max_cycles_limit, 12);
@@ -4153,7 +4257,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             cfg.default_universe_manifest,
-            PathBuf::from("/Users/jinchen/Projects/universe.intent.lisp")
+            PathBuf::from("$MISSIOND_PROJECTS_DIR/universe.intent.lisp")
         );
     }
 

@@ -629,6 +629,12 @@ pub struct UpdateBoardTaskInput {
     pub claim_executor_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub claim_executor_type: Option<String>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        rename = "artifactHash",
+        alias = "artifact_hash"
+    )]
+    pub artifact_hash: Option<String>,
 }
 
 impl Default for UpdateBoardTaskInput {
@@ -654,6 +660,7 @@ impl Default for UpdateBoardTaskInput {
             depends_on: None,
             claim_executor_id: None,
             claim_executor_type: None,
+            artifact_hash: None,
         }
     }
 }

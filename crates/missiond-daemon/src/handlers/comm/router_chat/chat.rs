@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use missiond_mcp::tools::ToolResult;
@@ -18,6 +18,7 @@ use super::files::{
 };
 
 pub(super) async fn handle_chat(state: &AppState, args: Value) -> Result<ToolResult> {
+    let started_at = Instant::now();
     let params: serde_json::Value =
         serde_json::from_value(args).map_err(|e| anyhow!("Invalid params: {}", e))?;
     let router_config = RouterRuntimeConfig::load_for_current_dir()
@@ -526,6 +527,49 @@ pub(super) async fn handle_chat(state: &AppState, args: Value) -> Result<ToolRes
 
     let finish_reason = finish_reason_owned.as_str();
     let resp_model = resp_model_owned.as_str();
+    let latency_ms = started_at.elapsed().as_millis() as i64;
+    let input_tokens = usage_token(usage.as_ref(), &["prompt_tokens", "input_tokens"]);
+    let output_tokens = usage_token(usage.as_ref(), &["completion_tokens", "output_tokens"]);
+    let total_tokens = usage_token(usage.as_ref(), &["total_tokens"]);
+    let route_task_class = params
+        .get("task_class")
+        .or_else(|| params.get("taskClass"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(context_mode);
+    let provider = if multimodal_use_direct_api && !multimodal_files.is_empty() {
+        "gemini-direct"
+    } else if state.gemini.is_cli_mode() {
+        "gemini-cli"
+    } else {
+        "router-http"
+    };
+    let _ = state
+        .storage()
+        .shared_memory
+        .handle_action(&serde_json::json!({
+            "action": "model_route_outcome_put",
+            "project_id": params.get("project_id").or_else(|| params.get("projectId")).and_then(|v| v.as_str()),
+            "task_id": task_id.as_deref(),
+            "provider": provider,
+            "model": resp_model,
+            "task_class": route_task_class,
+            "latency_ms": latency_ms,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+            "outcome": finish_reason,
+            "metadata": {
+                "has_files": has_files,
+                "search": search_enabled,
+                "retry_count": retry_diagnostics.len(),
+                "context_mode": context_mode
+            }
+        }))
+        .await
+        .map_err(|err| {
+            warn!(error = %err, "mission_router_chat failed to record model route outcome");
+            err
+        });
 
     // When files are attached, output truncation is unacceptable — return error with partial content
     if has_files && (finish_reason == "length" || finish_reason == "max_tokens") {
@@ -588,6 +632,12 @@ pub(super) async fn handle_chat(state: &AppState, args: Value) -> Result<ToolRes
     }
 
     Ok(ToolResult::json_pretty(&resp))
+}
+
+fn usage_token(usage: Option<&Value>, keys: &[&str]) -> Option<i64> {
+    let usage = usage?;
+    keys.iter()
+        .find_map(|key| usage.get(*key).and_then(Value::as_i64))
 }
 
 fn is_router_chat_transient_error(error: &str) -> bool {
