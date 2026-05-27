@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS capability_grants (
   id TEXT PRIMARY KEY,
   subject_kind TEXT NOT NULL CHECK (subject_kind IN ('worker', 'conversation', 'task')),
   subject_id TEXT NOT NULL,
-  operation TEXT NOT NULL CHECK (operation IN ('read', 'write', 'claim', 'settle', 'delegate', 'deploy', 'network')),
+  operation TEXT NOT NULL CHECK (operation IN ('read', 'write', 'claim', 'settle', 'delegate', 'deploy', 'network', 'spawn')),
   scope_kind TEXT NOT NULL CHECK (scope_kind IN ('project', 'path', 'task', 'shared-memory', 'deploy-target', 'network-target')),
   scope_key TEXT NOT NULL,
   project_id TEXT,

@@ -32,6 +32,7 @@ const FILES = {
   boardRoute: 'packages/board/src/app/api/tasks/route.ts',
   boardStoreTs: 'packages/board/src/store.ts',
   verifierRouterMigration: 'crates/missiond-core/migrations/20260527001000_runtime_verifier_router_outcomes.sql',
+  capabilityGrantOperationMigration: 'crates/missiond-core/migrations/20260527002000_capability_grants_spawn_operation.sql',
   backfillRuntimeMetadata: 'scripts/backfill-board-runtime-metadata.mjs',
 };
 
@@ -106,6 +107,7 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.migration, sources.migration, [
     'CREATE TABLE IF NOT EXISTS capability_grants',
+    "'read', 'write', 'claim', 'settle', 'delegate', 'deploy', 'network', 'spawn'",
     'CREATE TABLE IF NOT EXISTS capability_audit_events',
     'CREATE TABLE IF NOT EXISTS jobs',
     'CREATE TABLE IF NOT EXISTS job_attempts',
@@ -235,6 +237,12 @@ function checkFiles(root, files) {
     'CREATE TABLE IF NOT EXISTS model_route_outcomes',
     'idx_worktree_manifests_attempt_phase',
     'idx_model_route_outcomes_model',
+  ]);
+
+  requireAll(diagnostics, files.capabilityGrantOperationMigration, sources.capabilityGrantOperationMigration, [
+    'DROP CONSTRAINT IF EXISTS capability_grants_operation_check',
+    'ADD CONSTRAINT capability_grants_operation_check',
+    "'read', 'write', 'claim', 'settle', 'delegate', 'deploy', 'network', 'spawn'",
   ]);
 
   requireAll(diagnostics, files.backfillRuntimeMetadata, sources.backfillRuntimeMetadata, [
