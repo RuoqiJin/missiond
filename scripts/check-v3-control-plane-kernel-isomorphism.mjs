@@ -11,6 +11,7 @@ Checks the hard-cut control-plane kernel contract:
   - V3 declares typed runtime facts, runtime ABI fields, and hard-cut rules.
   - Postgres has capability/job/lease/projection tables and constraints.
   - Completion, claim, delegation, sandbox, and frontend error paths use typed facts/codes.
+  - Non-core full-os tools stay behind explicit feature gates and return FEATURE_DISABLED.
 `;
 
 const FILES = {
@@ -18,6 +19,10 @@ const FILES = {
   migration: 'crates/missiond-core/migrations/20260527000000_control_plane_kernel.sql',
   controlPlaneKernel: 'crates/missiond-daemon/src/engine/control_plane_kernel.rs',
   sharedMemory: 'crates/missiond-daemon/src/engine/shared_memory.rs',
+  featureGates: 'crates/missiond-daemon/src/feature_gates.rs',
+  handlers: 'crates/missiond-daemon/src/handlers/mod.rs',
+  main: 'crates/missiond-daemon/src/main.rs',
+  deployDaemon: 'scripts/deploy-daemon.sh',
   autopilot: 'crates/missiond-daemon/src/engine/intent_engine/autopilot.rs',
   taskDelegate: 'crates/missiond-daemon/src/handlers/compute/task_delegate.rs',
   computeSlot: 'crates/missiond-daemon/src/handlers/compute/compute_slot.rs',
@@ -96,6 +101,9 @@ function checkFiles(root, files) {
     ':schema "missiond.control-plane-kernel.v1"',
     ':facts [task_contracts task_result_artifacts event_log jobs job_attempts work_leases capability_grants capability_audit_events review_gates board_task_views]',
     ':runtime-abi-fields [completion_artifact_schema job_state_machine capability_policy sandbox_policy projection_policy]',
+    ':kernel-core [delegate claim-lease capability spawn attempt completion-artifact settle event-log board-projection pty-worker-adapter]',
+    ':optional-full-os-layers [workflow memory skill-store router-experiments codex-replay self-evolution advanced-conversations infra-os advanced-board]',
+    ':feature-gates [MISSIOND_FULL_OS_ENABLE',
     ':hard-cutover true',
     'BoardTask description, Board notes, PTY screens, TUI summaries, and provider prose are projection/observation inputs only.',
     'Runtime control paths MUST read task_contracts, subject-bound capability_grants, work_leases, jobs/job_attempts, event_log, and task_result_artifacts',
@@ -103,8 +111,70 @@ function checkFiles(root, files) {
     'task_result_put and worker_settle MUST pass exact grant_id + subject_kind + subject_id + operation + scope + task_id capability checks',
     'Worker spawn MUST carry a task-bound spawn grant',
     'ProjectionEngine updates board_task_views and Board-facing status from typed events/state',
+    'Non-core full-os tools MUST keep their public MCP names but default to FEATURE_DISABLED',
+    'Startup services for self-evolution, Lisp code sync, workflow recovery, memory embeddings, and multi-provider diagnostics MUST NOT start in kernel-core mode.',
+    'Blue-green launchd deployment MUST propagate MISSIOND_FULL_OS_ENABLE and individual MISSIOND_FEATURE_* gates',
     ':checker "scripts/check-v3-control-plane-kernel-isomorphism.mjs"',
     'node scripts/check-v3-control-plane-kernel-isomorphism.mjs',
+  ]);
+
+  requireAll(diagnostics, files.featureGates, sources.featureGates, [
+    'pub(crate) const FULL_OS_ENV: &str = "MISSIOND_FULL_OS_ENABLE";',
+    'pub(crate) const WORKFLOW_ENV: &str = "MISSIOND_FEATURE_WORKFLOW_ENABLE";',
+    'pub(crate) const MEMORY_ENV: &str = "MISSIOND_FEATURE_MEMORY_ENABLE";',
+    'pub(crate) const SKILL_STORE_ENV: &str = "MISSIOND_FEATURE_SKILL_STORE_ENABLE";',
+    'pub(crate) const ROUTER_EXPERIMENTS_ENV: &str = "MISSIOND_FEATURE_ROUTER_EXPERIMENTS_ENABLE";',
+    'pub(crate) const CODEX_REPLAY_ENV: &str = "MISSIOND_FEATURE_CODEX_REPLAY_ENABLE";',
+    'pub(crate) const SELF_EVOLUTION_ENV: &str = "MISSIOND_FEATURE_SELF_EVOLUTION_ENABLE";',
+    'pub(crate) const CONVERSATIONS_ENV: &str = "MISSIOND_FEATURE_CONVERSATIONS_ENABLE";',
+    'pub(crate) const INFRA_OS_ENV: &str = "MISSIOND_FEATURE_INFRA_OS_ENABLE";',
+    'pub(crate) const BOARD_ADVANCED_ENV: &str = "MISSIOND_FEATURE_BOARD_ADVANCED_ENABLE";',
+    'pub(crate) fn optional_feature_for_tool',
+    'error_codes::FEATURE_DISABLED',
+    'disabled in kernel-core mode',
+    'mission_task_delegate',
+    'mission_compute_slot',
+    'mission_shared_memory',
+    'mission_plan',
+    'mission_workflow',
+    'mission_memory',
+    'mission_skill_exec',
+    'mission_router_chat',
+    'mission_codex_replay',
+    'mission_nightly_evolution',
+  ]);
+
+  requireAll(diagnostics, files.handlers, sources.handlers, [
+    'crate::feature_gates::optional_feature_for_tool(name)',
+    'crate::feature_gates::disabled_tool_result(name, feature)',
+  ]);
+
+  requireAll(diagnostics, files.main, sources.main, [
+    'mod feature_gates;',
+    'feature_gates::optional_feature_enabled(feature_gates::WORKFLOW_ENV)',
+    'workflow_run startup recovery disabled in kernel-core mode',
+    'feature_gates::optional_feature_enabled(feature_gates::SELF_EVOLUTION_ENV)',
+    'self-evolution services disabled in kernel-core mode',
+    'feature_gates::optional_feature_enabled(feature_gates::MEMORY_ENV)',
+    'embedding worker disabled in kernel-core mode',
+    'AST embedding health monitor disabled in kernel-core mode',
+    'feature_gates::optional_feature_enabled(feature_gates::ROUTER_EXPERIMENTS_ENV)',
+    'Gemini logger worker disabled in kernel-core mode',
+    'vision worker disabled in kernel-core mode',
+  ]);
+
+  requireAll(diagnostics, files.deployDaemon, sources.deployDaemon, [
+    'MISSIOND_FULL_OS_ENABLE',
+    'MISSIOND_FEATURE_WORKFLOW_ENABLE',
+    'MISSIOND_FEATURE_MEMORY_ENABLE',
+    'MISSIOND_FEATURE_SKILL_STORE_ENABLE',
+    'MISSIOND_FEATURE_ROUTER_EXPERIMENTS_ENABLE',
+    'MISSIOND_FEATURE_CODEX_REPLAY_ENABLE',
+    'MISSIOND_FEATURE_SELF_EVOLUTION_ENABLE',
+    'MISSIOND_FEATURE_CONVERSATIONS_ENABLE',
+    'MISSIOND_FEATURE_INFRA_OS_ENABLE',
+    'MISSIOND_FEATURE_BOARD_ADVANCED_ENABLE',
+    'plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_FULL_OS_ENABLE"',
   ]);
 
   requireAll(diagnostics, files.migration, sources.migration, [

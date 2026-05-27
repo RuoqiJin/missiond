@@ -18,6 +18,7 @@ mod bus;
 #[allow(dead_code)]
 mod control_tree;
 mod events_sync;
+mod feature_gates;
 mod handlers;
 mod helpers;
 mod lenient;
@@ -1215,25 +1216,33 @@ async fn main() -> Result<()> {
         },
     };
 
-    match state
-        .storage()
-        .shared_memory
-        .startup_recover_workflow_runs()
-        .await
-    {
-        Ok(summary) => {
-            let blocked = summary
-                .get("blockedUnrecoverable")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            if blocked > 0 {
-                warn!(
-                    blocked_unrecoverable = blocked,
-                    "workflow_run startup recovery blocked runs that lack resumable identity"
-                );
+    if feature_gates::optional_feature_enabled(feature_gates::WORKFLOW_ENV) {
+        match state
+            .storage()
+            .shared_memory
+            .startup_recover_workflow_runs()
+            .await
+        {
+            Ok(summary) => {
+                let blocked = summary
+                    .get("blockedUnrecoverable")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                if blocked > 0 {
+                    warn!(
+                        blocked_unrecoverable = blocked,
+                        "workflow_run startup recovery blocked runs that lack resumable identity"
+                    );
+                }
             }
+            Err(err) => warn!(error = %err, "workflow_run startup recovery scan failed"),
         }
-        Err(err) => warn!(error = %err, "workflow_run startup recovery scan failed"),
+    } else {
+        info!(
+            env = feature_gates::WORKFLOW_ENV,
+            full_os_env = feature_gates::FULL_OS_ENV,
+            "workflow_run startup recovery disabled in kernel-core mode"
+        );
     }
 
     {
@@ -1750,32 +1759,64 @@ async fn main() -> Result<()> {
         &state,
         shutdown_rx.clone(),
     );
-    engine::lisp_code_sync::start_lisp_code_sync_service(
-        &bus_services,
-        &state,
-        shutdown_rx.clone(),
-    );
-    engine::nightly_evolution::start_nightly_evolution_service(&state, shutdown_rx.clone());
+    if feature_gates::optional_feature_enabled(feature_gates::SELF_EVOLUTION_ENV) {
+        engine::lisp_code_sync::start_lisp_code_sync_service(
+            &bus_services,
+            &state,
+            shutdown_rx.clone(),
+        );
+        engine::nightly_evolution::start_nightly_evolution_service(&state, shutdown_rx.clone());
+    } else {
+        info!(
+            env = feature_gates::SELF_EVOLUTION_ENV,
+            full_os_env = feature_gates::FULL_OS_ENV,
+            "self-evolution services disabled in kernel-core mode"
+        );
+    }
 
     // Embedding Worker: event-driven actor (KB/Skill/Conv/AST embeddings + backfill)
-    workers::spawn_worker(
-        workers::sonnet::embedding_worker::EmbeddingLoopWorker { rx: embedding_rx },
-        Arc::new(state.clone()),
-        shutdown_rx.clone(),
-    );
+    if feature_gates::optional_feature_enabled(feature_gates::MEMORY_ENV) {
+        workers::spawn_worker(
+            workers::sonnet::embedding_worker::EmbeddingLoopWorker { rx: embedding_rx },
+            Arc::new(state.clone()),
+            shutdown_rx.clone(),
+        );
+    } else {
+        info!(
+            env = feature_gates::MEMORY_ENV,
+            full_os_env = feature_gates::FULL_OS_ENV,
+            "embedding worker disabled in kernel-core mode"
+        );
+    }
 
     // Gemini request log subscriber (v2 bus → DB persistence)
-    workers::spawn_worker(
-        workers::local::gemini_logger::GeminiLoggerWorker,
-        Arc::new(state.clone()),
-        shutdown_rx.clone(),
-    );
+    if feature_gates::optional_feature_enabled(feature_gates::ROUTER_EXPERIMENTS_ENV) {
+        workers::spawn_worker(
+            workers::local::gemini_logger::GeminiLoggerWorker,
+            Arc::new(state.clone()),
+            shutdown_rx.clone(),
+        );
+    } else {
+        info!(
+            env = feature_gates::ROUTER_EXPERIMENTS_ENV,
+            full_os_env = feature_gates::FULL_OS_ENV,
+            "Gemini logger worker disabled in kernel-core mode"
+        );
+    }
 
-    workers::spawn_worker(
-        vision_worker::VisionWorker,
-        Arc::new(state.clone()),
-        shutdown_rx.clone(),
-    );
+    if feature_gates::optional_feature_enabled(feature_gates::ROUTER_EXPERIMENTS_ENV) {
+        workers::spawn_worker(
+            vision_worker::VisionWorker,
+            Arc::new(state.clone()),
+            shutdown_rx.clone(),
+        );
+    } else {
+        info!(
+            env = feature_gates::ROUTER_EXPERIMENTS_ENV,
+            full_os_env = feature_gates::FULL_OS_ENV,
+            "vision worker disabled in kernel-core mode"
+        );
+    }
     // v1.3.0 SSOT cutover: briefing_worker deleted — its `update_timeline_summary`
     // UPDATE pattern is incompatible with the append-only event_log. Message
     // previews come from payload_inline directly; semantic briefing is deferred.
@@ -1848,7 +1889,7 @@ async fn main() -> Result<()> {
 
     // --- AST Embedding Health Monitor (periodic self-healing, Gemini-reviewed) ---
     // Every 15 min: check AST coverage, trigger BackfillAll if gaps detected.
-    {
+    if feature_gates::optional_feature_enabled(feature_gates::MEMORY_ENV) {
         let health_state = state.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(15 * 60));
@@ -1881,8 +1922,14 @@ async fn main() -> Result<()> {
                 }
             }
         });
+        info!("AST embedding health monitor started (15min interval)");
+    } else {
+        info!(
+            env = feature_gates::MEMORY_ENV,
+            full_os_env = feature_gates::FULL_OS_ENV,
+            "AST embedding health monitor disabled in kernel-core mode"
+        );
     }
-    info!("AST embedding health monitor started (15min interval)");
 
     // --- Phase 8: WS bridge — tail event_log and push v1-compatible JSON ---
     // to `frontend_events_tx`, preserving the browser WS wire contract.

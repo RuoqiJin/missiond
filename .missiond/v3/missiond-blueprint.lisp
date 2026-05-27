@@ -234,6 +234,9 @@
     :authority "postgres-typed-runtime-facts"
     :facts [task_contracts task_result_artifacts event_log jobs job_attempts work_leases capability_grants capability_audit_events review_gates board_task_views]
     :runtime-abi-fields [completion_artifact_schema job_state_machine capability_policy sandbox_policy projection_policy]
+    :kernel-core [delegate claim-lease capability spawn attempt completion-artifact settle event-log board-projection pty-worker-adapter]
+    :optional-full-os-layers [workflow memory skill-store router-experiments codex-replay self-evolution advanced-conversations infra-os advanced-board]
+    :feature-gates [MISSIOND_FULL_OS_ENABLE MISSIOND_FEATURE_WORKFLOW_ENABLE MISSIOND_FEATURE_MEMORY_ENABLE MISSIOND_FEATURE_SKILL_STORE_ENABLE MISSIOND_FEATURE_ROUTER_EXPERIMENTS_ENABLE MISSIOND_FEATURE_CODEX_REPLAY_ENABLE MISSIOND_FEATURE_SELF_EVOLUTION_ENABLE MISSIOND_FEATURE_CONVERSATIONS_ENABLE MISSIOND_FEATURE_INFRA_OS_ENABLE MISSIOND_FEATURE_BOARD_ADVANCED_ENABLE]
     :hard-cutover true
     :note "capability_usage.rs is the thin capability-governance facade; capability_usage/runtime.rs owns snapshot/report/candidates/mark/ack; audit.rs owns mission_audit trace/detail/stats/export; codex_ops.rs owns mission_codex_ops recent/thread/tool_stats; tool_directory.rs owns read-only mission_tool_directory list/recommend/lookup/explain/deprecated/guide; agent_navigation.rs owns mission_agent_navigation catalog/review/feedback/suggest_entries."
     :rules ["BoardTask description, Board notes, PTY screens, TUI summaries, and provider prose are projection/observation inputs only."
@@ -241,7 +244,9 @@
             "Missing task_contracts on a control-plane task returns TASK_CONTRACT_REQUIRED; MissionD must not parse Markdown descriptions or BoardTask.runtime_metadata to recover canonical control fields."
             "task_result_put and worker_settle MUST pass exact grant_id + subject_kind + subject_id + operation + scope + task_id capability checks; write-scoped completed artifacts also require current attempt_id plus verification and changed-path evidence."
             "Worker spawn MUST carry a task-bound spawn grant and project sandbox_profile from task_contracts/capability facts; unsupported engine/scope combinations return SANDBOX_POLICY_UNSUPPORTED or CAPABILITY_DENIED."
-            "ProjectionEngine updates board_task_views and Board-facing status from typed events/state, not from note text or PTY/provider final prose."]
+            "ProjectionEngine updates board_task_views and Board-facing status from typed events/state, not from note text or PTY/provider final prose."
+            "Non-core full-os tools MUST keep their public MCP names but default to FEATURE_DISABLED unless MISSIOND_FULL_OS_ENABLE or the matching MISSIOND_FEATURE_* gate is explicitly enabled."
+            "Startup services for self-evolution, Lisp code sync, workflow recovery, memory embeddings, and multi-provider diagnostics MUST NOT start in kernel-core mode."]
     :state-machine [(job.created created)
                     (job.claimed claimed)
                     (attempt.started running)

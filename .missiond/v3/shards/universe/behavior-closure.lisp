@@ -88,12 +88,12 @@
     :id autopilot-runtime-isomorphism-checker-subprocess
     :kind subprocess
     :owner autopilot-runtime
-    :observed ["subprocess:scripts/check-v3-autopilot-runtime-isomorphism.mjs:218"]
+    :observed ["subprocess:scripts/check-v3-autopilot-runtime-isomorphism.mjs:223"]
     :code ["scripts/check-v3-autopilot-runtime-isomorphism.mjs"]
     :effects []
     (anchor
       :role subprocess
-      :observed "subprocess:scripts/check-v3-autopilot-runtime-isomorphism.mjs:218"
+      :observed "subprocess:scripts/check-v3-autopilot-runtime-isomorphism.mjs:223"
       :file "scripts/check-v3-autopilot-runtime-isomorphism.mjs"
       :symbol "delegated")
     (trigger

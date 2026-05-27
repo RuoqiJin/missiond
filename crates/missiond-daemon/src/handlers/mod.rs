@@ -39,6 +39,12 @@ use sysinfra::{global_instruction, health, infra, misc, permission, power, syste
 // @beacon: mcp
 /// Dispatch a tool call to the appropriate handler module.
 pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
+    if let Some(feature) = crate::feature_gates::optional_feature_for_tool(name) {
+        if !feature.enabled() {
+            return Ok(crate::feature_gates::disabled_tool_result(name, feature));
+        }
+    }
+
     match name {
         // ===== Consolidated tools (new names) =====
         "mission_task_submit" | "mission_task_query" | "mission_task_cancel" => {

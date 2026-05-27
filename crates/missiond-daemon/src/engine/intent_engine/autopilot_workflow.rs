@@ -72,6 +72,13 @@ impl DispatchRunActor {
     /// Classify the current `pty.send` failure path without mutating durable
     /// Board state. The caller still owns the concrete note/retry writes.
     pub(crate) fn failure_policy_for_send_error(error_chain: &str) -> DispatchRunFailurePolicy {
+        let lower = error_chain.to_ascii_lowercase();
+        if lower.contains("timeout")
+            && lower.contains("waiting for")
+            && lower.contains("response from slot")
+        {
+            return DispatchRunFailurePolicy::DoNotCloseWithoutTaskResultArtifact;
+        }
         if error_chain.contains("Cannot send message in state:") {
             DispatchRunFailurePolicy::ReleaseClaim
         } else {
@@ -162,6 +169,12 @@ mod tests {
         assert_eq!(
             DispatchRunActor::failure_policy_for_send_error("provider crashed"),
             DispatchRunFailurePolicy::PreserveTaskWithBlocker
+        );
+        assert_eq!(
+            DispatchRunActor::failure_policy_for_send_error(
+                "Timeout (600000ms) waiting for Codex response from slot slot-codex-review-worker"
+            ),
+            DispatchRunFailurePolicy::DoNotCloseWithoutTaskResultArtifact
         );
     }
 }

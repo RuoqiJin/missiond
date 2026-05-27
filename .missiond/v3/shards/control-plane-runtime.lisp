@@ -434,6 +434,20 @@
        "xjp-router embedding client MUST project its missing timeout default from router-runtime-policy direct HTTP timeout; explicit llm.yaml timeout_secs still wins."
        "BoardTask urgent/ops/docs-test-chore ANTHROPIC_MODEL overrides MUST project from router-runtime-policy, not Rust literals."])
 
+  (full-os-feature-gate-policy
+    :schema "missiond.full-os-feature-gate-policy.v1"
+    :owner control-plane-kernel
+    :status code-aligned
+    :kernel-core [delegate claim-lease capability spawn attempt completion-artifact settle event-log board-projection pty-worker-adapter]
+    :optional-layers [workflow memory skill-store router-experiments codex-replay self-evolution advanced-conversations infra-os advanced-board]
+    :feature-gates [MISSIOND_FULL_OS_ENABLE MISSIOND_FEATURE_WORKFLOW_ENABLE MISSIOND_FEATURE_MEMORY_ENABLE MISSIOND_FEATURE_SKILL_STORE_ENABLE MISSIOND_FEATURE_ROUTER_EXPERIMENTS_ENABLE MISSIOND_FEATURE_CODEX_REPLAY_ENABLE MISSIOND_FEATURE_SELF_EVOLUTION_ENABLE MISSIOND_FEATURE_CONVERSATIONS_ENABLE MISSIOND_FEATURE_INFRA_OS_ENABLE MISSIOND_FEATURE_BOARD_ADVANCED_ENABLE]
+    :rule
+      ["MissionD kernel-core keeps delegate, claim/lease, capability, spawn, attempt, completion artifact, settle, event_log, Board projection, and the minimal PTY worker adapter enabled by default."
+       "workflow, memory/KB, skill-store, router experiments, codex replay, self-evolution/Lisp code sync, advanced conversations, infra OS operations, and advanced Board decomposition are full-os optional layers."
+       "Optional MCP tool names remain public but dispatch MUST return structured FEATURE_DISABLED unless MISSIOND_FULL_OS_ENABLE or the matching MISSIOND_FEATURE_* gate is enabled."
+       "Optional startup services MUST NOT run in kernel-core mode."
+       "Blue-green launchd deployment MUST propagate MISSIOND_FULL_OS_ENABLE and individual MISSIOND_FEATURE_* gates from the caller environment so Mac mini can run full MissionD without rsync or manual plist edits."])
+
   (mechanic-collaboration-boundary
     :schema "missiond.mechanic-collaboration-boundary.v1"
     :status mechanic-executor-lane-enabled

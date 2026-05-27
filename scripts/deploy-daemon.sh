@@ -35,6 +35,9 @@
 #                               localhost-only Jarvis slot ensure endpoint
 #                               after restart when launchd/current env enables
 #                               MISSIOND_JARVIS_SLOT_AUTO_HEAL. Default: auto.
+#   MISSIOND_FULL_OS_ENABLE     when truthy, enable optional full-os layers in
+#                               launchd. Individual MISSIOND_FEATURE_* gates
+#                               are also propagated when present.
 #   MISSION_WS_PORT             daemon HTTP/WebSocket port, default: 9120.
 #   MISSIOND_DEPLOY_TIMEOUT     socket readiness timeout, default: 90
 #   MISSIOND_DEPLOY_SMOKE_TIMEOUT  MCP smoke timeout, default: 45
@@ -353,6 +356,16 @@ ensure_launchd_runtime_root() {
   plist_set_or_add_env_string "$LAUNCHD_PLIST" "MISSIOND_COMPILED_RUNTIME_DIR" "$COMPILED_RUNTIME_DIR"
   plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_JARVIS_SLOT_AUTO_HEAL"
   plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_JARVIS_SLOT_AUTO_HEAL_TIMEOUT_SECS"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_FULL_OS_ENABLE"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_FEATURE_WORKFLOW_ENABLE"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_FEATURE_MEMORY_ENABLE"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_FEATURE_SKILL_STORE_ENABLE"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_FEATURE_ROUTER_EXPERIMENTS_ENABLE"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_FEATURE_CODEX_REPLAY_ENABLE"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_FEATURE_SELF_EVOLUTION_ENABLE"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_FEATURE_CONVERSATIONS_ENABLE"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_FEATURE_INFRA_OS_ENABLE"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_FEATURE_BOARD_ADVANCED_ENABLE"
   plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_INTERACTION_SERVICE_TOKEN"
   plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_INTERACTION_AUTH_USERINFO_URL"
   plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_INTERACTION_AUTH_TIMEOUT_MS"

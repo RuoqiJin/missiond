@@ -3801,6 +3801,11 @@ impl PTYWebSocketServer {
             "read_scope": read_scope,
             "write_scope": write_scope,
             "must_not_touch": must_not_touch,
+            "completion_materialization_policy": if write_policy == "read-only" {
+                serde_json::json!("autopilot_readonly_ok")
+            } else {
+                serde_json::json!("worker_artifact_required")
+            },
             "acceptance": [
                 "Return a structured artifact with Findings / Evidence / Recommendations / Verification",
                 "Use the grounding context and cited evidence instead of rediscovering broad context",
@@ -7284,6 +7289,10 @@ mod tests {
         assert_eq!(metadata["task_class"], "review");
         assert_eq!(metadata["write_policy"], "read-only");
         assert_eq!(metadata["pool_hint"], "codex-review-worker");
+        assert_eq!(
+            metadata["completion_materialization_policy"],
+            "autopilot_readonly_ok"
+        );
         let ws = metadata["write_scope"].as_array().unwrap();
         assert!(ws.is_empty());
     }
@@ -7344,6 +7353,10 @@ mod tests {
         assert_eq!(metadata["task_class"], "code");
         assert_eq!(metadata["write_policy"], "scoped");
         assert_eq!(metadata["pool_hint"], "claude-code-default");
+        assert_eq!(
+            metadata["completion_materialization_policy"],
+            "worker_artifact_required"
+        );
         assert_eq!(metadata["write_scope"][0], "/repo");
     }
 

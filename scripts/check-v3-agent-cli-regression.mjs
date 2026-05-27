@@ -61,6 +61,9 @@ function main() {
       'Agy/Antigravity writes durable markdown artifacts under the provider brain store',
       'provider-empty-final as a task-result-candidate observation only',
       'idle worker slot without canonical artifact',
+      'Codex PTY send timeout after prompt delivery is non-terminal',
+      'scan recent unbound codex_cli rollout conversations',
+      'completion_materialization_policy=autopilot_readonly_ok',
       'All generated or compatibility CliEngine enums MUST cover the canonical provider set',
     ]);
     requireAll(diagnostics, FILES.workstationPoolEvidence, sources.workstationPoolEvidence, [
@@ -148,6 +151,14 @@ function main() {
       '.or(existing_task_id)',
       'source: "codex_cli"',
       'refresh_conversation_message_count',
+    ]);
+    requireAll(diagnostics, FILES.autopilot, sources.autopilot, [
+      'DoNotCloseWithoutTaskResultArtifact',
+      'append_unbound_codex_rollout_candidates',
+      'unbound_codex_rollout_summary_for_task',
+      'pre-send-codex-rollout-recovery',
+      'send-timeout-durable-rollout-recovery',
+      'implicit_jarvis_readonly_interaction',
     ]);
     requireAll(diagnostics, FILES.frontendBlueprint, sources.frontendBlueprint, [
       'jarvis-intent-draft',

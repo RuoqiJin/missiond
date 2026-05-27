@@ -522,14 +522,29 @@ async fn materialize_read_only_task_result_artifact_from_durable_final(
     if final_summary.is_empty() {
         return None;
     }
-    let materialization_policy = state
+    let explicit_materialization_policy = state
         .storage()
         .shared_memory
         .task_completion_materialization_policy(task.id.as_str())
         .await
         .ok()
-        .flatten();
-    if materialization_policy.as_deref() != Some("autopilot_readonly_ok") {
+        .flatten()
+        .or_else(|| board_task_runtime_metadata_string(task, "completion_materialization_policy"))
+        .or_else(|| board_task_runtime_metadata_string(task, "completionMaterializationPolicy"));
+    let implicit_readonly_interaction = explicit_materialization_policy.is_none()
+        && board_task_is_read_only_result_task(task)
+        && task_requires_structured_output_contract(&board_task_runtime_contract_envelope(task))
+        && board_task_runtime_metadata_string(task, "interaction_id").is_some()
+        && board_task_runtime_metadata_string(task, "grounding_context_id").is_some()
+        && board_task_runtime_metadata_string(task, "intent_artifact_id").is_some()
+        && board_task_runtime_metadata_string(task, "plan_artifact_id").is_some();
+    let materialization_policy = explicit_materialization_policy.or_else(|| {
+        implicit_readonly_interaction.then(|| "implicit_jarvis_readonly_interaction".to_string())
+    });
+    if !matches!(
+        materialization_policy.as_deref(),
+        Some("autopilot_readonly_ok" | "implicit_jarvis_readonly_interaction")
+    ) {
         info!(
             task_id = %task.id,
             slot_id,
@@ -550,6 +565,7 @@ async fn materialize_read_only_task_result_artifact_from_durable_final(
             serde_json::json!({
                 "task_id": task.id.as_str(),
                 "policy": materialization_policy,
+                "implicit_readonly_interaction": implicit_readonly_interaction,
                 "slot_id": slot_id,
                 "conversation_id": completion.session_id
             }),
@@ -824,6 +840,53 @@ async fn settle_autopilot_done_from_existing_artifact(
         })
         .await;
     settle_autopilot_done_with_artifact(state, task, slot_id, &artifact_hash, summary).await?;
+    Ok(true)
+}
+
+async fn materialize_and_settle_readonly_durable_completion(
+    state: &AppState,
+    task: &missiond_core::types::BoardTask,
+    slot_id: &str,
+    durable_completion: &DurableProviderCompletion,
+    source: &str,
+) -> Result<bool> {
+    let summary = durable_completion.summary.trim();
+    if summary.is_empty() {
+        return Ok(false);
+    }
+    let artifact_hash = observe_autopilot_task_result_candidate(
+        state,
+        task,
+        slot_id,
+        Some(durable_completion),
+        summary,
+        "completed",
+        0,
+    )
+    .await;
+    let Some(artifact_hash) = artifact_hash else {
+        return Ok(false);
+    };
+    let summary_for_note = truncate_safe(summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES);
+    let _ = state
+        .store
+        .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+            task_id: task.id.to_string(),
+            content: format!(
+                "**Provider durable final materialized** ({source}; {} / {})\n\n{}\
+                 \n\ntask_result_artifact: `{artifact_hash}`",
+                durable_completion.source, durable_completion.session_id, summary_for_note
+            ),
+            note_type: Some("summary".to_string()),
+            author: Some("autopilot".to_string()),
+        })
+        .await;
+    settle_autopilot_done_with_artifact(state, task, slot_id, &artifact_hash, summary).await?;
+    settle_worker_conversation(state, slot_id, task).await;
+    let _ = state
+        .store
+        .update_prompt_snapshot_outcome(task.id.as_str(), "success")
+        .await;
     Ok(true)
 }
 
@@ -1440,6 +1503,151 @@ async fn settle_worker_conversation(
     }
 }
 
+fn parsed_rfc3339(value: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    chrono::DateTime::parse_from_rfc3339(value.trim()).ok()
+}
+
+fn conversation_overlaps_task_window(
+    conv: &missiond_core::types::Conversation,
+    task: &missiond_core::types::BoardTask,
+) -> bool {
+    let Some(task_created_at) = parsed_rfc3339(task.created_at.as_str()) else {
+        return true;
+    };
+    [
+        conv.started_at.as_str(),
+        conv.updated_at.as_deref().unwrap_or_default(),
+        conv.ended_at.as_deref().unwrap_or_default(),
+    ]
+    .iter()
+    .filter_map(|value| parsed_rfc3339(value))
+    .any(|ts| ts >= task_created_at)
+}
+
+fn conversation_matches_slot_project(
+    conv: &missiond_core::types::Conversation,
+    task: &missiond_core::types::BoardTask,
+    slot_project_root: Option<&str>,
+) -> bool {
+    if let Some(root) = slot_project_root
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if conv
+            .project
+            .as_deref()
+            .map(str::trim)
+            .filter(|project| *project == root || project.starts_with(root))
+            .is_some()
+        {
+            return true;
+        }
+    }
+    if let Some(project_id) = task
+        .project
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return conv.project_id.as_deref() == Some(project_id)
+            || conv.project.as_deref() == Some(project_id);
+    }
+    false
+}
+
+fn codex_slot_project_root(state: &AppState, slot_id: &str) -> Option<String> {
+    let slot = state.mission.get_slot(slot_id)?;
+    if !matches!(slot.config.engine, missiond_core::types::CliEngine::Codex) {
+        return None;
+    }
+    slot.config
+        .project_root
+        .or(slot.config.cwd)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+async fn append_unbound_codex_rollout_candidates(
+    state: &AppState,
+    task: &missiond_core::types::BoardTask,
+    slot_id: &str,
+    candidates: &mut Vec<missiond_core::types::Conversation>,
+) {
+    let Some(slot_project_root) = codex_slot_project_root(state, slot_id) else {
+        return;
+    };
+    let Ok(recent) = state
+        .store
+        .list_conversations(None, 40, Some("all"), None, None, None, Some("codex_cli"))
+        .await
+    else {
+        return;
+    };
+    let mut seen: HashSet<String> = candidates.iter().map(|conv| conv.id.clone()).collect();
+    for conv in recent {
+        if !seen.insert(conv.id.clone()) {
+            continue;
+        }
+        if conv
+            .task_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && *value != task.id.as_str())
+            .is_some()
+        {
+            continue;
+        }
+        if !conversation_matches_slot_project(&conv, task, Some(slot_project_root.as_str())) {
+            continue;
+        }
+        if !conversation_overlaps_task_window(&conv, task) {
+            continue;
+        }
+        candidates.push(conv);
+    }
+}
+
+fn unbound_codex_rollout_summary_for_task(
+    messages: &[missiond_core::types::ConversationMessage],
+    task: &missiond_core::types::BoardTask,
+) -> Option<String> {
+    if !task_requires_structured_output_contract(&board_task_runtime_contract_envelope(task)) {
+        return None;
+    }
+    assistant_candidates_after_claim(messages, Some(task.created_at.as_str()))
+        .into_iter()
+        .rev()
+        .find(|summary| {
+            provider_summary_satisfies_task_contract(
+                &board_task_runtime_contract_envelope(task),
+                summary,
+            )
+        })
+}
+
+async fn maybe_promote_slot_session_to_provider_conversation(
+    state: &AppState,
+    slot_id: &str,
+    conv: &missiond_core::types::Conversation,
+) {
+    if conv.source != "codex_cli" {
+        return;
+    }
+    let Ok(current) = state.store.get_slot_session(slot_id).await else {
+        return;
+    };
+    let should_promote = current
+        .as_deref()
+        .map(|session_id| session_id.starts_with("pty-"))
+        .unwrap_or(true);
+    if should_promote {
+        let _ = state
+            .store
+            .set_slot_session(slot_id, conv.id.as_str())
+            .await;
+    }
+}
+
 async fn durable_provider_completion_for_slot_task(
     state: &AppState,
     task: &missiond_core::types::BoardTask,
@@ -1461,6 +1669,7 @@ async fn durable_provider_completion_for_slot_task(
             }
         }
     }
+    append_unbound_codex_rollout_candidates(state, task, slot_id, &mut candidates).await;
 
     candidates.sort_by(|a, b| b.started_at.cmp(&a.started_at));
     for conv in candidates {
@@ -1476,7 +1685,14 @@ async fn durable_provider_completion_for_slot_task(
             contract_envelope.as_str(),
             task.claimed_at.as_deref(),
             conv.task_id.as_deref(),
-        );
+        )
+        .or_else(|| {
+            if conv.source == "codex_cli" && conv.task_id.as_deref() != Some(task.id.as_str()) {
+                unbound_codex_rollout_summary_for_task(&messages, task)
+            } else {
+                None
+            }
+        });
         if let Some(summary) = summary {
             if conv.task_id.as_deref() != Some(task.id.as_str())
                 && crate::flow_engine::conversation_task_binding_update_allowed(
@@ -1492,6 +1708,7 @@ async fn durable_provider_completion_for_slot_task(
             if conv.status == "active" {
                 let _ = state.store.complete_conversation(&conv.id).await;
             }
+            maybe_promote_slot_session_to_provider_conversation(state, slot_id, &conv).await;
             return Ok(Some(DurableProviderCompletion {
                 session_id: conv.id,
                 source: conv.source,
@@ -4345,6 +4562,35 @@ async fn dispatch_board_tasks_with_config(
                 slot_id = %dispatch_run.slot_id,
                 "Autopilot: dispatch run actor started"
             );
+            if let Ok(Some(durable_completion)) =
+                durable_provider_completion_for_slot_task(state, task, &slot_id).await
+            {
+                if materialize_and_settle_readonly_durable_completion(
+                    state,
+                    task,
+                    &slot_id,
+                    &durable_completion,
+                    "pre-send-codex-rollout-recovery",
+                )
+                .await
+                .unwrap_or_else(|err| {
+                    warn!(
+                        task_id = %task.id,
+                        slot_id = %slot_id,
+                        error = %err,
+                        "Autopilot: pre-send durable completion materialization failed"
+                    );
+                    false
+                }) {
+                    info!(
+                        task_id = %task.id,
+                        slot_id = %slot_id,
+                        conversation_id = %durable_completion.session_id,
+                        "Autopilot: settled task from existing durable provider final before duplicate prompt send"
+                    );
+                    return;
+                }
+            }
             match state.pty.send(&slot_id, &full_prompt, timeout_ms).await {
                 Ok(res) => {
                     // Check for auth errors in successful PTY response
@@ -4939,12 +5185,57 @@ async fn dispatch_board_tasks_with_config(
                         DispatchRunActor::failure_policy_for_send_error(&err_msg);
                     let is_transient =
                         send_failure_policy == DispatchRunFailurePolicy::ReleaseClaim;
+                    let preserve_for_durable_artifact = send_failure_policy
+                        == DispatchRunFailurePolicy::DoNotCloseWithoutTaskResultArtifact;
 
                     if is_transient {
                         // Slot not ready — transient failure, just unclaim without penalty
                         debug!(task_id = %task.id, slot_id = %slot_id, error = %err_msg,
                         "Autopilot: slot not ready (transient), returning task to queue");
                         let _ = state.store.unclaim_board_task(task.id.as_str()).await;
+                    } else if preserve_for_durable_artifact {
+                        warn!(
+                            task_id = %task.id,
+                            slot_id = %slot_id,
+                            error = %err_msg,
+                            "Autopilot: pty.send timed out after prompt delivery; preserving claim until durable task_result_artifact appears"
+                        );
+                        if let Ok(Some(durable_completion)) =
+                            await_durable_provider_completion_for_slot_task(state, task, &slot_id)
+                                .await
+                        {
+                            if materialize_and_settle_readonly_durable_completion(
+                                state,
+                                task,
+                                &slot_id,
+                                &durable_completion,
+                                "send-timeout-durable-rollout-recovery",
+                            )
+                            .await
+                            .unwrap_or_else(|err| {
+                                warn!(
+                                    task_id = %task.id,
+                                    slot_id = %slot_id,
+                                    error = %err,
+                                    "Autopilot: timeout durable completion materialization failed"
+                                );
+                                false
+                            }) {
+                                return;
+                            }
+                        }
+                        let _ = state
+                            .store
+                            .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+                                task_id: task.id.to_string(),
+                                content: format!(
+                                    "⚠️ **Autopilot observation** — PTY send timed out after prompt delivery; task remains claimed until durable provider final + task-result-artifact settle.\n\n{}",
+                                    truncate_safe(&err_msg, 1_000)
+                                ),
+                                note_type: Some("note".to_string()),
+                                author: Some("autopilot".to_string()),
+                            })
+                            .await;
                     } else {
                         // Real execution failure — track and retry
                         let note_content = format!(
