@@ -375,6 +375,8 @@ export function OperationsOverview() {
               <span>dlq</span><span className={cn('text-right font-mono text-neutral-300', eventDlq > 0 && 'text-amber-300')}>{eventDlq}</span>
               <span>evidence max</span><span className={cn('text-right font-mono text-neutral-300', evidenceGapMax24h > 0 && 'text-amber-300')}>{evidenceGapMax24h}</span>
               <span className="flex items-center gap-1"><RefreshCw className="h-3 w-3" /> resync</span><span className="truncate text-right font-mono text-neutral-300">{eventHealth.lastResyncReason ?? '—'}</span>
+              <span>cursor lag</span><span className={cn('text-right font-mono text-neutral-300', (eventHealth.lastLagDiagnostic?.cursorLag ?? 0) > 100 && 'text-amber-300')}>{eventHealth.lastLagDiagnostic?.cursorLag ?? '—'}</span>
+              <span>subscriber</span><span className="truncate text-right font-mono text-neutral-300">{eventHealth.lastLagDiagnostic?.subscriberId ?? '—'}</span>
               <span className="flex items-center gap-1"><Radio className="h-3 w-3" /> error</span><span className="truncate text-right font-mono text-neutral-300">{eventHealth.lastError ?? error ?? '—'}</span>
             </div>
           </div>

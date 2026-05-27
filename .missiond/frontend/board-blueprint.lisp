@@ -318,13 +318,14 @@
     (pillar event-stream-ui
       (function event-stream-cache
         :surface event-stream-ui
-        :entry [eventbus-websocket connected caught_up too_far_behind FrontendEvent]
+        :entry [eventbus-websocket connected caught_up too_far_behind resync FrontendEvent]
         :core ((step s1 :logic "connect to the EventBus websocket using configured host and port")
                (step s2 :logic "sync missed events using last sequence and request resync on large gaps")
                (step s3 :logic "route event types to debounced domain version counters")
                (step s4 :logic "dispatch local CustomEvents only for UI-local updates such as timeline summaries and Jarvis completion")
-               (step s5 :logic "reconnect with bounded exponential backoff"))
-        :egress [connection-state version-counters health-snapshot ui-custom-event]))
+               (step s5 :logic "treat missiond.eventbus-live-lag-diagnostic.v1 resync payloads as observable runtime diagnostics with subscriber_id, lag_class, latest_seq, last_client_seq, cursor_lag, missed, and consecutive_lags; classify startup_catchup, event_burst, and slow_subscriber instead of hiding backlog as log noise")
+               (step s6 :logic "reconnect with bounded exponential backoff"))
+        :egress [connection-state version-counters health-snapshot ui-custom-event eventbus-lag-diagnostic]))
 
     (pillar timeline-log-ui
       (function timeline-logs

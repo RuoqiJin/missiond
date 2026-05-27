@@ -54,6 +54,7 @@ export function useEventHealth() {
       lastError: s.lastError,
       lastResyncAt: s.lastResyncAt,
       lastResyncReason: s.lastResyncReason,
+      lastLagDiagnostic: s.lastLagDiagnostic,
       malformedCount: s.malformedCount,
       status: s.eventHealthStatus,
       severity: s.eventHealthSeverity,

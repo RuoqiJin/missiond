@@ -6403,7 +6403,12 @@ impl PTYWebSocketServer {
         let mut rx = tx.subscribe();
         let (mut ws_tx, mut ws_rx) = ws_stream.split();
 
-        info!(?addr, "Client subscribing to EventBus stream");
+        let subscriber_id = format!(
+            "frontend-events-{}-{}",
+            addr,
+            chrono::Utc::now().timestamp_millis()
+        );
+        info!(?addr, subscriber_id = %subscriber_id, "Client subscribing to EventBus stream");
 
         // Send connected message with latest seq from DB (for catch-up protocol)
         let latest_seq = match db.as_ref() {
@@ -6421,6 +6426,7 @@ impl PTYWebSocketServer {
         let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(15));
         ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut consecutive_lags: u32 = 0;
+        let mut last_client_seq = latest_seq;
 
         loop {
             tokio::select! {
@@ -6428,20 +6434,53 @@ impl PTYWebSocketServer {
                     match event {
                         Ok(json_str) => {
                             consecutive_lags = 0;
+                            if let Ok(event) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                                if let Some(seq) = event.get("seq").and_then(|v| v.as_i64()) {
+                                    if seq >= 0 {
+                                        last_client_seq = last_client_seq.max(seq);
+                                    }
+                                }
+                            }
                             if ws_tx.send(Message::Text(json_str)).await.is_err() {
                                 break;
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(n)) => {
                             consecutive_lags += 1;
+                            let latest_seq = match db.as_ref() {
+                                Some(d) => d.timeline_latest_seq().await.unwrap_or(0),
+                                None => 0,
+                            };
+                            let lag_class = if consecutive_lags == 1 && latest_seq <= n as i64 {
+                                "startup_catchup"
+                            } else if consecutive_lags >= 3 {
+                                "slow_subscriber"
+                            } else {
+                                "event_burst"
+                            };
+                            let cursor_lag = latest_seq.saturating_sub(last_client_seq);
                             let resync = serde_json::json!({
                                 "type": "resync",
+                                "schema": "missiond.eventbus-live-lag-diagnostic.v1",
                                 "ts": chrono::Utc::now().timestamp_millis(),
+                                "seq": latest_seq,
+                                "subscriber_id": subscriber_id,
                                 "missed": n,
+                                "latest_seq": latest_seq,
+                                "last_client_seq": last_client_seq,
+                                "cursor_lag": cursor_lag,
+                                "lag_class": lag_class,
+                                "consecutive_lags": consecutive_lags,
+                                "classification": {
+                                    "startup_catchup": lag_class == "startup_catchup",
+                                    "slow_subscriber": lag_class == "slow_subscriber",
+                                    "event_burst": lag_class == "event_burst"
+                                },
+                                "diagnostic": "Frontend EventBus subscriber lagged; client should request bounded sync and MissionD should surface this as observability, not silent log noise.",
                             });
                             let _ = send_json(&mut ws_tx, &resync).await;
                             if consecutive_lags >= 3 {
-                                warn!(?addr, "Events client too slow, disconnecting");
+                                warn!(?addr, subscriber_id = %subscriber_id, missed = n, latest_seq, "Events client too slow, disconnecting");
                                 let _ = ws_tx
                                     .send(Message::Close(Some(close_frame(4008, "Too slow"))))
                                     .await;
@@ -6467,6 +6506,7 @@ impl PTYWebSocketServer {
                             if let Ok(req) = serde_json::from_str::<serde_json::Value>(&text) {
                                 if req.get("action").and_then(|v| v.as_str()) == Some("sync") {
                                     let since_seq = req.get("since_seq").and_then(|v| v.as_i64()).unwrap_or(0);
+                                    last_client_seq = last_client_seq.max(since_seq);
                                     if let Some(ref db) = db {
                                         Self::handle_catch_up(&mut ws_tx, db, since_seq).await;
                                     }

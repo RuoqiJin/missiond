@@ -3,6 +3,7 @@
 const args = new Set(process.argv.slice(2));
 const json = args.has('--json');
 const allowCreate = args.has('--allow-create') || process.env.JARVIS_DISPATCH_ALLOW_CREATE === '1';
+const followToFinal = args.has('--follow') || process.env.JARVIS_DISPATCH_FOLLOW === '1';
 const baseUrl = stripTrailingSlash(process.env.JARVIS_BASE_URL || 'https://auth.xiaojinpro.com/jarvis');
 const smokeSecretRef =
   process.env.MISSIOND_JARVIS_SMOKE_SECRET_REF ||
@@ -173,6 +174,47 @@ function hasEvent(response, name) {
   return eventNames(response).includes(name);
 }
 
+function eventDataObjects(response) {
+  return (response?.events || [])
+    .map((event) => event?.data)
+    .filter((data) => data && typeof data === 'object');
+}
+
+function findFollowTaskId(response) {
+  for (const data of eventDataObjects(response)) {
+    const direct = data.missiond_follow_task_id;
+    if (typeof direct === 'string' && direct.trim()) return direct.trim();
+    const followPayload = data.follow_payload || data.followPayload;
+    if (followPayload && typeof followPayload === 'object') {
+      const nested = followPayload.missiond_follow_task_id || followPayload.task_id;
+      if (typeof nested === 'string' && nested.trim()) return nested.trim();
+    }
+    if (typeof data.task_id === 'string' && (data.phase === 'result_pending' || data.status === 'result_pending')) {
+      return data.task_id.trim();
+    }
+  }
+  return '';
+}
+
+function hasResultArtifact(response) {
+  return (response?.events || []).some((event) => {
+    if (event?.event === 'result_artifact') return true;
+    const data = event?.data;
+    return Boolean(data && typeof data === 'object' && (data.artifact_hash || data.task_result_artifact_hash));
+  });
+}
+
+function hasTerminalFinal(response) {
+  return (response?.events || []).some((event) => {
+    if (event?.event !== 'final') return false;
+    const data = event.data;
+    if (!data || typeof data !== 'object') return true;
+    return data.terminal_task_result !== false
+      && data.phase !== 'result_pending'
+      && data.status !== 'result_pending';
+  });
+}
+
 function hasNonTerminalFinal(response) {
   return (response?.events || []).some((event) => {
     if (event?.event !== 'final') return false;
@@ -182,6 +224,48 @@ function hasNonTerminalFinal(response) {
     if (data.phase === 'result_pending' || data.status === 'result_pending') return true;
     return false;
   });
+}
+
+async function followTaskUntilTerminal(taskId, diagnostics) {
+  const maxAttempts = Number(process.env.JARVIS_FOLLOW_MAX_ATTEMPTS || 8);
+  const delayMs = Number(process.env.JARVIS_FOLLOW_RETRY_MS || 5000);
+  const attempts = [];
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const response = await postInteraction(buildBody({
+      missiond_follow_task_id: taskId,
+      missiond_follow: { task_id: taskId, stream: true },
+    }));
+    validateHttp(`follow-${attempt}`, response, diagnostics);
+    attempts.push(summarize(response));
+    if (!response.ok) return { attempts, terminal: false };
+    if (hasNonTerminalFinal(response)) {
+      diagnostics.push({
+        code: 'FOLLOW_NON_TERMINAL_FINAL',
+        message: 'follow emitted a non-terminal final; follow must return result_pending until task-result-artifact is terminal',
+        events: eventNames(response),
+      });
+    }
+    if (hasTerminalFinal(response)) {
+      if (!hasResultArtifact(response)) {
+        diagnostics.push({
+          code: 'FOLLOW_FINAL_WITHOUT_RESULT_ARTIFACT',
+          message: 'follow reached final without a result_artifact event',
+          events: eventNames(response),
+        });
+      }
+      return { attempts, terminal: true };
+    }
+    if (attempt < maxAttempts) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  diagnostics.push({
+    code: 'FOLLOW_TERMINAL_RESULT_MISSING',
+    message: `follow did not reach terminal final within ${maxAttempts} attempt(s)`,
+    task_id: taskId,
+    attempts,
+  });
+  return { attempts, terminal: false };
 }
 
 async function main() {
@@ -236,6 +320,7 @@ async function main() {
   }
 
   let third = null;
+  let follow = null;
   if (allowCreate && planConfirm) {
     third = await postInteraction(buildBody({ missiond_plan_confirmed: true, missiond_confirm: { confirm_payload: planConfirm } }));
     validateHttp('dispatch', third, diagnostics);
@@ -252,6 +337,18 @@ async function main() {
       if (hasNonTerminalFinal(third)) {
         diagnostics.push({ code: 'NON_TERMINAL_FINAL', message: 'dispatch phase emitted final before a terminal task-result-artifact; use result_pending/dispatch_accepted instead', events: thirdEvents });
       }
+      if (followToFinal) {
+        const followTaskId = findFollowTaskId(third);
+        if (!followTaskId) {
+          diagnostics.push({
+            code: 'FOLLOW_TASK_ID_MISSING',
+            message: 'dispatch phase did not return follow_payload.missiond_follow_task_id',
+            events: thirdEvents,
+          });
+        } else {
+          follow = await followTaskUntilTerminal(followTaskId, diagnostics);
+        }
+      }
     }
   }
 
@@ -264,6 +361,7 @@ async function main() {
       intent: summarize(first),
       plan: summarize(second),
       dispatch: summarize(third),
+      follow,
     },
     diagnostics,
   }, diagnostics.length === 0 ? 0 : 1);

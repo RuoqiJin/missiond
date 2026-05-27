@@ -128,18 +128,12 @@
     :id jarvis-intent-plan-dispatch-smoke-secret-read
     :kind subprocess
     :owner interaction-gateway
-    :observed ["subprocess:scripts/smoke-jarvis-intent-plan-dispatch.mjs:34"
-               "subprocess:scripts/smoke-jarvis-intent-plan-dispatch.mjs:35"]
+    :observed ["subprocess:scripts/smoke-jarvis-intent-plan-dispatch.mjs:36"]
     :code ["scripts/smoke-jarvis-intent-plan-dispatch.mjs"]
     :effects []
     (anchor
       :role subprocess
-      :observed "subprocess:scripts/smoke-jarvis-intent-plan-dispatch.mjs:34"
-      :file "scripts/smoke-jarvis-intent-plan-dispatch.mjs"
-      :symbol "tokenFromSecretStore")
-    (anchor
-      :role subprocess
-      :observed "subprocess:scripts/smoke-jarvis-intent-plan-dispatch.mjs:35"
+      :observed "subprocess:scripts/smoke-jarvis-intent-plan-dispatch.mjs:36"
       :file "scripts/smoke-jarvis-intent-plan-dispatch.mjs"
       :symbol "tokenFromSecretStore")
     (trigger
@@ -151,14 +145,20 @@
     :id jarvis-intent-plan-dispatch-smoke-timeout
     :kind scheduler
     :owner interaction-gateway
-    :observed ["scheduler:scripts/smoke-jarvis-intent-plan-dispatch.mjs:52"]
+    :observed ["scheduler:scripts/smoke-jarvis-intent-plan-dispatch.mjs:53"
+               "scheduler:scripts/smoke-jarvis-intent-plan-dispatch.mjs:259"]
     :code ["scripts/smoke-jarvis-intent-plan-dispatch.mjs"]
     :effects []
     (anchor
       :role scheduler
-      :observed "scheduler:scripts/smoke-jarvis-intent-plan-dispatch.mjs:52"
+      :observed "scheduler:scripts/smoke-jarvis-intent-plan-dispatch.mjs:53"
       :file "scripts/smoke-jarvis-intent-plan-dispatch.mjs"
       :symbol "postInteraction")
+    (anchor
+      :role scheduler
+      :observed "scheduler:scripts/smoke-jarvis-intent-plan-dispatch.mjs:259"
+      :file "scripts/smoke-jarvis-intent-plan-dispatch.mjs"
+      :symbol "followTaskUntilTerminal")
     (trigger
       :from-file "scripts/smoke-jarvis-intent-plan-dispatch.mjs"
       :from-symbol "postInteraction"

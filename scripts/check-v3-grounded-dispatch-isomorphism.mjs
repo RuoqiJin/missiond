@@ -58,6 +58,7 @@ const checks = [
       'result_pending',
       'MISSIOND_JARVIS_VISIBLE_HEARTBEAT_SECS',
       'visible worker_status heartbeat',
+      'Web/iOS clients and smoke tests MUST automatically follow',
       'missiond_confirm',
       'missiond_objective',
       'mission_context_gather(persist=true)',
@@ -239,6 +240,17 @@ const checks = [
       'jarvis_follow_does_not_synthesize_task_result_from_board_summary',
       'mission_shared_memory(action=\\"artifact_get\\"',
       'mission_context_slice',
+    ],
+  ],
+  [
+    'jarvis intent/plan dispatch follow smoke',
+    'scripts/smoke-jarvis-intent-plan-dispatch.mjs',
+    [
+      'JARVIS_DISPATCH_FOLLOW',
+      'findFollowTaskId',
+      'followTaskUntilTerminal',
+      'FOLLOW_TERMINAL_RESULT_MISSING',
+      'FOLLOW_FINAL_WITHOUT_RESULT_ARTIFACT',
     ],
   ],
   [

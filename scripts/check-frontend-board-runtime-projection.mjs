@@ -275,6 +275,9 @@ function checkRepo(repo) {
     'RESYNC_VERSION_KEYS',
     'dispatchConfiguredCustomEvent',
     'bumpKeys',
+    'missiond.eventbus-live-lag-diagnostic.v1',
+    'lastLagDiagnostic',
+    'cursorLag',
   ]);
 
   requireText(diagnostics, FILES.autopilotMonitor, src.autopilotMonitor, [
@@ -319,7 +322,7 @@ function buildFixture() {
   fs.writeFileSync(path.join(root, FILES.taskDialog), "import type { SlotDef } from '../types'; fetch('/api/slots'); availableSlots; setAvailableSlots;\n");
   fs.writeFileSync(path.join(root, FILES.terminal), 'providerLabel; Starting session; No active session;\n');
   fs.writeFileSync(path.join(root, FILES.app), "import type { SlotDef } from './types'; BOARD_TABS; DEFAULT_TAB; TAB_MIGRATION; fetchSlots; /api/slots; slotStateLabel; overflow-x-auto overflow-y-hidden whitespace-nowrap; min-w-[160px] max-w-[280px]; truncate;\n");
-  fs.writeFileSync(path.join(root, FILES.eventStream), 'EVENT_ROUTE_TABLE; EVENT_PREFIX_ROUTES; EVENT_CUSTOM_EVENTS; RESYNC_VERSION_KEYS; dispatchConfiguredCustomEvent; bumpKeys;\n');
+  fs.writeFileSync(path.join(root, FILES.eventStream), 'EVENT_ROUTE_TABLE; EVENT_PREFIX_ROUTES; EVENT_CUSTOM_EVENTS; RESYNC_VERSION_KEYS; dispatchConfiguredCustomEvent; bumpKeys; missiond.eventbus-live-lag-diagnostic.v1; lastLagDiagnostic; cursorLag;\n');
   fs.writeFileSync(path.join(root, FILES.autopilotMonitor), "import { FLOW_PHASE_LABELS, FLOW_PHASES } from '../constants';\n");
   fs.writeFileSync(path.join(root, FILES.timelineConstants), "import { TIMELINE_EVENT_VISUALS, TIMELINE_SLOT_COLORS, TIMELINE_SWIMLANES } from '../../generated/board-frontend-config'; EVENT_ICON_MAP;\n");
   return root;

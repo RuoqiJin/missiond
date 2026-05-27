@@ -19,12 +19,34 @@ export interface FrontendEvent {
   type: string;
   ts: number;
   seq: number;
+  schema?: string;
+  subscriber_id?: string;
+  missed?: number;
+  latest_seq?: number;
+  last_client_seq?: number;
+  cursor_lag?: number;
+  lag_class?: string;
+  consecutive_lags?: number;
+  diagnostic?: string;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   payload?: any;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type HealthSnapshot = Record<string, any>;
+
+export interface EventBusLagDiagnostic {
+  schema: string;
+  subscriberId: string;
+  lagClass: string;
+  missed: number;
+  latestSeq: number;
+  lastClientSeq: number;
+  cursorLag: number;
+  consecutiveLags: number;
+  diagnostic: string;
+  observedAt: number;
+}
 
 interface EventStreamState {
   // Connection
@@ -36,6 +58,7 @@ interface EventStreamState {
   lastError: string | null;
   lastResyncAt: number | null;
   lastResyncReason: string | null;
+  lastLagDiagnostic: EventBusLagDiagnostic | null;
   malformedCount: number;
   eventHealthStatus: EventHealthStatus;
   eventHealthSeverity: EventHealthSeverity;
@@ -114,6 +137,30 @@ function dispatchConfiguredCustomEvent(event: FrontendEvent) {
   return true;
 }
 
+function numOrZero(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+function stringOrEmpty(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+function normalizeLagDiagnostic(event: FrontendEvent): EventBusLagDiagnostic | null {
+  if (event.schema !== 'missiond.eventbus-live-lag-diagnostic.v1') return null;
+  return {
+    schema: event.schema,
+    subscriberId: stringOrEmpty(event.subscriber_id),
+    lagClass: stringOrEmpty(event.lag_class) || 'resync',
+    missed: numOrZero(event.missed),
+    latestSeq: numOrZero(event.latest_seq),
+    lastClientSeq: numOrZero(event.last_client_seq),
+    cursorLag: numOrZero(event.cursor_lag),
+    consecutiveLags: numOrZero(event.consecutive_lags),
+    diagnostic: stringOrEmpty(event.diagnostic),
+    observedAt: Date.now(),
+  };
+}
+
 function handleEvent(
   event: FrontendEvent,
   set: (fn: (s: EventStreamState) => Partial<EventStreamState>) => void,
@@ -122,9 +169,11 @@ function handleEvent(
   set(() => ({ lastSeq: event.seq }));
 
   if (event.type === 'resync') {
+    const lagDiagnostic = normalizeLagDiagnostic(event);
     set(() => ({
       lastResyncAt: Date.now(),
-      lastResyncReason: typeof event.payload?.reason === 'string' ? event.payload.reason : 'resync',
+      lastResyncReason: lagDiagnostic?.lagClass ?? (typeof event.payload?.reason === 'string' ? event.payload.reason : 'resync'),
+      lastLagDiagnostic: lagDiagnostic,
     }));
     bumpKeys(set, RESYNC_VERSION_KEYS, 0);
     return;
@@ -159,6 +208,7 @@ export const useEventStreamStore = create<EventStreamState>()((set, get) => ({
   lastError: null,
   lastResyncAt: null,
   lastResyncReason: null,
+  lastLagDiagnostic: null,
   malformedCount: 0,
   eventHealthStatus: 'disconnected',
   eventHealthSeverity: 'bad',

@@ -173,6 +173,10 @@ requireIncludes('jarvisIntentPlanDispatchSmoke', [
   'board_task_created',
   'dispatch_accepted',
   'result_pending',
+  'JARVIS_DISPATCH_FOLLOW',
+  'follow_payload',
+  'FOLLOW_TERMINAL_RESULT_MISSING',
+  'FOLLOW_FINAL_WITHOUT_RESULT_ARTIFACT',
   'NON_TERMINAL_FINAL',
   'terminal_task_result',
 ]);
