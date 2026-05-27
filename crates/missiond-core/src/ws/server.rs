@@ -281,8 +281,8 @@ fn jarvis_task_wait_secs() -> u64 {
 }
 
 fn clamp_jarvis_public_stream_budget_secs(value: Option<u64>) -> u64 {
-    const DEFAULT_BUDGET_SECS: u64 = 85;
-    const MIN_BUDGET_SECS: u64 = 10;
+    const DEFAULT_BUDGET_SECS: u64 = 6;
+    const MIN_BUDGET_SECS: u64 = 2;
     const MAX_BUDGET_SECS: u64 = 240;
 
     value
@@ -6834,8 +6834,8 @@ mod tests {
 
     #[test]
     fn jarvis_public_stream_budget_is_bounded_for_proxy_routes() {
-        assert_eq!(clamp_jarvis_public_stream_budget_secs(None), 85);
-        assert_eq!(clamp_jarvis_public_stream_budget_secs(Some(1)), 10);
+        assert_eq!(clamp_jarvis_public_stream_budget_secs(None), 6);
+        assert_eq!(clamp_jarvis_public_stream_budget_secs(Some(1)), 2);
         assert_eq!(clamp_jarvis_public_stream_budget_secs(Some(90)), 90);
         assert_eq!(clamp_jarvis_public_stream_budget_secs(Some(900)), 240);
     }
