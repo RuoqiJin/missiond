@@ -1459,6 +1459,37 @@ pub(crate) fn extract_worker_final_summary(response: &str, dispatched_prompt: &s
 /// label anchor and skip its line. When neither anchor exists, return the
 /// input unchanged so artifact stripping can still run.
 fn strip_prompt_echo<'a>(response: &'a str, _dispatched_prompt: &str) -> &'a str {
+    const LINE_ANCHORS: &[&str] = &[
+        "Autopilot/orchestrator",
+        "mission_board_update",
+        "mission_board_note_add",
+        "mission_question_create",
+        "多仓库 git status 输出规范",
+        "Board Task ID",
+        "负责关闭此 BoardTask",
+    ];
+    if let Some(cut) = response
+        .lines()
+        .scan(0usize, |offset, line| {
+            let start = *offset;
+            *offset += line.len() + 1;
+            Some((start, line))
+        })
+        .filter_map(|(start, line)| {
+            if LINE_ANCHORS.iter().any(|anchor| line.contains(anchor)) {
+                Some(start + line.len())
+            } else {
+                None
+            }
+        })
+        .last()
+    {
+        let mut cut = cut;
+        if response.as_bytes().get(cut) == Some(&b'\n') {
+            cut += 1;
+        }
+        return &response[cut..];
+    }
     const TAIL_ANCHOR: &str = "负责关闭此 BoardTask。";
     if let Some(idx) = response.rfind(TAIL_ANCHOR) {
         let cut = idx + TAIL_ANCHOR.len();
@@ -1950,6 +1981,9 @@ fn output_contract_close_blocker(task_description: &str, summary: &str) -> Optio
     if !is_delegated_worker_description(task_description) {
         return None;
     }
+    if contains_worker_prompt_contract_echo(summary) {
+        return Some("echoed-worker-prompt-contract");
+    }
     let output_contract = extract_dispatch_metadata_field(task_description, "output_contract")
         .unwrap_or_else(|| task_description.to_string());
     if !output_contract
@@ -2055,6 +2089,9 @@ fn is_delegated_worker_description(task_description: &str) -> bool {
 /// the existing acceptance-evidence markers. Match is case-insensitive on the
 /// heading body so `# Findings`, `## Findings`, `Findings:` all qualify.
 fn pty_summary_has_structured_artifact(summary: &str) -> bool {
+    if contains_worker_prompt_contract_echo(summary) {
+        return false;
+    }
     if worker_final_has_acceptance_evidence(summary) {
         return true;
     }
@@ -2076,6 +2113,36 @@ fn pty_summary_has_structured_artifact(summary: &str) -> bool {
     STRUCTURAL_MARKERS
         .iter()
         .any(|marker| lower.contains(marker))
+}
+
+fn contains_worker_prompt_contract_echo(summary: &str) -> bool {
+    let lower = summary.to_ascii_lowercase();
+    const CASE_INSENSITIVE_MARKERS: &[&str] = &[
+        "board task id",
+        "mission_board_update",
+        "mission_board_note_add",
+        "mission_question_create",
+        "autopilot/orchestrator",
+        "write_scope is the only allowed write set",
+        "must_not_touch",
+        "completion protocol",
+        "do not paste raw kb json",
+        "do not paste full logs",
+        "task-result-artifact 验证后",
+        "负责关闭此 boardtask",
+    ];
+    if CASE_INSENSITIVE_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
+    {
+        return true;
+    }
+    const EXACT_MARKERS: &[&str] = &[
+        "📋 **Board Task ID**",
+        "多仓库 git status 输出规范",
+        "若遇架构选择或反复 debug 失败的死胡同",
+    ];
+    EXACT_MARKERS.iter().any(|marker| summary.contains(marker))
 }
 
 fn delegated_task_is_read_only(task_description: &str) -> bool {
@@ -6982,6 +7049,49 @@ Review only.
     }
 
     #[test]
+    fn extract_worker_final_summary_strips_echoed_output_contract_prompt() {
+        let prompt_echo = r#"
+## Output contract
+- output_contract: return a structured artifact with Findings / Evidence / Recommendations / Verification; do not paste raw KB JSON or full logs as the final answer
+
+## Parent linkage
+- parent_board_task_id: parent-123
+
+---
+注：若遇架构选择或反复 debug 失败的死胡同，请调 `mission_question_create(target="master", taskId="task-echo", decisionType="...")` 呼叫主控裁决，附带 options 方案。
+
+---
+📋 **Board Task ID**: `task-echo`
+任务完成时：若当前工位已挂载 `mission_board_update` / `mission_board_note_add`，请调用
+`mission_board_update(id="task-echo", status="done")` 关闭任务，并用
+`mission_board_note_add(taskId="task-echo", content="...", noteType="summary")`
+写入诊断摘要。若上述 board MCP 工具未挂载到本工位，请直接返回一段简明的最终完成摘要，由 Autopilot/orchestrator
+负责关闭此 BoardTask。
+"#;
+        let response = format!(
+            "{prompt_echo}\n\nFindings\n1. 已完成真实调查。\n\nEvidence\n- checked current runtime.\n\nRecommendations\n- continue with implementation shard.\n\nVerification\n- read-only task, no files changed."
+        );
+        let summary = extract_worker_final_summary(&response, prompt_echo);
+        assert!(
+            !summary.contains("Board Task ID"),
+            "echoed task contract leaked: {summary}"
+        );
+        assert!(
+            !summary.contains("mission_board_update"),
+            "echoed board close instruction leaked: {summary}"
+        );
+        assert!(
+            !summary.contains("Autopilot/orchestrator"),
+            "echoed orchestrator instruction leaked: {summary}"
+        );
+        assert!(
+            summary.starts_with("Findings"),
+            "worker artifact should begin at the real report: {summary}"
+        );
+        assert!(summary.contains("已完成真实调查。"));
+    }
+
+    #[test]
     fn extract_worker_final_summary_strips_paste_collapse_marker() {
         // Claude Code TUI collapses long pastes into `[Pasted text +N lines,
         // paste again to expand]`. That marker must never reach the BoardTask
@@ -8472,6 +8582,36 @@ Review only.
         assert!(pty_summary_has_structured_artifact(
             "All acceptance gates passed; verification done."
         ));
+    }
+
+    #[test]
+    fn pty_summary_rejects_echoed_worker_prompt_contract() {
+        let echoed_prompt = r#"
+Findings
+
+Evidence
+
+Recommendations
+
+Verification
+
+📋 **Board Task ID**: `task-echo`
+任务完成时：若当前工位已挂载 `mission_board_update` / `mission_board_note_add`，请调用
+`mission_board_update(id="task-echo", status="done")` 关闭任务，并用
+`mission_board_note_add(taskId="task-echo", content="...", noteType="summary")`
+写入诊断摘要。若上述 board MCP 工具未挂载到本工位，请直接返回一段简明的最终完成摘要，由 Autopilot/orchestrator 负责关闭此 BoardTask。
+"#;
+        assert!(
+            !pty_summary_has_structured_artifact(echoed_prompt),
+            "echoed prompt contract must not become a structured artifact"
+        );
+        assert_eq!(
+            output_contract_close_blocker(
+                delegated_context_pack_with_output_contract(),
+                echoed_prompt
+            ),
+            Some("echoed-worker-prompt-contract")
+        );
     }
 
     /// Durable provider summaries from a reused long-lived session can contain

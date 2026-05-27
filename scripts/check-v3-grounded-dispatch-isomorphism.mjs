@@ -276,6 +276,9 @@ const checks = [
       '"raw_evidence": raw_evidence',
       '"summary": final_summary',
       'extract_worker_final_summary_prefers_findings_contract_block',
+      'contains_worker_prompt_contract_echo',
+      'echoed-worker-prompt-contract',
+      'pty_summary_rejects_echoed_worker_prompt_contract',
     ],
   ],
   [
