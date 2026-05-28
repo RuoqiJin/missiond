@@ -687,6 +687,7 @@ function checkFiles(root, files) {
     'with_details(control.details.clone())',
     'with_suggestion(suggestion.clone())',
     'Board notes and PTY text are projections only',
+    'fn legacy_projection_action(action: &str) -> bool',
     'ControlPlaneKernel::new(state)',
     '.task_result_put_request_from_args(&args)',
     '.task_result_put_command(request)',
@@ -699,8 +700,11 @@ function checkFiles(root, files) {
     '.capability_grant_command(capability_grant_command_from_args(&args)?)',
     'JobEventCommand { args: args.clone() }',
     '.job_event_command(',
+    '_ if legacy_projection_action(action)',
+    'unknown shared memory action: {other}',
   ]);
   rejectAll(diagnostics, files.sharedHandler, sources.sharedHandler, [
+    '_ => state.shared_memory.handle_action(&args).await',
     'task_result_put_typed(&args)',
     'settle_worker_typed(args.clone())',
     'capability_check_typed(&args)',

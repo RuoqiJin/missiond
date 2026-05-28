@@ -190,7 +190,9 @@ const NEEDLES = [
   ['dispatcher mission_shared_memory branch', 'crates/missiond-daemon/src/handlers/knowledge/shared_memory.rs', '"mission_shared_memory" =>'],
   ['dispatcher mission_context_slice branch', 'crates/missiond-daemon/src/handlers/knowledge/shared_memory.rs', '"mission_context_slice" =>'],
   ['dispatcher mission_claim_status branch', 'crates/missiond-daemon/src/handlers/knowledge/shared_memory.rs', '"mission_claim_status" =>'],
-  ['dispatcher handle_action call', 'crates/missiond-daemon/src/handlers/knowledge/shared_memory.rs', 'state.shared_memory.handle_action'],
+  ['dispatcher explicit legacy projection guard', 'crates/missiond-daemon/src/handlers/knowledge/shared_memory.rs', 'fn legacy_projection_action(action: &str) -> bool'],
+  ['dispatcher no unknown action fallback', 'crates/missiond-daemon/src/handlers/knowledge/shared_memory.rs', 'unknown shared memory action: {other}'],
+  ['dispatcher projection handler call', 'crates/missiond-daemon/src/handlers/knowledge/shared_memory.rs', '_ if legacy_projection_action(action)'],
   ['dispatcher context_slice call', 'crates/missiond-daemon/src/handlers/knowledge/shared_memory.rs', 'state.shared_memory.context_slice'],
   ['dispatcher claim_status call', 'crates/missiond-daemon/src/handlers/knowledge/shared_memory.rs', 'state.shared_memory.claim_status'],
 
@@ -231,6 +233,10 @@ const NEEDLES = [
   ['mcp knowledge mod registration', 'crates/missiond-mcp/src/tools/knowledge/mod.rs', 'pub(crate) mod shared_memory;'],
 ];
 
+const REJECT_NEEDLES = [
+  ['dispatcher catch-all mega-handler fallback', 'crates/missiond-daemon/src/handlers/knowledge/shared_memory.rs', '_ => state.shared_memory.handle_action(&args).await'],
+];
+
 function parseArgs(argv) {
   return { json: argv.includes('--json') };
 }
@@ -254,12 +260,24 @@ function main() {
       diagnostics.push({ severity: 'error', id, file, message: `missing needle: ${needle}` });
     }
   }
+  for (const [id, file, needle] of REJECT_NEEDLES) {
+    const full = path.join(ROOT, file);
+    const text = fs.existsSync(full)
+      ? (file === '.missiond/v3/missiond-blueprint.lisp'
+          ? readBlueprintWithEvidenceSidecars(ROOT, file)
+          : fs.readFileSync(full, 'utf8'))
+      : '';
+    if (text.includes(needle)) {
+      diagnostics.push({ severity: 'error', id, file, message: `forbidden needle: ${needle}` });
+    }
+  }
   const ok = diagnostics.length === 0;
   const result = {
     ok,
     checker: 'check-v3-shared-memory-isomorphism',
     files: FILES.length,
     needles: NEEDLES.length,
+    rejects: REJECT_NEEDLES.length,
     diagnostics,
   };
   if (opts.json) console.log(JSON.stringify(result, null, 2));

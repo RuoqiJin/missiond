@@ -26,6 +26,42 @@ fn shared_memory_error(err: anyhow::Error) -> ToolError {
     )
 }
 
+fn legacy_projection_action(action: &str) -> bool {
+    matches!(
+        action,
+        "append"
+            | "query"
+            | "artifact_put"
+            | "put_artifact"
+            | "artifact_get"
+            | "get_artifact"
+            | "task_result_get"
+            | "get_task_result"
+            | "task_evidence_summary"
+            | "evidence_summary"
+            | "workflow_start"
+            | "start_workflow"
+            | "workflow_checkpoint"
+            | "checkpoint_workflow"
+            | "workflow_status"
+            | "get_workflow_status"
+            | "workflow_summary"
+            | "workflow_runs_summary"
+            | "runtime_artifact_index"
+            | "index_runtime_artifact"
+            | "runtime_artifact_list"
+            | "list_runtime_artifacts"
+            | "runtime_artifact_prune"
+            | "prune_runtime_artifacts"
+            | "evidence_view"
+            | "evidence_governance_view"
+            | "get_evidence_view"
+            | "model_route_outcome_put"
+            | "record_model_route_outcome"
+            | "cursor"
+    )
+}
+
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     match name {
         "mission_shared_memory" => {
@@ -79,7 +115,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                         .job_event_command(JobEventCommand { args: args.clone() })
                         .await
                 }
-                _ => state.shared_memory.handle_action(&args).await,
+                _ if legacy_projection_action(action) => {
+                    state.shared_memory.handle_action(&args).await
+                }
+                other => Err(anyhow!("unknown shared memory action: {other}")),
             };
             match result {
                 Ok(value) => Ok(ToolResult::json_pretty(&value)),
@@ -331,4 +370,42 @@ fn system_or_operator_bypass_allowed(args: &Value) -> bool {
                     "operatorConfirmed",
                 ],
             ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_memory_adapter_allowlists_legacy_projection_actions() {
+        for action in [
+            "append",
+            "query",
+            "artifact_put",
+            "task_result_get",
+            "workflow_start",
+            "evidence_view",
+            "model_route_outcome_put",
+            "cursor",
+        ] {
+            assert!(legacy_projection_action(action), "{action}");
+        }
+    }
+
+    #[test]
+    fn shared_memory_adapter_does_not_legacy_route_control_actions() {
+        for action in [
+            "task_result_put",
+            "worker_settle",
+            "claim",
+            "release",
+            "heartbeat",
+            "capability_check",
+            "capability_grant",
+            "job_event",
+            "unknown_future_control_action",
+        ] {
+            assert!(!legacy_projection_action(action), "{action}");
+        }
+    }
 }
