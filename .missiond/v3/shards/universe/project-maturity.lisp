@@ -54,4 +54,4 @@
     (maturity :id chat-translator :current M6 :target M6 :gap [])
     (maturity :id long-image-service :current M6 :target M6 :gap [])
     (maturity :id wechat-publisher :current M6 :target M6 :gap [])
-    (maturity :id daily-spark :current M2 :target M6 :gap [backend-api-domain vercel-domain-binding gcp-runtime-secrets supabase-cloud-dump gcp-db-restore caddy-dns vercel-env smoke-rollout final-m6-report]))
+    (maturity :id daily-spark :current M2 :target M6 :gap [backend-api-domain vercel-domain-binding gcp-runtime-secrets supabase-cloud-dump gcp-db-restore lexicon1728-backfill caddy-dns vercel-env smoke-rollout final-m6-report]))
