@@ -10,7 +10,9 @@ use std::time::Duration;
 use tokio::process::Command;
 
 use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
-use crate::engine::shared_memory::{StructuredControlError, TaskRuntimeContract};
+use crate::engine::shared_memory::{
+    StructuredControlError, TaskRuntimeContract, WorkerSettleRequest,
+};
 use crate::slot_dispatch::SlotAcquireGuard;
 use crate::state::AppState;
 
@@ -3426,20 +3428,25 @@ async fn run_xjpcode_readonly_worker(state: AppState, run: XjpcodeWorkerRun) -> 
     let Some(artifact_hash) = artifact.get("artifact_hash").and_then(Value::as_str) else {
         return Ok(());
     };
+    let task_id = request["task_id"]
+        .as_str()
+        .ok_or_else(|| anyhow!("xjpcode worker settle requires task_id"))?;
     state
         .shared_memory
-        .settle_worker_typed(json!({
-            "task_id": request["task_id"],
-            "project_id": request["project_id"],
-            "slot_id": "xjpcode-readonly-worker",
-            "provider": "xjpcode",
-            "status": missiond_settle_status,
-            "summary": summary,
-            "artifact_hash": artifact_hash,
-            "grant_id": settle_grant_id,
-            "subject_kind": "worker",
-            "subject_id": "xjpcode-readonly-worker"
-        }))
+        .settle_worker_command(WorkerSettleRequest {
+            task_id: task_id.to_string(),
+            project_id: request["project_id"].as_str().map(str::to_string),
+            slot_id: Some("xjpcode-readonly-worker".to_string()),
+            conversation_id: None,
+            artifact_hash: Some(artifact_hash.to_string()),
+            status: missiond_settle_status.to_string(),
+            summary: Some(summary.to_string()),
+            grant_id: Some(settle_grant_id.to_string()),
+            subject_kind: "worker".to_string(),
+            subject_id: "xjpcode-readonly-worker".to_string(),
+            attempt_id: None,
+            allow_system_bypass: false,
+        })
         .await?;
     Ok(())
 }
@@ -3609,24 +3616,22 @@ fn spawn_mechanic_repair(
             }
             return;
         }
-        let mut settle_args = json!({
-                "task_id": run.task_id,
-                "project_id": run.project_id,
-                "slot_id": "mechanic",
-                "provider": "mechanic",
-                "status": status,
-                "summary": summary,
-                "attempt_id": run.attempt_id,
-                "grant_id": run.settle_task_grant_id,
-                "subject_kind": "worker",
-                "subject_id": "mechanic",
-                "accepted_shard_id": run.metadata.accepted_shard_id,
-                "json": content,
-        });
-        if let Some(hash) = artifact_hash {
-            settle_args["artifact_hash"] = Value::String(hash);
-        }
-        let settle = shared_memory.settle_worker_typed(settle_args).await;
+        let settle = shared_memory
+            .settle_worker_command(WorkerSettleRequest {
+                task_id: run.task_id.clone(),
+                project_id: run.project_id.clone(),
+                slot_id: Some("mechanic".to_string()),
+                conversation_id: None,
+                artifact_hash,
+                status: status.to_string(),
+                summary: Some(summary),
+                grant_id: run.settle_task_grant_id.clone(),
+                subject_kind: "worker".to_string(),
+                subject_id: "mechanic".to_string(),
+                attempt_id: Some(run.attempt_id.clone()),
+                allow_system_bypass: false,
+            })
+            .await;
         if let Err(err) = settle {
             tracing::warn!(task_id = %run.task_id, error = %err, "mechanic repair worker_settle failed");
         }

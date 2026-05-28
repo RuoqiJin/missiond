@@ -794,17 +794,39 @@ async fn settle_autopilot_done_with_artifact(
     artifact_hash: &str,
     summary: &str,
 ) -> Result<()> {
+    let settle_grant_id = state
+        .storage()
+        .shared_memory
+        .active_capability_grant_id(
+            task.id.as_str(),
+            "worker",
+            slot_id,
+            "settle",
+            "task",
+            task.id.as_str(),
+        )
+        .await?;
     state
         .storage()
         .shared_memory
-        .settle_worker_typed(serde_json::json!({
-            "task_id": task.id.as_str(),
-            "project_id": task.project.as_deref().unwrap_or("missiond"),
-            "slot_id": slot_id,
-            "status": "done",
-            "artifact_hash": artifact_hash,
-            "summary": summary,
-        }))
+        .settle_worker_command(crate::engine::shared_memory::WorkerSettleRequest {
+            task_id: task.id.to_string(),
+            project_id: Some(
+                task.project
+                    .clone()
+                    .unwrap_or_else(|| "missiond".to_string()),
+            ),
+            slot_id: Some(slot_id.to_string()),
+            conversation_id: None,
+            artifact_hash: Some(artifact_hash.to_string()),
+            status: "done".to_string(),
+            summary: Some(summary.to_string()),
+            grant_id: settle_grant_id,
+            subject_kind: "worker".to_string(),
+            subject_id: slot_id.to_string(),
+            attempt_id: None,
+            allow_system_bypass: false,
+        })
         .await?;
     Ok(())
 }

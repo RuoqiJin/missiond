@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use chrono::Utc;
 use serde_json::{json, Value};
 
-use crate::engine::shared_memory::{CapabilityCheckRequest, ClaimRequest};
+use crate::engine::shared_memory::{CapabilityCheckRequest, ClaimRequest, WorkerSettleRequest};
 use crate::engine::task_completion_evidence::{
     TaskCompletionEvidenceInput, TaskCompletionEvidenceWriter,
 };
@@ -61,16 +61,20 @@ impl<'a> ControlPlaneKernel<'a> {
     ) -> Result<Value> {
         self.state
             .shared_memory
-            .settle_worker_typed(json!({
-                "task_id": task_id,
-                "status": "done",
-                "artifact_hash": artifact_hash,
-                "summary": summary,
-                "slot_id": producer_id,
-                "subject_kind": "system",
-                "subject_id": producer_id,
-                "confirm": true
-            }))
+            .settle_worker_command(WorkerSettleRequest {
+                task_id: task_id.to_string(),
+                project_id: None,
+                slot_id: Some(producer_id.to_string()),
+                conversation_id: None,
+                artifact_hash: Some(artifact_hash.to_string()),
+                status: "done".to_string(),
+                summary: Some(summary.to_string()),
+                grant_id: None,
+                subject_kind: "system".to_string(),
+                subject_id: producer_id.to_string(),
+                attempt_id: None,
+                allow_system_bypass: true,
+            })
             .await
     }
 

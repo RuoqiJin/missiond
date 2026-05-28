@@ -185,6 +185,22 @@ pub(crate) struct CapabilityCheckRequest {
     pub details: Value,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct WorkerSettleRequest {
+    pub task_id: String,
+    pub project_id: Option<String>,
+    pub slot_id: Option<String>,
+    pub conversation_id: Option<String>,
+    pub artifact_hash: Option<String>,
+    pub status: String,
+    pub summary: Option<String>,
+    pub grant_id: Option<String>,
+    pub subject_kind: String,
+    pub subject_id: String,
+    pub attempt_id: Option<String>,
+    pub allow_system_bypass: bool,
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TaskRuntimeContract {
     pub(crate) project_id: Option<String>,
@@ -268,7 +284,8 @@ impl SharedMemoryService {
                 self.evidence_view(args).await
             }
             "worker_settle" | "completion_settle" | "settle_worker" => {
-                self.worker_settle(args).await
+                let req = self.worker_settle_request_from_args(args)?;
+                self.worker_settle(req).await
             }
             "capability_grant" | "grant_capability" => self.capability_grant_from_args(args).await,
             "capability_check" | "check_capability" => self.capability_check_from_args(args).await,
@@ -308,7 +325,12 @@ impl SharedMemoryService {
     }
 
     pub(crate) async fn settle_worker_typed(&self, args: Value) -> Result<Value> {
-        self.worker_settle(&args).await
+        let req = self.worker_settle_request_from_args(&args)?;
+        self.settle_worker_command(req).await
+    }
+
+    pub(crate) async fn settle_worker_command(&self, req: WorkerSettleRequest) -> Result<Value> {
+        self.worker_settle(req).await
     }
 
     pub(crate) async fn task_result_put_typed(&self, args: &Value) -> Result<Value> {
@@ -1243,6 +1265,43 @@ impl SharedMemoryService {
                 "required": "grant_id + subject_kind + subject_id + operation + scope_kind + scope_key + task_id"
             }),
         ))
+    }
+
+    pub(crate) async fn active_capability_grant_id(
+        &self,
+        task_id: &str,
+        subject_kind: &str,
+        subject_id: &str,
+        operation: &str,
+        scope_kind: &str,
+        scope_key: &str,
+    ) -> Result<Option<String>> {
+        let grant_id = sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT id
+            FROM capability_grants
+            WHERE task_id IS NOT DISTINCT FROM $1
+              AND subject_kind = $2
+              AND subject_id = $3
+              AND operation = $4
+              AND scope_kind = $5
+              AND scope_key = $6
+              AND status = 'active'
+              AND consumed_at IS NULL
+              AND (expires_at IS NULL OR expires_at > now())
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(task_id)
+        .bind(subject_kind)
+        .bind(subject_id)
+        .bind(operation)
+        .bind(scope_kind)
+        .bind(scope_key)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(grant_id)
     }
 
     pub(crate) async fn task_runtime_contract(&self, task_id: &str) -> Result<TaskRuntimeContract> {
@@ -3252,20 +3311,77 @@ impl SharedMemoryService {
         }))
     }
 
-    async fn worker_settle(&self, args: &Value) -> Result<Value> {
+    fn worker_settle_request_from_args(&self, args: &Value) -> Result<WorkerSettleRequest> {
         let task_id = string_arg(args, "task_id")
             .or_else(|| string_arg(args, "taskId"))
-            .ok_or_else(|| anyhow!("task_id is required"))?;
-        let project_id = string_arg(args, "project_id").or_else(|| string_arg(args, "projectId"));
-        let slot_id = string_arg(args, "slot_id").or_else(|| string_arg(args, "slotId"));
-        let conversation_id =
-            string_arg(args, "conversation_id").or_else(|| string_arg(args, "conversationId"));
-        let artifact_hash_owned = string_arg(args, "artifact_hash")
+            .ok_or_else(|| anyhow!("task_id is required"))?
+            .to_string();
+        let project_id = string_arg(args, "project_id")
+            .or_else(|| string_arg(args, "projectId"))
+            .map(str::to_string);
+        let slot_id = string_arg(args, "slot_id")
+            .or_else(|| string_arg(args, "slotId"))
+            .map(str::to_string);
+        let conversation_id = string_arg(args, "conversation_id")
+            .or_else(|| string_arg(args, "conversationId"))
+            .map(str::to_string);
+        let artifact_hash = string_arg(args, "artifact_hash")
             .or_else(|| string_arg(args, "artifactHash"))
             .map(str::to_string);
-        let target_status = normalize_worker_settle_status(string_arg(args, "status"))?;
-        let note_summary = string_arg(args, "summary")
+        let status = normalize_worker_settle_status(string_arg(args, "status"))?.to_string();
+        let grant_id = string_arg(args, "grant_id")
+            .or_else(|| string_arg(args, "grantId"))
+            .or_else(|| string_arg(args, "capability_grant_id"))
+            .or_else(|| string_arg(args, "capabilityGrantId"))
+            .map(str::to_string);
+        let subject_kind = string_arg(args, "subject_kind")
+            .or_else(|| string_arg(args, "subjectKind"))
             .map(str::to_string)
+            .unwrap_or_else(|| {
+                if slot_id.is_some() {
+                    "worker".to_string()
+                } else if conversation_id.is_some() {
+                    "conversation".to_string()
+                } else {
+                    "task".to_string()
+                }
+            });
+        let subject_id = string_arg(args, "subject_id")
+            .or_else(|| string_arg(args, "subjectId"))
+            .map(str::to_string)
+            .or_else(|| slot_id.clone())
+            .or_else(|| conversation_id.clone())
+            .unwrap_or_else(|| task_id.clone());
+        let attempt_id = string_arg(args, "attempt_id")
+            .or_else(|| string_arg(args, "attemptId"))
+            .map(str::to_string);
+
+        Ok(WorkerSettleRequest {
+            task_id,
+            project_id,
+            slot_id,
+            conversation_id,
+            artifact_hash,
+            status,
+            summary: string_arg(args, "summary").map(str::to_string),
+            grant_id,
+            subject_kind,
+            subject_id,
+            attempt_id,
+            allow_system_bypass: system_or_operator_bypass_allowed(args),
+        })
+    }
+
+    async fn worker_settle(&self, req: WorkerSettleRequest) -> Result<Value> {
+        let task_id = req.task_id.as_str();
+        let project_id = req.project_id.as_deref();
+        let slot_id = req.slot_id.as_deref();
+        let conversation_id = req.conversation_id.as_deref();
+        let artifact_hash_owned = req.artifact_hash.clone();
+        let target_status = normalize_worker_settle_status(Some(req.status.as_str()))?;
+        let note_summary = req
+            .summary
+            .clone()
             .unwrap_or_else(|| "Worker durable final settled.".to_string());
 
         if target_status.eq_ignore_ascii_case("done") && artifact_hash_owned.is_none() {
@@ -3279,38 +3395,15 @@ impl SharedMemoryService {
             ));
         }
         let runtime_contract = self.task_runtime_contract(task_id).await?;
-        let requested_grant_id = string_arg(args, "grant_id")
-            .or_else(|| string_arg(args, "grantId"))
-            .or_else(|| string_arg(args, "capability_grant_id"))
-            .or_else(|| string_arg(args, "capabilityGrantId"))
-            .map(str::to_string);
-        let subject_kind = string_arg(args, "subject_kind")
-            .or_else(|| string_arg(args, "subjectKind"))
-            .unwrap_or_else(|| {
-                if slot_id.is_some() {
-                    "worker"
-                } else if conversation_id.is_some() {
-                    "conversation"
-                } else {
-                    "task"
-                }
-            })
-            .to_string();
-        let subject_id = string_arg(args, "subject_id")
-            .or_else(|| string_arg(args, "subjectId"))
-            .map(str::to_string)
-            .or_else(|| slot_id.map(str::to_string))
-            .or_else(|| conversation_id.map(str::to_string))
-            .unwrap_or_else(|| task_id.to_string());
         self.require_capability(CapabilityCheckRequest {
-            grant_id: requested_grant_id.clone(),
-            subject_kind: subject_kind.clone(),
-            subject_id: subject_id.clone(),
+            grant_id: req.grant_id.clone(),
+            subject_kind: req.subject_kind.clone(),
+            subject_id: req.subject_id.clone(),
             operation: "settle".to_string(),
             scope_kind: "task".to_string(),
             scope_key: task_id.to_string(),
             task_id: Some(task_id.to_string()),
-            allow_system_bypass: system_or_operator_bypass_allowed(args),
+            allow_system_bypass: req.allow_system_bypass,
             bypass_reason: Some("worker_settle system/operator authority".to_string()),
             details: json!({
                 "artifact_hash": artifact_hash_owned.clone(),
@@ -3327,8 +3420,6 @@ impl SharedMemoryService {
                     json!({"task_id": task_id, "required": "artifact_hash"}),
                 )
             })?;
-            let attempt_id =
-                string_arg(args, "attempt_id").or_else(|| string_arg(args, "attemptId"));
             let artifact_attempt_id = sqlx::query_scalar::<_, Option<String>>(
                 "SELECT attempt_id FROM task_result_artifacts WHERE task_id = $1 AND artifact_hash = $2",
             )
@@ -3339,7 +3430,10 @@ impl SharedMemoryService {
             .flatten();
             let (_job_id, current_attempt_id) = self.current_job_attempt_for_task(task_id).await?;
             if artifact_attempt_id.as_deref() != current_attempt_id.as_deref()
-                || attempt_id.is_some_and(|value| Some(value) != current_attempt_id.as_deref())
+                || req
+                    .attempt_id
+                    .as_deref()
+                    .is_some_and(|value| Some(value) != current_attempt_id.as_deref())
             {
                 return Err(control_error_details(
                     EVIDENCE_REQUIRED_CODE,
@@ -3349,7 +3443,7 @@ impl SharedMemoryService {
                         "artifact_hash": artifact_hash,
                         "artifact_attempt_id": artifact_attempt_id,
                         "current_attempt_id": current_attempt_id,
-                        "provided_attempt_id": attempt_id
+                        "provided_attempt_id": req.attempt_id.clone()
                     }),
                 ));
             }

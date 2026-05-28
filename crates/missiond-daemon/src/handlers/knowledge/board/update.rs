@@ -312,15 +312,22 @@ async fn handle_batch_done_settle(
         };
         match state
             .shared_memory
-            .settle_worker_typed(serde_json::json!({
-                "task_id": id,
-                "status": "done",
-                "artifact_hash": artifact_hash,
-                "summary": "mission_board_update batch requested typed completion settle.",
-                "subject_kind": "operator",
-                "subject_id": "mission_board_update",
-                "confirm": true
-            }))
+            .settle_worker_command(crate::engine::shared_memory::WorkerSettleRequest {
+                task_id: id.clone(),
+                project_id: None,
+                slot_id: None,
+                conversation_id: None,
+                artifact_hash: Some(artifact_hash),
+                status: "done".to_string(),
+                summary: Some(
+                    "mission_board_update batch requested typed completion settle.".to_string(),
+                ),
+                grant_id: None,
+                subject_kind: "operator".to_string(),
+                subject_id: "mission_board_update".to_string(),
+                attempt_id: None,
+                allow_system_bypass: true,
+            })
             .await
         {
             Ok(value) => {
@@ -360,15 +367,20 @@ async fn settle_done_via_shared_memory(
     }
     match state
         .shared_memory
-        .settle_worker_typed(serde_json::json!({
-            "task_id": task_id,
-            "status": "done",
-            "artifact_hash": artifact_hash,
-            "summary": summary,
-            "subject_kind": "operator",
-            "subject_id": "mission_board_update",
-            "confirm": true
-        }))
+        .settle_worker_command(crate::engine::shared_memory::WorkerSettleRequest {
+            task_id: task_id.to_string(),
+            project_id: None,
+            slot_id: None,
+            conversation_id: None,
+            artifact_hash: Some(artifact_hash.to_string()),
+            status: "done".to_string(),
+            summary: Some(summary.to_string()),
+            grant_id: None,
+            subject_kind: "operator".to_string(),
+            subject_id: "mission_board_update".to_string(),
+            attempt_id: None,
+            allow_system_bypass: true,
+        })
         .await
     {
         Ok(value) => {

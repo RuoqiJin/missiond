@@ -31,6 +31,9 @@
 #                               secret-store for Jarvis/interaction smoke.
 #   MISSIOND_INTERACTION_AUTH_USERINFO_URL  optional Auth userinfo endpoint.
 #   MISSIOND_INTERACTION_AUTH_TIMEOUT_MS  optional Auth userinfo timeout.
+#   MISSIOND_XJPCODE_WORKER_URL  optional portable xjpcode worker base URL
+#                               injected into launchd for MissionD delegated
+#                               xjpcode read-only worker dispatch.
 #   MISSIOND_DEPLOY_ENSURE_JARVIS_SLOT  1/0/auto. In auto mode, call the
 #                               localhost-only Jarvis slot ensure endpoint
 #                               after restart when launchd/current env enables
@@ -369,6 +372,7 @@ ensure_launchd_runtime_root() {
   plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_INTERACTION_SERVICE_TOKEN"
   plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_INTERACTION_AUTH_USERINFO_URL"
   plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_INTERACTION_AUTH_TIMEOUT_MS"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_XJPCODE_WORKER_URL"
   plutil -lint "$LAUNCHD_PLIST" >/dev/null
   log "launchd: runtime root $LAUNCHD_PROJECT_ROOT written to $LAUNCHD_PLIST"
   log "launchd: artifact runtime dir $RUNTIME_DIR written to $LAUNCHD_PLIST"
