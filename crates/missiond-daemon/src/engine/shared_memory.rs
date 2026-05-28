@@ -3666,24 +3666,13 @@ impl SharedMemoryService {
             .await?
             .flatten();
             let (_job_id, current_attempt_id) = self.current_job_attempt_for_task(task_id).await?;
-            if artifact_attempt_id.as_deref() != current_attempt_id.as_deref()
-                || req
-                    .attempt_id
-                    .as_deref()
-                    .is_some_and(|value| Some(value) != current_attempt_id.as_deref())
-            {
-                return Err(control_error_details(
-                    EVIDENCE_REQUIRED_CODE,
-                    format!("worker_settle(done) artifact attempt does not match current attempt for task {task_id}"),
-                    json!({
-                        "task_id": task_id,
-                        "artifact_hash": artifact_hash,
-                        "artifact_attempt_id": artifact_attempt_id,
-                        "current_attempt_id": current_attempt_id,
-                        "provided_attempt_id": req.attempt_id.clone()
-                    }),
-                ));
-            }
+            validate_write_scoped_settle_attempt(
+                task_id,
+                artifact_hash,
+                artifact_attempt_id.as_deref(),
+                current_attempt_id.as_deref(),
+                req.attempt_id.as_deref(),
+            )?;
         }
 
         if target_status.eq_ignore_ascii_case("done") {
@@ -4758,6 +4747,38 @@ fn normalize_worker_settle_status(status: Option<&str>) -> Result<&str> {
             "unsupported worker_settle status `{other}`; expected done, failed, blocked, or skipped"
         )),
     }
+}
+
+fn validate_write_scoped_settle_attempt(
+    task_id: &str,
+    artifact_hash: &str,
+    artifact_attempt_id: Option<&str>,
+    current_attempt_id: Option<&str>,
+    provided_attempt_id: Option<&str>,
+) -> Result<()> {
+    let attempt_ok = match (artifact_attempt_id, current_attempt_id, provided_attempt_id) {
+        (Some(artifact), Some(current), Some(provided)) => {
+            artifact == current && provided == current
+        }
+        _ => false,
+    };
+    if attempt_ok {
+        return Ok(());
+    }
+    Err(control_error_details(
+        EVIDENCE_REQUIRED_CODE,
+        format!(
+            "worker_settle(done) for write-scoped task {task_id} requires artifact, current, and provided attempt_id to match"
+        ),
+        json!({
+            "task_id": task_id,
+            "artifact_hash": artifact_hash,
+            "artifact_attempt_id": artifact_attempt_id,
+            "current_attempt_id": current_attempt_id,
+            "provided_attempt_id": provided_attempt_id,
+            "required": "artifact_attempt_id == jobs.current_attempt_id == worker_settle.attempt_id"
+        }),
+    ))
 }
 
 fn metadata_string_list_any(value: Option<&Value>) -> Vec<String> {
@@ -5855,5 +5876,70 @@ mod tests {
         assert_eq!(confirmed.subject_id, "slot-xjpcode");
         assert_eq!(confirmed.lease_secs, 90);
         assert!(confirmed.allow_system_bypass);
+    }
+
+    #[test]
+    fn write_scoped_settle_attempt_requires_exact_three_way_match() {
+        assert!(validate_write_scoped_settle_attempt(
+            "task-1",
+            "hash-1",
+            Some("attempt-1"),
+            Some("attempt-1"),
+            Some("attempt-1"),
+        )
+        .is_ok());
+
+        let missing_current = validate_write_scoped_settle_attempt(
+            "task-1",
+            "hash-1",
+            Some("attempt-1"),
+            None,
+            Some("attempt-1"),
+        )
+        .expect_err("current attempt is required");
+        assert_write_scoped_attempt_error(&missing_current, None, Some("attempt-1"));
+
+        let missing_provided = validate_write_scoped_settle_attempt(
+            "task-1",
+            "hash-1",
+            Some("attempt-1"),
+            Some("attempt-1"),
+            None,
+        )
+        .expect_err("worker_settle attempt_id is required");
+        assert_write_scoped_attempt_error(&missing_provided, Some("attempt-1"), None);
+
+        let wrong_artifact = validate_write_scoped_settle_attempt(
+            "task-1",
+            "hash-1",
+            Some("attempt-old"),
+            Some("attempt-1"),
+            Some("attempt-1"),
+        )
+        .expect_err("artifact attempt must match current attempt");
+        assert_write_scoped_attempt_error(&wrong_artifact, Some("attempt-1"), Some("attempt-1"));
+    }
+
+    fn assert_write_scoped_attempt_error(
+        err: &anyhow::Error,
+        current_attempt_id: Option<&str>,
+        provided_attempt_id: Option<&str>,
+    ) {
+        let structured = err
+            .downcast_ref::<StructuredControlError>()
+            .expect("structured control error");
+        assert_eq!(structured.code, EVIDENCE_REQUIRED_CODE);
+        assert_eq!(
+            structured.details["required"],
+            "artifact_attempt_id == jobs.current_attempt_id == worker_settle.attempt_id"
+        );
+        assert_eq!(
+            structured.details["current_attempt_id"],
+            current_attempt_id.map(Value::from).unwrap_or(Value::Null)
+        );
+        assert_eq!(
+            structured.details["provided_attempt_id"],
+            provided_attempt_id.map(Value::from).unwrap_or(Value::Null)
+        );
     }
 }
