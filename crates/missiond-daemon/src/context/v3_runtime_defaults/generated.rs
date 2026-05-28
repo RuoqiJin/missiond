@@ -4,7 +4,7 @@
 // Do not edit by hand.
 
 pub const SCHEMA_VERSION: &str = "missiond.compiled-runtime-config.v1";
-pub const SOURCE_HASH: &str = "d1513464c99ac0cf8e5dfa46705fd0e8";
+pub const SOURCE_HASH: &str = "dfdeda68e2d4b9333d9c0a383f505135";
 pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
   "blueprint": ".missiond/v3/missiond-blueprint.lisp",
   "source_units": [
@@ -34,7 +34,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
       "kind": "multi-section-shard",
       "included_by": ".missiond/v3/shards/index.lisp",
       "include_line": 14,
-      "source_hash": "e91efa96a105dcf56ed8fa3a27fb8978"
+      "source_hash": "4b081610f807bb2d839ca4a7d5de3da0"
     },
     {
       "file": ".missiond/v3/shards/control-plane-runtime.lisp",
@@ -118,14 +118,14 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
       "kind": "behavior-universe",
       "included_by": ".missiond/v3/shards/index.lisp",
       "include_line": 98,
-      "source_hash": "2dc6c7b8b71755d261a59f1bdc37408d"
+      "source_hash": "dcfca2adcf31d0ee2b283e5d04a0e18c"
     },
     {
       "file": ".missiond/v3/shards/implementation/request-surfaces.lisp",
       "kind": "implementation-map",
       "included_by": ".missiond/v3/shards/index.lisp",
       "include_line": 105,
-      "source_hash": "01baccb7fce77f0a7e88b141ac2d9031"
+      "source_hash": "e8ac40f8e52910e22b6eec67b7be74fd"
     },
     {
       "file": ".missiond/v3/shards/implementation/execution-surfaces.lisp",
@@ -199,14 +199,14 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
     },
     {
       "id": "workstation-runtime",
-      "source_hash": "fe77561bc4c17c899b2817fd57267f9a",
+      "source_hash": "26e820e637c5ccc6e46d7eafc165e831",
       "source_units": [
         {
           "file": ".missiond/v3/shards/workstation-runtime.lisp",
           "kind": "multi-section-shard",
           "included_by": ".missiond/v3/shards/index.lisp",
           "include_line": 14,
-          "source_hash": "e91efa96a105dcf56ed8fa3a27fb8978"
+          "source_hash": "4b081610f807bb2d839ca4a7d5de3da0"
         }
       ]
     },
@@ -277,7 +277,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
     },
     {
       "id": "universe",
-      "source_hash": "ce088d143de3d121dfe89f36b7040b0a",
+      "source_hash": "5773799fc1c60d15e6dac53ae357c47b",
       "source_units": [
         {
           "file": ".missiond/v3/shards/universe/service-runtime.lisp",
@@ -319,20 +319,20 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
           "kind": "behavior-universe",
           "included_by": ".missiond/v3/shards/index.lisp",
           "include_line": 98,
-          "source_hash": "2dc6c7b8b71755d261a59f1bdc37408d"
+          "source_hash": "dcfca2adcf31d0ee2b283e5d04a0e18c"
         }
       ]
     },
     {
       "id": "implementation-map",
-      "source_hash": "baa90b09240b08bb1b52f2bd96862eac",
+      "source_hash": "c8dcd00688f9dc876d7ad464075f557a",
       "source_units": [
         {
           "file": ".missiond/v3/shards/implementation/request-surfaces.lisp",
           "kind": "implementation-map",
           "included_by": ".missiond/v3/shards/index.lisp",
           "include_line": 105,
-          "source_hash": "01baccb7fce77f0a7e88b141ac2d9031"
+          "source_hash": "e8ac40f8e52910e22b6eec67b7be74fd"
         },
         {
           "file": ".missiond/v3/shards/implementation/execution-surfaces.lisp",
@@ -393,7 +393,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 323,
         "source_column": 3,
-        "source_hash": "d1513464c99ac0cf8e5dfa46705fd0e8"
+        "source_hash": "dfdeda68e2d4b9333d9c0a383f505135"
       }
     },
     {
@@ -418,7 +418,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 344,
         "source_column": 3,
-        "source_hash": "d1513464c99ac0cf8e5dfa46705fd0e8"
+        "source_hash": "dfdeda68e2d4b9333d9c0a383f505135"
       }
     },
     {
@@ -440,7 +440,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 357,
         "source_column": 3,
-        "source_hash": "d1513464c99ac0cf8e5dfa46705fd0e8"
+        "source_hash": "dfdeda68e2d4b9333d9c0a383f505135"
       }
     },
     {
@@ -459,7 +459,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 369,
         "source_column": 3,
-        "source_hash": "d1513464c99ac0cf8e5dfa46705fd0e8"
+        "source_hash": "dfdeda68e2d4b9333d9c0a383f505135"
       }
     },
     {
@@ -480,7 +480,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 379,
         "source_column": 3,
-        "source_hash": "d1513464c99ac0cf8e5dfa46705fd0e8"
+        "source_hash": "dfdeda68e2d4b9333d9c0a383f505135"
       }
     },
     {
@@ -523,7 +523,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 390,
         "source_column": 3,
-        "source_hash": "d1513464c99ac0cf8e5dfa46705fd0e8"
+        "source_hash": "dfdeda68e2d4b9333d9c0a383f505135"
       }
     },
     {
@@ -545,7 +545,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/universe/project-registry.lisp",
         "source_line": 1,
         "source_column": 1,
-        "source_hash": "d1513464c99ac0cf8e5dfa46705fd0e8"
+        "source_hash": "dfdeda68e2d4b9333d9c0a383f505135"
       }
     },
     {
@@ -565,7 +565,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 1,
         "source_column": 3,
-        "source_hash": "d1513464c99ac0cf8e5dfa46705fd0e8"
+        "source_hash": "dfdeda68e2d4b9333d9c0a383f505135"
       }
     },
     {
@@ -592,7 +592,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 118,
         "source_column": 3,
-        "source_hash": "d1513464c99ac0cf8e5dfa46705fd0e8"
+        "source_hash": "dfdeda68e2d4b9333d9c0a383f505135"
       }
     },
     {
@@ -629,7 +629,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 185,
         "source_column": 3,
-        "source_hash": "d1513464c99ac0cf8e5dfa46705fd0e8"
+        "source_hash": "dfdeda68e2d4b9333d9c0a383f505135"
       }
     },
     {
@@ -673,7 +673,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 141,
         "source_column": 3,
-        "source_hash": "d1513464c99ac0cf8e5dfa46705fd0e8"
+        "source_hash": "dfdeda68e2d4b9333d9c0a383f505135"
       }
     }
   ],
@@ -1028,6 +1028,34 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "max_concurrency": 1,
         "timeout_secs": 180,
         "default_use": "jarvis-intent-authoring",
+        "accepts_boardtask": false,
+        "write_allowed": false,
+        "reasoning_effort": "xhigh",
+        "search_enabled": true,
+        "sandbox": "read-only",
+        "approval_policy": "never",
+        "tool_policy_path": null
+      },
+      {
+        "id": "codex-plan-author",
+        "engine": "codex",
+        "role": "plan-author",
+        "slot_id": "slot-codex-plan-author",
+        "task_type": "codex_plan_author",
+        "model_profile": "codex-master-gpt-5-5-xhigh",
+        "model": null,
+        "task_classes": [
+          "plan-authoring",
+          "plan-generation"
+        ],
+        "capabilities": [
+          "plan-generation",
+          "code-read",
+          "search"
+        ],
+        "max_concurrency": 1,
+        "timeout_secs": 180,
+        "default_use": "jarvis-plan-authoring",
         "accepts_boardtask": false,
         "write_allowed": false,
         "reasoning_effort": "xhigh",

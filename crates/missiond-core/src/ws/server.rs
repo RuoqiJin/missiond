@@ -202,12 +202,54 @@ impl Default for JarvisIntentAuthorConfig {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct JarvisPlanAuthorConfig {
+    pub slot_id: String,
+    pub model: String,
+    pub reasoning_effort: String,
+    pub search_enabled: bool,
+    pub sandbox: String,
+    pub approval_policy: String,
+    pub timeout_secs: u64,
+}
+
+impl Default for JarvisPlanAuthorConfig {
+    fn default() -> Self {
+        Self {
+            slot_id: "slot-codex-plan-author".to_string(),
+            model: "gpt-5.5".to_string(),
+            reasoning_effort: "xhigh".to_string(),
+            search_enabled: true,
+            sandbox: "read-only".to_string(),
+            approval_policy: "never".to_string(),
+            timeout_secs: 180,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct JarvisCodexIntentResponse {
     recognized_objective: String,
     intent_kind: String,
     understanding: String,
     review_text: String,
+    #[serde(default)]
+    assumptions: Vec<String>,
+    #[serde(default)]
+    non_goals: Vec<String>,
+    #[serde(default)]
+    acceptance_signals: Vec<String>,
+    #[serde(default)]
+    confidence: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct JarvisCodexPlanResponse {
+    objective: String,
+    review_text: String,
+    steps: Vec<String>,
+    #[serde(default)]
+    boundary: Option<String>,
     #[serde(default)]
     assumptions: Vec<String>,
     #[serde(default)]
@@ -225,6 +267,19 @@ struct JarvisAuthoredIntentDraft {
     understanding: String,
     review_text: String,
     artifact_body: String,
+    assumptions: Vec<String>,
+    non_goals: Vec<String>,
+    acceptance_signals: Vec<String>,
+    confidence: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct JarvisAuthoredPlanDraft {
+    objective: String,
+    review_text: String,
+    artifact_body: String,
+    steps: Vec<String>,
+    boundary: Option<String>,
     assumptions: Vec<String>,
     non_goals: Vec<String>,
     acceptance_signals: Vec<String>,
@@ -261,6 +316,8 @@ pub struct WSServerOptions {
     pub default_chat_slot: String,
     /// V3-projected Codex CLI authoring lane for intent.lisp.
     pub jarvis_intent_author: JarvisIntentAuthorConfig,
+    /// V3-projected Codex CLI authoring lane for plan.lisp.
+    pub jarvis_plan_author: JarvisPlanAuthorConfig,
 }
 
 /// PTY WebSocket Server
@@ -281,6 +338,7 @@ pub struct PTYWebSocketServer {
     tool_count: usize,
     default_chat_slot: String,
     jarvis_intent_author: JarvisIntentAuthorConfig,
+    jarvis_plan_author: JarvisPlanAuthorConfig,
 }
 
 /// Jarvis system prompt — injected before context enrichment so Claude Code
@@ -1511,6 +1569,7 @@ impl PTYWebSocketServer {
             tool_count: options.tool_count,
             default_chat_slot: options.default_chat_slot,
             jarvis_intent_author: options.jarvis_intent_author,
+            jarvis_plan_author: options.jarvis_plan_author,
         }
     }
 
@@ -1586,6 +1645,7 @@ impl PTYWebSocketServer {
         let tool_count = self.tool_count;
         let default_chat_slot = self.default_chat_slot.clone();
         let jarvis_intent_author = self.jarvis_intent_author.clone();
+        let jarvis_plan_author = self.jarvis_plan_author.clone();
 
         tokio::spawn(async move {
             let mut shutdown_rx = shutdown_tx.subscribe();
@@ -1608,8 +1668,9 @@ impl PTYWebSocketServer {
                                 let tool_count = tool_count;
                                 let default_chat_slot = default_chat_slot.clone();
                                 let jarvis_intent_author = jarvis_intent_author.clone();
+                                let jarvis_plan_author = jarvis_plan_author.clone();
                                 tokio::spawn(async move {
-                                    if let Err(e) = Self::handle_connection(stream, addr, pty_manager, cc_tasks_watcher, screenshot_broker, jarvis_trace, incident_tx, system_event_tx, frontend_events_tx, db, context_enricher, jarvis_grounding, jarvis_artifact_writer, tool_count, default_chat_slot, jarvis_intent_author).await {
+                                    if let Err(e) = Self::handle_connection(stream, addr, pty_manager, cc_tasks_watcher, screenshot_broker, jarvis_trace, incident_tx, system_event_tx, frontend_events_tx, db, context_enricher, jarvis_grounding, jarvis_artifact_writer, tool_count, default_chat_slot, jarvis_intent_author, jarvis_plan_author).await {
                                         error!(?e, ?addr, "WebSocket connection error");
                                     }
                                 });
@@ -2347,6 +2408,7 @@ impl PTYWebSocketServer {
         addr: SocketAddr,
         pty_manager: Option<Arc<PTYManager>>,
         jarvis_intent_author: JarvisIntentAuthorConfig,
+        jarvis_plan_author: JarvisPlanAuthorConfig,
         jarvis_grounding: JarvisGroundingSlot,
         jarvis_artifact_writer: JarvisArtifactSlot,
         db: Option<Arc<dyn crate::db::traits::MissionStore>>,
@@ -2377,6 +2439,7 @@ impl PTYWebSocketServer {
             envelope,
             pty_manager,
             jarvis_intent_author,
+            jarvis_plan_author,
             jarvis_grounding,
             jarvis_artifact_writer,
             db,
@@ -2390,6 +2453,7 @@ impl PTYWebSocketServer {
         pty_manager: Option<Arc<PTYManager>>,
         default_chat_slot: String,
         jarvis_intent_author: JarvisIntentAuthorConfig,
+        jarvis_plan_author: JarvisPlanAuthorConfig,
         jarvis_grounding: JarvisGroundingSlot,
         jarvis_artifact_writer: JarvisArtifactSlot,
         db: Option<Arc<dyn crate::db::traits::MissionStore>>,
@@ -2430,6 +2494,7 @@ impl PTYWebSocketServer {
             envelope,
             pty_manager,
             jarvis_intent_author,
+            jarvis_plan_author,
             jarvis_grounding,
             jarvis_artifact_writer,
             db,
@@ -2444,6 +2509,7 @@ impl PTYWebSocketServer {
         mut envelope: InteractionEnvelope,
         pty_manager: Option<Arc<PTYManager>>,
         jarvis_intent_author: JarvisIntentAuthorConfig,
+        jarvis_plan_author: JarvisPlanAuthorConfig,
         jarvis_grounding: JarvisGroundingSlot,
         jarvis_artifact_writer: JarvisArtifactSlot,
         db: Option<Arc<dyn crate::db::traits::MissionStore>>,
@@ -2911,26 +2977,68 @@ impl PTYWebSocketServer {
             .await;
         }
 
-        let plan_steps = vec![
-            "按 PermissionContext 和 grounding evidence 确认可执行范围",
-            "创建可追踪 BoardTask，并写入 grounding / intent / plan artifact ids",
-            "由主控选择合适工位，不直接执行实现任务",
-            "等待 task-result-artifact 后通过对应 channel response sink 返回结果",
-        ];
-        let plan_review_text = Self::jarvis_plan_review_text(&objective_text, &plan_steps);
-        let plan_artifact_body = Self::jarvis_plan_lisp_body(
+        Self::write_sse_event(
+            &mut stream,
+            "status",
+            &serde_json::json!({
+                "interaction_id": interaction_id,
+                "phase": "plan_authoring",
+                "author": "codex-cli-gpt-5.5-xhigh",
+                "slot_id": &jarvis_plan_author.slot_id,
+                "message": "Codex CLI GPT-5.5 xhigh is authoring plan.lisp for user confirmation."
+            }),
+        )
+        .await?;
+        let authored_plan = match Self::author_jarvis_plan_draft(
+            pty_manager.as_ref(),
+            &jarvis_plan_author,
             "missiond.interaction-plan-artifact.v1",
             &channel,
             &objective_text,
             &grounding_context_id,
             &intent_artifact_id,
-            &plan_steps,
-        );
+            resolved_topic_id.as_deref(),
+            resolved_topic_label.as_deref(),
+            &sources_used,
+            Some(&permission_context),
+        )
+        .await
+        {
+            Ok(draft) => draft,
+            Err(error) => {
+                let diagnostic = serde_json::json!({
+                    "phase": "plan_authoring_failed",
+                    "error": {
+                        "code": "JARVIS_PLAN_AUTHOR_FAILED",
+                        "message": error.to_string()
+                    }
+                });
+                Self::write_sse_event(&mut stream, "diagnostic", &diagnostic).await?;
+                Self::write_sse_openai_text_and_persist(
+                    &mut stream,
+                    &chat_id,
+                    "plan.lisp 需要 Codex CLI GPT-5.5 xhigh 工位生成；当前工位不可用或输出未通过校验，已停止，不会用 Rust fallback 代替你的计划生成。",
+                    Some("stop"),
+                    db.as_ref(),
+                    jarvis_conv_id.as_deref(),
+                )
+                .await?;
+                Self::finish_sse(&mut stream).await?;
+                return Ok(());
+            }
+        };
+        let objective_text = authored_plan.objective.clone();
+        let plan_review_text = authored_plan.review_text.clone();
+        let plan_artifact_body = authored_plan.artifact_body.clone();
+        let plan_steps = authored_plan.steps.clone();
         let plan_payload = serde_json::json!({
             "schema": "missiond.interaction-plan-artifact.v1",
             "interaction_id": interaction_id,
             "channel": channel,
             "phase": "plan_draft",
+            "author": "codex-cli-gpt-5.5-xhigh",
+            "plan_author_slot_id": &jarvis_plan_author.slot_id,
+            "confidence": authored_plan.confidence,
             "grounding_context_id": grounding_context_id,
             "context_pack_path": context_pack_path,
             "context_pack_file": context_pack_file,
@@ -2944,6 +3052,11 @@ impl PTYWebSocketServer {
             "artifact_language": "lisp",
             "artifact_body": plan_artifact_body,
             "steps": plan_steps,
+            "boundary": authored_plan.boundary,
+            "assumptions": authored_plan.assumptions,
+            "non_goals": authored_plan.non_goals,
+            "acceptance_signals": authored_plan.acceptance_signals,
+            "sources_used": sources_used,
             "requires_confirmation": true
         });
         let plan_artifact = match Self::put_jarvis_artifact(
@@ -3855,7 +3968,7 @@ impl PTYWebSocketServer {
         Self::write_sse_openai_text(stream, chat_id, text, finish_reason).await
     }
 
-    fn clamp_jarvis_intent_author_timeout_secs(value: Option<u64>) -> u64 {
+    fn clamp_jarvis_author_timeout_secs(value: Option<u64>) -> u64 {
         const DEFAULT_TIMEOUT_SECS: u64 = 180;
         const MIN_TIMEOUT_SECS: u64 = 30;
         const MAX_TIMEOUT_SECS: u64 = 300;
@@ -3864,9 +3977,26 @@ impl PTYWebSocketServer {
             .clamp(MIN_TIMEOUT_SECS, MAX_TIMEOUT_SECS)
     }
 
+    fn clamp_jarvis_intent_author_timeout_secs(value: Option<u64>) -> u64 {
+        Self::clamp_jarvis_author_timeout_secs(value)
+    }
+
+    fn clamp_jarvis_plan_author_timeout_secs(value: Option<u64>) -> u64 {
+        Self::clamp_jarvis_author_timeout_secs(value)
+    }
+
     fn jarvis_intent_author_timeout_secs(config: &JarvisIntentAuthorConfig) -> u64 {
         Self::clamp_jarvis_intent_author_timeout_secs(
             std::env::var("MISSIOND_JARVIS_INTENT_AUTHOR_TIMEOUT_SECS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .or(Some(config.timeout_secs)),
+        )
+    }
+
+    fn jarvis_plan_author_timeout_secs(config: &JarvisPlanAuthorConfig) -> u64 {
+        Self::clamp_jarvis_plan_author_timeout_secs(
+            std::env::var("MISSIOND_JARVIS_PLAN_AUTHOR_TIMEOUT_SECS")
                 .ok()
                 .and_then(|value| value.parse::<u64>().ok())
                 .or(Some(config.timeout_secs)),
@@ -3921,6 +4051,57 @@ JSON 字段必须是：\n\
         )
     }
 
+    fn jarvis_codex_plan_prompt(
+        config: &JarvisPlanAuthorConfig,
+        schema: &str,
+        channel: &str,
+        objective: &str,
+        grounding_context_id: &str,
+        intent_artifact_id: &str,
+        topic_id: Option<&str>,
+        topic_label: Option<&str>,
+        sources_used: &[String],
+        permission_context: Option<&serde_json::Value>,
+    ) -> String {
+        let input = serde_json::json!({
+            "schema": schema,
+            "channel": channel,
+            "confirmed_intent_objective": objective,
+            "grounding_context_id": grounding_context_id,
+            "intent_artifact_id": intent_artifact_id,
+            "topic_id": topic_id,
+            "topic_label": topic_label,
+            "sources_used": sources_used,
+            "permission_context": permission_context.cloned().unwrap_or(serde_json::Value::Null),
+            "authoring_lane": {
+                "engine": "codex-cli",
+                "slot_id": config.slot_id,
+                "model": config.model,
+                "reasoning_effort": config.reasoning_effort,
+                "sandbox": config.sandbox,
+                "approval_policy": config.approval_policy
+            }
+        });
+        format!(
+            "你是 MissionD 的 Jarvis plan.lisp 语义作者，运行在 Codex CLI GPT-5.5 xhigh headless 工位。\n\
+任务：基于已确认的 intent.lisp 目标，生成可供用户确认的 plan draft。不要创建 BoardTask、不要派工位、不要执行实现、不要改文件。\n\
+计划必须只描述 MissionD 在用户确认 plan 后会如何创建可追踪 BoardTask、选择工位、等待 task-result-artifact，不得假装任务已经完成。\n\
+只返回一个严格 JSON object，不要 Markdown，不要代码围栏，不要额外解释。JSON key 必须使用双引号。\n\
+JSON 字段必须是：\n\
+  objective: string，必须等同或更保守地表达已确认意图，不要扩大范围。\n\
+  review_text: string，给用户看的审阅摘要，必须说明边界：确认 plan 后才创建 BoardTask，结果以 task-result-artifact 为准。\n\
+  steps: string[]，2 到 6 个中文步骤，每步是可审阅的计划动作，不是执行结果。\n\
+  boundary: string，计划确认边界和不执行承诺。\n\
+  assumptions: string[]，你做出的假设。\n\
+  non_goals: string[]，明确不做什么。\n\
+  acceptance_signals: string[]，用户确认 plan 时实际接受的内容。\n\
+  confidence: string，low/medium/high。\n\
+\n\
+输入 JSON：\n{}\n",
+            serde_json::to_string_pretty(&input).unwrap_or_else(|_| "{}".to_string())
+        )
+    }
+
     fn extract_codex_exec_message(stdout: &str) -> Option<String> {
         let mut content_parts = Vec::new();
         for line in stdout.lines() {
@@ -3968,29 +4149,38 @@ JSON 字段必须是：\n\
         text.chars().take(500).collect::<String>()
     }
 
-    async fn run_jarvis_codex_intent_exec(
-        config: &JarvisIntentAuthorConfig,
+    async fn run_jarvis_codex_author_exec(
+        slot_id: &str,
+        model: &str,
+        reasoning_effort: &str,
+        search_enabled: bool,
+        sandbox: &str,
+        approval_policy: &str,
+        timeout_secs: u64,
+        output_prefix: &str,
+        env_marker: &str,
+        error_prefix: &str,
         prompt: &str,
     ) -> anyhow::Result<String> {
-        let timeout_secs = Self::jarvis_intent_author_timeout_secs(config);
         let cwd = Self::jarvis_slot_runtime_cwd();
         let cwd_arg = cwd.display().to_string();
         let output_path = std::env::temp_dir().join(format!(
-            "missiond-jarvis-intent-{}.json",
+            "missiond-jarvis-{}-{}.json",
+            output_prefix,
             uuid::Uuid::new_v4()
         ));
         let output_path_arg = output_path.display().to_string();
-        let reasoning_config = format!("model_reasoning_effort=\"{}\"", config.reasoning_effort);
+        let reasoning_config = format!("model_reasoning_effort=\"{}\"", reasoning_effort);
 
         let mut cmd = tokio::process::Command::new("codex");
         cmd.kill_on_drop(true);
-        if config.search_enabled {
+        if search_enabled {
             cmd.arg("--search");
         }
-        cmd.arg("--model").arg(&config.model);
+        cmd.arg("--model").arg(model);
         cmd.arg("-c").arg(reasoning_config);
-        cmd.arg("--sandbox").arg(&config.sandbox);
-        cmd.arg("--ask-for-approval").arg(&config.approval_policy);
+        cmd.arg("--sandbox").arg(sandbox);
+        cmd.arg("--ask-for-approval").arg(approval_policy);
         cmd.arg("--cd").arg(cwd_arg);
         cmd.arg("exec");
         cmd.arg("--json");
@@ -3999,11 +4189,8 @@ JSON 字段必须是：\n\
         cmd.arg("--color").arg("never");
         cmd.arg("--output-last-message").arg(&output_path_arg);
         cmd.arg(prompt);
-        cmd.env("MISSIOND_SLOT_ID", &config.slot_id);
-        cmd.env(
-            "MISSIOND_JARVIS_INTENT_AUTHOR",
-            chrono::Utc::now().to_rfc3339(),
-        );
+        cmd.env("MISSIOND_SLOT_ID", slot_id);
+        cmd.env(env_marker, chrono::Utc::now().to_rfc3339());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
@@ -4013,13 +4200,15 @@ JSON 字段必须是：\n\
             {
                 Ok(result) => result.map_err(|err| {
                     anyhow::anyhow!(
-                        "JARVIS_INTENT_AUTHOR_UNAVAILABLE: spawn codex exec failed: {err}"
+                        "{}_UNAVAILABLE: spawn codex exec failed: {err}",
+                        error_prefix
                     )
                 })?,
                 Err(_) => {
                     let _ = tokio::fs::remove_file(&output_path).await;
                     anyhow::bail!(
-                        "JARVIS_INTENT_AUTHOR_TIMEOUT: codex exec did not finish within {}s",
+                        "{}_TIMEOUT: codex exec did not finish within {}s",
+                        error_prefix,
                         timeout_secs
                     );
                 }
@@ -4030,7 +4219,8 @@ JSON 字段必须是：\n\
         if !output.status.success() {
             let _ = tokio::fs::remove_file(&output_path).await;
             anyhow::bail!(
-                "JARVIS_INTENT_AUTHOR_FAILED: codex exec exited with {}: {}",
+                "{}_FAILED: codex exec exited with {}: {}",
+                error_prefix,
                 output.status,
                 Self::jarvis_codex_output_sample(&stderr)
             );
@@ -4045,10 +4235,51 @@ JSON 字段必须是：\n\
         }
         Self::extract_codex_exec_message(&stdout).ok_or_else(|| {
             anyhow::anyhow!(
-                "JARVIS_INTENT_AUTHOR_FAILED: codex exec produced no final message; stdout={}",
+                "{}_FAILED: codex exec produced no final message; stdout={}",
+                error_prefix,
                 Self::jarvis_codex_output_sample(&stdout)
             )
         })
+    }
+
+    async fn run_jarvis_codex_intent_exec(
+        config: &JarvisIntentAuthorConfig,
+        prompt: &str,
+    ) -> anyhow::Result<String> {
+        Self::run_jarvis_codex_author_exec(
+            &config.slot_id,
+            &config.model,
+            &config.reasoning_effort,
+            config.search_enabled,
+            &config.sandbox,
+            &config.approval_policy,
+            Self::jarvis_intent_author_timeout_secs(config),
+            "intent",
+            "MISSIOND_JARVIS_INTENT_AUTHOR",
+            "JARVIS_INTENT_AUTHOR",
+            prompt,
+        )
+        .await
+    }
+
+    async fn run_jarvis_codex_plan_exec(
+        config: &JarvisPlanAuthorConfig,
+        prompt: &str,
+    ) -> anyhow::Result<String> {
+        Self::run_jarvis_codex_author_exec(
+            &config.slot_id,
+            &config.model,
+            &config.reasoning_effort,
+            config.search_enabled,
+            &config.sandbox,
+            &config.approval_policy,
+            Self::jarvis_plan_author_timeout_secs(config),
+            "plan",
+            "MISSIOND_JARVIS_PLAN_AUTHOR",
+            "JARVIS_PLAN_AUTHOR",
+            prompt,
+        )
+        .await
     }
 
     fn extract_json_object(text: &str) -> Option<&str> {
@@ -4101,6 +4332,25 @@ JSON 字段必须是：\n\
             || parsed.review_text.trim().is_empty()
         {
             anyhow::bail!("Codex intent author returned an incomplete intent draft");
+        }
+        Ok(parsed)
+    }
+
+    fn parse_codex_plan_response(text: &str) -> anyhow::Result<JarvisCodexPlanResponse> {
+        let json_text = Self::extract_json_object(text)
+            .ok_or_else(|| anyhow::anyhow!("Codex plan author did not return a JSON object"))?;
+        let mut parsed: JarvisCodexPlanResponse = serde_json::from_str(json_text)?;
+        parsed.steps = parsed
+            .steps
+            .into_iter()
+            .map(|step| step.trim().to_string())
+            .filter(|step| !step.is_empty())
+            .collect();
+        if parsed.objective.trim().is_empty()
+            || parsed.review_text.trim().is_empty()
+            || parsed.steps.is_empty()
+        {
+            anyhow::bail!("Codex plan author returned an incomplete plan draft");
         }
         Ok(parsed)
     }
@@ -4224,27 +4474,19 @@ JSON 字段必须是：\n\
         format!("[{}]", joined)
     }
 
-    fn jarvis_plan_review_text(objective: &str, steps: &[&str]) -> String {
-        let steps = steps
-            .iter()
-            .enumerate()
-            .map(|(idx, step)| format!("{}. {}", idx + 1, step))
-            .collect::<Vec<_>>()
-            .join("\n");
-        format!(
-            "目标: {objective}\n计划:\n{steps}\n边界: 确认 plan 后才创建 BoardTask；执行结果必须以 task-result-artifact 为准。"
-        )
-    }
-
-    fn jarvis_plan_lisp_body(
+    fn jarvis_authored_plan_lisp_body(
         schema: &str,
+        config: &JarvisPlanAuthorConfig,
         channel: &str,
-        objective: &str,
+        draft: &JarvisCodexPlanResponse,
         grounding_context_id: &str,
         intent_artifact_id: &str,
-        steps: &[&str],
+        topic_id: Option<&str>,
+        topic_label: Option<&str>,
+        sources_used: &[String],
     ) -> String {
-        let rendered_steps = steps
+        let rendered_steps = draft
+            .steps
             .iter()
             .enumerate()
             .map(|(idx, step)| {
@@ -4257,14 +4499,77 @@ JSON 字段必须是：\n\
             .collect::<Vec<_>>()
             .join("\n");
         format!(
-            "(plan-draft\n  :schema {}\n  :authority deterministic-rust-gate\n  :channel {}\n  :objective {}\n  :grounding-context-id {}\n  :intent-artifact-id {}\n  :execution\n    (:create-board-task-after-plan-confirmation true\n     :worker-dispatch-after-board-task true\n     :completion-authority task-result-artifact)\n  :steps [\n{}\n  ]\n  :approval (:state awaiting-plan-confirmation :required true))",
+            "(plan-draft\n  :schema {}\n  :authority codex-cli-gpt-5.5-xhigh\n  :semantic-author (:engine codex-cli :slot-id {} :model {} :reasoning-effort xhigh :sandbox {} :approval-policy {})\n  :channel {}\n  :objective {}\n  :confidence {}\n  :grounding-context-id {}\n  :intent-artifact-id {}\n  :topic-id {}\n  :topic-label {}\n  :sources-used {}\n  :execution\n    (:create-board-task-after-plan-confirmation true\n     :worker-dispatch-after-board-task true\n     :completion-authority task-result-artifact)\n  :steps [\n{}\n  ]\n  :boundary {}\n  :assumptions {}\n  :non-goals {}\n  :acceptance-signals {}\n  :approval (:state awaiting-plan-confirmation :required true))",
             Self::jarvis_lisp_string(schema),
+            Self::jarvis_lisp_string(&config.slot_id),
+            Self::jarvis_lisp_string(&config.model),
+            Self::jarvis_lisp_string(&config.sandbox),
+            Self::jarvis_lisp_string(&config.approval_policy),
             Self::jarvis_lisp_string(channel),
-            Self::jarvis_lisp_string(objective),
+            Self::jarvis_lisp_string(draft.objective.trim()),
+            Self::jarvis_lisp_optional(draft.confidence.as_deref()),
             Self::jarvis_lisp_string(grounding_context_id),
             Self::jarvis_lisp_string(intent_artifact_id),
+            Self::jarvis_lisp_optional(topic_id),
+            Self::jarvis_lisp_optional(topic_label),
+            Self::jarvis_lisp_string_list(sources_used),
             rendered_steps,
+            Self::jarvis_lisp_optional(draft.boundary.as_deref()),
+            Self::jarvis_lisp_string_list(&draft.assumptions),
+            Self::jarvis_lisp_string_list(&draft.non_goals),
+            Self::jarvis_lisp_string_list(&draft.acceptance_signals),
         )
+    }
+
+    async fn author_jarvis_plan_draft(
+        _pty_manager: Option<&Arc<PTYManager>>,
+        config: &JarvisPlanAuthorConfig,
+        schema: &str,
+        channel: &str,
+        objective: &str,
+        grounding_context_id: &str,
+        intent_artifact_id: &str,
+        topic_id: Option<&str>,
+        topic_label: Option<&str>,
+        sources_used: &[String],
+        permission_context: Option<&serde_json::Value>,
+    ) -> anyhow::Result<JarvisAuthoredPlanDraft> {
+        let prompt = Self::jarvis_codex_plan_prompt(
+            config,
+            schema,
+            channel,
+            objective,
+            grounding_context_id,
+            intent_artifact_id,
+            topic_id,
+            topic_label,
+            sources_used,
+            permission_context,
+        );
+        let response = Self::run_jarvis_codex_plan_exec(config, &prompt).await?;
+        let parsed = Self::parse_codex_plan_response(&response)?;
+        let artifact_body = Self::jarvis_authored_plan_lisp_body(
+            schema,
+            config,
+            channel,
+            &parsed,
+            grounding_context_id,
+            intent_artifact_id,
+            topic_id,
+            topic_label,
+            sources_used,
+        );
+        Ok(JarvisAuthoredPlanDraft {
+            objective: parsed.objective.trim().to_string(),
+            review_text: parsed.review_text.trim().to_string(),
+            artifact_body,
+            steps: parsed.steps,
+            boundary: parsed.boundary,
+            assumptions: parsed.assumptions,
+            non_goals: parsed.non_goals,
+            acceptance_signals: parsed.acceptance_signals,
+            confidence: parsed.confidence,
+        })
     }
 
     fn jarvis_artifact_projection_text(
@@ -6010,24 +6315,66 @@ JSON 字段必须是：\n\
                 .await;
             }
 
-            let plan_steps = vec![
-                "确认 project_id / read_scope / skill evidence / deploy facts 等 grounding 证据",
-                "把用户目标拆成可验收的 BoardTask / accepted shard",
-                "按任务类型选择 Codex / ClaudeCode / Agy 工位",
-                "等待 task-result-artifact，再由主控返回结果",
-            ];
-            let plan_review_text = Self::jarvis_plan_review_text(&objective_text, &plan_steps);
-            let plan_artifact_body = Self::jarvis_plan_lisp_body(
+            let jarvis_plan_author = JarvisPlanAuthorConfig::default();
+            Self::write_sse_event(
+                &mut stream,
+                "status",
+                &serde_json::json!({
+                    "phase": "plan_authoring",
+                    "author": "codex-cli-gpt-5.5-xhigh",
+                    "slot_id": &jarvis_plan_author.slot_id,
+                    "message": "Codex CLI GPT-5.5 xhigh is authoring plan.lisp for user confirmation."
+                }),
+            )
+            .await?;
+            let authored_plan = match Self::author_jarvis_plan_draft(
+                Some(&pty_manager),
+                &jarvis_plan_author,
                 "missiond.jarvis-plan-artifact.v1",
                 "jarvis",
                 &objective_text,
                 &grounding_context_id,
                 &intent_artifact_id,
-                &plan_steps,
-            );
+                resolved_topic_id.as_deref(),
+                resolved_topic_label.as_deref(),
+                &sources_used,
+                None,
+            )
+            .await
+            {
+                Ok(draft) => draft,
+                Err(error) => {
+                    let diagnostic = serde_json::json!({
+                        "phase": "plan_authoring_failed",
+                        "error": {
+                            "code": "JARVIS_PLAN_AUTHOR_FAILED",
+                            "message": error.to_string()
+                        }
+                    });
+                    Self::write_sse_event(&mut stream, "diagnostic", &diagnostic).await?;
+                    Self::write_sse_openai_text_and_persist(
+                        &mut stream,
+                        &chat_id,
+                        "plan.lisp 需要 Codex CLI GPT-5.5 xhigh 工位生成；当前工位不可用或输出未通过校验，已停止，不会用 Rust fallback 代替你的计划生成。",
+                        Some("stop"),
+                        db.as_ref(),
+                        jarvis_conv_id.as_deref(),
+                    )
+                    .await?;
+                    Self::finish_sse(&mut stream).await?;
+                    return Ok(());
+                }
+            };
+            let objective_text = authored_plan.objective.clone();
+            let plan_review_text = authored_plan.review_text.clone();
+            let plan_artifact_body = authored_plan.artifact_body.clone();
+            let plan_steps = authored_plan.steps.clone();
             let plan_payload = serde_json::json!({
                 "schema": "missiond.jarvis-plan-artifact.v1",
                 "phase": "plan_draft",
+                "author": "codex-cli-gpt-5.5-xhigh",
+                "plan_author_slot_id": &jarvis_plan_author.slot_id,
+                "confidence": authored_plan.confidence,
                 "grounding_context_id": grounding_context_id,
                 "context_pack_path": context_pack_path,
                 "context_pack_file": context_pack_file,
@@ -6041,6 +6388,11 @@ JSON 字段必须是：\n\
                 "artifact_language": "lisp",
                 "artifact_body": plan_artifact_body,
                 "steps": plan_steps,
+                "boundary": authored_plan.boundary,
+                "assumptions": authored_plan.assumptions,
+                "non_goals": authored_plan.non_goals,
+                "acceptance_signals": authored_plan.acceptance_signals,
+                "sources_used": sources_used,
                 "requires_confirmation": true
             });
             let plan_artifact = match Self::put_jarvis_artifact(
@@ -7640,6 +7992,7 @@ JSON 字段必须是：\n\
         _tool_count: usize,
         default_chat_slot: String,
         jarvis_intent_author: JarvisIntentAuthorConfig,
+        jarvis_plan_author: JarvisPlanAuthorConfig,
     ) -> anyhow::Result<()> {
         // Peek at first bytes to detect non-WebSocket HTTP requests
         let mut peek_buf = [0u8; 512];
@@ -7730,6 +8083,7 @@ JSON 字段必须是：\n\
                     addr,
                     pty_manager,
                     jarvis_intent_author.clone(),
+                    jarvis_plan_author.clone(),
                     jarvis_grounding,
                     jarvis_artifact_writer,
                     db,
@@ -7761,6 +8115,7 @@ JSON 字段必须是：\n\
                     pty_manager.clone(),
                     default_chat_slot.clone(),
                     jarvis_intent_author.clone(),
+                    jarvis_plan_author.clone(),
                     jarvis_grounding,
                     jarvis_artifact_writer,
                     db,
@@ -8606,6 +8961,26 @@ mod tests {
     }
 
     #[test]
+    fn jarvis_plan_author_timeout_budget_is_bounded() {
+        assert_eq!(
+            PTYWebSocketServer::clamp_jarvis_plan_author_timeout_secs(None),
+            180
+        );
+        assert_eq!(
+            PTYWebSocketServer::clamp_jarvis_plan_author_timeout_secs(Some(1)),
+            30
+        );
+        assert_eq!(
+            PTYWebSocketServer::clamp_jarvis_plan_author_timeout_secs(Some(90)),
+            90
+        );
+        assert_eq!(
+            PTYWebSocketServer::clamp_jarvis_plan_author_timeout_secs(Some(900)),
+            300
+        );
+    }
+
+    #[test]
     fn jarvis_codex_intent_response_parses_from_wrapped_output() {
         let output = r#"Thinking...
 {"recognized_objective":"修复 iOS intent 确认体验","intent_kind":"implementation","understanding":"用户要把 intent.lisp 改成可审阅且由 LLM 识别。","review_text":"目标: 修复确认体验\n边界: 只确认意图。","assumptions":["用户希望 Codex 参与"],"non_goals":["确认前创建 BoardTask"],"acceptance_signals":["看到完整 intent.lisp"],"confidence":"high"}
@@ -8625,6 +9000,17 @@ done"#;
         let parsed = PTYWebSocketServer::parse_codex_intent_response(&message).unwrap();
         assert_eq!(parsed.recognized_objective, "展示 intent.lisp 正文");
         assert_eq!(parsed.non_goals, vec!["创建任务"]);
+    }
+
+    #[test]
+    fn jarvis_codex_plan_response_parses_from_wrapped_output() {
+        let output = r#"noise
+{"objective":"修复 plan.lisp 作者链路","review_text":"目标: 修复 plan.lisp 作者链路\n边界: 确认 plan 后才创建 BoardTask。","steps":["确认已批准 intent","生成 Codex-authored plan.lisp","等待用户确认 plan"],"boundary":"不创建 BoardTask，直到用户确认 plan。","assumptions":["intent 已确认"],"non_goals":["Rust deterministic plan"],"acceptance_signals":["plan 标出 Codex author"],"confidence":"high"}
+done"#;
+        let parsed = PTYWebSocketServer::parse_codex_plan_response(output).unwrap();
+        assert_eq!(parsed.objective, "修复 plan.lisp 作者链路");
+        assert_eq!(parsed.steps.len(), 3);
+        assert_eq!(parsed.non_goals, vec!["Rust deterministic plan"]);
     }
 
     #[test]
@@ -8655,6 +9041,41 @@ done"#;
         assert!(body.contains(":semantic-author"));
         assert!(body.contains(":objective \"识别真实意图\""));
         assert!(body.contains(":non-goals [\"Rust 自行猜测意图\"]"));
+    }
+
+    #[test]
+    fn jarvis_authored_plan_lisp_records_codex_authority() {
+        let config = JarvisPlanAuthorConfig::default();
+        let draft = JarvisCodexPlanResponse {
+            objective: "生成 Codex-authored plan".to_string(),
+            review_text: "目标: 生成 Codex-authored plan".to_string(),
+            steps: vec![
+                "确认 intent artifact".to_string(),
+                "创建可审阅 plan draft".to_string(),
+                "等待用户确认 plan".to_string(),
+            ],
+            boundary: Some("确认 plan 后才创建 BoardTask。".to_string()),
+            assumptions: vec!["intent 已确认".to_string()],
+            non_goals: vec!["Rust 自行拼接 plan".to_string()],
+            acceptance_signals: vec!["plan.lisp 标出 Codex author".to_string()],
+            confidence: Some("high".to_string()),
+        };
+        let body = PTYWebSocketServer::jarvis_authored_plan_lisp_body(
+            "missiond.interaction-plan-artifact.v1",
+            &config,
+            "jarvis",
+            &draft,
+            "context-gather:test",
+            "interaction-intent-draft:test",
+            Some("topic-1"),
+            Some("Jarvis plan"),
+            &["source-a".to_string()],
+        );
+        assert!(body.contains(":authority codex-cli-gpt-5.5-xhigh"));
+        assert!(body.contains(":semantic-author"));
+        assert!(body.contains(":slot-id \"slot-codex-plan-author\""));
+        assert!(body.contains(":objective \"生成 Codex-authored plan\""));
+        assert!(body.contains(":non-goals [\"Rust 自行拼接 plan\"]"));
     }
 
     #[test]

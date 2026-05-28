@@ -108,6 +108,7 @@ function checkFiles(root) {
     'codex-code-worker',
     'codex-review-worker',
     'codex-intent-author',
+    'codex-plan-author',
     'agy-research',
     'read-only',
     ':tool-policy-path ".missiond/v3/policies/gemini-readonly-policy.toml"',
@@ -152,6 +153,7 @@ function checkFiles(root) {
   requireAll(diagnostics, FILES.main, sources.main, [
     'fn workstation_pool_model',
     'fn jarvis_intent_author_config',
+    'fn jarvis_plan_author_config',
     'GenericCliSlotManager::new',
     'CliEngine::Agy',
     '"agy" | "agy-cli"',
@@ -397,6 +399,15 @@ function validateBlueprint(file, source, diagnostics) {
     acceptsBoardtask: false,
     sandbox: 'read-only',
     taskClasses: ['intent-authoring', 'intent-recognition'],
+  });
+  validateCodexWorker(file, byId.get('codex-plan-author'), diagnostics, {
+    role: 'plan-author',
+    slotId: 'slot-codex-plan-author',
+    taskType: 'codex_plan_author',
+    writeAllowed: false,
+    acceptsBoardtask: false,
+    sandbox: 'read-only',
+    taskClasses: ['plan-authoring', 'plan-generation'],
   });
   validateAgyWorker(file, byId.get('agy-research'), diagnostics);
 

@@ -205,7 +205,12 @@ function hasReviewableArtifactDraft(response, expectedEvent) {
       && data.artifact_body.includes(expectedForm)
       && (expectedEvent !== 'intent_draft'
         || (data.author === 'codex-cli-gpt-5.5-xhigh'
-          && data.artifact_body.includes(':authority codex-cli-gpt-5.5-xhigh')));
+          && data.artifact_body.includes(':authority codex-cli-gpt-5.5-xhigh')))
+      && (expectedEvent !== 'plan_draft'
+        || (data.author === 'codex-cli-gpt-5.5-xhigh'
+          && data.plan_author_slot_id === 'slot-codex-plan-author'
+          && data.artifact_body.includes(':authority codex-cli-gpt-5.5-xhigh')
+          && data.artifact_body.includes(':semantic-author')));
   });
 }
 

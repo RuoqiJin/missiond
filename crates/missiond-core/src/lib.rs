@@ -73,7 +73,7 @@ pub use ws::{
     ContextEnrichResult, ContextEnricherFn, ContextEnricherSlot, JarvisArtifactFn,
     JarvisArtifactRequest, JarvisArtifactResult, JarvisArtifactSlot, JarvisGroundingFn,
     JarvisGroundingRequest, JarvisGroundingResult, JarvisGroundingSlot, JarvisIntentAuthorConfig,
-    PTYWebSocketServer, WSServerOptions,
+    JarvisPlanAuthorConfig, PTYWebSocketServer, WSServerOptions,
 };
 
 // Re-export Sync types
