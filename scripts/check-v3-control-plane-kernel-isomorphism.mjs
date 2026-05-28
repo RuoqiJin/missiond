@@ -260,6 +260,9 @@ function checkFiles(root, files) {
   ]);
 
   requireAll(diagnostics, files.pgIntegrationTests, sources.pgIntegrationTests, [
+    'test_pg_board_claim_uses_work_leases_authority',
+    'second active Board claim must fail at work_leases',
+    'release_board_claims_by_executor("slot-worker-1")',
     'test_pg_control_plane_kernel_schema_contracts',
     'grant-worker-spawn',
     'grant-system-settle',

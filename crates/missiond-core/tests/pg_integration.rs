@@ -5,6 +5,7 @@
 
 #![cfg(feature = "postgres")]
 
+use missiond_core::db::error::DbError;
 use missiond_core::db::pg::PgMissionStore;
 use missiond_core::db::traits::*;
 use missiond_core::types::*;
@@ -152,6 +153,105 @@ async fn test_pg_board_store() {
     // Delete
     let deleted = store.delete_board_task(task.id.as_str()).await.unwrap();
     assert_eq!(deleted, 1);
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_pg_board_claim_uses_work_leases_authority() {
+    let (store, _container) = setup_pg().await;
+    let input = CreateBoardTaskInput {
+        title: "Lease-backed Board claim".into(),
+        description: Some("Board projection over work_leases".into()),
+        priority: Some("medium".into()),
+        category: Some("test".into()),
+        ..Default::default()
+    };
+    let task = store.create_board_task(&input).await.unwrap();
+
+    let claimed = store
+        .claim_board_task(task.id.as_str(), "slot-worker-1", "pty_slot")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.status.as_str(), "running");
+    assert_eq!(claimed.claim_executor_id.as_deref(), Some("slot-worker-1"));
+
+    let lease_row = sqlx::query(
+        r#"
+        SELECT holder_id, holder_kind, status
+        FROM work_leases
+        WHERE task_id = $1 AND scope_kind = 'board_task' AND scope_key = $1
+        "#,
+    )
+    .bind(task.id.as_str())
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        lease_row.try_get::<String, _>("holder_id").unwrap(),
+        "slot-worker-1"
+    );
+    assert_eq!(
+        lease_row.try_get::<String, _>("holder_kind").unwrap(),
+        "pty_slot"
+    );
+    assert_eq!(lease_row.try_get::<String, _>("status").unwrap(), "active");
+
+    let conflict = store
+        .claim_board_task(task.id.as_str(), "slot-worker-2", "pty_slot")
+        .await
+        .expect_err("second active Board claim must fail at work_leases");
+    match conflict {
+        DbError::ClaimConflict {
+            scope_kind,
+            scope_key,
+            holder,
+            lease_expires_at,
+        } => {
+            assert_eq!(scope_kind, "board_task");
+            assert_eq!(scope_key, task.id.as_str());
+            assert_eq!(holder.as_deref(), Some("slot-worker-1"));
+            assert!(lease_expires_at.is_some());
+        }
+        other => panic!("expected CLAIM_CONFLICT, got {other:?}"),
+    }
+
+    let released = store
+        .release_board_claims_by_executor("slot-worker-1")
+        .await
+        .unwrap();
+    assert_eq!(released, 1);
+
+    let released_status = sqlx::query_scalar::<_, String>(
+        "SELECT status FROM work_leases WHERE task_id = $1 AND holder_id = 'slot-worker-1'",
+    )
+    .bind(task.id.as_str())
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(released_status, "released");
+
+    let reclaimed = store
+        .claim_board_task(task.id.as_str(), "slot-worker-2", "pty_slot")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        reclaimed.claim_executor_id.as_deref(),
+        Some("slot-worker-2")
+    );
+    let active_holder = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT holder_id
+        FROM work_leases
+        WHERE task_id = $1 AND scope_kind = 'board_task' AND status = 'active'
+        "#,
+    )
+    .bind(task.id.as_str())
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(active_holder, "slot-worker-2");
 }
 
 #[tokio::test]
