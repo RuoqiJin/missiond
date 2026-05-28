@@ -38,6 +38,24 @@ pub(crate) struct SettleTaskCommand {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct RecordObservationCommand {
+    pub task_id: String,
+    pub project_id: Option<String>,
+    pub producer_id: String,
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct StartAttemptCommand {
+    pub task_id: String,
+    pub project_id: Option<String>,
+    pub attempt_id: String,
+    pub agent_id: String,
+    pub worker_id: String,
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct ClaimLeaseCommand {
     pub project_id: Option<String>,
     pub task_id: Option<String>,
@@ -78,9 +96,46 @@ impl<'a> ControlPlaneKernel<'a> {
         producer_id: &str,
         payload: Value,
     ) -> Result<Value> {
+        self.record_observation_command(RecordObservationCommand {
+            task_id: task_id.to_string(),
+            project_id: None,
+            producer_id: producer_id.to_string(),
+            payload,
+        })
+        .await
+    }
+
+    pub(crate) async fn record_observation_command(
+        &self,
+        command: RecordObservationCommand,
+    ) -> Result<Value> {
         self.state
             .shared_memory
-            .record_job_event_typed(task_id, None, producer_id, "observation.recorded", payload)
+            .record_job_event_typed(
+                command.task_id.as_str(),
+                command.project_id.as_deref(),
+                command.producer_id.as_str(),
+                "observation.recorded",
+                command.payload,
+            )
+            .await
+    }
+
+    pub(crate) async fn start_attempt_command(
+        &self,
+        command: StartAttemptCommand,
+    ) -> Result<Value> {
+        self.state
+            .shared_memory
+            .job_event_typed(json!({
+                "task_id": command.task_id,
+                "project_id": command.project_id,
+                "event_kind": "attempt.started",
+                "attempt_id": command.attempt_id,
+                "agent_id": command.agent_id,
+                "worker_id": command.worker_id,
+                "payload": command.payload,
+            }))
             .await
     }
 

@@ -11,7 +11,8 @@ use tokio::process::Command;
 
 use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
 use crate::engine::control_plane_kernel::{
-    ControlPlaneKernel, ReleaseLeaseCommand, SettleTaskCommand,
+    ControlPlaneKernel, RecordObservationCommand, ReleaseLeaseCommand, SettleTaskCommand,
+    StartAttemptCommand,
 };
 use crate::engine::shared_memory::{StructuredControlError, TaskRuntimeContract};
 use crate::engine::task_completion_evidence::TaskCompletionEvidenceInput;
@@ -3345,20 +3346,18 @@ async fn run_xjpcode_readonly_worker(state: AppState, run: XjpcodeWorkerRun) -> 
             "raw_response": response_body
         })
     });
-    state
-        .shared_memory
-        .record_job_event_typed(
-            request["task_id"].as_str().unwrap_or("unknown"),
-            request["project_id"].as_str(),
-            "xjpcode-readonly-worker",
-            "observation.recorded",
-            json!({
+    ControlPlaneKernel::new(&state)
+        .record_observation_command(RecordObservationCommand {
+            task_id: request["task_id"].as_str().unwrap_or("unknown").to_string(),
+            project_id: request["project_id"].as_str().map(str::to_string),
+            producer_id: "xjpcode-readonly-worker".to_string(),
+            payload: json!({
                 "schema": "missiond.xjpcode-worker-observation.v1",
                 "status": status.as_u16(),
                 "endpoint": endpoint,
                 "response": response_json.clone()
             }),
-        )
+        })
         .await?;
     let frames = parse_xjpcode_sse_frames(&response_body);
     let (task_result, worker_final_status) = if status.is_success() {
@@ -3511,16 +3510,14 @@ fn spawn_mechanic_repair(state: AppState, run: MechanicRepairRun) {
     // into the canonical task-result-artifact via worker_settle. It is not a
     // PTY slot and it never becomes a resident orchestrator.
     tokio::spawn(async move {
-        let shared_memory = state.shared_memory.clone();
-        if let Err(err) = shared_memory
-            .job_event_typed(json!({
-                "task_id": run.task_id.as_str(),
-                "project_id": run.project_id.as_deref(),
-                "event_kind": "attempt.started",
-                "attempt_id": run.attempt_id.as_str(),
-                "agent_id": "mechanic",
-                "worker_id": "mechanic",
-                "payload": {
+        if let Err(err) = ControlPlaneKernel::new(&state)
+            .start_attempt_command(StartAttemptCommand {
+                task_id: run.task_id.clone(),
+                project_id: run.project_id.clone(),
+                attempt_id: run.attempt_id.clone(),
+                agent_id: "mechanic".to_string(),
+                worker_id: "mechanic".to_string(),
+                payload: json!({
                     "source": "mission_task_delegate.mechanic",
                     "engine_hint": "mechanic",
                     "mode": run.config.mode.as_str(),
@@ -3529,8 +3526,8 @@ fn spawn_mechanic_repair(state: AppState, run: MechanicRepairRun) {
                     "accepted_shard_id": run.metadata.accepted_shard_id,
                     "write_scope": run.metadata.write_scope,
                     "must_not_touch": run.metadata.must_not_touch,
-                }
-            }))
+                }),
+            })
             .await
         {
             tracing::warn!(task_id = %run.task_id, error = %err, "mechanic repair attempt.started event failed");

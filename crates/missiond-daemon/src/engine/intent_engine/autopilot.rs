@@ -10,7 +10,9 @@ use crate::claude_md_sync::sync_claude_md;
 use crate::context::v3_blueprint_runtime::{
     AutopilotRuntimeConfig, RouterRuntimeConfig, WorkstationRuntimeConfig,
 };
-use crate::engine::control_plane_kernel::{ControlPlaneKernel, SettleTaskCommand};
+use crate::engine::control_plane_kernel::{
+    ControlPlaneKernel, RecordObservationCommand, SettleTaskCommand,
+};
 use crate::engine::learning_engine;
 use crate::engine::shared_memory::TaskRuntimeContract;
 use crate::flow_engine::{ensure_autopilot_pty, execute_flow_task};
@@ -228,20 +230,17 @@ async fn resolve_stale_lisp_code_sync_runtime_report_task(
             author: Some("autopilot".to_string()),
         })
         .await;
-    let _ = state
-        .storage()
-        .shared_memory
-        .job_event_typed(serde_json::json!({
-            "task_id": task.id.as_str(),
-            "project_id": task.project.as_deref().unwrap_or("missiond"),
-            "event_kind": "observation.recorded",
-            "agent_id": "autopilot",
-            "payload": {
+    let _ = ControlPlaneKernel::new(state)
+        .record_observation_command(RecordObservationCommand {
+            task_id: task.id.to_string(),
+            project_id: Some(task.project.as_deref().unwrap_or("missiond").to_string()),
+            producer_id: "autopilot".to_string(),
+            payload: serde_json::json!({
                 "schema": "missiond.autopilot-stale-runtime-report-observation.v1",
                 "reason": "stale_lisp_code_sync_runtime_report",
                 "summary": note
-            }
-        }))
+            }),
+        })
         .await;
     info!(
         task_id = %task.id,
@@ -460,15 +459,12 @@ async fn observe_autopilot_task_result_candidate(
         .map(|completion| completion.summary.as_str())
         .unwrap_or(final_summary);
     let candidate_hash = task_result_artifact_hash_from_text(final_summary);
-    let _ = state
-        .storage()
-        .shared_memory
-        .job_event_typed(serde_json::json!({
-            "task_id": task.id.as_str(),
-            "project_id": project_id,
-            "event_kind": "observation.recorded",
-            "agent_id": "autopilot",
-            "payload": {
+    let _ = ControlPlaneKernel::new(state)
+        .record_observation_command(RecordObservationCommand {
+            task_id: task.id.to_string(),
+            project_id: Some(project_id.to_string()),
+            producer_id: "autopilot".to_string(),
+            payload: serde_json::json!({
                 "schema": "missiond.task-result-candidate.v1",
                 "source": "autopilot",
                 "source_kind": if durable_completion.is_some() { "provider_final" } else { "pty_screen" },
@@ -480,8 +476,8 @@ async fn observe_autopilot_task_result_candidate(
                 "summary": final_summary,
                 "raw_evidence": raw_evidence,
                 "candidate_artifact_hash": candidate_hash
-            }
-        }))
+            }),
+        })
         .await
         .map_err(|err| {
             warn!(
@@ -2149,21 +2145,23 @@ async fn maybe_complete_delegated_execution_log(
         return Ok(false);
     };
     let project_id = project_id_for_execution_log(state, task, &execution_id).await;
-    let _ = state
-        .storage()
-        .shared_memory
-        .job_event_typed(serde_json::json!({
-            "task_id": task.id.as_str(),
-            "project_id": project_id.as_deref().unwrap_or_else(|| task.project.as_deref().unwrap_or("missiond")),
-            "event_kind": "observation.recorded",
-            "agent_id": "autopilot",
-            "payload": {
+    let _ = ControlPlaneKernel::new(state)
+        .record_observation_command(RecordObservationCommand {
+            task_id: task.id.to_string(),
+            project_id: Some(
+                project_id
+                    .as_deref()
+                    .unwrap_or_else(|| task.project.as_deref().unwrap_or("missiond"))
+                    .to_string(),
+            ),
+            producer_id: "autopilot".to_string(),
+            payload: serde_json::json!({
                 "schema": "missiond.delegated-execution-log-candidate.v1",
                 "execution_id": execution_id,
                 "duration_ms": duration_ms,
                 "summary": truncate_safe(worker_response, 500)
-            }
-        }))
+            }),
+        })
         .await;
     Ok(false)
 }

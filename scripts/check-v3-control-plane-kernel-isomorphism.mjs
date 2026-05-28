@@ -289,9 +289,13 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.controlPlaneKernel, sources.controlPlaneKernel, [
     'pub(crate) struct ControlPlaneKernel',
     'pub(crate) struct SettleTaskCommand',
+    'pub(crate) struct RecordObservationCommand',
+    'pub(crate) struct StartAttemptCommand',
     'pub(crate) struct ClaimLeaseCommand',
     'pub(crate) struct ReleaseLeaseCommand',
     'pub(crate) async fn record_observation',
+    'pub(crate) async fn record_observation_command',
+    'pub(crate) async fn start_attempt_command',
     'pub(crate) async fn write_completion_artifact',
     'pub(crate) async fn settle_task',
     'pub(crate) async fn settle_task_command',
@@ -305,6 +309,7 @@ function checkFiles(root, files) {
     'WorkerSettleRequest',
     'record_job_event_typed',
     'settle_worker_command',
+    'job_event_typed',
     'claim_lease_typed',
     'ensure_task_contract_from_metadata',
     'TaskCompletionEvidenceWriter::new',
@@ -332,7 +337,7 @@ function checkFiles(root, files) {
     'canonical artifact remains the only close authority',
     'canonical completed task_result_artifact hash required',
     'no canonical completed task_result_artifact exists yet',
-    '.job_event_typed(serde_json::json!',
+    '.record_observation_command(RecordObservationCommand',
     '.task_result_get_typed(&args)',
     'ControlPlaneKernel::new(state)',
     '.settle_task_command(SettleTaskCommand',
@@ -393,7 +398,8 @@ function checkFiles(root, files) {
     'duplicate_worker_source_reference_uses_task_contracts',
     'fn enrich_runtime_metadata_with_control_facts',
     'fn sandbox_profile_for_worker',
-    'job_event_typed(json!',
+    '.start_attempt_command(StartAttemptCommand',
+    '.record_observation_command(RecordObservationCommand',
     '.workflow_start_typed(&json!',
     '.workflow_checkpoint_typed(&json!',
     'TaskCompletionEvidenceInput',
@@ -575,8 +581,22 @@ function checkFiles(root, files) {
   rejectDirectSettleOutsideKernel(diagnostics, files, sources);
   rejectDirectEvidenceWriterOutsideKernel(diagnostics, files, sources);
   rejectDirectLeaseCommandsOutsideKernel(diagnostics, files, sources);
+  rejectDirectJobEventsOutsideKernel(diagnostics, files, sources);
 
   return diagnostics;
+}
+
+function rejectDirectJobEventsOutsideKernel(diagnostics, files, sources) {
+  const allowed = new Set(['controlPlaneKernel', 'sharedMemory', 'sharedHandler']);
+  for (const [key, source] of Object.entries(sources)) {
+    if (allowed.has(key)) continue;
+    if (source.includes('.job_event_typed(') || source.includes('.record_job_event_typed(')) {
+      diagnostics.push({
+        file: files[key],
+        message: 'direct shared_memory job-event writes outside ControlPlaneKernel are forbidden',
+      });
+    }
+  }
 }
 
 function rejectDirectLeaseCommandsOutsideKernel(diagnostics, files, sources) {
