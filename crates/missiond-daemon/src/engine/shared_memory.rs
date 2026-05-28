@@ -82,6 +82,20 @@ fn control_error_details(
         .into()
 }
 
+fn kernel_routed_action_error(action: &str) -> anyhow::Error {
+    StructuredControlError::new(
+        CAPABILITY_DENIED_CODE,
+        format!("shared memory action `{action}` must enter through ControlPlaneKernel"),
+    )
+    .with_details(json!({
+        "action": action,
+        "required": "ControlPlaneKernel",
+        "adapter": "mission_shared_memory"
+    }))
+    .with_suggestion("call the mission_shared_memory adapter so it can route this control action through ControlPlaneKernel")
+    .into()
+}
+
 fn ensure_optional_feature_enabled_for_shared_action(
     action: &str,
     feature: &str,
@@ -293,7 +307,7 @@ impl SharedMemoryService {
             "query" => self.query(args).await,
             "artifact_put" | "put_artifact" => self.artifact_put(args).await,
             "artifact_get" | "get_artifact" => self.artifact_get(args).await,
-            "task_result_put" | "put_task_result" => self.task_result_put_typed(args).await,
+            "task_result_put" | "put_task_result" => Err(kernel_routed_action_error(action)),
             "task_result_get" | "get_task_result" => self.task_result_get(args).await,
             "task_evidence_summary" | "evidence_summary" => self.task_evidence_summary(args).await,
             "workflow_start" | "start_workflow" => {
@@ -324,20 +338,15 @@ impl SharedMemoryService {
             "evidence_view" | "evidence_governance_view" | "get_evidence_view" => {
                 self.evidence_view(args).await
             }
-            "worker_settle" | "completion_settle" | "settle_worker" => {
-                let req = self.worker_settle_request_from_args(args)?;
-                self.worker_settle(req).await
+            "worker_settle" | "completion_settle" | "settle_worker" | "capability_grant"
+            | "grant_capability" | "capability_check" | "check_capability" | "job_event"
+            | "record_job_event" | "claim" | "release" | "heartbeat" => {
+                Err(kernel_routed_action_error(action))
             }
-            "capability_grant" | "grant_capability" => self.capability_grant_from_args(args).await,
-            "capability_check" | "check_capability" => self.capability_check_from_args(args).await,
-            "job_event" | "record_job_event" => self.job_event_from_args(args).await,
             "model_route_outcome_put" | "record_model_route_outcome" => {
                 ensure_router_experiments_enabled_for_shared_action(action)?;
                 self.model_route_outcome_put(args).await
             }
-            "claim" => self.claim_from_args(args).await,
-            "release" => self.release(args).await,
-            "heartbeat" => self.heartbeat(args).await,
             "cursor" => self.cursor(args).await,
             other => Err(anyhow!("unknown shared memory action: {other}")),
         }
