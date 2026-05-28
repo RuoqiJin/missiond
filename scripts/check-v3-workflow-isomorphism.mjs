@@ -533,6 +533,10 @@ function checkFiles(root, files) {
     'resolve_compiled_flow',
     'MISSING_COMPILED_FLOW',
     'CreateBoardTaskInput',
+    'UpsertTaskContractCommand',
+    'methodology_run_runtime_metadata',
+    '"control_state": "task_contracts"',
+    '"sandbox_profile": "system-methodology-flow-orchestrator"',
     'runner::run_flow',
     'workflow_record_execution',
     'artifact_only_no_workflow_row',
@@ -863,6 +867,10 @@ pub(super) async fn action_run_methodology() {
   resolve_compiled_flow();
   "MISSING_COMPILED_FLOW";
   CreateBoardTaskInput;
+  UpsertTaskContractCommand;
+  methodology_run_runtime_metadata();
+  "control_state": "task_contracts";
+  "sandbox_profile": "system-methodology-flow-orchestrator";
   runner::run_flow();
   workflow_record_execution();
 }

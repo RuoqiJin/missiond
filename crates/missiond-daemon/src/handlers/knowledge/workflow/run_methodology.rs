@@ -115,8 +115,17 @@ pub(super) async fn action_run_methodology(state: &AppState, args: &Value) -> Re
 
     // dry_run=false → dispatch through flow engine.
     let title = format!("Methodology: {}", flow.name);
+    let project_id = methodology_run_project_id(args);
+    let runtime_metadata = methodology_run_runtime_metadata(
+        args,
+        project_root.as_path(),
+        flow.id.as_str(),
+        resolved.path.as_path(),
+        &record_intent,
+    );
     let input = missiond_core::types::CreateBoardTaskInput {
         title,
+        project: project_id.clone(),
         category: Some("methodology".to_string()),
         description: Some(format!(
             "compiled methodology flow `{}` — source: {}",
@@ -124,6 +133,7 @@ pub(super) async fn action_run_methodology(state: &AppState, args: &Value) -> Re
             resolved.path.display()
         )),
         flow_template: Some(flow.id.clone()),
+        runtime_metadata: Some(runtime_metadata),
         ..Default::default()
     };
     let task = state
@@ -132,6 +142,16 @@ pub(super) async fn action_run_methodology(state: &AppState, args: &Value) -> Re
         .await
         .map_err(|e| anyhow!("DB: {}", e))?;
     let task_id = task.id.to_string();
+    crate::engine::control_plane_kernel::ControlPlaneKernel::new(state)
+        .upsert_task_contract_command(
+            crate::engine::control_plane_kernel::UpsertTaskContractCommand {
+                task_id: task_id.clone(),
+                project_id: task.project.clone().or(project_id),
+                runtime_metadata: task.runtime_metadata.clone(),
+            },
+        )
+        .await
+        .map_err(|err| anyhow!("control-plane task_contracts upsert failed: {}", err))?;
 
     let mut ctx = crate::engine::flow::FlowContext::new();
     if let Some(params) = args.get("params").and_then(|v| v.as_object()) {
@@ -234,5 +254,119 @@ pub(super) async fn action_run_methodology(state: &AppState, args: &Value) -> Re
                 .await;
             Err(e)
         }
+    }
+}
+
+fn methodology_run_project_id(args: &Value) -> Option<String> {
+    for key in ["project_id", "projectId"] {
+        if let Some(value) = string_arg(args, key) {
+            return Some(value.to_string());
+        }
+    }
+    for key in ["project", "target_project", "targetProject"] {
+        let Some(value) = string_arg(args, key) else {
+            continue;
+        };
+        if !Path::new(value).is_absolute() {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+fn methodology_run_runtime_metadata(
+    args: &Value,
+    project_root: &Path,
+    flow_id: &str,
+    flow_path: &Path,
+    record_intent: &RunMethodologyRecordIntent,
+) -> Value {
+    json!({
+        "schema": "missiond.board-task-runtime-metadata.v1",
+        "source": "run_methodology",
+        "control_state": "task_contracts",
+        "dispatch_metadata": {
+            "task_class": "methodology-flow-run",
+            "flow_id": flow_id,
+            "flow_path": flow_path.display().to_string(),
+            "project_id": methodology_run_project_id(args),
+            "project_root": project_root.display().to_string(),
+            "workflow_id": record_intent.workflow_id,
+            "cost_usd": record_intent.cost_usd,
+            "output_contract": "methodology flow runner writes canonical system completion artifact through ControlPlaneKernel"
+        },
+        "read_scope": [
+            flow_path.display().to_string(),
+            project_root.display().to_string()
+        ],
+        "write_scope": [],
+        "must_not_touch": [],
+        "capability_grant_ids": [],
+        "sandbox_profile": "system-methodology-flow-orchestrator",
+        "projection_policy": "description_notes_are_projection_only"
+    })
+}
+
+fn string_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn methodology_run_metadata_declares_task_contract_authority() {
+        let workflow_id = uuid::Uuid::new_v4();
+        let intent = RunMethodologyRecordIntent {
+            workflow_id: Some(workflow_id),
+            cost_usd: Some(0.25),
+        };
+        let metadata = methodology_run_runtime_metadata(
+            &json!({ "project": "missiond" }),
+            Path::new("/tmp/missiond-project"),
+            "methodology-smoke",
+            Path::new("/tmp/missiond-project/.missiond/generated/flows/methodology.yml"),
+            &intent,
+        );
+        assert_eq!(
+            metadata["schema"],
+            "missiond.board-task-runtime-metadata.v1"
+        );
+        assert_eq!(metadata["source"], "run_methodology");
+        assert_eq!(metadata["control_state"], "task_contracts");
+        assert_eq!(
+            metadata["dispatch_metadata"]["task_class"],
+            "methodology-flow-run"
+        );
+        let workflow_id_text = workflow_id.to_string();
+        assert_eq!(
+            metadata["dispatch_metadata"]["workflow_id"].as_str(),
+            Some(workflow_id_text.as_str())
+        );
+        assert_eq!(metadata["write_scope"].as_array().unwrap().len(), 0);
+        assert_eq!(
+            metadata["sandbox_profile"],
+            "system-methodology-flow-orchestrator"
+        );
+    }
+
+    #[test]
+    fn methodology_run_project_id_does_not_store_path_as_project() {
+        assert_eq!(
+            methodology_run_project_id(&json!({ "project": "/tmp/project-root" })),
+            None
+        );
+        assert_eq!(
+            methodology_run_project_id(&json!({ "project_id": "missiond" })).as_deref(),
+            Some("missiond")
+        );
+        assert_eq!(
+            methodology_run_project_id(&json!({ "target_project": "alpha" })).as_deref(),
+            Some("alpha")
+        );
     }
 }
