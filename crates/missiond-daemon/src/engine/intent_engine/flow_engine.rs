@@ -8,10 +8,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
+use serde_json::json;
 use tracing::{debug, info, warn};
 
 use crate::context::v3_blueprint_runtime::{RouterRuntimeConfig, WorkstationRuntimeConfig};
 use crate::decision_harvest::harvest_decisions_for_task;
+use crate::engine::control_plane_kernel::{ControlPlaneKernel, RequireCapabilityCommand};
 use crate::llm_gateway::{call_gemini_for_flow, determine_llm_env};
 use crate::state::AppState;
 use crate::supervisor::{is_auth_error, is_quota_exhausted, strip_prompt_echo, truncate_safe};
@@ -162,6 +164,45 @@ fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| haystack.contains(needle))
 }
 
+async fn require_flow_claim_authority(
+    state: &AppState,
+    task_id: &str,
+    slot_id: &str,
+    phase: &str,
+) -> bool {
+    match ControlPlaneKernel::new(state)
+        .require_capability_command(RequireCapabilityCommand {
+            grant_id: None,
+            subject_kind: "system".to_string(),
+            subject_id: "flow_engine".to_string(),
+            operation: "claim".to_string(),
+            scope_kind: "task".to_string(),
+            scope_key: task_id.to_string(),
+            task_id: Some(task_id.to_string()),
+            allow_system_bypass: true,
+            bypass_reason: Some("flow engine internal BoardTask claim".to_string()),
+            details: json!({
+                "slot_id": slot_id,
+                "phase": phase,
+                "source": "flow_engine.execute_flow_task"
+            }),
+        })
+        .await
+    {
+        Ok(_) => true,
+        Err(err) => {
+            warn!(
+                task_id,
+                slot_id,
+                phase,
+                error = %err,
+                "Flow engine: BoardTask claim capability denied"
+            );
+            false
+        }
+    }
+}
+
 // @beacon: orchestration
 /// Execute a flow-enabled Board task through the Engineering Flow Engine.
 /// Handles all phase types: slot phases (send to PTY), daemon phases (call Gemini), and Done.
@@ -254,6 +295,9 @@ pub(crate) async fn execute_flow_task(
 
         // === Daemon phases: call Gemini directly ===
         p if p.is_daemon_phase() => {
+            if !require_flow_claim_authority(state, task.id.as_str(), slot_id, phase_str).await {
+                return Ok(());
+            }
             // Claim task as running + set lease
             let _ = state
                 .store
@@ -431,6 +475,9 @@ pub(crate) async fn execute_flow_task(
 
         // === Slot phases: send prompt to PTY ===
         p if p.is_slot_phase() => {
+            if !require_flow_claim_authority(state, task.id.as_str(), slot_id, phase_str).await {
+                return Ok(());
+            }
             // Claim the task
             match state
                 .store

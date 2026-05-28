@@ -1,6 +1,7 @@
 use tracing::{debug, info, warn};
 
 use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
+use crate::engine::control_plane_kernel::{ControlPlaneKernel, RequireCapabilityCommand};
 use crate::extraction::{check_deep_analysis, check_kb_consolidation, check_realtime_extraction};
 use crate::state::AppState;
 use crate::state::MEMORY_SLOT_ID;
@@ -186,6 +187,9 @@ pub(crate) async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
             if used_slots.contains(slot_id) {
                 continue;
             }
+            if !require_memory_hook_claim_authority(state, task.id.as_str(), slot_id, role).await {
+                continue;
+            }
             // Acquire per-slot dispatch guard
             if !state.slot_dispatch.try_acquire(slot_id) {
                 continue;
@@ -339,6 +343,45 @@ pub(crate) async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
     }
 
     any_dispatched
+}
+
+async fn require_memory_hook_claim_authority(
+    state: &AppState,
+    task_id: &str,
+    slot_id: &str,
+    role: &str,
+) -> bool {
+    match ControlPlaneKernel::new(state)
+        .require_capability_command(RequireCapabilityCommand {
+            grant_id: None,
+            subject_kind: "system".to_string(),
+            subject_id: "memory_scheduler".to_string(),
+            operation: "claim".to_string(),
+            scope_kind: "task".to_string(),
+            scope_key: task_id.to_string(),
+            task_id: Some(task_id.to_string()),
+            allow_system_bypass: true,
+            bypass_reason: Some("memory scheduler internal BoardTask claim".to_string()),
+            details: json!({
+                "slot_id": slot_id,
+                "role": role,
+                "source": "memory_scheduler.dispatch_queued_submit_tasks"
+            }),
+        })
+        .await
+    {
+        Ok(_) => true,
+        Err(err) => {
+            warn!(
+                task_id,
+                slot_id,
+                role,
+                error = %err,
+                "Memory scheduler: BoardTask claim capability denied"
+            );
+            false
+        }
+    }
 }
 
 /// Reap memory-hook board_tasks stuck in Running state for too long (15 min).
