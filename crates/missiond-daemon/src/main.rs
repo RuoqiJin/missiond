@@ -1563,10 +1563,7 @@ async fn main() -> Result<()> {
                             .and_then(Value::as_str)
                             .or_else(|| req.payload.get("content").and_then(Value::as_str))
                             .unwrap_or("");
-                        let result = crate::engine::control_plane_kernel::ControlPlaneKernel::new(
-                            &s,
-                        )
-                        .write_completion_artifact(
+                        let evidence =
                             crate::engine::task_completion_evidence::TaskCompletionEvidenceInput {
                                 task_id: task_id.clone(),
                                 project_id: Some(
@@ -1598,6 +1595,13 @@ async fn main() -> Result<()> {
                                     "task_id": task_id
                                 }])),
                                 created_at: Some(chrono::Utc::now().to_rfc3339()),
+                            };
+                        let result = crate::engine::control_plane_kernel::ControlPlaneKernel::new(
+                            &s,
+                        )
+                        .write_completion_artifact_command(
+                            crate::engine::control_plane_kernel::WriteCompletionArtifactCommand {
+                                evidence,
                             },
                         )
                         .await

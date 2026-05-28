@@ -25,6 +25,11 @@ pub(crate) struct SystemTaskCompletionInput {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct WriteCompletionArtifactCommand {
+    pub evidence: TaskCompletionEvidenceInput,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct SettleTaskCommand {
     pub task_id: String,
     pub project_id: Option<String>,
@@ -232,9 +237,17 @@ impl<'a> ControlPlaneKernel<'a> {
         &self,
         input: TaskCompletionEvidenceInput,
     ) -> Result<crate::engine::task_completion_evidence::TaskCompletionEvidenceResult> {
+        self.write_completion_artifact_command(WriteCompletionArtifactCommand { evidence: input })
+            .await
+    }
+
+    pub(crate) async fn write_completion_artifact_command(
+        &self,
+        command: WriteCompletionArtifactCommand,
+    ) -> Result<crate::engine::task_completion_evidence::TaskCompletionEvidenceResult> {
         // Control-plane ABI anchor: typed task-result artifact command.
         TaskCompletionEvidenceWriter::new(self.state.shared_memory.clone())
-            .write_bounded(input)
+            .write_bounded(command.evidence)
             .await
     }
 
