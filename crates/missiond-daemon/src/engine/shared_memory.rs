@@ -3818,51 +3818,67 @@ impl SharedMemoryService {
             .or_else(|| string_arg(args, "id"))
             .ok_or_else(|| anyhow!("claim_id is required"))?;
         let owner_id = string_arg(args, "owner_id").or_else(|| string_arg(args, "ownerId"));
-        if let Some(lease) = sqlx::query(
-            "SELECT task_id, holder_id, scope_kind, scope_key, metadata FROM work_leases WHERE id = $1",
+        let lease = sqlx::query(
+            "SELECT task_id, holder_id, scope_kind, scope_key, status, lease_expires_at, metadata FROM work_leases WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
-        .await?
-        {
-            let task_id = lease.try_get::<Option<String>, _>("task_id")?;
-            let holder_id: String = lease.try_get("holder_id")?;
-            let scope_kind: String = lease.try_get("scope_kind")?;
-            let scope_key: String = lease.try_get("scope_key")?;
-            self.require_capability(CapabilityCheckRequest {
-                grant_id: string_arg(args, "grant_id")
-                    .or_else(|| string_arg(args, "grantId"))
-                    .or_else(|| string_arg(args, "capability_grant_id"))
-                    .or_else(|| string_arg(args, "capabilityGrantId"))
-                    .map(str::to_string),
-                subject_kind: string_arg(args, "subject_kind")
-                    .or_else(|| string_arg(args, "subjectKind"))
-                    .unwrap_or("worker")
-                    .to_string(),
-                subject_id: string_arg(args, "subject_id")
-                    .or_else(|| string_arg(args, "subjectId"))
-                    .or(owner_id)
-                    .unwrap_or(holder_id.as_str())
-                    .to_string(),
-                operation: "claim".to_string(),
-                scope_kind,
-                scope_key,
-                task_id,
-                allow_system_bypass: system_or_operator_bypass_allowed(args),
-                bypass_reason: Some(
-                    "mission_shared_memory release system/operator authority".to_string(),
-                ),
-                details: lease
-                    .try_get::<Value, _>("metadata")
-                    .unwrap_or_else(|_| json!({})),
-            })
-            .await?;
-        }
+        .await?;
+        let Some(lease) = lease else {
+            return Err(control_error_details(
+                CLAIM_CONFLICT_CODE,
+                format!("work lease {id} does not exist; release is fail-closed"),
+                json!({
+                    "claim_id": id,
+                    "owner_id": owner_id,
+                    "reason": "lease_not_found",
+                    "authority": "work_leases"
+                }),
+            ));
+        };
+        let task_id = lease.try_get::<Option<String>, _>("task_id")?;
+        let holder_id: String = lease.try_get("holder_id")?;
+        let scope_kind: String = lease.try_get("scope_kind")?;
+        let scope_key: String = lease.try_get("scope_key")?;
+        let lease_status: String = lease.try_get("status")?;
+        let lease_expires_at = lease
+            .try_get::<DateTime<Utc>, _>("lease_expires_at")
+            .ok()
+            .map(|ts| ts.to_rfc3339());
+        self.require_capability(CapabilityCheckRequest {
+            grant_id: string_arg(args, "grant_id")
+                .or_else(|| string_arg(args, "grantId"))
+                .or_else(|| string_arg(args, "capability_grant_id"))
+                .or_else(|| string_arg(args, "capabilityGrantId"))
+                .map(str::to_string),
+            subject_kind: string_arg(args, "subject_kind")
+                .or_else(|| string_arg(args, "subjectKind"))
+                .unwrap_or("worker")
+                .to_string(),
+            subject_id: string_arg(args, "subject_id")
+                .or_else(|| string_arg(args, "subjectId"))
+                .or(owner_id)
+                .unwrap_or(holder_id.as_str())
+                .to_string(),
+            operation: "claim".to_string(),
+            scope_kind: scope_kind.clone(),
+            scope_key: scope_key.clone(),
+            task_id: task_id.clone(),
+            allow_system_bypass: system_or_operator_bypass_allowed(args),
+            bypass_reason: Some(
+                "mission_shared_memory release system/operator authority".to_string(),
+            ),
+            details: lease
+                .try_get::<Value, _>("metadata")
+                .unwrap_or_else(|_| json!({})),
+        })
+        .await?;
         let row = sqlx::query(
             r#"
             UPDATE work_leases
             SET status = 'released', released_at = now()
             WHERE id = $1
+              AND status = 'active'
               AND ($2::text IS NULL OR holder_id = $2)
             RETURNING id, project_id, task_id, holder_id AS owner_id, scope_kind, scope_key, status,
                       acquired_at, lease_expires_at, released_at, heartbeat_at, metadata
@@ -3886,10 +3902,26 @@ impl SharedMemoryService {
             .execute(&self.pool)
             .await;
         }
+        let Some(row) = row else {
+            return Err(control_error_details(
+                CLAIM_CONFLICT_CODE,
+                format!("work lease {id} was not released; holder or status does not match"),
+                json!({
+                    "claim_id": id,
+                    "owner_id": owner_id,
+                    "holder": holder_id,
+                    "scope_kind": scope_kind,
+                    "scope_key": scope_key,
+                    "lease_status": lease_status,
+                    "lease_expires_at": lease_expires_at,
+                    "authority": "work_leases"
+                }),
+            ));
+        };
         Ok(json!({
             "schema": "missiond.shared-claim-release.v1",
-            "ok": row.is_some(),
-            "claim": row.map(claim_row_json)
+            "ok": true,
+            "claim": claim_row_json(row)
         }))
     }
 
@@ -3906,46 +3938,61 @@ impl SharedMemoryService {
             .unwrap_or(DEFAULT_LEASE_SECS)
             .clamp(30, MAX_LEASE_SECS);
         let lease_expires_at = Utc::now() + Duration::seconds(lease_secs);
-        if let Some(lease) = sqlx::query(
-            "SELECT task_id, holder_id, scope_kind, scope_key, metadata FROM work_leases WHERE id = $1",
+        let lease = sqlx::query(
+            "SELECT task_id, holder_id, scope_kind, scope_key, status, lease_expires_at, metadata FROM work_leases WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
-        .await?
-        {
-            let task_id = lease.try_get::<Option<String>, _>("task_id")?;
-            let holder_id: String = lease.try_get("holder_id")?;
-            let scope_kind: String = lease.try_get("scope_kind")?;
-            let scope_key: String = lease.try_get("scope_key")?;
-            self.require_capability(CapabilityCheckRequest {
-                grant_id: string_arg(args, "grant_id")
-                    .or_else(|| string_arg(args, "grantId"))
-                    .or_else(|| string_arg(args, "capability_grant_id"))
-                    .or_else(|| string_arg(args, "capabilityGrantId"))
-                    .map(str::to_string),
-                subject_kind: string_arg(args, "subject_kind")
-                    .or_else(|| string_arg(args, "subjectKind"))
-                    .unwrap_or("worker")
-                    .to_string(),
-                subject_id: string_arg(args, "subject_id")
-                    .or_else(|| string_arg(args, "subjectId"))
-                    .or(owner_id)
-                    .unwrap_or(holder_id.as_str())
-                    .to_string(),
-                operation: "claim".to_string(),
-                scope_kind,
-                scope_key,
-                task_id,
-                allow_system_bypass: system_or_operator_bypass_allowed(args),
-                bypass_reason: Some(
-                    "mission_shared_memory heartbeat system/operator authority".to_string(),
-                ),
-                details: lease
-                    .try_get::<Value, _>("metadata")
-                    .unwrap_or_else(|_| json!({})),
-            })
-            .await?;
-        }
+        .await?;
+        let Some(lease) = lease else {
+            return Err(control_error_details(
+                CLAIM_CONFLICT_CODE,
+                format!("work lease {id} does not exist; heartbeat is fail-closed"),
+                json!({
+                    "claim_id": id,
+                    "owner_id": owner_id,
+                    "reason": "lease_not_found",
+                    "authority": "work_leases"
+                }),
+            ));
+        };
+        let task_id = lease.try_get::<Option<String>, _>("task_id")?;
+        let holder_id: String = lease.try_get("holder_id")?;
+        let scope_kind: String = lease.try_get("scope_kind")?;
+        let scope_key: String = lease.try_get("scope_key")?;
+        let lease_status: String = lease.try_get("status")?;
+        let current_lease_expires_at = lease
+            .try_get::<DateTime<Utc>, _>("lease_expires_at")
+            .ok()
+            .map(|ts| ts.to_rfc3339());
+        self.require_capability(CapabilityCheckRequest {
+            grant_id: string_arg(args, "grant_id")
+                .or_else(|| string_arg(args, "grantId"))
+                .or_else(|| string_arg(args, "capability_grant_id"))
+                .or_else(|| string_arg(args, "capabilityGrantId"))
+                .map(str::to_string),
+            subject_kind: string_arg(args, "subject_kind")
+                .or_else(|| string_arg(args, "subjectKind"))
+                .unwrap_or("worker")
+                .to_string(),
+            subject_id: string_arg(args, "subject_id")
+                .or_else(|| string_arg(args, "subjectId"))
+                .or(owner_id)
+                .unwrap_or(holder_id.as_str())
+                .to_string(),
+            operation: "claim".to_string(),
+            scope_kind: scope_kind.clone(),
+            scope_key: scope_key.clone(),
+            task_id: task_id.clone(),
+            allow_system_bypass: system_or_operator_bypass_allowed(args),
+            bypass_reason: Some(
+                "mission_shared_memory heartbeat system/operator authority".to_string(),
+            ),
+            details: lease
+                .try_get::<Value, _>("metadata")
+                .unwrap_or_else(|_| json!({})),
+        })
+        .await?;
         let row = sqlx::query(
             r#"
             UPDATE work_leases
@@ -3978,10 +4025,26 @@ impl SharedMemoryService {
             .execute(&self.pool)
             .await;
         }
+        let Some(row) = row else {
+            return Err(control_error_details(
+                CLAIM_CONFLICT_CODE,
+                format!("work lease {id} was not heartbeated; holder or status does not match"),
+                json!({
+                    "claim_id": id,
+                    "owner_id": owner_id,
+                    "holder": holder_id,
+                    "scope_kind": scope_kind,
+                    "scope_key": scope_key,
+                    "lease_status": lease_status,
+                    "lease_expires_at": current_lease_expires_at,
+                    "authority": "work_leases"
+                }),
+            ));
+        };
         Ok(json!({
             "schema": "missiond.shared-claim-heartbeat.v1",
-            "ok": row.is_some(),
-            "claim": row.map(claim_row_json)
+            "ok": true,
+            "claim": claim_row_json(row)
         }))
     }
 
