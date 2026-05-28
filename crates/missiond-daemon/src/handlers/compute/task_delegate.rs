@@ -10,7 +10,9 @@ use std::time::Duration;
 use tokio::process::Command;
 
 use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
-use crate::engine::control_plane_kernel::{ControlPlaneKernel, SettleTaskCommand};
+use crate::engine::control_plane_kernel::{
+    ControlPlaneKernel, ReleaseLeaseCommand, SettleTaskCommand,
+};
 use crate::engine::shared_memory::{StructuredControlError, TaskRuntimeContract};
 use crate::engine::task_completion_evidence::TaskCompletionEvidenceInput;
 use crate::slot_dispatch::SlotAcquireGuard;
@@ -3655,13 +3657,17 @@ fn spawn_mechanic_repair(state: AppState, run: MechanicRepairRun) {
         };
         if status == "done" && artifact_hash.is_none() {
             for claim_id in &run.metadata.shared_claim_ids {
-                let release = shared_memory
-                    .release_typed(json!({
-                        "claim_id": claim_id,
-                        "subject_kind": "daemon",
-                        "subject_id": "mission_task_delegate.mechanic",
-                        "details": { "claim_task_grant_id": run.claim_task_grant_id.as_deref() },
-                    }))
+                let release = ControlPlaneKernel::new(&state)
+                    .release_lease_command(ReleaseLeaseCommand {
+                        claim_id: claim_id.clone(),
+                        owner_id: None,
+                        grant_id: None,
+                        subject_kind: "daemon".to_string(),
+                        subject_id: "mission_task_delegate.mechanic".to_string(),
+                        details: json!({
+                            "claim_task_grant_id": run.claim_task_grant_id.as_deref()
+                        }),
+                    })
                     .await;
                 if let Err(err) = release {
                     tracing::warn!(task_id = %run.task_id, claim_id = %claim_id, error = %err, "mechanic repair claim release failed");
@@ -3690,13 +3696,17 @@ fn spawn_mechanic_repair(state: AppState, run: MechanicRepairRun) {
         }
 
         for claim_id in &run.metadata.shared_claim_ids {
-            let release = shared_memory
-                .release_typed(json!({
-                    "claim_id": claim_id,
-                    "subject_kind": "daemon",
-                    "subject_id": "mission_task_delegate.mechanic",
-                    "details": { "claim_task_grant_id": run.claim_task_grant_id.as_deref() },
-                }))
+            let release = ControlPlaneKernel::new(&state)
+                .release_lease_command(ReleaseLeaseCommand {
+                    claim_id: claim_id.clone(),
+                    owner_id: None,
+                    grant_id: None,
+                    subject_kind: "daemon".to_string(),
+                    subject_id: "mission_task_delegate.mechanic".to_string(),
+                    details: json!({
+                        "claim_task_grant_id": run.claim_task_grant_id.as_deref()
+                    }),
+                })
                 .await;
             if let Err(err) = release {
                 tracing::warn!(task_id = %run.task_id, claim_id = %claim_id, error = %err, "mechanic repair claim release failed");

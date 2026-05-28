@@ -37,6 +37,32 @@ pub(crate) struct SettleTaskCommand {
     pub allow_system_bypass: bool,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ClaimLeaseCommand {
+    pub project_id: Option<String>,
+    pub task_id: Option<String>,
+    pub owner_id: String,
+    pub grant_id: Option<String>,
+    pub subject_kind: String,
+    pub subject_id: String,
+    pub scope_kind: String,
+    pub scope_key: String,
+    pub lease_secs: i64,
+    pub metadata: Value,
+    pub allow_system_bypass: bool,
+    pub bypass_reason: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ReleaseLeaseCommand {
+    pub claim_id: String,
+    pub owner_id: Option<String>,
+    pub grant_id: Option<String>,
+    pub subject_kind: String,
+    pub subject_id: String,
+    pub details: Value,
+}
+
 pub(crate) struct ControlPlaneKernel<'a> {
     state: &'a AppState,
 }
@@ -119,24 +145,59 @@ impl<'a> ControlPlaneKernel<'a> {
         scope_kind: &str,
         scope_key: &str,
     ) -> Result<Value> {
+        self.claim_lease_command(ClaimLeaseCommand {
+            project_id: None,
+            task_id: Some(task_id.to_string()),
+            owner_id: owner_id.to_string(),
+            grant_id: None,
+            subject_kind: "system".to_string(),
+            subject_id: "control-plane-kernel".to_string(),
+            scope_kind: scope_kind.to_string(),
+            scope_key: scope_key.to_string(),
+            lease_secs: 1800,
+            metadata: json!({
+                "source": "control-plane-kernel"
+            }),
+            allow_system_bypass: true,
+            bypass_reason: Some("internal control-plane kernel lease authority".to_string()),
+        })
+        .await
+    }
+
+    pub(crate) async fn claim_lease_command(&self, command: ClaimLeaseCommand) -> Result<Value> {
         self.state
             .shared_memory
             .claim_lease_typed(ClaimRequest {
-                project_id: None,
-                task_id: Some(task_id.to_string()),
-                owner_id: owner_id.to_string(),
-                grant_id: None,
-                subject_kind: "system".to_string(),
-                subject_id: "control-plane-kernel".to_string(),
-                scope_kind: scope_kind.to_string(),
-                scope_key: scope_key.to_string(),
-                lease_secs: 1800,
-                metadata: json!({
-                    "source": "control-plane-kernel"
-                }),
-                allow_system_bypass: true,
-                bypass_reason: Some("internal control-plane kernel lease authority".to_string()),
+                project_id: command.project_id,
+                task_id: command.task_id,
+                owner_id: command.owner_id,
+                grant_id: command.grant_id,
+                subject_kind: command.subject_kind,
+                subject_id: command.subject_id,
+                scope_kind: command.scope_kind,
+                scope_key: command.scope_key,
+                lease_secs: command.lease_secs,
+                metadata: command.metadata,
+                allow_system_bypass: command.allow_system_bypass,
+                bypass_reason: command.bypass_reason,
             })
+            .await
+    }
+
+    pub(crate) async fn release_lease_command(
+        &self,
+        command: ReleaseLeaseCommand,
+    ) -> Result<Value> {
+        self.state
+            .shared_memory
+            .release_typed(json!({
+                "claim_id": command.claim_id,
+                "owner_id": command.owner_id,
+                "grant_id": command.grant_id,
+                "subject_kind": command.subject_kind,
+                "subject_id": command.subject_id,
+                "details": command.details,
+            }))
             .await
     }
 

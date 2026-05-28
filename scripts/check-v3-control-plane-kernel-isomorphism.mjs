@@ -27,6 +27,7 @@ const FILES = {
   autopilot: 'crates/missiond-daemon/src/engine/intent_engine/autopilot.rs',
   flowEngine: 'crates/missiond-daemon/src/engine/intent_engine/flow_engine.rs',
   taskDelegate: 'crates/missiond-daemon/src/handlers/compute/task_delegate.rs',
+  agentExecutionClaimLease: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_lease.rs',
   v2Subscribers: 'crates/missiond-daemon/src/bus/v2_subscribers.rs',
   computeSlot: 'crates/missiond-daemon/src/handlers/compute/compute_slot.rs',
   ptyHandler: 'crates/missiond-daemon/src/handlers/compute/pty.rs',
@@ -288,11 +289,15 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.controlPlaneKernel, sources.controlPlaneKernel, [
     'pub(crate) struct ControlPlaneKernel',
     'pub(crate) struct SettleTaskCommand',
+    'pub(crate) struct ClaimLeaseCommand',
+    'pub(crate) struct ReleaseLeaseCommand',
     'pub(crate) async fn record_observation',
     'pub(crate) async fn write_completion_artifact',
     'pub(crate) async fn settle_task',
     'pub(crate) async fn settle_task_command',
     'pub(crate) async fn claim_lease',
+    'pub(crate) async fn claim_lease_command',
+    'pub(crate) async fn release_lease_command',
     'pub(crate) async fn require_capability',
     'pub(crate) async fn project_board_view',
     'pub(crate) async fn complete_system_task',
@@ -395,7 +400,7 @@ function checkFiles(root, files) {
     '.write_completion_artifact(',
     'ControlPlaneKernel::new(&state)',
     '.settle_task_command(SettleTaskCommand',
-    '.release_typed(json!',
+    '.release_lease_command(ReleaseLeaseCommand',
   ]);
   rejectAll(diagnostics, files.taskDelegate, sources.taskDelegate, [
     '"action": "workflow_start"',
@@ -404,6 +409,14 @@ function checkFiles(root, files) {
     '"action": "worker_settle"',
     'fn parse_write_scope_from_description',
     'fn description_references_source',
+  ]);
+
+  requireAll(diagnostics, files.agentExecutionClaimLease, sources.agentExecutionClaimLease, [
+    'ControlPlaneKernel::new(state)',
+    '.claim_lease_command(ClaimLeaseCommand',
+  ]);
+  rejectAll(diagnostics, files.agentExecutionClaimLease, sources.agentExecutionClaimLease, [
+    '.claim_lease_typed(',
   ]);
 
   requireAll(diagnostics, files.v2Subscribers, sources.v2Subscribers, [
@@ -561,8 +574,22 @@ function checkFiles(root, files) {
 
   rejectDirectSettleOutsideKernel(diagnostics, files, sources);
   rejectDirectEvidenceWriterOutsideKernel(diagnostics, files, sources);
+  rejectDirectLeaseCommandsOutsideKernel(diagnostics, files, sources);
 
   return diagnostics;
+}
+
+function rejectDirectLeaseCommandsOutsideKernel(diagnostics, files, sources) {
+  const allowed = new Set(['controlPlaneKernel', 'sharedMemory', 'sharedHandler']);
+  for (const [key, source] of Object.entries(sources)) {
+    if (allowed.has(key)) continue;
+    if (source.includes('.claim_lease_typed(') || source.includes('.release_typed(')) {
+      diagnostics.push({
+        file: files[key],
+        message: 'direct shared_memory lease commands outside ControlPlaneKernel are forbidden',
+      });
+    }
+  }
 }
 
 function rejectDirectSettleOutsideKernel(diagnostics, files, sources) {

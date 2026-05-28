@@ -1,4 +1,4 @@
-use crate::engine::shared_memory::ClaimRequest;
+use crate::engine::control_plane_kernel::{ClaimLeaseCommand, ControlPlaneKernel};
 use crate::state::AppState;
 use anyhow::Result;
 use chrono::{SecondsFormat, Utc};
@@ -95,9 +95,8 @@ pub(super) async fn action_claim(state: &AppState, args: &Value) -> Result<ToolR
         .unwrap_or(DEFAULT_LEASE_SECS)
         .clamp(60, MAX_LEASE_SECS);
 
-    let db_claim = state
-        .shared_memory
-        .claim_lease_typed(ClaimRequest {
+    let db_claim = ControlPlaneKernel::new(state)
+        .claim_lease_command(ClaimLeaseCommand {
             project_id: None,
             task_id: Some(execution_id.to_string()),
             owner_id: claimer.to_string(),
