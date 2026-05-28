@@ -703,12 +703,21 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.boardRoute, sources.boardRoute, [
     'missiondBody?.code ?? missiondBody?.error_code',
-    "code !== 'EVIDENCE_REQUIRED'",
+    'structuredMissiondErrorResponse',
+    "code === 'EVIDENCE_REQUIRED'",
+    "code === 'CLAIM_CONFLICT'",
+    "code === 'CAPABILITY_DENIED'",
+    "code === 'WRITE_SCOPE_VIOLATION'",
+    "code === 'RUNTIME_METADATA_REQUIRED'",
+    "code === 'TASK_CONTRACT_REQUIRED'",
+    "code === 'FEATURE_DISABLED'",
+    "code: 'BOARD_API_ERROR'",
   ]);
   rejectAll(diagnostics, files.boardRoute, sources.boardRoute, [
     '.includes(',
     '.startsWith(',
     'JSON.stringify(resp.error)',
+    "NextResponse.json({ error: errorText(err) }",
   ]);
 
   requireAll(diagnostics, files.boardStoreTs, sources.boardStoreTs, [

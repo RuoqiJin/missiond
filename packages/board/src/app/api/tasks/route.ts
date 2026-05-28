@@ -27,35 +27,79 @@ function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-function evidenceErrorResponse(err: unknown) {
+function taskIdFromMissiondBody(body: Record<string, unknown>): string {
+  if (typeof body.taskId === 'string') return body.taskId;
+  if (typeof body.task_id === 'string') return body.task_id;
+  const details = body.details;
+  if (
+    details
+    && typeof details === 'object'
+    && 'task_id' in details
+    && typeof (details as { task_id?: unknown }).task_id === 'string'
+  ) {
+    return (details as { task_id: string }).task_id;
+  }
+  return '';
+}
+
+function structuredErrorStatus(code?: string): number {
+  if (code === 'CAPABILITY_DENIED' || code === 'FEATURE_DISABLED') return 403;
+  if (
+    code === 'COMPLETION_ARTIFACT_INVALID'
+    || code === 'SANDBOX_POLICY_UNSUPPORTED'
+    || code === 'WRITE_SCOPE_VIOLATION'
+  ) {
+    return 422;
+  }
+  if (
+    code === 'EVIDENCE_REQUIRED'
+    || code === 'CLAIM_CONFLICT'
+    || code === 'RUNTIME_METADATA_REQUIRED'
+    || code === 'TASK_CONTRACT_REQUIRED'
+  ) {
+    return 409;
+  }
+  if (code === 'COMPLETION_ARTIFACT_WRITE_FAILED') return 502;
+  return 502;
+}
+
+function structuredMissiondErrorResponse(err: unknown) {
   const missiondBody = err instanceof MissiondError ? err.body : null;
+  if (!missiondBody) return null;
   const code = missiondBody?.code ?? missiondBody?.error_code;
   const message = missiondBody?.message ?? missiondBody?.reason ?? errorText(err);
-  if (code !== 'EVIDENCE_REQUIRED') return null;
-  const taskId = typeof missiondBody?.taskId === 'string'
-    ? missiondBody.taskId
-    : typeof missiondBody?.details === 'object' && missiondBody.details !== null
-      && 'task_id' in missiondBody.details
-      && typeof (missiondBody.details as { task_id?: unknown }).task_id === 'string'
-        ? (missiondBody.details as { task_id: string }).task_id
-        : '';
-  const responseBody = {
-    code: 'EVIDENCE_REQUIRED',
-    taskId,
-    message: taskId
-      ? `Task ${taskId} cannot be marked done until canonical completion evidence exists.`
-      : 'Task cannot be marked done until canonical completion evidence exists.',
-    suggestedAction: taskId
-      ? `mission_shared_memory(action="task_result_put", task_id="${taskId}", result_status="completed", ...)`
-      : 'mission_shared_memory(action="task_result_put", task_id=..., result_status="completed", ...)',
+  const suggestion = missiondBody?.suggestedAction ?? missiondBody?.suggestion;
+  const taskId = taskIdFromMissiondBody(missiondBody);
+  const responseBody: Record<string, unknown> = {
+    ...missiondBody,
+    code,
+    message,
+    suggestedAction: suggestion,
     error: message,
   };
-  return NextResponse.json(responseBody, { status: 409 });
+  if (code === 'EVIDENCE_REQUIRED') {
+    responseBody.taskId = taskId;
+    responseBody.message = taskId
+      ? `Task ${taskId} cannot be marked done until canonical completion evidence exists.`
+      : 'Task cannot be marked done until canonical completion evidence exists.';
+    responseBody.suggestedAction = taskId
+      ? `mission_shared_memory(action="task_result_put", task_id="${taskId}", result_status="completed", ...)`
+      : 'mission_shared_memory(action="task_result_put", task_id=..., result_status="completed", ...)';
+    responseBody.error = responseBody.message;
+  }
+  return NextResponse.json(responseBody, { status: structuredErrorStatus(code) });
 }
 
 function taskApiError(err: unknown) {
-  return evidenceErrorResponse(err)
-    ?? NextResponse.json({ error: errorText(err) }, { status: 502 });
+  return structuredMissiondErrorResponse(err)
+    ?? NextResponse.json(
+      {
+        code: 'BOARD_API_ERROR',
+        message: errorText(err),
+        error: errorText(err),
+      },
+      { status: 502 },
+    );
 }
 
 export async function GET(req: NextRequest) {
