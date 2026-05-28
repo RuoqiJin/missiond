@@ -559,6 +559,7 @@ function checkFiles(root, files) {
   ]);
 
   rejectDirectSettleOutsideKernel(diagnostics, files, sources);
+  rejectDirectEvidenceWriterOutsideKernel(diagnostics, files, sources);
 
   return diagnostics;
 }
@@ -570,6 +571,18 @@ function rejectDirectSettleOutsideKernel(diagnostics, files, sources) {
       diagnostics.push({
         file: files[key],
         message: 'direct shared_memory.settle_worker_command outside ControlPlaneKernel is forbidden',
+      });
+    }
+  }
+}
+
+function rejectDirectEvidenceWriterOutsideKernel(diagnostics, files, sources) {
+  for (const [key, source] of Object.entries(sources)) {
+    if (key === 'controlPlaneKernel' || key === 'evidenceWriter') continue;
+    if (source.includes('TaskCompletionEvidenceWriter::new')) {
+      diagnostics.push({
+        file: files[key],
+        message: 'direct TaskCompletionEvidenceWriter construction outside ControlPlaneKernel is forbidden',
       });
     }
   }

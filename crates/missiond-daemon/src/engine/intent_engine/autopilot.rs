@@ -590,11 +590,8 @@ async fn materialize_read_only_task_result_artifact_from_durable_final(
         .unwrap_or_else(|| "missiond".to_string());
     let accepted_shard_id = runtime_contract.accepted_shard_id.clone();
     let summary = truncate_safe(final_summary, 4_000);
-    let writer = crate::engine::task_completion_evidence::TaskCompletionEvidenceWriter::new(
-        state.storage().shared_memory.clone(),
-    );
-    match writer
-        .write_bounded(
+    match ControlPlaneKernel::new(state)
+        .write_completion_artifact(
             crate::engine::task_completion_evidence::TaskCompletionEvidenceInput {
                 task_id: task.id.to_string(),
                 project_id: Some(project_id),

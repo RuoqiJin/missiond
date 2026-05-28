@@ -3,9 +3,8 @@ use missiond_core::event::events::ExecutionEvent;
 use missiond_mcp::tools::ToolResult;
 use serde_json::{json, Value};
 
-use crate::engine::task_completion_evidence::{
-    TaskCompletionEvidenceInput, TaskCompletionEvidenceWriter,
-};
+use crate::engine::control_plane_kernel::ControlPlaneKernel;
+use crate::engine::task_completion_evidence::TaskCompletionEvidenceInput;
 use crate::state::AppState;
 
 use super::completion_entry::{render_completion_entry, CompletionEntryFields};
@@ -210,9 +209,8 @@ pub(super) async fn action_complete(state: &AppState, args: &Value) -> Result<To
         } else {
             "completed".to_string()
         };
-        let writer = TaskCompletionEvidenceWriter::new(state.storage().shared_memory.clone());
-        let artifact = writer
-            .write_bounded(TaskCompletionEvidenceInput {
+        let artifact = ControlPlaneKernel::new(state)
+            .write_completion_artifact(TaskCompletionEvidenceInput {
                 task_id: task_id.to_string(),
                 project_id: project_or_target_project(args).map(str::to_string),
                 slot_id: None,

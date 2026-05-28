@@ -1439,8 +1439,8 @@ async fn main() -> Result<()> {
         *jarvis_grounding_slot.write().await = Some(grounder);
 
         let state_for_artifact = state.clone();
-        let artifact_writer: missiond_core::JarvisArtifactFn = Arc::new(
-            move |req: missiond_core::JarvisArtifactRequest| {
+        let artifact_writer: missiond_core::JarvisArtifactFn =
+            Arc::new(move |req: missiond_core::JarvisArtifactRequest| {
                 let s = state_for_artifact.clone();
                 Box::pin(async move {
                     if req.kind == "task-result-artifact" {
@@ -1478,47 +1478,45 @@ async fn main() -> Result<()> {
                             .and_then(Value::as_str)
                             .or_else(|| req.payload.get("content").and_then(Value::as_str))
                             .unwrap_or("");
-                        let writer =
-                            crate::engine::task_completion_evidence::TaskCompletionEvidenceWriter::new(
-                                s.storage().shared_memory.clone(),
-                            );
-                        let result = writer
-                            .write_bounded(
-                                crate::engine::task_completion_evidence::TaskCompletionEvidenceInput {
-                                    task_id: task_id.clone(),
-                                    project_id: Some(
-                                        req.project_id
-                                            .clone()
-                                            .unwrap_or_else(|| "missiond".to_string()),
-                                    ),
-                                    slot_id: None,
-                                    conversation_id: None,
-                                    provider: provider.to_string(),
-                                    result_status: result_status.to_string(),
-                                    summary: summary.to_string(),
-                                    content: Some(summary.to_string()),
-                                    json: req.payload.clone(),
-                                    accepted_shard_id: None,
-                                    attempt_id: None,
-                                    capability_grant_id: None,
-                                    subject_kind: Some("system".to_string()),
-                                    subject_id: Some("jarvis-artifact-request".to_string()),
-                                    confirm: Some(true),
-                                    producer: Some(serde_json::json!({
-                                        "kind": "system",
-                                        "id": "jarvis-artifact-request",
-                                        "source": "artifact_request"
-                                    })),
-                                    raw_evidence: Some(req.payload.clone()),
-                                    evidence_refs: Some(serde_json::json!([{
-                                        "kind": "artifact_request_payload",
-                                        "task_id": task_id
-                                    }])),
-                                    created_at: Some(chrono::Utc::now().to_rfc3339()),
-                                },
-                            )
-                            .await
-                            .map_err(|err| err.to_string())?;
+                        let result = crate::engine::control_plane_kernel::ControlPlaneKernel::new(
+                            &s,
+                        )
+                        .write_completion_artifact(
+                            crate::engine::task_completion_evidence::TaskCompletionEvidenceInput {
+                                task_id: task_id.clone(),
+                                project_id: Some(
+                                    req.project_id
+                                        .clone()
+                                        .unwrap_or_else(|| "missiond".to_string()),
+                                ),
+                                slot_id: None,
+                                conversation_id: None,
+                                provider: provider.to_string(),
+                                result_status: result_status.to_string(),
+                                summary: summary.to_string(),
+                                content: Some(summary.to_string()),
+                                json: req.payload.clone(),
+                                accepted_shard_id: None,
+                                attempt_id: None,
+                                capability_grant_id: None,
+                                subject_kind: Some("system".to_string()),
+                                subject_id: Some("jarvis-artifact-request".to_string()),
+                                confirm: Some(true),
+                                producer: Some(serde_json::json!({
+                                    "kind": "system",
+                                    "id": "jarvis-artifact-request",
+                                    "source": "artifact_request"
+                                })),
+                                raw_evidence: Some(req.payload.clone()),
+                                evidence_refs: Some(serde_json::json!([{
+                                    "kind": "artifact_request_payload",
+                                    "task_id": task_id
+                                }])),
+                                created_at: Some(chrono::Utc::now().to_rfc3339()),
+                            },
+                        )
+                        .await
+                        .map_err(|err| err.to_string())?;
                         let hash = result.artifact_hash;
                         return Ok(missiond_core::JarvisArtifactResult {
                             artifact_id: format!("task-result-artifact:{hash}"),
@@ -1548,8 +1546,7 @@ async fn main() -> Result<()> {
                         path: format!("shared-artifact://{hash}"),
                     })
                 })
-            },
-        );
+            });
         *jarvis_artifact_writer_slot.write().await = Some(artifact_writer);
         info!("Jarvis grounded intent/plan runtime activated");
     }
