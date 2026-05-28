@@ -127,6 +127,7 @@ function checkFiles(root, files) {
     'Write-scoped completion verification MUST bind to the current job_attempt',
     'compares git status plus git diff --name-only between pre/post HEAD',
     'Worker spawn MUST carry an exact subject-bound worker/conversation spawn grant',
+    'mission_compute_slot(create) for task-bound dynamic workers MUST start a kernel attempt.started event after PTY spawn succeeds',
     'BoardTask claim, release, heartbeat, expiry, and recovery MUST use work_leases as the lease authority',
     'ProjectionEngine updates board_task_views and Board-facing status from typed events/state',
     'Non-core full-os tools MUST keep their public MCP names but default to FEATURE_DISABLED',
@@ -565,10 +566,14 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.computeSlot, sources.computeSlot, [
     'RequireCapabilityCommand',
+    'StartAttemptCommand',
     'ControlPlaneKernel::new(state)',
     '.require_capability_command(RequireCapabilityCommand',
+    '.start_attempt_command(StartAttemptCommand',
     'operation: "spawn".to_string()',
     'capability_grant_id',
+    '"source": "mission_compute_slot.create"',
+    '"attempt_id": task_bound_attempt_id',
     'unwrap_or("worker")',
     'unwrap_or(&slot_id)',
     'mission_compute_slot(create) requires task_id with an active worker-bound spawn capability',

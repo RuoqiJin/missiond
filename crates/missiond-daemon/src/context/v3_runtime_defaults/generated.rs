@@ -4,7 +4,7 @@
 // Do not edit by hand.
 
 pub const SCHEMA_VERSION: &str = "missiond.compiled-runtime-config.v1";
-pub const SOURCE_HASH: &str = "b5b07e5b14f97c6d719e97f20e9e280d";
+pub const SOURCE_HASH: &str = "d1513464c99ac0cf8e5dfa46705fd0e8";
 pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
   "blueprint": ".missiond/v3/missiond-blueprint.lisp",
   "source_units": [
@@ -13,13 +13,13 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
       "kind": "missiond-blueprint",
       "included_by": null,
       "include_line": null,
-      "source_hash": "588e1bee8ac9191e1203592bbbab39a3"
+      "source_hash": "bb0f6dff610bf907d1c26ea56d64d950"
     },
     {
       "file": ".missiond/v3/shards/index.lisp",
       "kind": "missiond-blueprint-shards",
       "included_by": ".missiond/v3/missiond-blueprint.lisp",
-      "include_line": 397,
+      "include_line": 398,
       "source_hash": "8882108e8391f000fe8717dc67c1c03f"
     },
     {
@@ -41,7 +41,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
       "kind": "multi-section-shard",
       "included_by": ".missiond/v3/shards/index.lisp",
       "include_line": 21,
-      "source_hash": "3bc38a6e0b91abfe2d0eff6a9be86d31"
+      "source_hash": "09b81d3db03d8642ff6377a54c2a3c02"
     },
     {
       "file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
@@ -159,27 +159,27 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
   "source_domains": [
     {
       "id": "blueprint-core",
-      "source_hash": "ff5d027b20d7a846d6734642bccd6596",
+      "source_hash": "8829cf2ceeff3b8f9df2bd1215c1b22c",
       "source_units": [
         {
           "file": ".missiond/v3/missiond-blueprint.lisp",
           "kind": "missiond-blueprint",
           "included_by": null,
           "include_line": null,
-          "source_hash": "588e1bee8ac9191e1203592bbbab39a3"
+          "source_hash": "bb0f6dff610bf907d1c26ea56d64d950"
         },
         {
           "file": ".missiond/v3/shards/index.lisp",
           "kind": "missiond-blueprint-shards",
           "included_by": ".missiond/v3/missiond-blueprint.lisp",
-          "include_line": 397,
+          "include_line": 398,
           "source_hash": "8882108e8391f000fe8717dc67c1c03f"
         }
       ]
     },
     {
       "id": "control-plane-runtime",
-      "source_hash": "c00672c05ce28af87edf8648d702e7e7",
+      "source_hash": "bf2b9555179e6283dd5d322ae881de21",
       "source_units": [
         {
           "file": ".missiond/v3/shards/request-runtime.lisp",
@@ -193,7 +193,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
           "kind": "multi-section-shard",
           "included_by": ".missiond/v3/shards/index.lisp",
           "include_line": 21,
-          "source_hash": "3bc38a6e0b91abfe2d0eff6a9be86d31"
+          "source_hash": "09b81d3db03d8642ff6377a54c2a3c02"
         }
       ]
     },
@@ -393,7 +393,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 323,
         "source_column": 3,
-        "source_hash": "b5b07e5b14f97c6d719e97f20e9e280d"
+        "source_hash": "d1513464c99ac0cf8e5dfa46705fd0e8"
       }
     },
     {
@@ -418,7 +418,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 344,
         "source_column": 3,
-        "source_hash": "b5b07e5b14f97c6d719e97f20e9e280d"
+        "source_hash": "d1513464c99ac0cf8e5dfa46705fd0e8"
       }
     },
     {
@@ -440,7 +440,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 357,
         "source_column": 3,
-        "source_hash": "b5b07e5b14f97c6d719e97f20e9e280d"
+        "source_hash": "d1513464c99ac0cf8e5dfa46705fd0e8"
       }
     },
     {
@@ -459,7 +459,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 369,
         "source_column": 3,
-        "source_hash": "b5b07e5b14f97c6d719e97f20e9e280d"
+        "source_hash": "d1513464c99ac0cf8e5dfa46705fd0e8"
       }
     },
     {
@@ -480,7 +480,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 379,
         "source_column": 3,
-        "source_hash": "b5b07e5b14f97c6d719e97f20e9e280d"
+        "source_hash": "d1513464c99ac0cf8e5dfa46705fd0e8"
       }
     },
     {
@@ -523,7 +523,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 390,
         "source_column": 3,
-        "source_hash": "b5b07e5b14f97c6d719e97f20e9e280d"
+        "source_hash": "d1513464c99ac0cf8e5dfa46705fd0e8"
       }
     },
     {
@@ -545,7 +545,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/universe/project-registry.lisp",
         "source_line": 1,
         "source_column": 1,
-        "source_hash": "b5b07e5b14f97c6d719e97f20e9e280d"
+        "source_hash": "d1513464c99ac0cf8e5dfa46705fd0e8"
       }
     },
     {
@@ -565,7 +565,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 1,
         "source_column": 3,
-        "source_hash": "b5b07e5b14f97c6d719e97f20e9e280d"
+        "source_hash": "d1513464c99ac0cf8e5dfa46705fd0e8"
       }
     },
     {
@@ -592,7 +592,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 118,
         "source_column": 3,
-        "source_hash": "b5b07e5b14f97c6d719e97f20e9e280d"
+        "source_hash": "d1513464c99ac0cf8e5dfa46705fd0e8"
       }
     },
     {
@@ -629,7 +629,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 185,
         "source_column": 3,
-        "source_hash": "b5b07e5b14f97c6d719e97f20e9e280d"
+        "source_hash": "d1513464c99ac0cf8e5dfa46705fd0e8"
       }
     },
     {
@@ -673,7 +673,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 141,
         "source_column": 3,
-        "source_hash": "b5b07e5b14f97c6d719e97f20e9e280d"
+        "source_hash": "d1513464c99ac0cf8e5dfa46705fd0e8"
       }
     }
   ],
@@ -1286,6 +1286,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
       "task_result_put and worker_settle MUST pass exact grant_id + subject_kind + subject_id + operation + scope + task_id capability checks; write-scoped completed artifacts also require current attempt_id plus verification and changed-path evidence.",
       "Write-scoped completion verification MUST bind to the current job_attempt: attempt.started records a pre worktree manifest, settle-time verification records a post manifest, compares git status plus git diff --name-only between pre/post HEAD, subtracts pre-existing dirty paths, and fails closed when the current attempt or pre manifest is missing.",
       "Worker spawn MUST carry an exact subject-bound worker/conversation spawn grant and project sandbox_profile from task_contracts/capability facts; unsupported engine/scope combinations return SANDBOX_POLICY_UNSUPPORTED or CAPABILITY_DENIED.",
+      "mission_compute_slot(create) for task-bound dynamic workers MUST start a kernel attempt.started event after PTY spawn succeeds and before the worker is advertised idle, so jobs.current_attempt_id and the pre worktree manifest exist before task dispatch or artifact writes.",
       "BoardTask claim, release, heartbeat, expiry, and recovery MUST use work_leases as the lease authority; BoardTask claim fields and shared_claims are compatibility projections/mirrors only.",
       "ProjectionEngine updates board_task_views and Board-facing status from typed events/state, not from note text or PTY/provider final prose.",
       "Non-core full-os tools MUST keep their public MCP names but default to FEATURE_DISABLED unless MISSIOND_FULL_OS_ENABLE or the matching MISSIOND_FEATURE_* gate is explicitly enabled.",

@@ -8,10 +8,23 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
-use crate::engine::control_plane_kernel::{ControlPlaneKernel, RequireCapabilityCommand};
+use crate::engine::control_plane_kernel::{
+    ControlPlaneKernel, RequireCapabilityCommand, StartAttemptCommand,
+};
 use crate::state::AppState;
 
 const CODING_DEFAULT_PROFILE: &str = "coding-default-opus-4-7";
+
+#[derive(Debug, Clone)]
+struct TaskBoundAttemptStart {
+    task_id: String,
+    project_id: Option<String>,
+    attempt_id: String,
+    subject_kind: String,
+    subject_id: String,
+    capability_grant_id: String,
+    sandbox_profile: String,
+}
 
 pub(crate) fn resolve_model_projection(
     template_name: &str,
@@ -215,6 +228,7 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
     });
     let task_id = string_arg(args, &["task_id", "taskId"]).map(str::to_string);
     let mut task_contract_sandbox_profile: Option<String> = None;
+    let mut task_bound_attempt_start: Option<TaskBoundAttemptStart> = None;
     if let Some(task_id) = task_id.as_deref() {
         let grant_id = string_arg(
             args,
@@ -235,7 +249,7 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
         });
         let subject_kind = string_arg(args, &["subject_kind", "subjectKind"]).unwrap_or("worker");
         let subject_id = string_arg(args, &["subject_id", "subjectId"]).unwrap_or(&slot_id);
-        if let Err(err) = ControlPlaneKernel::new(state)
+        let spawn_grant_id = match ControlPlaneKernel::new(state)
             .require_capability_command(RequireCapabilityCommand {
                 grant_id,
                 subject_kind: subject_kind.to_string(),
@@ -250,11 +264,14 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
             })
             .await
         {
-            return Ok(ToolResult::structured_error(control_plane_tool_error(
-                err,
-                "spawn dynamic workers through mission_task_delegate so the worker slot carries an active spawn capability and sandbox metadata",
-            )));
-        }
+            Ok(grant_id) => grant_id,
+            Err(err) => {
+                return Ok(ToolResult::structured_error(control_plane_tool_error(
+                    err,
+                    "spawn dynamic workers through mission_task_delegate so the worker slot carries an active spawn capability and sandbox metadata",
+                )));
+            }
+        };
         let contract = match state.shared_memory.task_runtime_contract(task_id).await {
             Ok(contract) => contract,
             Err(err) => {
@@ -320,6 +337,17 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
             }
         }
         task_contract_sandbox_profile = Some(derived_sandbox.to_string());
+        task_bound_attempt_start = Some(TaskBoundAttemptStart {
+            task_id: task_id.to_string(),
+            project_id: contract.project_id.clone(),
+            attempt_id: string_arg(args, &["attempt_id", "attemptId"])
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("attempt:{task_id}:slot:{slot_id}")),
+            subject_kind: subject_kind.to_string(),
+            subject_id: subject_id.to_string(),
+            capability_grant_id: spawn_grant_id,
+            sandbox_profile: derived_sandbox.to_string(),
+        });
     } else if !bool_arg(
         args,
         &[
@@ -612,6 +640,10 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
     let slot_id_owned = slot_id.clone();
     let template_owned = template_name.to_string();
     let objective_owned = objective.map(|s| s.to_string());
+    let task_bound_attempt_id = task_bound_attempt_start
+        .as_ref()
+        .map(|attempt| attempt.attempt_id.clone());
+    let task_bound_attempt_start_for_spawn = task_bound_attempt_start.clone();
     let initial_prompt_for_spawn =
         effective_initial_prompt(explicit_initial_prompt, suppress_initial_prompt);
     let expires_at_str = expires_at.to_rfc3339();
@@ -662,13 +694,47 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
         )
         .await;
 
+        let mut attempt_started: Option<Value> = None;
+        let mut attempt_start_failed: Option<String> = None;
+        if result.is_ok() {
+            if let Some(attempt) = task_bound_attempt_start_for_spawn.as_ref() {
+                match ControlPlaneKernel::new(&state_clone)
+                    .start_attempt_command(StartAttemptCommand {
+                        task_id: attempt.task_id.clone(),
+                        project_id: attempt.project_id.clone(),
+                        attempt_id: attempt.attempt_id.clone(),
+                        agent_id: attempt.subject_id.clone(),
+                        worker_id: slot_id_owned.clone(),
+                        payload: json!({
+                            "source": "mission_compute_slot.create",
+                            "slot_id": slot_id_owned.clone(),
+                            "template": template_owned.clone(),
+                            "subject_kind": attempt.subject_kind.clone(),
+                            "subject_id": attempt.subject_id.clone(),
+                            "capability_grant_id": attempt.capability_grant_id.clone(),
+                            "sandbox_profile": attempt.sandbox_profile.clone(),
+                            "model": slot_config.model.clone(),
+                        }),
+                    })
+                    .await
+                {
+                    Ok(event) => {
+                        attempt_started = Some(event);
+                    }
+                    Err(err) => {
+                        attempt_start_failed = Some(control_plane_error_message(&err));
+                    }
+                }
+            }
+        }
+
         let mut became_idle = false;
         let mut spawn_failed = None;
         {
             let mut store = state_clone.job_store.write().await;
             if let Some(job) = store.get_mut(&job_id_bg) {
                 match result {
-                    Ok(_) => {
+                    Ok(_) if attempt_start_failed.is_none() => {
                         job.complete(json!({
                             "slot_id": slot_id_owned.clone(),
                             "status": "spawned",
@@ -678,8 +744,19 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
                             "ttl_seconds": ttl,
                             "expires_at": expires_at_str,
                             "objective": objective_owned,
+                            "attempt_id": task_bound_attempt_start_for_spawn.as_ref().map(|attempt| attempt.attempt_id.clone()),
+                            "attempt": attempt_started,
                         }));
                         became_idle = true;
+                    }
+                    Ok(_) => {
+                        let message = format!(
+                            "Failed to start task attempt: {}",
+                            attempt_start_failed
+                                .unwrap_or_else(|| "unknown attempt start error".to_string())
+                        );
+                        job.fail(message.clone());
+                        spawn_failed = Some(message);
                     }
                     Err(e) => {
                         let message = format!("Failed to spawn slot: {}", e);
@@ -690,6 +767,7 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
             }
         }
         if spawn_failed.is_some() {
+            let _ = state_clone.pty.kill(&slot_id_owned).await;
             state_clone
                 .store
                 .terminate_dynamic_slot(&slot_id_owned, "spawn_failed")
@@ -716,8 +794,18 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
             "template": template_name,
             "status_detail": "spawn_pending",
             "sandbox_profile": task_contract_sandbox_profile,
+            "attempt_id": task_bound_attempt_id,
         }),
     ))
+}
+
+fn control_plane_error_message(err: &anyhow::Error) -> String {
+    if let Some(control) =
+        err.downcast_ref::<crate::engine::shared_memory::StructuredControlError>()
+    {
+        return format!("{}: {}", control.code, control.message);
+    }
+    err.to_string()
 }
 
 fn control_plane_tool_error(err: anyhow::Error, fallback_suggestion: &str) -> ToolError {

@@ -443,6 +443,7 @@
     :feature-gates [MISSIOND_FULL_OS_ENABLE MISSIOND_FEATURE_WORKFLOW_ENABLE MISSIOND_FEATURE_MEMORY_ENABLE MISSIOND_FEATURE_SKILL_STORE_ENABLE MISSIOND_FEATURE_ROUTER_EXPERIMENTS_ENABLE MISSIOND_FEATURE_CODEX_REPLAY_ENABLE MISSIOND_FEATURE_SELF_EVOLUTION_ENABLE MISSIOND_FEATURE_CONVERSATIONS_ENABLE MISSIOND_FEATURE_INFRA_OS_ENABLE MISSIOND_FEATURE_BOARD_ADVANCED_ENABLE]
     :rule
       ["MissionD kernel-core keeps delegate, claim/lease, capability, spawn, attempt, completion artifact, settle, event_log, Board projection, and the minimal PTY worker adapter enabled by default."
+       "mission_compute_slot(create) for task-bound dynamic workers MUST bind spawn to a current job_attempt via ControlPlaneKernel::start_attempt_command after PTY spawn succeeds and before the slot is announced idle."
        "workflow, memory/KB, skill-store, router experiments, codex replay, self-evolution/Lisp code sync, advanced conversations, infra OS operations, and advanced Board decomposition are full-os optional layers."
        "Optional MCP tool names remain public but dispatch MUST return structured FEATURE_DISABLED unless MISSIOND_FULL_OS_ENABLE or the matching MISSIOND_FEATURE_* gate is enabled."
        "Optional startup services MUST NOT run in kernel-core mode."
