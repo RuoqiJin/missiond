@@ -21,6 +21,7 @@ use crate::context::v3_blueprint_runtime::{
     compiled_runtime_projection_status, WorkstationRuntimeConfig,
 };
 use crate::control_tree::CtlDomain;
+use crate::engine::control_plane_kernel::{ControlPlaneKernel, UpsertTaskContractCommand};
 use crate::state::AppState;
 
 pub(crate) const MASTER_WORKER_ID: &str = "codex-master-control";
@@ -828,9 +829,17 @@ pub(crate) async fn ensure_code_drift_backfill_task_for_state(
         hidden: Some(false),
         dedupe_key: Some(drift.dedupe_key.clone()),
         context_intent: Some("code".to_string()),
+        runtime_metadata: Some(code_drift_backfill_runtime_metadata(&drift)),
         ..Default::default()
     };
     let task = state.storage().store.create_board_task(&input).await?;
+    ControlPlaneKernel::new(state)
+        .upsert_task_contract_command(UpsertTaskContractCommand {
+            task_id: task.id.to_string(),
+            project_id: task.project.clone(),
+            runtime_metadata: task.runtime_metadata.clone(),
+        })
+        .await?;
     let ev = BoardEvent::TaskCreated {
         task_id: task.id.to_string(),
         title: task.title.clone(),
@@ -839,6 +848,25 @@ pub(crate) async fn ensure_code_drift_backfill_task_for_state(
     notify_board_event_direct(&ev);
     let _ = state.storage().bus.publish_board(ev).await;
     Ok(Some(task.id.to_string()))
+}
+
+fn code_drift_backfill_runtime_metadata(drift: &CodeFirstDrift) -> Value {
+    json!({
+        "schema": "missiond.board-task-runtime-metadata.v1",
+        "source": "master_control_code_drift",
+        "control_state": "task_contracts",
+        "dispatch_metadata": {
+            "task_class": "code-drift-backfill-review",
+            "dedupe_key": drift.dedupe_key,
+            "completion_protocol": "review-only drift backfill; Lisp/checker/code writes require explicit delegated write_scope"
+        },
+        "read_scope": drift.files.clone(),
+        "write_scope": [],
+        "must_not_touch": [],
+        "capability_grant_ids": [],
+        "sandbox_profile": "system-master-control-review",
+        "projection_policy": "description_notes_are_projection_only"
+    })
 }
 
 pub(crate) fn start_master_control_service(
@@ -2418,6 +2446,26 @@ mod tests {
         let tasks = vec![old, newest, ignored, m6];
         let selected = select_recoverable_master_objective(&tasks).expect("recover objective");
         assert_eq!(selected.id.as_str(), "dddddddd-dddd-dddd-dddd-dddddddddddd");
+    }
+
+    #[test]
+    fn code_drift_backfill_metadata_declares_task_contract_authority() {
+        let drift = CodeFirstDrift {
+            files: vec![
+                "crates/missiond-daemon/src/engine/master_control.rs".to_string(),
+                "scripts/check-v3-master-control-isomorphism.mjs".to_string(),
+            ],
+            dedupe_key: "lisp-code-drift:sample".to_string(),
+        };
+        let metadata = code_drift_backfill_runtime_metadata(&drift);
+        assert_eq!(metadata["source"], "master_control_code_drift");
+        assert_eq!(metadata["control_state"], "task_contracts");
+        assert_eq!(
+            metadata["dispatch_metadata"]["task_class"],
+            "code-drift-backfill-review"
+        );
+        assert_eq!(metadata["write_scope"].as_array().unwrap().len(), 0);
+        assert_eq!(metadata["sandbox_profile"], "system-master-control-review");
     }
 
     #[test]

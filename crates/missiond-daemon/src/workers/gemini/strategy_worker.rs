@@ -15,13 +15,14 @@
 use anyhow::{anyhow, Result};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::Write;
 use std::sync::{Arc, LazyLock};
 use tokio::sync::Notify;
 use tracing::{debug, info, warn};
 
+use crate::engine::control_plane_kernel::{ControlPlaneKernel, UpsertTaskContractCommand};
 use crate::state::AppState;
 use missiond_core::event::events::{MemoryEvent, SystemEvent};
 
@@ -619,43 +620,46 @@ async fn apply_strategic_output(
         }
     }
 
-    // 3. Create Board tasks for workflow proposals
-    // Phase 2b: ≥5 occurrences → auto-generate Skill (auto_execute + assignee)
-    // Phase 2a: ≥3 occurrences → human review task
+    // 3. Create review Board tasks for workflow proposals. Strategy analysis
+    // may propose follow-up work, but writes require explicit delegation.
     for proposal in &output.workflow_proposals {
         if proposal.occurrences >= 5 {
-            // Phase 2b: High-confidence workflow → auto-dispatch to Agent for Skill generation
             let dedupe = format!("strategy-skill-gen-{}", slug(&proposal.action));
             let skill_slug = slug(&proposal.action);
-            state
+            let task = state
                 .store
                 .create_board_task(&missiond_core::types::CreateBoardTaskInput {
-                    title: format!("自动生成 Skill: {}", truncate(&proposal.action, 50)),
+                    title: format!("审查 Skill 提案: {}", truncate(&proposal.action, 50)),
                     description: Some(format!(
-                        "战略分析发现此操作出现 {} 次，已达自动化阈值。\n\n\
-                    请创建 Skill 文件 `~/.claude/skills/{}/SKILL.md`：\n\
+                        "战略分析发现此操作出现 {} 次，已达 Skill 提案阈值。\n\n\
+                    建议审查是否需要创建 Skill `~/.claude/skills/{}/SKILL.md`：\n\
                     1. 分析此工作流涉及的代码路径和工具\n\
-                    2. 编写 frontmatter (name, description, allowed-tools)\n\
-                    3. 编写 INDEX 表和关键章节\n\
+                    2. 判断是否值得进入显式 delegate/write_scope 流程\n\
+                    3. 如批准，创建后续带 write_scope 的 Skill 维护任务\n\
                     4. 工作流描述: {}\n\n\
                     来源: session {}",
                         proposal.occurrences, skill_slug, proposal.action, session_id
                     )),
                     category: Some("dev".to_string()),
                     priority: Some("medium".to_string()),
-                    assignee: Some("slot-memory-slow".to_string()),
-                    auto_execute: Some(true),
+                    assignee: None,
+                    auto_execute: Some(false),
                     dedupe_key: Some(dedupe),
                     project: Some("missiond".to_string()),
+                    runtime_metadata: Some(strategy_skill_review_runtime_metadata(
+                        proposal,
+                        session_id,
+                        &skill_slug,
+                    )),
                     ..Default::default()
                 })
                 .await?;
+            upsert_strategy_task_contract(state, &task).await;
             info!(action = %proposal.action, occurrences = proposal.occurrences,
-                "strategy_analyst: auto-dispatching Skill generation task");
+                "strategy_analyst: created Skill proposal review task");
         } else if proposal.occurrences >= 3 {
-            // Phase 2a: Moderate frequency → human review
             let dedupe = format!("strategy-workflow-{}", slug(&proposal.action));
-            state
+            let task = state
                 .store
                 .create_board_task(&missiond_core::types::CreateBoardTaskInput {
                     title: format!("工作流自动化: {}", proposal.action),
@@ -665,17 +669,23 @@ async fn apply_strategic_output(
                 )),
                     category: Some("dev".to_string()),
                     priority: Some("medium".to_string()),
+                    project: Some("missiond".to_string()),
+                    auto_execute: Some(false),
                     dedupe_key: Some(dedupe),
+                    runtime_metadata: Some(strategy_workflow_review_runtime_metadata(
+                        proposal, session_id,
+                    )),
                     ..Default::default()
                 })
                 .await?;
+            upsert_strategy_task_contract(state, &task).await;
         }
     }
 
     // 4. Create Board tasks for architectural drifts
     for drift in &output.architectural_drifts {
         let dedupe = format!("strategy-drift-{}", slug(&drift.description));
-        state.store.create_board_task(&missiond_core::types::CreateBoardTaskInput {
+        let task = state.store.create_board_task(&missiond_core::types::CreateBoardTaskInput {
             title: format!("架构漂移: {}", truncate(&drift.description, 60)),
             description: Some(format!(
                 "战略分析发现架构偏离。\n影响范围: {}\n建议: 验证后更新 YAML manifest\n来源: session {}",
@@ -685,8 +695,12 @@ async fn apply_strategic_output(
             category: Some("dev".to_string()),
             priority: Some("high".to_string()),
             dedupe_key: Some(dedupe),
+            project: Some("missiond".to_string()),
+            auto_execute: Some(false),
+            runtime_metadata: Some(strategy_drift_review_runtime_metadata(drift, session_id)),
             ..Default::default()
         }).await?;
+        upsert_strategy_task_contract(state, &task).await;
     }
 
     // 5. Log friction points as KB entries
@@ -789,6 +803,94 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+async fn upsert_strategy_task_contract(state: &AppState, task: &missiond_core::types::BoardTask) {
+    if let Err(err) = ControlPlaneKernel::new(state)
+        .upsert_task_contract_command(UpsertTaskContractCommand {
+            task_id: task.id.to_string(),
+            project_id: task.project.clone(),
+            runtime_metadata: task.runtime_metadata.clone(),
+        })
+        .await
+    {
+        warn!(
+            error = %err,
+            task_id = %task.id,
+            "strategy_analyst: failed to upsert task_contracts for strategy BoardTask"
+        );
+    }
+}
+
+fn strategy_skill_review_runtime_metadata(
+    proposal: &WorkflowProposal,
+    session_id: &str,
+    skill_slug: &str,
+) -> Value {
+    strategy_review_runtime_metadata(
+        "strategy-skill-review",
+        session_id,
+        json!({
+            "action": proposal.action,
+            "occurrences": proposal.occurrences,
+            "skill_slug": skill_slug,
+            "completion_protocol": "review-only Skill proposal; skill writes require explicit delegated write_scope"
+        }),
+    )
+}
+
+fn strategy_workflow_review_runtime_metadata(
+    proposal: &WorkflowProposal,
+    session_id: &str,
+) -> Value {
+    strategy_review_runtime_metadata(
+        "strategy-workflow-review",
+        session_id,
+        json!({
+            "action": proposal.action,
+            "occurrences": proposal.occurrences,
+            "status": proposal.status,
+            "completion_protocol": "review-only workflow automation proposal"
+        }),
+    )
+}
+
+fn strategy_drift_review_runtime_metadata(drift: &ArchDrift, session_id: &str) -> Value {
+    strategy_review_runtime_metadata(
+        "strategy-architecture-drift-review",
+        session_id,
+        json!({
+            "description": drift.description,
+            "affected_area": drift.affected_area,
+            "completion_protocol": "review-only architecture drift; manifest/code writes require explicit delegated write_scope"
+        }),
+    )
+}
+
+fn strategy_review_runtime_metadata(task_class: &str, session_id: &str, details: Value) -> Value {
+    json!({
+        "schema": "missiond.board-task-runtime-metadata.v1",
+        "source": "strategy_analyst",
+        "control_state": "task_contracts",
+        "dispatch_metadata": {
+            "task_class": task_class,
+            "session_id": session_id,
+            "details": details
+        },
+        "read_scope": [
+            format!("conversation-session:{session_id}"),
+            "knowledge-base:strategic-state"
+        ],
+        "write_scope": [],
+        "must_not_touch": [
+            "~/.claude/skills",
+            "~/.codex/skills",
+            ".missiond/v3"
+        ],
+        "capability_grant_ids": [],
+        "sandbox_profile": "system-learning-review",
+        "projection_policy": "description_notes_are_projection_only"
+    })
+}
+
 /// Extract JSON object from LLM response, handling:
 /// - Pure JSON output
 /// - Markdown code blocks (```json ... ```)
@@ -849,5 +951,44 @@ impl BackgroundWorker for StrategyWorker {
             run_pending_analysis(&state).await;
             ctx.record_success();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strategy_skill_metadata_declares_task_contract_authority() {
+        let proposal = WorkflowProposal {
+            action: "create deployment SOP".to_string(),
+            occurrences: 5,
+            status: None,
+        };
+        let metadata = strategy_skill_review_runtime_metadata(&proposal, "session-1", "deploy-sop");
+        assert_eq!(metadata["source"], "strategy_analyst");
+        assert_eq!(metadata["control_state"], "task_contracts");
+        assert_eq!(
+            metadata["dispatch_metadata"]["task_class"],
+            "strategy-skill-review"
+        );
+        assert_eq!(metadata["write_scope"].as_array().unwrap().len(), 0);
+        assert_eq!(metadata["sandbox_profile"], "system-learning-review");
+    }
+
+    #[test]
+    fn strategy_drift_metadata_declares_task_contract_authority() {
+        let drift = ArchDrift {
+            description: "manifest mismatch".to_string(),
+            affected_area: Some("deployment".to_string()),
+        };
+        let metadata = strategy_drift_review_runtime_metadata(&drift, "session-2");
+        assert_eq!(metadata["source"], "strategy_analyst");
+        assert_eq!(
+            metadata["dispatch_metadata"]["task_class"],
+            "strategy-architecture-drift-review"
+        );
+        assert_eq!(metadata["write_scope"].as_array().unwrap().len(), 0);
+        assert_eq!(metadata["sandbox_profile"], "system-learning-review");
     }
 }

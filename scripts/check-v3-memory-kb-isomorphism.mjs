@@ -47,6 +47,7 @@ const DEFAULT_FILES = {
   learningIdle: 'crates/missiond-daemon/src/engine/learning_engine/idle_explorer.rs',
   learningHistorical: 'crates/missiond-daemon/src/engine/learning_engine/historical_scanner.rs',
   experienceHarvester: 'crates/missiond-daemon/src/workers/local/experience_harvester.rs',
+  strategyWorker: 'crates/missiond-daemon/src/workers/gemini/strategy_worker.rs',
   pgConversation: 'crates/missiond-core/src/db/pg/conversation.rs',
   eventProjection: 'crates/missiond-core/src/event/projection.rs',
   mcpKb: 'crates/missiond-mcp/src/tools/knowledge/kb.rs',
@@ -445,6 +446,16 @@ function checkFiles(root, files) {
     '"sandbox_profile": "system-learning-review"',
     'auto_execute: Some(false)',
     'skill_synthesis_metadata_declares_task_contract_authority',
+  ]);
+
+  requireAll(diagnostics, files.strategyWorker, sources.strategyWorker, [
+    'UpsertTaskContractCommand',
+    'strategy_skill_review_runtime_metadata',
+    'strategy_drift_review_runtime_metadata',
+    '"control_state": "task_contracts"',
+    '"sandbox_profile": "system-learning-review"',
+    'auto_execute: Some(false)',
+    'strategy_skill_metadata_declares_task_contract_authority',
   ]);
 
   requireAll(diagnostics, files.learningHistorical, sources.learningHistorical, [
@@ -1087,6 +1098,9 @@ _dedupe_merge_events;
 	`);
 	  writeFixture(root, DEFAULT_FILES.experienceHarvester, `
 	UpsertTaskContractCommand; skill_synthesis_runtime_metadata; "control_state": "task_contracts"; "sandbox_profile": "system-learning-review"; auto_execute: Some(false); skill_synthesis_metadata_declares_task_contract_authority;
+	`);
+	  writeFixture(root, DEFAULT_FILES.strategyWorker, `
+	UpsertTaskContractCommand; strategy_skill_review_runtime_metadata; strategy_drift_review_runtime_metadata; "control_state": "task_contracts"; "sandbox_profile": "system-learning-review"; auto_execute: Some(false); strategy_skill_metadata_declares_task_contract_authority;
 	`);
 	  writeFixture(root, DEFAULT_FILES.learningHistorical, `
 	LearningEngineRuntimeConfig; habit_scan_interval_secs; habit_scan_batch_size; habit_scan_timeout_ms;
