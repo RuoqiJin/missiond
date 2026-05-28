@@ -172,17 +172,17 @@ pub(crate) struct ClaimRequest {
     pub bypass_reason: Option<String>,
 }
 
-struct CapabilityGrantInput<'a> {
-    subject_kind: &'a str,
-    subject_id: &'a str,
-    operation: &'a str,
-    scope_kind: &'a str,
-    scope_key: &'a str,
-    project_id: Option<&'a str>,
-    task_id: Option<&'a str>,
-    issuer: &'a str,
-    evidence_requirement: Option<&'a str>,
-    details: Value,
+pub(crate) struct CapabilityGrantInput<'a> {
+    pub(crate) subject_kind: &'a str,
+    pub(crate) subject_id: &'a str,
+    pub(crate) operation: &'a str,
+    pub(crate) scope_kind: &'a str,
+    pub(crate) scope_key: &'a str,
+    pub(crate) project_id: Option<&'a str>,
+    pub(crate) task_id: Option<&'a str>,
+    pub(crate) issuer: &'a str,
+    pub(crate) evidence_requirement: Option<&'a str>,
+    pub(crate) details: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -708,7 +708,10 @@ impl SharedMemoryService {
             .flatten())
     }
 
-    async fn insert_capability_grant(&self, input: CapabilityGrantInput<'_>) -> Result<String> {
+    pub(crate) async fn insert_capability_grant(
+        &self,
+        input: CapabilityGrantInput<'_>,
+    ) -> Result<String> {
         let id = Uuid::new_v4().to_string();
         sqlx::query(
             r#"

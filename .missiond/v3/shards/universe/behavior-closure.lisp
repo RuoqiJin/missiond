@@ -235,24 +235,24 @@
     :id control-plane-worktree-verifier-git-subprocesses
     :kind subprocess
     :owner control-plane-kernel
-    :observed ["subprocess:crates/missiond-daemon/src/engine/shared_memory.rs:4780"
-               "subprocess:crates/missiond-daemon/src/engine/shared_memory.rs:4816"
-               "subprocess:crates/missiond-daemon/src/engine/shared_memory.rs:4836"]
+    :observed ["subprocess:crates/missiond-daemon/src/engine/shared_memory.rs:4783"
+               "subprocess:crates/missiond-daemon/src/engine/shared_memory.rs:4819"
+               "subprocess:crates/missiond-daemon/src/engine/shared_memory.rs:4839"]
     :code ["crates/missiond-daemon/src/engine/shared_memory.rs"]
     :effects []
     (anchor
       :role subprocess
-      :observed "subprocess:crates/missiond-daemon/src/engine/shared_memory.rs:4780"
+      :observed "subprocess:crates/missiond-daemon/src/engine/shared_memory.rs:4783"
       :file "crates/missiond-daemon/src/engine/shared_memory.rs"
       :symbol "git_status_changed_paths")
     (anchor
       :role subprocess
-      :observed "subprocess:crates/missiond-daemon/src/engine/shared_memory.rs:4816"
+      :observed "subprocess:crates/missiond-daemon/src/engine/shared_memory.rs:4819"
       :file "crates/missiond-daemon/src/engine/shared_memory.rs"
       :symbol "git_changed_paths_between")
     (anchor
       :role subprocess
-      :observed "subprocess:crates/missiond-daemon/src/engine/shared_memory.rs:4836"
+      :observed "subprocess:crates/missiond-daemon/src/engine/shared_memory.rs:4839"
       :file "crates/missiond-daemon/src/engine/shared_memory.rs"
       :symbol "git_head")
     (trigger

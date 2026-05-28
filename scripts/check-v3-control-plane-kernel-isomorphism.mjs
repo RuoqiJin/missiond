@@ -328,6 +328,7 @@ function checkFiles(root, files) {
     'pub(crate) async fn project_board_view',
     'pub(crate) async fn complete_system_task',
     'CapabilityCheckRequest',
+    'CapabilityGrantInput',
     'WorkerSettleRequest',
     'record_job_event_typed',
     'settle_worker_command',
@@ -337,11 +338,13 @@ function checkFiles(root, files) {
     'update_task_contract_capability_grants',
     'claim_lease_typed',
     'ensure_task_contract_from_metadata',
+    'insert_capability_grant(CapabilityGrantInput',
     'TaskCompletionEvidenceWriter::new',
     'artifact_hash: Some(artifact_hash.to_string())',
   ]);
   rejectAll(diagnostics, files.controlPlaneKernel, sources.controlPlaneKernel, [
     'task.runtime_metadata.clone()',
+    '.capability_grant_from_args(',
   ]);
 
   requireAll(diagnostics, files.evidenceWriter, sources.evidenceWriter, [
@@ -624,8 +627,7 @@ function checkFiles(root, files) {
     '.release_lease_command(release_lease_command_from_args(&args)?)',
     '.heartbeat_lease_command(heartbeat_lease_command_from_args(&args)?)',
     '.capability_check_command(capability_check_command_from_args(&args)?)',
-    'CapabilityGrantCommand { args: args.clone() }',
-    '.capability_grant_command(',
+    '.capability_grant_command(capability_grant_command_from_args(&args)?)',
     'JobEventCommand { args: args.clone() }',
     '.job_event_command(',
   ]);
@@ -634,6 +636,7 @@ function checkFiles(root, files) {
     'settle_worker_typed(args.clone())',
     'capability_check_typed(&args)',
     'capability_grant_from_args(&args)',
+    'CapabilityGrantCommand { args:',
     'job_event_typed(args.clone())',
     'state.shared_memory.claim_typed(&args)',
     'state.shared_memory.release_typed(args.clone())',

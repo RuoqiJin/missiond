@@ -71,7 +71,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 }
                 "capability_grant" | "grant_capability" => {
                     ControlPlaneKernel::new(state)
-                        .capability_grant_command(CapabilityGrantCommand { args: args.clone() })
+                        .capability_grant_command(capability_grant_command_from_args(&args)?)
                         .await
                 }
                 "job_event" | "record_job_event" => {
@@ -178,6 +178,44 @@ fn capability_check_command_from_args(args: &Value) -> Result<RequireCapabilityC
         task_id: Some(task_id),
         allow_system_bypass: system_or_operator_bypass_allowed(args),
         bypass_reason: Some("mission_shared_memory capability_check bypass".to_string()),
+        details: args
+            .get("details")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({})),
+    })
+}
+
+fn capability_grant_command_from_args(args: &Value) -> Result<CapabilityGrantCommand> {
+    Ok(CapabilityGrantCommand {
+        subject_kind: string_arg(args, "subject_kind")
+            .or_else(|| string_arg(args, "subjectKind"))
+            .unwrap_or("task")
+            .to_string(),
+        subject_id: string_arg(args, "subject_id")
+            .or_else(|| string_arg(args, "subjectId"))
+            .ok_or_else(|| anyhow!("subject_id is required"))?
+            .to_string(),
+        operation: string_arg(args, "operation")
+            .ok_or_else(|| anyhow!("operation is required"))?
+            .to_string(),
+        scope_kind: string_arg(args, "scope_kind")
+            .or_else(|| string_arg(args, "scopeKind"))
+            .ok_or_else(|| anyhow!("scope_kind is required"))?
+            .to_string(),
+        scope_key: string_arg(args, "scope_key")
+            .or_else(|| string_arg(args, "scopeKey"))
+            .ok_or_else(|| anyhow!("scope_key is required"))?
+            .to_string(),
+        project_id: string_arg(args, "project_id")
+            .or_else(|| string_arg(args, "projectId"))
+            .map(str::to_string),
+        task_id: string_arg(args, "task_id")
+            .or_else(|| string_arg(args, "taskId"))
+            .map(str::to_string),
+        issuer: string_arg(args, "issuer").unwrap_or("missiond").to_string(),
+        evidence_requirement: string_arg(args, "evidence_requirement")
+            .or_else(|| string_arg(args, "evidenceRequirement"))
+            .map(str::to_string),
         details: args
             .get("details")
             .cloned()

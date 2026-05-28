@@ -3,7 +3,8 @@ use chrono::Utc;
 use serde_json::{json, Value};
 
 use crate::engine::shared_memory::{
-    CapabilityCheckRequest, ClaimRequest, TaskResultPutRequest, WorkerSettleRequest,
+    CapabilityCheckRequest, CapabilityGrantInput, ClaimRequest, TaskResultPutRequest,
+    WorkerSettleRequest,
 };
 use crate::engine::task_completion_evidence::{
     TaskCompletionEvidenceInput, TaskCompletionEvidenceWriter,
@@ -64,7 +65,16 @@ pub(crate) struct JobEventCommand {
 
 #[derive(Debug, Clone)]
 pub(crate) struct CapabilityGrantCommand {
-    pub args: Value,
+    pub subject_kind: String,
+    pub subject_id: String,
+    pub operation: String,
+    pub scope_kind: String,
+    pub scope_key: String,
+    pub project_id: Option<String>,
+    pub task_id: Option<String>,
+    pub issuer: String,
+    pub evidence_requirement: Option<String>,
+    pub details: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -463,10 +473,27 @@ impl<'a> ControlPlaneKernel<'a> {
         &self,
         command: CapabilityGrantCommand,
     ) -> Result<Value> {
-        self.state
+        let id = self
+            .state
             .shared_memory
-            .capability_grant_from_args(&command.args)
-            .await
+            .insert_capability_grant(CapabilityGrantInput {
+                subject_kind: command.subject_kind.as_str(),
+                subject_id: command.subject_id.as_str(),
+                operation: command.operation.as_str(),
+                scope_kind: command.scope_kind.as_str(),
+                scope_key: command.scope_key.as_str(),
+                project_id: command.project_id.as_deref(),
+                task_id: command.task_id.as_deref(),
+                issuer: command.issuer.as_str(),
+                evidence_requirement: command.evidence_requirement.as_deref(),
+                details: command.details,
+            })
+            .await?;
+        Ok(json!({
+            "schema": "missiond.capability-grant.v1",
+            "ok": true,
+            "grant_id": id
+        }))
     }
 
     pub(crate) async fn job_event_command(&self, command: JobEventCommand) -> Result<Value> {
