@@ -3438,6 +3438,25 @@ async fn run_xjpcode_readonly_worker(state: AppState, run: XjpcodeWorkerRun) -> 
     let write_mode = !run.metadata.write_scope.is_empty();
     let worker_id = run.worker_id.clone();
     let request_task_id = run.task_id.clone();
+    ControlPlaneKernel::new(&state)
+        .start_attempt_command(StartAttemptCommand {
+            task_id: run.task_id.clone(),
+            project_id: Some(run.project_id.clone()),
+            attempt_id: run.attempt_id.clone(),
+            agent_id: worker_id.clone(),
+            worker_id: worker_id.clone(),
+            payload: json!({
+                "source": "mission_task_delegate.xjpcode",
+                "engine_hint": run.metadata.engine_hint.clone(),
+                "mode": if write_mode { "write" } else { "read_only" },
+                "capability_grant_ids": run.capability_grant_ids.clone(),
+                "accepted_shard_id": run.metadata.accepted_shard_id.clone(),
+                "read_scope": run.metadata.read_scope.clone(),
+                "write_scope": run.metadata.write_scope.clone(),
+                "must_not_touch": run.metadata.must_not_touch.clone(),
+            }),
+        })
+        .await?;
     let read_scope = if run.metadata.read_scope.is_empty() {
         run.project_root
             .as_ref()
@@ -3614,8 +3633,8 @@ async fn run_xjpcode_readonly_worker(state: AppState, run: XjpcodeWorkerRun) -> 
                 "sse_frames": frames,
                 "persisted_frame_count": persisted_frame_count
             }),
-            accepted_shard_id: None,
-            attempt_id: None,
+            accepted_shard_id: run.metadata.accepted_shard_id.clone(),
+            attempt_id: Some(run.attempt_id.clone()),
             capability_grant_id: Some(write_grant_id.to_string()),
             subject_kind: Some("worker".to_string()),
             subject_id: Some(worker_id.clone()),
@@ -3664,7 +3683,7 @@ async fn run_xjpcode_readonly_worker(state: AppState, run: XjpcodeWorkerRun) -> 
             grant_id: Some(settle_grant_id.to_string()),
             subject_kind: "worker".to_string(),
             subject_id: worker_id.clone(),
-            attempt_id: None,
+            attempt_id: Some(run.attempt_id.clone()),
             allow_system_bypass: false,
         })
         .await?;
