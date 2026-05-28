@@ -38,6 +38,7 @@ const FILES = {
   computeSlot: 'crates/missiond-daemon/src/handlers/compute/compute_slot.rs',
   ptyHandler: 'crates/missiond-daemon/src/handlers/compute/pty.rs',
   spawner: 'crates/missiond-daemon/src/slot_orchestrator/spawner.rs',
+  ptyManager: 'crates/missiond-pty/src/manager.rs',
   boardStore: 'crates/missiond-core/src/db/pg/board.rs',
   boardTypes: 'crates/missiond-core/src/types/board.rs',
   dbError: 'crates/missiond-core/src/db/error.rs',
@@ -593,6 +594,16 @@ function checkFiles(root, files) {
     'dangerously_skip_permissions = false',
     'MISSIOND_ALLOW_BROAD_SKIP_PERMISSIONS',
     'SANDBOX_POLICY_UNSUPPORTED',
+  ]);
+  requireAll(diagnostics, files.ptyManager, sources.ptyManager, [
+    'fn enforce_core_spawn_sandbox_policy',
+    'PTY core spawn policy',
+    'danger-full-access',
+    'workspace-write',
+    'approval_policy',
+    'dangerously_skip_permissions = false',
+    'enforce_core_spawn_sandbox_policy(slot, &mut options)',
+    'enforce_core_spawn_sandbox_policy(&slot_for_restart, &mut restart_options)',
   ]);
 
   requireAll(diagnostics, files.boardStore, sources.boardStore, [

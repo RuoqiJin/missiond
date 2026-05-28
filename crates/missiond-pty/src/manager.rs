@@ -238,9 +238,10 @@ impl PTYManager {
     }
 
     /// Spawn a PTY session for a slot
-    pub async fn spawn(&self, slot: &Slot, options: PTYSpawnOptions) -> Result<PTYAgentInfo> {
+    pub async fn spawn(&self, slot: &Slot, mut options: PTYSpawnOptions) -> Result<PTYAgentInfo> {
         // Pre-flight: verify internet connectivity (Claude Code needs API access)
         Self::check_network_reachability().await?;
+        enforce_core_spawn_sandbox_policy(slot, &mut options);
 
         let info = {
             let agent_info = self.agent_info.read().await;
@@ -617,12 +618,13 @@ impl PTYManager {
                     if auto_restart {
                         info!(slot_id = %slot_for_restart.id, "Auto-restarting PTY session");
 
-                        let restart_options = manager_spawn_options
+                        let mut restart_options = manager_spawn_options
                             .read()
                             .await
                             .get(&slot_for_restart.id)
                             .cloned()
                             .unwrap_or_default();
+                        enforce_core_spawn_sandbox_policy(&slot_for_restart, &mut restart_options);
 
                         // Create new session
                         let cwd = slot_for_restart.cwd.clone().unwrap_or_else(|| {
@@ -1180,6 +1182,59 @@ fn normalize_agent_info(mut info: PTYAgentInfo) -> PTYAgentInfo {
     info
 }
 
+fn enforce_core_spawn_sandbox_policy(slot: &Slot, options: &mut PTYSpawnOptions) {
+    use missiond_shared::CliEngine;
+
+    let role = slot.role.to_ascii_lowercase();
+    let privileged_role = role.contains("orchestrator")
+        || role.contains("master")
+        || role.contains("supervisor")
+        || role.contains("deploy");
+
+    match slot.engine {
+        CliEngine::Codex => {
+            if options.sandbox.as_deref() == Some("danger-full-access") && !privileged_role {
+                warn!(
+                    slot_id = %slot.id,
+                    role = %slot.role,
+                    "PTY core spawn policy: downgrading Codex worker from danger-full-access to workspace-write"
+                );
+                options.sandbox = Some("workspace-write".to_string());
+                options
+                    .approval_policy
+                    .get_or_insert_with(|| "never".to_string());
+            }
+            if options.sandbox.is_none() && !privileged_role {
+                options.sandbox = Some("read-only".to_string());
+            }
+        }
+        CliEngine::Gemini => {
+            if options.dangerously_skip_permissions && !privileged_role {
+                warn!(
+                    slot_id = %slot.id,
+                    role = %slot.role,
+                    "PTY core spawn policy: refusing Gemini yolo permissions for non-privileged worker"
+                );
+                options.dangerously_skip_permissions = false;
+                options.approval_policy = Some("plan".to_string());
+            }
+            options
+                .approval_policy
+                .get_or_insert_with(|| "plan".to_string());
+        }
+        CliEngine::ClaudeCode | CliEngine::Agy => {
+            if options.dangerously_skip_permissions && !privileged_role {
+                warn!(
+                    slot_id = %slot.id,
+                    role = %slot.role,
+                    "PTY core spawn policy: disabling broad skip-permissions for non-privileged worker"
+                );
+                options.dangerously_skip_permissions = false;
+            }
+        }
+    }
+}
+
 /// Manager statistics
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ManagerStats {
@@ -1195,6 +1250,79 @@ mod tests {
     use super::*;
     use crate::pty_recognition::{PtyCanonicalState, PtyRecognitionSnapshot};
     use missiond_shared::CliEngine;
+
+    fn test_slot(role: &str, engine: CliEngine) -> Slot {
+        Slot {
+            id: format!("slot-{role}"),
+            role: role.to_string(),
+            cwd: None,
+            engine,
+        }
+    }
+
+    #[test]
+    fn core_spawn_policy_downgrades_codex_worker_danger_full_access() {
+        let slot = test_slot("coder", CliEngine::Codex);
+        let mut options = PTYSpawnOptions {
+            sandbox: Some("danger-full-access".to_string()),
+            ..Default::default()
+        };
+
+        enforce_core_spawn_sandbox_policy(&slot, &mut options);
+
+        assert_eq!(options.sandbox.as_deref(), Some("workspace-write"));
+        assert_eq!(options.approval_policy.as_deref(), Some("never"));
+    }
+
+    #[test]
+    fn core_spawn_policy_defaults_codex_worker_to_read_only() {
+        let slot = test_slot("coder", CliEngine::Codex);
+        let mut options = PTYSpawnOptions::default();
+
+        enforce_core_spawn_sandbox_policy(&slot, &mut options);
+
+        assert_eq!(options.sandbox.as_deref(), Some("read-only"));
+    }
+
+    #[test]
+    fn core_spawn_policy_disables_gemini_worker_yolo() {
+        let slot = test_slot("gemini_worker", CliEngine::Gemini);
+        let mut options = PTYSpawnOptions {
+            dangerously_skip_permissions: true,
+            ..Default::default()
+        };
+
+        enforce_core_spawn_sandbox_policy(&slot, &mut options);
+
+        assert!(!options.dangerously_skip_permissions);
+        assert_eq!(options.approval_policy.as_deref(), Some("plan"));
+    }
+
+    #[test]
+    fn core_spawn_policy_disables_claude_worker_broad_skip() {
+        let slot = test_slot("coder", CliEngine::ClaudeCode);
+        let mut options = PTYSpawnOptions {
+            dangerously_skip_permissions: true,
+            ..Default::default()
+        };
+
+        enforce_core_spawn_sandbox_policy(&slot, &mut options);
+
+        assert!(!options.dangerously_skip_permissions);
+    }
+
+    #[test]
+    fn core_spawn_policy_preserves_privileged_orchestrator_options() {
+        let slot = test_slot("orchestrator", CliEngine::ClaudeCode);
+        let mut options = PTYSpawnOptions {
+            dangerously_skip_permissions: true,
+            ..Default::default()
+        };
+
+        enforce_core_spawn_sandbox_policy(&slot, &mut options);
+
+        assert!(options.dangerously_skip_permissions);
+    }
 
     #[test]
     fn exited_status_overrides_stale_running_recognition() {
