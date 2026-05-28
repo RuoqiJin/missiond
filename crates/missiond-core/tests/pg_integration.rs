@@ -8,6 +8,8 @@
 use missiond_core::db::pg::PgMissionStore;
 use missiond_core::db::traits::*;
 use missiond_core::types::*;
+use serde_json::json;
+use sqlx::Row;
 
 /// Spin up a PostgreSQL container and return PgMissionStore connected to it.
 async fn setup_pg() -> (
@@ -150,6 +152,223 @@ async fn test_pg_board_store() {
     // Delete
     let deleted = store.delete_board_task(task.id.as_str()).await.unwrap();
     assert_eq!(deleted, 1);
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_pg_control_plane_kernel_schema_contracts() {
+    let (store, _container) = setup_pg().await;
+    let pool = store.pool();
+    let task_id = "task-cpk-schema-test";
+
+    for (id, subject_kind, subject_id, operation) in [
+        ("grant-worker-spawn", "worker", "slot-cpk", "spawn"),
+        ("grant-system-settle", "system", "missiond-system", "settle"),
+        (
+            "grant-operator-delegate",
+            "operator",
+            "operator-local",
+            "delegate",
+        ),
+        ("grant-daemon-claim", "daemon", "missiond-daemon", "claim"),
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO capability_grants
+              (id, subject_kind, subject_id, operation, scope_kind, scope_key,
+               task_id, issuer, details)
+            VALUES ($1, $2, $3, $4, 'task', $5, $5, 'integration-test', $6)
+            "#,
+        )
+        .bind(id)
+        .bind(subject_kind)
+        .bind(subject_id)
+        .bind(operation)
+        .bind(task_id)
+        .bind(json!({"test": "control-plane-kernel-schema"}))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    let exact_spawn_grant = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT id
+        FROM capability_grants
+        WHERE id = 'grant-worker-spawn'
+          AND subject_kind = 'worker'
+          AND subject_id = 'slot-cpk'
+          AND operation = 'spawn'
+          AND scope_kind = 'task'
+          AND scope_key = $1
+          AND task_id = $1
+          AND status = 'active'
+          AND consumed_at IS NULL
+          AND (expires_at IS NULL OR expires_at > now())
+        "#,
+    )
+    .bind(task_id)
+    .fetch_optional(pool)
+    .await
+    .unwrap();
+    assert_eq!(exact_spawn_grant.as_deref(), Some("grant-worker-spawn"));
+
+    let wrong_subject_grant = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT id
+        FROM capability_grants
+        WHERE id = 'grant-worker-spawn'
+          AND subject_kind = 'worker'
+          AND subject_id = 'other-slot'
+          AND operation = 'spawn'
+          AND scope_kind = 'task'
+          AND scope_key = $1
+          AND task_id = $1
+          AND status = 'active'
+        "#,
+    )
+    .bind(task_id)
+    .fetch_optional(pool)
+    .await
+    .unwrap();
+    assert!(wrong_subject_grant.is_none());
+
+    sqlx::query(
+        r#"
+        INSERT INTO model_route_outcomes
+          (id, request_id, task_id, project_id, task_class, provider, model,
+           route, decision, outcome, latency_ms, prompt_tokens,
+           completion_tokens, total_tokens, cost_usd, artifact_hash, job_state,
+           status)
+        VALUES
+          ('route-outcome-cpk', 'req-cpk', $1, 'missiond', 'code',
+           'codex', 'gpt-5.5', 'compiled-policy', $2, $3, 1200, 10, 5,
+           15, 0.00012345, 'sha256:cpk', 'completed', 'succeeded')
+        "#,
+    )
+    .bind(task_id)
+    .bind(json!({"source": "compiled_policy"}))
+    .bind(json!({"result": "completed", "verified": true}))
+    .execute(pool)
+    .await
+    .unwrap();
+
+    let route_row = sqlx::query(
+        r#"
+        SELECT prompt_tokens, completion_tokens, cost_usd::float8 AS cost_usd,
+               status, decision, outcome
+        FROM model_route_outcomes
+        WHERE id = 'route-outcome-cpk'
+        "#,
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(route_row.try_get::<i64, _>("prompt_tokens").unwrap(), 10);
+    assert_eq!(route_row.try_get::<i64, _>("completion_tokens").unwrap(), 5);
+    assert_eq!(
+        route_row.try_get::<String, _>("status").unwrap(),
+        "succeeded"
+    );
+    assert!(route_row
+        .try_get::<f64, _>("cost_usd")
+        .unwrap()
+        .is_sign_positive());
+    assert_eq!(
+        route_row
+            .try_get::<serde_json::Value, _>("outcome")
+            .unwrap()["result"],
+        "completed"
+    );
+
+    sqlx::query(
+        r#"
+        INSERT INTO task_contracts
+          (id, task_id, task_contract_id, read_scope, write_scope,
+           must_not_touch, sandbox_profile)
+        VALUES
+          ('contract-cpk', $1, 'task-contract-cpk', $2, $3, $4, 'workspace-write')
+        "#,
+    )
+    .bind(task_id)
+    .bind(json!(["."]))
+    .bind(json!(["src/**"]))
+    .bind(json!(["secrets/**"]))
+    .execute(pool)
+    .await
+    .unwrap();
+    let write_scope = sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT write_scope FROM task_contracts WHERE task_id = $1",
+    )
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(write_scope, json!(["src/**"]));
+
+    sqlx::query(
+        r#"
+        INSERT INTO work_leases
+          (id, task_id, holder_id, holder_kind, scope_kind, scope_key,
+           lease_expires_at, metadata)
+        VALUES
+          ('lease-cpk-1', $1, 'holder-1', 'worker', 'path', 'src/lib.rs',
+           now() + interval '10 minutes', $2)
+        "#,
+    )
+    .bind(task_id)
+    .bind(json!({"mirror": "shared_claims_projection"}))
+    .execute(pool)
+    .await
+    .unwrap();
+
+    let duplicate_active = sqlx::query(
+        r#"
+        INSERT INTO work_leases
+          (id, task_id, holder_id, holder_kind, scope_kind, scope_key,
+           lease_expires_at)
+        VALUES
+          ('lease-cpk-duplicate', $1, 'holder-2', 'worker', 'path', 'src/lib.rs',
+           now() + interval '10 minutes')
+        "#,
+    )
+    .bind(task_id)
+    .execute(pool)
+    .await;
+    assert!(duplicate_active.is_err());
+
+    sqlx::query(
+        "UPDATE work_leases SET status = 'released', released_at = now() WHERE id = 'lease-cpk-1'",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO work_leases
+          (id, task_id, holder_id, holder_kind, scope_kind, scope_key,
+           lease_expires_at)
+        VALUES
+          ('lease-cpk-2', $1, 'holder-2', 'worker', 'path', 'src/lib.rs',
+           now() + interval '10 minutes')
+        "#,
+    )
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    let active_holder = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT holder_id
+        FROM work_leases
+        WHERE scope_kind = 'path' AND scope_key = 'src/lib.rs' AND status = 'active'
+        "#,
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(active_holder, "holder-2");
 }
 
 #[tokio::test]

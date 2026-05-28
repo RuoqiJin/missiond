@@ -50,6 +50,7 @@ const FILES = {
   sharedHandler: 'crates/missiond-daemon/src/handlers/knowledge/shared_memory.rs',
   boardRoute: 'packages/board/src/app/api/tasks/route.ts',
   boardStoreTs: 'packages/board/src/store.ts',
+  pgIntegrationTests: 'crates/missiond-core/tests/pg_integration.rs',
   verifierRouterMigration: 'crates/missiond-core/migrations/20260527001000_runtime_verifier_router_outcomes.sql',
   capabilityGrantOperationMigration: 'crates/missiond-core/migrations/20260527002000_capability_grants_spawn_operation.sql',
   kernelReverseMigration: 'crates/missiond-core/migrations/20260527003000_kernel_reverse_convergence.sql',
@@ -255,6 +256,20 @@ function checkFiles(root, files) {
     'capability_grant_id',
     'DROP VIEW IF EXISTS completion_artifacts',
     'CREATE VIEW completion_artifacts AS',
+  ]);
+
+  requireAll(diagnostics, files.pgIntegrationTests, sources.pgIntegrationTests, [
+    'test_pg_control_plane_kernel_schema_contracts',
+    'grant-worker-spawn',
+    'grant-system-settle',
+    'grant-operator-delegate',
+    'grant-daemon-claim',
+    'wrong_subject_grant.is_none()',
+    'INSERT INTO model_route_outcomes',
+    'prompt_tokens, completion_tokens, cost_usd::float8 AS cost_usd',
+    'INSERT INTO task_contracts',
+    'INSERT INTO work_leases',
+    'duplicate_active.is_err()',
   ]);
 
   requireAll(diagnostics, files.sharedMemory, sources.sharedMemory, [
