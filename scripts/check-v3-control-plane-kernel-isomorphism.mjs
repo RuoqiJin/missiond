@@ -294,6 +294,7 @@ function checkFiles(root, files) {
     'pub(crate) struct StartAttemptCommand',
     'pub(crate) struct ClaimLeaseCommand',
     'pub(crate) struct ReleaseLeaseCommand',
+    'pub(crate) struct HeartbeatLeaseCommand',
     'pub(crate) struct RequireCapabilityCommand',
     'pub(crate) struct GrantTaskCapabilitiesCommand',
     'pub(crate) struct UpsertTaskContractCommand',
@@ -307,6 +308,7 @@ function checkFiles(root, files) {
     'pub(crate) async fn claim_lease',
     'pub(crate) async fn claim_lease_command',
     'pub(crate) async fn release_lease_command',
+    'pub(crate) async fn heartbeat_lease_command',
     'pub(crate) async fn require_capability',
     'pub(crate) async fn require_capability_command',
     'pub(crate) async fn grant_task_capabilities_command',
@@ -584,9 +586,17 @@ function checkFiles(root, files) {
     'Board notes and PTY text are projections only',
     'task_result_put_typed(&args)',
     'settle_worker_typed(args.clone())',
-    'claim_typed(&args)',
+    'ControlPlaneKernel::new(state)',
+    '.claim_lease_command(claim_lease_command_from_args(&args)?)',
+    '.release_lease_command(release_lease_command_from_args(&args)?)',
+    '.heartbeat_lease_command(heartbeat_lease_command_from_args(&args)?)',
     'capability_check_typed(&args)',
     'job_event_typed(args.clone())',
+  ]);
+  rejectAll(diagnostics, files.sharedHandler, sources.sharedHandler, [
+    'state.shared_memory.claim_typed(&args)',
+    'state.shared_memory.release_typed(args.clone())',
+    'state.shared_memory.heartbeat_typed(args.clone())',
   ]);
 
   requireAll(diagnostics, files.boardRoute, sources.boardRoute, [
@@ -674,10 +684,15 @@ function rejectDirectJobEventsOutsideKernel(diagnostics, files, sources) {
 }
 
 function rejectDirectLeaseCommandsOutsideKernel(diagnostics, files, sources) {
-  const allowed = new Set(['controlPlaneKernel', 'sharedMemory', 'sharedHandler']);
+  const allowed = new Set(['controlPlaneKernel', 'sharedMemory']);
   for (const [key, source] of Object.entries(sources)) {
     if (allowed.has(key)) continue;
-    if (source.includes('.claim_lease_typed(') || source.includes('.release_typed(')) {
+    if (
+      source.includes('.claim_lease_typed(') ||
+      source.includes('.claim_typed(') ||
+      source.includes('.release_typed(') ||
+      source.includes('.heartbeat_typed(')
+    ) {
       diagnostics.push({
         file: files[key],
         message: 'direct shared_memory lease commands outside ControlPlaneKernel are forbidden',

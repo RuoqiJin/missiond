@@ -414,10 +414,6 @@ impl SharedMemoryService {
         self.capability_check_from_args(args).await
     }
 
-    pub(crate) async fn claim_typed(&self, args: &Value) -> Result<Value> {
-        self.claim_from_args(args).await
-    }
-
     pub(crate) async fn claim_lease_typed(&self, req: ClaimRequest) -> Result<Value> {
         self.require_capability(CapabilityCheckRequest {
             grant_id: req.grant_id.clone(),
