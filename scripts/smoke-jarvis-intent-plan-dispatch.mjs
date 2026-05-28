@@ -201,6 +201,8 @@ function hasVisibleProgress(response, expectedPhase) {
       && data.phase === expectedPhase
       && data.visible === true
       && data.openai_delta === true
+      && data.event_bus_write_ok === true
+      && data.event_bus_projection === 'frontend_event_bus'
     ) {
       return true;
     }
