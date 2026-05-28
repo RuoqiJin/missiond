@@ -6,19 +6,14 @@ use crate::state::AppState;
 use serde_json::json;
 
 /// wave-17 / task 02 — emit a `pending -> claimed` evidence row + bus
-/// event for a node whose claim was successfully registered (or
-/// recorded best-effort under `enforce_claims=false`). The transition
-/// always runs BEFORE `ready -> running` so observers can pivot on the
-/// claim metadata without reconstructing it from the running row.
+/// event for a node whose canonical work_leases claim was successfully
+/// registered. The transition always runs BEFORE `ready -> running` so
+/// observers can pivot on the claim metadata without reconstructing it
+/// from the running row.
 ///
 /// `claim_status` is one of:
-///   * `"acquired"`       — `enforce_claims=true OR false`, registry
-///                          recorded the claim with no overlap.
-///   * `"recorded_compat"` — `enforce_claims=false`, registry detected
-///                          an overlap but compat-mode best-effort
-///                          recorded it anyway. The conflict snapshot
-///                          rides on the entry so the audit row is
-///                          self-contained.
+///   * `"acquired"` — work_leases accepted the claim with no active
+///                    conflicting holder.
 pub(in crate::handlers::knowledge::plan_dag) async fn emit_evidence_claimed(
     state: &AppState,
     ctx: &EvidenceCtx<'_>,
@@ -27,7 +22,6 @@ pub(in crate::handlers::knowledge::plan_dag) async fn emit_evidence_claimed(
     attempt: u32,
     claim: &PlanDagClaim,
     claim_status: &str,
-    compat_conflict: Option<(String, String, String, String)>,
     outcome: &mut ExecutionOutcome,
 ) {
     let (event_ref, warning) = publish_plan_node_state_change(
@@ -47,7 +41,7 @@ pub(in crate::handlers::knowledge::plan_dag) async fn emit_evidence_claimed(
     if let Some(w) = warning {
         outcome.bus_publish_warnings.push(w);
     }
-    let mut entry = EvidenceEntry::new(
+    let entry = EvidenceEntry::new(
         evidence_collector::source::PLAN_DAG_NODE_DISPATCH,
         evidence_collector::kind::DISPATCH,
     )
@@ -61,6 +55,7 @@ pub(in crate::handlers::knowledge::plan_dag) async fn emit_evidence_claimed(
     .with_extra("dispatch_strategy", json!(dispatch_strategy))
     .with_extra("attempt", json!(attempt))
     .with_extra("claim_id", json!(claim.claim_id))
+    .with_extra("work_lease_ids", json!(&claim.work_lease_ids))
     .with_extra("claimer", json!(claim.claimer))
     .with_extra("claim_scopes", json!(claim.scopes))
     .with_extra("claim_scope_source", json!(claim.scope_source))
@@ -70,16 +65,6 @@ pub(in crate::handlers::knowledge::plan_dag) async fn emit_evidence_claimed(
         json!(claim.lease_expires_at_iso()),
     )
     .with_extra("claim_status", json!(claim_status));
-    if let Some((conflict_id, conflict_claimer, held_scope, attempted_scope)) = compat_conflict {
-        entry = entry
-            .with_extra("claim_compat_conflict_claim_id", json!(conflict_id))
-            .with_extra("claim_compat_conflict_claimer", json!(conflict_claimer))
-            .with_extra("claim_compat_conflict_held_scope", json!(held_scope))
-            .with_extra(
-                "claim_compat_conflict_attempted_scope",
-                json!(attempted_scope),
-            );
-    }
     let append_outcome = evidence_collector::append(
         state,
         ctx.plan_id,
@@ -154,6 +139,7 @@ pub(in crate::handlers::knowledge::plan_dag) async fn emit_evidence_claim_releas
     .with_extra("dispatch_strategy", json!(dispatch_strategy))
     .with_extra("attempt", json!(attempt))
     .with_extra("claim_id", json!(claim.claim_id))
+    .with_extra("work_lease_ids", json!(&claim.work_lease_ids))
     .with_extra("claimer", json!(claim.claimer))
     .with_extra("claim_scopes", json!(claim.scopes))
     .with_extra("claim_scope_source", json!(claim.scope_source))
@@ -189,10 +175,10 @@ pub(in crate::handlers::knowledge::plan_dag) async fn emit_evidence_claim_releas
 }
 
 /// wave-17 / task 02 — emit a `pending -> failed` evidence row for a
-/// node refused at the claim gate under `enforce_claims=true`. The
-/// inner handler is NEVER invoked; the node fails fast with a
-/// structured `CLAIM_CONFLICT` reason so audit dashboards can pivot on
-/// the dedicated `claim_conflict` skip tag.
+/// node refused at the canonical work_leases claim gate. The inner
+/// handler is NEVER invoked; the node fails fast with a structured
+/// `CLAIM_CONFLICT` reason so audit dashboards can pivot on the
+/// dedicated `claim_conflict` skip tag.
 pub(in crate::handlers::knowledge::plan_dag) async fn emit_evidence_claim_conflict(
     state: &AppState,
     ctx: &EvidenceCtx<'_>,

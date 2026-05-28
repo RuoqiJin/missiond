@@ -30,6 +30,10 @@ const FILES = {
   agentExecutionClaimLease: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_lease.rs',
   agentExecutionClaimRelease: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_release.rs',
   agentExecutionClaimHeartbeat: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_heartbeat.rs',
+  planDagClaiming: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/runtime/claiming.rs',
+  planDagClaims: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/runtime/claims.rs',
+  planDagRetry: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/runtime/retry.rs',
+  planDagLifecycleClaims: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/lifecycle/claims.rs',
   v2Subscribers: 'crates/missiond-daemon/src/bus/v2_subscribers.rs',
   computeSlot: 'crates/missiond-daemon/src/handlers/compute/compute_slot.rs',
   ptyHandler: 'crates/missiond-daemon/src/handlers/compute/pty.rs',
@@ -473,6 +477,41 @@ function checkFiles(root, files) {
     'mission_execution.heartbeat',
     'claim {} has no canonical work_leases id',
     'work lease {} was not heartbeated',
+  ]);
+
+  requireAll(diagnostics, files.planDagClaiming, sources.planDagClaiming, [
+    'ControlPlaneKernel::new(state)',
+    '.claim_lease_command(ClaimLeaseCommand',
+    '.release_lease_command(ReleaseLeaseCommand',
+    'plan DAG scheduler work_leases authority',
+    'plan_dag_scope_kind',
+    '"schema": "missiond.plan-dag-work-lease.v1"',
+  ]);
+  rejectAll(diagnostics, files.planDagClaiming, sources.planDagClaiming, [
+    'claim_registry.try_acquire(',
+  ]);
+
+  requireAll(diagnostics, files.planDagClaims, sources.planDagClaims, [
+    'ControlPlaneKernel::new(state)',
+    '.release_lease_command(ReleaseLeaseCommand',
+    'released.work_lease_ids',
+    'plan DAG scheduler releases work_leases authority',
+  ]);
+  rejectAll(diagnostics, files.planDagClaims, sources.planDagClaims, [
+    'record_compat_claim',
+    'recorded_compat',
+  ]);
+
+  requireAll(diagnostics, files.planDagRetry, sources.planDagRetry, [
+    'acquire_plan_dag_work_leases',
+    'claim_registry.record_acquired',
+  ]);
+  rejectAll(diagnostics, files.planDagRetry, sources.planDagRetry, [
+    'claim_registry.try_acquire(',
+  ]);
+
+  requireAll(diagnostics, files.planDagLifecycleClaims, sources.planDagLifecycleClaims, [
+    '"work_lease_ids"',
   ]);
 
   requireAll(diagnostics, files.boardCreateHandler, sources.boardCreateHandler, [

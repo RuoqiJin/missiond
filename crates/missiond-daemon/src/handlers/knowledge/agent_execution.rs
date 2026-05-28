@@ -90,6 +90,7 @@ mod task_verifier_report;
 
 #[cfg(test)]
 use self::claim_lease::parse_claims;
+#[cfg(test)]
 pub(super) use self::claim_lease::scopes_overlap_pure;
 use self::claim_lease::{action_claim, action_heartbeat, action_release};
 use self::completion_audit::action_complete;

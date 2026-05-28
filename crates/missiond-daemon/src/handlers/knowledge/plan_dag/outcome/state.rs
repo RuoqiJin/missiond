@@ -56,14 +56,13 @@ pub(in crate::handlers::knowledge::plan_dag) enum NodeLifecycle {
     Pending,
     #[allow(dead_code)]
     Ready,
-    /// wave-17 / task 02 — node has had its claim registered (or
-    /// recorded best-effort under `enforce_claims=false`) but the
-    /// inner handler has not yet been invoked. Mostly invisible from
-    /// the outside: the dispatch path moves through `Claimed` for one
-    /// wave-loop cycle before flipping to `Running`. Surfaces on the
-    /// `pending -> claimed` evidence row + bus event so observers can
-    /// pivot on the new transition without reconstructing it from
-    /// `pending -> running` reasoning.
+    /// wave-17 / task 02 — node has had its canonical work_leases claim
+    /// registered, but the inner handler has not yet been invoked. Mostly
+    /// invisible from the outside: the dispatch path moves through `Claimed`
+    /// for one wave-loop cycle before flipping to `Running`. Surfaces on the
+    /// `pending -> claimed` evidence row + bus event so observers can pivot
+    /// on the new transition without reconstructing it from `pending ->
+    /// running` reasoning.
     Claimed,
     Running,
     Succeeded,

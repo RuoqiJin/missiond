@@ -183,10 +183,8 @@ pub(super) async fn execute_with_concurrency(
         // `pending -> claimed -> running` ladder. Claim acquisition runs
         // BEFORE the spawn so `enforce_claims=true` can fail-fast on
         // an unresolvable overlap without ever touching the inner
-        // handler. Under `enforce_claims=false` the registry still
-        // records best-effort metadata (so observers can tell the
-        // discipline ran) but the scheduler never blocks dispatch on
-        // an overlap.
+        // handler. Under the hard-cut kernel contract, the scheduler
+        // never dispatches a node after a work_leases conflict.
         let mut join_set: tokio::task::JoinSet<Result<DispatchOutcome>> =
             tokio::task::JoinSet::new();
         for node in to_dispatch {
@@ -218,7 +216,7 @@ pub(super) async fn execute_with_concurrency(
                 &succs,
                 &mut outcome,
             )
-            .await
+            .await?
             {
                 DispatchClaimDecision::Dispatch => {}
                 DispatchClaimDecision::ConflictFailed { fail_fast_abort } => {

@@ -3505,13 +3505,14 @@ fn parse_claimer_name_defaults_when_missing_or_blank() {
 }
 
 #[test]
-fn parse_enforce_claims_defaults_to_false() {
-    assert!(!parse_enforce_claims(&json!({})));
+fn parse_enforce_claims_defaults_to_true() {
+    assert!(parse_enforce_claims(&json!({})));
     assert!(parse_enforce_claims(&json!({"enforce_claims": true})));
-    assert!(!parse_enforce_claims(&json!({"enforce_claims": false})));
-    // Non-bool values normalise to false (strict opt-in).
-    assert!(!parse_enforce_claims(&json!({"enforce_claims": "yes"})));
-    assert!(!parse_enforce_claims(&json!({"enforce_claims": 1})));
+    // Legacy opt-out values normalise to true under the hard-cut kernel
+    // contract; Plan DAG claims are always canonical work_leases claims.
+    assert!(parse_enforce_claims(&json!({"enforce_claims": false})));
+    assert!(parse_enforce_claims(&json!({"enforce_claims": "yes"})));
+    assert!(parse_enforce_claims(&json!({"enforce_claims": 1})));
 }
 
 #[test]
@@ -3776,13 +3777,13 @@ async fn dry_run_response_includes_planned_claims_and_knobs() {
         plan_id,
         PLAN_DAG_DEFAULT_CLAIMER_NAME,
         PLAN_DAG_DEFAULT_CLAIM_LEASE_SECS,
-        false,
+        parse_enforce_claims(&json!({"enforce_claims": false})),
     );
     let arr = projection.as_array().expect("array");
     assert_eq!(arr.len(), 1);
     assert_eq!(arr[0]["claimer"], PLAN_DAG_DEFAULT_CLAIMER_NAME);
     assert_eq!(arr[0]["lease_secs"], PLAN_DAG_DEFAULT_CLAIM_LEASE_SECS);
-    assert_eq!(arr[0]["enforce_claims"], false);
+    assert_eq!(arr[0]["enforce_claims"], true);
     // Claim id format is byte-stable so dashboards can grep on it.
     let claim_id = arr[0]["claim_id"].as_str().unwrap();
     assert!(claim_id.starts_with("plan-dag:"));
@@ -3797,6 +3798,7 @@ fn plan_dag_claim_iso_timestamps_round_trip_through_chrono() {
     let now = claim_test_now();
     let claim = PlanDagClaim {
         claim_id: "plan-dag:00000000-0000-0000-0000-0000000c1a1d:n1:1".into(),
+        work_lease_ids: Vec::new(),
         claimer: "plan-dag-scheduler".into(),
         scopes: vec!["src/a.rs".into()],
         scope_source: CLAIM_SCOPE_SOURCE_OWNED_FILES,
@@ -3813,12 +3815,10 @@ fn plan_dag_claim_iso_timestamps_round_trip_through_chrono() {
 }
 
 #[test]
-fn enforce_claims_off_preserves_default_byte_compat_knobs() {
-    // The compat-mode default surface MUST report `enforce_claims=false`
-    // and the wave12-01 lease defaults so pre-wave17 callers see
-    // their expected byte-shape.
+fn enforce_claims_defaults_to_hard_cut_kernel_mode() {
+    // The hard-cut control plane defaults to canonical work_leases claims.
     let v = json!({});
-    assert!(!parse_enforce_claims(&v));
+    assert!(parse_enforce_claims(&v));
     assert_eq!(
         parse_claim_lease_secs(&v),
         PLAN_DAG_DEFAULT_CLAIM_LEASE_SECS

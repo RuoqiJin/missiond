@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
+#[cfg(test)]
 use super::scopes_overlap_pure;
 use super::DagNode;
 
@@ -24,19 +25,15 @@ use super::DagNode;
 //   * `claimer_name` — default `plan-dag-scheduler`. Matches the wave12-01
 //     `:claimer` field convention so audit dashboards can pivot on the
 //     same identity vocabulary across companion-log claims AND DAG claims.
-//   * `enforce_claims` — default `false` for backward compatibility with
-//     pre-wave17 callers. When false, claim metadata still surfaces on
-//     the evidence + response (so observers can tell the registry tried)
-//     but conflicts NEVER block dispatch. When true, an unresolvable
-//     overlap fails the node fast with `CLAIM_CONFLICT` and we never
-//     hand it to the inner handler.
+//   * `enforce_claims` — default `true` under the control-plane hard cut.
+//     Claim metadata still surfaces on evidence + response, but conflicts
+//     come from canonical `work_leases` and block dispatch.
 //
 // The `claimed` lifecycle state is added between `Ready` and `Running`
 // (wave-13/02 listed it in the spec but the loop transitioned ready ->
 // running directly). The transition is now `pending -> claimed -> running`
-// for every dispatched node (whether enforce_claims is true or false);
-// best-effort claim registration runs on the way to claimed, and the
-// registered claim is released on the way out of every terminal state
+// for every dispatched node; canonical work_lease registration runs on the
+// way to claimed, and the registered claim is released on the way out of every terminal state
 // (succeeded / failed / paused / skipped).
 // ───────────────────────────────────────────────────────────────────────
 
@@ -94,14 +91,12 @@ pub(super) fn parse_claimer_name(args: &Value) -> String {
         .to_string()
 }
 
-/// Parse `enforce_claims` from the call args. Default `false` so
-/// pre-wave17 callers keep their byte-compatible dispatch contract. Any
-/// non-bool value normalises to `false` (no error) — the enforcement is
-/// strict opt-in.
+/// Parse `enforce_claims` from the call args. The hard-cut kernel contract
+/// no longer permits caller opt-out: legacy `false` values are normalised to
+/// `true` so responses cannot imply a compatibility dispatch path.
 pub(super) fn parse_enforce_claims(args: &Value) -> bool {
-    args.get("enforce_claims")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
+    let _ = args;
+    true
 }
 
 /// Per-node claim scope derivation. Returns the list of scope tokens the
@@ -162,6 +157,7 @@ pub(super) fn derive_plan_dag_claim_id(plan_id: uuid::Uuid, node_id: &str, attem
 #[derive(Debug, Clone)]
 pub(super) struct PlanDagClaim {
     pub claim_id: String,
+    pub work_lease_ids: Vec<String>,
     pub claimer: String,
     pub scopes: Vec<String>,
     pub scope_source: &'static str,
@@ -191,8 +187,7 @@ impl PlanDagClaim {
 /// Outcome of a `ClaimRegistry::try_acquire` call. The `Conflict`
 /// variant carries enough context (the conflicting claim's id +
 /// claimer + the offending pair of scopes) for the scheduler to
-/// surface a structured error in `enforce_claims=true` mode and a
-/// best-effort warning in `enforce_claims=false` mode.
+/// surface a structured claim conflict without dispatching the node.
 #[derive(Debug, Clone)]
 pub(super) enum ClaimAcquire {
     Acquired(PlanDagClaim),
@@ -221,6 +216,10 @@ impl ClaimRegistry {
         Self::default()
     }
 
+    pub(super) fn record_acquired(&mut self, claim: PlanDagClaim) {
+        self.claims.insert(claim.claim_id.clone(), claim);
+    }
+
     /// Try to acquire a claim covering `scopes`. Returns:
     ///   * `Acquired(claim)` if no active claim overlaps any of the
     ///     attempted scopes (or every overlap is on a released claim).
@@ -232,6 +231,7 @@ impl ClaimRegistry {
     /// soft-released (mirrors wave12-01). The scheduler never
     /// explicitly garbage-collects them — the registry is per-DAG-run
     /// and dies with the call.
+    #[cfg(test)]
     pub(super) fn try_acquire(
         &mut self,
         claim_id: String,
@@ -270,6 +270,7 @@ impl ClaimRegistry {
         }
         let claim = PlanDagClaim {
             claim_id: claim_id.clone(),
+            work_lease_ids: Vec::new(),
             claimer,
             scopes,
             scope_source,
@@ -301,6 +302,7 @@ impl ClaimRegistry {
     /// Total number of recorded claims (active + released). Surfaced on
     /// the response so callers can spot "registry never recorded
     /// anything" without walking every node.
+    #[cfg(test)]
     pub(super) fn len(&self) -> usize {
         self.claims.len()
     }

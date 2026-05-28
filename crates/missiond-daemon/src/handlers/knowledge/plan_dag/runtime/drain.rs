@@ -130,7 +130,7 @@ pub(super) async fn drain_dispatch_wave<'a>(
             outcome,
             join_set,
         )
-        .await
+        .await?
         {
             continue;
         }

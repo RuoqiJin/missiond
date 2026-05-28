@@ -108,6 +108,7 @@ pub(super) use std::collections::HashMap;
 use crate::state::AppState;
 use missiond_core::types::Plan;
 
+#[cfg(test)]
 use super::agent_execution::scopes_overlap_pure;
 use super::plan::plan_contract_json_requires_projection;
 #[cfg(test)]

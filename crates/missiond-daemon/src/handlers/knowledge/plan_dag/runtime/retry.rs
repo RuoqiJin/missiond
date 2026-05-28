@@ -6,13 +6,14 @@ use missiond_core::types::Plan;
 use crate::state::AppState;
 
 use super::super::claim_lease::{
-    derive_node_claim_scopes, derive_plan_dag_claim_id, ClaimAcquire, ClaimRegistry, PlanDagClaim,
+    derive_node_claim_scopes, derive_plan_dag_claim_id, ClaimAcquire, ClaimRegistry,
 };
 use super::super::dispatch::{DispatchOutcome, TaskContractDispatchCtx};
 use super::super::lifecycle::{plan_node_should_retry, EvidenceCtx};
 use super::super::outcome::{ExecutionOutcome, NodeLifecycle};
 use super::super::parser::DagNode;
-use super::claims::{record_acquired_claim, record_compat_claim, release_claim_if_recorded};
+use super::claiming::acquire_plan_dag_work_leases;
+use super::claims::{record_acquired_claim, release_claim_if_recorded};
 use super::spawn::spawn_dispatch_attempt;
 
 pub(super) async fn retry_failed_node_if_allowed(
@@ -35,7 +36,7 @@ pub(super) async fn retry_failed_node_if_allowed(
     lifecycle: &mut HashMap<String, NodeLifecycle>,
     outcome: &mut ExecutionOutcome,
     join_set: &mut tokio::task::JoinSet<Result<DispatchOutcome>>,
-) -> bool {
+) -> Result<bool> {
     // Failure path retry gate. The predicate is `plan_node_should_retry` so
     // unit tests can pin the decision without standing up the wave loop.
     if !plan_node_should_retry(
@@ -44,13 +45,13 @@ pub(super) async fn retry_failed_node_if_allowed(
         non_retryable,
         abort_new_dispatch,
     ) {
-        return false;
+        return Ok(false);
     }
 
     // Release the failed-attempt claim BEFORE re-acquiring on retry so the
     // new attempt's claim id replaces the prior one in the registry without
     // overlap. Best-effort: skip if the original attempt never registered a
-    // claim (compat-mode conflict).
+    // claim (for example a strict work_leases conflict before dispatch).
     release_claim_if_recorded(
         state,
         ctx,
@@ -84,17 +85,22 @@ pub(super) async fn retry_failed_node_if_allowed(
     // metadata distinctly.
     let (retry_scopes, retry_scope_source) = derive_node_claim_scopes(&node, plan.id);
     let retry_claim_id = derive_plan_dag_claim_id(plan.id, node_id, next_attempt);
-    let retry_now = chrono::Utc::now();
-    let retry_acquire = claim_registry.try_acquire(
+    let retry_acquire = acquire_plan_dag_work_leases(
+        state,
+        ctx,
+        plan.id,
+        &node,
+        next_attempt,
         retry_claim_id.clone(),
-        claimer_name.to_string(),
-        retry_scopes.clone(),
+        claimer_name,
+        retry_scopes,
         retry_scope_source,
         claim_lease_secs,
-        retry_now,
-    );
+    )
+    .await?;
     match retry_acquire {
         ClaimAcquire::Acquired(retry_claim) => {
+            claim_registry.record_acquired(retry_claim.clone());
             record_acquired_claim(
                 state,
                 ctx,
@@ -108,45 +114,7 @@ pub(super) async fn retry_failed_node_if_allowed(
             )
             .await;
         }
-        ClaimAcquire::Conflict {
-            attempted_scopes,
-            attempted_scope_source,
-            conflicting_claim_id,
-            conflicting_claimer,
-            conflicting_scope,
-            offending_scope,
-            ..
-        } => {
-            // Compat / enforce both end here for retries: we are already
-            // mid-flight and cannot fail the prior attempt over a retry-claim
-            // conflict. Surface the audit row as recorded_compat and continue.
-            let synthetic = PlanDagClaim {
-                claim_id: retry_claim_id,
-                claimer: claimer_name.to_string(),
-                scopes: attempted_scopes,
-                scope_source: attempted_scope_source,
-                acquired_at: retry_now,
-                lease_expires_at: retry_now + chrono::Duration::seconds(claim_lease_secs),
-                released_at: None,
-            };
-            record_compat_claim(
-                state,
-                ctx,
-                &node,
-                dispatch_strategy,
-                next_attempt,
-                &synthetic,
-                (
-                    conflicting_claim_id,
-                    conflicting_claimer,
-                    conflicting_scope,
-                    offending_scope,
-                ),
-                lifecycle,
-                outcome,
-            )
-            .await;
-        }
+        ClaimAcquire::Conflict { .. } => return Ok(false),
     }
     spawn_dispatch_attempt(
         state,
@@ -161,5 +129,5 @@ pub(super) async fn retry_failed_node_if_allowed(
         join_set,
     )
     .await;
-    true
+    Ok(true)
 }
