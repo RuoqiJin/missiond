@@ -447,6 +447,9 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.boardStore, sources.boardStore, [
     'fn board_task_contract_projection',
+    'fn board_task_runtime_metadata',
+    'async fn upsert_task_contract_projection_tx',
+    'async fn insert_board_task',
     'control_state".to_string())',
     'serde_json::json!("task_contracts")',
     'INSERT INTO task_contracts',

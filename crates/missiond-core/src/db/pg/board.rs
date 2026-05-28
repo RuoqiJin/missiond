@@ -81,6 +81,42 @@ fn board_create_runtime_metadata(
 }
 
 #[cfg(feature = "postgres")]
+fn board_task_runtime_metadata(task: &BoardTask) -> serde_json::Value {
+    board_create_runtime_metadata(
+        &task.id,
+        &CreateBoardTaskInput {
+            title: task.title.clone(),
+            description: if task.description.is_empty() {
+                None
+            } else {
+                Some(task.description.clone())
+            },
+            priority: Some(task.priority.clone()),
+            category: Some(task.category.clone()),
+            project: task.project.clone(),
+            server: task.server.clone(),
+            due_date: task.due_date.clone(),
+            parent_id: task.parent_id.as_ref().map(|id| id.as_str().to_string()),
+            assignee: task.assignee.clone(),
+            auto_execute: Some(task.auto_execute),
+            prompt_template: task.prompt_template.clone(),
+            hidden: Some(task.hidden),
+            flow_template: task.flow_template.clone(),
+            depends_on: Some(
+                task.depends_on
+                    .iter()
+                    .map(|id| id.as_str().to_string())
+                    .collect(),
+            ),
+            dedupe_key: task.dedupe_key.clone(),
+            timeout_secs: task.timeout_secs,
+            context_intent: task.context_intent.clone(),
+            runtime_metadata: Some(task.runtime_metadata.clone()),
+        },
+    )
+}
+
+#[cfg(feature = "postgres")]
 struct BoardTaskContractProjection {
     id: String,
     task_contract_id: String,
@@ -167,6 +203,53 @@ fn board_task_contract_projection(
         grounding_refs,
         context_refs,
     }
+}
+
+#[cfg(feature = "postgres")]
+async fn upsert_task_contract_projection_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    task_id: &str,
+    contract: BoardTaskContractProjection,
+) -> DbResult<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO task_contracts
+          (id, task_id, project_id, task_contract_id, dispatch_metadata,
+           read_scope, write_scope, must_not_touch, capability_grant_ids,
+           sandbox_profile, completion_materialization_policy, grounding_refs,
+           context_refs)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+        ON CONFLICT (task_id)
+        DO UPDATE SET project_id = EXCLUDED.project_id,
+                      task_contract_id = EXCLUDED.task_contract_id,
+                      dispatch_metadata = EXCLUDED.dispatch_metadata,
+                      read_scope = EXCLUDED.read_scope,
+                      write_scope = EXCLUDED.write_scope,
+                      must_not_touch = EXCLUDED.must_not_touch,
+                      capability_grant_ids = EXCLUDED.capability_grant_ids,
+                      sandbox_profile = EXCLUDED.sandbox_profile,
+                      completion_materialization_policy = EXCLUDED.completion_materialization_policy,
+                      grounding_refs = EXCLUDED.grounding_refs,
+                      context_refs = EXCLUDED.context_refs,
+                      updated_at = now()
+        "#,
+    )
+    .bind(&contract.id)
+    .bind(task_id)
+    .bind(contract.project_id.as_deref())
+    .bind(&contract.task_contract_id)
+    .bind(contract.dispatch_metadata)
+    .bind(serde_json::json!(contract.read_scope))
+    .bind(serde_json::json!(contract.write_scope))
+    .bind(serde_json::json!(contract.must_not_touch))
+    .bind(serde_json::json!(contract.capability_grant_ids))
+    .bind(contract.sandbox_profile.as_deref())
+    .bind(contract.completion_materialization_policy.as_deref())
+    .bind(contract.grounding_refs)
+    .bind(contract.context_refs)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 #[cfg(feature = "postgres")]
@@ -281,6 +364,62 @@ mod task_contract_projection_tests {
             Some("workspace-write")
         );
     }
+
+    #[test]
+    fn insert_projection_normalizes_empty_runtime_metadata() {
+        let task = BoardTask {
+            id: TaskId::from_trusted("task-memory-hook".to_string()),
+            title: "Memory hook".to_string(),
+            description: String::new(),
+            status: BoardTaskStatus::Open,
+            priority: "medium".to_string(),
+            category: "memory".to_string(),
+            project: Some("missiond".to_string()),
+            server: None,
+            due_date: None,
+            parent_id: None,
+            assignee: None,
+            auto_execute: false,
+            prompt_template: Some("summarize".to_string()),
+            hidden: true,
+            retry_count: 0,
+            max_retries: 2,
+            order_idx: 0,
+            created_at: "2026-05-28T00:00:00Z".to_string(),
+            updated_at: "2026-05-28T00:00:00Z".to_string(),
+            claim_executor_id: None,
+            claim_executor_type: None,
+            claimed_at: None,
+            flow_phase: None,
+            flow_context: None,
+            flow_template: None,
+            depends_on: Vec::new(),
+            lease_expires_at: None,
+            dedupe_key: None,
+            timeout_secs: None,
+            context_intent: Some("general".to_string()),
+            trigger_source: Some("memory_hook".to_string()),
+            runtime_metadata: serde_json::json!({}),
+            notes_count: 0,
+        };
+
+        let runtime_metadata = board_task_runtime_metadata(&task);
+        let projection = board_task_contract_projection(
+            task.id.as_str(),
+            task.project.as_deref(),
+            &runtime_metadata,
+        );
+
+        assert_eq!(
+            runtime_metadata
+                .get("control_state")
+                .and_then(|value| value.as_str()),
+            Some("task_contracts")
+        );
+        assert_eq!(projection.task_contract_id, "board-task:task-memory-hook");
+        assert_eq!(projection.project_id.as_deref(), Some("missiond"));
+        assert_eq!(projection.sandbox_profile.as_deref(), Some("read-only"));
+    }
 }
 
 #[cfg(feature = "postgres")]
@@ -344,6 +483,13 @@ impl BoardStore for PgMissionStore {
     async fn insert_board_task(&self, task: &BoardTask) -> DbResult<()> {
         let depends_on_json =
             serde_json::to_string(&task.depends_on).unwrap_or_else(|_| "[]".to_string());
+        let runtime_metadata = board_task_runtime_metadata(task);
+        let contract = board_task_contract_projection(
+            task.id.as_str(),
+            task.project.as_deref(),
+            &runtime_metadata,
+        );
+        let mut tx = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO board_tasks (id, title, description, status, priority, category, project, server, due_date, parent_id, assignee, auto_execute, prompt_template, hidden, retry_count, max_retries, order_idx, created_at, updated_at, depends_on, dedupe_key, timeout_secs, context_intent, trigger_source, runtime_metadata)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)"
@@ -372,9 +518,11 @@ impl BoardStore for PgMissionStore {
         .bind(task.timeout_secs)
         .bind(&task.context_intent)
         .bind(&task.trigger_source)
-        .bind(&task.runtime_metadata)
-        .execute(&self.pool)
+        .bind(&runtime_metadata)
+        .execute(&mut *tx)
         .await?;
+        upsert_task_contract_projection_tx(&mut tx, task.id.as_str(), contract).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -508,44 +656,7 @@ impl BoardStore for PgMissionStore {
         .bind(&task.runtime_metadata)
         .execute(&mut *tx)
         .await?;
-        sqlx::query(
-            r#"
-            INSERT INTO task_contracts
-              (id, task_id, project_id, task_contract_id, dispatch_metadata,
-               read_scope, write_scope, must_not_touch, capability_grant_ids,
-               sandbox_profile, completion_materialization_policy, grounding_refs,
-               context_refs)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-            ON CONFLICT (task_id)
-            DO UPDATE SET project_id = EXCLUDED.project_id,
-                          task_contract_id = EXCLUDED.task_contract_id,
-                          dispatch_metadata = EXCLUDED.dispatch_metadata,
-                          read_scope = EXCLUDED.read_scope,
-                          write_scope = EXCLUDED.write_scope,
-                          must_not_touch = EXCLUDED.must_not_touch,
-                          capability_grant_ids = EXCLUDED.capability_grant_ids,
-                          sandbox_profile = EXCLUDED.sandbox_profile,
-                          completion_materialization_policy = EXCLUDED.completion_materialization_policy,
-                          grounding_refs = EXCLUDED.grounding_refs,
-                          context_refs = EXCLUDED.context_refs,
-                          updated_at = now()
-            "#,
-        )
-        .bind(&contract.id)
-        .bind(task.id.as_str())
-        .bind(contract.project_id.as_deref())
-        .bind(&contract.task_contract_id)
-        .bind(contract.dispatch_metadata)
-        .bind(serde_json::json!(contract.read_scope))
-        .bind(serde_json::json!(contract.write_scope))
-        .bind(serde_json::json!(contract.must_not_touch))
-        .bind(serde_json::json!(contract.capability_grant_ids))
-        .bind(contract.sandbox_profile.as_deref())
-        .bind(contract.completion_materialization_policy.as_deref())
-        .bind(contract.grounding_refs)
-        .bind(contract.context_refs)
-        .execute(&mut *tx)
-        .await?;
+        upsert_task_contract_projection_tx(&mut tx, task.id.as_str(), contract).await?;
         tx.commit().await?;
         Ok(task)
     }

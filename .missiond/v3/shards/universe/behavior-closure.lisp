@@ -26,6 +26,33 @@
     :effects [])
 
   (behavior
+    :id gemini-cli-watcher-background-tasks
+    :kind scheduler
+    :owner conversation-ingestion
+    :observed ["background-task:crates/missiond-core/src/gemini_cli/watcher.rs:66"
+               "background-task:crates/missiond-core/src/gemini_cli/watcher.rs:145"]
+    :code ["crates/missiond-core/src/gemini_cli/watcher.rs"]
+    :effects []
+    (anchor
+      :role scheduler
+      :observed "background-task:crates/missiond-core/src/gemini_cli/watcher.rs:66"
+      :file "crates/missiond-core/src/gemini_cli/watcher.rs"
+      :symbol "new")
+    (anchor
+      :role scheduler
+      :observed "background-task:crates/missiond-core/src/gemini_cli/watcher.rs:145"
+      :file "crates/missiond-core/src/gemini_cli/watcher.rs"
+      :symbol "start")
+    (trigger
+      :from-file "crates/missiond-core/src/gemini_cli/watcher.rs"
+      :from-symbol "GeminiCliWatcher::new"
+      :calls "spawn ack-based Gemini cursor persistence loop")
+    (trigger
+      :from-file "crates/missiond-core/src/gemini_cli/watcher.rs"
+      :from-symbol "GeminiCliWatcher::start"
+      :calls "spawn Gemini CLI file watcher event handler"))
+
+  (behavior
     :id missiond-public-tools
     :kind mcp-tool
     :owner mcp-gateway
