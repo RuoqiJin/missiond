@@ -172,6 +172,31 @@ pub(crate) struct ClaimRequest {
     pub bypass_reason: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ReleaseLeaseRequest {
+    pub claim_id: String,
+    pub owner_id: Option<String>,
+    pub grant_id: Option<String>,
+    pub subject_kind: String,
+    pub subject_id: String,
+    pub details: Value,
+    pub allow_system_bypass: bool,
+    pub bypass_reason: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct HeartbeatLeaseRequest {
+    pub claim_id: String,
+    pub owner_id: Option<String>,
+    pub grant_id: Option<String>,
+    pub subject_kind: String,
+    pub subject_id: String,
+    pub lease_secs: i64,
+    pub details: Value,
+    pub allow_system_bypass: bool,
+    pub bypass_reason: Option<String>,
+}
+
 pub(crate) struct CapabilityGrantInput<'a> {
     pub(crate) subject_kind: &'a str,
     pub(crate) subject_id: &'a str,
@@ -411,12 +436,12 @@ impl SharedMemoryService {
         self.model_route_outcome_put(args).await
     }
 
-    pub(crate) async fn release_typed(&self, args: Value) -> Result<Value> {
-        self.release(&args).await
+    pub(crate) async fn release_lease_typed(&self, req: ReleaseLeaseRequest) -> Result<Value> {
+        self.release(req).await
     }
 
-    pub(crate) async fn heartbeat_typed(&self, args: Value) -> Result<Value> {
-        self.heartbeat(&args).await
+    pub(crate) async fn heartbeat_lease_typed(&self, req: HeartbeatLeaseRequest) -> Result<Value> {
+        self.heartbeat(req).await
     }
 
     pub(crate) async fn capability_check_typed(&self, args: &Value) -> Result<Value> {
@@ -3910,16 +3935,16 @@ impl SharedMemoryService {
         }))
     }
 
-    async fn release(&self, args: &Value) -> Result<Value> {
-        let id = string_arg(args, "claim_id")
-            .or_else(|| string_arg(args, "claimId"))
-            .or_else(|| string_arg(args, "id"))
-            .ok_or_else(|| anyhow!("claim_id is required"))?;
-        let owner_id = string_arg(args, "owner_id").or_else(|| string_arg(args, "ownerId"));
+    async fn release(&self, req: ReleaseLeaseRequest) -> Result<Value> {
+        let id = req.claim_id.trim().to_string();
+        if id.is_empty() {
+            return Err(anyhow!("claim_id is required"));
+        }
+        let owner_id = req.owner_id.clone();
         let lease = sqlx::query(
             "SELECT task_id, holder_id, scope_kind, scope_key, status, lease_expires_at, metadata FROM work_leases WHERE id = $1",
         )
-        .bind(id)
+        .bind(&id)
         .fetch_optional(&self.pool)
         .await?;
         let Some(lease) = lease else {
@@ -3943,32 +3968,42 @@ impl SharedMemoryService {
             .try_get::<DateTime<Utc>, _>("lease_expires_at")
             .ok()
             .map(|ts| ts.to_rfc3339());
-        self.require_capability(CapabilityCheckRequest {
-            grant_id: string_arg(args, "grant_id")
-                .or_else(|| string_arg(args, "grantId"))
-                .or_else(|| string_arg(args, "capability_grant_id"))
-                .or_else(|| string_arg(args, "capabilityGrantId"))
-                .map(str::to_string),
-            subject_kind: string_arg(args, "subject_kind")
-                .or_else(|| string_arg(args, "subjectKind"))
-                .unwrap_or("worker")
-                .to_string(),
-            subject_id: string_arg(args, "subject_id")
-                .or_else(|| string_arg(args, "subjectId"))
-                .or(owner_id)
+        let lease_metadata = lease
+            .try_get::<Value, _>("metadata")
+            .unwrap_or_else(|_| json!({}));
+        let subject_id = if req.subject_id.trim().is_empty() {
+            owner_id
+                .as_deref()
                 .unwrap_or(holder_id.as_str())
-                .to_string(),
+                .to_string()
+        } else {
+            req.subject_id.clone()
+        };
+        let capability_details = if req
+            .details
+            .as_object()
+            .is_some_and(|fields| !fields.is_empty())
+        {
+            json!({
+                "lease_metadata": lease_metadata,
+                "request_details": req.details
+            })
+        } else {
+            lease_metadata
+        };
+        self.require_capability(CapabilityCheckRequest {
+            grant_id: req.grant_id,
+            subject_kind: req.subject_kind,
+            subject_id,
             operation: "claim".to_string(),
             scope_kind: scope_kind.clone(),
             scope_key: scope_key.clone(),
             task_id: task_id.clone(),
-            allow_system_bypass: system_or_operator_bypass_allowed(args),
-            bypass_reason: Some(
-                "mission_shared_memory release system/operator authority".to_string(),
-            ),
-            details: lease
-                .try_get::<Value, _>("metadata")
-                .unwrap_or_else(|_| json!({})),
+            allow_system_bypass: req.allow_system_bypass,
+            bypass_reason: req.bypass_reason.or_else(|| {
+                Some("mission_shared_memory release system/operator authority".to_string())
+            }),
+            details: capability_details,
         })
         .await?;
         let row = sqlx::query(
@@ -3982,8 +4017,8 @@ impl SharedMemoryService {
                       acquired_at, lease_expires_at, released_at, heartbeat_at, metadata
             "#,
         )
-        .bind(id)
-        .bind(owner_id)
+        .bind(&id)
+        .bind(owner_id.as_deref())
         .fetch_optional(&self.pool)
         .await?;
         if row.is_some() {
@@ -3995,8 +4030,8 @@ impl SharedMemoryService {
                   AND ($2::text IS NULL OR owner_id = $2)
                 "#,
             )
-            .bind(id)
-            .bind(owner_id)
+            .bind(&id)
+            .bind(owner_id.as_deref())
             .execute(&self.pool)
             .await;
         }
@@ -4023,23 +4058,18 @@ impl SharedMemoryService {
         }))
     }
 
-    async fn heartbeat(&self, args: &Value) -> Result<Value> {
-        let id = string_arg(args, "claim_id")
-            .or_else(|| string_arg(args, "claimId"))
-            .or_else(|| string_arg(args, "id"))
-            .ok_or_else(|| anyhow!("claim_id is required"))?;
-        let owner_id = string_arg(args, "owner_id").or_else(|| string_arg(args, "ownerId"));
-        let lease_secs = args
-            .get("lease_secs")
-            .or_else(|| args.get("leaseSecs"))
-            .and_then(Value::as_i64)
-            .unwrap_or(DEFAULT_LEASE_SECS)
-            .clamp(30, MAX_LEASE_SECS);
+    async fn heartbeat(&self, req: HeartbeatLeaseRequest) -> Result<Value> {
+        let id = req.claim_id.trim().to_string();
+        if id.is_empty() {
+            return Err(anyhow!("claim_id is required"));
+        }
+        let owner_id = req.owner_id.clone();
+        let lease_secs = req.lease_secs.clamp(30, MAX_LEASE_SECS);
         let lease_expires_at = Utc::now() + Duration::seconds(lease_secs);
         let lease = sqlx::query(
             "SELECT task_id, holder_id, scope_kind, scope_key, status, lease_expires_at, metadata FROM work_leases WHERE id = $1",
         )
-        .bind(id)
+        .bind(&id)
         .fetch_optional(&self.pool)
         .await?;
         let Some(lease) = lease else {
@@ -4063,32 +4093,42 @@ impl SharedMemoryService {
             .try_get::<DateTime<Utc>, _>("lease_expires_at")
             .ok()
             .map(|ts| ts.to_rfc3339());
-        self.require_capability(CapabilityCheckRequest {
-            grant_id: string_arg(args, "grant_id")
-                .or_else(|| string_arg(args, "grantId"))
-                .or_else(|| string_arg(args, "capability_grant_id"))
-                .or_else(|| string_arg(args, "capabilityGrantId"))
-                .map(str::to_string),
-            subject_kind: string_arg(args, "subject_kind")
-                .or_else(|| string_arg(args, "subjectKind"))
-                .unwrap_or("worker")
-                .to_string(),
-            subject_id: string_arg(args, "subject_id")
-                .or_else(|| string_arg(args, "subjectId"))
-                .or(owner_id)
+        let lease_metadata = lease
+            .try_get::<Value, _>("metadata")
+            .unwrap_or_else(|_| json!({}));
+        let subject_id = if req.subject_id.trim().is_empty() {
+            owner_id
+                .as_deref()
                 .unwrap_or(holder_id.as_str())
-                .to_string(),
+                .to_string()
+        } else {
+            req.subject_id.clone()
+        };
+        let capability_details = if req
+            .details
+            .as_object()
+            .is_some_and(|fields| !fields.is_empty())
+        {
+            json!({
+                "lease_metadata": lease_metadata,
+                "request_details": req.details
+            })
+        } else {
+            lease_metadata
+        };
+        self.require_capability(CapabilityCheckRequest {
+            grant_id: req.grant_id,
+            subject_kind: req.subject_kind,
+            subject_id,
             operation: "claim".to_string(),
             scope_kind: scope_kind.clone(),
             scope_key: scope_key.clone(),
             task_id: task_id.clone(),
-            allow_system_bypass: system_or_operator_bypass_allowed(args),
-            bypass_reason: Some(
-                "mission_shared_memory heartbeat system/operator authority".to_string(),
-            ),
-            details: lease
-                .try_get::<Value, _>("metadata")
-                .unwrap_or_else(|_| json!({})),
+            allow_system_bypass: req.allow_system_bypass,
+            bypass_reason: req.bypass_reason.or_else(|| {
+                Some("mission_shared_memory heartbeat system/operator authority".to_string())
+            }),
+            details: capability_details,
         })
         .await?;
         let row = sqlx::query(
@@ -4102,8 +4142,8 @@ impl SharedMemoryService {
                       acquired_at, lease_expires_at, released_at, heartbeat_at, metadata
             "#,
         )
-        .bind(id)
-        .bind(owner_id)
+        .bind(&id)
+        .bind(owner_id.as_deref())
         .bind(lease_expires_at)
         .fetch_optional(&self.pool)
         .await?;
@@ -4117,8 +4157,8 @@ impl SharedMemoryService {
                   AND ($2::text IS NULL OR owner_id = $2)
                 "#,
             )
-            .bind(id)
-            .bind(owner_id)
+            .bind(&id)
+            .bind(owner_id.as_deref())
             .bind(lease_expires_at)
             .execute(&self.pool)
             .await;

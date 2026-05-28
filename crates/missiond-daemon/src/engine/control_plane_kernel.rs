@@ -3,8 +3,8 @@ use chrono::Utc;
 use serde_json::{json, Value};
 
 use crate::engine::shared_memory::{
-    CapabilityCheckRequest, CapabilityGrantInput, ClaimRequest, TaskResultPutRequest,
-    WorkerSettleRequest,
+    CapabilityCheckRequest, CapabilityGrantInput, ClaimRequest, HeartbeatLeaseRequest,
+    ReleaseLeaseRequest, TaskResultPutRequest, WorkerSettleRequest,
 };
 use crate::engine::task_completion_evidence::{
     TaskCompletionEvidenceInput, TaskCompletionEvidenceWriter,
@@ -344,61 +344,39 @@ impl<'a> ControlPlaneKernel<'a> {
         &self,
         command: ReleaseLeaseCommand,
     ) -> Result<Value> {
-        let mut payload = json!({
-            "claim_id": command.claim_id,
-            "details": command.details,
-        });
-        if let Some(owner_id) = command.owner_id {
-            payload["owner_id"] = Value::String(owner_id);
-        }
-        if let Some(grant_id) = command.grant_id {
-            payload["grant_id"] = Value::String(grant_id);
-        }
-        if !command.subject_kind.trim().is_empty() {
-            payload["subject_kind"] = Value::String(command.subject_kind);
-        }
-        if !command.subject_id.trim().is_empty() {
-            payload["subject_id"] = Value::String(command.subject_id);
-        }
-        if command.allow_system_bypass {
-            payload["confirm"] = Value::Bool(true);
-            payload["operator_confirm"] = Value::Bool(true);
-        }
-        if let Some(reason) = command.bypass_reason {
-            payload["bypass_reason"] = Value::String(reason);
-        }
-        self.state.shared_memory.release_typed(payload).await
+        self.state
+            .shared_memory
+            .release_lease_typed(ReleaseLeaseRequest {
+                claim_id: command.claim_id,
+                owner_id: command.owner_id,
+                grant_id: command.grant_id,
+                subject_kind: command.subject_kind,
+                subject_id: command.subject_id,
+                details: command.details,
+                allow_system_bypass: command.allow_system_bypass,
+                bypass_reason: command.bypass_reason,
+            })
+            .await
     }
 
     pub(crate) async fn heartbeat_lease_command(
         &self,
         command: HeartbeatLeaseCommand,
     ) -> Result<Value> {
-        let mut payload = json!({
-            "claim_id": command.claim_id,
-            "lease_secs": command.lease_secs,
-            "details": command.details,
-        });
-        if let Some(owner_id) = command.owner_id {
-            payload["owner_id"] = Value::String(owner_id);
-        }
-        if let Some(grant_id) = command.grant_id {
-            payload["grant_id"] = Value::String(grant_id);
-        }
-        if !command.subject_kind.trim().is_empty() {
-            payload["subject_kind"] = Value::String(command.subject_kind);
-        }
-        if !command.subject_id.trim().is_empty() {
-            payload["subject_id"] = Value::String(command.subject_id);
-        }
-        if command.allow_system_bypass {
-            payload["confirm"] = Value::Bool(true);
-            payload["operator_confirm"] = Value::Bool(true);
-        }
-        if let Some(reason) = command.bypass_reason {
-            payload["bypass_reason"] = Value::String(reason);
-        }
-        self.state.shared_memory.heartbeat_typed(payload).await
+        self.state
+            .shared_memory
+            .heartbeat_lease_typed(HeartbeatLeaseRequest {
+                claim_id: command.claim_id,
+                owner_id: command.owner_id,
+                grant_id: command.grant_id,
+                subject_kind: command.subject_kind,
+                subject_id: command.subject_id,
+                lease_secs: command.lease_secs,
+                details: command.details,
+                allow_system_bypass: command.allow_system_bypass,
+                bypass_reason: command.bypass_reason,
+            })
+            .await
     }
 
     pub(crate) async fn require_capability(

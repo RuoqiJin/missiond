@@ -241,6 +241,8 @@ function checkFiles(root, files) {
     'fn kernel_routed_action_error',
     'shared memory action `{action}` must enter through ControlPlaneKernel',
     'struct CapabilityGrantInput',
+    'pub(crate) struct ReleaseLeaseRequest',
+    'pub(crate) struct HeartbeatLeaseRequest',
     'pub(crate) struct CapabilityCheckRequest',
     'pub(crate) struct TaskRuntimeContract',
     'upsert_task_contract_from_metadata',
@@ -248,6 +250,8 @@ function checkFiles(root, files) {
     'ON CONFLICT (task_id) DO NOTHING',
     'pub(crate) async fn grant_task_capabilities',
     'pub(crate) async fn claim_lease_typed',
+    'pub(crate) async fn release_lease_typed',
+    'pub(crate) async fn heartbeat_lease_typed',
     'pub(crate) async fn task_result_put_typed',
     'pub(crate) async fn task_result_put_command',
     'pub(crate) fn task_result_put_request_from_args',
@@ -363,6 +367,10 @@ function checkFiles(root, files) {
     'upsert_task_contract_from_metadata',
     'update_task_contract_capability_grants',
     'claim_lease_typed',
+    'ReleaseLeaseRequest',
+    'HeartbeatLeaseRequest',
+    'release_lease_typed',
+    'heartbeat_lease_typed',
     'ensure_task_contract_from_metadata',
     'insert_capability_grant(CapabilityGrantInput',
     'TaskCompletionEvidenceWriter::new',
@@ -371,6 +379,8 @@ function checkFiles(root, files) {
   rejectAll(diagnostics, files.controlPlaneKernel, sources.controlPlaneKernel, [
     'task.runtime_metadata.clone()',
     '.capability_grant_from_args(',
+    '.release_typed(',
+    '.heartbeat_typed(',
   ]);
 
   requireAll(diagnostics, files.evidenceWriter, sources.evidenceWriter, [
