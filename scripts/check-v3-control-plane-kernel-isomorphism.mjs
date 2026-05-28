@@ -296,6 +296,8 @@ function checkFiles(root, files) {
     'pub(crate) struct ReleaseLeaseCommand',
     'pub(crate) struct RequireCapabilityCommand',
     'pub(crate) struct GrantTaskCapabilitiesCommand',
+    'pub(crate) struct UpsertTaskContractCommand',
+    'pub(crate) struct UpdateTaskContractCapabilityGrantsCommand',
     'pub(crate) async fn record_observation',
     'pub(crate) async fn record_observation_command',
     'pub(crate) async fn start_attempt_command',
@@ -308,6 +310,8 @@ function checkFiles(root, files) {
     'pub(crate) async fn require_capability',
     'pub(crate) async fn require_capability_command',
     'pub(crate) async fn grant_task_capabilities_command',
+    'pub(crate) async fn upsert_task_contract_command',
+    'pub(crate) async fn update_task_contract_capability_grants_command',
     'pub(crate) async fn project_board_view',
     'pub(crate) async fn complete_system_task',
     'CapabilityCheckRequest',
@@ -316,6 +320,8 @@ function checkFiles(root, files) {
     'settle_worker_command',
     'job_event_typed',
     'grant_task_capabilities',
+    'upsert_task_contract_from_metadata',
+    'update_task_contract_capability_grants',
     'claim_lease_typed',
     'ensure_task_contract_from_metadata',
     'TaskCompletionEvidenceWriter::new',
@@ -323,7 +329,6 @@ function checkFiles(root, files) {
   ]);
   rejectAll(diagnostics, files.controlPlaneKernel, sources.controlPlaneKernel, [
     'task.runtime_metadata.clone()',
-    '.upsert_task_contract_from_metadata(',
   ]);
 
   requireAll(diagnostics, files.evidenceWriter, sources.evidenceWriter, [
@@ -349,6 +354,7 @@ function checkFiles(root, files) {
     '.settle_task_command(SettleTaskCommand',
     '.active_capability_grant_id(',
     '.grant_task_capabilities_command(GrantTaskCapabilitiesCommand',
+    '.update_task_contract_capability_grants_command(',
     '.task_runtime_contract(task.id.as_str())',
     'task_contract_workstation_class(task, runtime_contract)',
     'autopilot_grounding_gate_reason_from_contract(&task, &runtime_contract)',
@@ -398,7 +404,7 @@ function checkFiles(root, files) {
     'create_args["subject_kind"] = Value::String("worker".to_string())',
     'runtime_metadata: Some(runtime_metadata.clone())',
     'control_state": "task_contracts"',
-    'upsert_task_contract_from_metadata',
+    'UpsertTaskContractCommand',
     '.task_runtime_contract(task.id.as_str())',
     'task_contract_references_parent(&contract, parent_id)',
     'task_contract_references_source(&contract, src)',
@@ -436,9 +442,11 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.boardCreateHandler, sources.boardCreateHandler, [
     'ControlPlaneKernel::new(state)',
     '.grant_task_capabilities_command(GrantTaskCapabilitiesCommand',
+    '.upsert_task_contract_command(UpsertTaskContractCommand',
   ]);
   rejectAll(diagnostics, files.boardCreateHandler, sources.boardCreateHandler, [
     '.grant_task_capabilities(',
+    '.upsert_task_contract_from_metadata(',
   ]);
 
   requireAll(diagnostics, files.v2Subscribers, sources.v2Subscribers, [
@@ -605,8 +613,25 @@ function checkFiles(root, files) {
   rejectDirectJobEventsOutsideKernel(diagnostics, files, sources);
   rejectDirectCapabilityChecksOutsideKernel(diagnostics, files, sources);
   rejectDirectCapabilityGrantsOutsideKernel(diagnostics, files, sources);
+  rejectDirectTaskContractWritesOutsideKernel(diagnostics, files, sources);
 
   return diagnostics;
+}
+
+function rejectDirectTaskContractWritesOutsideKernel(diagnostics, files, sources) {
+  const allowed = new Set(['controlPlaneKernel', 'sharedMemory']);
+  for (const [key, source] of Object.entries(sources)) {
+    if (allowed.has(key)) continue;
+    if (
+      source.includes('.upsert_task_contract_from_metadata(') ||
+      source.includes('.update_task_contract_capability_grants(')
+    ) {
+      diagnostics.push({
+        file: files[key],
+        message: 'direct task_contract writes outside ControlPlaneKernel are forbidden',
+      });
+    }
+  }
 }
 
 function rejectDirectCapabilityGrantsOutsideKernel(diagnostics, files, sources) {

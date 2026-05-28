@@ -1,5 +1,7 @@
 use super::*;
-use crate::engine::control_plane_kernel::{ControlPlaneKernel, GrantTaskCapabilitiesCommand};
+use crate::engine::control_plane_kernel::{
+    ControlPlaneKernel, GrantTaskCapabilitiesCommand, UpsertTaskContractCommand,
+};
 
 pub(super) async fn handle_create(state: &AppState, args: Value) -> Result<ToolResult> {
     let input: missiond_core::types::CreateBoardTaskInput =
@@ -39,13 +41,12 @@ pub(super) async fn handle_create(state: &AppState, args: Value) -> Result<ToolR
             Err(err) => return Ok(super::board_store_error("mission_board_create grants", err)),
         }
     }
-    if let Err(err) = state
-        .shared_memory
-        .upsert_task_contract_from_metadata(
-            task.id.as_str(),
-            task.project.as_deref(),
-            &task.runtime_metadata,
-        )
+    if let Err(err) = ControlPlaneKernel::new(state)
+        .upsert_task_contract_command(UpsertTaskContractCommand {
+            task_id: task.id.to_string(),
+            project_id: task.project.clone(),
+            runtime_metadata: task.runtime_metadata.clone(),
+        })
         .await
     {
         return Ok(ToolResult::structured_error(

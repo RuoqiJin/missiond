@@ -12,6 +12,7 @@ use crate::context::v3_blueprint_runtime::{
 };
 use crate::engine::control_plane_kernel::{
     ControlPlaneKernel, GrantTaskCapabilitiesCommand, RecordObservationCommand, SettleTaskCommand,
+    UpdateTaskContractCapabilityGrantsCommand,
 };
 use crate::engine::learning_engine;
 use crate::engine::shared_memory::TaskRuntimeContract;
@@ -697,10 +698,11 @@ async fn ensure_task_result_control_capabilities(
             issuer: "autopilot-dispatch".to_string(),
         })
         .await?;
-    state
-        .storage()
-        .shared_memory
-        .update_task_contract_capability_grants(task.id.as_str(), &grant_ids)
+    ControlPlaneKernel::new(state)
+        .update_task_contract_capability_grants_command(UpdateTaskContractCapabilityGrantsCommand {
+            task_id: task.id.to_string(),
+            capability_grant_ids: grant_ids.clone(),
+        })
         .await?;
     let mut runtime_metadata = task.runtime_metadata.clone();
     if let Some(fields) = runtime_metadata.as_object_mut() {

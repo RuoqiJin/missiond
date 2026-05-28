@@ -12,7 +12,7 @@ use tokio::process::Command;
 use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
 use crate::engine::control_plane_kernel::{
     ControlPlaneKernel, GrantTaskCapabilitiesCommand, RecordObservationCommand,
-    ReleaseLeaseCommand, SettleTaskCommand, StartAttemptCommand,
+    ReleaseLeaseCommand, SettleTaskCommand, StartAttemptCommand, UpsertTaskContractCommand,
 };
 use crate::engine::shared_memory::{StructuredControlError, TaskRuntimeContract};
 use crate::engine::task_completion_evidence::TaskCompletionEvidenceInput;
@@ -629,15 +629,14 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             },
         )
         .await;
-    state
-        .shared_memory
-        .upsert_task_contract_from_metadata(
-            &task_id,
-            target_project_resolution
+    ControlPlaneKernel::new(state)
+        .upsert_task_contract_command(UpsertTaskContractCommand {
+            task_id: task_id.clone(),
+            project_id: target_project_resolution
                 .as_ref()
-                .map(|resolution| resolution.project_id.as_str()),
-            &runtime_metadata,
-        )
+                .map(|resolution| resolution.project_id.clone()),
+            runtime_metadata: runtime_metadata.clone(),
+        })
         .await
         .map_err(|e| anyhow!("task contract error: {}", e))?;
     if should_auto_provision_slot {
@@ -1333,13 +1332,12 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
                     },
                 )
                 .await;
-            state
-                .shared_memory
-                .upsert_task_contract_from_metadata(
-                    &task_id,
-                    Some(&task_project_id),
-                    &runtime_metadata,
-                )
+            ControlPlaneKernel::new(state)
+                .upsert_task_contract_command(UpsertTaskContractCommand {
+                    task_id: task_id.clone(),
+                    project_id: Some(task_project_id.clone()),
+                    runtime_metadata: runtime_metadata.clone(),
+                })
                 .await
                 .map_err(|e| anyhow!("task contract error: {}", e))?;
             if should_auto_provision_child {

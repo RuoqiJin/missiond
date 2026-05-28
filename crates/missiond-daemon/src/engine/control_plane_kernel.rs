@@ -107,6 +107,19 @@ pub(crate) struct GrantTaskCapabilitiesCommand {
     pub issuer: String,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct UpsertTaskContractCommand {
+    pub task_id: String,
+    pub project_id: Option<String>,
+    pub runtime_metadata: Value,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct UpdateTaskContractCapabilityGrantsCommand {
+    pub task_id: String,
+    pub capability_grant_ids: Vec<String>,
+}
+
 pub(crate) struct ControlPlaneKernel<'a> {
     state: &'a AppState,
 }
@@ -350,6 +363,33 @@ impl<'a> ControlPlaneKernel<'a> {
                 &command.write_scope,
                 &command.must_not_touch,
                 command.issuer.as_str(),
+            )
+            .await
+    }
+
+    pub(crate) async fn upsert_task_contract_command(
+        &self,
+        command: UpsertTaskContractCommand,
+    ) -> Result<String> {
+        self.state
+            .shared_memory
+            .upsert_task_contract_from_metadata(
+                command.task_id.as_str(),
+                command.project_id.as_deref(),
+                &command.runtime_metadata,
+            )
+            .await
+    }
+
+    pub(crate) async fn update_task_contract_capability_grants_command(
+        &self,
+        command: UpdateTaskContractCapabilityGrantsCommand,
+    ) -> Result<()> {
+        self.state
+            .shared_memory
+            .update_task_contract_capability_grants(
+                command.task_id.as_str(),
+                &command.capability_grant_ids,
             )
             .await
     }
