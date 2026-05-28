@@ -321,6 +321,9 @@ function checkFiles(root, files) {
     'pub(crate) struct RecordObservationCommand',
     'pub(crate) struct StartAttemptCommand',
     'pub(crate) struct JobEventCommand',
+    'pub task_id: String',
+    'pub event_kind: String',
+    'pub runtime_metadata: Value',
     'pub(crate) struct CapabilityGrantCommand',
     'pub authority_grant_id: Option<String>',
     'pub authority_subject_kind: String',
@@ -381,6 +384,7 @@ function checkFiles(root, files) {
     '.capability_grant_from_args(',
     '.release_typed(',
     '.heartbeat_typed(',
+    'pub args: Value',
   ]);
 
   requireAll(diagnostics, files.evidenceWriter, sources.evidenceWriter, [
@@ -735,7 +739,7 @@ function checkFiles(root, files) {
     'authority_subject_kind',
     'authority_subject_id',
     'authority_grant_id',
-    'JobEventCommand { args: args.clone() }',
+    'job_event_command_from_args(&args)?',
     '.job_event_command(',
     '_ if legacy_projection_action(action)',
     'unknown shared memory action: {other}',
@@ -747,6 +751,7 @@ function checkFiles(root, files) {
     'capability_check_typed(&args)',
     'capability_grant_from_args(&args)',
     'CapabilityGrantCommand { args:',
+    'JobEventCommand { args:',
     'job_event_typed(args.clone())',
     'state.shared_memory.claim_typed(&args)',
     'state.shared_memory.release_typed(args.clone())',

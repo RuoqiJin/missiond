@@ -112,7 +112,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 }
                 "job_event" | "record_job_event" => {
                     ControlPlaneKernel::new(state)
-                        .job_event_command(JobEventCommand { args: args.clone() })
+                        .job_event_command(job_event_command_from_args(&args)?)
                         .await
                 }
                 _ if legacy_projection_action(action) => {
@@ -302,6 +302,45 @@ fn capability_grant_command_from_args(args: &Value) -> Result<CapabilityGrantCom
         bypass_reason: string_arg(args, "bypass_reason")
             .or_else(|| string_arg(args, "bypassReason"))
             .map(str::to_string),
+    })
+}
+
+fn job_event_command_from_args(args: &Value) -> Result<JobEventCommand> {
+    let task_id = string_arg(args, "task_id")
+        .or_else(|| string_arg(args, "taskId"))
+        .ok_or_else(|| anyhow!("task_id is required"))?
+        .to_string();
+    Ok(JobEventCommand {
+        task_id,
+        project_id: string_arg(args, "project_id")
+            .or_else(|| string_arg(args, "projectId"))
+            .map(str::to_string),
+        agent_id: string_arg(args, "agent_id")
+            .or_else(|| string_arg(args, "agentId"))
+            .unwrap_or("missiond")
+            .to_string(),
+        event_kind: string_arg(args, "event_kind")
+            .or_else(|| string_arg(args, "eventKind"))
+            .unwrap_or("observation.recorded")
+            .to_string(),
+        attempt_id: string_arg(args, "attempt_id")
+            .or_else(|| string_arg(args, "attemptId"))
+            .map(str::to_string),
+        worker_id: string_arg(args, "worker_id")
+            .or_else(|| string_arg(args, "workerId"))
+            .map(str::to_string),
+        conversation_id: string_arg(args, "conversation_id")
+            .or_else(|| string_arg(args, "conversationId"))
+            .map(str::to_string),
+        runtime_metadata: args
+            .get("runtime_metadata")
+            .or_else(|| args.get("runtimeMetadata"))
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({})),
+        payload: args
+            .get("payload")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({})),
     })
 }
 

@@ -60,7 +60,15 @@ pub(crate) struct StartAttemptCommand {
 
 #[derive(Debug, Clone)]
 pub(crate) struct JobEventCommand {
-    pub args: Value,
+    pub task_id: String,
+    pub project_id: Option<String>,
+    pub agent_id: String,
+    pub event_kind: String,
+    pub attempt_id: Option<String>,
+    pub worker_id: Option<String>,
+    pub conversation_id: Option<String>,
+    pub runtime_metadata: Value,
+    pub payload: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -533,7 +541,20 @@ impl<'a> ControlPlaneKernel<'a> {
     }
 
     pub(crate) async fn job_event_command(&self, command: JobEventCommand) -> Result<Value> {
-        self.state.shared_memory.job_event_typed(command.args).await
+        self.state
+            .shared_memory
+            .job_event_typed(json!({
+                "task_id": command.task_id,
+                "project_id": command.project_id,
+                "agent_id": command.agent_id,
+                "event_kind": command.event_kind,
+                "attempt_id": command.attempt_id,
+                "worker_id": command.worker_id,
+                "conversation_id": command.conversation_id,
+                "runtime_metadata": command.runtime_metadata,
+                "payload": command.payload,
+            }))
+            .await
     }
 
     pub(crate) async fn grant_task_capabilities_command(
