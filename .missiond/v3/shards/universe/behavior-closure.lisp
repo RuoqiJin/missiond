@@ -67,6 +67,23 @@
     :effects [])
 
   (behavior
+    :id board-runtime-metadata-backfill-psql
+    :kind subprocess
+    :owner control-plane-kernel
+    :observed ["subprocess:scripts/backfill-board-runtime-metadata.mjs:249"]
+    :code ["scripts/backfill-board-runtime-metadata.mjs"]
+    :effects []
+    (anchor
+      :role subprocess
+      :observed "subprocess:scripts/backfill-board-runtime-metadata.mjs:249"
+      :file "scripts/backfill-board-runtime-metadata.mjs"
+      :symbol "runPsql")
+    (trigger
+      :from-file "scripts/backfill-board-runtime-metadata.mjs"
+      :from-symbol "applyBackfill"
+      :calls "psql -X -v ON_ERROR_STOP=1 -f <generated-backfill-sql>"))
+
+  (behavior
     :id agent-navigation-quality-subprocess
     :kind subprocess
     :owner agent-navigation
@@ -186,6 +203,43 @@
       :from-file "scripts/audit-stale-boardtask-finals.mjs"
       :from-symbol "callMissiond"
       :calls "bounded MissionD IPC timeout for stale-final audit"))
+
+  (behavior
+    :id control-plane-worktree-verifier-git-subprocesses
+    :kind subprocess
+    :owner control-plane-kernel
+    :observed ["subprocess:crates/missiond-daemon/src/engine/shared_memory.rs:4493"
+               "subprocess:crates/missiond-daemon/src/engine/shared_memory.rs:4529"
+               "subprocess:crates/missiond-daemon/src/engine/shared_memory.rs:4549"]
+    :code ["crates/missiond-daemon/src/engine/shared_memory.rs"]
+    :effects []
+    (anchor
+      :role subprocess
+      :observed "subprocess:crates/missiond-daemon/src/engine/shared_memory.rs:4493"
+      :file "crates/missiond-daemon/src/engine/shared_memory.rs"
+      :symbol "git_status_changed_paths")
+    (anchor
+      :role subprocess
+      :observed "subprocess:crates/missiond-daemon/src/engine/shared_memory.rs:4529"
+      :file "crates/missiond-daemon/src/engine/shared_memory.rs"
+      :symbol "git_changed_paths_between")
+    (anchor
+      :role subprocess
+      :observed "subprocess:crates/missiond-daemon/src/engine/shared_memory.rs:4549"
+      :file "crates/missiond-daemon/src/engine/shared_memory.rs"
+      :symbol "git_head")
+    (trigger
+      :from-file "crates/missiond-daemon/src/engine/shared_memory.rs"
+      :from-symbol "git_status_changed_paths"
+      :calls "git -C <project_root> status --porcelain=v1 for attempt-bound changed path verification")
+    (trigger
+      :from-file "crates/missiond-daemon/src/engine/shared_memory.rs"
+      :from-symbol "git_changed_paths_between"
+      :calls "git -C <project_root> diff --name-only <pre>..<post> for attempt-bound changed path verification")
+    (trigger
+      :from-file "crates/missiond-daemon/src/engine/shared_memory.rs"
+      :from-symbol "git_head"
+      :calls "git -C <project_root> rev-parse HEAD for attempt-bound worktree manifest verification"))
 
   (behavior
     :id global-claude-md-sync

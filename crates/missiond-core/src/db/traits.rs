@@ -838,6 +838,7 @@ pub trait BoardStore: Send + Sync {
     async fn insert_board_task(&self, task: &BoardTask) -> DbResult<()>;
     async fn create_board_task(&self, input: &CreateBoardTaskInput) -> DbResult<BoardTask>;
     async fn get_board_task(&self, id: &str) -> DbResult<Option<BoardTask>>;
+    async fn get_board_task_projection_artifact_hash(&self, id: &str) -> DbResult<Option<String>>;
     async fn list_board_tasks(
         &self,
         status: Option<&str>,

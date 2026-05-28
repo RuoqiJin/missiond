@@ -19,13 +19,17 @@ const FILES = {
   migration: 'crates/missiond-core/migrations/20260527000000_control_plane_kernel.sql',
   controlPlaneKernel: 'crates/missiond-daemon/src/engine/control_plane_kernel.rs',
   sharedMemory: 'crates/missiond-daemon/src/engine/shared_memory.rs',
+  evidenceWriter: 'crates/missiond-daemon/src/engine/task_completion_evidence.rs',
   featureGates: 'crates/missiond-daemon/src/feature_gates.rs',
   handlers: 'crates/missiond-daemon/src/handlers/mod.rs',
   main: 'crates/missiond-daemon/src/main.rs',
   deployDaemon: 'scripts/deploy-daemon.sh',
   autopilot: 'crates/missiond-daemon/src/engine/intent_engine/autopilot.rs',
+  flowEngine: 'crates/missiond-daemon/src/engine/intent_engine/flow_engine.rs',
   taskDelegate: 'crates/missiond-daemon/src/handlers/compute/task_delegate.rs',
+  v2Subscribers: 'crates/missiond-daemon/src/bus/v2_subscribers.rs',
   computeSlot: 'crates/missiond-daemon/src/handlers/compute/compute_slot.rs',
+  ptyHandler: 'crates/missiond-daemon/src/handlers/compute/pty.rs',
   spawner: 'crates/missiond-daemon/src/slot_orchestrator/spawner.rs',
   boardStore: 'crates/missiond-core/src/db/pg/board.rs',
   boardTypes: 'crates/missiond-core/src/types/board.rs',
@@ -107,9 +111,13 @@ function checkFiles(root, files) {
     ':hard-cutover true',
     'BoardTask description, Board notes, PTY screens, TUI summaries, and provider prose are projection/observation inputs only.',
     'Runtime control paths MUST read task_contracts, subject-bound capability_grants, work_leases, jobs/job_attempts, event_log, and task_result_artifacts',
+    'Kernel-internal completion writes MUST call typed task_result_put entrypoints directly',
     'Missing task_contracts on a control-plane task returns TASK_CONTRACT_REQUIRED',
     'task_result_put and worker_settle MUST pass exact grant_id + subject_kind + subject_id + operation + scope + task_id capability checks',
-    'Worker spawn MUST carry a task-bound spawn grant',
+    'Write-scoped completion verification MUST bind to the current job_attempt',
+    'compares git status plus git diff --name-only between pre/post HEAD',
+    'Worker spawn MUST carry an exact subject-bound worker/conversation spawn grant',
+    'BoardTask claim, release, heartbeat, expiry, and recovery MUST use work_leases as the lease authority',
     'ProjectionEngine updates board_task_views and Board-facing status from typed events/state',
     'Non-core full-os tools MUST keep their public MCP names but default to FEATURE_DISABLED',
     'Startup services for self-evolution, Lisp code sync, workflow recovery, memory embeddings, and multi-provider diagnostics MUST NOT start in kernel-core mode.',
@@ -219,9 +227,11 @@ function checkFiles(root, files) {
     'const WRITE_SCOPE_VIOLATION_CODE: &str = "WRITE_SCOPE_VIOLATION";',
     'struct CapabilityGrantInput',
     'pub(crate) struct CapabilityCheckRequest',
-    'struct TaskRuntimeContract',
+    'pub(crate) struct TaskRuntimeContract',
     'upsert_task_contract_from_metadata',
     'pub(crate) async fn grant_task_capabilities',
+    'pub(crate) async fn claim_lease_typed',
+    'pub(crate) async fn task_result_put_typed',
     'pub(crate) async fn audit_capability_bypass',
     '"job_event" | "record_job_event"',
     'INSERT INTO capability_grants',
@@ -229,11 +239,23 @@ function checkFiles(root, files) {
     'INSERT INTO task_contracts',
     'INSERT INTO board_task_views',
     'async fn require_capability',
-    'async fn task_runtime_contract',
+    'pub(crate) async fn task_runtime_contract',
+    'pub(crate) async fn update_task_contract_capability_grants',
     'FROM task_contracts',
     'no exact active subject-bound capability grant',
+    'ensure_optional_feature_enabled_for_shared_action',
+    'ensure_workflow_enabled_for_shared_action',
+    'ensure_router_experiments_enabled_for_shared_action',
+    'workflow runs, checkpoints, plan DAG, review gate, and swarm orchestration are full-os optional layers',
+    'model_route_outcomes and route learning are non-core projections',
     'async fn verify_completion_scope',
+    'fn attempt_actual_changed_paths',
+    'fn git_changed_paths_between',
+    'worktree_manifests phase=pre',
+    'verifier": "attempt baseline diff"',
+    'git diff --name-only',
     'operation: "write".to_string()',
+    'operation: "claim".to_string()',
     'operation: "settle".to_string()',
     'attempt_id',
     'operation: "spawn"',
@@ -246,6 +268,9 @@ function checkFiles(root, files) {
     '"job.failed"',
     'source": "job_state_machine"',
     'SELECT pg_advisory_xact_lock(hashtextextended($1::text || \':\' || $2::text, 0))',
+    'mission_shared_memory claim system/operator authority',
+    'mission_shared_memory release system/operator authority',
+    'mission_shared_memory heartbeat system/operator authority',
     'FOR UPDATE',
     'INSERT INTO work_leases',
     'FROM work_leases',
@@ -269,6 +294,18 @@ function checkFiles(root, files) {
     'TaskCompletionEvidenceWriter::new',
     '"artifact_hash": artifact_hash',
   ]);
+  rejectAll(diagnostics, files.controlPlaneKernel, sources.controlPlaneKernel, [
+    'task.runtime_metadata.clone()',
+  ]);
+
+  requireAll(diagnostics, files.evidenceWriter, sources.evidenceWriter, [
+    'into_task_result_put_args',
+    '.task_result_put_typed(&payload)',
+  ]);
+  rejectAll(diagnostics, files.evidenceWriter, sources.evidenceWriter, [
+    '.handle_action(&payload)',
+    'fn into_payload',
+  ]);
 
   requireAll(diagnostics, files.autopilot, sources.autopilot, [
     'missiond.task-result-candidate.v1',
@@ -277,13 +314,43 @@ function checkFiles(root, files) {
     'canonical artifact remains the only close authority',
     'canonical completed task_result_artifact hash required',
     'no canonical completed task_result_artifact exists yet',
-    '"action": "job_event"',
-    '"action": "worker_settle"',
+    '.job_event_typed(serde_json::json!',
+    '.task_result_get_typed(&args)',
+    '.settle_worker_typed(serde_json::json!',
+    '.task_runtime_contract(task.id.as_str())',
+    'task_contract_workstation_class(task, runtime_contract)',
+    'autopilot_grounding_gate_reason_from_contract(&task, &runtime_contract)',
+    'task_contract_runtime_envelope(runtime_contract)',
+    'durable_provider_completion_for_slot_task(state, task, &slot_id, &runtime_contract)',
+    'output_contract_close_blocker_for_contract(',
+    'BoardTask.runtime_metadata is UI cache only',
+    'task_contracts completion_materialization_policy is not autopilot_readonly_ok',
     'autopilot_readonly_ok',
     'observed_readonly_completion',
   ]);
   rejectAll(diagnostics, files.autopilot, sources.autopilot, [
+    '"action": "job_event"',
+    '"action": "task_result_get"',
     '"action": "task_result_put"',
+    '"action": "worker_settle"',
+    'implicit_jarvis_readonly_interaction',
+    'board_task_runtime_metadata_string(task, "completion_materialization_policy")',
+    'runtime_contract.contains("## Swarm metadata")',
+    'runtime_contract.contains("## Dispatch metadata")',
+    'let task_class = board_task_workstation_class(task);',
+    'extract_board_task_dispatch_metadata_field(task, "engine_hint")',
+    'extract_board_task_dispatch_metadata_field(task, "pool_hint")',
+  ]);
+
+  requireAll(diagnostics, files.flowEngine, sources.flowEngine, [
+    '.task_runtime_contract(task.id.as_str())',
+    'legacy BoardTask.description fallback is disabled',
+  ]);
+  rejectAll(diagnostics, files.flowEngine, sources.flowEngine, [
+    'extract_task_metadata_field(&task.description',
+    'fn extract_task_metadata_field',
+    '## Dispatch metadata',
+    '## Swarm metadata',
   ]);
 
   requireAll(diagnostics, files.taskDelegate, sources.taskDelegate, [
@@ -293,24 +360,70 @@ function checkFiles(root, files) {
     'task_contract_id',
     'Some(&task_id)',
     'Some(&capability_grant_ids)',
+    'preallocated_slot_id',
+    '"worker",',
+    'create_args["subject_kind"] = Value::String("worker".to_string())',
     'runtime_metadata: Some(runtime_metadata.clone())',
     'control_state": "task_contracts"',
     'upsert_task_contract_from_metadata',
+    '.task_runtime_contract(task.id.as_str())',
+    'task_contract_references_parent(&contract, parent_id)',
+    'task_contract_references_source(&contract, src)',
+    'contract.write_scope.clone()',
+    'duplicate_worker_source_reference_uses_task_contracts',
     'fn enrich_runtime_metadata_with_control_facts',
     'fn sandbox_profile_for_worker',
-    'board_task_source_reference_uses_runtime_metadata_without_description_fallback',
+    'job_event_typed(json!',
+    '.workflow_start_typed(&json!',
+    '.workflow_checkpoint_typed(&json!',
+    '.task_result_put_typed(&task_result_args)',
+    '.settle_worker_typed(settle_args)',
+    '.release_typed(json!',
   ]);
   rejectAll(diagnostics, files.taskDelegate, sources.taskDelegate, [
+    '"action": "workflow_start"',
+    '"action": "workflow_checkpoint"',
+    '"action": "task_result_put"',
+    '"action": "worker_settle"',
     'fn parse_write_scope_from_description',
     'fn description_references_source',
+  ]);
+
+  requireAll(diagnostics, files.v2Subscribers, sources.v2Subscribers, [
+    'runtime_metadata: Some(runtime_metadata)',
+    '"source": "eventbridge"',
+    '"control_state": "task_contracts"',
+    '"task_class": "deploy-ops"',
+    '"task_class": "router-ops"',
+    '"pool_hint": "claude-code-deploy-ops"',
+    '"pool_hint": "claude-code-default"',
+    '"sandbox_profile": "read-only"',
+    'deployment_event_response_task_declares_deploy_ops_lane',
+    'router_event_response_task_declares_runtime_contract',
   ]);
 
   requireAll(diagnostics, files.computeSlot, sources.computeSlot, [
     'CapabilityCheckRequest',
     'operation: "spawn".to_string()',
     'capability_grant_id',
-    'mission_compute_slot(create) requires task_id with active spawn capability',
+    'unwrap_or("worker")',
+    'unwrap_or(&slot_id)',
+    'mission_compute_slot(create) requires task_id with an active worker-bound spawn capability',
+    'task_runtime_contract(task_id)',
+    'sandbox override does not match canonical task_contracts sandbox_profile',
+    'error_codes::SANDBOX_POLICY_UNSUPPORTED',
     'audit_capability_bypass',
+    'error_codes::CAPABILITY_DENIED',
+  ]);
+
+  requireAll(diagnostics, files.ptyHandler, sources.ptyHandler, [
+    'operation: "spawn".to_string()',
+    'mission_pty_spawn requires task_id with an exact spawn capability',
+    'task_runtime_contract(task_id)',
+    'mission_pty_spawn slot sandbox does not match canonical task_contracts sandbox_profile',
+    'audit_capability_bypass',
+    'operator confirmed mission_pty_spawn without worker-bound spawn grant',
+    'error_codes::SANDBOX_POLICY_UNSUPPORTED',
     'error_codes::CAPABILITY_DENIED',
   ]);
 
@@ -324,12 +437,23 @@ function checkFiles(root, files) {
   ]);
 
   requireAll(diagnostics, files.boardStore, sources.boardStore, [
+    'fn board_task_contract_projection',
+    'control_state".to_string())',
+    'serde_json::json!("task_contracts")',
+    'INSERT INTO task_contracts',
+    'ON CONFLICT (task_id)',
+    'tx.commit().await?',
     'artifact_hash = $2',
     'runtime_metadata = $',
-    'SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))',
+    "SELECT pg_advisory_xact_lock(hashtextextended($1::text || ':' || $2::text, 0))",
     'FOR UPDATE',
     'INSERT INTO work_leases',
+    "scope_kind = 'board_task'",
+    "UPDATE work_leases\n            SET status = 'released'",
     'DbError::ClaimConflict',
+  ]);
+  rejectAll(diagnostics, files.boardStore, sources.boardStore, [
+    'ON CONFLICT DO NOTHING',
   ]);
 
   requireAll(diagnostics, files.boardTypes, sources.boardTypes, [
@@ -360,8 +484,15 @@ function checkFiles(root, files) {
     'backfill-board-runtime-metadata',
     '--apply',
     'runtime_metadata',
+    'task_contracts',
+    "control_state: 'task_contracts'",
+    'taskContractForBackfill',
+    'ON CONFLICT (task_id)',
     'capability_grants',
     'parseLegacyDescription',
+  ]);
+  rejectAll(diagnostics, files.backfillRuntimeMetadata, sources.backfillRuntimeMetadata, [
+    "control_state: 'runtime_metadata'",
   ]);
 
   for (const fileKey of ['dbError', 'mcpTools', 'mcpGateway', 'boardHandler']) {
@@ -383,6 +514,11 @@ function checkFiles(root, files) {
     'with_details(control.details.clone())',
     'with_suggestion(suggestion.clone())',
     'Board notes and PTY text are projections only',
+    'task_result_put_typed(&args)',
+    'settle_worker_typed(args.clone())',
+    'claim_typed(&args)',
+    'capability_check_typed(&args)',
+    'job_event_typed(args.clone())',
   ]);
 
   requireAll(diagnostics, files.boardRoute, sources.boardRoute, [

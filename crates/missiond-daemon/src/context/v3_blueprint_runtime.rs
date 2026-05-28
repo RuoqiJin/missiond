@@ -3617,7 +3617,7 @@ pub(crate) mod tests {
       :model nil
       :reasoning-effort xhigh
       :search true
-      :sandbox danger-full-access
+      :sandbox workspace-write
       :approval-policy never
       :task-classes [code implementation design review regression-analysis]
       :capabilities [code-read code-write scoped-commit shell-exec search]
@@ -3872,6 +3872,13 @@ pub(crate) mod tests {
                 .map(|worker| worker.id.as_str()),
             Some("claude-code-default")
         );
+        let codex_code = cfg
+            .workstation_pool()
+            .iter()
+            .find(|worker| worker.id == "codex-code-worker")
+            .expect("codex code worker");
+        assert_eq!(codex_code.sandbox.as_deref(), Some("workspace-write"));
+        assert!(codex_code.accepts_boardtask);
         assert_eq!(
             cfg.boardtask_pool_candidates("deploy-ops")
                 .first()
@@ -4147,7 +4154,7 @@ pub(crate) mod tests {
     (worker claude-code-default :engine claude-code :role coder :slot-id "slot-claude-code-default" :task-type claude_code_default :model-profile coding-default-opus-4-7 :model nil :task-classes [code] :capabilities [code-write] :max-concurrency 1 :timeout-secs 1800 :default-use code-implementation :accepts-boardtask true :write-allowed true)
     (worker gemini-ultra-pro :engine gemini :role researcher :slot-id "slot-gemini-ultra" :task-type gemini_ultra :model-profile gemini-ultra-pro-preview :model nil :approval-policy plan :tool-policy-path ".missiond/v3/policies/gemini-readonly-policy.toml" :task-classes [research] :capabilities [read-only] :max-concurrency 1 :timeout-secs 900 :default-use research-review :accepts-boardtask true :write-allowed false)
     (worker agy-research :engine agy :role researcher :slot-id "slot-agy-research" :task-type agy_research :model-profile nil :model nil :task-classes [research] :capabilities [read-only] :max-concurrency 1 :timeout-secs 900 :default-use agy-read-only-research :accepts-boardtask true :write-allowed false)
-    (worker codex-code-worker :engine codex :role coder :slot-id "slot-codex-code-worker" :task-type codex_code_worker :model-profile codex-master-gpt-5-5-xhigh :model nil :reasoning-effort xhigh :search true :sandbox danger-full-access :approval-policy never :task-classes [code] :capabilities [code-read code-write] :max-concurrency 1 :timeout-secs 1800 :default-use codex-code-shard :accepts-boardtask true :write-allowed true)
+    (worker codex-code-worker :engine codex :role coder :slot-id "slot-codex-code-worker" :task-type codex_code_worker :model-profile codex-master-gpt-5-5-xhigh :model nil :reasoning-effort xhigh :search true :sandbox workspace-write :approval-policy never :task-classes [code] :capabilities [code-read code-write] :max-concurrency 1 :timeout-secs 1800 :default-use codex-code-shard :accepts-boardtask true :write-allowed true)
     (worker codex-master-control :engine codex :role orchestrator :slot-id "slot-codex-master-control" :task-type codex_master_control :model-profile codex-master-gpt-5-5-xhigh :model nil :reasoning-effort xhigh :search true :sandbox danger-full-access :approval-policy never :task-classes [master-control] :capabilities [board-write kb-write execution-log dispatch code-read code-write shell-exec search mcp full-access] :max-concurrency 1 :timeout-secs 7200 :default-use resident-master-control :accepts-boardtask false :write-allowed true)))"#,
         )
         .expect_err("missing policy");
@@ -4203,7 +4210,7 @@ pub(crate) mod tests {
     (worker claude-code-default :engine claude-code :role coder :slot-id "slot-claude-code-default" :task-type claude_code_default :model-profile coding-default-opus-4-7 :model nil :task-classes [code] :capabilities [code-write] :max-concurrency 1 :timeout-secs 1800 :default-use code-implementation :accepts-boardtask true :write-allowed true)
     (worker gemini-ultra-pro :engine gemini :role researcher :slot-id "slot-gemini-ultra" :task-type gemini_ultra :model-profile gemini-ultra-pro-preview :model nil :approval-policy plan :tool-policy-path ".missiond/v3/policies/gemini-readonly-policy.toml" :task-classes [research] :capabilities [read-only] :max-concurrency 1 :timeout-secs 900 :default-use research-review :accepts-boardtask true :write-allowed false)
     (worker agy-research :engine agy :role researcher :slot-id "slot-agy-research" :task-type agy_research :model-profile nil :model nil :task-classes [research] :capabilities [read-only] :max-concurrency 1 :timeout-secs 900 :default-use agy-read-only-research :accepts-boardtask true :write-allowed false)
-    (worker codex-code-worker :engine codex :role coder :slot-id "slot-codex-code-worker" :task-type codex_code_worker :model-profile codex-master-gpt-5-5-xhigh :model nil :reasoning-effort xhigh :search true :sandbox danger-full-access :approval-policy never :task-classes [code] :capabilities [code-read code-write] :max-concurrency 1 :timeout-secs 1800 :default-use codex-code-shard :accepts-boardtask true :write-allowed true)
+    (worker codex-code-worker :engine codex :role coder :slot-id "slot-codex-code-worker" :task-type codex_code_worker :model-profile codex-master-gpt-5-5-xhigh :model nil :reasoning-effort xhigh :search true :sandbox workspace-write :approval-policy never :task-classes [code] :capabilities [code-read code-write] :max-concurrency 1 :timeout-secs 1800 :default-use codex-code-shard :accepts-boardtask true :write-allowed true)
     (worker codex-master-control :engine codex :role orchestrator :slot-id "slot-codex-master-control" :task-type codex_master_control :model-profile codex-master-gpt-5-5-xhigh :model nil :reasoning-effort xhigh :search true :sandbox danger-full-access :approval-policy never :task-classes [master-control] :capabilities [board-write kb-write execution-log dispatch code-read code-write shell-exec search mcp full-access] :max-concurrency 1 :timeout-secs 7200 :default-use resident-master-control :accepts-boardtask false :write-allowed true)))
 "#;
         let err = parse_workstation_config(source).expect_err("missing ttl policy");

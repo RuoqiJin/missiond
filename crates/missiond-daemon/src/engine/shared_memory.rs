@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -81,6 +82,58 @@ fn control_error_details(
         .into()
 }
 
+fn ensure_optional_feature_enabled_for_shared_action(
+    action: &str,
+    feature: &str,
+    env_key: &str,
+    reason: &str,
+) -> Result<()> {
+    if crate::feature_gates::optional_feature_enabled(env_key) {
+        return Ok(());
+    }
+
+    Err(StructuredControlError::new(
+        FEATURE_DISABLED_CODE,
+        format!(
+            "mission_shared_memory action `{action}` belongs to optional MissionD {feature} layer and is disabled in kernel-core mode"
+        ),
+    )
+    .with_details(json!({
+        "schema": "missiond.feature-disabled.v1",
+        "tool": "mission_shared_memory",
+        "action": action,
+        "feature": feature,
+        "layer": "full-os",
+        "enable_env": env_key,
+        "enable_all_env": crate::feature_gates::FULL_OS_ENV,
+        "reason": reason
+    }))
+    .with_suggestion(format!(
+        "enable {}=true or {}=true for this full-os action; kernel-core keeps only delegate/lease/capability/attempt/artifact/settle/projection paths",
+        env_key,
+        crate::feature_gates::FULL_OS_ENV
+    ))
+    .into())
+}
+
+fn ensure_router_experiments_enabled_for_shared_action(action: &str) -> Result<()> {
+    ensure_optional_feature_enabled_for_shared_action(
+        action,
+        "router-experiments",
+        crate::feature_gates::ROUTER_EXPERIMENTS_ENV,
+        "model_route_outcomes and route learning are non-core projections",
+    )
+}
+
+fn ensure_workflow_enabled_for_shared_action(action: &str) -> Result<()> {
+    ensure_optional_feature_enabled_for_shared_action(
+        action,
+        "workflow",
+        crate::feature_gates::WORKFLOW_ENV,
+        "workflow runs, checkpoints, plan DAG, review gate, and swarm orchestration are full-os optional layers",
+    )
+}
+
 #[derive(Clone)]
 pub(crate) struct SharedMemoryService {
     pool: PgPool,
@@ -94,10 +147,15 @@ pub(crate) struct ClaimRequest {
     pub project_id: Option<String>,
     pub task_id: Option<String>,
     pub owner_id: String,
+    pub grant_id: Option<String>,
+    pub subject_kind: String,
+    pub subject_id: String,
     pub scope_kind: String,
     pub scope_key: String,
     pub lease_secs: i64,
     pub metadata: Value,
+    pub allow_system_bypass: bool,
+    pub bypass_reason: Option<String>,
 }
 
 struct CapabilityGrantInput<'a> {
@@ -128,16 +186,32 @@ pub(crate) struct CapabilityCheckRequest {
 }
 
 #[derive(Debug, Clone, Default)]
-struct TaskRuntimeContract {
-    project_id: Option<String>,
-    project_root: Option<String>,
-    task_contract_id: Option<String>,
-    read_scope: Vec<String>,
-    write_scope: Vec<String>,
-    must_not_touch: Vec<String>,
-    capability_grant_ids: Vec<String>,
-    sandbox_profile: Option<String>,
-    completion_materialization_policy: Option<String>,
+pub(crate) struct TaskRuntimeContract {
+    pub(crate) project_id: Option<String>,
+    pub(crate) project_root: Option<String>,
+    pub(crate) task_contract_id: Option<String>,
+    pub(crate) parent_board_task_id: Option<String>,
+    pub(crate) source_board_task_id: Option<String>,
+    pub(crate) accepted_shard_id: Option<String>,
+    pub(crate) context_pack_path: Option<String>,
+    pub(crate) task_class: Option<String>,
+    pub(crate) engine_hint: Option<String>,
+    pub(crate) pool_hint: Option<String>,
+    pub(crate) output_contract: Option<String>,
+    pub(crate) conversation_id: Option<String>,
+    pub(crate) grounding_context_id: Option<String>,
+    pub(crate) read_scope: Vec<String>,
+    pub(crate) write_scope: Vec<String>,
+    pub(crate) must_not_touch: Vec<String>,
+    pub(crate) capability_grant_ids: Vec<String>,
+    pub(crate) sandbox_profile: Option<String>,
+    pub(crate) completion_materialization_policy: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct WorktreeManifestSnapshot {
+    head: Option<String>,
+    changed_paths: Vec<String>,
 }
 
 impl SharedMemoryService {
@@ -165,10 +239,20 @@ impl SharedMemoryService {
             "task_result_put" | "put_task_result" => self.task_result_put(args).await,
             "task_result_get" | "get_task_result" => self.task_result_get(args).await,
             "task_evidence_summary" | "evidence_summary" => self.task_evidence_summary(args).await,
-            "workflow_start" | "start_workflow" => self.workflow_start(args).await,
-            "workflow_checkpoint" | "checkpoint_workflow" => self.workflow_checkpoint(args).await,
-            "workflow_status" | "get_workflow_status" => self.workflow_status(args).await,
+            "workflow_start" | "start_workflow" => {
+                ensure_workflow_enabled_for_shared_action(action)?;
+                self.workflow_start(args).await
+            }
+            "workflow_checkpoint" | "checkpoint_workflow" => {
+                ensure_workflow_enabled_for_shared_action(action)?;
+                self.workflow_checkpoint(args).await
+            }
+            "workflow_status" | "get_workflow_status" => {
+                ensure_workflow_enabled_for_shared_action(action)?;
+                self.workflow_status(args).await
+            }
             "workflow_summary" | "workflow_runs_summary" => {
+                ensure_workflow_enabled_for_shared_action(action)?;
                 Ok(self.workflow_runs_summary(bounded_limit(args)).await)
             }
             "runtime_artifact_index" | "index_runtime_artifact" => {
@@ -190,6 +274,7 @@ impl SharedMemoryService {
             "capability_check" | "check_capability" => self.capability_check_from_args(args).await,
             "job_event" | "record_job_event" => self.job_event_from_args(args).await,
             "model_route_outcome_put" | "record_model_route_outcome" => {
+                ensure_router_experiments_enabled_for_shared_action(action)?;
                 self.model_route_outcome_put(args).await
             }
             "claim" => self.claim_from_args(args).await,
@@ -218,11 +303,67 @@ impl SharedMemoryService {
         .await
     }
 
+    pub(crate) async fn job_event_typed(&self, args: Value) -> Result<Value> {
+        self.job_event_from_args(&args).await
+    }
+
     pub(crate) async fn settle_worker_typed(&self, args: Value) -> Result<Value> {
         self.worker_settle(&args).await
     }
 
+    pub(crate) async fn task_result_put_typed(&self, args: &Value) -> Result<Value> {
+        self.task_result_put(args).await
+    }
+
+    pub(crate) async fn task_result_get_typed(&self, args: &Value) -> Result<Value> {
+        self.task_result_get(args).await
+    }
+
+    pub(crate) async fn workflow_start_typed(&self, args: &Value) -> Result<Value> {
+        ensure_workflow_enabled_for_shared_action("workflow_start")?;
+        self.workflow_start(args).await
+    }
+
+    pub(crate) async fn workflow_checkpoint_typed(&self, args: &Value) -> Result<Value> {
+        ensure_workflow_enabled_for_shared_action("workflow_checkpoint")?;
+        self.workflow_checkpoint(args).await
+    }
+
+    pub(crate) async fn model_route_outcome_put_typed(&self, args: &Value) -> Result<Value> {
+        ensure_router_experiments_enabled_for_shared_action("model_route_outcome_put")?;
+        self.model_route_outcome_put(args).await
+    }
+
+    pub(crate) async fn release_typed(&self, args: Value) -> Result<Value> {
+        self.release(&args).await
+    }
+
+    pub(crate) async fn heartbeat_typed(&self, args: Value) -> Result<Value> {
+        self.heartbeat(&args).await
+    }
+
+    pub(crate) async fn capability_check_typed(&self, args: &Value) -> Result<Value> {
+        self.capability_check_from_args(args).await
+    }
+
+    pub(crate) async fn claim_typed(&self, args: &Value) -> Result<Value> {
+        self.claim_from_args(args).await
+    }
+
     pub(crate) async fn claim_lease_typed(&self, req: ClaimRequest) -> Result<Value> {
+        self.require_capability(CapabilityCheckRequest {
+            grant_id: req.grant_id.clone(),
+            subject_kind: req.subject_kind.clone(),
+            subject_id: req.subject_id.clone(),
+            operation: "claim".to_string(),
+            scope_kind: req.scope_kind.clone(),
+            scope_key: req.scope_key.clone(),
+            task_id: req.task_id.clone(),
+            allow_system_bypass: req.allow_system_bypass,
+            bypass_reason: req.bypass_reason.clone(),
+            details: req.metadata.clone(),
+        })
+        .await?;
         self.claim(req).await
     }
 
@@ -434,6 +575,32 @@ impl SharedMemoryService {
         .execute(&self.pool)
         .await?;
         Ok(task_contract_id)
+    }
+
+    pub(crate) async fn update_task_contract_capability_grants(
+        &self,
+        task_id: &str,
+        capability_grant_ids: &[String],
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE task_contracts
+            SET capability_grant_ids = $2,
+                updated_at = now()
+            WHERE task_id = $1
+            "#,
+        )
+        .bind(task_id)
+        .bind(Value::Array(
+            capability_grant_ids
+                .iter()
+                .cloned()
+                .map(Value::String)
+                .collect(),
+        ))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     pub(crate) async fn task_completion_materialization_policy(
@@ -666,6 +833,10 @@ impl SharedMemoryService {
                     project_root,
                     "pre",
                     &changed_paths,
+                    json!({
+                        "source": "attempt-baseline",
+                        "phase_role": "pre_attempt_baseline"
+                    }),
                 )
                 .await?;
             }
@@ -804,7 +975,10 @@ impl SharedMemoryService {
         &self,
         task_class: &str,
     ) -> Result<Option<Value>> {
-        if !runtime_feature_enabled("MISSIOND_ROUTE_LEARNING_ENABLE") {
+        if !crate::feature_gates::optional_feature_enabled(
+            crate::feature_gates::ROUTER_EXPERIMENTS_ENV,
+        ) || !runtime_feature_enabled("MISSIOND_ROUTE_LEARNING_ENABLE")
+        {
             return Ok(None);
         }
         let row = sqlx::query(
@@ -1071,7 +1245,7 @@ impl SharedMemoryService {
         ))
     }
 
-    async fn task_runtime_contract(&self, task_id: &str) -> Result<TaskRuntimeContract> {
+    pub(crate) async fn task_runtime_contract(&self, task_id: &str) -> Result<TaskRuntimeContract> {
         let row = sqlx::query(
             r#"
             SELECT project_id, task_contract_id, dispatch_metadata, read_scope,
@@ -1105,6 +1279,28 @@ impl SharedMemoryService {
             project_id,
             project_root: metadata_string_value_any(dispatch.get("project_root")),
             task_contract_id: row.try_get::<Option<String>, _>("task_contract_id")?,
+            parent_board_task_id: metadata_string_value_any(dispatch.get("parent_board_task_id"))
+                .or_else(|| metadata_string_value_any(dispatch.get("parentBoardTaskId"))),
+            source_board_task_id: metadata_string_value_any(dispatch.get("source_board_task_id"))
+                .or_else(|| metadata_string_value_any(dispatch.get("sourceBoardTaskId")))
+                .or_else(|| metadata_string_value_any(dispatch.get("source_id")))
+                .or_else(|| metadata_string_value_any(dispatch.get("sourceId"))),
+            accepted_shard_id: metadata_string_value_any(dispatch.get("accepted_shard_id"))
+                .or_else(|| metadata_string_value_any(dispatch.get("acceptedShardId"))),
+            context_pack_path: metadata_string_value_any(dispatch.get("context_pack_path"))
+                .or_else(|| metadata_string_value_any(dispatch.get("contextPackPath"))),
+            task_class: metadata_string_value_any(dispatch.get("task_class"))
+                .or_else(|| metadata_string_value_any(dispatch.get("taskClass"))),
+            engine_hint: metadata_string_value_any(dispatch.get("engine_hint"))
+                .or_else(|| metadata_string_value_any(dispatch.get("engineHint"))),
+            pool_hint: metadata_string_value_any(dispatch.get("pool_hint"))
+                .or_else(|| metadata_string_value_any(dispatch.get("poolHint"))),
+            output_contract: metadata_string_value_any(dispatch.get("output_contract"))
+                .or_else(|| metadata_string_value_any(dispatch.get("outputContract"))),
+            conversation_id: metadata_string_value_any(dispatch.get("conversation_id"))
+                .or_else(|| metadata_string_value_any(dispatch.get("conversationId"))),
+            grounding_context_id: metadata_string_value_any(dispatch.get("grounding_context_id"))
+                .or_else(|| metadata_string_value_any(dispatch.get("groundingContextId"))),
             read_scope: metadata_string_list_any(Some(&row.try_get::<Value, _>("read_scope")?)),
             write_scope: metadata_string_list_any(Some(&row.try_get::<Value, _>("write_scope")?)),
             must_not_touch: metadata_string_list_any(Some(
@@ -1250,7 +1446,34 @@ impl SharedMemoryService {
                 }),
             ));
         };
-        let actual_changed_paths = git_status_changed_paths(project_root).map_err(|err| {
+        let (job_id, attempt_id) = self.current_job_attempt_for_task(task_id).await?;
+        let Some(attempt_id) = attempt_id else {
+            return Err(control_error_details(
+                COMPLETION_ARTIFACT_INVALID_CODE,
+                format!("task {task_id} completed write-scoped work without a current attempt"),
+                json!({
+                    "task_id": task_id,
+                    "required": "jobs.current_attempt_id",
+                    "verifier": "attempt baseline diff"
+                }),
+            ));
+        };
+        let Some(pre_manifest) = self
+            .latest_worktree_manifest(task_id, attempt_id.as_str(), "pre")
+            .await?
+        else {
+            return Err(control_error_details(
+                COMPLETION_ARTIFACT_INVALID_CODE,
+                format!("task {task_id} completed write-scoped work without a pre worktree manifest for attempt {attempt_id}"),
+                json!({
+                    "task_id": task_id,
+                    "attempt_id": attempt_id,
+                    "required": "worktree_manifests phase=pre",
+                    "verifier": "attempt baseline diff"
+                }),
+            ));
+        };
+        let status_changed_paths = git_status_changed_paths(project_root).map_err(|err| {
             control_error_details(
                 COMPLETION_ARTIFACT_INVALID_CODE,
                 format!("task {task_id} post-run verifier failed: {err}"),
@@ -1261,20 +1484,66 @@ impl SharedMemoryService {
                 }),
             )
         })?;
-        let (job_id, attempt_id) = self.current_job_attempt_for_task(task_id).await?;
+        let post_head = git_head(project_root).ok();
+        let head_changed_paths = match (pre_manifest.head.as_deref(), post_head.as_deref()) {
+            (Some(pre_head), Some(post_head)) if pre_head != post_head => {
+                git_changed_paths_between(project_root, pre_head, post_head).map_err(|err| {
+                    control_error_details(
+                        COMPLETION_ARTIFACT_INVALID_CODE,
+                        format!(
+                            "task {task_id} post-run verifier failed to diff attempt heads: {err}"
+                        ),
+                        json!({
+                            "task_id": task_id,
+                            "project_root": project_root,
+                            "pre_head": pre_head,
+                            "post_head": post_head,
+                            "verifier": "git diff --name-only"
+                        }),
+                    )
+                })?
+            }
+            _ => Vec::new(),
+        };
+        let actual_changed_paths = attempt_actual_changed_paths(
+            &pre_manifest.changed_paths,
+            &status_changed_paths,
+            &head_changed_paths,
+        );
         let _ = self
             .record_worktree_manifest(
                 task_id,
                 contract.project_id.as_deref(),
                 job_id.as_deref(),
-                attempt_id.as_deref(),
+                Some(attempt_id.as_str()),
                 project_root,
                 "post",
                 &actual_changed_paths,
+                json!({
+                    "source": "attempt-diff-verifier",
+                    "phase_role": "post_attempt_diff",
+                    "attempt_id": attempt_id,
+                    "pre_head": pre_manifest.head,
+                    "post_head": post_head,
+                    "pre_changed_paths": pre_manifest.changed_paths,
+                    "status_changed_paths": status_changed_paths,
+                    "head_changed_paths": head_changed_paths,
+                    "algorithm": "actual = committed paths between pre/post HEAD + current dirty paths not present in pre manifest"
+                }),
             )
             .await;
         if actual_changed_paths.is_empty() {
-            return Ok(());
+            return Err(control_error_details(
+                COMPLETION_ARTIFACT_INVALID_CODE,
+                format!("task {task_id} reported changed paths but attempt diff found no actual post-run change"),
+                json!({
+                    "task_id": task_id,
+                    "project_root": project_root,
+                    "reported_changed_paths": reported_changed_paths,
+                    "verifier": "attempt baseline diff",
+                    "required": "post manifest dirty diff or committed HEAD diff"
+                }),
+            ));
         }
         let mut violations = Vec::new();
         for path in &actual_changed_paths {
@@ -1355,16 +1624,18 @@ impl SharedMemoryService {
         project_root: &str,
         phase: &str,
         changed_paths: &[String],
+        extra: Value,
     ) -> Result<()> {
         let head = git_head(project_root).ok();
         let dirty = !changed_paths.is_empty();
-        let manifest = json!({
+        let mut manifest = json!({
             "schema": "missiond.worktree-manifest.v1",
             "source": "post-run-verifier",
             "changed_paths": changed_paths,
             "head": head,
             "dirty": dirty,
         });
+        merge_json_object(&mut manifest, extra);
         sqlx::query(
             r#"
             INSERT INTO worktree_manifests
@@ -1388,6 +1659,42 @@ impl SharedMemoryService {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    async fn latest_worktree_manifest(
+        &self,
+        task_id: &str,
+        attempt_id: &str,
+        phase: &str,
+    ) -> Result<Option<WorktreeManifestSnapshot>> {
+        let row = sqlx::query(
+            r#"
+            SELECT manifest, changed_paths
+            FROM worktree_manifests
+            WHERE task_id = $1
+              AND attempt_id = $2
+              AND phase = $3
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(task_id)
+        .bind(attempt_id)
+        .bind(phase)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            let manifest: Value = row.try_get("manifest")?;
+            let changed_paths: Value = row.try_get("changed_paths")?;
+            Ok(WorktreeManifestSnapshot {
+                head: manifest
+                    .get("head")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                changed_paths: metadata_string_list_any(Some(&changed_paths)),
+            })
+        })
+        .transpose()
     }
 
     async fn current_job_attempt_for_task(
@@ -1801,6 +2108,9 @@ impl SharedMemoryService {
                 project_id: project_id.clone(),
                 task_id: task_id.clone(),
                 owner_id: owner_id.clone(),
+                grant_id: None,
+                subject_kind: "daemon".to_string(),
+                subject_id: "mission_task_delegate".to_string(),
                 scope_kind: "write_scope".to_string(),
                 scope_key: scope.to_string(),
                 lease_secs: DEFAULT_LEASE_SECS,
@@ -1808,8 +2118,13 @@ impl SharedMemoryService {
                     "accepted_shard_id": accepted_shard_id,
                     "source": "mission_task_delegate"
                 }),
+                allow_system_bypass: true,
+                bypass_reason: Some(
+                    "mission_task_delegate pre-claims write_scope before worker subject binding"
+                        .to_string(),
+                ),
             };
-            claims.push(self.claim(req).await?);
+            claims.push(self.claim_lease_typed(req).await?);
         }
         Ok(claims)
     }
@@ -3106,6 +3421,21 @@ impl SharedMemoryService {
                 .or_else(|| string_arg(args, "ownerId"))
                 .unwrap_or("unknown")
                 .to_string(),
+            grant_id: string_arg(args, "grant_id")
+                .or_else(|| string_arg(args, "grantId"))
+                .or_else(|| string_arg(args, "capability_grant_id"))
+                .or_else(|| string_arg(args, "capabilityGrantId"))
+                .map(str::to_string),
+            subject_kind: string_arg(args, "subject_kind")
+                .or_else(|| string_arg(args, "subjectKind"))
+                .unwrap_or("worker")
+                .to_string(),
+            subject_id: string_arg(args, "subject_id")
+                .or_else(|| string_arg(args, "subjectId"))
+                .or_else(|| string_arg(args, "owner_id"))
+                .or_else(|| string_arg(args, "ownerId"))
+                .unwrap_or("unknown")
+                .to_string(),
             scope_kind: string_arg(args, "scope_kind")
                 .or_else(|| string_arg(args, "scopeKind"))
                 .unwrap_or("write_scope")
@@ -3120,35 +3450,12 @@ impl SharedMemoryService {
                 .and_then(Value::as_i64)
                 .unwrap_or(DEFAULT_LEASE_SECS),
             metadata: args.get("metadata").cloned().unwrap_or_else(|| json!({})),
+            allow_system_bypass: system_or_operator_bypass_allowed(args),
+            bypass_reason: Some(
+                "mission_shared_memory claim system/operator authority".to_string(),
+            ),
         };
-        if let Some(task_id) = req.task_id.as_deref() {
-            self.require_capability(CapabilityCheckRequest {
-                grant_id: string_arg(args, "grant_id")
-                    .or_else(|| string_arg(args, "grantId"))
-                    .or_else(|| string_arg(args, "capability_grant_id"))
-                    .or_else(|| string_arg(args, "capabilityGrantId"))
-                    .map(str::to_string),
-                subject_kind: string_arg(args, "subject_kind")
-                    .or_else(|| string_arg(args, "subjectKind"))
-                    .unwrap_or("worker")
-                    .to_string(),
-                subject_id: string_arg(args, "subject_id")
-                    .or_else(|| string_arg(args, "subjectId"))
-                    .unwrap_or(req.owner_id.as_str())
-                    .to_string(),
-                operation: "claim".to_string(),
-                scope_kind: req.scope_kind.clone(),
-                scope_key: req.scope_key.clone(),
-                task_id: Some(task_id.to_string()),
-                allow_system_bypass: system_or_operator_bypass_allowed(args),
-                bypass_reason: Some(
-                    "mission_shared_memory claim system/operator authority".to_string(),
-                ),
-                details: req.metadata.clone(),
-            })
-            .await?;
-        }
-        self.claim(req).await
+        self.claim_lease_typed(req).await
     }
 
     async fn claim(&self, req: ClaimRequest) -> Result<Value> {
@@ -3226,7 +3533,7 @@ impl SharedMemoryService {
             INSERT INTO work_leases
               (id, project_id, task_id, holder_id, holder_kind, scope_kind, scope_key, status,
                lease_expires_at, heartbeat_at, metadata)
-            VALUES ($1,$2,$3,$4,'worker',$5,$6,'active',$7,now(),$8)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,'active',$8,now(),$9)
             RETURNING id, project_id, task_id, holder_id AS owner_id, scope_kind, scope_key, status,
                       acquired_at, lease_expires_at, released_at, heartbeat_at, metadata
             "#,
@@ -3235,6 +3542,7 @@ impl SharedMemoryService {
         .bind(req.project_id.as_deref())
         .bind(req.task_id.as_deref())
         .bind(req.owner_id.as_str())
+        .bind(req.subject_kind.as_str())
         .bind(req.scope_kind.as_str())
         .bind(req.scope_key.as_str())
         .bind(lease_expires_at)
@@ -3298,39 +3606,38 @@ impl SharedMemoryService {
         .fetch_optional(&self.pool)
         .await?
         {
-            if let Some(task_id) = lease.try_get::<Option<String>, _>("task_id")? {
-                let holder_id: String = lease.try_get("holder_id")?;
-                let scope_kind: String = lease.try_get("scope_kind")?;
-                let scope_key: String = lease.try_get("scope_key")?;
-                self.require_capability(CapabilityCheckRequest {
-                    grant_id: string_arg(args, "grant_id")
-                        .or_else(|| string_arg(args, "grantId"))
-                        .or_else(|| string_arg(args, "capability_grant_id"))
-                        .or_else(|| string_arg(args, "capabilityGrantId"))
-                        .map(str::to_string),
-                    subject_kind: string_arg(args, "subject_kind")
-                        .or_else(|| string_arg(args, "subjectKind"))
-                        .unwrap_or("worker")
-                        .to_string(),
-                    subject_id: string_arg(args, "subject_id")
-                        .or_else(|| string_arg(args, "subjectId"))
-                        .or(owner_id)
-                        .unwrap_or(holder_id.as_str())
-                        .to_string(),
-                    operation: "claim".to_string(),
-                    scope_kind,
-                    scope_key,
-                    task_id: Some(task_id),
-                    allow_system_bypass: system_or_operator_bypass_allowed(args),
-                    bypass_reason: Some(
-                        "mission_shared_memory release system/operator authority".to_string(),
-                    ),
-                    details: lease
-                        .try_get::<Value, _>("metadata")
-                        .unwrap_or_else(|_| json!({})),
-                })
-                .await?;
-            }
+            let task_id = lease.try_get::<Option<String>, _>("task_id")?;
+            let holder_id: String = lease.try_get("holder_id")?;
+            let scope_kind: String = lease.try_get("scope_kind")?;
+            let scope_key: String = lease.try_get("scope_key")?;
+            self.require_capability(CapabilityCheckRequest {
+                grant_id: string_arg(args, "grant_id")
+                    .or_else(|| string_arg(args, "grantId"))
+                    .or_else(|| string_arg(args, "capability_grant_id"))
+                    .or_else(|| string_arg(args, "capabilityGrantId"))
+                    .map(str::to_string),
+                subject_kind: string_arg(args, "subject_kind")
+                    .or_else(|| string_arg(args, "subjectKind"))
+                    .unwrap_or("worker")
+                    .to_string(),
+                subject_id: string_arg(args, "subject_id")
+                    .or_else(|| string_arg(args, "subjectId"))
+                    .or(owner_id)
+                    .unwrap_or(holder_id.as_str())
+                    .to_string(),
+                operation: "claim".to_string(),
+                scope_kind,
+                scope_key,
+                task_id,
+                allow_system_bypass: system_or_operator_bypass_allowed(args),
+                bypass_reason: Some(
+                    "mission_shared_memory release system/operator authority".to_string(),
+                ),
+                details: lease
+                    .try_get::<Value, _>("metadata")
+                    .unwrap_or_else(|_| json!({})),
+            })
+            .await?;
         }
         let row = sqlx::query(
             r#"
@@ -3387,39 +3694,38 @@ impl SharedMemoryService {
         .fetch_optional(&self.pool)
         .await?
         {
-            if let Some(task_id) = lease.try_get::<Option<String>, _>("task_id")? {
-                let holder_id: String = lease.try_get("holder_id")?;
-                let scope_kind: String = lease.try_get("scope_kind")?;
-                let scope_key: String = lease.try_get("scope_key")?;
-                self.require_capability(CapabilityCheckRequest {
-                    grant_id: string_arg(args, "grant_id")
-                        .or_else(|| string_arg(args, "grantId"))
-                        .or_else(|| string_arg(args, "capability_grant_id"))
-                        .or_else(|| string_arg(args, "capabilityGrantId"))
-                        .map(str::to_string),
-                    subject_kind: string_arg(args, "subject_kind")
-                        .or_else(|| string_arg(args, "subjectKind"))
-                        .unwrap_or("worker")
-                        .to_string(),
-                    subject_id: string_arg(args, "subject_id")
-                        .or_else(|| string_arg(args, "subjectId"))
-                        .or(owner_id)
-                        .unwrap_or(holder_id.as_str())
-                        .to_string(),
-                    operation: "claim".to_string(),
-                    scope_kind,
-                    scope_key,
-                    task_id: Some(task_id),
-                    allow_system_bypass: system_or_operator_bypass_allowed(args),
-                    bypass_reason: Some(
-                        "mission_shared_memory heartbeat system/operator authority".to_string(),
-                    ),
-                    details: lease
-                        .try_get::<Value, _>("metadata")
-                        .unwrap_or_else(|_| json!({})),
-                })
-                .await?;
-            }
+            let task_id = lease.try_get::<Option<String>, _>("task_id")?;
+            let holder_id: String = lease.try_get("holder_id")?;
+            let scope_kind: String = lease.try_get("scope_kind")?;
+            let scope_key: String = lease.try_get("scope_key")?;
+            self.require_capability(CapabilityCheckRequest {
+                grant_id: string_arg(args, "grant_id")
+                    .or_else(|| string_arg(args, "grantId"))
+                    .or_else(|| string_arg(args, "capability_grant_id"))
+                    .or_else(|| string_arg(args, "capabilityGrantId"))
+                    .map(str::to_string),
+                subject_kind: string_arg(args, "subject_kind")
+                    .or_else(|| string_arg(args, "subjectKind"))
+                    .unwrap_or("worker")
+                    .to_string(),
+                subject_id: string_arg(args, "subject_id")
+                    .or_else(|| string_arg(args, "subjectId"))
+                    .or(owner_id)
+                    .unwrap_or(holder_id.as_str())
+                    .to_string(),
+                operation: "claim".to_string(),
+                scope_kind,
+                scope_key,
+                task_id,
+                allow_system_bypass: system_or_operator_bypass_allowed(args),
+                bypass_reason: Some(
+                    "mission_shared_memory heartbeat system/operator authority".to_string(),
+                ),
+                details: lease
+                    .try_get::<Value, _>("metadata")
+                    .unwrap_or_else(|_| json!({})),
+            })
+            .await?;
         }
         let row = sqlx::query(
             r#"
@@ -4075,6 +4381,15 @@ fn metadata_string_value_any(value: Option<&Value>) -> Option<String> {
     }
 }
 
+fn merge_json_object(target: &mut Value, extra: Value) {
+    let (Some(target), Some(extra)) = (target.as_object_mut(), extra.as_object()) else {
+        return;
+    };
+    for (key, value) in extra {
+        target.insert(key.clone(), value.clone());
+    }
+}
+
 fn bool_arg_any(args: &Value, keys: &[&str]) -> bool {
     keys.iter().any(|key| {
         let Some(value) = args.get(*key) else {
@@ -4206,6 +4521,30 @@ fn git_status_changed_paths(project_root: &str) -> Result<Vec<String>> {
     Ok(paths)
 }
 
+fn git_changed_paths_between(
+    project_root: &str,
+    from_head: &str,
+    to_head: &str,
+) -> Result<Vec<String>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(project_root)
+        .args(["diff", "--name-only", &format!("{from_head}..{to_head}")])
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!("git diff --name-only failed: {}", stderr.trim()));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut paths = Vec::new();
+    for line in stdout.lines() {
+        push_changed_path(&mut paths, line);
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
 fn git_head(project_root: &str) -> Result<String> {
     let output = Command::new("git")
         .arg("-C")
@@ -4224,6 +4563,40 @@ fn push_changed_path(paths: &mut Vec<String>, path: &str) {
     if !normalized.is_empty() {
         paths.push(normalized.to_string());
     }
+}
+
+fn normalize_changed_path(path: &str) -> String {
+    path.trim()
+        .trim_matches('"')
+        .trim_start_matches("./")
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn attempt_actual_changed_paths(
+    pre_changed_paths: &[String],
+    status_changed_paths: &[String],
+    head_changed_paths: &[String],
+) -> Vec<String> {
+    let pre_dirty: BTreeSet<String> = pre_changed_paths
+        .iter()
+        .map(|path| normalize_changed_path(path))
+        .filter(|path| !path.is_empty())
+        .collect();
+    let mut actual = BTreeSet::new();
+    for path in head_changed_paths {
+        let path = normalize_changed_path(path);
+        if !path.is_empty() {
+            actual.insert(path);
+        }
+    }
+    for path in status_changed_paths {
+        let path = normalize_changed_path(path);
+        if !path.is_empty() && !pre_dirty.contains(&path) {
+            actual.insert(path);
+        }
+    }
+    actual.into_iter().collect()
 }
 
 fn is_completed_result_status(status: &str) -> bool {
@@ -4801,6 +5174,35 @@ mod tests {
         assert!(refs
             .iter()
             .any(|value| value["kind"] == "raw_evidence_inline"));
+    }
+
+    #[test]
+    fn attempt_actual_changed_paths_uses_head_diff_and_subtracts_pre_dirty_status_paths() {
+        let actual = attempt_actual_changed_paths(
+            &[
+                "already-dirty.rs".to_string(),
+                "./pre-existing.md".to_string(),
+            ],
+            &[
+                "already-dirty.rs".to_string(),
+                "new-dirty.rs".to_string(),
+                "./pre-existing.md".to_string(),
+            ],
+            &[
+                "committed.rs".to_string(),
+                "already-dirty.rs".to_string(),
+                "nested/committed.md".to_string(),
+            ],
+        );
+        assert_eq!(
+            actual,
+            vec![
+                "already-dirty.rs".to_string(),
+                "committed.rs".to_string(),
+                "nested/committed.md".to_string(),
+                "new-dirty.rs".to_string()
+            ]
+        );
     }
 
     #[test]

@@ -326,8 +326,7 @@ pub(super) async fn action_execute_dag_v1(
     let workflow_start_result = state
         .storage()
         .shared_memory
-        .handle_action(&json!({
-            "action": "workflow_start",
+        .workflow_start_typed(&json!({
             "workflow_run_id": workflow_run_id.as_str(),
             "workflow_id": "mission_plan_execute",
             "workflow_path": ".missiond/workflows/plan-dag-runtime.lisp",
@@ -367,8 +366,7 @@ pub(super) async fn action_execute_dag_v1(
     let workflow_checkpoint_result = state
         .storage()
         .shared_memory
-        .handle_action(&json!({
-            "action": "workflow_checkpoint",
+        .workflow_checkpoint_typed(&json!({
             "workflow_run_id": workflow_run_id.as_str(),
             "status": workflow_final_status,
             "cursor": { "topological_order": order.clone() },

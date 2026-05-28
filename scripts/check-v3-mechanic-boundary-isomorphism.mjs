@@ -84,7 +84,7 @@ function main() {
       'parse_mechanic_run_config',
       'spawn_mechanic_repair',
       'mechanic_mode',
-      'auto_execute: Some(!mechanic_config.is_some())',
+      'auto_execute: Some(!mechanic_config.is_some() && !xjpcode_worker)',
       'if mechanic_config.is_none()',
       'must not enter the normal Autopilot/PTY dispatcher',
       'mechanic_implementation_requires_exact_shard_metadata_even_without_write_scope',

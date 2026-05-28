@@ -6,9 +6,11 @@ use missiond_mcp::tools::{error_codes, ToolContent, ToolError, ToolResult};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use tokio::process::Command;
 
 use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
+use crate::engine::shared_memory::{StructuredControlError, TaskRuntimeContract};
 use crate::slot_dispatch::SlotAcquireGuard;
 use crate::state::AppState;
 
@@ -152,6 +154,29 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         Ok(config) => config,
         Err(error) => return Ok(error),
     };
+    let xjpcode_worker = engine_hint_is_xjpcode(delegation_metadata.engine_hint.as_deref());
+    if xjpcode_worker && !delegation_metadata.write_scope.is_empty() {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(
+                "XJPCODE_WRITE_MODE_NOT_ENABLED",
+                "mission_task_delegate refused xjpcode write mode because the portable worker write lane is still gated",
+            )
+            .with_suggestion(
+                "rerun as read-only, or keep write work on Codex/ClaudeCode until xjpcode implements accepted_shard/write_lease/apply_patch",
+            ),
+        ));
+    }
+    if xjpcode_worker && xjpcode_worker_endpoint_from_env().is_none() {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(
+                "XJPCODE_WORKER_NOT_CONFIGURED",
+                "mission_task_delegate refused xjpcode dispatch because MISSIOND_XJPCODE_WORKER_URL is not configured",
+            )
+            .with_suggestion(
+                "start xjpcode with --serve and set MISSIOND_XJPCODE_WORKER_URL to its base URL before dispatching xjpcode workers",
+            ),
+        ));
+    }
     let delegate_sandbox_profile = sandbox_profile_for_worker(
         delegation_metadata.engine_hint.as_deref(),
         !delegation_metadata.write_scope.is_empty(),
@@ -336,7 +361,24 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         write_scope: &delegation_metadata.write_scope,
     };
     if !allow_duplicate_code_worker {
-        if let Some(dup) = find_overlapping_active_code_worker(state, &dedup_check).await {
+        if let Some(dup) = match find_overlapping_active_code_worker(state, &dedup_check).await {
+            Ok(dup) => dup,
+            Err(err) => {
+                let (code, details) =
+                    if let Some(control) = err.downcast_ref::<StructuredControlError>() {
+                        (control.code, control.details.clone())
+                    } else {
+                        (error_codes::DB_ERROR, json!({}))
+                    };
+                return Ok(ToolResult::structured_error(
+                    ToolError::new(code, format!("mission_task_delegate dedup guard failed: {err}"))
+                        .with_details(details)
+                        .with_suggestion(
+                            "backfill task_contracts for active legacy BoardTasks before delegating overlapping code work",
+                        ),
+                ));
+            }
+        } {
             let note_attached = attach_duplicate_delegation_note(
                 state,
                 &dup,
@@ -409,7 +451,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     // Phase 6.1: Find idle slot with RAII guard (atomic check+reserve).
     // intent-flow.lisp F-task-delegate-autoprovision :: s2 requires
     // slot.project_root == target_project_root for reuse.
-    let guard = if mechanic_config.is_some() {
+    let guard = if mechanic_config.is_some() || xjpcode_worker {
         None
     } else if prefer_gemini_researcher {
         find_and_reserve_gemini_researcher_slot(
@@ -432,7 +474,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         .unwrap_or_default();
 
     // 2. If no idle slot, try auto-provision dynamic slot
-    let (mut assignee, mut provisioned, should_auto_provision_slot) = if !assignee.is_empty() {
+    let (mut assignee, mut provisioned, should_auto_provision_slot) = if xjpcode_worker {
+        ("xjpcode-readonly-worker".to_string(), false, false)
+    } else if !assignee.is_empty() {
         (assignee, false, false)
     } else if mechanic_config.is_some() {
         (String::new(), false, false)
@@ -449,6 +493,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         (String::new(), false, true)
     };
     // guard is dropped here (if Some) → auto-releases slot dispatch lock
+    let preallocated_slot_id = should_auto_provision_slot.then(new_dynamic_slot_id);
 
     // 3. Build description. `context_hints` is accepted for API
     // compatibility, but default worker prompts must not auto-prefetch KB or
@@ -512,7 +557,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         } else {
             Some(assignee.clone())
         },
-        auto_execute: Some(!mechanic_config.is_some()),
+        auto_execute: Some(!mechanic_config.is_some() && !xjpcode_worker),
         depends_on: if depends_on.is_empty() {
             None
         } else {
@@ -532,22 +577,30 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         .map_err(|e| anyhow!("DB error: {}", e))?;
     let task_id = task.id.to_string();
     let sandbox_profile = delegate_sandbox_profile;
-    let capability_grant_ids = state
-        .shared_memory
-        .grant_task_capabilities(
-            target_project_resolution
-                .as_ref()
-                .map(|resolution| resolution.project_id.as_str()),
-            &task_id,
-            "task",
-            &task_id,
-            &delegation_metadata.read_scope,
-            &delegation_metadata.write_scope,
-            &delegation_metadata.must_not_touch,
-            "mission_task_delegate",
-        )
-        .await
-        .map_err(|e| anyhow!("capability grant error: {}", e))?;
+    let grant_subject_id = preallocated_slot_id
+        .as_deref()
+        .or_else(|| (!assignee.is_empty()).then_some(assignee.as_str()))
+        .or_else(|| mechanic_config.is_some().then_some("mechanic"));
+    let capability_grant_ids = if let Some(subject_id) = grant_subject_id {
+        state
+            .shared_memory
+            .grant_task_capabilities(
+                target_project_resolution
+                    .as_ref()
+                    .map(|resolution| resolution.project_id.as_str()),
+                &task_id,
+                "worker",
+                subject_id,
+                &delegation_metadata.read_scope,
+                &delegation_metadata.write_scope,
+                &delegation_metadata.must_not_touch,
+                "mission_task_delegate",
+            )
+            .await
+            .map_err(|e| anyhow!("capability grant error: {}", e))?
+    } else {
+        Vec::new()
+    };
     let runtime_metadata = enrich_runtime_metadata_with_control_facts(
         runtime_metadata,
         &task_id,
@@ -587,6 +640,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             Some(delegate_sandbox_profile),
             Some(&task_id),
             Some(&capability_grant_ids),
+            preallocated_slot_id.as_deref(),
         )
         .await
         {
@@ -626,8 +680,34 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     // causality. Duplicate Notify wakeups are coalesced and harmless.
     // Mechanic BoardTasks are visible records for the subprocess executor
     // lane; they must not enter the normal Autopilot/PTY dispatcher.
-    if mechanic_config.is_none() {
+    if mechanic_config.is_none() && !xjpcode_worker {
         state.board_dispatch_notify.notify_one();
+    }
+
+    if xjpcode_worker {
+        spawn_xjpcode_readonly_worker(
+            state.clone(),
+            XjpcodeWorkerRun {
+                task_id: task_id.clone(),
+                project_id: target_project_resolution
+                    .as_ref()
+                    .map(|resolution| resolution.project_id.clone())
+                    .unwrap_or_else(|| "missiond".to_string()),
+                project_root: target_project_root.clone(),
+                objective: objective.to_string(),
+                metadata: delegation_metadata.clone(),
+                capability_grant_ids: capability_grant_ids.clone(),
+                write_task_grant_id: task_write_grant_id(
+                    &delegation_metadata,
+                    &capability_grant_ids,
+                ),
+                settle_task_grant_id: task_settle_grant_id(
+                    &delegation_metadata,
+                    &capability_grant_ids,
+                ),
+                timeout_secs,
+            },
+        );
     }
 
     if let Some(config) = mechanic_config.clone() {
@@ -641,6 +721,24 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 project_root: target_project_root.clone().unwrap_or_default(),
                 objective: objective.to_string(),
                 metadata: delegation_metadata.clone(),
+                capability_grant_ids: capability_grant_ids.clone(),
+                write_task_grant_id: task_write_grant_id(
+                    &delegation_metadata,
+                    &capability_grant_ids,
+                ),
+                settle_task_grant_id: task_settle_grant_id(
+                    &delegation_metadata,
+                    &capability_grant_ids,
+                ),
+                claim_task_grant_id: task_claim_grant_id(
+                    &delegation_metadata,
+                    &capability_grant_ids,
+                ),
+                attempt_id: format!(
+                    "attempt:{}:mechanic:{}",
+                    task_id,
+                    chrono::Utc::now().timestamp_millis()
+                ),
                 config,
                 timeout_secs,
             },
@@ -650,7 +748,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     Ok(ToolResult::json_pretty(&json!({
         "task_id": task_id,
         "assignee": if assignee.is_empty() { Value::Null } else { Value::String(assignee) },
-        "status": if mechanic_config.is_some() { "mechanic-dispatched" } else { "queued" },
+        "status": if xjpcode_worker { "xjpcode-dispatched" } else if mechanic_config.is_some() { "mechanic-dispatched" } else { "queued" },
         "intent": intent,
         "template": template,
         "model": requested_model,
@@ -1104,8 +1202,7 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
             state
                 .storage()
                 .shared_memory
-                .handle_action(&json!({
-                    "action": "workflow_start",
+                .workflow_start_typed(&json!({
                     "workflow_run_id": id,
                     "workflow_id": "mission_swarm_run",
                     "workflow_path": ".missiond/workflows/swarm-run.lisp",
@@ -1138,6 +1235,7 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
             let assignee: Option<String> = None;
             let should_auto_provision_child =
                 auto_provision_slots && planned_task.engine_hint == "claude-code";
+            let preallocated_slot_id = should_auto_provision_child.then(new_dynamic_slot_id);
             let description = render_swarm_task_description(
                 &objective,
                 &task_project_id,
@@ -1189,20 +1287,24 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
                 Some(&planned_task.engine_hint),
                 !planned_task.write_scope.is_empty(),
             );
-            let capability_grant_ids = state
-                .shared_memory
-                .grant_task_capabilities(
-                    Some(&task_project_id),
-                    &task_id,
-                    "task",
-                    &task_id,
-                    &planned_task.read_scope,
-                    &planned_task.write_scope,
-                    &planned_task.must_not_touch,
-                    "mission_swarm_run",
-                )
-                .await
-                .map_err(|e| anyhow!("capability grant error: {}", e))?;
+            let capability_grant_ids = if let Some(subject_id) = preallocated_slot_id.as_deref() {
+                state
+                    .shared_memory
+                    .grant_task_capabilities(
+                        Some(&task_project_id),
+                        &task_id,
+                        "worker",
+                        subject_id,
+                        &planned_task.read_scope,
+                        &planned_task.write_scope,
+                        &planned_task.must_not_touch,
+                        "mission_swarm_run",
+                    )
+                    .await
+                    .map_err(|e| anyhow!("capability grant error: {}", e))?
+            } else {
+                Vec::new()
+            };
             let runtime_metadata = enrich_runtime_metadata_with_control_facts(
                 runtime_metadata,
                 &task_id,
@@ -1240,6 +1342,7 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
                     Some(sandbox_profile),
                     Some(&task_id),
                     Some(&capability_grant_ids),
+                    preallocated_slot_id.as_deref(),
                 )
                 .await
                 {
@@ -1299,8 +1402,7 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
                 state
                     .storage()
                     .shared_memory
-                    .handle_action(&json!({
-                        "action": "workflow_checkpoint",
+                    .workflow_checkpoint_typed(&json!({
                         "workflow_run_id": id,
                         "status": "running",
                         "cursor": { "created_task_ids": created_task_ids.clone() },
@@ -1972,7 +2074,7 @@ fn sandbox_profile_for_worker(engine_hint: Option<&str>, write_enabled: bool) ->
         "workspace-write"
     } else if engine.contains("gemini") {
         "plan-policy-write"
-    } else if engine.contains("agy") {
+    } else if engine.contains("agy") || engine.contains("xjpcode") {
         "unsupported-write"
     } else {
         "workspace-write-policy"
@@ -2048,7 +2150,25 @@ struct MechanicRepairRun {
     project_root: String,
     objective: String,
     metadata: DelegationMetadata,
+    capability_grant_ids: Vec<String>,
+    write_task_grant_id: Option<String>,
+    settle_task_grant_id: Option<String>,
+    claim_task_grant_id: Option<String>,
+    attempt_id: String,
     config: MechanicRunConfig,
+    timeout_secs: i64,
+}
+
+#[derive(Debug, Clone)]
+struct XjpcodeWorkerRun {
+    task_id: String,
+    project_id: String,
+    project_root: Option<String>,
+    objective: String,
+    metadata: DelegationMetadata,
+    capability_grant_ids: Vec<String>,
+    write_task_grant_id: Option<String>,
+    settle_task_grant_id: Option<String>,
     timeout_secs: i64,
 }
 
@@ -2060,6 +2180,96 @@ fn engine_hint_is_mechanic(metadata: &DelegationMetadata) -> bool {
         metadata.pool_hint.as_deref(),
         Some("mechanic") | Some("jarvis-mechanic")
     )
+}
+
+fn engine_hint_is_xjpcode(engine_hint: Option<&str>) -> bool {
+    engine_hint
+        .map(|hint| {
+            let hint = hint.trim().to_ascii_lowercase();
+            hint == "xjpcode" || hint == "xjpcode-readonly-worker"
+        })
+        .unwrap_or(false)
+}
+
+fn xjpcode_worker_endpoint_from_env() -> Option<String> {
+    std::env::var("MISSIOND_XJPCODE_WORKER_URL")
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+        .map(|base| {
+            if base.ends_with("/worker/v1/work-orders") {
+                base
+            } else {
+                format!("{base}/worker/v1/work-orders")
+            }
+        })
+}
+
+fn parse_xjpcode_sse_frames(body: &str) -> Vec<Value> {
+    body.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let data = line.strip_prefix("data:").map(str::trim).unwrap_or(line);
+            if data.is_empty() || data.starts_with("event:") || data == "[DONE]" {
+                return None;
+            }
+            serde_json::from_str::<Value>(data).ok()
+        })
+        .collect()
+}
+
+fn xjpcode_artifact_from_frames(frames: &[Value]) -> Option<Value> {
+    frames.iter().find_map(|frame| {
+        (frame.get("type").and_then(Value::as_str) == Some("task_result_artifact"))
+            .then(|| frame.get("artifact").cloned())
+            .flatten()
+    })
+}
+
+fn xjpcode_final_status_from_frames(frames: &[Value]) -> Option<String> {
+    frames.iter().rev().find_map(|frame| {
+        (frame.get("type").and_then(Value::as_str) == Some("final"))
+            .then(|| {
+                frame
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .flatten()
+    })
+}
+
+fn xjpcode_result_status_for_artifact(status: &str) -> &'static str {
+    match status.trim().to_ascii_lowercase().as_str() {
+        "done" | "completed" | "complete" | "success" | "succeeded" => "completed",
+        "blocked" => "blocked",
+        "skipped" => "skipped",
+        _ => "failed",
+    }
+}
+
+fn xjpcode_status_for_worker_settle(status: &str) -> &'static str {
+    match status.trim().to_ascii_lowercase().as_str() {
+        "done" | "completed" | "complete" | "success" | "succeeded" => "done",
+        "blocked" => "blocked",
+        "skipped" => "skipped",
+        _ => "failed",
+    }
+}
+
+fn task_write_grant_id(metadata: &DelegationMetadata, grant_ids: &[String]) -> Option<String> {
+    let index = metadata.read_scope.len() + metadata.write_scope.len();
+    grant_ids.get(index).cloned()
+}
+
+fn task_settle_grant_id(metadata: &DelegationMetadata, grant_ids: &[String]) -> Option<String> {
+    let index = metadata.read_scope.len() + metadata.write_scope.len() + 1;
+    grant_ids.get(index).cloned()
+}
+
+fn task_claim_grant_id(metadata: &DelegationMetadata, grant_ids: &[String]) -> Option<String> {
+    let index = metadata.read_scope.len() + metadata.write_scope.len() + 2;
+    grant_ids.get(index).cloned()
 }
 
 fn parse_mechanic_run_config(
@@ -2375,12 +2585,12 @@ fn dedup_applies(check: &DuplicateCodeCheck<'_>) -> bool {
 async fn find_overlapping_active_code_worker(
     state: &AppState,
     check: &DuplicateCodeCheck<'_>,
-) -> Option<DuplicateCodeWorker> {
+) -> Result<Option<DuplicateCodeWorker>> {
     if !dedup_applies(check) {
-        return None;
+        return Ok(None);
     }
     if check.parent_id.is_none() && check.source_id.is_none() {
-        return None;
+        return Ok(None);
     }
 
     let mut candidates = Vec::new();
@@ -2398,18 +2608,28 @@ async fn find_overlapping_active_code_worker(
     }
 
     for task in candidates {
-        let parent_match = match (check.parent_id, task.parent_id.as_ref()) {
-            (Some(left), Some(right)) => left == right.as_ref(),
-            _ => false,
+        let contract = state
+            .storage()
+            .shared_memory
+            .task_runtime_contract(task.id.as_str())
+            .await?;
+        let parent_match = match check.parent_id {
+            Some(parent_id) => {
+                task.parent_id
+                    .as_ref()
+                    .is_some_and(|candidate| candidate.as_ref() == parent_id)
+                    || task_contract_references_parent(&contract, parent_id)
+            }
+            None => false,
         };
         let source_match = match check.source_id {
-            Some(src) => board_task_references_source(&task, src),
+            Some(src) => task_contract_references_source(&contract, src),
             None => false,
         };
         if !(parent_match || source_match) {
             continue;
         }
-        let candidate_scope = board_task_write_scope(&task);
+        let candidate_scope = contract.write_scope.clone();
         if candidate_scope.is_empty() {
             continue;
         }
@@ -2431,15 +2651,15 @@ async fn find_overlapping_active_code_worker(
             (false, true) => "source",
             _ => "unknown",
         };
-        return Some(DuplicateCodeWorker {
+        return Ok(Some(DuplicateCodeWorker {
             task_id: task.id.to_string(),
             title: task.title.clone(),
             status: task.status.as_str().to_string(),
             overlap,
             linkage: linkage.to_string(),
-        });
+        }));
     }
-    None
+    Ok(None)
 }
 
 /// Relative write scopes only collide inside the same registered project. A
@@ -2469,6 +2689,7 @@ fn scope_is_absolute(scope: &str) -> bool {
     scope.starts_with('/') || scope.starts_with("~/")
 }
 
+#[cfg(test)]
 fn metadata_string_list(value: Option<&Value>) -> Vec<String> {
     match value {
         Some(Value::Array(values)) => values
@@ -2488,6 +2709,7 @@ fn metadata_string_list(value: Option<&Value>) -> Vec<String> {
     }
 }
 
+#[cfg(test)]
 fn board_task_write_scope(task: &missiond_core::types::BoardTask) -> Vec<String> {
     for key in ["write_scope", "writeScope"] {
         let top = metadata_string_list(task.runtime_metadata.get(key));
@@ -2508,6 +2730,7 @@ fn board_task_write_scope(task: &missiond_core::types::BoardTask) -> Vec<String>
     Vec::new()
 }
 
+#[cfg(test)]
 fn metadata_string_value(value: Option<&Value>) -> Option<String> {
     match value {
         Some(Value::String(value)) if !value.trim().is_empty() => Some(value.trim().to_string()),
@@ -2516,6 +2739,7 @@ fn metadata_string_value(value: Option<&Value>) -> Option<String> {
     }
 }
 
+#[cfg(test)]
 fn board_task_references_source(task: &missiond_core::types::BoardTask, source_id: &str) -> bool {
     for key in ["source_board_task_id", "source_id", "parent_board_task_id"] {
         if metadata_string_value(task.runtime_metadata.get(key)).as_deref() == Some(source_id) {
@@ -2532,6 +2756,20 @@ fn board_task_references_source(task: &missiond_core::types::BoardTask, source_i
         }
     }
     false
+}
+
+fn task_contract_references_source(contract: &TaskRuntimeContract, source_id: &str) -> bool {
+    contract
+        .source_board_task_id
+        .as_deref()
+        .is_some_and(|candidate| candidate == source_id)
+}
+
+fn task_contract_references_parent(contract: &TaskRuntimeContract, parent_id: &str) -> bool {
+    contract
+        .parent_board_task_id
+        .as_deref()
+        .is_some_and(|candidate| candidate == parent_id)
 }
 
 /// Cross-product of requested vs existing write scopes; returns every pair
@@ -2745,6 +2983,7 @@ async fn auto_provision_slot(
     sandbox_profile: Option<&str>,
     task_id: Option<&str>,
     capability_grant_ids: Option<&[String]>,
+    slot_id: Option<&str>,
 ) -> Result<String> {
     // Check quota
     let active = state
@@ -2777,6 +3016,7 @@ async fn auto_provision_slot(
         sandbox_profile,
         task_id,
         capability_grant_ids,
+        slot_id,
     );
 
     // Delegate to existing compute_slot handler
@@ -2810,6 +3050,11 @@ fn parse_auto_provision_slot_id(result: &ToolResult) -> Result<String> {
 
 fn auto_provision_slot_ttl_secs(runtime_config: &WorkstationRuntimeConfig) -> i64 {
     runtime_config.clamp_slot_ttl_secs(None)
+}
+
+fn new_dynamic_slot_id() -> String {
+    let short_id = &uuid::Uuid::new_v4().to_string()[..8];
+    format!("slot-dyn-{}", short_id)
 }
 
 fn string_arg<'a>(args: &'a Value, keys: &[&str]) -> Option<&'a str> {
@@ -2894,7 +3139,7 @@ fn default_swarm_context_pack_path(missiond_root: Option<&Path>) -> String {
 /// `mission_task_delegate` is the common BoardTask entry used by Codex master,
 /// context-pack-run-wave, and direct MCP callers. Metadata is kept visible in
 /// the durable BoardTask description only as a prompt projection; runtime
-/// control reads the structured `runtime_metadata` written beside it.
+/// control reads canonical `task_contracts`.
 fn render_delegation_metadata_block(metadata: &DelegationMetadata) -> String {
     let mut lines = Vec::new();
     if let Some(value) = &metadata.task_class {
@@ -2990,6 +3235,215 @@ fn render_delegation_metadata_block(metadata: &DelegationMetadata) -> String {
     lines.join("\n")
 }
 
+fn spawn_xjpcode_readonly_worker(state: AppState, run: XjpcodeWorkerRun) {
+    tokio::spawn(async move {
+        if let Err(err) = run_xjpcode_readonly_worker(state, run).await {
+            tracing::warn!(error = %err, "xjpcode readonly worker dispatch failed");
+        }
+    });
+}
+
+async fn run_xjpcode_readonly_worker(state: AppState, run: XjpcodeWorkerRun) -> Result<()> {
+    let endpoint = match xjpcode_worker_endpoint_from_env() {
+        Some(endpoint) => endpoint,
+        None => return Ok(()),
+    };
+    let read_scope = if run.metadata.read_scope.is_empty() {
+        run.project_root
+            .as_ref()
+            .map(|root| vec![root.clone()])
+            .unwrap_or_default()
+    } else {
+        run.metadata.read_scope.clone()
+    };
+
+    let request = json!({
+        "schema": "missiond.work-order-request.v1",
+        "task_id": run.task_id,
+        "project_id": run.project_id,
+        "mode": "read_only",
+        "objective": run.objective,
+        "project_root": run.project_root,
+        "context_capsule_lisp": run.metadata.context_pack_path.unwrap_or_default(),
+        "accepted_shard_id": run.metadata.accepted_shard_id,
+        "read_scope": read_scope,
+        "write_scope": [],
+        "must_not_touch": run.metadata.must_not_touch,
+        "capability_grant_ids": run.capability_grant_ids,
+        "tool_policy": {
+            "source": "mission_task_delegate",
+            "mode": "read_only",
+            "scope_authority": "MissionD capability grants"
+        },
+        "artifact_contract": {
+            "schema": "missiond.xjpcode-worker-artifact-contract.v1",
+            "requires": ["task-result-artifact", "final"],
+            "completion": "task-result-artifact before final"
+        },
+        "event_sink": "missiond.shared-memory"
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(run.timeout_secs.clamp(30, 7200) as u64))
+        .build()?;
+    let response = client.post(endpoint.as_str()).json(&request).send().await?;
+    let status = response.status();
+    let response_body = response.text().await.unwrap_or_default();
+    let response_json = serde_json::from_str::<Value>(&response_body).unwrap_or_else(|_| {
+        json!({
+            "raw_response": response_body
+        })
+    });
+    state
+        .shared_memory
+        .record_job_event_typed(
+            request["task_id"].as_str().unwrap_or("unknown"),
+            request["project_id"].as_str(),
+            "xjpcode-readonly-worker",
+            "observation.recorded",
+            json!({
+                "schema": "missiond.xjpcode-worker-observation.v1",
+                "status": status.as_u16(),
+                "endpoint": endpoint,
+                "response": response_json.clone()
+            }),
+        )
+        .await?;
+    let frames = parse_xjpcode_sse_frames(&response_body);
+    let (task_result, worker_final_status) = if status.is_success() {
+        (
+            xjpcode_artifact_from_frames(&frames).unwrap_or_else(|| {
+                json!({
+                    "schema": "xjpcode.task-result-artifact.v1",
+                    "task_id": request["task_id"],
+                    "project_id": request["project_id"],
+                    "status": "failed",
+                    "mode": "read_only",
+                    "summary": "xjpcode worker response did not contain task_result_artifact.",
+                    "files_read": [],
+                    "files_changed": [],
+                    "commands_run": [],
+                    "diagnostics": [{
+                        "code": "XJPCODE_ARTIFACT_MISSING",
+                        "message": "xjpcode worker response did not contain task_result_artifact."
+                    }],
+                    "model_usage": null
+                })
+            }),
+            xjpcode_final_status_from_frames(&frames).unwrap_or_else(|| "failed".to_string()),
+        )
+    } else {
+        (
+            json!({
+                "schema": "xjpcode.task-result-artifact.v1",
+                "task_id": request["task_id"],
+                "project_id": request["project_id"],
+                "status": "failed",
+                "mode": "read_only",
+                "summary": format!("xjpcode worker HTTP request failed with status {status}."),
+                "files_read": [],
+                "files_changed": [],
+                "commands_run": [],
+                "diagnostics": [{
+                    "code": "XJPCODE_HTTP_ERROR",
+                    "message": format!("xjpcode worker HTTP request failed with status {status}.")
+                }],
+                "model_usage": null
+            }),
+            "failed".to_string(),
+        )
+    };
+    let Some(write_grant_id) = run.write_task_grant_id.as_deref() else {
+        tracing::warn!(
+            task_id = %request["task_id"],
+            "xjpcode worker returned artifact but no write task grant was available"
+        );
+        return Ok(());
+    };
+    let Some(settle_grant_id) = run.settle_task_grant_id.as_deref() else {
+        tracing::warn!(
+            task_id = %request["task_id"],
+            "xjpcode worker returned artifact but no settle task grant was available"
+        );
+        return Ok(());
+    };
+    let summary = task_result
+        .get("summary")
+        .and_then(Value::as_str)
+        .unwrap_or("xjpcode read-only worker completed.");
+    let missiond_result_status = xjpcode_result_status_for_artifact(
+        task_result
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or(worker_final_status.as_str()),
+    );
+    let missiond_settle_status = xjpcode_status_for_worker_settle(
+        task_result
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or(worker_final_status.as_str()),
+    );
+    let content = task_result
+        .get("content")
+        .cloned()
+        .unwrap_or_else(|| Value::String(summary.to_string()));
+    let created_at = chrono::Utc::now().to_rfc3339();
+    let artifact = state
+        .shared_memory
+        .task_result_put_typed(&json!({
+            "task_id": request["task_id"],
+            "project_id": request["project_id"],
+            "provider": "xjpcode",
+            "result_status": missiond_result_status,
+            "summary": summary,
+            "content": content,
+            "json": {
+                "schema": "missiond.xjpcode-worker-result.v1",
+                "response": task_result,
+                "sse_frames": frames
+            },
+            "grant_id": write_grant_id,
+            "subject_kind": "worker",
+            "subject_id": "xjpcode-readonly-worker",
+            "producer": {
+                "kind": "portable-worker",
+                "id": "xjpcode-readonly-worker",
+                "created_at": created_at
+            },
+            "raw_evidence": {
+                "kind": "xjpcode-work-order-response",
+                "response": task_result,
+                "sse_frames": frames
+            },
+            "evidence_refs": [{
+                "kind": "xjpcode-work-order-response",
+                "task_id": request["task_id"],
+                "created_at": created_at
+            }],
+            "created_at": created_at
+        }))
+        .await?;
+    let Some(artifact_hash) = artifact.get("artifact_hash").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    state
+        .shared_memory
+        .settle_worker_typed(json!({
+            "task_id": request["task_id"],
+            "project_id": request["project_id"],
+            "slot_id": "xjpcode-readonly-worker",
+            "provider": "xjpcode",
+            "status": missiond_settle_status,
+            "summary": summary,
+            "artifact_hash": artifact_hash,
+            "grant_id": settle_grant_id,
+            "subject_kind": "worker",
+            "subject_id": "xjpcode-readonly-worker"
+        }))
+        .await?;
+    Ok(())
+}
+
 fn spawn_mechanic_repair(
     shared_memory: std::sync::Arc<crate::engine::shared_memory::SharedMemoryService>,
     run: MechanicRepairRun,
@@ -2998,6 +3452,29 @@ fn spawn_mechanic_repair(
     // into the canonical task-result-artifact via worker_settle. It is not a
     // PTY slot and it never becomes a resident orchestrator.
     tokio::spawn(async move {
+        if let Err(err) = shared_memory
+            .job_event_typed(json!({
+                "task_id": run.task_id.as_str(),
+                "project_id": run.project_id.as_deref(),
+                "event_kind": "attempt.started",
+                "attempt_id": run.attempt_id.as_str(),
+                "agent_id": "mechanic",
+                "worker_id": "mechanic",
+                "payload": {
+                    "source": "mission_task_delegate.mechanic",
+                    "engine_hint": "mechanic",
+                    "mode": run.config.mode.as_str(),
+                    "target": run.config.target.as_str(),
+                    "capability_grant_ids": run.capability_grant_ids,
+                    "accepted_shard_id": run.metadata.accepted_shard_id,
+                    "write_scope": run.metadata.write_scope,
+                    "must_not_touch": run.metadata.must_not_touch,
+                }
+            }))
+            .await
+        {
+            tracing::warn!(task_id = %run.task_id, error = %err, "mechanic repair attempt.started event failed");
+        }
         let result = run_mechanic_repair_subprocess(&run).await;
         let (status, summary, content) = match result {
             Ok(content) => {
@@ -3067,37 +3544,39 @@ fn spawn_mechanic_repair(
                 });
             }
             let created_at = chrono::Utc::now().to_rfc3339();
-            match shared_memory
-                .handle_action(&json!({
-                    "action": "task_result_put",
-                    "task_id": run.task_id,
-                    "project_id": run.project_id,
-                    "provider": "mechanic",
-                    "result_status": "completed",
-                    "summary": summary,
-                    "content": summary,
-                    "json": artifact_details,
-                    "accepted_shard_id": run.metadata.accepted_shard_id,
-                    "producer": {
-                        "kind": "mechanic-subprocess",
-                        "id": "mechanic",
-                        "created_at": created_at
-                    },
-                    "raw_evidence": {
-                        "kind": "mechanic-run",
-                        "mode": run.config.mode.as_str(),
-                        "target": run.config.target,
-                        "project_root": run.project_root
-                    },
-                    "evidence_refs": [{
-                        "kind": "mechanic-run",
-                        "task_id": run.task_id,
-                        "created_at": created_at
-                    }],
+            let task_result_args = json!({
+                "task_id": run.task_id,
+                "project_id": run.project_id,
+                "slot_id": "mechanic",
+                "provider": "mechanic",
+                "result_status": "completed",
+                "summary": summary,
+                "content": summary,
+                "json": artifact_details,
+                "attempt_id": run.attempt_id,
+                "grant_id": run.write_task_grant_id,
+                "subject_kind": "worker",
+                "subject_id": "mechanic",
+                "accepted_shard_id": run.metadata.accepted_shard_id,
+                "producer": {
+                    "kind": "mechanic-subprocess",
+                    "id": "mechanic",
                     "created_at": created_at
-                }))
-                .await
-            {
+                },
+                "raw_evidence": {
+                    "kind": "mechanic-run",
+                    "mode": run.config.mode.as_str(),
+                    "target": run.config.target,
+                    "project_root": run.project_root
+                },
+                "evidence_refs": [{
+                    "kind": "mechanic-run",
+                    "task_id": run.task_id,
+                    "created_at": created_at
+                }],
+                "created_at": created_at
+            });
+            match shared_memory.task_result_put_typed(&task_result_args).await {
                 Ok(value) => value
                     .get("artifact_hash")
                     .and_then(Value::as_str)
@@ -3117,9 +3596,11 @@ fn spawn_mechanic_repair(
         if status == "done" && artifact_hash.is_none() {
             for claim_id in &run.metadata.shared_claim_ids {
                 let release = shared_memory
-                    .handle_action(&json!({
-                        "action": "release",
+                    .release_typed(json!({
                         "claim_id": claim_id,
+                        "subject_kind": "daemon",
+                        "subject_id": "mission_task_delegate.mechanic",
+                        "details": { "claim_task_grant_id": run.claim_task_grant_id.as_deref() },
                     }))
                     .await;
                 if let Err(err) = release {
@@ -3129,28 +3610,34 @@ fn spawn_mechanic_repair(
             return;
         }
         let mut settle_args = json!({
-                "action": "worker_settle",
                 "task_id": run.task_id,
                 "project_id": run.project_id,
+                "slot_id": "mechanic",
                 "provider": "mechanic",
                 "status": status,
                 "summary": summary,
+                "attempt_id": run.attempt_id,
+                "grant_id": run.settle_task_grant_id,
+                "subject_kind": "worker",
+                "subject_id": "mechanic",
                 "accepted_shard_id": run.metadata.accepted_shard_id,
                 "json": content,
         });
         if let Some(hash) = artifact_hash {
             settle_args["artifact_hash"] = Value::String(hash);
         }
-        let settle = shared_memory.handle_action(&settle_args).await;
+        let settle = shared_memory.settle_worker_typed(settle_args).await;
         if let Err(err) = settle {
             tracing::warn!(task_id = %run.task_id, error = %err, "mechanic repair worker_settle failed");
         }
 
         for claim_id in &run.metadata.shared_claim_ids {
             let release = shared_memory
-                .handle_action(&json!({
-                    "action": "release",
+                .release_typed(json!({
                     "claim_id": claim_id,
+                    "subject_kind": "daemon",
+                    "subject_id": "mission_task_delegate.mechanic",
+                    "details": { "claim_task_grant_id": run.claim_task_grant_id.as_deref() },
                 }))
                 .await;
             if let Err(err) = release {
@@ -3274,6 +3761,7 @@ fn build_compute_slot_create_args(
     sandbox_profile: Option<&str>,
     task_id: Option<&str>,
     capability_grant_ids: Option<&[String]>,
+    slot_id: Option<&str>,
 ) -> Value {
     let mut create_args = json!({
         "action": "create",
@@ -3299,6 +3787,11 @@ fn build_compute_slot_create_args(
     }
     if let Some(grant_ids) = capability_grant_ids {
         create_args["capability_grant_ids"] = json!(grant_ids);
+    }
+    if let Some(slot_id) = slot_id {
+        create_args["slot_id"] = Value::String(slot_id.to_string());
+        create_args["subject_kind"] = Value::String("worker".to_string());
+        create_args["subject_id"] = Value::String(slot_id.to_string());
     }
     create_args
 }
@@ -3340,6 +3833,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert_eq!(args["suppress_initial_prompt"], json!(true));
     }
@@ -3360,6 +3854,7 @@ mod tests {
             "researcher",
             "investigate",
             7200,
+            None,
             None,
             None,
             None,
@@ -3409,6 +3904,7 @@ mod tests {
             Some("workspace-write"),
             Some("task-1"),
             Some(&["grant-1".to_string(), "grant-2".to_string()]),
+            Some("slot-dyn-fixed1"),
         );
         assert_eq!(args["cwd"], json!("/Users/jinchen/Projects/missiond"));
         assert_eq!(args["model"], json!("sonnet"));
@@ -3416,16 +3912,82 @@ mod tests {
         assert_eq!(args["sandbox"], json!("workspace-write"));
         assert_eq!(args["task_id"], json!("task-1"));
         assert_eq!(args["capability_grant_ids"], json!(["grant-1", "grant-2"]));
+        assert_eq!(args["slot_id"], json!("slot-dyn-fixed1"));
+        assert_eq!(args["subject_kind"], json!("worker"));
+        assert_eq!(args["subject_id"], json!("slot-dyn-fixed1"));
         assert_eq!(args["suppress_initial_prompt"], json!(true));
     }
 
     #[test]
     fn create_args_omit_optional_fields_when_absent() {
-        let args =
-            build_compute_slot_create_args("coder", "x", 3600, None, None, None, None, None, None);
+        let args = build_compute_slot_create_args(
+            "coder", "x", 3600, None, None, None, None, None, None, None,
+        );
         assert!(args.get("cwd").is_none());
         assert!(args.get("model").is_none());
         assert!(args.get("model_profile").is_none());
+    }
+
+    #[test]
+    fn xjpcode_engine_hint_detector_is_readonly_only() {
+        assert!(engine_hint_is_xjpcode(Some("xjpcode")));
+        assert!(engine_hint_is_xjpcode(Some("xjpcode-readonly-worker")));
+        assert!(!engine_hint_is_xjpcode(Some("xjpcode-code-worker")));
+        assert!(!engine_hint_is_xjpcode(Some("claude-code")));
+        assert!(!engine_hint_is_xjpcode(None));
+    }
+
+    #[test]
+    fn xjpcode_sse_parser_extracts_artifact_and_final() {
+        let body = r#"
+data: {"type":"accepted","task_id":"t1","project_id":"p","mode":"read_only","at":"now"}
+
+data: {"type":"task_result_artifact","task_id":"t1","artifact":{"schema":"xjpcode.task-result-artifact.v1","task_id":"t1","project_id":"p","status":"done","mode":"read_only","summary":"ok","files_read":[],"files_changed":[],"commands_run":[],"diagnostics":[],"model_usage":null},"at":"now"}
+
+data: {"type":"final","task_id":"t1","status":"done","at":"now"}
+"#;
+        let frames = parse_xjpcode_sse_frames(body);
+        assert_eq!(frames.len(), 3);
+        let artifact = xjpcode_artifact_from_frames(&frames).expect("artifact frame");
+        assert_eq!(artifact["summary"], json!("ok"));
+        assert_eq!(
+            xjpcode_final_status_from_frames(&frames).as_deref(),
+            Some("done")
+        );
+        assert_eq!(xjpcode_result_status_for_artifact("done"), "completed");
+        assert_eq!(xjpcode_status_for_worker_settle("done"), "done");
+        assert_eq!(xjpcode_result_status_for_artifact("blocked"), "blocked");
+        assert_eq!(xjpcode_status_for_worker_settle("blocked"), "blocked");
+    }
+
+    #[test]
+    fn task_capability_grant_ids_follow_delegate_order() {
+        let metadata = DelegationMetadata {
+            read_scope: vec!["/repo".to_string(), "/docs".to_string()],
+            write_scope: vec!["/repo/src".to_string()],
+            ..Default::default()
+        };
+        let grants = vec![
+            "read-1".to_string(),
+            "read-2".to_string(),
+            "write-path".to_string(),
+            "write-task".to_string(),
+            "settle-task".to_string(),
+            "claim-task".to_string(),
+            "spawn-task".to_string(),
+        ];
+        assert_eq!(
+            task_write_grant_id(&metadata, &grants).as_deref(),
+            Some("write-task")
+        );
+        assert_eq!(
+            task_settle_grant_id(&metadata, &grants).as_deref(),
+            Some("settle-task")
+        );
+        assert_eq!(
+            task_claim_grant_id(&metadata, &grants).as_deref(),
+            Some("claim-task")
+        );
     }
 
     #[test]
@@ -4314,6 +4876,20 @@ mod tests {
             !board_task_references_source(&legacy_task, "legacy-source"),
             "hard cutover forbids parsing BoardTask description as control metadata"
         );
+    }
+
+    #[test]
+    fn duplicate_worker_source_reference_uses_task_contracts() {
+        let contract = TaskRuntimeContract {
+            parent_board_task_id: Some("parent-1".to_string()),
+            source_board_task_id: Some("source-1".to_string()),
+            write_scope: vec!["src/runtime.rs".to_string()],
+            ..Default::default()
+        };
+        assert!(task_contract_references_parent(&contract, "parent-1"));
+        assert!(!task_contract_references_parent(&contract, "parent-2"));
+        assert!(task_contract_references_source(&contract, "source-1"));
+        assert!(!task_contract_references_source(&contract, "source-2"));
     }
 
     #[test]

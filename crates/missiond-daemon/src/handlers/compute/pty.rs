@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use chrono::Utc;
-use missiond_mcp::tools::{ToolError, ToolResult};
+use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tracing::info;
@@ -18,6 +18,28 @@ use std::path::PathBuf;
 struct PTYSpawnArgs {
     #[serde(rename = "slotId")]
     slot_id: String,
+    #[serde(rename = "taskId", alias = "task_id", default)]
+    task_id: Option<String>,
+    #[serde(
+        rename = "grantId",
+        alias = "grant_id",
+        alias = "capabilityGrantId",
+        alias = "capability_grant_id",
+        default
+    )]
+    grant_id: Option<String>,
+    #[serde(rename = "subjectKind", alias = "subject_kind", default)]
+    subject_kind: Option<String>,
+    #[serde(rename = "subjectId", alias = "subject_id", default)]
+    subject_id: Option<String>,
+    #[serde(
+        rename = "operatorConfirm",
+        alias = "operator_confirm",
+        alias = "confirm",
+        default,
+        deserialize_with = "lenient::option_bool"
+    )]
+    operator_confirm: Option<bool>,
     #[serde(
         rename = "waitForIdle",
         default,
@@ -136,6 +158,11 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
         "mission_pty_spawn" => {
             let PTYSpawnArgs {
                 slot_id,
+                task_id,
+                grant_id,
+                subject_kind,
+                subject_id,
+                operator_confirm,
                 wait_for_idle,
                 timeout_secs,
                 auto_restart,
@@ -147,6 +174,129 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 .into_iter()
                 .find(|s| s.config.id == slot_id)
                 .ok_or_else(|| anyhow!("Slot not found: {}", slot_id))?;
+
+            if let Some(task_id) = task_id.as_deref() {
+                let subject_kind = subject_kind.as_deref().unwrap_or("worker");
+                let subject_id = subject_id.as_deref().unwrap_or(slot_id.as_str());
+                if let Err(err) = state
+                    .shared_memory
+                    .require_capability(crate::engine::shared_memory::CapabilityCheckRequest {
+                        grant_id,
+                        subject_kind: subject_kind.to_string(),
+                        subject_id: subject_id.to_string(),
+                        operation: "spawn".to_string(),
+                        scope_kind: "task".to_string(),
+                        scope_key: task_id.to_string(),
+                        task_id: Some(task_id.to_string()),
+                        allow_system_bypass: false,
+                        bypass_reason: None,
+                        details: json!({"source": "mission_pty_spawn", "slot_id": slot_id}),
+                    })
+                    .await
+                {
+                    return Ok(ToolResult::structured_error(control_plane_tool_error(
+                        err,
+                        "spawn worker PTYs through mission_task_delegate or pass an exact subject-bound spawn grant",
+                    )));
+                }
+                let contract = match state.shared_memory.task_runtime_contract(task_id).await {
+                    Ok(contract) => contract,
+                    Err(err) => {
+                        return Ok(ToolResult::structured_error(control_plane_tool_error(
+                            err,
+                            "backfill or create task_contracts before spawning a task-bound PTY",
+                        )));
+                    }
+                };
+                let contract_sandbox = contract
+                    .sandbox_profile
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_else(|| {
+                        if contract.write_scope.is_empty() {
+                            "read-only"
+                        } else {
+                            "workspace-write"
+                        }
+                    });
+                if matches!(
+                    contract_sandbox,
+                    "unsupported-write" | "danger-full-access" | "none" | "system-no-sandbox"
+                ) {
+                    return Ok(ToolResult::structured_error(
+                        ToolError::new(
+                            error_codes::SANDBOX_POLICY_UNSUPPORTED,
+                            format!(
+                                "mission_pty_spawn refused task {task_id}: sandbox profile `{contract_sandbox}` is not valid for an ordinary worker spawn",
+                            ),
+                        )
+                        .with_details(json!({
+                            "task_id": task_id,
+                            "slot_id": slot_id,
+                            "sandbox_profile": contract_sandbox,
+                            "source": "task_contracts"
+                        }))
+                        .with_suggestion(
+                            "use a task contract with an enforceable sandbox, or use operatorConfirm=true only for operator diagnostics",
+                        ),
+                    ));
+                }
+                if let Some(slot_sandbox) = slot
+                    .config
+                    .sandbox
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    if slot_sandbox != contract_sandbox {
+                        return Ok(ToolResult::structured_error(
+                            ToolError::new(
+                                error_codes::CAPABILITY_DENIED,
+                                "mission_pty_spawn slot sandbox does not match canonical task_contracts sandbox_profile",
+                            )
+                            .with_details(json!({
+                                "task_id": task_id,
+                                "slot_id": slot_id,
+                                "slot_sandbox": slot_sandbox,
+                                "contract_sandbox_profile": contract_sandbox
+                            }))
+                            .with_suggestion(
+                                "use mission_task_delegate/mission_compute_slot so the worker slot is created from task_contracts",
+                            ),
+                        ));
+                    }
+                }
+            } else if !operator_confirm.unwrap_or(false) {
+                return Ok(ToolResult::structured_error(
+                    ToolError::new(
+                        error_codes::CAPABILITY_DENIED,
+                        "mission_pty_spawn requires task_id with an exact spawn capability, or operatorConfirm=true for an operator-managed diagnostic spawn",
+                    )
+                    .with_details(json!({
+                        "operation": "spawn",
+                        "scope_kind": "task",
+                        "required": "task_id or operatorConfirm"
+                    }))
+                    .with_suggestion(
+                        "use mission_task_delegate for ordinary workers; pass operatorConfirm=true only for manual operator slot lifecycle actions",
+                    ),
+                ));
+            } else {
+                state
+                    .shared_memory
+                    .audit_capability_bypass(
+                        "operator",
+                        "mission_pty_spawn",
+                        "spawn",
+                        "task",
+                        "operator-confirmed-pty-spawn",
+                        "operator confirmed mission_pty_spawn without worker-bound spawn grant",
+                        json!({"slot_id": slot_id}),
+                    )
+                    .await
+                    .map_err(|e| anyhow!("capability audit error: {}", e))?;
+            }
 
             // Resolve target_project_root for project-bound CLI spawn
             // (intent-worker.lisp :: invariant project-root-spawn-cwd). For
@@ -582,6 +732,22 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
 
         _ => Err(anyhow!("Unknown pty tool: {name}")),
     }
+}
+
+fn control_plane_tool_error(err: anyhow::Error, fallback_suggestion: &str) -> ToolError {
+    if let Some(control) =
+        err.downcast_ref::<crate::engine::shared_memory::StructuredControlError>()
+    {
+        let mut tool_error = ToolError::new(control.code, control.message.clone())
+            .with_details(control.details.clone());
+        if let Some(suggestion) = &control.suggestion {
+            tool_error = tool_error.with_suggestion(suggestion.clone());
+        } else {
+            tool_error = tool_error.with_suggestion(fallback_suggestion);
+        }
+        return tool_error;
+    }
+    ToolError::new(error_codes::DB_ERROR, err.to_string()).with_suggestion(fallback_suggestion)
 }
 
 fn slot_project_root(state: &AppState, slot_id: &str) -> Option<String> {

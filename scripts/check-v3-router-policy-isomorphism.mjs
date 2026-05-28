@@ -211,6 +211,8 @@ function checkFiles(root, files) {
     'send_with_timeout',
     'router_chat_append_messages',
     'recommended_model_for_task_class',
+    'ROUTER_EXPERIMENTS_ENV',
+    'optional_feature_enabled',
     'model_route_outcomes',
     '"route_decision"',
     'model_route_outcomes" } else { "compiled_policy"',
@@ -652,7 +654,7 @@ Unknown router_chat tool
 	router_config.router_chat_idle_timeout()
 	router_config.router_chat_retry_initial_backoff() router_config.router_chat_retry_max_backoff() router_config.router_chat_retry_max_attempts retry_diagnostics is_router_chat_transient_error next_router_chat_retry_delay
 	router_chat_get_or_create router_chat_get_summary router_chat_load_active_history
-	kb_list list_board_tasks send_with_timeout router_chat_append_messages recommended_model_for_task_class model_route_outcomes "route_decision" model_route_outcomes" } else { "compiled_policy" finish_reason context_budget
+	kb_list list_board_tasks send_with_timeout router_chat_append_messages recommended_model_for_task_class ROUTER_EXPERIMENTS_ENV optional_feature_enabled model_route_outcomes "route_decision" model_route_outcomes" } else { "compiled_policy" finish_reason context_budget
 	`);
 
   writeFixture(root, DEFAULT_FILES.files, `

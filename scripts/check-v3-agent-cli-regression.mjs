@@ -158,7 +158,7 @@ function main() {
       'unbound_codex_rollout_summary_for_task',
       'pre-send-codex-rollout-recovery',
       'send-timeout-durable-rollout-recovery',
-      'implicit_jarvis_readonly_interaction',
+      'task_contracts completion_materialization_policy is not autopilot_readonly_ok',
     ]);
     requireAll(diagnostics, FILES.frontendBlueprint, sources.frontendBlueprint, [
       'jarvis-intent-draft',

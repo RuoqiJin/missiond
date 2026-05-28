@@ -184,6 +184,7 @@ export class PTYManager {
       await this.toolCaller('mission_pty_spawn', {
         slotId: options.slotId,
         autoRestart: options.autoRestart ?? false,
+        operatorConfirm: true,
       });
     } else {
       const response = await fetch(`${this.httpUrl}/pty/spawn`, {
@@ -591,6 +592,7 @@ export class MissionControl extends TypedEventEmitter {
     const result = await this.callTool('mission_pty_spawn', {
       slotId,
       autoRestart: options?.autoRestart ?? false,
+      operatorConfirm: true,
     });
     return this.parseToolResult<PTYSessionInfo>(result);
   }

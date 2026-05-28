@@ -78,8 +78,9 @@
       :backend ".missiond/xjpcode-app-blueprint.lisp"
       :status project-ssot-owned
       :checks ["node scripts/check-xjpcode-ssot-complete.mjs --json"
-               "node scripts/check-xjpcode-code-isomorphism.mjs"]
-      :missiond-role "registered devtool; ratatui TUI Rust CLI agent"
+               "node scripts/check-xjpcode-code-isomorphism.mjs"
+               "node scripts/check-xjpcode-portable-worker-runtime.mjs --json"]
+      :missiond-role "registered devtool and portable agent runtime candidate; read-only MissionD WorkOrder worker over /worker/v1/work-orders, with write lane gated by accepted shard + write lease"
       :surface project-registry)
     (project :id neural-codegen
       :kind rust-multi-crate

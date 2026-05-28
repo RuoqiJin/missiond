@@ -190,7 +190,31 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
         }
     };
     let objective = args.get("objective").and_then(|v| v.as_str());
+    let requested_slot_id = string_arg(args, &["slot_id", "slotId"]).map(str::to_string);
+    if let Some(slot_id) = requested_slot_id.as_deref() {
+        let valid = slot_id.starts_with("slot-dyn-")
+            && slot_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-');
+        if !valid {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::INVALID_PARAM,
+                    "mission_compute_slot(create) slot_id must be a safe slot-dyn-* identifier",
+                )
+                .with_details(json!({
+                    "slot_id": slot_id,
+                    "required_prefix": "slot-dyn-"
+                })),
+            ));
+        }
+    }
+    let slot_id = requested_slot_id.unwrap_or_else(|| {
+        let short_id = &uuid::Uuid::new_v4().to_string()[..8];
+        format!("slot-dyn-{}", short_id)
+    });
     let task_id = string_arg(args, &["task_id", "taskId"]).map(str::to_string);
+    let mut task_contract_sandbox_profile: Option<String> = None;
     if let Some(task_id) = task_id.as_deref() {
         let grant_id = string_arg(
             args,
@@ -209,8 +233,8 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
                 .and_then(|values| values.iter().rev().find_map(Value::as_str))
                 .map(str::to_string)
         });
-        let subject_kind = string_arg(args, &["subject_kind", "subjectKind"]).unwrap_or("task");
-        let subject_id = string_arg(args, &["subject_id", "subjectId"]).unwrap_or(task_id);
+        let subject_kind = string_arg(args, &["subject_kind", "subjectKind"]).unwrap_or("worker");
+        let subject_id = string_arg(args, &["subject_id", "subjectId"]).unwrap_or(&slot_id);
         if let Err(err) = state
             .shared_memory
             .require_capability(CapabilityCheckRequest {
@@ -229,9 +253,74 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
         {
             return Ok(ToolResult::structured_error(control_plane_tool_error(
                 err,
-                "spawn dynamic workers through mission_task_delegate so the BoardTask carries active spawn capability and sandbox metadata",
+                "spawn dynamic workers through mission_task_delegate so the worker slot carries an active spawn capability and sandbox metadata",
             )));
         }
+        let contract = match state.shared_memory.task_runtime_contract(task_id).await {
+            Ok(contract) => contract,
+            Err(err) => {
+                return Ok(ToolResult::structured_error(control_plane_tool_error(
+                    err,
+                    "backfill or create a canonical task_contracts row before spawning a worker",
+                )));
+            }
+        };
+        let derived_sandbox = contract
+            .sandbox_profile
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| {
+                if contract.write_scope.is_empty() {
+                    "read-only"
+                } else {
+                    "workspace-write"
+                }
+            });
+        if matches!(
+            derived_sandbox,
+            "unsupported-write" | "danger-full-access" | "none" | "system-no-sandbox"
+        ) {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::SANDBOX_POLICY_UNSUPPORTED,
+                    format!(
+                        "mission_compute_slot(create) refused task {task_id}: sandbox profile `{derived_sandbox}` is not valid for an ordinary worker spawn",
+                    ),
+                )
+                .with_details(json!({
+                    "task_id": task_id,
+                    "sandbox_profile": derived_sandbox,
+                    "source": "task_contracts",
+                    "ordinary_worker": true
+                }))
+                .with_suggestion(
+                    "use mission_task_delegate to create a task with an enforceable worker sandbox, or use confirm=true only for operator diagnostics",
+                ),
+            ));
+        }
+        if let Some(explicit_sandbox) =
+            string_arg(args, &["sandbox", "sandbox_profile", "sandboxProfile"])
+        {
+            if explicit_sandbox != derived_sandbox {
+                return Ok(ToolResult::structured_error(
+                    ToolError::new(
+                        error_codes::CAPABILITY_DENIED,
+                        "mission_compute_slot(create) sandbox override does not match canonical task_contracts sandbox_profile",
+                    )
+                    .with_details(json!({
+                        "task_id": task_id,
+                        "requested_sandbox": explicit_sandbox,
+                        "contract_sandbox_profile": derived_sandbox,
+                        "required": "sandbox_profile from task_contracts"
+                    }))
+                    .with_suggestion(
+                        "do not pass a sandbox override for task-bound workers; let MissionD derive it from task_contracts",
+                    ),
+                ));
+            }
+        }
+        task_contract_sandbox_profile = Some(derived_sandbox.to_string());
     } else if !bool_arg(
         args,
         &[
@@ -247,7 +336,7 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
         return Ok(ToolResult::structured_error(
             ToolError::new(
                 error_codes::CAPABILITY_DENIED,
-                "mission_compute_slot(create) requires task_id with active spawn capability, or an explicit operator confirm bypass",
+                "mission_compute_slot(create) requires task_id with an active worker-bound spawn capability, or an explicit operator confirm bypass",
             )
             .with_details(json!({
                 "operation": "spawn",
@@ -267,7 +356,7 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
                 "spawn",
                 "task",
                 "operator-confirmed-dynamic-slot",
-                "operator confirmed mission_compute_slot(create) without task-bound spawn grant",
+                "operator confirmed mission_compute_slot(create) without worker-bound spawn grant",
                 json!({
                     "template": template_name,
                     "objective": objective,
@@ -345,10 +434,6 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
         .get("suppress_initial_prompt")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-
-    // Generate slot ID
-    let short_id = &uuid::Uuid::new_v4().to_string()[..8];
-    let slot_id = format!("slot-dyn-{}", short_id);
 
     // Resolve canonical_cwd to a registered project root (per
     // intent-worker.lisp :: invariant project-root-spawn-cwd). For
@@ -462,10 +547,11 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
             .get("search_enabled")
             .or_else(|| args.get("searchEnabled"))
             .and_then(|v| v.as_bool()),
-        sandbox: args
-            .get("sandbox")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
+        sandbox: task_contract_sandbox_profile.clone().or_else(|| {
+            args.get("sandbox")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        }),
         approval_policy: args
             .get("approval_policy")
             .or_else(|| args.get("approvalPolicy"))
@@ -630,6 +716,7 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
             "slot_id": slot_id,
             "template": template_name,
             "status_detail": "spawn_pending",
+            "sandbox_profile": task_contract_sandbox_profile,
         }),
     ))
 }

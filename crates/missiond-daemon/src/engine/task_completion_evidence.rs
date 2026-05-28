@@ -67,10 +67,10 @@ impl TaskCompletionEvidenceWriter {
         input: TaskCompletionEvidenceInput,
     ) -> Result<TaskCompletionEvidenceResult> {
         let task_id = input.task_id.clone();
-        let payload = input.into_payload();
+        let payload = input.into_task_result_put_args();
         let response = self
             .shared_memory
-            .handle_action(&payload)
+            .task_result_put_typed(&payload)
             .await
             .map_err(|err| anyhow!("{EVIDENCE_WRITE_FAILED}: task_id={task_id}: {err}"))?;
         let artifact_hash = response
@@ -103,7 +103,7 @@ impl TaskCompletionEvidenceWriter {
 }
 
 impl TaskCompletionEvidenceInput {
-    fn into_payload(self) -> Value {
+    fn into_task_result_put_args(self) -> Value {
         let raw_evidence = self.raw_evidence.unwrap_or_else(|| {
             json!({
                 "kind": "task_completion_evidence_input",
@@ -117,7 +117,6 @@ impl TaskCompletionEvidenceInput {
             }])
         });
         json!({
-            "action": "task_result_put",
             "task_id": self.task_id,
             "project_id": self.project_id,
             "slot_id": self.slot_id,

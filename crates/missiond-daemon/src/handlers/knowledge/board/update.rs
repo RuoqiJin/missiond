@@ -312,8 +312,7 @@ async fn handle_batch_done_settle(
         };
         match state
             .shared_memory
-            .handle_action(&serde_json::json!({
-                "action": "worker_settle",
+            .settle_worker_typed(serde_json::json!({
                 "task_id": id,
                 "status": "done",
                 "artifact_hash": artifact_hash,
@@ -361,8 +360,7 @@ async fn settle_done_via_shared_memory(
     }
     match state
         .shared_memory
-        .handle_action(&serde_json::json!({
-            "action": "worker_settle",
+        .settle_worker_typed(serde_json::json!({
             "task_id": task_id,
             "status": "done",
             "artifact_hash": artifact_hash,

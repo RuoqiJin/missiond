@@ -1,3 +1,4 @@
+use crate::engine::shared_memory::ClaimRequest;
 use crate::state::AppState;
 use anyhow::Result;
 use chrono::{SecondsFormat, Utc};
@@ -19,6 +20,36 @@ pub(super) use super::claim_release::action_release;
 
 pub(super) const DEFAULT_LEASE_SECS: i64 = 1800;
 pub(super) const MAX_LEASE_SECS: i64 = 24 * 3600;
+
+fn optional_str<'a>(args: &'a Value, snake: &str, camel: &str) -> Option<&'a str> {
+    args.get(snake)
+        .or_else(|| args.get(camel))
+        .and_then(Value::as_str)
+}
+
+fn bool_arg(args: &Value, key: &str) -> bool {
+    args.get(key).is_some_and(|value| {
+        value.as_bool().unwrap_or_else(|| {
+            value.as_str().is_some_and(|text| {
+                matches!(
+                    text.trim().to_ascii_lowercase().as_str(),
+                    "true" | "1" | "yes" | "on"
+                )
+            })
+        })
+    })
+}
+
+fn claim_bypass_allowed(args: &Value) -> bool {
+    let subject_kind = optional_str(args, "subject_kind", "subjectKind").unwrap_or("");
+    matches!(subject_kind, "system" | "daemon")
+        || (subject_kind == "operator"
+            && (bool_arg(args, "confirm")
+                || bool_arg(args, "operator_confirm")
+                || bool_arg(args, "operatorConfirm")
+                || bool_arg(args, "operator_confirmed")
+                || bool_arg(args, "operatorConfirmed")))
+}
 
 pub(super) fn scopes_overlap(a: &str, b: &str) -> bool {
     scopes_overlap_pure(a, b)
@@ -66,18 +97,29 @@ pub(super) async fn action_claim(state: &AppState, args: &Value) -> Result<ToolR
 
     let db_claim = state
         .shared_memory
-        .handle_action(&json!({
-            "action": "claim",
-            "task_id": execution_id,
-            "owner_id": claimer,
-            "scope_kind": "owned-files",
-            "scope_key": scope,
-            "lease_secs": lease_secs,
-            "metadata": {
+        .claim_lease_typed(ClaimRequest {
+            project_id: None,
+            task_id: Some(execution_id.to_string()),
+            owner_id: claimer.to_string(),
+            grant_id: optional_str(args, "grant_id", "grantId")
+                .or_else(|| optional_str(args, "capability_grant_id", "capabilityGrantId"))
+                .map(str::to_string),
+            subject_kind: optional_str(args, "subject_kind", "subjectKind")
+                .unwrap_or("worker")
+                .to_string(),
+            subject_id: optional_str(args, "subject_id", "subjectId")
+                .unwrap_or(claimer)
+                .to_string(),
+            scope_kind: "owned-files".to_string(),
+            scope_key: scope.to_string(),
+            lease_secs,
+            metadata: json!({
                 "source": "mission_execution.claim",
                 "phase": phase
-            }
-        }))
+            }),
+            allow_system_bypass: claim_bypass_allowed(args),
+            bypass_reason: Some("mission_execution claim system/operator authority".to_string()),
+        })
         .await?;
     if db_claim.get("ok").and_then(Value::as_bool) == Some(false) {
         return Ok(ToolResult::structured_error(

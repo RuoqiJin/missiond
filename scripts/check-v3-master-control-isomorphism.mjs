@@ -187,10 +187,16 @@ function check(s, diagnostics) {
     'bind_conversation_to_task',
     'set_conversation_task_id',
     'resolve_task_target_project_root',
-    'extract_task_metadata_field',
+    '.task_runtime_contract(task.id.as_str())',
+    'legacy BoardTask.description fallback is disabled',
     'Autopilot: retargeting persistent workstation slot to task project root',
     'register_runtime_slot(config)',
     'absolutize_config_path',
+  ]);
+  rejectAll(diagnostics, FILES.flowEngine, s.flowEngine, [
+    'extract_task_metadata_field',
+    '## Dispatch metadata',
+    '## Swarm metadata',
   ]);
   requireAll(diagnostics, FILES.blueprint, s.blueprint, [
     '(worker codex-master-control',
@@ -476,6 +482,12 @@ function check(s, diagnostics) {
 function requireAll(diagnostics, file, source, needles) {
   for (const needle of needles) {
     if (!source.includes(needle)) diagnostics.push(`${file}: missing required text: ${needle}`);
+  }
+}
+
+function rejectAll(diagnostics, file, source, needles) {
+  for (const needle of needles) {
+    if (source.includes(needle)) diagnostics.push(`${file}: forbidden text present: ${needle}`);
   }
 }
 

@@ -566,37 +566,39 @@ pub(super) async fn handle_chat(state: &AppState, args: Value) -> Result<ToolRes
     } else {
         "router-http"
     };
-    let _ = state
-        .storage()
-        .shared_memory
-        .handle_action(&serde_json::json!({
-            "action": "model_route_outcome_put",
-            "project_id": params.get("project_id").or_else(|| params.get("projectId")).and_then(|v| v.as_str()),
-            "task_id": task_id.as_deref(),
-            "provider": provider,
-            "model": resp_model,
-            "task_class": route_task_class.as_str(),
-            "latency_ms": latency_ms,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "total_tokens": total_tokens,
-            "outcome": finish_reason,
-            "metadata": {
-                "has_files": has_files,
-                "search": search_enabled,
-                "retry_count": retry_diagnostics.len(),
-                "context_mode": context_mode,
-                "route_decision": {
+    if crate::feature_gates::optional_feature_enabled(crate::feature_gates::ROUTER_EXPERIMENTS_ENV)
+    {
+        let _ = state
+            .storage()
+            .shared_memory
+            .model_route_outcome_put_typed(&serde_json::json!({
+                "project_id": params.get("project_id").or_else(|| params.get("projectId")).and_then(|v| v.as_str()),
+                "task_id": task_id.as_deref(),
+                "provider": provider,
+                "model": resp_model,
+                "task_class": route_task_class.as_str(),
+                "latency_ms": latency_ms,
+                "prompt_tokens": input_tokens,
+                "completion_tokens": output_tokens,
+                "total_tokens": total_tokens,
+                "outcome": {
+                    "finish_reason": finish_reason,
+                    "has_files": has_files,
+                    "search": search_enabled,
+                    "retry_count": retry_diagnostics.len(),
+                    "context_mode": context_mode
+                },
+                "decision": {
                     "source": if route_recommendation.is_some() { "model_route_outcomes" } else { "compiled_policy" },
                     "recommendation": route_recommendation.clone()
                 }
-            }
-        }))
-        .await
-        .map_err(|err| {
-            warn!(error = %err, "mission_router_chat failed to record model route outcome");
-            err
-        });
+            }))
+            .await
+            .map_err(|err| {
+                warn!(error = %err, "mission_router_chat failed to record model route outcome");
+                err
+            });
+    }
 
     // When files are attached, output truncation is unacceptable — return error with partial content
     if has_files && (finish_reason == "length" || finish_reason == "max_tokens") {

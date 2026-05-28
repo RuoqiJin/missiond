@@ -46,7 +46,7 @@ impl<'a> ControlPlaneKernel<'a> {
         &self,
         input: TaskCompletionEvidenceInput,
     ) -> Result<crate::engine::task_completion_evidence::TaskCompletionEvidenceResult> {
-        // Control-plane ABI anchor: shared memory action `"action": "task_result_put"`.
+        // Control-plane ABI anchor: typed task-result artifact command.
         TaskCompletionEvidenceWriter::new(self.state.shared_memory.clone())
             .write_bounded(input)
             .await
@@ -87,12 +87,17 @@ impl<'a> ControlPlaneKernel<'a> {
                 project_id: None,
                 task_id: Some(task_id.to_string()),
                 owner_id: owner_id.to_string(),
+                grant_id: None,
+                subject_kind: "system".to_string(),
+                subject_id: "control-plane-kernel".to_string(),
                 scope_kind: scope_kind.to_string(),
                 scope_key: scope_key.to_string(),
                 lease_secs: 1800,
                 metadata: json!({
                     "source": "control-plane-kernel"
                 }),
+                allow_system_bypass: true,
+                bypass_reason: Some("internal control-plane kernel lease authority".to_string()),
             })
             .await
     }
@@ -169,28 +174,21 @@ impl<'a> ControlPlaneKernel<'a> {
             .or_else(|| task.project.clone())
             .unwrap_or_else(|| "missiond".to_string());
         let task_id = input.task_id.clone();
-        let runtime_metadata = if task
-            .runtime_metadata
-            .as_object()
-            .is_some_and(|obj| !obj.is_empty())
-        {
-            task.runtime_metadata.clone()
-        } else {
-            json!({
-                "schema": "missiond.runtime-task-metadata.v1",
-                "source": "control-plane-kernel",
-                "task_contract_id": format!("board-task:{task_id}"),
-                "dispatch_metadata": {
-                    "project_id": project_id,
-                    "task_id": task_id,
-                    "read_scope": [],
-                    "write_scope": [],
-                    "must_not_touch": [],
-                    "control_state": "task_contracts"
-                },
-                "sandbox_profile": "system-no-sandbox"
-            })
-        };
+        let runtime_metadata = json!({
+            "schema": "missiond.runtime-task-metadata.v1",
+            "source": "control-plane-kernel",
+            "task_contract_id": format!("board-task:{task_id}"),
+            "dispatch_metadata": {
+                "project_id": project_id,
+                "task_id": task_id,
+                "read_scope": [],
+                "write_scope": [],
+                "must_not_touch": [],
+                "control_state": "task_contracts",
+                "authority": "system"
+            },
+            "sandbox_profile": "system-no-sandbox"
+        });
         self.state
             .shared_memory
             .upsert_task_contract_from_metadata(

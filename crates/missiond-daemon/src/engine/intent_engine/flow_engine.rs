@@ -1042,6 +1042,29 @@ async fn resolve_task_target_project_root(
     state: &AppState,
     task: &missiond_core::types::BoardTask,
 ) -> Option<String> {
+    match state
+        .shared_memory
+        .task_runtime_contract(task.id.as_str())
+        .await
+    {
+        Ok(contract) => {
+            if let Some(project_root) = contract
+                .project_root
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                return Some(project_root.to_string());
+            }
+        }
+        Err(err) => {
+            warn!(
+                task_id = %task.id,
+                error = %err,
+                "Flow engine: task_contracts project root unavailable; legacy BoardTask.description fallback is disabled"
+            );
+        }
+    }
     if let Some(project_id) = task.project.as_deref() {
         match crate::slot_orchestrator::project_root::resolve_target_project_root(
             Some(project_id),
@@ -1061,29 +1084,6 @@ async fn resolve_task_target_project_root(
                     error = %err,
                     "Autopilot: task project could not resolve to project root"
                 );
-            }
-        }
-    }
-    extract_task_metadata_field(&task.description, "project_root")
-}
-
-fn extract_task_metadata_field(description: &str, field: &str) -> Option<String> {
-    let needle = format!("- {}:", field);
-    let mut in_metadata = false;
-    for line in description.lines() {
-        let trimmed = line.trim_start();
-        if let Some(rest) = trimmed.strip_prefix("## ") {
-            let lowered = rest.to_ascii_lowercase();
-            in_metadata =
-                lowered.starts_with("dispatch metadata") || lowered.starts_with("swarm metadata");
-            continue;
-        }
-        if in_metadata {
-            if let Some(value) = trimmed.strip_prefix(needle.as_str()) {
-                let value = value.trim().trim_end_matches(',').trim();
-                if !value.is_empty() {
-                    return Some(value.to_string());
-                }
             }
         }
     }

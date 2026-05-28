@@ -133,9 +133,9 @@ impl CodexReplayService {
         let id = args
             .campaign_id
             .unwrap_or_else(|| format!("codex-replay-{}", Uuid::new_v4()));
-        let project_root = args.project_root.unwrap_or_else(|| {
-            current_dir_string().unwrap_or_else(|| "/Users/jinchen/Projects/missiond".to_string())
-        });
+        let project_root = args
+            .project_root
+            .unwrap_or_else(default_codex_replay_project_root);
         let interval_seconds = args.interval_seconds.unwrap_or(0).clamp(0, 86_400);
         let max_cycles = args.max_cycles.map(|v| v.max(1));
 
@@ -1525,6 +1525,19 @@ fn codex_binary_candidates() -> Vec<String> {
         candidates.push(format!("{home}/.cargo/bin/codex"));
     }
     candidates
+}
+
+fn default_codex_replay_project_root() -> String {
+    std::env::var("MISSIOND_PROJECT_ROOT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            std::env::var("MISSIOND_ORCHESTRATOR_ROOT")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .or_else(current_dir_string)
+        .unwrap_or_else(|| ".".to_string())
 }
 
 fn current_dir_string() -> Option<String> {

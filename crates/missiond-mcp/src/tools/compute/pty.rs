@@ -15,6 +15,11 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "required": ["slotId"],
                 "properties": {
                     "slotId": {"type": "string"},
+                    "taskId": {"type": "string", "description": "Task-bound spawn scope; requires exact spawn capability when present"},
+                    "grantId": {"type": "string", "description": "Exact subject-bound spawn capability grant id"},
+                    "subjectKind": {"type": "string", "description": "Capability subject kind, default worker"},
+                    "subjectId": {"type": "string", "description": "Capability subject id, default slotId"},
+                    "operatorConfirm": {"type": "boolean", "description": "Required for operator-managed diagnostic spawn without taskId/grant"},
                     "waitForIdle": {"type": "boolean", "description": "等待 Claude 就绪", "default": false},
                     "timeoutSecs": {"type": "number", "description": "Idle 超时秒数(waitForIdle=true 时生效)", "default": 60},
                     "autoRestart": {"type": "boolean", "description": "崩溃后自动重启"},

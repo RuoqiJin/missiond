@@ -457,6 +457,44 @@ fn deployment_event_board_task_input(
         correlation_id.as_deref().unwrap_or(""),
         trace_id.unwrap_or(""),
     );
+    let runtime_metadata = serde_json::json!({
+        "schema": "missiond.board-task-runtime-metadata.v1",
+        "source": "eventbridge",
+        "control_state": "task_contracts",
+        "dispatch_metadata": {
+            "task_class": "deploy-ops",
+            "pool_hint": "claude-code-deploy-ops",
+            "engine_hint": "claude-code",
+            "eventbridge_service_id": service_id,
+            "event_id": event_id,
+            "event_kind": event_kind,
+            "deploy_event_id": deploy_event_id,
+            "project_id": project_id,
+            "subject": subject,
+            "correlation_id": correlation_id,
+            "trace_id": trace_id,
+            "output_contract": "return Findings / Evidence / Recommendations / Verification with structured smoke/provenance evidence",
+            "acceptance": "deploy-center provenance queried | deploy event row inspected | project deployment facts and skill evidence checked before action | xjp_build_wait/xjp_deploy_watch or deploy-center event wait used for CI/build waiting | rollback/redeploy proposal uses deploy-center policy or explicit Board approval"
+        },
+        "read_scope": [
+            "deploy-center provenance",
+            "deploy_events",
+            "deploy_logs",
+            "MissionD EventBridge envelope",
+            "mission_infra_query skill_evidence",
+            "project deployment SSOT/workflow evidence"
+        ],
+        "write_scope": [],
+        "must_not_touch": [
+            "production DNS",
+            "Cloudflare",
+            "secrets",
+            "direct production mutation"
+        ],
+        "capability_grant_ids": [],
+        "sandbox_profile": "read-only",
+        "projection_policy": "description_notes_are_projection_only"
+    });
     Some(CreateBoardTaskInput {
         title: format!("Deploy event response: {event_kind} ({project_id})"),
         description: Some(description),
@@ -467,6 +505,7 @@ fn deployment_event_board_task_input(
         hidden: Some(false),
         dedupe_key: Some(format!("deployment-event-response:{service_id}:{event_id}")),
         context_intent: Some("deploy-ops".to_string()),
+        runtime_metadata: Some(runtime_metadata),
         ..Default::default()
     })
 }
@@ -522,6 +561,41 @@ fn router_event_board_task_input(
         "Router EventBridge created this task from a durable usage/anomaly event.\n\nService: {service_id}\nEvent: {event_kind}\nEvent ID: {event_id}\nProject: {project_id}\nProvider: {provider}\nModel: {model}\nTrace: {}\n\nSummary:\n{summary}\n\n## Dispatch metadata\n- task_class: router-ops\n- pool_hint: claude-code-default\n- engine_hint: claude-code\n- read_scope: router usage_logs, router event envelope, provider/channel policy, MissionD EventBridge timeline\n- write_scope: \n- must_not_touch: production DNS, secrets, provider credentials, deploy mutation\n- acceptance: router usage burst inspected | provider/model attribution verified | remediation or quota/auth follow-up proposed | no hidden translation/background LLM retry loop\n- output_contract: return Findings / Evidence / Recommendations / Verification with event_id and provider/model attribution\n\nNext checks:\n1. Query router usage logs around the event time and provider/model.\n2. Determine whether this is expected user workload, runaway background worker, auth/quota failure, or provider outage.\n3. If credentials or provider quota are implicated, create a Decision Inbox item or deploy-center/secret-store follow-up; do not mutate secrets directly.",
         trace_id.unwrap_or(""),
     );
+    let runtime_metadata = serde_json::json!({
+        "schema": "missiond.board-task-runtime-metadata.v1",
+        "source": "eventbridge",
+        "control_state": "task_contracts",
+        "dispatch_metadata": {
+            "task_class": "router-ops",
+            "pool_hint": "claude-code-default",
+            "engine_hint": "claude-code",
+            "eventbridge_service_id": service_id,
+            "event_id": event_id,
+            "event_kind": event_kind,
+            "project_id": project_id,
+            "provider": provider,
+            "model": model,
+            "trace_id": trace_id,
+            "output_contract": "return Findings / Evidence / Recommendations / Verification with event_id and provider/model attribution",
+            "acceptance": "router usage burst inspected | provider/model attribution verified | remediation or quota/auth follow-up proposed | no hidden translation/background LLM retry loop"
+        },
+        "read_scope": [
+            "router usage_logs",
+            "router event envelope",
+            "provider/channel policy",
+            "MissionD EventBridge timeline"
+        ],
+        "write_scope": [],
+        "must_not_touch": [
+            "production DNS",
+            "secrets",
+            "provider credentials",
+            "deploy mutation"
+        ],
+        "capability_grant_ids": [],
+        "sandbox_profile": "read-only",
+        "projection_policy": "description_notes_are_projection_only"
+    });
     Some(CreateBoardTaskInput {
         title: format!("Router event response: {event_kind} ({provider}/{model})"),
         description: Some(description),
@@ -532,6 +606,7 @@ fn router_event_board_task_input(
         hidden: Some(false),
         dedupe_key: Some(format!("router-event-response:{service_id}:{event_id}")),
         context_intent: Some("router-ops".to_string()),
+        runtime_metadata: Some(runtime_metadata),
         ..Default::default()
     })
 }
@@ -1278,7 +1353,7 @@ mod tests {
         .expect("actionable deploy event should create task input");
         assert_eq!(input.context_intent.as_deref(), Some("deploy-ops"));
         assert_eq!(input.category.as_deref(), Some("ops"));
-        let description = input.description.expect("description");
+        let description = input.description.as_deref().expect("description");
         for expected in [
             "## Dispatch metadata",
             "- task_class: deploy-ops",
@@ -1291,6 +1366,83 @@ mod tests {
                 "missing {expected}: {description}"
             );
         }
+        let runtime_metadata = input.runtime_metadata.expect("runtime metadata");
+        assert_eq!(
+            runtime_metadata
+                .get("control_state")
+                .and_then(Value::as_str),
+            Some("task_contracts")
+        );
+        assert_eq!(
+            runtime_metadata
+                .get("dispatch_metadata")
+                .and_then(|v| v.get("task_class"))
+                .and_then(Value::as_str),
+            Some("deploy-ops")
+        );
+        assert_eq!(
+            runtime_metadata
+                .get("dispatch_metadata")
+                .and_then(|v| v.get("pool_hint"))
+                .and_then(Value::as_str),
+            Some("claude-code-deploy-ops")
+        );
+        assert_eq!(
+            runtime_metadata
+                .get("sandbox_profile")
+                .and_then(Value::as_str),
+            Some("read-only")
+        );
+        assert!(
+            runtime_metadata
+                .get("read_scope")
+                .and_then(Value::as_array)
+                .is_some_and(|items| !items.is_empty()),
+            "EventBridge task contracts must carry typed read_scope"
+        );
+    }
+
+    #[test]
+    fn router_event_response_task_declares_runtime_contract() {
+        let payload = serde_json::json!({
+            "project_id": "missiond",
+            "payload": {
+                "provider": "anthropic",
+                "model": "claude-sonnet"
+            }
+        })
+        .to_string();
+        let input = router_event_board_task_input(
+            "router",
+            "evt-router-1",
+            "usage_burst",
+            "usage anomaly",
+            Some("trace-router"),
+            &payload,
+        )
+        .expect("actionable router event should create task input");
+        assert_eq!(input.context_intent.as_deref(), Some("router-ops"));
+        let runtime_metadata = input.runtime_metadata.expect("runtime metadata");
+        assert_eq!(
+            runtime_metadata
+                .get("dispatch_metadata")
+                .and_then(|v| v.get("task_class"))
+                .and_then(Value::as_str),
+            Some("router-ops")
+        );
+        assert_eq!(
+            runtime_metadata
+                .get("dispatch_metadata")
+                .and_then(|v| v.get("pool_hint"))
+                .and_then(Value::as_str),
+            Some("claude-code-default")
+        );
+        assert_eq!(
+            runtime_metadata
+                .get("sandbox_profile")
+                .and_then(Value::as_str),
+            Some("read-only")
+        );
     }
 
     #[test]

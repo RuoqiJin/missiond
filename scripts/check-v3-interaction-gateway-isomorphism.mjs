@@ -238,17 +238,29 @@ requireIncludes('boardMetadataMigration', [
 ]);
 
 const autopilotText = requireIncludes('autopilot', [
-  'fn extract_board_task_dispatch_metadata_field',
   'json_metadata_value_to_string',
-  'extract_board_task_dispatch_metadata_field(task, "engine_hint")',
-  'extract_board_task_dispatch_metadata_field(task, "pool_hint")',
-  'task.runtime_metadata',
+  '.task_runtime_contract(task.id.as_str())',
+  'task_contract_workstation_class(task, runtime_contract)',
+  'let engine_hint = runtime_contract.engine_hint.clone();',
+  'let pool_hint = runtime_contract.pool_hint.clone();',
+  'legacy BoardTask.runtime_metadata fallback is disabled',
 ]);
 if (autopilotText.includes('extract_dispatch_metadata_field(&task.description, field)')) {
   diagnostics.push({
     file: files.autopilot,
     message: 'runtime control must not parse BoardTask.description for dispatch metadata',
   });
+}
+for (const forbidden of [
+  'extract_board_task_dispatch_metadata_field(task, "engine_hint")',
+  'extract_board_task_dispatch_metadata_field(task, "pool_hint")',
+]) {
+  if (autopilotText.includes(forbidden)) {
+    diagnostics.push({
+      file: files.autopilot,
+      message: `runtime dispatch must read canonical task_contracts, not BoardTask.runtime_metadata projection (${forbidden})`,
+    });
+  }
 }
 
 requireIncludes('boardFrontendTypes', [

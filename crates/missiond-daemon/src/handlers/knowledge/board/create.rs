@@ -105,6 +105,14 @@ async fn ensure_board_create_capabilities(
     if !existing_grants.is_empty() {
         return Ok(None);
     }
+    let Some(subject_id) = task
+        .assignee
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
     let read_scope = metadata_string_list(metadata.get("read_scope"));
     let write_scope = metadata_string_list(metadata.get("write_scope"));
     let must_not_touch = metadata_string_list(metadata.get("must_not_touch"));
@@ -113,8 +121,8 @@ async fn ensure_board_create_capabilities(
         .grant_task_capabilities(
             task.project.as_deref(),
             task.id.as_str(),
-            "task",
-            task.id.as_str(),
+            "worker",
+            subject_id,
             &read_scope,
             &write_scope,
             &must_not_touch,

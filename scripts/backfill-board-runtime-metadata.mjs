@@ -9,9 +9,10 @@ import { spawnSync } from 'node:child_process';
 const usage = `Usage:
   node scripts/backfill-board-runtime-metadata.mjs [--apply] [--limit N]
 
-Preview or backfill BoardTask runtime_metadata for the hard-cut control plane.
+Preview or backfill BoardTask runtime_metadata + task_contracts for the hard-cut control plane.
 Runtime code must not parse BoardTask.description; this migration tool may read
-legacy descriptions once and materialize typed runtime_metadata + grants.
+legacy descriptions once and materialize typed runtime_metadata, task_contracts,
+and grants.
 `;
 
 const opts = parseArgs(process.argv.slice(2));
@@ -23,10 +24,11 @@ if (!opts.apply) {
     schema: 'missiond.board-runtime-metadata-backfill.preview.v1',
     apply: false,
     count: updates.length,
-    tasks: updates.map(({ id, title, runtime_metadata, grants }) => ({
+    tasks: updates.map(({ id, title, runtime_metadata, task_contract, grants }) => ({
       id,
       title,
       runtime_metadata,
+      task_contract,
       grants: grants.map(({ operation, scope_kind, scope_key }) => ({
         operation,
         scope_kind,
@@ -71,12 +73,14 @@ function queryTasks(limit) {
   const sql = `
     SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json)
     FROM (
-      SELECT id, title, description, project, category, context_intent, runtime_metadata
-      FROM board_tasks
-      WHERE runtime_metadata IS NULL
-         OR runtime_metadata = '{}'::jsonb
-         OR NOT (runtime_metadata ? 'task_contract_id')
-      ORDER BY created_at ASC
+      SELECT bt.id, bt.title, bt.description, bt.project, bt.category, bt.context_intent, bt.runtime_metadata
+      FROM board_tasks bt
+      LEFT JOIN task_contracts tc ON tc.task_id = bt.id
+      WHERE bt.runtime_metadata IS NULL
+         OR bt.runtime_metadata = '{}'::jsonb
+         OR NOT (bt.runtime_metadata ? 'task_contract_id')
+         OR tc.task_id IS NULL
+      ORDER BY bt.created_at ASC
       LIMIT ${Number(limit)}
     ) t
   `;
@@ -93,9 +97,11 @@ function buildBackfill(task) {
     ...(isObject(task.runtime_metadata) ? task.runtime_metadata : {}),
     schema: 'missiond.board-task-runtime-metadata.v1',
     source: 'backfill-board-runtime-metadata',
-    control_state: 'runtime_metadata',
+    control_state: 'task_contracts',
     task_contract_id: `board-task:${task.id}`,
     dispatch_metadata: {
+      project_id: task.project || null,
+      task_id: task.id,
       task_class: legacy.task_class || task.context_intent || task.category || 'general',
       accepted_shard_id: legacy.accepted_shard_id || null,
       context_pack_path: legacy.context_pack_path || null,
@@ -116,7 +122,26 @@ function buildBackfill(task) {
   metadata.dispatch_metadata.capability_grant_ids = metadata.capability_grant_ids;
   metadata.dispatch_metadata.sandbox_profile = metadata.sandbox_profile;
   metadata.dispatch_metadata.task_contract_id = metadata.task_contract_id;
-  return { id: task.id, title: task.title, runtime_metadata: metadata, grants };
+  const taskContract = taskContractForBackfill(task, metadata, readScope, writeScope, mustNotTouch);
+  return { id: task.id, title: task.title, runtime_metadata: metadata, task_contract: taskContract, grants };
+}
+
+function taskContractForBackfill(task, metadata, readScope, writeScope, mustNotTouch) {
+  return {
+    id: `task-contract:${task.id}`,
+    task_id: task.id,
+    project_id: task.project || null,
+    task_contract_id: metadata.task_contract_id,
+    dispatch_metadata: metadata.dispatch_metadata,
+    read_scope: readScope,
+    write_scope: writeScope,
+    must_not_touch: mustNotTouch,
+    capability_grant_ids: metadata.capability_grant_ids,
+    sandbox_profile: metadata.sandbox_profile,
+    completion_materialization_policy: metadata.completion_materialization_policy || null,
+    grounding_refs: metadata.grounding_refs || [],
+    context_refs: metadata.context_refs || [],
+  };
 }
 
 function grantsForTask(task, readScope, writeScope, mustNotTouch) {
@@ -180,6 +205,25 @@ function applyBackfill(updates) {
   const statements = [];
   for (const update of updates) {
     statements.push(`UPDATE board_tasks SET runtime_metadata = ${sqlString(JSON.stringify(update.runtime_metadata))}::jsonb, updated_at = now() WHERE id = ${sqlString(update.id)};`);
+    statements.push(`
+      INSERT INTO task_contracts
+        (id, task_id, project_id, task_contract_id, dispatch_metadata, read_scope, write_scope, must_not_touch, capability_grant_ids, sandbox_profile, completion_materialization_policy, grounding_refs, context_refs)
+      VALUES
+        (${sqlString(update.task_contract.id)}, ${sqlString(update.task_contract.task_id)}, ${sqlNullable(update.task_contract.project_id)}, ${sqlString(update.task_contract.task_contract_id)}, ${sqlString(JSON.stringify(update.task_contract.dispatch_metadata))}::jsonb, ${sqlString(JSON.stringify(update.task_contract.read_scope))}::jsonb, ${sqlString(JSON.stringify(update.task_contract.write_scope))}::jsonb, ${sqlString(JSON.stringify(update.task_contract.must_not_touch))}::jsonb, ${sqlString(JSON.stringify(update.task_contract.capability_grant_ids))}::jsonb, ${sqlNullable(update.task_contract.sandbox_profile)}, ${sqlNullable(update.task_contract.completion_materialization_policy)}, ${sqlString(JSON.stringify(update.task_contract.grounding_refs))}::jsonb, ${sqlString(JSON.stringify(update.task_contract.context_refs))}::jsonb)
+      ON CONFLICT (task_id)
+      DO UPDATE SET project_id = EXCLUDED.project_id,
+                    task_contract_id = EXCLUDED.task_contract_id,
+                    dispatch_metadata = EXCLUDED.dispatch_metadata,
+                    read_scope = EXCLUDED.read_scope,
+                    write_scope = EXCLUDED.write_scope,
+                    must_not_touch = EXCLUDED.must_not_touch,
+                    capability_grant_ids = EXCLUDED.capability_grant_ids,
+                    sandbox_profile = EXCLUDED.sandbox_profile,
+                    completion_materialization_policy = EXCLUDED.completion_materialization_policy,
+                    grounding_refs = EXCLUDED.grounding_refs,
+                    context_refs = EXCLUDED.context_refs,
+                    updated_at = now();
+    `);
     for (const grant of update.grants) {
       statements.push(`
         INSERT INTO capability_grants

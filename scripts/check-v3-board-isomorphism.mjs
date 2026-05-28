@@ -308,12 +308,13 @@ function checkFiles(root, files) {
     'active_filter_applied',
     'historical_included',
     'Default search scope excludes done/skipped historical tasks',
-    "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
+    "SELECT pg_advisory_xact_lock(hashtextextended($1::text || ':' || $2::text, 0))",
     'FOR UPDATE',
     'DbError::ClaimConflict',
     'INSERT INTO work_leases',
     "WHERE id = $2 AND status = 'open' AND assignee = $3",
-    "WHERE claim_executor_id = $2 AND status = 'running'",
+    "WHERE claim_executor_id = $2",
+    "AND status = 'running'",
     "WHERE status = 'running'",
     "lease_expires_at < $1",
     'COALESCE(timeout_secs, $2)',
@@ -604,9 +605,13 @@ ACTIVE_BOARD_SEARCH_STATUSES
 active_filter_applied
 historical_included
 Default search scope excludes done/skipped historical tasks
-WHERE id = $4 AND status = 'open' AND claim_executor_id IS NULL
+SELECT pg_advisory_xact_lock(hashtextextended($1::text || ':' || $2::text, 0))
+FOR UPDATE
+DbError::ClaimConflict
+INSERT INTO work_leases
 WHERE id = $2 AND status = 'open' AND assignee = $3
-WHERE claim_executor_id = $2 AND status = 'running'
+WHERE claim_executor_id = $2
+AND status = 'running'
 WHERE status = 'running'
 lease_expires_at < $1
 COALESCE(timeout_secs, $2)

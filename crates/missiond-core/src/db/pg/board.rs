@@ -44,7 +44,7 @@ fn board_create_runtime_metadata(
         .or_insert_with(|| serde_json::json!("mission_board_create"));
     fields
         .entry("control_state".to_string())
-        .or_insert_with(|| serde_json::json!("runtime_metadata"));
+        .or_insert_with(|| serde_json::json!("task_contracts"));
     fields
         .entry("task_contract_id".to_string())
         .or_insert_with(|| serde_json::json!(format!("board-task:{}", task_id.as_str())));
@@ -78,6 +78,209 @@ fn board_create_runtime_metadata(
         .entry("projection_policy".to_string())
         .or_insert_with(|| serde_json::json!("description_notes_are_projection_only"));
     metadata
+}
+
+#[cfg(feature = "postgres")]
+struct BoardTaskContractProjection {
+    id: String,
+    task_contract_id: String,
+    project_id: Option<String>,
+    dispatch_metadata: serde_json::Value,
+    read_scope: Vec<String>,
+    write_scope: Vec<String>,
+    must_not_touch: Vec<String>,
+    capability_grant_ids: Vec<String>,
+    sandbox_profile: Option<String>,
+    completion_materialization_policy: Option<String>,
+    grounding_refs: serde_json::Value,
+    context_refs: serde_json::Value,
+}
+
+#[cfg(feature = "postgres")]
+fn board_task_contract_projection(
+    task_id: &str,
+    project_id: Option<&str>,
+    runtime_metadata: &serde_json::Value,
+) -> BoardTaskContractProjection {
+    let dispatch = runtime_metadata
+        .get("dispatch_metadata")
+        .or_else(|| runtime_metadata.get("swarm_metadata"))
+        .or_else(|| runtime_metadata.get("metadata"))
+        .unwrap_or(runtime_metadata);
+    let task_contract_id = metadata_string_value_any(runtime_metadata.get("task_contract_id"))
+        .or_else(|| metadata_string_value_any(dispatch.get("task_contract_id")))
+        .unwrap_or_else(|| format!("board-task:{task_id}"));
+    let project_id = metadata_string_value_any(dispatch.get("project_id")).or_else(|| {
+        project_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    });
+    let read_scope = first_non_empty_metadata_list(&[
+        runtime_metadata.get("read_scope"),
+        dispatch.get("read_scope"),
+    ]);
+    let write_scope = first_non_empty_metadata_list(&[
+        runtime_metadata.get("write_scope"),
+        dispatch.get("write_scope"),
+    ]);
+    let must_not_touch = first_non_empty_metadata_list(&[
+        runtime_metadata.get("must_not_touch"),
+        dispatch.get("must_not_touch"),
+    ]);
+    let capability_grant_ids =
+        metadata_string_list_any(runtime_metadata.get("capability_grant_ids"))
+            .into_iter()
+            .chain(metadata_string_list_any(
+                dispatch.get("capability_grant_ids"),
+            ))
+            .collect::<Vec<_>>();
+    let sandbox_profile = metadata_string_value_any(runtime_metadata.get("sandbox_profile"))
+        .or_else(|| metadata_string_value_any(dispatch.get("sandbox_profile")));
+    let completion_materialization_policy =
+        metadata_string_value_any(runtime_metadata.get("completion_materialization_policy"))
+            .or_else(|| {
+                metadata_string_value_any(dispatch.get("completion_materialization_policy"))
+            });
+    let grounding_refs = runtime_metadata
+        .get("grounding_refs")
+        .or_else(|| dispatch.get("grounding_refs"))
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+    let context_refs = runtime_metadata
+        .get("context_refs")
+        .or_else(|| dispatch.get("context_refs"))
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+
+    BoardTaskContractProjection {
+        id: format!("task-contract:{task_id}"),
+        task_contract_id,
+        project_id,
+        dispatch_metadata: dispatch.clone(),
+        read_scope,
+        write_scope,
+        must_not_touch,
+        capability_grant_ids,
+        sandbox_profile,
+        completion_materialization_policy,
+        grounding_refs,
+        context_refs,
+    }
+}
+
+#[cfg(feature = "postgres")]
+fn metadata_string_value_any(value: Option<&serde_json::Value>) -> Option<String> {
+    match value {
+        Some(serde_json::Value::String(value)) => {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        }
+        _ => None,
+    }
+}
+
+#[cfg(feature = "postgres")]
+fn metadata_string_list_any(value: Option<&serde_json::Value>) -> Vec<String> {
+    match value {
+        Some(serde_json::Value::Array(values)) => values
+            .iter()
+            .filter_map(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect(),
+        Some(serde_json::Value::String(value)) => value
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && *value != "[]")
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+#[cfg(feature = "postgres")]
+fn first_non_empty_metadata_list(candidates: &[Option<&serde_json::Value>]) -> Vec<String> {
+    candidates
+        .iter()
+        .find_map(|candidate| {
+            let values = metadata_string_list_any(*candidate);
+            (!values.is_empty()).then_some(values)
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(all(test, feature = "postgres"))]
+mod task_contract_projection_tests {
+    use super::*;
+
+    #[test]
+    fn board_create_metadata_declares_task_contract_authority() {
+        let task_id = TaskId::from_trusted("task-1".to_string());
+        let metadata = board_create_runtime_metadata(
+            &task_id,
+            &CreateBoardTaskInput {
+                title: "Investigate router burst".to_string(),
+                context_intent: Some("router-ops".to_string()),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            metadata
+                .get("control_state")
+                .and_then(|value| value.as_str()),
+            Some("task_contracts")
+        );
+        assert_eq!(
+            metadata
+                .get("projection_policy")
+                .and_then(|value| value.as_str()),
+            Some("description_notes_are_projection_only")
+        );
+    }
+
+    #[test]
+    fn task_contract_projection_prefers_canonical_metadata_over_description() {
+        let runtime_metadata = serde_json::json!({
+            "task_contract_id": "contract-1",
+            "dispatch_metadata": {
+                "project_id": "missiond",
+                "task_class": "code",
+                "write_scope": ["crates/missiond-core/src/db/pg/board.rs"],
+                "must_not_touch": "secrets.env,production"
+            },
+            "read_scope": "README.md,.missiond/v3",
+            "capability_grant_ids": ["grant-1"],
+            "sandbox_profile": "workspace-write",
+            "grounding_refs": [{"kind": "context_pack", "id": "ctx-1"}]
+        });
+
+        let projection =
+            board_task_contract_projection("task-1", Some("fallback"), &runtime_metadata);
+
+        assert_eq!(projection.id, "task-contract:task-1");
+        assert_eq!(projection.task_contract_id, "contract-1");
+        assert_eq!(projection.project_id.as_deref(), Some("missiond"));
+        assert_eq!(
+            projection.read_scope,
+            vec!["README.md".to_string(), ".missiond/v3".to_string()]
+        );
+        assert_eq!(
+            projection.write_scope,
+            vec!["crates/missiond-core/src/db/pg/board.rs".to_string()]
+        );
+        assert_eq!(
+            projection.must_not_touch,
+            vec!["secrets.env".to_string(), "production".to_string()]
+        );
+        assert_eq!(projection.capability_grant_ids, vec!["grant-1".to_string()]);
+        assert_eq!(
+            projection.sandbox_profile.as_deref(),
+            Some("workspace-write")
+        );
+    }
 }
 
 #[cfg(feature = "postgres")]
@@ -266,7 +469,84 @@ impl BoardStore for PgMissionStore {
             notes_count: 0,
         };
 
-        self.insert_board_task(&task).await?;
+        let depends_on_json =
+            serde_json::to_string(&task.depends_on).unwrap_or_else(|_| "[]".to_string());
+        let contract = board_task_contract_projection(
+            task.id.as_str(),
+            task.project.as_deref(),
+            &task.runtime_metadata,
+        );
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO board_tasks (id, title, description, status, priority, category, project, server, due_date, parent_id, assignee, auto_execute, prompt_template, hidden, retry_count, max_retries, order_idx, created_at, updated_at, depends_on, dedupe_key, timeout_secs, context_intent, trigger_source, runtime_metadata)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)"
+        )
+        .bind(task.id.as_str())
+        .bind(&task.title)
+        .bind(&task.description)
+        .bind(task.status.as_str())
+        .bind(&task.priority)
+        .bind(&task.category)
+        .bind(&task.project)
+        .bind(&task.server)
+        .bind(&task.due_date)
+        .bind(task.parent_id.as_ref().map(|p| p.as_str()))
+        .bind(&task.assignee)
+        .bind(task.auto_execute as i32)
+        .bind(&task.prompt_template)
+        .bind(task.hidden as i32)
+        .bind(task.retry_count)
+        .bind(task.max_retries)
+        .bind(task.order_idx)
+        .bind(&task.created_at)
+        .bind(&task.updated_at)
+        .bind(&depends_on_json)
+        .bind(&task.dedupe_key)
+        .bind(task.timeout_secs)
+        .bind(&task.context_intent)
+        .bind(&task.trigger_source)
+        .bind(&task.runtime_metadata)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO task_contracts
+              (id, task_id, project_id, task_contract_id, dispatch_metadata,
+               read_scope, write_scope, must_not_touch, capability_grant_ids,
+               sandbox_profile, completion_materialization_policy, grounding_refs,
+               context_refs)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+            ON CONFLICT (task_id)
+            DO UPDATE SET project_id = EXCLUDED.project_id,
+                          task_contract_id = EXCLUDED.task_contract_id,
+                          dispatch_metadata = EXCLUDED.dispatch_metadata,
+                          read_scope = EXCLUDED.read_scope,
+                          write_scope = EXCLUDED.write_scope,
+                          must_not_touch = EXCLUDED.must_not_touch,
+                          capability_grant_ids = EXCLUDED.capability_grant_ids,
+                          sandbox_profile = EXCLUDED.sandbox_profile,
+                          completion_materialization_policy = EXCLUDED.completion_materialization_policy,
+                          grounding_refs = EXCLUDED.grounding_refs,
+                          context_refs = EXCLUDED.context_refs,
+                          updated_at = now()
+            "#,
+        )
+        .bind(&contract.id)
+        .bind(task.id.as_str())
+        .bind(contract.project_id.as_deref())
+        .bind(&contract.task_contract_id)
+        .bind(contract.dispatch_metadata)
+        .bind(serde_json::json!(contract.read_scope))
+        .bind(serde_json::json!(contract.write_scope))
+        .bind(serde_json::json!(contract.must_not_touch))
+        .bind(serde_json::json!(contract.capability_grant_ids))
+        .bind(contract.sandbox_profile.as_deref())
+        .bind(contract.completion_materialization_policy.as_deref())
+        .bind(contract.grounding_refs)
+        .bind(contract.context_refs)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
         Ok(task)
     }
 
@@ -282,6 +562,36 @@ impl BoardStore for PgMissionStore {
         .fetch_optional(&self.pool)
         .await?;
         Ok(row.map(|r| r.into_board_task()))
+    }
+
+    async fn get_board_task_projection_artifact_hash(&self, id: &str) -> DbResult<Option<String>> {
+        let full_id = match self.resolve_board_task_id(id).await? {
+            Some(fid) => fid,
+            None => return Ok(None),
+        };
+        let row = sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT artifact_hash
+            FROM (
+              SELECT artifact_hash, projected_at AS observed_at, 0 AS source_priority
+              FROM board_task_views
+              WHERE task_id = $1
+                AND artifact_hash IS NOT NULL
+                AND artifact_hash <> ''
+              UNION ALL
+              SELECT artifact_hash, created_at AS observed_at, 1 AS source_priority
+              FROM task_result_artifacts
+              WHERE task_id = $1
+                AND result_status = 'completed'
+            ) artifacts
+            ORDER BY source_priority ASC, observed_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(&full_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
     }
 
     async fn list_board_tasks(
@@ -531,8 +841,8 @@ impl BoardStore for PgMissionStore {
             set_parts.push(format!("order_idx = ${}", param_idx));
         }
 
-        // Handle runtime_metadata (JSONB). This is the control-plane contract;
-        // descriptions are prompt projections only.
+        // Handle runtime_metadata (JSONB). This is a UI/cache projection;
+        // canonical control facts live in task_contracts.
         if update.runtime_metadata.is_some() {
             param_idx += 1;
             set_parts.push(format!("runtime_metadata = ${}", param_idx));
@@ -887,32 +1197,61 @@ impl BoardStore for PgMissionStore {
             None => return Ok(None),
         };
         let mut tx = self.pool.begin().await?;
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
-            .bind(format!("board-task-claim:{full_id}"))
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1::text || ':' || $2::text, 0))",
+        )
+        .bind("board_task")
+        .bind(&full_id)
+        .execute(&mut *tx)
+        .await?;
         sqlx::query(
             r#"
-            UPDATE board_tasks
-            SET claim_executor_id = NULL,
-                claim_executor_type = NULL,
-                claimed_at = NULL,
-                lease_expires_at = NULL,
-                status = CASE WHEN status = 'running' THEN 'open' ELSE status END,
-                updated_at = $2
-            WHERE id = $1
-              AND claim_executor_id IS NOT NULL
-              AND lease_expires_at IS NOT NULL
-              AND NULLIF(lease_expires_at, '')::timestamptz < now()
+            UPDATE work_leases
+            SET status = 'expired'
+            WHERE status = 'active'
+              AND scope_kind = 'board_task'
+              AND scope_key = $1
+              AND lease_expires_at < now()
             "#,
         )
         .bind(&full_id)
-        .bind(chrono::Utc::now().to_rfc3339())
         .execute(&mut *tx)
         .await?;
+        let active_lease = sqlx::query(
+            r#"
+            SELECT holder_id, holder_kind, lease_expires_at::text AS lease_expires_at
+            FROM work_leases
+            WHERE status = 'active'
+              AND scope_kind = 'board_task'
+              AND scope_key = $1
+              AND lease_expires_at >= now()
+            ORDER BY acquired_at ASC
+            LIMIT 1
+            FOR UPDATE
+            "#,
+        )
+        .bind(&full_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(row) = active_lease {
+            tx.commit().await?;
+            let holder: Option<String> =
+                row.try_get::<Option<String>, _>("holder_id")?.or_else(|| {
+                    row.try_get::<Option<String>, _>("holder_kind")
+                        .ok()
+                        .flatten()
+                });
+            return Err(DbError::ClaimConflict {
+                scope_kind: "board_task".to_string(),
+                scope_key: full_id,
+                holder,
+                lease_expires_at: row.try_get::<Option<String>, _>("lease_expires_at")?,
+            });
+        }
+
         let existing = sqlx::query(
             r#"
-            SELECT claim_executor_id, claim_executor_type, lease_expires_at, status
+            SELECT status
             FROM board_tasks
             WHERE id = $1
             FOR UPDATE
@@ -926,21 +1265,38 @@ impl BoardStore for PgMissionStore {
             return Ok(None);
         };
         let existing_status: String = existing.try_get("status")?;
-        let existing_holder: Option<String> = existing.try_get("claim_executor_id")?;
-        if existing_status != "open" || existing_holder.is_some() {
-            let holder = existing_holder.or_else(|| existing.try_get("claim_executor_type").ok());
-            let lease_expires_at: Option<String> = existing.try_get("lease_expires_at")?;
+        if !matches!(existing_status.as_str(), "open" | "running") {
             tx.commit().await?;
             return Err(DbError::ClaimConflict {
                 scope_kind: "board_task".to_string(),
                 scope_key: full_id,
-                holder,
-                lease_expires_at,
+                holder: Some(existing_status),
+                lease_expires_at: None,
             });
         }
         let now = chrono::Utc::now();
         let now_s = now.to_rfc3339();
         let lease_expires_at = (now + chrono::Duration::minutes(30)).to_rfc3339();
+        let lease_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            r#"
+            INSERT INTO work_leases
+              (id, task_id, holder_id, holder_kind, scope_kind, scope_key,
+               status, lease_expires_at, heartbeat_at, metadata)
+            VALUES ($1,$2,$3,$4,'board_task',$2,'active',$5,now(),$6)
+            "#,
+        )
+        .bind(&lease_id)
+        .bind(&full_id)
+        .bind(executor_id)
+        .bind(executor_type)
+        .bind(&lease_expires_at)
+        .bind(serde_json::json!({
+            "source": "board.claim",
+            "projection": "board_tasks"
+        }))
+        .execute(&mut *tx)
+        .await?;
         sqlx::query(
             r#"
             UPDATE board_tasks
@@ -960,23 +1316,6 @@ impl BoardStore for PgMissionStore {
         .bind(&full_id)
         .execute(&mut *tx)
         .await?;
-        sqlx::query(
-            r#"
-            INSERT INTO work_leases
-              (id, task_id, holder_id, holder_kind, scope_kind, scope_key,
-               lease_expires_at, metadata)
-            VALUES ($1,$2,$3,$4,'board_task',$2,$5,'{}'::jsonb)
-            ON CONFLICT DO NOTHING
-            "#,
-        )
-        .bind(uuid::Uuid::new_v4().to_string())
-        .bind(&full_id)
-        .bind(executor_id)
-        .bind(executor_type)
-        .bind(&lease_expires_at)
-        .execute(&mut *tx)
-        .await
-        .ok();
         tx.commit().await?;
         self.get_board_task(&full_id).await
     }
@@ -1006,20 +1345,42 @@ impl BoardStore for PgMissionStore {
 
     async fn release_board_claims_by_executor(&self, executor_id: &str) -> DbResult<usize> {
         let now = chrono::Utc::now().to_rfc3339();
+        let mut tx = self.pool.begin().await?;
+        let lease_result = sqlx::query(
+            r#"
+            UPDATE work_leases
+            SET status = 'released', released_at = now()
+            WHERE status = 'active'
+              AND holder_id = $1
+              AND scope_kind = 'board_task'
+            "#,
+        )
+        .bind(executor_id)
+        .execute(&mut *tx)
+        .await?;
         let result = sqlx::query(
-            "UPDATE board_tasks
-             SET claim_executor_id = NULL, claim_executor_type = NULL, claimed_at = NULL,
-                 status = 'open', updated_at = $1
-             WHERE claim_executor_id = $2 AND status = 'running'",
+            r#"
+            UPDATE board_tasks
+            SET claim_executor_id = NULL,
+                claim_executor_type = NULL,
+                claimed_at = NULL,
+                lease_expires_at = NULL,
+                status = 'open',
+                updated_at = $1
+            WHERE claim_executor_id = $2
+              AND status = 'running'
+            "#,
         )
         .bind(&now)
         .bind(executor_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         let count = result.rows_affected() as usize;
-        if count > 0 {
+        if count > 0 || lease_result.rows_affected() > 0 {
             tracing::info!(
                 count,
+                leases = lease_result.rows_affected(),
                 executor_id,
                 "Released board claims for disconnected executor"
             );
@@ -1029,17 +1390,38 @@ impl BoardStore for PgMissionStore {
 
     async fn recover_stale_running_tasks(&self, fallback_stale_minutes: i64) -> DbResult<usize> {
         let now = chrono::Utc::now().to_rfc3339();
+        let mut tx = self.pool.begin().await?;
 
         // Recover tasks with expired lease
+        sqlx::query(
+            r#"
+            UPDATE work_leases
+            SET status = 'expired'
+            WHERE status = 'active'
+              AND scope_kind = 'board_task'
+              AND lease_expires_at < now()
+            "#,
+        )
+        .execute(&mut *tx)
+        .await?;
         let leased = sqlx::query(
             "UPDATE board_tasks SET status = 'open', claim_executor_id = NULL,
                  claim_executor_type = NULL, claimed_at = NULL, lease_expires_at = NULL, updated_at = $1
              WHERE status = 'running'
-               AND lease_expires_at IS NOT NULL
-               AND lease_expires_at < $1"
+               AND (
+                 (lease_expires_at IS NOT NULL AND lease_expires_at < $1)
+                 OR NOT EXISTS (
+                   SELECT 1
+                   FROM work_leases wl
+                   WHERE wl.scope_kind = 'board_task'
+                     AND wl.scope_key = board_tasks.id
+                     AND wl.status = 'active'
+                     AND wl.lease_expires_at >= now()
+                 )
+               )"
         )
         .bind(&now)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?
         .rows_affected();
 
@@ -1054,9 +1436,10 @@ impl BoardStore for PgMissionStore {
         )
         .bind(&now)
         .bind(fallback_secs)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?
         .rows_affected();
+        tx.commit().await?;
 
         let count = (leased + unleased) as usize;
         if count > 0 {
@@ -1105,6 +1488,21 @@ impl BoardStore for PgMissionStore {
 
     async fn set_board_task_lease(&self, task_id: &str, lease_expires_at: &str) -> DbResult<usize> {
         let now = chrono::Utc::now().to_rfc3339();
+        let mut tx = self.pool.begin().await?;
+        let _ = sqlx::query(
+            r#"
+            UPDATE work_leases
+            SET lease_expires_at = $1::timestamptz,
+                heartbeat_at = now()
+            WHERE task_id = $2
+              AND scope_kind = 'board_task'
+              AND status = 'active'
+            "#,
+        )
+        .bind(lease_expires_at)
+        .bind(task_id)
+        .execute(&mut *tx)
+        .await?;
         let result = sqlx::query(
             "UPDATE board_tasks SET lease_expires_at = $1, updated_at = $2
              WHERE id = $3 AND status = 'running'",
@@ -1112,8 +1510,9 @@ impl BoardStore for PgMissionStore {
         .bind(lease_expires_at)
         .bind(&now)
         .bind(task_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(result.rows_affected() as usize)
     }
 
@@ -1257,14 +1656,21 @@ impl BoardStore for PgMissionStore {
         reset_downstream: bool,
     ) -> DbResult<Vec<String>> {
         let now = chrono::Utc::now().to_rfc3339();
+        let mut tx = self.pool.begin().await?;
 
         // Reset target task
         sqlx::query(
-            "UPDATE board_tasks SET status = 'open', claim_executor_id = NULL, claim_executor_type = NULL, claimed_at = NULL, updated_at = $1 WHERE id = $2"
+            "UPDATE work_leases SET status = 'released', released_at = now() WHERE task_id = $1 AND scope_kind = 'board_task' AND status = 'active'",
+        )
+        .bind(task_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE board_tasks SET status = 'open', claim_executor_id = NULL, claim_executor_type = NULL, claimed_at = NULL, lease_expires_at = NULL, updated_at = $1 WHERE id = $2"
         )
         .bind(&now)
         .bind(task_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
         let mut reset_ids = vec![task_id.to_string()];
@@ -1273,16 +1679,23 @@ impl BoardStore for PgMissionStore {
             let downstream = self.find_downstream_tasks(task_id).await?;
             for ds_id in &downstream {
                 sqlx::query(
-                    "UPDATE board_tasks SET status = 'open', claim_executor_id = NULL, claim_executor_type = NULL, claimed_at = NULL, updated_at = $1 WHERE id = $2"
+                    "UPDATE work_leases SET status = 'released', released_at = now() WHERE task_id = $1 AND scope_kind = 'board_task' AND status = 'active'",
+                )
+                .bind(ds_id)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query(
+                    "UPDATE board_tasks SET status = 'open', claim_executor_id = NULL, claim_executor_type = NULL, claimed_at = NULL, lease_expires_at = NULL, updated_at = $1 WHERE id = $2"
                 )
                 .bind(&now)
                 .bind(ds_id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
             }
             reset_ids.extend(downstream);
         }
 
+        tx.commit().await?;
         Ok(reset_ids)
     }
 
@@ -1873,26 +2286,48 @@ impl BoardStore for PgMissionStore {
 
     async fn increment_board_task_retry(&self, task_id: &str, new_retry: i64) -> DbResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
+        let mut tx = self.pool.begin().await?;
         sqlx::query(
-            "UPDATE board_tasks SET retry_count = $1, status = 'open', claim_executor_id = NULL, claim_executor_type = NULL, claimed_at = NULL, updated_at = $2 WHERE id = $3"
+            "UPDATE work_leases SET status = 'released', released_at = now() WHERE task_id = $1 AND scope_kind = 'board_task' AND status = 'active'",
+        )
+        .bind(task_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE board_tasks SET retry_count = $1, status = 'open', claim_executor_id = NULL, claim_executor_type = NULL, claimed_at = NULL, lease_expires_at = NULL, updated_at = $2 WHERE id = $3"
         )
         .bind(new_retry)
         .bind(&now)
         .bind(task_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(())
     }
 
     async fn unclaim_board_task(&self, task_id: &str) -> DbResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
+        let mut tx = self.pool.begin().await?;
         sqlx::query(
-            "UPDATE board_tasks SET status = 'open', claim_executor_id = NULL, claim_executor_type = NULL, claimed_at = NULL, updated_at = $1 WHERE id = $2"
+            r#"
+            UPDATE work_leases
+            SET status = 'released', released_at = now()
+            WHERE task_id = $1
+              AND scope_kind = 'board_task'
+              AND status = 'active'
+            "#,
+        )
+        .bind(task_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE board_tasks SET status = 'open', claim_executor_id = NULL, claim_executor_type = NULL, claimed_at = NULL, lease_expires_at = NULL, updated_at = $1 WHERE id = $2"
         )
         .bind(&now)
         .bind(task_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(())
     }
 }

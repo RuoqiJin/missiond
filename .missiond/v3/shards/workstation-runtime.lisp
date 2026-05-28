@@ -71,7 +71,31 @@
       :checker "node scripts/check-v3-agent-cli-regression.mjs"
       :providers [claude-code codex agy gemini-legacy]
       :states [idle running tool-running approval-blocked auth-unavailable billing-unavailable quota-unavailable complete post-answer-feedback-complete]
-      :rule "Every provider lane must have command construction, provider-specific PTY recognition, slot visibility, durable conversation source mapping, task-result-artifact completion, capability/sandbox projection, and regression fixtures before it can be promoted beyond read-only research. Codex worker lanes must inject MissionD MCP tool approval_mode=approve command overrides for mission_compute_slot, mission_context_boot, mission_context_slice, mission_shared_memory, and mission_claim_status because --ask-for-approval never does not suppress MCP approval overlays on every host. Agy/Antigravity writes durable markdown artifacts under the provider brain store (`$HOME/.gemini/antigravity-cli/brain`, overridable by MISSIOND_AGY_ARTIFACT_ROOT); Autopilot may record matching post-claim Agy brain artifacts as task_result_candidate observations but must not close until an explicit canonical task-result-artifact exists. Post-answer feedback prompts (for example Agy CLI experience survey screens) are terminal UI affordances and must not keep a BoardTask running after a canonical artifact exists. PTY structured finals, provider durable finals, and provider-empty finals are observation/candidate inputs only; they cannot create terminal BoardTask state without task_result_put + worker_settle artifact_hash. Reused provider sessions, especially Codex worker lanes backed by rollout JSONL, must ignore durable assistant messages that do not satisfy the current output contract; a later watchdog pass may settle only after the current-task canonical artifact is written. Codex PTY send timeout after prompt delivery is non-terminal: Autopilot must keep the claim, scan recent unbound codex_cli rollout conversations in the same slot project, bind the matching task_complete final back to the BoardTask, and materialize read-only Jarvis completions only when completion_materialization_policy=autopilot_readonly_ok or the strict Jarvis interaction metadata proves an implicit read-only interaction. Jarvis SSE must revalidate a terminal BoardTask by reading the canonical task-result-artifact; writer timeout must emit a typed diagnostic and close SSE instead of hanging after the Board already reached done. Jarvis synchronous worker supervision must also be bounded by jarvis-sync-worker-wait so a slow or stuck worker returns a typed timeout diagnostic instead of making iOS wait past the mobile request budget.")
+    :rule "Every provider lane must have command construction, provider-specific PTY recognition, slot visibility, durable conversation source mapping, task-result-artifact completion, capability/sandbox projection, and regression fixtures before it can be promoted beyond read-only research. Codex worker lanes must inject MissionD MCP tool approval_mode=approve command overrides for mission_compute_slot, mission_context_boot, mission_context_slice, mission_shared_memory, and mission_claim_status because --ask-for-approval never does not suppress MCP approval overlays on every host. Agy/Antigravity writes durable markdown artifacts under the provider brain store (`$HOME/.gemini/antigravity-cli/brain`, overridable by MISSIOND_AGY_ARTIFACT_ROOT); Autopilot may record matching post-claim Agy brain artifacts as task_result_candidate observations but must not close until an explicit canonical task-result-artifact exists. Post-answer feedback prompts (for example Agy CLI experience survey screens) are terminal UI affordances and must not keep a BoardTask running after a canonical artifact exists. PTY structured finals, provider durable finals, and provider-empty finals are observation/candidate inputs only; they cannot create terminal BoardTask state without task_result_put + worker_settle artifact_hash. Reused provider sessions, especially Codex worker lanes backed by rollout JSONL, must ignore durable assistant messages that do not satisfy the current output contract; a later watchdog pass may settle only after the current-task canonical artifact is written. Codex PTY send timeout after prompt delivery is non-terminal: Autopilot must keep the claim, scan recent unbound codex_cli rollout conversations in the same slot project, bind the matching task_complete final back to the BoardTask, and materialize read-only Jarvis completions only when canonical task_contracts explicitly set completion_materialization_policy=autopilot_readonly_ok. Jarvis SSE must revalidate a terminal BoardTask by reading the canonical task-result-artifact; writer timeout must emit a typed diagnostic and close SSE instead of hanging after the Board already reached done. Jarvis synchronous worker supervision must also be bounded by jarvis-sync-worker-wait so a slow or stuck worker returns a typed timeout diagnostic instead of making iOS wait past the mobile request budget.")
+    (portable-worker-runtime-registry
+      :schema "missiond.portable-worker-runtime-registry.v1"
+      :checker "node scripts/check-v3-xjpcode-portable-runtime.mjs --json"
+      :rule "Portable workers are HTTP/SSE runtimes that execute a single MissionD WorkOrder and return task-result-artifact plus agent-runtime-events; they are not resident master controllers and must not bypass grounding, accepted shard, scope, write lease, or artifact-first completion gates."
+      (worker :id xjpcode-readonly-worker
+        :project xjpcode
+        :engine xjpcode
+        :mode read_only
+        :runtime-env MISSIOND_XJPCODE_WORKER_URL
+        :endpoint "/worker/v1/work-orders"
+        :events "/worker/v1/work-orders/{id}/events"
+        :health "/worker/v1/health"
+        :capabilities [list_files read_file router_model_call task_result_artifact]
+        :required-inputs [task_id project_id context_capsule_lisp read_scope artifact_contract]
+        :forbidden [file_write apply_patch commit secret_dump direct_cli_pty_drive]
+        :completion "task-result-artifact before final"
+        :dispatch-surface "mission_task_delegate detects engine_hint=xjpcode/xjpcode-readonly-worker, requires MISSIOND_XJPCODE_WORKER_URL, POSTs the scoped WorkOrder, parses SSE frames, writes task_result_put_typed, then closes through worker_settle.")
+      (worker :id xjpcode-code-worker
+        :project xjpcode
+        :engine xjpcode
+        :mode write
+        :status gated
+        :required-inputs [accepted_shard_id write_scope write_lease worktree artifact_contract]
+        :rule "Disabled until xjpcode write mode implements apply_patch, touched-file formatting, targeted tests, and MissionD work-order commit gate."))
     (startup-slot arch_maintenance
       :engine claude-code
       :lifecycle persistent
@@ -187,11 +211,11 @@
       :legacy-rule "PTY recognition MUST classify provider unavailable states as blocked diagnostics, not completed turns.")
     (policy-clause workstation-task-delegate-structured-metadata
       :owner workstation-config
-      :applies-to [mission-task-delegate board-task-description autopilot-worker-prompt]
+      :applies-to [mission-task-delegate task-contracts board-task-description autopilot-worker-prompt]
       :must [persist-task-class-pool-engine-context-pack read-write-scope must-not-touch acceptance output-contract forbid-side-channel-only-context]
       :evidence [task-delegate-tests workstation-dispatch-check context-pack-check]
       :checker "node scripts/check-v3-workstation-dispatch-isomorphism.mjs"
-      :legacy-rule "mission_task_delegate MUST accept structured two-stage delegation metadata and persist it into the BoardTask description.")
+      :legacy-rule "mission_task_delegate MUST accept structured two-stage delegation metadata, persist canonical control fields into task_contracts, and render BoardTask.description only as a worker prompt projection.")
     (policy-clause workstation-swarm-project-root-resolution
       :owner workstation-config
       :applies-to [mission-swarm-run project-registry autopilot-dynamic-slot]
@@ -278,7 +302,7 @@
 	       "mission_compute_slot model_profile resolution MUST use workstation-config model-profile spawn-model-arg, not a Rust-local profile table"
 	       "caller-supplied model wins over model_profile, but must be a single shell token"
 	       "task_delegate must pass model/model_profile through to compute_slot and must not reuse an idle slot with a conflicting model override"
-	       "mission_task_delegate MUST accept structured two-stage delegation metadata (task_class, pool_hint, engine_hint, context_pack_path, read_scope, write_scope, must_not_touch, acceptance) and persist it into the BoardTask description so Autopilot workers see context-pack path, explicit readable evidence, exact write scope, forbidden write paths, and acceptance commands without relying on side-channel PTY text. The generated scope_semantics line MUST state that must_not_touch forbids write/stage/commit and is not a read ban by itself; review/context-pack/research tasks MUST carry an output_contract requiring a structured artifact with Findings / Evidence / Recommendations / Verification rather than raw KB JSON or full logs."
+	       "mission_task_delegate MUST accept structured two-stage delegation metadata (task_class, pool_hint, engine_hint, context_pack_path, read_scope, write_scope, must_not_touch, acceptance), persist canonical control fields into task_contracts, and render BoardTask.description only as a worker prompt projection. Autopilot and flow runtime MUST read task_contracts/runtime ABI rather than parsing description. The generated scope_semantics line MUST state that must_not_touch forbids write/stage/commit and is not a read ban by itself; review/context-pack/research tasks MUST carry an output_contract requiring a structured artifact with Findings / Evidence / Recommendations / Verification rather than raw KB JSON or full logs."
 	       "mission_task_delegate duplicate-code-worker guard MUST compare relative write_scope entries inside their resolved BoardTask.project/project_root only; cross-project sibling tasks may all write .missiond/check.sh or .missiond/evidence/current-code-mapping.md without false DUPLICATE_CODE_WORKER_BLOCKED refusals. Absolute write_scope entries remain globally comparable."
 	       "mission_task_delegate MUST NOT auto-preload KB/Skill context from context_hints into worker prompts by default; current KB/skill stores are noisy and hidden prompt injection obscures task contracts. Context must come from explicit read_scope, context_pack_path, task contract, or a future explicit memory-audit workflow."
 		       "Autopilot context prefetch defaults disabled until memory stores are cleaned: delegated worker prompts MUST NOT prepend KB/Skill/context-pipeline output unless an explicit memory-audit workflow opts in via MISSIOND_AUTOPILOT_CONTEXT_PREFETCH=1."

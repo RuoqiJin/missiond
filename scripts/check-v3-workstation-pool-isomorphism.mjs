@@ -220,15 +220,16 @@ function checkFiles(root) {
   ]);
 
   requireAll(diagnostics, FILES.autopilot, sources.autopilot, [
-    'fn board_task_workstation_class',
+    'fn task_contract_workstation_class',
     'deploy-ops',
     'async fn select_workstation_pool_slot',
+    'runtime_contract: &TaskRuntimeContract',
+    'let task_class = task_contract_workstation_class(task, runtime_contract);',
     '.boardtask_pool_candidates(task_class)',
-    'fn extract_board_task_dispatch_metadata_field',
-    'json_metadata_value_to_string',
-    'extract_board_task_dispatch_metadata_field(task, "engine_hint")',
-    'extract_board_task_dispatch_metadata_field(task, "pool_hint")',
-    'task.runtime_metadata',
+    'let engine_hint = runtime_contract.engine_hint.clone();',
+    'let pool_hint = runtime_contract.pool_hint.clone();',
+    '.task_runtime_contract(task.id.as_str())',
+    'legacy BoardTask.runtime_metadata fallback is disabled',
     'fn dispatch_hint_eq',
     ".replace('_', \"-\")",
     'fn workstation_worker_matches_dispatch_hints',
@@ -258,6 +259,8 @@ function checkFiles(root) {
   ]);
   forbidAll(diagnostics, FILES.autopilot, sources.autopilot, [
     'extract_dispatch_metadata_field(&task.description, field)',
+    'extract_board_task_dispatch_metadata_field(task, "engine_hint")',
+    'extract_board_task_dispatch_metadata_field(task, "pool_hint")',
   ]);
 
   requireAll(diagnostics, FILES.computeSlot, sources.computeSlot, [

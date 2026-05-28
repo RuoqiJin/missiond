@@ -22,10 +22,35 @@ fn shared_memory_error(err: anyhow::Error) -> ToolError {
 
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     match name {
-        "mission_shared_memory" => match state.shared_memory.handle_action(&args).await {
-            Ok(value) => Ok(ToolResult::json_pretty(&value)),
-            Err(err) => Ok(ToolResult::structured_error(shared_memory_error(err))),
-        },
+        "mission_shared_memory" => {
+            let action = args
+                .get("action")
+                .and_then(Value::as_str)
+                .unwrap_or("query")
+                .trim();
+            let result = match action {
+                "task_result_put" | "put_task_result" => {
+                    state.shared_memory.task_result_put_typed(&args).await
+                }
+                "worker_settle" | "completion_settle" | "settle_worker" => {
+                    state.shared_memory.settle_worker_typed(args.clone()).await
+                }
+                "claim" => state.shared_memory.claim_typed(&args).await,
+                "release" => state.shared_memory.release_typed(args.clone()).await,
+                "heartbeat" => state.shared_memory.heartbeat_typed(args.clone()).await,
+                "capability_check" | "check_capability" => {
+                    state.shared_memory.capability_check_typed(&args).await
+                }
+                "job_event" | "record_job_event" => {
+                    state.shared_memory.job_event_typed(args.clone()).await
+                }
+                _ => state.shared_memory.handle_action(&args).await,
+            };
+            match result {
+                Ok(value) => Ok(ToolResult::json_pretty(&value)),
+                Err(err) => Ok(ToolResult::structured_error(shared_memory_error(err))),
+            }
+        }
         "mission_context_slice" => match state.shared_memory.context_slice(&args).await {
             Ok(value) => Ok(ToolResult::json_pretty(&value)),
             Err(err) => Ok(ToolResult::structured_error(shared_memory_error(err))),
