@@ -23,6 +23,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::process::Stdio;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -3872,88 +3873,6 @@ impl PTYWebSocketServer {
         )
     }
 
-    async fn wait_for_jarvis_intent_author_idle(
-        pty_manager: &PTYManager,
-        slot_id: &str,
-        timeout_secs: u64,
-    ) -> anyhow::Result<()> {
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs.max(1));
-        loop {
-            match pty_manager.get_status(slot_id).await {
-                Some(info) if info.state == SessionState::Idle => return Ok(()),
-                Some(info) if matches!(info.state, SessionState::Exited | SessionState::Error) => {
-                    anyhow::bail!(
-                        "JARVIS_INTENT_AUTHOR_UNAVAILABLE: slot {} entered {:?}",
-                        slot_id,
-                        info.state
-                    );
-                }
-                Some(_) if std::time::Instant::now() >= deadline => {
-                    anyhow::bail!(
-                        "JARVIS_INTENT_AUTHOR_BUSY: slot {} did not become idle within {}s",
-                        slot_id,
-                        timeout_secs
-                    );
-                }
-                None => {
-                    anyhow::bail!(
-                        "JARVIS_INTENT_AUTHOR_UNAVAILABLE: slot {} is not registered",
-                        slot_id
-                    );
-                }
-                _ => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
-            }
-        }
-    }
-
-    async fn ensure_jarvis_intent_author_ready(
-        pty_manager: &PTYManager,
-        config: &JarvisIntentAuthorConfig,
-    ) -> anyhow::Result<()> {
-        let cwd = Self::jarvis_slot_runtime_cwd();
-        let timeout_secs = Self::jarvis_intent_author_timeout_secs(config);
-        let slot = PTYSlot {
-            id: config.slot_id.clone(),
-            role: "intent-author".to_string(),
-            cwd: Some(cwd.clone()),
-            engine: missiond_shared::CliEngine::Codex,
-        };
-
-        if pty_manager.get_status(&config.slot_id).await.is_none() {
-            pty_manager.init_slot(&slot).await;
-        }
-
-        let status = pty_manager.get_status(&config.slot_id).await;
-        let needs_spawn = status
-            .as_ref()
-            .map(|info| matches!(info.state, SessionState::Exited | SessionState::Error))
-            .unwrap_or(true);
-        if needs_spawn {
-            let mut extra_env = HashMap::new();
-            extra_env.insert("MISSIOND_SLOT_ID".to_string(), config.slot_id.clone());
-            extra_env.insert(
-                "MISSIOND_JARVIS_INTENT_AUTHOR".to_string(),
-                chrono::Utc::now().to_rfc3339(),
-            );
-            let options = PTYSpawnOptions {
-                auto_restart: true,
-                wait_for_idle: true,
-                timeout_secs: Some(timeout_secs),
-                model: Some(config.model.clone()),
-                reasoning_effort: Some(config.reasoning_effort.clone()),
-                search_enabled: config.search_enabled,
-                sandbox: Some(config.sandbox.clone()),
-                approval_policy: Some(config.approval_policy.clone()),
-                extra_env,
-                ..Default::default()
-            };
-            pty_manager.restart(&slot, options).await?;
-        }
-
-        Self::wait_for_jarvis_intent_author_idle(pty_manager, &config.slot_id, timeout_secs).await
-    }
-
     fn jarvis_codex_intent_prompt(
         config: &JarvisIntentAuthorConfig,
         schema: &str,
@@ -3984,9 +3903,9 @@ impl PTYWebSocketServer {
             }
         });
         format!(
-            "你是 MissionD 的 Jarvis intent.lisp 语义作者，运行在 Codex CLI GPT-5.5 xhigh 工位。\n\
+            "你是 MissionD 的 Jarvis intent.lisp 语义作者，运行在 Codex CLI GPT-5.5 xhigh headless 工位。\n\
 任务：识别用户真实意图，并输出一个可供用户确认的 intent draft。不要创建任务、不要改文件、不要派工位。\n\
-只返回一个 JSON object，不要 Markdown，不要代码围栏，不要额外解释。\n\
+只返回一个严格 JSON object，不要 Markdown，不要代码围栏，不要额外解释。JSON key 必须使用双引号。\n\
 JSON 字段必须是：\n\
   recognized_objective: string，归一化后的用户目标，保留用户本意，不要扩大范围。\n\
   intent_kind: string，例如 greeting/question/review/design/implementation/ops/unknown。\n\
@@ -4000,6 +3919,136 @@ JSON 字段必须是：\n\
 输入 JSON：\n{}\n",
             serde_json::to_string_pretty(&input).unwrap_or_else(|_| "{}".to_string())
         )
+    }
+
+    fn extract_codex_exec_message(stdout: &str) -> Option<String> {
+        let mut content_parts = Vec::new();
+        for line in stdout.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let event_type = event
+                .get("type")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            if event_type != "item.completed" {
+                continue;
+            }
+            if let Some(text) = event.pointer("/item/text").and_then(|value| value.as_str()) {
+                if !text.trim().is_empty() {
+                    content_parts.push(text.to_string());
+                    continue;
+                }
+            }
+            if let Some(content) = event
+                .pointer("/item/content")
+                .and_then(|value| value.as_array())
+            {
+                for part in content {
+                    if let Some(text) = part.get("text").and_then(|value| value.as_str()) {
+                        if !text.trim().is_empty() {
+                            content_parts.push(text.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        if content_parts.is_empty() {
+            None
+        } else {
+            Some(content_parts.join("\n"))
+        }
+    }
+
+    fn jarvis_codex_output_sample(text: &str) -> String {
+        text.chars().take(500).collect::<String>()
+    }
+
+    async fn run_jarvis_codex_intent_exec(
+        config: &JarvisIntentAuthorConfig,
+        prompt: &str,
+    ) -> anyhow::Result<String> {
+        let timeout_secs = Self::jarvis_intent_author_timeout_secs(config);
+        let cwd = Self::jarvis_slot_runtime_cwd();
+        let cwd_arg = cwd.display().to_string();
+        let output_path = std::env::temp_dir().join(format!(
+            "missiond-jarvis-intent-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let output_path_arg = output_path.display().to_string();
+        let reasoning_config = format!("model_reasoning_effort=\"{}\"", config.reasoning_effort);
+
+        let mut cmd = tokio::process::Command::new("codex");
+        cmd.kill_on_drop(true);
+        if config.search_enabled {
+            cmd.arg("--search");
+        }
+        cmd.arg("--model").arg(&config.model);
+        cmd.arg("-c").arg(reasoning_config);
+        cmd.arg("--sandbox").arg(&config.sandbox);
+        cmd.arg("--ask-for-approval").arg(&config.approval_policy);
+        cmd.arg("--cd").arg(cwd_arg);
+        cmd.arg("exec");
+        cmd.arg("--json");
+        cmd.arg("--ephemeral");
+        cmd.arg("--skip-git-repo-check");
+        cmd.arg("--color").arg("never");
+        cmd.arg("--output-last-message").arg(&output_path_arg);
+        cmd.arg(prompt);
+        cmd.env("MISSIOND_SLOT_ID", &config.slot_id);
+        cmd.env(
+            "MISSIOND_JARVIS_INTENT_AUTHOR",
+            chrono::Utc::now().to_rfc3339(),
+        );
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+
+        let output =
+            match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output())
+                .await
+            {
+                Ok(result) => result.map_err(|err| {
+                    anyhow::anyhow!(
+                        "JARVIS_INTENT_AUTHOR_UNAVAILABLE: spawn codex exec failed: {err}"
+                    )
+                })?,
+                Err(_) => {
+                    let _ = tokio::fs::remove_file(&output_path).await;
+                    anyhow::bail!(
+                        "JARVIS_INTENT_AUTHOR_TIMEOUT: codex exec did not finish within {}s",
+                        timeout_secs
+                    );
+                }
+            };
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if !output.status.success() {
+            let _ = tokio::fs::remove_file(&output_path).await;
+            anyhow::bail!(
+                "JARVIS_INTENT_AUTHOR_FAILED: codex exec exited with {}: {}",
+                output.status,
+                Self::jarvis_codex_output_sample(&stderr)
+            );
+        }
+
+        let last_message = tokio::fs::read_to_string(&output_path)
+            .await
+            .unwrap_or_default();
+        let _ = tokio::fs::remove_file(&output_path).await;
+        if !last_message.trim().is_empty() {
+            return Ok(last_message);
+        }
+        Self::extract_codex_exec_message(&stdout).ok_or_else(|| {
+            anyhow::anyhow!(
+                "JARVIS_INTENT_AUTHOR_FAILED: codex exec produced no final message; stdout={}",
+                Self::jarvis_codex_output_sample(&stdout)
+            )
+        })
     }
 
     fn extract_json_object(text: &str) -> Option<&str> {
@@ -4091,7 +4140,7 @@ JSON 字段必须是：\n\
     }
 
     async fn author_jarvis_intent_draft(
-        pty_manager: Option<&Arc<PTYManager>>,
+        _pty_manager: Option<&Arc<PTYManager>>,
         config: &JarvisIntentAuthorConfig,
         schema: &str,
         channel: &str,
@@ -4102,10 +4151,6 @@ JSON 字段必须是：\n\
         sources_used: &[String],
         permission_context: Option<&serde_json::Value>,
     ) -> anyhow::Result<JarvisAuthoredIntentDraft> {
-        let Some(pty_manager) = pty_manager else {
-            anyhow::bail!("JARVIS_INTENT_AUTHOR_UNAVAILABLE: PTY manager is not available");
-        };
-        Self::ensure_jarvis_intent_author_ready(pty_manager, config).await?;
         let prompt = Self::jarvis_codex_intent_prompt(
             config,
             schema,
@@ -4117,11 +4162,8 @@ JSON 字段必须是：\n\
             sources_used,
             permission_context,
         );
-        let timeout_secs = Self::jarvis_intent_author_timeout_secs(config);
-        let response = pty_manager
-            .send(&config.slot_id, &prompt, timeout_secs.saturating_mul(1000))
-            .await?;
-        let parsed = Self::parse_codex_intent_response(&response.response)?;
+        let response = Self::run_jarvis_codex_intent_exec(config, &prompt).await?;
+        let parsed = Self::parse_codex_intent_response(&response)?;
         let artifact_body = Self::jarvis_authored_intent_lisp_body(
             schema,
             config,
@@ -8572,6 +8614,17 @@ done"#;
         assert_eq!(parsed.intent_kind, "implementation");
         assert!(parsed.review_text.contains("目标"));
         assert_eq!(parsed.assumptions, vec!["用户希望 Codex 参与"]);
+    }
+
+    #[test]
+    fn jarvis_codex_exec_jsonl_extracts_final_message() {
+        let stdout = r#"{"type":"thread.started","thread_id":"t"}
+{"type":"item.completed","item":{"type":"message","text":"{\"recognized_objective\":\"展示 intent.lisp 正文\",\"intent_kind\":\"review\",\"understanding\":\"用户只想先看到可确认的 intent。\",\"review_text\":\"目标: 展示 intent.lisp 正文\",\"assumptions\":[\"只读\"],\"non_goals\":[\"创建任务\"],\"acceptance_signals\":[\"看到正文\"],\"confidence\":\"high\"}"}}
+{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":2}}"#;
+        let message = PTYWebSocketServer::extract_codex_exec_message(stdout).unwrap();
+        let parsed = PTYWebSocketServer::parse_codex_intent_response(&message).unwrap();
+        assert_eq!(parsed.recognized_objective, "展示 intent.lisp 正文");
+        assert_eq!(parsed.non_goals, vec!["创建任务"]);
     }
 
     #[test]

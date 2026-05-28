@@ -89,7 +89,8 @@ requireIncludes('requestSurfaces', [
   'missiond.jarvis-pending-confirmation.v1',
   'review_text',
   'artifact_body/artifact_language',
-  'Codex CLI GPT-5.5 xhigh intent.lisp authoring',
+  'Codex CLI GPT-5.5 xhigh headless intent.lisp authoring',
+  'codex exec --json --output-last-message',
   'codex-intent-author',
   'author=codex-cli-gpt-5.5-xhigh',
 ]);
@@ -101,6 +102,7 @@ requireIncludes('workstationRuntime', [
   ':reasoning-effort xhigh',
   ':sandbox read-only',
   ':accepts-boardtask false',
+  'codex exec --json --output-last-message',
   'JARVIS_INTENT_AUTHOR_FAILED',
 ]);
 
@@ -153,6 +155,8 @@ requireIncludes('server', [
   'artifact_language',
   'JarvisIntentAuthorConfig',
   'author_jarvis_intent_draft',
+  'run_jarvis_codex_intent_exec',
+  'extract_codex_exec_message',
   'codex-cli-gpt-5.5-xhigh',
   'JARVIS_INTENT_AUTHOR_FAILED',
   'jarvis_authored_intent_lisp_body',

@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import os from 'node:os';
 
 import {
   loadDeclaredBehaviorUniverse,
@@ -115,15 +116,24 @@ function parseArgs(argv) {
 
 function resolveProjectRoot(repo, projectId) {
   if (projectId === 'missiond') return repo;
-  const compiled = path.join(repo, '.missiond/v3/runtime/compiled/compiled-project-universe.json');
-  if (!fs.existsSync(compiled)) return null;
+  const runtimeDir = process.env.MISSIOND_RUNTIME_DIR
+    || path.join(os.homedir(), '.missiond/runtime/missiond');
+  const compiled = [
+    path.join(runtimeDir, 'compiled/compiled-project-universe.json'),
+    path.join(repo, '.missiond/v3/runtime/compiled/compiled-project-universe.json'),
+  ].find((candidate) => fs.existsSync(candidate));
+  if (!compiled) return null;
   const payload = JSON.parse(fs.readFileSync(compiled, 'utf8')).payload ?? {};
   const project = (payload.projects ?? []).find((entry) => entry.id === projectId);
   return project?.root ?? null;
 }
 
 function behaviorUniverseTarget(root, { missiondV3 }) {
-  if (missiondV3) return path.join(root, '.missiond/v3/runtime/compiled/compiled-behavior-navigation.json');
+  if (missiondV3) {
+    const runtimeDir = process.env.MISSIOND_RUNTIME_DIR
+      || path.join(os.homedir(), '.missiond/runtime/missiond');
+    return path.join(runtimeDir, 'compiled/compiled-behavior-navigation.json');
+  }
   return path.join(root, '.missiond/behavior-universe.lisp');
 }
 

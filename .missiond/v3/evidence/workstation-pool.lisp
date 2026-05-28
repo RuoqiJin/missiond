@@ -58,7 +58,7 @@
        :sandbox read-only
        :approval-policy never
        :write-policy read-only
-       :runtime-rule "Jarvis intent.lisp authoring lane. It performs every user-intent semantic read before confirmation, returns structured intent fields for MissionD schema normalization, and must fail closed instead of allowing deterministic Rust fallback.")
+       :runtime-rule "Jarvis intent.lisp authoring lane. It performs every user-intent semantic read before confirmation through headless `codex exec --json --output-last-message`, returns structured intent fields for MissionD schema normalization, must not use interactive PTY screen text as semantic output, and must fail closed instead of allowing deterministic Rust fallback.")
      (claude-code-fast-patch
        :account current-claude-code-default
        :model "Sonnet only when explicitly selected"

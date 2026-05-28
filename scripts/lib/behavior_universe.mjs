@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 import {
@@ -244,8 +245,22 @@ export function validateBehaviorClosure(root, {
   };
 }
 
+function missiondRuntimeCompiledDir() {
+  const runtimeDir = process.env.MISSIOND_RUNTIME_DIR
+    || path.join(os.homedir(), '.missiond/runtime/missiond');
+  return path.join(runtimeDir, 'compiled');
+}
+
+function behaviorNavigationCandidates(root) {
+  return [
+    path.join(missiondRuntimeCompiledDir(), 'compiled-behavior-navigation.json'),
+    path.join(root, '.missiond/v3/runtime/compiled/compiled-behavior-navigation.json'),
+  ];
+}
+
 function loadCompiledBehaviorNavigation(root, projectId) {
-  const file = path.join(root, '.missiond/v3/runtime/compiled/compiled-behavior-navigation.json');
+  const candidates = behaviorNavigationCandidates(root);
+  const file = candidates.find((candidate) => fs.existsSync(candidate)) ?? candidates[0];
   if (!fs.existsSync(file)) {
     return {
       universes: [],
@@ -254,7 +269,7 @@ function loadCompiledBehaviorNavigation(root, projectId) {
         line: 1,
         column: 1,
         code: 'BEHAVIOR_NAVIGATION_ARTIFACT_MISSING',
-        message: 'MissionD V3 behavior navigation anchors must come from compiled-behavior-navigation.json; run node scripts/propose-behavior-navigation.mjs --project missiond --write',
+        message: 'MissionD V3 behavior navigation anchors must come from compiled-behavior-navigation.json under MISSIOND_RUNTIME_DIR/compiled; run node scripts/propose-behavior-navigation.mjs --project missiond --write',
       }],
     };
   }
