@@ -17,6 +17,7 @@ function exists(rel) {
 const files = {
   v3: '.missiond/v3/shards/pillar-flow-map.lisp',
   requestSurfaces: '.missiond/v3/shards/implementation/request-surfaces.lisp',
+  workstationRuntime: '.missiond/v3/shards/workstation-runtime.lisp',
   v2: '.missiond/v3/shards/v2-convergence-map.lisp',
   workflow: '.missiond/workflows/intent-intake-grounding.lisp',
   frontend: '.missiond/frontend/board-blueprint.lisp',
@@ -88,6 +89,19 @@ requireIncludes('requestSurfaces', [
   'missiond.jarvis-pending-confirmation.v1',
   'review_text',
   'artifact_body/artifact_language',
+  'Codex CLI GPT-5.5 xhigh intent.lisp authoring',
+  'codex-intent-author',
+  'author=codex-cli-gpt-5.5-xhigh',
+]);
+
+requireIncludes('workstationRuntime', [
+  '(worker codex-intent-author',
+  ':slot-id "slot-codex-intent-author"',
+  ':model-profile codex-master-gpt-5-5-xhigh',
+  ':reasoning-effort xhigh',
+  ':sandbox read-only',
+  ':accepts-boardtask false',
+  'JARVIS_INTENT_AUTHOR_FAILED',
 ]);
 
 requireIncludes('v2', [
@@ -137,7 +151,11 @@ requireIncludes('server', [
   'review_text',
   'artifact_body',
   'artifact_language',
-  'jarvis_intent_lisp_body',
+  'JarvisIntentAuthorConfig',
+  'author_jarvis_intent_draft',
+  'codex-cli-gpt-5.5-xhigh',
+  'JARVIS_INTENT_AUTHOR_FAILED',
+  'jarvis_authored_intent_lisp_body',
   'jarvis_plan_lisp_body',
   'board_task_created',
   'write_sse_openai_missiond_projection',

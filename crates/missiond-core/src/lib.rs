@@ -72,8 +72,8 @@ pub use gemini_cli::{GeminiCliWatcher, GeminiCliWatcherOptions};
 pub use ws::{
     ContextEnrichResult, ContextEnricherFn, ContextEnricherSlot, JarvisArtifactFn,
     JarvisArtifactRequest, JarvisArtifactResult, JarvisArtifactSlot, JarvisGroundingFn,
-    JarvisGroundingRequest, JarvisGroundingResult, JarvisGroundingSlot, PTYWebSocketServer,
-    WSServerOptions,
+    JarvisGroundingRequest, JarvisGroundingResult, JarvisGroundingSlot, JarvisIntentAuthorConfig,
+    PTYWebSocketServer, WSServerOptions,
 };
 
 // Re-export Sync types

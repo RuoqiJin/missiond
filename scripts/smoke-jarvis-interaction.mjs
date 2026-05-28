@@ -115,7 +115,10 @@ function hasReviewableArtifactDraft(events, expectedEvent) {
       && data.review_text.trim().length > 0
       && data.artifact_language === 'lisp'
       && typeof data.artifact_body === 'string'
-      && data.artifact_body.includes(expectedForm);
+      && data.artifact_body.includes(expectedForm)
+      && (expectedEvent !== 'intent_draft'
+        || (data.author === 'codex-cli-gpt-5.5-xhigh'
+          && data.artifact_body.includes(':authority codex-cli-gpt-5.5-xhigh')));
   });
 }
 
@@ -147,7 +150,7 @@ async function tokenFromSecretStore(ref) {
 
 async function postInteraction(body) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), Number(process.env.JARVIS_SMOKE_TIMEOUT_MS || 30000));
+  const timeout = setTimeout(() => controller.abort(), Number(process.env.JARVIS_SMOKE_TIMEOUT_MS || 180000));
   try {
     const response = await fetch(`${baseUrl}/v1/chat/completions`, {
       method: 'POST',

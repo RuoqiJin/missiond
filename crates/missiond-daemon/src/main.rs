@@ -54,8 +54,9 @@ use missiond_core::{
     CCTasksWatcher, CCTasksWatcherOptions, GeminiCliWatcher, GeminiCliWatcherOptions,
 };
 use missiond_core::{
-    InfraConfig, LearnedPermissions, MissionControl, MissionControlOptions, PTYManager,
-    PTYWebSocketServer, PermissionPolicy, SkillIndex, WSServerOptions,
+    InfraConfig, JarvisIntentAuthorConfig, LearnedPermissions, MissionControl,
+    MissionControlOptions, PTYManager, PTYWebSocketServer, PermissionPolicy, SkillIndex,
+    WSServerOptions,
 };
 use missiond_mcp::tools::{all_tools, ToolContent, ToolResult};
 use serde_json::Value;
@@ -190,6 +191,32 @@ fn workstation_pool_model(
             .map_err(|e| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", e)),
         None => Ok(None),
     }
+}
+
+fn jarvis_intent_author_config(
+    config: &context::v3_blueprint_runtime::WorkstationRuntimeConfig,
+) -> Result<JarvisIntentAuthorConfig> {
+    let mut projected = JarvisIntentAuthorConfig::default();
+    if let Some(worker) = config
+        .workstation_pool()
+        .iter()
+        .find(|worker| worker.id == "codex-intent-author")
+    {
+        projected.slot_id = worker.slot_id.clone();
+        projected.model = workstation_pool_model(worker, config)?.unwrap_or(projected.model);
+        projected.reasoning_effort = worker
+            .reasoning_effort
+            .clone()
+            .unwrap_or(projected.reasoning_effort);
+        projected.search_enabled = worker.search_enabled;
+        projected.sandbox = worker.sandbox.clone().unwrap_or(projected.sandbox);
+        projected.approval_policy = worker
+            .approval_policy
+            .clone()
+            .unwrap_or(projected.approval_policy);
+        projected.timeout_secs = worker.timeout_secs;
+    }
+    Ok(projected)
 }
 
 fn should_register_workstation_pool_task(
@@ -634,6 +661,7 @@ async fn main() -> Result<()> {
                 .chat_completions_default_slot()
                 .to_string()
         });
+    let jarvis_intent_author = jarvis_intent_author_config(&workstation_config_for_ws)?;
     let mut ws_server = PTYWebSocketServer::new(WSServerOptions {
         port: ws_port,
         pty_manager: Some(Arc::clone(&pty)),
@@ -648,6 +676,7 @@ async fn main() -> Result<()> {
         jarvis_artifact_writer: Arc::clone(&jarvis_artifact_writer_slot),
         tool_count: all_tools().len(),
         default_chat_slot,
+        jarvis_intent_author,
     });
     if let Err(e) = ws_server.start().await {
         // WS is required for Board UI — fail startup rather than running headless.

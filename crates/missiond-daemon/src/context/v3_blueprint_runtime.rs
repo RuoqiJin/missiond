@@ -3644,6 +3644,24 @@ pub(crate) mod tests {
       :default-use codex-review-shard
       :accepts-boardtask true
       :write-allowed false)
+    (worker codex-intent-author
+      :engine codex
+      :role intent-author
+      :slot-id "slot-codex-intent-author"
+      :task-type codex_intent_author
+      :model-profile codex-master-gpt-5-5-xhigh
+      :model nil
+      :reasoning-effort xhigh
+      :search true
+      :sandbox read-only
+      :approval-policy never
+      :task-classes [intent-authoring intent-recognition]
+      :capabilities [intent-recognition code-read search]
+      :max-concurrency 1
+      :timeout-secs 180
+      :default-use jarvis-intent-authoring
+      :accepts-boardtask false
+      :write-allowed false)
     (worker codex-master-control
       :engine codex
       :role orchestrator
@@ -3844,7 +3862,7 @@ pub(crate) mod tests {
             Some("gpt-5.5".to_string())
         );
         assert_eq!(cfg.startup_slots().len(), 4);
-        assert_eq!(cfg.workstation_pool().len(), 9);
+        assert_eq!(cfg.workstation_pool().len(), 10);
         assert_eq!(
             cfg.chat_completions_default_slot(),
             DEFAULT_CHAT_COMPLETIONS_DEFAULT_SLOT
@@ -3879,6 +3897,19 @@ pub(crate) mod tests {
             .expect("codex code worker");
         assert_eq!(codex_code.sandbox.as_deref(), Some("workspace-write"));
         assert!(codex_code.accepts_boardtask);
+        let codex_intent = cfg
+            .workstation_pool()
+            .iter()
+            .find(|worker| worker.id == "codex-intent-author")
+            .expect("codex intent author worker");
+        assert_eq!(codex_intent.slot_id, "slot-codex-intent-author");
+        assert_eq!(
+            codex_intent.model_profile.as_deref(),
+            Some(DEFAULT_CODEX_MASTER_PROFILE)
+        );
+        assert_eq!(codex_intent.reasoning_effort.as_deref(), Some("xhigh"));
+        assert_eq!(codex_intent.sandbox.as_deref(), Some("read-only"));
+        assert!(!codex_intent.accepts_boardtask);
         assert_eq!(
             cfg.boardtask_pool_candidates("deploy-ops")
                 .first()

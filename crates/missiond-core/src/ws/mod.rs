@@ -13,6 +13,6 @@ pub use screenshot_broker::{ScreenshotBroker, ScreenshotResult};
 pub use server::{
     ContextEnrichResult, ContextEnricherFn, ContextEnricherSlot, JarvisArtifactFn,
     JarvisArtifactRequest, JarvisArtifactResult, JarvisArtifactSlot, JarvisGroundingFn,
-    JarvisGroundingRequest, JarvisGroundingResult, JarvisGroundingSlot, PTYWebSocketServer,
-    WSServerOptions,
+    JarvisGroundingRequest, JarvisGroundingResult, JarvisGroundingSlot, JarvisIntentAuthorConfig,
+    PTYWebSocketServer, WSServerOptions,
 };

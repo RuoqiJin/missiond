@@ -175,6 +175,61 @@ fn default_interaction_channel() -> String {
     "web".to_string()
 }
 
+/// V3-projected Codex CLI authoring lane for Jarvis intent.lisp drafts.
+#[derive(Debug, Clone)]
+pub struct JarvisIntentAuthorConfig {
+    pub slot_id: String,
+    pub model: String,
+    pub reasoning_effort: String,
+    pub search_enabled: bool,
+    pub sandbox: String,
+    pub approval_policy: String,
+    pub timeout_secs: u64,
+}
+
+impl Default for JarvisIntentAuthorConfig {
+    fn default() -> Self {
+        Self {
+            slot_id: "slot-codex-intent-author".to_string(),
+            model: "gpt-5.5".to_string(),
+            reasoning_effort: "xhigh".to_string(),
+            search_enabled: true,
+            sandbox: "read-only".to_string(),
+            approval_policy: "never".to_string(),
+            timeout_secs: 180,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct JarvisCodexIntentResponse {
+    recognized_objective: String,
+    intent_kind: String,
+    understanding: String,
+    review_text: String,
+    #[serde(default)]
+    assumptions: Vec<String>,
+    #[serde(default)]
+    non_goals: Vec<String>,
+    #[serde(default)]
+    acceptance_signals: Vec<String>,
+    #[serde(default)]
+    confidence: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct JarvisAuthoredIntentDraft {
+    objective: String,
+    intent_kind: String,
+    understanding: String,
+    review_text: String,
+    artifact_body: String,
+    assumptions: Vec<String>,
+    non_goals: Vec<String>,
+    acceptance_signals: Vec<String>,
+    confidence: Option<String>,
+}
+
 /// WebSocket server options
 pub struct WSServerOptions {
     /// Server port
@@ -203,6 +258,8 @@ pub struct WSServerOptions {
     pub tool_count: usize,
     /// V3-projected default slot for OpenAI-compatible chat completions.
     pub default_chat_slot: String,
+    /// V3-projected Codex CLI authoring lane for intent.lisp.
+    pub jarvis_intent_author: JarvisIntentAuthorConfig,
 }
 
 /// PTY WebSocket Server
@@ -222,6 +279,7 @@ pub struct PTYWebSocketServer {
     jarvis_artifact_writer: JarvisArtifactSlot,
     tool_count: usize,
     default_chat_slot: String,
+    jarvis_intent_author: JarvisIntentAuthorConfig,
 }
 
 /// Jarvis system prompt — injected before context enrichment so Claude Code
@@ -1451,6 +1509,7 @@ impl PTYWebSocketServer {
             jarvis_artifact_writer: Arc::clone(&options.jarvis_artifact_writer),
             tool_count: options.tool_count,
             default_chat_slot: options.default_chat_slot,
+            jarvis_intent_author: options.jarvis_intent_author,
         }
     }
 
@@ -1525,6 +1584,7 @@ impl PTYWebSocketServer {
         let jarvis_artifact_writer = self.jarvis_artifact_writer.clone();
         let tool_count = self.tool_count;
         let default_chat_slot = self.default_chat_slot.clone();
+        let jarvis_intent_author = self.jarvis_intent_author.clone();
 
         tokio::spawn(async move {
             let mut shutdown_rx = shutdown_tx.subscribe();
@@ -1546,8 +1606,9 @@ impl PTYWebSocketServer {
                                 let jarvis_artifact_writer = jarvis_artifact_writer.clone();
                                 let tool_count = tool_count;
                                 let default_chat_slot = default_chat_slot.clone();
+                                let jarvis_intent_author = jarvis_intent_author.clone();
                                 tokio::spawn(async move {
-                                    if let Err(e) = Self::handle_connection(stream, addr, pty_manager, cc_tasks_watcher, screenshot_broker, jarvis_trace, incident_tx, system_event_tx, frontend_events_tx, db, context_enricher, jarvis_grounding, jarvis_artifact_writer, tool_count, default_chat_slot).await {
+                                    if let Err(e) = Self::handle_connection(stream, addr, pty_manager, cc_tasks_watcher, screenshot_broker, jarvis_trace, incident_tx, system_event_tx, frontend_events_tx, db, context_enricher, jarvis_grounding, jarvis_artifact_writer, tool_count, default_chat_slot, jarvis_intent_author).await {
                                         error!(?e, ?addr, "WebSocket connection error");
                                     }
                                 });
@@ -2283,6 +2344,8 @@ impl PTYWebSocketServer {
     async fn handle_interaction_messages(
         mut stream: TcpStream,
         addr: SocketAddr,
+        pty_manager: Option<Arc<PTYManager>>,
+        jarvis_intent_author: JarvisIntentAuthorConfig,
         jarvis_grounding: JarvisGroundingSlot,
         jarvis_artifact_writer: JarvisArtifactSlot,
         db: Option<Arc<dyn crate::db::traits::MissionStore>>,
@@ -2311,6 +2374,8 @@ impl PTYWebSocketServer {
             addr,
             headers,
             envelope,
+            pty_manager,
+            jarvis_intent_author,
             jarvis_grounding,
             jarvis_artifact_writer,
             db,
@@ -2323,6 +2388,7 @@ impl PTYWebSocketServer {
         addr: SocketAddr,
         pty_manager: Option<Arc<PTYManager>>,
         default_chat_slot: String,
+        jarvis_intent_author: JarvisIntentAuthorConfig,
         jarvis_grounding: JarvisGroundingSlot,
         jarvis_artifact_writer: JarvisArtifactSlot,
         db: Option<Arc<dyn crate::db::traits::MissionStore>>,
@@ -2361,6 +2427,8 @@ impl PTYWebSocketServer {
             addr,
             headers,
             envelope,
+            pty_manager,
+            jarvis_intent_author,
             jarvis_grounding,
             jarvis_artifact_writer,
             db,
@@ -2373,6 +2441,8 @@ impl PTYWebSocketServer {
         addr: SocketAddr,
         headers: String,
         mut envelope: InteractionEnvelope,
+        pty_manager: Option<Arc<PTYManager>>,
+        jarvis_intent_author: JarvisIntentAuthorConfig,
         jarvis_grounding: JarvisGroundingSlot,
         jarvis_artifact_writer: JarvisArtifactSlot,
         db: Option<Arc<dyn crate::db::traits::MissionStore>>,
@@ -2669,28 +2739,65 @@ impl PTYWebSocketServer {
         )
         .await?;
 
-        let intent_understanding = "我理解这是一个外部渠道请求，需要先确认 intent.lisp，再确认 plan.lisp，之后才创建 BoardTask 并派工位。";
-        let intent_review_text = Self::jarvis_intent_review_text(
-            &objective_text,
-            intent_understanding,
-            &grounding_context_id,
-            &sources_used,
-        );
-        let intent_artifact_body = Self::jarvis_intent_lisp_body(
+        Self::write_sse_event(
+            &mut stream,
+            "status",
+            &serde_json::json!({
+                "interaction_id": interaction_id,
+                "phase": "intent_authoring",
+                "author": "codex-cli-gpt-5.5-xhigh",
+                "slot_id": &jarvis_intent_author.slot_id,
+                "message": "Codex CLI GPT-5.5 xhigh is authoring intent.lisp for user confirmation."
+            }),
+        )
+        .await?;
+        let authored_intent = match Self::author_jarvis_intent_draft(
+            pty_manager.as_ref(),
+            &jarvis_intent_author,
             "missiond.interaction-intent-artifact.v1",
             &channel,
             &objective_text,
-            intent_understanding,
             &grounding_context_id,
             resolved_topic_id.as_deref(),
             resolved_topic_label.as_deref(),
             &sources_used,
-        );
+            Some(&permission_context),
+        )
+        .await
+        {
+            Ok(draft) => draft,
+            Err(error) => {
+                let diagnostic = serde_json::json!({
+                    "phase": "intent_authoring_failed",
+                    "error": {
+                        "code": "JARVIS_INTENT_AUTHOR_FAILED",
+                        "message": error.to_string()
+                    }
+                });
+                Self::write_sse_event(&mut stream, "diagnostic", &diagnostic).await?;
+                Self::write_sse_openai_text_and_persist(
+                    &mut stream,
+                    &chat_id,
+                    "intent.lisp 需要 Codex CLI GPT-5.5 xhigh 工位生成；当前工位不可用或输出未通过校验，已停止，不会用 Rust fallback 代替你的意图识别。",
+                    Some("stop"),
+                    db.as_ref(),
+                    jarvis_conv_id.as_deref(),
+                )
+                .await?;
+                Self::finish_sse(&mut stream).await?;
+                return Ok(());
+            }
+        };
+        let objective_text = authored_intent.objective.clone();
         let intent_payload = serde_json::json!({
             "schema": "missiond.interaction-intent-artifact.v1",
             "interaction_id": interaction_id,
             "channel": channel,
             "phase": "intent_draft",
+            "author": "codex-cli-gpt-5.5-xhigh",
+            "intent_author_slot_id": &jarvis_intent_author.slot_id,
+            "intent_kind": authored_intent.intent_kind,
+            "confidence": authored_intent.confidence,
             "grounding_context_id": grounding_context_id,
             "context_pack_path": context_pack_path,
             "context_pack_file": context_pack_file,
@@ -2699,12 +2806,16 @@ impl PTYWebSocketServer {
             "topic_id": resolved_topic_id,
             "topic_label": resolved_topic_label,
             "permission_context": permission_context.clone(),
-            "understanding": intent_understanding,
+            "understanding": authored_intent.understanding,
             "objective": objective_text,
-            "user_message_preview": objective_text.chars().take(240).collect::<String>(),
-            "review_text": intent_review_text,
+            "original_user_message": &raw_user_text,
+            "user_message_preview": raw_user_text.chars().take(240).collect::<String>(),
+            "review_text": authored_intent.review_text,
             "artifact_language": "lisp",
-            "artifact_body": intent_artifact_body,
+            "artifact_body": authored_intent.artifact_body,
+            "assumptions": authored_intent.assumptions,
+            "non_goals": authored_intent.non_goals,
+            "acceptance_signals": authored_intent.acceptance_signals,
             "sources_used": sources_used,
             "requires_confirmation": true
         });
@@ -3743,6 +3854,298 @@ impl PTYWebSocketServer {
         Self::write_sse_openai_text(stream, chat_id, text, finish_reason).await
     }
 
+    fn clamp_jarvis_intent_author_timeout_secs(value: Option<u64>) -> u64 {
+        const DEFAULT_TIMEOUT_SECS: u64 = 180;
+        const MIN_TIMEOUT_SECS: u64 = 30;
+        const MAX_TIMEOUT_SECS: u64 = 300;
+        value
+            .unwrap_or(DEFAULT_TIMEOUT_SECS)
+            .clamp(MIN_TIMEOUT_SECS, MAX_TIMEOUT_SECS)
+    }
+
+    fn jarvis_intent_author_timeout_secs(config: &JarvisIntentAuthorConfig) -> u64 {
+        Self::clamp_jarvis_intent_author_timeout_secs(
+            std::env::var("MISSIOND_JARVIS_INTENT_AUTHOR_TIMEOUT_SECS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .or(Some(config.timeout_secs)),
+        )
+    }
+
+    async fn wait_for_jarvis_intent_author_idle(
+        pty_manager: &PTYManager,
+        slot_id: &str,
+        timeout_secs: u64,
+    ) -> anyhow::Result<()> {
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs.max(1));
+        loop {
+            match pty_manager.get_status(slot_id).await {
+                Some(info) if info.state == SessionState::Idle => return Ok(()),
+                Some(info) if matches!(info.state, SessionState::Exited | SessionState::Error) => {
+                    anyhow::bail!(
+                        "JARVIS_INTENT_AUTHOR_UNAVAILABLE: slot {} entered {:?}",
+                        slot_id,
+                        info.state
+                    );
+                }
+                Some(_) if std::time::Instant::now() >= deadline => {
+                    anyhow::bail!(
+                        "JARVIS_INTENT_AUTHOR_BUSY: slot {} did not become idle within {}s",
+                        slot_id,
+                        timeout_secs
+                    );
+                }
+                None => {
+                    anyhow::bail!(
+                        "JARVIS_INTENT_AUTHOR_UNAVAILABLE: slot {} is not registered",
+                        slot_id
+                    );
+                }
+                _ => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
+            }
+        }
+    }
+
+    async fn ensure_jarvis_intent_author_ready(
+        pty_manager: &PTYManager,
+        config: &JarvisIntentAuthorConfig,
+    ) -> anyhow::Result<()> {
+        let cwd = Self::jarvis_slot_runtime_cwd();
+        let timeout_secs = Self::jarvis_intent_author_timeout_secs(config);
+        let slot = PTYSlot {
+            id: config.slot_id.clone(),
+            role: "intent-author".to_string(),
+            cwd: Some(cwd.clone()),
+            engine: missiond_shared::CliEngine::Codex,
+        };
+
+        if pty_manager.get_status(&config.slot_id).await.is_none() {
+            pty_manager.init_slot(&slot).await;
+        }
+
+        let status = pty_manager.get_status(&config.slot_id).await;
+        let needs_spawn = status
+            .as_ref()
+            .map(|info| matches!(info.state, SessionState::Exited | SessionState::Error))
+            .unwrap_or(true);
+        if needs_spawn {
+            let mut extra_env = HashMap::new();
+            extra_env.insert("MISSIOND_SLOT_ID".to_string(), config.slot_id.clone());
+            extra_env.insert(
+                "MISSIOND_JARVIS_INTENT_AUTHOR".to_string(),
+                chrono::Utc::now().to_rfc3339(),
+            );
+            let options = PTYSpawnOptions {
+                auto_restart: true,
+                wait_for_idle: true,
+                timeout_secs: Some(timeout_secs),
+                model: Some(config.model.clone()),
+                reasoning_effort: Some(config.reasoning_effort.clone()),
+                search_enabled: config.search_enabled,
+                sandbox: Some(config.sandbox.clone()),
+                approval_policy: Some(config.approval_policy.clone()),
+                extra_env,
+                ..Default::default()
+            };
+            pty_manager.restart(&slot, options).await?;
+        }
+
+        Self::wait_for_jarvis_intent_author_idle(pty_manager, &config.slot_id, timeout_secs).await
+    }
+
+    fn jarvis_codex_intent_prompt(
+        config: &JarvisIntentAuthorConfig,
+        schema: &str,
+        channel: &str,
+        objective: &str,
+        grounding_context_id: &str,
+        topic_id: Option<&str>,
+        topic_label: Option<&str>,
+        sources_used: &[String],
+        permission_context: Option<&serde_json::Value>,
+    ) -> String {
+        let input = serde_json::json!({
+            "schema": schema,
+            "channel": channel,
+            "original_user_message": objective,
+            "grounding_context_id": grounding_context_id,
+            "topic_id": topic_id,
+            "topic_label": topic_label,
+            "sources_used": sources_used,
+            "permission_context": permission_context.cloned().unwrap_or(serde_json::Value::Null),
+            "authoring_lane": {
+                "engine": "codex-cli",
+                "slot_id": config.slot_id,
+                "model": config.model,
+                "reasoning_effort": config.reasoning_effort,
+                "sandbox": config.sandbox,
+                "approval_policy": config.approval_policy
+            }
+        });
+        format!(
+            "你是 MissionD 的 Jarvis intent.lisp 语义作者，运行在 Codex CLI GPT-5.5 xhigh 工位。\n\
+任务：识别用户真实意图，并输出一个可供用户确认的 intent draft。不要创建任务、不要改文件、不要派工位。\n\
+只返回一个 JSON object，不要 Markdown，不要代码围栏，不要额外解释。\n\
+JSON 字段必须是：\n\
+  recognized_objective: string，归一化后的用户目标，保留用户本意，不要扩大范围。\n\
+  intent_kind: string，例如 greeting/question/review/design/implementation/ops/unknown。\n\
+  understanding: string，用中文说明你理解的真实意图。\n\
+  review_text: string，给用户看的审阅摘要，必须说明边界：只确认意图，确认后才生成 plan.lisp。\n\
+  assumptions: string[]，你做出的假设。\n\
+  non_goals: string[]，明确不做什么。\n\
+  acceptance_signals: string[]，用户确认时实际接受的内容。\n\
+  confidence: string，low/medium/high。\n\
+\n\
+输入 JSON：\n{}\n",
+            serde_json::to_string_pretty(&input).unwrap_or_else(|_| "{}".to_string())
+        )
+    }
+
+    fn extract_json_object(text: &str) -> Option<&str> {
+        let bytes = text.as_bytes();
+        let mut start = None;
+        let mut depth = 0usize;
+        let mut in_string = false;
+        let mut escaped = false;
+        for (idx, byte) in bytes.iter().enumerate() {
+            let ch = *byte as char;
+            if start.is_none() {
+                if ch == '{' {
+                    start = Some(idx);
+                    depth = 1;
+                }
+                continue;
+            }
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    in_string = false;
+                }
+                continue;
+            }
+            match ch {
+                '"' => in_string = true,
+                '{' => depth += 1,
+                '}' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return start.map(|s| &text[s..=idx]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn parse_codex_intent_response(text: &str) -> anyhow::Result<JarvisCodexIntentResponse> {
+        let json_text = Self::extract_json_object(text)
+            .ok_or_else(|| anyhow::anyhow!("Codex intent author did not return a JSON object"))?;
+        let parsed: JarvisCodexIntentResponse = serde_json::from_str(json_text)?;
+        if parsed.recognized_objective.trim().is_empty()
+            || parsed.intent_kind.trim().is_empty()
+            || parsed.understanding.trim().is_empty()
+            || parsed.review_text.trim().is_empty()
+        {
+            anyhow::bail!("Codex intent author returned an incomplete intent draft");
+        }
+        Ok(parsed)
+    }
+
+    fn jarvis_authored_intent_lisp_body(
+        schema: &str,
+        config: &JarvisIntentAuthorConfig,
+        channel: &str,
+        original_message: &str,
+        draft: &JarvisCodexIntentResponse,
+        grounding_context_id: &str,
+        topic_id: Option<&str>,
+        topic_label: Option<&str>,
+        sources_used: &[String],
+    ) -> String {
+        format!(
+            "(intent-draft\n  :schema {}\n  :authority codex-cli-gpt-5.5-xhigh\n  :semantic-author (:engine codex-cli :slot-id {} :model {} :reasoning-effort xhigh :sandbox {} :approval-policy {})\n  :channel {}\n  :original-message {}\n  :objective {}\n  :intent-kind {}\n  :confidence {}\n  :understanding {}\n  :grounding-context-id {}\n  :topic-id {}\n  :topic-label {}\n  :sources-used {}\n  :assumptions {}\n  :non-goals {}\n  :acceptance-signals {}\n  :approval (:state awaiting-intent-confirmation :required true)\n  :next-step \"confirm intent -> generate plan.lisp -> confirm plan -> create BoardTask\")",
+            Self::jarvis_lisp_string(schema),
+            Self::jarvis_lisp_string(&config.slot_id),
+            Self::jarvis_lisp_string(&config.model),
+            Self::jarvis_lisp_string(&config.sandbox),
+            Self::jarvis_lisp_string(&config.approval_policy),
+            Self::jarvis_lisp_string(channel),
+            Self::jarvis_lisp_string(original_message),
+            Self::jarvis_lisp_string(draft.recognized_objective.trim()),
+            Self::jarvis_lisp_string(draft.intent_kind.trim()),
+            Self::jarvis_lisp_optional(draft.confidence.as_deref()),
+            Self::jarvis_lisp_string(draft.understanding.trim()),
+            Self::jarvis_lisp_string(grounding_context_id),
+            Self::jarvis_lisp_optional(topic_id),
+            Self::jarvis_lisp_optional(topic_label),
+            Self::jarvis_lisp_string_list(sources_used),
+            Self::jarvis_lisp_string_list(&draft.assumptions),
+            Self::jarvis_lisp_string_list(&draft.non_goals),
+            Self::jarvis_lisp_string_list(&draft.acceptance_signals),
+        )
+    }
+
+    async fn author_jarvis_intent_draft(
+        pty_manager: Option<&Arc<PTYManager>>,
+        config: &JarvisIntentAuthorConfig,
+        schema: &str,
+        channel: &str,
+        objective: &str,
+        grounding_context_id: &str,
+        topic_id: Option<&str>,
+        topic_label: Option<&str>,
+        sources_used: &[String],
+        permission_context: Option<&serde_json::Value>,
+    ) -> anyhow::Result<JarvisAuthoredIntentDraft> {
+        let Some(pty_manager) = pty_manager else {
+            anyhow::bail!("JARVIS_INTENT_AUTHOR_UNAVAILABLE: PTY manager is not available");
+        };
+        Self::ensure_jarvis_intent_author_ready(pty_manager, config).await?;
+        let prompt = Self::jarvis_codex_intent_prompt(
+            config,
+            schema,
+            channel,
+            objective,
+            grounding_context_id,
+            topic_id,
+            topic_label,
+            sources_used,
+            permission_context,
+        );
+        let timeout_secs = Self::jarvis_intent_author_timeout_secs(config);
+        let response = pty_manager
+            .send(&config.slot_id, &prompt, timeout_secs.saturating_mul(1000))
+            .await?;
+        let parsed = Self::parse_codex_intent_response(&response.response)?;
+        let artifact_body = Self::jarvis_authored_intent_lisp_body(
+            schema,
+            config,
+            channel,
+            objective,
+            &parsed,
+            grounding_context_id,
+            topic_id,
+            topic_label,
+            sources_used,
+        );
+        Ok(JarvisAuthoredIntentDraft {
+            objective: parsed.recognized_objective.trim().to_string(),
+            intent_kind: parsed.intent_kind.trim().to_string(),
+            understanding: parsed.understanding.trim().to_string(),
+            review_text: parsed.review_text.trim().to_string(),
+            artifact_body,
+            assumptions: parsed.assumptions,
+            non_goals: parsed.non_goals,
+            acceptance_signals: parsed.acceptance_signals,
+            confidence: parsed.confidence,
+        })
+    }
+
     fn jarvis_lisp_string(value: &str) -> String {
         let mut escaped = String::with_capacity(value.len() + 2);
         escaped.push('"');
@@ -3779,22 +4182,6 @@ impl PTYWebSocketServer {
         format!("[{}]", joined)
     }
 
-    fn jarvis_intent_review_text(
-        objective: &str,
-        understanding: &str,
-        grounding_context_id: &str,
-        sources_used: &[String],
-    ) -> String {
-        let sources = if sources_used.is_empty() {
-            "暂无额外来源；只基于当前消息和权限上下文。".to_string()
-        } else {
-            sources_used.join(" / ")
-        };
-        format!(
-            "目标: {objective}\n理解: {understanding}\n边界: 只确认意图；不会创建 BoardTask，不会派工位，不会修改文件。\n下一步: 你确认意图后，MissionD 才生成 plan.lisp；plan 再确认后才创建 BoardTask 并派工位。\n上下文: grounding_context_id={grounding_context_id}; sources={sources}"
-        )
-    }
-
     fn jarvis_plan_review_text(objective: &str, steps: &[&str]) -> String {
         let steps = steps
             .iter()
@@ -3804,29 +4191,6 @@ impl PTYWebSocketServer {
             .join("\n");
         format!(
             "目标: {objective}\n计划:\n{steps}\n边界: 确认 plan 后才创建 BoardTask；执行结果必须以 task-result-artifact 为准。"
-        )
-    }
-
-    fn jarvis_intent_lisp_body(
-        schema: &str,
-        channel: &str,
-        objective: &str,
-        understanding: &str,
-        grounding_context_id: &str,
-        topic_id: Option<&str>,
-        topic_label: Option<&str>,
-        sources_used: &[String],
-    ) -> String {
-        format!(
-            "(intent-draft\n  :schema {}\n  :authority deterministic-rust-gate\n  :channel {}\n  :objective {}\n  :understanding {}\n  :grounding-context-id {}\n  :topic-id {}\n  :topic-label {}\n  :sources-used {}\n  :approval (:state awaiting-intent-confirmation :required true)\n  :non-goals [\"create BoardTask before plan confirmation\" \"dispatch worker before plan confirmation\" \"modify files during intent review\"]\n  :next-step \"confirm intent -> generate plan.lisp -> confirm plan -> create BoardTask\")",
-            Self::jarvis_lisp_string(schema),
-            Self::jarvis_lisp_string(channel),
-            Self::jarvis_lisp_string(objective),
-            Self::jarvis_lisp_string(understanding),
-            Self::jarvis_lisp_string(grounding_context_id),
-            Self::jarvis_lisp_optional(topic_id),
-            Self::jarvis_lisp_optional(topic_label),
-            Self::jarvis_lisp_string_list(sources_used),
         )
     }
 
@@ -5436,27 +5800,63 @@ impl PTYWebSocketServer {
             });
             Self::write_sse_event(&mut stream, "status", &grounding_event).await?;
 
-            let intent_understanding =
-                "我理解这是一个需要先确认意图、再拆 plan.lisp、再派工位执行的 Jarvis 请求。";
-            let intent_review_text = Self::jarvis_intent_review_text(
-                &objective_text,
-                intent_understanding,
-                &grounding_context_id,
-                &sources_used,
-            );
-            let intent_artifact_body = Self::jarvis_intent_lisp_body(
+            let jarvis_intent_author = JarvisIntentAuthorConfig::default();
+            Self::write_sse_event(
+                &mut stream,
+                "status",
+                &serde_json::json!({
+                    "phase": "intent_authoring",
+                    "author": "codex-cli-gpt-5.5-xhigh",
+                    "slot_id": &jarvis_intent_author.slot_id,
+                    "message": "Codex CLI GPT-5.5 xhigh is authoring intent.lisp for user confirmation."
+                }),
+            )
+            .await?;
+            let authored_intent = match Self::author_jarvis_intent_draft(
+                Some(&pty_manager),
+                &jarvis_intent_author,
                 "missiond.jarvis-intent-artifact.v1",
                 "jarvis",
                 &objective_text,
-                intent_understanding,
                 &grounding_context_id,
                 resolved_topic_id.as_deref(),
                 resolved_topic_label.as_deref(),
                 &sources_used,
-            );
+                None,
+            )
+            .await
+            {
+                Ok(draft) => draft,
+                Err(error) => {
+                    let diagnostic = serde_json::json!({
+                        "phase": "intent_authoring_failed",
+                        "error": {
+                            "code": "JARVIS_INTENT_AUTHOR_FAILED",
+                            "message": error.to_string()
+                        }
+                    });
+                    Self::write_sse_event(&mut stream, "diagnostic", &diagnostic).await?;
+                    Self::write_sse_openai_text_and_persist(
+                        &mut stream,
+                        &chat_id,
+                        "intent.lisp 需要 Codex CLI GPT-5.5 xhigh 工位生成；当前工位不可用或输出未通过校验，已停止，不会用 Rust fallback 代替你的意图识别。",
+                        Some("stop"),
+                        db.as_ref(),
+                        jarvis_conv_id.as_deref(),
+                    )
+                    .await?;
+                    Self::finish_sse(&mut stream).await?;
+                    return Ok(());
+                }
+            };
+            let objective_text = authored_intent.objective.clone();
             let intent_payload = serde_json::json!({
                 "schema": "missiond.jarvis-intent-artifact.v1",
                 "phase": "intent_draft",
+                "author": "codex-cli-gpt-5.5-xhigh",
+                "intent_author_slot_id": &jarvis_intent_author.slot_id,
+                "intent_kind": authored_intent.intent_kind,
+                "confidence": authored_intent.confidence,
                 "grounding_context_id": grounding_context_id,
                 "context_pack_path": context_pack_path,
                 "context_pack_file": context_pack_file,
@@ -5464,12 +5864,16 @@ impl PTYWebSocketServer {
                 "context_capsule_file": context_capsule_file,
                 "topic_id": resolved_topic_id,
                 "topic_label": resolved_topic_label,
-                "understanding": intent_understanding,
+                "understanding": authored_intent.understanding,
                 "objective": objective_text,
-                "user_message_preview": objective_text.chars().take(240).collect::<String>(),
-                "review_text": intent_review_text,
+                "original_user_message": &raw_user_text,
+                "user_message_preview": raw_user_text.chars().take(240).collect::<String>(),
+                "review_text": authored_intent.review_text,
                 "artifact_language": "lisp",
-                "artifact_body": intent_artifact_body,
+                "artifact_body": authored_intent.artifact_body,
+                "assumptions": authored_intent.assumptions,
+                "non_goals": authored_intent.non_goals,
+                "acceptance_signals": authored_intent.acceptance_signals,
                 "sources_used": sources_used,
                 "requires_confirmation": true
             });
@@ -7193,6 +7597,7 @@ impl PTYWebSocketServer {
         jarvis_artifact_writer: JarvisArtifactSlot,
         _tool_count: usize,
         default_chat_slot: String,
+        jarvis_intent_author: JarvisIntentAuthorConfig,
     ) -> anyhow::Result<()> {
         // Peek at first bytes to detect non-WebSocket HTTP requests
         let mut peek_buf = [0u8; 512];
@@ -7281,6 +7686,8 @@ impl PTYWebSocketServer {
                 return Self::handle_interaction_messages(
                     stream,
                     addr,
+                    pty_manager,
+                    jarvis_intent_author.clone(),
                     jarvis_grounding,
                     jarvis_artifact_writer,
                     db,
@@ -7311,6 +7718,7 @@ impl PTYWebSocketServer {
                     addr,
                     pty_manager.clone(),
                     default_chat_slot.clone(),
+                    jarvis_intent_author.clone(),
                     jarvis_grounding,
                     jarvis_artifact_writer,
                     db,
@@ -8133,6 +8541,67 @@ mod tests {
         assert_eq!(clamp_jarvis_visible_heartbeat_secs(Some(1)), 3);
         assert_eq!(clamp_jarvis_visible_heartbeat_secs(Some(12)), 12);
         assert_eq!(clamp_jarvis_visible_heartbeat_secs(Some(90)), 30);
+    }
+
+    #[test]
+    fn jarvis_intent_author_timeout_budget_is_bounded() {
+        assert_eq!(
+            PTYWebSocketServer::clamp_jarvis_intent_author_timeout_secs(None),
+            180
+        );
+        assert_eq!(
+            PTYWebSocketServer::clamp_jarvis_intent_author_timeout_secs(Some(1)),
+            30
+        );
+        assert_eq!(
+            PTYWebSocketServer::clamp_jarvis_intent_author_timeout_secs(Some(90)),
+            90
+        );
+        assert_eq!(
+            PTYWebSocketServer::clamp_jarvis_intent_author_timeout_secs(Some(900)),
+            300
+        );
+    }
+
+    #[test]
+    fn jarvis_codex_intent_response_parses_from_wrapped_output() {
+        let output = r#"Thinking...
+{"recognized_objective":"修复 iOS intent 确认体验","intent_kind":"implementation","understanding":"用户要把 intent.lisp 改成可审阅且由 LLM 识别。","review_text":"目标: 修复确认体验\n边界: 只确认意图。","assumptions":["用户希望 Codex 参与"],"non_goals":["确认前创建 BoardTask"],"acceptance_signals":["看到完整 intent.lisp"],"confidence":"high"}
+done"#;
+        let parsed = PTYWebSocketServer::parse_codex_intent_response(output).unwrap();
+        assert_eq!(parsed.intent_kind, "implementation");
+        assert!(parsed.review_text.contains("目标"));
+        assert_eq!(parsed.assumptions, vec!["用户希望 Codex 参与"]);
+    }
+
+    #[test]
+    fn jarvis_authored_intent_lisp_records_codex_authority() {
+        let config = JarvisIntentAuthorConfig::default();
+        let draft = JarvisCodexIntentResponse {
+            recognized_objective: "识别真实意图".to_string(),
+            intent_kind: "design".to_string(),
+            understanding: "用户要求 Codex CLI 参与 intent authoring。".to_string(),
+            review_text: "目标: 识别真实意图".to_string(),
+            assumptions: vec!["使用 GPT-5.5".to_string()],
+            non_goals: vec!["Rust 自行猜测意图".to_string()],
+            acceptance_signals: vec!["intent.lisp 标出 Codex author".to_string()],
+            confidence: Some("high".to_string()),
+        };
+        let body = PTYWebSocketServer::jarvis_authored_intent_lisp_body(
+            "missiond.interaction-intent-artifact.v1",
+            &config,
+            "jarvis",
+            "原始消息",
+            &draft,
+            "context-gather:test",
+            Some("topic-1"),
+            Some("Jarvis intent"),
+            &["source-a".to_string()],
+        );
+        assert!(body.contains(":authority codex-cli-gpt-5.5-xhigh"));
+        assert!(body.contains(":semantic-author"));
+        assert!(body.contains(":objective \"识别真实意图\""));
+        assert!(body.contains(":non-goals [\"Rust 自行猜测意图\"]"));
     }
 
     #[test]

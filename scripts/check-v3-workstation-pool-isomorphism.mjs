@@ -107,6 +107,7 @@ function checkFiles(root) {
     'codex-master-control',
     'codex-code-worker',
     'codex-review-worker',
+    'codex-intent-author',
     'agy-research',
     'read-only',
     ':tool-policy-path ".missiond/v3/policies/gemini-readonly-policy.toml"',
@@ -150,6 +151,7 @@ function checkFiles(root) {
 
   requireAll(diagnostics, FILES.main, sources.main, [
     'fn workstation_pool_model',
+    'fn jarvis_intent_author_config',
     'GenericCliSlotManager::new',
     'CliEngine::Agy',
     '"agy" | "agy-cli"',
@@ -387,6 +389,15 @@ function validateBlueprint(file, source, diagnostics) {
     sandbox: 'read-only',
     taskClasses: ['review', 'architecture-review', 'regression-analysis'],
   });
+  validateCodexWorker(file, byId.get('codex-intent-author'), diagnostics, {
+    role: 'intent-author',
+    slotId: 'slot-codex-intent-author',
+    taskType: 'codex_intent_author',
+    writeAllowed: false,
+    acceptsBoardtask: false,
+    sandbox: 'read-only',
+    taskClasses: ['intent-authoring', 'intent-recognition'],
+  });
   validateAgyWorker(file, byId.get('agy-research'), diagnostics);
 
   const impl = root.children.find((form) => isList(form) && head(form) === 'implementation-map');
@@ -435,7 +446,7 @@ function validateCodexWorker(file, worker, diagnostics, expected) {
   requirePropText(diagnostics, file, props, ':sandbox', expected.sandbox ?? 'workspace-write');
   requirePropText(diagnostics, file, props, ':approval-policy', 'never');
   requirePropBool(diagnostics, file, props, ':search', true);
-  requirePropBool(diagnostics, file, props, ':accepts-boardtask', true);
+  requirePropBool(diagnostics, file, props, ':accepts-boardtask', expected.acceptsBoardtask ?? true);
   requirePropBool(diagnostics, file, props, ':write-allowed', expected.writeAllowed);
   requireListItems(diagnostics, file, props, ':task-classes', expected.taskClasses);
 }

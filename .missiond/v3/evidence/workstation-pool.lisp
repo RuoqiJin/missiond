@@ -50,6 +50,15 @@
        :approval-policy never
        :write-policy read-only
        :runtime-rule "Codex review/regression lane. It can audit designs and code but cannot replace resident master-control. Runtime MUST launch Codex with --cd <slot project root> in addition to PTY cwd so review evidence and slot metadata share the same repository root.")
+     (codex-intent-author
+       :account current-codex-cli-login
+       :model "gpt-5.5"
+       :reasoning-effort xhigh
+       :search true
+       :sandbox read-only
+       :approval-policy never
+       :write-policy read-only
+       :runtime-rule "Jarvis intent.lisp authoring lane. It performs every user-intent semantic read before confirmation, returns structured intent fields for MissionD schema normalization, and must fail closed instead of allowing deterministic Rust fallback.")
      (claude-code-fast-patch
        :account current-claude-code-default
        :model "Sonnet only when explicitly selected"
