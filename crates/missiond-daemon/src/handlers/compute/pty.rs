@@ -6,7 +6,9 @@ use serde_json::{json, Value};
 use tracing::info;
 
 use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
-use crate::engine::control_plane_kernel::{ControlPlaneKernel, RequireCapabilityCommand};
+use crate::engine::control_plane_kernel::{
+    AuditCapabilityBypassCommand, ControlPlaneKernel, RequireCapabilityCommand,
+};
 use crate::helpers::default_mission_home;
 use crate::lenient;
 use crate::slot_env::build_slot_tracking_env;
@@ -286,17 +288,18 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                     ),
                 ));
             } else {
-                state
-                    .shared_memory
-                    .audit_capability_bypass(
-                        "operator",
-                        "mission_pty_spawn",
-                        "spawn",
-                        "task",
-                        "operator-confirmed-pty-spawn",
-                        "operator confirmed mission_pty_spawn without worker-bound spawn grant",
-                        json!({"slot_id": slot_id}),
-                    )
+                ControlPlaneKernel::new(state)
+                    .audit_capability_bypass_command(AuditCapabilityBypassCommand {
+                        subject_kind: "operator".to_string(),
+                        subject_id: "mission_pty_spawn".to_string(),
+                        operation: "spawn".to_string(),
+                        scope_kind: "task".to_string(),
+                        scope_key: "operator-confirmed-pty-spawn".to_string(),
+                        reason:
+                            "operator confirmed mission_pty_spawn without worker-bound spawn grant"
+                                .to_string(),
+                        details: json!({"slot_id": slot_id}),
+                    })
                     .await
                     .map_err(|e| anyhow!("capability audit error: {}", e))?;
             }

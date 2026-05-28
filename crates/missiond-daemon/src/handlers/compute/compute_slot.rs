@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
 use crate::engine::control_plane_kernel::{
-    ControlPlaneKernel, RequireCapabilityCommand, StartAttemptCommand,
+    AuditCapabilityBypassCommand, ControlPlaneKernel, RequireCapabilityCommand, StartAttemptCommand,
 };
 use crate::state::AppState;
 
@@ -378,20 +378,21 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
             ),
         ));
     } else {
-        state
-            .shared_memory
-            .audit_capability_bypass(
-                "operator",
-                "mission_compute_slot",
-                "spawn",
-                "task",
-                "operator-confirmed-dynamic-slot",
-                "operator confirmed mission_compute_slot(create) without worker-bound spawn grant",
-                json!({
+        ControlPlaneKernel::new(state)
+            .audit_capability_bypass_command(AuditCapabilityBypassCommand {
+                subject_kind: "operator".to_string(),
+                subject_id: "mission_compute_slot".to_string(),
+                operation: "spawn".to_string(),
+                scope_kind: "task".to_string(),
+                scope_key: "operator-confirmed-dynamic-slot".to_string(),
+                reason:
+                    "operator confirmed mission_compute_slot(create) without worker-bound spawn grant"
+                        .to_string(),
+                details: json!({
                     "template": template_name,
                     "objective": objective,
                 }),
-            )
+            })
             .await
             .map_err(|e| anyhow!("capability audit error: {}", e))?;
     }

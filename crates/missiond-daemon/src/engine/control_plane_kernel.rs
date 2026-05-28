@@ -167,6 +167,17 @@ pub(crate) struct RequireCapabilityCommand {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct AuditCapabilityBypassCommand {
+    pub subject_kind: String,
+    pub subject_id: String,
+    pub operation: String,
+    pub scope_kind: String,
+    pub scope_key: String,
+    pub reason: String,
+    pub details: Value,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct GrantTaskCapabilitiesCommand {
     pub project_id: Option<String>,
     pub task_id: String,
@@ -547,6 +558,24 @@ impl<'a> ControlPlaneKernel<'a> {
             "scope_kind": scope_kind,
             "scope_key": scope_key
         }))
+    }
+
+    pub(crate) async fn audit_capability_bypass_command(
+        &self,
+        command: AuditCapabilityBypassCommand,
+    ) -> Result<()> {
+        self.state
+            .shared_memory
+            .audit_capability_bypass(
+                command.subject_kind.as_str(),
+                command.subject_id.as_str(),
+                command.operation.as_str(),
+                command.scope_kind.as_str(),
+                command.scope_key.as_str(),
+                command.reason.as_str(),
+                command.details,
+            )
+            .await
     }
 
     pub(crate) async fn capability_grant_command(

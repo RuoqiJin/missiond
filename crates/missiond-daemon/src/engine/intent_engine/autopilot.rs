@@ -11,8 +11,9 @@ use crate::context::v3_blueprint_runtime::{
     AutopilotRuntimeConfig, RouterRuntimeConfig, WorkstationRuntimeConfig,
 };
 use crate::engine::control_plane_kernel::{
-    ControlPlaneKernel, GrantTaskCapabilitiesCommand, RecordObservationCommand,
-    RequireCapabilityCommand, SettleTaskCommand, UpdateTaskContractCapabilityGrantsCommand,
+    AuditCapabilityBypassCommand, ControlPlaneKernel, GrantTaskCapabilitiesCommand,
+    RecordObservationCommand, RequireCapabilityCommand, SettleTaskCommand,
+    UpdateTaskContractCapabilityGrantsCommand,
 };
 use crate::engine::learning_engine;
 use crate::engine::shared_memory::TaskRuntimeContract;
@@ -551,24 +552,23 @@ async fn materialize_read_only_task_result_artifact_from_durable_final(
         return None;
     }
     let policy = materialization_policy.unwrap_or_else(|| "autopilot_readonly_ok".to_string());
-    if let Err(err) = state
-        .storage()
-        .shared_memory
-        .audit_capability_bypass(
-            "system",
-            "autopilot-readonly-materializer",
-            "write",
-            "task",
-            task.id.as_str(),
-            "explicit task_contracts autopilot_readonly_ok materialization policy",
-            serde_json::json!({
+    if let Err(err) = ControlPlaneKernel::new(state)
+        .audit_capability_bypass_command(AuditCapabilityBypassCommand {
+            subject_kind: "system".to_string(),
+            subject_id: "autopilot-readonly-materializer".to_string(),
+            operation: "write".to_string(),
+            scope_kind: "task".to_string(),
+            scope_key: task.id.to_string(),
+            reason: "explicit task_contracts autopilot_readonly_ok materialization policy"
+                .to_string(),
+            details: serde_json::json!({
                 "task_id": task.id.as_str(),
                 "policy": policy,
                 "slot_id": slot_id,
                 "conversation_id": completion.session_id,
                 "task_contract_id": runtime_contract.task_contract_id.clone()
             }),
-        )
+        })
         .await
     {
         warn!(

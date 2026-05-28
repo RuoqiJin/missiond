@@ -392,6 +392,7 @@ function checkFiles(root, files) {
     'pub(crate) struct ReleaseLeaseCommand',
     'pub(crate) struct HeartbeatLeaseCommand',
     'pub(crate) struct RequireCapabilityCommand',
+    'pub(crate) struct AuditCapabilityBypassCommand',
     'pub(crate) struct GrantTaskCapabilitiesCommand',
     'pub(crate) struct UpsertTaskContractCommand',
     'pub(crate) struct UpdateTaskContractCapabilityGrantsCommand',
@@ -412,6 +413,7 @@ function checkFiles(root, files) {
     'pub(crate) async fn task_runtime_contract',
     'pub(crate) async fn active_capability_grant_id',
     'pub(crate) async fn capability_check_command',
+    'pub(crate) async fn audit_capability_bypass_command',
     'pub(crate) async fn capability_grant_command',
     'operation: "delegate".to_string()',
     'target_subject_kind',
@@ -477,6 +479,7 @@ function checkFiles(root, files) {
     'canonical completed task_result_artifact hash required',
     'no canonical completed task_result_artifact exists yet',
     '.record_observation_command(RecordObservationCommand',
+    '.audit_capability_bypass_command(AuditCapabilityBypassCommand',
     '.task_result_get_typed(&args)',
     'ControlPlaneKernel::new(state)',
     '.settle_task_command(SettleTaskCommand',
@@ -508,6 +511,7 @@ function checkFiles(root, files) {
     'let task_class = board_task_workstation_class(task);',
     'extract_board_task_dispatch_metadata_field(task, "engine_hint")',
     'extract_board_task_dispatch_metadata_field(task, "pool_hint")',
+    '.storage()\n        .shared_memory\n        .audit_capability_bypass(',
   ]);
 
   requireAll(diagnostics, files.flowEngine, sources.flowEngine, [
@@ -678,9 +682,11 @@ function checkFiles(root, files) {
   ]);
 
   requireAll(diagnostics, files.computeSlot, sources.computeSlot, [
+    'AuditCapabilityBypassCommand',
     'RequireCapabilityCommand',
     'StartAttemptCommand',
     'ControlPlaneKernel::new(state)',
+    '.audit_capability_bypass_command(AuditCapabilityBypassCommand',
     '.require_capability_command(RequireCapabilityCommand',
     '.start_attempt_command(StartAttemptCommand',
     'operation: "spawn".to_string()',
@@ -693,7 +699,6 @@ function checkFiles(root, files) {
     'task_runtime_contract(task_id)',
     'sandbox override does not match canonical task_contracts sandbox_profile',
     'error_codes::SANDBOX_POLICY_UNSUPPORTED',
-    'audit_capability_bypass',
     'error_codes::CAPABILITY_DENIED',
   ]);
   rejectAll(diagnostics, files.computeSlot, sources.computeSlot, [
@@ -701,14 +706,15 @@ function checkFiles(root, files) {
   ]);
 
   requireAll(diagnostics, files.ptyHandler, sources.ptyHandler, [
+    'AuditCapabilityBypassCommand',
     'RequireCapabilityCommand',
     'ControlPlaneKernel::new(state)',
+    '.audit_capability_bypass_command(AuditCapabilityBypassCommand',
     '.require_capability_command(RequireCapabilityCommand',
     'operation: "spawn".to_string()',
     'mission_pty_spawn requires task_id with an exact spawn capability',
     'task_runtime_contract(task_id)',
     'mission_pty_spawn slot sandbox does not match canonical task_contracts sandbox_profile',
-    'audit_capability_bypass',
     'operator confirmed mission_pty_spawn without worker-bound spawn grant',
     'error_codes::SANDBOX_POLICY_UNSUPPORTED',
     'error_codes::CAPABILITY_DENIED',
@@ -889,9 +895,23 @@ function checkFiles(root, files) {
   rejectDirectSharedMemoryJsonAdapterOutsideAdapter(diagnostics, files, sources);
   rejectDirectCapabilityChecksOutsideKernel(diagnostics, files, sources);
   rejectDirectCapabilityGrantsOutsideKernel(diagnostics, files, sources);
+  rejectDirectCapabilityAuditOutsideKernel(diagnostics, files, sources);
   rejectDirectTaskContractWritesOutsideKernel(diagnostics, files, sources);
 
   return diagnostics;
+}
+
+function rejectDirectCapabilityAuditOutsideKernel(diagnostics, files, sources) {
+  const allowed = new Set(['controlPlaneKernel', 'sharedMemory']);
+  for (const [key, source] of Object.entries(sources)) {
+    if (allowed.has(key)) continue;
+    if (source.includes('.audit_capability_bypass(')) {
+      diagnostics.push({
+        file: files[key],
+        message: 'direct capability bypass audit outside ControlPlaneKernel is forbidden',
+      });
+    }
+  }
 }
 
 function rejectDirectTaskContractWritesOutsideKernel(diagnostics, files, sources) {
