@@ -293,6 +293,7 @@ function checkFiles(root, files) {
     'pub(crate) struct HeartbeatLeaseRequest',
     'pub(crate) struct CapabilityCheckRequest',
     'pub(crate) struct JobEventRequest',
+    'pub(crate) struct AppendSharedEventRequest',
     'pub(crate) struct TaskRuntimeContract',
     'upsert_task_contract_from_metadata',
     'ensure_task_contract_from_metadata',
@@ -302,6 +303,7 @@ function checkFiles(root, files) {
     'pub(crate) async fn release_lease_typed',
     'pub(crate) async fn heartbeat_lease_typed',
     'pub(crate) async fn job_event_command',
+    'pub(crate) async fn append_shared_event_command',
     'pub(crate) async fn task_result_put_command',
     'pub(crate) fn task_result_put_request_from_args',
     'pub(crate) async fn audit_capability_bypass',
@@ -379,6 +381,9 @@ function checkFiles(root, files) {
     'pub task_id: String',
     'pub event_kind: String',
     'pub runtime_metadata: Value',
+    'pub(crate) struct AppendSharedEventCommand',
+    'pub stream_id: String',
+    'pub parent_event_ids: Value',
     'pub(crate) struct CapabilityGrantCommand',
     'pub authority_grant_id: Option<String>',
     'pub authority_subject_kind: String',
@@ -412,6 +417,7 @@ function checkFiles(root, files) {
     'target_subject_kind',
     'authority_grant_id',
     'pub(crate) async fn job_event_command',
+    'pub(crate) async fn append_shared_event_command',
     'pub(crate) async fn grant_task_capabilities_command',
     'pub(crate) async fn upsert_task_contract_command',
     'pub(crate) async fn update_task_contract_capability_grants_command',
@@ -419,6 +425,7 @@ function checkFiles(root, files) {
     'pub(crate) async fn complete_system_task',
     'CapabilityCheckRequest',
     'CapabilityGrantInput',
+    'AppendSharedEventRequest',
     'WorkerSettleRequest',
     'settle_worker_command',
     'job_event_command(JobEventRequest',
@@ -432,10 +439,13 @@ function checkFiles(root, files) {
     'heartbeat_lease_typed',
     'ensure_task_contract_from_metadata',
     'insert_capability_grant(CapabilityGrantInput',
-    'TaskCompletionEvidenceWriter::new',
+    'DEFAULT_EVIDENCE_WRITE_TIMEOUT',
+    'into_task_result_put_request',
+    'tokio::time::timeout',
     'artifact_hash: Some(artifact_hash.to_string())',
   ]);
   rejectAll(diagnostics, files.controlPlaneKernel, sources.controlPlaneKernel, [
+    'TaskCompletionEvidenceWriter::new',
     'task.runtime_metadata.clone()',
     '.capability_grant_from_args(',
     '.release_typed(',
@@ -446,12 +456,16 @@ function checkFiles(root, files) {
   ]);
 
   requireAll(diagnostics, files.evidenceWriter, sources.evidenceWriter, [
-    'into_task_result_put_args',
-    '.task_result_put_request_from_args(&payload)',
-    '.task_result_put_command(request)',
+    'TaskResultPutRequest',
+    'into_task_result_put_request',
+    'has_explicit_evidence: true',
+    'raw_args',
   ]);
   rejectAll(diagnostics, files.evidenceWriter, sources.evidenceWriter, [
     '.handle_action(&payload)',
+    '.task_result_put_request_from_args(&payload)',
+    '.task_result_put_command(request)',
+    'TaskCompletionEvidenceWriter',
     'fn into_payload',
   ]);
 
@@ -535,6 +549,8 @@ function checkFiles(root, files) {
     '.workflow_checkpoint_typed(&json!',
     'TaskCompletionEvidenceInput',
     '.write_completion_artifact(',
+    'AppendSharedEventCommand',
+    '.append_shared_event_command(AppendSharedEventCommand',
     'ControlPlaneKernel::new(&state)',
     '.settle_task_command(SettleTaskCommand',
     '.release_lease_command(ReleaseLeaseCommand',
@@ -545,6 +561,7 @@ function checkFiles(root, files) {
     '"action": "workflow_checkpoint"',
     '"action": "task_result_put"',
     '"action": "worker_settle"',
+    '.shared_memory\n        .handle_action(&json!',
     'fn parse_write_scope_from_description',
     'fn description_references_source',
   ]);
@@ -866,6 +883,7 @@ function checkFiles(root, files) {
   rejectDirectEvidenceWriterOutsideKernel(diagnostics, files, sources);
   rejectDirectLeaseCommandsOutsideKernel(diagnostics, files, sources);
   rejectDirectJobEventsOutsideKernel(diagnostics, files, sources);
+  rejectDirectSharedMemoryJsonAdapterOutsideAdapter(diagnostics, files, sources);
   rejectDirectCapabilityChecksOutsideKernel(diagnostics, files, sources);
   rejectDirectCapabilityGrantsOutsideKernel(diagnostics, files, sources);
   rejectDirectTaskContractWritesOutsideKernel(diagnostics, files, sources);
@@ -965,6 +983,18 @@ function rejectDirectEvidenceWriterOutsideKernel(diagnostics, files, sources) {
       diagnostics.push({
         file: files[key],
         message: 'direct TaskCompletionEvidenceWriter construction outside ControlPlaneKernel is forbidden',
+      });
+    }
+  }
+}
+
+function rejectDirectSharedMemoryJsonAdapterOutsideAdapter(diagnostics, files, sources) {
+  for (const [key, source] of Object.entries(sources)) {
+    if (key === 'sharedMemory' || key === 'sharedHandler') continue;
+    if (source.includes('.handle_action(&json!')) {
+      diagnostics.push({
+        file: files[key],
+        message: 'direct shared_memory.handle_action(json) outside the mission_shared_memory adapter is forbidden',
       });
     }
   }

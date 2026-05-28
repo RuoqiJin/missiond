@@ -3,12 +3,13 @@ use chrono::Utc;
 use serde_json::{json, Value};
 
 use crate::engine::shared_memory::{
-    CapabilityCheckRequest, CapabilityGrantInput, ClaimRequest, HeartbeatLeaseRequest,
-    JobEventRequest, ReleaseLeaseRequest, TaskResultPutRequest, TaskRuntimeContract,
-    WorkerSettleRequest,
+    AppendSharedEventRequest, CapabilityCheckRequest, CapabilityGrantInput, ClaimRequest,
+    HeartbeatLeaseRequest, JobEventRequest, ReleaseLeaseRequest, TaskResultPutRequest,
+    TaskRuntimeContract, WorkerSettleRequest,
 };
 use crate::engine::task_completion_evidence::{
-    TaskCompletionEvidenceInput, TaskCompletionEvidenceWriter,
+    TaskCompletionEvidenceInput, DEFAULT_EVIDENCE_WRITE_TIMEOUT, EVIDENCE_WRITE_FAILED,
+    EVIDENCE_WRITE_TIMEOUT,
 };
 use crate::state::AppState;
 
@@ -74,6 +75,20 @@ pub(crate) struct JobEventCommand {
     pub worker_id: Option<String>,
     pub conversation_id: Option<String>,
     pub runtime_metadata: Value,
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AppendSharedEventCommand {
+    pub stream_id: String,
+    pub project_id: Option<String>,
+    pub task_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub event_kind: String,
+    pub idempotency_key: Option<String>,
+    pub correlation_id: Option<String>,
+    pub parent_event_ids: Value,
+    pub trace_id: Option<String>,
     pub payload: Value,
 }
 
@@ -252,10 +267,35 @@ impl<'a> ControlPlaneKernel<'a> {
         &self,
         command: WriteCompletionArtifactCommand,
     ) -> Result<crate::engine::task_completion_evidence::TaskCompletionEvidenceResult> {
-        // Control-plane ABI anchor: typed task-result artifact command.
-        TaskCompletionEvidenceWriter::new(self.state.shared_memory.clone())
-            .write_bounded(command.evidence)
-            .await
+        let task_id = command.evidence.task_id.clone();
+        let request = command.evidence.into_task_result_put_request();
+        let response = tokio::time::timeout(
+            DEFAULT_EVIDENCE_WRITE_TIMEOUT,
+            self.task_result_put_command(request),
+        )
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "{EVIDENCE_WRITE_TIMEOUT}: task_id={task_id}: task_result_put exceeded {:?}",
+                DEFAULT_EVIDENCE_WRITE_TIMEOUT
+            )
+        })?
+        .map_err(|err| anyhow!("{EVIDENCE_WRITE_FAILED}: task_id={task_id}: {err}"))?;
+        let artifact_hash = response
+            .get("artifact_hash")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                anyhow!(
+                    "{EVIDENCE_WRITE_FAILED}: task_id={task_id}: task_result_put returned no artifact_hash"
+                )
+            })?
+            .to_string();
+        Ok(
+            crate::engine::task_completion_evidence::TaskCompletionEvidenceResult {
+                artifact_hash,
+                response,
+            },
+        )
     }
 
     pub(crate) async fn task_result_put_command(
@@ -601,6 +641,27 @@ impl<'a> ControlPlaneKernel<'a> {
                 worker_id: command.worker_id,
                 conversation_id: command.conversation_id,
                 runtime_metadata: command.runtime_metadata,
+                payload: command.payload,
+            })
+            .await
+    }
+
+    pub(crate) async fn append_shared_event_command(
+        &self,
+        command: AppendSharedEventCommand,
+    ) -> Result<Value> {
+        self.state
+            .shared_memory
+            .append_shared_event_command(AppendSharedEventRequest {
+                stream_id: command.stream_id,
+                project_id: command.project_id,
+                task_id: command.task_id,
+                agent_id: command.agent_id,
+                event_kind: command.event_kind,
+                idempotency_key: command.idempotency_key,
+                correlation_id: command.correlation_id,
+                parent_event_ids: command.parent_event_ids,
+                trace_id: command.trace_id,
                 payload: command.payload,
             })
             .await

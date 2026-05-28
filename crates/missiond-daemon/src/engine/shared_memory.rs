@@ -238,6 +238,20 @@ pub(crate) struct JobEventRequest {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct AppendSharedEventRequest {
+    pub stream_id: String,
+    pub project_id: Option<String>,
+    pub task_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub event_kind: String,
+    pub idempotency_key: Option<String>,
+    pub correlation_id: Option<String>,
+    pub parent_event_ids: Value,
+    pub trace_id: Option<String>,
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct WorkerSettleRequest {
     pub task_id: String,
     pub project_id: Option<String>,
@@ -275,7 +289,7 @@ pub(crate) struct TaskResultPutRequest {
     pub has_explicit_evidence: bool,
     pub created_at: String,
     pub allow_system_bypass: bool,
-    raw_args: Value,
+    pub(crate) raw_args: Value,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -392,6 +406,25 @@ impl SharedMemoryService {
 
     pub(crate) async fn job_event_command(&self, req: JobEventRequest) -> Result<Value> {
         self.job_event_request(req).await
+    }
+
+    pub(crate) async fn append_shared_event_command(
+        &self,
+        req: AppendSharedEventRequest,
+    ) -> Result<Value> {
+        self.append_event(&json!({
+            "stream_id": req.stream_id,
+            "project_id": req.project_id,
+            "task_id": req.task_id,
+            "agent_id": req.agent_id,
+            "event_kind": req.event_kind,
+            "idempotency_key": req.idempotency_key,
+            "correlation_id": req.correlation_id,
+            "parent_event_ids": req.parent_event_ids,
+            "trace_id": req.trace_id,
+            "payload": req.payload
+        }))
+        .await
     }
 
     pub(crate) async fn settle_worker_command(&self, req: WorkerSettleRequest) -> Result<Value> {

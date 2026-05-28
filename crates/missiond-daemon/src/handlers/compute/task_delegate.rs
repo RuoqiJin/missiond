@@ -11,8 +11,9 @@ use tokio::process::Command;
 
 use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
 use crate::engine::control_plane_kernel::{
-    ControlPlaneKernel, GrantTaskCapabilitiesCommand, RecordObservationCommand,
-    ReleaseLeaseCommand, SettleTaskCommand, StartAttemptCommand, UpsertTaskContractCommand,
+    AppendSharedEventCommand, ControlPlaneKernel, GrantTaskCapabilitiesCommand,
+    RecordObservationCommand, ReleaseLeaseCommand, SettleTaskCommand, StartAttemptCommand,
+    UpsertTaskContractCommand,
 };
 use crate::engine::shared_memory::{StructuredControlError, TaskRuntimeContract};
 use crate::engine::task_completion_evidence::TaskCompletionEvidenceInput;
@@ -718,6 +719,11 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 ),
                 write_lease_id: delegation_metadata.shared_claim_ids.first().cloned(),
                 apply_patch: string_arg(&args, &["apply_patch", "applyPatch"]).map(str::to_string),
+                attempt_id: format!(
+                    "attempt:{}:xjpcode:{}",
+                    task_id,
+                    chrono::Utc::now().timestamp_millis()
+                ),
                 timeout_secs,
             },
         );
@@ -2187,6 +2193,7 @@ struct XjpcodeWorkerRun {
     claim_task_grant_id: Option<String>,
     write_lease_id: Option<String>,
     apply_patch: Option<String>,
+    attempt_id: String,
     timeout_secs: i64,
 }
 
@@ -2316,19 +2323,19 @@ async fn append_xjpcode_worker_event(
     idempotency_key: String,
     payload: Value,
 ) {
-    if let Err(err) = state
-        .shared_memory
-        .handle_action(&json!({
-            "action": "append",
-            "stream_id": "worker-runtime:xjpcode",
-            "event_kind": event_kind,
-            "project_id": project_id,
-            "task_id": task_id,
-            "agent_id": worker_id,
-            "correlation_id": task_id,
-            "idempotency_key": idempotency_key,
-            "payload": payload
-        }))
+    if let Err(err) = ControlPlaneKernel::new(state)
+        .append_shared_event_command(AppendSharedEventCommand {
+            stream_id: "worker-runtime:xjpcode".to_string(),
+            event_kind: event_kind.to_string(),
+            project_id: project_id.map(str::to_string),
+            task_id: Some(task_id.to_string()),
+            agent_id: Some(worker_id.to_string()),
+            correlation_id: Some(task_id.to_string()),
+            idempotency_key: Some(idempotency_key),
+            parent_event_ids: json!([]),
+            trace_id: None,
+            payload,
+        })
         .await
     {
         tracing::warn!(
