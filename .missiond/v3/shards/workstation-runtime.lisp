@@ -99,6 +99,18 @@
         :required-inputs [accepted_shard_id write_scope write_lease_id worktree_id tool_policy.apply_patch artifact_contract]
         :capabilities [scoped_apply_patch task_result_artifact worker_telemetry]
         :rule "mission_task_delegate may dispatch engine_hint=xjpcode-code-worker only when the implementation contract is exact-shard-ready and shared-memory write_scope claims have been acquired; xjpcode validates accepted_shard_id/write_lease_id/worktree_id, parses git patch paths, requires every changed path to fall under write_scope, runs git apply --check before git apply, emits task-result-artifact before final, and MissionD must promote the xjpcode artifact's files_changed into canonical changed_paths/files_changed/verification evidence before task_result_put so write-scoped completion cannot close without path evidence. If the canonical artifact verifier rejects the worker artifact, MissionD must emit xjpcode_worker.artifact_rejected, settle the BoardTask as failed, and release pre-claimed write_scope leases instead of leaving stale claims. MissionD releases write claims after worker_settle on success. Formatting, targeted tests, and commit remain MissionD work-order gate responsibilities until promoted as separate xjpcode tools."))
+    (text-only-paid-cli-provider-registry
+      :schema "missiond.text-only-paid-cli-provider-registry.v1"
+      :checker "node scripts/check-v3-xjpcode-portable-runtime.mjs --json"
+      :purpose "Expose ClaudeCode/Codex/Agy to xjpcode only as paid pure-text model channels. This is not a worker lane: the provider must not receive tools, MCP, read/write scope, worktree authority, or filesystem permissions, and any tool-like output becomes a provider violation."
+      :default-enabled false
+      :enable-env XJPCODE_TEXT_ONLY_CLI_ENABLED
+      :contract "xjpcode.text-only-provider.v1"
+      :endpoint "/provider/v1/text-only/completions"
+      :provider-list "/provider/v1/text-only/providers"
+      :providers [claude-code codex-cli agy-cli]
+      :forbidden [mcp tool_use tool_call function_call slash_command file_read file_write apply_patch shell_exec approval_prompt]
+      :rule "xjpcode owns the text-only provider implementation. It must run paid CLI channels in an isolated temporary cwd with stdin closed, no MCP config, no tool schema, no work-order write authority, and a bounded timeout. ClaudeCode uses print/text mode with slash commands and MCP disabled; Codex uses exec in read-only sandbox; Agy uses its print/sandbox mode. Router model calls may share the same response contract only when tool schemas are empty. MissionD pins this registry so future xjpcode provider expansions cannot silently reintroduce CLI tool execution through the text-only path.")
     (startup-slot arch_maintenance
       :engine claude-code
       :lifecycle persistent

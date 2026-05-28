@@ -35,6 +35,7 @@ const intent = read(XJPCODE_ROOT, ".missiond/intent.lisp");
 const manifest = read(XJPCODE_ROOT, ".missiond/intent-manifest.lisp");
 const serverMod = read(XJPCODE_ROOT, "src/server/mod.rs");
 const worker = read(XJPCODE_ROOT, "src/server/worker.rs");
+const textProvider = read(XJPCODE_ROOT, "src/server/text_provider.rs");
 const workerChecker = read(XJPCODE_ROOT, "scripts/check-xjpcode-portable-worker-runtime.mjs");
 const taskDelegate = read(MISSIOND_ROOT, "crates/missiond-daemon/src/handlers/compute/task_delegate.rs");
 const liveSmoke = read(MISSIOND_ROOT, "scripts/smoke-xjpcode-worker-dispatch.mjs");
@@ -44,6 +45,7 @@ push("missiond project registry exists", Boolean(projectRegistry));
 push("missiond workstation runtime exists", Boolean(workstationRuntime));
 push("xjpcode blueprint exists", Boolean(blueprint));
 push("xjpcode worker implementation exists", Boolean(worker));
+push("xjpcode text-only provider implementation exists", Boolean(textProvider));
 
 push("project registry names xjpcode worker checker", has(projectRegistry, "check-xjpcode-portable-worker-runtime.mjs"));
 push("project registry declares portable runtime role", has(projectRegistry, "portable agent runtime"));
@@ -51,14 +53,23 @@ push("portable worker registry exists", has(workstationRuntime, "portable-worker
 push("xjpcode read-only worker registered", has(workstationRuntime, "xjpcode-readonly-worker"));
 push("xjpcode write worker active-gated", has(workstationRuntime, "xjpcode-code-worker") && has(workstationRuntime, ":status active-gated"));
 push("registry forbids write bypass", has(workstationRuntime, "write_lease_id") && has(workstationRuntime, "artifact-first") && has(workstationRuntime, "git apply --check"));
+push("text-only paid CLI registry exists", has(workstationRuntime, "text-only-paid-cli-provider-registry"));
+push("text-only registry disabled by default", has(workstationRuntime, ":default-enabled false") && has(workstationRuntime, "XJPCODE_TEXT_ONLY_CLI_ENABLED"));
+push("text-only registry forbids tools", has(workstationRuntime, "tool_use") && has(workstationRuntime, "apply_patch") && has(workstationRuntime, "approval_prompt"));
+push("text-only registry pins xjpcode endpoint", has(workstationRuntime, "/provider/v1/text-only/completions") && has(workstationRuntime, "xjpcode.text-only-provider.v1"));
 
 push("blueprint portable-worker-runtime pillar", has(blueprint, "(pillar portable-worker-runtime"));
+push("blueprint text-only-provider-runtime pillar", has(blueprint, "(pillar text-only-provider-runtime"));
 push("intent portable-worker-runtime pillar", has(intent, "(pillar portable-worker-runtime"));
+push("intent text-only-provider-runtime pillar", has(intent, "(pillar text-only-provider-runtime"));
 push("manifest portable-worker module-map", has(manifest, "(portable-worker-runtime \"src/server/worker.rs\""));
+push("manifest text-only-provider module-map", has(manifest, "(text-only-provider-runtime \"src/server/text_provider.rs\""));
 push("manifest portable-worker checker", has(manifest, "(checker portable-worker-runtime"));
 push("server exposes health route", has(serverMod, "/worker/v1/health"));
 push("server exposes work-order route", has(serverMod, "/worker/v1/work-orders"));
 push("server exposes event replay route", has(serverMod, "/worker/v1/work-orders/:id/events"));
+push("server exposes text-only provider list route", has(serverMod, "/provider/v1/text-only/providers"));
+push("server exposes text-only completion route", has(serverMod, "/provider/v1/text-only/completions"));
 push("mission_task_delegate xjpcode detector", has(taskDelegate, "engine_hint_is_xjpcode"));
 push("mission_task_delegate spawns xjpcode worker", has(taskDelegate, "spawn_xjpcode_readonly_worker"));
 push("mission_task_delegate xjpcode env", has(taskDelegate, "MISSIOND_XJPCODE_WORKER_URL"));
@@ -106,6 +117,27 @@ for (const token of [
 }
 
 push("xjpcode project-local worker checker exists", Boolean(workerChecker));
+
+for (const token of [
+  "TextOnlyProviderId",
+  "ClaudeCode",
+  "CodexCli",
+  "AgyCli",
+  "TEXT_ONLY_CONTRACT",
+  "xjpcode.text-only-provider.v1",
+  "TextOnlyFrame::TextDelta",
+  "TEXT_ONLY_PAID_CLI_DISABLED",
+  "XJPCODE_TEXT_ONLY_CLI_ENABLED",
+  "build_text_only_cli_invocation",
+  "detect_text_only_violation",
+  "TEXT_ONLY_PROVIDER_VIOLATION",
+  "--disable-slash-commands",
+  "--strict-mcp-config",
+  "--sandbox",
+  "read-only",
+]) {
+  push(`text-only provider token ${token}`, has(textProvider, token));
+}
 
 const failures = checks.filter((c) => !c.ok);
 const result = {
