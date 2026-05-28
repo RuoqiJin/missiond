@@ -169,6 +169,7 @@ fn workflow_tool(name: &str) -> bool {
             | "mission_directive"
             | "mission_execution"
             | "mission_flow_run"
+            | "mission_submit_phase_result"
             | "mission_swarm_run"
             | "mission_forge_build"
             | "mission_forge_lint"
@@ -265,6 +266,7 @@ mod tests {
         let cases = [
             ("mission_plan", WORKFLOW_ENV),
             ("mission_workflow", WORKFLOW_ENV),
+            ("mission_submit_phase_result", WORKFLOW_ENV),
             ("mission_memory", MEMORY_ENV),
             ("mission_kb_query", MEMORY_ENV),
             ("mission_skill_exec", SKILL_STORE_ENV),

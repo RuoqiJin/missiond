@@ -158,6 +158,7 @@ function checkFiles(root, files) {
     'mission_shared_memory',
     'mission_plan',
     'mission_workflow',
+    'mission_submit_phase_result',
     'mission_memory',
     'mission_skill_exec',
     'mission_router_chat',
