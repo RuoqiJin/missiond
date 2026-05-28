@@ -66,10 +66,15 @@ push("mission_task_delegate accepts xjpcode code worker", has(taskDelegate, "xjp
 push("mission_task_delegate passes xjpcode write lease", has(taskDelegate, "write_lease_id") && has(taskDelegate, "apply_patch") && has(taskDelegate, "claim_task_grant_id"));
 push("mission_task_delegate loopback smoke override", has(taskDelegate, "xjpcode_worker_url") && has(taskDelegate, "XJPCODE_WORKER_URL_UNTRUSTED"));
 push("mission_task_delegate parses xjpcode SSE", has(taskDelegate, "parse_xjpcode_sse_frames"));
+push("mission_task_delegate stops xjpcode SSE on final frame", has(taskDelegate, "read_xjpcode_sse_until_final") && has(taskDelegate, "xjpcode_final_status_from_frames(&frames).is_some()"));
 push("mission_task_delegate persists xjpcode worker events", has(taskDelegate, "record_xjpcode_worker_events") && has(taskDelegate, "worker-runtime:xjpcode"));
 push("mission_task_delegate persists xjpcode worker telemetry", has(taskDelegate, "record_xjpcode_worker_telemetry") && has(taskDelegate, "xjpcode_worker.telemetry"));
 push("registry pins durable xjpcode worker event stream", has(workstationRuntime, "shared_events stream_id=worker-runtime:xjpcode") && has(workstationRuntime, "xjpcode_worker.telemetry"));
 push("mission_task_delegate writes task artifact", has(taskDelegate, "write_completion_artifact") && has(taskDelegate, "TaskCompletionEvidenceInput"));
+push("mission_task_delegate promotes xjpcode changed-path evidence", has(taskDelegate, "\"changed_paths\": files_changed.clone()") && has(taskDelegate, "\"files_changed\": files_changed") && has(taskDelegate, "\"verification\": verification"));
+push("mission_task_delegate binds xjpcode artifacts to attempts", has(taskDelegate, "accepted_shard_id: run.metadata.accepted_shard_id.clone()") && has(taskDelegate, "attempt_id: Some(run.attempt_id.clone())"));
+push("mission_task_delegate reports rejected xjpcode artifacts", has(taskDelegate, "xjpcode_worker.artifact_rejected") && has(workstationRuntime, "xjpcode_worker.artifact_rejected"));
+push("mission_task_delegate releases xjpcode claims on terminal outcomes", has(taskDelegate, "release_xjpcode_worker_claims") && has(taskDelegate, "artifact_rejected") && has(taskDelegate, "artifact_settled"));
 push("mission_task_delegate settles xjpcode worker", has(taskDelegate, "settle_task_command") && has(taskDelegate, "SettleTaskCommand"));
 push("xjpcode dispatch smoke script exists", Boolean(liveSmoke));
 push("xjpcode dispatch smoke calls mission_task_delegate", has(liveSmoke, "mission_task_delegate"));

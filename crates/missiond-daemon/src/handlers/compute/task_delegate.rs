@@ -2304,6 +2304,18 @@ fn xjpcode_final_status_from_frames(frames: &[Value]) -> Option<String> {
     })
 }
 
+async fn read_xjpcode_sse_until_final(mut response: reqwest::Response) -> Result<String> {
+    let mut response_body = String::new();
+    while let Some(chunk) = response.chunk().await? {
+        response_body.push_str(&String::from_utf8_lossy(&chunk));
+        let frames = parse_xjpcode_sse_frames(&response_body);
+        if xjpcode_final_status_from_frames(&frames).is_some() {
+            break;
+        }
+    }
+    Ok(response_body)
+}
+
 fn xjpcode_frame_event_kind(frame: &Value) -> String {
     let frame_type = frame
         .get("type")
@@ -2429,6 +2441,40 @@ async fn record_xjpcode_worker_telemetry(
         }),
     )
     .await;
+}
+
+async fn release_xjpcode_worker_claims(
+    state: &AppState,
+    task_id: &str,
+    worker_id: &str,
+    claim_ids: &[String],
+    reason: &str,
+) {
+    for claim_id in claim_ids {
+        let release = ControlPlaneKernel::new(state)
+            .release_lease_command(ReleaseLeaseCommand {
+                claim_id: claim_id.clone(),
+                owner_id: None,
+                grant_id: None,
+                subject_kind: "daemon".to_string(),
+                subject_id: "mission_task_delegate".to_string(),
+                details: json!({
+                    "source": "mission_task_delegate.xjpcode",
+                    "task_id": task_id,
+                    "worker_id": worker_id,
+                    "reason": reason
+                }),
+                allow_system_bypass: true,
+                bypass_reason: Some(
+                    "mission_task_delegate releases its pre-claimed xjpcode write_scope after terminal worker outcome"
+                        .to_string(),
+                ),
+            })
+            .await;
+        if let Err(err) = release {
+            tracing::warn!(task_id = %task_id, claim_id = %claim_id, error = %err, "xjpcode worker claim release failed");
+        }
+    }
 }
 
 fn xjpcode_result_status_for_artifact(status: &str) -> &'static str {
@@ -3500,7 +3546,9 @@ async fn run_xjpcode_readonly_worker(state: AppState, run: XjpcodeWorkerRun) -> 
         .build()?;
     let response = client.post(endpoint.as_str()).json(&request).send().await?;
     let status = response.status();
-    let response_body = response.text().await.unwrap_or_default();
+    let response_body = read_xjpcode_sse_until_final(response)
+        .await
+        .unwrap_or_default();
     let response_json = serde_json::from_str::<Value>(&response_body).unwrap_or_else(|_| {
         json!({
             "raw_response": response_body
@@ -3637,7 +3685,7 @@ async fn run_xjpcode_readonly_worker(state: AppState, run: XjpcodeWorkerRun) -> 
         .as_str()
         .ok_or_else(|| anyhow!("xjpcode worker artifact requires task_id"))?;
     let project_id = request["project_id"].as_str().map(str::to_string);
-    let artifact = ControlPlaneKernel::new(&state)
+    let artifact_result = ControlPlaneKernel::new(&state)
         .write_completion_artifact(TaskCompletionEvidenceInput {
             task_id: task_id.to_string(),
             project_id: project_id.clone(),
@@ -3686,7 +3734,59 @@ async fn run_xjpcode_readonly_worker(state: AppState, run: XjpcodeWorkerRun) -> 
             }])),
             created_at: Some(created_at),
         })
-        .await?;
+        .await;
+    let artifact = match artifact_result {
+        Ok(artifact) => artifact,
+        Err(err) => {
+            let error_message = err.to_string();
+            append_xjpcode_worker_event(
+                &state,
+                task_id,
+                project_id.as_deref(),
+                worker_id.as_str(),
+                "xjpcode_worker.artifact_rejected",
+                format!("xjpcode-artifact-rejected:{task_id}:{}", run.attempt_id),
+                json!({
+                    "schema": "missiond.xjpcode-worker-artifact-rejected.v1",
+                    "attempt_id": run.attempt_id.clone(),
+                    "error": error_message,
+                    "task_result": task_result,
+                    "sse_frames": frames,
+                    "claim_ids": run.metadata.shared_claim_ids.clone()
+                }),
+            )
+            .await;
+            if let Some(settle_grant_id) = run.settle_task_grant_id.as_deref() {
+                let _ = ControlPlaneKernel::new(&state)
+                    .settle_task_command(SettleTaskCommand {
+                        task_id: task_id.to_string(),
+                        project_id: project_id.clone(),
+                        slot_id: Some(worker_id.clone()),
+                        conversation_id: None,
+                        artifact_hash: None,
+                        status: "failed".to_string(),
+                        summary: Some(format!("xjpcode worker artifact rejected: {error_message}")),
+                        grant_id: Some(settle_grant_id.to_string()),
+                        subject_kind: "worker".to_string(),
+                        subject_id: worker_id.clone(),
+                        attempt_id: Some(run.attempt_id.clone()),
+                        allow_system_bypass: false,
+                    })
+                    .await;
+            }
+            release_xjpcode_worker_claims(
+                &state,
+                task_id,
+                worker_id.as_str(),
+                &run.metadata.shared_claim_ids,
+                "artifact_rejected",
+            )
+            .await;
+            return Err(anyhow!(
+                "xjpcode worker artifact rejected for task {task_id}: {error_message}"
+            ));
+        }
+    };
     let artifact_hash = artifact.artifact_hash.clone();
     record_xjpcode_worker_telemetry(
         &state,
@@ -3716,30 +3816,14 @@ async fn run_xjpcode_readonly_worker(state: AppState, run: XjpcodeWorkerRun) -> 
             allow_system_bypass: false,
         })
         .await?;
-    for claim_id in &run.metadata.shared_claim_ids {
-        let release = ControlPlaneKernel::new(&state)
-            .release_lease_command(ReleaseLeaseCommand {
-                claim_id: claim_id.clone(),
-                owner_id: None,
-                grant_id: None,
-                subject_kind: "daemon".to_string(),
-                subject_id: "mission_task_delegate".to_string(),
-                details: json!({
-                    "source": "mission_task_delegate.xjpcode",
-                    "task_id": task_id,
-                    "worker_id": worker_id
-                }),
-                allow_system_bypass: true,
-                bypass_reason: Some(
-                    "mission_task_delegate releases its pre-claimed xjpcode write_scope after terminal artifact"
-                        .to_string(),
-                ),
-            })
-            .await;
-        if let Err(err) = release {
-            tracing::warn!(task_id = %task_id, claim_id = %claim_id, error = %err, "xjpcode worker claim release failed");
-        }
-    }
+    release_xjpcode_worker_claims(
+        &state,
+        task_id,
+        worker_id.as_str(),
+        &run.metadata.shared_claim_ids,
+        "artifact_settled",
+    )
+    .await;
     Ok(())
 }
 
