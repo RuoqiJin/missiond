@@ -286,6 +286,12 @@ struct JarvisAuthoredPlanDraft {
     confidence: Option<String>,
 }
 
+#[derive(Clone, Default)]
+struct JarvisProgressBus {
+    system_event_tx: Option<tokio::sync::mpsc::Sender<SystemEvent>>,
+    frontend_events_tx: Option<broadcast::Sender<String>>,
+}
+
 /// WebSocket server options
 pub struct WSServerOptions {
     /// Server port
@@ -2407,6 +2413,7 @@ impl PTYWebSocketServer {
         mut stream: TcpStream,
         addr: SocketAddr,
         pty_manager: Option<Arc<PTYManager>>,
+        jarvis_progress_bus: JarvisProgressBus,
         jarvis_intent_author: JarvisIntentAuthorConfig,
         jarvis_plan_author: JarvisPlanAuthorConfig,
         jarvis_grounding: JarvisGroundingSlot,
@@ -2438,6 +2445,7 @@ impl PTYWebSocketServer {
             headers,
             envelope,
             pty_manager,
+            jarvis_progress_bus,
             jarvis_intent_author,
             jarvis_plan_author,
             jarvis_grounding,
@@ -2452,6 +2460,7 @@ impl PTYWebSocketServer {
         addr: SocketAddr,
         pty_manager: Option<Arc<PTYManager>>,
         default_chat_slot: String,
+        jarvis_progress_bus: JarvisProgressBus,
         jarvis_intent_author: JarvisIntentAuthorConfig,
         jarvis_plan_author: JarvisPlanAuthorConfig,
         jarvis_grounding: JarvisGroundingSlot,
@@ -2493,6 +2502,7 @@ impl PTYWebSocketServer {
             headers,
             envelope,
             pty_manager,
+            jarvis_progress_bus,
             jarvis_intent_author,
             jarvis_plan_author,
             jarvis_grounding,
@@ -2508,6 +2518,7 @@ impl PTYWebSocketServer {
         headers: String,
         mut envelope: InteractionEnvelope,
         pty_manager: Option<Arc<PTYManager>>,
+        jarvis_progress_bus: JarvisProgressBus,
         jarvis_intent_author: JarvisIntentAuthorConfig,
         jarvis_plan_author: JarvisPlanAuthorConfig,
         jarvis_grounding: JarvisGroundingSlot,
@@ -2576,6 +2587,20 @@ impl PTYWebSocketServer {
                 "interaction_id": interaction_id,
                 "permission_context": permission_context.clone(),
             }),
+        )
+        .await?;
+        Self::write_jarvis_progress(
+            &mut stream,
+            &jarvis_progress_bus,
+            &chat_id,
+            Some(&interaction_id),
+            "permission_resolved",
+            "auth_permission",
+            "completed",
+            "已完成身份和权限解析，下一步收集 grounding context。",
+            None,
+            None,
+            None,
         )
         .await?;
 
@@ -2721,10 +2746,15 @@ impl PTYWebSocketServer {
             match interaction_metadata_string(&envelope, "missiond_objective") {
                 Some(value) => value,
                 None => {
-                    Self::fail_jarvis_gate(
+                    Self::fail_jarvis_gate_visible(
                         &mut stream,
+                        &jarvis_progress_bus,
+                        &chat_id,
+                        Some(&interaction_id),
                         "Jarvis confirmation requires missiond_objective from the previous intent/plan payload; refusing to use the confirmation text as the task objective.".to_string(),
                         "confirmation_objective",
+                        db.as_ref(),
+                        jarvis_conv_id.as_deref(),
                     )
                     .await?;
                     return Ok(());
@@ -2733,6 +2763,20 @@ impl PTYWebSocketServer {
         } else {
             raw_user_text.clone()
         };
+        Self::write_jarvis_progress(
+            &mut stream,
+            &jarvis_progress_bus,
+            &chat_id,
+            Some(&interaction_id),
+            "grounding",
+            "context_gather_start",
+            "running",
+            "正在收集上下文、权限和项目证据，准备生成可确认的 Lisp 草案。",
+            None,
+            None,
+            None,
+        )
+        .await?;
         let grounding = match Self::gather_jarvis_grounding(
             &jarvis_grounding,
             JarvisGroundingRequest {
@@ -2757,7 +2801,17 @@ impl PTYWebSocketServer {
         {
             Ok(result) => result,
             Err(error) => {
-                Self::fail_jarvis_gate(&mut stream, error, "grounding").await?;
+                Self::fail_jarvis_gate_visible(
+                    &mut stream,
+                    &jarvis_progress_bus,
+                    &chat_id,
+                    Some(&interaction_id),
+                    error,
+                    "grounding",
+                    db.as_ref(),
+                    jarvis_conv_id.as_deref(),
+                )
+                .await?;
                 return Ok(());
             }
         };
@@ -2805,21 +2859,29 @@ impl PTYWebSocketServer {
             }),
         )
         .await?;
+        Self::write_jarvis_progress(
+            &mut stream,
+            &jarvis_progress_bus,
+            &chat_id,
+            Some(&interaction_id),
+            "grounding",
+            "context_gather_completed",
+            "completed",
+            &format!(
+                "grounding 已完成，context={grounding_context_id}，下一步进入 intent/plan gate。"
+            ),
+            None,
+            None,
+            None,
+        )
+        .await?;
 
         let intent_artifact_id = if !intent_confirmed {
-            Self::write_sse_event(
+            let authored_intent = match Self::author_jarvis_intent_draft_with_progress(
                 &mut stream,
-                "status",
-                &serde_json::json!({
-                    "interaction_id": interaction_id,
-                    "phase": "intent_authoring",
-                    "author": "codex-cli-gpt-5.5-xhigh",
-                    "slot_id": &jarvis_intent_author.slot_id,
-                    "message": "Codex CLI GPT-5.5 xhigh is authoring intent.lisp for user confirmation."
-                }),
-            )
-            .await?;
-            let authored_intent = match Self::author_jarvis_intent_draft(
+                &jarvis_progress_bus,
+                &chat_id,
+                Some(&interaction_id),
                 pty_manager.as_ref(),
                 &jarvis_intent_author,
                 "missiond.interaction-intent-artifact.v1",
@@ -2887,6 +2949,20 @@ impl PTYWebSocketServer {
                 "sources_used": sources_used,
                 "requires_confirmation": true
             });
+            Self::write_jarvis_progress(
+                &mut stream,
+                &jarvis_progress_bus,
+                &chat_id,
+                Some(&interaction_id),
+                "intent_artifact",
+                "shared_artifact_put",
+                "running",
+                "正在写入 intent.lisp artifact，写入完成后页面会显示可确认内容。",
+                None,
+                None,
+                None,
+            )
+            .await?;
             let intent_artifact = match Self::put_jarvis_artifact(
                 &jarvis_artifact_writer,
                 JarvisArtifactRequest {
@@ -2907,11 +2983,35 @@ impl PTYWebSocketServer {
             {
                 Ok(result) => result,
                 Err(error) => {
-                    Self::fail_jarvis_gate(&mut stream, error, "intent_artifact").await?;
+                    Self::fail_jarvis_gate_visible(
+                        &mut stream,
+                        &jarvis_progress_bus,
+                        &chat_id,
+                        Some(&interaction_id),
+                        error,
+                        "intent_artifact",
+                        db.as_ref(),
+                        jarvis_conv_id.as_deref(),
+                    )
+                    .await?;
                     return Ok(());
                 }
             };
             let intent_artifact_id = intent_artifact.artifact_id.clone();
+            Self::write_jarvis_progress(
+                &mut stream,
+                &jarvis_progress_bus,
+                &chat_id,
+                Some(&interaction_id),
+                "intent_artifact",
+                "shared_artifact_put_completed",
+                "completed",
+                "intent.lisp artifact 已写入，正在发送草案卡片和确认请求。",
+                None,
+                None,
+                None,
+            )
+            .await?;
             let mut intent = intent_payload;
             if let Some(object) = intent.as_object_mut() {
                 object.insert(
@@ -2970,10 +3070,15 @@ impl PTYWebSocketServer {
             match interaction_metadata_string(&envelope, "missiond_intent_artifact_id") {
                 Some(value) => value,
                 None => {
-                    Self::fail_jarvis_gate(
+                    Self::fail_jarvis_gate_visible(
                         &mut stream,
+                        &jarvis_progress_bus,
+                        &chat_id,
+                        Some(&interaction_id),
                         "Jarvis intent confirmation requires missiond_intent_artifact_id from the previous intent payload; refusing to regenerate intent.lisp during confirmation.".to_string(),
                         "confirmation_intent_artifact",
+                        db.as_ref(),
+                        jarvis_conv_id.as_deref(),
                     )
                     .await?;
                     return Ok(());
@@ -2991,19 +3096,11 @@ impl PTYWebSocketServer {
         }
 
         let plan_artifact_id = if !plan_confirmed {
-            Self::write_sse_event(
+            let authored_plan = match Self::author_jarvis_plan_draft_with_progress(
                 &mut stream,
-                "status",
-                &serde_json::json!({
-                    "interaction_id": interaction_id,
-                    "phase": "plan_authoring",
-                    "author": "codex-cli-gpt-5.5-xhigh",
-                    "slot_id": &jarvis_plan_author.slot_id,
-                    "message": "Codex CLI GPT-5.5 xhigh is authoring plan.lisp for user confirmation."
-                }),
-            )
-            .await?;
-            let authored_plan = match Self::author_jarvis_plan_draft(
+                &jarvis_progress_bus,
+                &chat_id,
+                Some(&interaction_id),
                 pty_manager.as_ref(),
                 &jarvis_plan_author,
                 "missiond.interaction-plan-artifact.v1",
@@ -3073,6 +3170,20 @@ impl PTYWebSocketServer {
                 "sources_used": sources_used,
                 "requires_confirmation": true
             });
+            Self::write_jarvis_progress(
+                &mut stream,
+                &jarvis_progress_bus,
+                &chat_id,
+                Some(&interaction_id),
+                "plan_artifact",
+                "shared_artifact_put",
+                "running",
+                "正在写入 plan.lisp artifact，写入完成后页面会显示可确认计划。",
+                None,
+                None,
+                None,
+            )
+            .await?;
             let plan_artifact = match Self::put_jarvis_artifact(
                 &jarvis_artifact_writer,
                 JarvisArtifactRequest {
@@ -3093,11 +3204,35 @@ impl PTYWebSocketServer {
             {
                 Ok(result) => result,
                 Err(error) => {
-                    Self::fail_jarvis_gate(&mut stream, error, "plan_artifact").await?;
+                    Self::fail_jarvis_gate_visible(
+                        &mut stream,
+                        &jarvis_progress_bus,
+                        &chat_id,
+                        Some(&interaction_id),
+                        error,
+                        "plan_artifact",
+                        db.as_ref(),
+                        jarvis_conv_id.as_deref(),
+                    )
+                    .await?;
                     return Ok(());
                 }
             };
             let plan_artifact_id = plan_artifact.artifact_id.clone();
+            Self::write_jarvis_progress(
+                &mut stream,
+                &jarvis_progress_bus,
+                &chat_id,
+                Some(&interaction_id),
+                "plan_artifact",
+                "shared_artifact_put_completed",
+                "completed",
+                "plan.lisp artifact 已写入，正在发送草案卡片和确认请求。",
+                None,
+                None,
+                None,
+            )
+            .await?;
             let mut plan = plan_payload;
             if let Some(object) = plan.as_object_mut() {
                 object.insert(
@@ -3158,10 +3293,15 @@ impl PTYWebSocketServer {
             match interaction_metadata_string(&envelope, "missiond_plan_artifact_id") {
                 Some(value) => value,
                 None => {
-                    Self::fail_jarvis_gate(
+                    Self::fail_jarvis_gate_visible(
                         &mut stream,
+                        &jarvis_progress_bus,
+                        &chat_id,
+                        Some(&interaction_id),
                         "Jarvis plan confirmation requires missiond_plan_artifact_id from the previous plan payload; refusing to regenerate plan.lisp during confirmation.".to_string(),
                         "confirmation_plan_artifact",
+                        db.as_ref(),
+                        jarvis_conv_id.as_deref(),
                     )
                     .await?;
                     return Ok(());
@@ -3181,6 +3321,13 @@ impl PTYWebSocketServer {
                         "message": "MissionD DB unavailable; cannot create BoardTask."
                     }
                 }),
+            )
+            .await?;
+            Self::write_sse_openai_text(
+                &mut stream,
+                &chat_id,
+                "失败在 board_task_create：MissionD DB 不可用，无法创建 BoardTask。\n",
+                Some("stop"),
             )
             .await?;
             Self::finish_sse(&mut stream).await?;
@@ -3248,6 +3395,20 @@ impl PTYWebSocketServer {
             context_intent: Some(context_intent),
             runtime_metadata: Some(meta),
         };
+        Self::write_jarvis_progress(
+            &mut stream,
+            &jarvis_progress_bus,
+            &chat_id,
+            Some(&interaction_id),
+            "board_task_create",
+            "create_board_task",
+            "running",
+            "计划已确认，正在创建可追踪 BoardTask 并准备异步派工。",
+            None,
+            None,
+            None,
+        )
+        .await?;
         match db.create_board_task(&task_input).await {
             Ok(task) => {
                 Self::persist_jarvis_confirmation_fulfilled(
@@ -3353,6 +3514,15 @@ impl PTYWebSocketServer {
                             "message": e.to_string()
                         }
                     }),
+                )
+                .await?;
+                Self::write_sse_openai_text_and_persist(
+                    &mut stream,
+                    &chat_id,
+                    &format!("失败在 board_task_create：{}", e),
+                    Some("stop"),
+                    Some(db),
+                    jarvis_conv_id.as_deref(),
                 )
                 .await?;
             }
@@ -3959,6 +4129,192 @@ impl PTYWebSocketServer {
         Ok(())
     }
 
+    async fn write_jarvis_progress(
+        stream: &mut TcpStream,
+        progress_bus: &JarvisProgressBus,
+        chat_id: &str,
+        interaction_id: Option<&str>,
+        phase: &str,
+        step: &str,
+        status: &str,
+        message: &str,
+        elapsed_secs: Option<u64>,
+        slot_id: Option<&str>,
+        author: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let event_id = format!(
+            "jarvis-progress-{}-{}-{}-{}",
+            interaction_id.unwrap_or("unknown"),
+            phase,
+            step,
+            uuid::Uuid::new_v4().simple()
+        );
+        let mut payload = serde_json::json!({
+            "schema": "missiond.jarvis-progress.v1",
+            "event_id": event_id.clone(),
+            "event_kind": "jarvis_progress",
+            "event_bus_required": true,
+            "interaction_id": interaction_id,
+            "phase": phase,
+            "step": step,
+            "status": status,
+            "message": message,
+            "visible": true,
+            "openai_delta": true,
+        });
+        if let Some(object) = payload.as_object_mut() {
+            if let Some(elapsed_secs) = elapsed_secs {
+                object.insert(
+                    "elapsed_secs".to_string(),
+                    serde_json::Value::Number(elapsed_secs.into()),
+                );
+            }
+            if let Some(slot_id) = slot_id {
+                object.insert(
+                    "slot_id".to_string(),
+                    serde_json::Value::String(slot_id.to_string()),
+                );
+            }
+            if let Some(author) = author {
+                object.insert(
+                    "author".to_string(),
+                    serde_json::Value::String(author.to_string()),
+                );
+            }
+        }
+        let mut bus_rx = progress_bus
+            .frontend_events_tx
+            .as_ref()
+            .map(|tx| tx.subscribe());
+        let bus_write_ok =
+            Self::publish_jarvis_progress_to_event_bus(progress_bus, &payload, message).await;
+        let mut event_payload = if bus_write_ok {
+            Self::read_jarvis_progress_from_event_bus(bus_rx.as_mut(), &event_id)
+                .await
+                .unwrap_or_else(|| {
+                    Self::stamp_jarvis_progress_bus_projection(
+                        payload.clone(),
+                        "direct_fallback_after_bus_timeout",
+                    )
+                })
+        } else {
+            Self::stamp_jarvis_progress_bus_projection(
+                payload.clone(),
+                "direct_fallback_bus_write_failed",
+            )
+        };
+        if let Some(object) = event_payload.as_object_mut() {
+            object.insert(
+                "event_bus_write_ok".to_string(),
+                serde_json::Value::Bool(bus_write_ok),
+            );
+        }
+        Self::write_sse_event(stream, "status", &event_payload).await?;
+        Self::write_sse_openai_text(stream, chat_id, &format!("{message}\n"), None).await?;
+        Ok(())
+    }
+
+    async fn publish_jarvis_progress_to_event_bus(
+        progress_bus: &JarvisProgressBus,
+        payload: &serde_json::Value,
+        message: &str,
+    ) -> bool {
+        let Some(tx) = progress_bus.system_event_tx.as_ref() else {
+            return false;
+        };
+        let event_id = payload
+            .get("event_id")
+            .and_then(|value| value.as_str())
+            .unwrap_or("jarvis-progress-missing-event-id")
+            .to_string();
+        let trace_id = payload
+            .get("interaction_id")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        let event = SystemEvent::ExternalServiceEvent {
+            service_id: "missiond-jarvis".to_string(),
+            event_id,
+            event_kind: "jarvis_progress".to_string(),
+            summary: message.chars().take(240).collect::<String>(),
+            trace_id,
+            payload_json: serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_string()),
+        };
+        match tx.send(event).await {
+            Ok(()) => true,
+            Err(error) => {
+                warn!(error = %error, "failed to publish Jarvis progress to EventBus");
+                false
+            }
+        }
+    }
+
+    async fn read_jarvis_progress_from_event_bus(
+        rx: Option<&mut broadcast::Receiver<String>>,
+        event_id: &str,
+    ) -> Option<serde_json::Value> {
+        let rx = rx?;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(1200);
+        loop {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return None;
+            }
+            let remaining = deadline.saturating_duration_since(now);
+            match tokio::time::timeout(remaining, rx.recv()).await {
+                Ok(Ok(json_str)) => {
+                    if let Some(payload) =
+                        Self::jarvis_progress_payload_from_event_bus_wire(&json_str, event_id)
+                    {
+                        return Some(payload);
+                    }
+                }
+                Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+                Ok(Err(broadcast::error::RecvError::Closed)) | Err(_) => return None,
+            }
+        }
+    }
+
+    fn jarvis_progress_payload_from_event_bus_wire(
+        json_str: &str,
+        expected_event_id: &str,
+    ) -> Option<serde_json::Value> {
+        let wire = serde_json::from_str::<serde_json::Value>(json_str).ok()?;
+        if wire.get("type").and_then(|value| value.as_str()) != Some("external_service_event") {
+            return None;
+        }
+        let payload = wire.get("payload")?;
+        if payload.get("service_id").and_then(|value| value.as_str()) != Some("missiond-jarvis") {
+            return None;
+        }
+        if payload.get("event_kind").and_then(|value| value.as_str()) != Some("jarvis_progress") {
+            return None;
+        }
+        if payload.get("event_id").and_then(|value| value.as_str()) != Some(expected_event_id) {
+            return None;
+        }
+        let payload_json = payload
+            .get("payload_json")
+            .and_then(|value| value.as_str())?;
+        let progress = serde_json::from_str::<serde_json::Value>(payload_json).ok()?;
+        Some(Self::stamp_jarvis_progress_bus_projection(
+            progress,
+            "frontend_event_bus",
+        ))
+    }
+
+    fn stamp_jarvis_progress_bus_projection(
+        mut payload: serde_json::Value,
+        projection: &str,
+    ) -> serde_json::Value {
+        if let Some(object) = payload.as_object_mut() {
+            object.insert(
+                "event_bus_projection".to_string(),
+                serde_json::Value::String(projection.to_string()),
+            );
+        }
+        payload
+    }
+
     async fn persist_jarvis_visible_assistant_message(
         db: Option<&Arc<dyn crate::db::traits::MissionStore>>,
         conversation_id: Option<&str>,
@@ -4464,6 +4820,119 @@ JSON 字段必须是：\n\
         })
     }
 
+    async fn author_jarvis_intent_draft_with_progress(
+        stream: &mut TcpStream,
+        progress_bus: &JarvisProgressBus,
+        chat_id: &str,
+        interaction_id: Option<&str>,
+        pty_manager: Option<&Arc<PTYManager>>,
+        config: &JarvisIntentAuthorConfig,
+        schema: &str,
+        channel: &str,
+        objective: &str,
+        grounding_context_id: &str,
+        topic_id: Option<&str>,
+        topic_label: Option<&str>,
+        sources_used: &[String],
+        permission_context: Option<&serde_json::Value>,
+    ) -> anyhow::Result<JarvisAuthoredIntentDraft> {
+        const HEARTBEAT_SECS: u64 = 8;
+        let author = "codex-cli-gpt-5.5-xhigh";
+        Self::write_jarvis_progress(
+            stream,
+            progress_bus,
+            chat_id,
+            interaction_id,
+            "intent_authoring",
+            "codex_exec_start",
+            "running",
+            "正在调用 codex-intent-author 生成 intent.lisp。",
+            None,
+            Some(&config.slot_id),
+            Some(author),
+        )
+        .await?;
+        let started = tokio::time::Instant::now();
+        let mut authoring = Box::pin(Self::author_jarvis_intent_draft(
+            pty_manager,
+            config,
+            schema,
+            channel,
+            objective,
+            grounding_context_id,
+            topic_id,
+            topic_label,
+            sources_used,
+            permission_context,
+        ));
+        let mut heartbeat = Box::pin(tokio::time::sleep(std::time::Duration::from_secs(
+            HEARTBEAT_SECS,
+        )));
+        loop {
+            tokio::select! {
+                result = &mut authoring => {
+                    return match result {
+                        Ok(draft) => {
+                            Self::write_jarvis_progress(
+                                stream,
+                                progress_bus,
+                                chat_id,
+                                interaction_id,
+                                "intent_authoring",
+                                "codex_exec_completed",
+                                "completed",
+                                "intent.lisp 已由 Codex 生成并通过结构校验，正在写入 artifact。",
+                                Some(started.elapsed().as_secs()),
+                                Some(&config.slot_id),
+                                Some(author),
+                            )
+                            .await?;
+                            Ok(draft)
+                        }
+                        Err(error) => {
+                            let error_message = error.to_string();
+                            Self::write_jarvis_progress(
+                                stream,
+                                progress_bus,
+                                chat_id,
+                                interaction_id,
+                                "intent_authoring_failed",
+                                "codex_exec_failed",
+                                "failed",
+                                &format!("失败在 intent.lisp 生成：{error_message}"),
+                                Some(started.elapsed().as_secs()),
+                                Some(&config.slot_id),
+                                Some(author),
+                            )
+                            .await?;
+                            Err(error)
+                        }
+                    };
+                }
+                _ = &mut heartbeat => {
+                    let elapsed = started.elapsed().as_secs();
+                    Self::write_jarvis_progress(
+                        stream,
+                        progress_bus,
+                        chat_id,
+                        interaction_id,
+                        "intent_authoring",
+                        "codex_exec_waiting",
+                        "running",
+                        &format!("Codex intent author 仍在运行，已等待 {elapsed}s；当前步骤：生成并校验 intent.lisp。"),
+                        Some(elapsed),
+                        Some(&config.slot_id),
+                        Some(author),
+                    )
+                    .await?;
+                    heartbeat.as_mut().reset(
+                        tokio::time::Instant::now() + std::time::Duration::from_secs(HEARTBEAT_SECS),
+                    );
+                }
+            }
+        }
+    }
+
     fn jarvis_lisp_string(value: &str) -> String {
         let mut escaped = String::with_capacity(value.len() + 2);
         escaped.push('"');
@@ -4596,6 +5065,121 @@ JSON 字段必须是：\n\
             acceptance_signals: parsed.acceptance_signals,
             confidence: parsed.confidence,
         })
+    }
+
+    async fn author_jarvis_plan_draft_with_progress(
+        stream: &mut TcpStream,
+        progress_bus: &JarvisProgressBus,
+        chat_id: &str,
+        interaction_id: Option<&str>,
+        pty_manager: Option<&Arc<PTYManager>>,
+        config: &JarvisPlanAuthorConfig,
+        schema: &str,
+        channel: &str,
+        objective: &str,
+        grounding_context_id: &str,
+        intent_artifact_id: &str,
+        topic_id: Option<&str>,
+        topic_label: Option<&str>,
+        sources_used: &[String],
+        permission_context: Option<&serde_json::Value>,
+    ) -> anyhow::Result<JarvisAuthoredPlanDraft> {
+        const HEARTBEAT_SECS: u64 = 8;
+        let author = "codex-cli-gpt-5.5-xhigh";
+        Self::write_jarvis_progress(
+            stream,
+            progress_bus,
+            chat_id,
+            interaction_id,
+            "plan_authoring",
+            "codex_exec_start",
+            "running",
+            "正在调用 codex-plan-author 生成 plan.lisp。",
+            None,
+            Some(&config.slot_id),
+            Some(author),
+        )
+        .await?;
+        let started = tokio::time::Instant::now();
+        let mut authoring = Box::pin(Self::author_jarvis_plan_draft(
+            pty_manager,
+            config,
+            schema,
+            channel,
+            objective,
+            grounding_context_id,
+            intent_artifact_id,
+            topic_id,
+            topic_label,
+            sources_used,
+            permission_context,
+        ));
+        let mut heartbeat = Box::pin(tokio::time::sleep(std::time::Duration::from_secs(
+            HEARTBEAT_SECS,
+        )));
+        loop {
+            tokio::select! {
+                result = &mut authoring => {
+                    return match result {
+                        Ok(draft) => {
+                            Self::write_jarvis_progress(
+                                stream,
+                                progress_bus,
+                                chat_id,
+                                interaction_id,
+                                "plan_authoring",
+                                "codex_exec_completed",
+                                "completed",
+                                "plan.lisp 已由 Codex 生成并通过结构校验，正在写入 artifact。",
+                                Some(started.elapsed().as_secs()),
+                                Some(&config.slot_id),
+                                Some(author),
+                            )
+                            .await?;
+                            Ok(draft)
+                        }
+                        Err(error) => {
+                            let error_message = error.to_string();
+                            Self::write_jarvis_progress(
+                                stream,
+                                progress_bus,
+                                chat_id,
+                                interaction_id,
+                                "plan_authoring_failed",
+                                "codex_exec_failed",
+                                "failed",
+                                &format!("失败在 plan.lisp 生成：{error_message}"),
+                                Some(started.elapsed().as_secs()),
+                                Some(&config.slot_id),
+                                Some(author),
+                            )
+                            .await?;
+                            Err(error)
+                        }
+                    };
+                }
+                _ = &mut heartbeat => {
+                    let elapsed = started.elapsed().as_secs();
+                    Self::write_jarvis_progress(
+                        stream,
+                        progress_bus,
+                        chat_id,
+                        interaction_id,
+                        "plan_authoring",
+                        "codex_exec_waiting",
+                        "running",
+                        &format!("Codex plan author 仍在运行，已等待 {elapsed}s；当前步骤：生成并校验 plan.lisp。"),
+                        Some(elapsed),
+                        Some(&config.slot_id),
+                        Some(author),
+                    )
+                    .await?;
+                    heartbeat.as_mut().reset(
+                        tokio::time::Instant::now() + std::time::Duration::from_secs(HEARTBEAT_SECS),
+                    );
+                }
+            }
+        }
     }
 
     fn jarvis_artifact_projection_text(
@@ -4852,6 +5436,56 @@ JSON 字段必须是：\n\
             "next_action": "Fix the missing runtime capability instead of falling back to direct PTY execution."
         });
         Self::write_sse_event(stream, "diagnostic", &diagnostic).await?;
+        Self::finish_sse(stream).await
+    }
+
+    async fn fail_jarvis_gate_visible(
+        stream: &mut TcpStream,
+        progress_bus: &JarvisProgressBus,
+        chat_id: &str,
+        interaction_id: Option<&str>,
+        message: impl Into<String>,
+        stage: &str,
+        db: Option<&Arc<dyn crate::db::traits::MissionStore>>,
+        conversation_id: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let message = message.into();
+        let visible_message = format!("失败在 {stage}：{message}");
+        Self::write_jarvis_progress(
+            stream,
+            progress_bus,
+            chat_id,
+            interaction_id,
+            stage,
+            stage,
+            "failed",
+            &visible_message,
+            None,
+            None,
+            None,
+        )
+        .await?;
+        let diagnostic = serde_json::json!({
+            "schema": "missiond.jarvis-progress.v1",
+            "interaction_id": interaction_id,
+            "phase": stage,
+            "step": stage,
+            "status": "failed",
+            "visible": true,
+            "openai_delta": true,
+            "error": {"message": message},
+            "next_action": "Fix the missing runtime capability instead of falling back to direct PTY execution."
+        });
+        Self::write_sse_event(stream, "diagnostic", &diagnostic).await?;
+        Self::write_sse_openai_text_and_persist(
+            stream,
+            chat_id,
+            &visible_message,
+            Some("stop"),
+            db,
+            conversation_id,
+        )
+        .await?;
         Self::finish_sse(stream).await
     }
 
@@ -8033,6 +8667,10 @@ JSON 字段必须是：\n\
             let normalized_path = normalize_public_jarvis_path(path);
             let normalized_request_line = format!("{method} {normalized_path} {version}");
             let is_upgrade = request_line.to_ascii_lowercase().contains("upgrade:");
+            let jarvis_progress_bus = JarvisProgressBus {
+                system_event_tx: system_event_tx.clone(),
+                frontend_events_tx: frontend_events_tx.clone(),
+            };
             // Local deploy-center smoke may restore the default Jarvis slot after
             // a blue/green restart. This is intentionally not a normalized
             // `/jarvis/*` public route.
@@ -8108,6 +8746,7 @@ JSON 字段必须是：\n\
                     stream,
                     addr,
                     pty_manager,
+                    jarvis_progress_bus,
                     jarvis_intent_author.clone(),
                     jarvis_plan_author.clone(),
                     jarvis_grounding,
@@ -8140,6 +8779,7 @@ JSON 字段必须是：\n\
                     addr,
                     pty_manager.clone(),
                     default_chat_slot.clone(),
+                    jarvis_progress_bus,
                     jarvis_intent_author.clone(),
                     jarvis_plan_author.clone(),
                     jarvis_grounding,

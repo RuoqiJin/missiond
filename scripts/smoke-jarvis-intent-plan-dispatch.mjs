@@ -188,6 +188,29 @@ function hasOpenAIArtifactProjection(response, expectedEvent) {
   });
 }
 
+function openAIContent(data) {
+  return data?.choices?.[0]?.delta?.content;
+}
+
+function hasVisibleProgress(response, expectedPhase) {
+  return (response?.events || []).some((event) => {
+    const data = event?.data;
+    if (!data || typeof data !== 'object') return false;
+    if (
+      data.schema === 'missiond.jarvis-progress.v1'
+      && data.phase === expectedPhase
+      && data.visible === true
+      && data.openai_delta === true
+    ) {
+      return true;
+    }
+    const content = openAIContent(data);
+    return typeof content === 'string'
+      && content.includes(expectedPhase === 'plan_authoring' ? 'plan.lisp' : 'intent.lisp')
+      && /正在|仍在运行|已由 Codex|失败在/.test(content);
+  });
+}
+
 function hasReviewableArtifactDraft(response, expectedEvent) {
   return (response?.events || []).some((event) => {
     const data = event?.data;
@@ -376,6 +399,13 @@ async function main() {
         events: eventNames(first),
       });
     }
+    if (!hasVisibleProgress(first, 'intent_authoring')) {
+      diagnostics.push({
+        code: 'VISIBLE_PROGRESS_MISSING',
+        message: 'intent authoring must emit missiond.jarvis-progress.v1 and OpenAI-compatible progress deltas while waiting.',
+        events: eventNames(first),
+      });
+    }
     if (!hasReviewableArtifactDraft(first, 'intent_draft')) {
       diagnostics.push({
         code: 'REVIEWABLE_ARTIFACT_BODY_MISSING',
@@ -404,6 +434,13 @@ async function main() {
         diagnostics.push({
           code: 'OPENAI_ARTIFACT_PROJECTION_MISSING',
           message: 'plan_draft must also be visible as an OpenAI-compatible artifact delta',
+          events: eventNames(second),
+        });
+      }
+      if (!hasVisibleProgress(second, 'plan_authoring')) {
+        diagnostics.push({
+          code: 'VISIBLE_PROGRESS_MISSING',
+          message: 'plan authoring must emit missiond.jarvis-progress.v1 and OpenAI-compatible progress deltas while waiting.',
           events: eventNames(second),
         });
       }
