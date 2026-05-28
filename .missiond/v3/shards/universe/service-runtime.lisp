@@ -138,6 +138,44 @@
       :events [deploy_created build_started build_succeeded build_failed deploy_started deploy_succeeded deploy_failed smoke_succeeded smoke_failed rollback_started rollback_succeeded rollback_failed agent_heartbeat agent_update_started agent_update_succeeded agent_update_failed provenance_changed]
       :ops-capability deploy-ops
       :surface service-runtime-universe)
+    (service :id search-center
+      :project search-center
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/search-center"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/search-center-backend-blueprint.lisp"
+      :environment production
+      :public-base-url "https://auth.xiaojinpro.com"
+      :frontend-url "https://search.xiaojin.pro"
+      :domains ["search.xiaojin.pro" "auth.xiaojinpro.com"]
+      :dns-provider cloudflare
+      :deployment (:substrate deploy-center :dc_slug "xjp-search-center" :runtime-target gcp-runtime :executor gcp-agent :container "xjp-search-center" :default-port 3120 :authority release-provenance)
+      :proxy (:kind caddy :domain "auth.xiaojinpro.com" :routes ["/v1/search" "/v1/search/*" "/v1/research" "/v1/research/*" "/v1/history" "/v1/health"])
+      :ports (:http 3120)
+      :health ["/v1/health"]
+      :dependencies [xjp-auth xjp-router xjp-pg-prod secret-store anysearch bocha tavily? brave?]
+      :ops-capability deploy-ops
+      :source-evidence [skill:search-center skill:services/search-center]
+      :risks [deep-research-e2e-verification-pending browser-oauth-flow-unverified provider-secret-activation-pending]
+      :surface service-runtime-universe)
+    (service :id wepub
+      :project wechat-publisher
+      :root "/Users/jinchen/Projects/wechat-publisher"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/wechat-publisher-backend-blueprint.lisp"
+      :environment production
+      :public-base-url "https://www.wepub.top"
+      :api-base-url "https://api.wepub.top"
+      :domains ["wepub.top" "www.wepub.top" "api.wepub.top"]
+      :dns-provider cloudflare
+      :deployment (:substrate deploy-center :dc_slug "wepub" :runtime-target gcp-runtime :executor gcp-agent :container "wepub" :default-port 8094 :authority release-provenance)
+      :proxy (:kind caddy :domain "api.wepub.top" :upstream "localhost:8094")
+      :ports (:http 8094)
+      :health ["/api/health"]
+      :dependencies [xjp-auth xjp-pg-prod stripe openrouter cloudflare]
+      :ops-capability deploy-ops
+      :source-evidence [skill:wepub wechat-publisher-project-ssot]
+      :risks [subscription-webhook-secret-required bot-jwt-local-decode-audit]
+      :surface service-runtime-universe)
     (service :id secret-store
       :project secret-store
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/services/secret-store-rs"

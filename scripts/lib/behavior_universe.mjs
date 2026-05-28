@@ -30,6 +30,7 @@ const EXCLUDED_DIRS = new Set([
   '.next',
   '.turbo',
   '.cache',
+  '.vercel',
   'coverage',
   'dist',
   'build',

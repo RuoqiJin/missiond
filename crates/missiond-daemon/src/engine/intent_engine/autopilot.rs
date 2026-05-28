@@ -492,7 +492,7 @@ async fn observe_autopilot_task_result_candidate(
         .ok();
 
     let artifact =
-        completed_task_result_artifact_for_task(state, task, candidate_hash.as_deref()).await;
+        completed_task_result_artifact_hash_for_task(state, task, candidate_hash.as_deref()).await;
     let artifact_hash = artifact.map(|artifact| artifact.artifact_hash);
     if artifact_hash.is_none() {
         info!(
@@ -773,7 +773,7 @@ fn completed_task_result_artifact_from_results(
         })
 }
 
-async fn completed_task_result_artifact_for_task(
+async fn completed_task_result_artifact_hash_for_task(
     state: &AppState,
     task: &missiond_core::types::BoardTask,
     candidate_hash: Option<&str>,
@@ -854,7 +854,8 @@ async fn settle_autopilot_done_from_existing_artifact(
     summary: &str,
     source: &str,
 ) -> Result<bool> {
-    let Some(artifact) = completed_task_result_artifact_for_task(state, task, None).await else {
+    let Some(artifact) = completed_task_result_artifact_hash_for_task(state, task, None).await
+    else {
         return Ok(false);
     };
     let CompletedTaskResultArtifact {
@@ -2124,7 +2125,7 @@ async fn close_idle_running_task_from_durable_summary(
             "EVIDENCE_REQUIRED: task_id={task_id}: canonical completed task_result_artifact hash required"
         )
     })?;
-    let artifact = completed_task_result_artifact_for_task(
+    let artifact = completed_task_result_artifact_hash_for_task(
         state,
         &task_with_notes.task,
         Some(artifact_hash.as_str()),
@@ -5369,7 +5370,7 @@ async fn dispatch_board_tasks_with_config(
                         DispatchCloseAction::OwnerClosesAsDone => {
                             // Normal case: running → done. Autopilot is the close owner.
                             if let Some(hash) = task_result_artifact_hash.as_deref() {
-                                let artifact = completed_task_result_artifact_for_task(
+                                let artifact = completed_task_result_artifact_hash_for_task(
                                     state,
                                     &task,
                                     Some(hash),

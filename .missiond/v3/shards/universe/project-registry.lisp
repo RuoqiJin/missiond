@@ -159,6 +159,18 @@
       :backend ".missiond/backend/router-backend-blueprint.lisp"
       :status v3-runtime-ssot
       :surface project-registry)
+    (project :id search-center
+      :aliases [xjp-search-center deep-research "聚合搜索" "搜索中心"]
+      :kind rust-nextjs-service
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/search-center"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/search-center-backend-blueprint.lisp"
+      :frontend ".missiond/frontend/search-center-web-blueprint.lisp"
+      :operations ".missiond/operations/search-center-operations-blueprint.lisp"
+      :status project-ssot-owned
+      :checks ["bash .missiond/check.sh"]
+      :missiond-role "registered XJP search product; Quick Search and Deep Research service with Rust backend, Vercel frontend, xjp-auth, router search, and deploy-center/GCP runtime boundaries"
+      :surface project-registry)
     (project :id xjp-memory
       :kind rust-service
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/xjp-memory"
@@ -185,6 +197,7 @@
       :status v3-runtime-ssot
       :surface project-registry)
     (project :id asr
+      :aliases ["ASR" speech-recognition subtitle-service]
       :kind rust-service
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/asr"
       :intent ".missiond/intent.lisp"
@@ -265,10 +278,10 @@
       :operations ".missiond/operations/palm-era-operations-blueprint.lisp"
       :status project-ssot-owned
       :checks ["bash .missiond/check.sh"]
-      :missiond-role "registered independent app; text island industrial management simulator with Rust authoritative simulation and Next.js dashboard"
+      :missiond-role "registered independent app; text island industrial management simulator with Vercel-only Next.js frontend, GCP VM Rust authoritative simulation backend, and self-managed GCP VM Postgres"
       :surface project-registry)
     (project :id chat-translator
-      :aliases ["chat 翻译工具" chat-translation-tool]
+      :aliases ["chat 翻译工具" "chat翻译" chat-translation-tool]
       :kind rust-nextjs-local-agent-app
       :root "/Users/jinchen/Projects/chat-translator"
       :intent ".missiond/intent.lisp"
@@ -280,7 +293,7 @@
       :missiond-role "registered independent app; single-user chat translation and WeChat mirror tool with Rust backend, local sync agent, and Next.js frontend"
       :surface project-registry)
     (project :id long-image-service
-      :aliases [changtu "长图工具"]
+      :aliases [changtu "长图" "长图工具" changtu-pro]
       :kind vite-express-app
       :root "/Users/jinchen/Projects/long-image-service"
       :intent ".missiond/intent.lisp"
@@ -292,7 +305,7 @@
       :missiond-role "registered independent app; Markdown to long-image generation service with history, membership, API rendering, and CN/global deployment boundaries"
       :surface project-registry)
     (project :id wechat-publisher
-      :aliases ["微信公众号文章编辑器" wechat-article-editor]
+      :aliases [wepub "WePub" "微信公众号文章编辑器" wechat-article-editor]
       :kind rust-nextjs-cms
       :root "/Users/jinchen/Projects/wechat-publisher"
       :intent ".missiond/intent.lisp"
@@ -302,4 +315,16 @@
       :status project-ssot-owned
       :checks ["bash .missiond/check.sh"]
       :missiond-role "registered independent app; WeChat Official Account article editor with Rust backend, versioned article store, and Next.js editing workspace"
+      :surface project-registry)
+    (project :id daily-spark
+      :aliases ["每日一句" daily-spark-lovable]
+      :kind vite-self-hosted-supabase-app
+      :root "/Users/jinchen/Projects/daily-spark"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/daily-spark-backend-blueprint.lisp"
+      :frontend ".missiond/frontend/daily-spark-frontend-blueprint.lisp"
+      :operations ".missiond/operations/daily-spark-operations-blueprint.lisp"
+      :status project-ssot-owned
+      :checks ["bash .missiond/check.sh"]
+      :missiond-role "registered independent app migration; Daily Spark moves Lovable/Supabase Cloud runtime to Vercel frontend plus GCP VM self-hosted Supabase-compatible backend/database"
       :surface project-registry))
