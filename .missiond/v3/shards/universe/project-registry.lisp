@@ -57,7 +57,7 @@
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/jarvis-backend-blueprint.lisp"
       :frontend ".missiond/frontend/jarvis-ui-blueprint.lisp"
-      :status project-ssot-owned
+      :status incubating-project
       :checks ["bash .missiond/check.sh"]
       :missiond-role "registered devtool; clean MissionD rewrite (intent.lisp + 14 intent-*.lisp shards + GAP_ANALYSIS.md)"
       :surface project-registry)

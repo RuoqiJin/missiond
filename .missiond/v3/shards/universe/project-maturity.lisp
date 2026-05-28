@@ -1,7 +1,7 @@
 (project-maturity-model
     :schema "missiond.project-maturity-model.v2"
     :rule "M6 is the highest maturity level and means Auth-grade production-ready SSOT/code/runtime/test clarity: domain model, policy, flow, event, runtime projection, implementation map, compatibility ledger, hot-path wiring, regression matrix, source hygiene, and data-residency declarations for data-bearing projects are fine-grained, code-aligned, and formatter-converged."
-    :gate "scripts/check-project-maturity.mjs --min-level M5 is the default universe operational gate; scripts/check-project-maturity.mjs --min-level M6 proves Auth-grade final maturity."
+    :gate "scripts/check-project-maturity.mjs --min-level M5 is the default universe operational gate for active/runtime-owned projects; incubating projects remain visible with gaps but do not block the global M5 gate until promoted. scripts/check-project-maturity.mjs --min-level M6 proves Auth-grade final maturity."
     :levels
       ((level M0 :name raw :requires [] :meaning "unregistered or only scattered facts")
        (level M1 :name registered-intent :requires [project-registration intent-l1-index])
@@ -15,6 +15,7 @@
        "Old M10 maps to new M5 unless the project also has Auth-grade depth evidence."
        "M6 requires Auth-grade domain/policy/flow/event/runtime/implementation/compatibility/hot-path/regression evidence plus formatter convergence: official project formatter checks must be safe to run without unrelated churn. Data-bearing projects also require a data-residency declaration that states region partitions, cross-region defaults, data classes, and compliance blockers."
        "Universe status MUST expose current and target maturity for each registered project."
+       "Incubating projects MAY be registered below M5 with explicit gaps; they are shown in Universe and can run their own checkers, but they are excluded from the global M5 operational gate until their registry status is promoted out of incubating-project."
        "Intent-only projects MUST NOT be marked M2+; projects without code-isomorphism evidence MUST NOT be marked M3+."
        "Resident master and swarm runners MUST use M6 SSOT convergence language and never create H-level tasks."])
 
