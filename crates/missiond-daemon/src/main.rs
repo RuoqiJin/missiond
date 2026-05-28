@@ -886,6 +886,7 @@ async fn main() -> Result<()> {
             Arc::clone(&bus_services),
         ))
     };
+    let memory_feature_enabled = feature_gates::optional_feature_enabled(feature_gates::MEMORY_ENV);
 
     let slot_mgr_pty2 = Arc::clone(&pty);
     let slot_mgr_store2 = Arc::clone(&store);
@@ -1206,7 +1207,7 @@ async fn main() -> Result<()> {
             default_mission_home().join("xjp-mcp-config.json"),
         )),
         flow_in_progress: Arc::new(std::sync::Mutex::new(HashSet::new())),
-        embedding_service: {
+        embedding_service: if memory_feature_enabled {
             // Build HTTP client first, then init provider (needs it for Ollama probe)
             // Note: we already have http_client above; reuse pattern via temp client
             let temp_client = reqwest::Client::builder()
@@ -1214,6 +1215,13 @@ async fn main() -> Result<()> {
                 .build()
                 .unwrap();
             init_embedding_provider(&temp_client).await
+        } else {
+            info!(
+                env = feature_gates::MEMORY_ENV,
+                full_os_env = feature_gates::FULL_OS_ENV,
+                "embedding provider initialization disabled in kernel-core mode"
+            );
+            None
         },
         embedding_cache: missiond_core::embedding::new_cache(),
         conversation_topic_cache: missiond_core::embedding::new_topic_cache(),
@@ -1724,7 +1732,7 @@ async fn main() -> Result<()> {
     }
 
     // One-time backfill: generate embeddings for policy:decision KB entries + warm cache
-    if state.embedding_service.is_some() {
+    if memory_feature_enabled && state.embedding_service.is_some() {
         let emb_state = state.clone();
         tokio::spawn(async move {
             let emb_svc = emb_state.embedding_service.as_ref().unwrap();
@@ -1790,10 +1798,16 @@ async fn main() -> Result<()> {
                 Err(e) => warn!(error = %e, "Failed to warm AST embedding cache"),
             }
         });
+    } else if !memory_feature_enabled {
+        info!(
+            env = feature_gates::MEMORY_ENV,
+            full_os_env = feature_gates::FULL_OS_ENV,
+            "embedding cache warmup and startup backfill disabled in kernel-core mode"
+        );
     }
 
     // Warm embedding caches (one-shot) — TopicCache removed in P3 (pgvector replaces in-memory)
-    {
+    if memory_feature_enabled {
         let conv_state = state.clone();
         tokio::spawn(async move {
             // Skill topic embedding cache (still in-memory, not migrated to pgvector)
@@ -1806,10 +1820,16 @@ async fn main() -> Result<()> {
                 Err(e) => warn!(error = %e, "Failed to warm skill embedding cache"),
             }
         });
+    } else {
+        info!(
+            env = feature_gates::MEMORY_ENV,
+            full_os_env = feature_gates::FULL_OS_ENV,
+            "skill embedding cache warmup disabled in kernel-core mode"
+        );
     }
 
     // One-time startup: trigger full backfill (covers timeline build + stale embeds)
-    {
+    if memory_feature_enabled {
         let tx = state.embedding_tx.clone();
         tokio::spawn(async move {
             // Delay slightly to let caches warm first
@@ -1817,6 +1837,12 @@ async fn main() -> Result<()> {
             let _ = tx.try_send(EmbeddingTask::BackfillAll);
             info!("Startup BackfillAll triggered");
         });
+    } else {
+        info!(
+            env = feature_gates::MEMORY_ENV,
+            full_os_env = feature_gates::FULL_OS_ENV,
+            "startup embedding BackfillAll disabled in kernel-core mode"
+        );
     }
 
     // --- Background Workers (unified lifecycle via BackgroundWorker trait) ---
@@ -1861,7 +1887,7 @@ async fn main() -> Result<()> {
     }
 
     // Embedding Worker: event-driven actor (KB/Skill/Conv/AST embeddings + backfill)
-    if feature_gates::optional_feature_enabled(feature_gates::MEMORY_ENV) {
+    if memory_feature_enabled {
         workers::spawn_worker(
             workers::sonnet::embedding_worker::EmbeddingLoopWorker { rx: embedding_rx },
             Arc::new(state.clone()),
@@ -1975,7 +2001,7 @@ async fn main() -> Result<()> {
 
     // --- AST Embedding Health Monitor (periodic self-healing, Gemini-reviewed) ---
     // Every 15 min: check AST coverage, trigger BackfillAll if gaps detected.
-    if feature_gates::optional_feature_enabled(feature_gates::MEMORY_ENV) {
+    if memory_feature_enabled {
         let health_state = state.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(15 * 60));
@@ -2081,13 +2107,21 @@ async fn main() -> Result<()> {
 
     // --- AST Sync Worker (P2 HCE) ---
     // BackgroundWorker: unified lifecycle + ControlTree pause/resume
-    workers::spawn_worker(
-        workers::local::ast_sync_worker::AstSyncWorker { rx: ast_sync_rx },
-        Arc::new(state.clone()),
-        shutdown_rx.clone(),
-    );
+    if memory_feature_enabled {
+        workers::spawn_worker(
+            workers::local::ast_sync_worker::AstSyncWorker { rx: ast_sync_rx },
+            Arc::new(state.clone()),
+            shutdown_rx.clone(),
+        );
+    } else {
+        info!(
+            env = feature_gates::MEMORY_ENV,
+            full_os_env = feature_gates::FULL_OS_ENV,
+            "AST sync worker disabled in kernel-core mode"
+        );
+    }
 
-    if env_truthy("MISSIOND_AST_FULL_SYNC_ON_STARTUP") {
+    if memory_feature_enabled && env_truthy("MISSIOND_AST_FULL_SYNC_ON_STARTUP") {
         // Full sync at startup is an explicit operator action. It can scan every
         // slot repository and rewrite module KB summaries, so the default path
         // stays event-driven to keep blue-green restarts cheap.
@@ -2117,9 +2151,15 @@ async fn main() -> Result<()> {
                 }
             }
         });
-    } else {
+    } else if memory_feature_enabled {
         tracing::info!(
             "AST startup full sync skipped; set MISSIOND_AST_FULL_SYNC_ON_STARTUP=1 to run repository-wide backfill"
+        );
+    } else {
+        tracing::info!(
+            env = feature_gates::MEMORY_ENV,
+            full_os_env = feature_gates::FULL_OS_ENV,
+            "AST startup full sync disabled in kernel-core mode"
         );
     }
 
