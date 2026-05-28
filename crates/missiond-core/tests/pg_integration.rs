@@ -118,6 +118,16 @@ async fn test_pg_board_store() {
     };
     let missing_evidence = store.update_board_task(task.id.as_str(), &update).await;
     assert!(missing_evidence.is_err());
+    let wrong_hash = UpdateBoardTaskInput {
+        status: Some("done".into()),
+        artifact_hash: Some("sha256:wrong".into()),
+        ..Default::default()
+    };
+    let wrong_evidence = store.update_board_task(task.id.as_str(), &wrong_hash).await;
+    match wrong_evidence {
+        Err(DbError::EvidenceRequired { task_id }) => assert_eq!(task_id, task.id.as_str()),
+        other => panic!("wrong artifact hash must fail EVIDENCE_REQUIRED, got {other:?}"),
+    }
     sqlx::query(
         "INSERT INTO shared_artifacts (hash, kind, media_type, bytes, size_bytes) VALUES ($1,$2,$3,$4,$5)",
     )
@@ -216,14 +226,55 @@ async fn test_pg_board_claim_uses_work_leases_authority() {
         other => panic!("expected CLAIM_CONFLICT, got {other:?}"),
     }
 
+    sqlx::query(
+        r#"
+        UPDATE work_leases
+        SET lease_expires_at = now() - interval '1 minute'
+        WHERE task_id = $1 AND scope_kind = 'board_task' AND holder_id = 'slot-worker-1'
+        "#,
+    )
+    .bind(task.id.as_str())
+    .execute(store.pool())
+    .await
+    .unwrap();
+    let expired_reclaim = store
+        .claim_board_task(task.id.as_str(), "slot-worker-2", "pty_slot")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        expired_reclaim.claim_executor_id.as_deref(),
+        Some("slot-worker-2")
+    );
+    let expired_status = sqlx::query_scalar::<_, String>(
+        "SELECT status FROM work_leases WHERE task_id = $1 AND holder_id = 'slot-worker-1'",
+    )
+    .bind(task.id.as_str())
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(expired_status, "expired");
+    let active_holder_after_expiry = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT holder_id
+        FROM work_leases
+        WHERE task_id = $1 AND scope_kind = 'board_task' AND status = 'active'
+        "#,
+    )
+    .bind(task.id.as_str())
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(active_holder_after_expiry, "slot-worker-2");
+
     let released = store
-        .release_board_claims_by_executor("slot-worker-1")
+        .release_board_claims_by_executor("slot-worker-2")
         .await
         .unwrap();
     assert_eq!(released, 1);
 
     let released_status = sqlx::query_scalar::<_, String>(
-        "SELECT status FROM work_leases WHERE task_id = $1 AND holder_id = 'slot-worker-1'",
+        "SELECT status FROM work_leases WHERE task_id = $1 AND holder_id = 'slot-worker-2'",
     )
     .bind(task.id.as_str())
     .fetch_one(store.pool())
@@ -232,13 +283,13 @@ async fn test_pg_board_claim_uses_work_leases_authority() {
     assert_eq!(released_status, "released");
 
     let reclaimed = store
-        .claim_board_task(task.id.as_str(), "slot-worker-2", "pty_slot")
+        .claim_board_task(task.id.as_str(), "slot-worker-3", "pty_slot")
         .await
         .unwrap()
         .unwrap();
     assert_eq!(
         reclaimed.claim_executor_id.as_deref(),
-        Some("slot-worker-2")
+        Some("slot-worker-3")
     );
     let active_holder = sqlx::query_scalar::<_, String>(
         r#"
@@ -251,7 +302,7 @@ async fn test_pg_board_claim_uses_work_leases_authority() {
     .fetch_one(store.pool())
     .await
     .unwrap();
-    assert_eq!(active_holder, "slot-worker-2");
+    assert_eq!(active_holder, "slot-worker-3");
 }
 
 #[tokio::test]
