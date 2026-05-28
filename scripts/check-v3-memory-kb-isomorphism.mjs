@@ -46,6 +46,7 @@ const DEFAULT_FILES = {
   learningTimeline: 'crates/missiond-daemon/src/engine/learning_engine/timeline_analyst.rs',
   learningIdle: 'crates/missiond-daemon/src/engine/learning_engine/idle_explorer.rs',
   learningHistorical: 'crates/missiond-daemon/src/engine/learning_engine/historical_scanner.rs',
+  experienceHarvester: 'crates/missiond-daemon/src/workers/local/experience_harvester.rs',
   pgConversation: 'crates/missiond-core/src/db/pg/conversation.rs',
   eventProjection: 'crates/missiond-core/src/event/projection.rs',
   mcpKb: 'crates/missiond-mcp/src/tools/knowledge/kb.rs',
@@ -399,6 +400,10 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.learningTimeline, sources.learningTimeline, [
     'LearningEngineRuntimeConfig',
+    'UpsertTaskContractCommand',
+    'timeline_insight_runtime_metadata',
+    '"control_state": "task_contracts"',
+    '"sandbox_profile": "system-learning-review"',
     'llm_gate::is_disabled',
     'LlmProvider::Gemini',
     'Timeline Analyst: skipped because Gemini gate is closed',
@@ -425,7 +430,21 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.learningIdle, sources.learningIdle, [
     'LearningEngineRuntimeConfig',
+    'UpsertTaskContractCommand',
+    'idle_exploration_runtime_metadata',
+    '"control_state": "task_contracts"',
+    '"sandbox_profile": "system-learning-review"',
+    'auto_execute: Some(false)',
     'idle_explore_interval_secs',
+  ]);
+
+  requireAll(diagnostics, files.experienceHarvester, sources.experienceHarvester, [
+    'UpsertTaskContractCommand',
+    'skill_synthesis_runtime_metadata',
+    '"control_state": "task_contracts"',
+    '"sandbox_profile": "system-learning-review"',
+    'auto_execute: Some(false)',
+    'skill_synthesis_metadata_declares_task_contract_authority',
   ]);
 
   requireAll(diagnostics, files.learningHistorical, sources.learningHistorical, [
@@ -1056,7 +1075,7 @@ _dedupe_merge_events;
 	LearningEngineRuntimeConfig; decision_tier3_timeout_ms;
 	`);
 	  writeFixture(root, DEFAULT_FILES.learningTimeline, `
-	LearningEngineRuntimeConfig; llm_gate::is_disabled; LlmProvider::Gemini; Timeline Analyst: skipped because Gemini gate is closed; last_timeline_analysis_at; timeline_analysis_interval_secs; timeline_window_arg; timeline_error_limit; timeline_llm_sample_limit; timeline_slow_threshold_ms;
+	LearningEngineRuntimeConfig; UpsertTaskContractCommand; timeline_insight_runtime_metadata; "control_state": "task_contracts"; "sandbox_profile": "system-learning-review"; llm_gate::is_disabled; LlmProvider::Gemini; Timeline Analyst: skipped because Gemini gate is closed; last_timeline_analysis_at; timeline_analysis_interval_secs; timeline_window_arg; timeline_error_limit; timeline_llm_sample_limit; timeline_slow_threshold_ms;
 	`);
 	  writeFixture(root, DEFAULT_FILES.eventProjection, `
 	conditions.push(format!("ts >= \${}::timestamptz", idx));
@@ -1064,7 +1083,10 @@ _dedupe_merge_events;
 	WHERE ts >= $1::timestamptz AND ts <= $2::timestamptz
 	`);
 	  writeFixture(root, DEFAULT_FILES.learningIdle, `
-	LearningEngineRuntimeConfig; idle_explore_interval_secs;
+	LearningEngineRuntimeConfig; UpsertTaskContractCommand; idle_exploration_runtime_metadata; "control_state": "task_contracts"; "sandbox_profile": "system-learning-review"; auto_execute: Some(false); idle_explore_interval_secs;
+	`);
+	  writeFixture(root, DEFAULT_FILES.experienceHarvester, `
+	UpsertTaskContractCommand; skill_synthesis_runtime_metadata; "control_state": "task_contracts"; "sandbox_profile": "system-learning-review"; auto_execute: Some(false); skill_synthesis_metadata_declares_task_contract_authority;
 	`);
 	  writeFixture(root, DEFAULT_FILES.learningHistorical, `
 	LearningEngineRuntimeConfig; habit_scan_interval_secs; habit_scan_batch_size; habit_scan_timeout_ms;

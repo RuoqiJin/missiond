@@ -7,9 +7,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde_json::{json, Value};
 use tokio::sync::Notify;
 use tracing::{debug, info, warn};
 
+use crate::engine::control_plane_kernel::{ControlPlaneKernel, UpsertTaskContractCommand};
 use crate::minimax_client::ChatMessage;
 use crate::state::AppState;
 
@@ -301,7 +303,7 @@ async fn call_sonnet_triage(
 }
 
 /// Create a Board task for high-severity anomaly sessions.
-/// Sets assignee=slot-memory-slow + auto_execute=true so autopilot dispatches automatically.
+/// The task is review-only; any follow-up execution requires explicit delegation.
 /// All instructions go in description (NOT prompt_template, which would hide the triage data).
 async fn create_anomaly_board_task(
     state: &AppState,
@@ -329,7 +331,7 @@ async fn create_anomaly_board_task(
          6. 创建根因调查子任务：调用 `mission_board_create(title=\"[根因调查] 简述问题\", description=\"## 调查目标\\n简述需要定位的问题\\n\\n## 关键线索\\n从诊断中提取的错误消息、可疑代码路径、相关会话 ID\\n\\n## 调查步骤\\n1. mission_conversation_get 查看实际错误\\n2. 读相关 handler/DB 源码\\n3. 追踪错误产生路径\\n\\n## 约束\\nCRITICAL: 这是 INVESTIGATION ONLY 任务。禁止修改任何代码文件。只做调查和报告。\", parentId=\"{{TASK_ID}}\", category=\"investigation\", assignee=\"slot-coder-1\", autoExecute=true, priority=\"medium\", project=\"missiond\")`。记录返回的调查任务 ID\n\
          7. 创建待修复子任务：调用 `mission_board_create(title=\"[待修复] 简述问题\", description=\"根因+修复建议（调查完成后 DAG 自动注入调查报告）\", parentId=\"{{TASK_ID}}\", category=\"dev\", dependsOn=[步骤6返回的调查任务ID], priority=\"medium\", project=\"missiond\")`。注意：不要设置 assignee 和 autoExecute，由人工审核调查报告后决定\n\
          8. 确认两个子任务都已创建成功\n\
-         9. CRITICAL: 调用 board_note_add 写入诊断报告（含结论: resolved_no_action / investigation_dispatched / escalated_to_human），然后调用 board_update 设为 done",
+         9. 写入诊断报告（含结论: resolved_no_action / investigation_dispatched / escalated_to_human）。如果需要关闭任务，必须先写入 canonical task_result_artifact，再由 typed settle 完成。",
         session_id = session_id,
         trigger = trigger,
         severity = severity,
@@ -337,6 +339,7 @@ async fn create_anomaly_board_task(
     );
 
     let dedupe = format!("retro-anomaly-{}", session_id);
+    let runtime_metadata = retro_anomaly_runtime_metadata(session_id, trigger, severity, &dedupe);
 
     let input = missiond_core::types::CreateBoardTaskInput {
         title,
@@ -354,8 +357,8 @@ async fn create_anomaly_board_task(
         server: None,
         due_date: None,
         parent_id: None,
-        assignee: Some("slot-diagnosis".to_string()),
-        auto_execute: Some(true),
+        assignee: None,
+        auto_execute: Some(false),
         prompt_template: None, // Must be None — autopilot uses title+description as prompt
         hidden: None,
         flow_template: None,
@@ -363,15 +366,63 @@ async fn create_anomaly_board_task(
         dedupe_key: Some(dedupe),
         timeout_secs: None,
         context_intent: None,
-        runtime_metadata: None,
+        runtime_metadata: Some(runtime_metadata),
     };
 
     match state.store.create_board_task(&input).await {
         Ok(task) => {
+            upsert_retro_task_contract(state, &task).await;
             info!(task_id = %task.id, session_id, "Retro worker: created anomaly Board task")
         }
         Err(e) => warn!(session_id, error = %e, "Retro worker: failed to create Board task"),
     }
+}
+
+async fn upsert_retro_task_contract(state: &AppState, task: &missiond_core::types::BoardTask) {
+    if let Err(err) = ControlPlaneKernel::new(state)
+        .upsert_task_contract_command(UpsertTaskContractCommand {
+            task_id: task.id.to_string(),
+            project_id: task.project.clone(),
+            runtime_metadata: task.runtime_metadata.clone(),
+        })
+        .await
+    {
+        warn!(
+            error = %err,
+            task_id = %task.id,
+            "Retro worker: failed to upsert task_contracts for anomaly BoardTask"
+        );
+    }
+}
+
+fn retro_anomaly_runtime_metadata(
+    session_id: &str,
+    trigger: &str,
+    severity: &str,
+    dedupe_key: &str,
+) -> Value {
+    json!({
+        "schema": "missiond.board-task-runtime-metadata.v1",
+        "source": "retro_worker",
+        "control_state": "task_contracts",
+        "dispatch_metadata": {
+            "task_class": "retro-anomaly-review",
+            "session_id": session_id,
+            "trigger": trigger,
+            "severity": severity,
+            "dedupe_key": dedupe_key,
+            "completion_protocol": "review-only retrospective; provider prose cannot close tasks"
+        },
+        "read_scope": [
+            format!("conversation-session:{session_id}"),
+            "retrospective-analysis"
+        ],
+        "write_scope": [],
+        "must_not_touch": [],
+        "capability_grant_ids": [],
+        "sandbox_profile": "system-learning-review",
+        "projection_policy": "description_notes_are_projection_only"
+    })
 }
 
 // ── BackgroundWorker wrapper ──────────────────────────────────────────
@@ -400,5 +451,25 @@ impl BackgroundWorker for RetroWorker {
                 ctx.record_success();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retro_anomaly_metadata_declares_task_contract_authority() {
+        let metadata =
+            retro_anomaly_runtime_metadata("session-1", "error-rate", "high", "retro-anomaly-1");
+        assert_eq!(metadata["source"], "retro_worker");
+        assert_eq!(metadata["control_state"], "task_contracts");
+        assert_eq!(
+            metadata["dispatch_metadata"]["task_class"],
+            "retro-anomaly-review"
+        );
+        assert_eq!(metadata["dispatch_metadata"]["session_id"], "session-1");
+        assert_eq!(metadata["write_scope"].as_array().unwrap().len(), 0);
+        assert_eq!(metadata["sandbox_profile"], "system-learning-review");
     }
 }

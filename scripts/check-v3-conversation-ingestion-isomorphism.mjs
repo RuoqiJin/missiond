@@ -25,6 +25,7 @@ const DEFAULT_FILES = {
   maintenance: 'crates/missiond-daemon/src/handlers/comm/conversation/maintenance.rs',
   timeline: 'crates/missiond-daemon/src/handlers/comm/timeline.rs',
   retrospective: 'crates/missiond-daemon/src/handlers/comm/retrospective.rs',
+  retroWorker: 'crates/missiond-daemon/src/workers/sonnet/retro_worker.rs',
   contextPipeline: 'crates/missiond-daemon/src/context/context_pipeline.rs',
   visionWorker: 'crates/missiond-daemon/src/workers/codex/vision_worker.rs',
   codexCli: 'crates/missiond-daemon/src/llm/codex_cli.rs',
@@ -313,6 +314,15 @@ function checkFiles(root, files) {
     'noiseAdjustedWasteRatio',
   ]);
 
+  requireAll(diagnostics, files.retroWorker, sources.retroWorker, [
+    'UpsertTaskContractCommand',
+    'retro_anomaly_runtime_metadata',
+    '"control_state": "task_contracts"',
+    '"sandbox_profile": "system-learning-review"',
+    'auto_execute: Some(false)',
+    'retro_anomaly_metadata_declares_task_contract_authority',
+  ]);
+
   requireAll(diagnostics, files.contextPipeline, sources.contextPipeline, [
     'ConversationIngestionRuntimeConfig::load_for_current_dir',
     'config.intent_router_model.as_str()',
@@ -500,6 +510,10 @@ function buildFixture() {
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.retrospective),
     'mission_retrospective_list mission_retrospective_backfill run_analysis get_retrospective_meta list_retrospective_results retro_worker::backfill signalQuality bulkToolWhitelist noiseAdjustedWasteRatio',
+  );
+  fs.writeFileSync(
+    path.join(root, DEFAULT_FILES.retroWorker),
+    'UpsertTaskContractCommand retro_anomaly_runtime_metadata "control_state": "task_contracts" "sandbox_profile": "system-learning-review" auto_execute: Some(false) retro_anomaly_metadata_declares_task_contract_authority',
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.contextPipeline),

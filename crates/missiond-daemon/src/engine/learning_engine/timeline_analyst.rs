@@ -12,11 +12,13 @@ use std::sync::atomic::Ordering;
 use tracing::{debug, info, warn};
 
 use crate::context::v3_blueprint_runtime::LearningEngineRuntimeConfig;
+use crate::engine::control_plane_kernel::{ControlPlaneKernel, UpsertTaskContractCommand};
 use crate::llm_gate::{self, LlmProvider};
 use crate::llm_gateway::call_gemini_for_flow;
 use crate::state::AppState;
 use missiond_core::db::TimelineRow;
 use missiond_core::event::events::SystemEvent;
+use serde_json::{json, Value};
 
 /// Check if timeline analysis is due and run it.
 /// Called from autopilot_tick every 60s.
@@ -384,8 +386,11 @@ async fn execute_insights(state: &AppState, insights: &[Insight]) -> usize {
                     continue;
                 }
 
-                match state.store.create_board_task(
-                    &missiond_core::types::CreateBoardTaskInput {
+                let runtime_metadata =
+                    timeline_insight_runtime_metadata(insight, trace_id.as_str());
+                match state
+                    .store
+                    .create_board_task(&missiond_core::types::CreateBoardTaskInput {
                         title: format!("[Proactive] {}", insight.title),
                         description: Some(format!(
                             "## Timeline Insight (L4)\n\n{}\n\n## 建议行动\n\n{}\n\n---\n_trace: {}_",
@@ -406,10 +411,12 @@ async fn execute_insights(state: &AppState, insights: &[Insight]) -> usize {
                         dedupe_key: None,
                         timeout_secs: None,
                         context_intent: None,
-                        runtime_metadata: None,
-                    },
-                ).await {
+                        runtime_metadata: Some(runtime_metadata),
+                    })
+                    .await
+                {
                     Ok(task) => {
+                        upsert_timeline_task_contract(state, &task).await;
                         info!(
                             task_id = %task.id,
                             title = %insight.title,
@@ -493,4 +500,73 @@ fn slug(title: &str) -> String {
         .chars()
         .take(60)
         .collect()
+}
+
+async fn upsert_timeline_task_contract(state: &AppState, task: &missiond_core::types::BoardTask) {
+    if let Err(err) = ControlPlaneKernel::new(state)
+        .upsert_task_contract_command(UpsertTaskContractCommand {
+            task_id: task.id.to_string(),
+            project_id: task.project.clone(),
+            runtime_metadata: task.runtime_metadata.clone(),
+        })
+        .await
+    {
+        warn!(
+            error = %err,
+            task_id = %task.id,
+            "Timeline Analyst: failed to upsert task_contracts for proactive BoardTask"
+        );
+    }
+}
+
+fn timeline_insight_runtime_metadata(insight: &Insight, trace_id: &str) -> Value {
+    json!({
+        "schema": "missiond.board-task-runtime-metadata.v1",
+        "source": "timeline_analyst",
+        "control_state": "task_contracts",
+        "dispatch_metadata": {
+            "task_class": "timeline-insight-review",
+            "category": insight.category,
+            "priority": insight.priority,
+            "action": insight.action,
+            "trace_id": trace_id,
+            "completion_protocol": "review-only task; timeline/provider prose remains observation evidence"
+        },
+        "read_scope": [
+            "event_log:timeline",
+            "learning-engine:timeline-analyst"
+        ],
+        "write_scope": [],
+        "must_not_touch": [],
+        "capability_grant_ids": [],
+        "sandbox_profile": "system-learning-review",
+        "projection_policy": "description_notes_are_projection_only"
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timeline_insight_metadata_declares_task_contract_authority() {
+        let insight = Insight {
+            category: "performance".to_string(),
+            priority: "medium".to_string(),
+            title: "slow model".to_string(),
+            description: "p90 high".to_string(),
+            action: "create_task".to_string(),
+            action_detail: "review latency".to_string(),
+        };
+        let metadata = timeline_insight_runtime_metadata(&insight, "trace-1");
+        assert_eq!(metadata["source"], "timeline_analyst");
+        assert_eq!(metadata["control_state"], "task_contracts");
+        assert_eq!(
+            metadata["dispatch_metadata"]["task_class"],
+            "timeline-insight-review"
+        );
+        assert_eq!(metadata["dispatch_metadata"]["trace_id"], "trace-1");
+        assert_eq!(metadata["write_scope"].as_array().unwrap().len(), 0);
+        assert_eq!(metadata["sandbox_profile"], "system-learning-review");
+    }
 }

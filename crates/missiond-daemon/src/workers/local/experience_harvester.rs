@@ -9,6 +9,9 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::engine::control_plane_kernel::{ControlPlaneKernel, UpsertTaskContractCommand};
+use crate::state::AppState;
+use serde_json::{json, Value};
 use tracing::{debug, info, warn};
 
 use missiond_core::types::ToolCallRecord;
@@ -423,7 +426,7 @@ pub(crate) async fn harvest_session(state: &crate::state::AppState, session_id: 
              2. 调用 `mission_conversation_search(query=\"{beacon}\")` 查看历史对话上下文\n\
              3. 综合以上信息，调用 `mission_skill_upsert` 创建 Skill 草稿\n\
              4. Skill 应包含: 路径/端点/配置 + 操作步骤 + 常见问题\n\
-             5. 完成后标记本任务 done",
+             5. 写入审查结论；如需落地 Skill，由 operator/delegate 创建带 write_scope 的后续任务",
             beacon = beacon_name,
             count = harvest_count,
             files_read = exploration.files_read.iter().take(5).collect::<Vec<_>>(),
@@ -447,8 +450,8 @@ pub(crate) async fn harvest_session(state: &crate::state::AppState, session_id: 
             server: None,
             due_date: None,
             parent_id: None,
-            assignee: Some("slot-coder-1".to_string()),
-            auto_execute: Some(true),
+            assignee: None,
+            auto_execute: Some(false),
             prompt_template: None,
             hidden: None,
             flow_template: None,
@@ -456,15 +459,82 @@ pub(crate) async fn harvest_session(state: &crate::state::AppState, session_id: 
             dedupe_key: Some(format!("skill-synthesis-{}", beacon_name)),
             timeout_secs: None,
             context_intent: None,
-            runtime_metadata: None,
+            runtime_metadata: Some(skill_synthesis_runtime_metadata(
+                &beacon_name,
+                &exploration,
+                harvest_count,
+            )),
         };
         match state.store.create_board_task(&input).await {
             Ok(task) => {
+                upsert_skill_synthesis_task_contract(state, &task).await;
                 info!(task_id = %task.id, beacon = %beacon_name, "Skill synthesis triggered")
             }
             Err(e) => debug!(error = %e, "Skill synthesis task creation failed (may be deduped)"),
         }
     }
+}
+
+async fn upsert_skill_synthesis_task_contract(
+    state: &AppState,
+    task: &missiond_core::types::BoardTask,
+) {
+    if let Err(err) = ControlPlaneKernel::new(state)
+        .upsert_task_contract_command(UpsertTaskContractCommand {
+            task_id: task.id.to_string(),
+            project_id: task.project.clone(),
+            runtime_metadata: task.runtime_metadata.clone(),
+        })
+        .await
+    {
+        warn!(
+            error = %err,
+            task_id = %task.id,
+            "Experience harvester: failed to upsert task_contracts for skill synthesis BoardTask"
+        );
+    }
+}
+
+fn skill_synthesis_runtime_metadata(
+    beacon_name: &str,
+    exploration: &ExplorationPath,
+    harvest_count: i64,
+) -> Value {
+    json!({
+        "schema": "missiond.board-task-runtime-metadata.v1",
+        "source": "experience_harvester",
+        "control_state": "task_contracts",
+        "dispatch_metadata": {
+            "task_class": "skill-synthesis-review",
+            "beacon_name": beacon_name,
+            "harvest_count": harvest_count,
+            "query_intent": exploration.query_intent,
+            "completion_protocol": "review-only task; skill file writes require explicit delegated write_scope"
+        },
+        "read_scope": exploration
+            .files_read
+            .iter()
+            .chain(exploration.files_modified.iter())
+            .take(20)
+            .cloned()
+            .collect::<Vec<_>>(),
+        "write_scope": [],
+        "must_not_touch": [
+            "~/.claude/skills",
+            "~/.codex/skills"
+        ],
+        "capability_grant_ids": [],
+        "sandbox_profile": "system-learning-review",
+        "grounding_refs": {
+            "patterns_searched": exploration
+                .patterns_searched
+                .iter()
+                .take(20)
+                .cloned()
+                .collect::<Vec<_>>()
+        },
+        "projection_policy": "description_notes_are_projection_only"
+    })
 }
 
 #[cfg(test)]
@@ -596,5 +666,25 @@ mod tests {
             "crates/foo/src/lib.rs"
         );
         assert_eq!(strip_project_prefix("other/path.rs"), "other/path.rs");
+    }
+
+    #[test]
+    fn skill_synthesis_metadata_declares_task_contract_authority() {
+        let exploration = ExplorationPath {
+            query_intent: "improve skill flow".to_string(),
+            files_read: vec!["crates/a.rs".to_string()],
+            patterns_searched: vec!["skill".to_string()],
+            files_modified: vec!["crates/b.rs".to_string()],
+        };
+        let metadata = skill_synthesis_runtime_metadata("skill-flow", &exploration, 3);
+        assert_eq!(metadata["source"], "experience_harvester");
+        assert_eq!(metadata["control_state"], "task_contracts");
+        assert_eq!(
+            metadata["dispatch_metadata"]["task_class"],
+            "skill-synthesis-review"
+        );
+        assert_eq!(metadata["dispatch_metadata"]["beacon_name"], "skill-flow");
+        assert_eq!(metadata["write_scope"].as_array().unwrap().len(), 0);
+        assert_eq!(metadata["sandbox_profile"], "system-learning-review");
     }
 }

@@ -1,13 +1,15 @@
 //! Idle Exploration — autonomous maintenance when system has spare capacity.
 //!
 //! Phase 4 of Jarvis evolution: when no user work is active, the system
-//! generates read-only analysis tasks that run on idle slots.
+//! generates read-only analysis tasks for operator review.
 //!
-//! Safety: exploration tasks are auto_execute=true but READ-ONLY analysis.
-//! Any modification suggestions become auto_execute=false follow-up tasks.
+//! Safety: exploration tasks are review-only projections. Any modification
+//! suggestions require a separate delegated task with explicit grants.
 
 use crate::context::v3_blueprint_runtime::LearningEngineRuntimeConfig;
+use crate::engine::control_plane_kernel::{ControlPlaneKernel, UpsertTaskContractCommand};
 use crate::state::AppState;
+use serde_json::{json, Value};
 use tracing::{debug, info, warn};
 
 /// Check if conditions are right for idle exploration, and if so,
@@ -468,7 +470,7 @@ async fn create_explore_task(
         due_date: None,
         parent_id: None,
         assignee: Some(assignee.to_string()),
-        auto_execute: Some(true),
+        auto_execute: Some(false),
         prompt_template: None,
         hidden: None,
         flow_template: None,
@@ -476,11 +478,16 @@ async fn create_explore_task(
         dedupe_key: None,
         timeout_secs: None,
         context_intent: None,
-        runtime_metadata: None,
+        runtime_metadata: Some(idle_exploration_runtime_metadata(
+            title,
+            description,
+            assignee,
+        )),
     };
 
     match state.store.create_board_task(&input).await {
         Ok(task) => {
+            upsert_idle_exploration_task_contract(state, &task).await;
             let _ = state
                 .bus
                 .publish_board(missiond_core::event::events::BoardEvent::StatusChanged {
@@ -497,6 +504,54 @@ async fn create_explore_task(
             false
         }
     }
+}
+
+async fn upsert_idle_exploration_task_contract(
+    state: &AppState,
+    task: &missiond_core::types::BoardTask,
+) {
+    if let Err(err) = ControlPlaneKernel::new(state)
+        .upsert_task_contract_command(UpsertTaskContractCommand {
+            task_id: task.id.to_string(),
+            project_id: task.project.clone(),
+            runtime_metadata: task.runtime_metadata.clone(),
+        })
+        .await
+    {
+        warn!(
+            error = %err,
+            task_id = %task.id,
+            "Idle explorer: failed to upsert task_contracts for exploration BoardTask"
+        );
+    }
+}
+
+fn idle_exploration_runtime_metadata(
+    title: &str,
+    description: &str,
+    candidate_slot: &str,
+) -> Value {
+    json!({
+        "schema": "missiond.board-task-runtime-metadata.v1",
+        "source": "idle_explorer",
+        "control_state": "task_contracts",
+        "dispatch_metadata": {
+            "task_class": "idle-exploration-review",
+            "title": title,
+            "candidate_slot": candidate_slot,
+            "description_preview": description.chars().take(240).collect::<String>(),
+            "completion_protocol": "review-only task; learning prose is projection and cannot close tasks"
+        },
+        "read_scope": [
+            "learning-engine:idle-explorer",
+            "knowledge-base:read"
+        ],
+        "write_scope": [],
+        "must_not_touch": [],
+        "capability_grant_ids": [],
+        "sandbox_profile": "system-learning-review",
+        "projection_policy": "description_notes_are_projection_only"
+    })
 }
 
 /// Explore 5: Memory Consolidation — find clusters of similar KB entries within the same
@@ -701,4 +756,24 @@ async fn explore_shadow_replay(state: &AppState, assignee: &str) -> bool {
         assignee,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn idle_exploration_metadata_declares_task_contract_authority() {
+        let metadata =
+            idle_exploration_runtime_metadata("Explore: KB", "review knowledge base", "slot-a");
+        assert_eq!(metadata["source"], "idle_explorer");
+        assert_eq!(metadata["control_state"], "task_contracts");
+        assert_eq!(
+            metadata["dispatch_metadata"]["task_class"],
+            "idle-exploration-review"
+        );
+        assert_eq!(metadata["dispatch_metadata"]["candidate_slot"], "slot-a");
+        assert_eq!(metadata["write_scope"].as_array().unwrap().len(), 0);
+        assert_eq!(metadata["sandbox_profile"], "system-learning-review");
+    }
 }
