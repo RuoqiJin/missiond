@@ -1126,23 +1126,38 @@ impl SharedMemoryService {
         }
         let row = sqlx::query(
             r#"
+            WITH scored AS (
+              SELECT provider,
+                     model,
+                     latency_ms,
+                     total_tokens,
+                     cost_usd,
+                     CASE
+                       WHEN status = 'succeeded'
+                         OR lower(COALESCE(outcome->>'status', '')) IN ('completed', 'complete', 'success', 'succeeded', 'accepted')
+                         OR lower(COALESCE(outcome->>'result', '')) IN ('completed', 'complete', 'success', 'succeeded', 'accepted')
+                         OR lower(COALESCE(outcome->>'finish_reason', '')) IN ('completed', 'complete', 'success', 'succeeded', 'accepted', 'stop')
+                       THEN 1.0 ELSE 0.0
+                     END AS route_success
+              FROM model_route_outcomes
+              WHERE task_class = $1
+                AND model IS NOT NULL
+                AND model <> 'unknown'
+                AND status IN ('recorded', 'succeeded', 'failed', 'blocked')
+                AND created_at > now() - interval '14 days'
+            )
             SELECT provider,
                    model,
                    COUNT(*)::bigint AS samples,
-                   AVG(CASE WHEN status = 'succeeded' THEN 1.0 ELSE 0.0 END) AS success_rate,
+                   AVG(route_success) AS success_rate,
                    AVG(NULLIF(latency_ms, 0)) AS avg_latency_ms,
                    AVG(NULLIF(total_tokens, 0)) AS avg_total_tokens,
                    AVG(NULLIF(cost_usd, 0)) AS avg_cost_usd
-            FROM model_route_outcomes
-            WHERE task_class = $1
-              AND model IS NOT NULL
-              AND model <> 'unknown'
-              AND status IN ('recorded', 'succeeded', 'failed', 'blocked')
-              AND created_at > now() - interval '14 days'
+            FROM scored
             GROUP BY provider, model
             HAVING COUNT(*) >= 5
             ORDER BY
-              AVG(CASE WHEN status = 'succeeded' THEN 1.0 ELSE 0.0 END) DESC,
+              AVG(route_success) DESC,
               COALESCE(AVG(NULLIF(latency_ms, 0)), 999999999) ASC,
               COALESCE(AVG(NULLIF(total_tokens, 0)), 999999999) ASC,
               COALESCE(AVG(NULLIF(cost_usd, 0)), 999999999) ASC
