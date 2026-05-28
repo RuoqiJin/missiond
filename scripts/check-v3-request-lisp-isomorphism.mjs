@@ -141,6 +141,10 @@ function checkFiles(root, files, { useCompiled = true } = {}) {
   requireText(diagnostics, files.requestRespondRouting, sources.requestRespondRouting, 'pub(in crate::handlers::knowledge::request) fn resolve_plan_ref');
   requireText(diagnostics, files.requestRespondRouting, sources.requestRespondRouting, 'pub(in crate::handlers::knowledge::request) fn build_respond_plan_compile_args');
   requireText(diagnostics, files.requestRespondMaterialization, sources.requestRespondMaterialization, 'pub(in crate::handlers::knowledge::request) async fn ensure_request_board_task');
+  requireText(diagnostics, files.requestRespondMaterialization, sources.requestRespondMaterialization, 'UpsertTaskContractCommand');
+  requireText(diagnostics, files.requestRespondMaterialization, sources.requestRespondMaterialization, 'request_board_task_runtime_metadata');
+  requireText(diagnostics, files.requestRespondMaterialization, sources.requestRespondMaterialization, '"control_state": "task_contracts"');
+  requireText(diagnostics, files.requestRespondMaterialization, sources.requestRespondMaterialization, '"sandbox_profile": "system-request-review-anchor"');
   requireText(diagnostics, files.requestRespondMaterialization, sources.requestRespondMaterialization, 'pub(in crate::handlers::knowledge::request) fn enrich_materialized_plan_lisp');
   requireText(diagnostics, files.requestRespondMaterialization, sources.requestRespondMaterialization, 'pub(in crate::handlers::knowledge::request) async fn materialize_request_plan');
   requireText(diagnostics, files.requestRespondMaterialization, sources.requestRespondMaterialization, 'PlanStatus::Draft');

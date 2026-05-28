@@ -3,9 +3,10 @@
 //! Extracted from decision_engine.rs (Phase 3 PR4) to separate operational
 //! concerns from the decision routing logic.
 
-use serde_json::json;
+use serde_json::{json, Value};
 use tracing::{debug, error, info, warn};
 
+use crate::engine::control_plane_kernel::{ControlPlaneKernel, UpsertTaskContractCommand};
 use crate::state::AppState;
 
 // ============ AIOps CronSensor ============
@@ -386,11 +387,14 @@ pub(crate) async fn triage_incident(
             payload = truncated_payload,
         );
 
-        let (priority, auto_execute) = match incident.severity {
-            missiond_core::types::IncidentSeverity::Critical => ("urgent", true),
-            missiond_core::types::IncidentSeverity::High => ("high", true),
-            missiond_core::types::IncidentSeverity::Warning => ("medium", false),
+        let priority = match incident.severity {
+            missiond_core::types::IncidentSeverity::Critical => "urgent",
+            missiond_core::types::IncidentSeverity::High => "high",
+            missiond_core::types::IncidentSeverity::Warning => "medium",
         };
+        let auto_execute = false;
+        let runtime_metadata =
+            aiops_incident_runtime_metadata(&incident, &dedupe_key, priority, auto_execute);
 
         let task_input = missiond_core::types::CreateBoardTaskInput {
             title: format!("[AIOps] {}", incident.title),
@@ -410,11 +414,12 @@ pub(crate) async fn triage_incident(
             dedupe_key: Some(dedupe_key.clone()),
             timeout_secs: None,
             context_intent: None,
-            runtime_metadata: None,
+            runtime_metadata: Some(runtime_metadata),
         };
 
         match state.store.create_board_task(&task_input).await {
             Ok(task) => {
+                upsert_aiops_task_contract(state, &task, "AIOps incident").await;
                 info!(
                     incident_id = %incident.id,
                     board_task_id = %task.id,
@@ -527,6 +532,8 @@ pub(crate) async fn create_pty_remediation_task(
         title = incident_title,
         desc = incident_description,
     );
+    let runtime_metadata =
+        pty_remediation_runtime_metadata(target_slot_id, incident_title, dedupe_key);
 
     let task_input = missiond_core::types::CreateBoardTaskInput {
         title: format!("[自愈] {}", incident_title),
@@ -546,12 +553,13 @@ pub(crate) async fn create_pty_remediation_task(
         dedupe_key: Some(dedupe_key.to_string()),
         timeout_secs: None,
         context_intent: None,
-        runtime_metadata: None,
+        runtime_metadata: Some(runtime_metadata),
     };
 
     match state.store.create_board_task(&task_input).await {
         Ok(task) => {
             let id = task.id.to_string();
+            upsert_aiops_task_contract(state, &task, "PTY remediation").await;
             info!(
                 task_id = %id,
                 target_slot = %target_slot_id,
@@ -564,6 +572,87 @@ pub(crate) async fn create_pty_remediation_task(
             None
         }
     }
+}
+
+async fn upsert_aiops_task_contract(
+    state: &AppState,
+    task: &missiond_core::types::BoardTask,
+    source: &str,
+) {
+    if let Err(err) = ControlPlaneKernel::new(state)
+        .upsert_task_contract_command(UpsertTaskContractCommand {
+            task_id: task.id.to_string(),
+            project_id: task.project.clone(),
+            runtime_metadata: task.runtime_metadata.clone(),
+        })
+        .await
+    {
+        warn!(
+            error = %err,
+            task_id = %task.id,
+            source,
+            "AIOps: failed to upsert task_contracts for diagnostic BoardTask"
+        );
+    }
+}
+
+fn aiops_incident_runtime_metadata(
+    incident: &missiond_core::types::MissionIncident,
+    dedupe_key: &str,
+    priority: &str,
+    auto_execute: bool,
+) -> Value {
+    json!({
+        "schema": "missiond.board-task-runtime-metadata.v1",
+        "source": "aiops_incident",
+        "control_state": "task_contracts",
+        "dispatch_metadata": {
+            "task_class": "incident-response-review",
+            "incident_id": incident.id.clone(),
+            "severity": incident.severity.to_string(),
+            "source": incident.source.to_string(),
+            "server_id": incident.server_id.clone(),
+            "dedupe_key": dedupe_key,
+            "priority": priority,
+            "auto_execute": auto_execute,
+            "completion_protocol": "diagnostic incident task; remediation requires explicit delegated write_scope"
+        },
+        "read_scope": incident
+            .server_id
+            .as_ref()
+            .map(|server| vec![format!("server:{server}")])
+            .unwrap_or_default(),
+        "write_scope": [],
+        "must_not_touch": [],
+        "capability_grant_ids": [],
+        "sandbox_profile": "system-incident-review",
+        "projection_policy": "description_notes_are_projection_only"
+    })
+}
+
+fn pty_remediation_runtime_metadata(
+    target_slot_id: &str,
+    incident_title: &str,
+    dedupe_key: &str,
+) -> Value {
+    json!({
+        "schema": "missiond.board-task-runtime-metadata.v1",
+        "source": "pty_remediation",
+        "control_state": "task_contracts",
+        "dispatch_metadata": {
+            "task_class": "pty-remediation-review",
+            "target_slot_id": target_slot_id,
+            "incident_title": incident_title,
+            "dedupe_key": dedupe_key,
+            "completion_protocol": "operator-review task; PTY text remains observation evidence"
+        },
+        "read_scope": [format!("pty-slot:{target_slot_id}")],
+        "write_scope": [],
+        "must_not_touch": [],
+        "capability_grant_ids": [],
+        "sandbox_profile": "system-incident-review",
+        "projection_policy": "description_notes_are_projection_only"
+    })
 }
 
 #[cfg(test)]
@@ -663,5 +752,50 @@ mod tests {
     fn safe_close_accepts_aiops_owned_task() {
         let task = make_task("ops", Some("health_check:foo"));
         assert!(is_safe_to_close_task(&task).is_ok());
+    }
+
+    #[test]
+    fn aiops_incident_metadata_is_review_only_task_contract() {
+        let incident = missiond_core::types::MissionIncident {
+            id: "inc-1".to_string(),
+            severity: IncidentSeverity::High,
+            source: IncidentSource::HealthCheck,
+            title: "health failed".to_string(),
+            description: "server down".to_string(),
+            server_id: Some("server-a".to_string()),
+            raw_payload: serde_json::json!({}),
+            created_at: "2026-05-28T00:00:00Z".to_string(),
+        };
+        let metadata =
+            aiops_incident_runtime_metadata(&incident, "health_check:server-a", "high", false);
+        assert_eq!(metadata["source"], "aiops_incident");
+        assert_eq!(metadata["control_state"], "task_contracts");
+        assert_eq!(
+            metadata["dispatch_metadata"]["task_class"],
+            "incident-response-review"
+        );
+        assert_eq!(metadata["dispatch_metadata"]["auto_execute"], false);
+        assert_eq!(metadata["write_scope"].as_array().unwrap().len(), 0);
+        assert_eq!(metadata["sandbox_profile"], "system-incident-review");
+    }
+
+    #[test]
+    fn pty_remediation_metadata_is_observation_only() {
+        let metadata = pty_remediation_runtime_metadata(
+            "slot-claude-code-default",
+            "MCP tools missing",
+            "pty:slot-claude-code-default",
+        );
+        assert_eq!(metadata["source"], "pty_remediation");
+        assert_eq!(metadata["control_state"], "task_contracts");
+        assert_eq!(
+            metadata["dispatch_metadata"]["task_class"],
+            "pty-remediation-review"
+        );
+        assert_eq!(
+            metadata["read_scope"][0],
+            "pty-slot:slot-claude-code-default"
+        );
+        assert_eq!(metadata["write_scope"].as_array().unwrap().len(), 0);
     }
 }

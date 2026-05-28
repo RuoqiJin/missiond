@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 use tracing::{info, warn};
 
 use crate::context::v3_blueprint_runtime::RouterRuntimeConfig;
+use crate::engine::control_plane_kernel::{ControlPlaneKernel, UpsertTaskContractCommand};
 use crate::state::AppState;
 
 pub(super) async fn handle(state: &AppState, args: Value) -> Result<ToolResult> {
@@ -254,15 +255,70 @@ async fn gemini_watch_loop(state: AppState, model: String) {
                 dedupe_key: None,
                 timeout_secs: None,
                 context_intent: None,
-                runtime_metadata: None,
+                runtime_metadata: Some(gemini_recovery_runtime_metadata(&model, attempt as u64)),
             };
-            if let Err(e) = state.store.create_board_task(&input).await {
-                warn!("Gemini watch: failed to create board task: {}", e);
+            match state.store.create_board_task(&input).await {
+                Ok(task) => {
+                    if let Err(err) = ControlPlaneKernel::new(&state)
+                        .upsert_task_contract_command(UpsertTaskContractCommand {
+                            task_id: task.id.to_string(),
+                            project_id: task.project.clone(),
+                            runtime_metadata: task.runtime_metadata.clone(),
+                        })
+                        .await
+                    {
+                        warn!(
+                            "Gemini watch: failed to upsert task_contracts for recovery notice: {}",
+                            err
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!("Gemini watch: failed to create board task: {}", e);
+                }
             }
             break;
         }
 
         info!(attempt, "Gemini watch: still unavailable, waiting 10 min");
         tokio::time::sleep(Duration::from_secs(600)).await;
+    }
+}
+
+fn gemini_recovery_runtime_metadata(model: &str, attempt: u64) -> Value {
+    json!({
+        "schema": "missiond.board-task-runtime-metadata.v1",
+        "source": "gemini_watch",
+        "control_state": "task_contracts",
+        "dispatch_metadata": {
+            "task_class": "gemini-recovery-notice",
+            "model": model,
+            "attempt": attempt,
+            "completion_protocol": "diagnostic notice only; no worker-controlled terminal state"
+        },
+        "read_scope": [],
+        "write_scope": [],
+        "must_not_touch": [],
+        "capability_grant_ids": [],
+        "sandbox_profile": "system-diagnostic-notice",
+        "projection_policy": "description_notes_are_projection_only"
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gemini_recovery_metadata_is_diagnostic_projection() {
+        let metadata = gemini_recovery_runtime_metadata("gemini-2.5-pro", 3);
+        assert_eq!(metadata["source"], "gemini_watch");
+        assert_eq!(metadata["control_state"], "task_contracts");
+        assert_eq!(
+            metadata["dispatch_metadata"]["task_class"],
+            "gemini-recovery-notice"
+        );
+        assert_eq!(metadata["write_scope"].as_array().unwrap().len(), 0);
+        assert_eq!(metadata["sandbox_profile"], "system-diagnostic-notice");
     }
 }

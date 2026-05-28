@@ -354,6 +354,11 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.aiops, sources.aiops, [
     'create_pty_remediation_task',
     'find_open_task_by_dedupe_key',
+    'UpsertTaskContractCommand',
+    'aiops_incident_runtime_metadata',
+    'pty_remediation_runtime_metadata',
+    '"control_state": "task_contracts"',
+    '"sandbox_profile": "system-incident-review"',
     'PTY remediation: duplicate incident aggregated into existing task',
     'auto_execute: Some(false)',
     'assignee: None',

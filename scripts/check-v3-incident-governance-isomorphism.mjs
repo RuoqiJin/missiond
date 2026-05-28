@@ -181,6 +181,10 @@ function checkFiles(root, files) {
     'RouterRuntimeConfig::load_for_current_dir',
     'router_config.flow_gemini_model',
     'V3_BLUEPRINT_CONFIG_ERROR',
+    'UpsertTaskContractCommand',
+    'gemini_recovery_runtime_metadata',
+    '"control_state": "task_contracts"',
+    '"sandbox_profile": "system-diagnostic-notice"',
   ]);
   forbidAll(diagnostics, files.llmTrace, sources.llmTrace, [
     'let model = "gemini-3.1-pro-preview"',

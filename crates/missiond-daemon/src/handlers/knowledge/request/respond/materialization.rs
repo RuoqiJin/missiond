@@ -1,4 +1,5 @@
 use super::*;
+use crate::engine::control_plane_kernel::{ControlPlaneKernel, UpsertTaskContractCommand};
 use crate::handlers::knowledge::file_artifacts::{
     ArtifactCommitEnvelope, ArtifactCommitEnvelopeInput,
 };
@@ -40,6 +41,8 @@ pub(in crate::handlers::knowledge::request) async fn ensure_request_board_task(
     }
 
     let project = nonblank(args.get("project")).or_else(|| nonblank(args.get("target_project")));
+    let runtime_metadata =
+        request_board_task_runtime_metadata(request_id, project.as_deref(), paths);
     let input = CreateBoardTaskInput {
         title: format!("Mission request {} plan", request_id),
         description: Some(format!(
@@ -51,6 +54,7 @@ pub(in crate::handlers::knowledge::request) async fn ensure_request_board_task(
         project,
         hidden: Some(true),
         context_intent: Some("code".into()),
+        runtime_metadata: Some(runtime_metadata),
         ..Default::default()
     };
     let task = state
@@ -58,10 +62,47 @@ pub(in crate::handlers::knowledge::request) async fn ensure_request_board_task(
         .create_board_task(&input)
         .await
         .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
+    ControlPlaneKernel::new(state)
+        .upsert_task_contract_command(UpsertTaskContractCommand {
+            task_id: task.id.to_string(),
+            project_id: task.project.clone(),
+            runtime_metadata: task.runtime_metadata.clone(),
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("task_contracts upsert error: {}", e))?;
 
     Ok(BoardTaskMaterialization {
         board_task_id: task.id.to_string(),
         board_task_created: true,
+    })
+}
+
+fn request_board_task_runtime_metadata(
+    request_id: &str,
+    project: Option<&str>,
+    paths: &RequestPaths,
+) -> Value {
+    json!({
+        "schema": "missiond.board-task-runtime-metadata.v1",
+        "source": "mission_request_respond",
+        "control_state": "task_contracts",
+        "dispatch_metadata": {
+            "task_class": "request-plan-hidden-anchor",
+            "request_id": request_id,
+            "project_id": project,
+            "intent_path": path_json(&paths.intent_alignment),
+            "plan_path": path_json(&paths.plan),
+            "completion_protocol": "hidden request-local anchor; execution must go through reviewed plan/delegated task"
+        },
+        "read_scope": [
+            path_json(&paths.intent_alignment),
+            path_json(&paths.plan)
+        ],
+        "write_scope": [],
+        "must_not_touch": [],
+        "capability_grant_ids": [],
+        "sandbox_profile": "system-request-review-anchor",
+        "projection_policy": "description_notes_are_projection_only"
     })
 }
 
@@ -257,4 +298,23 @@ pub(in crate::handlers::knowledge::request) async fn materialize_request_plan(
         artifact_projection,
         artifact_projection_error: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_board_task_metadata_declares_hidden_anchor_contract() {
+        let paths = request_paths_for(Path::new("/tmp/missiond"), "req-1");
+        let metadata = request_board_task_runtime_metadata("req-1", Some("missiond"), &paths);
+        assert_eq!(metadata["source"], "mission_request_respond");
+        assert_eq!(metadata["control_state"], "task_contracts");
+        assert_eq!(
+            metadata["dispatch_metadata"]["task_class"],
+            "request-plan-hidden-anchor"
+        );
+        assert_eq!(metadata["write_scope"].as_array().unwrap().len(), 0);
+        assert_eq!(metadata["sandbox_profile"], "system-request-review-anchor");
+    }
 }
