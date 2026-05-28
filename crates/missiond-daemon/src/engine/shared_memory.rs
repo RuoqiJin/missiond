@@ -5574,6 +5574,77 @@ fn score_agent_entry(entry: &Value, normalized_intent: &str) -> i64 {
 mod tests {
     use super::*;
 
+    fn release_lease_request_from_args(args: &Value) -> Result<ReleaseLeaseRequest> {
+        Ok(ReleaseLeaseRequest {
+            claim_id: string_arg(args, "claim_id")
+                .or_else(|| string_arg(args, "claimId"))
+                .or_else(|| string_arg(args, "id"))
+                .ok_or_else(|| anyhow!("claim_id is required"))?
+                .to_string(),
+            owner_id: string_arg(args, "owner_id")
+                .or_else(|| string_arg(args, "ownerId"))
+                .map(str::to_string),
+            grant_id: string_arg(args, "grant_id")
+                .or_else(|| string_arg(args, "grantId"))
+                .or_else(|| string_arg(args, "capability_grant_id"))
+                .or_else(|| string_arg(args, "capabilityGrantId"))
+                .map(str::to_string),
+            subject_kind: string_arg(args, "subject_kind")
+                .or_else(|| string_arg(args, "subjectKind"))
+                .unwrap_or("worker")
+                .to_string(),
+            subject_id: string_arg(args, "subject_id")
+                .or_else(|| string_arg(args, "subjectId"))
+                .or_else(|| string_arg(args, "owner_id"))
+                .or_else(|| string_arg(args, "ownerId"))
+                .unwrap_or("")
+                .to_string(),
+            details: args.get("details").cloned().unwrap_or_else(|| json!({})),
+            allow_system_bypass: system_or_operator_bypass_allowed(args),
+            bypass_reason: Some(
+                "mission_shared_memory release system/operator authority".to_string(),
+            ),
+        })
+    }
+
+    fn heartbeat_lease_request_from_args(args: &Value) -> Result<HeartbeatLeaseRequest> {
+        Ok(HeartbeatLeaseRequest {
+            claim_id: string_arg(args, "claim_id")
+                .or_else(|| string_arg(args, "claimId"))
+                .or_else(|| string_arg(args, "id"))
+                .ok_or_else(|| anyhow!("claim_id is required"))?
+                .to_string(),
+            owner_id: string_arg(args, "owner_id")
+                .or_else(|| string_arg(args, "ownerId"))
+                .map(str::to_string),
+            grant_id: string_arg(args, "grant_id")
+                .or_else(|| string_arg(args, "grantId"))
+                .or_else(|| string_arg(args, "capability_grant_id"))
+                .or_else(|| string_arg(args, "capabilityGrantId"))
+                .map(str::to_string),
+            subject_kind: string_arg(args, "subject_kind")
+                .or_else(|| string_arg(args, "subjectKind"))
+                .unwrap_or("worker")
+                .to_string(),
+            subject_id: string_arg(args, "subject_id")
+                .or_else(|| string_arg(args, "subjectId"))
+                .or_else(|| string_arg(args, "owner_id"))
+                .or_else(|| string_arg(args, "ownerId"))
+                .unwrap_or("")
+                .to_string(),
+            lease_secs: args
+                .get("lease_secs")
+                .or_else(|| args.get("leaseSecs"))
+                .and_then(Value::as_i64)
+                .unwrap_or(DEFAULT_LEASE_SECS),
+            details: args.get("details").cloned().unwrap_or_else(|| json!({})),
+            allow_system_bypass: system_or_operator_bypass_allowed(args),
+            bypass_reason: Some(
+                "mission_shared_memory heartbeat system/operator authority".to_string(),
+            ),
+        })
+    }
+
     #[test]
     fn runtime_artifact_kind_is_inferred_from_v3_runtime_path() {
         assert_eq!(
@@ -5741,5 +5812,48 @@ mod tests {
             entry.get("projectId").and_then(Value::as_str),
             Some("jarvis")
         );
+    }
+
+    #[test]
+    fn release_lease_request_from_args_preserves_authority_and_scope() {
+        let req = release_lease_request_from_args(&json!({
+            "claim_id": "claim-1",
+            "owner_id": "slot-xjpcode",
+            "grant_id": "grant-lease",
+            "subject_kind": "worker",
+            "details": {"source": "worker-shutdown"}
+        }))
+        .expect("release request");
+
+        assert_eq!(req.claim_id, "claim-1");
+        assert_eq!(req.owner_id.as_deref(), Some("slot-xjpcode"));
+        assert_eq!(req.grant_id.as_deref(), Some("grant-lease"));
+        assert_eq!(req.subject_kind, "worker");
+        assert_eq!(req.subject_id, "slot-xjpcode");
+        assert!(!req.allow_system_bypass);
+        assert_eq!(req.details["source"], "worker-shutdown");
+    }
+
+    #[test]
+    fn heartbeat_lease_request_from_args_requires_explicit_operator_confirm_for_bypass() {
+        let unconfirmed = heartbeat_lease_request_from_args(&json!({
+            "claim_id": "claim-1",
+            "owner_id": "slot-xjpcode",
+            "subject_kind": "operator"
+        }))
+        .expect("heartbeat request");
+        assert!(!unconfirmed.allow_system_bypass);
+
+        let confirmed = heartbeat_lease_request_from_args(&json!({
+            "claim_id": "claim-1",
+            "owner_id": "slot-xjpcode",
+            "subject_kind": "operator",
+            "operator_confirmed": true,
+            "lease_secs": 90
+        }))
+        .expect("confirmed heartbeat request");
+        assert_eq!(confirmed.subject_id, "slot-xjpcode");
+        assert_eq!(confirmed.lease_secs, 90);
+        assert!(confirmed.allow_system_bypass);
     }
 }
