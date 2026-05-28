@@ -565,7 +565,7 @@ function checkFiles(root, files, { useOcaml = false } = {}) {
     'provider_final_summary_rejects_retrying_once_progress',
     'worker_final_close_blocker_detects_commit_failures',
     '"schema": "missiond.delegated-execution-log-candidate.v1"',
-    '.job_event_typed(serde_json::json!',
+    '.record_observation_command(RecordObservationCommand',
     'fn is_dynamic_slot_id',
     'fn should_clear_stale_dynamic_assignee',
     'clear_board_task_assignee(task.id.as_str(), id)',
