@@ -1,4 +1,5 @@
 use super::*;
+use crate::engine::control_plane_kernel::{ControlPlaneKernel, SettleTaskCommand};
 
 #[derive(Deserialize)]
 struct BoardIdArgs {
@@ -310,9 +311,8 @@ async fn handle_batch_done_settle(
             }));
             continue;
         };
-        match state
-            .shared_memory
-            .settle_worker_command(crate::engine::shared_memory::WorkerSettleRequest {
+        match ControlPlaneKernel::new(state)
+            .settle_task_command(SettleTaskCommand {
                 task_id: id.clone(),
                 project_id: None,
                 slot_id: None,
@@ -365,9 +365,8 @@ async fn settle_done_via_shared_memory(
     if let Some(blocked) = guard_done_close_against_code_drift(state).await? {
         return Ok(blocked);
     }
-    match state
-        .shared_memory
-        .settle_worker_command(crate::engine::shared_memory::WorkerSettleRequest {
+    match ControlPlaneKernel::new(state)
+        .settle_task_command(SettleTaskCommand {
             task_id: task_id.to_string(),
             project_id: None,
             slot_id: None,

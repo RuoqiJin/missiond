@@ -10,9 +10,8 @@ use std::time::Duration;
 use tokio::process::Command;
 
 use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
-use crate::engine::shared_memory::{
-    StructuredControlError, TaskRuntimeContract, WorkerSettleRequest,
-};
+use crate::engine::control_plane_kernel::{ControlPlaneKernel, SettleTaskCommand};
+use crate::engine::shared_memory::{StructuredControlError, TaskRuntimeContract};
 use crate::slot_dispatch::SlotAcquireGuard;
 use crate::state::AppState;
 
@@ -723,7 +722,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 
     if let Some(config) = mechanic_config.clone() {
         spawn_mechanic_repair(
-            state.shared_memory.clone(),
+            state.clone(),
             MechanicRepairRun {
                 task_id: task_id.clone(),
                 project_id: target_project_resolution
@@ -3478,9 +3477,8 @@ async fn run_xjpcode_readonly_worker(state: AppState, run: XjpcodeWorkerRun) -> 
     let task_id = request["task_id"]
         .as_str()
         .ok_or_else(|| anyhow!("xjpcode worker settle requires task_id"))?;
-    state
-        .shared_memory
-        .settle_worker_command(WorkerSettleRequest {
+    ControlPlaneKernel::new(&state)
+        .settle_task_command(SettleTaskCommand {
             task_id: task_id.to_string(),
             project_id: request["project_id"].as_str().map(str::to_string),
             slot_id: Some("xjpcode-readonly-worker".to_string()),
@@ -3498,14 +3496,12 @@ async fn run_xjpcode_readonly_worker(state: AppState, run: XjpcodeWorkerRun) -> 
     Ok(())
 }
 
-fn spawn_mechanic_repair(
-    shared_memory: std::sync::Arc<crate::engine::shared_memory::SharedMemoryService>,
-    run: MechanicRepairRun,
-) {
+fn spawn_mechanic_repair(state: AppState, run: MechanicRepairRun) {
     // Mechanic is a subprocess executor lane: its final output is normalized
     // into the canonical task-result-artifact via worker_settle. It is not a
     // PTY slot and it never becomes a resident orchestrator.
     tokio::spawn(async move {
+        let shared_memory = state.shared_memory.clone();
         if let Err(err) = shared_memory
             .job_event_typed(json!({
                 "task_id": run.task_id.as_str(),
@@ -3663,8 +3659,8 @@ fn spawn_mechanic_repair(
             }
             return;
         }
-        let settle = shared_memory
-            .settle_worker_command(WorkerSettleRequest {
+        let settle = ControlPlaneKernel::new(&state)
+            .settle_task_command(SettleTaskCommand {
                 task_id: run.task_id.clone(),
                 project_id: run.project_id.clone(),
                 slot_id: Some("mechanic".to_string()),

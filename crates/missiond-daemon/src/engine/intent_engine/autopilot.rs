@@ -10,6 +10,7 @@ use crate::claude_md_sync::sync_claude_md;
 use crate::context::v3_blueprint_runtime::{
     AutopilotRuntimeConfig, RouterRuntimeConfig, WorkstationRuntimeConfig,
 };
+use crate::engine::control_plane_kernel::{ControlPlaneKernel, SettleTaskCommand};
 use crate::engine::learning_engine;
 use crate::engine::shared_memory::TaskRuntimeContract;
 use crate::flow_engine::{ensure_autopilot_pty, execute_flow_task};
@@ -806,10 +807,8 @@ async fn settle_autopilot_done_with_artifact(
             task.id.as_str(),
         )
         .await?;
-    state
-        .storage()
-        .shared_memory
-        .settle_worker_command(crate::engine::shared_memory::WorkerSettleRequest {
+    ControlPlaneKernel::new(state)
+        .settle_task_command(SettleTaskCommand {
             task_id: task.id.to_string(),
             project_id: Some(
                 task.project

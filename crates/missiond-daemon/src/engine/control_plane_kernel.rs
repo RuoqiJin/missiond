@@ -21,6 +21,22 @@ pub(crate) struct SystemTaskCompletionInput {
     pub metadata: Value,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct SettleTaskCommand {
+    pub task_id: String,
+    pub project_id: Option<String>,
+    pub slot_id: Option<String>,
+    pub conversation_id: Option<String>,
+    pub artifact_hash: Option<String>,
+    pub status: String,
+    pub summary: Option<String>,
+    pub grant_id: Option<String>,
+    pub subject_kind: String,
+    pub subject_id: String,
+    pub attempt_id: Option<String>,
+    pub allow_system_bypass: bool,
+}
+
 pub(crate) struct ControlPlaneKernel<'a> {
     state: &'a AppState,
 }
@@ -59,21 +75,39 @@ impl<'a> ControlPlaneKernel<'a> {
         summary: &str,
         producer_id: &str,
     ) -> Result<Value> {
+        self.settle_task_command(SettleTaskCommand {
+            task_id: task_id.to_string(),
+            project_id: None,
+            slot_id: Some(producer_id.to_string()),
+            conversation_id: None,
+            artifact_hash: Some(artifact_hash.to_string()),
+            status: "done".to_string(),
+            summary: Some(summary.to_string()),
+            grant_id: None,
+            subject_kind: "system".to_string(),
+            subject_id: producer_id.to_string(),
+            attempt_id: None,
+            allow_system_bypass: true,
+        })
+        .await
+    }
+
+    pub(crate) async fn settle_task_command(&self, command: SettleTaskCommand) -> Result<Value> {
         self.state
             .shared_memory
             .settle_worker_command(WorkerSettleRequest {
-                task_id: task_id.to_string(),
-                project_id: None,
-                slot_id: Some(producer_id.to_string()),
-                conversation_id: None,
-                artifact_hash: Some(artifact_hash.to_string()),
-                status: "done".to_string(),
-                summary: Some(summary.to_string()),
-                grant_id: None,
-                subject_kind: "system".to_string(),
-                subject_id: producer_id.to_string(),
-                attempt_id: None,
-                allow_system_bypass: true,
+                task_id: command.task_id,
+                project_id: command.project_id,
+                slot_id: command.slot_id,
+                conversation_id: command.conversation_id,
+                artifact_hash: command.artifact_hash,
+                status: command.status,
+                summary: command.summary,
+                grant_id: command.grant_id,
+                subject_kind: command.subject_kind,
+                subject_id: command.subject_id,
+                attempt_id: command.attempt_id,
+                allow_system_bypass: command.allow_system_bypass,
             })
             .await
     }

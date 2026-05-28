@@ -287,9 +287,11 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.controlPlaneKernel, sources.controlPlaneKernel, [
     'pub(crate) struct ControlPlaneKernel',
+    'pub(crate) struct SettleTaskCommand',
     'pub(crate) async fn record_observation',
     'pub(crate) async fn write_completion_artifact',
     'pub(crate) async fn settle_task',
+    'pub(crate) async fn settle_task_command',
     'pub(crate) async fn claim_lease',
     'pub(crate) async fn require_capability',
     'pub(crate) async fn project_board_view',
@@ -327,7 +329,8 @@ function checkFiles(root, files) {
     'no canonical completed task_result_artifact exists yet',
     '.job_event_typed(serde_json::json!',
     '.task_result_get_typed(&args)',
-    '.settle_worker_command(crate::engine::shared_memory::WorkerSettleRequest',
+    'ControlPlaneKernel::new(state)',
+    '.settle_task_command(SettleTaskCommand',
     '.active_capability_grant_id(',
     '.task_runtime_contract(task.id.as_str())',
     'task_contract_workstation_class(task, runtime_contract)',
@@ -389,7 +392,8 @@ function checkFiles(root, files) {
     '.workflow_start_typed(&json!',
     '.workflow_checkpoint_typed(&json!',
     '.task_result_put_typed(&task_result_args)',
-    '.settle_worker_command(WorkerSettleRequest',
+    'ControlPlaneKernel::new(&state)',
+    '.settle_task_command(SettleTaskCommand',
     '.release_typed(json!',
   ]);
   rejectAll(diagnostics, files.taskDelegate, sources.taskDelegate, [
@@ -554,7 +558,21 @@ function checkFiles(root, files) {
     "code === 'RUNTIME_METADATA_REQUIRED'",
   ]);
 
+  rejectDirectSettleOutsideKernel(diagnostics, files, sources);
+
   return diagnostics;
+}
+
+function rejectDirectSettleOutsideKernel(diagnostics, files, sources) {
+  for (const [key, source] of Object.entries(sources)) {
+    if (key === 'controlPlaneKernel' || key === 'sharedMemory') continue;
+    if (source.includes('.settle_worker_command(')) {
+      diagnostics.push({
+        file: files[key],
+        message: 'direct shared_memory.settle_worker_command outside ControlPlaneKernel is forbidden',
+      });
+    }
+  }
 }
 
 function requireAll(diagnostics, file, source, needles) {
