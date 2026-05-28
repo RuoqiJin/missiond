@@ -57,7 +57,7 @@
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/jarvis-backend-blueprint.lisp"
       :frontend ".missiond/frontend/jarvis-ui-blueprint.lisp"
-      :status incubating-project
+      :status project-ssot-owned
       :checks ["bash .missiond/check.sh"]
       :missiond-role "registered devtool; clean MissionD rewrite (intent.lisp + 14 intent-*.lisp shards + GAP_ANALYSIS.md)"
       :surface project-registry)
@@ -66,7 +66,7 @@
       :root "/Users/jinchen/Projects/jarvis-mechanic"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/jarvis-mechanic-backend-blueprint.lisp"
-      :status project-ssot-owned
+      :status incubating-project
       :checks ["node scripts/check-mechanic-ssot.mjs"
                "bash .missiond/check.sh"]
       :missiond-role "registered devtool; opt-in repair executor CLI, not a MissionD orchestrator or automatic runtime worker"
@@ -324,7 +324,7 @@
       :backend ".missiond/backend/daily-spark-backend-blueprint.lisp"
       :frontend ".missiond/frontend/daily-spark-frontend-blueprint.lisp"
       :operations ".missiond/operations/daily-spark-operations-blueprint.lisp"
-      :status project-ssot-owned
+      :status incubating-project
       :checks ["bash .missiond/check.sh"]
       :missiond-role "registered independent app migration; Daily Spark moves Lovable/Supabase Cloud runtime to Vercel frontend plus GCP VM self-hosted Supabase-compatible backend/database"
       :surface project-registry))

@@ -82,9 +82,9 @@ export type V3ScannerPolicyId = "plan-lisp-raw-scanner";
 export type V3SemanticGateId = "final-convergence-semantic-facts";
 
 export const SCHEMA_VERSION: "missiond.contract-abi.v1";
-export const SOURCE_HASH: "9534635bef4020d5546994aaca58cc81";
-export const RUNTIME_CONFIG_SOURCE_HASH: "275524d0808f4ff1ad3b2352bcabc83d";
-export const PROJECT_UNIVERSE_SOURCE_HASH: "275524d0808f4ff1ad3b2352bcabc83d";
+export const SOURCE_HASH: "23daeb52532c2a088f433068880bca43";
+export const RUNTIME_CONFIG_SOURCE_HASH: "1aa6f0420ffd6d5974de6b662bf7583f";
+export const PROJECT_UNIVERSE_SOURCE_HASH: "1aa6f0420ffd6d5974de6b662bf7583f";
 export const RUNTIME_DOMAIN_FILES: Readonly<Record<string, string>>;
 export const RUNTIME_DOMAIN_SOURCE_HASHES: Readonly<Record<string, string>>;
 export const SOURCE_UNITS: readonly SourceUnit[];

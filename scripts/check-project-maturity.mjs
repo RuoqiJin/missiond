@@ -29,10 +29,11 @@ const usage = `Usage:
   node scripts/check-project-maturity.mjs --dry-fixture [--json] [--engine=auto|js|ocaml]
 
 Checks MissionD's project maturity registry against project-local Lisp SSOT
-structure. The default gate proves every registered project is at least M5
-worker-operational SSOT closure. Use --min-level M6 for Auth-grade final
-maturity: domain, policy, flow, event, runtime, implementation,
-compatibility, hot-path wiring, and regression evidence.
+structure. The default gate proves every active/runtime-owned project is at
+least M5 worker-operational SSOT closure. Incubating projects remain visible
+with gaps, but do not block the global M5 gate until promoted. Use
+--min-level M6 for Auth-grade final maturity: domain, policy, flow, event,
+runtime, implementation, compatibility, hot-path wiring, and regression evidence.
 Use --evidence-only inside worker shards before the central V3 maturity
 registry is advanced.
 `;
@@ -165,7 +166,10 @@ export function runProjectMaturityCheck(repoRoot, opts = {}) {
     }
     const row = assessProject(repoRoot, id, m, registry);
     rows.push(row);
-    diagnostics.push(...diagnosticsForProject(row, minLevel, { evidenceOnly: opts.evidenceOnly === true }));
+    diagnostics.push(...diagnosticsForProject(row, minLevel, {
+      evidenceOnly: opts.evidenceOnly === true,
+      explicitProject: (opts.projectIds?.length ?? 0) > 0,
+    }));
   }
 
   return {
@@ -438,6 +442,7 @@ function assessProject(repoRoot, id, maturity, registry) {
     target: maturity.target,
     declared_gap: maturity.gap,
     registry_status: registry?.status ?? (id === 'missiond' ? 'code-aligned' : null),
+    global_gate_exempt: isGlobalGateExempt(registry),
     root,
     missiond_dir: projectMissiondDir(repoRoot, root, registry, id),
     structural,
@@ -595,7 +600,7 @@ function nextGap(current, evidence) {
   return null;
 }
 
-function diagnosticsForProject(row, minLevel, { evidenceOnly = false } = {}) {
+function diagnosticsForProject(row, minLevel, { evidenceOnly = false, explicitProject = false } = {}) {
   const diagnostics = [];
   const file = row.root ?? row.id;
   if (!row.evidence.root_exists) diagnostics.push({ file, message: `${row.id} root does not exist` });
@@ -606,6 +611,18 @@ function diagnosticsForProject(row, minLevel, { evidenceOnly = false } = {}) {
   }
   if (levelValue(minLevel) >= 2 && !row.evidence.has_project_blueprint) {
     diagnostics.push({ file, message: `${row.id} has no project-level *blueprint.lisp; intent-only projects cannot satisfy M2+` });
+  }
+
+  if (
+    row.global_gate_exempt === true
+    && explicitProject !== true
+    && evidenceOnly !== true
+    && levelValue(minLevel) >= 5
+  ) {
+    if (row.declared_gap.length === 0) {
+      diagnostics.push({ file, message: `${row.id} is incubating below M5 but declares no gap` });
+    }
+    return diagnostics;
   }
 
   if (evidenceOnly) {
@@ -663,6 +680,11 @@ function diagnosticsForProject(row, minLevel, { evidenceOnly = false } = {}) {
     diagnostics.push({ file, message: `${row.id} is below M6 but declares no gap` });
   }
   return diagnostics;
+}
+
+function isGlobalGateExempt(registry) {
+  const status = (registry?.status ?? '').toString().trim().toLowerCase();
+  return status === 'incubating-project' || status === 'incubating';
 }
 
 function evidenceLevel(evidence) {
