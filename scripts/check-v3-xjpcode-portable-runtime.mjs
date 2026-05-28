@@ -64,8 +64,8 @@ push("mission_task_delegate spawns xjpcode worker", has(taskDelegate, "spawn_xjp
 push("mission_task_delegate xjpcode env", has(taskDelegate, "MISSIOND_XJPCODE_WORKER_URL"));
 push("mission_task_delegate loopback smoke override", has(taskDelegate, "xjpcode_worker_url") && has(taskDelegate, "XJPCODE_WORKER_URL_UNTRUSTED"));
 push("mission_task_delegate parses xjpcode SSE", has(taskDelegate, "parse_xjpcode_sse_frames"));
-push("mission_task_delegate writes task artifact", has(taskDelegate, "task_result_put_typed"));
-push("mission_task_delegate settles xjpcode worker", has(taskDelegate, "settle_worker_command") && has(taskDelegate, "WorkerSettleRequest"));
+push("mission_task_delegate writes task artifact", has(taskDelegate, "write_completion_artifact") && has(taskDelegate, "TaskCompletionEvidenceInput"));
+push("mission_task_delegate settles xjpcode worker", has(taskDelegate, "settle_task_command") && has(taskDelegate, "SettleTaskCommand"));
 push("xjpcode dispatch smoke script exists", Boolean(liveSmoke));
 push("xjpcode dispatch smoke calls mission_task_delegate", has(liveSmoke, "mission_task_delegate"));
 push("xjpcode dispatch smoke passes loopback worker url", has(liveSmoke, "xjpcode_worker_url"));
@@ -80,6 +80,8 @@ for (const token of [
   "read_scope",
   "write_scope",
   "accepted_shard_id",
+  "write_lease_id",
+  "worktree_id",
   "TaskResultArtifact",
   "xjpcode.task-result-artifact.v1",
   "READ_SCOPE_OUTSIDE_PROJECT",
