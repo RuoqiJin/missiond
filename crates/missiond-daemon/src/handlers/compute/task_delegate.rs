@@ -12,6 +12,7 @@ use tokio::process::Command;
 use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
 use crate::engine::control_plane_kernel::{ControlPlaneKernel, SettleTaskCommand};
 use crate::engine::shared_memory::{StructuredControlError, TaskRuntimeContract};
+use crate::engine::task_completion_evidence::TaskCompletionEvidenceInput;
 use crate::slot_dispatch::SlotAcquireGuard;
 use crate::state::AppState;
 
@@ -3436,54 +3437,61 @@ async fn run_xjpcode_readonly_worker(state: AppState, run: XjpcodeWorkerRun) -> 
         .cloned()
         .unwrap_or_else(|| Value::String(summary.to_string()));
     let created_at = chrono::Utc::now().to_rfc3339();
-    let artifact = state
-        .shared_memory
-        .task_result_put_typed(&json!({
-            "task_id": request["task_id"],
-            "project_id": request["project_id"],
-            "provider": "xjpcode",
-            "result_status": missiond_result_status,
-            "summary": summary,
-            "content": content,
-            "json": {
+    let task_id = request["task_id"]
+        .as_str()
+        .ok_or_else(|| anyhow!("xjpcode worker artifact requires task_id"))?;
+    let project_id = request["project_id"].as_str().map(str::to_string);
+    let artifact = ControlPlaneKernel::new(&state)
+        .write_completion_artifact(TaskCompletionEvidenceInput {
+            task_id: task_id.to_string(),
+            project_id: project_id.clone(),
+            slot_id: None,
+            conversation_id: None,
+            provider: "xjpcode".to_string(),
+            result_status: missiond_result_status.to_string(),
+            summary: summary.to_string(),
+            content: Some(
+                content
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| content.to_string()),
+            ),
+            json: json!({
                 "schema": "missiond.xjpcode-worker-result.v1",
                 "response": task_result,
                 "sse_frames": frames
-            },
-            "grant_id": write_grant_id,
-            "subject_kind": "worker",
-            "subject_id": "xjpcode-readonly-worker",
-            "producer": {
+            }),
+            accepted_shard_id: None,
+            attempt_id: None,
+            capability_grant_id: Some(write_grant_id.to_string()),
+            subject_kind: Some("worker".to_string()),
+            subject_id: Some("xjpcode-readonly-worker".to_string()),
+            confirm: None,
+            producer: Some(json!({
                 "kind": "portable-worker",
                 "id": "xjpcode-readonly-worker",
                 "created_at": created_at
-            },
-            "raw_evidence": {
+            })),
+            raw_evidence: Some(json!({
                 "kind": "xjpcode-work-order-response",
                 "response": task_result,
                 "sse_frames": frames
-            },
-            "evidence_refs": [{
+            })),
+            evidence_refs: Some(json!([{
                 "kind": "xjpcode-work-order-response",
-                "task_id": request["task_id"],
+                "task_id": task_id,
                 "created_at": created_at
-            }],
-            "created_at": created_at
-        }))
+            }])),
+            created_at: Some(created_at),
+        })
         .await?;
-    let Some(artifact_hash) = artifact.get("artifact_hash").and_then(Value::as_str) else {
-        return Ok(());
-    };
-    let task_id = request["task_id"]
-        .as_str()
-        .ok_or_else(|| anyhow!("xjpcode worker settle requires task_id"))?;
     ControlPlaneKernel::new(&state)
         .settle_task_command(SettleTaskCommand {
             task_id: task_id.to_string(),
-            project_id: request["project_id"].as_str().map(str::to_string),
+            project_id,
             slot_id: Some("xjpcode-readonly-worker".to_string()),
             conversation_id: None,
-            artifact_hash: Some(artifact_hash.to_string()),
+            artifact_hash: Some(artifact.artifact_hash),
             status: missiond_settle_status.to_string(),
             summary: Some(summary.to_string()),
             grant_id: Some(settle_grant_id.to_string()),
@@ -3594,43 +3602,45 @@ fn spawn_mechanic_repair(state: AppState, run: MechanicRepairRun) {
                 });
             }
             let created_at = chrono::Utc::now().to_rfc3339();
-            let task_result_args = json!({
-                "task_id": run.task_id,
-                "project_id": run.project_id,
-                "slot_id": "mechanic",
-                "provider": "mechanic",
-                "result_status": "completed",
-                "summary": summary,
-                "content": summary,
-                "json": artifact_details,
-                "attempt_id": run.attempt_id,
-                "grant_id": run.write_task_grant_id,
-                "subject_kind": "worker",
-                "subject_id": "mechanic",
-                "accepted_shard_id": run.metadata.accepted_shard_id,
-                "producer": {
+            let artifact_input = TaskCompletionEvidenceInput {
+                task_id: run.task_id.clone(),
+                project_id: run.project_id.clone(),
+                slot_id: Some("mechanic".to_string()),
+                conversation_id: None,
+                provider: "mechanic".to_string(),
+                result_status: "completed".to_string(),
+                summary: summary.clone(),
+                content: Some(summary.clone()),
+                json: artifact_details,
+                accepted_shard_id: run.metadata.accepted_shard_id.clone(),
+                attempt_id: Some(run.attempt_id.clone()),
+                capability_grant_id: run.write_task_grant_id.clone(),
+                subject_kind: Some("worker".to_string()),
+                subject_id: Some("mechanic".to_string()),
+                confirm: None,
+                producer: Some(json!({
                     "kind": "mechanic-subprocess",
                     "id": "mechanic",
                     "created_at": created_at
-                },
-                "raw_evidence": {
+                })),
+                raw_evidence: Some(json!({
                     "kind": "mechanic-run",
                     "mode": run.config.mode.as_str(),
                     "target": run.config.target,
                     "project_root": run.project_root
-                },
-                "evidence_refs": [{
+                })),
+                evidence_refs: Some(json!([{
                     "kind": "mechanic-run",
                     "task_id": run.task_id,
                     "created_at": created_at
-                }],
-                "created_at": created_at
-            });
-            match shared_memory.task_result_put_typed(&task_result_args).await {
-                Ok(value) => value
-                    .get("artifact_hash")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
+                }])),
+                created_at: Some(created_at),
+            };
+            match ControlPlaneKernel::new(&state)
+                .write_completion_artifact(artifact_input)
+                .await
+            {
+                Ok(value) => Some(value.artifact_hash),
                 Err(err) => {
                     tracing::warn!(
                         task_id = %run.task_id,
