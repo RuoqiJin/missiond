@@ -753,7 +753,7 @@ impl SharedMemoryService {
         .await
     }
 
-    async fn capability_grant_from_args(&self, args: &Value) -> Result<Value> {
+    pub(crate) async fn capability_grant_from_args(&self, args: &Value) -> Result<Value> {
         let subject_kind = string_arg(args, "subject_kind")
             .or_else(|| string_arg(args, "subjectKind"))
             .unwrap_or("task");

@@ -2,8 +2,8 @@ use anyhow::{anyhow, Result};
 use serde_json::Value;
 
 use crate::engine::control_plane_kernel::{
-    ClaimLeaseCommand, ControlPlaneKernel, HeartbeatLeaseCommand, JobEventCommand,
-    ReleaseLeaseCommand, RequireCapabilityCommand,
+    CapabilityGrantCommand, ClaimLeaseCommand, ControlPlaneKernel, HeartbeatLeaseCommand,
+    JobEventCommand, ReleaseLeaseCommand, RequireCapabilityCommand,
 };
 use crate::state::AppState;
 use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
@@ -67,6 +67,11 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 "capability_check" | "check_capability" => {
                     ControlPlaneKernel::new(state)
                         .capability_check_command(capability_check_command_from_args(&args)?)
+                        .await
+                }
+                "capability_grant" | "grant_capability" => {
+                    ControlPlaneKernel::new(state)
+                        .capability_grant_command(CapabilityGrantCommand { args: args.clone() })
                         .await
                 }
                 "job_event" | "record_job_event" => {

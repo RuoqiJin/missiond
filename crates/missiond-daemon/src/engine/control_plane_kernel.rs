@@ -63,6 +63,11 @@ pub(crate) struct JobEventCommand {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct CapabilityGrantCommand {
+    pub args: Value,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct ClaimLeaseCommand {
     pub project_id: Option<String>,
     pub task_id: Option<String>,
@@ -434,6 +439,16 @@ impl<'a> ControlPlaneKernel<'a> {
             "scope_kind": scope_kind,
             "scope_key": scope_key
         }))
+    }
+
+    pub(crate) async fn capability_grant_command(
+        &self,
+        command: CapabilityGrantCommand,
+    ) -> Result<Value> {
+        self.state
+            .shared_memory
+            .capability_grant_from_args(&command.args)
+            .await
     }
 
     pub(crate) async fn job_event_command(&self, command: JobEventCommand) -> Result<Value> {
