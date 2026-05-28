@@ -61,6 +61,7 @@ use tracing::{debug, info, warn};
 
 use crate::bus::BusServices;
 use crate::decision_engine::process_pending_master_questions;
+use crate::engine::control_plane_kernel::{ControlPlaneKernel, UpsertTaskContractCommand};
 use crate::experience_harvester;
 use crate::extraction::{check_deep_analysis, check_kb_consolidation, check_realtime_extraction};
 use crate::handlers::knowledge::directive::{
@@ -400,6 +401,23 @@ fn spawn_deployment_event_response_sub(
                         if let Some(input) = board_input {
                             match state.store.create_board_task(&input).await {
                                 Ok(task) => {
+                                    if let Err(err) = ControlPlaneKernel::new(&state)
+                                        .upsert_task_contract_command(UpsertTaskContractCommand {
+                                            task_id: task.id.to_string(),
+                                            project_id: task.project.clone(),
+                                            runtime_metadata: task.runtime_metadata.clone(),
+                                        })
+                                        .await
+                                    {
+                                        warn!(
+                                            task_id = %task.id,
+                                            service_id = %service_id,
+                                            event_id = %event_id,
+                                            event_kind = %event_kind,
+                                            error = %err,
+                                            "v2[deployment_event_response]: failed to upsert EventBridge task_contracts"
+                                        );
+                                    }
                                     let ev = BoardEvent::TaskCreated {
                                         task_id: task.id.to_string(),
                                         title: task.title.clone(),

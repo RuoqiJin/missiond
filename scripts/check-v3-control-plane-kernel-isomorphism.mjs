@@ -604,6 +604,10 @@ function checkFiles(root, files) {
   ]);
 
   requireAll(diagnostics, files.v2Subscribers, sources.v2Subscribers, [
+    'ControlPlaneKernel',
+    'UpsertTaskContractCommand',
+    '.upsert_task_contract_command(UpsertTaskContractCommand',
+    'failed to upsert EventBridge task_contracts',
     'runtime_metadata: Some(runtime_metadata)',
     '"source": "eventbridge"',
     '"control_state": "task_contracts"',
