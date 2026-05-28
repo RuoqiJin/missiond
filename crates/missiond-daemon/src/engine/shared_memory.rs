@@ -1335,6 +1335,92 @@ impl SharedMemoryService {
         ))
     }
 
+    async fn consume_capability_grant(
+        &self,
+        grant_id: &str,
+        operation: &str,
+        task_id: &str,
+        subject_kind: &str,
+        subject_id: &str,
+    ) -> Result<()> {
+        if grant_id.starts_with("bypass:") {
+            return Ok(());
+        }
+
+        let result = sqlx::query(
+            r#"
+            UPDATE capability_grants
+            SET status = 'consumed', consumed_at = now()
+            WHERE id = $1
+              AND operation = $2
+              AND task_id IS NOT DISTINCT FROM $3
+              AND subject_kind = $4
+              AND subject_id = $5
+              AND status = 'active'
+              AND consumed_at IS NULL
+              AND (expires_at IS NULL OR expires_at > now())
+            "#,
+        )
+        .bind(grant_id)
+        .bind(operation)
+        .bind(task_id)
+        .bind(subject_kind)
+        .bind(subject_id)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() != 1 {
+            self.audit_capability(
+                Some(grant_id),
+                Some(subject_kind),
+                Some(subject_id),
+                operation,
+                "task",
+                task_id,
+                "denied",
+                Some(CAPABILITY_DENIED_CODE),
+                json!({
+                    "reason": "exact capability grant was not consumable",
+                    "task_id": task_id,
+                    "grant_id": grant_id,
+                    "subject_kind": subject_kind,
+                    "subject_id": subject_id
+                }),
+            )
+            .await?;
+            return Err(control_error_details(
+                CAPABILITY_DENIED_CODE,
+                format!("exact {operation} grant {grant_id} for task {task_id} was not consumable"),
+                json!({
+                    "task_id": task_id,
+                    "grant_id": grant_id,
+                    "subject_kind": subject_kind,
+                    "subject_id": subject_id,
+                    "required": "active exact unconsumed grant"
+                }),
+            ));
+        }
+
+        self.audit_capability(
+            Some(grant_id),
+            Some(subject_kind),
+            Some(subject_id),
+            operation,
+            "task",
+            task_id,
+            "allowed",
+            None,
+            json!({
+                "task_id": task_id,
+                "grant_id": grant_id,
+                "consumed": true,
+                "exact_grant": true
+            }),
+        )
+        .await?;
+        Ok(())
+    }
+
     pub(crate) async fn active_capability_grant_id(
         &self,
         task_id: &str,
@@ -3520,23 +3606,24 @@ impl SharedMemoryService {
             ));
         }
         let runtime_contract = self.task_runtime_contract(task_id).await?;
-        self.require_capability(CapabilityCheckRequest {
-            grant_id: req.grant_id.clone(),
-            subject_kind: req.subject_kind.clone(),
-            subject_id: req.subject_id.clone(),
-            operation: "settle".to_string(),
-            scope_kind: "task".to_string(),
-            scope_key: task_id.to_string(),
-            task_id: Some(task_id.to_string()),
-            allow_system_bypass: req.allow_system_bypass,
-            bypass_reason: Some("worker_settle system/operator authority".to_string()),
-            details: json!({
-                "artifact_hash": artifact_hash_owned.clone(),
-                "task_contract_id": runtime_contract.task_contract_id.clone(),
-                "runtime_contract_grants": runtime_contract.capability_grant_ids.clone()
-            }),
-        })
-        .await?;
+        let settle_capability_grant_id = self
+            .require_capability(CapabilityCheckRequest {
+                grant_id: req.grant_id.clone(),
+                subject_kind: req.subject_kind.clone(),
+                subject_id: req.subject_id.clone(),
+                operation: "settle".to_string(),
+                scope_kind: "task".to_string(),
+                scope_key: task_id.to_string(),
+                task_id: Some(task_id.to_string()),
+                allow_system_bypass: req.allow_system_bypass,
+                bypass_reason: Some("worker_settle system/operator authority".to_string()),
+                details: json!({
+                    "artifact_hash": artifact_hash_owned.clone(),
+                    "task_contract_id": runtime_contract.task_contract_id.clone(),
+                    "runtime_contract_grants": runtime_contract.capability_grant_ids.clone()
+                }),
+            })
+            .await?;
         if target_status.eq_ignore_ascii_case("done") && !runtime_contract.write_scope.is_empty() {
             let artifact_hash = artifact_hash_owned.as_deref().ok_or_else(|| {
                 control_error_details(
@@ -3572,6 +3659,17 @@ impl SharedMemoryService {
                     }),
                 ));
             }
+        }
+
+        if target_status.eq_ignore_ascii_case("done") {
+            self.consume_capability_grant(
+                settle_capability_grant_id.as_str(),
+                "settle",
+                task_id,
+                req.subject_kind.as_str(),
+                req.subject_id.as_str(),
+            )
+            .await?;
         }
 
         let conversation_rows = self

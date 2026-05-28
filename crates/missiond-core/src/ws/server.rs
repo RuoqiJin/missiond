@@ -2806,112 +2806,112 @@ impl PTYWebSocketServer {
         )
         .await?;
 
-        Self::write_sse_event(
-            &mut stream,
-            "status",
-            &serde_json::json!({
-                "interaction_id": interaction_id,
-                "phase": "intent_authoring",
-                "author": "codex-cli-gpt-5.5-xhigh",
-                "slot_id": &jarvis_intent_author.slot_id,
-                "message": "Codex CLI GPT-5.5 xhigh is authoring intent.lisp for user confirmation."
-            }),
-        )
-        .await?;
-        let authored_intent = match Self::author_jarvis_intent_draft(
-            pty_manager.as_ref(),
-            &jarvis_intent_author,
-            "missiond.interaction-intent-artifact.v1",
-            &channel,
-            &objective_text,
-            &grounding_context_id,
-            resolved_topic_id.as_deref(),
-            resolved_topic_label.as_deref(),
-            &sources_used,
-            Some(&permission_context),
-        )
-        .await
-        {
-            Ok(draft) => draft,
-            Err(error) => {
-                let diagnostic = serde_json::json!({
-                    "phase": "intent_authoring_failed",
-                    "error": {
-                        "code": "JARVIS_INTENT_AUTHOR_FAILED",
-                        "message": error.to_string()
-                    }
-                });
-                Self::write_sse_event(&mut stream, "diagnostic", &diagnostic).await?;
-                Self::write_sse_openai_text_and_persist(
-                    &mut stream,
-                    &chat_id,
-                    "intent.lisp 需要 Codex CLI GPT-5.5 xhigh 工位生成；当前工位不可用或输出未通过校验，已停止，不会用 Rust fallback 代替你的意图识别。",
-                    Some("stop"),
-                    db.as_ref(),
-                    jarvis_conv_id.as_deref(),
-                )
-                .await?;
-                Self::finish_sse(&mut stream).await?;
-                return Ok(());
-            }
-        };
-        let objective_text = authored_intent.objective.clone();
-        let intent_payload = serde_json::json!({
-            "schema": "missiond.interaction-intent-artifact.v1",
-            "interaction_id": interaction_id,
-            "channel": channel,
-            "phase": "intent_draft",
-            "author": "codex-cli-gpt-5.5-xhigh",
-            "intent_author_slot_id": &jarvis_intent_author.slot_id,
-            "intent_kind": authored_intent.intent_kind,
-            "confidence": authored_intent.confidence,
-            "grounding_context_id": grounding_context_id,
-            "context_pack_path": context_pack_path,
-            "context_pack_file": context_pack_file,
-            "context_capsule_hash": context_capsule_hash,
-            "context_capsule_file": context_capsule_file,
-            "topic_id": resolved_topic_id,
-            "topic_label": resolved_topic_label,
-            "permission_context": permission_context.clone(),
-            "understanding": authored_intent.understanding,
-            "objective": objective_text,
-            "original_user_message": &raw_user_text,
-            "user_message_preview": raw_user_text.chars().take(240).collect::<String>(),
-            "review_text": authored_intent.review_text,
-            "artifact_language": "lisp",
-            "artifact_body": authored_intent.artifact_body,
-            "assumptions": authored_intent.assumptions,
-            "non_goals": authored_intent.non_goals,
-            "acceptance_signals": authored_intent.acceptance_signals,
-            "sources_used": sources_used,
-            "requires_confirmation": true
-        });
-        let intent_artifact = match Self::put_jarvis_artifact(
-            &jarvis_artifact_writer,
-            JarvisArtifactRequest {
-                kind: "interaction-intent-draft".to_string(),
-                project_id: None,
-                task_id: None,
-                payload: intent_payload.clone(),
-                metadata: serde_json::json!({
-                    "schema": "missiond.interaction-intent-artifact.v1",
+        let intent_artifact_id = if !intent_confirmed {
+            Self::write_sse_event(
+                &mut stream,
+                "status",
+                &serde_json::json!({
                     "interaction_id": interaction_id,
-                    "channel": channel,
-                    "conversation_id": jarvis_conv_id,
-                    "grounding_context_id": grounding_context_id,
+                    "phase": "intent_authoring",
+                    "author": "codex-cli-gpt-5.5-xhigh",
+                    "slot_id": &jarvis_intent_author.slot_id,
+                    "message": "Codex CLI GPT-5.5 xhigh is authoring intent.lisp for user confirmation."
                 }),
-            },
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(error) => {
-                Self::fail_jarvis_gate(&mut stream, error, "intent_artifact").await?;
-                return Ok(());
-            }
-        };
-        let intent_artifact_id = intent_artifact.artifact_id.clone();
-        if !intent_confirmed {
+            )
+            .await?;
+            let authored_intent = match Self::author_jarvis_intent_draft(
+                pty_manager.as_ref(),
+                &jarvis_intent_author,
+                "missiond.interaction-intent-artifact.v1",
+                &channel,
+                &objective_text,
+                &grounding_context_id,
+                resolved_topic_id.as_deref(),
+                resolved_topic_label.as_deref(),
+                &sources_used,
+                Some(&permission_context),
+            )
+            .await
+            {
+                Ok(draft) => draft,
+                Err(error) => {
+                    let diagnostic = serde_json::json!({
+                        "phase": "intent_authoring_failed",
+                        "error": {
+                            "code": "JARVIS_INTENT_AUTHOR_FAILED",
+                            "message": error.to_string()
+                        }
+                    });
+                    Self::write_sse_event(&mut stream, "diagnostic", &diagnostic).await?;
+                    Self::write_sse_openai_text_and_persist(
+                        &mut stream,
+                        &chat_id,
+                        "intent.lisp 需要 Codex CLI GPT-5.5 xhigh 工位生成；当前工位不可用或输出未通过校验，已停止，不会用 Rust fallback 代替你的意图识别。",
+                        Some("stop"),
+                        db.as_ref(),
+                        jarvis_conv_id.as_deref(),
+                    )
+                    .await?;
+                    Self::finish_sse(&mut stream).await?;
+                    return Ok(());
+                }
+            };
+            let objective_text = authored_intent.objective.clone();
+            let intent_payload = serde_json::json!({
+                "schema": "missiond.interaction-intent-artifact.v1",
+                "interaction_id": interaction_id,
+                "channel": &channel,
+                "phase": "intent_draft",
+                "author": "codex-cli-gpt-5.5-xhigh",
+                "intent_author_slot_id": &jarvis_intent_author.slot_id,
+                "intent_kind": authored_intent.intent_kind,
+                "confidence": authored_intent.confidence,
+                "grounding_context_id": grounding_context_id,
+                "context_pack_path": context_pack_path,
+                "context_pack_file": context_pack_file,
+                "context_capsule_hash": context_capsule_hash,
+                "context_capsule_file": context_capsule_file,
+                "topic_id": resolved_topic_id,
+                "topic_label": resolved_topic_label,
+                "permission_context": permission_context.clone(),
+                "understanding": authored_intent.understanding,
+                "objective": objective_text,
+                "original_user_message": &raw_user_text,
+                "user_message_preview": raw_user_text.chars().take(240).collect::<String>(),
+                "review_text": authored_intent.review_text,
+                "artifact_language": "lisp",
+                "artifact_body": authored_intent.artifact_body,
+                "assumptions": authored_intent.assumptions,
+                "non_goals": authored_intent.non_goals,
+                "acceptance_signals": authored_intent.acceptance_signals,
+                "sources_used": sources_used,
+                "requires_confirmation": true
+            });
+            let intent_artifact = match Self::put_jarvis_artifact(
+                &jarvis_artifact_writer,
+                JarvisArtifactRequest {
+                    kind: "interaction-intent-draft".to_string(),
+                    project_id: None,
+                    task_id: None,
+                    payload: intent_payload.clone(),
+                    metadata: serde_json::json!({
+                        "schema": "missiond.interaction-intent-artifact.v1",
+                        "interaction_id": interaction_id,
+                        "channel": &channel,
+                        "conversation_id": jarvis_conv_id,
+                        "grounding_context_id": grounding_context_id,
+                    }),
+                },
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    Self::fail_jarvis_gate(&mut stream, error, "intent_artifact").await?;
+                    return Ok(());
+                }
+            };
+            let intent_artifact_id = intent_artifact.artifact_id.clone();
             let mut intent = intent_payload;
             if let Some(object) = intent.as_object_mut() {
                 object.insert(
@@ -2966,7 +2966,20 @@ impl PTYWebSocketServer {
             .await?;
             Self::finish_sse(&mut stream).await?;
             return Ok(());
-        }
+        } else {
+            match interaction_metadata_string(&envelope, "missiond_intent_artifact_id") {
+                Some(value) => value,
+                None => {
+                    Self::fail_jarvis_gate(
+                        &mut stream,
+                        "Jarvis intent confirmation requires missiond_intent_artifact_id from the previous intent payload; refusing to regenerate intent.lisp during confirmation.".to_string(),
+                        "confirmation_intent_artifact",
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            }
+        };
 
         if intent_confirmed && !plan_confirmed {
             Self::persist_jarvis_confirmation_fulfilled(
@@ -2977,114 +2990,114 @@ impl PTYWebSocketServer {
             .await;
         }
 
-        Self::write_sse_event(
-            &mut stream,
-            "status",
-            &serde_json::json!({
-                "interaction_id": interaction_id,
-                "phase": "plan_authoring",
-                "author": "codex-cli-gpt-5.5-xhigh",
-                "slot_id": &jarvis_plan_author.slot_id,
-                "message": "Codex CLI GPT-5.5 xhigh is authoring plan.lisp for user confirmation."
-            }),
-        )
-        .await?;
-        let authored_plan = match Self::author_jarvis_plan_draft(
-            pty_manager.as_ref(),
-            &jarvis_plan_author,
-            "missiond.interaction-plan-artifact.v1",
-            &channel,
-            &objective_text,
-            &grounding_context_id,
-            &intent_artifact_id,
-            resolved_topic_id.as_deref(),
-            resolved_topic_label.as_deref(),
-            &sources_used,
-            Some(&permission_context),
-        )
-        .await
-        {
-            Ok(draft) => draft,
-            Err(error) => {
-                let diagnostic = serde_json::json!({
-                    "phase": "plan_authoring_failed",
-                    "error": {
-                        "code": "JARVIS_PLAN_AUTHOR_FAILED",
-                        "message": error.to_string()
-                    }
-                });
-                Self::write_sse_event(&mut stream, "diagnostic", &diagnostic).await?;
-                Self::write_sse_openai_text_and_persist(
-                    &mut stream,
-                    &chat_id,
-                    "plan.lisp 需要 Codex CLI GPT-5.5 xhigh 工位生成；当前工位不可用或输出未通过校验，已停止，不会用 Rust fallback 代替你的计划生成。",
-                    Some("stop"),
-                    db.as_ref(),
-                    jarvis_conv_id.as_deref(),
-                )
-                .await?;
-                Self::finish_sse(&mut stream).await?;
-                return Ok(());
-            }
-        };
-        let objective_text = authored_plan.objective.clone();
-        let plan_review_text = authored_plan.review_text.clone();
-        let plan_artifact_body = authored_plan.artifact_body.clone();
-        let plan_steps = authored_plan.steps.clone();
-        let plan_payload = serde_json::json!({
-            "schema": "missiond.interaction-plan-artifact.v1",
-            "interaction_id": interaction_id,
-            "channel": channel,
-            "phase": "plan_draft",
-            "author": "codex-cli-gpt-5.5-xhigh",
-            "plan_author_slot_id": &jarvis_plan_author.slot_id,
-            "confidence": authored_plan.confidence,
-            "grounding_context_id": grounding_context_id,
-            "context_pack_path": context_pack_path,
-            "context_pack_file": context_pack_file,
-            "context_capsule_hash": context_capsule_hash,
-            "context_capsule_file": context_capsule_file,
-            "topic_id": resolved_topic_id,
-            "topic_label": resolved_topic_label,
-            "intent_artifact_id": intent_artifact_id,
-            "objective": objective_text,
-            "review_text": plan_review_text,
-            "artifact_language": "lisp",
-            "artifact_body": plan_artifact_body,
-            "steps": plan_steps,
-            "boundary": authored_plan.boundary,
-            "assumptions": authored_plan.assumptions,
-            "non_goals": authored_plan.non_goals,
-            "acceptance_signals": authored_plan.acceptance_signals,
-            "sources_used": sources_used,
-            "requires_confirmation": true
-        });
-        let plan_artifact = match Self::put_jarvis_artifact(
-            &jarvis_artifact_writer,
-            JarvisArtifactRequest {
-                kind: "interaction-plan-draft".to_string(),
-                project_id: None,
-                task_id: None,
-                payload: plan_payload.clone(),
-                metadata: serde_json::json!({
-                    "schema": "missiond.interaction-plan-artifact.v1",
+        let plan_artifact_id = if !plan_confirmed {
+            Self::write_sse_event(
+                &mut stream,
+                "status",
+                &serde_json::json!({
                     "interaction_id": interaction_id,
-                    "channel": channel,
-                    "grounding_context_id": grounding_context_id,
-                    "intent_artifact_id": intent_artifact_id,
+                    "phase": "plan_authoring",
+                    "author": "codex-cli-gpt-5.5-xhigh",
+                    "slot_id": &jarvis_plan_author.slot_id,
+                    "message": "Codex CLI GPT-5.5 xhigh is authoring plan.lisp for user confirmation."
                 }),
-            },
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(error) => {
-                Self::fail_jarvis_gate(&mut stream, error, "plan_artifact").await?;
-                return Ok(());
-            }
-        };
-        let plan_artifact_id = plan_artifact.artifact_id.clone();
-        if !plan_confirmed {
+            )
+            .await?;
+            let authored_plan = match Self::author_jarvis_plan_draft(
+                pty_manager.as_ref(),
+                &jarvis_plan_author,
+                "missiond.interaction-plan-artifact.v1",
+                &channel,
+                &objective_text,
+                &grounding_context_id,
+                &intent_artifact_id,
+                resolved_topic_id.as_deref(),
+                resolved_topic_label.as_deref(),
+                &sources_used,
+                Some(&permission_context),
+            )
+            .await
+            {
+                Ok(draft) => draft,
+                Err(error) => {
+                    let diagnostic = serde_json::json!({
+                        "phase": "plan_authoring_failed",
+                        "error": {
+                            "code": "JARVIS_PLAN_AUTHOR_FAILED",
+                            "message": error.to_string()
+                        }
+                    });
+                    Self::write_sse_event(&mut stream, "diagnostic", &diagnostic).await?;
+                    Self::write_sse_openai_text_and_persist(
+                        &mut stream,
+                        &chat_id,
+                        "plan.lisp 需要 Codex CLI GPT-5.5 xhigh 工位生成；当前工位不可用或输出未通过校验，已停止，不会用 Rust fallback 代替你的计划生成。",
+                        Some("stop"),
+                        db.as_ref(),
+                        jarvis_conv_id.as_deref(),
+                    )
+                    .await?;
+                    Self::finish_sse(&mut stream).await?;
+                    return Ok(());
+                }
+            };
+            let plan_objective_text = authored_plan.objective.clone();
+            let plan_review_text = authored_plan.review_text.clone();
+            let plan_artifact_body = authored_plan.artifact_body.clone();
+            let plan_steps = authored_plan.steps.clone();
+            let plan_payload = serde_json::json!({
+                "schema": "missiond.interaction-plan-artifact.v1",
+                "interaction_id": interaction_id,
+                "channel": &channel,
+                "phase": "plan_draft",
+                "author": "codex-cli-gpt-5.5-xhigh",
+                "plan_author_slot_id": &jarvis_plan_author.slot_id,
+                "confidence": authored_plan.confidence,
+                "grounding_context_id": grounding_context_id,
+                "context_pack_path": context_pack_path,
+                "context_pack_file": context_pack_file,
+                "context_capsule_hash": context_capsule_hash,
+                "context_capsule_file": context_capsule_file,
+                "topic_id": resolved_topic_id,
+                "topic_label": resolved_topic_label,
+                "intent_artifact_id": intent_artifact_id,
+                "objective": plan_objective_text,
+                "review_text": plan_review_text,
+                "artifact_language": "lisp",
+                "artifact_body": plan_artifact_body,
+                "steps": plan_steps,
+                "boundary": authored_plan.boundary,
+                "assumptions": authored_plan.assumptions,
+                "non_goals": authored_plan.non_goals,
+                "acceptance_signals": authored_plan.acceptance_signals,
+                "sources_used": sources_used,
+                "requires_confirmation": true
+            });
+            let plan_artifact = match Self::put_jarvis_artifact(
+                &jarvis_artifact_writer,
+                JarvisArtifactRequest {
+                    kind: "interaction-plan-draft".to_string(),
+                    project_id: None,
+                    task_id: None,
+                    payload: plan_payload.clone(),
+                    metadata: serde_json::json!({
+                        "schema": "missiond.interaction-plan-artifact.v1",
+                        "interaction_id": interaction_id,
+                        "channel": &channel,
+                        "grounding_context_id": grounding_context_id,
+                        "intent_artifact_id": intent_artifact_id,
+                    }),
+                },
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    Self::fail_jarvis_gate(&mut stream, error, "plan_artifact").await?;
+                    return Ok(());
+                }
+            };
+            let plan_artifact_id = plan_artifact.artifact_id.clone();
             let mut plan = plan_payload;
             if let Some(object) = plan.as_object_mut() {
                 object.insert(
@@ -3117,7 +3130,7 @@ impl PTYWebSocketServer {
                 "confirm_payload": {
                     "missiond_intent_confirmed": true,
                     "missiond_plan_confirmed": true,
-                    "missiond_objective": objective_text,
+                    "missiond_objective": plan_objective_text,
                     "missiond_grounding_context_id": grounding_context_id,
                     "missiond_intent_artifact_id": intent_artifact_id,
                     "missiond_plan_artifact_id": plan_artifact_id,
@@ -3141,7 +3154,20 @@ impl PTYWebSocketServer {
             .await?;
             Self::finish_sse(&mut stream).await?;
             return Ok(());
-        }
+        } else {
+            match interaction_metadata_string(&envelope, "missiond_plan_artifact_id") {
+                Some(value) => value,
+                None => {
+                    Self::fail_jarvis_gate(
+                        &mut stream,
+                        "Jarvis plan confirmation requires missiond_plan_artifact_id from the previous plan payload; refusing to regenerate plan.lisp during confirmation.".to_string(),
+                        "confirmation_plan_artifact",
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            }
+        };
 
         let Some(ref db) = db else {
             Self::write_sse_event(
@@ -9329,7 +9355,9 @@ done"#;
                 "missiond_confirm": {
                     "confirm_payload": {
                         "missiond_intent_confirmed": true,
-                        "missiond_objective": "原始目标"
+                        "missiond_objective": "原始目标",
+                        "missiond_intent_artifact_id": "intent-artifact-1",
+                        "missiond_plan_artifact_id": "plan-artifact-1"
                     }
                 }
             },
@@ -9355,6 +9383,14 @@ done"#;
         assert_eq!(
             interaction_metadata_string(&envelope, "missiond_objective").as_deref(),
             Some("原始目标")
+        );
+        assert_eq!(
+            interaction_metadata_string(&envelope, "missiond_intent_artifact_id").as_deref(),
+            Some("intent-artifact-1")
+        );
+        assert_eq!(
+            interaction_metadata_string(&envelope, "missiond_plan_artifact_id").as_deref(),
+            Some("plan-artifact-1")
         );
         assert_eq!(
             interaction_metadata_string(&envelope, "missiond_follow_task_id").as_deref(),
