@@ -2983,8 +2983,10 @@ impl SharedMemoryService {
         let limit = bounded_limit(args);
         let rows = sqlx::query(
             r#"
-            SELECT id, artifact_hash, project_id, task_id, slot_id, conversation_id,
-                   provider, result_status, summary, created_at
+            SELECT id, artifact_hash, project_id, task_id, job_id, attempt_id,
+                   slot_id, conversation_id, provider, result_status, summary,
+                   producer_subject_kind, producer_subject_id, capability_grant_id,
+                   created_at
             FROM task_result_artifacts
             WHERE ($1::text IS NULL OR task_id = $1)
               AND ($2::text IS NULL OR artifact_hash = $2)
@@ -3421,8 +3423,10 @@ impl SharedMemoryService {
 
         let task_results = sqlx::query(
             r#"
-            SELECT id, artifact_hash, project_id, task_id, slot_id, conversation_id,
-                   provider, result_status, summary, created_at
+            SELECT id, artifact_hash, project_id, task_id, job_id, attempt_id,
+                   slot_id, conversation_id, provider, result_status, summary,
+                   producer_subject_kind, producer_subject_id, capability_grant_id,
+                   created_at
             FROM task_result_artifacts
             WHERE ($1::text IS NULL OR task_id = $1)
               AND ($2::text IS NULL OR project_id = $2)
@@ -5314,11 +5318,16 @@ fn task_result_row_json(row: sqlx::postgres::PgRow) -> Value {
         "artifact_hash": row.get::<String, _>("artifact_hash"),
         "project_id": row.try_get::<Option<String>, _>("project_id").ok().flatten(),
         "task_id": row.get::<String, _>("task_id"),
+        "job_id": row.try_get::<Option<String>, _>("job_id").ok().flatten(),
+        "attempt_id": row.try_get::<Option<String>, _>("attempt_id").ok().flatten(),
         "slot_id": row.try_get::<Option<String>, _>("slot_id").ok().flatten(),
         "conversation_id": row.try_get::<Option<String>, _>("conversation_id").ok().flatten(),
         "provider": row.try_get::<Option<String>, _>("provider").ok().flatten(),
         "result_status": row.get::<String, _>("result_status"),
         "summary": row.get::<String, _>("summary"),
+        "producer_subject_kind": row.try_get::<Option<String>, _>("producer_subject_kind").ok().flatten(),
+        "producer_subject_id": row.try_get::<Option<String>, _>("producer_subject_id").ok().flatten(),
+        "capability_grant_id": row.try_get::<Option<String>, _>("capability_grant_id").ok().flatten(),
         "created_at": created_at.to_rfc3339()
     })
 }

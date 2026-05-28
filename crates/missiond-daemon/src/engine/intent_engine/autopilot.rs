@@ -491,8 +491,9 @@ async fn observe_autopilot_task_result_candidate(
         })
         .ok();
 
-    let artifact_hash =
-        completed_task_result_artifact_hash_for_task(state, task, candidate_hash.as_deref()).await;
+    let artifact =
+        completed_task_result_artifact_for_task(state, task, candidate_hash.as_deref()).await;
+    let artifact_hash = artifact.map(|artifact| artifact.artifact_hash);
     if artifact_hash.is_none() {
         info!(
             task_id = %task.id,
@@ -733,11 +734,50 @@ async fn ensure_task_result_control_capabilities(
     Ok(grant_ids)
 }
 
-async fn completed_task_result_artifact_hash_for_task(
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompletedTaskResultArtifact {
+    artifact_hash: String,
+    attempt_id: Option<String>,
+}
+
+fn completed_task_result_artifact_from_results(
+    value: &serde_json::Value,
+    task_id: &str,
+) -> Option<CompletedTaskResultArtifact> {
+    value
+        .get("results")
+        .and_then(|v| v.as_array())
+        .and_then(|rows| {
+            rows.iter().find_map(|row| {
+                let row_task_id = row.get("task_id").and_then(|v| v.as_str())?;
+                if row_task_id != task_id {
+                    return None;
+                }
+                let status = row.get("result_status").and_then(|v| v.as_str());
+                if !task_result_status_is_completed(status) {
+                    return None;
+                }
+                Some(CompletedTaskResultArtifact {
+                    artifact_hash: row
+                        .get("artifact_hash")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)?,
+                    attempt_id: row
+                        .get("attempt_id")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string),
+                })
+            })
+        })
+}
+
+async fn completed_task_result_artifact_for_task(
     state: &AppState,
     task: &missiond_core::types::BoardTask,
     candidate_hash: Option<&str>,
-) -> Option<String> {
+) -> Option<CompletedTaskResultArtifact> {
     let mut args = serde_json::json!({
         "task_id": task.id.as_str(),
         "limit": 10
@@ -751,24 +791,7 @@ async fn completed_task_result_artifact_hash_for_task(
         .task_result_get_typed(&args)
         .await
         .ok()?;
-    value
-        .get("results")
-        .and_then(|v| v.as_array())
-        .and_then(|rows| {
-            rows.iter().find_map(|row| {
-                let row_task_id = row.get("task_id").and_then(|v| v.as_str())?;
-                if row_task_id != task.id.as_str() {
-                    return None;
-                }
-                let status = row.get("result_status").and_then(|v| v.as_str());
-                if !task_result_status_is_completed(status) {
-                    return None;
-                }
-                row.get("artifact_hash")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string)
-            })
-        })
+    completed_task_result_artifact_from_results(&value, task.id.as_str())
 }
 
 fn task_result_status_is_completed(status: Option<&str>) -> bool {
@@ -786,6 +809,7 @@ async fn settle_autopilot_done_with_artifact(
     task: &missiond_core::types::BoardTask,
     slot_id: &str,
     artifact_hash: &str,
+    attempt_id: Option<&str>,
     summary: &str,
 ) -> Result<()> {
     let settle_grant_id = state
@@ -816,7 +840,7 @@ async fn settle_autopilot_done_with_artifact(
             grant_id: settle_grant_id,
             subject_kind: "worker".to_string(),
             subject_id: slot_id.to_string(),
-            attempt_id: None,
+            attempt_id: attempt_id.map(str::to_string),
             allow_system_bypass: false,
         })
         .await?;
@@ -830,10 +854,13 @@ async fn settle_autopilot_done_from_existing_artifact(
     summary: &str,
     source: &str,
 ) -> Result<bool> {
-    let Some(artifact_hash) = completed_task_result_artifact_hash_for_task(state, task, None).await
-    else {
+    let Some(artifact) = completed_task_result_artifact_for_task(state, task, None).await else {
         return Ok(false);
     };
+    let CompletedTaskResultArtifact {
+        artifact_hash,
+        attempt_id,
+    } = artifact;
     let summary_for_note = truncate_safe(summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES);
     let note = format!(
         "**Canonical artifact already accepted** ({source})\n\n{}\
@@ -849,7 +876,15 @@ async fn settle_autopilot_done_from_existing_artifact(
             author: Some("autopilot".to_string()),
         })
         .await;
-    settle_autopilot_done_with_artifact(state, task, slot_id, &artifact_hash, summary).await?;
+    settle_autopilot_done_with_artifact(
+        state,
+        task,
+        slot_id,
+        &artifact_hash,
+        attempt_id.as_deref(),
+        summary,
+    )
+    .await?;
     Ok(true)
 }
 
@@ -890,7 +925,8 @@ async fn materialize_and_settle_readonly_durable_completion(
             author: Some("autopilot".to_string()),
         })
         .await;
-    settle_autopilot_done_with_artifact(state, task, slot_id, &artifact_hash, summary).await?;
+    settle_autopilot_done_with_artifact(state, task, slot_id, &artifact_hash, None, summary)
+        .await?;
     settle_worker_conversation(state, slot_id, task).await;
     let _ = state
         .store
@@ -2088,11 +2124,23 @@ async fn close_idle_running_task_from_durable_summary(
             "EVIDENCE_REQUIRED: task_id={task_id}: canonical completed task_result_artifact hash required"
         )
     })?;
+    let artifact = completed_task_result_artifact_for_task(
+        state,
+        &task_with_notes.task,
+        Some(artifact_hash.as_str()),
+    )
+    .await
+    .ok_or_else(|| {
+        anyhow!(
+            "EVIDENCE_REQUIRED: task_id={task_id}: exact completed task_result_artifact hash no longer resolves"
+        )
+    })?;
     settle_autopilot_done_with_artifact(
         state,
         &task_with_notes.task,
         slot_id,
-        &artifact_hash,
+        artifact.artifact_hash.as_str(),
+        artifact.attempt_id.as_deref(),
         "Durable completion observed by Autopilot idle watchdog.",
     )
     .await?;
@@ -5293,11 +5341,26 @@ async fn dispatch_board_tasks_with_config(
                         DispatchCloseAction::OwnerClosesAsDone => {
                             // Normal case: running → done. Autopilot is the close owner.
                             if let Some(hash) = task_result_artifact_hash.as_deref() {
+                                let artifact = completed_task_result_artifact_for_task(
+                                    state,
+                                    &task,
+                                    Some(hash),
+                                )
+                                .await;
+                                let Some(artifact) = artifact else {
+                                    warn!(
+                                        task_id = %task.id,
+                                        artifact_hash = hash,
+                                        "Autopilot: worker_settle(done) refused task close because exact artifact hash no longer resolves"
+                                    );
+                                    return;
+                                };
                                 if let Err(err) = settle_autopilot_done_with_artifact(
                                     state,
                                     &task,
                                     &slot_id,
-                                    hash,
+                                    artifact.artifact_hash.as_str(),
+                                    artifact.attempt_id.as_deref(),
                                     &summary_for_note,
                                 )
                                 .await
@@ -6201,6 +6264,40 @@ mod tests {
     use super::*;
 
     // Minimal AppState is hard to construct, so test pure functions only.
+
+    #[test]
+    fn completed_task_result_artifact_carries_attempt_fact() {
+        let value = serde_json::json!({
+            "results": [
+                {
+                    "task_id": "task-1",
+                    "artifact_hash": "hash-running",
+                    "attempt_id": "attempt-old",
+                    "result_status": "running"
+                },
+                {
+                    "task_id": "task-other",
+                    "artifact_hash": "hash-other",
+                    "attempt_id": "attempt-other",
+                    "result_status": "completed"
+                },
+                {
+                    "task_id": "task-1",
+                    "artifact_hash": "hash-1",
+                    "attempt_id": "attempt-1",
+                    "result_status": "completed"
+                }
+            ]
+        });
+
+        assert_eq!(
+            completed_task_result_artifact_from_results(&value, "task-1"),
+            Some(CompletedTaskResultArtifact {
+                artifact_hash: "hash-1".to_string(),
+                attempt_id: Some("attempt-1".to_string())
+            })
+        );
+    }
 
     #[test]
     fn test_build_stuck_summary_basic() {
