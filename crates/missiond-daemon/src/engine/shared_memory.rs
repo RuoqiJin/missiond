@@ -225,6 +225,19 @@ pub(crate) struct CapabilityCheckRequest {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct JobEventRequest {
+    pub task_id: String,
+    pub project_id: Option<String>,
+    pub agent_id: String,
+    pub event_kind: String,
+    pub attempt_id: Option<String>,
+    pub worker_id: Option<String>,
+    pub conversation_id: Option<String>,
+    pub runtime_metadata: Value,
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct WorkerSettleRequest {
     pub task_id: String,
     pub project_id: Option<String>,
@@ -397,6 +410,21 @@ impl SharedMemoryService {
 
     pub(crate) async fn job_event_typed(&self, args: Value) -> Result<Value> {
         self.job_event_from_args(&args).await
+    }
+
+    pub(crate) async fn job_event_command(&self, req: JobEventRequest) -> Result<Value> {
+        self.job_event_from_args(&json!({
+            "task_id": req.task_id,
+            "project_id": req.project_id,
+            "agent_id": req.agent_id,
+            "event_kind": req.event_kind,
+            "attempt_id": req.attempt_id,
+            "worker_id": req.worker_id,
+            "conversation_id": req.conversation_id,
+            "runtime_metadata": req.runtime_metadata,
+            "payload": req.payload
+        }))
+        .await
     }
 
     pub(crate) async fn settle_worker_typed(&self, args: Value) -> Result<Value> {

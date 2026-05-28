@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 
 use crate::engine::shared_memory::{
     CapabilityCheckRequest, CapabilityGrantInput, ClaimRequest, HeartbeatLeaseRequest,
-    ReleaseLeaseRequest, TaskResultPutRequest, WorkerSettleRequest,
+    JobEventRequest, ReleaseLeaseRequest, TaskResultPutRequest, WorkerSettleRequest,
 };
 use crate::engine::task_completion_evidence::{
     TaskCompletionEvidenceInput, TaskCompletionEvidenceWriter,
@@ -221,15 +221,17 @@ impl<'a> ControlPlaneKernel<'a> {
     ) -> Result<Value> {
         self.state
             .shared_memory
-            .job_event_typed(json!({
-                "task_id": command.task_id,
-                "project_id": command.project_id,
-                "event_kind": "attempt.started",
-                "attempt_id": command.attempt_id,
-                "agent_id": command.agent_id,
-                "worker_id": command.worker_id,
-                "payload": command.payload,
-            }))
+            .job_event_command(JobEventRequest {
+                task_id: command.task_id,
+                project_id: command.project_id,
+                agent_id: command.agent_id,
+                event_kind: "attempt.started".to_string(),
+                attempt_id: Some(command.attempt_id),
+                worker_id: Some(command.worker_id),
+                conversation_id: None,
+                runtime_metadata: json!({}),
+                payload: command.payload,
+            })
             .await
     }
 
@@ -556,17 +558,17 @@ impl<'a> ControlPlaneKernel<'a> {
     pub(crate) async fn job_event_command(&self, command: JobEventCommand) -> Result<Value> {
         self.state
             .shared_memory
-            .job_event_typed(json!({
-                "task_id": command.task_id,
-                "project_id": command.project_id,
-                "agent_id": command.agent_id,
-                "event_kind": command.event_kind,
-                "attempt_id": command.attempt_id,
-                "worker_id": command.worker_id,
-                "conversation_id": command.conversation_id,
-                "runtime_metadata": command.runtime_metadata,
-                "payload": command.payload,
-            }))
+            .job_event_command(JobEventRequest {
+                task_id: command.task_id,
+                project_id: command.project_id,
+                agent_id: command.agent_id,
+                event_kind: command.event_kind,
+                attempt_id: command.attempt_id,
+                worker_id: command.worker_id,
+                conversation_id: command.conversation_id,
+                runtime_metadata: command.runtime_metadata,
+                payload: command.payload,
+            })
             .await
     }
 

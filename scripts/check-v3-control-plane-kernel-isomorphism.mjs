@@ -289,6 +289,7 @@ function checkFiles(root, files) {
     'pub(crate) struct ReleaseLeaseRequest',
     'pub(crate) struct HeartbeatLeaseRequest',
     'pub(crate) struct CapabilityCheckRequest',
+    'pub(crate) struct JobEventRequest',
     'pub(crate) struct TaskRuntimeContract',
     'upsert_task_contract_from_metadata',
     'ensure_task_contract_from_metadata',
@@ -297,6 +298,7 @@ function checkFiles(root, files) {
     'pub(crate) async fn claim_lease_typed',
     'pub(crate) async fn release_lease_typed',
     'pub(crate) async fn heartbeat_lease_typed',
+    'pub(crate) async fn job_event_command',
     'pub(crate) async fn task_result_put_typed',
     'pub(crate) async fn task_result_put_command',
     'pub(crate) fn task_result_put_request_from_args',
@@ -410,7 +412,7 @@ function checkFiles(root, files) {
     'WorkerSettleRequest',
     'record_job_event_typed',
     'settle_worker_command',
-    'job_event_typed',
+    'job_event_command(JobEventRequest',
     'grant_task_capabilities',
     'upsert_task_contract_from_metadata',
     'update_task_contract_capability_grants',
@@ -429,6 +431,7 @@ function checkFiles(root, files) {
     '.capability_grant_from_args(',
     '.release_typed(',
     '.heartbeat_typed(',
+    '.job_event_typed(',
     'pub args: Value',
   ]);
 
