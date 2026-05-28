@@ -726,6 +726,10 @@ function checkFiles(root, files) {
     "code === 'CAPABILITY_DENIED'",
     "code === 'WRITE_SCOPE_VIOLATION'",
     "code === 'RUNTIME_METADATA_REQUIRED'",
+    'api.toggleTask(id)',
+  ]);
+  rejectAll(diagnostics, files.boardStoreTs, sources.boardStoreTs, [
+    "status === BOARD_TASK_DEFAULTS.status ? 'done'",
   ]);
 
   rejectDirectSettleOutsideKernel(diagnostics, files, sources);

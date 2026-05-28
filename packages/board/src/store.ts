@@ -244,14 +244,6 @@ export const useTaskCenterStore = create<TaskCenterState>()(
     toggleTask: (id) => {
       const previousTask = get().tasks.find((t) => t.id === id);
       if (!previousTask) return;
-      set({
-        tasks: get().tasks.map((t) =>
-          t.id === id
-            ? { ...t, status: t.status === BOARD_TASK_DEFAULTS.status ? 'done' as const : BOARD_TASK_DEFAULTS.status, updatedAt: new Date().toISOString() }
-            : t
-        ),
-      });
-
       api.toggleTask(id)
         .then((saved) => {
           set({ tasks: get().tasks.map((t) => (t.id === id ? saved : t)), lastError: null });
