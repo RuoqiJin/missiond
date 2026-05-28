@@ -81,6 +81,20 @@ pub(crate) struct ReleaseLeaseCommand {
     pub details: Value,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct RequireCapabilityCommand {
+    pub grant_id: Option<String>,
+    pub subject_kind: String,
+    pub subject_id: String,
+    pub operation: String,
+    pub scope_kind: String,
+    pub scope_key: String,
+    pub task_id: Option<String>,
+    pub allow_system_bypass: bool,
+    pub bypass_reason: Option<String>,
+    pub details: Value,
+}
+
 pub(crate) struct ControlPlaneKernel<'a> {
     state: &'a AppState,
 }
@@ -264,9 +278,7 @@ impl<'a> ControlPlaneKernel<'a> {
         scope_key: &str,
     ) -> Result<Value> {
         let grant_id = self
-            .state
-            .shared_memory
-            .require_capability(CapabilityCheckRequest {
+            .require_capability_command(RequireCapabilityCommand {
                 grant_id: None,
                 subject_kind: "system".to_string(),
                 subject_id: "control-plane-kernel".to_string(),
@@ -288,6 +300,27 @@ impl<'a> ControlPlaneKernel<'a> {
             "scope_kind": scope_kind,
             "scope_key": scope_key
         }))
+    }
+
+    pub(crate) async fn require_capability_command(
+        &self,
+        command: RequireCapabilityCommand,
+    ) -> Result<String> {
+        self.state
+            .shared_memory
+            .require_capability(CapabilityCheckRequest {
+                grant_id: command.grant_id,
+                subject_kind: command.subject_kind,
+                subject_id: command.subject_id,
+                operation: command.operation,
+                scope_kind: command.scope_kind,
+                scope_key: command.scope_key,
+                task_id: command.task_id,
+                allow_system_bypass: command.allow_system_bypass,
+                bypass_reason: command.bypass_reason,
+                details: command.details,
+            })
+            .await
     }
 
     pub(crate) async fn project_board_view(

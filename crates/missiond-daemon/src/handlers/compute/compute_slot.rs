@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
-use crate::engine::shared_memory::CapabilityCheckRequest;
+use crate::engine::control_plane_kernel::{ControlPlaneKernel, RequireCapabilityCommand};
 use crate::state::AppState;
 
 const CODING_DEFAULT_PROFILE: &str = "coding-default-opus-4-7";
@@ -235,9 +235,8 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
         });
         let subject_kind = string_arg(args, &["subject_kind", "subjectKind"]).unwrap_or("worker");
         let subject_id = string_arg(args, &["subject_id", "subjectId"]).unwrap_or(&slot_id);
-        if let Err(err) = state
-            .shared_memory
-            .require_capability(CapabilityCheckRequest {
+        if let Err(err) = ControlPlaneKernel::new(state)
+            .require_capability_command(RequireCapabilityCommand {
                 grant_id,
                 subject_kind: subject_kind.to_string(),
                 subject_id: subject_id.to_string(),

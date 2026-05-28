@@ -293,6 +293,7 @@ function checkFiles(root, files) {
     'pub(crate) struct StartAttemptCommand',
     'pub(crate) struct ClaimLeaseCommand',
     'pub(crate) struct ReleaseLeaseCommand',
+    'pub(crate) struct RequireCapabilityCommand',
     'pub(crate) async fn record_observation',
     'pub(crate) async fn record_observation_command',
     'pub(crate) async fn start_attempt_command',
@@ -303,6 +304,7 @@ function checkFiles(root, files) {
     'pub(crate) async fn claim_lease_command',
     'pub(crate) async fn release_lease_command',
     'pub(crate) async fn require_capability',
+    'pub(crate) async fn require_capability_command',
     'pub(crate) async fn project_board_view',
     'pub(crate) async fn complete_system_task',
     'CapabilityCheckRequest',
@@ -439,7 +441,9 @@ function checkFiles(root, files) {
   ]);
 
   requireAll(diagnostics, files.computeSlot, sources.computeSlot, [
-    'CapabilityCheckRequest',
+    'RequireCapabilityCommand',
+    'ControlPlaneKernel::new(state)',
+    '.require_capability_command(RequireCapabilityCommand',
     'operation: "spawn".to_string()',
     'capability_grant_id',
     'unwrap_or("worker")',
@@ -453,6 +457,9 @@ function checkFiles(root, files) {
   ]);
 
   requireAll(diagnostics, files.ptyHandler, sources.ptyHandler, [
+    'RequireCapabilityCommand',
+    'ControlPlaneKernel::new(state)',
+    '.require_capability_command(RequireCapabilityCommand',
     'operation: "spawn".to_string()',
     'mission_pty_spawn requires task_id with an exact spawn capability',
     'task_runtime_contract(task_id)',
@@ -582,8 +589,22 @@ function checkFiles(root, files) {
   rejectDirectEvidenceWriterOutsideKernel(diagnostics, files, sources);
   rejectDirectLeaseCommandsOutsideKernel(diagnostics, files, sources);
   rejectDirectJobEventsOutsideKernel(diagnostics, files, sources);
+  rejectDirectCapabilityChecksOutsideKernel(diagnostics, files, sources);
 
   return diagnostics;
+}
+
+function rejectDirectCapabilityChecksOutsideKernel(diagnostics, files, sources) {
+  const allowed = new Set(['controlPlaneKernel', 'sharedMemory', 'sharedHandler']);
+  for (const [key, source] of Object.entries(sources)) {
+    if (allowed.has(key)) continue;
+    if (source.includes('.require_capability(')) {
+      diagnostics.push({
+        file: files[key],
+        message: 'direct shared_memory capability checks outside ControlPlaneKernel are forbidden',
+      });
+    }
+  }
 }
 
 function rejectDirectJobEventsOutsideKernel(diagnostics, files, sources) {

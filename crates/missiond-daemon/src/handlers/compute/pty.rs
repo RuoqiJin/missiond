@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 use tracing::info;
 
 use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
+use crate::engine::control_plane_kernel::{ControlPlaneKernel, RequireCapabilityCommand};
 use crate::helpers::default_mission_home;
 use crate::lenient;
 use crate::slot_env::build_slot_tracking_env;
@@ -178,9 +179,8 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             if let Some(task_id) = task_id.as_deref() {
                 let subject_kind = subject_kind.as_deref().unwrap_or("worker");
                 let subject_id = subject_id.as_deref().unwrap_or(slot_id.as_str());
-                if let Err(err) = state
-                    .shared_memory
-                    .require_capability(crate::engine::shared_memory::CapabilityCheckRequest {
+                if let Err(err) = ControlPlaneKernel::new(state)
+                    .require_capability_command(RequireCapabilityCommand {
                         grant_id,
                         subject_kind: subject_kind.to_string(),
                         subject_id: subject_id.to_string(),
