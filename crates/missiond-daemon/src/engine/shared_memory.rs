@@ -390,55 +390,12 @@ impl SharedMemoryService {
         }
     }
 
-    pub(crate) async fn record_job_event_typed(
-        &self,
-        task_id: &str,
-        project_id: Option<&str>,
-        agent_id: &str,
-        event_kind: &str,
-        payload: Value,
-    ) -> Result<Value> {
-        self.job_event_from_args(&json!({
-            "task_id": task_id,
-            "project_id": project_id,
-            "agent_id": agent_id,
-            "event_kind": event_kind,
-            "payload": payload
-        }))
-        .await
-    }
-
-    pub(crate) async fn job_event_typed(&self, args: Value) -> Result<Value> {
-        self.job_event_from_args(&args).await
-    }
-
     pub(crate) async fn job_event_command(&self, req: JobEventRequest) -> Result<Value> {
-        self.job_event_from_args(&json!({
-            "task_id": req.task_id,
-            "project_id": req.project_id,
-            "agent_id": req.agent_id,
-            "event_kind": req.event_kind,
-            "attempt_id": req.attempt_id,
-            "worker_id": req.worker_id,
-            "conversation_id": req.conversation_id,
-            "runtime_metadata": req.runtime_metadata,
-            "payload": req.payload
-        }))
-        .await
-    }
-
-    pub(crate) async fn settle_worker_typed(&self, args: Value) -> Result<Value> {
-        let req = self.worker_settle_request_from_args(&args)?;
-        self.settle_worker_command(req).await
+        self.job_event_request(req).await
     }
 
     pub(crate) async fn settle_worker_command(&self, req: WorkerSettleRequest) -> Result<Value> {
         self.worker_settle(req).await
-    }
-
-    pub(crate) async fn task_result_put_typed(&self, args: &Value) -> Result<Value> {
-        let req = self.task_result_put_request_from_args(args)?;
-        self.task_result_put_command(req).await
     }
 
     pub(crate) async fn task_result_put_command(&self, req: TaskResultPutRequest) -> Result<Value> {
@@ -470,10 +427,6 @@ impl SharedMemoryService {
 
     pub(crate) async fn heartbeat_lease_typed(&self, req: HeartbeatLeaseRequest) -> Result<Value> {
         self.heartbeat(req).await
-    }
-
-    pub(crate) async fn capability_check_typed(&self, args: &Value) -> Result<Value> {
-        self.capability_check_from_args(args).await
     }
 
     pub(crate) async fn claim_lease_typed(&self, req: ClaimRequest) -> Result<Value> {
@@ -818,123 +771,29 @@ impl SharedMemoryService {
         .await
     }
 
-    pub(crate) async fn capability_grant_from_args(&self, args: &Value) -> Result<Value> {
-        let subject_kind = string_arg(args, "subject_kind")
-            .or_else(|| string_arg(args, "subjectKind"))
-            .unwrap_or("task");
-        let subject_id = string_arg(args, "subject_id")
-            .or_else(|| string_arg(args, "subjectId"))
-            .ok_or_else(|| anyhow!("subject_id is required"))?;
-        let operation =
-            string_arg(args, "operation").ok_or_else(|| anyhow!("operation is required"))?;
-        let scope_kind = string_arg(args, "scope_kind")
-            .or_else(|| string_arg(args, "scopeKind"))
-            .ok_or_else(|| anyhow!("scope_kind is required"))?;
-        let scope_key = string_arg(args, "scope_key")
-            .or_else(|| string_arg(args, "scopeKey"))
-            .ok_or_else(|| anyhow!("scope_key is required"))?;
-        let task_id = string_arg(args, "task_id").or_else(|| string_arg(args, "taskId"));
-        let project_id = string_arg(args, "project_id").or_else(|| string_arg(args, "projectId"));
-        let id = self
-            .insert_capability_grant(CapabilityGrantInput {
-                subject_kind,
-                subject_id,
-                operation,
-                scope_kind,
-                scope_key,
-                project_id,
-                task_id,
-                issuer: string_arg(args, "issuer").unwrap_or("missiond"),
-                evidence_requirement: string_arg(args, "evidence_requirement")
-                    .or_else(|| string_arg(args, "evidenceRequirement")),
-                details: args.get("details").cloned().unwrap_or_else(|| json!({})),
-            })
-            .await?;
-        Ok(json!({
-            "schema": "missiond.capability-grant.v1",
-            "ok": true,
-            "grant_id": id
-        }))
-    }
-
-    async fn capability_check_from_args(&self, args: &Value) -> Result<Value> {
-        let task_id = string_arg(args, "task_id")
-            .or_else(|| string_arg(args, "taskId"))
-            .ok_or_else(|| anyhow!("task_id is required"))?;
-        let operation =
-            string_arg(args, "operation").ok_or_else(|| anyhow!("operation is required"))?;
-        let scope_kind = string_arg(args, "scope_kind")
-            .or_else(|| string_arg(args, "scopeKind"))
-            .unwrap_or("task");
-        let scope_key = string_arg(args, "scope_key")
-            .or_else(|| string_arg(args, "scopeKey"))
-            .unwrap_or(task_id);
-        let grant_id = self
-            .require_capability(CapabilityCheckRequest {
-                grant_id: string_arg(args, "grant_id")
-                    .or_else(|| string_arg(args, "grantId"))
-                    .or_else(|| string_arg(args, "capability_grant_id"))
-                    .or_else(|| string_arg(args, "capabilityGrantId"))
-                    .map(str::to_string),
-                subject_kind: string_arg(args, "subject_kind")
-                    .or_else(|| string_arg(args, "subjectKind"))
-                    .unwrap_or("task")
-                    .to_string(),
-                subject_id: string_arg(args, "subject_id")
-                    .or_else(|| string_arg(args, "subjectId"))
-                    .unwrap_or(task_id)
-                    .to_string(),
-                operation: operation.to_string(),
-                scope_kind: scope_kind.to_string(),
-                scope_key: scope_key.to_string(),
-                task_id: Some(task_id.to_string()),
-                allow_system_bypass: system_or_operator_bypass_allowed(args),
-                bypass_reason: Some("mission_shared_memory capability_check bypass".to_string()),
-                details: args.get("details").cloned().unwrap_or_else(|| json!({})),
-            })
-            .await?;
-        Ok(json!({
-            "schema": "missiond.capability-check.v1",
-            "ok": true,
-            "task_id": task_id,
-            "grant_id": grant_id,
-            "operation": operation,
-            "scope_kind": scope_kind,
-            "scope_key": scope_key
-        }))
-    }
-
-    async fn job_event_from_args(&self, args: &Value) -> Result<Value> {
-        let task_id = string_arg(args, "task_id")
-            .or_else(|| string_arg(args, "taskId"))
-            .ok_or_else(|| anyhow!("task_id is required"))?;
-        let event_kind = string_arg(args, "event_kind")
-            .or_else(|| string_arg(args, "eventKind"))
-            .unwrap_or("observation.recorded");
-        let state = job_state_for_event(event_kind).unwrap_or("running");
-        let project_id = string_arg(args, "project_id").or_else(|| string_arg(args, "projectId"));
+    async fn job_event_request(&self, req: JobEventRequest) -> Result<Value> {
+        let task_id = req.task_id;
+        let project_id = req.project_id;
+        let event_kind = req.event_kind;
+        let agent_id = req.agent_id;
+        let runtime_metadata = req.runtime_metadata;
+        let payload = req.payload;
+        let state = job_state_for_event(event_kind.as_str()).unwrap_or("running");
         let job_id = self
             .ensure_job_for_task(
-                project_id,
-                task_id,
+                project_id.as_deref(),
+                task_id.as_str(),
                 state,
-                args.get("runtime_metadata")
-                    .cloned()
-                    .unwrap_or_else(|| json!({})),
+                runtime_metadata,
             )
             .await?;
         let mut attempt_id_result: Option<String> = None;
         if event_kind == "attempt.started" {
-            let attempt_id = string_arg(args, "attempt_id")
-                .or_else(|| string_arg(args, "attemptId"))
-                .map(str::to_string)
+            let attempt_id = req
+                .attempt_id
                 .unwrap_or_else(|| format!("attempt:{task_id}:{}", Utc::now().timestamp_millis()));
-            let worker_id = string_arg(args, "worker_id")
-                .or_else(|| string_arg(args, "workerId"))
-                .or_else(|| string_arg(args, "agent_id"))
-                .or_else(|| string_arg(args, "agentId"));
-            let conversation_id =
-                string_arg(args, "conversation_id").or_else(|| string_arg(args, "conversationId"));
+            let worker_id = req.worker_id.as_deref().or(Some(agent_id.as_str()));
+            let conversation_id = req.conversation_id.as_deref();
             sqlx::query(
                 r#"
                 INSERT INTO job_attempts
@@ -950,7 +809,7 @@ impl SharedMemoryService {
             .bind(&job_id)
             .bind(worker_id)
             .bind(conversation_id)
-            .bind(args.get("payload").cloned().unwrap_or_else(|| json!({})))
+            .bind(payload.clone())
             .execute(&self.pool)
             .await?;
             sqlx::query(
@@ -960,7 +819,7 @@ impl SharedMemoryService {
             .bind(&attempt_id)
             .execute(&self.pool)
             .await?;
-            let contract = self.task_runtime_contract(task_id).await?;
+            let contract = self.task_runtime_contract(task_id.as_str()).await?;
             if let Some(project_root) = contract
                 .project_root
                 .as_deref()
@@ -969,8 +828,8 @@ impl SharedMemoryService {
             {
                 let changed_paths = git_status_changed_paths(project_root).unwrap_or_default();
                 self.record_worktree_manifest(
-                    task_id,
-                    contract.project_id.as_deref().or(project_id),
+                    task_id.as_str(),
+                    contract.project_id.as_deref().or(project_id.as_deref()),
                     Some(job_id.as_str()),
                     Some(attempt_id.as_str()),
                     project_root,
@@ -991,9 +850,9 @@ impl SharedMemoryService {
                 "event_kind": event_kind,
                 "project_id": project_id,
                 "task_id": task_id,
-                "agent_id": string_arg(args, "agent_id").or_else(|| string_arg(args, "agentId")).unwrap_or("missiond"),
+                "agent_id": agent_id,
                 "idempotency_key": format!("job-event:{task_id}:{event_kind}:{}", Utc::now().timestamp_millis()),
-                "payload": args.get("payload").cloned().unwrap_or_else(|| json!({}))
+                "payload": payload
             }))
             .await?;
         Ok(json!({
@@ -3785,55 +3644,6 @@ impl SharedMemoryService {
             "board": board,
             "event": event
         }))
-    }
-
-    async fn claim_from_args(&self, args: &Value) -> Result<Value> {
-        let req = ClaimRequest {
-            project_id: string_arg(args, "project_id")
-                .or_else(|| string_arg(args, "projectId"))
-                .map(str::to_string),
-            task_id: string_arg(args, "task_id")
-                .or_else(|| string_arg(args, "taskId"))
-                .map(str::to_string),
-            owner_id: string_arg(args, "owner_id")
-                .or_else(|| string_arg(args, "ownerId"))
-                .unwrap_or("unknown")
-                .to_string(),
-            grant_id: string_arg(args, "grant_id")
-                .or_else(|| string_arg(args, "grantId"))
-                .or_else(|| string_arg(args, "capability_grant_id"))
-                .or_else(|| string_arg(args, "capabilityGrantId"))
-                .map(str::to_string),
-            subject_kind: string_arg(args, "subject_kind")
-                .or_else(|| string_arg(args, "subjectKind"))
-                .unwrap_or("worker")
-                .to_string(),
-            subject_id: string_arg(args, "subject_id")
-                .or_else(|| string_arg(args, "subjectId"))
-                .or_else(|| string_arg(args, "owner_id"))
-                .or_else(|| string_arg(args, "ownerId"))
-                .unwrap_or("unknown")
-                .to_string(),
-            scope_kind: string_arg(args, "scope_kind")
-                .or_else(|| string_arg(args, "scopeKind"))
-                .unwrap_or("write_scope")
-                .to_string(),
-            scope_key: string_arg(args, "scope_key")
-                .or_else(|| string_arg(args, "scopeKey"))
-                .ok_or_else(|| anyhow!("scope_key is required"))?
-                .to_string(),
-            lease_secs: args
-                .get("lease_secs")
-                .or_else(|| args.get("leaseSecs"))
-                .and_then(Value::as_i64)
-                .unwrap_or(DEFAULT_LEASE_SECS),
-            metadata: args.get("metadata").cloned().unwrap_or_else(|| json!({})),
-            allow_system_bypass: system_or_operator_bypass_allowed(args),
-            bypass_reason: Some(
-                "mission_shared_memory claim system/operator authority".to_string(),
-            ),
-        };
-        self.claim_lease_typed(req).await
     }
 
     async fn claim(&self, req: ClaimRequest) -> Result<Value> {

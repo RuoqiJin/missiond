@@ -205,13 +205,17 @@ impl<'a> ControlPlaneKernel<'a> {
     ) -> Result<Value> {
         self.state
             .shared_memory
-            .record_job_event_typed(
-                command.task_id.as_str(),
-                command.project_id.as_deref(),
-                command.producer_id.as_str(),
-                "observation.recorded",
-                command.payload,
-            )
+            .job_event_command(JobEventRequest {
+                task_id: command.task_id,
+                project_id: command.project_id,
+                agent_id: command.producer_id,
+                event_kind: "observation.recorded".to_string(),
+                attempt_id: None,
+                worker_id: None,
+                conversation_id: None,
+                runtime_metadata: json!({}),
+                payload: command.payload,
+            })
             .await
     }
 
@@ -626,17 +630,21 @@ impl<'a> ControlPlaneKernel<'a> {
     ) -> Result<Value> {
         self.state
             .shared_memory
-            .record_job_event_typed(
-                task_id,
-                None,
-                "control-plane-kernel",
-                "observation.recorded",
-                json!({
+            .job_event_command(JobEventRequest {
+                task_id: task_id.to_string(),
+                project_id: None,
+                agent_id: "control-plane-kernel".to_string(),
+                event_kind: "observation.recorded".to_string(),
+                attempt_id: None,
+                worker_id: None,
+                conversation_id: None,
+                runtime_metadata: json!({}),
+                payload: json!({
                     "schema": "missiond.board-task-view-projection-request.v1",
                     "projected_status": projected_status,
                     "projection": payload
                 }),
-            )
+            })
             .await
     }
 
