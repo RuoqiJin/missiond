@@ -35,6 +35,13 @@ import {
 
 const CHECK_COMMAND = 'node scripts/check-v3-final-convergence.mjs';
 const BLUEPRINT_PATH = '.missiond/v3/missiond-blueprint.lisp';
+const BOOTSTRAP_COMPILED_RUNTIME_FILES = Object.freeze([
+  '.missiond/v3/runtime/compiled/compiled-final-convergence-manifest.json',
+  '.missiond/v3/runtime/compiled/compiled-runtime-workstation.json',
+  '.missiond/v3/runtime/compiled/compiled-semantic-ir.json',
+  '.missiond/v3/runtime/compiled/compiled-agent-slices.json',
+  '.missiond/v3/runtime/compiled/compiled-project-agent-navigation.json',
+]);
 const FINAL_CONVERGENCE_META_CHECKS = Object.freeze([
   'control-plane-m6-split',
   'check-v3-control-plane-m6-split.mjs',
@@ -146,6 +153,8 @@ export function runFinalConvergenceCheck(repoRoot, blueprintRel = BLUEPRINT_PATH
   });
   const compiledSurfaceCount = compiledSurfaceIds(contract).length;
   diagnostics.push(...compiledDiagnostics(contract, blueprintRel));
+  const runtimeBootstrap = ensureCompiledRuntimeProjections(repoRoot);
+  diagnostics.push(...runtimeBootstrap.diagnostics);
   const gateLoad = loadFinalConvergenceManifest(repoRoot, contract);
   diagnostics.push(...gateLoad.diagnostics);
   const gate = gateLoad.gate;
@@ -244,8 +253,48 @@ export function runFinalConvergenceCheck(repoRoot, blueprintRel = BLUEPRINT_PATH
     facades: facades.files,
     split_files: splitFiles.files,
     runtime_files: runtimeFiles.files,
+    runtime_bootstrap: runtimeBootstrap,
     subchecks,
     runtime_checks: runtimeChecks,
+  };
+}
+
+function ensureCompiledRuntimeProjections(repoRoot) {
+  const missing = BOOTSTRAP_COMPILED_RUNTIME_FILES.filter((rel) => !fs.existsSync(path.join(repoRoot, rel)));
+  if (missing.length === 0) {
+    return {
+      ok: true,
+      compiled: false,
+      missing: [],
+      diagnostics: [],
+    };
+  }
+
+  const proc = spawnSync(process.execPath, ['scripts/compile-v3-runtime.mjs', '--write', '--json'], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    timeout: 120_000,
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  const diagnostics = [];
+  if (proc.status !== 0 || proc.error) {
+    diagnostics.push({
+      file: 'scripts/compile-v3-runtime.mjs',
+      message: `failed to bootstrap compiled runtime projections before final convergence: ${proc.error?.message ?? `exit ${proc.status}`}; stdout=${tail(proc.stdout)}; stderr=${tail(proc.stderr)}`,
+    });
+  }
+  const stillMissing = BOOTSTRAP_COMPILED_RUNTIME_FILES.filter((rel) => !fs.existsSync(path.join(repoRoot, rel)));
+  for (const rel of stillMissing) {
+    diagnostics.push({
+      file: rel,
+      message: 'compiled runtime projection is still missing after bootstrap compile',
+    });
+  }
+  return {
+    ok: diagnostics.length === 0,
+    compiled: true,
+    missing,
+    diagnostics,
   };
 }
 

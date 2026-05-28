@@ -3607,6 +3607,31 @@ async fn run_xjpcode_readonly_worker(state: AppState, run: XjpcodeWorkerRun) -> 
         .get("content")
         .cloned()
         .unwrap_or_else(|| Value::String(summary.to_string()));
+    let files_changed = task_result
+        .get("files_changed")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let commands_run = task_result
+        .get("commands_run")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let verification = if write_mode {
+        json!({
+            "method": "xjpcode git apply --check + git apply",
+            "changed_paths": files_changed.clone(),
+            "commands_run": commands_run.clone(),
+            "worker_id": worker_id
+        })
+    } else {
+        json!({
+            "method": "xjpcode read-only work-order artifact",
+            "files_read": task_result
+                .get("files_read")
+                .cloned()
+                .unwrap_or_else(|| json!([])),
+            "worker_id": worker_id
+        })
+    };
     let created_at = chrono::Utc::now().to_rfc3339();
     let task_id = request["task_id"]
         .as_str()
@@ -3630,6 +3655,10 @@ async fn run_xjpcode_readonly_worker(state: AppState, run: XjpcodeWorkerRun) -> 
             json: json!({
                 "schema": "missiond.xjpcode-worker-result.v1",
                 "response": task_result,
+                "changed_paths": files_changed.clone(),
+                "files_changed": files_changed,
+                "commands_run": commands_run,
+                "verification": verification,
                 "sse_frames": frames,
                 "persisted_frame_count": persisted_frame_count
             }),

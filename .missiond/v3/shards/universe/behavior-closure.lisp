@@ -169,6 +169,24 @@
       :calls "per-surface-checker-subprocess"))
 
   (behavior
+    :id final-convergence-runtime-bootstrap-subprocess
+    :kind subprocess
+    :owner typed-lisp-compiler
+    :observed ["subprocess:scripts/check-v3-final-convergence.mjs:*"]
+    :code ["scripts/check-v3-final-convergence.mjs"
+           "scripts/compile-v3-runtime.mjs"]
+    :effects []
+    (anchor
+      :role subprocess
+      :observed "subprocess:scripts/check-v3-final-convergence.mjs:*"
+      :file "scripts/check-v3-final-convergence.mjs"
+      :symbol "ensureCompiledRuntimeProjections")
+    (trigger
+      :from-file "scripts/check-v3-final-convergence.mjs"
+      :from-symbol "ensureCompiledRuntimeProjections"
+      :calls "node scripts/compile-v3-runtime.mjs --write --json"))
+
+  (behavior
     :id jarvis-intent-plan-dispatch-smoke-secret-read
     :kind subprocess
     :owner interaction-gateway
