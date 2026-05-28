@@ -232,6 +232,8 @@ function checkFiles(root, files) {
     'pub(crate) async fn grant_task_capabilities',
     'pub(crate) async fn claim_lease_typed',
     'pub(crate) async fn task_result_put_typed',
+    'pub(crate) async fn task_result_put_command',
+    'pub(crate) fn task_result_put_request_from_args',
     'pub(crate) async fn audit_capability_bypass',
     '"job_event" | "record_job_event"',
     'INSERT INTO capability_grants',
@@ -243,6 +245,7 @@ function checkFiles(root, files) {
     'pub(crate) async fn update_task_contract_capability_grants',
     'pub(crate) async fn settle_worker_command',
     'pub(crate) async fn active_capability_grant_id',
+    'pub(crate) struct TaskResultPutRequest',
     'pub(crate) struct WorkerSettleRequest',
     'FROM task_contracts',
     'no exact active subject-bound capability grant',
@@ -304,7 +307,8 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.evidenceWriter, sources.evidenceWriter, [
     'into_task_result_put_args',
-    '.task_result_put_typed(&payload)',
+    '.task_result_put_request_from_args(&payload)',
+    '.task_result_put_command(request)',
   ]);
   rejectAll(diagnostics, files.evidenceWriter, sources.evidenceWriter, [
     '.handle_action(&payload)',

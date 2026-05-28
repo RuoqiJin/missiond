@@ -76,6 +76,8 @@ fn task_delegate_schema() -> Value {
             "poolHint": {"type": "string", "description": "pool_hint camelCase alias"},
             "engine_hint": {"type": "string", "description": "建议引擎，如 claude-code / gemini / codex / mechanic"},
             "engineHint": {"type": "string", "description": "engine_hint camelCase alias"},
+            "xjpcode_worker_url": {"type": "string", "description": "engine_hint=xjpcode local smoke/dev override. Only loopback URLs are accepted unless daemon policy explicitly allows remote argument overrides."},
+            "xjpcodeWorkerUrl": {"type": "string", "description": "xjpcode_worker_url camelCase alias"},
             "context_pack_path": {"type": "string", "description": "两阶段 context-pack Lisp 路径"},
             "contextPackPath": {"type": "string", "description": "context_pack_path camelCase alias"},
             "accepted_shard_id": {"type": "string", "description": "已接受 exact shard ID。code/implementation 工位必填，防止宽目标直接进入实现工位"},

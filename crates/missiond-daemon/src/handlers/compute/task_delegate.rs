@@ -157,6 +157,14 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         Err(error) => return Ok(error),
     };
     let xjpcode_worker = engine_hint_is_xjpcode(delegation_metadata.engine_hint.as_deref());
+    let xjpcode_worker_endpoint = if xjpcode_worker {
+        match xjpcode_worker_endpoint_from_args_or_env(&args) {
+            Ok(endpoint) => endpoint,
+            Err(error) => return Ok(error),
+        }
+    } else {
+        None
+    };
     if xjpcode_worker && !delegation_metadata.write_scope.is_empty() {
         return Ok(ToolResult::structured_error(
             ToolError::new(
@@ -168,7 +176,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             ),
         ));
     }
-    if xjpcode_worker && xjpcode_worker_endpoint_from_env().is_none() {
+    if xjpcode_worker && xjpcode_worker_endpoint.is_none() {
         return Ok(ToolResult::structured_error(
             ToolError::new(
                 "XJPCODE_WORKER_NOT_CONFIGURED",
@@ -691,6 +699,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             state.clone(),
             XjpcodeWorkerRun {
                 task_id: task_id.clone(),
+                endpoint: xjpcode_worker_endpoint.clone().unwrap_or_default(),
                 project_id: target_project_resolution
                     .as_ref()
                     .map(|resolution| resolution.project_id.clone())
@@ -2164,6 +2173,7 @@ struct MechanicRepairRun {
 #[derive(Debug, Clone)]
 struct XjpcodeWorkerRun {
     task_id: String,
+    endpoint: String,
     project_id: String,
     project_root: Option<String>,
     objective: String,
@@ -2198,13 +2208,53 @@ fn xjpcode_worker_endpoint_from_env() -> Option<String> {
         .ok()
         .map(|value| value.trim().trim_end_matches('/').to_string())
         .filter(|value| !value.is_empty())
-        .map(|base| {
-            if base.ends_with("/worker/v1/work-orders") {
-                base
-            } else {
-                format!("{base}/worker/v1/work-orders")
-            }
-        })
+        .map(xjpcode_worker_endpoint_normalize)
+}
+
+fn xjpcode_worker_endpoint_normalize(base: String) -> String {
+    if base.ends_with("/worker/v1/work-orders") {
+        base
+    } else {
+        format!("{base}/worker/v1/work-orders")
+    }
+}
+
+fn xjpcode_worker_endpoint_from_args(args: &Value) -> Result<Option<String>, ToolResult> {
+    let Some(raw) = string_arg(args, &["xjpcode_worker_url", "xjpcodeWorkerUrl"]) else {
+        return Ok(None);
+    };
+    let value = raw.trim().trim_end_matches('/').to_string();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let lower = value.to_ascii_lowercase();
+    let is_loopback = lower.starts_with("http://127.0.0.1:")
+        || lower.starts_with("http://localhost:")
+        || lower == "http://127.0.0.1"
+        || lower == "http://localhost";
+    let remote_override_allowed = std::env::var("MISSIOND_XJPCODE_ALLOW_REMOTE_ARG")
+        .ok()
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false);
+    if !is_loopback && !remote_override_allowed {
+        return Err(ToolResult::structured_error(
+            ToolError::new(
+                "XJPCODE_WORKER_URL_UNTRUSTED",
+                "mission_task_delegate refused xjpcode_worker_url because only loopback dev/smoke overrides are accepted",
+            )
+            .with_suggestion(
+                "configure remote xjpcode workers through MISSIOND_XJPCODE_WORKER_URL in deploy/launchd, or pass http://127.0.0.1:<port> for local smoke",
+            ),
+        ));
+    }
+    Ok(Some(xjpcode_worker_endpoint_normalize(value)))
+}
+
+fn xjpcode_worker_endpoint_from_args_or_env(args: &Value) -> Result<Option<String>, ToolResult> {
+    match xjpcode_worker_endpoint_from_args(args)? {
+        Some(endpoint) => Ok(Some(endpoint)),
+        None => Ok(xjpcode_worker_endpoint_from_env()),
+    }
 }
 
 fn parse_xjpcode_sse_frames(body: &str) -> Vec<Value> {
@@ -3246,10 +3296,7 @@ fn spawn_xjpcode_readonly_worker(state: AppState, run: XjpcodeWorkerRun) {
 }
 
 async fn run_xjpcode_readonly_worker(state: AppState, run: XjpcodeWorkerRun) -> Result<()> {
-    let endpoint = match xjpcode_worker_endpoint_from_env() {
-        Some(endpoint) => endpoint,
-        None => return Ok(()),
-    };
+    let endpoint = run.endpoint.clone();
     let read_scope = if run.metadata.read_scope.is_empty() {
         run.project_root
             .as_ref()

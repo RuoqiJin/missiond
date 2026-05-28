@@ -68,9 +68,12 @@ impl TaskCompletionEvidenceWriter {
     ) -> Result<TaskCompletionEvidenceResult> {
         let task_id = input.task_id.clone();
         let payload = input.into_task_result_put_args();
+        let request = self
+            .shared_memory
+            .task_result_put_request_from_args(&payload)?;
         let response = self
             .shared_memory
-            .task_result_put_typed(&payload)
+            .task_result_put_command(request)
             .await
             .map_err(|err| anyhow!("{EVIDENCE_WRITE_FAILED}: task_id={task_id}: {err}"))?;
         let artifact_hash = response

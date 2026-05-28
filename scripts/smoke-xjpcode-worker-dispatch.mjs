@@ -202,6 +202,7 @@ async function main() {
     intent: "research",
     cwd: MISSIOND_ROOT,
     engine_hint: "xjpcode",
+    xjpcode_worker_url: null,
     task_class: "review",
     read_scope: [join(MISSIOND_ROOT, "AGENTS.md")],
     write_scope: [],
@@ -260,6 +261,7 @@ async function main() {
     });
   }
   steps.push({ name: "xjpcode worker health", ok: true, detail: workerUrl });
+  plannedArgs.xjpcode_worker_url = workerUrl;
 
   const extraEnv = { MISSIOND_XJPCODE_WORKER_URL: workerUrl };
   const delegate = await callTool("mission_task_delegate", plannedArgs, extraEnv);

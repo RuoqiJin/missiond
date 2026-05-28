@@ -201,6 +201,31 @@ pub(crate) struct WorkerSettleRequest {
     pub allow_system_bypass: bool,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct TaskResultPutRequest {
+    pub task_id: String,
+    pub project_id: String,
+    pub slot_id: Option<String>,
+    pub conversation_id: Option<String>,
+    pub provider: String,
+    pub result_status: String,
+    pub summary: String,
+    pub content: Value,
+    pub details: Value,
+    pub accepted_shard_id: Option<String>,
+    pub attempt_id: Option<String>,
+    pub grant_id: Option<String>,
+    pub subject_kind: String,
+    pub subject_id: String,
+    pub producer: Value,
+    pub raw_evidence: Option<Value>,
+    pub evidence_refs: Vec<Value>,
+    pub has_explicit_evidence: bool,
+    pub created_at: String,
+    pub allow_system_bypass: bool,
+    raw_args: Value,
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TaskRuntimeContract {
     pub(crate) project_id: Option<String>,
@@ -252,7 +277,7 @@ impl SharedMemoryService {
             "query" => self.query(args).await,
             "artifact_put" | "put_artifact" => self.artifact_put(args).await,
             "artifact_get" | "get_artifact" => self.artifact_get(args).await,
-            "task_result_put" | "put_task_result" => self.task_result_put(args).await,
+            "task_result_put" | "put_task_result" => self.task_result_put_typed(args).await,
             "task_result_get" | "get_task_result" => self.task_result_get(args).await,
             "task_evidence_summary" | "evidence_summary" => self.task_evidence_summary(args).await,
             "workflow_start" | "start_workflow" => {
@@ -334,7 +359,12 @@ impl SharedMemoryService {
     }
 
     pub(crate) async fn task_result_put_typed(&self, args: &Value) -> Result<Value> {
-        self.task_result_put(args).await
+        let req = self.task_result_put_request_from_args(args)?;
+        self.task_result_put_command(req).await
+    }
+
+    pub(crate) async fn task_result_put_command(&self, req: TaskResultPutRequest) -> Result<Value> {
+        self.task_result_put(req).await
     }
 
     pub(crate) async fn task_result_get_typed(&self, args: &Value) -> Result<Value> {
@@ -2406,7 +2436,10 @@ impl SharedMemoryService {
         }
     }
 
-    async fn task_result_put(&self, args: &Value) -> Result<Value> {
+    pub(crate) fn task_result_put_request_from_args(
+        &self,
+        args: &Value,
+    ) -> Result<TaskResultPutRequest> {
         let task_id = string_arg(args, "task_id")
             .or_else(|| string_arg(args, "taskId"))
             .ok_or_else(|| anyhow!("task_id is required"))?
@@ -2434,11 +2467,11 @@ impl SharedMemoryService {
             .map(str::to_string)
             .unwrap_or_else(|| summary_from_result_payload(args));
         let details = args.get("json").cloned().unwrap_or_else(|| json!({}));
-        let content = if let Some(s) = string_arg(args, "content") {
-            Value::String(s.to_string())
-        } else {
-            details.clone()
-        };
+        let content = args
+            .get("content")
+            .cloned()
+            .filter(|value| !value.is_null())
+            .unwrap_or_else(|| details.clone());
         let raw_evidence = args
             .get("raw_evidence")
             .cloned()
@@ -2475,10 +2508,84 @@ impl SharedMemoryService {
             .or_else(|| string_arg(args, "createdAt"))
             .map(str::to_string)
             .unwrap_or_else(|| Utc::now().to_rfc3339());
-        let runtime_contract = self.task_runtime_contract(&task_id).await?;
         let attempt_id = string_arg(args, "attempt_id")
             .or_else(|| string_arg(args, "attemptId"))
             .map(str::to_string);
+        let accepted_shard_id = string_arg(args, "accepted_shard_id")
+            .or_else(|| string_arg(args, "acceptedShardId"))
+            .map(str::to_string);
+        let subject_kind = string_arg(args, "subject_kind")
+            .or_else(|| string_arg(args, "subjectKind"))
+            .unwrap_or_else(|| {
+                if slot_id.is_some() {
+                    "worker"
+                } else if conversation_id.is_some() {
+                    "conversation"
+                } else {
+                    "task"
+                }
+            })
+            .to_string();
+        let subject_id = string_arg(args, "subject_id")
+            .or_else(|| string_arg(args, "subjectId"))
+            .map(str::to_string)
+            .or_else(|| slot_id.clone())
+            .or_else(|| conversation_id.clone())
+            .unwrap_or_else(|| task_id.clone());
+        let grant_id = string_arg(args, "grant_id")
+            .or_else(|| string_arg(args, "grantId"))
+            .or_else(|| string_arg(args, "capability_grant_id"))
+            .or_else(|| string_arg(args, "capabilityGrantId"))
+            .map(str::to_string);
+
+        Ok(TaskResultPutRequest {
+            task_id,
+            project_id,
+            slot_id,
+            conversation_id,
+            provider,
+            result_status,
+            summary,
+            content,
+            details,
+            accepted_shard_id,
+            attempt_id,
+            grant_id,
+            subject_kind,
+            subject_id,
+            producer,
+            raw_evidence,
+            evidence_refs,
+            has_explicit_evidence,
+            created_at,
+            allow_system_bypass: system_or_operator_bypass_allowed(args),
+            raw_args: args.clone(),
+        })
+    }
+
+    async fn task_result_put(&self, req: TaskResultPutRequest) -> Result<Value> {
+        let task_id = req.task_id;
+        let project_id = req.project_id;
+        let slot_id = req.slot_id;
+        let conversation_id = req.conversation_id;
+        let provider = req.provider;
+        let result_status = req.result_status;
+        let summary = req.summary;
+        let details = req.details;
+        let content = req.content;
+        let raw_evidence = req.raw_evidence;
+        let evidence_refs = req.evidence_refs;
+        let has_explicit_evidence = req.has_explicit_evidence;
+        let producer = req.producer;
+        let created_at = req.created_at;
+        let attempt_id = req.attempt_id;
+        let subject_kind = req.subject_kind;
+        let subject_id = req.subject_id;
+        let requested_grant_id = req.grant_id;
+        let accepted_shard_id = req.accepted_shard_id;
+        let allow_system_bypass = req.allow_system_bypass;
+        let raw_args = req.raw_args;
+        let runtime_contract = self.task_runtime_contract(&task_id).await?;
         if is_completed_result_status(&result_status) && !runtime_contract.write_scope.is_empty() {
             let Some(attempt_id) = attempt_id.as_deref() else {
                 return Err(control_error_details(
@@ -2506,29 +2613,6 @@ impl SharedMemoryService {
                 ));
             }
         }
-        let subject_kind = string_arg(args, "subject_kind")
-            .or_else(|| string_arg(args, "subjectKind"))
-            .unwrap_or_else(|| {
-                if slot_id.is_some() {
-                    "worker"
-                } else if conversation_id.is_some() {
-                    "conversation"
-                } else {
-                    "task"
-                }
-            })
-            .to_string();
-        let subject_id = string_arg(args, "subject_id")
-            .or_else(|| string_arg(args, "subjectId"))
-            .map(str::to_string)
-            .or_else(|| slot_id.clone())
-            .or_else(|| conversation_id.clone())
-            .unwrap_or_else(|| task_id.clone());
-        let requested_grant_id = string_arg(args, "grant_id")
-            .or_else(|| string_arg(args, "grantId"))
-            .or_else(|| string_arg(args, "capability_grant_id"))
-            .or_else(|| string_arg(args, "capabilityGrantId"))
-            .map(str::to_string);
         let capability_grant_id = self
             .require_capability(CapabilityCheckRequest {
                 grant_id: requested_grant_id.clone(),
@@ -2538,7 +2622,7 @@ impl SharedMemoryService {
                 scope_kind: "task".to_string(),
                 scope_key: task_id.clone(),
                 task_id: Some(task_id.clone()),
-                allow_system_bypass: system_or_operator_bypass_allowed(args),
+                allow_system_bypass,
                 bypass_reason: Some("task_result_put system/operator authority".to_string()),
                 details: json!({
                     "provider": provider,
@@ -2549,7 +2633,7 @@ impl SharedMemoryService {
             })
             .await?;
         if is_completed_result_status(&result_status) {
-            self.verify_completion_scope(&task_id, args, &details, &runtime_contract)
+            self.verify_completion_scope(&task_id, &raw_args, &details, &runtime_contract)
                 .await?;
         }
         validate_task_result_artifact_payload(
@@ -2647,7 +2731,7 @@ impl SharedMemoryService {
             "producer_subject_id": subject_id,
             "capability_grant_id": requested_grant_id,
             "attempt_id": attempt_id,
-            "accepted_shard_id": string_arg(args, "accepted_shard_id").or_else(|| string_arg(args, "acceptedShardId"))
+            "accepted_shard_id": accepted_shard_id
         });
         let artifact = self
             .put_artifact_bytes(

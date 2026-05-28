@@ -88,9 +88,9 @@
         :required-inputs [task_id project_id context_capsule_lisp read_scope artifact_contract]
         :forbidden [file_write apply_patch commit secret_dump direct_cli_pty_drive]
         :completion "task-result-artifact before final"
-        :dispatch-surface "mission_task_delegate detects engine_hint=xjpcode/xjpcode-readonly-worker, requires MISSIOND_XJPCODE_WORKER_URL, POSTs the scoped WorkOrder, parses SSE frames, writes task_result_put_typed, then closes through worker_settle."
+        :dispatch-surface "mission_task_delegate detects engine_hint=xjpcode/xjpcode-readonly-worker, requires MISSIOND_XJPCODE_WORKER_URL or a loopback-only xjpcode_worker_url smoke override, POSTs the scoped WorkOrder, parses SSE frames, writes task_result_put_typed, then closes through worker_settle."
         :smoke "node scripts/smoke-xjpcode-worker-dispatch.mjs --live --json"
-        :smoke-rule "The smoke is explicit live opt-in because it creates a real read-only BoardTask; it must start or use xjpcode worker health, delegate through mission_task_delegate, then poll mission_shared_memory(action=task_result_get) until a canonical artifact exists.")
+        :smoke-rule "The smoke is explicit live opt-in because it creates a real read-only BoardTask; it may pass a loopback-only xjpcode_worker_url for local dev smoke or use daemon-visible MISSIOND_XJPCODE_WORKER_URL configured through deploy-daemon/launchd, then delegates through mission_task_delegate and polls mission_shared_memory(action=task_result_get) until a canonical artifact exists.")
       (worker :id xjpcode-code-worker
         :project xjpcode
         :engine xjpcode

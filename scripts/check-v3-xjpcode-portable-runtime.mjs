@@ -38,6 +38,7 @@ const worker = read(XJPCODE_ROOT, "src/server/worker.rs");
 const workerChecker = read(XJPCODE_ROOT, "scripts/check-xjpcode-portable-worker-runtime.mjs");
 const taskDelegate = read(MISSIOND_ROOT, "crates/missiond-daemon/src/handlers/compute/task_delegate.rs");
 const liveSmoke = read(MISSIOND_ROOT, "scripts/smoke-xjpcode-worker-dispatch.mjs");
+const deployDaemon = read(MISSIOND_ROOT, "scripts/deploy-daemon.sh");
 
 push("missiond project registry exists", Boolean(projectRegistry));
 push("missiond workstation runtime exists", Boolean(workstationRuntime));
@@ -61,13 +62,16 @@ push("server exposes event replay route", has(serverMod, "/worker/v1/work-orders
 push("mission_task_delegate xjpcode detector", has(taskDelegate, "engine_hint_is_xjpcode"));
 push("mission_task_delegate spawns xjpcode worker", has(taskDelegate, "spawn_xjpcode_readonly_worker"));
 push("mission_task_delegate xjpcode env", has(taskDelegate, "MISSIOND_XJPCODE_WORKER_URL"));
+push("mission_task_delegate loopback smoke override", has(taskDelegate, "xjpcode_worker_url") && has(taskDelegate, "XJPCODE_WORKER_URL_UNTRUSTED"));
 push("mission_task_delegate parses xjpcode SSE", has(taskDelegate, "parse_xjpcode_sse_frames"));
 push("mission_task_delegate writes task artifact", has(taskDelegate, "task_result_put_typed"));
 push("mission_task_delegate settles xjpcode worker", has(taskDelegate, "settle_worker_command") && has(taskDelegate, "WorkerSettleRequest"));
 push("xjpcode dispatch smoke script exists", Boolean(liveSmoke));
 push("xjpcode dispatch smoke calls mission_task_delegate", has(liveSmoke, "mission_task_delegate"));
+push("xjpcode dispatch smoke passes loopback worker url", has(liveSmoke, "xjpcode_worker_url"));
 push("xjpcode dispatch smoke polls task_result_get", has(liveSmoke, "task_result_get"));
 push("xjpcode dispatch smoke is explicit live opt-in", has(liveSmoke, "--live"));
+push("deploy-daemon propagates xjpcode worker env", has(deployDaemon, "MISSIOND_XJPCODE_WORKER_URL"));
 
 for (const token of [
   "pub struct WorkOrderRequest",
