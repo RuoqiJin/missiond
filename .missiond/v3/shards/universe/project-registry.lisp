@@ -278,7 +278,7 @@
       :operations ".missiond/operations/palm-era-operations-blueprint.lisp"
       :status project-ssot-owned
       :checks ["bash .missiond/check.sh"]
-      :missiond-role "registered independent app; text island industrial management simulator with Vercel-only Next.js frontend, GCP VM Rust authoritative simulation backend, and self-managed GCP VM Postgres"
+      :missiond-role "registered independent app; text island industrial management simulator with Vercel-only Next.js frontend at palm-era.xiaojinpro.top, GCP VM Rust authoritative simulation backend at palm-era-api.xiaojinpro.top, and self-managed GCP VM Postgres"
       :surface project-registry)
     (project :id chat-translator
       :aliases ["chat 翻译工具" "chat翻译" chat-translation-tool]
@@ -326,5 +326,5 @@
       :operations ".missiond/operations/daily-spark-operations-blueprint.lisp"
       :status incubating-project
       :checks ["bash .missiond/check.sh"]
-      :missiond-role "registered independent app migration; Daily Spark moves Lovable/Supabase Cloud runtime to Vercel frontend plus GCP VM self-hosted Supabase-compatible backend/database"
+      :missiond-role "registered independent app migration; Daily Spark moves Lovable/Supabase Cloud runtime to Vercel frontend spark.xiaojinpro.top plus GCP VM self-hosted Supabase-compatible backend/database"
       :surface project-registry))
