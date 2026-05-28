@@ -326,10 +326,21 @@ const checks = [
     [
       'if req.kind == "task-result-artifact"',
       '"task-result-artifact requires task_id"',
-      'TaskCompletionEvidenceWriter::new',
-      '.write_bounded(',
+      'ControlPlaneKernel::new',
+      'WriteCompletionArtifactCommand',
+      '.write_completion_artifact_command(',
       'artifact_id: format!("task-result-artifact:{hash}")',
       'path: format!("shared-artifact://{hash}")',
+    ],
+  ],
+  [
+    'control-plane task-result-artifact writer',
+    'crates/missiond-daemon/src/engine/control_plane_kernel.rs',
+    [
+      'pub(crate) struct WriteCompletionArtifactCommand',
+      'pub(crate) async fn write_completion_artifact_command',
+      'TaskCompletionEvidenceWriter::new',
+      '.write_bounded(',
     ],
   ],
   [
