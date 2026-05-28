@@ -617,14 +617,36 @@ async fn main() -> Result<()> {
     });
     cc.start().await?;
 
+    let workflow_feature_enabled =
+        feature_gates::optional_feature_enabled(feature_gates::WORKFLOW_ENV);
+    let memory_feature_enabled = feature_gates::optional_feature_enabled(feature_gates::MEMORY_ENV);
+    let router_experiments_enabled =
+        feature_gates::optional_feature_enabled(feature_gates::ROUTER_EXPERIMENTS_ENV);
+    let self_evolution_feature_enabled =
+        feature_gates::optional_feature_enabled(feature_gates::SELF_EVOLUTION_ENV);
+    let conversations_feature_enabled =
+        feature_gates::optional_feature_enabled(feature_gates::CONVERSATIONS_ENV);
+    let infra_os_feature_enabled =
+        feature_gates::optional_feature_enabled(feature_gates::INFRA_OS_ENV);
+    let provider_diagnostics_enabled = router_experiments_enabled || conversations_feature_enabled;
+
     // Gemini CLI watcher: shares the same broadcast channel as CC watcher
     let mut gemini_watcher = GeminiCliWatcher::new(GeminiCliWatcherOptions {
         gemini_home: None,
         event_tx: cc.event_sender(),
         store: Some(Arc::clone(&store)),
     });
-    if let Err(e) = gemini_watcher.start().await {
-        warn!(error = %e, "Failed to start GeminiCliWatcher (non-fatal)");
+    if provider_diagnostics_enabled {
+        if let Err(e) = gemini_watcher.start().await {
+            warn!(error = %e, "Failed to start GeminiCliWatcher (non-fatal)");
+        }
+    } else {
+        info!(
+            env = feature_gates::CONVERSATIONS_ENV,
+            router_env = feature_gates::ROUTER_EXPERIMENTS_ENV,
+            full_os_env = feature_gates::FULL_OS_ENV,
+            "Gemini CLI watcher disabled in kernel-core mode"
+        );
     }
 
     let cc_tasks = Arc::new(Mutex::new(cc));
@@ -886,8 +908,6 @@ async fn main() -> Result<()> {
             Arc::clone(&bus_services),
         ))
     };
-    let memory_feature_enabled = feature_gates::optional_feature_enabled(feature_gates::MEMORY_ENV);
-
     let slot_mgr_pty2 = Arc::clone(&pty);
     let slot_mgr_store2 = Arc::clone(&store);
     let slot_mgr_pty3 = Arc::clone(&pty);
@@ -904,7 +924,7 @@ async fn main() -> Result<()> {
         .timeout(std::time::Duration::from_secs(180))
         .build()
         .expect("Failed to build HTTP client");
-    let gemini = {
+    let gemini = if router_experiments_enabled {
         let router_runtime_config =
             context::v3_blueprint_runtime::RouterRuntimeConfig::load_for_current_dir()
                 .map_err(|e| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", e))?;
@@ -973,8 +993,15 @@ async fn main() -> Result<()> {
                 .with_router_runtime_config(&router_runtime_config)
                 .with_bus(Arc::clone(&bus_services))
         }
+    } else {
+        info!(
+            env = feature_gates::ROUTER_EXPERIMENTS_ENV,
+            full_os_env = feature_gates::FULL_OS_ENV,
+            "Gemini router client advanced config disabled in kernel-core mode"
+        );
+        gemini_client::GeminiClient::new().with_bus(Arc::clone(&bus_services))
     };
-    let minimax = {
+    let minimax = if router_experiments_enabled {
         let gw = minimax_gateway::create_minimax_gateway()?;
         if let Some((handle, gateway)) = gw {
             let gateway = gateway.with_bus(Arc::clone(&bus_services));
@@ -985,13 +1012,32 @@ async fn main() -> Result<()> {
             warn!("MinimaxGateway: API key not found, gateway disabled");
             None
         }
+    } else {
+        info!(
+            env = feature_gates::ROUTER_EXPERIMENTS_ENV,
+            full_os_env = feature_gates::FULL_OS_ENV,
+            "MinimaxGateway disabled in kernel-core mode"
+        );
+        None
     };
-    let sonnet = {
+    let sonnet_gateway_enabled = router_experiments_enabled
+        || conversations_feature_enabled
+        || self_evolution_feature_enabled;
+    let sonnet = if sonnet_gateway_enabled {
         let (handle, gateway) = sonnet_gateway::create_sonnet_gateway()?;
         let gateway = gateway.with_bus(Arc::clone(&bus_services));
         info!("SonnetGateway initialized");
         tokio::spawn(gateway.run());
         Some(handle)
+    } else {
+        info!(
+            conversation_env = feature_gates::CONVERSATIONS_ENV,
+            router_env = feature_gates::ROUTER_EXPERIMENTS_ENV,
+            self_evolution_env = feature_gates::SELF_EVOLUTION_ENV,
+            full_os_env = feature_gates::FULL_OS_ENV,
+            "SonnetGateway disabled in kernel-core mode"
+        );
+        None
     };
     let prompts_store = Arc::new(prompts::PromptStore::load());
     let strategy_notify = Arc::new(tokio::sync::Notify::new());
@@ -1281,7 +1327,7 @@ async fn main() -> Result<()> {
         },
     };
 
-    if feature_gates::optional_feature_enabled(feature_gates::WORKFLOW_ENV) {
+    if workflow_feature_enabled {
         match state
             .storage()
             .shared_memory
@@ -1700,10 +1746,12 @@ async fn main() -> Result<()> {
         }
     }
 
-    let conversation_backfill_on_startup = backfill_enabled
+    let conversation_backfill_requested = backfill_enabled
         || std::env::var("MISSIOND_CONVERSATION_BACKFILL_ON_STARTUP")
             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
+    let conversation_backfill_on_startup =
+        conversations_feature_enabled && conversation_backfill_requested;
 
     // Historical conversation repair is intentionally opt-in. Large provider
     // stores can contain hundreds of thousands of rows; running this on every
@@ -1713,9 +1761,15 @@ async fn main() -> Result<()> {
         tokio::spawn(async move {
             events_sync::backfill_conversation_events(&backfill_state).await;
         });
-    } else {
+    } else if conversations_feature_enabled {
         info!(
             "Conversation event backfill skipped on startup; enable llm.yaml backfill_enabled or MISSIOND_CONVERSATION_BACKFILL_ON_STARTUP=1"
+        );
+    } else {
+        info!(
+            env = feature_gates::CONVERSATIONS_ENV,
+            full_os_env = feature_gates::FULL_OS_ENV,
+            "conversation event backfill disabled in kernel-core mode"
         );
     }
 
@@ -1725,9 +1779,15 @@ async fn main() -> Result<()> {
         tokio::spawn(async move {
             events_sync::backfill_tool_calls(&backfill_state).await;
         });
-    } else {
+    } else if conversations_feature_enabled {
         info!(
             "Conversation tool-call backfill skipped on startup; enable llm.yaml backfill_enabled or MISSIOND_CONVERSATION_BACKFILL_ON_STARTUP=1"
+        );
+    } else {
+        info!(
+            env = feature_gates::CONVERSATIONS_ENV,
+            full_os_env = feature_gates::FULL_OS_ENV,
+            "conversation tool-call backfill disabled in kernel-core mode"
         );
     }
 
@@ -1871,7 +1931,7 @@ async fn main() -> Result<()> {
         &state,
         shutdown_rx.clone(),
     );
-    if feature_gates::optional_feature_enabled(feature_gates::SELF_EVOLUTION_ENV) {
+    if self_evolution_feature_enabled {
         engine::lisp_code_sync::start_lisp_code_sync_service(
             &bus_services,
             &state,
@@ -1902,7 +1962,7 @@ async fn main() -> Result<()> {
     }
 
     // Gemini request log subscriber (v2 bus → DB persistence)
-    if feature_gates::optional_feature_enabled(feature_gates::ROUTER_EXPERIMENTS_ENV) {
+    if router_experiments_enabled {
         workers::spawn_worker(
             workers::local::gemini_logger::GeminiLoggerWorker,
             Arc::new(state.clone()),
@@ -1916,7 +1976,7 @@ async fn main() -> Result<()> {
         );
     }
 
-    if feature_gates::optional_feature_enabled(feature_gates::ROUTER_EXPERIMENTS_ENV) {
+    if router_experiments_enabled {
         workers::spawn_worker(
             vision_worker::VisionWorker,
             Arc::new(state.clone()),
@@ -2241,7 +2301,7 @@ async fn main() -> Result<()> {
     }
 
     // AIOps CronSensor: health scan every 5 minutes
-    {
+    if infra_os_feature_enabled {
         let s = state.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
@@ -2252,6 +2312,12 @@ async fn main() -> Result<()> {
             }
         });
         info!("AIOps health scanner started (300s interval)");
+    } else {
+        info!(
+            env = feature_gates::INFRA_OS_ENV,
+            full_os_env = feature_gates::FULL_OS_ENV,
+            "AIOps health scanner disabled in kernel-core mode"
+        );
     }
 
     // Conversation logger event stream
@@ -2267,11 +2333,14 @@ async fn main() -> Result<()> {
     {
         let catchup_cc = Arc::clone(&state.cc_tasks);
         let catchup_gemini = Arc::clone(&gemini_tasks);
+        let catchup_provider_diagnostics_enabled = provider_diagnostics_enabled;
         tokio::spawn(async move {
             // Yield to let ConversationLoggerWorker's run_loop reach its first recv()
             tokio::task::yield_now().await;
             catchup_cc.lock().await.run_startup_catchup().await;
-            catchup_gemini.lock().await.run_startup_catchup().await;
+            if catchup_provider_diagnostics_enabled {
+                catchup_gemini.lock().await.run_startup_catchup().await;
+            }
         });
     }
 
@@ -2284,81 +2353,113 @@ async fn main() -> Result<()> {
         shutdown_rx.clone(),
     );
 
-    // Retro Worker — Notify-driven session retrospective (Sonnet)
-    workers::spawn_worker(
-        workers::sonnet::retro_worker::RetroWorker {
-            notify: Arc::clone(&state.retro_notify),
-        },
-        Arc::new(state.clone()),
-        shutdown_rx.clone(),
-    );
+    if conversations_feature_enabled {
+        // Retro Worker — Notify-driven session retrospective (Sonnet)
+        workers::spawn_worker(
+            workers::sonnet::retro_worker::RetroWorker {
+                notify: Arc::clone(&state.retro_notify),
+            },
+            Arc::new(state.clone()),
+            shutdown_rx.clone(),
+        );
 
-    // Architecture maintenance worker — auto-updates YAML manifests on structural code changes
-    workers::spawn_worker(
-        workers::sonnet::arch_maintenance_worker::ArchMaintenanceWorker,
-        Arc::new(state.clone()),
-        shutdown_rx.clone(),
-    );
+        // Daily reconcile worker — JSONL-to-DB integrity checker (safety net for missed FSEvents)
+        workers::spawn_worker(
+            workers::local::reconcile_worker::ReconcileWorker,
+            Arc::new(state.clone()),
+            shutdown_rx.clone(),
+        );
 
-    // Lisp survey worker — commit-triggered intent.lisp incremental maintenance
-    workers::spawn_worker(
-        workers::sonnet::lisp_survey_worker::LispSurveyWorker,
-        Arc::new(state.clone()),
-        shutdown_rx.clone(),
-    );
+        // Gemini CLI reconcile worker — ~/.gemini/tmp/*/chats/*.json integrity checker
+        workers::spawn_worker(
+            workers::local::gemini_reconcile_worker::GeminiReconcileWorker,
+            Arc::new(state.clone()),
+            shutdown_rx.clone(),
+        );
 
-    // Strategy Worker — Notify-driven strategic analysis (Gemini CLI)
-    workers::spawn_worker(
-        workers::gemini::strategy_worker::StrategyWorker {
-            notify: Arc::clone(&state.strategy_notify),
-        },
-        Arc::new(state.clone()),
-        shutdown_rx.clone(),
-    );
+        // Codex ingestion worker — reads Codex's provider-local thread index
+        workers::spawn_worker(
+            workers::local::codex_ingestion_worker::CodexIngestionWorker,
+            Arc::new(state.clone()),
+            shutdown_rx.clone(),
+        );
 
-    // Daily reconcile worker — JSONL-to-DB integrity checker (safety net for missed FSEvents)
-    workers::spawn_worker(
-        workers::local::reconcile_worker::ReconcileWorker,
-        Arc::new(state.clone()),
-        shutdown_rx.clone(),
-    );
+        // Conversation Organizer — Stage 2 of Cognitive Pipeline
+        // Repairs parent links, splices compaction fragments, emits SessionOrganized
+        workers::spawn_worker(
+            workers::local::conversation_organizer::ConversationOrganizerWorker,
+            Arc::new(state.clone()),
+            shutdown_rx.clone(),
+        );
 
-    // XJPCode briefing worker — writes ~/.xjpcode/xjpcode.md every 60s
-    workers::spawn_worker(
-        workers::local::xjpcode_briefing_worker::XjpcodeBriefingWorker,
-        Arc::new(state.clone()),
-        shutdown_rx.clone(),
-    );
+        // Tagger & Chunker — Stage 3 of Cognitive Pipeline
+        // Extracts structured Turns from flat messages, applies noise labels
+        workers::spawn_worker(
+            workers::local::tagger_chunker::TaggerChunkerWorker,
+            Arc::new(state.clone()),
+            shutdown_rx.clone(),
+        );
+    } else {
+        info!(
+            env = feature_gates::CONVERSATIONS_ENV,
+            full_os_env = feature_gates::FULL_OS_ENV,
+            "advanced conversation workers disabled in kernel-core mode"
+        );
+    }
 
-    // Gemini CLI reconcile worker — ~/.gemini/tmp/*/chats/*.json integrity checker
-    workers::spawn_worker(
-        workers::local::gemini_reconcile_worker::GeminiReconcileWorker,
-        Arc::new(state.clone()),
-        shutdown_rx.clone(),
-    );
+    if self_evolution_feature_enabled {
+        // Architecture maintenance worker — auto-updates YAML manifests on structural code changes
+        workers::spawn_worker(
+            workers::sonnet::arch_maintenance_worker::ArchMaintenanceWorker,
+            Arc::new(state.clone()),
+            shutdown_rx.clone(),
+        );
 
-    // Codex ingestion worker — reads Codex's provider-local thread index
-    workers::spawn_worker(
-        workers::local::codex_ingestion_worker::CodexIngestionWorker,
-        Arc::new(state.clone()),
-        shutdown_rx.clone(),
-    );
+        // Lisp survey worker — commit-triggered intent.lisp incremental maintenance
+        workers::spawn_worker(
+            workers::sonnet::lisp_survey_worker::LispSurveyWorker,
+            Arc::new(state.clone()),
+            shutdown_rx.clone(),
+        );
+    } else {
+        info!(
+            env = feature_gates::SELF_EVOLUTION_ENV,
+            full_os_env = feature_gates::FULL_OS_ENV,
+            "self-evolution provider workers disabled in kernel-core mode"
+        );
+    }
 
-    // Conversation Organizer — Stage 2 of Cognitive Pipeline
-    // Repairs parent links, splices compaction fragments, emits SessionOrganized
-    workers::spawn_worker(
-        workers::local::conversation_organizer::ConversationOrganizerWorker,
-        Arc::new(state.clone()),
-        shutdown_rx.clone(),
-    );
+    if router_experiments_enabled {
+        // Strategy Worker — Notify-driven strategic analysis (Gemini CLI)
+        workers::spawn_worker(
+            workers::gemini::strategy_worker::StrategyWorker {
+                notify: Arc::clone(&state.strategy_notify),
+            },
+            Arc::new(state.clone()),
+            shutdown_rx.clone(),
+        );
+    } else {
+        info!(
+            env = feature_gates::ROUTER_EXPERIMENTS_ENV,
+            full_os_env = feature_gates::FULL_OS_ENV,
+            "router experiment provider workers disabled in kernel-core mode"
+        );
+    }
 
-    // Tagger & Chunker — Stage 3 of Cognitive Pipeline
-    // Extracts structured Turns from flat messages, applies noise labels
-    workers::spawn_worker(
-        workers::local::tagger_chunker::TaggerChunkerWorker,
-        Arc::new(state.clone()),
-        shutdown_rx.clone(),
-    );
+    if infra_os_feature_enabled {
+        // XJPCode briefing worker — writes ~/.xjpcode/xjpcode.md every 60s
+        workers::spawn_worker(
+            workers::local::xjpcode_briefing_worker::XjpcodeBriefingWorker,
+            Arc::new(state.clone()),
+            shutdown_rx.clone(),
+        );
+    } else {
+        info!(
+            env = feature_gates::INFRA_OS_ENV,
+            full_os_env = feature_gates::FULL_OS_ENV,
+            "XJPCode briefing worker disabled in kernel-core mode"
+        );
+    }
 
     info!("All event handlers started (isolated tasks)");
 

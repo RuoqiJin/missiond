@@ -172,10 +172,21 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.main, sources.main, [
     'mod feature_gates;',
+    'workflow_feature_enabled',
+    'router_experiments_enabled',
+    'self_evolution_feature_enabled',
+    'conversations_feature_enabled',
+    'infra_os_feature_enabled',
+    'provider_diagnostics_enabled',
+    'Gemini CLI watcher disabled in kernel-core mode',
+    'Gemini router client advanced config disabled in kernel-core mode',
+    'MinimaxGateway disabled in kernel-core mode',
+    'SonnetGateway disabled in kernel-core mode',
     'feature_gates::optional_feature_enabled(feature_gates::WORKFLOW_ENV)',
     'workflow_run startup recovery disabled in kernel-core mode',
     'feature_gates::optional_feature_enabled(feature_gates::SELF_EVOLUTION_ENV)',
     'self-evolution services disabled in kernel-core mode',
+    'self-evolution provider workers disabled in kernel-core mode',
     'let memory_feature_enabled = feature_gates::optional_feature_enabled(feature_gates::MEMORY_ENV);',
     'embedding provider initialization disabled in kernel-core mode',
     'embedding cache warmup and startup backfill disabled in kernel-core mode',
@@ -187,6 +198,12 @@ function checkFiles(root, files) {
     'feature_gates::optional_feature_enabled(feature_gates::ROUTER_EXPERIMENTS_ENV)',
     'Gemini logger worker disabled in kernel-core mode',
     'vision worker disabled in kernel-core mode',
+    'router experiment provider workers disabled in kernel-core mode',
+    'conversation event backfill disabled in kernel-core mode',
+    'conversation tool-call backfill disabled in kernel-core mode',
+    'advanced conversation workers disabled in kernel-core mode',
+    'AIOps health scanner disabled in kernel-core mode',
+    'XJPCode briefing worker disabled in kernel-core mode',
   ]);
 
   requireAll(diagnostics, files.deployDaemon, sources.deployDaemon, [
