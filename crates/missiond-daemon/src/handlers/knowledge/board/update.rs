@@ -8,6 +8,15 @@ struct BoardIdArgs {
     artifact_hash: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DoneSettleAuthority {
+    grant_id: Option<String>,
+    subject_kind: String,
+    subject_id: String,
+    attempt_id: Option<String>,
+    allow_system_bypass: bool,
+}
+
 pub(super) async fn handle_update(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     let args = super::normalize_board_args(args);
     // Detect batch mode: explicit ids array or old batch_update tool name.
@@ -103,6 +112,7 @@ async fn handle_batch_update(state: &AppState, args: Value) -> Result<ToolResult
 }
 
 async fn handle_toggle(state: &AppState, args: Value) -> Result<ToolResult> {
+    let authority = done_settle_authority_from_args(&args);
     let BoardIdArgs { id, artifact_hash } = match serde_json::from_value(args) {
         Ok(args) => args,
         Err(err) => return Ok(super::invalid_board_args("mission_board_toggle", err)),
@@ -132,6 +142,7 @@ async fn handle_toggle(state: &AppState, args: Value) -> Result<ToolResult> {
             &id,
             artifact_hash,
             "mission_board_toggle requested typed completion settle.",
+            authority,
         )
         .await;
     }
@@ -196,6 +207,7 @@ async fn handle_single_update(state: &AppState, args: Value) -> Result<ToolResul
             &id,
             artifact_hash,
             "mission_board_update requested typed completion settle.",
+            done_settle_authority_from_args(&args_val),
         )
         .await;
     }
@@ -311,6 +323,7 @@ async fn handle_batch_done_settle(
             }));
             continue;
         };
+        let authority = done_settle_authority_from_args(args);
         match ControlPlaneKernel::new(state)
             .settle_task_command(SettleTaskCommand {
                 task_id: id.clone(),
@@ -322,11 +335,11 @@ async fn handle_batch_done_settle(
                 summary: Some(
                     "mission_board_update batch requested typed completion settle.".to_string(),
                 ),
-                grant_id: None,
-                subject_kind: "operator".to_string(),
-                subject_id: "mission_board_update".to_string(),
-                attempt_id: None,
-                allow_system_bypass: true,
+                grant_id: authority.grant_id,
+                subject_kind: authority.subject_kind,
+                subject_id: authority.subject_id,
+                attempt_id: authority.attempt_id,
+                allow_system_bypass: authority.allow_system_bypass,
             })
             .await
         {
@@ -361,6 +374,7 @@ async fn settle_done_via_shared_memory(
     task_id: &str,
     artifact_hash: &str,
     summary: &str,
+    authority: DoneSettleAuthority,
 ) -> Result<ToolResult> {
     if let Some(blocked) = guard_done_close_against_code_drift(state).await? {
         return Ok(blocked);
@@ -374,11 +388,11 @@ async fn settle_done_via_shared_memory(
             artifact_hash: Some(artifact_hash.to_string()),
             status: "done".to_string(),
             summary: Some(summary.to_string()),
-            grant_id: None,
-            subject_kind: "operator".to_string(),
-            subject_id: "mission_board_update".to_string(),
-            attempt_id: None,
-            allow_system_bypass: true,
+            grant_id: authority.grant_id,
+            subject_kind: authority.subject_kind,
+            subject_id: authority.subject_id,
+            attempt_id: authority.attempt_id,
+            allow_system_bypass: authority.allow_system_bypass,
         })
         .await
     {
@@ -398,6 +412,50 @@ async fn settle_done_via_shared_memory(
             err,
         ))),
     }
+}
+
+fn done_settle_authority_from_args(args: &Value) -> DoneSettleAuthority {
+    DoneSettleAuthority {
+        grant_id: string_arg_any(
+            args,
+            &[
+                "grant_id",
+                "grantId",
+                "capability_grant_id",
+                "capabilityGrantId",
+            ],
+        ),
+        subject_kind: string_arg_any(args, &["subject_kind", "subjectKind"])
+            .unwrap_or_else(|| "operator".to_string()),
+        subject_id: string_arg_any(args, &["subject_id", "subjectId"])
+            .unwrap_or_else(|| "mission_board_update".to_string()),
+        attempt_id: string_arg_any(args, &["attempt_id", "attemptId"]),
+        allow_system_bypass: bool_arg_any(
+            args,
+            &["confirm", "operator_confirm", "operatorConfirm"],
+        ),
+    }
+}
+
+fn string_arg_any(args: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| args.get(*key).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn bool_arg_any(args: &Value, keys: &[&str]) -> bool {
+    keys.iter()
+        .filter_map(|key| args.get(*key))
+        .any(|value| match value {
+            Value::Bool(v) => *v,
+            Value::String(s) => matches!(
+                s.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            ),
+            _ => false,
+        })
 }
 
 fn artifact_hash_for_batch_id(
@@ -474,4 +532,66 @@ fn tool_error_json(error: missiond_mcp::tools::ToolError) -> Value {
             "message": err.to_string()
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn done_settle_authority_defaults_to_unconfirmed_operator() {
+        let authority = done_settle_authority_from_args(&json!({}));
+
+        assert_eq!(authority.grant_id, None);
+        assert_eq!(authority.subject_kind, "operator");
+        assert_eq!(authority.subject_id, "mission_board_update");
+        assert_eq!(authority.attempt_id, None);
+        assert!(!authority.allow_system_bypass);
+    }
+
+    #[test]
+    fn done_settle_authority_accepts_confirmation_aliases() {
+        let authority = done_settle_authority_from_args(&json!({
+            "operatorConfirm": "yes"
+        }));
+
+        assert!(authority.allow_system_bypass);
+
+        let authority = done_settle_authority_from_args(&json!({
+            "confirm": true
+        }));
+
+        assert!(authority.allow_system_bypass);
+    }
+
+    #[test]
+    fn done_settle_authority_accepts_exact_grant_subject_and_attempt_aliases() {
+        let authority = done_settle_authority_from_args(&json!({
+            "capabilityGrantId": "grant-1",
+            "subjectKind": "worker",
+            "subjectId": "slot-1",
+            "attemptId": "attempt-1"
+        }));
+
+        assert_eq!(authority.grant_id.as_deref(), Some("grant-1"));
+        assert_eq!(authority.subject_kind, "worker");
+        assert_eq!(authority.subject_id, "slot-1");
+        assert_eq!(authority.attempt_id.as_deref(), Some("attempt-1"));
+        assert!(!authority.allow_system_bypass);
+    }
+
+    #[test]
+    fn artifact_hash_for_batch_id_accepts_normalized_aliases() {
+        let args = super::super::normalize_board_args(json!({
+            "artifact_hashes": {
+                "task-1": " hash-1 "
+            }
+        }));
+
+        assert_eq!(
+            artifact_hash_for_batch_id(&args, "task-1", 0, 2).as_deref(),
+            Some("hash-1")
+        );
+    }
 }

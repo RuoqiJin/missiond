@@ -45,6 +45,7 @@ const FILES = {
   mcpGateway: 'crates/missiond-mcp/src/gen_gateway.rs',
   boardHandler: 'crates/missiond-daemon/src/handlers/knowledge/board.rs',
   boardCreateHandler: 'crates/missiond-daemon/src/handlers/knowledge/board/create.rs',
+  boardUpdateHandler: 'crates/missiond-daemon/src/handlers/knowledge/board/update.rs',
   sharedHandler: 'crates/missiond-daemon/src/handlers/knowledge/shared_memory.rs',
   boardRoute: 'packages/board/src/app/api/tasks/route.ts',
   boardStoreTs: 'packages/board/src/store.ts',
@@ -522,6 +523,24 @@ function checkFiles(root, files) {
   rejectAll(diagnostics, files.boardCreateHandler, sources.boardCreateHandler, [
     '.grant_task_capabilities(',
     '.upsert_task_contract_from_metadata(',
+  ]);
+
+  requireAll(diagnostics, files.boardUpdateHandler, sources.boardUpdateHandler, [
+    'ControlPlaneKernel::new(state)',
+    '.settle_task_command(SettleTaskCommand',
+    'done_settle_authority_from_args',
+    'capability_grant_id',
+    'capabilityGrantId',
+    'operatorConfirm',
+    'grant_id: authority.grant_id',
+    'subject_kind: authority.subject_kind',
+    'subject_id: authority.subject_id',
+    'attempt_id: authority.attempt_id',
+    'allow_system_bypass: authority.allow_system_bypass',
+    'mission_board_update(status=done) requires artifactHash',
+  ]);
+  rejectAll(diagnostics, files.boardUpdateHandler, sources.boardUpdateHandler, [
+    'allow_system_bypass: true',
   ]);
 
   requireAll(diagnostics, files.v2Subscribers, sources.v2Subscribers, [
