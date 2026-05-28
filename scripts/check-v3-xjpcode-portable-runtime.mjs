@@ -71,6 +71,8 @@ push("xjpcode dispatch smoke calls mission_task_delegate", has(liveSmoke, "missi
 push("xjpcode dispatch smoke passes loopback worker url", has(liveSmoke, "xjpcode_worker_url"));
 push("xjpcode dispatch smoke polls task_result_get", has(liveSmoke, "task_result_get"));
 push("xjpcode dispatch smoke is explicit live opt-in", has(liveSmoke, "--live"));
+push("xjpcode dispatch smoke rejects non-success artifacts by default", has(liveSmoke, "XJPCODE_ARTIFACT_NOT_SUCCESS") && has(liveSmoke, "artifactStatusIsTerminalSuccess"));
+push("xjpcode dispatch smoke keeps diagnostic escape hatch explicit", has(liveSmoke, "--allow-blocked-artifact") && has(workstationRuntime, "--allow-blocked-artifact"));
 push("deploy-daemon propagates xjpcode worker env", has(deployDaemon, "MISSIOND_XJPCODE_WORKER_URL"));
 
 for (const token of [

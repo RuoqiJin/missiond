@@ -18,6 +18,7 @@ const flags = new Set(args);
 const JSON_MODE = flags.has("--json");
 const LIVE = flags.has("--live");
 const NO_START_WORKER = flags.has("--no-start-worker");
+const ALLOW_BLOCKED_ARTIFACT = flags.has("--allow-blocked-artifact");
 const WAIT_SECS = numberArg("--wait-secs", Number(process.env.MISSIOND_XJPCODE_SMOKE_WAIT_SECS || 45));
 const PREFLIGHT_RUNTIME = flags.has("--preflight-runtime");
 
@@ -124,6 +125,21 @@ async function startWorker() {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function artifactStatus(artifact) {
+  const direct = artifact?.result_status || artifact?.resultStatus || artifact?.status;
+  if (typeof direct === "string" && direct.trim()) return direct.trim().toLowerCase();
+  const payload = artifact?.payload || artifact?.artifact || artifact?.data;
+  if (payload && typeof payload === "object") {
+    const nested = payload.result_status || payload.resultStatus || payload.status;
+    if (typeof nested === "string" && nested.trim()) return nested.trim().toLowerCase();
+  }
+  return "unknown";
+}
+
+function artifactStatusIsTerminalSuccess(status) {
+  return new Set(["completed", "complete", "done", "ok", "success", "succeeded"]).has(status);
 }
 
 async function callTool(tool, payload, extraEnv = {}) {
@@ -294,11 +310,30 @@ async function main() {
       steps,
     });
   }
+  const status = artifactStatus(artifact);
   steps.push({ name: "canonical task-result-artifact exists", ok: true, detail: artifact.artifactHash || artifact.artifact_hash || "" });
+  if (!artifactStatusIsTerminalSuccess(status) && !ALLOW_BLOCKED_ARTIFACT) {
+    fail("xjpcode delegated BoardTask produced a non-success task-result-artifact", {
+      code: "XJPCODE_ARTIFACT_NOT_SUCCESS",
+      artifact_status: status,
+      task_id: taskId,
+      delegate,
+      artifact,
+      hint: "Pass --allow-blocked-artifact only for plumbing-only diagnostics; production smoke requires a successful terminal artifact.",
+      steps,
+    });
+  }
+  steps.push({
+    name: ALLOW_BLOCKED_ARTIFACT
+      ? "canonical task-result-artifact status observed"
+      : "canonical task-result-artifact status success",
+    ok: true,
+    detail: status,
+  });
 
   emit({
     ok: true,
-    summary: "MissionD delegated a read-only BoardTask to xjpcode and recorded canonical task-result-artifact",
+    summary: "MissionD delegated a read-only BoardTask to xjpcode and recorded a successful canonical task-result-artifact",
     live: true,
     worker_url: workerUrl,
     worker_spawned: workerSpawned,

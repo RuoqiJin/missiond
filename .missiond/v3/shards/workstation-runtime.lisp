@@ -90,7 +90,7 @@
         :completion "task-result-artifact before final"
         :dispatch-surface "mission_task_delegate detects engine_hint=xjpcode/xjpcode-readonly-worker, requires MISSIOND_XJPCODE_WORKER_URL or a loopback-only xjpcode_worker_url smoke override, POSTs the scoped WorkOrder, parses SSE frames, writes task_result_put_typed, then closes through worker_settle."
         :smoke "node scripts/smoke-xjpcode-worker-dispatch.mjs --live --json"
-        :smoke-rule "The smoke is explicit live opt-in because it creates a real read-only BoardTask; it may pass a loopback-only xjpcode_worker_url for local dev smoke or use daemon-visible MISSIOND_XJPCODE_WORKER_URL configured through deploy-daemon/launchd, then delegates through mission_task_delegate and polls mission_shared_memory(action=task_result_get) until a canonical artifact exists.")
+        :smoke-rule "The smoke is explicit live opt-in because it creates a real read-only BoardTask; it may pass a loopback-only xjpcode_worker_url for local dev smoke or use daemon-visible MISSIOND_XJPCODE_WORKER_URL configured through deploy-daemon/launchd, then delegates through mission_task_delegate and polls mission_shared_memory(action=task_result_get) until a canonical task-result-artifact exists. Production smoke MUST require a terminal-success artifact status; --allow-blocked-artifact is reserved only for plumbing diagnostics so provider/router failures cannot be reported as worker success.")
       (worker :id xjpcode-code-worker
         :project xjpcode
         :engine xjpcode
