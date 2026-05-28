@@ -221,6 +221,7 @@ fn conversation_tool(name: &str) -> bool {
         || name == "mission_message_search"
         || name == "mission_context_around"
         || name == "mission_user_message_index"
+        || name == "mission_token_stats"
         || name == "mission_activity_report"
 }
 
@@ -274,6 +275,7 @@ mod tests {
             ("mission_codex_replay", CODEX_REPLAY_ENV),
             ("mission_nightly_evolution", SELF_EVOLUTION_ENV),
             ("mission_conversation_query", CONVERSATIONS_ENV),
+            ("mission_token_stats", CONVERSATIONS_ENV),
             ("mission_infra_ops", INFRA_OS_ENV),
             ("mission_board_decompose", BOARD_ADVANCED_ENV),
         ];

@@ -165,6 +165,7 @@ function checkFiles(root, files) {
     'mission_router_chat',
     'mission_codex_replay',
     'mission_nightly_evolution',
+    'mission_token_stats',
   ]);
 
   requireAll(diagnostics, files.handlers, sources.handlers, [
