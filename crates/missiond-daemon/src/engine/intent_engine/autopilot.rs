@@ -11,8 +11,8 @@ use crate::context::v3_blueprint_runtime::{
     AutopilotRuntimeConfig, RouterRuntimeConfig, WorkstationRuntimeConfig,
 };
 use crate::engine::control_plane_kernel::{
-    ControlPlaneKernel, GrantTaskCapabilitiesCommand, RecordObservationCommand, SettleTaskCommand,
-    UpdateTaskContractCapabilityGrantsCommand,
+    ControlPlaneKernel, GrantTaskCapabilitiesCommand, RecordObservationCommand,
+    RequireCapabilityCommand, SettleTaskCommand, UpdateTaskContractCapabilityGrantsCommand,
 };
 use crate::engine::learning_engine;
 use crate::engine::shared_memory::TaskRuntimeContract;
@@ -4588,6 +4588,34 @@ async fn dispatch_board_tasks_with_config(
                     author: Some("autopilot".to_string()),
                 })
                 .await;
+        }
+
+        if let Err(err) = ControlPlaneKernel::new(state)
+            .require_capability_command(RequireCapabilityCommand {
+                grant_id: None,
+                subject_kind: "system".to_string(),
+                subject_id: "autopilot".to_string(),
+                operation: "claim".to_string(),
+                scope_kind: "task".to_string(),
+                scope_key: task.id.to_string(),
+                task_id: Some(task.id.to_string()),
+                allow_system_bypass: true,
+                bypass_reason: Some("autopilot scheduler BoardTask claim authority".to_string()),
+                details: serde_json::json!({
+                    "source": "autopilot.dispatch",
+                    "slot_id": slot_id,
+                    "executor_type": "pty_slot"
+                }),
+            })
+            .await
+        {
+            warn!(
+                task_id = %task.id,
+                slot_id = %slot_id,
+                error = %err,
+                "Autopilot: capability guard refused BoardTask claim"
+            );
+            continue;
         }
 
         // Atomically claim the task (CAS: only succeeds if open + unclaimed)
