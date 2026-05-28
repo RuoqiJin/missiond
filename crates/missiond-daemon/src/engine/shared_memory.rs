@@ -255,6 +255,22 @@ struct WorktreeManifestSnapshot {
     changed_paths: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+struct TaskContractMetadataProjection {
+    id: String,
+    task_contract_id: String,
+    project_id: Option<String>,
+    dispatch_metadata: Value,
+    read_scope: Vec<String>,
+    write_scope: Vec<String>,
+    must_not_touch: Vec<String>,
+    capability_grant_ids: Vec<String>,
+    sandbox_profile: Option<String>,
+    completion_materialization_policy: Option<String>,
+    grounding_refs: Value,
+    context_refs: Value,
+}
+
 impl SharedMemoryService {
     pub(crate) fn new(
         pool: PgPool,
@@ -537,57 +553,8 @@ impl SharedMemoryService {
         project_id: Option<&str>,
         runtime_metadata: &Value,
     ) -> Result<String> {
-        let dispatch = runtime_metadata
-            .get("dispatch_metadata")
-            .or_else(|| runtime_metadata.get("swarm_metadata"))
-            .or_else(|| runtime_metadata.get("metadata"))
-            .unwrap_or(runtime_metadata);
-        let task_contract_id = metadata_string_value_any(runtime_metadata.get("task_contract_id"))
-            .or_else(|| metadata_string_value_any(dispatch.get("task_contract_id")))
-            .unwrap_or_else(|| format!("board-task:{task_id}"));
-        let project_id = metadata_string_value_any(dispatch.get("project_id")).or_else(|| {
-            project_id
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-        });
-        let read_scope = first_non_empty_metadata_list(&[
-            runtime_metadata.get("read_scope"),
-            dispatch.get("read_scope"),
-        ]);
-        let write_scope = first_non_empty_metadata_list(&[
-            runtime_metadata.get("write_scope"),
-            dispatch.get("write_scope"),
-        ]);
-        let must_not_touch = first_non_empty_metadata_list(&[
-            runtime_metadata.get("must_not_touch"),
-            dispatch.get("must_not_touch"),
-        ]);
-        let capability_grant_ids =
-            metadata_string_list_any(runtime_metadata.get("capability_grant_ids"))
-                .into_iter()
-                .chain(metadata_string_list_any(
-                    dispatch.get("capability_grant_ids"),
-                ))
-                .collect::<Vec<_>>();
-        let sandbox_profile = metadata_string_value_any(runtime_metadata.get("sandbox_profile"))
-            .or_else(|| metadata_string_value_any(dispatch.get("sandbox_profile")));
-        let completion_materialization_policy =
-            metadata_string_value_any(runtime_metadata.get("completion_materialization_policy"))
-                .or_else(|| {
-                    metadata_string_value_any(dispatch.get("completion_materialization_policy"))
-                });
-        let grounding_refs = runtime_metadata
-            .get("grounding_refs")
-            .or_else(|| dispatch.get("grounding_refs"))
-            .cloned()
-            .unwrap_or_else(|| json!([]));
-        let context_refs = runtime_metadata
-            .get("context_refs")
-            .or_else(|| dispatch.get("context_refs"))
-            .cloned()
-            .unwrap_or_else(|| json!([]));
-        let id = format!("task-contract:{task_id}");
+        let projection =
+            task_contract_projection_from_metadata(task_id, project_id, runtime_metadata);
         sqlx::query(
             r#"
             INSERT INTO task_contracts
@@ -611,22 +578,85 @@ impl SharedMemoryService {
                           updated_at = now()
             "#,
         )
-        .bind(&id)
+        .bind(&projection.id)
         .bind(task_id)
-        .bind(project_id.as_deref())
-        .bind(&task_contract_id)
-        .bind(dispatch.clone())
-        .bind(json!(read_scope))
-        .bind(json!(write_scope))
-        .bind(json!(must_not_touch))
-        .bind(json!(capability_grant_ids))
-        .bind(sandbox_profile.as_deref())
-        .bind(completion_materialization_policy.as_deref())
-        .bind(grounding_refs)
-        .bind(context_refs)
+        .bind(projection.project_id.as_deref())
+        .bind(&projection.task_contract_id)
+        .bind(projection.dispatch_metadata)
+        .bind(json!(projection.read_scope))
+        .bind(json!(projection.write_scope))
+        .bind(json!(projection.must_not_touch))
+        .bind(json!(projection.capability_grant_ids))
+        .bind(projection.sandbox_profile.as_deref())
+        .bind(projection.completion_materialization_policy.as_deref())
+        .bind(projection.grounding_refs)
+        .bind(projection.context_refs)
         .execute(&self.pool)
         .await?;
-        Ok(task_contract_id)
+        Ok(projection.task_contract_id)
+    }
+
+    pub(crate) async fn ensure_task_contract_from_metadata(
+        &self,
+        task_id: &str,
+        project_id: Option<&str>,
+        runtime_metadata: &Value,
+    ) -> Result<String> {
+        if let Some(existing) = sqlx::query_scalar::<_, String>(
+            "SELECT task_contract_id FROM task_contracts WHERE task_id = $1",
+        )
+        .bind(task_id)
+        .fetch_optional(&self.pool)
+        .await?
+        {
+            return Ok(existing);
+        }
+
+        let projection =
+            task_contract_projection_from_metadata(task_id, project_id, runtime_metadata);
+        let task_contract_id = projection.task_contract_id.clone();
+        let inserted = sqlx::query_scalar::<_, String>(
+            r#"
+            INSERT INTO task_contracts
+              (id, task_id, project_id, task_contract_id, dispatch_metadata,
+               read_scope, write_scope, must_not_touch, capability_grant_ids,
+               sandbox_profile, completion_materialization_policy, grounding_refs,
+               context_refs)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+            ON CONFLICT (task_id) DO NOTHING
+            RETURNING task_contract_id
+            "#,
+        )
+        .bind(&projection.id)
+        .bind(task_id)
+        .bind(projection.project_id.as_deref())
+        .bind(&projection.task_contract_id)
+        .bind(projection.dispatch_metadata)
+        .bind(json!(projection.read_scope))
+        .bind(json!(projection.write_scope))
+        .bind(json!(projection.must_not_touch))
+        .bind(json!(projection.capability_grant_ids))
+        .bind(projection.sandbox_profile.as_deref())
+        .bind(projection.completion_materialization_policy.as_deref())
+        .bind(projection.grounding_refs)
+        .bind(projection.context_refs)
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(inserted) = inserted {
+            return Ok(inserted);
+        }
+
+        sqlx::query_scalar::<_, String>(
+            "SELECT task_contract_id FROM task_contracts WHERE task_id = $1",
+        )
+        .bind(task_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| {
+            anyhow!(
+                "task_contracts insert raced but no row exists for task {task_id} ({task_contract_id})"
+            )
+        })
     }
 
     pub(crate) async fn update_task_contract_capability_grants(
@@ -4619,6 +4649,77 @@ fn route_outcome_status(outcome: &str) -> &'static str {
         "blocked" | "cancelled" | "canceled" => "blocked",
         "failed" | "failure" | "error" | "errored" | "length" | "max_tokens" => "failed",
         _ => "recorded",
+    }
+}
+
+fn task_contract_projection_from_metadata(
+    task_id: &str,
+    project_id: Option<&str>,
+    runtime_metadata: &Value,
+) -> TaskContractMetadataProjection {
+    let dispatch = runtime_metadata
+        .get("dispatch_metadata")
+        .or_else(|| runtime_metadata.get("swarm_metadata"))
+        .or_else(|| runtime_metadata.get("metadata"))
+        .unwrap_or(runtime_metadata);
+    let task_contract_id = metadata_string_value_any(runtime_metadata.get("task_contract_id"))
+        .or_else(|| metadata_string_value_any(dispatch.get("task_contract_id")))
+        .unwrap_or_else(|| format!("board-task:{task_id}"));
+    let project_id = metadata_string_value_any(dispatch.get("project_id")).or_else(|| {
+        project_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    });
+    let read_scope = first_non_empty_metadata_list(&[
+        runtime_metadata.get("read_scope"),
+        dispatch.get("read_scope"),
+    ]);
+    let write_scope = first_non_empty_metadata_list(&[
+        runtime_metadata.get("write_scope"),
+        dispatch.get("write_scope"),
+    ]);
+    let must_not_touch = first_non_empty_metadata_list(&[
+        runtime_metadata.get("must_not_touch"),
+        dispatch.get("must_not_touch"),
+    ]);
+    let capability_grant_ids =
+        metadata_string_list_any(runtime_metadata.get("capability_grant_ids"))
+            .into_iter()
+            .chain(metadata_string_list_any(
+                dispatch.get("capability_grant_ids"),
+            ))
+            .collect::<Vec<_>>();
+    let sandbox_profile = metadata_string_value_any(runtime_metadata.get("sandbox_profile"))
+        .or_else(|| metadata_string_value_any(dispatch.get("sandbox_profile")));
+    let completion_materialization_policy =
+        metadata_string_value_any(runtime_metadata.get("completion_materialization_policy"))
+            .or_else(|| {
+                metadata_string_value_any(dispatch.get("completion_materialization_policy"))
+            });
+    let grounding_refs = runtime_metadata
+        .get("grounding_refs")
+        .or_else(|| dispatch.get("grounding_refs"))
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let context_refs = runtime_metadata
+        .get("context_refs")
+        .or_else(|| dispatch.get("context_refs"))
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    TaskContractMetadataProjection {
+        id: format!("task-contract:{task_id}"),
+        task_contract_id,
+        project_id,
+        dispatch_metadata: dispatch.clone(),
+        read_scope,
+        write_scope,
+        must_not_touch,
+        capability_grant_ids,
+        sandbox_profile,
+        completion_materialization_policy,
+        grounding_refs,
+        context_refs,
     }
 }
 

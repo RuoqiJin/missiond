@@ -195,7 +195,7 @@ impl<'a> ControlPlaneKernel<'a> {
         });
         self.state
             .shared_memory
-            .upsert_task_contract_from_metadata(
+            .ensure_task_contract_from_metadata(
                 input.task_id.as_str(),
                 Some(project_id.as_str()),
                 &runtime_metadata,

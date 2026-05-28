@@ -229,6 +229,8 @@ function checkFiles(root, files) {
     'pub(crate) struct CapabilityCheckRequest',
     'pub(crate) struct TaskRuntimeContract',
     'upsert_task_contract_from_metadata',
+    'ensure_task_contract_from_metadata',
+    'ON CONFLICT (task_id) DO NOTHING',
     'pub(crate) async fn grant_task_capabilities',
     'pub(crate) async fn claim_lease_typed',
     'pub(crate) async fn task_result_put_typed',
@@ -297,12 +299,13 @@ function checkFiles(root, files) {
     'record_job_event_typed',
     'settle_worker_command',
     'claim_lease_typed',
-    'upsert_task_contract_from_metadata',
+    'ensure_task_contract_from_metadata',
     'TaskCompletionEvidenceWriter::new',
     'artifact_hash: Some(artifact_hash.to_string())',
   ]);
   rejectAll(diagnostics, files.controlPlaneKernel, sources.controlPlaneKernel, [
     'task.runtime_metadata.clone()',
+    '.upsert_task_contract_from_metadata(',
   ]);
 
   requireAll(diagnostics, files.evidenceWriter, sources.evidenceWriter, [
