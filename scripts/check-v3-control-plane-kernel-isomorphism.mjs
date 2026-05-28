@@ -28,6 +28,8 @@ const FILES = {
   flowEngine: 'crates/missiond-daemon/src/engine/intent_engine/flow_engine.rs',
   taskDelegate: 'crates/missiond-daemon/src/handlers/compute/task_delegate.rs',
   agentExecutionClaimLease: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_lease.rs',
+  agentExecutionClaimRelease: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_release.rs',
+  agentExecutionClaimHeartbeat: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_heartbeat.rs',
   v2Subscribers: 'crates/missiond-daemon/src/bus/v2_subscribers.rs',
   computeSlot: 'crates/missiond-daemon/src/handlers/compute/compute_slot.rs',
   ptyHandler: 'crates/missiond-daemon/src/handlers/compute/pty.rs',
@@ -445,9 +447,29 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.agentExecutionClaimLease, sources.agentExecutionClaimLease, [
     'ControlPlaneKernel::new(state)',
     '.claim_lease_command(ClaimLeaseCommand',
+    ':work-lease-id {work_lease_id}',
+    '"work_lease_id": work_lease_id',
   ]);
   rejectAll(diagnostics, files.agentExecutionClaimLease, sources.agentExecutionClaimLease, [
     '.claim_lease_typed(',
+  ]);
+
+  requireAll(diagnostics, files.agentExecutionClaimRelease, sources.agentExecutionClaimRelease, [
+    'ControlPlaneKernel::new(state)',
+    '.release_lease_command(ReleaseLeaseCommand',
+    'work-lease-id',
+    'mission_execution.release',
+    'claim {} has no canonical work_leases id',
+    'work lease {} was not released',
+  ]);
+
+  requireAll(diagnostics, files.agentExecutionClaimHeartbeat, sources.agentExecutionClaimHeartbeat, [
+    'ControlPlaneKernel::new(state)',
+    '.heartbeat_lease_command(HeartbeatLeaseCommand',
+    'work-lease-id',
+    'mission_execution.heartbeat',
+    'claim {} has no canonical work_leases id',
+    'work lease {} was not heartbeated',
   ]);
 
   requireAll(diagnostics, files.boardCreateHandler, sources.boardCreateHandler, [

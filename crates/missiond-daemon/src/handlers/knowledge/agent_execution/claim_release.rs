@@ -3,8 +3,10 @@ use missiond_core::event::events::ExecutionEvent;
 use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
 use serde_json::{json, Value};
 
+use crate::engine::control_plane_kernel::{ControlPlaneKernel, ReleaseLeaseCommand};
 use crate::state::AppState;
 
+use super::claim_lease::{claim_bypass_allowed, control_error_tool_result, optional_str};
 use super::claim_records::find_claim_node;
 use super::log_dispatch::read_dispatch_metadata_from_log;
 use super::log_store::{
@@ -61,6 +63,69 @@ pub(super) async fn action_release(state: &AppState, args: &Value) -> Result<Too
             .with_suggestion("use the original claimer_name or run action=audit"),
         ));
     }
+    let work_lease_id = match kvs
+        .get("work-lease-id")
+        .or_else(|| kvs.get("work_lease_id"))
+        .or_else(|| kvs.get("lease-id"))
+        .map(|value| value.trim().trim_matches('"').to_string())
+        .filter(|value| !value.is_empty())
+    {
+        Some(id) => id,
+        None => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::NOT_FOUND,
+                    format!("claim {} has no canonical work_leases id", claim_id),
+                )
+                .with_suggestion(
+                    "reclaim the scope so MissionD can create a work_leases-backed claim",
+                ),
+            ))
+        }
+    };
+
+    let lease_release = match ControlPlaneKernel::new(state)
+        .release_lease_command(ReleaseLeaseCommand {
+            claim_id: work_lease_id.clone(),
+            owner_id: Some(claimer.to_string()),
+            grant_id: optional_str(args, "grant_id", "grantId")
+                .or_else(|| optional_str(args, "capability_grant_id", "capabilityGrantId"))
+                .map(str::to_string),
+            subject_kind: optional_str(args, "subject_kind", "subjectKind")
+                .unwrap_or("worker")
+                .to_string(),
+            subject_id: optional_str(args, "subject_id", "subjectId")
+                .unwrap_or(claimer)
+                .to_string(),
+            details: json!({
+                "source": "mission_execution.release",
+                "execution_id": execution_id,
+                "legacy_claim_id": claim_id,
+                "summary": summary
+            }),
+            allow_system_bypass: claim_bypass_allowed(args),
+            bypass_reason: Some("mission_execution release system/operator authority".to_string()),
+        })
+        .await
+    {
+        Ok(value) => value,
+        Err(err) => {
+            return Ok(control_error_tool_result(
+                err,
+                "provide a subject-bound claim grant or explicit system/operator bypass before releasing execution scope",
+            ))
+        }
+    };
+    if lease_release.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(
+                "CLAIM_CONFLICT",
+                format!("work lease {} was not released", work_lease_id),
+            )
+            .with_details(lease_release)
+            .with_suggestion("verify the claim owner, active lease id, and capability grant"),
+        ));
+    }
 
     let now = now_iso();
     update_kv_in_node(
@@ -115,6 +180,7 @@ pub(super) async fn action_release(state: &AppState, args: &Value) -> Result<Too
     Ok(ToolResult::json_pretty(&json!({
         "status": "released",
         "claim_id": claim_id,
+        "work_lease_id": work_lease_id,
         "released_at": now,
         "summary": summary,
     })))

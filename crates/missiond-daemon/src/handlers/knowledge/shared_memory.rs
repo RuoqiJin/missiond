@@ -204,6 +204,8 @@ fn release_lease_command_from_args(args: &Value) -> Result<ReleaseLeaseCommand> 
             .get("details")
             .cloned()
             .unwrap_or_else(|| serde_json::json!({})),
+        allow_system_bypass: system_or_operator_bypass_allowed(args),
+        bypass_reason: Some("mission_shared_memory release system/operator authority".to_string()),
     })
 }
 
@@ -231,6 +233,10 @@ fn heartbeat_lease_command_from_args(args: &Value) -> Result<HeartbeatLeaseComma
             .get("details")
             .cloned()
             .unwrap_or_else(|| serde_json::json!({})),
+        allow_system_bypass: system_or_operator_bypass_allowed(args),
+        bypass_reason: Some(
+            "mission_shared_memory heartbeat system/operator authority".to_string(),
+        ),
     })
 }
 

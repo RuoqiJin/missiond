@@ -3660,6 +3660,10 @@ fn spawn_mechanic_repair(state: AppState, run: MechanicRepairRun) {
                         details: json!({
                             "claim_task_grant_id": run.claim_task_grant_id.as_deref()
                         }),
+                        allow_system_bypass: true,
+                        bypass_reason: Some(
+                            "mission_task_delegate mechanic daemon claim release".to_string(),
+                        ),
                     })
                     .await;
                 if let Err(err) = release {
@@ -3699,6 +3703,10 @@ fn spawn_mechanic_repair(state: AppState, run: MechanicRepairRun) {
                     details: json!({
                         "claim_task_grant_id": run.claim_task_grant_id.as_deref()
                     }),
+                    allow_system_bypass: true,
+                    bypass_reason: Some(
+                        "mission_task_delegate mechanic daemon claim release".to_string(),
+                    ),
                 })
                 .await;
             if let Err(err) = release {

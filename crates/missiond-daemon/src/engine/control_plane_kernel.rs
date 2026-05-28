@@ -91,6 +91,8 @@ pub(crate) struct ReleaseLeaseCommand {
     pub subject_kind: String,
     pub subject_id: String,
     pub details: Value,
+    pub allow_system_bypass: bool,
+    pub bypass_reason: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -102,6 +104,8 @@ pub(crate) struct HeartbeatLeaseCommand {
     pub subject_id: String,
     pub lease_secs: i64,
     pub details: Value,
+    pub allow_system_bypass: bool,
+    pub bypass_reason: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -341,6 +345,13 @@ impl<'a> ControlPlaneKernel<'a> {
         if !command.subject_id.trim().is_empty() {
             payload["subject_id"] = Value::String(command.subject_id);
         }
+        if command.allow_system_bypass {
+            payload["confirm"] = Value::Bool(true);
+            payload["operator_confirm"] = Value::Bool(true);
+        }
+        if let Some(reason) = command.bypass_reason {
+            payload["bypass_reason"] = Value::String(reason);
+        }
         self.state.shared_memory.release_typed(payload).await
     }
 
@@ -364,6 +375,13 @@ impl<'a> ControlPlaneKernel<'a> {
         }
         if !command.subject_id.trim().is_empty() {
             payload["subject_id"] = Value::String(command.subject_id);
+        }
+        if command.allow_system_bypass {
+            payload["confirm"] = Value::Bool(true);
+            payload["operator_confirm"] = Value::Bool(true);
+        }
+        if let Some(reason) = command.bypass_reason {
+            payload["bypass_reason"] = Value::String(reason);
         }
         self.state.shared_memory.heartbeat_typed(payload).await
     }

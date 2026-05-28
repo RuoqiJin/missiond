@@ -3,7 +3,7 @@ use crate::state::AppState;
 use anyhow::Result;
 use chrono::{SecondsFormat, Utc};
 use missiond_core::event::events::ExecutionEvent;
-use missiond_mcp::tools::{ToolError, ToolResult};
+use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
 use serde_json::{json, Value};
 
 use super::log_counters::{allocate_id, Counter};
@@ -21,7 +21,7 @@ pub(super) use super::claim_release::action_release;
 pub(super) const DEFAULT_LEASE_SECS: i64 = 1800;
 pub(super) const MAX_LEASE_SECS: i64 = 24 * 3600;
 
-fn optional_str<'a>(args: &'a Value, snake: &str, camel: &str) -> Option<&'a str> {
+pub(super) fn optional_str<'a>(args: &'a Value, snake: &str, camel: &str) -> Option<&'a str> {
     args.get(snake)
         .or_else(|| args.get(camel))
         .and_then(Value::as_str)
@@ -40,7 +40,7 @@ fn bool_arg(args: &Value, key: &str) -> bool {
     })
 }
 
-fn claim_bypass_allowed(args: &Value) -> bool {
+pub(super) fn claim_bypass_allowed(args: &Value) -> bool {
     let subject_kind = optional_str(args, "subject_kind", "subjectKind").unwrap_or("");
     matches!(subject_kind, "system" | "daemon")
         || (subject_kind == "operator"
@@ -49,6 +49,24 @@ fn claim_bypass_allowed(args: &Value) -> bool {
                 || bool_arg(args, "operatorConfirm")
                 || bool_arg(args, "operator_confirmed")
                 || bool_arg(args, "operatorConfirmed")))
+}
+
+pub(super) fn control_error_tool_result(err: anyhow::Error, suggestion: &str) -> ToolResult {
+    if let Some(control) =
+        err.downcast_ref::<crate::engine::shared_memory::StructuredControlError>()
+    {
+        let mut tool_error = ToolError::new(control.code, control.message.clone())
+            .with_details(control.details.clone());
+        if let Some(control_suggestion) = &control.suggestion {
+            tool_error = tool_error.with_suggestion(control_suggestion.clone());
+        } else {
+            tool_error = tool_error.with_suggestion(suggestion);
+        }
+        return ToolResult::structured_error(tool_error);
+    }
+    ToolResult::structured_error(
+        ToolError::new(error_codes::INVALID_PARAM, err.to_string()).with_suggestion(suggestion),
+    )
 }
 
 pub(super) fn scopes_overlap(a: &str, b: &str) -> bool {
@@ -95,7 +113,7 @@ pub(super) async fn action_claim(state: &AppState, args: &Value) -> Result<ToolR
         .unwrap_or(DEFAULT_LEASE_SECS)
         .clamp(60, MAX_LEASE_SECS);
 
-    let db_claim = ControlPlaneKernel::new(state)
+    let db_claim = match ControlPlaneKernel::new(state)
         .claim_lease_command(ClaimLeaseCommand {
             project_id: None,
             task_id: Some(execution_id.to_string()),
@@ -119,7 +137,16 @@ pub(super) async fn action_claim(state: &AppState, args: &Value) -> Result<ToolR
             allow_system_bypass: claim_bypass_allowed(args),
             bypass_reason: Some("mission_execution claim system/operator authority".to_string()),
         })
-        .await?;
+        .await
+    {
+        Ok(value) => value,
+        Err(err) => {
+            return Ok(control_error_tool_result(
+                err,
+                "provide a subject-bound claim grant or explicit system/operator bypass before claiming execution scope",
+            ))
+        }
+    };
     if db_claim.get("ok").and_then(Value::as_bool) == Some(false) {
         return Ok(ToolResult::structured_error(
             ToolError::new(
@@ -130,6 +157,23 @@ pub(super) async fn action_claim(state: &AppState, args: &Value) -> Result<ToolR
             .with_suggestion("wait for lease expiry, release stale ownership, or narrow the scope"),
         ));
     }
+    let work_lease_id = match db_claim
+        .get("claim")
+        .and_then(|claim| claim.get("id"))
+        .and_then(Value::as_str)
+    {
+        Some(id) if !id.trim().is_empty() => id.trim().to_string(),
+        _ => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    "CLAIM_CONFLICT",
+                    "work_leases claim did not return a canonical lease id",
+                )
+                .with_details(db_claim)
+                .with_suggestion("retry the claim through ControlPlaneKernel"),
+            ))
+        }
+    };
 
     let root = resolve_project_root(state, project_or_target_project(args)).await?;
     let path = companion_path(&root, execution_id);
@@ -140,8 +184,9 @@ pub(super) async fn action_claim(state: &AppState, args: &Value) -> Result<ToolR
     let expires =
         (now + chrono::Duration::seconds(lease_secs)).to_rfc3339_opts(SecondsFormat::Secs, true);
     let entry = format!(
-        "    ({id}\n      :claimer {claimer}\n      :scope {scope}\n      :phase {phase}\n      :acquired-at {acquired}\n      :lease-expires-at {expires}\n      :heartbeat-at {acquired}\n      :status \"active\")",
+        "    ({id}\n      :work-lease-id {work_lease_id}\n      :claimer {claimer}\n      :scope {scope}\n      :phase {phase}\n      :acquired-at {acquired}\n      :lease-expires-at {expires}\n      :heartbeat-at {acquired}\n      :status \"active\")",
         id = claim_id,
+        work_lease_id = lisp_quote_string(&work_lease_id),
         claimer = lisp_quote_string(claimer),
         scope = lisp_quote_string(scope),
         phase = lisp_quote_string(phase),
@@ -178,6 +223,7 @@ pub(super) async fn action_claim(state: &AppState, args: &Value) -> Result<ToolR
     Ok(ToolResult::json_pretty(&json!({
         "status": "claimed",
         "claim_id": claim_id,
+        "work_lease_id": work_lease_id,
         "claimer": claimer,
         "scope": scope,
         "phase": phase,
