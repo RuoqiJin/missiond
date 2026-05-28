@@ -51,7 +51,19 @@ async fn handle_recent(state: &AppState, args: Value) -> Result<ToolResult> {
     // long-lived threads that just got fresh tool calls.
     let convs = state
         .store
-        .list_conversations(None, 500, None, None, None, None, Some("codex_cli"))
+        .list_conversations(
+            None,
+            500,
+            None,
+            None,
+            None,
+            None,
+            Some("codex_cli"),
+            None,
+            None,
+            None,
+            None,
+        )
         .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
 
@@ -249,7 +261,19 @@ async fn handle_tool_stats(state: &AppState, args: Value) -> Result<ToolResult> 
 
     let convs = state
         .store
-        .list_conversations(None, 500, None, None, None, None, Some("codex_cli"))
+        .list_conversations(
+            None,
+            500,
+            None,
+            None,
+            None,
+            None,
+            Some("codex_cli"),
+            None,
+            None,
+            None,
+            None,
+        )
         .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
 

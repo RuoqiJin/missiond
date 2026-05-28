@@ -8,6 +8,30 @@ use crate::db::traits::MessageStore;
 use crate::types::*;
 use async_trait::async_trait;
 
+fn push_scope_conditions(
+    conditions: &mut Vec<String>,
+    param_idx: &mut u32,
+    bind_values: &mut Vec<String>,
+    user_id: Option<&str>,
+    tenant_id: Option<&str>,
+    application_id: Option<&str>,
+    channel: Option<&str>,
+    prefix: &str,
+) {
+    for (column, value) in [
+        ("user_id", user_id),
+        ("tenant_id", tenant_id),
+        ("application_id", application_id),
+        ("channel", channel),
+    ] {
+        if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+            *param_idx += 1;
+            conditions.push(format!("{prefix}{column} = ${}", *param_idx));
+            bind_values.push(value.to_string());
+        }
+    }
+}
+
 #[cfg(feature = "postgres")]
 #[async_trait]
 impl MessageStore for PgMissionStore {
@@ -274,6 +298,10 @@ impl MessageStore for PgMissionStore {
         tool_name: Option<&str>,
         time_after: Option<&str>,
         limit: i64,
+        user_id: Option<&str>,
+        tenant_id: Option<&str>,
+        application_id: Option<&str>,
+        channel: Option<&str>,
     ) -> DbResult<Vec<ConversationMessage>> {
         // Build dynamic WHERE conditions
         let mut conditions = vec!["c.conversation_type NOT IN ('meta', 'compaction')".to_string()];
@@ -305,6 +333,16 @@ impl MessageStore for PgMissionStore {
             ));
             bind_values.push(ta.to_string());
         }
+        push_scope_conditions(
+            &mut conditions,
+            &mut param_idx,
+            &mut bind_values,
+            user_id,
+            tenant_id,
+            application_id,
+            channel,
+            "c.",
+        );
 
         let where_clause = conditions.join(" AND ");
 
@@ -448,6 +486,10 @@ impl MessageStore for PgMissionStore {
         time_after: Option<&str>,
         project: Option<&str>,
         conversation_type: Option<&str>,
+        user_id: Option<&str>,
+        tenant_id: Option<&str>,
+        application_id: Option<&str>,
+        channel: Option<&str>,
     ) -> DbResult<Vec<(String, f64)>> {
         let mut conditions = vec![
             "m.fts_content @@ plainto_tsquery('simple', $1)".to_string(),
@@ -489,6 +531,16 @@ impl MessageStore for PgMissionStore {
                 ));
             }
         }
+        push_scope_conditions(
+            &mut conditions,
+            &mut param_idx,
+            &mut extra_vals,
+            user_id,
+            tenant_id,
+            application_id,
+            channel,
+            "c.",
+        );
 
         let where_clause = conditions.join(" AND ");
         let fts_sql = format!(
@@ -553,6 +605,16 @@ impl MessageStore for PgMissionStore {
                 ));
             }
         }
+        push_scope_conditions(
+            &mut like_conditions,
+            &mut like_idx,
+            &mut like_vals,
+            user_id,
+            tenant_id,
+            application_id,
+            channel,
+            "c.",
+        );
 
         let like_sql = format!(
             "SELECT m.session_id, COUNT(*)::float8 as hits
@@ -579,16 +641,24 @@ impl MessageStore for PgMissionStore {
         query: &str,
         limit: i64,
         conversation_type: Option<&str>,
+        user_id: Option<&str>,
+        tenant_id: Option<&str>,
+        application_id: Option<&str>,
+        channel: Option<&str>,
     ) -> DbResult<Vec<(String, f64)>> {
         let pattern = format!("%{}%", query);
         let mut extra_vals: Vec<String> = Vec::new();
         let mut param_idx = 2u32; // $1 = pattern, $2 = limit
-        let ct_clause = if let Some(ct) = conversation_type {
+        let mut conditions = vec![
+            "conversation_type NOT IN ('meta', 'compaction')".to_string(),
+            "(id::text ILIKE $1 OR task_id ILIKE $1 OR llm_summary ILIKE $1)".to_string(),
+        ];
+        if let Some(ct) = conversation_type {
             let types: Vec<&str> = ct.split(',').map(|s| s.trim()).collect();
             if types.len() == 1 {
                 param_idx += 1;
                 extra_vals.push(types[0].to_string());
-                format!("AND conversation_type = ${}", param_idx)
+                conditions.push(format!("conversation_type = ${}", param_idx));
             } else {
                 let placeholders: Vec<String> = types
                     .iter()
@@ -598,18 +668,24 @@ impl MessageStore for PgMissionStore {
                         format!("${}", param_idx)
                     })
                     .collect();
-                format!("AND conversation_type IN ({})", placeholders.join(","))
+                conditions.push(format!("conversation_type IN ({})", placeholders.join(",")));
             }
-        } else {
-            String::new()
-        };
+        }
+        push_scope_conditions(
+            &mut conditions,
+            &mut param_idx,
+            &mut extra_vals,
+            user_id,
+            tenant_id,
+            application_id,
+            channel,
+            "",
+        );
         let sql = format!(
             "SELECT id, 1.0::float8 as score FROM conversations
-             WHERE conversation_type NOT IN ('meta', 'compaction')
-               AND (id::text ILIKE $1 OR task_id ILIKE $1 OR llm_summary ILIKE $1)
-               {}
+             WHERE {}
              ORDER BY started_at DESC LIMIT $2",
-            ct_clause
+            conditions.join(" AND ")
         );
         let mut q = sqlx::query_as::<_, (String, f64)>(&sql)
             .bind(&pattern)
@@ -657,12 +733,34 @@ impl MessageStore for PgMissionStore {
         query_text: &str,
         session_id: Option<&str>,
         limit: i64,
+        user_id: Option<&str>,
+        tenant_id: Option<&str>,
+        application_id: Option<&str>,
+        channel: Option<&str>,
     ) -> DbResult<Vec<(i64, String, String, String, String, f64)>> {
         let vec_lit = vec_to_pg_literal(query_vec);
         let pool_size = limit * 3; // recall pool
 
         // Session-scoped: B-Tree exact distance (NOT HNSW — anti-pattern with WHERE filter)
         if let Some(sid) = session_id {
+            let mut scope_conditions = Vec::new();
+            let mut param_idx = 3u32; // $1 = query, $2 = limit, $3 = session_id
+            let mut scope_vals = Vec::new();
+            push_scope_conditions(
+                &mut scope_conditions,
+                &mut param_idx,
+                &mut scope_vals,
+                user_id,
+                tenant_id,
+                application_id,
+                channel,
+                "c.",
+            );
+            let scope_clause = if scope_conditions.is_empty() {
+                String::new()
+            } else {
+                format!("WHERE {}", scope_conditions.join(" AND "))
+            };
             let sql = format!(
                 "WITH vec_top AS (
                     SELECT me.message_id,
@@ -694,24 +792,50 @@ impl MessageStore for PgMissionStore {
                 FROM vec_ranked v
                 FULL OUTER JOIN fts_ranked f ON v.message_id = f.message_id
                 JOIN conversation_messages cm ON cm.id = COALESCE(v.message_id, f.message_id)
+                JOIN conversations c ON c.id = cm.session_id
+                {scope_clause}
                 ORDER BY rrf_score DESC
                 LIMIT $2",
-                vec = vec_lit, pool = pool_size
+                vec = vec_lit,
+                pool = pool_size,
+                scope_clause = scope_clause
             );
-            let rows = sqlx::query_as::<_, (i64, String, String, String, String, f64)>(&sql)
+            let mut q = sqlx::query_as::<_, (i64, String, String, String, String, f64)>(&sql)
                 .bind(query_text)
                 .bind(limit)
-                .bind(sid)
-                .fetch_all(&self.pool)
-                .await?;
+                .bind(sid);
+            for value in &scope_vals {
+                q = q.bind(value);
+            }
+            let rows = q.fetch_all(&self.pool).await?;
             return Ok(rows);
         }
 
         // Global: HNSW recall → RRF fusion with FTS (two-step CTE)
+        let mut scope_conditions = Vec::new();
+        let mut param_idx = 2u32; // $1 = query, $2 = limit
+        let mut scope_vals = Vec::new();
+        push_scope_conditions(
+            &mut scope_conditions,
+            &mut param_idx,
+            &mut scope_vals,
+            user_id,
+            tenant_id,
+            application_id,
+            channel,
+            "c.",
+        );
+        let scope_clause = if scope_conditions.is_empty() {
+            String::new()
+        } else {
+            format!("AND {}", scope_conditions.join(" AND "))
+        };
         let sql = format!(
             "WITH vec_top AS (
                 SELECT me.message_id, me.embedding_vec <=> '{vec}'::halfvec AS distance
                 FROM message_embeddings me
+                JOIN conversations c ON c.id = me.session_id
+                WHERE 1=1 {scope_clause}
                 ORDER BY me.embedding_vec <=> '{vec}'::halfvec
                 LIMIT {pool}
             ),
@@ -720,10 +844,12 @@ impl MessageStore for PgMissionStore {
                 FROM vec_top
             ),
             fts_top AS (
-                SELECT id AS message_id,
-                       ts_rank(fts_content, plainto_tsquery('simple', $1)) AS score
-                FROM conversation_messages
-                WHERE fts_content @@ plainto_tsquery('simple', $1)
+                SELECT m.id AS message_id,
+                       ts_rank(m.fts_content, plainto_tsquery('simple', $1)) AS score
+                FROM conversation_messages m
+                JOIN conversations c ON c.id = m.session_id
+                WHERE m.fts_content @@ plainto_tsquery('simple', $1)
+                  {scope_clause}
                 ORDER BY score DESC
                 LIMIT {pool}
             ),
@@ -738,13 +864,17 @@ impl MessageStore for PgMissionStore {
             JOIN conversation_messages cm ON cm.id = COALESCE(v.message_id, f.message_id)
             ORDER BY rrf_score DESC
             LIMIT $2",
-            vec = vec_lit, pool = pool_size
+            vec = vec_lit,
+            pool = pool_size,
+            scope_clause = scope_clause
         );
-        let rows = sqlx::query_as::<_, (i64, String, String, String, String, f64)>(&sql)
+        let mut q = sqlx::query_as::<_, (i64, String, String, String, String, f64)>(&sql)
             .bind(query_text)
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await?;
+            .bind(limit);
+        for value in &scope_vals {
+            q = q.bind(value);
+        }
+        let rows = q.fetch_all(&self.pool).await?;
         Ok(rows)
     }
 
@@ -753,24 +883,45 @@ impl MessageStore for PgMissionStore {
         query_vec: &[f32],
         session_id: &str,
         limit: i64,
+        user_id: Option<&str>,
+        tenant_id: Option<&str>,
+        application_id: Option<&str>,
+        channel: Option<&str>,
     ) -> DbResult<Vec<(i64, String, String, String, f64)>> {
         let vec_lit = vec_to_pg_literal(query_vec);
+        let mut conditions = vec!["me.session_id = $1".to_string()];
+        let mut param_idx = 2u32; // $1 = session_id, $2 = limit
+        let mut scope_vals = Vec::new();
+        push_scope_conditions(
+            &mut conditions,
+            &mut param_idx,
+            &mut scope_vals,
+            user_id,
+            tenant_id,
+            application_id,
+            channel,
+            "c.",
+        );
         // B-Tree filter on session_id → exact cosine distance (no HNSW needed)
         let sql = format!(
             "SELECT cm.id, cm.role, cm.content, cm.timestamp,
                     (1.0 - (me.embedding_vec <=> '{vec}'::halfvec))::float8 AS similarity
              FROM message_embeddings me
              JOIN conversation_messages cm ON cm.id = me.message_id
-             WHERE me.session_id = $1
+             JOIN conversations c ON c.id = me.session_id
+             WHERE {}
              ORDER BY me.embedding_vec <=> '{vec}'::halfvec
              LIMIT $2",
+            conditions.join(" AND "),
             vec = vec_lit
         );
-        let rows = sqlx::query_as::<_, (i64, String, String, String, f64)>(&sql)
+        let mut q = sqlx::query_as::<_, (i64, String, String, String, f64)>(&sql)
             .bind(session_id)
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await?;
+            .bind(limit);
+        for value in &scope_vals {
+            q = q.bind(value);
+        }
+        let rows = q.fetch_all(&self.pool).await?;
         Ok(rows)
     }
 
@@ -778,17 +929,35 @@ impl MessageStore for PgMissionStore {
         &self,
         query_vec: &[f32],
         limit: i64,
+        user_id: Option<&str>,
+        tenant_id: Option<&str>,
+        application_id: Option<&str>,
+        channel: Option<&str>,
     ) -> DbResult<Vec<(String, f64)>> {
         let vec_lit = vec_to_pg_literal(query_vec);
+        let mut conditions = vec!["tv.embedding_vec IS NOT NULL".to_string()];
+        let mut param_idx = 1u32; // $1 = limit
+        let mut scope_vals = Vec::new();
+        push_scope_conditions(
+            &mut conditions,
+            &mut param_idx,
+            &mut scope_vals,
+            user_id,
+            tenant_id,
+            application_id,
+            channel,
+            "c.",
+        );
         // HNSW recall Top-N topics → group by session_id (small set, safe to GROUP BY)
         let pool_size = limit * 5;
         let sql = format!(
             "WITH top_topics AS (
-                SELECT session_id,
-                       (1.0 - (embedding_vec <=> '{vec}'::vector))::float8 AS similarity
-                FROM conversation_topic_vectors
-                WHERE embedding_vec IS NOT NULL
-                ORDER BY embedding_vec <=> '{vec}'::vector
+                SELECT tv.session_id,
+                       (1.0 - (tv.embedding_vec <=> '{vec}'::vector))::float8 AS similarity
+                FROM conversation_topic_vectors tv
+                JOIN conversations c ON c.id = tv.session_id
+                WHERE {}
+                ORDER BY tv.embedding_vec <=> '{vec}'::vector
                 LIMIT {pool}
             )
             SELECT session_id, MAX(similarity)::float8 AS max_sim
@@ -796,13 +965,15 @@ impl MessageStore for PgMissionStore {
             GROUP BY session_id
             ORDER BY max_sim DESC
             LIMIT $1",
+            conditions.join(" AND "),
             vec = vec_lit,
             pool = pool_size
         );
-        let rows = sqlx::query_as::<_, (String, f64)>(&sql)
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await?;
+        let mut q = sqlx::query_as::<_, (String, f64)>(&sql).bind(limit);
+        for value in &scope_vals {
+            q = q.bind(value);
+        }
+        let rows = q.fetch_all(&self.pool).await?;
         Ok(rows)
     }
 }

@@ -175,6 +175,19 @@ function hasEvent(response, name) {
   return eventNames(response).includes(name);
 }
 
+function hasOpenAIArtifactProjection(response, expectedEvent) {
+  return (response?.events || []).some((event) => {
+    const data = event?.data;
+    if (!data || typeof data !== 'object') return false;
+    const projection = data.missiond_projection;
+    const content = data.choices?.[0]?.delta?.content;
+    return projection?.schema === 'missiond.openai-artifact-projection.v1'
+      && projection?.event === expectedEvent
+      && typeof content === 'string'
+      && content.includes('artifact_id:');
+  });
+}
+
 function eventDataObjects(response) {
   return (response?.events || [])
     .map((event) => event?.data)
@@ -330,6 +343,13 @@ async function main() {
     if (hasEvent(first, 'board_task_created') || hasEvent(first, 'worker_dispatched')) {
       diagnostics.push({ code: 'CONFIRMATION_BYPASS', message: 'initial request created/dispatched work before confirmation' });
     }
+    if (!hasOpenAIArtifactProjection(first, 'intent_draft')) {
+      diagnostics.push({
+        code: 'OPENAI_ARTIFACT_PROJECTION_MISSING',
+        message: 'intent_draft must also be visible as an OpenAI-compatible artifact delta',
+        events: eventNames(first),
+      });
+    }
   }
   const intentConfirm = findConfirmPayload(first);
 
@@ -346,6 +366,13 @@ async function main() {
       }
       if (hasEvent(second, 'board_task_created') || hasEvent(second, 'worker_dispatched')) {
         diagnostics.push({ code: 'PLAN_CONFIRMATION_BYPASS', message: 'plan draft phase created/dispatched work before plan confirmation' });
+      }
+      if (!hasOpenAIArtifactProjection(second, 'plan_draft')) {
+        diagnostics.push({
+          code: 'OPENAI_ARTIFACT_PROJECTION_MISSING',
+          message: 'plan_draft must also be visible as an OpenAI-compatible artifact delta',
+          events: eventNames(second),
+        });
       }
     }
     planConfirm = findConfirmPayload(second);

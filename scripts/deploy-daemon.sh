@@ -449,6 +449,32 @@ post_switch_smoke() {
   return 1
 }
 
+pre_switch_mcp_smoke() {
+  local mcp="$1"
+  local current_resp resp
+  if [ "$DO_SMOKE" -eq 0 ]; then
+    log "pre-switch smoke: skipped by --no-smoke"
+    return 0
+  fi
+  if [ ! -S "$SOCK_PATH" ]; then
+    log "pre-switch smoke: current socket missing; defer candidate MCP initialize until post-switch"
+    return 0
+  fi
+  current_resp="$(run_mcp_initialize_smoke "$MCP_BIN_PATH" 2>&1 | tail -3 || true)"
+  if ! echo "$current_resp" | grep -q '"protocolVersion"'; then
+    log "pre-switch smoke: current IPC is not healthy; defer candidate MCP initialize until post-switch"
+    echo "$current_resp" | sed 's/^/[pre-smoke-current] /' >&2
+    return 0
+  fi
+  resp="$(run_mcp_initialize_smoke "$mcp" 2>&1 | tail -3 || true)"
+  if echo "$resp" | grep -q '"protocolVersion"'; then
+    log "pre-switch smoke: candidate MCP initialize OK against current daemon"
+    return 0
+  fi
+  echo "$resp" | sed 's/^/[pre-smoke] /' >&2
+  return 1
+}
+
 truthy_env_value() {
   case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
     1|true|yes|on) return 0 ;;
@@ -793,9 +819,7 @@ log "candidate: $CANDIDATE_DIR"
 
 log "pre-switch smoke: candidate MCP initialize"
 PRE_SWITCH_SMOKE_START="$(date +%s)"
-PRE_RESP="$(run_mcp_initialize_smoke "$CANDIDATE_DIR/bin/mission-mcp" 2>&1 | tail -3 || true)"
-if ! echo "$PRE_RESP" | grep -q '"protocolVersion"'; then
-  echo "$PRE_RESP" | sed 's/^/[pre-smoke] /' >&2
+if ! pre_switch_mcp_smoke "$CANDIDATE_DIR/bin/mission-mcp"; then
   fail "candidate MCP initialize failed before active switch" 3
 fi
 record_timing "pre-switch-mcp-smoke" "$PRE_SWITCH_SMOKE_START"

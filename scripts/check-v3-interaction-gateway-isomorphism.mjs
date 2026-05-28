@@ -84,6 +84,8 @@ requireIncludes('requestSurfaces', [
   'MISSIOND_INTERACTION_AUTH_USERINFO_URL',
   'INTERACTION_AUTH_UNAVAILABLE',
   'missiond.jarvis-smoke/INTERACTION_SERVICE_TOKEN',
+  'missiond.openai-artifact-projection.v1',
+  'missiond.jarvis-pending-confirmation.v1',
 ]);
 
 requireIncludes('v2', [
@@ -131,6 +133,13 @@ requireIncludes('server', [
   'intent_draft',
   'plan_draft',
   'board_task_created',
+  'write_sse_openai_missiond_projection',
+  'jarvis_artifact_projection_text',
+  'missiond.openai-artifact-projection.v1',
+  'missiond.jarvis-pending-confirmation.v1',
+  'jarvis_text_confirms_pending_review',
+  'latest_pending_jarvis_confirmation',
+  'inject_jarvis_confirm_payload',
   'dispatch_accepted',
   'result_pending',
   'terminal_task_result',
@@ -163,6 +172,7 @@ requireIncludes('jarvisInteractionSmoke', [
   '--raw',
   'intent_draft',
   'confirm_required',
+  'OPENAI_ARTIFACT_PROJECTION_MISSING',
   'JARVIS_CONFIRMATION_BYPASS',
 ]);
 

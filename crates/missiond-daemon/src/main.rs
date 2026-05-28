@@ -1385,6 +1385,14 @@ async fn main() -> Result<()> {
                             "query": req.query,
                             "unknowns": req.unknowns,
                             "source_id": req.chat_id,
+                            "conversation_id": req.conversation_id,
+                            "user_id": req.user_id,
+                            "tenant_id": req.tenant_id,
+                            "application_id": req.application_id,
+                            "channel": req.channel,
+                            "topic_id": req.topic_id,
+                            "topic_label": req.topic_label,
+                            "permission_context": req.permission_context,
                             "persist": true,
                             "limit": 8
                         }),
@@ -1411,6 +1419,22 @@ async fn main() -> Result<()> {
                         .get("artifact_hash")
                         .and_then(Value::as_str)
                         .map(str::to_string);
+                    let context_capsule_hash = value
+                        .get("context_capsule_hash")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    let context_capsule_file = value
+                        .get("context_capsule_file")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    let topic_id = value
+                        .get("topic_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    let topic_label = value
+                        .get("topic_label")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
                     let sources_used = value
                         .get("sources_used")
                         .and_then(Value::as_array)
@@ -1431,6 +1455,10 @@ async fn main() -> Result<()> {
                         context_pack_path,
                         context_pack_file,
                         artifact_hash,
+                        context_capsule_hash,
+                        context_capsule_file,
+                        topic_id,
+                        topic_label,
                         sources_used,
                         diagnostics,
                     })

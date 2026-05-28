@@ -75,6 +75,13 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                 until: Option<String>,
                 source: Option<String>,
                 project: Option<String>,
+                #[serde(alias = "user_id")]
+                user_id: Option<String>,
+                #[serde(alias = "tenant_id")]
+                tenant_id: Option<String>,
+                #[serde(alias = "application_id")]
+                application_id: Option<String>,
+                channel: Option<String>,
             }
             let Args {
                 status,
@@ -85,6 +92,10 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                 until,
                 source,
                 project,
+                user_id,
+                tenant_id,
+                application_id,
+                channel,
             } = serde_json::from_value(args).unwrap_or(Args {
                 status: None,
                 limit: None,
@@ -94,6 +105,10 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                 until: None,
                 source: None,
                 project: None,
+                user_id: None,
+                tenant_id: None,
+                application_id: None,
+                channel: None,
             });
 
             let mut query = missiond_core::db::conversation_query::ConversationQuery::new();
@@ -122,6 +137,18 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
             }
             if let Some(proj) = project {
                 query = query.project(proj);
+            }
+            if let Some(value) = user_id {
+                query = query.user_id(value);
+            }
+            if let Some(value) = tenant_id {
+                query = query.tenant_id(value);
+            }
+            if let Some(value) = application_id {
+                query = query.application_id(value);
+            }
+            if let Some(value) = channel {
+                query = query.channel(value);
             }
 
             let manager = missiond_core::services::ConversationManager::new(std::sync::Arc::clone(
@@ -519,6 +546,13 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                 /// Filter by conversation_type (e.g. "gemini_chat")
                 #[serde(alias = "conversation_type")]
                 conversation_type: Option<String>,
+                #[serde(alias = "user_id")]
+                user_id: Option<String>,
+                #[serde(alias = "tenant_id")]
+                tenant_id: Option<String>,
+                #[serde(alias = "application_id")]
+                application_id: Option<String>,
+                channel: Option<String>,
             }
             let Args {
                 query,
@@ -530,6 +564,10 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                 time_range,
                 project,
                 conversation_type,
+                user_id,
+                tenant_id,
+                application_id,
+                channel,
             } = serde_json::from_value(args)?;
             let top_k = limit.unwrap_or(config.conversation_search_default_limit) as usize;
             let skip = offset.unwrap_or(0) as usize;
@@ -570,6 +608,10 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                         &query,
                         top_k as i64,
                         conversation_type.as_deref(),
+                        user_id.as_deref(),
+                        tenant_id.as_deref(),
+                        application_id.as_deref(),
+                        channel.as_deref(),
                     )
                     .await
                     .unwrap_or_default();
@@ -610,7 +652,15 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                 let semantic_results = if let Some(ref qe) = query_embedding {
                     state
                         .store
-                        .session_semantic_search(qe, sid, lim)
+                        .session_semantic_search(
+                            qe,
+                            sid,
+                            lim,
+                            user_id.as_deref(),
+                            tenant_id.as_deref(),
+                            application_id.as_deref(),
+                            channel.as_deref(),
+                        )
                         .await
                         .unwrap_or_default()
                 } else {
@@ -645,6 +695,10 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                         None,
                         time_after.as_deref(),
                         lim,
+                        user_id.as_deref(),
+                        tenant_id.as_deref(),
+                        application_id.as_deref(),
+                        channel.as_deref(),
                     )
                     .await
                     .map_err(|e| anyhow!("DB error: {}", e))?;
@@ -677,6 +731,10 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                         time_after.as_deref(),
                         project.as_deref(),
                         conversation_type.as_deref(),
+                        user_id.as_deref(),
+                        tenant_id.as_deref(),
+                        application_id.as_deref(),
+                        channel.as_deref(),
                     )
                     .await
                     .map_err(|e| anyhow!("DB error: {}", e))?;
@@ -698,7 +756,14 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                 if let Some(ref qe) = query_embedding {
                     let db_results = state
                         .store
-                        .semantic_conversation_search(qe, ((top_k + skip) * 3) as i64)
+                        .semantic_conversation_search(
+                            qe,
+                            ((top_k + skip) * 3) as i64,
+                            user_id.as_deref(),
+                            tenant_id.as_deref(),
+                            application_id.as_deref(),
+                            channel.as_deref(),
+                        )
                         .await
                         .unwrap_or_default();
                     db_results
@@ -833,6 +898,13 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                 limit: Option<i64>,
                 #[serde(alias = "time_range")]
                 time_range: Option<String>,
+                #[serde(alias = "user_id")]
+                user_id: Option<String>,
+                #[serde(alias = "tenant_id")]
+                tenant_id: Option<String>,
+                #[serde(alias = "application_id")]
+                application_id: Option<String>,
+                channel: Option<String>,
             }
             let Args {
                 query,
@@ -841,6 +913,10 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                 tool_name,
                 limit,
                 time_range,
+                user_id,
+                tenant_id,
+                application_id,
+                channel,
             } = serde_json::from_value(args)?;
             let lim = limit.unwrap_or(config.message_search_default_limit);
 
@@ -873,7 +949,16 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
             if let Some(ref qe) = query_embedding {
                 let hybrid = state
                     .store
-                    .hybrid_message_search(qe, &query, session_id.as_deref(), lim)
+                    .hybrid_message_search(
+                        qe,
+                        &query,
+                        session_id.as_deref(),
+                        lim,
+                        user_id.as_deref(),
+                        tenant_id.as_deref(),
+                        application_id.as_deref(),
+                        channel.as_deref(),
+                    )
                     .await
                     .unwrap_or_default();
 
@@ -905,6 +990,10 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                     tool_name.as_deref(),
                     time_after.as_deref(),
                     lim,
+                    user_id.as_deref(),
+                    tenant_id.as_deref(),
+                    application_id.as_deref(),
+                    channel.as_deref(),
                 )
                 .await
                 .map_err(|e| anyhow!("DB error: {}", e))?;

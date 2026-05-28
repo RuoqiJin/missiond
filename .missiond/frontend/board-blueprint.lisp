@@ -171,7 +171,7 @@
       (custom-event :event jarvis_task_completed :name "jarvis-task-completed" :detail [conversation_id task_id])
       (custom-event :event jarvis_intent_draft :name "jarvis-intent-draft" :detail [conversation_id grounding_context_id intent_artifact_id])
       (custom-event :event jarvis_plan_draft :name "jarvis-plan-draft" :detail [conversation_id grounding_context_id plan_artifact_id])
-      (custom-event :event jarvis_confirm_required :name "jarvis-confirm-required" :detail [conversation_id confirmation_type])
+      (custom-event :event jarvis_confirm_required :name "jarvis-confirm-required" :detail [conversation_id confirmation_type confirm_payload])
       (custom-event :event jarvis_worker_status :name "jarvis-worker-status" :detail [conversation_id task_id slot_id provider])
       (custom-event :event jarvis_result_artifact :name "jarvis-result-artifact" :detail [conversation_id task_id artifact_id])
       (custom-event :event interaction_received :name "interaction-received" :detail [interaction_id channel external_user_id])
@@ -348,7 +348,7 @@
                (step s3 :logic "render SSOT Universe, service runtime deployment/domain/DNS capability, runtime targets, credential refs, skill evidence drift, Decision Inbox, memory review, runtime health, architecture graph, status badges, and diagnostics")
                (step s4 :logic "keep operational actions behind explicit buttons and existing route policies")
                (step s5 :logic "project constants promoted from repeated KB lookup, such as auth service path/ports and 12900kf/router target anchors, into the Universe/Infra surface instead of leaving them as loose memory")
-               (step s6 :logic "JarvisChat, Web, iOS, and WeChat bridge are interaction-gateway channel adapters: they render InteractionEventStream phases, confirmation prompts, BoardTask links, worker status, and task-result-artifact summaries; they never write directly to PTY"))
+               (step s6 :logic "JarvisChat, Web, iOS, and WeChat bridge are interaction-gateway channel adapters: they render InteractionEventStream phases, confirmation prompts, BoardTask links, worker status, and task-result-artifact summaries; OpenAI-compatible clients must preserve missiond_projection artifact payloads from chat-completion deltas as a fallback display path; they never write directly to PTY"))
         :egress [knowledge-dashboard system-dashboard architecture-dashboard operational-action]))
 
     (pillar frontend-design-system

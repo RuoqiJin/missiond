@@ -88,6 +88,19 @@ function includesAny(events, candidates) {
   return candidates.some((candidate) => names.has(candidate));
 }
 
+function hasOpenAIArtifactProjection(events, expectedEvent) {
+  return events.some((event) => {
+    const data = event?.data;
+    if (!data || typeof data !== 'object') return false;
+    const projection = data.missiond_projection;
+    const content = data.choices?.[0]?.delta?.content;
+    return projection?.schema === 'missiond.openai-artifact-projection.v1'
+      && projection?.event === expectedEvent
+      && typeof content === 'string'
+      && content.includes('artifact_id:');
+  });
+}
+
 function parseSecretRef(ref) {
   const text = String(ref || '').trim();
   if (!text || !text.includes('/')) return null;
@@ -191,6 +204,13 @@ async function main() {
       diagnostics.push({
         code: 'JARVIS_CONFIRMATION_BYPASS',
         message: 'Initial broad request created or dispatched work before intent/plan confirmation.',
+      });
+    }
+    if (!hasOpenAIArtifactProjection(first.events, 'intent_draft')) {
+      diagnostics.push({
+        code: 'OPENAI_ARTIFACT_PROJECTION_MISSING',
+        message: 'Initial broad request must mirror intent_draft as an OpenAI-compatible artifact delta for legacy iOS/chat clients.',
+        events: names,
       });
     }
   }

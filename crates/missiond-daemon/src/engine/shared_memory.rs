@@ -3421,7 +3421,10 @@ impl SharedMemoryService {
         }))
     }
 
-    fn worker_settle_request_from_args(&self, args: &Value) -> Result<WorkerSettleRequest> {
+    pub(crate) fn worker_settle_request_from_args(
+        &self,
+        args: &Value,
+    ) -> Result<WorkerSettleRequest> {
         let task_id = string_arg(args, "task_id")
             .or_else(|| string_arg(args, "taskId"))
             .ok_or_else(|| anyhow!("task_id is required"))?

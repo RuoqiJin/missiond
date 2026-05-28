@@ -61,6 +61,10 @@ async fn classification_audit_rows(
                 since,
                 None,
                 source.or(Some("claude_code")),
+                None,
+                None,
+                None,
+                None,
             )
             .await
             .map_err(|e| anyhow!("DB error: {e}"))?

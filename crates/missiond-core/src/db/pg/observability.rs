@@ -9,7 +9,7 @@
 
 use super::PgMissionStore;
 use crate::db::error::DbResult;
-use crate::db::traits::ObservabilityStore;
+use crate::db::traits::{ConversationStore, ObservabilityStore};
 use crate::types::*;
 use async_trait::async_trait;
 use sqlx::Column;
@@ -1081,6 +1081,382 @@ impl ObservabilityStore for PgMissionStore {
         .execute(&self.pool)
         .await?;
         Ok(id)
+    }
+
+    async fn jarvis_get_or_create_scoped(
+        &self,
+        conversation_id: Option<&str>,
+        user_id: Option<&str>,
+        tenant_id: Option<&str>,
+        application_id: Option<&str>,
+        channel: Option<&str>,
+        topic_id: Option<&str>,
+        topic_label: Option<&str>,
+    ) -> DbResult<String> {
+        let channel = channel.unwrap_or("jarvis_sse");
+
+        if let Some(id) = conversation_id.map(str::trim).filter(|id| !id.is_empty()) {
+            let row: Option<(String,)> = sqlx::query_as(
+                "SELECT id FROM conversations
+                 WHERE id = $1
+                   AND source = 'jarvis_ui'
+                   AND ($2::text IS NULL OR user_id IS NULL OR user_id = $2)
+                   AND ($3::text IS NULL OR tenant_id IS NULL OR tenant_id = $3)
+                   AND ($4::text IS NULL OR application_id IS NULL OR application_id = $4)
+                   AND ($5::text IS NULL OR channel IS NULL OR channel = 'cli' OR channel = $5)",
+            )
+            .bind(id)
+            .bind(user_id)
+            .bind(tenant_id)
+            .bind(application_id)
+            .bind(Some(channel))
+            .fetch_optional(&self.pool)
+            .await?;
+            if row.is_some() {
+                sqlx::query(
+                    "UPDATE conversations SET
+                        user_id = COALESCE(user_id, $2),
+                        tenant_id = COALESCE(tenant_id, $3),
+                        application_id = COALESCE(application_id, $4),
+                        channel = CASE
+                            WHEN channel IS NULL OR channel = '' OR channel = 'cli' THEN COALESCE($5, channel, 'jarvis_sse')
+                            ELSE channel
+                        END,
+                        topic_id = COALESCE(topic_id, $6),
+                        topic_label = COALESCE(topic_label, $7)
+                     WHERE id = $1",
+                )
+                .bind(id)
+                .bind(user_id)
+                .bind(tenant_id)
+                .bind(application_id)
+                .bind(Some(channel))
+                .bind(topic_id)
+                .bind(topic_label)
+                .execute(&self.pool)
+                .await?;
+                return Ok(id.to_string());
+            }
+        }
+
+        if let Some(tid) = topic_id {
+            if let Some(conv) = ConversationStore::resolve_active_session(
+                self,
+                user_id,
+                tenant_id,
+                application_id,
+                Some(channel),
+                Some(tid),
+            )
+            .await?
+            {
+                return Ok(conv.id);
+            }
+        }
+
+        if let Some(conv) = ConversationStore::resolve_active_session(
+            self,
+            user_id,
+            tenant_id,
+            application_id,
+            Some(channel),
+            None,
+        )
+        .await?
+        {
+            if topic_id.is_some() || topic_label.is_some() {
+                sqlx::query(
+                    "UPDATE conversations SET
+                        topic_id = COALESCE(topic_id, $2),
+                        topic_label = COALESCE(topic_label, $3)
+                     WHERE id = $1",
+                )
+                .bind(&conv.id)
+                .bind(topic_id)
+                .bind(topic_label)
+                .execute(&self.pool)
+                .await?;
+            }
+            return Ok(conv.id);
+        }
+
+        let id = format!("jarvis-{}", uuid::Uuid::new_v4().simple());
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO conversations (
+                id, source, model, chat_type, message_count, started_at, status,
+                conversation_type, user_id, tenant_id, application_id, channel,
+                topic_id, topic_label
+             )
+             VALUES (
+                $1, 'jarvis_ui', 'claude-code', 'jarvis', 0, $2, 'active',
+                'jarvis', $3, $4, $5, $6, $7, $8
+             )",
+        )
+        .bind(&id)
+        .bind(&now)
+        .bind(user_id)
+        .bind(tenant_id)
+        .bind(application_id)
+        .bind(channel)
+        .bind(topic_id)
+        .bind(topic_label)
+        .execute(&self.pool)
+        .await?;
+        Ok(id)
+    }
+
+    async fn jarvis_list_scoped(
+        &self,
+        user_id: Option<&str>,
+        tenant_id: Option<&str>,
+        application_id: Option<&str>,
+        channel: Option<&str>,
+        include_legacy_unscoped: bool,
+        limit: i64,
+    ) -> DbResult<Vec<serde_json::Value>> {
+        let channel = channel.unwrap_or("jarvis");
+        let limit = limit.clamp(1, 100);
+        let rows = sqlx::query(
+            "SELECT c.id, c.model, c.message_count, c.started_at, c.status,
+                    c.user_id, c.tenant_id, c.application_id, c.channel,
+                    c.topic_id, c.topic_label, c.session_timeline,
+                    lm.id AS last_message_id,
+                    lm.role AS last_message_role,
+                    lm.content AS last_message_content,
+                    lm.timestamp AS last_message_timestamp,
+                    COALESCE(
+                        (SELECT MAX(m.timestamp) FROM conversation_messages m WHERE m.session_id = c.id),
+                        c.started_at,
+                        ''
+                    ) AS updated_at
+             FROM conversations c
+             LEFT JOIN LATERAL (
+                SELECT m.id, m.role, m.content, m.timestamp
+                FROM conversation_messages m
+                WHERE m.session_id = c.id
+                  AND NOT (
+                    m.role = 'assistant'
+                    AND m.content LIKE '%\"missiond.jarvis-pending-confirmation.v1\"%'
+                  )
+                ORDER BY m.id DESC
+                LIMIT 1
+             ) lm ON TRUE
+             WHERE c.source = 'jarvis_ui'
+               AND (
+                    (
+                        ($1::text IS NULL OR c.user_id = $1)
+                        AND ($2::text IS NULL OR c.tenant_id = $2)
+                        AND ($3::text IS NULL OR c.application_id = $3)
+                        AND (
+                            $4::text IS NULL
+                            OR c.channel IS NULL
+                            OR c.channel = $4
+                            OR (
+                                $4::text IN ('jarvis', 'jarvis_sse', 'jarvis_mobile')
+                                AND c.channel IN ('jarvis', 'jarvis_sse', 'jarvis_mobile')
+                            )
+                        )
+                    )
+                    OR (
+                        $5::bool
+                        AND c.user_id IS NULL
+                        AND c.tenant_id IS NULL
+                        AND c.application_id IS NULL
+                    )
+               )
+             ORDER BY updated_at DESC, c.id DESC
+             LIMIT $6",
+        )
+        .bind(user_id)
+        .bind(tenant_id)
+        .bind(application_id)
+        .bind(Some(channel))
+        .bind(include_legacy_unscoped)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .iter()
+            .map(|r| {
+                use sqlx::Row;
+                let id: String = r.get("id");
+                let topic_label: Option<String> = r.get("topic_label");
+                let timeline_title: Option<String> = r.get("session_timeline");
+                let content: Option<String> = r.get("last_message_content");
+                let preview = content
+                    .as_deref()
+                    .map(|value| value.chars().take(240).collect::<String>());
+                let row_user_id: Option<String> = r.get("user_id");
+                let row_tenant_id: Option<String> = r.get("tenant_id");
+                let row_application_id: Option<String> = r.get("application_id");
+                let scope_state = if row_user_id.is_none()
+                    && row_tenant_id.is_none()
+                    && row_application_id.is_none()
+                {
+                    "legacy_unscoped"
+                } else {
+                    "scoped"
+                };
+                serde_json::json!({
+                    "id": id,
+                    "model": r.get::<Option<String>, _>("model"),
+                    "message_count": r.get::<Option<i64>, _>("message_count").unwrap_or(0),
+                    "started_at": r.get::<Option<String>, _>("started_at"),
+                    "updated_at": r.get::<Option<String>, _>("updated_at"),
+                    "status": r.get::<Option<String>, _>("status"),
+                    "title": topic_label
+                        .clone()
+                        .or_else(|| timeline_title.filter(|value| !value.trim().is_empty()))
+                        .or_else(|| preview.clone()),
+                    "topic_id": r.get::<Option<String>, _>("topic_id"),
+                    "topic_label": topic_label,
+                    "scope": {
+                        "user_id": row_user_id,
+                        "tenant_id": row_tenant_id,
+                        "application_id": row_application_id,
+                        "channel": r.get::<Option<String>, _>("channel"),
+                        "state": scope_state,
+                    },
+                    "last_message": content.map(|content| serde_json::json!({
+                        "id": r.get::<Option<i64>, _>("last_message_id"),
+                        "role": r.get::<Option<String>, _>("last_message_role"),
+                        "content": content,
+                        "timestamp": r.get::<Option<String>, _>("last_message_timestamp"),
+                    })),
+                })
+            })
+            .collect())
+    }
+
+    async fn jarvis_history_scoped(
+        &self,
+        conversation_id: &str,
+        user_id: Option<&str>,
+        tenant_id: Option<&str>,
+        application_id: Option<&str>,
+        channel: Option<&str>,
+        include_legacy_unscoped: bool,
+        tail: i64,
+    ) -> DbResult<Option<serde_json::Value>> {
+        let channel = channel.unwrap_or("jarvis");
+        let tail = tail.clamp(1, 300);
+        let row = sqlx::query(
+            "SELECT c.id, c.model, c.message_count, c.started_at, c.status,
+                    c.user_id, c.tenant_id, c.application_id, c.channel,
+                    c.topic_id, c.topic_label, c.session_timeline
+             FROM conversations c
+             WHERE c.id = $1
+               AND c.source = 'jarvis_ui'
+               AND (
+                    (
+                        ($2::text IS NULL OR c.user_id = $2)
+                        AND ($3::text IS NULL OR c.tenant_id = $3)
+                        AND ($4::text IS NULL OR c.application_id = $4)
+                        AND (
+                            $5::text IS NULL
+                            OR c.channel IS NULL
+                            OR c.channel = $5
+                            OR (
+                                $5::text IN ('jarvis', 'jarvis_sse', 'jarvis_mobile')
+                                AND c.channel IN ('jarvis', 'jarvis_sse', 'jarvis_mobile')
+                            )
+                        )
+                    )
+                    OR (
+                        $6::bool
+                        AND c.user_id IS NULL
+                        AND c.tenant_id IS NULL
+                        AND c.application_id IS NULL
+                    )
+               )",
+        )
+        .bind(conversation_id)
+        .bind(user_id)
+        .bind(tenant_id)
+        .bind(application_id)
+        .bind(Some(channel))
+        .bind(include_legacy_unscoped)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let message_rows = sqlx::query(
+            "SELECT id, role, content, timestamp
+             FROM (
+                SELECT id, role, content, timestamp
+                FROM conversation_messages
+                WHERE session_id = $1
+                  AND NOT (
+                    role = 'assistant'
+                    AND content LIKE '%\"missiond.jarvis-pending-confirmation.v1\"%'
+                  )
+                ORDER BY id DESC
+                LIMIT $2
+             ) m
+             ORDER BY id ASC",
+        )
+        .bind(conversation_id)
+        .bind(tail)
+        .fetch_all(&self.pool)
+        .await?;
+
+        use sqlx::Row;
+        let row_user_id: Option<String> = row.get("user_id");
+        let row_tenant_id: Option<String> = row.get("tenant_id");
+        let row_application_id: Option<String> = row.get("application_id");
+        let scope_state =
+            if row_user_id.is_none() && row_tenant_id.is_none() && row_application_id.is_none() {
+                "legacy_unscoped"
+            } else {
+                "scoped"
+            };
+        let topic_label: Option<String> = row.get("topic_label");
+        let timeline_title: Option<String> = row.get("session_timeline");
+        let messages = message_rows
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "id": r.get::<i64, _>("id"),
+                    "role": r.get::<String, _>("role"),
+                    "content": r.get::<String, _>("content"),
+                    "timestamp": r.get::<Option<String>, _>("timestamp"),
+                })
+            })
+            .collect::<Vec<_>>();
+        let title_from_message = messages
+            .iter()
+            .find(|message| message.get("role").and_then(|value| value.as_str()) == Some("user"))
+            .and_then(|message| message.get("content").and_then(|value| value.as_str()))
+            .map(|value| value.chars().take(240).collect::<String>());
+
+        Ok(Some(serde_json::json!({
+            "conversation": {
+                "id": row.get::<String, _>("id"),
+                "model": row.get::<Option<String>, _>("model"),
+                "message_count": row.get::<Option<i64>, _>("message_count").unwrap_or(0),
+                "started_at": row.get::<Option<String>, _>("started_at"),
+                "status": row.get::<Option<String>, _>("status"),
+                "title": topic_label
+                    .clone()
+                    .or_else(|| timeline_title.filter(|value| !value.trim().is_empty()))
+                    .or(title_from_message),
+                "topic_id": row.get::<Option<String>, _>("topic_id"),
+                "topic_label": topic_label,
+                "scope": {
+                    "user_id": row_user_id,
+                    "tenant_id": row_tenant_id,
+                    "application_id": row_application_id,
+                    "channel": row.get::<Option<String>, _>("channel"),
+                    "state": scope_state,
+                },
+            },
+            "messages": messages,
+        })))
     }
 
     async fn jarvis_save_exchange(

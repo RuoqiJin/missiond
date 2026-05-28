@@ -776,15 +776,16 @@ function validateNavigationClosure({
       anchorValid = false;
     }
 
-    for (const item of matchedObserved) {
-      if (!anchorMatchesObserved(root, anchor, item)) {
-        diagnostics.push(diag(
-          anchor,
-          'NAVIGATION_ANCHOR_STALE',
-          `anchor for ${anchor.observed} no longer matches observed ${item.id}`,
-        ));
-        continue;
-      }
+    const matchingObserved = matchedObserved.filter((item) => anchorMatchesObserved(root, anchor, item));
+    if (matchedObserved.length > 0 && matchingObserved.length === 0) {
+      diagnostics.push(diag(
+        anchor,
+        'NAVIGATION_ANCHOR_STALE',
+        `anchor for ${anchor.observed} no longer matches any observed behavior after role/symbol/effect checks`,
+      ));
+    }
+
+    for (const item of matchingObserved) {
       if (anchorValid) {
         const anchors = validAnchorsByObservedId.get(item.id) ?? [];
         anchors.push(anchor);

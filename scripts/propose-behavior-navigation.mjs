@@ -144,7 +144,7 @@ function generateNavigationForms(projectId, items) {
   const forms = [];
   for (const [kind, group] of [...groups.entries()].sort(([a], [b]) => a.localeCompare(b))) {
     const id = `${projectId}-navigation-${kind}`;
-    const observed = unique(group.map((item) => item.id));
+    const observed = unique(group.map((item) => navigationObservedId(item)));
     const code = unique(group.map((item) => item.file));
     const effects = unique(group.map((item) => item.effectHint).filter(Boolean));
     const anchors = group.map((item) => formatAnchor(item)).join('\n');
@@ -174,13 +174,21 @@ function formatAnchor(item) {
   const role = item.role ?? roleForKind(item.kind);
   const parts = [
     `      :role ${role}`,
-    `      :observed ${quote(item.id)}`,
+    `      :observed ${quote(navigationObservedId(item))}`,
     `      :file ${quote(item.file)}`,
   ];
   if (item.symbol) parts.push(`      :symbol ${quote(item.symbol)}`);
   if (item.effectHint) parts.push(`      :effect ${item.effectHint}`);
   return `    (anchor
 ${parts.join('\n')})`;
+}
+
+function navigationObservedId(item) {
+  if (!item.symbol) return item.id;
+  const suffix = `:${item.file}:${item.line}`;
+  if (!item.id.endsWith(suffix)) return item.id;
+  const prefix = item.id.slice(0, -suffix.length);
+  return `${prefix}:${item.file}:*`;
 }
 
 function roleForKind(kind) {
@@ -242,7 +250,8 @@ function compiledBehaviorNavigationArtifact({
   navigationForms,
 }) {
   const anchors = riskItems.map((item) => ({
-    id: item.id,
+    id: navigationObservedId(item),
+    observed_id: item.id,
     kind: item.kind,
     role: item.role ?? roleForKind(item.kind),
     file: item.file,

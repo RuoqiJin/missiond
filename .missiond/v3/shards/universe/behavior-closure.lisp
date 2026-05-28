@@ -190,8 +190,8 @@
     :kind scheduler
     :owner interaction-gateway
     :observed ["scheduler:scripts/smoke-jarvis-intent-plan-dispatch.mjs:54"
-               "scheduler:scripts/smoke-jarvis-intent-plan-dispatch.mjs:244"
-               "scheduler:scripts/smoke-jarvis-intent-plan-dispatch.mjs:268"]
+               "scheduler:scripts/smoke-jarvis-intent-plan-dispatch.mjs:257"
+               "scheduler:scripts/smoke-jarvis-intent-plan-dispatch.mjs:281"]
     :code ["scripts/smoke-jarvis-intent-plan-dispatch.mjs"]
     :effects []
     (anchor
@@ -201,12 +201,12 @@
       :symbol "postInteraction")
     (anchor
       :role scheduler
-      :observed "scheduler:scripts/smoke-jarvis-intent-plan-dispatch.mjs:244"
+      :observed "scheduler:scripts/smoke-jarvis-intent-plan-dispatch.mjs:257"
       :file "scripts/smoke-jarvis-intent-plan-dispatch.mjs"
       :symbol "followTaskUntilTerminal")
     (anchor
       :role scheduler
-      :observed "scheduler:scripts/smoke-jarvis-intent-plan-dispatch.mjs:268"
+      :observed "scheduler:scripts/smoke-jarvis-intent-plan-dispatch.mjs:281"
       :file "scripts/smoke-jarvis-intent-plan-dispatch.mjs"
       :symbol "followTaskUntilTerminal")
     (trigger
@@ -235,24 +235,24 @@
     :id control-plane-worktree-verifier-git-subprocesses
     :kind subprocess
     :owner control-plane-kernel
-    :observed ["subprocess:crates/missiond-daemon/src/engine/shared_memory.rs:4768"
-               "subprocess:crates/missiond-daemon/src/engine/shared_memory.rs:4804"
-               "subprocess:crates/missiond-daemon/src/engine/shared_memory.rs:4824"]
+    :observed ["subprocess:crates/missiond-daemon/src/engine/shared_memory.rs:4771"
+               "subprocess:crates/missiond-daemon/src/engine/shared_memory.rs:4807"
+               "subprocess:crates/missiond-daemon/src/engine/shared_memory.rs:4827"]
     :code ["crates/missiond-daemon/src/engine/shared_memory.rs"]
     :effects []
     (anchor
       :role subprocess
-      :observed "subprocess:crates/missiond-daemon/src/engine/shared_memory.rs:4768"
+      :observed "subprocess:crates/missiond-daemon/src/engine/shared_memory.rs:4771"
       :file "crates/missiond-daemon/src/engine/shared_memory.rs"
       :symbol "git_status_changed_paths")
     (anchor
       :role subprocess
-      :observed "subprocess:crates/missiond-daemon/src/engine/shared_memory.rs:4804"
+      :observed "subprocess:crates/missiond-daemon/src/engine/shared_memory.rs:4807"
       :file "crates/missiond-daemon/src/engine/shared_memory.rs"
       :symbol "git_changed_paths_between")
     (anchor
       :role subprocess
-      :observed "subprocess:crates/missiond-daemon/src/engine/shared_memory.rs:4824"
+      :observed "subprocess:crates/missiond-daemon/src/engine/shared_memory.rs:4827"
       :file "crates/missiond-daemon/src/engine/shared_memory.rs"
       :symbol "git_head")
     (trigger
@@ -267,6 +267,76 @@
       :from-file "crates/missiond-daemon/src/engine/shared_memory.rs"
       :from-symbol "git_head"
       :calls "git -C <project_root> rev-parse HEAD for attempt-bound worktree manifest verification"))
+
+  (behavior
+    :id ws-server-interaction-frontend-streaming
+    :kind scheduler
+    :owner interaction-gateway
+    :observed ["background-task:crates/missiond-core/src/ws/server.rs:*"
+               "scheduler:crates/missiond-core/src/ws/server.rs:*"]
+    :code ["crates/missiond-core/src/ws/server.rs"]
+    :effects []
+    (anchor
+      :role scheduler
+      :observed "background-task:crates/missiond-core/src/ws/server.rs:*"
+      :file "crates/missiond-core/src/ws/server.rs"
+      :symbol "handle_chat_completions")
+    (anchor
+      :role scheduler
+      :observed "scheduler:crates/missiond-core/src/ws/server.rs:*"
+      :file "crates/missiond-core/src/ws/server.rs"
+      :symbol "handle_pty_subscription")
+    (anchor
+      :role scheduler
+      :observed "scheduler:crates/missiond-core/src/ws/server.rs:*"
+      :file "crates/missiond-core/src/ws/server.rs"
+      :symbol "handle_events_subscription")
+    (trigger
+      :from-file "crates/missiond-core/src/ws/server.rs"
+      :from-symbol "handle_chat_completions"
+      :calls "bridge Jarvis chat task execution into SSE activity/result stream")
+    (trigger
+      :from-file "crates/missiond-core/src/ws/server.rs"
+      :from-symbol "handle_pty_subscription"
+      :calls "send PTY replay buffer to late-joining Terminal clients")
+    (trigger
+      :from-file "crates/missiond-core/src/ws/server.rs"
+      :from-symbol "handle_events_subscription"
+      :calls "close frontend EventBus websocket with typed unavailable diagnostic when publisher is missing"))
+
+  (behavior
+    :id conversation-maintenance-reconcile-background
+    :kind scheduler
+    :owner conversation-ingestion
+    :observed ["background-task:crates/missiond-daemon/src/handlers/comm/conversation/maintenance.rs:*"]
+    :code ["crates/missiond-daemon/src/handlers/comm/conversation/maintenance.rs"]
+    :effects []
+    (anchor
+      :role scheduler
+      :observed "background-task:crates/missiond-daemon/src/handlers/comm/conversation/maintenance.rs:*"
+      :file "crates/missiond-daemon/src/handlers/comm/conversation/maintenance.rs"
+      :symbol "handle_maintenance")
+    (trigger
+      :from-file "crates/missiond-daemon/src/handlers/comm/conversation/maintenance.rs"
+      :from-symbol "handle_maintenance"
+      :calls "spawn full conversation reconciliation worker from explicit maintenance request"))
+
+  (behavior
+    :id conversation-events-git-log-subprocess
+    :kind subprocess
+    :owner conversation-ingestion
+    :observed ["subprocess:crates/missiond-daemon/src/handlers/comm/conversation/events.rs:*"]
+    :code ["crates/missiond-daemon/src/handlers/comm/conversation/events.rs"]
+    :effects []
+    (anchor
+      :role subprocess
+      :observed "subprocess:crates/missiond-daemon/src/handlers/comm/conversation/events.rs:*"
+      :file "crates/missiond-daemon/src/handlers/comm/conversation/events.rs"
+      :symbol "handle_events")
+    (trigger
+      :from-file "crates/missiond-daemon/src/handlers/comm/conversation/events.rs"
+      :from-symbol "handle_events"
+      :calls "git log --oneline bounded by requested time range for conversation event context"))
 
   (behavior
     :id global-claude-md-sync

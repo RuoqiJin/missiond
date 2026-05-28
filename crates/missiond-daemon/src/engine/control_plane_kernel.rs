@@ -2,7 +2,9 @@ use anyhow::{anyhow, Result};
 use chrono::Utc;
 use serde_json::{json, Value};
 
-use crate::engine::shared_memory::{CapabilityCheckRequest, ClaimRequest, WorkerSettleRequest};
+use crate::engine::shared_memory::{
+    CapabilityCheckRequest, ClaimRequest, TaskResultPutRequest, WorkerSettleRequest,
+};
 use crate::engine::task_completion_evidence::{
     TaskCompletionEvidenceInput, TaskCompletionEvidenceWriter,
 };
@@ -53,6 +55,11 @@ pub(crate) struct StartAttemptCommand {
     pub agent_id: String,
     pub worker_id: String,
     pub payload: Value,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct JobEventCommand {
+    pub args: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -199,6 +206,16 @@ impl<'a> ControlPlaneKernel<'a> {
             .await
     }
 
+    pub(crate) async fn task_result_put_command(
+        &self,
+        request: TaskResultPutRequest,
+    ) -> Result<Value> {
+        self.state
+            .shared_memory
+            .task_result_put_command(request)
+            .await
+    }
+
     pub(crate) async fn settle_task(
         &self,
         task_id: &str,
@@ -240,6 +257,16 @@ impl<'a> ControlPlaneKernel<'a> {
                 attempt_id: command.attempt_id,
                 allow_system_bypass: command.allow_system_bypass,
             })
+            .await
+    }
+
+    pub(crate) async fn worker_settle_command(
+        &self,
+        request: WorkerSettleRequest,
+    ) -> Result<Value> {
+        self.state
+            .shared_memory
+            .settle_worker_command(request)
             .await
     }
 
@@ -387,6 +414,30 @@ impl<'a> ControlPlaneKernel<'a> {
                 details: command.details,
             })
             .await
+    }
+
+    pub(crate) async fn capability_check_command(
+        &self,
+        command: RequireCapabilityCommand,
+    ) -> Result<Value> {
+        let task_id = command.task_id.clone();
+        let operation = command.operation.clone();
+        let scope_kind = command.scope_kind.clone();
+        let scope_key = command.scope_key.clone();
+        let grant_id = self.require_capability_command(command).await?;
+        Ok(json!({
+            "schema": "missiond.capability-check.v1",
+            "ok": true,
+            "task_id": task_id,
+            "grant_id": grant_id,
+            "operation": operation,
+            "scope_kind": scope_kind,
+            "scope_key": scope_key
+        }))
+    }
+
+    pub(crate) async fn job_event_command(&self, command: JobEventCommand) -> Result<Value> {
+        self.state.shared_memory.job_event_typed(command.args).await
     }
 
     pub(crate) async fn grant_task_capabilities_command(

@@ -21,6 +21,10 @@ const DEFAULT_FILES = {
   types: 'crates/missiond-core/src/types/conversation.rs',
   traits: 'crates/missiond-core/src/db/traits.rs',
   pgConversation: 'crates/missiond-core/src/db/pg/conversation.rs',
+  pgMessage: 'crates/missiond-core/src/db/pg/message.rs',
+  pgObservability: 'crates/missiond-core/src/db/pg/observability.rs',
+  wsServer: 'crates/missiond-core/src/ws/server.rs',
+  conversationQueryHandler: 'crates/missiond-daemon/src/handlers/comm/conversation/query.rs',
   contextCapsule: 'crates/missiond-daemon/src/handlers/knowledge/context_capsule.rs',
   contextGather: 'crates/missiond-daemon/src/handlers/knowledge/context_gather.rs',
 };
@@ -145,6 +149,12 @@ function checkFiles(root) {
         message: 'ConversationStore trait missing bind_context_capsule method',
       });
     }
+    if (!sources.traits.includes('jarvis_get_or_create_scoped')) {
+      diagnostics.push({
+        file: DEFAULT_FILES.traits,
+        message: 'ObservabilityStore trait missing scoped Jarvis session resolver',
+      });
+    }
   }
 
   if (sources.pgConversation) {
@@ -166,6 +176,69 @@ function checkFiles(root) {
     }
   }
 
+  if (sources.pgObservability) {
+    for (const needle of [
+      'jarvis_get_or_create_scoped',
+      'resolve_active_session',
+      'user_id = COALESCE(user_id',
+      'topic_id = COALESCE(topic_id',
+    ]) {
+      if (!sources.pgObservability.includes(needle)) {
+        diagnostics.push({
+          file: DEFAULT_FILES.pgObservability,
+          message: `Scoped Jarvis session implementation missing: ${needle}`,
+        });
+      }
+    }
+  }
+
+  if (sources.wsServer) {
+    for (const needle of [
+      'conversation_scope_from_permission',
+      'conversation_scope_from_request',
+      'jarvis_get_or_create_scoped',
+      'context_capsule_hash',
+      'bind_context_capsule',
+      'topic_id',
+    ]) {
+      if (!sources.wsServer.includes(needle)) {
+        diagnostics.push({
+          file: DEFAULT_FILES.wsServer,
+          message: `Jarvis/OpenAI gateway missing end-to-end session/capsule hook: ${needle}`,
+        });
+      }
+    }
+  }
+
+  if (sources.conversationQueryHandler) {
+    for (const needle of ['user_id', 'tenant_id', 'application_id', 'channel']) {
+      if (!sources.conversationQueryHandler.includes(needle)) {
+        diagnostics.push({
+          file: DEFAULT_FILES.conversationQueryHandler,
+          message: `Conversation query handler does not accept isolation filter: ${needle}`,
+        });
+      }
+    }
+  }
+
+  if (sources.pgMessage) {
+    for (const needle of [
+      'push_scope_conditions',
+      '"user_id"',
+      '"tenant_id"',
+      '"application_id"',
+      '"channel"',
+      'semantic_conversation_search',
+    ]) {
+      if (!sources.pgMessage.includes(needle)) {
+        diagnostics.push({
+          file: DEFAULT_FILES.pgMessage,
+          message: `Conversation search store does not enforce isolation scope: ${needle}`,
+        });
+      }
+    }
+  }
+
   if (sources.contextCapsule) {
     if (!sources.contextCapsule.includes('generate_lisp_capsule')) {
       diagnostics.push({
@@ -182,11 +255,20 @@ function checkFiles(root) {
   }
 
   if (sources.contextGather) {
-    if (!sources.contextGather.includes('context_capsule_hash')) {
-      diagnostics.push({
-        file: DEFAULT_FILES.contextGather,
-        message: 'Context gather handler not generating capsule hash',
-      });
+    for (const needle of [
+      'context_capsule_hash',
+      'bind_context_capsule',
+      'set_conversation_topic_vectors',
+      'permission_context',
+      'conversation_id',
+      'isolation_scope',
+    ]) {
+      if (!sources.contextGather.includes(needle)) {
+        diagnostics.push({
+          file: DEFAULT_FILES.contextGather,
+          message: `Context gather handler missing capsule/session binding hook: ${needle}`,
+        });
+      }
     }
   }
 

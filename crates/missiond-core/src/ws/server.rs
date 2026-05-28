@@ -19,6 +19,7 @@ use crate::event::events::SystemEvent;
 use crate::pty::{PTYManager, PTYSpawnOptions, SessionEvent, SessionState, Slot as PTYSlot};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -69,6 +70,14 @@ pub struct JarvisGroundingResult {
     pub context_pack_file: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifact_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_capsule_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_capsule_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub topic_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub topic_label: Option<String>,
     #[serde(default)]
     pub sources_used: Vec<String>,
     #[serde(default)]
@@ -82,6 +91,20 @@ pub struct JarvisGroundingRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
     pub chat_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub application_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub topic_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub topic_label: Option<String>,
+    #[serde(default)]
+    pub permission_context: serde_json::Value,
     #[serde(default)]
     pub unknowns: Vec<String>,
 }
@@ -636,6 +659,139 @@ fn json_string_field(value: &serde_json::Value, keys: &[&str]) -> Option<String>
             .filter(|field| !field.is_empty())
             .map(ToOwned::to_owned)
     })
+}
+
+fn normalized_scope_value(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .filter(|value| !matches!(*value, "unknown" | "null" | "undefined"))
+        .map(ToOwned::to_owned)
+}
+
+fn json_scope_string_field(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        value.get(*key).and_then(|field| match field {
+            serde_json::Value::String(text) => normalized_scope_value(Some(text)),
+            serde_json::Value::Null => None,
+            other => normalized_scope_value(Some(&other.to_string())),
+        })
+    })
+}
+
+#[derive(Debug, Clone, Default)]
+struct ConversationSessionScope {
+    user_id: Option<String>,
+    tenant_id: Option<String>,
+    application_id: Option<String>,
+    channel: String,
+    topic_id: Option<String>,
+    topic_label: Option<String>,
+}
+
+fn compact_topic_label(text: &str) -> Option<String> {
+    let collapsed = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string();
+    if collapsed.is_empty() {
+        return None;
+    }
+    let mut label = collapsed.chars().take(96).collect::<String>();
+    if collapsed.chars().count() > 96 {
+        label.push_str("...");
+    }
+    Some(label)
+}
+
+fn stable_topic_id(
+    user_id: Option<&str>,
+    tenant_id: Option<&str>,
+    application_id: Option<&str>,
+    channel: &str,
+    topic_label: Option<&str>,
+) -> Option<String> {
+    let topic_label = topic_label
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let normalized_topic = topic_label.to_ascii_lowercase();
+    let input = format!(
+        "{}|{}|{}|{}|{}",
+        tenant_id.unwrap_or(""),
+        user_id.unwrap_or(""),
+        application_id.unwrap_or("missiond"),
+        channel,
+        normalized_topic
+    );
+    let digest = Sha256::digest(input.as_bytes());
+    let short = digest
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Some(format!("topic-{short}"))
+}
+
+fn conversation_scope_from_permission(
+    envelope: &InteractionEnvelope,
+    permission_context: &serde_json::Value,
+    channel: &str,
+    user_text: &str,
+) -> ConversationSessionScope {
+    let topic_label = compact_topic_label(user_text);
+    let user_id = json_scope_string_field(permission_context, &["user_id"])
+        .or_else(|| normalized_scope_value(envelope.external_user_id.as_deref()));
+    let tenant_id = json_scope_string_field(permission_context, &["tenant_id"])
+        .or_else(|| json_scope_string_field(&envelope.metadata, &["tenant_id"]));
+    let application_id = json_scope_string_field(permission_context, &["application_id"])
+        .or_else(|| json_scope_string_field(&envelope.metadata, &["application_id"]))
+        .or_else(|| Some("missiond".to_string()));
+    let topic_id = stable_topic_id(
+        user_id.as_deref(),
+        tenant_id.as_deref(),
+        application_id.as_deref(),
+        channel,
+        topic_label.as_deref(),
+    );
+    ConversationSessionScope {
+        user_id,
+        tenant_id,
+        application_id,
+        channel: channel.to_string(),
+        topic_id,
+        topic_label,
+    }
+}
+
+fn conversation_scope_from_request(
+    req: &serde_json::Value,
+    default_channel: &str,
+    user_text: &str,
+) -> ConversationSessionScope {
+    let channel =
+        json_scope_string_field(req, &["channel"]).unwrap_or_else(|| default_channel.to_string());
+    let user_id = json_scope_string_field(req, &["user", "user_id", "userId", "external_user_id"]);
+    let tenant_id = json_scope_string_field(req, &["tenant_id", "tenantId"]);
+    let application_id = json_scope_string_field(req, &["application_id", "applicationId"])
+        .or_else(|| Some("missiond".to_string()));
+    let topic_label = compact_topic_label(user_text);
+    let topic_id = stable_topic_id(
+        user_id.as_deref(),
+        tenant_id.as_deref(),
+        application_id.as_deref(),
+        &channel,
+        topic_label.as_deref(),
+    );
+    ConversationSessionScope {
+        user_id,
+        tenant_id,
+        application_id,
+        channel,
+        topic_id,
+        topic_label,
+    }
 }
 
 fn json_string_array_field(value: &serde_json::Value, keys: &[&str]) -> Vec<String> {
@@ -2205,7 +2361,7 @@ impl PTYWebSocketServer {
         mut stream: TcpStream,
         addr: SocketAddr,
         headers: String,
-        envelope: InteractionEnvelope,
+        mut envelope: InteractionEnvelope,
         jarvis_grounding: JarvisGroundingSlot,
         jarvis_artifact_writer: JarvisArtifactSlot,
         db: Option<Arc<dyn crate::db::traits::MissionStore>>,
@@ -2304,6 +2460,12 @@ impl PTYWebSocketServer {
         }
 
         let conversation_id = envelope.conversation_id.clone();
+        let conversation_scope = conversation_scope_from_permission(
+            &envelope,
+            &permission_context,
+            &channel,
+            &raw_user_text,
+        );
         if let Some(follow_task_id) =
             interaction_metadata_string(&envelope, "missiond_follow_task_id")
         {
@@ -2324,6 +2486,7 @@ impl PTYWebSocketServer {
                     &mut stream,
                     &chat_id,
                     &follow_task_id,
+                    conversation_id.as_deref(),
                 )
                 .await?;
             } else {
@@ -2346,7 +2509,14 @@ impl PTYWebSocketServer {
         }
 
         let jarvis_conv_id = if let Some(ref db) = db {
-            match db.jarvis_get_or_create(conversation_id.as_deref()).await {
+            match Self::resolve_jarvis_conversation_id(
+                db,
+                conversation_id.as_deref(),
+                &raw_user_text,
+                &conversation_scope,
+            )
+            .await
+            {
                 Ok(id) => {
                     let _ = db
                         .router_chat_append_messages(
@@ -2377,6 +2547,26 @@ impl PTYWebSocketServer {
             .await?;
         }
 
+        if !interaction_metadata_bool(&envelope, "missiond_intent_confirmed")
+            && !interaction_metadata_bool(&envelope, "missiond_plan_confirmed")
+            && Self::jarvis_text_confirms_pending_review(&raw_user_text)
+        {
+            if let (Some(ref db), Some(ref cid)) = (&db, &jarvis_conv_id) {
+                match Self::load_pending_jarvis_confirmation(db, cid).await {
+                    Ok(Some(confirm_payload)) => {
+                        Self::inject_jarvis_confirm_payload(
+                            &mut envelope.metadata,
+                            confirm_payload,
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        warn!(conversation_id = %cid, error = %error, "failed to load pending Jarvis confirmation");
+                    }
+                }
+            }
+        }
+
         let intent_confirmed = interaction_metadata_bool(&envelope, "missiond_intent_confirmed");
         let plan_confirmed = interaction_metadata_bool(&envelope, "missiond_plan_confirmed");
         let objective_text = if intent_confirmed || plan_confirmed {
@@ -2401,6 +2591,13 @@ impl PTYWebSocketServer {
                 query: objective_text.clone(),
                 conversation_id: jarvis_conv_id.clone(),
                 chat_id: chat_id.clone(),
+                user_id: conversation_scope.user_id.clone(),
+                tenant_id: conversation_scope.tenant_id.clone(),
+                application_id: conversation_scope.application_id.clone(),
+                channel: Some(conversation_scope.channel.clone()),
+                topic_id: conversation_scope.topic_id.clone(),
+                topic_label: conversation_scope.topic_label.clone(),
+                permission_context: permission_context.clone(),
                 unknowns: vec![
                     format!("What does this {channel} channel user intend MissionD to do?"),
                     "Which project registry, SSOT, skill, infra, or tool facts are required before planning?".to_string(),
@@ -2419,7 +2616,29 @@ impl PTYWebSocketServer {
         let grounding_context_id = grounding.grounding_context_id.clone();
         let context_pack_path = grounding.context_pack_path.clone();
         let context_pack_file = grounding.context_pack_file.clone();
+        let context_capsule_hash = grounding.context_capsule_hash.clone();
+        let context_capsule_file = grounding.context_capsule_file.clone();
+        let resolved_topic_id = grounding
+            .topic_id
+            .clone()
+            .or_else(|| conversation_scope.topic_id.clone());
+        let resolved_topic_label = grounding
+            .topic_label
+            .clone()
+            .or_else(|| conversation_scope.topic_label.clone());
         let sources_used = grounding.sources_used.clone();
+        if let (Some(ref db), Some(ref cid), Some(ref capsule_hash)) =
+            (&db, &jarvis_conv_id, &context_capsule_hash)
+        {
+            let _ = db
+                .bind_context_capsule(
+                    cid,
+                    capsule_hash,
+                    resolved_topic_id.as_deref(),
+                    resolved_topic_label.as_deref(),
+                )
+                .await;
+        }
         Self::write_sse_event(
             &mut stream,
             "grounding",
@@ -2429,6 +2648,10 @@ impl PTYWebSocketServer {
                 "grounding_context_id": grounding_context_id,
                 "context_pack_path": context_pack_path,
                 "context_pack_file": context_pack_file,
+                "context_capsule_hash": context_capsule_hash,
+                "context_capsule_file": context_capsule_file,
+                "topic_id": resolved_topic_id,
+                "topic_label": resolved_topic_label,
                 "sources_used": sources_used,
                 "diagnostics": grounding.diagnostics,
             }),
@@ -2441,6 +2664,12 @@ impl PTYWebSocketServer {
             "channel": channel,
             "phase": "intent_draft",
             "grounding_context_id": grounding_context_id,
+            "context_pack_path": context_pack_path,
+            "context_pack_file": context_pack_file,
+            "context_capsule_hash": context_capsule_hash,
+            "context_capsule_file": context_capsule_file,
+            "topic_id": resolved_topic_id,
+            "topic_label": resolved_topic_label,
             "permission_context": permission_context.clone(),
             "understanding": "我理解这是一个外部渠道请求，需要先确认 intent.lisp，再确认 plan.lisp，之后才创建 BoardTask 并派工位。",
             "objective": objective_text,
@@ -2490,31 +2719,53 @@ impl PTYWebSocketServer {
                 );
             }
             Self::write_sse_event(&mut stream, "intent_draft", &intent).await?;
-            Self::write_sse_event(
+            Self::write_sse_openai_missiond_projection(
                 &mut stream,
-                "confirm_required",
-                &serde_json::json!({
-                    "interaction_id": interaction_id,
-                    "phase": "awaiting_intent_confirmation",
-                    "confirmation_type": "intent",
-                    "confirm_payload": {
-                        "missiond_intent_confirmed": true,
-                        "missiond_objective": objective_text,
-                        "missiond_grounding_context_id": grounding_context_id,
-                        "missiond_intent_artifact_id": intent_artifact_id,
-                    }
-                }),
+                &chat_id,
+                "intent_draft",
+                &intent_artifact_id,
+                &intent_artifact.artifact_hash,
+                &intent_artifact.path,
             )
             .await?;
-            Self::write_sse_openai_text(
+            let confirm = serde_json::json!({
+                "interaction_id": interaction_id,
+                "phase": "awaiting_intent_confirmation",
+                "confirmation_type": "intent",
+                "confirm_payload": {
+                    "missiond_intent_confirmed": true,
+                    "missiond_objective": objective_text,
+                    "missiond_grounding_context_id": grounding_context_id,
+                    "missiond_intent_artifact_id": intent_artifact_id,
+                }
+            });
+            Self::write_sse_event(&mut stream, "confirm_required", &confirm).await?;
+            Self::persist_jarvis_pending_confirmation(
+                db.as_ref(),
+                jarvis_conv_id.as_deref(),
+                &confirm,
+            )
+            .await;
+            Self::write_sse_openai_text_and_persist(
                 &mut stream,
                 &chat_id,
                 "我已生成 intent.lisp 草案，等待你确认意图。",
                 Some("stop"),
+                db.as_ref(),
+                jarvis_conv_id.as_deref(),
             )
             .await?;
             Self::finish_sse(&mut stream).await?;
             return Ok(());
+        }
+
+        if intent_confirmed && !plan_confirmed {
+            Self::persist_jarvis_confirmation_fulfilled(
+                db.as_ref(),
+                jarvis_conv_id.as_deref(),
+                "intent",
+            )
+            .await;
         }
 
         let plan_payload = serde_json::json!({
@@ -2525,6 +2776,10 @@ impl PTYWebSocketServer {
             "grounding_context_id": grounding_context_id,
             "context_pack_path": context_pack_path,
             "context_pack_file": context_pack_file,
+            "context_capsule_hash": context_capsule_hash,
+            "context_capsule_file": context_capsule_file,
+            "topic_id": resolved_topic_id,
+            "topic_label": resolved_topic_label,
             "intent_artifact_id": intent_artifact_id,
             "objective": objective_text,
             "steps": [
@@ -2577,29 +2832,42 @@ impl PTYWebSocketServer {
                 );
             }
             Self::write_sse_event(&mut stream, "plan_draft", &plan).await?;
-            Self::write_sse_event(
+            Self::write_sse_openai_missiond_projection(
                 &mut stream,
-                "confirm_required",
-                &serde_json::json!({
-                    "interaction_id": interaction_id,
-                    "phase": "awaiting_plan_confirmation",
-                    "confirmation_type": "plan",
-                    "confirm_payload": {
-                        "missiond_intent_confirmed": true,
-                        "missiond_plan_confirmed": true,
-                        "missiond_objective": objective_text,
-                        "missiond_grounding_context_id": grounding_context_id,
-                        "missiond_intent_artifact_id": intent_artifact_id,
-                        "missiond_plan_artifact_id": plan_artifact_id,
-                    }
-                }),
+                &chat_id,
+                "plan_draft",
+                &plan_artifact_id,
+                &plan_artifact.artifact_hash,
+                &plan_artifact.path,
             )
             .await?;
-            Self::write_sse_openai_text(
+            let confirm = serde_json::json!({
+                "interaction_id": interaction_id,
+                "phase": "awaiting_plan_confirmation",
+                "confirmation_type": "plan",
+                "confirm_payload": {
+                    "missiond_intent_confirmed": true,
+                    "missiond_plan_confirmed": true,
+                    "missiond_objective": objective_text,
+                    "missiond_grounding_context_id": grounding_context_id,
+                    "missiond_intent_artifact_id": intent_artifact_id,
+                    "missiond_plan_artifact_id": plan_artifact_id,
+                }
+            });
+            Self::write_sse_event(&mut stream, "confirm_required", &confirm).await?;
+            Self::persist_jarvis_pending_confirmation(
+                db.as_ref(),
+                jarvis_conv_id.as_deref(),
+                &confirm,
+            )
+            .await;
+            Self::write_sse_openai_text_and_persist(
                 &mut stream,
                 &chat_id,
                 "我已生成 plan.lisp 草案，等待你确认计划。",
                 Some("stop"),
+                db.as_ref(),
+                jarvis_conv_id.as_deref(),
             )
             .await?;
             Self::finish_sse(&mut stream).await?;
@@ -2647,6 +2915,10 @@ impl PTYWebSocketServer {
             "grounding_context_id": grounding_context_id,
             "context_pack_path": context_pack_path,
             "context_pack_file": context_pack_file,
+            "context_capsule_hash": context_capsule_hash,
+            "context_capsule_file": context_capsule_file,
+            "topic_id": resolved_topic_id,
+            "topic_label": resolved_topic_label,
             "intent_artifact_id": intent_artifact_id,
             "plan_artifact_id": plan_artifact_id,
             "dispatch_metadata": dispatch_metadata,
@@ -2683,6 +2955,12 @@ impl PTYWebSocketServer {
         };
         match db.create_board_task(&task_input).await {
             Ok(task) => {
+                Self::persist_jarvis_confirmation_fulfilled(
+                    Some(db),
+                    jarvis_conv_id.as_deref(),
+                    "plan",
+                )
+                .await;
                 let follow_payload = serde_json::json!({
                     "missiond_follow_task_id": task.id,
                     "interaction_id": interaction_id,
@@ -2754,14 +3032,17 @@ impl PTYWebSocketServer {
                     }),
                 )
                 .await?;
-                Self::write_sse_openai_text(
+                let accepted_text = format!(
+                    "计划已确认，BoardTask 已创建。后续用 missiond_follow_task_id={} 读取 task-result-artifact。",
+                    task.id
+                );
+                Self::write_sse_openai_text_and_persist(
                     &mut stream,
                     &chat_id,
-                    &format!(
-                        "计划已确认，BoardTask 已创建。后续用 missiond_follow_task_id={} 读取 task-result-artifact。",
-                        task.id
-                    ),
+                    &accepted_text,
                     Some("stop"),
+                    Some(db),
+                    jarvis_conv_id.as_deref(),
                 )
                 .await?;
             }
@@ -2922,6 +3203,53 @@ impl PTYWebSocketServer {
         Ok(())
     }
 
+    async fn send_json_response(
+        stream: &mut TcpStream,
+        status: u16,
+        reason: &str,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let body = body.to_string();
+        let response = format!(
+            "HTTP/1.1 {} {}\r\n\
+             Content-Type: application/json\r\n\
+             Access-Control-Allow-Origin: *\r\n\
+             Access-Control-Allow-Headers: Content-Type, Authorization\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\
+             \r\n{}",
+            status,
+            reason,
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes()).await?;
+        stream.shutdown().await?;
+        Ok(())
+    }
+
+    fn request_path_without_query(path: &str) -> &str {
+        path.split('?').next().unwrap_or(path)
+    }
+
+    fn request_query_i64(path: &str, key: &str, default: i64, min: i64, max: i64) -> i64 {
+        let Some(query) = path.split_once('?').map(|(_, query)| query) else {
+            return default;
+        };
+        query
+            .split('&')
+            .filter_map(|pair| pair.split_once('='))
+            .find_map(|(name, value)| {
+                if name == key {
+                    value.parse::<i64>().ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(default)
+            .clamp(min, max)
+    }
+
     /// Read full HTTP request from stream (headers + body)
     async fn read_http_request(stream: &mut TcpStream) -> anyhow::Result<(String, String)> {
         let mut buf = Vec::with_capacity(8192);
@@ -2977,6 +3305,180 @@ impl PTYWebSocketServer {
         let body =
             String::from_utf8_lossy(&body_buf[..content_length.min(body_buf.len())]).to_string();
         Ok((headers_str, body))
+    }
+
+    fn jarvis_history_include_legacy_unscoped(permission_context: &serde_json::Value) -> bool {
+        if std::env::var("MISSIOND_JARVIS_HISTORY_LEGACY_UNSCOPED")
+            .map(|value| value == "0" || value.eq_ignore_ascii_case("false"))
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        let roles = json_string_array_field(permission_context, &["roles"]);
+        let scopes = json_string_array_field(permission_context, &["scope", "scopes"]);
+        roles.iter().any(|role| {
+            matches!(
+                role.as_str(),
+                "admin"
+                    | "system_admin"
+                    | "tenant_admin"
+                    | "missiond_operator"
+                    | "service"
+                    | "user"
+            )
+        }) || scopes.iter().any(|scope| {
+            matches!(
+                scope.as_str(),
+                "missiond:operator" | "missiond:admin" | "jarvis:history" | "jarvis:*"
+            )
+        })
+    }
+
+    async fn handle_jarvis_conversations(
+        mut stream: TcpStream,
+        normalized_request_line: &str,
+        db: Option<Arc<dyn crate::db::traits::MissionStore>>,
+    ) -> anyhow::Result<()> {
+        let Some(db) = db else {
+            return Self::send_json_response(
+                &mut stream,
+                503,
+                "Service Unavailable",
+                &serde_json::json!({
+                    "error": {"code": "MISSIOND_DB_UNAVAILABLE", "message": "MissionD DB unavailable"}
+                }),
+            )
+            .await;
+        };
+        let (headers, _body) = match Self::read_http_request(&mut stream).await {
+            Ok(request) => request,
+            Err(error) => {
+                return Self::send_json_response(
+                    &mut stream,
+                    400,
+                    "Bad Request",
+                    &serde_json::json!({
+                        "error": {"message": format!("Bad request: {}", error)}
+                    }),
+                )
+                .await;
+            }
+        };
+
+        let envelope = InteractionEnvelope {
+            channel: "jarvis".to_string(),
+            external_user_id: None,
+            auth_token: None,
+            conversation_id: None,
+            message: serde_json::Value::String("jarvis history".to_string()),
+            attachments: Vec::new(),
+            metadata: serde_json::json!({"application_id": "missiond"}),
+        };
+        let auth_resolution = match resolve_interaction_auth(&envelope, &headers).await {
+            Ok(resolution) => resolution,
+            Err((status, reason, body)) => {
+                return Self::send_json_response(&mut stream, status, reason, &body).await;
+            }
+        };
+        let permission_context = auth_resolution.permission_context;
+        let scope =
+            conversation_scope_from_permission(&envelope, &permission_context, "jarvis", "");
+        let include_legacy_unscoped =
+            Self::jarvis_history_include_legacy_unscoped(&permission_context);
+
+        let request_path = normalized_request_line
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or("/api/jarvis/conversations");
+        let path_only = Self::request_path_without_query(request_path);
+        if path_only == "/api/jarvis/conversations" {
+            let limit = Self::request_query_i64(request_path, "limit", 25, 1, 100);
+            let conversations = db
+                .jarvis_list_scoped(
+                    scope.user_id.as_deref(),
+                    scope.tenant_id.as_deref(),
+                    scope.application_id.as_deref(),
+                    Some(scope.channel.as_str()),
+                    include_legacy_unscoped,
+                    limit,
+                )
+                .await?;
+            return Self::send_json_response(
+                &mut stream,
+                200,
+                "OK",
+                &serde_json::json!({
+                    "schema": "missiond.jarvis-conversation-list.v1",
+                    "permission_context": permission_context,
+                    "scope": {
+                        "user_id": scope.user_id,
+                        "tenant_id": scope.tenant_id,
+                        "application_id": scope.application_id,
+                        "channel": scope.channel,
+                        "include_legacy_unscoped": include_legacy_unscoped,
+                    },
+                    "conversations": conversations,
+                }),
+            )
+            .await;
+        }
+
+        let Some(conversation_id) = path_only
+            .strip_prefix("/api/jarvis/conversations/")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Self::send_json_response(
+                &mut stream,
+                404,
+                "Not Found",
+                &serde_json::json!({"error": {"message": "Jarvis conversation route not found"}}),
+            )
+            .await;
+        };
+
+        let tail = Self::request_query_i64(request_path, "tail", 80, 1, 300);
+        match db
+            .jarvis_history_scoped(
+                conversation_id,
+                scope.user_id.as_deref(),
+                scope.tenant_id.as_deref(),
+                scope.application_id.as_deref(),
+                Some(scope.channel.as_str()),
+                include_legacy_unscoped,
+                tail,
+            )
+            .await?
+        {
+            Some(history) => {
+                let mut response = serde_json::json!({
+                    "schema": "missiond.jarvis-conversation-history.v1",
+                    "permission_context": permission_context,
+                });
+                if let Some(object) = response.as_object_mut() {
+                    if let Some(history_object) = history.as_object() {
+                        for (key, value) in history_object {
+                            object.insert(key.clone(), value.clone());
+                        }
+                    }
+                }
+                Self::send_json_response(&mut stream, 200, "OK", &response).await
+            }
+            None => {
+                Self::send_json_response(
+                    &mut stream,
+                    404,
+                    "Not Found",
+                    &serde_json::json!({
+                        "error": {
+                            "code": "JARVIS_CONVERSATION_NOT_FOUND",
+                            "message": "Conversation not found in the caller's Jarvis scope"
+                        }
+                    }),
+                )
+                .await
+            }
+        }
     }
 
     /// Handle POST /webhooks/* — AIOps incident webhook receiver
@@ -3162,6 +3664,276 @@ impl PTYWebSocketServer {
         Ok(())
     }
 
+    async fn persist_jarvis_visible_assistant_message(
+        db: Option<&Arc<dyn crate::db::traits::MissionStore>>,
+        conversation_id: Option<&str>,
+        text: &str,
+    ) {
+        let text = text.trim();
+        let (Some(db), Some(conversation_id)) = (db, conversation_id) else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        if let Err(error) = db
+            .router_chat_append_messages(
+                conversation_id,
+                &[("assistant".to_string(), text.to_string())],
+            )
+            .await
+        {
+            warn!(%conversation_id, error = %error, "failed to persist visible Jarvis assistant text");
+        }
+    }
+
+    async fn write_sse_openai_text_and_persist(
+        stream: &mut TcpStream,
+        chat_id: &str,
+        text: &str,
+        finish_reason: Option<&str>,
+        db: Option<&Arc<dyn crate::db::traits::MissionStore>>,
+        conversation_id: Option<&str>,
+    ) -> anyhow::Result<()> {
+        Self::persist_jarvis_visible_assistant_message(db, conversation_id, text).await;
+        Self::write_sse_openai_text(stream, chat_id, text, finish_reason).await
+    }
+
+    fn jarvis_artifact_projection_text(
+        event: &str,
+        artifact_id: &str,
+        artifact_hash: &str,
+        artifact_path: &str,
+    ) -> String {
+        format!(
+            "{event} artifact ready\nartifact_id: {artifact_id}\nartifact_hash: {artifact_hash}\nartifact_path: {artifact_path}"
+        )
+    }
+
+    async fn write_sse_openai_missiond_projection(
+        stream: &mut TcpStream,
+        chat_id: &str,
+        event: &str,
+        artifact_id: &str,
+        artifact_hash: &str,
+        artifact_path: &str,
+    ) -> anyhow::Result<()> {
+        let content =
+            Self::jarvis_artifact_projection_text(event, artifact_id, artifact_hash, artifact_path);
+        let chunk = serde_json::json!({
+            "id": chat_id,
+            "object": "chat.completion.chunk",
+            "model": "jarvis-missiond",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": content},
+                "finish_reason": serde_json::Value::Null
+            }],
+            "missiond_projection": {
+                "schema": "missiond.openai-artifact-projection.v1",
+                "event": event,
+                "artifact_id": artifact_id,
+                "artifact_hash": artifact_hash,
+                "artifact_path": artifact_path
+            }
+        });
+        stream
+            .write_all(format!("data: {chunk}\n\n").as_bytes())
+            .await?;
+        stream.flush().await?;
+        Ok(())
+    }
+
+    fn jarvis_text_confirms_pending_review(text: &str) -> bool {
+        let compact: String = text
+            .trim()
+            .to_lowercase()
+            .chars()
+            .filter(|c| {
+                !c.is_whitespace()
+                    && !matches!(
+                        c,
+                        ',' | '.' | '!' | '?' | ';' | ':' | '，' | '。' | '！' | '？' | '；' | '：'
+                    )
+            })
+            .collect();
+        if compact.is_empty() {
+            return false;
+        }
+        if [
+            "不确认",
+            "不要确认",
+            "别确认",
+            "取消",
+            "拒绝",
+            "不同意",
+            "no",
+            "reject",
+            "rejected",
+            "cancel",
+        ]
+        .iter()
+        .any(|deny| compact.contains(deny))
+        {
+            return false;
+        }
+        matches!(
+            compact.as_str(),
+            "确认"
+                | "确认意图"
+                | "确认intent"
+                | "确认计划"
+                | "确认plan"
+                | "同意"
+                | "可以"
+                | "通过"
+                | "批准"
+                | "ok"
+                | "okay"
+                | "yes"
+                | "y"
+                | "confirm"
+                | "confirmed"
+                | "approve"
+                | "approved"
+        )
+    }
+
+    fn jarvis_pending_confirmation_marker(status: &str, confirm: &serde_json::Value) -> String {
+        serde_json::json!({
+            "schema": "missiond.jarvis-pending-confirmation.v1",
+            "status": status,
+            "confirmation_type": confirm.get("confirmation_type").cloned().unwrap_or(serde_json::Value::Null),
+            "phase": confirm.get("phase").cloned().unwrap_or(serde_json::Value::Null),
+            "confirm_payload": confirm.get("confirm_payload").cloned().unwrap_or(serde_json::json!({})),
+        })
+        .to_string()
+    }
+
+    fn latest_pending_jarvis_confirmation(
+        history: &[serde_json::Value],
+    ) -> Option<serde_json::Value> {
+        for message in history.iter().rev() {
+            let Some(content) = message.get("content").and_then(|value| value.as_str()) else {
+                continue;
+            };
+            let Ok(marker) = serde_json::from_str::<serde_json::Value>(content) else {
+                continue;
+            };
+            if marker.get("schema").and_then(|value| value.as_str())
+                != Some("missiond.jarvis-pending-confirmation.v1")
+            {
+                continue;
+            }
+            match marker.get("status").and_then(|value| value.as_str()) {
+                Some("pending") => return marker.get("confirm_payload").cloned(),
+                Some("fulfilled") => return None,
+                _ => continue,
+            }
+        }
+        None
+    }
+
+    async fn load_pending_jarvis_confirmation(
+        db: &Arc<dyn crate::db::traits::MissionStore>,
+        conversation_id: &str,
+    ) -> anyhow::Result<Option<serde_json::Value>> {
+        let history = db.router_chat_load_history(conversation_id).await?;
+        Ok(Self::latest_pending_jarvis_confirmation(&history))
+    }
+
+    async fn resolve_jarvis_conversation_id(
+        db: &Arc<dyn crate::db::traits::MissionStore>,
+        requested_conversation_id: Option<&str>,
+        raw_user_text: &str,
+        scope: &ConversationSessionScope,
+    ) -> anyhow::Result<String> {
+        let requested = requested_conversation_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let resolved = db
+            .jarvis_get_or_create_scoped(
+                requested,
+                scope.user_id.as_deref(),
+                scope.tenant_id.as_deref(),
+                scope.application_id.as_deref(),
+                Some(scope.channel.as_str()),
+                scope.topic_id.as_deref(),
+                scope.topic_label.as_deref(),
+            )
+            .await?;
+
+        if requested.is_none() && Self::jarvis_text_confirms_pending_review(raw_user_text) {
+            if Self::load_pending_jarvis_confirmation(db, &resolved)
+                .await?
+                .is_some()
+            {
+                return Ok(resolved);
+            }
+        }
+
+        Ok(resolved)
+    }
+
+    async fn persist_jarvis_pending_confirmation(
+        db: Option<&Arc<dyn crate::db::traits::MissionStore>>,
+        conversation_id: Option<&str>,
+        confirm: &serde_json::Value,
+    ) {
+        let (Some(db), Some(conversation_id)) = (db, conversation_id) else {
+            return;
+        };
+        let marker = Self::jarvis_pending_confirmation_marker("pending", confirm);
+        if let Err(error) = db
+            .router_chat_append_messages(conversation_id, &[("assistant".to_string(), marker)])
+            .await
+        {
+            warn!(%conversation_id, error = %error, "failed to persist Jarvis pending confirmation");
+        }
+    }
+
+    async fn persist_jarvis_confirmation_fulfilled(
+        db: Option<&Arc<dyn crate::db::traits::MissionStore>>,
+        conversation_id: Option<&str>,
+        confirmation_type: &str,
+    ) {
+        let (Some(db), Some(conversation_id)) = (db, conversation_id) else {
+            return;
+        };
+        let confirm = serde_json::json!({
+            "phase": "fulfilled",
+            "confirmation_type": confirmation_type,
+            "confirm_payload": {}
+        });
+        let marker = Self::jarvis_pending_confirmation_marker("fulfilled", &confirm);
+        if let Err(error) = db
+            .router_chat_append_messages(conversation_id, &[("assistant".to_string(), marker)])
+            .await
+        {
+            warn!(%conversation_id, error = %error, "failed to persist Jarvis fulfilled confirmation");
+        }
+    }
+
+    fn inject_jarvis_confirm_payload(
+        target: &mut serde_json::Value,
+        confirm_payload: serde_json::Value,
+    ) {
+        let Some(object) = target.as_object_mut() else {
+            return;
+        };
+        let confirm = object
+            .entry("missiond_confirm".to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        if !confirm.is_object() {
+            *confirm = serde_json::json!({});
+        }
+        if let Some(confirm_object) = confirm.as_object_mut() {
+            confirm_object
+                .entry("confirm_payload".to_string())
+                .or_insert(confirm_payload);
+        }
+    }
+
     async fn finish_sse(stream: &mut TcpStream) -> anyhow::Result<()> {
         stream.write_all(b"data: [DONE]\n\n").await?;
         stream.flush().await?;
@@ -3228,6 +4000,7 @@ impl PTYWebSocketServer {
         stream: &mut TcpStream,
         chat_id: &str,
         task_id: &str,
+        conversation_id: Option<&str>,
     ) -> anyhow::Result<()> {
         let wait_secs = jarvis_task_wait_secs();
         let public_stream_budget_secs = jarvis_public_stream_budget_secs();
@@ -3263,11 +4036,13 @@ impl PTYWebSocketServer {
                     }
                 });
                 Self::write_sse_event(stream, "result_pending", &pending_event).await?;
-                Self::write_sse_openai_text(
+                Self::write_sse_openai_text_and_persist(
                     stream,
                     chat_id,
                     "任务尚未在等待窗口内完成，我不会伪造结果。请检查 BoardTask、工位和 task-result-artifact。",
                     Some("stop"),
+                    Some(db),
+                    conversation_id,
                 )
                 .await?;
                 return Ok(());
@@ -3302,13 +4077,15 @@ impl PTYWebSocketServer {
                         }
                     });
                     Self::write_sse_event(stream, "result_pending", &pending_event).await?;
-                    Self::write_sse_openai_text(
-                            stream,
-                            chat_id,
-                            "任务监督链路读取 BoardTask 超时；我不会继续静默等待。请检查 MissionD DB / EventBus / worker completion 链路。",
-                            Some("stop"),
-                        )
-                        .await?;
+                    Self::write_sse_openai_text_and_persist(
+                        stream,
+                        chat_id,
+                        "任务监督链路读取 BoardTask 超时；我不会继续静默等待。请检查 MissionD DB / EventBus / worker completion 链路。",
+                        Some("stop"),
+                        Some(db),
+                        conversation_id,
+                    )
+                    .await?;
                     return Ok(());
                 }
             };
@@ -3320,11 +4097,13 @@ impl PTYWebSocketServer {
                     "error": {"code": "BOARD_TASK_NOT_FOUND", "message": "Created BoardTask disappeared before completion"}
                 });
                 Self::write_sse_event(stream, "diagnostic", &diagnostic).await?;
-                Self::write_sse_openai_text(
+                Self::write_sse_openai_text_and_persist(
                     stream,
                     chat_id,
                     "任务记录丢失，无法继续监督执行。",
                     Some("stop"),
+                    Some(db),
+                    conversation_id,
                 )
                 .await?;
                 return Ok(());
@@ -3495,11 +4274,13 @@ impl PTYWebSocketServer {
                                     "next_action": "Inspect DB pool/EventBus completion path before retrying; do not keep mobile SSE waiting silently."
                                 });
                                 Self::write_sse_event(stream, "diagnostic", &diagnostic).await?;
-                                Self::write_sse_openai_text(
+                                Self::write_sse_openai_text_and_persist(
                                     stream,
                                     chat_id,
                                     "任务已完成，但结果 notes/task-result-artifact 读取超时；我不会伪造结果。请检查结果落盘链路后重试 follow。",
                                     Some("stop"),
+                                    Some(db),
+                                    conversation_id,
                                 )
                                 .await?;
                                 return Ok(());
@@ -3517,11 +4298,13 @@ impl PTYWebSocketServer {
                             "next_action": "Inspect task-result-artifact writer before retrying; do not treat Board note as final authority."
                         });
                         Self::write_sse_event(stream, "diagnostic", &diagnostic).await?;
-                        Self::write_sse_openai_text(
+                        Self::write_sse_openai_text_and_persist(
                             stream,
                             chat_id,
                             "任务已完成但 task-result-artifact 未落盘；我不会把 Board note 当作最终结果返回。请先修复结果落盘链路。",
                             Some("stop"),
+                            Some(db),
+                            conversation_id,
                         )
                         .await?;
                         return Ok(());
@@ -3536,7 +4319,15 @@ impl PTYWebSocketServer {
                         "artifact_hash": latest_artifact_hash,
                     });
                     Self::write_sse_event(stream, "final", &final_event).await?;
-                    Self::write_sse_openai_text(stream, chat_id, &final_text, Some("stop")).await?;
+                    Self::write_sse_openai_text_and_persist(
+                        stream,
+                        chat_id,
+                        &final_text,
+                        Some("stop"),
+                        Some(db),
+                        conversation_id,
+                    )
+                    .await?;
                     return Ok(());
                 }
                 crate::types::BoardTaskStatus::Failed
@@ -3555,7 +4346,15 @@ impl PTYWebSocketServer {
                         "message": final_text,
                     });
                     Self::write_sse_event(stream, "diagnostic", &diagnostic).await?;
-                    Self::write_sse_openai_text(stream, chat_id, &final_text, Some("stop")).await?;
+                    Self::write_sse_openai_text_and_persist(
+                        stream,
+                        chat_id,
+                        &final_text,
+                        Some("stop"),
+                        Some(db),
+                        conversation_id,
+                    )
+                    .await?;
                     return Ok(());
                 }
                 _ => {
@@ -3586,14 +4385,17 @@ impl PTYWebSocketServer {
                             "follow_payload": follow_payload
                         });
                         Self::write_sse_event(stream, "result_pending", &pending_event).await?;
-                        Self::write_sse_openai_text(
+                        let pending_text = format!(
+                            "任务仍在运行，我已返回可续接状态而不是伪造结果。后续请求携带 missiond_follow_task_id={} 即可继续等待或读取最终 task-result-artifact。",
+                            task_id
+                        );
+                        Self::write_sse_openai_text_and_persist(
                             stream,
                             chat_id,
-                            &format!(
-                                "任务仍在运行，我已返回可续接状态而不是伪造结果。后续请求携带 missiond_follow_task_id={} 即可继续等待或读取最终 task-result-artifact。",
-                                task_id
-                            ),
+                            &pending_text,
                             Some("stop"),
+                            Some(db),
+                            conversation_id,
                         )
                         .await?;
                         return Ok(());
@@ -4101,6 +4903,13 @@ impl PTYWebSocketServer {
             .get("conversation_id")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        let request_scope = conversation_scope_from_request(
+            &req,
+            "jarvis_sse",
+            req.get("query")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default(),
+        );
 
         if let Some(follow_task_id) = req
             .get("missiond_follow_task_id")
@@ -4122,7 +4931,18 @@ impl PTYWebSocketServer {
             stream.flush().await?;
 
             if let Some(ref db) = db {
-                match db.jarvis_get_or_create(conversation_id.as_deref()).await {
+                match db
+                    .jarvis_get_or_create_scoped(
+                        conversation_id.as_deref(),
+                        request_scope.user_id.as_deref(),
+                        request_scope.tenant_id.as_deref(),
+                        request_scope.application_id.as_deref(),
+                        Some(request_scope.channel.as_str()),
+                        request_scope.topic_id.as_deref(),
+                        request_scope.topic_label.as_deref(),
+                    )
+                    .await
+                {
                     Ok(id) => {
                         let meta_evt = serde_json::json!({
                             "conversation_id": id,
@@ -4143,6 +4963,7 @@ impl PTYWebSocketServer {
                             &mut stream,
                             &chat_id,
                             follow_task_id,
+                            Some(id.as_str()),
                         )
                         .await?;
                     }
@@ -4273,9 +5094,9 @@ impl PTYWebSocketServer {
             Self::send_http_error(&mut stream, 400, "Bad Request", &err.to_string()).await?;
             return Ok(());
         }
+        let conversation_scope =
+            conversation_scope_from_request(&req, "jarvis_sse", &raw_user_text);
 
-        let intent_confirmed = jarvis_confirm_bool(&req, "missiond_intent_confirmed");
-        let plan_confirmed = jarvis_confirm_bool(&req, "missiond_plan_confirmed");
         let exact_shard_ready = req
             .get("exact_shard_ready")
             .and_then(|v| v.as_bool())
@@ -4298,7 +5119,14 @@ impl PTYWebSocketServer {
             stream.flush().await?;
 
             let jarvis_conv_id = if let Some(ref db) = db {
-                match db.jarvis_get_or_create(conversation_id.as_deref()).await {
+                match Self::resolve_jarvis_conversation_id(
+                    db,
+                    conversation_id.as_deref(),
+                    &raw_user_text,
+                    &conversation_scope,
+                )
+                .await
+                {
                     Ok(id) => {
                         if !raw_user_text.is_empty() {
                             let _ = db
@@ -4326,8 +5154,31 @@ impl PTYWebSocketServer {
                     .await;
             }
 
+            let mut effective_req = req.clone();
+            if !jarvis_confirm_bool(&effective_req, "missiond_intent_confirmed")
+                && !jarvis_confirm_bool(&effective_req, "missiond_plan_confirmed")
+                && Self::jarvis_text_confirms_pending_review(&raw_user_text)
+            {
+                if let (Some(ref db), Some(ref cid)) = (&db, &jarvis_conv_id) {
+                    match Self::load_pending_jarvis_confirmation(db, cid).await {
+                        Ok(Some(confirm_payload)) => {
+                            Self::inject_jarvis_confirm_payload(
+                                &mut effective_req,
+                                confirm_payload,
+                            );
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            warn!(conversation_id = %cid, error = %error, "failed to load pending Jarvis confirmation");
+                        }
+                    }
+                }
+            }
+
+            let intent_confirmed = jarvis_confirm_bool(&effective_req, "missiond_intent_confirmed");
+            let plan_confirmed = jarvis_confirm_bool(&effective_req, "missiond_plan_confirmed");
             let objective_text = if intent_confirmed || plan_confirmed {
-                match jarvis_confirm_string(&req, "missiond_objective") {
+                match jarvis_confirm_string(&effective_req, "missiond_objective") {
                     Some(value) => value,
                     None => {
                         Self::fail_jarvis_gate(
@@ -4349,12 +5200,27 @@ impl PTYWebSocketServer {
                     query: objective_text.clone(),
                     conversation_id: jarvis_conv_id.clone(),
                     chat_id: chat_id.clone(),
+                    user_id: conversation_scope.user_id.clone(),
+                    tenant_id: conversation_scope.tenant_id.clone(),
+                    application_id: conversation_scope.application_id.clone(),
+                    channel: Some(conversation_scope.channel.clone()),
+                    topic_id: conversation_scope.topic_id.clone(),
+                    topic_label: conversation_scope.topic_label.clone(),
+                    permission_context: serde_json::json!({
+                        "resolution": "openai-chat-completions",
+                        "user_id": conversation_scope.user_id.clone(),
+                        "tenant_id": conversation_scope.tenant_id.clone(),
+                        "application_id": conversation_scope.application_id.clone(),
+                        "channel": conversation_scope.channel.clone(),
+                        "capabilities": ["worker:dispatch"]
+                    }),
                     unknowns: vec![
                         "What project, skill, deploy fact, or tool context is needed before dispatch?"
                             .to_string(),
                         "Is this broad request ready for intent/plan confirmation or already an exact shard?"
                             .to_string(),
                     ],
+                    ..Default::default()
                 },
             )
             .await
@@ -4369,14 +5235,40 @@ impl PTYWebSocketServer {
             let context_pack_path = grounding.context_pack_path.clone();
             let context_pack_file = grounding.context_pack_file.clone();
             let grounding_artifact_hash = grounding.artifact_hash.clone();
+            let context_capsule_hash = grounding.context_capsule_hash.clone();
+            let context_capsule_file = grounding.context_capsule_file.clone();
+            let resolved_topic_id = grounding
+                .topic_id
+                .clone()
+                .or_else(|| conversation_scope.topic_id.clone());
+            let resolved_topic_label = grounding
+                .topic_label
+                .clone()
+                .or_else(|| conversation_scope.topic_label.clone());
             let sources_used = grounding.sources_used.clone();
             let grounding_diagnostics = grounding.diagnostics.clone();
+            if let (Some(ref db), Some(ref cid), Some(ref capsule_hash)) =
+                (&db, &jarvis_conv_id, &context_capsule_hash)
+            {
+                let _ = db
+                    .bind_context_capsule(
+                        cid,
+                        capsule_hash,
+                        resolved_topic_id.as_deref(),
+                        resolved_topic_label.as_deref(),
+                    )
+                    .await;
+            }
             let grounding_event = serde_json::json!({
                 "phase": "grounding",
                 "grounding_context_id": grounding_context_id,
                 "context_pack_path": context_pack_path,
                 "context_pack_file": context_pack_file,
                 "artifact_hash": grounding_artifact_hash,
+                "context_capsule_hash": context_capsule_hash,
+                "context_capsule_file": context_capsule_file,
+                "topic_id": resolved_topic_id,
+                "topic_label": resolved_topic_label,
                 "sources_used": sources_used,
                 "diagnostics": grounding_diagnostics,
             });
@@ -4387,6 +5279,10 @@ impl PTYWebSocketServer {
                 "grounding_context_id": grounding_context_id,
                 "context_pack_path": context_pack_path,
                 "context_pack_file": context_pack_file,
+                "context_capsule_hash": context_capsule_hash,
+                "context_capsule_file": context_capsule_file,
+                "topic_id": resolved_topic_id,
+                "topic_label": resolved_topic_label,
                 "understanding": "我理解这是一个需要先确认意图、再拆 plan.lisp、再派工位执行的 Jarvis 请求。",
                 "objective": objective_text,
                 "user_message_preview": objective_text.chars().take(240).collect::<String>(),
@@ -4436,6 +5332,15 @@ impl PTYWebSocketServer {
                     );
                 }
                 Self::write_sse_event(&mut stream, "intent_draft", &intent).await?;
+                Self::write_sse_openai_missiond_projection(
+                    &mut stream,
+                    &chat_id,
+                    "intent_draft",
+                    &intent_artifact_id,
+                    &intent_artifact_hash,
+                    &intent_artifact_path,
+                )
+                .await?;
                 let confirm = serde_json::json!({
                     "phase": "awaiting_intent_confirmation",
                     "message": "请确认：我的意图理解是否正确？确认后我会生成 plan.lisp，再等你确认后创建 BoardTask 并派工位。",
@@ -4447,15 +5352,32 @@ impl PTYWebSocketServer {
                     }
                 });
                 Self::write_sse_event(&mut stream, "confirm_required", &confirm).await?;
-                Self::write_sse_openai_text(
+                Self::persist_jarvis_pending_confirmation(
+                    db.as_ref(),
+                    jarvis_conv_id.as_deref(),
+                    &confirm,
+                )
+                .await;
+                Self::write_sse_openai_text_and_persist(
                     &mut stream,
                     &chat_id,
                     "我已生成 intent.lisp 草案，等待你确认意图。",
                     Some("stop"),
+                    db.as_ref(),
+                    jarvis_conv_id.as_deref(),
                 )
                 .await?;
                 Self::finish_sse(&mut stream).await?;
                 return Ok(());
+            }
+
+            if intent_confirmed && !plan_confirmed {
+                Self::persist_jarvis_confirmation_fulfilled(
+                    db.as_ref(),
+                    jarvis_conv_id.as_deref(),
+                    "intent",
+                )
+                .await;
             }
 
             let plan_payload = serde_json::json!({
@@ -4463,6 +5385,10 @@ impl PTYWebSocketServer {
                 "grounding_context_id": grounding_context_id,
                 "context_pack_path": context_pack_path,
                 "context_pack_file": context_pack_file,
+                "context_capsule_hash": context_capsule_hash,
+                "context_capsule_file": context_capsule_file,
+                "topic_id": resolved_topic_id,
+                "topic_label": resolved_topic_label,
                 "intent_artifact_id": intent_artifact_id,
                 "objective": objective_text,
                 "steps": [
@@ -4517,6 +5443,15 @@ impl PTYWebSocketServer {
                     );
                 }
                 Self::write_sse_event(&mut stream, "plan_draft", &plan).await?;
+                Self::write_sse_openai_missiond_projection(
+                    &mut stream,
+                    &chat_id,
+                    "plan_draft",
+                    &plan_artifact_id,
+                    &plan_artifact_hash,
+                    &plan_artifact_path,
+                )
+                .await?;
                 let confirm = serde_json::json!({
                     "phase": "awaiting_plan_confirmation",
                     "message": "请确认 plan.lisp。确认后我会创建 BoardTask 并派工位，不会让主控直接做实现。",
@@ -4530,11 +5465,19 @@ impl PTYWebSocketServer {
                     }
                 });
                 Self::write_sse_event(&mut stream, "confirm_required", &confirm).await?;
-                Self::write_sse_openai_text(
+                Self::persist_jarvis_pending_confirmation(
+                    db.as_ref(),
+                    jarvis_conv_id.as_deref(),
+                    &confirm,
+                )
+                .await;
+                Self::write_sse_openai_text_and_persist(
                     &mut stream,
                     &chat_id,
                     "我已生成 plan.lisp 草案，等待你确认计划。",
                     Some("stop"),
+                    db.as_ref(),
+                    jarvis_conv_id.as_deref(),
                 )
                 .await?;
                 Self::finish_sse(&mut stream).await?;
@@ -4579,6 +5522,10 @@ impl PTYWebSocketServer {
                 "grounding_context_id": grounding_context_id,
                 "context_pack_path": context_pack_path,
                 "context_pack_file": context_pack_file,
+                "context_capsule_hash": context_capsule_hash,
+                "context_capsule_file": context_capsule_file,
+                "topic_id": resolved_topic_id,
+                "topic_label": resolved_topic_label,
                 "intent_artifact_id": intent_artifact_id,
                 "plan_artifact_id": plan_artifact_id,
                 "dispatch_metadata": dispatch_metadata,
@@ -4610,6 +5557,12 @@ impl PTYWebSocketServer {
             };
             match db.create_board_task(&task_input).await {
                 Ok(task) => {
+                    Self::persist_jarvis_confirmation_fulfilled(
+                        Some(db),
+                        jarvis_conv_id.as_deref(),
+                        "plan",
+                    )
+                    .await;
                     let event = serde_json::json!({
                         "task_id": task.id,
                         "title": task.title,
@@ -4636,11 +5589,13 @@ impl PTYWebSocketServer {
                         }),
                     )
                     .await?;
-                    Self::write_sse_openai_text(
+                    Self::write_sse_openai_text_and_persist(
                         &mut stream,
                         &chat_id,
                         "计划已确认，我已创建 BoardTask；这次请求会返回 follow handle，不会等待长任务占住手机连接。",
                         None,
+                        Some(db),
+                        jarvis_conv_id.as_deref(),
                     )
                     .await?;
                     let follow_payload = serde_json::json!({
@@ -4677,14 +5632,17 @@ impl PTYWebSocketServer {
                         "follow_payload": follow_payload
                     });
                     Self::write_sse_event(&mut stream, "result_pending", &pending_event).await?;
-                    Self::write_sse_openai_text(
+                    let pending_text = format!(
+                        "BoardTask 已创建。后续请求携带 missiond_follow_task_id={} 读取 task-result-artifact；初始手机请求不会等待长任务完成。",
+                        task.id
+                    );
+                    Self::write_sse_openai_text_and_persist(
                         &mut stream,
                         &chat_id,
-                        &format!(
-                            "BoardTask 已创建。后续请求携带 missiond_follow_task_id={} 读取 task-result-artifact；初始手机请求不会等待长任务完成。",
-                            task.id
-                        ),
+                        &pending_text,
                         Some("stop"),
+                        Some(db),
+                        jarvis_conv_id.as_deref(),
                     )
                     .await?;
                 }
@@ -4822,7 +5780,18 @@ impl PTYWebSocketServer {
 
         // Create or reuse Jarvis UI conversation for persistence
         let jarvis_conv_id = if let Some(ref db) = db {
-            match db.jarvis_get_or_create(conversation_id.as_deref()).await {
+            match db
+                .jarvis_get_or_create_scoped(
+                    conversation_id.as_deref(),
+                    conversation_scope.user_id.as_deref(),
+                    conversation_scope.tenant_id.as_deref(),
+                    conversation_scope.application_id.as_deref(),
+                    Some(conversation_scope.channel.as_str()),
+                    conversation_scope.topic_id.as_deref(),
+                    conversation_scope.topic_label.as_deref(),
+                )
+                .await
+            {
                 Ok(id) => Some(id),
                 Err(e) => {
                     warn!(error = %e, "Failed to create jarvis conversation");
@@ -6124,6 +7093,18 @@ impl PTYWebSocketServer {
             if method == "GET" && normalized_path.starts_with("/interactions/v1/") && !is_upgrade {
                 return Self::handle_interaction_events(stream, &normalized_request_line).await;
             }
+            // Jarvis durable conversation history for authenticated mobile clients.
+            if method == "GET"
+                && normalized_path.starts_with("/api/jarvis/conversations")
+                && !is_upgrade
+            {
+                return Self::handle_jarvis_conversations(
+                    stream,
+                    &normalized_request_line,
+                    db.clone(),
+                )
+                .await;
+            }
             // Chat completions SSE endpoint
             // POST /v1/chat/completions (and public /jarvis/v1/chat/completions)
             if method == "POST" && normalized_path == "/v1/chat/completions" {
@@ -6158,6 +7139,20 @@ impl PTYWebSocketServer {
                     Access-Control-Allow-Origin: *\r\n\
                     Access-Control-Allow-Methods: POST, OPTIONS\r\n\
                     Access-Control-Allow-Headers: Content-Type, Authorization, X-Slot-Id, X-Trace-Id\r\n\
+                    Access-Control-Max-Age: 86400\r\n\
+                    Content-Length: 0\r\n\
+                    Connection: close\r\n\
+                    \r\n";
+                s.write_all(response.as_bytes()).await?;
+                s.shutdown().await?;
+                return Ok(());
+            }
+            if method == "OPTIONS" && normalized_path.starts_with("/api/jarvis/conversations") {
+                let mut s = stream;
+                let response = "HTTP/1.1 204 No Content\r\n\
+                    Access-Control-Allow-Origin: *\r\n\
+                    Access-Control-Allow-Methods: GET, OPTIONS\r\n\
+                    Access-Control-Allow-Headers: Content-Type, Authorization\r\n\
                     Access-Control-Max-Age: 86400\r\n\
                     Content-Length: 0\r\n\
                     Connection: close\r\n\
@@ -6982,6 +7977,70 @@ mod tests {
             )
             .as_deref(),
             Some("original objective")
+        );
+    }
+
+    #[test]
+    fn jarvis_confirmation_text_is_conservative() {
+        assert!(PTYWebSocketServer::jarvis_text_confirms_pending_review(
+            "确认意图"
+        ));
+        assert!(PTYWebSocketServer::jarvis_text_confirms_pending_review(
+            "确认 plan"
+        ));
+        assert!(PTYWebSocketServer::jarvis_text_confirms_pending_review(
+            "OK"
+        ));
+        assert!(!PTYWebSocketServer::jarvis_text_confirms_pending_review(
+            "草案在哪里"
+        ));
+        assert!(!PTYWebSocketServer::jarvis_text_confirms_pending_review(
+            "不要确认"
+        ));
+    }
+
+    #[test]
+    fn jarvis_pending_confirmation_marker_round_trips_latest_payload() {
+        let confirm = serde_json::json!({
+            "phase": "awaiting_intent_confirmation",
+            "confirmation_type": "intent",
+            "confirm_payload": {
+                "missiond_intent_confirmed": true,
+                "missiond_objective": "修复 iOS 草案确认"
+            }
+        });
+        let marker = PTYWebSocketServer::jarvis_pending_confirmation_marker("pending", &confirm);
+        let history = vec![serde_json::json!({
+            "role": "assistant",
+            "content": marker
+        })];
+        let payload = PTYWebSocketServer::latest_pending_jarvis_confirmation(&history).unwrap();
+        assert!(payload["missiond_intent_confirmed"].as_bool().unwrap());
+        assert_eq!(payload["missiond_objective"], "修复 iOS 草案确认");
+
+        let fulfilled =
+            PTYWebSocketServer::jarvis_pending_confirmation_marker("fulfilled", &confirm);
+        let history = vec![
+            serde_json::json!({"role": "assistant", "content": history[0]["content"]}),
+            serde_json::json!({"role": "assistant", "content": fulfilled}),
+        ];
+        assert!(PTYWebSocketServer::latest_pending_jarvis_confirmation(&history).is_none());
+    }
+
+    #[test]
+    fn jarvis_pending_confirmation_injects_nested_confirm_payload() {
+        let mut req = serde_json::json!({"messages": []});
+        PTYWebSocketServer::inject_jarvis_confirm_payload(
+            &mut req,
+            serde_json::json!({
+                "missiond_intent_confirmed": true,
+                "missiond_objective": "原始目标"
+            }),
+        );
+        assert!(jarvis_confirm_bool(&req, "missiond_intent_confirmed"));
+        assert_eq!(
+            jarvis_confirm_string(&req, "missiond_objective").as_deref(),
+            Some("原始目标")
         );
     }
 

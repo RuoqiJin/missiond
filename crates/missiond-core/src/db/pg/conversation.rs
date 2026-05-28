@@ -34,6 +34,33 @@ fn task_scoped_order_clause() -> &'static str {
     "ORDER BY CASE WHEN task_id = $1 THEN 0 ELSE 1 END, started_at DESC"
 }
 
+fn sql_text_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn optional_text_eq_clause(column: &str, value: Option<&str>) -> String {
+    value
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| format!(" AND {column} = {}", sql_text_literal(v)))
+        .unwrap_or_default()
+}
+
+fn conversation_isolation_clause(
+    user_id: Option<&str>,
+    tenant_id: Option<&str>,
+    application_id: Option<&str>,
+    channel: Option<&str>,
+) -> String {
+    [
+        optional_text_eq_clause("user_id", user_id),
+        optional_text_eq_clause("tenant_id", tenant_id),
+        optional_text_eq_clause("application_id", application_id),
+        optional_text_eq_clause("channel", channel),
+    ]
+    .concat()
+}
+
 /// Zero-allocation pgvector literal serializer.
 /// Pre-allocates a single String for 512-dim halfvec (~7KB) instead of 513 heap allocs.
 fn vec_to_pg_literal(v: &[f32]) -> String {
@@ -340,6 +367,10 @@ impl ConversationStore for PgMissionStore {
         since: Option<&str>,
         until: Option<&str>,
         source: Option<&str>,
+        user_id: Option<&str>,
+        tenant_id: Option<&str>,
+        application_id: Option<&str>,
+        channel: Option<&str>,
     ) -> DbResult<Vec<Conversation>> {
         let source_clause = match source {
             Some(s) if s.starts_with('!') => {
@@ -396,6 +427,8 @@ impl ConversationStore for PgMissionStore {
                 format!(" AND {}", parts.join(" AND "))
             }
         };
+        let isolation_clause =
+            conversation_isolation_clause(user_id, tenant_id, application_id, channel);
 
         // Fast path: filter by task_id
         if let Some(tid) = task_id {
@@ -406,10 +439,11 @@ impl ConversationStore for PgMissionStore {
                     FROM conversation_messages m
                     WHERE m.content ILIKE ('%' || $1 || '%')
                     LIMIT 50
-                )){}{}{} {} LIMIT $2",
+                )){}{}{}{} {} LIMIT $2",
                 task_type_clause,
                 source_clause,
                 time_clause,
+                isolation_clause,
                 task_scoped_order_clause()
             );
             let rows = sqlx::query(&sql)
@@ -428,8 +462,8 @@ impl ConversationStore for PgMissionStore {
                 "1=1".to_string()
             };
             let sql = format!(
-                "SELECT * FROM conversations WHERE {}{}{}{} ORDER BY started_at DESC LIMIT $1",
-                status_clause, type_clause, source_clause, time_clause
+                "SELECT * FROM conversations WHERE {}{}{}{}{} ORDER BY started_at DESC LIMIT $1",
+                status_clause, type_clause, source_clause, time_clause, isolation_clause
             );
             let rows = sqlx::query(&sql).bind(limit).fetch_all(&self.pool).await?;
             return Ok(rows.iter().map(Self::row_to_conversation).collect());
@@ -437,8 +471,8 @@ impl ConversationStore for PgMissionStore {
 
         if let Some(s) = status {
             let sql = format!(
-                "SELECT * FROM conversations WHERE status = $1{}{} ORDER BY started_at DESC LIMIT $2",
-                type_clause, source_clause
+                "SELECT * FROM conversations WHERE status = $1{}{}{} ORDER BY started_at DESC LIMIT $2",
+                type_clause, source_clause, isolation_clause
             );
             let rows = sqlx::query(&sql)
                 .bind(s)
@@ -449,8 +483,8 @@ impl ConversationStore for PgMissionStore {
         } else {
             // Active first, then others
             let sql_active = format!(
-                "SELECT * FROM conversations WHERE status = 'active'{}{} ORDER BY started_at DESC",
-                type_clause, source_clause
+                "SELECT * FROM conversations WHERE status = 'active'{}{}{} ORDER BY started_at DESC",
+                type_clause, source_clause, isolation_clause
             );
             let active_rows = sqlx::query(&sql_active).fetch_all(&self.pool).await?;
             let mut convs: Vec<Conversation> =
@@ -459,8 +493,8 @@ impl ConversationStore for PgMissionStore {
             let remaining = limit - convs.len() as i64;
             if remaining > 0 {
                 let sql_rest = format!(
-                    "SELECT * FROM conversations WHERE status != 'active'{}{} ORDER BY started_at DESC LIMIT $1",
-                    type_clause, source_clause
+                    "SELECT * FROM conversations WHERE status != 'active'{}{}{} ORDER BY started_at DESC LIMIT $1",
+                    type_clause, source_clause, isolation_clause
                 );
                 let rest_rows = sqlx::query(&sql_rest)
                     .bind(remaining)
@@ -504,7 +538,10 @@ impl ConversationStore for PgMissionStore {
         topic_id: Option<&str>,
     ) -> DbResult<Option<Conversation>> {
         let mut sql = String::from(
-            "SELECT * FROM conversations WHERE status = 'active' AND conversation_type IN ('user', 'codex_chat')",
+            "SELECT * FROM conversations
+             WHERE status = 'active'
+               AND conversation_type IN ('user', 'codex_chat', 'jarvis')
+               AND COALESCE(updated_at, started_at) >= to_char(NOW() AT TIME ZONE 'UTC' - INTERVAL '24 hours', 'YYYY-MM-DD\"T\"HH24:MI:SS')",
         );
         let mut param_idx = 1u32;
         let mut binds: Vec<Option<String>> = Vec::new();
@@ -1084,8 +1121,11 @@ impl ConversationStore for PgMissionStore {
         for (idx, (topic, vec)) in topics.iter().enumerate() {
             let bytes = crate::embedding::f32_vec_to_bytes(vec);
             sqlx::query(
-                "INSERT INTO conversation_topic_vectors (session_id, chunk_idx, topic, embedding, embedding_provider)
-                 VALUES ($1, $2, $3, $4, $5)"
+                &format!(
+                    "INSERT INTO conversation_topic_vectors (session_id, chunk_idx, topic, embedding, embedding_vec, embedding_provider)
+                     VALUES ($1, $2, $3, $4, '{}'::vector, $5)",
+                    vec_to_pg_literal(vec)
+                )
             )
             .bind(session_id)
             .bind(idx as i64)
@@ -1949,12 +1989,17 @@ impl ConversationStore for PgMissionStore {
         for (topic, turn_idx, vec) in vectors {
             let bytes = crate::embedding::f32_vec_to_bytes(vec);
             let result = sqlx::query(
-                "INSERT INTO conversation_topic_vectors (session_id, chunk_idx, topic, embedding, embedding_provider)
-                 VALUES ($1, $2, $3, $4, $5)
+                &format!(
+                    "INSERT INTO conversation_topic_vectors (session_id, chunk_idx, topic, embedding, embedding_vec, embedding_provider)
+                 VALUES ($1, $2, $3, $4, '{}'::vector, $5)
                  ON CONFLICT (session_id, chunk_idx)
                  DO UPDATE SET topic = EXCLUDED.topic,
                                embedding = EXCLUDED.embedding,
+                               embedding_vec = EXCLUDED.embedding_vec,
                                embedding_provider = EXCLUDED.embedding_provider"
+                    ,
+                    vec_to_pg_literal(vec)
+                )
             )
                 .bind(session_id)
                 .bind(*turn_idx as i64)

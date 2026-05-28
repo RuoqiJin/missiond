@@ -2,7 +2,8 @@ use anyhow::{anyhow, Result};
 use serde_json::Value;
 
 use crate::engine::control_plane_kernel::{
-    ClaimLeaseCommand, ControlPlaneKernel, HeartbeatLeaseCommand, ReleaseLeaseCommand,
+    ClaimLeaseCommand, ControlPlaneKernel, HeartbeatLeaseCommand, JobEventCommand,
+    ReleaseLeaseCommand, RequireCapabilityCommand,
 };
 use crate::state::AppState;
 use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
@@ -35,10 +36,18 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .trim();
             let result = match action {
                 "task_result_put" | "put_task_result" => {
-                    state.shared_memory.task_result_put_typed(&args).await
+                    let request = state
+                        .shared_memory
+                        .task_result_put_request_from_args(&args)?;
+                    ControlPlaneKernel::new(state)
+                        .task_result_put_command(request)
+                        .await
                 }
                 "worker_settle" | "completion_settle" | "settle_worker" => {
-                    state.shared_memory.settle_worker_typed(args.clone()).await
+                    let request = state.shared_memory.worker_settle_request_from_args(&args)?;
+                    ControlPlaneKernel::new(state)
+                        .worker_settle_command(request)
+                        .await
                 }
                 "claim" => {
                     ControlPlaneKernel::new(state)
@@ -56,10 +65,14 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                         .await
                 }
                 "capability_check" | "check_capability" => {
-                    state.shared_memory.capability_check_typed(&args).await
+                    ControlPlaneKernel::new(state)
+                        .capability_check_command(capability_check_command_from_args(&args)?)
+                        .await
                 }
                 "job_event" | "record_job_event" => {
-                    state.shared_memory.job_event_typed(args.clone()).await
+                    ControlPlaneKernel::new(state)
+                        .job_event_command(JobEventCommand { args: args.clone() })
+                        .await
                 }
                 _ => state.shared_memory.handle_action(&args).await,
             };
@@ -125,6 +138,45 @@ fn claim_lease_command_from_args(args: &Value) -> Result<ClaimLeaseCommand> {
             .unwrap_or_else(|| serde_json::json!({})),
         allow_system_bypass: system_or_operator_bypass_allowed(args),
         bypass_reason: Some("mission_shared_memory claim system/operator authority".to_string()),
+    })
+}
+
+fn capability_check_command_from_args(args: &Value) -> Result<RequireCapabilityCommand> {
+    let task_id = string_arg(args, "task_id")
+        .or_else(|| string_arg(args, "taskId"))
+        .ok_or_else(|| anyhow!("task_id is required"))?
+        .to_string();
+    let operation = string_arg(args, "operation")
+        .ok_or_else(|| anyhow!("operation is required"))?
+        .to_string();
+    let scope_kind = string_arg(args, "scope_kind")
+        .or_else(|| string_arg(args, "scopeKind"))
+        .unwrap_or("task")
+        .to_string();
+    let scope_key = string_arg(args, "scope_key")
+        .or_else(|| string_arg(args, "scopeKey"))
+        .unwrap_or(task_id.as_str())
+        .to_string();
+    Ok(RequireCapabilityCommand {
+        grant_id: grant_id_arg(args).map(str::to_string),
+        subject_kind: string_arg(args, "subject_kind")
+            .or_else(|| string_arg(args, "subjectKind"))
+            .unwrap_or("task")
+            .to_string(),
+        subject_id: string_arg(args, "subject_id")
+            .or_else(|| string_arg(args, "subjectId"))
+            .unwrap_or(task_id.as_str())
+            .to_string(),
+        operation,
+        scope_kind,
+        scope_key,
+        task_id: Some(task_id),
+        allow_system_bypass: system_or_operator_bypass_allowed(args),
+        bypass_reason: Some("mission_shared_memory capability_check bypass".to_string()),
+        details: args
+            .get("details")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({})),
     })
 }
 

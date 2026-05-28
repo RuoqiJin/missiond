@@ -185,11 +185,13 @@
              "crates/missiond-daemon/src/handlers/comm/conversation/query.rs"
              "crates/missiond-daemon/src/handlers/comm/conversation/events.rs"
              "crates/missiond-daemon/src/handlers/comm/conversation/maintenance.rs"
-             "crates/missiond-daemon/src/handlers/comm/timeline.rs"
-             "crates/missiond-daemon/src/handlers/comm/retrospective.rs"
-             "crates/missiond-daemon/src/context/context_pipeline.rs"
-             "crates/missiond-daemon/src/workers/codex/vision_worker.rs"
-             "crates/missiond-daemon/src/llm/codex_cli.rs"
+	     "crates/missiond-daemon/src/handlers/comm/timeline.rs"
+	     "crates/missiond-daemon/src/handlers/comm/retrospective.rs"
+	     "crates/missiond-daemon/src/context/context_pipeline.rs"
+	     "crates/missiond-core/src/ws/server.rs"
+	     "crates/missiond-core/src/db/pg/observability.rs"
+	     "crates/missiond-daemon/src/workers/codex/vision_worker.rs"
+	     "crates/missiond-daemon/src/llm/codex_cli.rs"
              "crates/missiond-daemon/src/infra/ingestion_router.rs"
              "crates/missiond-core/src/cc_tasks/watcher.rs"
              "crates/missiond-core/src/gemini_cli/watcher.rs"
@@ -198,6 +200,6 @@
              "scripts/audit-codex-history-ingestion.mjs"
              "scripts/check-v3-conversation-ingestion-isomorphism.mjs"
              "scripts/check-v3-cli-conversation-ingestion-isomorphism.mjs"]
-      :note "Runtime-projected V3 destination for conversation/session/timeline/retrospective/embedding public tools. context/v3_blueprint_runtime.rs projects conversation-ingestion-policy read-model default and max limits into conversation/query.rs, conversation/events.rs, and timeline.rs, projects context prefetch intent-router model/timeout into context/context_pipeline.rs, and projects Codex vision worker binary/model/idle/absolute timeout into workers/codex/vision_worker.rs plus llm/codex_cli.rs; conversation.rs is the thin conversation-ingestion facade; conversation/router.rs owns mission_conversation_query, mission_conversation_analyze, and mission_retrospective_manage consolidated routing; conversation/query.rs owns read-model query actions including list/get/search/analysis_context/message_search/user_index/labels/context; retrospective.rs owns bulk-tool whitelist plus worker/meta threshold signalQuality so batch scans do not masquerade as reasoning waste; conversation/events.rs owns analysis/event egress including conver..."
+      :note "Runtime-projected V3 destination for conversation/session/timeline/retrospective/embedding public tools. conversation/query.rs owns list/get/search/analysis_context/message_search/user_index/labels/context with additive isolation filters; ws/server.rs owns scoped Jarvis mobile history routes backed by observability.rs scoped read models; gateways persist visible user/assistant text; retrospective.rs owns retrospective analysis, list, and backfill; event workers stay under conversation-ingestion policy. See blueprint note note-017."
       :evidence-sidecar ".missiond/v3/evidence/blueprint-notes.lisp#note-017")
 )

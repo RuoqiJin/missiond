@@ -1681,7 +1681,19 @@ async fn append_unbound_codex_rollout_candidates(
     };
     let Ok(recent) = state
         .store
-        .list_conversations(None, 40, Some("all"), None, None, None, Some("codex_cli"))
+        .list_conversations(
+            None,
+            40,
+            Some("all"),
+            None,
+            None,
+            None,
+            Some("codex_cli"),
+            None,
+            None,
+            None,
+            None,
+        )
         .await
     else {
         return;

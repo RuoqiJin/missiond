@@ -2,6 +2,7 @@ use anyhow::Result;
 use missiond_mcp::tools::{ToolContent, ToolResult};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::{
     env, fs,
     path::{Path, PathBuf},
@@ -53,6 +54,22 @@ struct ContextGatherArgs {
     task_id: Option<String>,
     #[serde(default, alias = "sourceId")]
     source_id: Option<String>,
+    #[serde(default, alias = "conversationId", alias = "conversation_id")]
+    conversation_id: Option<String>,
+    #[serde(default, alias = "userId", alias = "user_id")]
+    user_id: Option<String>,
+    #[serde(default, alias = "tenantId", alias = "tenant_id")]
+    tenant_id: Option<String>,
+    #[serde(default, alias = "applicationId", alias = "application_id")]
+    application_id: Option<String>,
+    #[serde(default)]
+    channel: Option<String>,
+    #[serde(default, alias = "topicId", alias = "topic_id")]
+    topic_id: Option<String>,
+    #[serde(default, alias = "topicLabel", alias = "topic_label")]
+    topic_label: Option<String>,
+    #[serde(default, alias = "permissionContext", alias = "permission_context")]
+    permission_context: Option<Value>,
     #[serde(default, deserialize_with = "crate::lenient::option_bool")]
     persist: Option<bool>,
     #[serde(default = "default_limit")]
@@ -77,6 +94,58 @@ const CONTEXT_GATHER_WORKER_VISIBLE_REL: &str = ".missiond/v3/runtime/context-ga
 
 fn default_limit() -> usize {
     8
+}
+
+fn normalized_scope_value(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .filter(|value| !matches!(*value, "unknown" | "null" | "undefined"))
+        .map(ToOwned::to_owned)
+}
+
+fn compact_topic_label(text: &str) -> Option<String> {
+    let collapsed = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string();
+    if collapsed.is_empty() {
+        return None;
+    }
+    let mut label = collapsed.chars().take(96).collect::<String>();
+    if collapsed.chars().count() > 96 {
+        label.push_str("...");
+    }
+    Some(label)
+}
+
+fn stable_topic_id(
+    user_id: Option<&str>,
+    tenant_id: Option<&str>,
+    application_id: Option<&str>,
+    channel: &str,
+    topic_label: Option<&str>,
+) -> Option<String> {
+    let topic_label = topic_label
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let input = format!(
+        "{}|{}|{}|{}|{}",
+        tenant_id.unwrap_or(""),
+        user_id.unwrap_or(""),
+        application_id.unwrap_or("missiond"),
+        channel,
+        topic_label.to_ascii_lowercase()
+    );
+    let digest = Sha256::digest(input.as_bytes());
+    let short = digest
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Some(format!("topic-{short}"))
 }
 
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
@@ -230,10 +299,14 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 json!({
                     "action": "search",
                     "query": query,
-                    "project": args.project_id,
-                    "limit": limit,
-                    "time_range": args
-                        .conversation_time_range
+                        "project": args.project_id.clone(),
+                        "limit": limit,
+                        "user_id": args.user_id.clone(),
+                        "tenant_id": args.tenant_id.clone(),
+                        "application_id": args.application_id.clone(),
+                        "channel": args.channel.clone(),
+                        "time_range": args
+                            .conversation_time_range
                         .as_deref()
                         .unwrap_or("last_30d"),
                     "query_mode": "hybrid"
@@ -262,16 +335,44 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         .get("runtime_environment")
         .cloned()
         .unwrap_or(Value::Null);
+    let user_id = normalized_scope_value(args.user_id.as_deref());
+    let tenant_id = normalized_scope_value(args.tenant_id.as_deref());
+    let application_id = normalized_scope_value(args.application_id.as_deref())
+        .or_else(|| normalized_scope_value(args.project_id.as_deref()))
+        .or_else(|| Some("missiond".to_string()));
+    let channel =
+        normalized_scope_value(args.channel.as_deref()).unwrap_or_else(|| "cli".to_string());
+    let topic_label =
+        normalized_scope_value(args.topic_label.as_deref()).or_else(|| compact_topic_label(&query));
+    let topic_id = normalized_scope_value(args.topic_id.as_deref()).or_else(|| {
+        stable_topic_id(
+            user_id.as_deref(),
+            tenant_id.as_deref(),
+            application_id.as_deref(),
+            &channel,
+            topic_label.as_deref(),
+        )
+    });
     let mut payload = json!({
-        "ok": diagnostics.is_empty(),
-        "schema": "missiond.context-gather.v1",
-        "query": query,
-        "project_id": args.project_id,
-        "skill": args.skill,
-        "infra_target": args.infra_target,
-        "task_id": args.task_id,
-        "source_id": args.source_id,
-        "unknowns": args.unknowns,
+            "ok": diagnostics.is_empty(),
+            "schema": "missiond.context-gather.v1",
+            "query": query,
+            "project_id": args.project_id.clone(),
+            "skill": args.skill.clone(),
+            "infra_target": args.infra_target.clone(),
+            "task_id": args.task_id.clone(),
+            "source_id": args.source_id.clone(),
+            "conversation_id": args.conversation_id.clone(),
+            "isolation_scope": {
+                "user_id": user_id.clone(),
+                "tenant_id": tenant_id.clone(),
+                "application_id": application_id.clone(),
+                "channel": channel.clone(),
+            },
+            "topic_id": topic_id.clone(),
+            "topic_label": topic_label.clone(),
+            "permission_context": args.permission_context.clone(),
+            "unknowns": args.unknowns.clone(),
         "sources_used": sources_used,
         "runtime_environment": runtime_environment,
         "sources": Value::Object(sources),
@@ -314,21 +415,94 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             None
         };
         let isolation = super::context_capsule::CapsuleIsolation {
-            user_id: args.source_id.as_deref(),
-            tenant_id: None,
-            application_id: args.project_id.as_deref(),
-            channel: "cli",
+            user_id: user_id.as_deref(),
+            tenant_id: tenant_id.as_deref(),
+            application_id: application_id.as_deref(),
+            channel: &channel,
         };
         let (capsule_lisp, capsule_hash) = super::context_capsule::generate_lisp_capsule(
             &isolation,
             &payload,
-            None,
-            None,
+            topic_id.as_deref(),
+            topic_label.as_deref(),
             args.task_id.as_deref(),
             None,
             None,
         );
         let capsule_path = materialize_context_capsule(&capsule_hash, &capsule_lisp);
+        if let Some(conversation_id) = args.conversation_id.as_deref() {
+            if let Err(err) = state
+                .store
+                .bind_context_capsule(
+                    conversation_id,
+                    &capsule_hash,
+                    topic_id.as_deref(),
+                    topic_label.as_deref(),
+                )
+                .await
+            {
+                tracing::warn!(conversation_id, error = %err, "failed to bind context capsule to conversation");
+            }
+            if let (Some(embedding_service), Some(topic)) =
+                (state.embedding_service.as_ref(), topic_label.as_deref())
+            {
+                let topic_text = format!(
+                    "{}\n{}",
+                    topic,
+                    args.unknowns
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                );
+                if let Some(vector) = embedding_service.embed(&topic_text) {
+                    if let Err(err) = state
+                        .store
+                        .set_conversation_topic_vectors(
+                            conversation_id,
+                            &[(topic.to_string(), vector)],
+                            embedding_service.provider_id(),
+                        )
+                        .await
+                    {
+                        tracing::warn!(conversation_id, error = %err, "failed to write conversation topic vector");
+                    }
+                }
+            }
+        }
+        if let Some(task_id) = args.task_id.as_deref() {
+            if let Ok(Some(task)) = state.store.get_board_task(task_id).await {
+                let mut metadata = task.runtime_metadata.clone();
+                if !metadata.is_object() {
+                    metadata = json!({});
+                }
+                if let Some(object) = metadata.as_object_mut() {
+                    object.insert(
+                        "context_capsule_hash".to_string(),
+                        Value::String(capsule_hash.clone()),
+                    );
+                    object.insert("topic_id".to_string(), json!(topic_id));
+                    object.insert("topic_label".to_string(), json!(topic_label));
+                    if let Some((hash, _)) = context_pack_file.as_ref() {
+                        object.insert(
+                            "grounding_context_id".to_string(),
+                            Value::String(format!("context-gather:{hash}")),
+                        );
+                    }
+                }
+                let update = missiond_core::types::UpdateBoardTaskInput {
+                    runtime_metadata: Some(metadata),
+                    ..Default::default()
+                };
+                if let Err(err) = state
+                    .store
+                    .update_board_task(task.id.as_str(), &update)
+                    .await
+                {
+                    tracing::warn!(task_id = task.id.as_str(), error = %err, "failed to bind context capsule to BoardTask runtime_metadata");
+                }
+            }
+        }
 
         if let Some(object) = payload.as_object_mut() {
             if let Some((hash, context_pack_file)) = context_pack_file.as_ref() {

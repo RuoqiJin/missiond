@@ -90,6 +90,28 @@ pub(crate) fn generate_lisp_capsule(
     write_opt_field(&mut buf, "task-id", task_id);
     write_opt_field(&mut buf, "intent-ref", intent_ref);
     write_opt_field(&mut buf, "plan-ref", plan_ref);
+    write_payload_string_field(&mut buf, "query", context_gather_payload.get("query"));
+    write_json_summary(
+        &mut buf,
+        "unknowns",
+        context_gather_payload
+            .get("unknowns")
+            .unwrap_or(&Value::Null),
+    );
+    write_json_summary(
+        &mut buf,
+        "evidence-refs",
+        context_gather_payload
+            .get("evidence_refs")
+            .unwrap_or(&Value::Null),
+    );
+    write_json_summary(
+        &mut buf,
+        "unresolved",
+        context_gather_payload
+            .get("unresolved")
+            .unwrap_or(&Value::Null),
+    );
     writeln!(buf, "  )").ok();
 
     writeln!(buf, ")").ok();
@@ -121,6 +143,31 @@ fn write_json_summary(buf: &mut String, label: &str, val: &Value) {
             writeln!(buf, "    :{label} :present").ok();
         }
     }
+    if !val.is_null() {
+        let compact = compact_json(val, 1600);
+        if !compact.is_empty() {
+            writeln!(buf, "    :{label}-json \"{}\"", escape_lisp(&compact)).ok();
+        }
+    }
+}
+
+fn write_payload_string_field(buf: &mut String, key: &str, val: Option<&Value>) {
+    if let Some(text) = val.and_then(Value::as_str) {
+        writeln!(buf, "    :{key} \"{}\"", escape_lisp(text)).ok();
+    }
+}
+
+fn compact_json(val: &Value, max_chars: usize) -> String {
+    let raw = serde_json::to_string(val).unwrap_or_default();
+    if raw.chars().count() <= max_chars {
+        return raw;
+    }
+    let mut out = raw
+        .chars()
+        .take(max_chars.saturating_sub(3))
+        .collect::<String>();
+    out.push_str("...");
+    out
 }
 
 fn escape_lisp(s: &str) -> String {

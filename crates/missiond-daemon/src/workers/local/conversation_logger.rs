@@ -314,7 +314,19 @@ async fn build_session_timeline(s: &AppState, session_id: &str) {
 async fn reconcile(s: &AppState) {
     let convs = s
         .store
-        .list_conversations(Some("active"), 100, Some("all"), None, None, None, None)
+        .list_conversations(
+            Some("active"),
+            100,
+            Some("all"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap_or_default();
     let mut reconciled = 0usize;

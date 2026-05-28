@@ -335,6 +335,10 @@ pub struct ConversationQuery {
     pub project: Option<String>,
     pub project_id: Option<String>,
     pub parent_session_id: Option<String>,
+    pub user_id: Option<String>,
+    pub tenant_id: Option<String>,
+    pub application_id: Option<String>,
+    pub channel: Option<String>,
 }
 
 impl ConversationQuery {
@@ -389,6 +393,26 @@ impl ConversationQuery {
 
     pub fn project_id(mut self, project_id: impl Into<String>) -> Self {
         self.project_id = Some(project_id.into());
+        self
+    }
+
+    pub fn user_id(mut self, user_id: impl Into<String>) -> Self {
+        self.user_id = Some(user_id.into());
+        self
+    }
+
+    pub fn tenant_id(mut self, tenant_id: impl Into<String>) -> Self {
+        self.tenant_id = Some(tenant_id.into());
+        self
+    }
+
+    pub fn application_id(mut self, application_id: impl Into<String>) -> Self {
+        self.application_id = Some(application_id.into());
+        self
+    }
+
+    pub fn channel(mut self, channel: impl Into<String>) -> Self {
+        self.channel = Some(channel.into());
         self
     }
 }

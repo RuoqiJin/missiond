@@ -246,7 +246,19 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             // 2. Find all conversations linked to this task
             let linked_convs = state
                 .store
-                .list_conversations(None, 100, Some("all"), Some(&task_id), None, None, None)
+                .list_conversations(
+                    None,
+                    100,
+                    Some("all"),
+                    Some(&task_id),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
                 .await
                 .unwrap_or_default();
 

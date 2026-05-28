@@ -41,6 +41,10 @@ impl ConversationManager {
                 query.since.as_deref(),
                 query.until.as_deref(),
                 query.source.as_deref(),
+                query.user_id.as_deref(),
+                query.tenant_id.as_deref(),
+                query.application_id.as_deref(),
+                query.channel.as_deref(),
             )
             .await?;
 

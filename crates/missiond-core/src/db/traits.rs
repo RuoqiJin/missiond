@@ -57,6 +57,10 @@ pub trait ConversationStore: Send + Sync {
         since: Option<&str>,
         until: Option<&str>,
         source: Option<&str>,
+        user_id: Option<&str>,
+        tenant_id: Option<&str>,
+        application_id: Option<&str>,
+        channel: Option<&str>,
     ) -> DbResult<Vec<Conversation>>;
     async fn get_child_conversations(&self, parent_session_id: &str)
         -> DbResult<Vec<Conversation>>;
@@ -513,6 +517,10 @@ pub trait MessageStore: Send + Sync {
         tool_name: Option<&str>,
         time_after: Option<&str>,
         limit: i64,
+        user_id: Option<&str>,
+        tenant_id: Option<&str>,
+        application_id: Option<&str>,
+        channel: Option<&str>,
     ) -> DbResult<Vec<ConversationMessage>>;
     async fn search_conversation_sessions_fts(
         &self,
@@ -532,6 +540,10 @@ pub trait MessageStore: Send + Sync {
         time_after: Option<&str>,
         project: Option<&str>,
         conversation_type: Option<&str>,
+        user_id: Option<&str>,
+        tenant_id: Option<&str>,
+        application_id: Option<&str>,
+        channel: Option<&str>,
     ) -> DbResult<Vec<(String, f64)>>;
     /// Search conversations table by ID prefix, task_id, or llm_summary.
     async fn search_conversations_by_metadata(
@@ -539,8 +551,20 @@ pub trait MessageStore: Send + Sync {
         query: &str,
         limit: i64,
         conversation_type: Option<&str>,
+        user_id: Option<&str>,
+        tenant_id: Option<&str>,
+        application_id: Option<&str>,
+        channel: Option<&str>,
     ) -> DbResult<Vec<(String, f64)>> {
-        let _ = (query, limit, conversation_type);
+        let _ = (
+            query,
+            limit,
+            conversation_type,
+            user_id,
+            tenant_id,
+            application_id,
+            channel,
+        );
         Ok(vec![])
     }
     /// Lightweight user message index: (id, timestamp, content_preview) for minimap.
@@ -563,8 +587,21 @@ pub trait MessageStore: Send + Sync {
         query_text: &str,
         session_id: Option<&str>,
         limit: i64,
+        user_id: Option<&str>,
+        tenant_id: Option<&str>,
+        application_id: Option<&str>,
+        channel: Option<&str>,
     ) -> DbResult<Vec<(i64, String, String, String, String, f64)>> {
-        let _ = (query_vec, query_text, session_id, limit);
+        let _ = (
+            query_vec,
+            query_text,
+            session_id,
+            limit,
+            user_id,
+            tenant_id,
+            application_id,
+            channel,
+        );
         Ok(vec![])
     }
 
@@ -575,8 +612,20 @@ pub trait MessageStore: Send + Sync {
         query_vec: &[f32],
         session_id: &str,
         limit: i64,
+        user_id: Option<&str>,
+        tenant_id: Option<&str>,
+        application_id: Option<&str>,
+        channel: Option<&str>,
     ) -> DbResult<Vec<(i64, String, String, String, f64)>> {
-        let _ = (query_vec, session_id, limit);
+        let _ = (
+            query_vec,
+            session_id,
+            limit,
+            user_id,
+            tenant_id,
+            application_id,
+            channel,
+        );
         Ok(vec![])
     }
 
@@ -586,8 +635,19 @@ pub trait MessageStore: Send + Sync {
         &self,
         query_vec: &[f32],
         limit: i64,
+        user_id: Option<&str>,
+        tenant_id: Option<&str>,
+        application_id: Option<&str>,
+        channel: Option<&str>,
     ) -> DbResult<Vec<(String, f64)>> {
-        let _ = (query_vec, limit);
+        let _ = (
+            query_vec,
+            limit,
+            user_id,
+            tenant_id,
+            application_id,
+            channel,
+        );
         Ok(vec![])
     }
 }
@@ -1268,6 +1328,35 @@ pub trait ObservabilityStore: Send + Sync {
         messages: &[(String, String)],
     ) -> DbResult<()>;
     async fn jarvis_get_or_create(&self, conversation_id: Option<&str>) -> DbResult<String>;
+    async fn jarvis_get_or_create_scoped(
+        &self,
+        conversation_id: Option<&str>,
+        user_id: Option<&str>,
+        tenant_id: Option<&str>,
+        application_id: Option<&str>,
+        channel: Option<&str>,
+        topic_id: Option<&str>,
+        topic_label: Option<&str>,
+    ) -> DbResult<String>;
+    async fn jarvis_list_scoped(
+        &self,
+        user_id: Option<&str>,
+        tenant_id: Option<&str>,
+        application_id: Option<&str>,
+        channel: Option<&str>,
+        include_legacy_unscoped: bool,
+        limit: i64,
+    ) -> DbResult<Vec<serde_json::Value>>;
+    async fn jarvis_history_scoped(
+        &self,
+        conversation_id: &str,
+        user_id: Option<&str>,
+        tenant_id: Option<&str>,
+        application_id: Option<&str>,
+        channel: Option<&str>,
+        include_legacy_unscoped: bool,
+        tail: i64,
+    ) -> DbResult<Option<serde_json::Value>>;
     async fn jarvis_save_exchange(
         &self,
         conv_id: &str,

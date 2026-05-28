@@ -474,7 +474,19 @@ async fn latest_provider_conversation_for_slot(
     let conversations = state
         .storage()
         .store
-        .list_conversations(None, 10, None, None, None, None, Some(source))
+        .list_conversations(
+            None,
+            10,
+            None,
+            None,
+            None,
+            None,
+            Some(source),
+            None,
+            None,
+            None,
+            None,
+        )
         .await
         .ok()?;
     conversations

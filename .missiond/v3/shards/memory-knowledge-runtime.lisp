@@ -371,6 +371,14 @@
       :session-ttl-hours 24
       :max-active-sessions-per-user 10)
 
+    (jarvis-mobile-history
+      :desc "Authenticated Jarvis mobile/public HTTP clients restore durable conversation state from MissionD instead of local in-memory chat buffers."
+      :read-model "missiond.jarvis-conversation-history.v1"
+      :routes [GET:/api/jarvis/conversations GET:/api/jarvis/conversations/:conversation_id]
+      :scope "Auth PermissionContext resolves user_id, tenant_id, application_id, channel; list/get MUST enforce this scope before returning messages."
+      :write-rule "Jarvis interaction gateways MUST append both user messages and visible assistant final/diagnostic text to the same scoped jarvis_ui conversation."
+      :legacy-rule "Legacy jarvis_ui rows missing Auth scope may be exposed only as explicit legacy_unscoped compatibility rows and MUST be backfilled to the caller scope when the caller continues that conversation.")
+
     (context-capsule
       :desc "Compressed Lisp context capsule generated per interaction from SSOT, KB, project registry, skill evidence, infra/deploy facts, and related history."
       :schema "missiond.context-capsule.v1"
@@ -389,5 +397,7 @@
        "Topic auto-split MUST NOT fire for worker/meta/system conversation types; only user and codex_chat sessions participate in topic threading."
        "Context capsule binding to BoardTask MUST use runtime_metadata.context_capsule_hash, not a separate column, to avoid schema sprawl on the board_tasks table."
        "Conversation isolation filters MUST be additive: omitting a dimension returns all values for that dimension within the caller's permission scope."
+       "Jarvis mobile/public HTTP history list/get MUST return only scoped jarvis_ui read-model rows plus explicitly labeled legacy_unscoped compatibility rows during migration."
+       "Jarvis chat completions and interaction-envelope gateways MUST persist visible assistant completion text; PTY/provider logs alone are not sufficient mobile conversation history."
        "Legacy CLI sessions without Auth context MUST default to user_id=NULL, tenant_id=NULL, application_id=NULL, channel=cli and remain queryable."]
     :checker "node scripts/check-v3-conversation-session-management.mjs")

@@ -174,6 +174,10 @@ pub(super) async fn handle_events(state: &AppState, name: &str, args: Value) -> 
                     Some(&since),
                     Some(&until),
                     None,
+                    None,
+                    None,
+                    None,
+                    None,
                 )
                 .await
                 .unwrap_or_default();
