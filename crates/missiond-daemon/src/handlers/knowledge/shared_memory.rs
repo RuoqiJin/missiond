@@ -225,7 +225,46 @@ fn capability_check_command_from_args(args: &Value) -> Result<RequireCapabilityC
 }
 
 fn capability_grant_command_from_args(args: &Value) -> Result<CapabilityGrantCommand> {
+    let authority_subject_kind = string_arg(args, "authority_subject_kind")
+        .or_else(|| string_arg(args, "authoritySubjectKind"))
+        .or_else(|| string_arg(args, "issuer_subject_kind"))
+        .or_else(|| string_arg(args, "issuerSubjectKind"))
+        .or_else(|| string_arg(args, "actor_subject_kind"))
+        .or_else(|| string_arg(args, "actorSubjectKind"))
+        .unwrap_or("operator")
+        .to_string();
+    let authority_subject_id = string_arg(args, "authority_subject_id")
+        .or_else(|| string_arg(args, "authoritySubjectId"))
+        .or_else(|| string_arg(args, "issuer_subject_id"))
+        .or_else(|| string_arg(args, "issuerSubjectId"))
+        .or_else(|| string_arg(args, "actor_subject_id"))
+        .or_else(|| string_arg(args, "actorSubjectId"))
+        .unwrap_or("operator")
+        .to_string();
+    let allow_system_bypass = match authority_subject_kind.as_str() {
+        "system" | "daemon" => true,
+        "operator" => bool_arg_any(
+            args,
+            &[
+                "confirm",
+                "operator_confirm",
+                "operatorConfirm",
+                "operator_confirmed",
+                "operatorConfirmed",
+            ],
+        ),
+        _ => false,
+    };
     Ok(CapabilityGrantCommand {
+        authority_grant_id: string_arg(args, "authority_grant_id")
+            .or_else(|| string_arg(args, "authorityGrantId"))
+            .or_else(|| string_arg(args, "issuer_grant_id"))
+            .or_else(|| string_arg(args, "issuerGrantId"))
+            .or_else(|| string_arg(args, "delegate_grant_id"))
+            .or_else(|| string_arg(args, "delegateGrantId"))
+            .map(str::to_string),
+        authority_subject_kind,
+        authority_subject_id,
         subject_kind: string_arg(args, "subject_kind")
             .or_else(|| string_arg(args, "subjectKind"))
             .unwrap_or("task")
@@ -259,6 +298,10 @@ fn capability_grant_command_from_args(args: &Value) -> Result<CapabilityGrantCom
             .get("details")
             .cloned()
             .unwrap_or_else(|| serde_json::json!({})),
+        allow_system_bypass,
+        bypass_reason: string_arg(args, "bypass_reason")
+            .or_else(|| string_arg(args, "bypassReason"))
+            .map(str::to_string),
     })
 }
 
@@ -407,5 +450,42 @@ mod tests {
         ] {
             assert!(!legacy_projection_action(action), "{action}");
         }
+    }
+
+    #[test]
+    fn capability_grant_command_separates_authority_from_target_subject() {
+        let command = capability_grant_command_from_args(&serde_json::json!({
+            "subject_kind": "worker",
+            "subject_id": "slot-1",
+            "operation": "settle",
+            "scope_kind": "task",
+            "scope_key": "task-1",
+            "task_id": "task-1"
+        }))
+        .expect("command");
+        assert_eq!(command.subject_kind, "worker");
+        assert_eq!(command.subject_id, "slot-1");
+        assert_eq!(command.authority_subject_kind, "operator");
+        assert_eq!(command.authority_subject_id, "operator");
+        assert!(!command.allow_system_bypass);
+    }
+
+    #[test]
+    fn capability_grant_command_requires_confirmed_operator_bypass() {
+        let command = capability_grant_command_from_args(&serde_json::json!({
+            "authority_subject_kind": "operator",
+            "authority_subject_id": "jinchen",
+            "confirm": true,
+            "subject_kind": "worker",
+            "subject_id": "slot-1",
+            "operation": "settle",
+            "scope_kind": "task",
+            "scope_key": "task-1",
+            "task_id": "task-1"
+        }))
+        .expect("command");
+        assert_eq!(command.authority_subject_kind, "operator");
+        assert_eq!(command.authority_subject_id, "jinchen");
+        assert!(command.allow_system_bypass);
     }
 }

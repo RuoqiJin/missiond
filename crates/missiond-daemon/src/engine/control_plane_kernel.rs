@@ -65,6 +65,9 @@ pub(crate) struct JobEventCommand {
 
 #[derive(Debug, Clone)]
 pub(crate) struct CapabilityGrantCommand {
+    pub authority_grant_id: Option<String>,
+    pub authority_subject_kind: String,
+    pub authority_subject_id: String,
     pub subject_kind: String,
     pub subject_id: String,
     pub operation: String,
@@ -75,6 +78,8 @@ pub(crate) struct CapabilityGrantCommand {
     pub issuer: String,
     pub evidence_requirement: Option<String>,
     pub details: Value,
+    pub allow_system_bypass: bool,
+    pub bypass_reason: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -473,6 +478,59 @@ impl<'a> ControlPlaneKernel<'a> {
         &self,
         command: CapabilityGrantCommand,
     ) -> Result<Value> {
+        let authority_scope_kind = if command.task_id.is_some() {
+            "task"
+        } else {
+            command.scope_kind.as_str()
+        };
+        let authority_scope_key = command
+            .task_id
+            .as_deref()
+            .unwrap_or(command.scope_key.as_str());
+        let authority_grant_id = self
+            .require_capability_command(RequireCapabilityCommand {
+                grant_id: command.authority_grant_id.clone(),
+                subject_kind: command.authority_subject_kind.clone(),
+                subject_id: command.authority_subject_id.clone(),
+                operation: "delegate".to_string(),
+                scope_kind: authority_scope_kind.to_string(),
+                scope_key: authority_scope_key.to_string(),
+                task_id: command.task_id.clone(),
+                allow_system_bypass: command.allow_system_bypass,
+                bypass_reason: Some(command.bypass_reason.clone().unwrap_or_else(|| {
+                    "mission_shared_memory capability_grant system/operator authority".to_string()
+                })),
+                details: json!({
+                    "target_subject_kind": command.subject_kind.clone(),
+                    "target_subject_id": command.subject_id.clone(),
+                    "target_operation": command.operation.clone(),
+                    "target_scope_kind": command.scope_kind.clone(),
+                    "target_scope_key": command.scope_key.clone()
+                }),
+            })
+            .await?;
+        let mut details = command.details;
+        if let Some(object) = details.as_object_mut() {
+            object.insert(
+                "authority_grant_id".to_string(),
+                Value::String(authority_grant_id.clone()),
+            );
+            object.insert(
+                "authority_subject_kind".to_string(),
+                Value::String(command.authority_subject_kind.clone()),
+            );
+            object.insert(
+                "authority_subject_id".to_string(),
+                Value::String(command.authority_subject_id.clone()),
+            );
+        } else {
+            details = json!({
+                "value": details,
+                "authority_grant_id": authority_grant_id,
+                "authority_subject_kind": command.authority_subject_kind,
+                "authority_subject_id": command.authority_subject_id
+            });
+        }
         let id = self
             .state
             .shared_memory
@@ -486,7 +544,7 @@ impl<'a> ControlPlaneKernel<'a> {
                 task_id: command.task_id.as_deref(),
                 issuer: command.issuer.as_str(),
                 evidence_requirement: command.evidence_requirement.as_deref(),
-                details: command.details,
+                details,
             })
             .await?;
         Ok(json!({

@@ -13,9 +13,9 @@ pub struct SourceUnit {
 }
 
 pub const SCHEMA_VERSION: &str = "missiond.contract-abi.v1";
-pub const SOURCE_HASH: &str = "eb94be9015ac6b86db665fb083092ca6";
-pub const RUNTIME_CONFIG_SOURCE_HASH: &str = "d313a984351f98e6816e95cc199435dc";
-pub const PROJECT_UNIVERSE_SOURCE_HASH: &str = "d313a984351f98e6816e95cc199435dc";
+pub const SOURCE_HASH: &str = "fb287f66d5bcd9a242d1a42df3aa613c";
+pub const RUNTIME_CONFIG_SOURCE_HASH: &str = "b14e55149dba29502b22befb47e52382";
+pub const PROJECT_UNIVERSE_SOURCE_HASH: &str = "b14e55149dba29502b22befb47e52382";
 #[rustfmt::skip]
 pub const RUNTIME_DOMAIN_FILES: &[(&str, &str)] = &[
     (
@@ -75,55 +75,55 @@ pub const RUNTIME_DOMAIN_FILES: &[(&str, &str)] = &[
 pub const RUNTIME_DOMAIN_SOURCE_HASHES: &[(&str, &str)] = &[
     (
         "workstation",
-        "d313a984351f98e6816e95cc199435dc",
+        "b14e55149dba29502b22befb47e52382",
     ),
     (
         "flow",
-        "d313a984351f98e6816e95cc199435dc",
+        "b14e55149dba29502b22befb47e52382",
     ),
     (
         "compute",
-        "d313a984351f98e6816e95cc199435dc",
+        "b14e55149dba29502b22befb47e52382",
     ),
     (
         "minimax",
-        "d313a984351f98e6816e95cc199435dc",
+        "b14e55149dba29502b22befb47e52382",
     ),
     (
         "router",
-        "d313a984351f98e6816e95cc199435dc",
+        "b14e55149dba29502b22befb47e52382",
     ),
     (
         "cascade",
-        "d313a984351f98e6816e95cc199435dc",
+        "b14e55149dba29502b22befb47e52382",
     ),
     (
         "project-registry",
-        "d313a984351f98e6816e95cc199435dc",
+        "b14e55149dba29502b22befb47e52382",
     ),
     (
         "capability-governance",
-        "d313a984351f98e6816e95cc199435dc",
+        "b14e55149dba29502b22befb47e52382",
     ),
     (
         "memory-kb",
-        "d313a984351f98e6816e95cc199435dc",
+        "b14e55149dba29502b22befb47e52382",
     ),
     (
         "conversation-ingestion",
-        "d313a984351f98e6816e95cc199435dc",
+        "b14e55149dba29502b22befb47e52382",
     ),
     (
         "autopilot",
-        "d313a984351f98e6816e95cc199435dc",
+        "b14e55149dba29502b22befb47e52382",
     ),
     (
         "control-plane-kernel",
-        "d313a984351f98e6816e95cc199435dc",
+        "b14e55149dba29502b22befb47e52382",
     ),
     (
         "learning-engine",
-        "d313a984351f98e6816e95cc199435dc",
+        "b14e55149dba29502b22befb47e52382",
     ),
 ];
 
@@ -133,13 +133,13 @@ pub const SOURCE_UNITS: &[SourceUnit] = &[
         kind: "missiond-blueprint",
         included_by: None,
         include_line: None,
-        source_hash: "c2e1cab669552bb1d46ce9bea1b442b1",
+        source_hash: "f06f9d82fad84f96dae4538fab080f79",
     },
     SourceUnit {
         file: ".missiond/v3/shards/index.lisp",
         kind: "missiond-blueprint-shards",
         included_by: Some(".missiond/v3/missiond-blueprint.lisp"),
-        include_line: Some(399u32),
+        include_line: Some(400u32),
         source_hash: "8882108e8391f000fe8717dc67c1c03f",
     },
     SourceUnit {
@@ -287,20 +287,20 @@ pub struct SourceDomain {
 pub const SOURCE_DOMAINS: &[SourceDomain] = &[
     SourceDomain {
         id: "blueprint-core",
-        source_hash: "c7e0f41d95cf6029b87fc0ef12ec6ba3",
+        source_hash: "a866e060a34bfc5c1e1d15c37842ba0d",
         source_units: &[
             SourceUnit {
                 file: ".missiond/v3/missiond-blueprint.lisp",
                 kind: "missiond-blueprint",
                 included_by: None,
                 include_line: None,
-                source_hash: "c2e1cab669552bb1d46ce9bea1b442b1",
+                source_hash: "f06f9d82fad84f96dae4538fab080f79",
             },
             SourceUnit {
                 file: ".missiond/v3/shards/index.lisp",
                 kind: "missiond-blueprint-shards",
                 included_by: Some(".missiond/v3/missiond-blueprint.lisp"),
-                include_line: Some(399u32),
+                include_line: Some(400u32),
                 source_hash: "8882108e8391f000fe8717dc67c1c03f",
             },
         ],
