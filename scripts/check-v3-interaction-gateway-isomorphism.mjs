@@ -86,6 +86,8 @@ requireIncludes('requestSurfaces', [
   'missiond.jarvis-smoke/INTERACTION_SERVICE_TOKEN',
   'missiond.openai-artifact-projection.v1',
   'missiond.jarvis-pending-confirmation.v1',
+  'review_text',
+  'artifact_body/artifact_language',
 ]);
 
 requireIncludes('v2', [
@@ -132,6 +134,11 @@ requireIncludes('server', [
   'permission_resolved',
   'intent_draft',
   'plan_draft',
+  'review_text',
+  'artifact_body',
+  'artifact_language',
+  'jarvis_intent_lisp_body',
+  'jarvis_plan_lisp_body',
   'board_task_created',
   'write_sse_openai_missiond_projection',
   'jarvis_artifact_projection_text',
@@ -173,6 +180,8 @@ requireIncludes('jarvisInteractionSmoke', [
   'intent_draft',
   'confirm_required',
   'OPENAI_ARTIFACT_PROJECTION_MISSING',
+  'REVIEWABLE_ARTIFACT_BODY_MISSING',
+  'hasReviewableArtifactDraft',
   'JARVIS_CONFIRMATION_BYPASS',
 ]);
 
@@ -183,6 +192,8 @@ requireIncludes('jarvisIntentPlanDispatchSmoke', [
   'board_task_created',
   'dispatch_accepted',
   'result_pending',
+  'REVIEWABLE_ARTIFACT_BODY_MISSING',
+  'hasReviewableArtifactDraft',
   'JARVIS_DISPATCH_FOLLOW',
   'follow_payload',
   'FOLLOW_TERMINAL_RESULT_MISSING',

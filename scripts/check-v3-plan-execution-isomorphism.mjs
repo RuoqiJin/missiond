@@ -1057,27 +1057,29 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.planDagRuntimeClaiming, sources.planDagRuntimeClaiming, [
     'pub(super) enum DispatchClaimDecision',
     'pub(super) async fn prepare_dispatch_claim',
+    'acquire_plan_dag_work_leases',
     'derive_node_claim_scopes',
     'derive_plan_dag_claim_id',
+    'claim_lease_command',
     'ClaimAcquire::Acquired',
     'record_acquired_claim',
     'ClaimAcquire::Conflict',
     'emit_evidence_claim_conflict',
     'NodeState::Failed',
-    'record_compat_claim',
     'propagate_taint',
     'FAILURE_POLICY_FAIL_FAST',
   ]);
 
   requireAll(diagnostics, files.planDagRuntimeClaims, sources.planDagRuntimeClaims, [
     'pub(super) async fn record_acquired_claim',
-    'pub(super) async fn record_compat_claim',
     'emit_evidence_claimed',
     'NodeLifecycle::Claimed',
     'active_claims_by_node.insert(node.id.clone(), claim.claim_id.clone())',
+    'work_lease_ids',
     'pub(super) async fn release_claim_if_recorded',
     'active_claims_by_node.remove(&node.id)',
     'claim_registry.release(&claim_id, chrono::Utc::now())',
+    'release_lease_command',
     'emit_evidence_claim_released',
   ]);
 
@@ -1131,10 +1133,10 @@ function checkFiles(root, files) {
     'release_claim_if_recorded',
     'node.effective_retry_delay_ms()',
     'derive_plan_dag_claim_id',
+    'acquire_plan_dag_work_leases',
     'ClaimAcquire::Acquired',
     'record_acquired_claim',
     'ClaimAcquire::Conflict',
-    'record_compat_claim',
     'spawn_dispatch_attempt',
   ]);
 
@@ -2690,14 +2692,15 @@ pub(super) enum DispatchClaimDecision {
   ConflictFailed { fail_fast_abort: bool },
 }
 pub(super) async fn prepare_dispatch_claim() {
+  acquire_plan_dag_work_leases();
   derive_node_claim_scopes();
   derive_plan_dag_claim_id();
+  claim_lease_command();
   ClaimAcquire::Acquired;
   record_acquired_claim();
   ClaimAcquire::Conflict;
   emit_evidence_claim_conflict();
   NodeState::Failed;
-  record_compat_claim();
   propagate_taint();
   FAILURE_POLICY_FAIL_FAST;
 }`);
@@ -2706,14 +2709,12 @@ pub(super) async fn record_acquired_claim() {
   emit_evidence_claimed();
   NodeLifecycle::Claimed;
   active_claims_by_node.insert(node.id.clone(), claim.claim_id.clone());
-}
-pub(super) async fn record_compat_claim() {
-  emit_evidence_claimed();
-  NodeLifecycle::Claimed;
+  work_lease_ids;
 }
 pub(super) async fn release_claim_if_recorded() {
   active_claims_by_node.remove(&node.id);
   claim_registry.release(&claim_id, chrono::Utc::now());
+  release_lease_command();
   emit_evidence_claim_released();
 }`);
   writeFixture(root, DEFAULT_FILES.planDagRuntimeDrain, `
@@ -2762,10 +2763,10 @@ pub(super) async fn retry_failed_node_if_allowed() {
   release_claim_if_recorded();
   node.effective_retry_delay_ms();
   derive_plan_dag_claim_id();
+  acquire_plan_dag_work_leases();
   ClaimAcquire::Acquired;
   record_acquired_claim();
   ClaimAcquire::Conflict;
-  record_compat_claim();
   spawn_dispatch_attempt();
 }`);
   writeFixture(root, DEFAULT_FILES.planDagRuntimeSkips, `

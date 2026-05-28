@@ -101,6 +101,24 @@ function hasOpenAIArtifactProjection(events, expectedEvent) {
   });
 }
 
+function hasReviewableArtifactDraft(events, expectedEvent) {
+  return events.some((event) => {
+    const data = event?.data;
+    if (!data || typeof data !== 'object') return false;
+    const matchesIntent = expectedEvent === 'intent_draft'
+      && (event.event === 'intent_draft' || data.phase === 'intent_draft' || data.intent_artifact_id);
+    const matchesPlan = expectedEvent === 'plan_draft'
+      && (event.event === 'plan_draft' || data.phase === 'plan_draft' || data.plan_artifact_id);
+    const expectedForm = expectedEvent === 'plan_draft' ? '(plan-draft' : '(intent-draft';
+    return (matchesIntent || matchesPlan)
+      && typeof data.review_text === 'string'
+      && data.review_text.trim().length > 0
+      && data.artifact_language === 'lisp'
+      && typeof data.artifact_body === 'string'
+      && data.artifact_body.includes(expectedForm);
+  });
+}
+
 function parseSecretRef(ref) {
   const text = String(ref || '').trim();
   if (!text || !text.includes('/')) return null;
@@ -210,6 +228,13 @@ async function main() {
       diagnostics.push({
         code: 'OPENAI_ARTIFACT_PROJECTION_MISSING',
         message: 'Initial broad request must mirror intent_draft as an OpenAI-compatible artifact delta for legacy iOS/chat clients.',
+        events: names,
+      });
+    }
+    if (!hasReviewableArtifactDraft(first.events, 'intent_draft')) {
+      diagnostics.push({
+        code: 'REVIEWABLE_ARTIFACT_BODY_MISSING',
+        message: 'intent_draft must carry review_text plus Lisp artifact_body before the user can confirm intent.',
         events: names,
       });
     }

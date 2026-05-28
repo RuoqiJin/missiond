@@ -188,6 +188,24 @@ function hasOpenAIArtifactProjection(response, expectedEvent) {
   });
 }
 
+function hasReviewableArtifactDraft(response, expectedEvent) {
+  return (response?.events || []).some((event) => {
+    const data = event?.data;
+    if (!data || typeof data !== 'object') return false;
+    const matchesIntent = expectedEvent === 'intent_draft'
+      && (inferredEventName(event) === 'intent_draft' || data.phase === 'intent_draft' || data.intent_artifact_id);
+    const matchesPlan = expectedEvent === 'plan_draft'
+      && (inferredEventName(event) === 'plan_draft' || data.phase === 'plan_draft' || data.plan_artifact_id);
+    const expectedForm = expectedEvent === 'plan_draft' ? '(plan-draft' : '(intent-draft';
+    return (matchesIntent || matchesPlan)
+      && typeof data.review_text === 'string'
+      && data.review_text.trim().length > 0
+      && data.artifact_language === 'lisp'
+      && typeof data.artifact_body === 'string'
+      && data.artifact_body.includes(expectedForm);
+  });
+}
+
 function eventDataObjects(response) {
   return (response?.events || [])
     .map((event) => event?.data)
@@ -350,6 +368,13 @@ async function main() {
         events: eventNames(first),
       });
     }
+    if (!hasReviewableArtifactDraft(first, 'intent_draft')) {
+      diagnostics.push({
+        code: 'REVIEWABLE_ARTIFACT_BODY_MISSING',
+        message: 'intent_draft must carry review_text plus Lisp artifact_body before intent confirmation.',
+        events: eventNames(first),
+      });
+    }
   }
   const intentConfirm = findConfirmPayload(first);
 
@@ -371,6 +396,13 @@ async function main() {
         diagnostics.push({
           code: 'OPENAI_ARTIFACT_PROJECTION_MISSING',
           message: 'plan_draft must also be visible as an OpenAI-compatible artifact delta',
+          events: eventNames(second),
+        });
+      }
+      if (!hasReviewableArtifactDraft(second, 'plan_draft')) {
+        diagnostics.push({
+          code: 'REVIEWABLE_ARTIFACT_BODY_MISSING',
+          message: 'plan_draft must carry review_text plus Lisp artifact_body before plan confirmation.',
           events: eventNames(second),
         });
       }

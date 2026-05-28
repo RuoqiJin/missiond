@@ -1218,7 +1218,7 @@ impl ObservabilityStore for PgMissionStore {
         let channel = channel.unwrap_or("jarvis");
         let limit = limit.clamp(1, 100);
         let rows = sqlx::query(
-            "SELECT c.id, c.model, c.message_count, c.started_at, c.status,
+            "SELECT c.id, c.model, c.message_count::bigint AS message_count, c.started_at, c.status,
                     c.user_id, c.tenant_id, c.application_id, c.channel,
                     c.topic_id, c.topic_label, c.session_timeline,
                     lm.id AS last_message_id,
@@ -1343,7 +1343,7 @@ impl ObservabilityStore for PgMissionStore {
         let channel = channel.unwrap_or("jarvis");
         let tail = tail.clamp(1, 300);
         let row = sqlx::query(
-            "SELECT c.id, c.model, c.message_count, c.started_at, c.status,
+            "SELECT c.id, c.model, c.message_count::bigint AS message_count, c.started_at, c.status,
                     c.user_id, c.tenant_id, c.application_id, c.channel,
                     c.topic_id, c.topic_label, c.session_timeline
              FROM conversations c

@@ -956,13 +956,24 @@ fn interaction_binding_required_context(envelope: &InteractionEnvelope) -> serde
     })
 }
 
+fn interaction_envelope_user_id(envelope: &InteractionEnvelope, fallback: &str) -> String {
+    normalized_scope_value(envelope.external_user_id.as_deref())
+        .or_else(|| {
+            json_scope_string_field(
+                &envelope.metadata,
+                &["user_id", "userId", "external_user_id", "externalUserId"],
+            )
+        })
+        .unwrap_or_else(|| fallback.to_string())
+}
+
 fn interaction_service_permission_context(envelope: &InteractionEnvelope) -> serde_json::Value {
     let channel = envelope.channel.trim().to_ascii_lowercase();
     serde_json::json!({
         "schema": "missiond.permission-context.v1",
         "authority": "auth",
         "resolution": "service-token",
-        "user_id": envelope.external_user_id,
+        "user_id": interaction_envelope_user_id(envelope, "missiond-service"),
         "tenant_id": envelope.metadata.get("tenant_id").and_then(|v| v.as_str()).unwrap_or("system"),
         "application_id": envelope.metadata.get("application_id").and_then(|v| v.as_str()).unwrap_or("missiond"),
         "product_id": envelope.metadata.get("product_id").and_then(|v| v.as_str()),
@@ -979,7 +990,7 @@ fn interaction_dev_permission_context(envelope: &InteractionEnvelope) -> serde_j
         "schema": "missiond.permission-context.v1",
         "authority": "auth",
         "resolution": "dev-skip-auth-userinfo",
-        "user_id": envelope.external_user_id,
+        "user_id": interaction_envelope_user_id(envelope, "dev-user"),
         "tenant_id": envelope.metadata.get("tenant_id").and_then(|v| v.as_str()).unwrap_or("dev"),
         "application_id": envelope.metadata.get("application_id").and_then(|v| v.as_str()).unwrap_or("missiond"),
         "product_id": envelope.metadata.get("product_id").and_then(|v| v.as_str()),
@@ -2658,6 +2669,23 @@ impl PTYWebSocketServer {
         )
         .await?;
 
+        let intent_understanding = "我理解这是一个外部渠道请求，需要先确认 intent.lisp，再确认 plan.lisp，之后才创建 BoardTask 并派工位。";
+        let intent_review_text = Self::jarvis_intent_review_text(
+            &objective_text,
+            intent_understanding,
+            &grounding_context_id,
+            &sources_used,
+        );
+        let intent_artifact_body = Self::jarvis_intent_lisp_body(
+            "missiond.interaction-intent-artifact.v1",
+            &channel,
+            &objective_text,
+            intent_understanding,
+            &grounding_context_id,
+            resolved_topic_id.as_deref(),
+            resolved_topic_label.as_deref(),
+            &sources_used,
+        );
         let intent_payload = serde_json::json!({
             "schema": "missiond.interaction-intent-artifact.v1",
             "interaction_id": interaction_id,
@@ -2671,9 +2699,12 @@ impl PTYWebSocketServer {
             "topic_id": resolved_topic_id,
             "topic_label": resolved_topic_label,
             "permission_context": permission_context.clone(),
-            "understanding": "我理解这是一个外部渠道请求，需要先确认 intent.lisp，再确认 plan.lisp，之后才创建 BoardTask 并派工位。",
+            "understanding": intent_understanding,
             "objective": objective_text,
             "user_message_preview": objective_text.chars().take(240).collect::<String>(),
+            "review_text": intent_review_text,
+            "artifact_language": "lisp",
+            "artifact_body": intent_artifact_body,
             "sources_used": sources_used,
             "requires_confirmation": true
         });
@@ -2768,6 +2799,21 @@ impl PTYWebSocketServer {
             .await;
         }
 
+        let plan_steps = vec![
+            "按 PermissionContext 和 grounding evidence 确认可执行范围",
+            "创建可追踪 BoardTask，并写入 grounding / intent / plan artifact ids",
+            "由主控选择合适工位，不直接执行实现任务",
+            "等待 task-result-artifact 后通过对应 channel response sink 返回结果",
+        ];
+        let plan_review_text = Self::jarvis_plan_review_text(&objective_text, &plan_steps);
+        let plan_artifact_body = Self::jarvis_plan_lisp_body(
+            "missiond.interaction-plan-artifact.v1",
+            &channel,
+            &objective_text,
+            &grounding_context_id,
+            &intent_artifact_id,
+            &plan_steps,
+        );
         let plan_payload = serde_json::json!({
             "schema": "missiond.interaction-plan-artifact.v1",
             "interaction_id": interaction_id,
@@ -2782,12 +2828,10 @@ impl PTYWebSocketServer {
             "topic_label": resolved_topic_label,
             "intent_artifact_id": intent_artifact_id,
             "objective": objective_text,
-            "steps": [
-                "按 PermissionContext 和 grounding evidence 确认可执行范围",
-                "创建可追踪 BoardTask，并写入 grounding / intent / plan artifact ids",
-                "由主控选择合适工位，不直接执行实现任务",
-                "等待 task-result-artifact 后通过对应 channel response sink 返回结果"
-            ],
+            "review_text": plan_review_text,
+            "artifact_language": "lisp",
+            "artifact_body": plan_artifact_body,
+            "steps": plan_steps,
             "requires_confirmation": true
         });
         let plan_artifact = match Self::put_jarvis_artifact(
@@ -3697,6 +3741,124 @@ impl PTYWebSocketServer {
     ) -> anyhow::Result<()> {
         Self::persist_jarvis_visible_assistant_message(db, conversation_id, text).await;
         Self::write_sse_openai_text(stream, chat_id, text, finish_reason).await
+    }
+
+    fn jarvis_lisp_string(value: &str) -> String {
+        let mut escaped = String::with_capacity(value.len() + 2);
+        escaped.push('"');
+        for ch in value.chars() {
+            match ch {
+                '\\' => escaped.push_str("\\\\"),
+                '"' => escaped.push_str("\\\""),
+                '\n' => escaped.push_str("\\n"),
+                '\r' => escaped.push_str("\\r"),
+                '\t' => escaped.push_str("\\t"),
+                _ => escaped.push(ch),
+            }
+        }
+        escaped.push('"');
+        escaped
+    }
+
+    fn jarvis_lisp_optional(value: Option<&str>) -> String {
+        value
+            .filter(|v| !v.trim().is_empty())
+            .map(Self::jarvis_lisp_string)
+            .unwrap_or_else(|| "nil".to_string())
+    }
+
+    fn jarvis_lisp_string_list(values: &[String]) -> String {
+        if values.is_empty() {
+            return "[]".to_string();
+        }
+        let joined = values
+            .iter()
+            .map(|value| Self::jarvis_lisp_string(value))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!("[{}]", joined)
+    }
+
+    fn jarvis_intent_review_text(
+        objective: &str,
+        understanding: &str,
+        grounding_context_id: &str,
+        sources_used: &[String],
+    ) -> String {
+        let sources = if sources_used.is_empty() {
+            "暂无额外来源；只基于当前消息和权限上下文。".to_string()
+        } else {
+            sources_used.join(" / ")
+        };
+        format!(
+            "目标: {objective}\n理解: {understanding}\n边界: 只确认意图；不会创建 BoardTask，不会派工位，不会修改文件。\n下一步: 你确认意图后，MissionD 才生成 plan.lisp；plan 再确认后才创建 BoardTask 并派工位。\n上下文: grounding_context_id={grounding_context_id}; sources={sources}"
+        )
+    }
+
+    fn jarvis_plan_review_text(objective: &str, steps: &[&str]) -> String {
+        let steps = steps
+            .iter()
+            .enumerate()
+            .map(|(idx, step)| format!("{}. {}", idx + 1, step))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "目标: {objective}\n计划:\n{steps}\n边界: 确认 plan 后才创建 BoardTask；执行结果必须以 task-result-artifact 为准。"
+        )
+    }
+
+    fn jarvis_intent_lisp_body(
+        schema: &str,
+        channel: &str,
+        objective: &str,
+        understanding: &str,
+        grounding_context_id: &str,
+        topic_id: Option<&str>,
+        topic_label: Option<&str>,
+        sources_used: &[String],
+    ) -> String {
+        format!(
+            "(intent-draft\n  :schema {}\n  :authority deterministic-rust-gate\n  :channel {}\n  :objective {}\n  :understanding {}\n  :grounding-context-id {}\n  :topic-id {}\n  :topic-label {}\n  :sources-used {}\n  :approval (:state awaiting-intent-confirmation :required true)\n  :non-goals [\"create BoardTask before plan confirmation\" \"dispatch worker before plan confirmation\" \"modify files during intent review\"]\n  :next-step \"confirm intent -> generate plan.lisp -> confirm plan -> create BoardTask\")",
+            Self::jarvis_lisp_string(schema),
+            Self::jarvis_lisp_string(channel),
+            Self::jarvis_lisp_string(objective),
+            Self::jarvis_lisp_string(understanding),
+            Self::jarvis_lisp_string(grounding_context_id),
+            Self::jarvis_lisp_optional(topic_id),
+            Self::jarvis_lisp_optional(topic_label),
+            Self::jarvis_lisp_string_list(sources_used),
+        )
+    }
+
+    fn jarvis_plan_lisp_body(
+        schema: &str,
+        channel: &str,
+        objective: &str,
+        grounding_context_id: &str,
+        intent_artifact_id: &str,
+        steps: &[&str],
+    ) -> String {
+        let rendered_steps = steps
+            .iter()
+            .enumerate()
+            .map(|(idx, step)| {
+                format!(
+                    "    (step s{} :text {})",
+                    idx + 1,
+                    Self::jarvis_lisp_string(step)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "(plan-draft\n  :schema {}\n  :authority deterministic-rust-gate\n  :channel {}\n  :objective {}\n  :grounding-context-id {}\n  :intent-artifact-id {}\n  :execution\n    (:create-board-task-after-plan-confirmation true\n     :worker-dispatch-after-board-task true\n     :completion-authority task-result-artifact)\n  :steps [\n{}\n  ]\n  :approval (:state awaiting-plan-confirmation :required true))",
+            Self::jarvis_lisp_string(schema),
+            Self::jarvis_lisp_string(channel),
+            Self::jarvis_lisp_string(objective),
+            Self::jarvis_lisp_string(grounding_context_id),
+            Self::jarvis_lisp_string(intent_artifact_id),
+            rendered_steps,
+        )
     }
 
     fn jarvis_artifact_projection_text(
@@ -5274,7 +5436,26 @@ impl PTYWebSocketServer {
             });
             Self::write_sse_event(&mut stream, "status", &grounding_event).await?;
 
+            let intent_understanding =
+                "我理解这是一个需要先确认意图、再拆 plan.lisp、再派工位执行的 Jarvis 请求。";
+            let intent_review_text = Self::jarvis_intent_review_text(
+                &objective_text,
+                intent_understanding,
+                &grounding_context_id,
+                &sources_used,
+            );
+            let intent_artifact_body = Self::jarvis_intent_lisp_body(
+                "missiond.jarvis-intent-artifact.v1",
+                "jarvis",
+                &objective_text,
+                intent_understanding,
+                &grounding_context_id,
+                resolved_topic_id.as_deref(),
+                resolved_topic_label.as_deref(),
+                &sources_used,
+            );
             let intent_payload = serde_json::json!({
+                "schema": "missiond.jarvis-intent-artifact.v1",
                 "phase": "intent_draft",
                 "grounding_context_id": grounding_context_id,
                 "context_pack_path": context_pack_path,
@@ -5283,9 +5464,12 @@ impl PTYWebSocketServer {
                 "context_capsule_file": context_capsule_file,
                 "topic_id": resolved_topic_id,
                 "topic_label": resolved_topic_label,
-                "understanding": "我理解这是一个需要先确认意图、再拆 plan.lisp、再派工位执行的 Jarvis 请求。",
+                "understanding": intent_understanding,
                 "objective": objective_text,
                 "user_message_preview": objective_text.chars().take(240).collect::<String>(),
+                "review_text": intent_review_text,
+                "artifact_language": "lisp",
+                "artifact_body": intent_artifact_body,
                 "sources_used": sources_used,
                 "requires_confirmation": true
             });
@@ -5380,7 +5564,23 @@ impl PTYWebSocketServer {
                 .await;
             }
 
+            let plan_steps = vec![
+                "确认 project_id / read_scope / skill evidence / deploy facts 等 grounding 证据",
+                "把用户目标拆成可验收的 BoardTask / accepted shard",
+                "按任务类型选择 Codex / ClaudeCode / Agy 工位",
+                "等待 task-result-artifact，再由主控返回结果",
+            ];
+            let plan_review_text = Self::jarvis_plan_review_text(&objective_text, &plan_steps);
+            let plan_artifact_body = Self::jarvis_plan_lisp_body(
+                "missiond.jarvis-plan-artifact.v1",
+                "jarvis",
+                &objective_text,
+                &grounding_context_id,
+                &intent_artifact_id,
+                &plan_steps,
+            );
             let plan_payload = serde_json::json!({
+                "schema": "missiond.jarvis-plan-artifact.v1",
                 "phase": "plan_draft",
                 "grounding_context_id": grounding_context_id,
                 "context_pack_path": context_pack_path,
@@ -5391,12 +5591,10 @@ impl PTYWebSocketServer {
                 "topic_label": resolved_topic_label,
                 "intent_artifact_id": intent_artifact_id,
                 "objective": objective_text,
-                "steps": [
-                    "确认 project_id / read_scope / skill evidence / deploy facts 等 grounding 证据",
-                    "把用户目标拆成可验收的 BoardTask / accepted shard",
-                    "按任务类型选择 Codex / ClaudeCode / Agy 工位",
-                    "等待 task-result-artifact，再由主控返回结果"
-                ],
+                "review_text": plan_review_text,
+                "artifact_language": "lisp",
+                "artifact_body": plan_artifact_body,
+                "steps": plan_steps,
                 "requires_confirmation": true
             });
             let plan_artifact = match Self::put_jarvis_artifact(
