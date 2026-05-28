@@ -7,6 +7,7 @@ import { runLispc } from './lib/ocaml_lispc.mjs';
 import { buildAgentSlices, buildProjectAgentNavigation } from './lib/v3_agent_slices.mjs';
 import { runSemanticRules } from './lib/v3_semantic_rules.mjs';
 import { RUNTIME_DOMAIN_SPECS } from './lib/v3_runtime_domains.mjs';
+import { generateBehaviorNavigation } from './propose-behavior-navigation.mjs';
 
 const LEGACY_REPO_OUT_DIR = '.missiond/v3/runtime/compiled';
 const OUT_DIR = process.env.MISSIOND_RUNTIME_DIR
@@ -123,6 +124,29 @@ function main() {
       path: outPath,
       source_hash: finalManifest.source_hash,
       diagnostics: finalManifest.diagnostics,
+    });
+  }
+  const behaviorNavigation = generateBehaviorNavigation({
+    project: 'missiond',
+    root: process.cwd(),
+    repo: process.cwd(),
+    target: path.join(outDir, 'compiled-behavior-navigation.json'),
+  });
+  if (behaviorNavigation.artifact) {
+    const outPath = path.join(outDir, 'compiled-behavior-navigation.json');
+    fs.writeFileSync(outPath, `${JSON.stringify(behaviorNavigation.artifact, null, 2)}\n`);
+    results.push({
+      id: 'behavior-navigation',
+      ok: (behaviorNavigation.artifact.diagnostics ?? []).length === 0,
+      path: outPath,
+      source_hash: behaviorNavigation.artifact.source_hash,
+      diagnostics: behaviorNavigation.artifact.diagnostics ?? [],
+    });
+  } else {
+    results.push({
+      id: 'behavior-navigation',
+      ok: false,
+      diagnostics: [{ message: 'missiond behavior navigation artifact was not generated' }],
     });
   }
   const ssotRows = results.filter((row) => (

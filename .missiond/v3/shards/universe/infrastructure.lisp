@@ -126,14 +126,14 @@
       :kind cloud-runtime
       :environment production
       :owner_authority deploy-center
-      :capabilities [auth router deploy-center secret-store credential-vault caddy-reverse-proxy production-runtime google-cloud-storage global-object-store]
-      :service_ids [auth router deploy-center secret-store global-object-store]
+      :capabilities [auth router deploy-center missiond-jarvis-edge secret-store credential-vault caddy-reverse-proxy production-runtime google-cloud-storage global-object-store]
+      :service_ids [auth router deploy-center missiond-jarvis-edge secret-store global-object-store]
       :public_domain "ss.xiaojinpro.top"
       :public_ip "34.104.147.118"
       :credential_refs [secret-store://cloud/gcp/deploy-center-runtime secret-store://deploy-agent/gcp/DEPLOY_AGENT_API_KEY secret-store://secret-store/cloudflare/CLOUDFLARE_DNS_TOKEN]
       :diagnostic_profiles [deploy_provenance_snapshot container_inventory dependency_manifest_scan supply_chain_ioc_scan]
       :freshness verified-2026-05-11
-      :evidence_refs [service-runtime-universe deploy-center-provenance secret-store-gcp-migration-20260511 gcp-global-object-store-20260513])
+      :evidence_refs [service-runtime-universe deploy-center-provenance secret-store-gcp-migration-20260511 gcp-global-object-store-20260513 jarvis-xiaojinpro-top-cloudflare-dns-20260528])
     (runtime-target :target_id aliyun-account
       :aliases [aliyun-global aliyun-cloud-account]
       :kind cloud-account

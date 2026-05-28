@@ -3,7 +3,7 @@
 const args = new Set(process.argv.slice(2));
 const json = args.has('--json');
 const baseUrl = stripTrailingSlash(
-  process.env.JARVIS_BASE_URL || 'https://auth.xiaojinpro.com/jarvis',
+  process.env.JARVIS_BASE_URL || 'https://jarvis.xiaojinpro.top',
 );
 const smokeSecretRef =
   process.env.MISSIOND_JARVIS_SMOKE_SECRET_REF ||

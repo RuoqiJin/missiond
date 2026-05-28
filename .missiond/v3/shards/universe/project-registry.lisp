@@ -197,12 +197,16 @@
       :status v3-runtime-ssot
       :surface project-registry)
     (project :id asr
-      :aliases ["ASR" speech-recognition subtitle-service]
-      :kind rust-service
+      :aliases ["ASR" "XJP ASR" speech-recognition subtitle-service asr-web "语音转写"]
+      :kind rust-nextjs-service
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/asr"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/asr-backend-blueprint.lisp"
-      :status v3-runtime-ssot
+      :frontend ".missiond/frontend/asr-web-blueprint.lisp"
+      :operations ".missiond/operations/asr-operations-blueprint.lisp"
+      :status project-ssot-owned
+      :checks ["bash .missiond/check.sh"]
+      :missiond-role "registered XJP ASR product; independent Next.js frontend at asr.xiaojinpro.top, Rust ASR backend routed through auth.xiaojinpro.com/asr, XJP Auth + Payments membership, and deploy-center/GCP runtime boundaries"
       :surface project-registry)
     (project :id timeline
       :kind rust-service
@@ -278,7 +282,7 @@
       :operations ".missiond/operations/palm-era-operations-blueprint.lisp"
       :status project-ssot-owned
       :checks ["bash .missiond/check.sh"]
-      :missiond-role "registered independent app; text island industrial management simulator with Vercel-only Next.js frontend at palm-era.xiaojinpro.top, GCP VM Rust authoritative simulation backend at palm-era-api.xiaojinpro.top, and self-managed GCP VM Postgres"
+      :missiond-role "registered independent app; reset tree-timer prototype with Vercel-only Next.js frontend at palm-era.xiaojinpro.top, GCP VM Rust API at palm-era-api.xiaojinpro.top, self-managed GCP VM Postgres, and current gameplay limited to planting a tree and showing elapsed time since planted_at"
       :surface project-registry)
     (project :id chat-translator
       :aliases ["chat 翻译工具" "chat翻译" chat-translation-tool]
@@ -324,7 +328,7 @@
       :backend ".missiond/backend/daily-spark-backend-blueprint.lisp"
       :frontend ".missiond/frontend/daily-spark-frontend-blueprint.lisp"
       :operations ".missiond/operations/daily-spark-operations-blueprint.lisp"
-      :status incubating-project
+      :status project-ssot-owned
       :checks ["bash .missiond/check.sh"]
-      :missiond-role "registered independent app migration; Daily Spark moves Lovable/Supabase Cloud runtime to Vercel frontend spark.xiaojinpro.top plus GCP VM self-hosted Supabase-compatible backend/database"
+      :missiond-role "registered independent app; Daily Spark production runs on Vercel frontend spark.xiaojinpro.top plus GCP VM self-hosted Supabase-compatible backend/database at api.spark.xiaojinpro.top"
       :surface project-registry))

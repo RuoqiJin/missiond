@@ -138,6 +138,23 @@
       :events [deploy_created build_started build_succeeded build_failed deploy_started deploy_succeeded deploy_failed smoke_succeeded smoke_failed rollback_started rollback_succeeded rollback_failed agent_heartbeat agent_update_started agent_update_succeeded agent_update_failed provenance_changed]
       :ops-capability deploy-ops
       :surface service-runtime-universe)
+    (service :id missiond-jarvis-edge
+      :project missiond
+      :root "/Users/jinchen/Projects/missiond"
+      :environment production
+      :public-base-url "https://jarvis.xiaojinpro.top"
+      :domains ["jarvis.xiaojinpro.top"]
+      :dns-provider cloudflare
+      :dns-record (:type A :name "jarvis.xiaojinpro.top" :content "34.104.147.118" :proxied false :ttl 60 :authority cloudflare)
+      :deployment (:substrate gcp-caddy-edge :runtime-target gcp-runtime :origin "104.194.81.38:9876" :tunnel-client "rickyhqmac-mini" :target-service missiond :authority verified-smoke)
+      :proxy (:kind caddy :domain "jarvis.xiaojinpro.top" :routes ["/v1/*" "/api/monitor/jarvis" "/api/readiness" "/jarvis/*"] :upstream "104.194.81.38:9876" :sse-no-buffer true)
+      :ports (:https 443)
+      :health ["/api/monitor/jarvis" "/jarvis/api/monitor/jarvis"]
+      :dependencies [gcp-runtime caddy cloudflare-dns bwg-tunnel rickyhq-macmini-m4 missiond-daemon]
+      :ops-capability deploy-ops
+      :source-evidence [jarvis-xiaojinpro-top-cloudflare-dns-20260528 gcp-caddy-jarvis-edge-20260528 missiond-jarvis-sse-smoke-20260528]
+      :risks [dns-local-cache-propagation]
+      :surface service-runtime-universe)
     (service :id search-center
       :project search-center
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/search-center"
@@ -156,6 +173,31 @@
       :ops-capability deploy-ops
       :source-evidence [skill:search-center skill:services/search-center]
       :risks [deep-research-e2e-verification-pending browser-oauth-flow-unverified provider-secret-activation-pending]
+      :surface service-runtime-universe)
+    (service :id asr
+      :project asr
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/asr"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/asr-backend-blueprint.lisp"
+      :frontend ".missiond/frontend/asr-web-blueprint.lisp"
+      :operations ".missiond/operations/asr-operations-blueprint.lisp"
+      :environment production
+      :public-base-url "https://asr.xiaojinpro.top"
+      :frontend-url "https://asr.xiaojinpro.top"
+      :api-base-url "https://auth.xiaojinpro.com/asr"
+      :domains ["asr.xiaojinpro.top" "xjp-asr-web.vercel.app" "auth.xiaojinpro.com"]
+      :dns-provider cloudflare
+      :dns-record (:type A :name "asr.xiaojinpro.top" :content "76.76.21.21" :proxied false :authority cloudflare)
+      :deployment (:substrate deploy-center :dc_slug "asr" :runtime-target gcp-runtime :executor gcp-agent :container "xjp-asr" :default-port 8090 :host-bind "127.0.0.1:8089" :authority release-provenance)
+      :frontend-deployment (:substrate vercel :project "rickyjim626s-projects/xjp-asr-web" :production-domain "asr.xiaojinpro.top" :fallback-domain "xjp-asr-web.vercel.app")
+      :proxy (:kind caddy :domain "auth.xiaojinpro.com" :routes ["/asr" "/asr/*"] :upstream "localhost:8089")
+      :ports (:host 8089 :container 8090)
+      :health ["/health" "/health/live" "/health/ready" "/api/asr/health"]
+      :auth (:provider xjp-auth :client_id "xjp-asr" :redirect_uri "https://asr.xiaojinpro.top/auth/callback")
+      :dependencies [xjp-auth payments xjp-pg-prod redis secret-store volcengine-seed-asr cloudflare-r2 aliyun-oss vercel cloudflare]
+      :ops-capability deploy-ops
+      :source-evidence [skill:services/asr asr-web-vercel-20260528 cloudflare-dns-asr-20260528]
+      :risks [full-browser-oauth-callback-smoke-pending provider-cost-quota-regression-pending]
       :surface service-runtime-universe)
     (service :id wepub
       :project wechat-publisher

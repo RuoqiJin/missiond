@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import os from 'node:os';
+import { fileURLToPath } from 'node:url';
 
 import {
   loadDeclaredBehaviorUniverse,
@@ -30,46 +31,18 @@ authoring Lisp.
 
 function main() {
   const opts = parseArgs(process.argv.slice(2));
-  const root = opts.root ?? resolveProjectRoot(opts.repo, opts.project);
-  if (!root) fail(`cannot resolve project root for ${opts.project}`);
-  if (!fs.existsSync(root)) fail(`project root does not exist: ${root}`);
-
-  const missiondV3 = opts.project === 'missiond';
-  const observed = scanObservedUniverse(root, { projectId: opts.project });
-  const declared = loadDeclaredBehaviorUniverse(root, { projectId: opts.project, missiondV3 });
-  const riskItems = observed.filter(isNavigationRisk);
-  const navigationForms = generateNavigationForms(opts.project, riskItems);
-  const target = behaviorUniverseTarget(root, { missiondV3 });
-  const artifact = missiondV3
-    ? compiledBehaviorNavigationArtifact({
-        projectId: opts.project,
-        root,
-        target,
-        observed,
-        riskItems,
-        navigationForms,
-      })
-    : null;
-  const result = {
-    ok: true,
-    projectId: opts.project,
-    root,
-    target,
-    observed_count: observed.length,
-    risk_count: riskItems.length,
-    anchor_count: riskItems.length,
-    effect_anchor_count: riskItems.filter((item) => item.kind === 'effect').length,
-    declared_effect_count: declared.effects.length,
-    forms: navigationForms.trimEnd(),
-    artifact,
-  };
+  const result = generateBehaviorNavigation({
+    project: opts.project,
+    root: opts.root,
+    repo: opts.repo,
+  });
 
   if (opts.write) {
-    if (missiondV3) {
-      writeCompiledBehaviorNavigation(target, artifact);
-      stripMissiondV3NavigationBlock(root);
+    if (result.missiondV3) {
+      writeCompiledBehaviorNavigation(result.target, result.artifact);
+      stripMissiondV3NavigationBlock(result.root);
     } else {
-      writeNavigationForms(target, opts.project, root, navigationForms);
+      writeNavigationForms(result.target, opts.project, result.root, result.forms);
     }
     result.written = true;
   } else {
@@ -82,6 +55,48 @@ function main() {
     console.log(`${opts.project}: proposed ${result.anchor_count} navigation anchor(s) for ${target}`);
     if (opts.write) console.log(`${opts.project}: wrote navigation anchors`);
   }
+}
+
+export function generateBehaviorNavigation({
+  project,
+  root = null,
+  repo = process.cwd(),
+  target = null,
+}) {
+  const projectRoot = root ?? resolveProjectRoot(repo, project);
+  if (!projectRoot) fail(`cannot resolve project root for ${project}`);
+  if (!fs.existsSync(projectRoot)) fail(`project root does not exist: ${projectRoot}`);
+
+  const missiondV3 = project === 'missiond';
+  const observed = scanObservedUniverse(projectRoot, { projectId: project });
+  const declared = loadDeclaredBehaviorUniverse(projectRoot, { projectId: project, missiondV3 });
+  const riskItems = observed.filter(isNavigationRisk);
+  const navigationForms = generateNavigationForms(project, riskItems);
+  const outputTarget = target ?? behaviorUniverseTarget(projectRoot, { missiondV3 });
+  const artifact = missiondV3
+    ? compiledBehaviorNavigationArtifact({
+        projectId: project,
+        root: projectRoot,
+        target: outputTarget,
+        observed,
+        riskItems,
+        navigationForms,
+      })
+    : null;
+  return {
+    ok: true,
+    projectId: project,
+    root: projectRoot,
+    target: outputTarget,
+    missiondV3,
+    observed_count: observed.length,
+    risk_count: riskItems.length,
+    anchor_count: riskItems.length,
+    effect_anchor_count: riskItems.filter((item) => item.kind === 'effect').length,
+    declared_effect_count: declared.effects.length,
+    forms: navigationForms.trimEnd(),
+    artifact,
+  };
 }
 
 function parseArgs(argv) {
@@ -412,4 +427,6 @@ function fail(message) {
   process.exit(2);
 }
 
-main();
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main();
+}

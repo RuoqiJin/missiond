@@ -4,7 +4,7 @@ const args = new Set(process.argv.slice(2));
 const json = args.has('--json');
 const allowBusy = args.has('--allow-busy');
 const baseUrl = stripTrailingSlash(
-  process.env.JARVIS_BASE_URL || 'https://auth.xiaojinpro.com/jarvis',
+  process.env.JARVIS_BASE_URL || 'https://jarvis.xiaojinpro.top',
 );
 const authReadyUrl =
   process.env.AUTH_READY_URL || 'https://auth.xiaojinpro.com/health/ready';

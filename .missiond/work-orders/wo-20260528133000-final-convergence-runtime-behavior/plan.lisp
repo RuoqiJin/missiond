@@ -1,0 +1,41 @@
+(work-order-plan
+  :schema "missiond.work-order.plan.v1"
+  :id "wo-20260528133000-final-convergence-runtime-behavior"
+  :intent "wo-20260528133000-final-convergence-runtime-behavior"
+  :status draft
+  :accepted_shards
+    ((shard default
+       :accepted_shard_id "wo-20260528133000-final-convergence-runtime-behavior-shard-default"
+       :read_scope ["."]
+       :write_scope [".missiond/v3/shards/universe/infrastructure.lisp"
+                     ".missiond/v3/shards/universe/project-maturity.lisp"
+                     ".missiond/v3/shards/universe/project-registry.lisp"
+                     ".missiond/v3/shards/universe/service-runtime.lisp"
+                     ".missiond/v3/shards/workstation-runtime.lisp"
+                     "crates/missiond-daemon/src/context/v3_contracts/generated.rs"
+                     "crates/missiond-daemon/src/context/v3_runtime_defaults/generated.rs"
+                     "crates/missiond-daemon/src/handlers/compute/task_delegate.rs"
+                     "crates/missiond-daemon/src/handlers/knowledge/context_gather.rs"
+                     "scripts/check-project-ssot-universe.mjs"
+                     "scripts/check-v3-runtime-path-hygiene.mjs"
+                     "scripts/check-v3-xjpcode-portable-runtime.mjs"
+                     "scripts/compile-v3-runtime.mjs"
+                     "scripts/generated/v3_contracts.d.ts"
+                     "scripts/generated/v3_contracts.mjs"
+                     "scripts/generated/v3_runtime_defaults.mjs"
+                     "scripts/propose-behavior-navigation.mjs"
+                     "scripts/smoke-jarvis-chain.mjs"
+                     "scripts/smoke-jarvis-intent-plan-dispatch.mjs"
+                     "scripts/smoke-jarvis-interaction.mjs"
+                     ".missiond/work-orders/wo-20260528133000-final-convergence-runtime-behavior/intent.lisp"
+                     ".missiond/work-orders/wo-20260528133000-final-convergence-runtime-behavior/plan.lisp"
+                     ".missiond/work-orders/wo-20260528133000-final-convergence-runtime-behavior/audit.lisp"]
+       :acceptance ["node scripts/project-v3-contracts.mjs --check --json"
+                    "node scripts/compile-v3-runtime.mjs --check --json"
+                    "node scripts/check-v3-xjpcode-portable-runtime.mjs --json"
+                    "node scripts/check-project-ssot-universe.mjs --json"
+                    "node scripts/check-v3-control-plane-kernel-isomorphism.mjs --json"
+                    "node scripts/check-v3-final-convergence.mjs --json --static-only"
+                    "cargo test --workspace"
+                    "pnpm --dir packages/board build"
+                    "git diff --check"])))

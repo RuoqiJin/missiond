@@ -49,8 +49,8 @@ push("project registry names xjpcode worker checker", has(projectRegistry, "chec
 push("project registry declares portable runtime role", has(projectRegistry, "portable agent runtime"));
 push("portable worker registry exists", has(workstationRuntime, "portable-worker-runtime-registry"));
 push("xjpcode read-only worker registered", has(workstationRuntime, "xjpcode-readonly-worker"));
-push("xjpcode write worker gated", has(workstationRuntime, "xjpcode-code-worker") && has(workstationRuntime, ":status gated"));
-push("registry forbids write bypass", has(workstationRuntime, "write_lease") && has(workstationRuntime, "artifact-first"));
+push("xjpcode write worker active-gated", has(workstationRuntime, "xjpcode-code-worker") && has(workstationRuntime, ":status active-gated"));
+push("registry forbids write bypass", has(workstationRuntime, "write_lease_id") && has(workstationRuntime, "artifact-first") && has(workstationRuntime, "git apply --check"));
 
 push("blueprint portable-worker-runtime pillar", has(blueprint, "(pillar portable-worker-runtime"));
 push("intent portable-worker-runtime pillar", has(intent, "(pillar portable-worker-runtime"));
@@ -62,8 +62,13 @@ push("server exposes event replay route", has(serverMod, "/worker/v1/work-orders
 push("mission_task_delegate xjpcode detector", has(taskDelegate, "engine_hint_is_xjpcode"));
 push("mission_task_delegate spawns xjpcode worker", has(taskDelegate, "spawn_xjpcode_readonly_worker"));
 push("mission_task_delegate xjpcode env", has(taskDelegate, "MISSIOND_XJPCODE_WORKER_URL"));
+push("mission_task_delegate accepts xjpcode code worker", has(taskDelegate, "xjpcode-code-worker") && !has(taskDelegate, "XJPCODE_WRITE_MODE_NOT_ENABLED"));
+push("mission_task_delegate passes xjpcode write lease", has(taskDelegate, "write_lease_id") && has(taskDelegate, "apply_patch") && has(taskDelegate, "claim_task_grant_id"));
 push("mission_task_delegate loopback smoke override", has(taskDelegate, "xjpcode_worker_url") && has(taskDelegate, "XJPCODE_WORKER_URL_UNTRUSTED"));
 push("mission_task_delegate parses xjpcode SSE", has(taskDelegate, "parse_xjpcode_sse_frames"));
+push("mission_task_delegate persists xjpcode worker events", has(taskDelegate, "record_xjpcode_worker_events") && has(taskDelegate, "worker-runtime:xjpcode"));
+push("mission_task_delegate persists xjpcode worker telemetry", has(taskDelegate, "record_xjpcode_worker_telemetry") && has(taskDelegate, "xjpcode_worker.telemetry"));
+push("registry pins durable xjpcode worker event stream", has(workstationRuntime, "shared_events stream_id=worker-runtime:xjpcode") && has(workstationRuntime, "xjpcode_worker.telemetry"));
 push("mission_task_delegate writes task artifact", has(taskDelegate, "write_completion_artifact") && has(taskDelegate, "TaskCompletionEvidenceInput"));
 push("mission_task_delegate settles xjpcode worker", has(taskDelegate, "settle_task_command") && has(taskDelegate, "SettleTaskCommand"));
 push("xjpcode dispatch smoke script exists", Boolean(liveSmoke));
@@ -84,10 +89,12 @@ for (const token of [
   "accepted_shard_id",
   "write_lease_id",
   "worktree_id",
+  "validate_write_contract",
+  "PATCH_PATH_OUTSIDE_WRITE_SCOPE",
+  "git apply",
   "TaskResultArtifact",
   "xjpcode.task-result-artifact.v1",
   "READ_SCOPE_OUTSIDE_PROJECT",
-  "WRITE_MODE_NOT_ENABLED",
   "WorkerFrame::TaskResultArtifact",
 ]) {
   push(`worker token ${token}`, has(worker, token));

@@ -647,8 +647,8 @@ fn runtime_environment_payload() -> Value {
         "context_pack_worker_visible_dir": context_gather_worker_visible_dir().display().to_string(),
         "monitor_endpoints": {
             "canonical_local_http": "http://127.0.0.1:9120/api/monitor/jarvis",
-            "canonical_public_https": "https://auth.xiaojinpro.com/jarvis/api/monitor/jarvis",
-            "public_path": "/jarvis/api/monitor/jarvis",
+            "canonical_public_https": "https://jarvis.xiaojinpro.top/api/monitor/jarvis",
+            "public_path": "/api/monitor/jarvis",
             "daemon_path": "/api/monitor/jarvis",
             "rule": "Use these endpoints for Jarvis chain readiness. Do not guess ports or probe unix-socket paths unless a dedicated diagnostic asks for it."
         },

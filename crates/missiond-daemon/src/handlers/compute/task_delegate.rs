@@ -168,17 +168,6 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     } else {
         None
     };
-    if xjpcode_worker && !delegation_metadata.write_scope.is_empty() {
-        return Ok(ToolResult::structured_error(
-            ToolError::new(
-                "XJPCODE_WRITE_MODE_NOT_ENABLED",
-                "mission_task_delegate refused xjpcode write mode because the portable worker write lane is still gated",
-            )
-            .with_suggestion(
-                "rerun as read-only, or keep write work on Codex/ClaudeCode until xjpcode implements accepted_shard/write_lease/apply_patch",
-            ),
-        ));
-    }
     if xjpcode_worker && xjpcode_worker_endpoint.is_none() {
         return Ok(ToolResult::structured_error(
             ToolError::new(
@@ -487,8 +476,13 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         .unwrap_or_default();
 
     // 2. If no idle slot, try auto-provision dynamic slot
+    let xjpcode_worker_id = if xjpcode_worker && !delegation_metadata.write_scope.is_empty() {
+        "xjpcode-code-worker"
+    } else {
+        "xjpcode-readonly-worker"
+    };
     let (mut assignee, mut provisioned, should_auto_provision_slot) = if xjpcode_worker {
-        ("xjpcode-readonly-worker".to_string(), false, false)
+        (xjpcode_worker_id.to_string(), false, false)
     } else if !assignee.is_empty() {
         (assignee, false, false)
     } else if mechanic_config.is_some() {
@@ -700,6 +694,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             state.clone(),
             XjpcodeWorkerRun {
                 task_id: task_id.clone(),
+                worker_id: xjpcode_worker_id.to_string(),
                 endpoint: xjpcode_worker_endpoint.clone().unwrap_or_default(),
                 project_id: target_project_resolution
                     .as_ref()
@@ -717,6 +712,12 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     &delegation_metadata,
                     &capability_grant_ids,
                 ),
+                claim_task_grant_id: task_claim_grant_id(
+                    &delegation_metadata,
+                    &capability_grant_ids,
+                ),
+                write_lease_id: delegation_metadata.shared_claim_ids.first().cloned(),
+                apply_patch: string_arg(&args, &["apply_patch", "applyPatch"]).map(str::to_string),
                 timeout_secs,
             },
         );
@@ -2084,8 +2085,10 @@ fn sandbox_profile_for_worker(engine_hint: Option<&str>, write_enabled: bool) ->
         "workspace-write"
     } else if engine.contains("gemini") {
         "plan-policy-write"
-    } else if engine.contains("agy") || engine.contains("xjpcode") {
+    } else if engine.contains("agy") {
         "unsupported-write"
+    } else if engine.contains("xjpcode") {
+        "workspace-write-policy"
     } else {
         "workspace-write-policy"
     }
@@ -2172,6 +2175,7 @@ struct MechanicRepairRun {
 #[derive(Debug, Clone)]
 struct XjpcodeWorkerRun {
     task_id: String,
+    worker_id: String,
     endpoint: String,
     project_id: String,
     project_root: Option<String>,
@@ -2180,6 +2184,9 @@ struct XjpcodeWorkerRun {
     capability_grant_ids: Vec<String>,
     write_task_grant_id: Option<String>,
     settle_task_grant_id: Option<String>,
+    claim_task_grant_id: Option<String>,
+    write_lease_id: Option<String>,
+    apply_patch: Option<String>,
     timeout_secs: i64,
 }
 
@@ -2197,7 +2204,7 @@ fn engine_hint_is_xjpcode(engine_hint: Option<&str>) -> bool {
     engine_hint
         .map(|hint| {
             let hint = hint.trim().to_ascii_lowercase();
-            hint == "xjpcode" || hint == "xjpcode-readonly-worker"
+            hint == "xjpcode" || hint == "xjpcode-readonly-worker" || hint == "xjpcode-code-worker"
         })
         .unwrap_or(false)
 }
@@ -2288,6 +2295,133 @@ fn xjpcode_final_status_from_frames(frames: &[Value]) -> Option<String> {
             })
             .flatten()
     })
+}
+
+fn xjpcode_frame_event_kind(frame: &Value) -> String {
+    let frame_type = frame
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .trim()
+        .replace('-', "_");
+    format!("xjpcode_worker.{frame_type}")
+}
+
+async fn append_xjpcode_worker_event(
+    state: &AppState,
+    task_id: &str,
+    project_id: Option<&str>,
+    worker_id: &str,
+    event_kind: &str,
+    idempotency_key: String,
+    payload: Value,
+) {
+    if let Err(err) = state
+        .shared_memory
+        .handle_action(&json!({
+            "action": "append",
+            "stream_id": "worker-runtime:xjpcode",
+            "event_kind": event_kind,
+            "project_id": project_id,
+            "task_id": task_id,
+            "agent_id": worker_id,
+            "correlation_id": task_id,
+            "idempotency_key": idempotency_key,
+            "payload": payload
+        }))
+        .await
+    {
+        tracing::warn!(
+            task_id,
+            event_kind,
+            error = %err,
+            "failed to persist xjpcode worker event"
+        );
+    }
+}
+
+async fn record_xjpcode_worker_events(
+    state: &AppState,
+    task_id: &str,
+    project_id: Option<&str>,
+    worker_id: &str,
+    frames: &[Value],
+) -> usize {
+    for (index, frame) in frames.iter().enumerate() {
+        let event_kind = xjpcode_frame_event_kind(frame);
+        append_xjpcode_worker_event(
+            state,
+            task_id,
+            project_id,
+            worker_id,
+            &event_kind,
+            format!("xjpcode-frame:{task_id}:{index}:{event_kind}"),
+            json!({
+                "schema": "missiond.xjpcode-worker-event.v1",
+                "frame_index": index,
+                "frame": frame
+            }),
+        )
+        .await;
+    }
+    frames.len()
+}
+
+async fn record_xjpcode_worker_telemetry(
+    state: &AppState,
+    task_id: &str,
+    project_id: Option<&str>,
+    worker_id: &str,
+    endpoint: &str,
+    http_status: u16,
+    frames: &[Value],
+    task_result: &Value,
+    artifact_hash: Option<&str>,
+) {
+    let frame_types = frames
+        .iter()
+        .filter_map(|frame| frame.get("type").and_then(Value::as_str))
+        .fold(serde_json::Map::new(), |mut acc, frame_type| {
+            let count = acc.get(frame_type).and_then(Value::as_u64).unwrap_or(0) + 1;
+            acc.insert(frame_type.to_string(), json!(count));
+            acc
+        });
+    append_xjpcode_worker_event(
+        state,
+        task_id,
+        project_id,
+        worker_id,
+        "xjpcode_worker.telemetry",
+        format!(
+            "xjpcode-telemetry:{task_id}:{}",
+            artifact_hash.unwrap_or("no-artifact")
+        ),
+        json!({
+            "schema": "missiond.xjpcode-worker-telemetry.v1",
+            "endpoint": endpoint,
+            "http_status": http_status,
+            "artifact_hash": artifact_hash,
+            "artifact_status": task_result.get("status").and_then(Value::as_str),
+            "frame_count": frames.len(),
+            "frame_types": Value::Object(frame_types),
+            "files_read_count": task_result
+                .get("files_read")
+                .and_then(Value::as_array)
+                .map(|items| items.len())
+                .unwrap_or(0),
+            "files_changed_count": task_result
+                .get("files_changed")
+                .and_then(Value::as_array)
+                .map(|items| items.len())
+                .unwrap_or(0),
+            "commands_run_count": task_result
+                .get("commands_run")
+                .and_then(Value::as_array)
+                .map(|items| items.len())
+                .unwrap_or(0)
+        }),
+    )
+    .await;
 }
 
 fn xjpcode_result_status_for_artifact(status: &str) -> &'static str {
@@ -3296,6 +3430,9 @@ fn spawn_xjpcode_readonly_worker(state: AppState, run: XjpcodeWorkerRun) {
 
 async fn run_xjpcode_readonly_worker(state: AppState, run: XjpcodeWorkerRun) -> Result<()> {
     let endpoint = run.endpoint.clone();
+    let write_mode = !run.metadata.write_scope.is_empty();
+    let worker_id = run.worker_id.clone();
+    let request_task_id = run.task_id.clone();
     let read_scope = if run.metadata.read_scope.is_empty() {
         run.project_root
             .as_ref()
@@ -3307,21 +3444,24 @@ async fn run_xjpcode_readonly_worker(state: AppState, run: XjpcodeWorkerRun) -> 
 
     let request = json!({
         "schema": "missiond.work-order-request.v1",
-        "task_id": run.task_id,
+        "task_id": request_task_id,
         "project_id": run.project_id,
-        "mode": "read_only",
+        "mode": if write_mode { "write" } else { "read_only" },
         "objective": run.objective,
         "project_root": run.project_root,
-        "context_capsule_lisp": run.metadata.context_pack_path.unwrap_or_default(),
-        "accepted_shard_id": run.metadata.accepted_shard_id,
+        "context_capsule_lisp": run.metadata.context_pack_path.clone().unwrap_or_default(),
+        "accepted_shard_id": run.metadata.accepted_shard_id.clone(),
+        "write_lease_id": run.write_lease_id,
+        "worktree_id": if write_mode { Some(format!("missiond-task:{}", run.task_id)) } else { None },
         "read_scope": read_scope,
-        "write_scope": [],
-        "must_not_touch": run.metadata.must_not_touch,
+        "write_scope": run.metadata.write_scope.clone(),
+        "must_not_touch": run.metadata.must_not_touch.clone(),
         "capability_grant_ids": run.capability_grant_ids,
         "tool_policy": {
             "source": "mission_task_delegate",
-            "mode": "read_only",
-            "scope_authority": "MissionD capability grants"
+            "mode": if write_mode { "write" } else { "read_only" },
+            "scope_authority": "MissionD capability grants",
+            "apply_patch": run.apply_patch.clone()
         },
         "artifact_contract": {
             "schema": "missiond.xjpcode-worker-artifact-contract.v1",
@@ -3346,16 +3486,26 @@ async fn run_xjpcode_readonly_worker(state: AppState, run: XjpcodeWorkerRun) -> 
         .record_observation_command(RecordObservationCommand {
             task_id: request["task_id"].as_str().unwrap_or("unknown").to_string(),
             project_id: request["project_id"].as_str().map(str::to_string),
-            producer_id: "xjpcode-readonly-worker".to_string(),
+            producer_id: run.worker_id.clone(),
             payload: json!({
                 "schema": "missiond.xjpcode-worker-observation.v1",
                 "status": status.as_u16(),
-                "endpoint": endpoint,
+                "endpoint": endpoint.clone(),
                 "response": response_json.clone()
             }),
         })
         .await?;
     let frames = parse_xjpcode_sse_frames(&response_body);
+    let task_id_for_events = request["task_id"].as_str().unwrap_or("unknown");
+    let project_id_for_events = request["project_id"].as_str();
+    let persisted_frame_count = record_xjpcode_worker_events(
+        &state,
+        task_id_for_events,
+        project_id_for_events,
+        worker_id.as_str(),
+        &frames,
+    )
+    .await;
     let (task_result, worker_final_status) = if status.is_success() {
         (
             xjpcode_artifact_from_frames(&frames).unwrap_or_else(|| {
@@ -3385,7 +3535,7 @@ async fn run_xjpcode_readonly_worker(state: AppState, run: XjpcodeWorkerRun) -> 
                 "task_id": request["task_id"],
                 "project_id": request["project_id"],
                 "status": "failed",
-                "mode": "read_only",
+                "mode": if write_mode { "write" } else { "read_only" },
                 "summary": format!("xjpcode worker HTTP request failed with status {status}."),
                 "files_read": [],
                 "files_changed": [],
@@ -3456,23 +3606,25 @@ async fn run_xjpcode_readonly_worker(state: AppState, run: XjpcodeWorkerRun) -> 
             json: json!({
                 "schema": "missiond.xjpcode-worker-result.v1",
                 "response": task_result,
-                "sse_frames": frames
+                "sse_frames": frames,
+                "persisted_frame_count": persisted_frame_count
             }),
             accepted_shard_id: None,
             attempt_id: None,
             capability_grant_id: Some(write_grant_id.to_string()),
             subject_kind: Some("worker".to_string()),
-            subject_id: Some("xjpcode-readonly-worker".to_string()),
+            subject_id: Some(worker_id.clone()),
             confirm: None,
             producer: Some(json!({
                 "kind": "portable-worker",
-                "id": "xjpcode-readonly-worker",
+                "id": worker_id.clone(),
                 "created_at": created_at
             })),
             raw_evidence: Some(json!({
                 "kind": "xjpcode-work-order-response",
                 "response": task_result,
-                "sse_frames": frames
+                "sse_frames": frames,
+                "persisted_frame_count": persisted_frame_count
             })),
             evidence_refs: Some(json!([{
                 "kind": "xjpcode-work-order-response",
@@ -3482,22 +3634,59 @@ async fn run_xjpcode_readonly_worker(state: AppState, run: XjpcodeWorkerRun) -> 
             created_at: Some(created_at),
         })
         .await?;
+    let artifact_hash = artifact.artifact_hash.clone();
+    record_xjpcode_worker_telemetry(
+        &state,
+        task_id,
+        project_id.as_deref(),
+        worker_id.as_str(),
+        endpoint.as_str(),
+        status.as_u16(),
+        &frames,
+        &task_result,
+        Some(artifact_hash.as_str()),
+    )
+    .await;
     ControlPlaneKernel::new(&state)
         .settle_task_command(SettleTaskCommand {
             task_id: task_id.to_string(),
             project_id,
-            slot_id: Some("xjpcode-readonly-worker".to_string()),
+            slot_id: Some(worker_id.clone()),
             conversation_id: None,
-            artifact_hash: Some(artifact.artifact_hash),
+            artifact_hash: Some(artifact_hash),
             status: missiond_settle_status.to_string(),
             summary: Some(summary.to_string()),
             grant_id: Some(settle_grant_id.to_string()),
             subject_kind: "worker".to_string(),
-            subject_id: "xjpcode-readonly-worker".to_string(),
+            subject_id: worker_id.clone(),
             attempt_id: None,
             allow_system_bypass: false,
         })
         .await?;
+    for claim_id in &run.metadata.shared_claim_ids {
+        let release = ControlPlaneKernel::new(&state)
+            .release_lease_command(ReleaseLeaseCommand {
+                claim_id: claim_id.clone(),
+                owner_id: None,
+                grant_id: None,
+                subject_kind: "daemon".to_string(),
+                subject_id: "mission_task_delegate".to_string(),
+                details: json!({
+                    "source": "mission_task_delegate.xjpcode",
+                    "task_id": task_id,
+                    "worker_id": worker_id
+                }),
+                allow_system_bypass: true,
+                bypass_reason: Some(
+                    "mission_task_delegate releases its pre-claimed xjpcode write_scope after terminal artifact"
+                        .to_string(),
+                ),
+            })
+            .await;
+        if let Err(err) = release {
+            tracing::warn!(task_id = %task_id, claim_id = %claim_id, error = %err, "xjpcode worker claim release failed");
+        }
+    }
     Ok(())
 }
 
@@ -4001,7 +4190,7 @@ mod tests {
     fn xjpcode_engine_hint_detector_is_readonly_only() {
         assert!(engine_hint_is_xjpcode(Some("xjpcode")));
         assert!(engine_hint_is_xjpcode(Some("xjpcode-readonly-worker")));
-        assert!(!engine_hint_is_xjpcode(Some("xjpcode-code-worker")));
+        assert!(engine_hint_is_xjpcode(Some("xjpcode-code-worker")));
         assert!(!engine_hint_is_xjpcode(Some("claude-code")));
         assert!(!engine_hint_is_xjpcode(None));
     }
@@ -4027,6 +4216,18 @@ data: {"type":"final","task_id":"t1","status":"done","at":"now"}
         assert_eq!(xjpcode_status_for_worker_settle("done"), "done");
         assert_eq!(xjpcode_result_status_for_artifact("blocked"), "blocked");
         assert_eq!(xjpcode_status_for_worker_settle("blocked"), "blocked");
+    }
+
+    #[test]
+    fn xjpcode_frame_event_kind_is_namespaced() {
+        assert_eq!(
+            xjpcode_frame_event_kind(&json!({"type": "task-result-artifact"})),
+            "xjpcode_worker.task_result_artifact"
+        );
+        assert_eq!(
+            xjpcode_frame_event_kind(&json!({})),
+            "xjpcode_worker.unknown"
+        );
     }
 
     #[test]
