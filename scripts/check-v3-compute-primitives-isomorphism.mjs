@@ -223,6 +223,10 @@ function checkFiles(root, files) {
     'create_board_task',
     'status: Some("running".to_string())',
     'ControlPlaneKernel::new',
+    'UpsertTaskContractCommand',
+    'flow_run_runtime_metadata',
+    '"control_state": "task_contracts"',
+    '"sandbox_profile": "system-flow-orchestrator"',
     'complete_system_task',
     'resolve_project_root',
     'load_flow_from_path_with_project',
@@ -552,7 +556,7 @@ function buildFixture() {
   fs.appendFileSync(path.join(root, DEFAULT_FILES.job), ' "poll" "list" "cancel" AsyncJobStatus::Running');
   fs.appendFileSync(
     path.join(root, DEFAULT_FILES.flowRun),
-    ' create_board_task status: Some("running".to_string()) ControlPlaneKernel::new complete_system_task resolve_project_root load_flow_from_path_with_project',
+    ' create_board_task status: Some("running".to_string()) ControlPlaneKernel::new UpsertTaskContractCommand flow_run_runtime_metadata "control_state": "task_contracts" "sandbox_profile": "system-flow-orchestrator" complete_system_task resolve_project_root load_flow_from_path_with_project',
   );
   fs.appendFileSync(
     path.join(root, DEFAULT_FILES.flowMod),

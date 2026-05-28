@@ -7,7 +7,9 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tracing::{error, info};
 
-use crate::engine::control_plane_kernel::{ControlPlaneKernel, SystemTaskCompletionInput};
+use crate::engine::control_plane_kernel::{
+    ControlPlaneKernel, SystemTaskCompletionInput, UpsertTaskContractCommand,
+};
 use crate::engine::flow::loader;
 use crate::slot_orchestrator::project_root::{
     resolve_target_project_root, ResolutionError, ResolutionSource,
@@ -99,12 +101,22 @@ async fn action_run(state: &AppState, args: &Value) -> Result<ToolResult> {
     };
 
     let flow = &loaded.definition;
+    let project_id = flow_run_project_id(args);
+    let runtime_metadata = flow_run_runtime_metadata(
+        args,
+        &project,
+        flow.id.as_str(),
+        loaded.source.as_str(),
+        loaded.path.as_path(),
+    );
 
     let input = missiond_core::types::CreateBoardTaskInput {
         title: format!("Flow: {}", flow.name),
+        project: project_id.clone(),
         category: Some("flow".to_string()),
         description: Some(format!("Flow v2: '{}'", flow.id)),
         flow_template: Some(flow.id.clone()),
+        runtime_metadata: Some(runtime_metadata),
         ..Default::default()
     };
     let task = state
@@ -113,6 +125,14 @@ async fn action_run(state: &AppState, args: &Value) -> Result<ToolResult> {
         .await
         .map_err(|e| anyhow!("DB: {}", e))?;
     let task_id = task.id.to_string();
+    ControlPlaneKernel::new(state)
+        .upsert_task_contract_command(UpsertTaskContractCommand {
+            task_id: task_id.clone(),
+            project_id: task.project.clone().or(project_id),
+            runtime_metadata: task.runtime_metadata.clone(),
+        })
+        .await
+        .map_err(|err| anyhow!("control-plane task_contracts upsert failed: {}", err))?;
 
     let mut ctx = crate::engine::flow::FlowContext::new();
     if let Some(params) = args.get("params").and_then(|v| v.as_object()) {
@@ -217,6 +237,66 @@ async fn action_run(state: &AppState, args: &Value) -> Result<ToolResult> {
             Err(e)
         }
     }
+}
+
+fn flow_run_project_id(args: &Value) -> Option<String> {
+    for key in ["project_id", "projectId"] {
+        if let Some(value) = string_arg(args, key) {
+            return Some(value.to_string());
+        }
+    }
+    for key in ["project", "target_project", "targetProject"] {
+        let Some(value) = string_arg(args, key) else {
+            continue;
+        };
+        if !Path::new(value).is_absolute() {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+fn string_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn flow_run_runtime_metadata(
+    args: &Value,
+    project: &ProjectRoot,
+    flow_id: &str,
+    flow_source: &str,
+    flow_path: &Path,
+) -> Value {
+    let project_id = flow_run_project_id(args);
+    let project_root = project.root_display();
+    json!({
+        "schema": "missiond.board-task-runtime-metadata.v1",
+        "source": "mission_flow_run",
+        "control_state": "task_contracts",
+        "dispatch_metadata": {
+            "task_class": "flow-run",
+            "flow_id": flow_id,
+            "flow_source": flow_source,
+            "flow_path": flow_path.display().to_string(),
+            "project_id": project_id,
+            "project_root": project_root,
+            "project_root_status": project.status.as_str(),
+            "project_root_source": project.source.as_str(),
+            "output_contract": "flow runner writes canonical system completion artifact through ControlPlaneKernel"
+        },
+        "read_scope": [
+            flow_path.display().to_string(),
+            project.root_display().unwrap_or_else(|| "missiond runtime flow registry".to_string())
+        ],
+        "write_scope": [],
+        "must_not_touch": [],
+        "capability_grant_ids": [],
+        "sandbox_profile": "system-flow-orchestrator",
+        "projection_policy": "description_notes_are_projection_only"
+    })
 }
 
 fn entries_to_json(entries: &[loader::FlowEntry]) -> Value {
@@ -582,6 +662,52 @@ mod tests {
         assert!(r.target_project.is_none());
         assert_eq!(r.cwd.as_deref(), Some("/tmp"));
         assert!(!r.is_empty());
+    }
+
+    #[test]
+    fn flow_run_metadata_declares_task_contract_authority() {
+        let project = ProjectRoot {
+            root: Some(PathBuf::from("/tmp/missiond-project")),
+            status: ProjectRootStatus::Resolved,
+            source: ProjectRootSource::RegistryId,
+            diagnostic: None,
+        };
+        let metadata = flow_run_runtime_metadata(
+            &json!({ "project": "missiond" }),
+            &project,
+            "smoke-flow",
+            "project",
+            Path::new("/tmp/missiond-project/.missiond/flows/smoke.yml"),
+        );
+        assert_eq!(
+            metadata["schema"],
+            "missiond.board-task-runtime-metadata.v1"
+        );
+        assert_eq!(metadata["source"], "mission_flow_run");
+        assert_eq!(metadata["control_state"], "task_contracts");
+        assert_eq!(metadata["dispatch_metadata"]["flow_id"], "smoke-flow");
+        assert_eq!(
+            metadata["dispatch_metadata"]["project_root"],
+            "/tmp/missiond-project"
+        );
+        assert_eq!(metadata["write_scope"].as_array().unwrap().len(), 0);
+        assert_eq!(metadata["sandbox_profile"], "system-flow-orchestrator");
+    }
+
+    #[test]
+    fn flow_run_project_id_does_not_store_path_as_project() {
+        assert_eq!(
+            flow_run_project_id(&json!({ "project": "/tmp/project-root" })),
+            None
+        );
+        assert_eq!(
+            flow_run_project_id(&json!({ "project_id": "missiond" })).as_deref(),
+            Some("missiond")
+        );
+        assert_eq!(
+            flow_run_project_id(&json!({ "target_project": "alpha" })).as_deref(),
+            Some("alpha")
+        );
     }
 
     #[test]
