@@ -620,6 +620,8 @@ async fn main() -> Result<()> {
     let workflow_feature_enabled =
         feature_gates::optional_feature_enabled(feature_gates::WORKFLOW_ENV);
     let memory_feature_enabled = feature_gates::optional_feature_enabled(feature_gates::MEMORY_ENV);
+    let skill_store_feature_enabled =
+        feature_gates::optional_feature_enabled(feature_gates::SKILL_STORE_ENV);
     let router_experiments_enabled =
         feature_gates::optional_feature_enabled(feature_gates::ROUTER_EXPERIMENTS_ENV);
     let self_evolution_feature_enabled =
@@ -768,18 +770,26 @@ async fn main() -> Result<()> {
     }
     let pty_session_uuids_arc = Arc::new(tokio::sync::RwLock::new(pty_uuids));
 
-    // M1 Step 6: Skill sync via async store (moved from pre-store section)
-    let skill_sync = missiond_core::skill::sync_skills(store.as_ref(), &skills_dir).await;
-    let skill_count = skill_sync.index.list().len();
-    let ingested = skill_sync.ingested;
-    let removed = skill_sync.removed;
-    skills.replace(skill_sync.index);
-    info!(
-        ingested,
-        removed,
-        total = skill_count,
-        "Skill engine: synced skills into DB"
-    );
+    if skill_store_feature_enabled {
+        // M1 Step 6: Skill sync via async store (moved from pre-store section)
+        let skill_sync = missiond_core::skill::sync_skills(store.as_ref(), &skills_dir).await;
+        let skill_count = skill_sync.index.list().len();
+        let ingested = skill_sync.ingested;
+        let removed = skill_sync.removed;
+        skills.replace(skill_sync.index);
+        info!(
+            ingested,
+            removed,
+            total = skill_count,
+            "Skill engine: synced skills into DB"
+        );
+    } else {
+        info!(
+            env = feature_gates::SKILL_STORE_ENV,
+            full_os_env = feature_gates::FULL_OS_ENV,
+            "skill-store DB sync disabled in kernel-core mode"
+        );
+    }
 
     // Pre-parse llm.yaml for config flags needed by AppState
     let llm_config_parsed: Option<embedding_worker::LlmConfig> = {
@@ -2702,7 +2712,7 @@ async fn main() -> Result<()> {
     }
 
     // Skill hot-reload: watch ~/.claude/skills and sync only after filesystem changes.
-    {
+    if skill_store_feature_enabled {
         let watch_state = state.clone();
         let watch_skills_dir = skills_dir.clone();
         tokio::spawn(async move {
@@ -2822,6 +2832,12 @@ async fn main() -> Result<()> {
                 }
             }
         });
+    } else {
+        info!(
+            env = feature_gates::SKILL_STORE_ENV,
+            full_os_env = feature_gates::FULL_OS_ENV,
+            "skill-store watcher disabled in kernel-core mode"
+        );
     }
 
     // Keep main alive — all work is in spawned tasks above.
