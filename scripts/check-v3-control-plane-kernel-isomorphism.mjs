@@ -404,6 +404,8 @@ function checkFiles(root, files) {
     'pub(crate) async fn heartbeat_lease_command',
     'pub(crate) async fn require_capability',
     'pub(crate) async fn require_capability_command',
+    'pub(crate) async fn task_runtime_contract',
+    'pub(crate) async fn active_capability_grant_id',
     'pub(crate) async fn capability_check_command',
     'pub(crate) async fn capability_grant_command',
     'operation: "delegate".to_string()',
@@ -479,6 +481,8 @@ function checkFiles(root, files) {
     'observed_readonly_completion',
   ]);
   rejectAll(diagnostics, files.autopilot, sources.autopilot, [
+    'state.shared_memory.task_runtime_contract',
+    '.storage()\n        .shared_memory\n        .task_runtime_contract',
     '"action": "job_event"',
     '"action": "task_result_get"',
     '"action": "task_result_put"',
@@ -497,6 +501,7 @@ function checkFiles(root, files) {
     'legacy BoardTask.description fallback is disabled',
   ]);
   rejectAll(diagnostics, files.flowEngine, sources.flowEngine, [
+    'state\n        .shared_memory\n        .task_runtime_contract',
     'extract_task_metadata_field(&task.description',
     'fn extract_task_metadata_field',
     '## Dispatch metadata',
@@ -535,6 +540,7 @@ function checkFiles(root, files) {
     '.release_lease_command(ReleaseLeaseCommand',
   ]);
   rejectAll(diagnostics, files.taskDelegate, sources.taskDelegate, [
+    '.storage()\n            .shared_memory\n            .task_runtime_contract',
     '"action": "workflow_start"',
     '"action": "workflow_checkpoint"',
     '"action": "task_result_put"',
@@ -670,6 +676,9 @@ function checkFiles(root, files) {
     'audit_capability_bypass',
     'error_codes::CAPABILITY_DENIED',
   ]);
+  rejectAll(diagnostics, files.computeSlot, sources.computeSlot, [
+    'state.shared_memory.task_runtime_contract',
+  ]);
 
   requireAll(diagnostics, files.ptyHandler, sources.ptyHandler, [
     'RequireCapabilityCommand',
@@ -683,6 +692,9 @@ function checkFiles(root, files) {
     'operator confirmed mission_pty_spawn without worker-bound spawn grant',
     'error_codes::SANDBOX_POLICY_UNSUPPORTED',
     'error_codes::CAPABILITY_DENIED',
+  ]);
+  rejectAll(diagnostics, files.ptyHandler, sources.ptyHandler, [
+    'state.shared_memory.task_runtime_contract',
   ]);
 
   requireAll(diagnostics, files.spawner, sources.spawner, [

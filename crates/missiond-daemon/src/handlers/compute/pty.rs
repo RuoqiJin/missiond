@@ -199,7 +199,10 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                         "spawn worker PTYs through mission_task_delegate or pass an exact subject-bound spawn grant",
                     )));
                 }
-                let contract = match state.shared_memory.task_runtime_contract(task_id).await {
+                let contract = match ControlPlaneKernel::new(state)
+                    .task_runtime_contract(task_id)
+                    .await
+                {
                     Ok(contract) => contract,
                     Err(err) => {
                         return Ok(ToolResult::structured_error(control_plane_tool_error(

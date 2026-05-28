@@ -517,9 +517,7 @@ async fn materialize_read_only_task_result_artifact_from_durable_final(
     if final_summary.is_empty() {
         return None;
     }
-    let runtime_contract = match state
-        .storage()
-        .shared_memory
+    let runtime_contract = match ControlPlaneKernel::new(state)
         .task_runtime_contract(task.id.as_str())
         .await
     {
@@ -682,9 +680,7 @@ async fn ensure_task_result_control_capabilities(
     task: &missiond_core::types::BoardTask,
     slot_id: &str,
 ) -> Result<Vec<String>> {
-    let contract = state
-        .storage()
-        .shared_memory
+    let contract = ControlPlaneKernel::new(state)
         .task_runtime_contract(task.id.as_str())
         .await?;
     let grant_ids = ControlPlaneKernel::new(state)
@@ -812,9 +808,7 @@ async fn settle_autopilot_done_with_artifact(
     attempt_id: Option<&str>,
     summary: &str,
 ) -> Result<()> {
-    let settle_grant_id = state
-        .storage()
-        .shared_memory
+    let settle_grant_id = ControlPlaneKernel::new(state)
         .active_capability_grant_id(
             task.id.as_str(),
             "worker",
@@ -1924,9 +1918,7 @@ async fn close_idle_running_task_from_durable_summary(
     if task_with_notes.task.status != missiond_core::types::BoardTaskStatus::Running {
         return Ok(false);
     }
-    let runtime_contract = match state
-        .storage()
-        .shared_memory
+    let runtime_contract = match ControlPlaneKernel::new(state)
         .task_runtime_contract(task_with_notes.task.id.as_str())
         .await
     {
@@ -3389,9 +3381,7 @@ async fn notify_jarvis_failure(
     if task.category != "jarvis" {
         return;
     }
-    let conv_id = state
-        .storage()
-        .shared_memory
+    let conv_id = ControlPlaneKernel::new(state)
         .task_runtime_contract(task.id.as_str())
         .await
         .ok()
@@ -4273,9 +4263,7 @@ async fn dispatch_board_tasks_with_config(
             resolve_stale_lisp_code_sync_runtime_report_task(state, &task).await;
             continue;
         }
-        let runtime_contract = match state
-            .storage()
-            .shared_memory
+        let runtime_contract = match ControlPlaneKernel::new(state)
             .task_runtime_contract(task.id.as_str())
             .await
         {

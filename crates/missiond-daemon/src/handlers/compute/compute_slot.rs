@@ -272,7 +272,10 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
                 )));
             }
         };
-        let contract = match state.shared_memory.task_runtime_contract(task_id).await {
+        let contract = match ControlPlaneKernel::new(state)
+            .task_runtime_contract(task_id)
+            .await
+        {
             Ok(contract) => contract,
             Err(err) => {
                 return Ok(ToolResult::structured_error(control_plane_tool_error(

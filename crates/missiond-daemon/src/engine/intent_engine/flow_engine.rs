@@ -1089,8 +1089,7 @@ async fn resolve_task_target_project_root(
     state: &AppState,
     task: &missiond_core::types::BoardTask,
 ) -> Option<String> {
-    match state
-        .shared_memory
+    match ControlPlaneKernel::new(state)
         .task_runtime_contract(task.id.as_str())
         .await
     {

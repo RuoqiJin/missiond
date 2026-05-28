@@ -2793,9 +2793,7 @@ async fn find_overlapping_active_code_worker(
     }
 
     for task in candidates {
-        let contract = state
-            .storage()
-            .shared_memory
+        let contract = ControlPlaneKernel::new(state)
             .task_runtime_contract(task.id.as_str())
             .await?;
         let parent_match = match check.parent_id {

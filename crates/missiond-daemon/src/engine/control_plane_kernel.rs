@@ -4,7 +4,8 @@ use serde_json::{json, Value};
 
 use crate::engine::shared_memory::{
     CapabilityCheckRequest, CapabilityGrantInput, ClaimRequest, HeartbeatLeaseRequest,
-    JobEventRequest, ReleaseLeaseRequest, TaskResultPutRequest, WorkerSettleRequest,
+    JobEventRequest, ReleaseLeaseRequest, TaskResultPutRequest, TaskRuntimeContract,
+    WorkerSettleRequest,
 };
 use crate::engine::task_completion_evidence::{
     TaskCompletionEvidenceInput, TaskCompletionEvidenceWriter,
@@ -456,6 +457,35 @@ impl<'a> ControlPlaneKernel<'a> {
                 bypass_reason: command.bypass_reason,
                 details: command.details,
             })
+            .await
+    }
+
+    pub(crate) async fn task_runtime_contract(&self, task_id: &str) -> Result<TaskRuntimeContract> {
+        self.state
+            .shared_memory
+            .task_runtime_contract(task_id)
+            .await
+    }
+
+    pub(crate) async fn active_capability_grant_id(
+        &self,
+        task_id: &str,
+        subject_kind: &str,
+        subject_id: &str,
+        operation: &str,
+        scope_kind: &str,
+        scope_key: &str,
+    ) -> Result<Option<String>> {
+        self.state
+            .shared_memory
+            .active_capability_grant_id(
+                task_id,
+                subject_kind,
+                subject_id,
+                operation,
+                scope_kind,
+                scope_key,
+            )
             .await
     }
 
