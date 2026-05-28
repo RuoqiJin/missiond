@@ -11,8 +11,8 @@ use tokio::process::Command;
 
 use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
 use crate::engine::control_plane_kernel::{
-    ControlPlaneKernel, RecordObservationCommand, ReleaseLeaseCommand, SettleTaskCommand,
-    StartAttemptCommand,
+    ControlPlaneKernel, GrantTaskCapabilitiesCommand, RecordObservationCommand,
+    ReleaseLeaseCommand, SettleTaskCommand, StartAttemptCommand,
 };
 use crate::engine::shared_memory::{StructuredControlError, TaskRuntimeContract};
 use crate::engine::task_completion_evidence::TaskCompletionEvidenceInput;
@@ -595,20 +595,19 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         .or_else(|| (!assignee.is_empty()).then_some(assignee.as_str()))
         .or_else(|| mechanic_config.is_some().then_some("mechanic"));
     let capability_grant_ids = if let Some(subject_id) = grant_subject_id {
-        state
-            .shared_memory
-            .grant_task_capabilities(
-                target_project_resolution
+        ControlPlaneKernel::new(state)
+            .grant_task_capabilities_command(GrantTaskCapabilitiesCommand {
+                project_id: target_project_resolution
                     .as_ref()
-                    .map(|resolution| resolution.project_id.as_str()),
-                &task_id,
-                "worker",
-                subject_id,
-                &delegation_metadata.read_scope,
-                &delegation_metadata.write_scope,
-                &delegation_metadata.must_not_touch,
-                "mission_task_delegate",
-            )
+                    .map(|resolution| resolution.project_id.clone()),
+                task_id: task_id.clone(),
+                subject_kind: "worker".to_string(),
+                subject_id: subject_id.to_string(),
+                read_scope: delegation_metadata.read_scope.clone(),
+                write_scope: delegation_metadata.write_scope.clone(),
+                must_not_touch: delegation_metadata.must_not_touch.clone(),
+                issuer: "mission_task_delegate".to_string(),
+            })
             .await
             .map_err(|e| anyhow!("capability grant error: {}", e))?
     } else {
@@ -1302,18 +1301,17 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
                 !planned_task.write_scope.is_empty(),
             );
             let capability_grant_ids = if let Some(subject_id) = preallocated_slot_id.as_deref() {
-                state
-                    .shared_memory
-                    .grant_task_capabilities(
-                        Some(&task_project_id),
-                        &task_id,
-                        "worker",
-                        subject_id,
-                        &planned_task.read_scope,
-                        &planned_task.write_scope,
-                        &planned_task.must_not_touch,
-                        "mission_swarm_run",
-                    )
+                ControlPlaneKernel::new(state)
+                    .grant_task_capabilities_command(GrantTaskCapabilitiesCommand {
+                        project_id: Some(task_project_id.clone()),
+                        task_id: task_id.clone(),
+                        subject_kind: "worker".to_string(),
+                        subject_id: subject_id.to_string(),
+                        read_scope: planned_task.read_scope.clone(),
+                        write_scope: planned_task.write_scope.clone(),
+                        must_not_touch: planned_task.must_not_touch.clone(),
+                        issuer: "mission_swarm_run".to_string(),
+                    })
                     .await
                     .map_err(|e| anyhow!("capability grant error: {}", e))?
             } else {

@@ -11,7 +11,7 @@ use crate::context::v3_blueprint_runtime::{
     AutopilotRuntimeConfig, RouterRuntimeConfig, WorkstationRuntimeConfig,
 };
 use crate::engine::control_plane_kernel::{
-    ControlPlaneKernel, RecordObservationCommand, SettleTaskCommand,
+    ControlPlaneKernel, GrantTaskCapabilitiesCommand, RecordObservationCommand, SettleTaskCommand,
 };
 use crate::engine::learning_engine;
 use crate::engine::shared_memory::TaskRuntimeContract;
@@ -685,19 +685,17 @@ async fn ensure_task_result_control_capabilities(
         .shared_memory
         .task_runtime_contract(task.id.as_str())
         .await?;
-    let grant_ids = state
-        .storage()
-        .shared_memory
-        .grant_task_capabilities(
-            contract.project_id.as_deref().or(task.project.as_deref()),
-            task.id.as_str(),
-            "worker",
-            slot_id,
-            &contract.read_scope,
-            &contract.write_scope,
-            &contract.must_not_touch,
-            "autopilot-dispatch",
-        )
+    let grant_ids = ControlPlaneKernel::new(state)
+        .grant_task_capabilities_command(GrantTaskCapabilitiesCommand {
+            project_id: contract.project_id.clone().or_else(|| task.project.clone()),
+            task_id: task.id.to_string(),
+            subject_kind: "worker".to_string(),
+            subject_id: slot_id.to_string(),
+            read_scope: contract.read_scope.clone(),
+            write_scope: contract.write_scope.clone(),
+            must_not_touch: contract.must_not_touch.clone(),
+            issuer: "autopilot-dispatch".to_string(),
+        })
         .await?;
     state
         .storage()

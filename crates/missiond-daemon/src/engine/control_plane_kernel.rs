@@ -95,6 +95,18 @@ pub(crate) struct RequireCapabilityCommand {
     pub details: Value,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct GrantTaskCapabilitiesCommand {
+    pub project_id: Option<String>,
+    pub task_id: String,
+    pub subject_kind: String,
+    pub subject_id: String,
+    pub read_scope: Vec<String>,
+    pub write_scope: Vec<String>,
+    pub must_not_touch: Vec<String>,
+    pub issuer: String,
+}
+
 pub(crate) struct ControlPlaneKernel<'a> {
     state: &'a AppState,
 }
@@ -320,6 +332,25 @@ impl<'a> ControlPlaneKernel<'a> {
                 bypass_reason: command.bypass_reason,
                 details: command.details,
             })
+            .await
+    }
+
+    pub(crate) async fn grant_task_capabilities_command(
+        &self,
+        command: GrantTaskCapabilitiesCommand,
+    ) -> Result<Vec<String>> {
+        self.state
+            .shared_memory
+            .grant_task_capabilities(
+                command.project_id.as_deref(),
+                command.task_id.as_str(),
+                command.subject_kind.as_str(),
+                command.subject_id.as_str(),
+                &command.read_scope,
+                &command.write_scope,
+                &command.must_not_touch,
+                command.issuer.as_str(),
+            )
             .await
     }
 

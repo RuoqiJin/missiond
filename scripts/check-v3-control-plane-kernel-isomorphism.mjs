@@ -38,6 +38,7 @@ const FILES = {
   mcpTools: 'crates/missiond-mcp/src/tools/mod.rs',
   mcpGateway: 'crates/missiond-mcp/src/gen_gateway.rs',
   boardHandler: 'crates/missiond-daemon/src/handlers/knowledge/board.rs',
+  boardCreateHandler: 'crates/missiond-daemon/src/handlers/knowledge/board/create.rs',
   sharedHandler: 'crates/missiond-daemon/src/handlers/knowledge/shared_memory.rs',
   boardRoute: 'packages/board/src/app/api/tasks/route.ts',
   boardStoreTs: 'packages/board/src/store.ts',
@@ -294,6 +295,7 @@ function checkFiles(root, files) {
     'pub(crate) struct ClaimLeaseCommand',
     'pub(crate) struct ReleaseLeaseCommand',
     'pub(crate) struct RequireCapabilityCommand',
+    'pub(crate) struct GrantTaskCapabilitiesCommand',
     'pub(crate) async fn record_observation',
     'pub(crate) async fn record_observation_command',
     'pub(crate) async fn start_attempt_command',
@@ -305,6 +307,7 @@ function checkFiles(root, files) {
     'pub(crate) async fn release_lease_command',
     'pub(crate) async fn require_capability',
     'pub(crate) async fn require_capability_command',
+    'pub(crate) async fn grant_task_capabilities_command',
     'pub(crate) async fn project_board_view',
     'pub(crate) async fn complete_system_task',
     'CapabilityCheckRequest',
@@ -312,6 +315,7 @@ function checkFiles(root, files) {
     'record_job_event_typed',
     'settle_worker_command',
     'job_event_typed',
+    'grant_task_capabilities',
     'claim_lease_typed',
     'ensure_task_contract_from_metadata',
     'TaskCompletionEvidenceWriter::new',
@@ -344,6 +348,7 @@ function checkFiles(root, files) {
     'ControlPlaneKernel::new(state)',
     '.settle_task_command(SettleTaskCommand',
     '.active_capability_grant_id(',
+    '.grant_task_capabilities_command(GrantTaskCapabilitiesCommand',
     '.task_runtime_contract(task.id.as_str())',
     'task_contract_workstation_class(task, runtime_contract)',
     'autopilot_grounding_gate_reason_from_contract(&task, &runtime_contract)',
@@ -382,13 +387,14 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.taskDelegate, sources.taskDelegate, [
     'grant_task_capabilities',
+    'GrantTaskCapabilitiesCommand',
     'capability_grant_ids',
     'sandbox_profile',
     'task_contract_id',
     'Some(&task_id)',
     'Some(&capability_grant_ids)',
     'preallocated_slot_id',
-    '"worker",',
+    'subject_kind: "worker".to_string()',
     'create_args["subject_kind"] = Value::String("worker".to_string())',
     'runtime_metadata: Some(runtime_metadata.clone())',
     'control_state": "task_contracts"',
@@ -425,6 +431,14 @@ function checkFiles(root, files) {
   ]);
   rejectAll(diagnostics, files.agentExecutionClaimLease, sources.agentExecutionClaimLease, [
     '.claim_lease_typed(',
+  ]);
+
+  requireAll(diagnostics, files.boardCreateHandler, sources.boardCreateHandler, [
+    'ControlPlaneKernel::new(state)',
+    '.grant_task_capabilities_command(GrantTaskCapabilitiesCommand',
+  ]);
+  rejectAll(diagnostics, files.boardCreateHandler, sources.boardCreateHandler, [
+    '.grant_task_capabilities(',
   ]);
 
   requireAll(diagnostics, files.v2Subscribers, sources.v2Subscribers, [
@@ -590,8 +604,22 @@ function checkFiles(root, files) {
   rejectDirectLeaseCommandsOutsideKernel(diagnostics, files, sources);
   rejectDirectJobEventsOutsideKernel(diagnostics, files, sources);
   rejectDirectCapabilityChecksOutsideKernel(diagnostics, files, sources);
+  rejectDirectCapabilityGrantsOutsideKernel(diagnostics, files, sources);
 
   return diagnostics;
+}
+
+function rejectDirectCapabilityGrantsOutsideKernel(diagnostics, files, sources) {
+  const allowed = new Set(['controlPlaneKernel', 'sharedMemory']);
+  for (const [key, source] of Object.entries(sources)) {
+    if (allowed.has(key)) continue;
+    if (source.includes('.grant_task_capabilities(')) {
+      diagnostics.push({
+        file: files[key],
+        message: 'direct task capability grants outside ControlPlaneKernel are forbidden',
+      });
+    }
+  }
 }
 
 function rejectDirectCapabilityChecksOutsideKernel(diagnostics, files, sources) {

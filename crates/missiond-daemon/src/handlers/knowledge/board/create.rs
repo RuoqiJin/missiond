@@ -1,4 +1,5 @@
 use super::*;
+use crate::engine::control_plane_kernel::{ControlPlaneKernel, GrantTaskCapabilitiesCommand};
 
 pub(super) async fn handle_create(state: &AppState, args: Value) -> Result<ToolResult> {
     let input: missiond_core::types::CreateBoardTaskInput =
@@ -116,18 +117,17 @@ async fn ensure_board_create_capabilities(
     let read_scope = metadata_string_list(metadata.get("read_scope"));
     let write_scope = metadata_string_list(metadata.get("write_scope"));
     let must_not_touch = metadata_string_list(metadata.get("must_not_touch"));
-    let grant_ids = state
-        .shared_memory
-        .grant_task_capabilities(
-            task.project.as_deref(),
-            task.id.as_str(),
-            "worker",
-            subject_id,
-            &read_scope,
-            &write_scope,
-            &must_not_touch,
-            "mission_board_create",
-        )
+    let grant_ids = ControlPlaneKernel::new(state)
+        .grant_task_capabilities_command(GrantTaskCapabilitiesCommand {
+            project_id: task.project.clone(),
+            task_id: task.id.to_string(),
+            subject_kind: "worker".to_string(),
+            subject_id: subject_id.to_string(),
+            read_scope,
+            write_scope,
+            must_not_touch,
+            issuer: "mission_board_create".to_string(),
+        })
         .await
         .map_err(|err| anyhow!("capability grant error: {}", err))?;
     if let Some(fields) = metadata.as_object_mut() {
