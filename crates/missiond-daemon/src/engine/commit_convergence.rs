@@ -14,6 +14,7 @@ use tokio::sync::{watch, RwLock};
 use tracing::{info, warn};
 
 use crate::bus::BusServices;
+use crate::engine::control_plane_kernel::{ControlPlaneKernel, UpsertTaskContractCommand};
 use crate::state::AppState;
 
 const COMMIT_CONVERGENCE_SUBSCRIPTION: &str = "commit_convergence_contextual_commit_v1_live";
@@ -548,6 +549,15 @@ async fn create_backfill_task(
     let description = format!(
         "Commit {commit_hash} changed code without same-commit Lisp/checker/evidence coverage.\n\nSummary: {summary}\nConversation: {conversation_id} message_id={message_id}\n\nChanged code files:\n{code_files}\n\nRequired backfill:\n1. Map the behavior to the relevant V3/project Lisp surface.\n2. Add or update checker coverage.\n3. Add concise evidence explaining why the code landed before Lisp if applicable.\n4. Re-run the project convergence checker."
     );
+    let runtime_metadata = commit_backfill_runtime_metadata(
+        project_id,
+        commit_hash,
+        summary,
+        conversation_id,
+        message_id,
+        classes,
+        dedupe_key,
+    );
     let input = CreateBoardTaskInput {
         title: format!(
             "Backfill Lisp/checker for commit {}",
@@ -561,10 +571,18 @@ async fn create_backfill_task(
         hidden: Some(false),
         dedupe_key: Some(dedupe_key.to_string()),
         context_intent: Some("code".to_string()),
+        runtime_metadata: Some(runtime_metadata),
         ..Default::default()
     };
     let task = state.store.create_board_task(&input).await?;
     let task_id = task.id.to_string();
+    ControlPlaneKernel::new(state)
+        .upsert_task_contract_command(UpsertTaskContractCommand {
+            task_id: task_id.clone(),
+            project_id: task.project.clone(),
+            runtime_metadata: task.runtime_metadata.clone(),
+        })
+        .await?;
     let ev = BoardEvent::TaskCreated {
         task_id: task_id.clone(),
         title: task.title.clone(),
@@ -573,6 +591,39 @@ async fn create_backfill_task(
     crate::engine::master_control::notify_board_event_direct(&ev);
     let _ = state.bus.publish_board(ev).await;
     Ok(task_id)
+}
+
+fn commit_backfill_runtime_metadata(
+    project_id: &str,
+    commit_hash: &str,
+    summary: &str,
+    conversation_id: &str,
+    message_id: &i64,
+    classes: &ChangedFileClasses,
+    dedupe_key: &str,
+) -> Value {
+    json!({
+        "schema": "missiond.board-task-runtime-metadata.v1",
+        "source": "commit_lisp_convergence",
+        "control_state": "task_contracts",
+        "dispatch_metadata": {
+            "task_class": "commit-lisp-backfill-review",
+            "project_id": project_id,
+            "commit_hash": commit_hash,
+            "summary": summary,
+            "conversation_id": conversation_id,
+            "message_id": message_id,
+            "dedupe_key": dedupe_key,
+            "changed_code_files": classes.code.clone(),
+            "completion_protocol": "review-only task; implementation requires a delegated task with explicit write_scope"
+        },
+        "read_scope": classes.code.clone(),
+        "write_scope": [],
+        "must_not_touch": [],
+        "capability_grant_ids": [],
+        "sandbox_profile": "system-maintenance-review",
+        "projection_policy": "description_notes_are_projection_only"
+    })
 }
 
 fn dedupe_key_for_commit(project_id: &str, commit_hash: &str) -> String {
@@ -734,5 +785,30 @@ mod tests {
         assert!(rendered.contains("commit-lisp-convergence-report"));
         assert!(rendered.contains(":status needs-backfill"));
         assert!(rendered.contains("commit-lisp-backfill:missiond:abcdef123456"));
+    }
+
+    #[test]
+    fn commit_backfill_metadata_declares_task_contract_authority() {
+        let classes = ChangedFileClasses {
+            code: vec!["crates/missiond-daemon/src/engine/foo.rs".to_string()],
+            ..Default::default()
+        };
+        let metadata = commit_backfill_runtime_metadata(
+            "missiond",
+            "abcdef123456",
+            "fix control path",
+            "conversation-1",
+            &7,
+            &classes,
+            "commit-lisp-backfill:missiond:abcdef123456",
+        );
+        assert_eq!(metadata["source"], "commit_lisp_convergence");
+        assert_eq!(metadata["control_state"], "task_contracts");
+        assert_eq!(
+            metadata["dispatch_metadata"]["task_class"],
+            "commit-lisp-backfill-review"
+        );
+        assert_eq!(metadata["write_scope"].as_array().unwrap().len(), 0);
+        assert_eq!(metadata["sandbox_profile"], "system-maintenance-review");
     }
 }

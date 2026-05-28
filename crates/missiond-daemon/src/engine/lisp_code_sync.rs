@@ -16,6 +16,7 @@ use tokio::sync::{watch, RwLock};
 use tracing::{info, warn};
 
 use crate::bus::BusServices;
+use crate::engine::control_plane_kernel::{ControlPlaneKernel, UpsertTaskContractCommand};
 use crate::state::AppState;
 
 const LISP_CODE_SYNC_SUBSCRIPTION: &str = "lisp_code_sync_config_changed_v1_live";
@@ -1030,6 +1031,8 @@ async fn create_sync_task(
             resolution.project_id, changed_path, checker
         )
     };
+    let runtime_metadata =
+        lisp_code_sync_runtime_metadata(resolution, changed_path, check, dedupe_key, storm_circuit);
     let input = CreateBoardTaskInput {
         title: if storm_circuit {
             "Sync code for Lisp changes: storm circuit".to_string()
@@ -1044,10 +1047,18 @@ async fn create_sync_task(
         hidden: Some(false),
         dedupe_key: Some(dedupe_key.to_string()),
         context_intent: Some("code".to_string()),
+        runtime_metadata: Some(runtime_metadata),
         ..Default::default()
     };
     let task = state.store.create_board_task(&input).await?;
     let task_id = task.id.to_string();
+    ControlPlaneKernel::new(state)
+        .upsert_task_contract_command(UpsertTaskContractCommand {
+            task_id: task_id.clone(),
+            project_id: task.project.clone(),
+            runtime_metadata: task.runtime_metadata.clone(),
+        })
+        .await?;
     let ev = BoardEvent::TaskCreated {
         task_id: task_id.clone(),
         title: task.title.clone(),
@@ -1056,6 +1067,43 @@ async fn create_sync_task(
     crate::engine::master_control::notify_board_event_direct(&ev);
     let _ = state.bus.publish_board(ev).await;
     Ok(task_id)
+}
+
+fn lisp_code_sync_runtime_metadata(
+    resolution: &ProjectResolution,
+    changed_path: &str,
+    check: &Option<SyncCheckResult>,
+    dedupe_key: &str,
+    storm_circuit: bool,
+) -> Value {
+    json!({
+        "schema": "missiond.board-task-runtime-metadata.v1",
+        "source": "lisp_code_sync",
+        "control_state": "task_contracts",
+        "dispatch_metadata": {
+            "task_class": if storm_circuit {
+                "lisp-code-sync-storm-review"
+            } else {
+                "lisp-code-sync-review"
+            },
+            "project_id": resolution.project_id.clone(),
+            "changed_path": changed_path,
+            "dedupe_key": dedupe_key,
+            "storm_circuit": storm_circuit,
+            "checker_command": check.as_ref().map(|result| result.command.as_str()),
+            "checker_ok": check.as_ref().map(|result| result.ok),
+            "completion_protocol": "review-only task; implementation requires a delegated task with explicit write_scope"
+        },
+        "read_scope": [
+            changed_path,
+            resolution.root.display().to_string()
+        ],
+        "write_scope": [],
+        "must_not_touch": [],
+        "capability_grant_ids": [],
+        "sandbox_profile": "system-maintenance-review",
+        "projection_policy": "description_notes_are_projection_only"
+    })
 }
 
 fn dedupe_key_for_lisp_sync(project_id: &str, changed_path: &str) -> String {
@@ -1270,5 +1318,33 @@ mod tests {
         assert!(rendered.contains(":status needs-sync"));
         assert!(rendered.contains(":storm-circuit false"));
         assert!(rendered.contains(".missiond/v3/missiond-blueprint.lisp"));
+    }
+
+    #[test]
+    fn lisp_code_sync_metadata_declares_task_contract_authority() {
+        let resolution = ProjectResolution {
+            project_id: "missiond".to_string(),
+            root: PathBuf::from("/tmp/missiond"),
+        };
+        let check = Some(SyncCheckResult {
+            ok: false,
+            command: "node scripts/check-v3-code-isomorphism-complete.mjs --json".to_string(),
+            tail: "missing implementation".to_string(),
+        });
+        let metadata = lisp_code_sync_runtime_metadata(
+            &resolution,
+            ".missiond/v3/missiond-blueprint.lisp",
+            &check,
+            "lisp-code-sync:missiond:abc",
+            false,
+        );
+        assert_eq!(metadata["source"], "lisp_code_sync");
+        assert_eq!(metadata["control_state"], "task_contracts");
+        assert_eq!(
+            metadata["dispatch_metadata"]["task_class"],
+            "lisp-code-sync-review"
+        );
+        assert_eq!(metadata["write_scope"].as_array().unwrap().len(), 0);
+        assert_eq!(metadata["sandbox_profile"], "system-maintenance-review");
     }
 }

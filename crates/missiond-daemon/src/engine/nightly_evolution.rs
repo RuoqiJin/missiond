@@ -13,6 +13,7 @@ use tokio::process::Command;
 use tokio::sync::{watch, RwLock};
 use tracing::{info, warn};
 
+use crate::engine::control_plane_kernel::{ControlPlaneKernel, UpsertTaskContractCommand};
 use crate::state::AppState;
 
 const NIGHTLY_REPORT_DIR: &str = ".missiond/v3/runtime/nightly-evolution";
@@ -549,6 +550,13 @@ async fn create_requested_followup_if_needed(
     );
     let task = state.store.create_board_task(&input).await?;
     let task_id = task.id.to_string();
+    ControlPlaneKernel::new(state)
+        .upsert_task_contract_command(UpsertTaskContractCommand {
+            task_id: task_id.clone(),
+            project_id: task.project.clone(),
+            runtime_metadata: task.runtime_metadata.clone(),
+        })
+        .await?;
     let ev = BoardEvent::TaskCreated {
         task_id: task_id.clone(),
         title: task.title.clone(),
@@ -580,6 +588,13 @@ fn build_followup_task_input(
         .map(|finding| finding.id.as_str())
         .collect::<Vec<_>>()
         .join(", ");
+    let runtime_metadata = nightly_followup_runtime_metadata(
+        options,
+        proposal_findings,
+        proposal_paths,
+        convergence,
+        dedupe_key.as_str(),
+    );
     let description = format!(
         "Review MissionD self-evolution proposal artifact(s).\n\nMode: {}\nReason: {}\nFailed stage: {}\nFinding ids: {}\n\nProposal paths:\n{}\n\nAcceptance:\n1. Read the proposal Lisp artifact(s) and referenced SSOT/checker evidence.\n2. Decide whether to approve, reject, or ask for a narrower exact shard.\n3. Do not edit code, Lisp, or checker files from this review task.",
         options.mode,
@@ -598,8 +613,49 @@ fn build_followup_task_input(
         hidden: Some(false),
         dedupe_key: Some(dedupe_key),
         context_intent: Some("research".to_string()),
+        runtime_metadata: Some(runtime_metadata),
         ..Default::default()
     }
+}
+
+fn nightly_followup_runtime_metadata(
+    options: &NightlyRunOptions,
+    proposal_findings: &[NightlyFinding],
+    proposal_paths: &[PathBuf],
+    convergence: &Value,
+    dedupe_key: &str,
+) -> Value {
+    let failed_stage = convergence
+        .get("failed_stage")
+        .and_then(Value::as_str)
+        .unwrap_or("none");
+    json!({
+        "schema": "missiond.board-task-runtime-metadata.v1",
+        "source": "nightly_evolution",
+        "control_state": "task_contracts",
+        "dispatch_metadata": {
+            "task_class": "self-evolution-proposal-review",
+            "project_id": "missiond",
+            "mode": options.mode.clone(),
+            "reason": options.reason.clone(),
+            "failed_stage": failed_stage,
+            "dedupe_key": dedupe_key,
+            "finding_ids": proposal_findings
+                .iter()
+                .map(|finding| finding.id.as_str())
+                .collect::<Vec<_>>(),
+            "completion_protocol": "review-only task; self-evolution remains proposal-only"
+        },
+        "read_scope": proposal_paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>(),
+        "write_scope": [],
+        "must_not_touch": [],
+        "capability_grant_ids": [],
+        "sandbox_profile": "system-self-evolution-review",
+        "projection_policy": "description_notes_are_projection_only"
+    })
 }
 
 async fn write_proposals(
@@ -911,5 +967,14 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("Do not edit code"));
+        let metadata = input.runtime_metadata.as_ref().expect("runtime metadata");
+        assert_eq!(metadata["source"], "nightly_evolution");
+        assert_eq!(metadata["control_state"], "task_contracts");
+        assert_eq!(
+            metadata["dispatch_metadata"]["task_class"],
+            "self-evolution-proposal-review"
+        );
+        assert_eq!(metadata["write_scope"].as_array().unwrap().len(), 0);
+        assert_eq!(metadata["sandbox_profile"], "system-self-evolution-review");
     }
 }

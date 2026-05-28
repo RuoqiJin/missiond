@@ -221,7 +221,7 @@ async fn resolve_stale_lisp_code_sync_runtime_report_task(
     state: &AppState,
     task: &missiond_core::types::BoardTask,
 ) {
-    let note = "⚠️ stale_evidence observation — this BoardTask points at a lisp-code-sync runtime report under `.missiond/v3/runtime/lisp-code-sync/**`. Runtime reports are cold evidence, not editable SSOT source; the watcher ignores runtime output and report GC bounds the directory. Autopilot recorded this as an observation only; terminal status still requires a canonical task_result_artifact plus typed settle.";
+    let note = "resolved_by_runtime_fix / stale_evidence observation — this BoardTask points at a lisp-code-sync runtime report under `.missiond/v3/runtime/lisp-code-sync/**`. Runtime reports are cold evidence, not editable SSOT source; the watcher ignores runtime output and report GC bounds the directory. Autopilot recorded this as an observation only; terminal status still requires a canonical task_result_artifact plus typed settle.";
     let _ = state
         .store
         .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
