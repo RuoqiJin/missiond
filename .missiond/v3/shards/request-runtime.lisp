@@ -511,6 +511,7 @@
        "Staged source hygiene MUST reject raw NUL bytes in staged blobs before commit."
        "Staged source hygiene MUST run git diff --cached --check over the staged path set."
        "Task-scope guard MUST reject staged paths outside :write-scope and any path matching :must-not-touch."
+       "Repo text search hygiene MUST project ssot-retrieval-scope into .ignore sidecars so searches rooted at repo, .missiond, .missiond/v3, .missiond/research, or .missiond/tasks preserve the active-authoring default."
        "The hook doctor MUST be read-only by default; hook installation is a separate explicit install command."
        "Batch verification MAY import checkSuppliedFiles for final-tree source hygiene fixtures, but must not mutate git."])
 

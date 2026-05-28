@@ -47,10 +47,15 @@
              "scripts/check-missiond-hooks.mjs"
              "scripts/install-missiond-hooks.mjs"
              ".githooks/pre-commit"
+             ".ignore"
+             ".missiond/.ignore"
+             ".missiond/v3/.ignore"
+             ".missiond/research/.ignore"
+             ".missiond/tasks/.ignore"
              "scripts/verify-task-runner-batch.mjs"
              "scripts/check-v3-source-hygiene-isomorphism.mjs"
              "scripts/check-v3-runtime-path-hygiene.mjs"]
-      :note "check-staged-source-hygiene.mjs is the read-only staged/source preflight: it rejects raw NUL bytes, runs git diff --cached --check, and delegates task write-scope checks to task-scope-guard.mjs. .githooks/pre-commit runs missiond-work-order verify --staged so code-like staged files require MissionD-Work-Order coverage. check-missiond-hooks.mjs is read-only; install-missiond-hooks.mjs is the only mutating hook installer. verify-task-runner-batch imports checkSuppliedFiles for fixture coverage. ssot-retrieval-scope keeps broad review/search on active Lisp and treats .missiond/v3/runtime/** as cold diagnostic evidence unless include_runtime=true or a concrete trace path is requested. Production deploy writes projections under MISSIOND_RUNTIME_DIR; longer rationale lives in blueprint note evidence.")
+      :note "check-staged-source-hygiene.mjs is the read-only staged/source preflight: it rejects raw NUL bytes, runs git diff --cached --check, and delegates task write-scope checks to task-scope-guard.mjs. .githooks/pre-commit runs missiond-work-order verify --staged so code-like staged files require MissionD-Work-Order coverage. check-missiond-hooks.mjs is read-only; install-missiond-hooks.mjs is the only mutating hook installer. verify-task-runner-batch imports checkSuppliedFiles for fixture coverage. ssot-retrieval-scope keeps broad review/search on active Lisp and treats .missiond/v3/runtime/**, .missiond/tasks/wave*/**, memory-review, board-cleanup, and KB triage exports as cold diagnostic evidence unless include_runtime=true, --no-ignore, or a concrete trace path is requested. Repo-local .ignore sidecars mirror that boundary for searches rooted at repo, .missiond, .missiond/v3, .missiond/research, or .missiond/tasks. Production deploy writes projections under MISSIOND_RUNTIME_DIR; longer rationale lives in blueprint note evidence.")
 
 (surface lisp-code-drift-policy
       :status "code-aligned"

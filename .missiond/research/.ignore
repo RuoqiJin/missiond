@@ -1,0 +1,7 @@
+# Historical memory/Board cleanup evidence is opt-in during search.
+memory-review/**
+memory-review-v2/**
+board-cleanup/**
+kb-memory-triage-*/memory-export.tsv
+kb-memory-triage-*/triage-decisions.jsonl
+kb-memory-triage-*/applied-review-overlay.sql

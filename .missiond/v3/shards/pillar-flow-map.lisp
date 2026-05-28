@@ -160,7 +160,7 @@
         :core ((step s1 :logic "inspect staged or supplied files without mutating git")
                (step s2 :logic "reject raw NUL bytes and git diff whitespace errors")
                (step s3 :logic "enforce task contract write-scope and must-not-touch patterns")
-               (step s4 :logic "separate active SSOT authoring paths from warm evidence and cold runtime artifacts for broad search/review"))
+               (step s4 :logic "separate active SSOT authoring paths from warm evidence and cold runtime artifacts for broad search/review, and mirror that boundary into repo-local search ignore sidecars"))
         :egress [source_hygiene_result scope_guard_diagnostics hook_doctor_status ssot_retrieval_scope_diagnostics])
       (function external-work-order-gate
         :surface external-work-order-gate

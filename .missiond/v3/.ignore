@@ -1,0 +1,2 @@
+# Cold runtime artifacts are explicit diagnostic targets, not default V3 search.
+runtime/**

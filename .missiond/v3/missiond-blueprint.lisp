@@ -160,7 +160,9 @@
       :default false
       :paths [".missiond/v3/runtime/**"
               ".missiond/tasks/**"
-              ".missiond/research/memory-review*/**"]
+              ".missiond/research/memory-review*/**"
+              ".missiond/research/board-cleanup/**"
+              ".missiond/research/kb-memory-triage-*/**"]
       :catalog runtime_artifacts
       :examples [".missiond/v3/runtime/lisp-code-sync/*.report.lisp"
                  ".missiond/v3/runtime/nightly-evolution/*.report.lisp"
@@ -175,6 +177,7 @@
       ["Tools that answer 'what does the SSOT say?' MUST search active-authoring first and exclude cold-runtime by default."
        "Generated compiled JSON and runtime reports are projections/evidence; production runtime paths live outside git via MISSIOND_RUNTIME_DIR."
        "MissionD may query cold-runtime for trace/debug/report lookup, but that query must be explicit and visible in the context-pack."
+       "Repo-local search ignore projections (.ignore and nested .missiond/.ignore files) MUST mirror cold-runtime defaults so broad rg/fd searches from repo root or .missiond subroots exclude cold evidence unless --no-ignore, include_runtime=true, or a concrete trace path is explicit."
        "runtime_artifacts retention marks/prunes diagnostic caches only; canonical task/plan evidence is indexed without automatic deletion."]
     :checker "node scripts/check-v3-runtime-path-hygiene.mjs")
 

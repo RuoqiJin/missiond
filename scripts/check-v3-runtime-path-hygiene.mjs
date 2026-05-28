@@ -12,11 +12,18 @@ Checks that public/runtime-facing documentation names V3 runtime artifact paths
 first, while V2 paths appear only as explicit legacy fallbacks or historical
 design sources. It also pins the SSOT retrieval scope that keeps generated
 runtime artifacts out of default blueprint review/search.
+It also checks repo-local .ignore projections for explicit .missiond subroot
+searches that would otherwise bypass root-anchored gitignore patterns.
 `;
 
 const FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   gitignore: '.gitignore',
+  rootIgnore: '.ignore',
+  missiondIgnore: '.missiond/.ignore',
+  missiondV3Ignore: '.missiond/v3/.ignore',
+  missiondResearchIgnore: '.missiond/research/.ignore',
+  missiondTasksIgnore: '.missiond/tasks/.ignore',
   coreExecution: 'crates/missiond-core/src/event/events/execution.rs',
   coreObservability: 'crates/missiond-core/src/event/events/observability.rs',
   mcpExecution: 'crates/missiond-mcp/src/tools/knowledge/agent_execution.rs',
@@ -41,12 +48,16 @@ const REQUIRED = {
     'warm-evidence',
     'cold-runtime',
     '.missiond/v3/runtime/**',
+    '.missiond/tasks/**',
+    '.missiond/research/board-cleanup/**',
+    '.missiond/research/kb-memory-triage-*/**',
     '.missiond/v3/runtime/lisp-code-sync/*.report.lisp',
     '.missiond/v3/runtime/jarvis-smoke/*.json',
     'runtime_artifacts',
     'MISSIOND_RUNTIME_DIR',
     '$HOME/.missiond/runtime/<repo-id>',
     'include_runtime=true',
+    'Repo-local search ignore projections',
     '.missiond/v3/runtime/capability-usage-review.json',
     'node scripts/check-v3-runtime-path-hygiene.mjs',
     'New runtime work should cite v3 first',
@@ -60,6 +71,40 @@ const REQUIRED = {
     '.missiond/v3/runtime/lisp-code-sync/*.report.lisp',
     '.missiond/v3/runtime/jarvis-smoke/*.json',
     '.missiond/v3/runtime/jarvis-smoke/*.lisp',
+  ],
+  rootIgnore: [
+    'MissionD default search boundary',
+    '.missiond/v3/runtime/**',
+    '.missiond/tasks/wave*/**',
+    '.missiond/research/memory-review/**',
+    '.missiond/research/memory-review-v2/**',
+    '.missiond/research/board-cleanup/**',
+    '.missiond/research/kb-memory-triage-*/memory-export.tsv',
+    '.missiond/research/kb-memory-triage-*/triage-decisions.jsonl',
+    '.missiond/research/kb-memory-triage-*/applied-review-overlay.sql',
+  ],
+  missiondIgnore: [
+    'Projection of ssot-retrieval-scope',
+    'v3/runtime/**',
+    'tasks/wave*/**',
+    'research/memory-review/**',
+    'research/memory-review-v2/**',
+    'research/board-cleanup/**',
+  ],
+  missiondV3Ignore: [
+    'Cold runtime artifacts',
+    'runtime/**',
+  ],
+  missiondResearchIgnore: [
+    'Historical memory/Board cleanup evidence',
+    'memory-review/**',
+    'memory-review-v2/**',
+    'board-cleanup/**',
+    'kb-memory-triage-*/memory-export.tsv',
+  ],
+  missiondTasksIgnore: [
+    'Historical task-runner waves',
+    'wave*/**',
   ],
   coreExecution: [
     '.missiond/v3/runtime/executions/<id>.lisp',
@@ -249,13 +294,18 @@ function buildFixture() {
     (tier active-authoring :paths [".missiond/v3/missiond-blueprint.lisp"])
     (tier warm-evidence :paths [".missiond/v3/evidence/*.lisp"])
     (tier cold-runtime
-      :paths [".missiond/v3/runtime/**"]
+      :paths [".missiond/v3/runtime/**"
+              ".missiond/tasks/**"
+              ".missiond/research/board-cleanup/**"
+              ".missiond/research/kb-memory-triage-*/**"]
       :examples [".missiond/v3/runtime/lisp-code-sync/*.report.lisp"
                  ".missiond/v3/runtime/jarvis-smoke/*.json"]
       :catalog runtime_artifacts
       :runtime-root "MISSIOND_RUNTIME_DIR"
       :default-runtime-root "$HOME/.missiond/runtime/<repo-id>"
-      :rule "Cold runtime artifacts are excluded unless include_runtime=true is explicit."))
+      :rule "Cold runtime artifacts are excluded unless include_runtime=true is explicit.")
+    :invariants
+      ["Repo-local search ignore projections (.ignore and nested .missiond/.ignore files) MUST mirror cold-runtime defaults."])
   (capability-governance-policy
     :review-sidecar ".missiond/v3/runtime/capability-usage-review.json")
   (compression-contract
@@ -270,6 +320,35 @@ function buildFixture() {
 .missiond/v3/runtime/lisp-code-sync/*.report.lisp
 .missiond/v3/runtime/jarvis-smoke/*.json
 .missiond/v3/runtime/jarvis-smoke/*.lisp`);
+  write(root, 'rootIgnore', `
+MissionD default search boundary
+.missiond/v3/runtime/**
+.missiond/tasks/wave*/**
+.missiond/research/memory-review/**
+.missiond/research/memory-review-v2/**
+.missiond/research/board-cleanup/**
+.missiond/research/kb-memory-triage-*/memory-export.tsv
+.missiond/research/kb-memory-triage-*/triage-decisions.jsonl
+.missiond/research/kb-memory-triage-*/applied-review-overlay.sql`);
+  write(root, 'missiondIgnore', `
+Projection of ssot-retrieval-scope
+v3/runtime/**
+tasks/wave*/**
+research/memory-review/**
+research/memory-review-v2/**
+research/board-cleanup/**`);
+  write(root, 'missiondV3Ignore', `
+Cold runtime artifacts
+runtime/**`);
+  write(root, 'missiondResearchIgnore', `
+Historical memory/Board cleanup evidence
+memory-review/**
+memory-review-v2/**
+board-cleanup/**
+kb-memory-triage-*/memory-export.tsv`);
+  write(root, 'missiondTasksIgnore', `
+Historical task-runner waves
+wave*/**`);
   write(root, 'coreExecution', `
 //! Durable evidence remains the on-disk <project_root>/.missiond/v3/runtime/executions/<id>.lisp companion file.
 /// lives in <project_root>/.missiond/v3/runtime/plans/<plan_id>.evidence.json`);
@@ -301,6 +380,11 @@ runtime_environment
 MISSIOND_RUNTIME_DIR
 MISSIOND_COMPILED_RUNTIME_DIR
 context-capsules
+monitor_endpoints
+canonical_local_http
+http://127.0.0.1:9120/api/monitor/jarvis
+canonical_public_https
+https://auth.xiaojinpro.com/jarvis/api/monitor/jarvis
 Repo .missiond/v3/runtime/** is dev/cold evidence only
 context-gather-worker
 context_gather_runtime_dir
@@ -320,11 +404,15 @@ ACTIVATION_RELATIVE_PATH`);
   write(root, 'bootContext', `
 runtime artifacts live under MISSIOND_RUNTIME_DIR and MISSIOND_COMPILED_RUNTIME_DIR
 repo .missiond/v3/runtime/** is dev/cold evidence only
-runtime_environment`);
+runtime_environment
+canonical Jarvis monitor endpoints`);
   write(root, 'requestRuntime', `
 runtime-environment
 runtime_environment
 MISSIOND_RUNTIME_DIR/context-gather
+canonical Jarvis monitor endpoints
+runtime_environment.monitor_endpoints.canonical_local_http
+canonical_public_https
 repo .missiond/v3/runtime/** is dev/cold evidence only`);
   write(root, 'controlPlaneRuntime', `
 $MISSIOND_RUNTIME_DIR/master-control-checkpoint.lisp

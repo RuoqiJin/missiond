@@ -1,0 +1,10 @@
+# Projection of ssot-retrieval-scope for searches rooted at .missiond.
+v3/runtime/**
+runtime-state/**
+tasks/wave*/**
+research/memory-review/**
+research/memory-review-v2/**
+research/board-cleanup/**
+research/kb-memory-triage-*/memory-export.tsv
+research/kb-memory-triage-*/triage-decisions.jsonl
+research/kb-memory-triage-*/applied-review-overlay.sql

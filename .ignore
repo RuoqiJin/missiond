@@ -1,0 +1,14 @@
+# MissionD default search boundary.
+#
+# Broad repo searches should see source code and active SSOT first. Cold runtime
+# and historical review evidence stays reachable through explicit paths or
+# --no-ignore, but should not pollute default rg/fd results.
+.missiond/v3/runtime/**
+.missiond/runtime-state/**
+.missiond/tasks/wave*/**
+.missiond/research/memory-review/**
+.missiond/research/memory-review-v2/**
+.missiond/research/board-cleanup/**
+.missiond/research/kb-memory-triage-*/memory-export.tsv
+.missiond/research/kb-memory-triage-*/triage-decisions.jsonl
+.missiond/research/kb-memory-triage-*/applied-review-overlay.sql

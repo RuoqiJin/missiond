@@ -12,6 +12,7 @@ Checks the V3 source-hygiene Lisp/code isomorphism contract:
   - staged source hygiene is read-only and task-contract aware.
   - NUL-byte, whitespace, and task-scope checks run before scoped commits.
   - repo-local pre-commit hook installation is explicit, inspectable, and opt-in.
+  - repo-local search ignore sidecars mirror ssot-retrieval-scope cold evidence.
 `;
 
 const DEFAULT_FILES = {
@@ -21,6 +22,11 @@ const DEFAULT_FILES = {
   checkHooks: 'scripts/check-missiond-hooks.mjs',
   installHooks: 'scripts/install-missiond-hooks.mjs',
   preCommit: '.githooks/pre-commit',
+  rootIgnore: '.ignore',
+  missiondIgnore: '.missiond/.ignore',
+  missiondV3Ignore: '.missiond/v3/.ignore',
+  missiondResearchIgnore: '.missiond/research/.ignore',
+  missiondTasksIgnore: '.missiond/tasks/.ignore',
   batchVerifier: 'scripts/verify-task-runner-batch.mjs',
 };
 
@@ -85,11 +91,17 @@ function checkFiles(root, files) {
     'scripts/check-missiond-hooks.mjs',
     'scripts/install-missiond-hooks.mjs',
     '.githooks/pre-commit',
+    '.ignore',
+    '.missiond/.ignore',
+    '.missiond/v3/.ignore',
+    '.missiond/research/.ignore',
+    '.missiond/tasks/.ignore',
     'Staged hygiene MUST be read-only',
     'MISSIOND_TASK_CONTRACT',
     'raw NUL bytes in staged blobs',
     'git diff --cached --check',
     'task-scope guard',
+    'Repo text search hygiene MUST project ssot-retrieval-scope into .ignore sidecars',
     'node scripts/check-v3-source-hygiene-isomorphism.mjs',
   ]);
 
@@ -149,6 +161,39 @@ function checkFiles(root, files) {
     'verify --staged',
   ]);
 
+  requireAll(diagnostics, files.rootIgnore, sources.rootIgnore, [
+    'MissionD default search boundary',
+    '.missiond/v3/runtime/**',
+    '.missiond/tasks/wave*/**',
+    '.missiond/research/memory-review/**',
+    '.missiond/research/board-cleanup/**',
+  ]);
+
+  requireAll(diagnostics, files.missiondIgnore, sources.missiondIgnore, [
+    'Projection of ssot-retrieval-scope',
+    'v3/runtime/**',
+    'tasks/wave*/**',
+    'research/memory-review/**',
+    'research/board-cleanup/**',
+  ]);
+
+  requireAll(diagnostics, files.missiondV3Ignore, sources.missiondV3Ignore, [
+    'Cold runtime artifacts',
+    'runtime/**',
+  ]);
+
+  requireAll(diagnostics, files.missiondResearchIgnore, sources.missiondResearchIgnore, [
+    'Historical memory/Board cleanup evidence',
+    'memory-review/**',
+    'memory-review-v2/**',
+    'board-cleanup/**',
+  ]);
+
+  requireAll(diagnostics, files.missiondTasksIgnore, sources.missiondTasksIgnore, [
+    'Historical task-runner waves',
+    'wave*/**',
+  ]);
+
   requireAll(diagnostics, files.batchVerifier, sources.batchVerifier, [
     "import { checkSuppliedFiles } from './check-staged-source-hygiene.mjs'",
     'validates source hygiene',
@@ -176,7 +221,8 @@ function buildFixture() {
        "MISSIOND_TASK_CONTRACT enables task-scope guard enforcement."
        "raw NUL bytes in staged blobs are rejected."
        "git diff --cached --check runs before scoped commits."
-       "task-scope guard rejects paths outside write-scope."])
+       "task-scope guard rejects paths outside write-scope."
+       "Repo text search hygiene MUST project ssot-retrieval-scope into .ignore sidecars."])
   (implementation-map
     (surface source-hygiene
       :status "code-aligned"
@@ -184,7 +230,12 @@ function buildFixture() {
              "scripts/task-scope-guard.mjs"
              "scripts/check-missiond-hooks.mjs"
              "scripts/install-missiond-hooks.mjs"
-             ".githooks/pre-commit"]
+             ".githooks/pre-commit"
+             ".ignore"
+             ".missiond/.ignore"
+             ".missiond/v3/.ignore"
+             ".missiond/research/.ignore"
+             ".missiond/tasks/.ignore"]
       :note "fixture"))
   (compression-contract
     :checks ["node scripts/check-v3-source-hygiene-isomorphism.mjs"]))`);
@@ -243,6 +294,39 @@ missiond-work-order.mjs
 scripts/check-staged-source-hygiene.mjs
 node "\${hygiene}" --task "\${contract}"
 verify --staged
+`);
+
+  writeFixture(root, DEFAULT_FILES.rootIgnore, `
+MissionD default search boundary
+.missiond/v3/runtime/**
+.missiond/tasks/wave*/**
+.missiond/research/memory-review/**
+.missiond/research/board-cleanup/**
+`);
+
+  writeFixture(root, DEFAULT_FILES.missiondIgnore, `
+Projection of ssot-retrieval-scope
+v3/runtime/**
+tasks/wave*/**
+research/memory-review/**
+research/board-cleanup/**
+`);
+
+  writeFixture(root, DEFAULT_FILES.missiondV3Ignore, `
+Cold runtime artifacts
+runtime/**
+`);
+
+  writeFixture(root, DEFAULT_FILES.missiondResearchIgnore, `
+Historical memory/Board cleanup evidence
+memory-review/**
+memory-review-v2/**
+board-cleanup/**
+`);
+
+  writeFixture(root, DEFAULT_FILES.missiondTasksIgnore, `
+Historical task-runner waves
+wave*/**
 `);
 
   writeFixture(root, DEFAULT_FILES.batchVerifier, `
