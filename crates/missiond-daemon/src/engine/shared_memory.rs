@@ -2264,7 +2264,16 @@ impl SharedMemoryService {
                         .to_string(),
                 ),
             };
-            claims.push(self.claim_lease_typed(req).await?);
+            match self.claim_lease_typed(req).await {
+                Ok(claim) => claims.push(claim),
+                Err(err) => {
+                    if let Some(conflict) = claim_conflict_projection_from_error(&err) {
+                        claims.push(conflict);
+                    } else {
+                        return Err(err);
+                    }
+                }
+            }
         }
         Ok(claims)
     }
@@ -3702,15 +3711,31 @@ impl SharedMemoryService {
         .fetch_optional(&mut *tx)
         .await?;
         if let Some(row) = active {
+            let conflict = claim_row_json(row);
             tx.commit().await?;
-            return Ok(json!({
-                "schema": "missiond.shared-claim.v1",
-                "ok": false,
-                "status": "conflict",
-                "code": CLAIM_CONFLICT_CODE,
-                "error_code": CLAIM_CONFLICT_CODE,
-                "conflict": claim_row_json(row)
-            }));
+            let holder = conflict
+                .get("owner_id")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let lease_expires_at = conflict
+                .get("lease_expires_at")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            return Err(control_error_details(
+                CLAIM_CONFLICT_CODE,
+                format!(
+                    "active work lease conflict for {}:{}",
+                    req.scope_kind, req.scope_key
+                ),
+                json!({
+                    "scope_kind": req.scope_kind,
+                    "scope_key": req.scope_key,
+                    "holder": holder,
+                    "lease_expires_at": lease_expires_at,
+                    "authority": "work_leases",
+                    "conflict": conflict
+                }),
+            ));
         }
 
         let id = Uuid::new_v4().to_string();
@@ -5133,6 +5158,28 @@ fn artifact_row_json(row: sqlx::postgres::PgRow, include_content: bool) -> Value
     value
 }
 
+fn claim_conflict_projection_from_error(err: &anyhow::Error) -> Option<Value> {
+    let control = err.downcast_ref::<StructuredControlError>()?;
+    if control.code != CLAIM_CONFLICT_CODE {
+        return None;
+    }
+    let conflict = control
+        .details
+        .get("conflict")
+        .cloned()
+        .unwrap_or_else(|| control.details.clone());
+    Some(json!({
+        "schema": "missiond.shared-claim.v1",
+        "ok": false,
+        "status": "conflict",
+        "code": CLAIM_CONFLICT_CODE,
+        "error_code": CLAIM_CONFLICT_CODE,
+        "message": control.message.clone(),
+        "details": control.details.clone(),
+        "conflict": conflict
+    }))
+}
+
 fn claim_row_json(row: sqlx::postgres::PgRow) -> Value {
     let acquired_at: DateTime<Utc> = row.get("acquired_at");
     let lease_expires_at: DateTime<Utc> = row.get("lease_expires_at");
@@ -5803,5 +5850,39 @@ mod tests {
             structured.details["provided_attempt_id"],
             provided_attempt_id.map(Value::from).unwrap_or(Value::Null)
         );
+    }
+
+    #[test]
+    fn claim_conflict_projection_preserves_structured_error_details() {
+        let err: anyhow::Error = StructuredControlError::new(
+            CLAIM_CONFLICT_CODE,
+            "active work lease conflict for write_scope:src",
+        )
+        .with_details(json!({
+            "scope_kind": "write_scope",
+            "scope_key": "src",
+            "holder": "worker-1",
+            "lease_expires_at": "2026-05-28T00:00:00Z",
+            "authority": "work_leases",
+            "conflict": {
+                "id": "lease-1",
+                "owner_id": "worker-1"
+            }
+        }))
+        .into();
+
+        let projection = claim_conflict_projection_from_error(&err).expect("conflict projection");
+        assert_eq!(projection["ok"], false);
+        assert_eq!(projection["code"], CLAIM_CONFLICT_CODE);
+        assert_eq!(projection["error_code"], CLAIM_CONFLICT_CODE);
+        assert_eq!(projection["details"]["authority"], "work_leases");
+        assert_eq!(projection["conflict"]["id"], "lease-1");
+    }
+
+    #[test]
+    fn claim_conflict_projection_ignores_non_conflict_errors() {
+        let err: anyhow::Error =
+            StructuredControlError::new(CAPABILITY_DENIED_CODE, "denied").into();
+        assert!(claim_conflict_projection_from_error(&err).is_none());
     }
 }

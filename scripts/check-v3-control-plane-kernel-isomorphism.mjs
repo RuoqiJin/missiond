@@ -365,6 +365,9 @@ function checkFiles(root, files) {
     'INSERT INTO work_leases',
     'FROM work_leases',
     '"code": CLAIM_CONFLICT_CODE',
+    'active work lease conflict for {}:{}',
+    'return Err(control_error_details(',
+    'claim_conflict_projection_from_error(&err)',
   ]);
 
   requireAll(diagnostics, files.controlPlaneKernel, sources.controlPlaneKernel, [
