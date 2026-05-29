@@ -147,9 +147,9 @@
       :dns-provider cloudflare
       :dns-record (:type A :name "jarvis.xiaojinpro.top" :content "34.104.147.118" :proxied false :ttl 60 :authority cloudflare)
       :deployment (:substrate gcp-caddy-edge :runtime-target gcp-runtime :origin "104.194.81.38:9876" :tunnel-client "rickyhqmac-mini" :target-service missiond :authority verified-smoke)
-      :proxy (:kind caddy :domain "jarvis.xiaojinpro.top" :routes ["/v1/*" "/api/monitor/jarvis" "/api/readiness" "/jarvis/*"] :upstream "104.194.81.38:9876" :sse-no-buffer true)
+      :proxy (:kind caddy :domain "jarvis.xiaojinpro.top" :routes ["/health" "/v1/*" "/api/monitor/jarvis" "/api/readiness" "/jarvis/*"] :upstream "104.194.81.38:9876" :sse-no-buffer true)
       :ports (:https 443)
-      :health ["/api/monitor/jarvis" "/jarvis/api/monitor/jarvis"]
+      :health ["/health" "/api/readiness" "/api/monitor/jarvis" "/jarvis/api/monitor/jarvis"]
       :dependencies [gcp-runtime caddy cloudflare-dns bwg-tunnel rickyhq-macmini-m4 missiond-daemon]
       :ops-capability deploy-ops
       :source-evidence [jarvis-xiaojinpro-top-cloudflare-dns-20260528 gcp-caddy-jarvis-edge-20260528 missiond-jarvis-sse-smoke-20260528]
@@ -161,18 +161,34 @@
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/search-center-backend-blueprint.lisp"
       :environment production
-      :public-base-url "https://auth.xiaojinpro.com"
-      :frontend-url "https://search.xiaojin.pro"
-      :domains ["search.xiaojin.pro" "auth.xiaojinpro.com"]
+      :public-base-url "https://search-center.xiaojinpro.com"
+      :frontend-url "https://search.xiaojinpro.com"
+      :domains ["search.xiaojinpro.com" "search-center.xiaojinpro.com" "auth.xiaojinpro.com"]
       :dns-provider cloudflare
       :deployment (:substrate deploy-center :dc_slug "xjp-search-center" :runtime-target gcp-runtime :executor gcp-agent :container "xjp-search-center" :default-port 3120 :authority release-provenance)
-      :proxy (:kind caddy :domain "auth.xiaojinpro.com" :routes ["/v1/search" "/v1/search/*" "/v1/research" "/v1/research/*" "/v1/history" "/v1/health"])
+      :proxy (:kind caddy :domain "search-center.xiaojinpro.com" :routes ["/health/live" "/health/ready" "/v1/health" "/v1/me" "/v1/search" "/v1/search/*" "/v1/research" "/v1/research/*" "/v1/history" "/v1/history/*"])
       :ports (:http 3120)
       :health ["/v1/health"]
-      :dependencies [xjp-auth xjp-router xjp-pg-prod secret-store anysearch bocha tavily? brave?]
+      :dependencies [xjp-auth xjp-router xjp-pg-prod secret-store anysearch bocha tavily? brave? dataforseo? exa?]
       :ops-capability deploy-ops
       :source-evidence [skill:search-center skill:services/search-center]
-      :risks [deep-research-e2e-verification-pending browser-oauth-flow-unverified provider-secret-activation-pending]
+      :risks [deep-research-live-300-source-artifact-pending cross-domain-benchmark-suite-pending production-browser-oauth-flow-pending provider-secret-activation-pending final-promotion-artifact-verification-pending]
+      :surface service-runtime-universe)
+    (service :id xiaojinpro-frontend
+      :project xiaojinpro-frontend
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/xiaojinpro-frontend"
+      :intent ".missiond/intent.lisp"
+      :frontend ".missiond/frontend/xiaojinpro-frontend-blueprint.lisp"
+      :environment production
+      :public-base-url "https://xiaojinpro.top"
+      :domains ["xiaojinpro.top" "www.xiaojinpro.top"]
+      :dns-provider cloudflare
+      :deployment (:substrate vercel :project "xiaojinpro-frontend" :framework nextjs :authority release-provenance)
+      :health ["/"]
+      :dependencies [xjp-auth xjp-router deploy-center object-storage supabase missiond-jarvis-edge]
+      :ops-capability deploy-ops
+      :source-evidence [xiaojinpro-frontend-project-ssot]
+      :risks [next-build-ignores-eslint next-build-ignores-typescript auth-flow-regression-proof-pending]
       :surface service-runtime-universe)
     (service :id asr
       :project asr
@@ -217,6 +233,22 @@
       :ops-capability deploy-ops
       :source-evidence [skill:wepub wechat-publisher-project-ssot]
       :risks [subscription-webhook-secret-required bot-jwt-local-decode-audit]
+      :surface service-runtime-universe)
+    (service :id jinstudio
+      :project jinstudio
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/jinstudio-frontend"
+      :intent ".missiond/intent.lisp"
+      :frontend ".missiond/frontend/jinstudio-frontend-blueprint.lisp"
+      :environment production
+      :public-base-url "https://jinstudio.com"
+      :domains ["jinstudio.com" "www.jinstudio.com"]
+      :dns-provider cloudflare
+      :deployment (:substrate lovable-or-static-host :framework vite-react :authority release-provenance)
+      :health ["/"]
+      :dependencies [supabase-lead-capture cloudflare]
+      :ops-capability deploy-ops
+      :source-evidence [jinstudio-project-ssot]
+      :risks [supabase-lead-capture-policy-pending production-hosting-authority-needs-proof]
       :surface service-runtime-universe)
     (service :id secret-store
       :project secret-store

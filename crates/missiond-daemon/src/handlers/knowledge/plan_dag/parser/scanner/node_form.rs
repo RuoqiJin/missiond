@@ -22,6 +22,12 @@ pub(super) fn parse_node_form(form: &str) -> Option<DagNode> {
     let mut owned_files_raw: Option<String> = None;
     let mut forbidden_files_raw: Option<String> = None;
     let mut acceptance_commands_raw: Option<String> = None;
+    let mut execution_order: Option<String> = None;
+    let mut parallel_group: Option<String> = None;
+    let mut atom_level: Option<u32> = None;
+    let mut atom_task_id: Option<String> = None;
+    let mut predicted_tool_sequence_raw: Option<String> = None;
+    let mut context_sources_raw: Option<String> = None;
     // wave-17 / task 03 — declarative acceptance evaluator hints.
     let mut acceptance_mode_raw: Option<String> = None;
     let mut acceptance_evidence_keys_raw: Option<String> = None;
@@ -93,6 +99,37 @@ pub(super) fn parse_node_form(form: &str) -> Option<DagNode> {
             "acceptance-commands" | "acceptance_commands" => {
                 set_first(&mut acceptance_commands_raw, &value)
             }
+            "execution-order" | "execution_order" => {
+                let raw = value.trim();
+                if !raw.is_empty() {
+                    let lc = raw.to_ascii_lowercase();
+                    if !matches!(
+                        lc.as_str(),
+                        "serial"
+                            | "parallel"
+                            | "serial-after-dependencies"
+                            | "serial_after_dependencies"
+                    ) {
+                        unsupported_fields.push((raw_key.clone(), value.clone()));
+                    }
+                }
+                set_first(&mut execution_order, &value);
+            }
+            "parallel-group" | "parallel_group" => set_first(&mut parallel_group, &value),
+            "atom-level" | "atom_level" => {
+                if atom_level.is_none() {
+                    let trimmed = value.trim();
+                    match trimmed.parse::<i64>() {
+                        Ok(n) if n >= 0 => atom_level = Some(n.min(u32::MAX as i64) as u32),
+                        _ => unsupported_fields.push((raw_key.clone(), value.clone())),
+                    }
+                }
+            }
+            "atom-task-id" | "atom_task_id" => set_first(&mut atom_task_id, &value),
+            "predicted-tool-sequence" | "predicted_tool_sequence" => {
+                set_first(&mut predicted_tool_sequence_raw, &value)
+            }
+            "context-sources" | "context_sources" => set_first(&mut context_sources_raw, &value),
             // wave-17 / task 03 — declarative acceptance evaluator hints.
             // `:acceptance-mode` is parsed strictly: unknown values land
             // BOTH on the typed slot AND in `unsupported_fields` so the
@@ -355,6 +392,12 @@ pub(super) fn parse_node_form(form: &str) -> Option<DagNode> {
         owned_files_raw,
         forbidden_files_raw,
         acceptance_commands_raw,
+        execution_order,
+        parallel_group,
+        atom_level,
+        atom_task_id,
+        predicted_tool_sequence_raw,
+        context_sources_raw,
         acceptance_mode_raw,
         acceptance_evidence_keys_raw,
         acceptance_depends_on,

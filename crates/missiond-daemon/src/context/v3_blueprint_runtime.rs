@@ -509,6 +509,8 @@ pub(crate) struct CompiledProjectUniverse {
 pub(crate) struct CompiledProjectUniverseEntry {
     pub id: Option<String>,
     pub kind: Option<String>,
+    pub management_domain: Option<String>,
+    pub runtime_layer: Option<String>,
     pub root: Option<String>,
     pub path: Option<String>,
     pub intent: Option<String>,

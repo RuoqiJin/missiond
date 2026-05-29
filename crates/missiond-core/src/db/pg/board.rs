@@ -27,6 +27,26 @@ fn board_create_runtime_metadata(
     task_id: &TaskId,
     input: &CreateBoardTaskInput,
 ) -> serde_json::Value {
+    let has_dependencies = input
+        .depends_on
+        .as_ref()
+        .is_some_and(|deps| deps.iter().any(|value| !value.trim().is_empty()));
+    let default_execution_order = if has_dependencies {
+        "serial"
+    } else {
+        "parallel"
+    };
+    let default_parallel_group = input
+        .parent_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| task_id.as_str());
+    let default_dependency_policy = if has_dependencies {
+        "depends_on_gate"
+    } else {
+        "independent_parallel_candidate"
+    };
+
     let mut metadata = input
         .runtime_metadata
         .clone()
@@ -77,6 +97,33 @@ fn board_create_runtime_metadata(
     fields
         .entry("projection_policy".to_string())
         .or_insert_with(|| serde_json::json!("description_notes_are_projection_only"));
+    fields
+        .entry("execution_order".to_string())
+        .or_insert_with(|| serde_json::json!(default_execution_order));
+    fields
+        .entry("dependency_policy".to_string())
+        .or_insert_with(|| serde_json::json!(default_dependency_policy));
+    if default_execution_order == "parallel" {
+        fields
+            .entry("parallel_group".to_string())
+            .or_insert_with(|| serde_json::json!(default_parallel_group));
+    }
+    if let Some(dispatch) = fields
+        .get_mut("dispatch_metadata")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        dispatch
+            .entry("execution_order".to_string())
+            .or_insert_with(|| serde_json::json!(default_execution_order));
+        dispatch
+            .entry("dependency_policy".to_string())
+            .or_insert_with(|| serde_json::json!(default_dependency_policy));
+        if default_execution_order == "parallel" {
+            dispatch
+                .entry("parallel_group".to_string())
+                .or_insert_with(|| serde_json::json!(default_parallel_group));
+        }
+    }
     metadata
 }
 
@@ -322,6 +369,52 @@ mod task_contract_projection_tests {
                 .and_then(|value| value.as_str()),
             Some("description_notes_are_projection_only")
         );
+        assert_eq!(
+            metadata
+                .get("execution_order")
+                .and_then(|value| value.as_str()),
+            Some("parallel")
+        );
+        assert_eq!(
+            metadata
+                .get("parallel_group")
+                .and_then(|value| value.as_str()),
+            Some("task-1")
+        );
+        assert_eq!(
+            metadata
+                .get("dispatch_metadata")
+                .and_then(|value| value.get("execution_order"))
+                .and_then(|value| value.as_str()),
+            Some("parallel")
+        );
+    }
+
+    #[test]
+    fn board_create_metadata_marks_dependency_tasks_serial() {
+        let task_id = TaskId::from_trusted("task-serial".to_string());
+        let metadata = board_create_runtime_metadata(
+            &task_id,
+            &CreateBoardTaskInput {
+                title: "Run after evidence".to_string(),
+                depends_on: Some(vec!["task-evidence".to_string()]),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            metadata
+                .get("execution_order")
+                .and_then(|value| value.as_str()),
+            Some("serial")
+        );
+        assert_eq!(
+            metadata
+                .get("dependency_policy")
+                .and_then(|value| value.as_str()),
+            Some("depends_on_gate")
+        );
+        assert!(metadata.get("parallel_group").is_none());
     }
 
     #[test]
@@ -1394,7 +1487,7 @@ impl BoardStore for PgMissionStore {
             INSERT INTO work_leases
               (id, task_id, holder_id, holder_kind, scope_kind, scope_key,
                status, lease_expires_at, heartbeat_at, metadata)
-            VALUES ($1,$2,$3,$4,'board_task',$2,'active',$5,now(),$6)
+            VALUES ($1,$2,$3,$4,'board_task',$2,'active',$5::timestamptz,now(),$6)
             "#,
         )
         .bind(&lease_id)
@@ -1413,10 +1506,10 @@ impl BoardStore for PgMissionStore {
             UPDATE board_tasks
             SET claim_executor_id = $1,
                 claim_executor_type = $2,
-                claimed_at = $3,
-                lease_expires_at = $4,
+                claimed_at = $3::timestamptz,
+                lease_expires_at = $4::timestamptz,
                 status = 'running',
-                updated_at = $3
+                updated_at = $3::timestamptz
             WHERE id = $5
             "#,
         )
@@ -1598,7 +1691,6 @@ impl BoardStore for PgMissionStore {
     }
 
     async fn set_board_task_lease(&self, task_id: &str, lease_expires_at: &str) -> DbResult<usize> {
-        let now = chrono::Utc::now().to_rfc3339();
         let mut tx = self.pool.begin().await?;
         let _ = sqlx::query(
             r#"
@@ -1615,11 +1707,10 @@ impl BoardStore for PgMissionStore {
         .execute(&mut *tx)
         .await?;
         let result = sqlx::query(
-            "UPDATE board_tasks SET lease_expires_at = $1, updated_at = $2
-             WHERE id = $3 AND status = 'running'",
+            "UPDATE board_tasks SET lease_expires_at = $1::timestamptz, updated_at = now()
+             WHERE id = $2 AND status = 'running'",
         )
         .bind(lease_expires_at)
-        .bind(&now)
         .bind(task_id)
         .execute(&mut *tx)
         .await?;

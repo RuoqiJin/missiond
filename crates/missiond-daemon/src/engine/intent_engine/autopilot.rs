@@ -4258,7 +4258,7 @@ async fn dispatch_board_tasks_with_config(
         "secret",
     ];
 
-    for task in tasks {
+    for mut task in tasks {
         if is_stale_lisp_code_sync_runtime_report_task(&task) {
             resolve_stale_lisp_code_sync_runtime_report_task(state, &task).await;
             continue;
@@ -4613,7 +4613,8 @@ async fn dispatch_board_tasks_with_config(
             .claim_board_task(task.id.as_str(), &slot_id, "pty_slot")
             .await
         {
-            Ok(Some(_)) => {
+            Ok(Some(claimed_task)) => {
+                task = claimed_task;
                 dispatched_slots.insert(slot_id.clone());
                 let grant_ids = match ensure_task_result_control_capabilities(
                     state, &task, &slot_id,
@@ -8967,6 +8968,23 @@ Review only.
         assert!(
             src.contains(unclaim_call),
             "a claimed BoardTask must be released when PTY spawn/readiness is transiently unavailable"
+        );
+    }
+
+    #[test]
+    fn dispatch_uses_claimed_task_snapshot_for_completion_filters() {
+        let src = include_str!("./autopilot.rs");
+        assert!(
+            src.contains("for mut task in tasks"),
+            "dispatch must be able to replace the stale pre-claim BoardTask snapshot"
+        );
+        assert!(
+            src.contains("Ok(Some(claimed_task))"),
+            "claim_board_task returns the authoritative post-claim BoardTask snapshot"
+        );
+        assert!(
+            src.contains("task = claimed_task;"),
+            "durable completion filters must see claimed_at from the claimed BoardTask"
         );
     }
 

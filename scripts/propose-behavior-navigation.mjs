@@ -257,13 +257,14 @@ function insertOrReplaceNavigationBlock(text, navigationForms) {
   const markerRe = /\n?\s*;; BEGIN GENERATED NAVIGATION ANCHORS[\s\S]*?;; END GENERATED NAVIGATION ANCHORS\n?/;
   let nextText = text.replace(markerRe, '\n');
   if (!navigationForms.trim()) return nextText;
+  const navigationSection = `${navigationForms.trimEnd()}\n`;
   const effectIndex = nextText.indexOf('\n  (effect\n');
   if (effectIndex >= 0) {
-    return `${nextText.slice(0, effectIndex)}\n${navigationForms}${nextText.slice(effectIndex)}`;
+    return `${nextText.slice(0, effectIndex)}\n${navigationSection}${nextText.slice(effectIndex)}`;
   }
   const closeIndex = nextText.lastIndexOf(')');
-  if (closeIndex < 0) return `${nextText.trimEnd()}\n${navigationForms}`;
-  return `${nextText.slice(0, closeIndex).trimEnd()}\n\n${navigationForms}${nextText.slice(closeIndex)}`;
+  if (closeIndex < 0) return `${nextText.trimEnd()}\n${navigationSection}`;
+  return `${nextText.slice(0, closeIndex).trimEnd()}\n\n${navigationSection}${nextText.slice(closeIndex)}`;
 }
 
 function compiledBehaviorNavigationArtifact({
@@ -304,6 +305,9 @@ function compiledBehaviorNavigationArtifact({
 }
 
 function defaultBehaviorUniverse(projectId, navigationForms = '') {
+  const navigationSection = navigationForms.trim()
+    ? `${navigationForms.trimEnd()}\n\n`
+    : '';
   return `(behavior-universe ${projectId}
   :schema "missiond.behavior-universe.v1"
   :project ${projectId}
@@ -354,7 +358,7 @@ function defaultBehaviorUniverse(projectId, navigationForms = '') {
               ${projectId}-repo-file-rename
               ${projectId}-repo-file-delete])
 
-${navigationForms}  (effect
+${navigationSection}  (effect
     :id ${projectId}-repo-file-write
     :feature ${projectId}-runtime-artifacts
     :kind filesystem-write

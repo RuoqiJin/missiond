@@ -126,13 +126,14 @@
         :entry [user-request external-application-intent.lisp external-service-intent-envelope BoardTaskCreated mission_board_create mission_request workflow-trigger]
         :core ((step s1 :logic "normalize every source into a work-order intent with objective, inferred user intent, constraints, unknowns, evidence_refs, source app, and optional source_board_task_id")
                (step s2 :logic "apply pre-task-board-anchor: every non-trivial mutation, deploy, skill edit, memory batch, or worker dispatch must bind the intent to exactly one BoardTask before execution; Board-sourced work uses the existing task as anchor, while file/API/external-app intent creates or links one visible BoardTask")
-               (step s3 :logic "compile plan.lisp with accepted shards, worker lanes, read_scope, write_scope, risk gates, completion authority, and retry policy")
-               (step s4 :logic "start workflow_run and shared-memory cursor, persist plan hash, and write an audit.lisp replay header before dispatch")
-               (step s5 :logic "dispatch workers only from accepted plan shards; external translation, code-refactor, deploy-ops, and memory-review requests use the same BoardTask/Autopilot chain")
-               (step s6 :logic "collect task-result-artifacts as canonical outputs; Board notes, provider finals, PTY snapshots, and app callbacks are projections or evidence")
-               (step s7 :logic "close or backfill only after durable final settle, audit.lisp append, slot release, and Lisp/checker/evidence convergence when code changes occurred")
-               (step s8 :logic "promote repeatable operation patterns into workflow.lisp or evidence, not ad hoc prompt text"))
-        :egress [work-order-intent.lisp plan.lisp audit.lisp BoardTask workflow_run accepted_shards task_result_artifacts task_contracts event_log workflow_promotion_candidate]))
+               (step s3 :logic "compile plan.lisp as a forecast with accepted shards, worker lanes, read_scope, write_scope, risk gates, completion authority, and retry policy")
+               (step s4 :logic "compile the plan into plan-atomization-graph by splitting shards into atom_tasks, marking dependency_edges, execution_order, serial_groups, and parallel_groups")
+               (step s5 :logic "start workflow_run and shared-memory cursor, persist plan/atom graph hashes, and write an audit.lisp replay header before dispatch")
+               (step s6 :logic "dispatch workers only from accepted atom_task_contracts; external translation, code-refactor, deploy-ops, and memory-review requests use the same BoardTask/Autopilot chain")
+               (step s7 :logic "collect task-result-artifacts and worker-detour-telemetry as canonical outputs; Board notes, provider finals, PTY snapshots, and app callbacks are projections or evidence")
+               (step s8 :logic "close or backfill only after durable final settle, audit.lisp append, slot release, and Lisp/checker/evidence convergence when code changes occurred")
+               (step s9 :logic "promote repeatable operation patterns into workflow.lisp or evidence, not ad hoc prompt text"))
+        :egress [work-order-intent.lisp plan.lisp plan-atomization-graph audit.lisp BoardTask workflow_run atom_task_contracts task_result_artifacts worker-capability-telemetry task_contracts event_log workflow_promotion_candidate]))
 
     (pillar review
       (function review-gate

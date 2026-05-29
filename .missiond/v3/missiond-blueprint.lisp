@@ -337,7 +337,7 @@
     :status compiler-active
     :rule "The root blueprint remains the compiler entrypoint. Root uses include-shard-index to expand compiler-active shards from shards/index.lisp; shard files still cannot recursively include other shards."
     :shards [request-runtime workstation-runtime control-plane-runtime memory-knowledge-runtime agent-navigation ops-infra v2-convergence-map pillar-flow-map
-             universe-service-runtime universe-infrastructure universe-data-residency universe-project-maturity universe-project-registry universe-behavior-closure
+             universe-service-runtime universe-service-layer-template universe-infrastructure universe-data-residency universe-project-maturity universe-project-registry universe-behavior-closure
              implementation-request-surfaces implementation-execution-surfaces implementation-runtime-surfaces implementation-knowledge-surfaces implementation-ops-surfaces]
     (shard request-runtime
       :path "shards/request-runtime.lisp"
@@ -365,6 +365,9 @@
       :status compiler-active)
     (shard universe-service-runtime
       :path "shards/universe/service-runtime.lisp"
+      :status compiler-active)
+    (shard universe-service-layer-template
+      :path "shards/universe/service-layer-template.lisp"
       :status compiler-active)
     (shard universe-infrastructure
       :path "shards/universe/infrastructure.lisp"

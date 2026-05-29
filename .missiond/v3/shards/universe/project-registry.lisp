@@ -10,7 +10,7 @@
 
 (project-identity-contract
     :schema "missiond.project-identity-contract.v1"
-    :fields [project_id canonical_root repo_remote ssot_paths deploy_center_slug forge_project_name service_ids aliases status]
+    :fields [project_id canonical_root repo_remote ssot_paths deploy_center_slug forge_project_name service_ids aliases status management_domain runtime_layer]
     :rule "MissionD is project identity and SSOT registry authority; deploy-center is deployment fact authority; Forge is component/pattern/reality catalog authority."
     :reconcile-action mission_project.reconcile
     :invariants
@@ -18,6 +18,32 @@
        "deploy-center owns deployment targets, runtime location, release provenance, deploy agents, and executor state."
        "Forge owns component/pattern catalog, code reality mirror, and Universe DAG recommendations; Forge-only references are not deployable unless MissionD registers them."
        "Historical aliases such as xjp-deploy-center MUST NOT become active project roots."])
+
+(project-management-taxonomy
+    :schema "missiond.project-management-taxonomy.v1"
+    :fields [management-domain runtime-layer]
+    :rule "Every registered project declares both an ownership universe and a runtime layer so MissionD does not confuse XJP platform backends, MissionD production systems, ops infrastructure, brand sites, and product-service projects."
+    :management-domains
+      ((domain missiond-production-system
+         :meaning "MissionD, Forge, Mechanic, Jarvis, and related agent/devtool production systems.")
+       (domain xiaojinpro-core-backend
+         :meaning "Pure XiaojinPro universe backend programs that provide global platform support across products.")
+       (domain xiaojinpro-platform-ops
+         :meaning "Deployment, operational, CLI, MCP, and infrastructure control surfaces for the XJP platform.")
+       (domain xiaojinpro-client-surface
+         :meaning "XiaojinPro public, admin, mobile, or gateway frontend clients.")
+       (domain product-service-layer
+         :meaning "Standalone products and service-layer applications such as Palm Era, Search Center, ASR, WePub, CutHub, and other user-facing services.")
+       (domain brand-content-site
+         :meaning "Public brand, portfolio, blog, and content sites such as ruoqijin.com and jinstudio.com.")
+       (domain external-infra
+         :meaning "External infrastructure runtime that products consume but that is not itself a user-facing product."))
+    :runtime-layers [control-plane-frontend devtool platform-monorepo support-backend ops-service ops-agent ops-tool platform-frontend mobile-client public-content-site brand-site product-fullstack product-api product-frontend external-infra-runtime]
+    :invariants
+      ["XiaojinPro core backends MUST NOT be used as product-service roots just because a product calls them."
+       "MissionD production-system projects MUST stay separate from user-facing product-service-layer apps."
+       "Brand/content sites are managed projects, but their runtime layer is not platform support backend unless they own shared APIs."
+       "Project queries, Board dispatch, and deploy-ops context packs MUST preserve management-domain and runtime-layer labels."])
 
 (registry-authority-map
     :schema "missiond.registry-authority-map.v1"
@@ -32,6 +58,8 @@
     :rule "Project-local app blueprints are independent SSOT files registered from V3; backend V3 stays compact and aggregate checkers follow the registry pointer."
     (project :id board
       :kind frontend-nextjs
+      :management-domain missiond-production-system
+      :runtime-layer control-plane-frontend
       :path ".missiond/frontend/board-blueprint.lisp"
       :package "packages/board/package.json"
       :status code-aligned
@@ -42,6 +70,8 @@
       :surface board-frontend)
     (project :id jarvis-forge
       :kind multi-crate-nextjs
+      :management-domain missiond-production-system
+      :runtime-layer devtool
       :root "/Users/jinchen/Projects/jarvis-forge"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/forge-backend-blueprint.lisp"
@@ -53,6 +83,8 @@
     ;; ── Part1 devtools — sibling devtool repos with M5 SSOT, registered as a group ──
     (project :id jarvis
       :kind rust-multi-crate
+      :management-domain missiond-production-system
+      :runtime-layer devtool
       :root "/Users/jinchen/Projects/jarvis"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/jarvis-backend-blueprint.lisp"
@@ -63,6 +95,8 @@
       :surface project-registry)
     (project :id jarvis-mechanic
       :kind rust-cli
+      :management-domain missiond-production-system
+      :runtime-layer devtool
       :root "/Users/jinchen/Projects/jarvis-mechanic"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/jarvis-mechanic-backend-blueprint.lisp"
@@ -73,6 +107,8 @@
       :surface project-registry)
     (project :id xjpcode
       :kind rust-cli
+      :management-domain missiond-production-system
+      :runtime-layer devtool
       :root "/Users/jinchen/Projects/xjpcode"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/xjpcode-app-blueprint.lisp"
@@ -84,6 +120,8 @@
       :surface project-registry)
     (project :id neural-codegen
       :kind rust-multi-crate
+      :management-domain missiond-production-system
+      :runtime-layer devtool
       :root "/Users/jinchen/Projects/neural-codegen"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/neural-codegen-blueprint.lisp"
@@ -93,6 +131,8 @@
       :surface project-registry)
     (project :id semantic-terminal
       :kind rust-napi-cdylib
+      :management-domain missiond-production-system
+      :runtime-layer devtool
       :root "/Users/jinchen/Projects/semantic-terminal"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/semantic-terminal-blueprint.lisp"
@@ -102,6 +142,8 @@
       :surface project-registry)
     (project :id xiaojinpro-backend
       :kind rust-monorepo
+      :management-domain xiaojinpro-core-backend
+      :runtime-layer platform-monorepo
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/xiaojinpro-backend-blueprint.lisp"
@@ -110,6 +152,8 @@
       :surface project-registry)
     (project :id xjp-mcp
       :kind node-mcp-server
+      :management-domain xiaojinpro-platform-ops
+      :runtime-layer ops-tool
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/tools/xjp-mcp"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/xjp-mcp-backend-blueprint.lisp"
@@ -119,6 +163,8 @@
       :surface project-registry)
     (project :id xjp-cli
       :kind rust-cli
+      :management-domain xiaojinpro-platform-ops
+      :runtime-layer ops-tool
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/crates/xjp-cli"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/xjp-cli-backend-blueprint.lisp"
@@ -129,6 +175,8 @@
     (project :id deploy-center
       :aliases [xjp-deploy-center]
       :kind ops-service
+      :management-domain xiaojinpro-platform-ops
+      :runtime-layer ops-service
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/deploy-center"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/deploy-center-backend-blueprint.lisp"
@@ -139,6 +187,8 @@
     (project :id deploy-agent
       :aliases [xjp-deploy-agent]
       :kind ops-agent
+      :management-domain xiaojinpro-platform-ops
+      :runtime-layer ops-agent
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/apps/xjp-deploy-agent"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/deploy-agent-backend-blueprint.lisp"
@@ -147,6 +197,8 @@
       :surface project-registry)
     (project :id auth
       :kind rust-service
+      :management-domain xiaojinpro-core-backend
+      :runtime-layer support-backend
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/auth"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/auth-backend-blueprint.lisp"
@@ -154,6 +206,8 @@
       :surface project-registry)
     (project :id router
       :kind rust-service
+      :management-domain xiaojinpro-core-backend
+      :runtime-layer support-backend
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/router"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/router-backend-blueprint.lisp"
@@ -162,6 +216,8 @@
     (project :id search-center
       :aliases [xjp-search-center deep-research "聚合搜索" "搜索中心"]
       :kind rust-nextjs-service
+      :management-domain product-service-layer
+      :runtime-layer product-fullstack
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/search-center"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/search-center-backend-blueprint.lisp"
@@ -173,6 +229,8 @@
       :surface project-registry)
     (project :id xjp-memory
       :kind rust-service
+      :management-domain xiaojinpro-core-backend
+      :runtime-layer support-backend
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/xjp-memory"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/xjp-memory-backend-blueprint.lisp"
@@ -182,6 +240,8 @@
       :surface project-registry)
     (project :id xjp-eventhub
       :kind rust-service
+      :management-domain xiaojinpro-core-backend
+      :runtime-layer support-backend
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/xjp-eventhub"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/xjp-eventhub-backend-blueprint.lisp"
@@ -191,6 +251,8 @@
       :surface project-registry)
     (project :id payments
       :kind rust-workspace-service
+      :management-domain xiaojinpro-core-backend
+      :runtime-layer support-backend
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/payments"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/payments-backend-blueprint.lisp"
@@ -199,6 +261,8 @@
     (project :id asr
       :aliases ["ASR" "XJP ASR" speech-recognition subtitle-service asr-web "语音转写"]
       :kind rust-nextjs-service
+      :management-domain product-service-layer
+      :runtime-layer product-fullstack
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/asr"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/asr-backend-blueprint.lisp"
@@ -210,6 +274,8 @@
       :surface project-registry)
     (project :id timeline
       :kind rust-service
+      :management-domain xiaojinpro-core-backend
+      :runtime-layer support-backend
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/timeline"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/timeline-backend-blueprint.lisp"
@@ -217,6 +283,8 @@
       :surface project-registry)
     (project :id pcea
       :kind rust-vite-app
+      :management-domain product-service-layer
+      :runtime-layer product-fullstack
       :root "/Users/jinchen/Downloads/PCEA develop"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/pcea-backend-blueprint.lisp"
@@ -225,6 +293,8 @@
       :surface project-registry)
     (project :id xiaojinpro-ios
       :kind ios-swiftui-app
+      :management-domain xiaojinpro-client-surface
+      :runtime-layer mobile-client
       :root "/Users/jinchen/development/xiaojinproIOS/xiaojinpro"
       :intent ".missiond/intent.lisp"
       :frontend ".missiond/frontend/xiaojinpro-ios-blueprint.lisp"
@@ -233,10 +303,25 @@
       :checks ["bash .missiond/check.sh"]
       :missiond-role "registered mobile control client; iPhone entry for Jarvis/MissionD, using Auth JWT and Jarvis HTTPS proxy to control the Mac mini MissionD node"
       :surface project-registry)
+    (project :id xiaojinpro-frontend
+      :aliases [xiaojinpro-web "xiaojinpro.top" "小金Pro官网" "小金Pro前端"]
+      :kind nextjs-platform-frontend
+      :management-domain xiaojinpro-client-surface
+      :runtime-layer platform-frontend
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/xiaojinpro-frontend"
+      :intent ".missiond/intent.lisp"
+      :frontend ".missiond/frontend/xiaojinpro-frontend-blueprint.lisp"
+      :operations ".missiond/operations/xiaojinpro-frontend-operations-blueprint.lisp"
+      :status incubating-project
+      :checks ["bash .missiond/check.sh"]
+      :missiond-role "registered XiaojinPro client surface; xiaojinpro.top main platform frontend, admin console, chat entry, and multi-product hub over auth/router/deploy/storage APIs"
+      :surface project-registry)
     ;; ── App + external-infra projects — already-converged with project-local check.sh runners ──
     (project :id secret-store
       :aliases [secret-store-rs]
       :kind rust-axum-microservice
+      :management-domain external-infra
+      :runtime-layer external-infra-runtime
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/services/secret-store-rs"
       :intent ".missiond/intent.lisp"
       :status project-ssot-owned
@@ -246,14 +331,31 @@
       :surface project-registry)
     (project :id xiaojin-blog
       :kind nextjs-app
+      :management-domain brand-content-site
+      :runtime-layer public-content-site
       :root "/Users/jinchen/Projects/xiaojin-blog"
       :intent ".missiond/intent.lisp"
       :status project-ssot-owned
       :checks ["bash .missiond/check.sh"]
       :missiond-role "registered app; ruoqijin.com personal blog + research portal (Next.js 16 + React 19 + Drizzle/PG; standalone repo xiaojinpro-team/xiaojin-blog)"
       :surface project-registry)
+    (project :id jinstudio
+      :aliases ["JinStudio" "小靳后期" "jinstudio.com" jinstudio-frontend]
+      :kind vite-react-brand-site
+      :management-domain brand-content-site
+      :runtime-layer brand-site
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/jinstudio-frontend"
+      :intent ".missiond/intent.lisp"
+      :frontend ".missiond/frontend/jinstudio-frontend-blueprint.lisp"
+      :operations ".missiond/operations/jinstudio-operations-blueprint.lisp"
+      :status incubating-project
+      :checks ["bash .missiond/check.sh"]
+      :missiond-role "registered brand/content site; jinstudio.com official site for JinStudio 小靳后期工作室, portfolio, service pages, notes, careers, and Supabase lead capture"
+      :surface project-registry)
     (project :id cuthub
       :kind nextjs-app
+      :management-domain product-service-layer
+      :runtime-layer product-frontend
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/cuthub-frontend"
       :intent ".missiond/intent.lisp"
       :status project-ssot-owned
@@ -264,6 +366,8 @@
       :surface project-registry)
     (project :id legacy-refactor-service
       :kind node-service
+      :management-domain product-service-layer
+      :runtime-layer product-api
       :root "/Users/jinchen/Projects/legacy-refactor-service"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/legacy-refactor-backend-blueprint.lisp"
@@ -275,6 +379,8 @@
     (project :id palm-era
       :aliases [ye-dao-ji-yuan "椰岛纪元"]
       :kind rust-nextjs-game
+      :management-domain product-service-layer
+      :runtime-layer product-fullstack
       :root "/Users/jinchen/Projects/palm-era"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/palm-era-backend-blueprint.lisp"
@@ -287,6 +393,8 @@
     (project :id chat-translator
       :aliases ["chat 翻译工具" "chat翻译" chat-translation-tool]
       :kind rust-nextjs-local-agent-app
+      :management-domain product-service-layer
+      :runtime-layer product-fullstack
       :root "/Users/jinchen/Projects/chat-translator"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/chat-translator-backend-blueprint.lisp"
@@ -299,6 +407,8 @@
     (project :id long-image-service
       :aliases [changtu "长图" "长图工具" changtu-pro]
       :kind vite-express-app
+      :management-domain product-service-layer
+      :runtime-layer product-fullstack
       :root "/Users/jinchen/Projects/long-image-service"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/long-image-backend-blueprint.lisp"
@@ -311,6 +421,8 @@
     (project :id wechat-publisher
       :aliases [wepub "WePub" "微信公众号文章编辑器" wechat-article-editor]
       :kind rust-nextjs-cms
+      :management-domain product-service-layer
+      :runtime-layer product-fullstack
       :root "/Users/jinchen/Projects/wechat-publisher"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/wechat-publisher-backend-blueprint.lisp"
@@ -320,9 +432,25 @@
       :checks ["bash .missiond/check.sh"]
       :missiond-role "registered independent app; WeChat Official Account article editor with Rust backend, versioned article store, and Next.js editing workspace"
       :surface project-registry)
+    (project :id problem-tutor
+      :aliases ["解题辅导" problem-solver tutor-visualizer "拍照解题"]
+      :kind rust-nextjs-service
+      :management-domain product-service-layer
+      :runtime-layer product-fullstack
+      :root "/Users/jinchen/Projects/problem-tutor"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/problem-tutor-backend-blueprint.lisp"
+      :frontend ".missiond/frontend/problem-tutor-frontend-blueprint.lisp"
+      :operations ".missiond/operations/problem-tutor-operations-blueprint.lisp"
+      :status project-ssot-owned
+      :checks ["bash .missiond/check.sh"]
+      :missiond-role "registered independent app; image-first AI problem solving tutor at problemwise.top with strict original-problem verification, XJP Router model orchestration, Search Center recovery, generated visualization, and quote-aware follow-up Q&A"
+      :surface project-registry)
     (project :id daily-spark
       :aliases ["每日一句" daily-spark-lovable]
       :kind vite-self-hosted-supabase-app
+      :management-domain product-service-layer
+      :runtime-layer product-fullstack
       :root "/Users/jinchen/Projects/daily-spark"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/daily-spark-backend-blueprint.lisp"

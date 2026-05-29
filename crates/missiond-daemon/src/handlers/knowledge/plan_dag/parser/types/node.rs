@@ -54,6 +54,26 @@ pub(in crate::handlers::knowledge) struct DagNode {
     pub owned_files_raw: Option<String>,
     pub forbidden_files_raw: Option<String>,
     pub acceptance_commands_raw: Option<String>,
+    /// Plan atomization / scheduling hints.
+    ///
+    /// `execution_order` is the human/agent-visible label for whether this
+    /// node is intended to run `serial` or `parallel`. Actual serial
+    /// execution is still enforced by `depends_on`; the label makes the
+    /// contract explicit for BoardTask metadata, UI, and checker output.
+    pub execution_order: Option<String>,
+    /// Stable sibling group for independent atom tasks that can run in
+    /// parallel. Serial nodes normally omit this and rely on `depends_on`.
+    pub parallel_group: Option<String>,
+    /// Recursive decomposition depth: plan step -> shard -> ring -> atom.
+    pub atom_level: Option<u32>,
+    /// Stable atom identifier used when lowering a plan node into BoardTask
+    /// runtime_metadata/task_contracts.
+    pub atom_task_id: Option<String>,
+    /// Raw Lisp-list form of the tool sequence the compiler predicts the
+    /// worker should need. Detours from this sequence become telemetry.
+    pub predicted_tool_sequence_raw: Option<String>,
+    /// Raw Lisp-list form of expected context/evidence sources for the atom.
+    pub context_sources_raw: Option<String>,
     /// wave-17 / task 03 — declarative acceptance evaluator hint.
     /// `:acceptance-mode "inner_status" | "manual" | "evidence_keys"`.
     /// Absent / blank / unrecognised values fall through to the default

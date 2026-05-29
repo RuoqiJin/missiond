@@ -229,6 +229,8 @@ function normalizeTypedMaturityInputs(payload, source) {
       projects.set(project.id, {
         id: project.id,
         kind: project.kind ?? null,
+        management_domain: project.management_domain ?? null,
+        runtime_layer: project.runtime_layer ?? null,
         root: project.root ?? null,
         path: project.path ?? null,
         intent: project.intent ?? null,
@@ -379,6 +381,8 @@ function parseProjectRegistry(node) {
     out.set(id, {
       id,
       kind: nodeText(props[':kind']?.value) ?? null,
+      management_domain: nodeText(props[':management-domain']?.value) ?? null,
+      runtime_layer: nodeText(props[':runtime-layer']?.value) ?? null,
       root: nodeText(props[':root']?.value) ?? null,
       path: nodeText(props[':path']?.value) ?? null,
       intent: nodeText(props[':intent']?.value) ?? null,
@@ -442,6 +446,8 @@ function assessProject(repoRoot, id, maturity, registry) {
     target: maturity.target,
     declared_gap: maturity.gap,
     registry_status: registry?.status ?? (id === 'missiond' ? 'code-aligned' : null),
+    management_domain: registry?.management_domain ?? (id === 'missiond' ? 'missiond-production-system' : null),
+    runtime_layer: registry?.runtime_layer ?? (id === 'missiond' ? 'control-plane' : null),
     global_gate_exempt: isGlobalGateExempt(registry),
     root,
     missiond_dir: projectMissiondDir(repoRoot, root, registry, id),

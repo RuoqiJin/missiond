@@ -248,6 +248,20 @@ pub(in crate::handlers::knowledge) fn build_internal_dispatch_args(
             if let Some(t) = args.get("timeout_secs").and_then(|v| v.as_i64()) {
                 inner["timeout_secs"] = json!(t);
             }
+            for key in [
+                "atom_task_id",
+                "atom_path",
+                "execution_order",
+                "dependency_policy",
+                "parallel_group",
+                "atom_level",
+                "predicted_tool_sequence",
+                "context_sources",
+            ] {
+                if let Some(value) = args.get(key) {
+                    inner[key] = value.clone();
+                }
+            }
             Ok(inner)
         }
         "mission_flow_run" => {

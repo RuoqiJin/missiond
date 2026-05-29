@@ -552,6 +552,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         target_project_root.as_deref(),
         parent_id.as_deref(),
     );
+    let runtime_metadata = merge_plan_atom_runtime_metadata(runtime_metadata, &args, &depends_on);
     let input = CreateBoardTaskInput {
         title: truncate_title(objective),
         description: Some(description),
@@ -2123,6 +2124,116 @@ fn enrich_runtime_metadata_with_control_facts(
         );
         dispatch.insert("sandbox_profile".to_string(), json!(sandbox_profile));
     }
+    metadata
+}
+
+fn merge_plan_atom_runtime_metadata(
+    mut metadata: Value,
+    args: &Value,
+    depends_on: &[String],
+) -> Value {
+    let has_dependencies = depends_on.iter().any(|value| !value.trim().is_empty());
+    let default_execution_order = if has_dependencies {
+        "serial"
+    } else {
+        "parallel"
+    };
+    let execution_order = string_arg(args, &["execution_order", "executionOrder"])
+        .unwrap_or(default_execution_order)
+        .trim()
+        .to_string();
+    let default_dependency_policy = if has_dependencies {
+        "depends_on_gate"
+    } else {
+        "independent_parallel_candidate"
+    };
+    let dependency_policy = string_arg(args, &["dependency_policy", "dependencyPolicy"])
+        .unwrap_or(default_dependency_policy)
+        .trim()
+        .to_string();
+    let parallel_group = string_arg(args, &["parallel_group", "parallelGroup"])
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    let atom_task_id = string_arg(args, &["atom_task_id", "atomTaskId"])
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let atom_path = string_arg(args, &["atom_path", "atomPath"])
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let atom_level = args
+        .get("atom_level")
+        .or_else(|| args.get("atomLevel"))
+        .and_then(Value::as_u64);
+    let predicted_tool_sequence = args
+        .get("predicted_tool_sequence")
+        .or_else(|| args.get("predictedToolSequence"))
+        .cloned();
+    let context_sources = args
+        .get("context_sources")
+        .or_else(|| args.get("contextSources"))
+        .cloned();
+
+    let mut atom_metadata = serde_json::Map::new();
+    if let Some(value) = atom_task_id {
+        atom_metadata.insert("atom_task_id".to_string(), json!(value));
+    }
+    if let Some(value) = atom_path {
+        atom_metadata.insert("atom_path".to_string(), json!(value));
+    }
+    if let Some(value) = atom_level {
+        atom_metadata.insert("atom_level".to_string(), json!(value));
+    }
+    if let Some(value) = predicted_tool_sequence {
+        atom_metadata.insert("predicted_tool_sequence".to_string(), value);
+    }
+    if let Some(value) = context_sources {
+        atom_metadata.insert("context_sources".to_string(), value);
+    }
+    if !atom_metadata.is_empty() {
+        atom_metadata.insert("schema".to_string(), json!("missiond.plan-atom-task.v1"));
+    }
+
+    if let Some(obj) = metadata.as_object_mut() {
+        obj.entry("execution_order".to_string())
+            .or_insert_with(|| json!(execution_order.clone()));
+        obj.entry("dependency_policy".to_string())
+            .or_insert_with(|| json!(dependency_policy.clone()));
+        if let Some(group) = &parallel_group {
+            obj.entry("parallel_group".to_string())
+                .or_insert_with(|| json!(group));
+        }
+        if !atom_metadata.is_empty() {
+            obj.entry("atom_metadata".to_string())
+                .or_insert_with(|| Value::Object(atom_metadata.clone()));
+        }
+    }
+
+    if let Some(dispatch) = metadata
+        .get_mut("dispatch_metadata")
+        .and_then(Value::as_object_mut)
+    {
+        dispatch
+            .entry("execution_order".to_string())
+            .or_insert_with(|| json!(execution_order.clone()));
+        dispatch
+            .entry("dependency_policy".to_string())
+            .or_insert_with(|| json!(dependency_policy.clone()));
+        if let Some(group) = parallel_group {
+            dispatch
+                .entry("parallel_group".to_string())
+                .or_insert_with(|| json!(group));
+        }
+        if !atom_metadata.is_empty() {
+            dispatch
+                .entry("atom_metadata".to_string())
+                .or_insert_with(|| Value::Object(atom_metadata));
+        }
+    }
+
     metadata
 }
 
@@ -5297,6 +5408,41 @@ data: {"type":"final","task_id":"t1","status":"done","at":"now"}
         assert!(!task_contract_references_parent(&contract, "parent-2"));
         assert!(task_contract_references_source(&contract, "source-1"));
         assert!(!task_contract_references_source(&contract, "source-2"));
+    }
+
+    #[test]
+    fn plan_atom_runtime_metadata_projects_execution_contract() {
+        let metadata =
+            delegation_runtime_metadata(&DelegationMetadata::default(), None, None, None);
+        let merged = merge_plan_atom_runtime_metadata(
+            metadata,
+            &json!({
+                "atom_task_id": "atom-a",
+                "atom_path": "step-1/shard-2/atom-3",
+                "atom_level": 3,
+                "execution_order": "parallel",
+                "dependency_policy": "independent_parallel_candidate",
+                "parallel_group": "grp-step-1",
+                "predicted_tool_sequence": ["rg", "read_file"],
+                "context_sources": ["SSOT", "project-registry"]
+            }),
+            &[],
+        );
+        assert_eq!(merged["execution_order"], "parallel");
+        assert_eq!(
+            merged["dependency_policy"],
+            "independent_parallel_candidate"
+        );
+        assert_eq!(merged["parallel_group"], "grp-step-1");
+        assert_eq!(
+            merged["atom_metadata"]["schema"],
+            "missiond.plan-atom-task.v1"
+        );
+        assert_eq!(merged["atom_metadata"]["atom_task_id"], "atom-a");
+        assert_eq!(
+            merged["dispatch_metadata"]["atom_metadata"]["predicted_tool_sequence"],
+            json!(["rg", "read_file"])
+        );
     }
 
     #[test]

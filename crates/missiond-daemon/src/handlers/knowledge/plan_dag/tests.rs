@@ -618,6 +618,12 @@ fn build_node_inner_args_for_task_delegate_uses_objective_and_cwd() {
         failure_policy: "fail-fast".into(),
         timeout_ms: Some(15_000),
         requested_cwd: Some("/abs/path".into()),
+        execution_order: Some("parallel".into()),
+        parallel_group: Some("group-a".into()),
+        atom_level: Some(3),
+        atom_task_id: Some("atom-1".into()),
+        predicted_tool_sequence_raw: Some(r#"["rg" "read_file"]"#.into()),
+        context_sources_raw: Some(r#"["SSOT" "project-registry"]"#.into()),
         ..Default::default()
     };
     let plan = fixture_plan("(plan)");
@@ -626,6 +632,13 @@ fn build_node_inner_args_for_task_delegate_uses_objective_and_cwd() {
     assert_eq!(inner["objective"], "ship a thing");
     assert_eq!(inner["cwd"], "/abs/path");
     assert_eq!(inner["timeout_secs"], 15);
+    assert_eq!(inner["execution_order"], "parallel");
+    assert_eq!(inner["parallel_group"], "group-a");
+    assert_eq!(inner["atom_level"], 3);
+    assert_eq!(inner["atom_task_id"], "atom-1");
+    assert_eq!(inner["atom_path"], "n1");
+    assert_eq!(inner["predicted_tool_sequence"], r#"["rg" "read_file"]"#);
+    assert_eq!(inner["context_sources"], r#"["SSOT" "project-registry"]"#);
 }
 
 #[test]
@@ -1788,6 +1801,57 @@ fn parse_node_form_captures_workstation_dispatch_contract() {
         assert!(
             !unsupported_keys.contains(&forbidden.to_string()),
             "key `{}` must land on a typed slot, not unsupported_fields",
+            forbidden
+        );
+    }
+}
+
+#[test]
+fn parse_node_form_captures_plan_atomization_contract() {
+    let sexp = r#"
+        (plan
+          (node :id "atom-1"
+                :target "mission_task_delegate"
+                :execution-order "parallel"
+                :parallel-group "gathering"
+                :atom-level 3
+                :atom-task-id "atom:gather:skill"
+                :predicted-tool-sequence ["mission_context_gather" "read_file"]
+                :context-sources ["ssot" "skill_evidence"]))
+    "#;
+    let parsed = parse_plan_dag(sexp);
+    assert_eq!(parsed.nodes.len(), 1);
+    let node = &parsed.nodes[0];
+    assert_eq!(node.execution_order.as_deref(), Some("parallel"));
+    assert_eq!(node.parallel_group.as_deref(), Some("gathering"));
+    assert_eq!(node.atom_level, Some(3));
+    assert_eq!(node.atom_task_id.as_deref(), Some("atom:gather:skill"));
+    assert!(node
+        .predicted_tool_sequence_raw
+        .as_deref()
+        .unwrap()
+        .contains("mission_context_gather"));
+    assert!(node
+        .context_sources_raw
+        .as_deref()
+        .unwrap()
+        .contains("skill_evidence"));
+    let unsupported_keys: Vec<String> = node
+        .unsupported_fields
+        .iter()
+        .map(|(k, _)| k.clone())
+        .collect();
+    for forbidden in [
+        "execution-order",
+        "parallel-group",
+        "atom-level",
+        "atom-task-id",
+        "predicted-tool-sequence",
+        "context-sources",
+    ] {
+        assert!(
+            !unsupported_keys.contains(&forbidden.to_string()),
+            "key `{}` must land on a typed atom slot",
             forbidden
         );
     }

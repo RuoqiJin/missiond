@@ -115,6 +115,32 @@ pub(super) fn build_node_inner_args(node: &DagNode, plan: &Plan) -> NodeInnerArg
         let secs = (t / 1000).max(1);
         node_args.insert("timeout_secs".to_string(), Value::Number(secs.into()));
     }
+    if let Some(value) = &node.execution_order {
+        node_args.insert("execution_order".to_string(), Value::String(value.clone()));
+    }
+    if let Some(value) = &node.parallel_group {
+        node_args.insert("parallel_group".to_string(), Value::String(value.clone()));
+    }
+    if let Some(value) = node.atom_level {
+        node_args.insert("atom_level".to_string(), Value::Number(value.into()));
+    }
+    if let Some(value) = &node.atom_task_id {
+        node_args.insert("atom_task_id".to_string(), Value::String(value.clone()));
+    } else if !node.id.trim().is_empty() {
+        node_args.insert("atom_task_id".to_string(), Value::String(node.id.clone()));
+    }
+    if !node.id.trim().is_empty() {
+        node_args.insert("atom_path".to_string(), Value::String(node.id.clone()));
+    }
+    if let Some(value) = &node.predicted_tool_sequence_raw {
+        node_args.insert(
+            "predicted_tool_sequence".to_string(),
+            Value::String(value.clone()),
+        );
+    }
+    if let Some(value) = &node.context_sources_raw {
+        node_args.insert("context_sources".to_string(), Value::String(value.clone()));
+    }
     let dispatch_strategy = node
         .dispatch_strategy
         .clone()

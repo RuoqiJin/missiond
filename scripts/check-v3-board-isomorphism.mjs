@@ -304,6 +304,13 @@ function checkFiles(root, files) {
     'references unknown BoardTask id',
     'parentId cannot reference the task itself',
     'dependsOn cannot reference the task itself',
+    'board_create_runtime_metadata',
+    'default_execution_order',
+    '"execution_order"',
+    '"dependency_policy"',
+    '"parallel_group"',
+    'depends_on_gate',
+    'independent_parallel_candidate',
     'ACTIVE_BOARD_SEARCH_STATUSES',
     'active_filter_applied',
     'historical_included',
@@ -321,7 +328,7 @@ function checkFiles(root, files) {
     "WHERE assignee LIKE 'slot-dyn-%'",
     "AND status = 'active'",
     'async fn set_board_task_lease',
-    "WHERE id = $3 AND status = 'running'",
+    "WHERE id = $2 AND status = 'running'",
     'async fn list_autopilot_tasks',
     'CASE WHEN assignee IS NOT NULL THEN 0 ELSE 1 END',
     'async fn check_dependencies',
@@ -623,7 +630,7 @@ COALESCE(timeout_secs, $2)
 WHERE assignee LIKE 'slot-dyn-%'
 AND status = 'active'
 async fn set_board_task_lease
-WHERE id = $3 AND status = 'running'
+WHERE id = $2 AND status = 'running'
 async fn list_autopilot_tasks
 CASE WHEN assignee IS NOT NULL THEN 0 ELSE 1 END
 async fn check_dependencies

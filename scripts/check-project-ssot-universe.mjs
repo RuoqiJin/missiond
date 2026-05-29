@@ -12,9 +12,11 @@ const usage = `Usage:
 Checks MissionD multi-project SSOT registry convergence:
   - OCaml typed universe projection names MissionD, Board, Forge, Part1 devtools,
     XJP services, PCEA, plus App + external-infra projects and independent
-    app projects search-center, palm-era, chat-translator, long-image-service,
-    and wechat-publisher.
+    app projects xiaojinpro-frontend, search-center, palm-era,
+    chat-translator, long-image-service, wechat-publisher, problem-tutor,
+    jinstudio, and daily-spark.
   - V3 service-runtime-universe exposes production service deployment facts.
+  - V3 service-layer-template standardizes new product-service-layer scaffolds.
   - project-ssot-convergence workflow exists.
   - XJP and PCEA local SSOT checkers pass; every Part1 devtools project executes
     its declared cheap/static project-local runner (jarvis and jarvis-forge run
@@ -25,6 +27,32 @@ Checks MissionD multi-project SSOT registry convergence:
 `;
 
 const COMPILED_UNIVERSE = '.missiond/v3/runtime/compiled/compiled-project-universe.json';
+const MANAGEMENT_DOMAINS = new Set([
+  'missiond-production-system',
+  'xiaojinpro-core-backend',
+  'xiaojinpro-platform-ops',
+  'xiaojinpro-client-surface',
+  'product-service-layer',
+  'brand-content-site',
+  'external-infra',
+]);
+const RUNTIME_LAYERS = new Set([
+  'control-plane-frontend',
+  'devtool',
+  'platform-monorepo',
+  'support-backend',
+  'ops-service',
+  'ops-agent',
+  'ops-tool',
+  'platform-frontend',
+  'mobile-client',
+  'public-content-site',
+  'brand-site',
+  'product-fullstack',
+  'product-api',
+  'product-frontend',
+  'external-infra-runtime',
+]);
 const PROJECT_CHECKERS = new Map([
   // JS owns execution policy for cheap/static local runners. OCaml owns project id/root/maturity facts.
   ['jarvis', ['bash', ['.missiond/check.sh']]],
@@ -41,14 +69,17 @@ const PROJECT_CHECKERS = new Map([
   ['asr', ['bash', ['.missiond/check.sh']]],
   ['search-center', ['bash', ['.missiond/check.sh']]],
   ['pcea', ['node', ['scripts/check-pcea-ssot-complete.mjs', '--json']]],
+  ['xiaojinpro-frontend', ['bash', ['.missiond/check.sh']]],
   ['secret-store', ['bash', ['.missiond/check.sh']]],
   ['xiaojin-blog', ['bash', ['.missiond/check.sh']]],
+  ['jinstudio', ['bash', ['.missiond/check.sh']]],
   ['cuthub', ['bash', ['.missiond/check.sh']]],
   ['legacy-refactor-service', ['node', ['scripts/check-legacy-refactor-ssot.mjs', '--json']]],
   ['palm-era', ['bash', ['.missiond/check.sh']]],
   ['chat-translator', ['bash', ['.missiond/check.sh']]],
   ['long-image-service', ['bash', ['.missiond/check.sh']]],
   ['wechat-publisher', ['bash', ['.missiond/check.sh']]],
+  ['problem-tutor', ['bash', ['.missiond/check.sh']]],
   ['daily-spark', ['bash', ['.missiond/check.sh']]],
 ]);
 
@@ -86,6 +117,53 @@ function main() {
 	    ':default-target M6',
 	    ':common-m5-to-m6-gap [domain-model policy-flow-event-split compatibility-ledger hot-path-wiring regression-matrix data-residency-declaration final-m6-report]',
 	    '(project-blueprint-registry',
+    '(project-management-taxonomy',
+    ':schema "missiond.project-management-taxonomy.v1"',
+    ':fields [management-domain runtime-layer]',
+    '(service-layer-template',
+    ':schema "missiond.service-layer-template.v1"',
+    ':id product-service-layer-standard',
+    ':operator-guide "docs/guides/product-service-layer-template.md"',
+    ':applies-to [product-service-layer]',
+    ':runtime-layers [product-fullstack product-api product-frontend]',
+    '(example :project palm-era :aliases ["椰岛纪元"] :shape product-fullstack)',
+    '(example :project search-center :aliases ["聚合搜索" "搜索中心"] :shape product-fullstack)',
+    '(example :project wechat-publisher :aliases [wepub "公众号发布"] :shape product-fullstack)',
+    '(example :project asr :aliases [ASR "语音识别"] :shape product-fullstack)',
+    '(example :project long-image-service :aliases ["长图"] :shape product-fullstack)',
+    '(example :project chat-translator :aliases ["chat翻译"] :shape product-fullstack)',
+    '(decision :id repo-placement',
+    ':root-pattern "/Users/jinchen/Projects/<project-id>"',
+    ':root-pattern "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/<service-id>"',
+    '(decision :id frontend-stack',
+    'Next.js 16 + React 19 + TypeScript + Tailwind 4',
+    '(decision :id backend-stack',
+    'Rust axum + sqlx + PostgreSQL',
+    '(auth-standard',
+    ':default-provider xjp-auth',
+    ':public-client-flow pkce',
+    'marker-cookie-gate',
+    'jwks-issuer',
+    '(payment-standard',
+    ':default-provider xjp-payments',
+    'product-code',
+    'entitlement-policy',
+    '(database-standard',
+    'Supabase session pooler port 5432',
+    '(secret-store-standard',
+    ':secret-path-pattern "projects/<project-id>/<environment>/<SECRET_NAME>"',
+    '(vercel-standard',
+    ':backend-entrypoint "backend/api/axum.rs"',
+    '(project-local-ssot-scaffold',
+    '.missiond/backend/<project-id>-backend-blueprint.lisp',
+    '(missiond-registration-scaffold',
+    ':management-domain product-service-layer',
+    ':default-maturity (:current M2 :target M6',
+    '(agent-bootstrap-flow',
+    'classify-product-service',
+    'configure-auth',
+    'configure-data-payment-secrets',
+    'register-missiond-universe',
     '(service-runtime-universe',
     ':schema "missiond.service-runtime-universe.v1"',
     '(service :id auth',
@@ -112,7 +190,8 @@ function main() {
     ':dns-record (:type A :name "jarvis.xiaojinpro.top" :content "34.104.147.118" :proxied false :ttl 60 :authority cloudflare)',
     ':deployment (:substrate gcp-caddy-edge :runtime-target gcp-runtime :origin "104.194.81.38:9876"',
     ':proxy (:kind caddy :domain "jarvis.xiaojinpro.top"',
-    ':health ["/api/monitor/jarvis" "/jarvis/api/monitor/jarvis"]',
+    ':routes ["/health" "/v1/*" "/api/monitor/jarvis" "/api/readiness" "/jarvis/*"]',
+    ':health ["/health" "/api/readiness" "/api/monitor/jarvis" "/jarvis/api/monitor/jarvis"]',
 	    '(data-residency-universe',
 	    ':schema "missiond.data-residency-universe.v1"',
 	    '(data-region-partition-contract',
@@ -142,6 +221,7 @@ function main() {
   ]);
   checkMaturityRegistry(diagnostics, typedUniverse.maturity);
   checkProjectMaturityCoverage(diagnostics, typedUniverse.projects, typedUniverse.maturity);
+  checkProjectTaxonomy(diagnostics, typedUniverse.projects);
 
 	  requireExistingText(diagnostics, '/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/auth/.missiond/intent.lisp', [
 	    '(intent auth-center',
@@ -177,6 +257,19 @@ function main() {
       'verify-and-report',
     ]);
   }
+
+  requireExistingText(diagnostics, 'docs/guides/product-service-layer-template.md', [
+    'Product Service Layer Template',
+    'management-domain=product-service-layer',
+    'Next.js 16 + React 19 + TypeScript + Tailwind 4',
+    'Rust axum + sqlx + PostgreSQL',
+    'XJP Auth with PKCE',
+    'shared payments service',
+    'Supabase Postgres through session pooler port `5432`',
+    'projects/<project-id>/<environment>/<SECRET_NAME>',
+    'experimentalServices',
+    '.missiond/v3/shards/universe/project-registry.lisp',
+  ]);
 
   const checkerResults = [];
   const behaviorClosureResults = [];
@@ -361,6 +454,8 @@ function normalizeTypedUniversePayload(payload, source) {
   const projects = rawProjects.map((project) => ({
     id: project.id,
     kind: project.kind ?? null,
+    management_domain: project.management_domain ?? null,
+    runtime_layer: project.runtime_layer ?? null,
     root: project.root ?? null,
     status: project.status ?? null,
     checks: Array.isArray(project.checks) ? project.checks : [],
@@ -372,6 +467,33 @@ function normalizeTypedUniversePayload(payload, source) {
     gap: Array.isArray(entry.gap) ? entry.gap : [],
   })).filter((entry) => entry.id);
   return { source, projects, maturity, diagnostics };
+}
+
+function checkProjectTaxonomy(diagnostics, projects) {
+  for (const project of projects) {
+    if (!project.management_domain) {
+      diagnostics.push({
+        file: '.missiond/v3/shards/universe/project-registry.lisp',
+        message: `project ${project.id} missing :management-domain`,
+      });
+    } else if (!MANAGEMENT_DOMAINS.has(project.management_domain)) {
+      diagnostics.push({
+        file: '.missiond/v3/shards/universe/project-registry.lisp',
+        message: `project ${project.id} has unknown management domain ${project.management_domain}`,
+      });
+    }
+    if (!project.runtime_layer) {
+      diagnostics.push({
+        file: '.missiond/v3/shards/universe/project-registry.lisp',
+        message: `project ${project.id} missing :runtime-layer`,
+      });
+    } else if (!RUNTIME_LAYERS.has(project.runtime_layer)) {
+      diagnostics.push({
+        file: '.missiond/v3/shards/universe/project-registry.lisp',
+        message: `project ${project.id} has unknown runtime layer ${project.runtime_layer}`,
+      });
+    }
+  }
 }
 
 function checkMaturityRegistry(diagnostics, maturityEntries) {

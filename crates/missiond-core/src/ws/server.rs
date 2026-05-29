@@ -247,7 +247,13 @@ struct JarvisCodexIntentResponse {
 struct JarvisCodexPlanResponse {
     objective: String,
     review_text: String,
+    execution_mode: String,
+    requires_board_task: bool,
     steps: Vec<String>,
+    #[serde(default)]
+    answer_policy: Option<String>,
+    #[serde(default)]
+    provider_hint: Option<String>,
     #[serde(default)]
     boundary: Option<String>,
     #[serde(default)]
@@ -277,13 +283,38 @@ struct JarvisAuthoredIntentDraft {
 struct JarvisAuthoredPlanDraft {
     objective: String,
     review_text: String,
+    execution_mode: String,
+    requires_board_task: bool,
     artifact_body: String,
     steps: Vec<String>,
+    answer_policy: Option<String>,
+    provider_hint: Option<String>,
     boundary: Option<String>,
     assumptions: Vec<String>,
     non_goals: Vec<String>,
     acceptance_signals: Vec<String>,
     confidence: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+enum XjpcodeTextOnlyFrame {
+    Accepted {
+        #[serde(default, rename = "provider")]
+        _provider: Option<String>,
+    },
+    TextDelta {
+        content: String,
+    },
+    Diagnostic {
+        code: String,
+        message: String,
+    },
+    Final {
+        status: String,
+        #[serde(default, rename = "provider")]
+        _provider: Option<String>,
+    },
 }
 
 #[derive(Clone, Default)]
@@ -3160,6 +3191,10 @@ impl PTYWebSocketServer {
                 "intent_artifact_id": intent_artifact_id,
                 "objective": plan_objective_text,
                 "review_text": plan_review_text,
+                "execution_mode": authored_plan.execution_mode,
+                "requires_board_task": authored_plan.requires_board_task,
+                "answer_policy": authored_plan.answer_policy,
+                "provider_hint": authored_plan.provider_hint,
                 "artifact_language": "lisp",
                 "artifact_body": plan_artifact_body,
                 "steps": plan_steps,
@@ -3269,6 +3304,14 @@ impl PTYWebSocketServer {
                     "missiond_grounding_context_id": grounding_context_id,
                     "missiond_intent_artifact_id": intent_artifact_id,
                     "missiond_plan_artifact_id": plan_artifact_id,
+                    "missiond_execution_mode": plan
+                        .get("execution_mode")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("work_order"),
+                    "missiond_requires_board_task": plan
+                        .get("requires_board_task")
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(true),
                 }
             });
             Self::write_sse_event(&mut stream, "confirm_required", &confirm).await?;
@@ -3308,6 +3351,80 @@ impl PTYWebSocketServer {
                 }
             }
         };
+
+        let execution_mode = interaction_metadata_string(&envelope, "missiond_execution_mode")
+            .unwrap_or_else(|| "work_order".to_string())
+            .to_ascii_lowercase();
+        if execution_mode == "grounded_direct_answer" {
+            if interaction_metadata_bool(&envelope, "missiond_requires_board_task") {
+                Self::fail_jarvis_gate_visible(
+                    &mut stream,
+                    &jarvis_progress_bus,
+                    &chat_id,
+                    Some(&interaction_id),
+                    "plan.lisp declared grounded_direct_answer but missiond_requires_board_task=true; refusing ambiguous execution.",
+                    "execution_mode",
+                    db.as_ref(),
+                    jarvis_conv_id.as_deref(),
+                )
+                .await?;
+                return Ok(());
+            }
+            Self::persist_jarvis_confirmation_fulfilled(
+                db.as_ref(),
+                jarvis_conv_id.as_deref(),
+                "plan",
+            )
+            .await;
+            if let Err(error) = Self::stream_jarvis_grounded_direct_answer(
+                &mut stream,
+                &jarvis_progress_bus,
+                &jarvis_artifact_writer,
+                &chat_id,
+                Some(&interaction_id),
+                &objective_text,
+                &grounding_context_id,
+                context_pack_path.as_deref(),
+                context_pack_file.as_deref(),
+                &intent_artifact_id,
+                &plan_artifact_id,
+                &permission_context,
+                &sources_used,
+                db.as_ref(),
+                jarvis_conv_id.as_deref(),
+            )
+            .await
+            {
+                Self::fail_jarvis_gate_visible(
+                    &mut stream,
+                    &jarvis_progress_bus,
+                    &chat_id,
+                    Some(&interaction_id),
+                    error.to_string(),
+                    "grounded_direct_answer",
+                    db.as_ref(),
+                    jarvis_conv_id.as_deref(),
+                )
+                .await?;
+                return Ok(());
+            }
+            Self::finish_sse(&mut stream).await?;
+            return Ok(());
+        }
+        if !matches!(execution_mode.as_str(), "work_order" | "investigation_only") {
+            Self::fail_jarvis_gate_visible(
+                &mut stream,
+                &jarvis_progress_bus,
+                &chat_id,
+                Some(&interaction_id),
+                format!("Unsupported Jarvis execution_mode: {execution_mode}"),
+                "execution_mode",
+                db.as_ref(),
+                jarvis_conv_id.as_deref(),
+            )
+            .await?;
+            return Ok(());
+        }
 
         let Some(ref db) = db else {
             Self::write_sse_event(
@@ -4159,8 +4276,10 @@ impl PTYWebSocketServer {
             "step": step,
             "status": status,
             "message": message,
+            "text": message,
             "visible": true,
-            "openai_delta": true,
+            "ui_surface": "progress_timeline",
+            "openai_delta": false,
         });
         if let Some(object) = payload.as_object_mut() {
             if let Some(elapsed_secs) = elapsed_secs {
@@ -4210,7 +4329,12 @@ impl PTYWebSocketServer {
             );
         }
         Self::write_sse_event(stream, "status", &event_payload).await?;
-        Self::write_sse_openai_text(stream, chat_id, &format!("{message}\n"), None).await?;
+        if std::env::var("MISSIOND_JARVIS_PROGRESS_OPENAI_DELTA")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+        {
+            Self::write_sse_openai_text(stream, chat_id, &format!("{message}\n"), None).await?;
+        }
         Ok(())
     }
 
@@ -4467,12 +4591,16 @@ JSON 字段必须是：\n\
         format!(
             "你是 MissionD 的 Jarvis plan.lisp 语义作者，运行在 Codex CLI GPT-5.5 xhigh headless 工位。\n\
 任务：基于已确认的 intent.lisp 目标，生成可供用户确认的 plan draft。不要创建 BoardTask、不要派工位、不要执行实现、不要改文件。\n\
-计划必须只描述 MissionD 在用户确认 plan 后会如何创建可追踪 BoardTask、选择工位、等待 task-result-artifact，不得假装任务已经完成。\n\
+计划必须声明用户确认 plan 后的 execution_mode。现阶段即使是聊天/问答也必须先经过 intent.lisp 和 plan.lisp，但简单问答应选择 grounded_direct_answer，不应污染 BoardTask。\n\
 只返回一个严格 JSON object，不要 Markdown，不要代码围栏，不要额外解释。JSON key 必须使用双引号。\n\
 JSON 字段必须是：\n\
   objective: string，必须等同或更保守地表达已确认意图，不要扩大范围。\n\
-  review_text: string，给用户看的审阅摘要，必须说明边界：确认 plan 后才创建 BoardTask，结果以 task-result-artifact 为准。\n\
+  review_text: string，给用户看的审阅摘要，必须说明边界：确认 plan 后才会进入 execution_mode 指定路径，结果以 artifact 为准。\n\
+  execution_mode: string，只能是 grounded_direct_answer、work_order、investigation_only 三者之一。普通问答/解释/身份确认/状态说明选 grounded_direct_answer；需要改代码、部署、长期运行或多工位任务选 work_order；只读调查但需要工位证据选 investigation_only。\n\
+  requires_board_task: boolean。grounded_direct_answer 必须是 false；work_order 和 investigation_only 必须是 true。\n\
   steps: string[]，2 到 6 个中文步骤，每步是可审阅的计划动作，不是执行结果。\n\
+  answer_policy: string，说明直接回答或工位结果如何使用 grounding sources；grounded_direct_answer 时必须说明使用 xjpcode text-only 且不调用工具/不改文件。\n\
+  provider_hint: string，例如 xjpcode-text-only、codex-review-worker、claude-code-default。\n\
   boundary: string，计划确认边界和不执行承诺。\n\
   assumptions: string[]，你做出的假设。\n\
   non_goals: string[]，明确不做什么。\n\
@@ -4722,6 +4850,7 @@ JSON 字段必须是：\n\
         let json_text = Self::extract_json_object(text)
             .ok_or_else(|| anyhow::anyhow!("Codex plan author did not return a JSON object"))?;
         let mut parsed: JarvisCodexPlanResponse = serde_json::from_str(json_text)?;
+        parsed.execution_mode = parsed.execution_mode.trim().to_ascii_lowercase();
         parsed.steps = parsed
             .steps
             .into_iter()
@@ -4730,9 +4859,31 @@ JSON 字段必须是：\n\
             .collect();
         if parsed.objective.trim().is_empty()
             || parsed.review_text.trim().is_empty()
+            || parsed.execution_mode.trim().is_empty()
             || parsed.steps.is_empty()
         {
             anyhow::bail!("Codex plan author returned an incomplete plan draft");
+        }
+        match parsed.execution_mode.as_str() {
+            "grounded_direct_answer" => {
+                if parsed.requires_board_task {
+                    anyhow::bail!("grounded_direct_answer plan must set requires_board_task=false");
+                }
+            }
+            "work_order" | "investigation_only" => {
+                if !parsed.requires_board_task {
+                    anyhow::bail!(
+                        "{} plan must set requires_board_task=true",
+                        parsed.execution_mode
+                    );
+                }
+            }
+            other => {
+                anyhow::bail!(
+                    "Codex plan author returned unsupported execution_mode: {}",
+                    other
+                );
+            }
         }
         Ok(parsed)
     }
@@ -4994,7 +5145,7 @@ JSON 字段必须是：\n\
             .collect::<Vec<_>>()
             .join("\n");
         format!(
-            "(plan-draft\n  :schema {}\n  :authority codex-cli-gpt-5.5-xhigh\n  :semantic-author (:engine codex-cli :slot-id {} :model {} :reasoning-effort xhigh :sandbox {} :approval-policy {})\n  :channel {}\n  :objective {}\n  :confidence {}\n  :grounding-context-id {}\n  :intent-artifact-id {}\n  :topic-id {}\n  :topic-label {}\n  :sources-used {}\n  :execution\n    (:create-board-task-after-plan-confirmation true\n     :worker-dispatch-after-board-task true\n     :completion-authority task-result-artifact)\n  :steps [\n{}\n  ]\n  :boundary {}\n  :assumptions {}\n  :non-goals {}\n  :acceptance-signals {}\n  :approval (:state awaiting-plan-confirmation :required true))",
+            "(plan-draft\n  :schema {}\n  :authority codex-cli-gpt-5.5-xhigh\n  :semantic-author (:engine codex-cli :slot-id {} :model {} :reasoning-effort xhigh :sandbox {} :approval-policy {})\n  :channel {}\n  :objective {}\n  :confidence {}\n  :grounding-context-id {}\n  :intent-artifact-id {}\n  :topic-id {}\n  :topic-label {}\n  :sources-used {}\n  :execution\n    (:mode {}\n     :requires-board-task {}\n     :answer-policy {}\n     :provider-hint {}\n     :direct-answer-provider xjpcode-text-only\n     :completion-authority {})\n  :steps [\n{}\n  ]\n  :boundary {}\n  :assumptions {}\n  :non-goals {}\n  :acceptance-signals {}\n  :approval (:state awaiting-plan-confirmation :required true))",
             Self::jarvis_lisp_string(schema),
             Self::jarvis_lisp_string(&config.slot_id),
             Self::jarvis_lisp_string(&config.model),
@@ -5008,6 +5159,19 @@ JSON 字段必须是：\n\
             Self::jarvis_lisp_optional(topic_id),
             Self::jarvis_lisp_optional(topic_label),
             Self::jarvis_lisp_string_list(sources_used),
+            draft.execution_mode.replace('_', "-"),
+            if draft.requires_board_task {
+                "true"
+            } else {
+                "false"
+            },
+            Self::jarvis_lisp_optional(draft.answer_policy.as_deref()),
+            Self::jarvis_lisp_optional(draft.provider_hint.as_deref()),
+            if draft.requires_board_task {
+                "task-result-artifact"
+            } else {
+                "interaction-result-artifact"
+            },
             rendered_steps,
             Self::jarvis_lisp_optional(draft.boundary.as_deref()),
             Self::jarvis_lisp_string_list(&draft.assumptions),
@@ -5057,8 +5221,12 @@ JSON 字段必须是：\n\
         Ok(JarvisAuthoredPlanDraft {
             objective: parsed.objective.trim().to_string(),
             review_text: parsed.review_text.trim().to_string(),
+            execution_mode: parsed.execution_mode.clone(),
+            requires_board_task: parsed.requires_board_task,
             artifact_body,
             steps: parsed.steps,
+            answer_policy: parsed.answer_policy,
+            provider_hint: parsed.provider_hint,
             boundary: parsed.boundary,
             assumptions: parsed.assumptions,
             non_goals: parsed.non_goals,
@@ -5525,6 +5693,301 @@ JSON 字段必须是：\n\
                 Ok(result)
             }
         })
+    }
+
+    fn jarvis_direct_answer_endpoint() -> Option<String> {
+        for key in [
+            "MISSIOND_XJPCODE_TEXT_ONLY_URL",
+            "MISSIOND_XJPCODE_TEXT_ONLY_ENDPOINT",
+        ] {
+            if let Ok(value) = std::env::var(key) {
+                let trimmed = value.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+        }
+        std::env::var("MISSIOND_XJPCODE_BASE_URL")
+            .ok()
+            .map(|value| value.trim().trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty())
+            .map(|base| format!("{base}/provider/v1/text-only/completions"))
+    }
+
+    fn jarvis_direct_answer_provider() -> String {
+        std::env::var("MISSIOND_JARVIS_DIRECT_ANSWER_PROVIDER")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "router".to_string())
+    }
+
+    fn jarvis_direct_answer_timeout_secs() -> u64 {
+        std::env::var("MISSIOND_JARVIS_DIRECT_ANSWER_TIMEOUT_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(120)
+            .clamp(10, 600)
+    }
+
+    async fn read_jarvis_context_preview(context_pack_file: Option<&str>) -> Option<String> {
+        const MAX_CONTEXT_CHARS: usize = 16_000;
+        let path = context_pack_file?.trim();
+        if path.is_empty() || path.starts_with("shared-artifact://") {
+            return None;
+        }
+        let content = tokio::fs::read_to_string(path).await.ok()?;
+        Some(content.chars().take(MAX_CONTEXT_CHARS).collect::<String>())
+    }
+
+    fn build_jarvis_direct_answer_prompt(
+        objective: &str,
+        grounding_context_id: &str,
+        context_pack_path: Option<&str>,
+        context_pack_file: Option<&str>,
+        context_preview: Option<&str>,
+        intent_artifact_id: &str,
+        plan_artifact_id: &str,
+        permission_context: &serde_json::Value,
+        sources_used: &[String],
+    ) -> (String, String) {
+        let system_prompt = "你是 MissionD Jarvis 的 grounded direct-answer materializer。你只能基于随请求提供的 grounding context、PermissionContext、sources_used、intent/plan artifact 生成自然语言回答。不要调用工具，不要读取文件，不要声称已创建 BoardTask，不要编造没有证据的事实。若证据不足，直接说明证据不足并列出还缺什么。".to_string();
+        let payload = serde_json::json!({
+            "schema": "missiond.jarvis-grounded-direct-answer-input.v1",
+            "objective": objective,
+            "grounding_context_id": grounding_context_id,
+            "context_pack_path": context_pack_path,
+            "context_pack_file": context_pack_file,
+            "context_preview": context_preview,
+            "intent_artifact_id": intent_artifact_id,
+            "plan_artifact_id": plan_artifact_id,
+            "permission_context": permission_context,
+            "sources_used": sources_used,
+            "answer_contract": {
+                "must_use_grounding": true,
+                "must_not_create_board_task": true,
+                "must_not_claim_tool_execution": true,
+                "must_report_evidence": true
+            }
+        });
+        let prompt = format!(
+            "请基于以下 MissionD grounding payload 给用户一个直接回答。回答要简洁，但必须说明依据来自哪些 MissionD sources；如果用户问身份/你是谁，要分别说明 Jarvis/MissionD 的身份和 PermissionContext 中可确认的用户信息。\n\n{}",
+            serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
+        );
+        (system_prompt, prompt)
+    }
+
+    async fn stream_jarvis_grounded_direct_answer(
+        stream: &mut TcpStream,
+        progress_bus: &JarvisProgressBus,
+        artifact_writer: &JarvisArtifactSlot,
+        chat_id: &str,
+        interaction_id: Option<&str>,
+        objective: &str,
+        grounding_context_id: &str,
+        context_pack_path: Option<&str>,
+        context_pack_file: Option<&str>,
+        intent_artifact_id: &str,
+        plan_artifact_id: &str,
+        permission_context: &serde_json::Value,
+        sources_used: &[String],
+        db: Option<&Arc<dyn crate::db::traits::MissionStore>>,
+        conversation_id: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let Some(endpoint) = Self::jarvis_direct_answer_endpoint() else {
+            anyhow::bail!("MISSIOND_XJPCODE_TEXT_ONLY_URL or MISSIOND_XJPCODE_BASE_URL is required for grounded_direct_answer; refusing to create a BoardTask fallback.");
+        };
+        let provider = Self::jarvis_direct_answer_provider();
+        let timeout_secs = Self::jarvis_direct_answer_timeout_secs();
+        Self::write_jarvis_progress(
+            stream,
+            progress_bus,
+            chat_id,
+            interaction_id,
+            "direct_answer",
+            "xjpcode_text_only_start",
+            "running",
+            "plan 已确认为 grounded_direct_answer，正在调用 xjpcode text-only 生成直接回答，不创建 BoardTask。",
+            None,
+            None,
+            Some("xjpcode-text-only"),
+        )
+        .await?;
+
+        let context_preview = Self::read_jarvis_context_preview(context_pack_file).await;
+        let (system_prompt, prompt) = Self::build_jarvis_direct_answer_prompt(
+            objective,
+            grounding_context_id,
+            context_pack_path,
+            context_pack_file,
+            context_preview.as_deref(),
+            intent_artifact_id,
+            plan_artifact_id,
+            permission_context,
+            sources_used,
+        );
+        let body = serde_json::json!({
+            "provider": &provider,
+            "prompt": prompt,
+            "system_prompt": system_prompt,
+            "model": std::env::var("MISSIOND_JARVIS_DIRECT_ANSWER_MODEL").ok(),
+            "timeout_secs": timeout_secs
+        });
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(timeout_secs + 5))
+            .build()?;
+        let response = client
+            .post(&endpoint)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| anyhow::anyhow!("JARVIS_DIRECT_ANSWER_PROVIDER_UNAVAILABLE: {err}"))?;
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "JARVIS_DIRECT_ANSWER_PROVIDER_FAILED: xjpcode text-only endpoint returned {}",
+                response.status()
+            );
+        }
+
+        let mut answer = String::new();
+        let mut saw_final = false;
+        let response_text = response
+            .text()
+            .await
+            .map_err(|err| anyhow::anyhow!("JARVIS_DIRECT_ANSWER_STREAM_FAILED: {err}"))?;
+        for line in response_text.lines().map(str::trim) {
+            if !line.starts_with("data:") {
+                continue;
+            }
+            let data = line.trim_start_matches("data:").trim();
+            if data.is_empty() {
+                continue;
+            }
+            let frame: XjpcodeTextOnlyFrame = serde_json::from_str(data)
+                .map_err(|err| anyhow::anyhow!("JARVIS_DIRECT_ANSWER_BAD_FRAME: {err}: {data}"))?;
+            match frame {
+                XjpcodeTextOnlyFrame::Accepted { .. } => {
+                    Self::write_sse_event(
+                        stream,
+                        "worker_status",
+                        &serde_json::json!({
+                            "phase": "direct_answer",
+                            "provider": &provider,
+                            "status": "accepted",
+                            "terminal_task_result": false,
+                        }),
+                    )
+                    .await?;
+                }
+                XjpcodeTextOnlyFrame::TextDelta { content } => {
+                    answer.push_str(&content);
+                    Self::write_sse_event(
+                        stream,
+                        "answer_delta",
+                        &serde_json::json!({
+                            "phase": "direct_answer",
+                            "provider": &provider,
+                            "content": content.clone(),
+                        }),
+                    )
+                    .await?;
+                    Self::write_sse_openai_text(stream, chat_id, &content, None).await?;
+                }
+                XjpcodeTextOnlyFrame::Diagnostic { code, message } => {
+                    Self::write_sse_event(
+                        stream,
+                        "diagnostic",
+                        &serde_json::json!({
+                            "phase": "direct_answer",
+                            "error": {"code": code, "message": message},
+                        }),
+                    )
+                    .await?;
+                }
+                XjpcodeTextOnlyFrame::Final { status, .. } => {
+                    saw_final = true;
+                    if status != "completed" {
+                        anyhow::bail!(
+                            "JARVIS_DIRECT_ANSWER_PROVIDER_FAILED: xjpcode final status={status}"
+                        );
+                    }
+                }
+            }
+        }
+        if !saw_final {
+            anyhow::bail!("JARVIS_DIRECT_ANSWER_NO_FINAL: xjpcode stream ended without final");
+        }
+        if answer.trim().is_empty() {
+            anyhow::bail!("JARVIS_DIRECT_ANSWER_EMPTY: xjpcode returned no visible answer");
+        }
+
+        Self::persist_jarvis_visible_assistant_message(db, conversation_id, &answer).await;
+        let payload = serde_json::json!({
+            "schema": "missiond.interaction-result-artifact.v1",
+            "kind": "grounded-direct-answer",
+            "interaction_id": interaction_id,
+            "objective": objective,
+            "grounding_context_id": grounding_context_id,
+            "context_pack_path": context_pack_path,
+            "context_pack_file": context_pack_file,
+            "intent_artifact_id": intent_artifact_id,
+            "plan_artifact_id": plan_artifact_id,
+            "provider": &provider,
+            "answer_text": answer,
+            "sources_used": sources_used,
+            "terminal_task_result": true,
+            "board_task_created": false,
+        });
+        let artifact = Self::put_jarvis_artifact(
+            artifact_writer,
+            JarvisArtifactRequest {
+                kind: "interaction-direct-answer".to_string(),
+                project_id: None,
+                task_id: None,
+                payload: payload.clone(),
+                metadata: serde_json::json!({
+                    "schema": "missiond.interaction-result-artifact.v1",
+                    "interaction_id": interaction_id,
+                    "grounding_context_id": grounding_context_id,
+                    "intent_artifact_id": intent_artifact_id,
+                    "plan_artifact_id": plan_artifact_id,
+                    "execution_mode": "grounded_direct_answer",
+                }),
+            },
+        )
+        .await
+        .map_err(|err| anyhow::anyhow!("JARVIS_DIRECT_ANSWER_ARTIFACT_FAILED: {err}"))?;
+        Self::write_sse_event(
+            stream,
+            "result_artifact",
+            &serde_json::json!({
+                "phase": "result_ready",
+                "interaction_id": interaction_id,
+                "artifact_id": &artifact.artifact_id,
+                "artifact_hash": &artifact.artifact_hash,
+                "artifact_path": &artifact.path,
+                "execution_mode": "grounded_direct_answer",
+                "terminal_task_result": true,
+                "board_task_created": false,
+            }),
+        )
+        .await?;
+        Self::write_sse_event(
+            stream,
+            "final",
+            &serde_json::json!({
+                "phase": "done",
+                "interaction_id": interaction_id,
+                "status": "done",
+                "execution_mode": "grounded_direct_answer",
+                "terminal_task_result": true,
+                "result_artifact_id": &artifact.artifact_id,
+                "result_artifact_hash": &artifact.artifact_hash,
+            }),
+        )
+        .await?;
+        Self::write_sse_openai_text(stream, chat_id, "", Some("stop")).await?;
+        Ok(())
     }
 
     async fn stream_jarvis_task_until_terminal(
@@ -6627,8 +7090,21 @@ JSON 字段必须是：\n\
             Self::send_http_error(&mut stream, 400, "Bad Request", &err.to_string()).await?;
             return Ok(());
         }
-        let conversation_scope =
-            conversation_scope_from_request(&req, "jarvis_sse", &raw_user_text);
+        let auth_envelope = openai_request_to_interaction_envelope(&req);
+        let auth_resolution = match resolve_interaction_auth(&auth_envelope, &headers).await {
+            Ok(resolution) => resolution,
+            Err((status, reason, body)) => {
+                Self::send_http_error(&mut stream, status, reason, &body.to_string()).await?;
+                return Ok(());
+            }
+        };
+        let permission_context = auth_resolution.permission_context;
+        let conversation_scope = conversation_scope_from_permission(
+            &auth_envelope,
+            &permission_context,
+            "jarvis",
+            &raw_user_text,
+        );
 
         let exact_shard_ready = req
             .get("exact_shard_ready")
@@ -6739,14 +7215,7 @@ JSON 字段必须是：\n\
                     channel: Some(conversation_scope.channel.clone()),
                     topic_id: conversation_scope.topic_id.clone(),
                     topic_label: conversation_scope.topic_label.clone(),
-                    permission_context: serde_json::json!({
-                        "resolution": "openai-chat-completions",
-                        "user_id": conversation_scope.user_id.clone(),
-                        "tenant_id": conversation_scope.tenant_id.clone(),
-                        "application_id": conversation_scope.application_id.clone(),
-                        "channel": conversation_scope.channel.clone(),
-                        "capabilities": ["worker:dispatch"]
-                    }),
+                    permission_context: permission_context.clone(),
                     unknowns: vec![
                         "What project, skill, deploy fact, or tool context is needed before dispatch?"
                             .to_string(),
@@ -6829,7 +7298,7 @@ JSON 字段必须是：\n\
                 resolved_topic_id.as_deref(),
                 resolved_topic_label.as_deref(),
                 &sources_used,
-                None,
+                Some(&permission_context),
             )
             .await
             {
@@ -7045,6 +7514,10 @@ JSON 字段必须是：\n\
                 "intent_artifact_id": intent_artifact_id,
                 "objective": objective_text,
                 "review_text": plan_review_text,
+                "execution_mode": authored_plan.execution_mode,
+                "requires_board_task": authored_plan.requires_board_task,
+                "answer_policy": authored_plan.answer_policy,
+                "provider_hint": authored_plan.provider_hint,
                 "artifact_language": "lisp",
                 "artifact_body": plan_artifact_body,
                 "steps": plan_steps,
@@ -7108,16 +7581,33 @@ JSON 字段必须是：\n\
                     &plan_artifact_path,
                 )
                 .await?;
+                let plan_confirm_message = if authored_plan
+                    .execution_mode
+                    .eq_ignore_ascii_case("grounded_direct_answer")
+                    && !authored_plan.requires_board_task
+                {
+                    "请确认 plan.lisp。确认后我会基于 grounding 和权限上下文生成直接回答，不创建 BoardTask。"
+                } else {
+                    "请确认 plan.lisp。确认后我会创建 BoardTask 并派工位，不会让主控直接做实现。"
+                };
                 let confirm = serde_json::json!({
                     "phase": "awaiting_plan_confirmation",
-                    "message": "请确认 plan.lisp。确认后我会创建 BoardTask 并派工位，不会让主控直接做实现。",
+                    "message": plan_confirm_message,
                     "confirm_payload": {
                         "missiond_intent_confirmed": true,
                         "missiond_plan_confirmed": true,
                         "missiond_objective": objective_text,
                         "missiond_grounding_context_id": grounding_context_id,
                         "missiond_intent_artifact_id": intent_artifact_id,
-                        "missiond_plan_artifact_id": plan_artifact_id
+                        "missiond_plan_artifact_id": plan_artifact_id,
+                        "missiond_execution_mode": plan
+                            .get("execution_mode")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("work_order"),
+                        "missiond_requires_board_task": plan
+                            .get("requires_board_task")
+                            .and_then(|value| value.as_bool())
+                            .unwrap_or(true)
                     }
                 });
                 Self::write_sse_event(&mut stream, "confirm_required", &confirm).await?;
@@ -7137,6 +7627,60 @@ JSON 字段必须是：\n\
                 )
                 .await?;
                 Self::finish_sse(&mut stream).await?;
+                return Ok(());
+            }
+
+            let execution_mode = jarvis_confirm_string(&req, "missiond_execution_mode")
+                .unwrap_or_else(|| "work_order".to_string())
+                .to_ascii_lowercase();
+            if execution_mode == "grounded_direct_answer" {
+                if jarvis_confirm_bool(&req, "missiond_requires_board_task") {
+                    Self::fail_jarvis_gate(
+                        &mut stream,
+                        "plan.lisp declared grounded_direct_answer but missiond_requires_board_task=true; refusing ambiguous execution.",
+                        "execution_mode",
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                let legacy_progress_bus = JarvisProgressBus::default();
+                if let Err(error) = Self::stream_jarvis_grounded_direct_answer(
+                    &mut stream,
+                    &legacy_progress_bus,
+                    &jarvis_artifact_writer,
+                    &chat_id,
+                    None,
+                    &objective_text,
+                    &grounding_context_id,
+                    context_pack_path.as_deref(),
+                    context_pack_file.as_deref(),
+                    &intent_artifact_id,
+                    &plan_artifact_id,
+                    &permission_context,
+                    &sources_used,
+                    db.as_ref(),
+                    jarvis_conv_id.as_deref(),
+                )
+                .await
+                {
+                    Self::fail_jarvis_gate(
+                        &mut stream,
+                        error.to_string(),
+                        "grounded_direct_answer",
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                Self::finish_sse(&mut stream).await?;
+                return Ok(());
+            }
+            if !matches!(execution_mode.as_str(), "work_order" | "investigation_only") {
+                Self::fail_jarvis_gate(
+                    &mut stream,
+                    format!("Unsupported Jarvis execution_mode: {execution_mode}"),
+                    "execution_mode",
+                )
+                .await?;
                 return Ok(());
             }
 
@@ -9671,12 +10215,49 @@ done"#;
     #[test]
     fn jarvis_codex_plan_response_parses_from_wrapped_output() {
         let output = r#"noise
-{"objective":"修复 plan.lisp 作者链路","review_text":"目标: 修复 plan.lisp 作者链路\n边界: 确认 plan 后才创建 BoardTask。","steps":["确认已批准 intent","生成 Codex-authored plan.lisp","等待用户确认 plan"],"boundary":"不创建 BoardTask，直到用户确认 plan。","assumptions":["intent 已确认"],"non_goals":["Rust deterministic plan"],"acceptance_signals":["plan 标出 Codex author"],"confidence":"high"}
+{"objective":"修复 plan.lisp 作者链路","review_text":"目标: 修复 plan.lisp 作者链路\n边界: 确认 plan 后才创建 BoardTask。","execution_mode":"work_order","requires_board_task":true,"steps":["确认已批准 intent","生成 Codex-authored plan.lisp","等待用户确认 plan"],"answer_policy":"结果来自 task-result-artifact。","provider_hint":"codex-review-worker","boundary":"不创建 BoardTask，直到用户确认 plan。","assumptions":["intent 已确认"],"non_goals":["Rust deterministic plan"],"acceptance_signals":["plan 标出 Codex author"],"confidence":"high"}
 done"#;
         let parsed = PTYWebSocketServer::parse_codex_plan_response(output).unwrap();
         assert_eq!(parsed.objective, "修复 plan.lisp 作者链路");
+        assert_eq!(parsed.execution_mode, "work_order");
+        assert!(parsed.requires_board_task);
         assert_eq!(parsed.steps.len(), 3);
         assert_eq!(parsed.non_goals, vec!["Rust deterministic plan"]);
+    }
+
+    #[test]
+    fn jarvis_codex_plan_response_rejects_inconsistent_execution_mode() {
+        let direct_answer_with_task = r#"{
+            "objective":"回答身份问题",
+            "review_text":"直接回答",
+            "execution_mode":"grounded_direct_answer",
+            "requires_board_task":true,
+            "steps":["基于 grounding 回答"],
+            "answer_policy":"xjpcode text-only",
+            "provider_hint":"xjpcode-text-only",
+            "boundary":"不改代码",
+            "assumptions":[],
+            "non_goals":[],
+            "acceptance_signals":["回答完整"],
+            "confidence":"high"
+        }"#;
+        assert!(PTYWebSocketServer::parse_codex_plan_response(direct_answer_with_task).is_err());
+
+        let work_order_without_task = r#"{
+            "objective":"修改代码",
+            "review_text":"需要工位执行",
+            "execution_mode":"work_order",
+            "requires_board_task":false,
+            "steps":["创建任务"],
+            "answer_policy":"task-result-artifact",
+            "provider_hint":"codex-code-worker",
+            "boundary":"需要 accepted shard",
+            "assumptions":[],
+            "non_goals":[],
+            "acceptance_signals":["测试通过"],
+            "confidence":"high"
+        }"#;
+        assert!(PTYWebSocketServer::parse_codex_plan_response(work_order_without_task).is_err());
     }
 
     #[test]
@@ -9715,11 +10296,15 @@ done"#;
         let draft = JarvisCodexPlanResponse {
             objective: "生成 Codex-authored plan".to_string(),
             review_text: "目标: 生成 Codex-authored plan".to_string(),
+            execution_mode: "grounded_direct_answer".to_string(),
+            requires_board_task: false,
             steps: vec![
                 "确认 intent artifact".to_string(),
                 "创建可审阅 plan draft".to_string(),
                 "等待用户确认 plan".to_string(),
             ],
+            answer_policy: Some("使用 xjpcode text-only 基于 grounding 直接回答。".to_string()),
+            provider_hint: Some("xjpcode-text-only".to_string()),
             boundary: Some("确认 plan 后才创建 BoardTask。".to_string()),
             assumptions: vec!["intent 已确认".to_string()],
             non_goals: vec!["Rust 自行拼接 plan".to_string()],
@@ -9741,6 +10326,9 @@ done"#;
         assert!(body.contains(":semantic-author"));
         assert!(body.contains(":slot-id \"slot-codex-plan-author\""));
         assert!(body.contains(":objective \"生成 Codex-authored plan\""));
+        assert!(body.contains(":mode grounded-direct-answer"));
+        assert!(body.contains(":requires-board-task false"));
+        assert!(body.contains(":completion-authority interaction-result-artifact"));
         assert!(body.contains(":non-goals [\"Rust 自行拼接 plan\"]"));
     }
 

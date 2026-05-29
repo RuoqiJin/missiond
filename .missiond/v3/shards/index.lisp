@@ -67,6 +67,13 @@
     :root-include "(include \"shards/universe/service-runtime.lisp\")"
     :surfaces [service-runtime-universe eventhub-service-boundary])
 
+  (shard universe-service-layer-template
+    :status compiler-active
+    :domain universe
+    :path "shards/universe/service-layer-template.lisp"
+    :root-include "(include \"shards/universe/service-layer-template.lisp\")"
+    :surfaces [service-layer-template product-service-layer-bootstrap])
+
   (shard universe-infrastructure
     :status compiler-active
     :domain universe

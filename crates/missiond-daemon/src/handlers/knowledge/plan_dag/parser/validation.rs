@@ -326,6 +326,16 @@ fn parsed_dag_from_contract_json(contract: &Value) -> Result<ParsedDag, DagBuild
                 "" | "none" | "question-event" | "question_event"
             )
         });
+        add_unknown_enum_unsupported(node, "execution_order", &mut unsupported_fields, |raw| {
+            let lc = raw.trim().to_ascii_lowercase();
+            matches!(
+                lc.as_str(),
+                "" | "serial"
+                    | "parallel"
+                    | "serial-after-dependencies"
+                    | "serial_after_dependencies"
+            )
+        });
         add_unknown_enum_unsupported(node, "rollback_policy", &mut unsupported_fields, |raw| {
             RollbackPolicy::parse(raw).is_some()
         });
@@ -364,6 +374,12 @@ fn parsed_dag_from_contract_json(contract: &Value) -> Result<ParsedDag, DagBuild
             owned_files_raw: raw_string_list(node, "owned_files", idx)?,
             forbidden_files_raw: raw_string_list(node, "forbidden_files", idx)?,
             acceptance_commands_raw: raw_string_list(node, "acceptance_commands", idx)?,
+            execution_order: optional_string(node, "execution_order", idx)?,
+            parallel_group: optional_string(node, "parallel_group", idx)?,
+            atom_level: optional_u32(node, "atom_level", idx)?,
+            atom_task_id: optional_string(node, "atom_task_id", idx)?,
+            predicted_tool_sequence_raw: raw_string_list(node, "predicted_tool_sequence", idx)?,
+            context_sources_raw: raw_string_list(node, "context_sources", idx)?,
             acceptance_mode_raw: optional_string(node, "acceptance_mode", idx)?,
             acceptance_evidence_keys_raw: raw_string_list(node, "acceptance_evidence_keys", idx)?,
             acceptance_depends_on: string_vec(node, "acceptance_depends_on", idx)?,

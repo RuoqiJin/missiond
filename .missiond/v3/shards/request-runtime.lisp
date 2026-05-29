@@ -76,7 +76,25 @@
          :id-field artifact_hash
          :storage "task_result_artifacts"
          :fields [task_id slot_id conversation_id provider result_status summary artifact_hash deduped]
-         :rule "Provider settle loops, Jarvis follow-up supervision, and Board note revalidation may observe the same final more than once. task_result_put MUST check for an existing row with the same task_id, slot_id, conversation_id, provider, result_status, and summary, then return that artifact_hash with deduped=true instead of writing timestamp-only duplicate artifacts or emitting duplicate task_result_artifact.created events."))
+         :rule "Provider settle loops, Jarvis follow-up supervision, and Board note revalidation may observe the same final more than once. task_result_put MUST check for an existing row with the same task_id, slot_id, conversation_id, provider, result_status, and summary, then return that artifact_hash with deduped=true instead of writing timestamp-only duplicate artifacts or emitting duplicate task_result_artifact.created events.")
+      (kind interaction-direct-answer
+         :schema "missiond.interaction-result-artifact.v1"
+         :id-field artifact_hash
+         :storage "shared_artifacts(kind=interaction-direct-answer)"
+         :fields [interaction_id grounding_context_id intent_artifact_id plan_artifact_id execution_mode requires_board_task answer_policy provider content sources_used]
+         :rule "After mandatory intent.lisp and plan.lisp confirmation, execution_mode=grounded_direct_answer with requires_board_task=false MUST answer through xjpcode text-only using MISSIOND_XJPCODE_TEXT_ONLY_URL or MISSIOND_XJPCODE_BASE_URL/provider/v1/text-only/completions, stream answer_delta events, and write this interaction result artifact. Missing provider configuration or failed provider final is a typed diagnostic; MissionD MUST NOT create a fallback BoardTask, run local code search, or fabricate an answer.")
+      (kind provider-text-only-source
+         :schema "missiond.provider-text-only-source.v1"
+         :id-field source_call_id
+         :storage "shared_artifacts(kind=provider-text-only-source)"
+         :fields [source_call_id provider_id engine_id model input_text output_text no_tools no_mcp no_shell no_file_access proposal_kind proposal_artifact_hash]
+         :rule "ClaudeCode, Codex CLI, Agy, or any paid CLI used as a proposal source for xjpcode/MissionD planning MUST run in no-tools text-only mode. They may propose intent, plan, decomposition, risks, or review text, but MUST NOT execute shell, MCP tools, file reads, file writes, hidden subagents, or PTY tool loops inside this source role.")
+      (kind plan-atomization-graph
+         :schema "missiond.plan-atomization-graph.v1"
+         :id-field atom_graph_id
+         :storage "shared_artifacts(kind=plan-atomization-graph)"
+         :fields [atom_graph_id interaction_id grounding_context_id intent_artifact_id plan_artifact_id shard_nodes atom_tasks dependency_edges serial_groups parallel_groups predicted_tool_sequence context_sources detour_budget]
+         :rule "A confirmed plan.lisp is a prediction and decomposition input, not a worker prompt. Before implementation dispatch, MissionD compiles it into shard_nodes and atom_tasks. Every atom task MUST declare execution_order=serial or execution_order=parallel, serial atoms MUST be represented by dependsOn/dependency_edges, parallel atoms MUST share a parallel_group without mutual dependencies, and provider workers receive only atom-level context slices."))
     :functions
       ((function context-gather-artifact
          :entry [mission_context_gather unknowns-inventory BoardTask source_id project_id]
@@ -87,6 +105,30 @@
                 (step s5 :logic "Jarvis worker prompts must prefer context_pack_file; if unavailable, they may use mission_shared_memory(action=artifact_get, hash=...) or mission_context_slice. Opaque artifact URIs without retrieval instructions are invalid")
                 (step s6 :logic "Jarvis worker prompts must include target engine/pool, write_policy, read/write scope, confirmed intent_artifact_id, confirmed plan_artifact_id, and a compact accepted execution slice for no-MCP workers"))
          :egress [grounding_context_id context_pack_path context_pack_file canonical_context_pack_file sources_used diagnostics shared_artifact])
+       (function plan-atomization-compiler
+         :entry [confirmed-plan.lisp grounding_context_id intent_artifact_id plan_artifact_id provider-text-only-source]
+         :core ((step s1 :logic "treat plan.lisp as a high-level forecast of the route, risks, evidence, and expected implementation surfaces; never dispatch it directly to a worker")
+                (step s2 :logic "optionally ask ClaudeCode/Codex/Agy text-only sources for decomposition proposals with no tools, no shell, no file reads, no MCP, and no hidden subagents")
+                (step s3 :logic "compile the accepted plan into shard_nodes, then recursively split each shard into atom_tasks whose objective is small enough for a low-skill worker to execute or verify")
+                (step s4 :logic "attach context_sources, predicted_tool_sequence, acceptance, read_scope, write_scope, and detour_budget to each atom")
+                (step s5 :logic "derive dependency_edges, serial_groups, and parallel_groups; serial atoms lower to BoardTask dependsOn, while parallel atoms lower to independent BoardTasks sharing a parallel_group")
+                (step s6 :logic "persist plan-atomization-graph and write atom_task_id, atom_path, execution_order, dependency_policy, and parallel_group into BoardTask runtime_metadata/task_contracts"))
+         :egress [plan-atomization-graph atom_task_contracts BoardTask.runtime_metadata task_contracts])
+       (function xjpcode-atom-worker-runtime
+         :entry [atom_task_contract context_capsule_lisp read_scope write_scope tool_policy xjpcode-worker]
+         :core ((step s1 :logic "xjpcode receives atom-level work-order context and may decide which scoped repo-local facts to gather")
+                (step s2 :logic "read-only mode may use list_files/read_file/ripgrep/git_status/git_diff/run_check within read_scope; write mode additionally requires accepted_shard_id, write_scope, and MissionD write lease")
+                (step s3 :logic "every tool call emits an event with atom_task_id, tool_id, scope, duration, and summarized output; large output spills through artifact storage")
+                (step s4 :logic "on missing context, xjpcode emits fact_request/detour telemetry instead of silently widening scope")
+                (step s5 :logic "completion writes task-result-artifact bound to atom_task_id and parent BoardTask"))
+         :egress [agent-runtime-events task-result-artifact worker-telemetry fact_request])
+       (function worker-detour-telemetry
+         :entry [provider-tool-event xjpcode-tool-event worker-final atom_task_contract]
+         :core ((step s1 :logic "compare actual tool sequence, files read, files changed, and extra searches against predicted_tool_sequence and context_sources")
+                (step s2 :logic "classify detours as decomposition-gap, context-gap, scope-gap, tool-gap, or worker-improvisation")
+                (step s3 :logic "write telemetry to worker-capability-telemetry and attach improvement candidates to the parent plan-atomization-graph")
+                (step s4 :logic "when detours recur, create a workflow/checker/SSOT optimization task rather than blaming the worker prompt"))
+         :egress [worker-capability-telemetry decomposition-gap-report workflow-improvement-candidate])
        (function task-delegate-grounding-gate
          :entry [mission_task_delegate mission_swarm_run mission_plan_execute]
          :core ((step s1 :logic "classify dispatch as exact shard, emergency code-first, or broad objective")
@@ -137,7 +179,17 @@
                 (step s6 :logic "while supervising a still-running worker on a public/mobile follow stream, emit client-visible worker_status heartbeat events bounded by MISSIOND_JARVIS_VISIBLE_HEARTBEAT_SECS; colon SSE comments remain transport keepalive only and are not sufficient UI progress")
                 (step s7 :logic "timeout, poll_timeout, or public stream budget exhaustion emits diagnostic plus result_pending, never non-terminal final")
                 (step s8 :logic "when an idle-slot watchdog has no durable provider final, it must read the fresh PTY screen before using cached pty.send responses, because cached responses can be stale progress frames"))
-         :egress [result_pending follow_payload result_followup_stream result_artifact_event final_event]))
+         :egress [result_pending follow_payload result_followup_stream result_artifact_event final_event])
+       (function jarvis-grounded-direct-answer
+         :entry [JarvisSSE confirmed-plan grounding_context_id intent_artifact_id plan_artifact_id xjpcode-text-only]
+         :core ((step s1 :logic "read execution_mode and requires_board_task from confirmed plan metadata")
+                (step s2 :logic "allow only execution_mode=grounded_direct_answer with requires_board_task=false")
+                (step s3 :logic "load bounded grounding context preview and source refs from context_pack_file/shared artifact")
+                (step s4 :logic "call xjpcode text-only provider with no tool schema, no write scope, and no BoardTask authority")
+                (step s5 :logic "stream answer_delta chunks and provider diagnostics to the client")
+                (step s6 :logic "write interaction-direct-answer artifact with schema missiond.interaction-result-artifact.v1 before terminal final")
+                (step s7 :logic "if MISSIOND_XJPCODE_TEXT_ONLY_URL/MISSIOND_XJPCODE_BASE_URL is missing or provider final is not completed, fail fast with typed diagnostic and no fallback BoardTask"))
+         :egress [answer_delta result_artifact_event final_event diagnostic]))
     :invariants
       ["All non-exact worker dispatch must carry grounding_context_id before a provider PTY receives the prompt."
        "mission_context_gather is the only default aggregate for runtime_environment/KB/SSOT/project/skill/infra/Board/conversation/tool facts; callers should not hand-roll partial context lookup."
@@ -166,7 +218,12 @@
        "Jarvis MUST NOT emit final for dispatch_accepted, result_pending, timeout, poll_timeout, or public stream budget exhaustion; final is terminal-only and requires task-result-artifact validation or a terminal typed diagnostic."
        "Agy and other provider artifact completion MUST accept numbered markdown report headings such as `## 1. Findings`, `## 2. Evidence`, `## 3. Recommendations`, and `## 4. Verification`; provider-generated numbering is formatting, not a missing output-contract section."
        "Jarvis intent/plan confirmations MUST accept both top-level missiond_intent_confirmed/missiond_plan_confirmed fields and wrapped missiond_confirm payloads, so iOS and external clients do not need to mirror MissionD's internal JSON shape."
-       "Jarvis intent/plan confirmation payloads MUST carry missiond_objective from the original request; confirmed dispatch must derive BoardTask title, worker prompt, and dispatch metadata from that objective, never from a later confirmation utterance such as `确认 plan`."]
+       "Jarvis intent/plan confirmation payloads MUST carry missiond_objective from the original request; confirmed dispatch must derive BoardTask title, worker prompt, and dispatch metadata from that objective, never from a later confirmation utterance such as `确认 plan`."
+       "Plan.lisp MUST NOT be dispatched directly as a worker prompt; confirmed plans first compile to plan-atomization-graph, then to atom-level BoardTasks."
+       "Each worker BoardTask created from a plan atom MUST carry atom_task_id, atom_path, execution_order, dependency_policy, and either dependsOn serial edges or a parallel_group in runtime_metadata/task_contracts."
+       "Board parallel execution is explicit: execution_order=parallel tasks have no mutual dependsOn edge and share a parallel_group; execution_order=serial tasks are gated by dependsOn or by the atom graph root order."
+       "ClaudeCode, Codex CLI, and Agy used as planning/decomposition proposal sources MUST be text-only no-tools sources; xjpcode remains the governed worker runtime and may gather scoped context through its own atom tool policy."
+       "Worker detours are first-class telemetry. If a worker had to discover missing context, invent a subplan, or widen search beyond predicted_tool_sequence, MissionD records a decomposition/context infrastructure gap for workflow improvement."]
     :checks ["node scripts/check-v3-grounded-dispatch-isomorphism.mjs --json"])
 
   (unified-entry

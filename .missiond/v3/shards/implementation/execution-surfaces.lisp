@@ -131,13 +131,17 @@
 
 (surface work-order-lifecycle
       :status "code-aligned"
-      :implements [work-order-intent work-order-plan work-order-audit board-intent-unification external-app-delegation task-result-artifact-projection]
+      :implements [work-order-intent work-order-plan plan-atomization-compiler atom-task-graph worker-detour-telemetry work-order-audit board-intent-unification external-app-delegation task-result-artifact-projection]
       :code ["crates/missiond-daemon/src/handlers/knowledge/request.rs"
              "crates/missiond-daemon/src/handlers/knowledge/request/respond/materialization.rs"
              "crates/missiond-daemon/src/handlers/knowledge/file_artifacts.rs"
              "crates/missiond-daemon/src/handlers/knowledge/board/create.rs"
              "crates/missiond-daemon/src/handlers/knowledge/board/events.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workflow.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan_dag/parser/types/node.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan_dag/parser/scanner/node_form.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan_dag/parser/validation.rs"
+             "crates/missiond-core/src/db/pg/board.rs"
              "crates/missiond-daemon/src/engine/shared_memory.rs"
              "crates/missiond-daemon/src/handlers/compute/task_delegate.rs"
              "crates/missiond-mcp/src/tools/knowledge/request.rs"
@@ -151,7 +155,7 @@
              "scripts/check-v3-work-order-lifecycle-isomorphism.mjs"]
       :acceptance ["node scripts/check-v3-work-order-lifecycle-isomorphism.mjs --json"
                    "node scripts/check-v3-pillar-flow-schema.mjs --engine=ocaml --json"]
-      :note "work-order-lifecycle is the single governance chain for user requests, Board-triggered worker tasks, intent.lisp files, and external application delegation such as translation or code-refactor jobs. It intentionally reuses mission_request, mission_board, mission_workflow, mission_shared_memory, and file_artifacts instead of adding another public MCP tool family: every source is normalized into work-order intent, bound to one BoardTask, compiled into plan.lisp accepted shards, executed through workflow_run/shared-memory, and closed by task-result-artifacts plus audit.lisp. Board notes and provider finals remain projections; external apps get the same audit/replay semantics without learning MissionD internals.")
+      :note "work-order-lifecycle is the single governance chain for user requests, Board-triggered worker tasks, intent.lisp files, and external application delegation such as translation or code-refactor jobs. It intentionally reuses mission_request, mission_board, mission_workflow, mission_shared_memory, and file_artifacts instead of adding another public MCP tool family: every source is normalized into work-order intent, bound to one BoardTask, compiled into plan.lisp accepted shards, then into plan-atomization-graph atom tasks. BoardTask runtime_metadata/task_contracts carry atom_task_id, atom_path, execution_order, dependency_policy, and parallel_group/dependency edges so Autopilot can run serial atoms through dependsOn and parallel atoms as independent siblings. Board notes and provider finals remain projections; external apps get the same audit/replay semantics without learning MissionD internals.")
 
 (surface external-work-order-gate
       :status "code-aligned"
