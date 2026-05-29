@@ -91,12 +91,25 @@
       :schema "missiond.service-layer-auth-standard.v1"
       :default-provider xjp-auth
       :public-client-flow pkce
+      :browser-oauth-flow
+        (:authorize-endpoint "https://auth.xiaojinpro.com/oauth2/authorize"
+         :token-endpoint "https://auth.xiaojinpro.com/oauth2/token"
+         :response-type code
+         :code-challenge-method S256
+         :default-scopes [openid profile email offline_access]
+         :forbidden ["legacy /oauth/authorize" "implicit response_type=token"])
       :machine-flow service-api-key
       :oauth-client-creation
         (:authority auth-admin-api
          :rule "Create or update OAuth clients through xjp_oauth_client_create or the auth Admin API/MCP surface; do not edit oauth_clients rows directly."
          :default-scopes [openid profile email offline_access]
-         :redirect-uris ["https://<domain>/auth/callback" "http://localhost:<port>/auth/callback"])
+         :redirect-uris ["https://<canonical-domain>/auth/callback" "https://www.<canonical-domain>/auth/callback" "https://<compat-domain>/auth/callback" "http://localhost:<port>/auth/callback"]
+         :allowlist-rule "Every production, www, compatibility, and Vercel/custom domain that can initiate login MUST be present in the OAuth client redirect allowlist before or with domain cutover; wildcards are forbidden."
+         :update-rule "Existing services changing domains must call xjp_oauth_client_update or the auth Admin API/MCP surface before deploy verification; auth rebuild/restart is not required for redirect URI changes."
+         :redirect-smoke
+           ((step s1 :id compare-runtime-domains :logic "Compare service-runtime public_base_url, frontend_url, api_base_url, domains, and Vercel production domains with OAuth redirect_uris.")
+            (step s2 :id google-authorize-smoke :logic "Click Google login or call authorize from each live host with response_type=code and PKCE; fail the release on invalid_client / unsupported_response_type / invalid_request / Invalid redirect_uri.")
+            (step s3 :id callback-roundtrip :logic "Verify /auth/callback returns to the initiating host, stores marker/session state, and reaches a protected route without redirect loops.")))
       :frontend-login-protection
         ((step s1 :id public-route-map :logic "declare public routes: /, /auth/login, /auth/callback, health, public assets, and product-specific public pages")
          (step s2 :id marker-cookie-gate :logic "Next.js proxy.ts protects private route prefixes using a short-lived marker cookie; unauthenticated users redirect to /auth/login")
@@ -181,7 +194,7 @@
       :intent-must-declare [purpose aliases owner management-domain runtime-layer data-classes auth db deployment domains risks]
       :backend-blueprint-must-declare [domain-model api-routes auth-extractor db-boundary payment-boundary event-log worker-jobs runtime-projection]
       :frontend-blueprint-must-declare [routes public-routes protected-routes auth-callback api-client error-states loading-states regression-smokes]
-      :operations-blueprint-must-declare [vercel deploy-center secret-store supabase migrations health-smoke rollback-risks]
+      :operations-blueprint-must-declare [vercel deploy-center secret-store supabase migrations oauth-redirect-allowlist auth-smoke health-smoke rollback-risks]
       :checker-must-run [package-manager-check backend-build frontend-build behavior-closure ssot-shape secret-value-redaction])
 
     (missiond-registration-scaffold

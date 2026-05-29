@@ -61,9 +61,38 @@ Every protected product needs:
 
 - Public route list.
 - `/auth/login` and `/auth/callback`.
+- Browser login must use OAuth2/OIDC authorization-code + PKCE:
+  - authorize endpoint: `https://auth.xiaojinpro.com/oauth2/authorize`
+  - token endpoint: `https://auth.xiaojinpro.com/oauth2/token`
+  - `response_type=code`
+  - `code_challenge_method=S256`
+  - scope baseline: `openid profile email offline_access`
+  - never use legacy `/oauth/authorize` or implicit `response_type=token`.
+- OAuth redirect allowlist entries for every production, `www`, compatibility, Vercel/custom, and local development host that can initiate login.
 - Next.js `proxy.ts` marker-cookie gate for protected route prefixes.
 - Backend JWKS verification for API requests.
 - 401 refresh/logout behavior in the frontend API client.
+
+For XJP Auth, create or update clients through `xjp_oauth_client_create`, `xjp_oauth_client_update`, Dynamic Client Registration, or the auth Admin API/MCP surface. Do not write `oauth_clients` rows directly, and do not rebuild or restart Auth just to add redirect URIs.
+
+Default redirect URI set:
+
+```text
+https://<canonical-domain>/auth/callback
+https://www.<canonical-domain>/auth/callback
+https://<compat-domain>/auth/callback
+https://<vercel-domain>/auth/callback
+http://localhost:<port>/auth/callback
+```
+
+Only include hosts that actually exist for the project; do not use wildcard redirect URIs. When a project changes from a compatibility domain to a new brand domain, update the OAuth client before or with the domain cutover.
+
+Auth deploy verification must include a redirect allowlist smoke:
+
+- Compare MissionD `service-runtime` domains, production URLs, and Vercel domains with the OAuth client `redirect_uris`.
+- Start login from each live host with `response_type=code` and PKCE, and fail the release on `invalid_client`, `unsupported_response_type`, `invalid_request`, or `Invalid redirect_uri`.
+- Start Google login from each live host and fail the release on `invalid_request` / `Invalid redirect_uri`.
+- Verify `/auth/callback` returns to the initiating host, sets the expected marker/session state, and reaches a protected route without redirect loops.
 
 ## Payment
 
