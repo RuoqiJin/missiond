@@ -9,4 +9,8 @@
            (event smoke-generalized
              :at "2026-05-29T18:35:00+08:00"
              :actor codex
-             :reason "Intent/plan smoke must accept configured paid CLI author metadata rather than hard-coding Codex-only author fields.")))
+             :reason "Intent/plan smoke must accept configured paid CLI author metadata rather than hard-coding Codex-only author fields.")
+           (event smoke-direct-answer-terminal
+             :at "2026-05-29T18:45:00+08:00"
+             :actor codex
+             :reason "Grounded direct answers complete with answer_delta/result_artifact/final and should not be forced through BoardTask dispatch semantics.")))

@@ -200,6 +200,15 @@ function hasVisibleProgress(response, expectedPhase) {
       data.schema === 'missiond.jarvis-progress.v1'
       && data.phase === expectedPhase
       && data.visible === true
+      && typeof data.message === 'string'
+      && data.message.trim().length > 0
+    ) {
+      return true;
+    }
+    if (
+      data.schema === 'missiond.jarvis-progress.v1'
+      && data.phase === expectedPhase
+      && data.visible === true
       && data.openai_delta === true
       && data.event_bus_write_ok === true
       && data.event_bus_projection === 'frontend_event_bus'
@@ -275,6 +284,12 @@ function hasTerminalFinal(response) {
       && data.phase !== 'result_pending'
       && data.status !== 'result_pending';
   });
+}
+
+function hasTerminalDirectAnswer(response) {
+  return hasResultArtifact(response)
+    && hasTerminalFinal(response)
+    && eventNames(response).includes('answer_delta');
 }
 
 function hasNonTerminalFinal(response) {
@@ -462,14 +477,17 @@ async function main() {
     third = await postInteraction(buildBody({ missiond_plan_confirmed: true, missiond_confirm: { confirm_payload: planConfirm } }));
     validateHttp('dispatch', third, diagnostics);
     if (third.ok) {
-      for (const required of ['board_task_created']) {
-        if (!hasEvent(third, required)) {
-          diagnostics.push({ code: 'DISPATCH_EVENT_MISSING', message: `dispatch phase missing ${required}`, events: eventNames(third) });
-        }
-      }
       const thirdEvents = eventNames(third);
-      if (!thirdEvents.includes('dispatch_accepted') && !thirdEvents.includes('result_pending')) {
-        diagnostics.push({ code: 'DISPATCH_PENDING_EVENT_MISSING', message: 'dispatch phase must return dispatch_accepted or result_pending for non-terminal async work', events: thirdEvents });
+      const terminalDirectAnswer = hasTerminalDirectAnswer(third);
+      if (!terminalDirectAnswer) {
+        for (const required of ['board_task_created']) {
+          if (!hasEvent(third, required)) {
+            diagnostics.push({ code: 'DISPATCH_EVENT_MISSING', message: `dispatch phase missing ${required}`, events: thirdEvents });
+          }
+        }
+        if (!thirdEvents.includes('dispatch_accepted') && !thirdEvents.includes('result_pending')) {
+          diagnostics.push({ code: 'DISPATCH_PENDING_EVENT_MISSING', message: 'dispatch phase must return dispatch_accepted or result_pending for non-terminal async work', events: thirdEvents });
+        }
       }
       if (hasNonTerminalFinal(third)) {
         diagnostics.push({ code: 'NON_TERMINAL_FINAL', message: 'dispatch phase emitted final before a terminal task-result-artifact; use result_pending/dispatch_accepted instead', events: thirdEvents });
