@@ -6842,6 +6842,10 @@ JSON 字段必须是：\n\
     ) -> anyhow::Result<()> {
         // Disable Nagle — SSE needs every chunk sent immediately
         stream.set_nodelay(true)?;
+        let jarvis_progress_bus = JarvisProgressBus {
+            system_event_tx: None,
+            frontend_events_tx: None,
+        };
 
         // Read full HTTP request
         let (headers, body) = match Self::read_http_request(&mut stream).await {
@@ -7277,18 +7281,11 @@ JSON 字段必须是：\n\
             Self::write_sse_event(&mut stream, "status", &grounding_event).await?;
 
             let jarvis_intent_author = JarvisIntentAuthorConfig::default();
-            Self::write_sse_event(
+            let authored_intent = match Self::author_jarvis_intent_draft_with_progress(
                 &mut stream,
-                "status",
-                &serde_json::json!({
-                    "phase": "intent_authoring",
-                    "author": "codex-cli-gpt-5.5-xhigh",
-                    "slot_id": &jarvis_intent_author.slot_id,
-                    "message": "Codex CLI GPT-5.5 xhigh is authoring intent.lisp for user confirmation."
-                }),
-            )
-            .await?;
-            let authored_intent = match Self::author_jarvis_intent_draft(
+                &jarvis_progress_bus,
+                &chat_id,
+                None,
                 Some(&pty_manager),
                 &jarvis_intent_author,
                 "missiond.jarvis-intent-artifact.v1",
@@ -7445,18 +7442,11 @@ JSON 字段必须是：\n\
             }
 
             let jarvis_plan_author = JarvisPlanAuthorConfig::default();
-            Self::write_sse_event(
+            let authored_plan = match Self::author_jarvis_plan_draft_with_progress(
                 &mut stream,
-                "status",
-                &serde_json::json!({
-                    "phase": "plan_authoring",
-                    "author": "codex-cli-gpt-5.5-xhigh",
-                    "slot_id": &jarvis_plan_author.slot_id,
-                    "message": "Codex CLI GPT-5.5 xhigh is authoring plan.lisp for user confirmation."
-                }),
-            )
-            .await?;
-            let authored_plan = match Self::author_jarvis_plan_draft(
+                &jarvis_progress_bus,
+                &chat_id,
+                None,
                 Some(&pty_manager),
                 &jarvis_plan_author,
                 "missiond.jarvis-plan-artifact.v1",
@@ -7467,7 +7457,7 @@ JSON 字段必须是：\n\
                 resolved_topic_id.as_deref(),
                 resolved_topic_label.as_deref(),
                 &sources_used,
-                None,
+                Some(&permission_context),
             )
             .await
             {

@@ -21,6 +21,9 @@ Checks the V3 grounded-dispatch contract:
   - Jarvis plan-confirmed dispatch emits a worker_dispatched/pending claim event
     before returning result_pending, and provider prompts no longer delegate the
     primary BoardTask done transition to workers.
+  - Jarvis intent/plan authoring uses the visible progress wrappers on every
+    public strict-gate path, so mobile SSE clients keep receiving status while
+    Codex CLI authoring is running.
 `;
 
 let json = false;
@@ -335,6 +338,9 @@ const checks = [
       '"pending_autopilot_claim"',
       '"terminal_task_result": false',
       '"result_followup"',
+      'author_jarvis_intent_draft_with_progress',
+      'author_jarvis_plan_draft_with_progress',
+      'codex_exec_waiting',
       'handle_chat_completions_interaction_adapter',
       'ensure_jarvis_slot_ready_for_chat',
       'jarvis_follow_request_is_detected_before_slot_readiness',
