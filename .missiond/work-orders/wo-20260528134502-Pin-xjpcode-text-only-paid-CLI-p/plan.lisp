@@ -12,6 +12,7 @@
                      ".missiond/v3/shards/request-runtime.lisp"
                      "crates/missiond-core/src/ws/server.rs"
                      "scripts/check-v3-xjpcode-portable-runtime.mjs"
+                     "scripts/smoke-jarvis-intent-plan-dispatch.mjs"
                      "scripts/deploy-daemon.sh"]
        :acceptance ["node scripts/check-v3-xjpcode-portable-runtime.mjs --json"
                     "node scripts/check-v3-grounded-dispatch-isomorphism.mjs --json"

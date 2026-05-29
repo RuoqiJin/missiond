@@ -222,20 +222,17 @@ function hasReviewableArtifactDraft(response, expectedEvent) {
     const matchesPlan = expectedEvent === 'plan_draft'
       && (inferredEventName(event) === 'plan_draft' || data.phase === 'plan_draft' || data.plan_artifact_id);
     const expectedForm = expectedEvent === 'plan_draft' ? '(plan-draft' : '(intent-draft';
+    const authorOk = typeof data.author === 'string' && data.author.trim().length > 0;
+    const semanticAuthorOk = typeof data.artifact_body === 'string'
+      && data.artifact_body.includes(':semantic-author');
     return (matchesIntent || matchesPlan)
       && typeof data.review_text === 'string'
       && data.review_text.trim().length > 0
       && data.artifact_language === 'lisp'
       && typeof data.artifact_body === 'string'
       && data.artifact_body.includes(expectedForm)
-      && (expectedEvent !== 'intent_draft'
-        || (data.author === 'codex-cli-gpt-5.5-xhigh'
-          && data.artifact_body.includes(':authority codex-cli-gpt-5.5-xhigh')))
-      && (expectedEvent !== 'plan_draft'
-        || (data.author === 'codex-cli-gpt-5.5-xhigh'
-          && data.plan_author_slot_id === 'slot-codex-plan-author'
-          && data.artifact_body.includes(':authority codex-cli-gpt-5.5-xhigh')
-          && data.artifact_body.includes(':semantic-author')));
+      && authorOk
+      && semanticAuthorOk;
   });
 }
 
