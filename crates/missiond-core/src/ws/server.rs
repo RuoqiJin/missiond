@@ -4672,6 +4672,18 @@ JSON 字段必须是：\n\
         error_prefix: &str,
         prompt: &str,
     ) -> anyhow::Result<String> {
+        if let Some(provider) = Self::jarvis_author_text_only_provider() {
+            return Self::run_jarvis_xjpcode_text_only_author_exec(
+                &provider,
+                model,
+                timeout_secs,
+                output_prefix,
+                error_prefix,
+                prompt,
+            )
+            .await;
+        }
+
         let cwd = Self::jarvis_slot_runtime_cwd();
         let cwd_arg = cwd.display().to_string();
         let output_path = std::env::temp_dir().join(format!(
@@ -4750,6 +4762,117 @@ JSON 字段必须是：\n\
                 Self::jarvis_codex_output_sample(&stdout)
             )
         })
+    }
+
+    fn jarvis_author_text_only_provider() -> Option<String> {
+        std::env::var("MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_PROVIDER")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+
+    async fn run_jarvis_xjpcode_text_only_author_exec(
+        provider: &str,
+        model: &str,
+        timeout_secs: u64,
+        output_prefix: &str,
+        error_prefix: &str,
+        prompt: &str,
+    ) -> anyhow::Result<String> {
+        let Some(endpoint) = Self::jarvis_direct_answer_endpoint() else {
+            anyhow::bail!(
+                "{}_UNAVAILABLE: MISSIOND_XJPCODE_TEXT_ONLY_URL or MISSIOND_XJPCODE_BASE_URL is required for xjpcode text-only authoring",
+                error_prefix
+            );
+        };
+        let system_prompt = format!(
+            "You are MissionD Jarvis {output_prefix}. Return only the requested Lisp artifact body. Do not call tools, do not read files, and do not add commentary outside the artifact."
+        );
+        let model_override = std::env::var("MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_MODEL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| (provider == "codex_cli").then_some(model.to_string()));
+        let body = serde_json::json!({
+            "provider": provider,
+            "prompt": prompt,
+            "system_prompt": system_prompt,
+            "model": model_override,
+            "timeout_secs": timeout_secs
+        });
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(timeout_secs + 5))
+            .build()?;
+        let response = client
+            .post(&endpoint)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| {
+                anyhow::anyhow!(
+                    "{}_UNAVAILABLE: xjpcode text-only author provider failed: {err}",
+                    error_prefix
+                )
+            })?;
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "{}_FAILED: xjpcode text-only author endpoint returned {}",
+                error_prefix,
+                response.status()
+            );
+        }
+
+        let response_text = response.text().await.map_err(|err| {
+            anyhow::anyhow!(
+                "{}_FAILED: xjpcode text-only author stream failed: {err}",
+                error_prefix
+            )
+        })?;
+        let mut artifact = String::new();
+        let mut saw_final = false;
+        for line in response_text.lines().map(str::trim) {
+            if !line.starts_with("data:") {
+                continue;
+            }
+            let data = line.trim_start_matches("data:").trim();
+            if data.is_empty() {
+                continue;
+            }
+            let frame: XjpcodeTextOnlyFrame = serde_json::from_str(data).map_err(|err| {
+                anyhow::anyhow!(
+                    "{}_FAILED: bad xjpcode text-only author frame: {err}: {data}",
+                    error_prefix
+                )
+            })?;
+            match frame {
+                XjpcodeTextOnlyFrame::Accepted { .. } => {}
+                XjpcodeTextOnlyFrame::TextDelta { content } => artifact.push_str(&content),
+                XjpcodeTextOnlyFrame::Diagnostic { code, message } => {
+                    anyhow::bail!("{}_FAILED: {code}: {message}", error_prefix);
+                }
+                XjpcodeTextOnlyFrame::Final { status, .. } => {
+                    saw_final = true;
+                    if status != "completed" {
+                        anyhow::bail!(
+                            "{}_FAILED: xjpcode text-only author final status={status}",
+                            error_prefix
+                        );
+                    }
+                }
+            }
+        }
+        if !saw_final {
+            anyhow::bail!(
+                "{}_FAILED: xjpcode text-only author stream ended without final",
+                error_prefix
+            );
+        }
+        if artifact.trim().is_empty() {
+            anyhow::bail!(
+                "{}_FAILED: xjpcode text-only author returned empty artifact",
+                error_prefix
+            );
+        }
+        Ok(artifact)
     }
 
     async fn run_jarvis_codex_intent_exec(
@@ -5719,7 +5842,7 @@ JSON 字段必须是：\n\
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "router".to_string())
+            .unwrap_or_else(|| "codex_cli".to_string())
     }
 
     fn jarvis_direct_answer_timeout_secs() -> u64 {

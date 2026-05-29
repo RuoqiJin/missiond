@@ -1,0 +1,8 @@
+(work-order-audit
+  :schema "missiond.work-order.audit.v1"
+  :id "wo-20260528134502-Pin-xjpcode-text-only-paid-CLI-p"
+  :events ((event created :at "2026-05-28T13:45:02.203Z" :actor missiond-work-order)
+           (event scope-expanded
+             :at "2026-05-29T14:00:00+08:00"
+             :actor codex
+             :reason "Jarvis intent/plan authoring also needs xjpcode text-only provider env, Rust author adapter, deploy env propagation, and checker pins.")))

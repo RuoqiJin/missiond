@@ -30,6 +30,7 @@ function has(body, needle) {
 
 const projectRegistry = read(MISSIOND_ROOT, ".missiond/v3/shards/universe/project-registry.lisp");
 const workstationRuntime = read(MISSIOND_ROOT, ".missiond/v3/shards/workstation-runtime.lisp");
+const requestSurfaces = read(MISSIOND_ROOT, ".missiond/v3/shards/implementation/request-surfaces.lisp");
 const blueprint = read(XJPCODE_ROOT, ".missiond/xjpcode-app-blueprint.lisp");
 const intent = read(XJPCODE_ROOT, ".missiond/intent.lisp");
 const manifest = read(XJPCODE_ROOT, ".missiond/intent-manifest.lisp");
@@ -40,6 +41,7 @@ const workerChecker = read(XJPCODE_ROOT, "scripts/check-xjpcode-portable-worker-
 const taskDelegate = read(MISSIOND_ROOT, "crates/missiond-daemon/src/handlers/compute/task_delegate.rs");
 const liveSmoke = read(MISSIOND_ROOT, "scripts/smoke-xjpcode-worker-dispatch.mjs");
 const deployDaemon = read(MISSIOND_ROOT, "scripts/deploy-daemon.sh");
+const serverRs = read(MISSIOND_ROOT, "crates/missiond-core/src/ws/server.rs");
 
 push("missiond project registry exists", Boolean(projectRegistry));
 push("missiond workstation runtime exists", Boolean(workstationRuntime));
@@ -55,6 +57,14 @@ push("xjpcode write worker active-gated", has(workstationRuntime, "xjpcode-code-
 push("registry forbids write bypass", has(workstationRuntime, "write_lease_id") && has(workstationRuntime, "artifact-first") && has(workstationRuntime, "git apply --check"));
 push("text-only paid CLI registry exists", has(workstationRuntime, "text-only-paid-cli-provider-registry"));
 push("text-only registry disabled by default", has(workstationRuntime, ":default-enabled false") && has(workstationRuntime, "XJPCODE_TEXT_ONLY_CLI_ENABLED"));
+push("MissionD direct answer defaults to paid CLI text lane", has(workstationRuntime, ":direct_answer_default_text_provider codex_cli") && has(workstationRuntime, ":missiond-default-provider codex_cli"));
+push(
+  "MissionD intent/plan authoring can use xjpcode text-only provider",
+  has(workstationRuntime, "MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_PROVIDER") &&
+    has(requestSurfaces, "MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_PROVIDER") &&
+    has(serverRs, "MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_PROVIDER") &&
+    has(serverRs, "run_jarvis_xjpcode_text_only_author_exec"),
+);
 push("text-only registry forbids tools", has(workstationRuntime, "tool_use") && has(workstationRuntime, "apply_patch") && has(workstationRuntime, "approval_prompt"));
 push("text-only registry pins xjpcode endpoint", has(workstationRuntime, "/provider/v1/text-only/completions") && has(workstationRuntime, "xjpcode.text-only-provider.v1"));
 
@@ -95,6 +105,23 @@ push("xjpcode dispatch smoke is explicit live opt-in", has(liveSmoke, "--live"))
 push("xjpcode dispatch smoke rejects non-success artifacts by default", has(liveSmoke, "XJPCODE_ARTIFACT_NOT_SUCCESS") && has(liveSmoke, "artifactStatusIsTerminalSuccess"));
 push("xjpcode dispatch smoke keeps diagnostic escape hatch explicit", has(liveSmoke, "--allow-blocked-artifact") && has(workstationRuntime, "--allow-blocked-artifact"));
 push("deploy-daemon propagates xjpcode worker env", has(deployDaemon, "MISSIOND_XJPCODE_WORKER_URL"));
+push(
+  "deploy-daemon propagates xjpcode text-only env",
+  has(deployDaemon, "MISSIOND_XJPCODE_TEXT_ONLY_URL") &&
+    has(deployDaemon, "MISSIOND_XJPCODE_TEXT_ONLY_ENDPOINT") &&
+    has(deployDaemon, "MISSIOND_XJPCODE_BASE_URL"),
+);
+push(
+  "deploy-daemon propagates Jarvis direct-answer provider env",
+  has(deployDaemon, "MISSIOND_JARVIS_DIRECT_ANSWER_PROVIDER") &&
+    has(deployDaemon, "MISSIOND_JARVIS_DIRECT_ANSWER_MODEL") &&
+    has(deployDaemon, "MISSIOND_JARVIS_DIRECT_ANSWER_TIMEOUT_SECS"),
+);
+push(
+  "deploy-daemon propagates Jarvis xjpcode author provider env",
+  has(deployDaemon, "MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_PROVIDER") &&
+    has(deployDaemon, "MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_MODEL"),
+);
 
 for (const token of [
   "pub struct WorkOrderRequest",

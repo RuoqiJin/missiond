@@ -82,7 +82,7 @@
          :id-field artifact_hash
          :storage "shared_artifacts(kind=interaction-direct-answer)"
          :fields [interaction_id grounding_context_id intent_artifact_id plan_artifact_id execution_mode requires_board_task answer_policy provider content sources_used]
-         :rule "After mandatory intent.lisp and plan.lisp confirmation, execution_mode=grounded_direct_answer with requires_board_task=false MUST answer through xjpcode text-only using MISSIOND_XJPCODE_TEXT_ONLY_URL or MISSIOND_XJPCODE_BASE_URL/provider/v1/text-only/completions, stream answer_delta events, and write this interaction result artifact. Missing provider configuration or failed provider final is a typed diagnostic; MissionD MUST NOT create a fallback BoardTask, run local code search, or fabricate an answer.")
+        :rule "After mandatory intent.lisp and plan.lisp confirmation, execution_mode=grounded_direct_answer with requires_board_task=false MUST answer through xjpcode text-only using MISSIOND_XJPCODE_TEXT_ONLY_URL or MISSIOND_XJPCODE_BASE_URL/provider/v1/text-only/completions, stream answer_delta events, and write this interaction result artifact. The default text provider is codex_cli via MISSIOND_JARVIS_DIRECT_ANSWER_PROVIDER so existing paid CLI lanes are preferred over router spend; router is allowed only when explicitly selected. Missing provider configuration or failed provider final is a typed diagnostic; MissionD MUST NOT create a fallback BoardTask, run local code search, or fabricate an answer.")
       (kind provider-text-only-source
          :schema "missiond.provider-text-only-source.v1"
          :id-field source_call_id

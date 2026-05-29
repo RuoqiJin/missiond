@@ -34,6 +34,23 @@
 #   MISSIOND_XJPCODE_WORKER_URL  optional portable xjpcode worker base URL
 #                               injected into launchd for MissionD delegated
 #                               xjpcode read-only worker dispatch.
+#   MISSIOND_XJPCODE_TEXT_ONLY_URL optional xjpcode text-only completion URL
+#                               used by Jarvis grounded_direct_answer.
+#   MISSIOND_XJPCODE_TEXT_ONLY_ENDPOINT compatibility alias for text-only URL.
+#   MISSIOND_XJPCODE_BASE_URL    optional xjpcode server base URL; MissionD
+#                               derives /provider/v1/text-only/completions.
+#   MISSIOND_JARVIS_DIRECT_ANSWER_PROVIDER optional xjpcode text-only provider
+#                               id. Defaults to codex_cli to prefer paid CLI
+#                               lanes over router usage for simple Q&A.
+#   MISSIOND_JARVIS_DIRECT_ANSWER_MODEL optional model passed to the selected
+#                               xjpcode text-only provider.
+#   MISSIOND_JARVIS_DIRECT_ANSWER_TIMEOUT_SECS optional timeout for xjpcode
+#                               direct-answer calls.
+#   MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_PROVIDER optional provider id for Jarvis
+#                               intent/plan authoring through xjpcode text-only.
+#                               When unset, MissionD uses local codex exec.
+#   MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_MODEL optional model override passed to
+#                               xjpcode text-only authoring.
 #   MISSIOND_DEPLOY_ENSURE_JARVIS_SLOT  1/0/auto. In auto mode, call the
 #                               localhost-only Jarvis slot ensure endpoint
 #                               after restart when launchd/current env enables
@@ -373,6 +390,14 @@ ensure_launchd_runtime_root() {
   plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_INTERACTION_AUTH_USERINFO_URL"
   plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_INTERACTION_AUTH_TIMEOUT_MS"
   plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_XJPCODE_WORKER_URL"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_XJPCODE_TEXT_ONLY_URL"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_XJPCODE_TEXT_ONLY_ENDPOINT"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_XJPCODE_BASE_URL"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_JARVIS_DIRECT_ANSWER_PROVIDER"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_JARVIS_DIRECT_ANSWER_MODEL"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_JARVIS_DIRECT_ANSWER_TIMEOUT_SECS"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_PROVIDER"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_MODEL"
   plutil -lint "$LAUNCHD_PLIST" >/dev/null
   log "launchd: runtime root $LAUNCHD_PROJECT_ROOT written to $LAUNCHD_PLIST"
   log "launchd: artifact runtime dir $RUNTIME_DIR written to $LAUNCHD_PLIST"
