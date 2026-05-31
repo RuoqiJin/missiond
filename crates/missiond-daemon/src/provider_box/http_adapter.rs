@@ -453,7 +453,7 @@ fn text_only_interaction_from_body(body: &Value) -> Option<ProviderInteractionRe
     let mut interaction = ProviderInteractionRequest::pure_text(CliEngine::Agy, prompt);
     interaction.schema = "missiond.provider-interaction-request.v1".to_string();
     interaction.provider = string_field(body, "provider").or_else(|| Some("agy_cli".to_string()));
-    interaction.model = Some(model);
+    interaction.model = Some(model.clone());
     interaction.slot_id = Some(slot_id);
     interaction.correlation_id = correlation_id;
     interaction.timeout_secs = body.get("timeout_secs").and_then(Value::as_u64);
@@ -469,6 +469,15 @@ fn text_only_interaction_from_body(body: &Value) -> Option<ProviderInteractionRe
             interaction.timeout_cancel_policy = Some(policy);
         }
     }
+    interaction.model_switch_policy = Some(ModelSwitchPolicy {
+        target_model: Some(model),
+        target_model_profile: string_field(body, "target_model_profile")
+            .or_else(|| string_field(body, "model_profile")),
+        allow_respawn: bool_field(body, "allow_model_switch")
+            .or_else(|| bool_field(body, "allow_respawn"))
+            .unwrap_or(false),
+        require_verification: bool_field(body, "require_verification").unwrap_or(true),
+    });
     Some(interaction)
 }
 
@@ -682,6 +691,29 @@ mod tests {
             .unwrap()
             .contains("Correlation-ID: corr-test"));
         assert!(request.no_tools);
+        let policy = request.model_switch_policy.expect("model policy");
+        assert!(!policy.allow_respawn);
+        assert!(policy.require_verification);
+    }
+
+    #[test]
+    fn text_only_body_can_explicitly_allow_model_switch() {
+        let body = json!({
+            "engine": "agy",
+            "model": "Claude Opus 4.6 (Thinking)",
+            "slot_id": "slot-agy-opus-46-a",
+            "messages": [{"role": "user", "content": "hello"}],
+            "pure_text": true,
+            "allow_model_switch": true
+        });
+
+        let request = text_only_interaction_from_body(&body).expect("request");
+        assert!(
+            request
+                .model_switch_policy
+                .expect("model policy")
+                .allow_respawn
+        );
     }
 
     #[test]

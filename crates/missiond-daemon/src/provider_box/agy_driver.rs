@@ -546,6 +546,50 @@ impl AgyProviderDriver {
         Some(ok)
     }
 
+    async fn verify_pinned_model_locked(
+        &self,
+        request: &ProviderInteractionRequest,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+        target_model: &str,
+    ) -> bool {
+        let observation = self.observe(slot_id).await;
+        let status = self.pty.get_status(slot_id).await;
+        result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
+        let current = observation
+            .snapshot
+            .screen_identity
+            .as_ref()
+            .and_then(|identity| identity.current_model.clone());
+        let ok = model_eq(current.as_deref(), target_model);
+        result.model_switch_result = Some(ModelSwitchResult {
+            status: if ok {
+                ModelSwitchStatus::Verified
+            } else {
+                ModelSwitchStatus::Unverified
+            },
+            requested_model: Some(target_model.to_string()),
+            requested_model_profile: request.model_profile.clone(),
+            verified_model: current.clone(),
+            verification_source: Some("agy:pinned-slot-screen_identity".to_string()),
+        });
+        if !ok {
+            result.status = ProviderBoxStatus::Unverified;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_MODEL_SWITCH_UNVERIFIED,
+                "AGY pinned text-only slot is not on the requested model; hot-path model switching is disabled",
+                json!({
+                    "slot_id": slot_id,
+                    "requested_model": target_model,
+                    "verified_model": current,
+                    "reason": observation.snapshot.reason,
+                    "switch_policy": "pinned_slot_verify_only",
+                }),
+            ));
+        }
+        ok
+    }
+
     async fn submit_prompt_step(
         &self,
         result: &mut ProviderBoxResult,
@@ -1426,12 +1470,18 @@ impl ProviderDriver for AgyProviderDriver {
         let _guard = lock.lock().await;
 
         if let Some(target_model) = request.model.as_deref() {
-            if !target_model.trim().is_empty()
-                && !self
-                    .switch_model_locked(request, &mut result, &slot_id, target_model)
-                    .await
-            {
-                return result;
+            if !target_model.trim().is_empty() {
+                let model_policy = request.model_switch_policy.clone().unwrap_or_default();
+                let model_ready = if model_policy.allow_respawn {
+                    self.switch_model_locked(request, &mut result, &slot_id, target_model)
+                        .await
+                } else {
+                    self.verify_pinned_model_locked(request, &mut result, &slot_id, target_model)
+                        .await
+                };
+                if !model_ready {
+                    return result;
+                }
             }
         }
 
