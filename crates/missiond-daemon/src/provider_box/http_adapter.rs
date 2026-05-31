@@ -109,6 +109,19 @@ impl ProviderBoxHttpAdapter {
                 ("POST", "usage") | ("POST", "usage/refresh") | ("POST", "actions/usage") => {
                     self.handle_slot_usage_refresh(request, slot_id).await
                 }
+                ("GET", "mcp")
+                | ("GET", "mcp/status")
+                | ("POST", "mcp/status")
+                | ("GET", "actions/mcp/status")
+                | ("POST", "actions/mcp/status") => {
+                    self.handle_slot_mcp_status(request, slot_id).await
+                }
+                ("POST", "mcp/reconnect")
+                | ("POST", "mcp/restart")
+                | ("POST", "actions/mcp/reconnect")
+                | ("POST", "actions/mcp/restart") => {
+                    self.handle_slot_mcp_reconnect(request, slot_id).await
+                }
                 ("POST", "completions") | ("POST", "text-only/completions") => {
                     self.handle_slot_text_only_completion(request, slot_id)
                         .await
@@ -387,6 +400,79 @@ impl ProviderBoxHttpAdapter {
         self.handle_usage_refresh(request).await
     }
 
+    async fn handle_slot_mcp_status(
+        &self,
+        request: ProviderBoxHttpRequest,
+        slot_id: String,
+    ) -> Result<ProviderBoxHttpResponse, String> {
+        let mut interaction =
+            ProviderInteractionRequest::new(BoxCommand::McpStatus, engine_from_body(&request.body));
+        interaction.provider = string_field(&request.body, "provider").or_else(|| {
+            if interaction.engine == CliEngine::Agy {
+                Some("agy_cli".to_string())
+            } else {
+                None
+            }
+        });
+        interaction.slot_id = Some(slot_id);
+        interaction.cwd = string_field(&request.body, "cwd");
+        interaction.project_root = string_field(&request.body, "project_root");
+        interaction.correlation_id = string_field(&request.body, "correlation_id")
+            .unwrap_or_else(|| interaction.correlation_id.clone());
+        interaction.desired_worker = Some(json!({
+            "spawn_if_missing": bool_field(&request.body, "spawn_if_missing")
+                .or_else(|| bool_field(&request.body, "spawn"))
+                .unwrap_or(true),
+            "mcp_server": string_field(&request.body, "server")
+                .or_else(|| string_field(&request.body, "mcp_server"))
+                .unwrap_or_else(|| "missiond".to_string()),
+        }));
+        let result = self
+            .boxed
+            .execute(interaction)
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok(result_response(result))
+    }
+
+    async fn handle_slot_mcp_reconnect(
+        &self,
+        request: ProviderBoxHttpRequest,
+        slot_id: String,
+    ) -> Result<ProviderBoxHttpResponse, String> {
+        let mut interaction = ProviderInteractionRequest::new(
+            BoxCommand::McpReconnect,
+            engine_from_body(&request.body),
+        );
+        interaction.provider = string_field(&request.body, "provider").or_else(|| {
+            if interaction.engine == CliEngine::Agy {
+                Some("agy_cli".to_string())
+            } else {
+                None
+            }
+        });
+        interaction.slot_id = Some(slot_id);
+        interaction.cwd = string_field(&request.body, "cwd");
+        interaction.project_root = string_field(&request.body, "project_root");
+        interaction.correlation_id = string_field(&request.body, "correlation_id")
+            .unwrap_or_else(|| interaction.correlation_id.clone());
+        interaction.desired_worker = Some(json!({
+            "spawn_if_missing": bool_field(&request.body, "spawn_if_missing")
+                .or_else(|| bool_field(&request.body, "spawn"))
+                .unwrap_or(true),
+            "mcp_server": string_field(&request.body, "server")
+                .or_else(|| string_field(&request.body, "mcp_server"))
+                .unwrap_or_else(|| "missiond".to_string()),
+            "force": bool_field(&request.body, "force").unwrap_or(true),
+        }));
+        let result = self
+            .boxed
+            .execute(interaction)
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok(result_response(result))
+    }
+
     async fn handle_slot_text_only_completion(
         &self,
         request: ProviderBoxHttpRequest,
@@ -616,7 +702,7 @@ fn text_only_interaction_from_body(body: &Value) -> Option<ProviderInteractionRe
     let messages = body.get("messages")?.as_array()?;
     let correlation_id = string_field(body, "correlation_id")
         .unwrap_or_else(|| format!("router-{}", uuid::Uuid::new_v4().simple()));
-    let prompt = build_pure_text_prompt(&correlation_id, messages)?;
+    let prompt = build_pure_text_prompt(messages)?;
 
     let mut interaction = ProviderInteractionRequest::pure_text(CliEngine::Agy, prompt);
     interaction.schema = "missiond.provider-interaction-request.v1".to_string();
@@ -795,7 +881,7 @@ fn engine_from_body(body: &Value) -> CliEngine {
     }
 }
 
-fn build_pure_text_prompt(correlation_id: &str, messages: &[Value]) -> Option<String> {
+fn build_pure_text_prompt(messages: &[Value]) -> Option<String> {
     let mut rendered = Vec::new();
     for message in messages {
         let role = message
@@ -824,21 +910,22 @@ fn build_pure_text_prompt(correlation_id: &str, messages: &[Value]) -> Option<St
             return None;
         };
         if !text.trim().is_empty() {
-            rendered.push(format!("{role}: {}", text.trim()));
+            rendered.push((role.to_string(), text.trim().to_string()));
         }
     }
     if rendered.is_empty() {
         return None;
     }
-    Some(format!(
-        "请求编号：{correlation_id}\n\
-         \n\
-         请直接回答下面消息。不要使用工具、不要读取或修改文件、不要执行命令；如果答案需要这些能力，只用一句话说明缺少什么输入。不要复述本段要求。\n\
-         \n\
-         消息：\n\
-         {}",
-        rendered.join("\n\n")
-    ))
+    if rendered.len() == 1 && rendered[0].0 == "user" {
+        return Some(rendered.remove(0).1);
+    }
+    Some(
+        rendered
+            .into_iter()
+            .map(|(role, text)| format!("{role}:\n{text}"))
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+    )
 }
 
 fn has_forbidden_text_only_fields(body: &Value) -> bool {
@@ -884,6 +971,7 @@ fn result_response(result: ProviderBoxResult) -> ProviderBoxHttpResponse {
             "model_catalog": result.model_catalog,
             "router_export": result.router_export,
             "model_switch_result": result.model_switch_result,
+            "mcp_status": result.mcp_status,
             "diagnostics": result.diagnostics,
             "step_records": result.step_records,
             "artifact_hash": result.artifact_hash
@@ -926,8 +1014,13 @@ fn result_response(result: ProviderBoxResult) -> ProviderBoxHttpResponse {
                 "completion_endpoint": "/provider-box/v1/text-only/completions",
                 "slot_scoped_apis": "internal_maintenance_only",
                 "pure_text_guard": {
-                    "prompt_instruction": true,
+                    "prompt_instruction": false,
+                    "sidecar_correlation": true,
+                    "transcript_cursor_guard": true,
+                    "isolated_runtime_workspace": true,
+                    "agy_sandbox_flag": true,
                     "durable_jsonl_guard": true,
+                    "permission_profile": "documented_deny_policy_plus_fail_closed_transcript_gate",
                     "tools": false,
                     "mcp": false,
                     "shell": false,
@@ -963,6 +1056,7 @@ fn result_response(result: ProviderBoxResult) -> ProviderBoxHttpResponse {
             "model_catalog": result.model_catalog,
             "router_export": result.router_export,
             "model_switch_result": result.model_switch_result,
+            "mcp_status": result.mcp_status,
             "artifact_hash": result.artifact_hash
         })
     };
@@ -1068,8 +1162,13 @@ fn provider_text_only_source_entry(entry: &ProviderModelCatalogEntry) -> Value {
             "shell": false
         },
         "guard": {
-            "prompt_instruction": true,
+            "prompt_instruction": false,
+            "sidecar_correlation": true,
+            "transcript_cursor_guard": true,
+            "isolated_runtime_workspace": true,
+            "agy_sandbox_flag": true,
             "durable_jsonl_guard": true,
+            "permission_profile": "documented_deny_policy_plus_fail_closed_transcript_gate",
             "rejects_tool_messages": true,
             "rejects_tool_request_fields": true
         }
@@ -1260,7 +1359,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn text_only_body_builds_correlated_prompt() {
+    fn text_only_body_builds_raw_prompt_with_sidecar_correlation() {
         let body = json!({
             "schema": "missiond.provider-box.text-only-completion-request.v1",
             "provider": "agy_cli",
@@ -1279,7 +1378,8 @@ mod tests {
             request.slot_id.as_deref(),
             Some("slot-agy-gemini-35-flash-high")
         );
-        assert!(request.prompt.unwrap().contains("请求编号：corr-test"));
+        assert_eq!(request.correlation_id, "corr-test");
+        assert_eq!(request.prompt.as_deref(), Some("hello"));
         assert!(request.no_tools);
         let policy = request.model_switch_policy.expect("model policy");
         assert!(!policy.allow_respawn);
@@ -1287,7 +1387,7 @@ mod tests {
     }
 
     #[test]
-    fn text_only_prompt_declines_tool_required_work_as_text() {
+    fn text_only_prompt_keeps_tool_policy_out_of_model_text() {
         let body = json!({
             "schema": "missiond.provider-box.text-only-completion-request.v1",
             "provider": "agy_cli",
@@ -1302,12 +1402,11 @@ mod tests {
         let request = text_only_interaction_from_body(&body).expect("request");
         let prompt = request.prompt.expect("prompt");
 
-        assert!(prompt.contains("请求编号：corr-tool-required"));
-        assert!(prompt.contains("请直接回答下面消息"));
-        assert!(prompt.contains("不要使用工具、不要读取或修改文件、不要执行命令"));
-        assert!(prompt.contains("只用一句话说明缺少什么输入"));
-        assert!(prompt.contains("不要复述本段要求"));
-        assert!(prompt.contains("消息："));
+        assert_eq!(request.correlation_id, "corr-tool-required");
+        assert_eq!(prompt, "read a file and summarize it");
+        assert!(!prompt.contains("不要使用工具"));
+        assert!(!prompt.contains("请求编号"));
+        assert!(request.no_tools);
     }
 
     #[test]

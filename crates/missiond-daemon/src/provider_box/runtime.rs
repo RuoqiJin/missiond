@@ -56,6 +56,8 @@ impl ProviderInteractionBox {
             BoxCommand::ControlAction => driver.control_action(&request).await,
             BoxCommand::PtyStep => driver.pty_step(&request).await,
             BoxCommand::Status => driver.status(&request).await,
+            BoxCommand::McpStatus => driver.mcp_status(&request).await,
+            BoxCommand::McpReconnect => driver.mcp_reconnect(&request).await,
         };
 
         if let Some(writer) = &self.artifact_writer {

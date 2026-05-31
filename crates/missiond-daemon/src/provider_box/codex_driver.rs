@@ -492,6 +492,8 @@ impl ProviderDriver for CodexProviderDriver {
             control_action: false,
             pty_step: false,
             status: false,
+            mcp_status: false,
+            mcp_reconnect: false,
         }
     }
 

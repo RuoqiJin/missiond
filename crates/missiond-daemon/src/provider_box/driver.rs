@@ -6,7 +6,8 @@ use super::types::{
     BoxCommand, ModelSwitchResult, ProviderBoxResult, ProviderBoxStatus,
     ProviderInteractionRequest, ProviderModelCatalog, ProviderUsageSnapshot,
     DIAG_AGY_MODEL_CATALOG_UNSUPPORTED, DIAG_MODEL_SWITCH_UNSUPPORTED,
-    DIAG_PROVIDER_CONTROL_ACTION_UNSUPPORTED, DIAG_PROVIDER_PTY_STEP_UNSUPPORTED,
+    DIAG_PROVIDER_CONTROL_ACTION_UNSUPPORTED, DIAG_PROVIDER_MCP_RECONNECT_UNSUPPORTED,
+    DIAG_PROVIDER_MCP_STATUS_UNSUPPORTED, DIAG_PROVIDER_PTY_STEP_UNSUPPORTED,
     DIAG_PURE_TEXT_GUARD_UNSUPPORTED, DIAG_SUBMIT_TURN_UNSUPPORTED,
 };
 
@@ -21,6 +22,8 @@ pub(crate) struct ProviderDriverCapabilities {
     pub(crate) control_action: bool,
     pub(crate) pty_step: bool,
     pub(crate) status: bool,
+    pub(crate) mcp_status: bool,
+    pub(crate) mcp_reconnect: bool,
 }
 
 #[async_trait]
@@ -101,6 +104,22 @@ pub(crate) trait ProviderDriver: Send + Sync {
     async fn status(&self, request: &ProviderInteractionRequest) -> ProviderBoxResult {
         ProviderBoxResult::base(request, ProviderBoxStatus::Unknown)
     }
+
+    async fn mcp_status(&self, request: &ProviderInteractionRequest) -> ProviderBoxResult {
+        ProviderBoxResult::unsupported(
+            request,
+            DIAG_PROVIDER_MCP_STATUS_UNSUPPORTED,
+            "Provider driver has not been taught interactive MCP status probing yet",
+        )
+    }
+
+    async fn mcp_reconnect(&self, request: &ProviderInteractionRequest) -> ProviderBoxResult {
+        ProviderBoxResult::unsupported(
+            request,
+            DIAG_PROVIDER_MCP_RECONNECT_UNSUPPORTED,
+            "Provider driver has not been taught interactive MCP restart/reconnect yet",
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -131,5 +150,7 @@ pub(crate) fn command_requires_driver(command: BoxCommand) -> bool {
                 | BoxCommand::ControlAction
                 | BoxCommand::PtyStep
                 | BoxCommand::Status
+                | BoxCommand::McpStatus
+                | BoxCommand::McpReconnect
         )
 }

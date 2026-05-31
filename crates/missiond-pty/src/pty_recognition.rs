@@ -653,6 +653,20 @@ fn recognize_agy(lines: &[String]) -> PtyRecognitionSnapshot {
         .with_screen_usage(usage);
     }
 
+    if is_agy_mcp_servers_screen(lines, &lower) {
+        return PtyRecognitionSnapshot::new(
+            CliEngine::Agy,
+            PtyCanonicalState::Blocked,
+            0.9,
+            "agy:mcp_servers",
+        )
+        .with_blocked_kind("mcp_servers")
+        .with_phase("mcp_status")
+        .with_elapsed(elapsed)
+        .with_source("tui_source_signature")
+        .with_screen_identity(identity);
+    }
+
     if is_agy_cli_help_output(lines) {
         return PtyRecognitionSnapshot::new(
             CliEngine::Agy,
@@ -1338,7 +1352,7 @@ fn snapshot_to_detection(snapshot: PtyRecognitionSnapshot) -> Option<StateDetect
     if snapshot.provider == CliEngine::Agy
         && matches!(
             snapshot.blocked_kind.as_deref(),
-            Some("model_picker" | "slash_command_menu" | "slash_command_input")
+            Some("model_picker" | "slash_command_menu" | "slash_command_input" | "mcp_servers")
         )
     {
         return Some(StateDetectionResult::new(
@@ -1436,10 +1450,16 @@ fn is_agy_slash_command_menu(lines: &[String]) -> bool {
         && lower.contains("esc to cancel")
         && lines.iter().any(|line| {
             let cleaned = normalize_identity_value(&clean_agy_identity_line(line));
-            cleaned.starts_with('/')
-                || cleaned.starts_with("> /")
-                || cleaned.starts_with("› /")
-                || cleaned.starts_with("❯ /")
+            is_agy_composer_slash_input(&cleaned)
+                || cleaned
+                    .strip_prefix('>')
+                    .is_some_and(is_agy_composer_slash_input)
+                || cleaned
+                    .strip_prefix('›')
+                    .is_some_and(is_agy_composer_slash_input)
+                || cleaned
+                    .strip_prefix('❯')
+                    .is_some_and(is_agy_composer_slash_input)
         })
 }
 
@@ -1467,10 +1487,16 @@ fn is_agy_pending_slash_command(lines: &[String]) -> bool {
         if matches!(trimmed, ">" | "›" | "❯") {
             return false;
         }
-        if trimmed.starts_with("> /")
-            || trimmed.starts_with("› /")
-            || trimmed.starts_with("❯ /")
-            || trimmed.starts_with('/')
+        if is_agy_composer_slash_input(trimmed)
+            || trimmed
+                .strip_prefix('>')
+                .is_some_and(is_agy_composer_slash_input)
+            || trimmed
+                .strip_prefix('›')
+                .is_some_and(is_agy_composer_slash_input)
+            || trimmed
+                .strip_prefix('❯')
+                .is_some_and(is_agy_composer_slash_input)
         {
             return true;
         }
@@ -1479,6 +1505,39 @@ fn is_agy_pending_slash_command(lines: &[String]) -> bool {
         }
     }
     false
+}
+
+fn is_agy_composer_slash_input(value: &str) -> bool {
+    let trimmed = value.trim_start();
+    let command = trimmed.strip_prefix('/').unwrap_or(trimmed);
+    let Some(first) = command.chars().next() else {
+        return false;
+    };
+    if !first.is_ascii_lowercase() {
+        return false;
+    }
+    let head = command
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches(':');
+    !head.contains('/') && head.chars().all(|ch| ch.is_ascii_lowercase() || ch == '-')
+}
+
+fn is_agy_mcp_servers_screen(lines: &[String], lower: &str) -> bool {
+    lower.contains("mcp servers")
+        && lower.contains("keyboard:")
+        && (lower.contains("enter actions") || lower.contains("enter select"))
+        && lower.contains("esc to cancel")
+        && lines.iter().any(|line| {
+            let cleaned = normalize_identity_value(&clean_agy_identity_line(line));
+            let lower = cleaned.to_ascii_lowercase();
+            lower.starts_with("mcp servers")
+                || lower.starts_with("plugins (")
+                || lower.contains("tools:")
+                || lower.contains("error:")
+                || lower.contains("[restart]")
+        })
 }
 
 fn is_separator_line(line: &str) -> bool {
@@ -2063,6 +2122,46 @@ mod tests {
         assert_eq!(result.state, PtyCanonicalState::Idle);
         assert_eq!(result.reason, "agy:composer_idle");
         assert_eq!(result.blocked_kind, None);
+    }
+
+    #[test]
+    fn agy_idle_screen_with_absolute_cwd_is_not_slash_command_pending() {
+        let result = recognize_agy(&lines(&[
+            "Antigravity CLI 1.0.3",
+            "jjrrqqq@gmail.com (Google AI Ultra)",
+            "Gemini 3.5 Flash (Medium)",
+            "/Users/jinchen/.missiond/runtime/missiond/provider-box/agy-text-only/slot-agy-gemini-35-flash-high-a/workspace",
+            "────────────────────────────────────────",
+            ">",
+            "────────────────────────────────────────",
+            "? for shortcuts                                                                                Gemini 3.5 Flash (Medium)",
+        ]));
+
+        assert_eq!(result.state, PtyCanonicalState::Idle);
+        assert_eq!(result.reason, "agy:composer_idle");
+        assert_eq!(result.blocked_kind, None);
+    }
+
+    #[test]
+    fn agy_mcp_servers_page_is_blocked_menu_not_composer_idle() {
+        let result = recognize_agy(&lines(&[
+            "      ▄▀▀▄        Antigravity CLI 1.0.3",
+            "     ▀▀▀▀▀▀       jjrrqqq@gmail.com (Google AI Ultra)",
+            "    ▀▀▀▀▀▀▀▀      Gemini 3.5 Flash (Medium)",
+            "   ▄▀▀    ▀▀▄     ~/Projects/missiond",
+            "────────────────────────────────────────",
+            "MCP Servers",
+            "Plugins (~/.gemini/antigravity-cli/plugins)",
+            ">  ✓ missiond  Tools: mission_board_query, mission_board_create, mission_board_update, mission_board_delete,",
+            "               mission_board_claim, +93 more",
+            "   ✗ missiond-reconnect-teach  error: missiond reconnect teaching failure : calling \"initialize\": EOF",
+            "Keyboard: ↑/↓ Navigate  enter Actions  esc to cancel                                      Gemini 3.5 Flash (Medium)",
+        ]));
+
+        assert_eq!(result.state, PtyCanonicalState::Blocked);
+        assert_eq!(result.reason, "agy:mcp_servers");
+        assert_eq!(result.blocked_kind.as_deref(), Some("mcp_servers"));
+        assert_eq!(result.phase.as_deref(), Some("mcp_status"));
     }
 
     #[test]

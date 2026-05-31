@@ -23,6 +23,11 @@ pub(crate) const DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED: &str =
     "PROVIDER_CONTROL_ACTION_UNVERIFIED";
 pub(crate) const DIAG_PROVIDER_PTY_STEP_UNSUPPORTED: &str = "PROVIDER_PTY_STEP_UNSUPPORTED";
 pub(crate) const DIAG_PROVIDER_STATUS_UNAVAILABLE: &str = "PROVIDER_STATUS_UNAVAILABLE";
+pub(crate) const DIAG_PROVIDER_MCP_STATUS_UNSUPPORTED: &str = "PROVIDER_MCP_STATUS_UNSUPPORTED";
+pub(crate) const DIAG_PROVIDER_MCP_RECONNECT_UNSUPPORTED: &str =
+    "PROVIDER_MCP_RECONNECT_UNSUPPORTED";
+pub(crate) const DIAG_PROVIDER_MCP_STATUS_UNAVAILABLE: &str = "PROVIDER_MCP_STATUS_UNAVAILABLE";
+pub(crate) const DIAG_PROVIDER_MCP_RECONNECT_UNVERIFIED: &str = "PROVIDER_MCP_RECONNECT_UNVERIFIED";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -39,6 +44,8 @@ pub(crate) enum BoxCommand {
     ControlAction,
     PtyStep,
     Status,
+    McpStatus,
+    McpReconnect,
 }
 
 impl BoxCommand {
@@ -612,6 +619,7 @@ pub(crate) struct ProviderBoxResult {
     pub(crate) model_catalog: Option<ProviderModelCatalog>,
     pub(crate) router_export: Option<ProviderRouterExport>,
     pub(crate) model_switch_result: Option<ModelSwitchResult>,
+    pub(crate) mcp_status: Option<Value>,
 }
 
 impl ProviderBoxResult {
@@ -637,6 +645,7 @@ impl ProviderBoxResult {
             model_catalog: None,
             router_export: None,
             model_switch_result: None,
+            mcp_status: None,
         }
     }
 

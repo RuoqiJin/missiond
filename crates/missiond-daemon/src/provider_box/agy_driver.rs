@@ -1,10 +1,10 @@
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use missiond_core::agy_cli::{discover_sessions, parse_session, AgySession, AgyStep};
+use missiond_core::agy_cli::{discover_sessions, parse_session, AgySession, AgyStep, HistoryIndex};
 use missiond_core::pty::{recognize_screen, PtyCanonicalState};
 use missiond_core::types::CliEngine;
 use missiond_core::{PTYManager, PTYSlot, PTYSpawnOptions, SessionState};
@@ -15,13 +15,14 @@ use tracing::{debug, warn};
 
 use super::driver::{ProviderDriver, ProviderDriverCapabilities};
 use super::types::{
-    ModelSwitchResult, ModelSwitchStatus, ProviderBoxDiagnostic, ProviderBoxResult,
+    BoxCommand, ModelSwitchResult, ModelSwitchStatus, ProviderBoxDiagnostic, ProviderBoxResult,
     ProviderBoxStatus, ProviderControlAction, ProviderInteractionRequest, ProviderModelCatalog,
     ProviderModelCatalogEntry, ProviderModelUsage, ProviderRouterExport, ProviderUsageSnapshot,
     ProviderUsageStatus, PtyObservation, PtyStepAction, PtyStepRecord, PtyStepVerificationStatus,
     TimeoutCancelPolicy, DIAG_MODEL_SWITCH_UNVERIFIED, DIAG_PROVIDER_BOX_INVALID_REQUEST,
     DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE, DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
-    DIAG_PROVIDER_DURABLE_FINAL_MISSING, DIAG_PROVIDER_STATUS_UNAVAILABLE,
+    DIAG_PROVIDER_DURABLE_FINAL_MISSING, DIAG_PROVIDER_MCP_RECONNECT_UNVERIFIED,
+    DIAG_PROVIDER_MCP_STATUS_UNAVAILABLE, DIAG_PROVIDER_STATUS_UNAVAILABLE,
     DIAG_PROVIDER_TEXT_ONLY_VIOLATION, DIAG_PROVIDER_TURN_STALLED,
     DIAG_PROVIDER_TURN_TIMEOUT_CANCELLED, DIAG_PROVIDER_TURN_TIMEOUT_CANCEL_FAILED,
     DIAG_USAGE_UNKNOWN,
@@ -64,6 +65,7 @@ pub(crate) struct AgyProviderDriver {
     pty: Arc<PTYManager>,
     slot_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     slot_last_used: Arc<Mutex<HashMap<String, Instant>>>,
+    text_turn_global_lock: Arc<Mutex<()>>,
     agy_home: PathBuf,
 }
 
@@ -79,6 +81,18 @@ struct AgyTurnFinal {
     session_id: String,
     transcript_path: String,
     final_text: String,
+}
+
+#[derive(Debug, Clone)]
+struct AgyTranscriptCursor {
+    workspace: Option<PathBuf>,
+    sessions: HashMap<String, AgySessionCursor>,
+}
+
+#[derive(Debug, Clone)]
+struct AgySessionCursor {
+    transcript_path: PathBuf,
+    step_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -135,6 +149,16 @@ struct AgyManualPtyStep {
     redacted: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgyMcpServerEntry {
+    name: String,
+    selected: bool,
+    connected: bool,
+    status: String,
+    tools_summary: Option<String>,
+    error: Option<String>,
+}
+
 impl AgyProviderDriver {
     pub(crate) fn new(pty: Arc<PTYManager>) -> Self {
         let slot_last_used = Arc::new(Mutex::new(HashMap::new()));
@@ -143,6 +167,7 @@ impl AgyProviderDriver {
             pty,
             slot_locks: Arc::new(Mutex::new(HashMap::new())),
             slot_last_used,
+            text_turn_global_lock: Arc::new(Mutex::new(())),
             agy_home: default_agy_home(),
         }
     }
@@ -201,6 +226,22 @@ impl AgyProviderDriver {
                     .and_then(Value::as_bool)
             })
             .unwrap_or(false)
+    }
+
+    fn request_mcp_server(request: &ProviderInteractionRequest) -> String {
+        request
+            .desired_worker
+            .as_ref()
+            .and_then(|worker| {
+                worker
+                    .get("mcp_server")
+                    .or_else(|| worker.get("server"))
+                    .and_then(Value::as_str)
+            })
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("missiond")
+            .to_string()
     }
 
     fn request_manual_pty_step(
@@ -335,9 +376,36 @@ impl AgyProviderDriver {
         let cwd = request
             .cwd
             .as_ref()
-            .or(request.project_root.as_ref())
             .map(PathBuf::from)
+            .or_else(|| {
+                if request.command == BoxCommand::PureTextSingleTurn
+                    && is_private_agy_text_slot_id(slot_id)
+                {
+                    Some(agy_text_only_workspace(slot_id))
+                } else {
+                    request.project_root.as_ref().map(PathBuf::from)
+                }
+            })
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
+        if let Err(err) = std::fs::create_dir_all(&cwd) {
+            warn!(
+                slot_id = %slot_id,
+                cwd = %cwd.display(),
+                error = %err,
+                "Failed to create AGY provider-box slot cwd before spawn"
+            );
+        }
+        if request.command == BoxCommand::PureTextSingleTurn && is_private_agy_text_slot_id(slot_id)
+        {
+            if let Err(err) = prepare_text_only_workspace(&cwd, slot_id) {
+                warn!(
+                    slot_id = %slot_id,
+                    cwd = %cwd.display(),
+                    error = %err,
+                    "Failed to prepare AGY text-only workspace policy evidence"
+                );
+            }
+        }
         PTYSlot {
             id: slot_id.to_string(),
             role: "provider-box-agy".to_string(),
@@ -355,6 +423,26 @@ impl AgyProviderDriver {
         }
     }
 
+    fn spawn_options_for_request(
+        request: &ProviderInteractionRequest,
+        slot_id: &str,
+    ) -> PTYSpawnOptions {
+        let mut options = Self::spawn_options();
+        if request.command == BoxCommand::PureTextSingleTurn && is_private_agy_text_slot_id(slot_id)
+        {
+            options.sandbox = Some("text-only".to_string());
+            options.extra_env.insert(
+                "MISSIOND_PROVIDER_BOX_TEXT_ONLY".to_string(),
+                "1".to_string(),
+            );
+            options.extra_env.insert(
+                "MISSIOND_PROVIDER_BOX_SLOT_ID".to_string(),
+                slot_id.to_string(),
+            );
+        }
+        options
+    }
+
     async fn ensure_slot(
         &self,
         request: &ProviderInteractionRequest,
@@ -362,7 +450,7 @@ impl AgyProviderDriver {
     ) -> Option<String> {
         let slot_id = Self::request_slot_id(request);
         let slot = Self::slot_for_request(request, &slot_id);
-        let options = Self::spawn_options();
+        let options = Self::spawn_options_for_request(request, &slot_id);
         if let Some(status) = self.pty.get_status(&slot_id).await {
             if status.engine != CliEngine::Agy {
                 result.status = ProviderBoxStatus::Failed;
@@ -1437,39 +1525,49 @@ impl AgyProviderDriver {
         slot_id: &str,
         prompt: &str,
     ) -> bool {
-        let before = self.observe(slot_id).await;
-        let send_result = self.pty.send_fire_and_forget(slot_id, prompt).await;
-        tokio::time::sleep(Duration::from_millis(OBSERVE_SETTLE_MS)).await;
-        let after = self.observe(slot_id).await;
-        let mut action = PtyStepAction::text("<pure text prompt paste then enter>");
-        action.redacted = true;
-        let status = if send_result.is_err() {
-            PtyStepVerificationStatus::Failed
-        } else if after.snapshot.state == PtyCanonicalState::Running || before.text != after.text {
-            PtyStepVerificationStatus::Verified
-        } else {
-            PtyStepVerificationStatus::Ambiguous
-        };
-        let mut step = PtyStepRecord::new(
-            Self::pty_observation(slot_id, &before),
-            action,
-            Self::pty_observation(slot_id, &after),
-            Some("AGY accepts prompt and enters running state".to_string()),
-            status,
-        );
-        if let Err(err) = send_result {
-            step.diagnostics.push(ProviderBoxDiagnostic::error(
-                DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
-                "AGY prompt submission failed",
-                json!({
-                    "slot_id": slot_id,
-                    "error": err.to_string(),
-                }),
-            ));
+        let mut paste_action = PtyStepAction::text("<pure text prompt paste>");
+        paste_action.redacted = true;
+        let paste_payload = format!("\x1b[200~{prompt}\x1b[201~");
+        let _after_paste = self
+            .write_step(
+                result,
+                slot_id,
+                paste_action,
+                &paste_payload,
+                Some("AGY composer receives the text-only prompt".to_string()),
+            )
+            .await;
+        if result
+            .step_records
+            .last()
+            .is_some_and(|step| step.verification_status == PtyStepVerificationStatus::Failed)
+        {
+            return false;
         }
-        let ok = step.verification_status != PtyStepVerificationStatus::Failed;
-        result.record_step(step);
-        ok
+
+        let after_enter = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::key("enter"),
+                "\r",
+                Some("AGY submits the text-only prompt".to_string()),
+            )
+            .await;
+        if result
+            .step_records
+            .last()
+            .is_some_and(|step| step.verification_status == PtyStepVerificationStatus::Failed)
+        {
+            return false;
+        }
+        if after_enter.snapshot.state == PtyCanonicalState::Running
+            || !is_ready_for_text(&after_enter)
+        {
+            return true;
+        }
+
+        true
     }
 
     async fn monitor_turn(
@@ -1477,6 +1575,8 @@ impl AgyProviderDriver {
         request: &ProviderInteractionRequest,
         result: &mut ProviderBoxResult,
         slot_id: &str,
+        cursor: &AgyTranscriptCursor,
+        prompt: &str,
         policy: &TimeoutCancelPolicy,
         attempt: u8,
     ) -> AgyMonitorOutcome {
@@ -1487,10 +1587,7 @@ impl AgyProviderDriver {
         let mut idle_seen_at: Option<Instant> = None;
 
         loop {
-            match self
-                .extract_turn_from_transcripts(&request.correlation_id)
-                .await
-            {
+            match self.extract_turn_from_transcripts(cursor, prompt).await {
                 AgyTranscriptOutcome::Completed(final_turn) => {
                     return AgyMonitorOutcome::Completed(final_turn);
                 }
@@ -1544,6 +1641,7 @@ impl AgyProviderDriver {
                             json!({
                                 "slot_id": slot_id,
                                 "correlation_id": request.correlation_id,
+                                "extraction": "workspace_cursor",
                                 "agy_home": self.agy_home.display().to_string(),
                             }),
                         ));
@@ -1638,10 +1736,57 @@ impl AgyProviderDriver {
         false
     }
 
-    async fn extract_turn_from_transcripts(&self, correlation_id: &str) -> AgyTranscriptOutcome {
+    async fn capture_transcript_cursor(
+        &self,
+        request: &ProviderInteractionRequest,
+        slot_id: &str,
+    ) -> AgyTranscriptCursor {
+        let workspace = text_only_workspace_for_request(request, slot_id);
+        let history = HistoryIndex::load(&self.agy_home).await;
+        let brain = self.agy_home.join("brain");
+        let mut sessions = HashMap::new();
+        for (session_id, transcript) in discover_sessions(&brain).await {
+            if !session_workspace_matches(&history, &session_id, workspace.as_deref()) {
+                continue;
+            }
+            let Some(session) = parse_session(&transcript).await else {
+                continue;
+            };
+            sessions.insert(
+                session_id,
+                AgySessionCursor {
+                    transcript_path: transcript,
+                    step_count: session.steps.len(),
+                },
+            );
+        }
+        AgyTranscriptCursor {
+            workspace,
+            sessions,
+        }
+    }
+
+    async fn extract_turn_from_transcripts(
+        &self,
+        cursor: &AgyTranscriptCursor,
+        prompt: &str,
+    ) -> AgyTranscriptOutcome {
+        let history = HistoryIndex::load(&self.agy_home).await;
         let brain = self.agy_home.join("brain");
         let sessions = discover_sessions(&brain).await;
         for (session_id, transcript) in sessions {
+            let cursor_for_session = cursor.sessions.get(&session_id);
+            let workspace_match =
+                session_workspace_matches(&history, &session_id, cursor.workspace.as_deref());
+            if !workspace_match && cursor.workspace.is_some() && cursor_for_session.is_none() {
+                if !cursor.sessions.is_empty() {
+                    continue;
+                }
+                debug!(
+                    session_id,
+                    "AGY text-only cursor has no baseline sessions; allowing prompt match fallback before history catches up"
+                );
+            }
             let Some(session) = parse_session(&transcript).await else {
                 continue;
             };
@@ -1651,10 +1796,15 @@ impl AgyProviderDriver {
                     "AGY parsed session id differs from directory id"
                 );
             }
-            if let Some(outcome) = extract_correlated_turn(&session, correlation_id) {
+            let start_index = cursor_for_session
+                .map(|value| value.step_count)
+                .unwrap_or(0);
+            if let Some(outcome) = extract_cursor_turn(&session, start_index, prompt) {
                 return match outcome {
                     AgyTranscriptOutcome::Completed(mut final_turn) => {
-                        final_turn.transcript_path = transcript.display().to_string();
+                        final_turn.transcript_path = cursor_for_session
+                            .map(|value| value.transcript_path.display().to_string())
+                            .unwrap_or_else(|| transcript.display().to_string());
                         AgyTranscriptOutcome::Completed(final_turn)
                     }
                     other => other,
@@ -1852,6 +2002,233 @@ impl AgyProviderDriver {
                     "reason": current_usage.snapshot.reason,
                 }),
             ));
+        }
+    }
+
+    async fn open_mcp_servers_locked(
+        &self,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+    ) -> Option<AgyObservation> {
+        let first = self.observe(slot_id).await;
+        if is_mcp_servers_screen(&first) {
+            let _ = self
+                .write_step(
+                    result,
+                    slot_id,
+                    PtyStepAction::key("escape"),
+                    "\x1b",
+                    Some("close current AGY MCP screen before refresh".to_string()),
+                )
+                .await;
+            let _ = self
+                .wait_until(slot_id, Duration::from_secs(5), is_ready_for_text)
+                .await;
+        }
+
+        if self.ensure_composer_ready(result, slot_id).await.is_none() {
+            return None;
+        }
+
+        let _ = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::text("/mcp"),
+                "/mcp",
+                Some("type AGY /mcp command".to_string()),
+            )
+            .await;
+        let after = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::key("enter"),
+                "\r",
+                Some("execute AGY /mcp command".to_string()),
+            )
+            .await;
+        let observation = if is_mcp_servers_screen(&after) {
+            after
+        } else {
+            self.wait_until(slot_id, Duration::from_secs(6), is_mcp_servers_screen)
+                .await
+        };
+
+        if is_mcp_servers_screen(&observation) {
+            Some(observation)
+        } else {
+            result.status = ProviderBoxStatus::Unverified;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_MCP_STATUS_UNAVAILABLE,
+                "AGY /mcp screen did not render a recognizable MCP server list",
+                json!({
+                    "slot_id": slot_id,
+                    "reason": observation.snapshot.reason,
+                    "state": observation.snapshot.state,
+                    "blocked_kind": observation.snapshot.blocked_kind,
+                }),
+            ));
+            None
+        }
+    }
+
+    async fn refresh_mcp_status_locked(
+        &self,
+        request: &ProviderInteractionRequest,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+    ) -> Option<AgyObservation> {
+        let target = Self::request_mcp_server(request);
+        let observation = self.open_mcp_servers_locked(result, slot_id).await?;
+        let status = self.pty.get_status(slot_id).await;
+        result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
+        result.mcp_status = Some(mcp_status_value(request, slot_id, &target, &observation));
+        result.status = ProviderBoxStatus::Completed;
+        Some(observation)
+    }
+
+    async fn reconnect_mcp_locked(
+        &self,
+        request: &ProviderInteractionRequest,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+    ) {
+        let target = Self::request_mcp_server(request);
+        let Some(observation) = self.open_mcp_servers_locked(result, slot_id).await else {
+            return;
+        };
+
+        match self
+            .select_mcp_server_locked(request, result, slot_id, observation, &target)
+            .await
+        {
+            Some(_) => {}
+            None => return,
+        }
+
+        let actions = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::key("enter"),
+                "\r",
+                Some(format!("open AGY MCP actions for {target}")),
+            )
+            .await;
+        if !mcp_restart_action_visible(&actions) {
+            result.status = ProviderBoxStatus::Unverified;
+            result.mcp_status = Some(mcp_status_value(request, slot_id, &target, &actions));
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_MCP_RECONNECT_UNVERIFIED,
+                "AGY MCP actions menu did not expose Restart for the selected server",
+                json!({
+                    "slot_id": slot_id,
+                    "server": target,
+                    "reason": actions.snapshot.reason,
+                }),
+            ));
+            return;
+        }
+
+        let mut restarted = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::key("enter"),
+                "\r",
+                Some(format!("restart AGY MCP server {target}")),
+            )
+            .await;
+        if !mcp_server_connected(&restarted, &target) {
+            restarted = self
+                .wait_until(slot_id, Duration::from_secs(8), |obs| {
+                    is_mcp_servers_screen(obs) && mcp_server_connected(obs, &target)
+                })
+                .await;
+        }
+
+        let status = self.pty.get_status(slot_id).await;
+        result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &restarted));
+        result.mcp_status = Some(mcp_status_value(request, slot_id, &target, &restarted));
+        if mcp_server_connected(&restarted, &target) {
+            result.status = ProviderBoxStatus::Completed;
+        } else {
+            result.status = ProviderBoxStatus::Unverified;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_MCP_RECONNECT_UNVERIFIED,
+                "AGY MCP Restart completed without a verified connected status",
+                json!({
+                    "slot_id": slot_id,
+                    "server": target,
+                    "mcp_status": result.mcp_status,
+                }),
+            ));
+        }
+    }
+
+    async fn select_mcp_server_locked(
+        &self,
+        request: &ProviderInteractionRequest,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+        mut observation: AgyObservation,
+        target: &str,
+    ) -> Option<AgyObservation> {
+        let entries = extract_mcp_server_entries_from_screen(&observation.text);
+        let selected_index = entries.iter().position(|entry| entry.selected).unwrap_or(0);
+        let Some(target_index) = entries
+            .iter()
+            .position(|entry| mcp_server_name_eq(&entry.name, target))
+        else {
+            result.status = ProviderBoxStatus::Failed;
+            result.mcp_status = Some(mcp_status_value(request, slot_id, target, &observation));
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_MCP_STATUS_UNAVAILABLE,
+                "AGY MCP server was not found in the /mcp list",
+                json!({
+                    "slot_id": slot_id,
+                    "server": target,
+                    "available_servers": entries.iter().map(|entry| entry.name.clone()).collect::<Vec<_>>(),
+                }),
+            ));
+            return None;
+        };
+
+        let steps = if entries.is_empty() {
+            0
+        } else {
+            (target_index + entries.len() - selected_index) % entries.len()
+        };
+        for _ in 0..steps {
+            observation = self
+                .write_step(
+                    result,
+                    slot_id,
+                    PtyStepAction::key("down"),
+                    "\x1b[B",
+                    Some(format!("move AGY MCP selection toward {target}")),
+                )
+                .await;
+        }
+        if selected_mcp_server_name(&observation)
+            .as_deref()
+            .is_some_and(|selected| mcp_server_name_eq(selected, target))
+        {
+            Some(observation)
+        } else {
+            result.status = ProviderBoxStatus::Unverified;
+            result.mcp_status = Some(mcp_status_value(request, slot_id, target, &observation));
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_MCP_RECONNECT_UNVERIFIED,
+                "AGY MCP server selection did not land on the requested server",
+                json!({
+                    "slot_id": slot_id,
+                    "server": target,
+                    "selected_server": selected_mcp_server_name(&observation),
+                }),
+            ));
+            None
         }
     }
 
@@ -2112,6 +2489,8 @@ impl ProviderDriver for AgyProviderDriver {
             control_action: true,
             pty_step: true,
             status: true,
+            mcp_status: true,
+            mcp_reconnect: true,
         }
     }
 
@@ -2159,6 +2538,32 @@ impl ProviderDriver for AgyProviderDriver {
         )
         .await;
         result.status = ProviderBoxStatus::Completed;
+        result
+    }
+
+    async fn mcp_status(&self, request: &ProviderInteractionRequest) -> ProviderBoxResult {
+        let mut result = ProviderBoxResult::base(request, ProviderBoxStatus::Unknown);
+        let Some(slot_id) = self.ensure_slot(request, &mut result).await else {
+            return result;
+        };
+        result.slot_id = Some(slot_id.clone());
+        let lock = self.slot_lock(&slot_id).await;
+        let _guard = lock.lock().await;
+        self.refresh_mcp_status_locked(request, &mut result, &slot_id)
+            .await;
+        result
+    }
+
+    async fn mcp_reconnect(&self, request: &ProviderInteractionRequest) -> ProviderBoxResult {
+        let mut result = ProviderBoxResult::base(request, ProviderBoxStatus::Unknown);
+        let Some(slot_id) = self.ensure_slot(request, &mut result).await else {
+            return result;
+        };
+        result.slot_id = Some(slot_id.clone());
+        let lock = self.slot_lock(&slot_id).await;
+        let _guard = lock.lock().await;
+        self.reconnect_mcp_locked(request, &mut result, &slot_id)
+            .await;
         result
     }
 
@@ -2445,6 +2850,7 @@ impl ProviderDriver for AgyProviderDriver {
             return result;
         }
         self.reclaim_idle_text_slots().await;
+        let _text_turn_guard = self.text_turn_global_lock.lock().await;
         let requested_slot_id = Self::request_slot_id(request);
         let cold_start_slot = match self.pty.get_status(&requested_slot_id).await {
             Some(status) => matches!(status.state, SessionState::Exited | SessionState::Error),
@@ -2490,6 +2896,7 @@ impl ProviderDriver for AgyProviderDriver {
         let prompt = request.prompt.clone().unwrap_or_default();
         let max_attempts = policy.max_retries.saturating_add(1).max(1);
         for attempt in 0..max_attempts {
+            let cursor = self.capture_transcript_cursor(request, &slot_id).await;
             if !self
                 .submit_prompt_step(&mut result, &slot_id, &prompt)
                 .await
@@ -2498,7 +2905,15 @@ impl ProviderDriver for AgyProviderDriver {
                 return result;
             }
             match self
-                .monitor_turn(request, &mut result, &slot_id, &policy, attempt)
+                .monitor_turn(
+                    request,
+                    &mut result,
+                    &slot_id,
+                    &cursor,
+                    &prompt,
+                    &policy,
+                    attempt,
+                )
                 .await
             {
                 AgyMonitorOutcome::Completed(final_turn) => {
@@ -2537,6 +2952,29 @@ impl ProviderDriver for AgyProviderDriver {
                 }
                 AgyMonitorOutcome::Failed(mut failed) => {
                     failed.diagnostics.extend(result.diagnostics.clone());
+                    if is_retryable_text_turn_failure(&failed) && attempt + 1 < max_attempts {
+                        result.diagnostics.extend(failed.diagnostics.clone());
+                        result.add_diagnostic(ProviderBoxDiagnostic::warning(
+                            DIAG_PROVIDER_TURN_STALLED,
+                            "AGY text-only turn failed without a durable final; clearing slot and retrying once",
+                            json!({
+                                "slot_id": slot_id,
+                                "attempt": attempt,
+                                "retry_attempt": attempt + 1,
+                            }),
+                        ));
+                        self.cleanup_after_pure_text_locked(request, &mut result, &slot_id)
+                            .await;
+                        result.status = ProviderBoxStatus::Unknown;
+                        if self
+                            .ensure_composer_ready(&mut result, &slot_id)
+                            .await
+                            .is_none()
+                        {
+                            return result;
+                        }
+                        continue;
+                    }
                     return failed;
                 }
             }
@@ -2723,9 +3161,22 @@ fn is_usage_screen(observation: &AgyObservation) -> bool {
             .contains("model quota")
 }
 
+fn is_mcp_servers_screen(observation: &AgyObservation) -> bool {
+    observation.snapshot.reason == "agy:mcp_servers"
+        || observation.snapshot.blocked_kind.as_deref() == Some("mcp_servers")
+        || {
+            let lower = observation.text.to_ascii_lowercase();
+            lower.contains("mcp servers")
+                && lower.contains("keyboard:")
+                && (lower.contains("enter actions") || lower.contains("enter select"))
+                && lower.contains("esc to cancel")
+        }
+}
+
 fn is_overlay_screen(observation: &AgyObservation) -> bool {
     is_model_picker(observation)
         || is_usage_screen(observation)
+        || is_mcp_servers_screen(observation)
         || is_slash_command_surface(observation)
 }
 
@@ -2743,6 +3194,7 @@ fn is_ready_for_text(observation: &AgyObservation) -> bool {
 fn is_hard_blocked(observation: &AgyObservation) -> bool {
     observation.snapshot.state == PtyCanonicalState::Blocked
         && !is_model_picker(observation)
+        && !is_mcp_servers_screen(observation)
         && !is_slash_command_surface(observation)
 }
 
@@ -2881,6 +3333,121 @@ fn slug_model(value: &str) -> String {
         .chars()
         .filter(|value| value.is_ascii_alphanumeric() || *value == '-')
         .collect()
+}
+
+fn missiond_runtime_dir() -> PathBuf {
+    std::env::var("MISSIOND_RUNTIME_DIR")
+        .ok()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("/tmp"))
+                .join(".missiond")
+                .join("runtime")
+                .join("missiond")
+        })
+}
+
+fn agy_text_only_workspace(slot_id: &str) -> PathBuf {
+    missiond_runtime_dir()
+        .join("provider-box")
+        .join("agy-text-only")
+        .join(slot_id)
+        .join("workspace")
+}
+
+fn prepare_text_only_workspace(cwd: &Path, slot_id: &str) -> std::io::Result<()> {
+    std::fs::create_dir_all(cwd)?;
+    let policy_dir = cwd.join(".missiond-provider-box");
+    std::fs::create_dir_all(&policy_dir)?;
+    let policy = json!({
+        "schema": "missiond.agy-text-only-workspace-policy.v1",
+        "slot_id": slot_id,
+        "mode": "text_only_llm_export",
+        "agy_cli_observation": {
+            "version_family": "1.0.x",
+            "disable_all_tools_flag": false,
+            "help_flags_used": ["--sandbox"],
+            "help_flags_not_found": ["--no-tools", "--disable-tools"],
+            "settings_panel_disable_all_tools": false
+        },
+        "desired_permissions": {
+            "toolPermission": "strict",
+            "allowNonWorkspaceAccess": false,
+            "enableTerminalSandbox": true,
+            "permissions": {
+                "deny": [
+                    "read_file(*)",
+                    "write_file(*)",
+                    "command(*)",
+                    "unsandboxed(*)",
+                    "read_url(*)",
+                    "execute_url(*)",
+                    "mcp(*)"
+                ]
+            }
+        },
+        "enforced_by_provider_box": [
+            "isolated runtime cwd per private replica slot",
+            "agy --sandbox when AGY accepts the toggle",
+            "sidecar correlation id outside prompt text",
+            "pre-submit durable transcript cursor",
+            "post-submit durable transcript violation gate"
+        ],
+        "note": "AGY 1.0.x documents global settings permissions but does not expose a stable per-process no-tools/profile flag in agy --help. Provider-box therefore treats this file as local policy evidence and fails closed from durable transcripts if a tool/file/shell/MCP step appears."
+    });
+    let policy_text = serde_json::to_string_pretty(&policy)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
+    std::fs::write(
+        policy_dir.join("agy-text-only-policy.json"),
+        format!("{policy_text}\n"),
+    )?;
+    std::fs::write(
+        cwd.join("README.missiond-text-only.txt"),
+        "MissionD provider-box AGY text-only workspace.\nThis directory is isolated from project code and is used only for router-facing plain text turns.\n",
+    )?;
+    Ok(())
+}
+
+fn text_only_workspace_for_request(
+    request: &ProviderInteractionRequest,
+    slot_id: &str,
+) -> Option<PathBuf> {
+    request.cwd.as_ref().map(PathBuf::from).or_else(|| {
+        if request.command == BoxCommand::PureTextSingleTurn && is_private_agy_text_slot_id(slot_id)
+        {
+            Some(agy_text_only_workspace(slot_id))
+        } else {
+            request.project_root.as_ref().map(PathBuf::from)
+        }
+    })
+}
+
+fn session_workspace_matches(
+    history: &HistoryIndex,
+    session_id: &str,
+    workspace: Option<&Path>,
+) -> bool {
+    let Some(workspace) = workspace else {
+        return true;
+    };
+    history
+        .resolve_cwd(session_id)
+        .as_deref()
+        .is_some_and(|cwd| paths_match(cwd, workspace))
+}
+
+fn paths_match(observed: &str, expected: &Path) -> bool {
+    let observed = PathBuf::from(observed);
+    if observed == expected {
+        return true;
+    }
+    let observed_canonical = observed.canonicalize().ok();
+    let expected_canonical = expected.canonicalize().ok();
+    match (observed_canonical, expected_canonical) {
+        (Some(observed), Some(expected)) => observed == expected,
+        _ => false,
+    }
 }
 
 fn agy_slot_pool_id(model: &str) -> String {
@@ -3145,6 +3712,138 @@ fn clean_agy_line(line: &str) -> String {
         .to_string()
 }
 
+fn extract_mcp_server_entries_from_screen(text: &str) -> Vec<AgyMcpServerEntry> {
+    let mut entries = Vec::new();
+    let mut in_latest_mcp_page = false;
+    for line in text.lines() {
+        let cleaned = clean_agy_line(line);
+        let lower = cleaned.to_ascii_lowercase();
+        if lower.starts_with("mcp servers") {
+            entries.clear();
+            in_latest_mcp_page = true;
+            continue;
+        }
+        if !in_latest_mcp_page {
+            continue;
+        }
+        if lower.starts_with("keyboard:") || lower.contains("[restart]") || lower == "disable" {
+            continue;
+        }
+        let selected = picker_line_selected(line);
+        let (connected, rest) = if let Some(rest) = cleaned.strip_prefix('✓') {
+            (true, rest.trim())
+        } else if let Some(rest) = cleaned.strip_prefix('✗') {
+            (false, rest.trim())
+        } else {
+            continue;
+        };
+        let rest_lower = rest.to_ascii_lowercase();
+        let (name, tools_summary, error) = if let Some(index) = rest_lower.find("tools:") {
+            (
+                rest[..index].trim().to_string(),
+                Some(rest[index + "tools:".len()..].trim().to_string()),
+                None,
+            )
+        } else if let Some(index) = rest_lower.find("error:") {
+            (
+                rest[..index].trim().to_string(),
+                None,
+                Some(rest[index + "error:".len()..].trim().to_string()),
+            )
+        } else {
+            (rest.trim().to_string(), None, None)
+        };
+        if name.is_empty() {
+            continue;
+        }
+        entries.push(AgyMcpServerEntry {
+            name,
+            selected,
+            connected,
+            status: if connected { "connected" } else { "failed" }.to_string(),
+            tools_summary: tools_summary.filter(|value| !value.is_empty()),
+            error: error.filter(|value| !value.is_empty()),
+        });
+    }
+    entries
+}
+
+fn mcp_status_value(
+    request: &ProviderInteractionRequest,
+    slot_id: &str,
+    target: &str,
+    observation: &AgyObservation,
+) -> Value {
+    let servers = extract_mcp_server_entries_from_screen(&observation.text);
+    let selected_server = servers
+        .iter()
+        .find(|entry| entry.selected)
+        .map(|entry| entry.name.clone());
+    let target_entry = servers
+        .iter()
+        .find(|entry| mcp_server_name_eq(&entry.name, target));
+    let aggregate_status = if servers.is_empty() {
+        "unknown"
+    } else if servers.iter().all(|entry| entry.connected) {
+        "connected"
+    } else if target_entry.as_ref().is_some_and(|entry| !entry.connected) {
+        "target_failed"
+    } else {
+        "degraded"
+    };
+    json!({
+        "schema": "missiond.provider-box.agy-mcp-status.v1",
+        "provider": request.provider.clone().or_else(|| Some("agy_cli".to_string())),
+        "engine": CliEngine::Agy,
+        "slot_id": slot_id,
+        "source": "agy:/mcp",
+        "observed_at": chrono::Utc::now().to_rfc3339(),
+        "status": aggregate_status,
+        "target_server": target,
+        "target_status": target_entry.map(|entry| entry.status.clone()),
+        "selected_server": selected_server,
+        "restart_action_visible": mcp_restart_action_visible(observation),
+        "servers": servers
+            .iter()
+            .map(|entry| {
+                json!({
+                    "name": entry.name,
+                    "selected": entry.selected,
+                    "status": entry.status,
+                    "connected": entry.connected,
+                    "tools_summary": entry.tools_summary,
+                    "error": entry.error,
+                })
+            })
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn selected_mcp_server_name(observation: &AgyObservation) -> Option<String> {
+    extract_mcp_server_entries_from_screen(&observation.text)
+        .into_iter()
+        .find(|entry| entry.selected)
+        .map(|entry| entry.name)
+}
+
+fn mcp_server_connected(observation: &AgyObservation, target: &str) -> bool {
+    extract_mcp_server_entries_from_screen(&observation.text)
+        .into_iter()
+        .any(|entry| mcp_server_name_eq(&entry.name, target) && entry.connected)
+}
+
+fn mcp_restart_action_visible(observation: &AgyObservation) -> bool {
+    observation
+        .text
+        .lines()
+        .map(clean_agy_line)
+        .any(|line| line.to_ascii_lowercase().contains("[restart]"))
+}
+
+fn mcp_server_name_eq(observed: &str, target: &str) -> bool {
+    observed.trim().eq_ignore_ascii_case(target.trim())
+}
+
 fn usage_screen_value(observation: &AgyObservation) -> Option<Value> {
     observation
         .snapshot
@@ -3268,14 +3967,31 @@ fn validate_manual_text_step(
     Ok(())
 }
 
-fn extract_correlated_turn(
+fn is_retryable_text_turn_failure(result: &ProviderBoxResult) -> bool {
+    matches!(result.status, ProviderBoxStatus::Failed)
+        && result.diagnostics.iter().any(|diagnostic| {
+            matches!(
+                diagnostic.code.as_str(),
+                DIAG_PROVIDER_DURABLE_FINAL_MISSING
+                    | DIAG_PROVIDER_TURN_TIMEOUT_CANCELLED
+                    | DIAG_PROVIDER_TURN_STALLED
+            )
+        })
+}
+
+fn extract_cursor_turn(
     session: &AgySession,
-    correlation_id: &str,
+    start_index: usize,
+    prompt: &str,
 ) -> Option<AgyTranscriptOutcome> {
     let start = session
         .steps
         .iter()
-        .position(|step| step.step_type == "USER_INPUT" && step_contains(step, correlation_id))?;
+        .enumerate()
+        .skip(start_index)
+        .find_map(|(index, step)| {
+            (step.step_type == "USER_INPUT" && step_contains_prompt(step, prompt)).then_some(index)
+        })?;
 
     let mut final_text = None;
     for step in session.steps.iter().skip(start + 1) {
@@ -3365,12 +4081,21 @@ fn pure_text_violation(step: &AgyStep) -> Option<AgyTranscriptOutcome> {
     })
 }
 
-fn step_contains(step: &AgyStep, needle: &str) -> bool {
-    step.content
-        .as_ref()
-        .map(value_text)
-        .unwrap_or_default()
-        .contains(needle)
+fn step_contains_prompt(step: &AgyStep, prompt: &str) -> bool {
+    let prompt = prompt.trim();
+    if prompt.is_empty() {
+        return false;
+    }
+    let content = step.content.as_ref().map(value_text).unwrap_or_default();
+    let content_trimmed = content.trim();
+    if content_trimmed.contains(prompt) {
+        return true;
+    }
+    normalize_prompt_match_text(content_trimmed).contains(&normalize_prompt_match_text(prompt))
+}
+
+fn normalize_prompt_match_text(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn value_text(value: &Value) -> String {
@@ -3498,6 +4223,8 @@ fn default_agy_home() -> PathBuf {
 mod tests {
     use missiond_core::agy_cli::{AgySession, AgyStep, AgyToolCall};
 
+    use crate::provider_box::types::BoxCommand;
+
     use super::*;
 
     fn observation(input: &[&str]) -> AgyObservation {
@@ -3558,6 +4285,63 @@ mod tests {
         assert!(is_overlay_screen(&obs));
         assert!(is_slash_command_surface(&obs));
         assert!(!is_ready_for_text(&obs));
+    }
+
+    #[test]
+    fn agy_driver_parses_mcp_server_status_page() {
+        let obs = observation(&[
+            "────────────────────────────────────────",
+            "MCP Servers",
+            "Plugins (~/.gemini/antigravity-cli/plugins)",
+            ">  ✓ missiond  Tools: mission_board_query, mission_board_create, mission_board_update, mission_board_delete,",
+            "               mission_board_claim, +93 more",
+            "   ✗ missiond-reconnect-teach  error: missiond reconnect teaching failure : calling \"initialize\": EOF",
+            "Keyboard: ↑/↓ Navigate  enter Actions  esc to cancel                                      Gemini 3.5 Flash (Medium)",
+        ]);
+
+        assert!(is_mcp_servers_screen(&obs));
+        assert!(is_overlay_screen(&obs));
+        assert!(!is_ready_for_text(&obs));
+        assert!(!is_hard_blocked(&obs));
+
+        let servers = extract_mcp_server_entries_from_screen(&obs.text);
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0].name, "missiond");
+        assert!(servers[0].selected);
+        assert!(servers[0].connected);
+        assert_eq!(servers[1].name, "missiond-reconnect-teach");
+        assert!(!servers[1].connected);
+        assert_eq!(
+            servers[1].error.as_deref(),
+            Some("missiond reconnect teaching failure : calling \"initialize\": EOF")
+        );
+
+        let mut request = ProviderInteractionRequest::new(BoxCommand::McpStatus, CliEngine::Agy);
+        request.provider = Some("agy_cli".to_string());
+        let value = mcp_status_value(&request, "slot-agy-research", "missiond", &obs);
+        assert_eq!(value["status"], "degraded");
+        assert_eq!(value["target_status"], "connected");
+        assert_eq!(value["selected_server"], "missiond");
+    }
+
+    #[test]
+    fn agy_driver_detects_mcp_restart_action_menu() {
+        let obs = observation(&[
+            "────────────────────────────────────────",
+            "MCP Servers",
+            "Plugins (~/.gemini/antigravity-cli/plugins)",
+            "   ✓ missiond  Tools: mission_board_query, mission_board_create",
+            ">  ✗ missiond-reconnect-teach  error: missiond reconnect teaching failure : calling \"initialize\": EOF",
+            "   [Restart]   Disable",
+            "Keyboard: ←/→ Navigate  enter Select  esc to cancel                                      Gemini 3.5 Flash (Medium)",
+        ]);
+
+        assert!(is_mcp_servers_screen(&obs));
+        assert!(mcp_restart_action_visible(&obs));
+        assert_eq!(
+            selected_mcp_server_name(&obs).as_deref(),
+            Some("missiond-reconnect-teach")
+        );
     }
 
     #[test]
@@ -3694,20 +4478,18 @@ mod tests {
     }
 
     #[test]
-    fn correlated_turn_extracts_final_after_matching_user() {
+    fn cursor_turn_extracts_final_after_matching_user() {
         let session = AgySession {
             session_id: "conv-1".to_string(),
             steps: vec![
-                step(
-                    1,
-                    "USER_INPUT",
-                    Some(json!("Correlation-ID: corr-1\nhello")),
-                ),
-                step(2, "PLANNER_RESPONSE", Some(json!("final answer"))),
+                step(1, "USER_INPUT", Some(json!("previous turn"))),
+                step(2, "PLANNER_RESPONSE", Some(json!("previous final"))),
+                step(3, "USER_INPUT", Some(json!("hello from router"))),
+                step(4, "PLANNER_RESPONSE", Some(json!("final answer"))),
             ],
         };
 
-        let outcome = extract_correlated_turn(&session, "corr-1").expect("matched");
+        let outcome = extract_cursor_turn(&session, 2, "hello from router").expect("matched");
 
         match outcome {
             AgyTranscriptOutcome::Completed(turn) => {
@@ -3719,7 +4501,7 @@ mod tests {
     }
 
     #[test]
-    fn correlated_turn_rejects_tool_call_before_final() {
+    fn cursor_turn_rejects_tool_call_before_final() {
         let mut tool_step = step(2, "PLANNER_RESPONSE", None);
         tool_step.tool_calls = Some(vec![AgyToolCall {
             name: "run_command".to_string(),
@@ -3727,29 +4509,26 @@ mod tests {
         }]);
         let session = AgySession {
             session_id: "conv-1".to_string(),
-            steps: vec![
-                step(1, "USER_INPUT", Some(json!("Correlation-ID: corr-2"))),
-                tool_step,
-            ],
+            steps: vec![step(1, "USER_INPUT", Some(json!("read a file"))), tool_step],
         };
 
-        let outcome = extract_correlated_turn(&session, "corr-2").expect("matched");
+        let outcome = extract_cursor_turn(&session, 0, "read a file").expect("matched");
 
         assert!(matches!(outcome, AgyTranscriptOutcome::Violation { .. }));
     }
 
     #[test]
-    fn correlated_turn_ignores_ephemeral_messages_before_final() {
+    fn cursor_turn_ignores_ephemeral_messages_before_final() {
         let session = AgySession {
             session_id: "conv-1".to_string(),
             steps: vec![
-                step(1, "USER_INPUT", Some(json!("Correlation-ID: corr-3"))),
+                step(1, "USER_INPUT", Some(json!("short prompt"))),
                 step(2, "EPHEMERAL_MESSAGE", Some(json!("Working..."))),
                 step(3, "PLANNER_RESPONSE", Some(json!("plain final"))),
             ],
         };
 
-        let outcome = extract_correlated_turn(&session, "corr-3").expect("matched");
+        let outcome = extract_cursor_turn(&session, 0, "short prompt").expect("matched");
 
         match outcome {
             AgyTranscriptOutcome::Completed(turn) => {
@@ -3757,6 +4536,34 @@ mod tests {
             }
             other => panic!("unexpected outcome: {other:?}"),
         }
+    }
+
+    #[test]
+    fn cursor_turn_matches_multiline_prompt_without_prompt_injected_correlation() {
+        let session = AgySession {
+            session_id: "conv-1".to_string(),
+            steps: vec![
+                step(1, "USER_INPUT", Some(json!("line one\nline two"))),
+                step(2, "PLANNER_RESPONSE", Some(json!("plain final"))),
+            ],
+        };
+
+        let outcome = extract_cursor_turn(&session, 0, "line one\nline two").expect("matched");
+
+        assert!(matches!(outcome, AgyTranscriptOutcome::Completed(_)));
+    }
+
+    #[test]
+    fn text_turn_failure_without_durable_final_is_retryable() {
+        let request = ProviderInteractionRequest::pure_text(CliEngine::Agy, "hello".to_string());
+        let mut result = ProviderBoxResult::base(&request, ProviderBoxStatus::Failed);
+        result.add_diagnostic(ProviderBoxDiagnostic::error(
+            DIAG_PROVIDER_DURABLE_FINAL_MISSING,
+            "missing final",
+            json!({}),
+        ));
+
+        assert!(is_retryable_text_turn_failure(&result));
     }
 
     #[test]
