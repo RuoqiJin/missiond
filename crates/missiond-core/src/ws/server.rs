@@ -6040,9 +6040,9 @@ JSON 字段必须是：\n\
             "agy" | "agy_cli" | "agy-cli" => Ok("agy"),
             "claude_code" | "claude-code" | "claude" => Ok("claude_code"),
             "gemini" | "gemini_cli" | "gemini-cli" => Ok("gemini"),
-            other => anyhow::bail!(
-                "unsupported provider_box provider for Jarvis direct answer: {other}"
-            ),
+            other => {
+                anyhow::bail!("unsupported provider_box provider for Jarvis direct answer: {other}")
+            }
         }
     }
 
@@ -6150,10 +6150,7 @@ JSON 字段必须是：\n\
             sources_used,
         );
         let prompt = format!("{system_prompt}\n\n{prompt}");
-        let correlation_id = format!(
-            "jarvis-direct-answer-{}",
-            uuid::Uuid::new_v4().simple()
-        );
+        let correlation_id = format!("jarvis-direct-answer-{}", uuid::Uuid::new_v4().simple());
         let body = serde_json::json!({
             "schema": "missiond.provider-interaction-request.v1",
             "command": "grounded-direct-answer",
@@ -6180,9 +6177,13 @@ JSON 字段必须是：\n\
                 "approval_policy": "never"
             }
         });
-        let answer =
-            Self::call_provider_box_turn(provider_box_http, body, timeout_secs, "JARVIS_DIRECT_ANSWER")
-                .await?;
+        let answer = Self::call_provider_box_turn(
+            provider_box_http,
+            body,
+            timeout_secs,
+            "JARVIS_DIRECT_ANSWER",
+        )
+        .await?;
         if answer.trim().is_empty() {
             anyhow::bail!("JARVIS_DIRECT_ANSWER_EMPTY: provider-box returned no visible answer");
         }

@@ -8,21 +8,21 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use missiond_core::db::traits::MissionStore;
-use missiond_core::pty::{PtyCanonicalState, recognize_screen};
+use missiond_core::pty::{recognize_screen, PtyCanonicalState};
 use missiond_core::types::{CliEngine, SharedProjectRegistry};
 use missiond_core::{LearnedPermissions, PTYManager, PTYSlot, PTYSpawnOptions, SessionState};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::{Mutex, RwLock};
 
 use super::driver::{ProviderDriver, ProviderDriverCapabilities};
 use super::types::{
-    DIAG_PROVIDER_BOX_INVALID_REQUEST, DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
-    DIAG_PROVIDER_DURABLE_FINAL_MISSING, DIAG_PROVIDER_TEXT_ONLY_VIOLATION,
-    DIAG_PROVIDER_TURN_TIMEOUT_CANCEL_FAILED, DIAG_PROVIDER_TURN_TIMEOUT_CANCELLED,
     ProviderBoxDiagnostic, ProviderBoxResult, ProviderBoxStatus, ProviderInteractionRequest,
     PtyObservation, PtyStepAction, PtyStepRecord, PtyStepVerificationStatus,
+    DIAG_PROVIDER_BOX_INVALID_REQUEST, DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+    DIAG_PROVIDER_DURABLE_FINAL_MISSING, DIAG_PROVIDER_TEXT_ONLY_VIOLATION,
+    DIAG_PROVIDER_TURN_TIMEOUT_CANCELLED, DIAG_PROVIDER_TURN_TIMEOUT_CANCEL_FAILED,
 };
 
 const DEFAULT_CODEX_SLOT: &str = "slot-codex-provider-box";

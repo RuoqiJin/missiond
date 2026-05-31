@@ -45,7 +45,10 @@ impl HistoryIndex {
                 idx.by_conversation.insert(cid.to_string(), ws.to_string());
             }
         }
-        debug!(count = idx.by_conversation.len(), "Loaded agy history index");
+        debug!(
+            count = idx.by_conversation.len(),
+            "Loaded agy history index"
+        );
         idx
     }
 
@@ -156,7 +159,14 @@ fn convert_step(step: &AgyStep, session_id: &str, cwd: &str, out: &mut Vec<CCMes
             let raw = step.content.as_ref().map(extract_text).unwrap_or_default();
             let text = strip_user_request_wrapper(&raw);
             if !text.trim().is_empty() {
-                out.push(make_cc_line(session_id, &base_uuid, &ts, "user", json!(text), cwd));
+                out.push(make_cc_line(
+                    session_id,
+                    &base_uuid,
+                    &ts,
+                    "user",
+                    json!(text),
+                    cwd,
+                ));
             }
         }
         "PLANNER_RESPONSE" => {
@@ -317,7 +327,11 @@ mod tests {
     #[test]
     fn planner_response_text_is_assistant() {
         let lines = agy_steps_to_cc(
-            &[step(5, "PLANNER_RESPONSE", Some(json!("https://github.com/x/y")))],
+            &[step(
+                5,
+                "PLANNER_RESPONSE",
+                Some(json!("https://github.com/x/y")),
+            )],
             "conv-1",
             "/cwd",
         );

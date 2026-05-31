@@ -362,6 +362,8 @@ mod tests {
         // Falls back to ~/.gemini/antigravity-cli when env is unset; exact path
         // is host-dependent, so just assert the suffix shape.
         let home = default_agy_home();
-        assert!(home.ends_with("antigravity-cli") || home.to_string_lossy().contains("antigravity"));
+        assert!(
+            home.ends_with("antigravity-cli") || home.to_string_lossy().contains("antigravity")
+        );
     }
 }
