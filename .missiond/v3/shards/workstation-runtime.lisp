@@ -149,6 +149,10 @@
            :current-files ["crates/missiond-core/src/ws/server.rs"]
            :current-patterns ["run_jarvis_codex_author_exec" "codex exec --json --output-last-message" "MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_PROVIDER"]
            :replacement "Jarvis authoring calls provider-interaction-box mode=semantic-authoring against slot-codex-intent-author/slot-codex-plan-author")
+         (target provider-box-codex-exec-text-only
+           :current-files ["crates/missiond-daemon/src/provider_box/codex_driver.rs"]
+           :current-patterns ["codex exec --json --output-last-message" "no_tools/no_mcp/no_shell/no_file_access" "DIAG_PROVIDER_TEXT_ONLY_VIOLATION"]
+           :replacement "Codex provider-box pure-text turns use codex exec only inside the provider-interaction-box driver, with no_tools/no_mcp/no_shell/no_file_access guards, scratch runtime cwd, output-last-message capture, and tool-activity violation diagnostics; normal worker turns remain interactive PTY plus durable rollout final extraction")
          (target jarvis-grounded-direct-answer-text-only
            :current-files ["crates/missiond-core/src/ws/server.rs" "scripts/deploy-daemon.sh"]
            :current-patterns ["MISSIOND_XJPCODE_TEXT_ONLY_URL" "MISSIOND_JARVIS_DIRECT_ANSWER_PROVIDER" "/provider/v1/text-only/completions"]

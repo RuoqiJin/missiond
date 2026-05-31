@@ -149,6 +149,27 @@ augment_managed_node_path() {
 
 augment_managed_node_path
 
+ensure_codex_app_cli_on_path() {
+  if command -v codex >/dev/null 2>&1; then
+    return 0
+  fi
+  local app_cli="/Applications/Codex.app/Contents/Resources/codex"
+  local local_bin="${HOME}/.local/bin"
+  if [ -x "$app_cli" ]; then
+    mkdir -p "$local_bin"
+    ln -sfn "$app_cli" "${local_bin}/codex"
+    case ":$PATH:" in
+      *":$local_bin:"*) ;;
+      *) PATH="$local_bin:$PATH" ;;
+    esac
+    export PATH
+    log "bootstrap: linked Codex.app CLI into ${local_bin}/codex"
+  fi
+}
+
+ensure_codex_app_cli_on_path
+augment_managed_node_path
+
 case "$PROFILE" in
   release)
     BUILD_ARG="--release"

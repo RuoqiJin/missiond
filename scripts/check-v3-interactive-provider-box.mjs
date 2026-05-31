@@ -61,6 +61,15 @@ const INVENTORIED_LEGACY = [
     ],
   },
   {
+    id: 'provider-box-codex-exec-text-only',
+    files: [FILES.providerBoxDriver.replace('driver.rs', 'codex_driver.rs')],
+    needles: [
+      'codex exec --json --output-last-message',
+      'no_tools/no_mcp/no_shell/no_file_access',
+      'DIAG_PROVIDER_TEXT_ONLY_VIOLATION',
+    ],
+  },
+  {
     id: 'jarvis-grounded-direct-answer-text-only',
     files: [FILES.jarvisServer, FILES.deployDaemon],
     needles: [

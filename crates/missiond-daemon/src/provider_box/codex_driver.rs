@@ -2,25 +2,27 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use missiond_core::db::traits::MissionStore;
-use missiond_core::pty::{recognize_screen, PtyCanonicalState};
+use missiond_core::pty::{PtyCanonicalState, recognize_screen};
 use missiond_core::types::{CliEngine, SharedProjectRegistry};
 use missiond_core::{LearnedPermissions, PTYManager, PTYSlot, PTYSpawnOptions, SessionState};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::{Mutex, RwLock};
 
 use super::driver::{ProviderDriver, ProviderDriverCapabilities};
 use super::types::{
+    DIAG_PROVIDER_BOX_INVALID_REQUEST, DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+    DIAG_PROVIDER_DURABLE_FINAL_MISSING, DIAG_PROVIDER_TEXT_ONLY_VIOLATION,
+    DIAG_PROVIDER_TURN_TIMEOUT_CANCEL_FAILED, DIAG_PROVIDER_TURN_TIMEOUT_CANCELLED,
     ProviderBoxDiagnostic, ProviderBoxResult, ProviderBoxStatus, ProviderInteractionRequest,
     PtyObservation, PtyStepAction, PtyStepRecord, PtyStepVerificationStatus,
-    DIAG_PROVIDER_BOX_INVALID_REQUEST, DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
-    DIAG_PROVIDER_DURABLE_FINAL_MISSING, DIAG_PROVIDER_TURN_TIMEOUT_CANCELLED,
-    DIAG_PROVIDER_TURN_TIMEOUT_CANCEL_FAILED,
 };
 
 const DEFAULT_CODEX_SLOT: &str = "slot-codex-provider-box";
@@ -183,7 +185,10 @@ impl CodexProviderDriver {
             mcp_config: None,
             dangerously_skip_permissions: false,
             model: request.model.clone(),
-            reasoning_effort: request.model_profile.clone().or_else(|| request.model.clone()),
+            reasoning_effort: request
+                .model_profile
+                .clone()
+                .or_else(|| request.model.clone()),
             search_enabled: true,
             sandbox: Some(
                 request
@@ -256,11 +261,7 @@ impl CodexProviderDriver {
         )
     }
 
-    async fn ensure_ready_for_prompt(
-        &self,
-        result: &mut ProviderBoxResult,
-        slot_id: &str,
-    ) -> bool {
+    async fn ensure_ready_for_prompt(&self, result: &mut ProviderBoxResult, slot_id: &str) -> bool {
         let started = Instant::now();
         loop {
             let observation = self.observe(slot_id).await;
@@ -324,9 +325,247 @@ impl CodexProviderDriver {
                 }),
             ));
         }
-        let ok = step.verification_status != PtyStepVerificationStatus::Failed;
+        if step.verification_status == PtyStepVerificationStatus::Ambiguous {
+            step.diagnostics.push(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_DURABLE_FINAL_MISSING,
+                "Codex provider-box prompt submission was not observed by the PTY",
+                json!({
+                    "slot_id": slot_id,
+                    "rule": "provider-box may not monitor a turn until prompt acceptance is observed",
+                    "before_reason": before.snapshot.reason,
+                    "after_reason": after.snapshot.reason,
+                    "after_state": after.snapshot.state,
+                }),
+            ));
+        }
+        let ok = step.verification_status == PtyStepVerificationStatus::Verified;
         result.record_step(step);
         ok
+    }
+
+    fn should_use_exec_text_turn(request: &ProviderInteractionRequest) -> bool {
+        request.attachments.is_empty()
+            && request.no_tools
+            && request.no_mcp
+            && request.no_shell
+            && request.no_file_access
+            && request.single_turn_policy.as_ref().map_or(true, |policy| {
+                policy.require_plain_text
+                    && policy.no_tools
+                    && policy.no_mcp
+                    && policy.no_shell
+                    && policy.no_file_access
+            })
+    }
+
+    async fn submit_exec_text_turn(
+        &self,
+        request: &ProviderInteractionRequest,
+    ) -> ProviderBoxResult {
+        // Migration-only headless path for provider-box pure-text turns:
+        // `codex exec --json --output-last-message` is allowed here only when
+        // the request carries no_tools/no_mcp/no_shell/no_file_access guards.
+        let mut result = ProviderBoxResult::base(request, ProviderBoxStatus::Unknown);
+        if !Self::validate_prompt_turn(request, &mut result) {
+            return result;
+        }
+        if !self.ensure_codex_binary(request, &mut result).await {
+            return result;
+        }
+
+        let runtime_dir = provider_box_runtime_dir();
+        let exec_dir = runtime_dir.join("codex-exec");
+        let scratch_dir = exec_dir
+            .join("scratch")
+            .join(safe_file_component(&request.correlation_id));
+        if let Err(err) =
+            fs::create_dir_all(&scratch_dir).and_then(|_| fs::create_dir_all(&exec_dir))
+        {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                "Codex exec runtime directory could not be created",
+                json!({
+                    "error": err.to_string(),
+                    "runtime_dir": runtime_dir.display().to_string(),
+                }),
+            ));
+            return result;
+        }
+
+        let output_path = exec_dir.join(format!(
+            "codex-exec-{}.txt",
+            safe_file_component(&request.correlation_id)
+        ));
+        let prompt = text_only_exec_prompt(request);
+        let mut command = Command::new("codex");
+        command
+            .arg("exec")
+            .arg("--json")
+            .arg("--color")
+            .arg("never")
+            .arg("--output-last-message")
+            .arg(&output_path)
+            .arg("--skip-git-repo-check")
+            .arg("--ignore-rules")
+            .arg("-C")
+            .arg(&scratch_dir)
+            .arg("--sandbox")
+            .arg("read-only")
+            .arg("--ask-for-approval")
+            .arg("never");
+        if let Some(model) = request
+            .model
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            command.arg("--model").arg(model);
+        }
+        if let Some(effort) = request
+            .model_profile
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            command
+                .arg("-c")
+                .arg(format!("model_reasoning_effort=\"{}\"", effort));
+        }
+        command
+            .arg("-")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let before = PtyObservation::structured(
+            "codex-exec:before",
+            "",
+            json!({
+                "mode": "codex_exec_text_only",
+                "scratch_dir": scratch_dir.display().to_string(),
+                "output_path": output_path.display().to_string(),
+                "no_tools": request.no_tools,
+                "no_mcp": request.no_mcp,
+                "no_shell": request.no_shell,
+                "no_file_access": request.no_file_access,
+            }),
+        );
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(err) => {
+                result.status = ProviderBoxStatus::Failed;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                    "Codex exec text-only turn could not be spawned",
+                    json!({
+                        "error": err.to_string(),
+                        "rule": "fast-fail; no fallback provider path is allowed",
+                    }),
+                ));
+                return result;
+            }
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            if let Err(err) = stdin.write_all(prompt.as_bytes()).await {
+                result.status = ProviderBoxStatus::Failed;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                    "Codex exec prompt could not be written to stdin",
+                    json!({
+                        "error": err.to_string(),
+                    }),
+                ));
+                let _ = child.kill().await;
+                return result;
+            }
+        }
+
+        let timeout_secs = request.timeout_secs.unwrap_or(180).clamp(10, 7_200);
+        let output =
+            match tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output())
+                .await
+            {
+                Ok(Ok(output)) => output,
+                Ok(Err(err)) => {
+                    result.status = ProviderBoxStatus::Failed;
+                    result.add_diagnostic(ProviderBoxDiagnostic::error(
+                        DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                        "Codex exec text-only turn failed while waiting for output",
+                        json!({
+                            "error": err.to_string(),
+                        }),
+                    ));
+                    return result;
+                }
+                Err(_) => {
+                    result.status = ProviderBoxStatus::Failed;
+                    result.add_diagnostic(ProviderBoxDiagnostic::error(
+                        DIAG_PROVIDER_TURN_TIMEOUT_CANCEL_FAILED,
+                        "Codex exec text-only turn timed out",
+                        json!({
+                            "timeout_secs": timeout_secs,
+                            "cancel": DIAG_PROVIDER_TURN_TIMEOUT_CANCELLED,
+                        }),
+                    ));
+                    return result;
+                }
+            };
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let final_text = fs::read_to_string(&output_path).unwrap_or_default();
+        let after = PtyObservation::structured(
+            "codex-exec:after",
+            stdout_tail(&stdout, 4_000),
+            json!({
+                "status": output.status.code(),
+                "success": output.status.success(),
+                "stderr_tail": stdout_tail(&stderr, 2_000),
+                "output_path": output_path.display().to_string(),
+                "final_text_len": final_text.len(),
+            }),
+        );
+        let mut step = PtyStepRecord::new(
+            before,
+            PtyStepAction::text("<codex exec text-only prompt via stdin>"),
+            after,
+            Some("Codex exec writes final assistant text to output-last-message".to_string()),
+            if output.status.success() && !final_text.trim().is_empty() {
+                PtyStepVerificationStatus::Verified
+            } else {
+                PtyStepVerificationStatus::Failed
+            },
+        );
+
+        if codex_exec_contains_tool_activity(&stdout) {
+            step.diagnostics.push(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_TEXT_ONLY_VIOLATION,
+                "Codex exec emitted tool activity during a text-only provider-box turn",
+                json!({
+                    "rule": "no_tools/no_shell/no_file_access turns must remain pure text",
+                    "stdout_tail": stdout_tail(&stdout, 2_000),
+                }),
+            ));
+            result.status = ProviderBoxStatus::Failed;
+        } else if output.status.success() && !final_text.trim().is_empty() {
+            result.status = ProviderBoxStatus::Completed;
+            result.final_text = Some(final_text);
+            result.durable_source = Some(output_path.display().to_string());
+            result.provider_conversation_id = Some(request.correlation_id.clone());
+        } else {
+            result.status = ProviderBoxStatus::Failed;
+            step.diagnostics.push(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_DURABLE_FINAL_MISSING,
+                "Codex exec completed without a non-empty final message",
+                json!({
+                    "status": output.status.code(),
+                    "stderr_tail": stdout_tail(&stderr, 2_000),
+                    "stdout_tail": stdout_tail(&stdout, 2_000),
+                    "output_path": output_path.display().to_string(),
+                }),
+            ));
+        }
+        result.record_step(step);
+        result
     }
 
     async fn monitor_turn(
@@ -340,7 +579,9 @@ impl CodexProviderDriver {
         let mut idle_seen_at: Option<Instant> = None;
 
         loop {
-            if let Some(final_turn) = self.extract_turn_from_rollouts(&request.correlation_id).await
+            if let Some(final_turn) = self
+                .extract_turn_from_rollouts(&request.correlation_id)
+                .await
             {
                 result.status = ProviderBoxStatus::Completed;
                 result.provider_conversation_id = Some(final_turn.session_id);
@@ -484,6 +725,9 @@ impl ProviderDriver for CodexProviderDriver {
     }
 
     async fn submit_turn(&self, request: &ProviderInteractionRequest) -> ProviderBoxResult {
+        if Self::should_use_exec_text_turn(request) {
+            return self.submit_exec_text_turn(request).await;
+        }
         let mut result = ProviderBoxResult::base(request, ProviderBoxStatus::Unknown);
         if !Self::validate_prompt_turn(request, &mut result) {
             return result;
@@ -508,6 +752,13 @@ impl ProviderDriver for CodexProviderDriver {
         }
         self.monitor_turn(request, &mut result, &slot_id).await
     }
+
+    async fn pure_text_single_turn(
+        &self,
+        request: &ProviderInteractionRequest,
+    ) -> ProviderBoxResult {
+        self.submit_exec_text_turn(request).await
+    }
 }
 
 fn correlate_prompt(request: &ProviderInteractionRequest) -> String {
@@ -529,8 +780,72 @@ fn default_codex_home() -> PathBuf {
         .ok()
         .map(PathBuf::from)
         .or_else(|| std::env::var("MISSIOND_CODEX_HOME").ok().map(PathBuf::from))
-        .or_else(|| std::env::var("HOME").ok().map(|home| PathBuf::from(home).join(".codex")))
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|home| PathBuf::from(home).join(".codex"))
+        })
         .unwrap_or_else(|| PathBuf::from(".codex"))
+}
+
+fn provider_box_runtime_dir() -> PathBuf {
+    std::env::var("MISSIOND_RUNTIME_DIR")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|home| PathBuf::from(home).join(".missiond/runtime/missiond"))
+        })
+        .unwrap_or_else(|| PathBuf::from(".missiond/runtime/missiond"))
+        .join("provider-box")
+}
+
+fn safe_file_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .chars()
+        .take(160)
+        .collect()
+}
+
+fn stdout_tail(value: &str, max_chars: usize) -> String {
+    let chars = value.chars().collect::<Vec<_>>();
+    let start = chars.len().saturating_sub(max_chars);
+    chars[start..].iter().collect()
+}
+
+fn text_only_exec_prompt(request: &ProviderInteractionRequest) -> String {
+    let prompt = correlate_prompt(request);
+    format!(
+        "MissionD provider-box text-only turn.\n\
+         Constraints:\n\
+         - Do not run shell commands, MCP tools, web search, file reads, file writes, or any other tool.\n\
+         - Use only the context included in this prompt.\n\
+         - Return only the requested final answer; do not describe these constraints.\n\
+         - Preserve the requested output format from the prompt/output contract.\n\n{}",
+        prompt
+    )
+}
+
+fn codex_exec_contains_tool_activity(stdout: &str) -> bool {
+    stdout.lines().any(|line| {
+        let lower = line.to_ascii_lowercase();
+        lower.contains("\"exec_command\"")
+            || lower.contains("\"tool_call\"")
+            || lower.contains("\"function_call\"")
+            || lower.contains("\"mcp_tool_call\"")
+            || lower.contains("\"command_begin\"")
+            || lower.contains("\"command_output\"")
+    })
 }
 
 fn collect_jsonl_files(root: &Path, out: &mut Vec<PathBuf>) {
