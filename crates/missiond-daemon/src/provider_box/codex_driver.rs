@@ -412,8 +412,8 @@ impl CodexProviderDriver {
             .arg(&scratch_dir)
             .arg("--sandbox")
             .arg("read-only")
-            .arg("--ask-for-approval")
-            .arg("never");
+            .arg("-c")
+            .arg("approval_policy=\"never\"");
         if let Some(model) = request
             .model
             .as_deref()

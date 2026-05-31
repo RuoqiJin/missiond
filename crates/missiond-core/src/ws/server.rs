@@ -4859,6 +4859,66 @@ impl PTYWebSocketServer {
         )
     }
 
+    fn jarvis_author_text_provider() -> String {
+        std::env::var("MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_PROVIDER")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "codex_cli".to_string())
+    }
+
+    fn jarvis_text_only_slot_id(
+        provider: &str,
+        explicit: Option<&str>,
+        default_slot: &str,
+    ) -> String {
+        if let Some(slot_id) = explicit.map(str::trim).filter(|value| !value.is_empty()) {
+            return slot_id.to_string();
+        }
+        match provider {
+            "agy" | "agy_cli" | "agy-cli" => "slot-agy-research".to_string(),
+            "claude_code" | "claude-code" | "claude" => "slot-claude-code-default".to_string(),
+            "gemini" | "gemini_cli" | "gemini-cli" => "slot-gemini-fast-survey".to_string(),
+            _ => default_slot.to_string(),
+        }
+    }
+
+    fn jarvis_author_text_slot_id(provider: &str, default_slot: &str) -> String {
+        Self::jarvis_text_only_slot_id(
+            provider,
+            std::env::var("MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_SLOT_ID")
+                .ok()
+                .as_deref(),
+            default_slot,
+        )
+    }
+
+    fn jarvis_author_text_model(provider: &str, default_model: &str) -> Option<String> {
+        if let Some(model) = std::env::var("MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_MODEL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            return Some(model);
+        }
+        match provider {
+            "codex" | "codex_cli" | "codex-cli" => Some(default_model.to_string()),
+            _ => None,
+        }
+    }
+
+    fn jarvis_author_text_authority(
+        provider: &str,
+        model: Option<&str>,
+        reasoning_effort: &str,
+    ) -> String {
+        let provider_label = provider.replace('_', "-");
+        match model.map(str::trim).filter(|value| !value.is_empty()) {
+            Some(model) => format!("{provider_label}-{model}-{reasoning_effort}"),
+            None => format!("{provider_label}-provider-current-{reasoning_effort}"),
+        }
+    }
+
     fn jarvis_codex_intent_prompt(
         config: &JarvisIntentAuthorConfig,
         schema: &str,
@@ -4870,6 +4930,10 @@ impl PTYWebSocketServer {
         sources_used: &[String],
         permission_context: Option<&serde_json::Value>,
     ) -> String {
+        let provider = Self::jarvis_author_text_provider();
+        let engine = Self::provider_box_engine_for_provider(provider.as_str()).unwrap_or("codex");
+        let slot_id = Self::jarvis_author_text_slot_id(provider.as_str(), &config.slot_id);
+        let model = Self::jarvis_author_text_model(provider.as_str(), &config.model);
         let input = serde_json::json!({
             "schema": schema,
             "channel": channel,
@@ -4880,16 +4944,17 @@ impl PTYWebSocketServer {
             "sources_used": sources_used,
             "permission_context": permission_context.cloned().unwrap_or(serde_json::Value::Null),
             "authoring_lane": {
-                "engine": "codex-cli",
-                "slot_id": config.slot_id,
-                "model": config.model,
+                "provider": provider,
+                "engine": engine,
+                "slot_id": slot_id,
+                "model": model,
                 "reasoning_effort": config.reasoning_effort,
                 "sandbox": config.sandbox,
                 "approval_policy": config.approval_policy
             }
         });
         format!(
-            "你是 MissionD 的 Jarvis intent.lisp 语义作者，运行在 provider_box 管理的 Codex CLI GPT-5.5 xhigh 交互工位。\n\
+            "你是 MissionD 的 Jarvis intent.lisp 语义作者，运行在 provider_box 管理的纯文本语义作者工位。\n\
 任务：识别用户真实意图，并输出一个可供用户确认的 intent draft。不要创建任务、不要改文件、不要派工位。\n\
 只返回一个严格 JSON object，不要 Markdown，不要代码围栏，不要额外解释。JSON key 必须使用双引号。\n\
 JSON 字段必须是：\n\
@@ -4919,6 +4984,10 @@ JSON 字段必须是：\n\
         sources_used: &[String],
         permission_context: Option<&serde_json::Value>,
     ) -> String {
+        let provider = Self::jarvis_author_text_provider();
+        let engine = Self::provider_box_engine_for_provider(provider.as_str()).unwrap_or("codex");
+        let slot_id = Self::jarvis_author_text_slot_id(provider.as_str(), &config.slot_id);
+        let model = Self::jarvis_author_text_model(provider.as_str(), &config.model);
         let input = serde_json::json!({
             "schema": schema,
             "channel": channel,
@@ -4930,16 +4999,17 @@ JSON 字段必须是：\n\
             "sources_used": sources_used,
             "permission_context": permission_context.cloned().unwrap_or(serde_json::Value::Null),
             "authoring_lane": {
-                "engine": "codex-cli",
-                "slot_id": config.slot_id,
-                "model": config.model,
+                "provider": provider,
+                "engine": engine,
+                "slot_id": slot_id,
+                "model": model,
                 "reasoning_effort": config.reasoning_effort,
                 "sandbox": config.sandbox,
                 "approval_policy": config.approval_policy
             }
         });
         format!(
-            "你是 MissionD 的 Jarvis plan.lisp 语义作者，运行在 provider_box 管理的 Codex CLI GPT-5.5 xhigh 交互工位。\n\
+            "你是 MissionD 的 Jarvis plan.lisp 语义作者，运行在 provider_box 管理的纯文本语义作者工位。\n\
 任务：基于已确认的 intent.lisp 目标，生成可供用户确认的 plan draft。不要创建 BoardTask、不要派工位、不要执行实现、不要改文件。\n\
 计划必须声明用户确认 plan 后的 execution_mode。现阶段即使是聊天/问答也必须先经过 intent.lisp 和 plan.lisp，但简单问答应选择 grounded_direct_answer，不应污染 BoardTask。\n\
 只返回一个严格 JSON object，不要 Markdown，不要代码围栏，不要额外解释。JSON key 必须使用双引号。\n\
@@ -5046,11 +5116,32 @@ JSON 字段必须是：\n\
     ) -> anyhow::Result<String> {
         let cwd = Self::jarvis_slot_runtime_cwd();
         let correlation_id = format!("jarvis-{}-{}", output_prefix, uuid::Uuid::new_v4().simple());
+        let provider = Self::jarvis_author_text_provider();
+        let engine = Self::provider_box_engine_for_provider(provider.as_str())?;
+        let slot_id = Self::jarvis_author_text_slot_id(provider.as_str(), slot_id);
+        let model = Self::jarvis_author_text_model(provider.as_str(), model);
+        let pure_text_command = engine == "agy";
+        let command = if pure_text_command {
+            "pure-text-single-turn"
+        } else {
+            "semantic-authoring"
+        };
+        let output_contract = if pure_text_command {
+            serde_json::json!({
+                "media_type": "text/plain",
+                "single_turn": true
+            })
+        } else {
+            serde_json::json!({
+                "media_type": "application/json",
+                "artifact": output_prefix
+            })
+        };
         let body = serde_json::json!({
             "schema": "missiond.provider-interaction-request.v1",
-            "command": "semantic-authoring",
-            "provider": "codex_cli",
-            "engine": "codex",
+            "command": command,
+            "provider": provider,
+            "engine": engine,
             "model": model,
             "model_profile": reasoning_effort,
             "cwd": cwd.display().to_string(),
@@ -5070,10 +5161,7 @@ JSON 字段必须是：\n\
                 "env_marker": env_marker,
                 "started_at": chrono::Utc::now().to_rfc3339()
             },
-            "output_contract": {
-                "media_type": "application/json",
-                "artifact": output_prefix
-            }
+            "output_contract": output_contract
         });
         Self::call_provider_box_turn(provider_box_http, body, timeout_secs, error_prefix).await
     }
@@ -5229,11 +5317,24 @@ JSON 字段必须是：\n\
         topic_label: Option<&str>,
         sources_used: &[String],
     ) -> String {
+        let provider = Self::jarvis_author_text_provider();
+        let engine = Self::provider_box_engine_for_provider(provider.as_str()).unwrap_or("codex");
+        let slot_id = Self::jarvis_author_text_slot_id(provider.as_str(), &config.slot_id);
+        let model = Self::jarvis_author_text_model(provider.as_str(), &config.model);
+        let authority = Self::jarvis_author_text_authority(
+            provider.as_str(),
+            model.as_deref(),
+            &config.reasoning_effort,
+        );
         format!(
-            "(intent-draft\n  :schema {}\n  :authority codex-cli-gpt-5.5-xhigh\n  :semantic-author (:engine codex-cli :slot-id {} :model {} :reasoning-effort xhigh :sandbox {} :approval-policy {})\n  :channel {}\n  :original-message {}\n  :objective {}\n  :intent-kind {}\n  :confidence {}\n  :understanding {}\n  :grounding-context-id {}\n  :topic-id {}\n  :topic-label {}\n  :sources-used {}\n  :assumptions {}\n  :non-goals {}\n  :acceptance-signals {}\n  :approval (:state awaiting-intent-confirmation :required true)\n  :next-step \"confirm intent -> generate plan.lisp -> confirm plan -> create BoardTask\")",
+            "(intent-draft\n  :schema {}\n  :authority {}\n  :semantic-author (:provider {} :engine {} :slot-id {} :model {} :reasoning-effort {} :sandbox {} :approval-policy {})\n  :channel {}\n  :original-message {}\n  :objective {}\n  :intent-kind {}\n  :confidence {}\n  :understanding {}\n  :grounding-context-id {}\n  :topic-id {}\n  :topic-label {}\n  :sources-used {}\n  :assumptions {}\n  :non-goals {}\n  :acceptance-signals {}\n  :approval (:state awaiting-intent-confirmation :required true)\n  :next-step \"confirm intent -> generate plan.lisp -> confirm plan -> create BoardTask\")",
             Self::jarvis_lisp_string(schema),
-            Self::jarvis_lisp_string(&config.slot_id),
-            Self::jarvis_lisp_string(&config.model),
+            Self::jarvis_lisp_string(&authority),
+            Self::jarvis_lisp_string(&provider),
+            Self::jarvis_lisp_string(engine),
+            Self::jarvis_lisp_string(&slot_id),
+            Self::jarvis_lisp_optional(model.as_deref()),
+            Self::jarvis_lisp_string(&config.reasoning_effort),
             Self::jarvis_lisp_string(&config.sandbox),
             Self::jarvis_lisp_string(&config.approval_policy),
             Self::jarvis_lisp_string(channel),
@@ -5462,6 +5563,15 @@ JSON 字段必须是：\n\
         topic_label: Option<&str>,
         sources_used: &[String],
     ) -> String {
+        let provider = Self::jarvis_author_text_provider();
+        let engine = Self::provider_box_engine_for_provider(provider.as_str()).unwrap_or("codex");
+        let slot_id = Self::jarvis_author_text_slot_id(provider.as_str(), &config.slot_id);
+        let model = Self::jarvis_author_text_model(provider.as_str(), &config.model);
+        let authority = Self::jarvis_author_text_authority(
+            provider.as_str(),
+            model.as_deref(),
+            &config.reasoning_effort,
+        );
         let rendered_steps = draft
             .steps
             .iter()
@@ -5476,10 +5586,14 @@ JSON 字段必须是：\n\
             .collect::<Vec<_>>()
             .join("\n");
         format!(
-            "(plan-draft\n  :schema {}\n  :authority codex-cli-gpt-5.5-xhigh\n  :semantic-author (:engine codex-cli :slot-id {} :model {} :reasoning-effort xhigh :sandbox {} :approval-policy {})\n  :channel {}\n  :objective {}\n  :confidence {}\n  :grounding-context-id {}\n  :intent-artifact-id {}\n  :topic-id {}\n  :topic-label {}\n  :sources-used {}\n  :execution\n    (:mode {}\n     :requires-board-task {}\n     :answer-policy {}\n     :provider-hint {}\n     :direct-answer-provider provider-box\n     :completion-authority {})\n  :steps [\n{}\n  ]\n  :boundary {}\n  :assumptions {}\n  :non-goals {}\n  :acceptance-signals {}\n  :approval (:state awaiting-plan-confirmation :required true))",
+            "(plan-draft\n  :schema {}\n  :authority {}\n  :semantic-author (:provider {} :engine {} :slot-id {} :model {} :reasoning-effort {} :sandbox {} :approval-policy {})\n  :channel {}\n  :objective {}\n  :confidence {}\n  :grounding-context-id {}\n  :intent-artifact-id {}\n  :topic-id {}\n  :topic-label {}\n  :sources-used {}\n  :execution\n    (:mode {}\n     :requires-board-task {}\n     :answer-policy {}\n     :provider-hint {}\n     :direct-answer-provider provider-box\n     :completion-authority {})\n  :steps [\n{}\n  ]\n  :boundary {}\n  :assumptions {}\n  :non-goals {}\n  :acceptance-signals {}\n  :approval (:state awaiting-plan-confirmation :required true))",
             Self::jarvis_lisp_string(schema),
-            Self::jarvis_lisp_string(&config.slot_id),
-            Self::jarvis_lisp_string(&config.model),
+            Self::jarvis_lisp_string(&authority),
+            Self::jarvis_lisp_string(&provider),
+            Self::jarvis_lisp_string(engine),
+            Self::jarvis_lisp_string(&slot_id),
+            Self::jarvis_lisp_optional(model.as_deref()),
+            Self::jarvis_lisp_string(&config.reasoning_effort),
             Self::jarvis_lisp_string(&config.sandbox),
             Self::jarvis_lisp_string(&config.approval_policy),
             Self::jarvis_lisp_string(channel),
@@ -6151,19 +6265,29 @@ JSON 字段必须是：\n\
         );
         let prompt = format!("{system_prompt}\n\n{prompt}");
         let correlation_id = format!("jarvis-direct-answer-{}", uuid::Uuid::new_v4().simple());
+        let pure_text_command = engine == "agy";
+        let command = if pure_text_command {
+            "pure-text-single-turn"
+        } else {
+            "grounded-direct-answer"
+        };
+        let slot_id = Self::jarvis_text_only_slot_id(
+            provider.as_str(),
+            std::env::var("MISSIOND_JARVIS_DIRECT_ANSWER_SLOT_ID")
+                .ok()
+                .as_deref(),
+            "slot-codex-review-worker",
+        );
         let body = serde_json::json!({
             "schema": "missiond.provider-interaction-request.v1",
-            "command": "grounded-direct-answer",
+            "command": command,
             "provider": &provider,
             "engine": engine,
             "prompt": prompt,
             "model": std::env::var("MISSIOND_JARVIS_DIRECT_ANSWER_MODEL").ok(),
             "timeout_secs": timeout_secs,
             "correlation_id": correlation_id,
-            "slot_id": std::env::var("MISSIOND_JARVIS_DIRECT_ANSWER_SLOT_ID")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| "slot-codex-review-worker".to_string()),
+            "slot_id": slot_id,
             "no_tools": true,
             "no_mcp": true,
             "no_shell": true,
