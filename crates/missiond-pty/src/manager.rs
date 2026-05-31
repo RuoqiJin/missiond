@@ -745,9 +745,18 @@ impl PTYManager {
             s.cwd.to_string_lossy().into_owned()
         };
 
+        {
+            let s = session.read().await;
+            let state = s.state().await;
+            if state != SessionState::Idle {
+                return Err(anyhow!("Cannot send message in state: {:?}", state));
+            }
+        }
+
         // Emit MessageSent BEFORE writing to PTY: the watcher FSEvent fires
         // the instant Claude Code writes to JSONL, which can happen before
-        // send returns. The expectation ticket must exist before then.
+        // send returns. Do this after the explicit idle check so rejected sends
+        // do not leave orphan expectation tickets.
         let _ = self.event_tx.send(ManagerEvent::MessageSent {
             slot_id: slot_id.to_string(),
             project_path: Some(cwd),

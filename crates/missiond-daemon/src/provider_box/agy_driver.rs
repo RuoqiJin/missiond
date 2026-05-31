@@ -35,7 +35,12 @@ const MODEL_CATALOG_MAX_DOWN: usize = 128;
 const OBSERVE_SETTLE_MS: u64 = 220;
 const AGY_STARTUP_SIGN_IN_WAIT_SECS: u64 = 10;
 const AGY_STARTUP_READY_WAIT_SECS: u64 = 30;
+const AGY_DURABLE_FINAL_IDLE_GRACE_SECS: u64 = 10;
+const AGY_PROMPT_SEND_READY_WAIT_SECS: u64 = 8;
 const AGY_MANUAL_TEXT_LIMIT: usize = 4096;
+const AGY_USAGE_MAX_PAGES: usize = 8;
+const AGY_TEXT_SLOT_IDLE_RECLAIM_SECS: u64 = 2 * 60 * 60;
+const AGY_TEXT_SLOT_REAPER_INTERVAL_SECS: u64 = 10 * 60;
 const AGY_MANUAL_KEY_NAMES: &[&str] = &[
     "enter",
     "escape",
@@ -58,6 +63,7 @@ const AGY_MANUAL_KEY_NAMES: &[&str] = &[
 pub(crate) struct AgyProviderDriver {
     pty: Arc<PTYManager>,
     slot_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    slot_last_used: Arc<Mutex<HashMap<String, Instant>>>,
     agy_home: PathBuf,
 }
 
@@ -131,9 +137,12 @@ struct AgyManualPtyStep {
 
 impl AgyProviderDriver {
     pub(crate) fn new(pty: Arc<PTYManager>) -> Self {
+        let slot_last_used = Arc::new(Mutex::new(HashMap::new()));
+        start_agy_text_slot_reaper(Arc::clone(&pty), Arc::clone(&slot_last_used));
         Self {
             pty,
             slot_locks: Arc::new(Mutex::new(HashMap::new())),
+            slot_last_used,
             agy_home: default_agy_home(),
         }
     }
@@ -144,6 +153,19 @@ impl AgyProviderDriver {
             .entry(slot_id.to_string())
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
+    }
+
+    async fn mark_text_slot_used(&self, slot_id: &str) {
+        if is_private_agy_text_slot_id(slot_id) {
+            self.slot_last_used
+                .lock()
+                .await
+                .insert(slot_id.to_string(), Instant::now());
+        }
+    }
+
+    async fn reclaim_idle_text_slots(&self) {
+        reclaim_idle_agy_text_slots(&self.pty, &self.slot_last_used).await;
     }
 
     fn request_slot_id(request: &ProviderInteractionRequest) -> String {
@@ -728,7 +750,7 @@ impl AgyProviderDriver {
             }
         }
 
-        observation = self
+        let mut observation = self
             .write_step(
                 result,
                 slot_id,
@@ -868,7 +890,9 @@ impl AgyProviderDriver {
         }
 
         if is_ready_for_text(&observation) {
-            return Some(observation);
+            return self
+                .wait_for_prompt_send_ready(result, slot_id, observation)
+                .await;
         }
 
         if observation.snapshot.state == PtyCanonicalState::Running {
@@ -878,7 +902,9 @@ impl AgyProviderDriver {
                 })
                 .await;
             if is_ready_for_text(&observation) {
-                return Some(observation);
+                return self
+                    .wait_for_prompt_send_ready(result, slot_id, observation)
+                    .await;
             }
         }
 
@@ -891,6 +917,98 @@ impl AgyProviderDriver {
                 "state": observation.snapshot.state,
                 "reason": observation.snapshot.reason,
                 "blocked_kind": observation.snapshot.blocked_kind,
+            }),
+        ));
+        None
+    }
+
+    async fn wait_for_prompt_send_ready(
+        &self,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+        initial: AgyObservation,
+    ) -> Option<AgyObservation> {
+        let before = initial.clone();
+        let mut observation = initial;
+        let mut last_session_state = self
+            .pty
+            .get_status(slot_id)
+            .await
+            .as_ref()
+            .map(|status| status.state);
+        if is_ready_for_text(&observation) && matches!(last_session_state, Some(SessionState::Idle))
+        {
+            return Some(observation);
+        }
+
+        let started = Instant::now();
+        loop {
+            if started.elapsed() >= Duration::from_secs(AGY_PROMPT_SEND_READY_WAIT_SECS) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            observation = self.observe(slot_id).await;
+            last_session_state = self
+                .pty
+                .get_status(slot_id)
+                .await
+                .as_ref()
+                .map(|status| status.state);
+            if is_ready_for_text(&observation)
+                && matches!(last_session_state, Some(SessionState::Idle))
+            {
+                result.record_step(PtyStepRecord::new(
+                    Self::pty_observation(slot_id, &before),
+                    PtyStepAction {
+                        action_type: "wait".to_string(),
+                        human_input: format!(
+                            "wait until AGY PTY session state is idle before prompt submit ({}s)",
+                            AGY_PROMPT_SEND_READY_WAIT_SECS
+                        ),
+                        redacted: false,
+                    },
+                    Self::pty_observation(slot_id, &observation),
+                    Some("AGY screen and PTY session are both ready for prompt input".to_string()),
+                    PtyStepVerificationStatus::Verified,
+                ));
+                return Some(observation);
+            }
+        }
+
+        let mut step = PtyStepRecord::new(
+            Self::pty_observation(slot_id, &before),
+            PtyStepAction {
+                action_type: "wait".to_string(),
+                human_input: format!(
+                    "wait until AGY PTY session state is idle before prompt submit ({}s)",
+                    AGY_PROMPT_SEND_READY_WAIT_SECS
+                ),
+                redacted: false,
+            },
+            Self::pty_observation(slot_id, &observation),
+            Some("AGY screen and PTY session are both ready for prompt input".to_string()),
+            PtyStepVerificationStatus::Failed,
+        );
+        step.diagnostics.push(ProviderBoxDiagnostic::error(
+            DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+            "AGY screen is ready, but PTY session state did not become idle for prompt submission",
+            json!({
+                "slot_id": slot_id,
+                "session_state": last_session_state,
+                "screen_state": observation.snapshot.state,
+                "reason": observation.snapshot.reason,
+            }),
+        ));
+        result.record_step(step);
+        result.status = ProviderBoxStatus::Blocked;
+        result.add_diagnostic(ProviderBoxDiagnostic::error(
+            DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+            "AGY slot is not ready for prompt submission",
+            json!({
+                "slot_id": slot_id,
+                "session_state": last_session_state,
+                "screen_state": observation.snapshot.state,
+                "reason": observation.snapshot.reason,
             }),
         ));
         None
@@ -927,7 +1045,13 @@ impl AgyProviderDriver {
                 .await
         };
         if is_model_picker(&observation) {
-            Some(observation)
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            let settled = self.observe(slot_id).await;
+            if is_model_picker(&settled) {
+                Some(settled)
+            } else {
+                Some(observation)
+            }
         } else {
             result.status = ProviderBoxStatus::Failed;
             result.add_diagnostic(ProviderBoxDiagnostic::error(
@@ -979,30 +1103,70 @@ impl AgyProviderDriver {
             return ok;
         }
 
-        if let Some(plan) = plan_model_picker_navigation(&observation, target_model) {
-            let (planned_result, planned_observation) = self
-                .execute_model_picker_navigation_plan(
-                    request,
-                    result,
-                    slot_id,
-                    target_model,
-                    &observation,
-                    &plan,
-                )
-                .await;
-            observation = planned_observation;
-            if let Some(ok) = planned_result {
-                return ok;
+        for _ in 0..3 {
+            if let Some(plan) = plan_model_picker_navigation(&observation, target_model) {
+                let (planned_result, planned_observation) = self
+                    .execute_model_picker_navigation_plan(
+                        request,
+                        result,
+                        slot_id,
+                        target_model,
+                        &observation,
+                        &plan,
+                    )
+                    .await;
+                observation = planned_observation;
+                if let Some(ok) = planned_result {
+                    return ok;
+                }
+                if !is_model_picker(&observation) {
+                    if current_model_eq(&observation, target_model) {
+                        result.model_switch_result = Some(ModelSwitchResult {
+                            status: ModelSwitchStatus::Verified,
+                            requested_model: Some(target_model.to_string()),
+                            requested_model_profile: request.model_profile.clone(),
+                            verified_model: observation
+                                .snapshot
+                                .screen_identity
+                                .as_ref()
+                                .and_then(|identity| identity.current_model.clone()),
+                            verification_source: Some("agy:screen_identity".to_string()),
+                        });
+                        return true;
+                    }
+                    result.add_diagnostic(ProviderBoxDiagnostic::warning(
+                        DIAG_MODEL_SWITCH_UNVERIFIED,
+                        "AGY model picker closed during navigation; reopening before retry",
+                        json!({
+                            "slot_id": slot_id,
+                            "target_model": target_model,
+                            "reason": observation.snapshot.reason,
+                        }),
+                    ));
+                    observation = match self.open_model_picker(result, slot_id).await {
+                        Some(observation) => observation,
+                        None => return false,
+                    };
+                    continue;
+                }
+                break;
+            } else {
+                break;
             }
         }
 
         let mut all_seen_selected = HashSet::new();
-        for (direction, key, label) in [
-            ("up", "\x1b[A", "move AGY model picker selection up"),
-            ("down", "\x1b[B", "move AGY model picker selection down"),
-        ] {
+        for (direction, key, label) in [("down", "\x1b[B", "move AGY model picker selection down")]
+        {
             let mut phase_seen_selected = HashSet::new();
             for _ in 0..MODEL_PICKER_MAX_DOWN {
+                if !is_model_picker(&observation) {
+                    observation = match self.open_model_picker(result, slot_id).await {
+                        Some(observation) => observation,
+                        None => return false,
+                    };
+                    phase_seen_selected.clear();
+                }
                 if let Some(ok) = self
                     .select_current_picker_model(
                         request,
@@ -1037,6 +1201,20 @@ impl AgyProviderDriver {
                         Some(label.to_string()),
                     )
                     .await;
+                if current_model_eq(&observation, target_model) {
+                    result.model_switch_result = Some(ModelSwitchResult {
+                        status: ModelSwitchStatus::Verified,
+                        requested_model: Some(target_model.to_string()),
+                        requested_model_profile: request.model_profile.clone(),
+                        verified_model: observation
+                            .snapshot
+                            .screen_identity
+                            .as_ref()
+                            .and_then(|identity| identity.current_model.clone()),
+                        verification_source: Some("agy:screen_identity".to_string()),
+                    });
+                    return true;
+                }
             }
         }
 
@@ -1059,7 +1237,7 @@ impl AgyProviderDriver {
                 "target_model": target_model,
                 "slot_id": slot_id,
                 "seen_selected_count": all_seen_selected.len(),
-                "scan_directions": ["up", "down"],
+                "scan_directions": ["down"],
             }),
         ));
         false
@@ -1089,8 +1267,7 @@ impl AgyProviderDriver {
                 )
                 .await;
             if !is_model_picker(&observation) {
-                result.status = ProviderBoxStatus::Unverified;
-                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                result.add_diagnostic(ProviderBoxDiagnostic::warning(
                     DIAG_MODEL_SWITCH_UNVERIFIED,
                     "AGY model picker closed during planned navigation",
                     json!({
@@ -1101,7 +1278,7 @@ impl AgyProviderDriver {
                         "reason": observation.snapshot.reason,
                     }),
                 ));
-                return (Some(false), observation);
+                return (None, observation);
             }
             let selected = observation
                 .snapshot
@@ -1356,7 +1533,7 @@ impl AgyProviderDriver {
 
             if is_ready_for_text(&observation) {
                 if let Some(seen_at) = idle_seen_at {
-                    if seen_at.elapsed() >= Duration::from_secs(2) {
+                    if seen_at.elapsed() >= Duration::from_secs(AGY_DURABLE_FINAL_IDLE_GRACE_SECS) {
                         let mut failed =
                             ProviderBoxResult::base(request, ProviderBoxStatus::Failed);
                         failed.slot_id = Some(slot_id.to_string());
@@ -1588,26 +1765,50 @@ impl AgyProviderDriver {
             .await
         };
 
-        if let Some(screen_usage) = usage_screen_value(&usage) {
-            let quotas = screen_usage
-                .get("modelQuotas")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(|entry| {
-                    Some(ProviderModelUsage {
-                        model: entry.get("model")?.as_str()?.to_string(),
-                        percent: entry
-                            .get("percent")
-                            .and_then(Value::as_u64)
-                            .map(|value| value.min(100) as u8),
-                        status: entry
-                            .get("status")
-                            .and_then(Value::as_str)
-                            .map(str::to_string),
-                    })
+        let mut current_usage = usage;
+        let mut usage_pages = Vec::new();
+        let mut seen_pages = HashSet::new();
+        let mut last_usage = current_usage.clone();
+        for page_index in 0..AGY_USAGE_MAX_PAGES {
+            let Some(screen_usage) = usage_screen_value(&current_usage) else {
+                break;
+            };
+            let page_signature = usage_page_signature(&screen_usage);
+            if !seen_pages.insert(page_signature) {
+                break;
+            }
+            let has_more_pages = usage_screen_has_more_pages(&screen_usage);
+            usage_pages.push(screen_usage);
+            last_usage = current_usage.clone();
+            if !has_more_pages {
+                break;
+            }
+
+            let after_scroll = self
+                .write_step(
+                    result,
+                    slot_id,
+                    PtyStepAction::key("pagedown"),
+                    "\x1b[6~",
+                    Some(format!(
+                        "scroll AGY /usage page down to collect remaining model quotas ({}/{})",
+                        page_index + 1,
+                        AGY_USAGE_MAX_PAGES
+                    )),
+                )
+                .await;
+            current_usage = if usage_screen_value(&after_scroll).is_some() {
+                after_scroll
+            } else {
+                self.wait_until(slot_id, Duration::from_secs(3), |obs| {
+                    usage_screen_value(obs).is_some()
                 })
-                .collect::<Vec<_>>();
+                .await
+            };
+        }
+
+        if !usage_pages.is_empty() {
+            let quotas = merge_usage_model_quotas(&usage_pages);
             result.status = ProviderBoxStatus::Completed;
             result.usage_snapshot = Some(ProviderUsageSnapshot {
                 schema: "missiond.provider-usage-snapshot.v1".to_string(),
@@ -1618,12 +1819,12 @@ impl AgyProviderDriver {
                     .or_else(|| Some("agy_cli".to_string())),
                 engine: CliEngine::Agy,
                 slot_id: Some(slot_id.to_string()),
-                account_ref: usage
+                account_ref: last_usage
                     .snapshot
                     .screen_identity
                     .as_ref()
                     .and_then(|identity| identity.account.clone()),
-                model: usage
+                model: last_usage
                     .snapshot
                     .screen_identity
                     .as_ref()
@@ -1635,7 +1836,7 @@ impl AgyProviderDriver {
                 limit: None,
                 reset_at: None,
                 source: Some("agy:/usage".to_string()),
-                confidence: usage.snapshot.confidence as f32,
+                confidence: last_usage.snapshot.confidence as f32,
                 block_kind: None,
                 model_quotas: quotas,
                 diagnostics: Vec::new(),
@@ -1648,7 +1849,7 @@ impl AgyProviderDriver {
                 "AGY /usage screen did not expose structured model quotas",
                 json!({
                     "slot_id": slot_id,
-                    "reason": usage.snapshot.reason,
+                    "reason": current_usage.snapshot.reason,
                 }),
             ));
         }
@@ -1659,100 +1860,16 @@ impl AgyProviderDriver {
             return;
         }
 
+        let _ = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::text("/clear"),
+                "/clear",
+                Some("type AGY /clear command".to_string()),
+            )
+            .await;
         let mut observation = self
-            .write_step(
-                result,
-                slot_id,
-                PtyStepAction::text("/"),
-                "/",
-                Some("open AGY slash command menu".to_string()),
-            )
-            .await;
-        if !is_slash_command_surface(&observation) {
-            observation = self
-                .wait_until(slot_id, Duration::from_secs(3), is_slash_command_surface)
-                .await;
-        }
-        if !is_slash_command_surface(&observation) {
-            mark_control_unverified(
-                result,
-                slot_id,
-                "AGY slash command menu did not open before clear",
-                &observation,
-            );
-            return;
-        }
-
-        let mut observation = self
-            .write_step(
-                result,
-                slot_id,
-                PtyStepAction::text("c"),
-                "c",
-                Some("filter AGY slash commands by c".to_string()),
-            )
-            .await;
-        if !observation.text.contains("/clear") {
-            observation = self
-                .wait_until(slot_id, Duration::from_secs(3), |obs| {
-                    is_slash_command_surface(obs) && obs.text.contains("/clear")
-                })
-                .await;
-        }
-        if !observation.text.contains("/clear") {
-            mark_control_unverified(
-                result,
-                slot_id,
-                "AGY /clear command was not visible after /c filter",
-                &observation,
-            );
-            return;
-        }
-
-        let observation = self
-            .write_step(
-                result,
-                slot_id,
-                PtyStepAction::key("down"),
-                "\x1b[B",
-                Some("select AGY /clear command".to_string()),
-            )
-            .await;
-        if !selected_clear_command(&observation) {
-            mark_control_unverified(
-                result,
-                slot_id,
-                "AGY /clear command was not selected after one down arrow",
-                &observation,
-            );
-            return;
-        }
-
-        let mut observation = self
-            .write_step(
-                result,
-                slot_id,
-                PtyStepAction::key("enter"),
-                "\r",
-                Some("complete AGY /clear into composer".to_string()),
-            )
-            .await;
-        if !is_pending_clear_command(&observation) {
-            observation = self
-                .wait_until(slot_id, Duration::from_secs(3), is_pending_clear_command)
-                .await;
-        }
-        if !is_pending_clear_command(&observation) {
-            mark_control_unverified(
-                result,
-                slot_id,
-                "AGY first enter did not complete /clear into the composer",
-                &observation,
-            );
-            return;
-        }
-
-        observation = self
             .write_step(
                 result,
                 slot_id,
@@ -1776,6 +1893,31 @@ impl AgyProviderDriver {
                 &observation,
             );
         }
+    }
+
+    async fn cleanup_after_pure_text_locked(
+        &self,
+        request: &ProviderInteractionRequest,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+    ) {
+        let mut cleanup = ProviderBoxResult::base(request, ProviderBoxStatus::Unknown);
+        self.clear_screen_locked(&mut cleanup, slot_id).await;
+        if cleanup.status == ProviderBoxStatus::Completed {
+            return;
+        }
+        let observation = self.observe(slot_id).await;
+        result.add_diagnostic(ProviderBoxDiagnostic::warning(
+            DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+            "AGY text-only turn completed, but post-turn /clear cleanup was not verified",
+            json!({
+                "slot_id": slot_id,
+                "cleanup_status": cleanup.status,
+                "cleanup_diagnostics": cleanup.diagnostics,
+                "reason": observation.snapshot.reason,
+                "blocked_kind": observation.snapshot.blocked_kind,
+            }),
+        ));
     }
 
     async fn exit_locked(&self, result: &mut ProviderBoxResult, slot_id: &str) {
@@ -2140,6 +2282,7 @@ impl ProviderDriver for AgyProviderDriver {
 
     async fn switch_model(&self, request: &ProviderInteractionRequest) -> ProviderBoxResult {
         let mut result = ProviderBoxResult::base(request, ProviderBoxStatus::Unknown);
+        self.reclaim_idle_text_slots().await;
         let Some(slot_id) = self.ensure_slot(request, &mut result).await else {
             return result;
         };
@@ -2165,6 +2308,7 @@ impl ProviderDriver for AgyProviderDriver {
             .switch_model_locked(request, &mut result, &slot_id, &target)
             .await
         {
+            self.mark_text_slot_used(&slot_id).await;
             result.status = ProviderBoxStatus::Completed;
         }
         result
@@ -2300,17 +2444,28 @@ impl ProviderDriver for AgyProviderDriver {
         if !Self::validate_pure_text(request, &mut result) {
             return result;
         }
+        self.reclaim_idle_text_slots().await;
+        let requested_slot_id = Self::request_slot_id(request);
+        let cold_start_slot = match self.pty.get_status(&requested_slot_id).await {
+            Some(status) => matches!(status.state, SessionState::Exited | SessionState::Error),
+            None => true,
+        };
         let Some(slot_id) = self.ensure_slot(request, &mut result).await else {
             return result;
         };
         result.slot_id = Some(slot_id.clone());
+        self.mark_text_slot_used(&slot_id).await;
         let lock = self.slot_lock(&slot_id).await;
         let _guard = lock.lock().await;
 
         if let Some(target_model) = request.model.as_deref() {
             if !target_model.trim().is_empty() {
                 let model_policy = request.model_switch_policy.clone().unwrap_or_default();
-                let model_ready = if model_policy.allow_respawn {
+                let model_ready = if should_switch_model_for_pure_text_slot(
+                    &slot_id,
+                    cold_start_slot,
+                    model_policy.allow_respawn,
+                ) {
                     self.switch_model_locked(request, &mut result, &slot_id, target_model)
                         .await
                 } else {
@@ -2351,6 +2506,10 @@ impl ProviderDriver for AgyProviderDriver {
                     result.provider_conversation_id = Some(final_turn.session_id);
                     result.durable_source = Some(final_turn.transcript_path);
                     result.final_text = Some(final_turn.final_text);
+                    self.cleanup_after_pure_text_locked(request, &mut result, &slot_id)
+                        .await;
+                    self.mark_text_slot_used(&slot_id).await;
+                    result.status = ProviderBoxStatus::Completed;
                     return result;
                 }
                 AgyMonitorOutcome::CancelledForRetry
@@ -2728,6 +2887,106 @@ fn agy_slot_pool_id(model: &str) -> String {
     format!("slot-pool-agy-{}", slug_model(model))
 }
 
+fn is_agy_text_model_exportable(model: &str) -> bool {
+    !normalize_model(model).starts_with("gpt-oss ")
+}
+
+fn is_private_agy_text_slot_id(slot_id: &str) -> bool {
+    if !slot_id.starts_with("slot-agy-") {
+        return false;
+    }
+    let Some((_, replica)) = slot_id.rsplit_once('-') else {
+        return false;
+    };
+    matches!(replica, "a" | "b")
+}
+
+fn should_switch_model_for_pure_text_slot(
+    slot_id: &str,
+    cold_start_slot: bool,
+    allow_model_switch: bool,
+) -> bool {
+    allow_model_switch || (cold_start_slot && is_private_agy_text_slot_id(slot_id))
+}
+
+fn idle_agy_text_slot_reclaim_candidates(
+    last_used: &HashMap<String, Instant>,
+    now: Instant,
+) -> Vec<String> {
+    last_used
+        .iter()
+        .filter_map(|(slot_id, seen_at)| {
+            if !is_private_agy_text_slot_id(slot_id) {
+                return None;
+            }
+            if now.duration_since(*seen_at) >= Duration::from_secs(AGY_TEXT_SLOT_IDLE_RECLAIM_SECS)
+            {
+                Some(slot_id.clone())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+}
+
+async fn reclaim_idle_agy_text_slots(
+    pty: &Arc<PTYManager>,
+    slot_last_used: &Arc<Mutex<HashMap<String, Instant>>>,
+) {
+    let now = Instant::now();
+    let candidates = {
+        let last_used = slot_last_used.lock().await;
+        idle_agy_text_slot_reclaim_candidates(&last_used, now)
+    };
+
+    for slot_id in candidates {
+        let Some(status) = pty.get_status(&slot_id).await else {
+            slot_last_used.lock().await.remove(&slot_id);
+            continue;
+        };
+        if !matches!(
+            status.state,
+            SessionState::Idle
+                | SessionState::SlashMenu
+                | SessionState::Exited
+                | SessionState::Error
+        ) {
+            continue;
+        }
+        if let Err(err) = pty.kill(&slot_id).await {
+            warn!(
+                slot_id = %slot_id,
+                error = %err,
+                "Failed to reclaim idle AGY text-only slot"
+            );
+            continue;
+        }
+        slot_last_used.lock().await.remove(&slot_id);
+        debug!(
+            slot_id = %slot_id,
+            idle_secs = AGY_TEXT_SLOT_IDLE_RECLAIM_SECS,
+            "Reclaimed idle AGY text-only slot"
+        );
+    }
+}
+
+fn start_agy_text_slot_reaper(
+    pty: Arc<PTYManager>,
+    slot_last_used: Arc<Mutex<HashMap<String, Instant>>>,
+) {
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    handle.spawn(async move {
+        let mut interval =
+            tokio::time::interval(Duration::from_secs(AGY_TEXT_SLOT_REAPER_INTERVAL_SECS));
+        loop {
+            interval.tick().await;
+            reclaim_idle_agy_text_slots(&pty, &slot_last_used).await;
+        }
+    });
+}
+
 fn extract_model_from_agy_line(line: &str) -> Option<String> {
     let regex = Regex::new(
         r"\b((?:Gemini|Claude|GPT(?:-OSS)?|OpenAI|Grok|Llama|Mistral|Qwen|DeepSeek)[A-Za-z0-9 ._/\-+]*(?:\([^)]+\))?)",
@@ -2852,26 +3111,24 @@ fn plan_model_picker_navigation_from_entries(
         });
     }
 
-    if target_index > selected_index {
-        Some(ModelPickerNavigationPlan {
-            direction: "down",
-            key: "\x1b[B",
-            expected_models: entries[selected_index + 1..=target_index]
-                .iter()
-                .map(|entry| entry.model.clone())
-                .collect(),
-        })
+    let expected_models = if target_index > selected_index {
+        entries[selected_index + 1..=target_index]
+            .iter()
+            .map(|entry| entry.model.clone())
+            .collect()
     } else {
-        Some(ModelPickerNavigationPlan {
-            direction: "up",
-            key: "\x1b[A",
-            expected_models: entries[target_index..selected_index]
-                .iter()
-                .rev()
-                .map(|entry| entry.model.clone())
-                .collect(),
-        })
-    }
+        entries[selected_index + 1..]
+            .iter()
+            .chain(entries[..=target_index].iter())
+            .map(|entry| entry.model.clone())
+            .collect()
+    };
+
+    Some(ModelPickerNavigationPlan {
+        direction: "down",
+        key: "\x1b[B",
+        expected_models,
+    })
 }
 
 fn clean_agy_line(line: &str) -> String {
@@ -2894,6 +3151,66 @@ fn usage_screen_value(observation: &AgyObservation) -> Option<Value> {
         .screen_usage
         .as_ref()
         .and_then(|usage| serde_json::to_value(usage).ok())
+}
+
+fn merge_usage_model_quotas(usage_pages: &[Value]) -> Vec<ProviderModelUsage> {
+    let mut seen = HashSet::new();
+    let mut quotas = Vec::new();
+    for page in usage_pages {
+        for quota in usage_model_quotas(page) {
+            if seen.insert(quota.model.clone()) {
+                quotas.push(quota);
+            }
+        }
+    }
+    quotas
+}
+
+fn usage_model_quotas(screen_usage: &Value) -> Vec<ProviderModelUsage> {
+    screen_usage
+        .get("modelQuotas")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            Some(ProviderModelUsage {
+                model: entry.get("model")?.as_str()?.to_string(),
+                percent: entry
+                    .get("percent")
+                    .and_then(Value::as_u64)
+                    .map(|value| value.min(100) as u8),
+                status: entry
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            })
+        })
+        .collect()
+}
+
+fn usage_screen_has_more_pages(screen_usage: &Value) -> bool {
+    usage_visible_range(screen_usage).is_some_and(|(_, end, total)| end < total)
+}
+
+fn usage_visible_range(screen_usage: &Value) -> Option<(u64, u64, u64)> {
+    let range = screen_usage.get("visibleRange")?;
+    Some((
+        range.get("start")?.as_u64()?,
+        range.get("end")?.as_u64()?,
+        range.get("total")?.as_u64()?,
+    ))
+}
+
+fn usage_page_signature(screen_usage: &Value) -> String {
+    let range = usage_visible_range(screen_usage)
+        .map(|(start, end, total)| format!("{start}-{end}/{total}"))
+        .unwrap_or_else(|| "unknown-range".to_string());
+    let models = usage_model_quotas(screen_usage)
+        .into_iter()
+        .map(|quota| quota.model)
+        .collect::<Vec<_>>()
+        .join("|");
+    format!("{range}:{models}")
 }
 
 fn agy_manual_key_bytes(key: &str) -> Option<(&'static str, &'static str)> {
@@ -3013,7 +3330,7 @@ fn pure_text_violation(step: &AgyStep) -> Option<AgyTranscriptOutcome> {
 
     if matches!(
         step.step_type.as_str(),
-        "PLANNER_RESPONSE" | "CONVERSATION_HISTORY"
+        "PLANNER_RESPONSE" | "CONVERSATION_HISTORY" | "EPHEMERAL_MESSAGE"
     ) {
         return None;
     }
@@ -3094,6 +3411,9 @@ fn build_router_export(
     let mut routeable_entries = Vec::new();
     let mut blocked_entries = Vec::new();
     for entry in &catalog.entries {
+        if !is_agy_text_model_exportable(&entry.display_name) {
+            continue;
+        }
         let slug = slug_model(&entry.display_name);
         let slot_pool_id = agy_slot_pool_id(&entry.display_name);
         let route = json!({
@@ -3419,6 +3739,27 @@ mod tests {
     }
 
     #[test]
+    fn correlated_turn_ignores_ephemeral_messages_before_final() {
+        let session = AgySession {
+            session_id: "conv-1".to_string(),
+            steps: vec![
+                step(1, "USER_INPUT", Some(json!("Correlation-ID: corr-3"))),
+                step(2, "EPHEMERAL_MESSAGE", Some(json!("Working..."))),
+                step(3, "PLANNER_RESPONSE", Some(json!("plain final"))),
+            ],
+        };
+
+        let outcome = extract_correlated_turn(&session, "corr-3").expect("matched");
+
+        match outcome {
+            AgyTranscriptOutcome::Completed(turn) => {
+                assert_eq!(turn.final_text, "plain final");
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    #[test]
     fn model_catalog_extractor_reads_visible_agy_models() {
         let models = extract_models_from_screen(
             "Switch Model\n> Gemini 3.5 Flash (High)\n  Claude Sonnet 4.6 (Thinking)\nesc to cancel",
@@ -3467,7 +3808,7 @@ mod tests {
     }
 
     #[test]
-    fn model_picker_navigation_plan_counts_visible_up_steps() {
+    fn model_picker_navigation_plan_wraps_down_when_target_is_above_selected() {
         let entries = extract_model_picker_entries_from_screen(
             "Switch Model\n\
                Gemini 3.5 Flash (Medium)\n\
@@ -3485,14 +3826,143 @@ mod tests {
         )
         .expect("navigation plan");
 
-        assert_eq!(plan.direction, "up");
+        assert_eq!(plan.direction, "down");
         assert_eq!(
             plan.expected_models,
             vec![
-                "Gemini 3.5 Flash (Low)".to_string(),
-                "Gemini 3.5 Flash (High)".to_string()
+                "Gemini 3.1 Pro (High)".to_string(),
+                "Gemini 3.5 Flash (Medium)".to_string(),
+                "Gemini 3.5 Flash (High)".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn model_picker_navigation_plan_uses_down_to_avoid_current_row_up_bug() {
+        let entries = extract_model_picker_entries_from_screen(
+            "Switch Model\n\
+               Gemini 3.5 Flash (Medium)\n\
+               Gemini 3.5 Flash (High)\n\
+             > Gemini 3.5 Flash (Low)       (current)\n\
+               Gemini 3.1 Pro (Low)\n\
+               Gemini 3.1 Pro (High)\n\
+               Claude Sonnet 4.6 (Thinking)\n\
+               Claude Opus 4.6 (Thinking)\n\
+               GPT-OSS 120B (Medium)\n\
+             Keyboard: up/down",
+        );
+
+        let plan = plan_model_picker_navigation_from_entries(
+            &entries,
+            Some("Gemini 3.5 Flash (Low)"),
+            "Gemini 3.5 Flash (Medium)",
+        )
+        .expect("navigation plan");
+
+        assert_eq!(plan.direction, "down");
+        assert_eq!(
+            plan.expected_models,
+            vec![
+                "Gemini 3.1 Pro (Low)".to_string(),
+                "Gemini 3.1 Pro (High)".to_string(),
+                "Claude Sonnet 4.6 (Thinking)".to_string(),
+                "Claude Opus 4.6 (Thinking)".to_string(),
+                "GPT-OSS 120B (Medium)".to_string(),
+                "Gemini 3.5 Flash (Medium)".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn usage_quota_merge_preserves_model_order_and_deduplicates_overlap() {
+        let pages = vec![
+            json!({
+                "modelQuotas": [
+                    {"model": "Gemini 3.5 Flash (Medium)", "percent": 100, "status": "Quota available"},
+                    {"model": "Gemini 3.5 Flash (High)", "percent": 100, "status": "Quota available"}
+                ],
+                "visibleRange": {"start": 1, "end": 20, "total": 33}
+            }),
+            json!({
+                "modelQuotas": [
+                    {"model": "Gemini 3.5 Flash (High)", "percent": 100, "status": "Quota available"},
+                    {"model": "Claude Opus 4.6 (Thinking)", "percent": 100, "status": "Quota available"}
+                ],
+                "visibleRange": {"start": 14, "end": 33, "total": 33}
+            }),
+        ];
+
+        let quotas = merge_usage_model_quotas(&pages);
+
+        assert_eq!(quotas.len(), 3);
+        assert_eq!(quotas[0].model, "Gemini 3.5 Flash (Medium)");
+        assert_eq!(quotas[1].model, "Gemini 3.5 Flash (High)");
+        assert_eq!(quotas[2].model, "Claude Opus 4.6 (Thinking)");
+        assert!(usage_screen_has_more_pages(&pages[0]));
+        assert!(!usage_screen_has_more_pages(&pages[1]));
+    }
+
+    #[test]
+    fn gpt_oss_is_not_exported_as_agy_text_model() {
+        assert!(is_agy_text_model_exportable("Claude Opus 4.6 (Thinking)"));
+        assert!(!is_agy_text_model_exportable("GPT-OSS 120B (Medium)"));
+        assert!(is_private_agy_text_slot_id(
+            "slot-agy-claude-opus-46-thinking-a"
+        ));
+        assert!(!is_private_agy_text_slot_id("slot-agy-usage-probe"));
+    }
+
+    #[test]
+    fn idle_reclaim_candidates_only_include_old_private_text_slots() {
+        let now = Instant::now();
+        let mut last_used = HashMap::new();
+        last_used.insert(
+            "slot-agy-claude-opus-46-thinking-a".to_string(),
+            now - Duration::from_secs(AGY_TEXT_SLOT_IDLE_RECLAIM_SECS + 1),
+        );
+        last_used.insert(
+            "slot-agy-claude-opus-46-thinking-b".to_string(),
+            now - Duration::from_secs(AGY_TEXT_SLOT_IDLE_RECLAIM_SECS - 1),
+        );
+        last_used.insert(
+            "slot-agy-usage-probe".to_string(),
+            now - Duration::from_secs(AGY_TEXT_SLOT_IDLE_RECLAIM_SECS + 1),
+        );
+        last_used.insert(
+            "slot-codex-worker-a".to_string(),
+            now - Duration::from_secs(AGY_TEXT_SLOT_IDLE_RECLAIM_SECS + 1),
+        );
+
+        let mut candidates = idle_agy_text_slot_reclaim_candidates(&last_used, now);
+        candidates.sort();
+        assert_eq!(
+            candidates,
+            vec!["slot-agy-claude-opus-46-thinking-a".to_string()]
+        );
+    }
+
+    #[test]
+    fn pure_text_model_switch_is_allowed_only_for_cold_private_or_explicit_policy() {
+        assert!(should_switch_model_for_pure_text_slot(
+            "slot-agy-gemini-35-flash-medium-a",
+            true,
+            false
+        ));
+        assert!(!should_switch_model_for_pure_text_slot(
+            "slot-agy-gemini-35-flash-medium-a",
+            false,
+            false
+        ));
+        assert!(!should_switch_model_for_pure_text_slot(
+            "slot-agy-usage-probe",
+            true,
+            false
+        ));
+        assert!(should_switch_model_for_pure_text_slot(
+            "slot-agy-usage-probe",
+            false,
+            true
+        ));
     }
 
     #[test]
@@ -3572,5 +4042,40 @@ mod tests {
         assert_eq!(extra["slot_policy"]["queue_owner"], "provider-box");
         assert_eq!(extra["allow_model_switch"], false);
         assert_eq!(extra["requires_current_model_verification"], true);
+    }
+
+    #[test]
+    fn router_export_omits_gpt_oss_text_source() {
+        let mut request = ProviderInteractionRequest::new(
+            super::super::types::BoxCommand::ModelCatalogExport,
+            CliEngine::Agy,
+        );
+        request.router_export_policy = Some(json!({
+            "provider_box_base_url": "https://missiond.example/provider-box"
+        }));
+        let catalog = ProviderModelCatalog {
+            schema: "missiond.provider-model-catalog.v1".to_string(),
+            catalog_id: "catalog-1".to_string(),
+            provider: Some("agy_cli".to_string()),
+            engine: CliEngine::Agy,
+            account_ref: None,
+            discovered_at: "2026-05-31T00:00:00Z".to_string(),
+            source: Some("agy:/model".to_string()),
+            entries: vec![ProviderModelCatalogEntry {
+                provider_model_id: "agy:gpt-oss-120b-medium".to_string(),
+                display_name: "GPT-OSS 120B (Medium)".to_string(),
+                family: Some("GPT-OSS".to_string()),
+                routeable_default: true,
+                switch_capability: "interactive_model_picker".to_string(),
+                usage_probe_capability: "interactive_usage_screen".to_string(),
+                confidence: 0.9,
+            }],
+            diagnostics: Vec::new(),
+        };
+
+        let export = build_router_export(&request, &catalog);
+
+        assert!(export.routeable_entries.is_empty());
+        assert!(export.blocked_entries.is_empty());
     }
 }

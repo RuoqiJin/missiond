@@ -962,8 +962,11 @@ fn extract_agy_usage_screen(lines: &[String]) -> Option<ProviderUsageScreen> {
     while index < lines.len() {
         let cleaned = normalize_identity_value(&clean_agy_identity_line(&lines[index]));
         let lower = cleaned.to_ascii_lowercase();
-        if cleaned.is_empty()
-            || lower.contains("scroll")
+        if cleaned.is_empty() {
+            index += 1;
+            continue;
+        }
+        if lower.contains("scroll")
             || lower.contains("pgup/pgdown")
             || lower.contains("ctrl+end")
             || lower.contains("ctrl+home")
@@ -981,24 +984,28 @@ fn extract_agy_usage_screen(lines: &[String]) -> Option<ProviderUsageScreen> {
             while lookahead < lines.len() && lookahead <= index + 5 {
                 let next = normalize_identity_value(&clean_agy_identity_line(&lines[lookahead]));
                 let next_lower = next.to_ascii_lowercase();
-                if next.is_empty()
-                    || next_lower.contains("scroll")
+                if next.is_empty() {
+                    lookahead += 1;
+                    continue;
+                }
+                if next_lower.contains("scroll")
                     || next_lower.contains("pgup/pgdown")
                     || next_lower.contains("ctrl+end")
                     || next_lower.contains("ctrl+home")
                     || next_lower == "close"
                     || next_lower.contains("esc to cancel")
                     || parse_visible_range(&next).is_some()
+                    || extract_agy_model_from_line(&next).is_some()
                 {
                     break;
                 }
+                let next_percent = parse_percent(&next);
                 if percent.is_none() {
-                    percent = parse_percent(&next);
-                } else if status.is_none()
-                    && !is_agy_meter_bar(&next)
-                    && extract_agy_model_from_line(&next).is_none()
-                {
+                    percent = next_percent;
+                }
+                if status.is_none() && !is_agy_meter_bar(&next) && next_percent.is_none() {
                     status = Some(next);
+                    lookahead += 1;
                     break;
                 }
                 lookahead += 1;
@@ -1328,6 +1335,18 @@ impl StateParser for AgyCliStateParser {
 }
 
 fn snapshot_to_detection(snapshot: PtyRecognitionSnapshot) -> Option<StateDetectionResult> {
+    if snapshot.provider == CliEngine::Agy
+        && matches!(
+            snapshot.blocked_kind.as_deref(),
+            Some("model_picker" | "slash_command_menu" | "slash_command_input")
+        )
+    {
+        return Some(StateDetectionResult::new(
+            State::SlashMenu,
+            snapshot.confidence,
+        ));
+    }
+
     let state = match snapshot.state {
         PtyCanonicalState::Idle | PtyCanonicalState::Complete => State::Idle,
         PtyCanonicalState::Blocked => State::Confirming,
@@ -1798,6 +1817,21 @@ mod tests {
     }
 
     #[test]
+    fn agy_model_picker_maps_to_slash_menu_not_confirmation() {
+        let result = snapshot_to_detection(recognize_agy(&lines(&[
+            "Switch Model",
+            "Gemini 3.5 Flash (Medium) (current)",
+            "> Claude Opus 4.6 (Thinking)",
+            "Keyboard:",
+            "Up/Down Navigate enter Select esc Go Back",
+            "esc to cancel                                                                                    Gemini 3.5 Flash (Medium)",
+        ])))
+        .expect("detection");
+
+        assert_eq!(result.state, State::SlashMenu);
+    }
+
+    #[test]
     fn agy_usage_meter_extracts_visible_model_quotas() {
         let result = recognize_agy(&lines(&[
             "└ Model Quota",
@@ -1844,6 +1878,48 @@ mod tests {
             Some("Quota available")
         );
         assert_eq!(usage.model_quotas[2].model, "Claude Sonnet 4.6 (Thinking)");
+    }
+
+    #[test]
+    fn agy_usage_meter_with_blank_rows_overrides_confirming_session_state() {
+        let result = recognize_screen(
+            CliEngine::Agy,
+            &lines(&[
+                "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+                ">",
+                "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+                "└ Model Quota",
+                "",
+                "  Gemini 3.5 Flash (Medium)",
+                "  ███████████ ███████████ ███████████ ███████████ ███████████ 100%",
+                "  Quota available",
+                "",
+                "  Gemini 3.5 Flash (High)",
+                "  ███████████ ███████████ ███████████ ███████████ ███████████ 100%",
+                "  Quota available",
+                "",
+                "  Gemini 3.5 Flash (Low)",
+                "  ███████████ ███████████ ███████████ ███████████ ███████████ 100%",
+                "  Quota available",
+                "",
+                "  (1–20 of 33 lines)",
+                "",
+                "  ↑/↓ Scroll · pgup/pgdown Page · ctrl+end Bottom · ctrl+home Top · esc Close",
+                "esc to cancel                                                                                      GPT-OSS 120B (Medium)",
+            ]),
+            SessionState::Confirming,
+        );
+
+        assert_eq!(result.state, PtyCanonicalState::Complete);
+        assert_eq!(result.reason, "agy:usage_meter");
+        let usage = result.screen_usage.expect("screen usage");
+        assert_eq!(usage.model_quotas.len(), 3);
+        assert_eq!(usage.model_quotas[0].model, "Gemini 3.5 Flash (Medium)");
+        assert_eq!(usage.model_quotas[0].percent, Some(100));
+        assert_eq!(
+            usage.model_quotas[0].status.as_deref(),
+            Some("Quota available")
+        );
     }
 
     #[test]

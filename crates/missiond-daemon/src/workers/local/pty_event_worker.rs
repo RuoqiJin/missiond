@@ -556,6 +556,14 @@ async fn handle_confirm_required(
         .and_then(|info| info.tool.as_ref())
         .and_then(|t| t.mcp_server.as_deref());
 
+    if slot_id.starts_with("slot-agy-") && tool_name.is_none() {
+        info!(
+            slot_id = %slot_id,
+            "AGY no-tool confirmation/control surface detected; leaving it to provider-box driver"
+        );
+        return;
+    }
+
     let should_auto_approve = match (tool_name, mcp_server) {
         (Some(name), Some("missiond")) | (Some(name), Some("mission")) => {
             info!(slot_id = %slot_id, tool = name, "Auto-confirming MissionD MCP tool");

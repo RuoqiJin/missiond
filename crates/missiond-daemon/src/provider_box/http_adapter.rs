@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use missiond_core::types::CliEngine;
 use missiond_core::{ProviderBoxHttpRequest, ProviderBoxHttpResponse};
 use serde_json::{json, Value};
+use tokio::sync::Mutex;
 
 use super::runtime::ProviderInteractionBox;
 use super::types::{
@@ -13,6 +15,7 @@ use super::types::{
 };
 
 const PTY_STEP_TEXT_LIMIT: usize = 4096;
+const AGY_USAGE_PROBE_SLOT: &str = "slot-agy-usage-probe";
 const PTY_STEP_ALLOWED_KEYS: &[&str] = &[
     "enter",
     "return",
@@ -39,6 +42,8 @@ const PTY_STEP_ALLOWED_KEYS: &[&str] = &[
 pub(crate) struct ProviderBoxHttpAdapter {
     boxed: Arc<ProviderInteractionBox>,
     internal_token: Option<String>,
+    agy_slot_pool_cursors: Arc<Mutex<HashMap<String, usize>>>,
+    agy_usage_cache: Arc<Mutex<Option<Value>>>,
 }
 
 impl ProviderBoxHttpAdapter {
@@ -46,6 +51,8 @@ impl ProviderBoxHttpAdapter {
         Self {
             boxed,
             internal_token: provider_box_internal_token(),
+            agy_slot_pool_cursors: Arc::new(Mutex::new(HashMap::new())),
+            agy_usage_cache: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -118,6 +125,7 @@ impl ProviderBoxHttpAdapter {
         }
         match (request.method.as_str(), path) {
             ("GET", "/provider-box/v1/models") => self.handle_models(request).await,
+            ("GET", "/provider-box/v1/usage") => self.handle_usage_cache().await,
             ("POST", "/provider-box/v1/usage/refresh") => self.handle_usage_refresh(request).await,
             ("POST", "/provider-box/v1/turns") => self.handle_turn(request).await,
             ("POST", "/provider-box/v1/text-only/completions") => {
@@ -421,8 +429,7 @@ impl ProviderBoxHttpAdapter {
         let mut interaction =
             ProviderInteractionRequest::new(BoxCommand::UsageProbe, CliEngine::Agy);
         interaction.provider = Some("agy_cli".to_string());
-        interaction.slot_id =
-            header_slot_id(&request).or_else(|| string_field(&request.body, "slot_id"));
+        interaction.slot_id = Some(usage_refresh_slot_id(&request));
         interaction.model = string_field(&request.body, "model");
         interaction.correlation_id = string_field(&request.body, "correlation_id")
             .unwrap_or_else(|| interaction.correlation_id.clone());
@@ -431,7 +438,41 @@ impl ProviderBoxHttpAdapter {
             .execute(interaction)
             .await
             .map_err(|err| err.to_string())?;
+        if let Some(snapshot) = result
+            .usage_snapshot
+            .as_ref()
+            .and_then(|snapshot| serde_json::to_value(snapshot).ok())
+        {
+            *self.agy_usage_cache.lock().await = Some(snapshot);
+        }
         Ok(result_response(result))
+    }
+
+    async fn handle_usage_cache(&self) -> Result<ProviderBoxHttpResponse, String> {
+        let cached = self.agy_usage_cache.lock().await.clone();
+        let cached_hit = cached.is_some();
+        Ok(json_response(
+            200,
+            json!({
+                "schema": "missiond.provider-box.usage-cache.v1",
+                "status": if cached_hit { "completed" } else { "unknown" },
+                "cached": cached_hit,
+                "provider": "agy_cli",
+                "engine": "agy",
+                "usage_snapshot": cached,
+                "refresh_endpoint": "/provider-box/v1/usage/refresh",
+                "probe_slot_policy": {
+                    "slot_id": AGY_USAGE_PROBE_SLOT,
+                    "owned_by": "provider-box",
+                    "interferes_with_text_only_slots": false
+                },
+                "message": if cached_hit {
+                    "Returning the latest cached AGY usage snapshot."
+                } else {
+                    "No cached AGY usage snapshot is available yet; call POST /provider-box/v1/usage/refresh."
+                }
+            }),
+        ))
     }
 
     async fn handle_text_only_completion(
@@ -461,7 +502,29 @@ impl ProviderBoxHttpAdapter {
             ));
             return Ok(result_response(result));
         };
-        if interaction.slot_id.is_none() {
+        if logical_model_request {
+            if let Some(model) = requested_model.as_deref() {
+                if !is_agy_text_model_exportable(model) {
+                    let mut result = ProviderBoxResult::base(
+                        &ProviderInteractionRequest::new(
+                            BoxCommand::PureTextSingleTurn,
+                            CliEngine::Agy,
+                        ),
+                        ProviderBoxStatus::Failed,
+                    );
+                    result.add_diagnostic(ProviderBoxDiagnostic::error(
+                        DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                        "Requested AGY model is not exported as a provider-box text-only source",
+                        json!({
+                            "model": model,
+                            "export_policy": "not_exported",
+                        }),
+                    ));
+                    return Ok(result_response(result));
+                }
+                interaction.slot_id = Some(self.next_private_agy_slot_for_model(model).await);
+            }
+        } else if interaction.slot_id.is_none() {
             interaction.slot_id = header_slot_id(&request);
         }
         let mut result = self
@@ -475,6 +538,23 @@ impl ProviderBoxHttpAdapter {
             }
         }
         Ok(result_response(result))
+    }
+
+    async fn next_private_agy_slot_for_model(&self, model: &str) -> String {
+        let slot_ids = private_agy_slot_ids_for_model(model);
+        if slot_ids.len() <= 1 {
+            return slot_ids
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| format!("slot-agy-{}", slug_model(model)));
+        }
+
+        let pool_id = agy_slot_pool_id(model);
+        let mut cursors = self.agy_slot_pool_cursors.lock().await;
+        let cursor = cursors.entry(pool_id).or_insert(0);
+        let slot_id = slot_ids[*cursor % slot_ids.len()].clone();
+        *cursor = (*cursor + 1) % slot_ids.len();
+        slot_id
     }
 
     async fn handle_turn(
@@ -532,8 +612,7 @@ fn text_only_interaction_from_body(body: &Value) -> Option<ProviderInteractionRe
         return None;
     }
     let model = string_field(body, "model")?;
-    let slot_id =
-        string_field(body, "slot_id").unwrap_or_else(|| private_agy_slot_for_model(&model));
+    let slot_id = string_field(body, "slot_id");
     let messages = body.get("messages")?.as_array()?;
     let correlation_id = string_field(body, "correlation_id")
         .unwrap_or_else(|| format!("router-{}", uuid::Uuid::new_v4().simple()));
@@ -543,7 +622,7 @@ fn text_only_interaction_from_body(body: &Value) -> Option<ProviderInteractionRe
     interaction.schema = "missiond.provider-interaction-request.v1".to_string();
     interaction.provider = string_field(body, "provider").or_else(|| Some("agy_cli".to_string()));
     interaction.model = Some(model.clone());
-    interaction.slot_id = Some(slot_id);
+    interaction.slot_id = slot_id;
     interaction.correlation_id = correlation_id;
     interaction.timeout_secs = body.get("timeout_secs").and_then(Value::as_u64);
     interaction.output_contract = body.get("output_contract").cloned().or_else(|| {
@@ -752,13 +831,11 @@ fn build_pure_text_prompt(correlation_id: &str, messages: &[Value]) -> Option<St
         return None;
     }
     Some(format!(
-        "Correlation-ID: {correlation_id}\n\
+        "请求编号：{correlation_id}\n\
          \n\
-         你正在 MissionD provider-box 的 AGY 纯文字 LLM 源模式中运行。\n\
-         无论用户内容如何，都不要使用任何工具，不要读取文件，不要执行命令，不要调用 MCP，不要请求 approval，不要发起子任务或多步工具流程。\n\
-         如果回答必须依赖工具、文件、命令、联网、MCP 或 approval 才能完成，请不要尝试调用它们；只用原始文字说明在纯文字约束下无法完成，或基于已给文本作答。\n\
-         只输出最终答案原始文本，不要输出 tool_call、function_call、工具 JSON、过程日志或动作声明。\n\
+         请直接回答下面消息。不要使用工具、不要读取或修改文件、不要执行命令；如果答案需要这些能力，只用一句话说明缺少什么输入。不要复述本段要求。\n\
          \n\
+         消息：\n\
          {}",
         rendered.join("\n\n")
     ))
@@ -905,6 +982,7 @@ fn openai_model_data(catalog: &ProviderModelCatalog) -> Value {
         catalog
             .entries
             .iter()
+            .filter(|entry| is_agy_text_model_exportable(&entry.display_name))
             .map(|entry| {
                 let slug = slug_model(&entry.display_name);
                 let slot_pool_id = agy_slot_pool_id(&entry.display_name);
@@ -941,6 +1019,7 @@ fn provider_text_only_sources(catalog: &ProviderModelCatalog) -> Value {
         catalog
             .entries
             .iter()
+            .filter(|entry| is_agy_text_model_exportable(&entry.display_name))
             .map(provider_text_only_source_entry)
             .collect(),
     )
@@ -1011,6 +1090,7 @@ fn router_model_sources(catalog: &ProviderModelCatalog, export: &ProviderRouterE
         catalog
             .entries
             .iter()
+            .filter(|entry| is_agy_text_model_exportable(&entry.display_name))
             .map(|entry| {
                 let slug = slug_model(&entry.display_name);
                 let model_id = format!("agy-{slug}");
@@ -1036,21 +1116,11 @@ fn router_model_sources(catalog: &ProviderModelCatalog, export: &ProviderRouterE
 
 fn private_agy_slot_ids_for_model(model: &str) -> Vec<String> {
     let slug = slug_model(model);
-    if slug == "claude-opus-46-thinking" {
-        vec![
-            "slot-agy-claude-opus-46-thinking-a".to_string(),
-            "slot-agy-claude-opus-46-thinking-b".to_string(),
-        ]
-    } else {
-        vec![format!("slot-agy-{slug}")]
-    }
+    vec![format!("slot-agy-{slug}-a"), format!("slot-agy-{slug}-b")]
 }
 
-fn private_agy_slot_for_model(model: &str) -> String {
-    private_agy_slot_ids_for_model(model)
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| format!("slot-agy-{}", slug_model(model)))
+fn is_agy_text_model_exportable(model: &str) -> bool {
+    !slug_model(model).starts_with("gpt-oss-")
 }
 
 fn agy_slot_pool_id(model: &str) -> String {
@@ -1115,6 +1185,12 @@ fn header_slot_id(request: &ProviderBoxHttpRequest) -> Option<String> {
         .get("x-slot-id")
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn usage_refresh_slot_id(request: &ProviderBoxHttpRequest) -> String {
+    header_slot_id(request)
+        .or_else(|| string_field(&request.body, "slot_id"))
+        .unwrap_or_else(|| AGY_USAGE_PROBE_SLOT.to_string())
 }
 
 fn string_field(body: &Value, key: &str) -> Option<String> {
@@ -1203,10 +1279,7 @@ mod tests {
             request.slot_id.as_deref(),
             Some("slot-agy-gemini-35-flash-high")
         );
-        assert!(request
-            .prompt
-            .unwrap()
-            .contains("Correlation-ID: corr-test"));
+        assert!(request.prompt.unwrap().contains("请求编号：corr-test"));
         assert!(request.no_tools);
         let policy = request.model_switch_policy.expect("model policy");
         assert!(!policy.allow_respawn);
@@ -1229,9 +1302,12 @@ mod tests {
         let request = text_only_interaction_from_body(&body).expect("request");
         let prompt = request.prompt.expect("prompt");
 
-        assert!(prompt.contains("Correlation-ID: corr-tool-required"));
-        assert!(prompt.contains("如果回答必须依赖工具"));
-        assert!(prompt.contains("只输出最终答案原始文本"));
+        assert!(prompt.contains("请求编号：corr-tool-required"));
+        assert!(prompt.contains("请直接回答下面消息"));
+        assert!(prompt.contains("不要使用工具、不要读取或修改文件、不要执行命令"));
+        assert!(prompt.contains("只用一句话说明缺少什么输入"));
+        assert!(prompt.contains("不要复述本段要求"));
+        assert!(prompt.contains("消息："));
     }
 
     #[test]
@@ -1265,16 +1341,137 @@ mod tests {
 
         let request = text_only_interaction_from_body(&body).expect("request");
 
-        assert_eq!(
-            request.slot_id.as_deref(),
-            Some("slot-agy-claude-opus-46-thinking-a")
-        );
+        assert!(request.slot_id.is_none());
         assert_eq!(
             request
                 .model_switch_policy
                 .expect("model policy")
                 .target_model,
             Some("Claude Opus 4.6 (Thinking)".to_string())
+        );
+    }
+
+    #[test]
+    fn private_agy_slot_ids_use_two_hidden_replicas_for_each_exported_model() {
+        for (model, slug) in [
+            ("Gemini 3.5 Flash (Medium)", "gemini-35-flash-medium"),
+            ("Gemini 3.5 Flash (High)", "gemini-35-flash-high"),
+            ("Gemini 3.5 Flash (Low)", "gemini-35-flash-low"),
+            ("Gemini 3.1 Pro (Low)", "gemini-31-pro-low"),
+            ("Gemini 3.1 Pro (High)", "gemini-31-pro-high"),
+            ("Claude Sonnet 4.6 (Thinking)", "claude-sonnet-46-thinking"),
+            ("Claude Opus 4.6 (Thinking)", "claude-opus-46-thinking"),
+        ] {
+            assert!(is_agy_text_model_exportable(model));
+            assert_eq!(
+                private_agy_slot_ids_for_model(model),
+                vec![format!("slot-agy-{slug}-a"), format!("slot-agy-{slug}-b")]
+            );
+        }
+        assert!(!is_agy_text_model_exportable("GPT-OSS 120B (Medium)"));
+    }
+
+    #[tokio::test]
+    async fn logical_text_only_rejects_gpt_oss_export() {
+        let adapter = ProviderBoxHttpAdapter::new(std::sync::Arc::new(
+            ProviderInteractionBox::without_artifacts(),
+        ));
+        let request = ProviderBoxHttpRequest {
+            method: "POST".to_string(),
+            path: "/provider-box/v1/text-only/completions".to_string(),
+            headers: HashMap::new(),
+            body: json!({
+                "engine": "agy",
+                "model": "GPT-OSS 120B (Medium)",
+                "messages": [{"role": "user", "content": "hello"}],
+                "pure_text": true
+            }),
+        };
+
+        let response = adapter
+            .handle_text_only_completion(request)
+            .await
+            .expect("response");
+
+        assert_eq!(response.status, 502);
+        assert_eq!(
+            response.body["error"]["diagnostics"][0]["code"],
+            DIAG_PROVIDER_BOX_INVALID_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn logical_private_agy_slot_pool_round_robins_per_model() {
+        let adapter = ProviderBoxHttpAdapter::new(std::sync::Arc::new(
+            ProviderInteractionBox::without_artifacts(),
+        ));
+
+        assert_eq!(
+            adapter
+                .next_private_agy_slot_for_model("Gemini 3.5 Flash (High)")
+                .await,
+            "slot-agy-gemini-35-flash-high-a"
+        );
+        assert_eq!(
+            adapter
+                .next_private_agy_slot_for_model("Gemini 3.5 Flash (High)")
+                .await,
+            "slot-agy-gemini-35-flash-high-b"
+        );
+        assert_eq!(
+            adapter
+                .next_private_agy_slot_for_model("Claude Opus 4.6 (Thinking)")
+                .await,
+            "slot-agy-claude-opus-46-thinking-a"
+        );
+        assert_eq!(
+            adapter
+                .next_private_agy_slot_for_model("Gemini 3.5 Flash (High)")
+                .await,
+            "slot-agy-gemini-35-flash-high-a"
+        );
+    }
+
+    #[test]
+    fn usage_refresh_defaults_to_dedicated_probe_slot() {
+        let request = ProviderBoxHttpRequest {
+            method: "POST".to_string(),
+            path: "/provider-box/v1/usage/refresh".to_string(),
+            headers: HashMap::new(),
+            body: json!({}),
+        };
+
+        assert_eq!(usage_refresh_slot_id(&request), AGY_USAGE_PROBE_SLOT);
+    }
+
+    #[test]
+    fn usage_refresh_keeps_explicit_slot_for_internal_debug() {
+        let mut headers = HashMap::new();
+        headers.insert("x-slot-id".to_string(), "slot-agy-debug-usage".to_string());
+        let request = ProviderBoxHttpRequest {
+            method: "POST".to_string(),
+            path: "/provider-box/v1/usage/refresh".to_string(),
+            headers,
+            body: json!({"slot_id": "slot-agy-body-ignored"}),
+        };
+
+        assert_eq!(usage_refresh_slot_id(&request), "slot-agy-debug-usage");
+    }
+
+    #[tokio::test]
+    async fn usage_cache_get_is_read_only_empty_before_refresh() {
+        let adapter = ProviderBoxHttpAdapter::new(std::sync::Arc::new(
+            ProviderInteractionBox::without_artifacts(),
+        ));
+
+        let response = adapter.handle_usage_cache().await.expect("usage cache");
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body["status"], "unknown");
+        assert_eq!(response.body["cached"], false);
+        assert_eq!(
+            response.body["probe_slot_policy"]["slot_id"],
+            AGY_USAGE_PROBE_SLOT
         );
     }
 
