@@ -250,13 +250,10 @@ async fn handle_tool_stats(state: &AppState, args: Value) -> Result<ToolResult> 
     let Args {
         since,
         project,
-        limit: _,
+        limit,
     } = serde_json::from_value(args)?;
+    let limit = limit.unwrap_or(50).clamp(1, 500);
 
-    // tool_stats can't filter individual tool_calls (it uses pre-aggregated SQL).
-    // `since` is therefore inherently approximate here — we drop conversations
-    // whose newest tool_call timestamp is older than the cutoff, after pulling
-    // a tiny sample to check.
     let since_dt = since.as_deref().and_then(parse_since_to_utc);
 
     let convs = state
@@ -298,18 +295,46 @@ async fn handle_tool_stats(state: &AppState, args: Value) -> Result<ToolResult> 
     let mut total_errors = 0i64;
 
     for conv in &convs {
-        let stats = state
+        if since_dt.is_none() {
+            let stats = state
+                .store
+                .get_tool_call_stats(&conv.id)
+                .await
+                .unwrap_or_default();
+            for (tool_name, count, success, errors) in stats {
+                let entry = tool_stats.entry(tool_name).or_default();
+                entry.total += count;
+                entry.success += success;
+                entry.errors += errors;
+                total_calls += count;
+                total_errors += errors;
+            }
+            continue;
+        }
+
+        let calls = state
             .store
-            .get_tool_call_stats(&conv.id)
+            .get_tool_calls_by_session(&conv.id, None, 100_000)
             .await
             .unwrap_or_default();
-        for (tool_name, count, success, errors) in stats {
-            let entry = tool_stats.entry(tool_name).or_default();
-            entry.total += count;
-            entry.success += success;
-            entry.errors += errors;
-            total_calls += count;
-            total_errors += errors;
+        for tc in calls {
+            if let Some(s_dt) = since_dt {
+                match chrono::DateTime::parse_from_rfc3339(&tc.timestamp) {
+                    Ok(tc_dt) if tc_dt.with_timezone(&chrono::Utc) < s_dt => continue,
+                    Ok(_) => {}
+                    Err(_) => continue,
+                }
+            }
+
+            let entry = tool_stats.entry(tc.tool_name).or_default();
+            entry.total += 1;
+            if tc.status == "success" {
+                entry.success += 1;
+            } else if tc.status == "error" {
+                entry.errors += 1;
+                total_errors += 1;
+            }
+            total_calls += 1;
         }
     }
 
@@ -336,6 +361,7 @@ async fn handle_tool_stats(state: &AppState, args: Value) -> Result<ToolResult> 
         let cb = b.get("total_calls").and_then(|v| v.as_i64()).unwrap_or(0);
         cb.cmp(&ca)
     });
+    stats_vec.truncate(limit as usize);
 
     Ok(ToolResult::json_pretty(&json!({
         "action": "tool_stats",

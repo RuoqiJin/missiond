@@ -34,7 +34,7 @@ mod state;
 mod supervisor;
 
 // ── Re-exports for backward-compatible `use crate::xxx` paths ──
-use context::{claude_md_sync, context_budget, context_pipeline, slot_env, topology_map};
+use context::{claude_md_sync, context_budget, context_pipeline, topology_map};
 use engine::{
     autopilot, decision_engine, decision_harvest, extraction, flow_engine, memory_scheduler,
 };
@@ -971,8 +971,6 @@ async fn main() -> Result<()> {
     };
     let slot_mgr_pty2 = Arc::clone(&pty);
     let slot_mgr_store2 = Arc::clone(&store);
-    let slot_mgr_pty3 = Arc::clone(&pty);
-    let slot_mgr_store3 = Arc::clone(&store);
     let slot_mgr_pty4 = Arc::clone(&pty);
     let slot_mgr_store4 = Arc::clone(&store);
     let pty_for_gemini_transport = Arc::clone(&pty);
@@ -1126,13 +1124,9 @@ async fn main() -> Result<()> {
             gemini_driver_for_slots,
             slot_mgr_store2,
         ));
-        let codex_mgr = Arc::new(slot_orchestrator::GenericCliSlotManager::new(
+        let codex_mgr = Arc::new(slot_orchestrator::ProviderBoxSlotManager::new(
             missiond_core::types::CliEngine::Codex,
-            slot_mgr_pty3,
-            slot_mgr_store3,
-            pty_session_uuids_arc.clone(),
-            project_registry.clone(),
-            learned.clone(),
+            Arc::clone(&provider_box_runtime),
         ));
         let agy_mgr = Arc::new(slot_orchestrator::GenericCliSlotManager::new(
             missiond_core::types::CliEngine::Agy,
@@ -2465,8 +2459,15 @@ async fn main() -> Result<()> {
             shutdown_rx.clone(),
         );
 
+        // Message Labeler — deterministic labels + evidence ledger projection
+        workers::spawn_worker(
+            workers::local::message_labeler::MessageLabelerWorker,
+            Arc::new(state.clone()),
+            shutdown_rx.clone(),
+        );
+
         // Tagger & Chunker — Stage 3 of Cognitive Pipeline
-        // Extracts structured Turns from flat messages, applies noise labels
+        // Extracts structured Turns from flat messages
         workers::spawn_worker(
             workers::local::tagger_chunker::TaggerChunkerWorker,
             Arc::new(state.clone()),
@@ -2999,4 +3000,3 @@ mod resident_master_startup_tests {
         ));
     }
 }
-mod services;

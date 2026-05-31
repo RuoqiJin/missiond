@@ -169,8 +169,44 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         runtime_environment_payload(),
     );
 
+    let mut effective_project_id = args.project_id.clone();
+    if effective_project_id.is_none() && !query.is_empty() && args.include_project.unwrap_or(true) {
+        match project::handle(
+            state,
+            "mission_project",
+            json!({
+                "action": "resolve",
+                "query": query,
+                "limit": 8,
+                "include_unregistered_candidates": true
+            }),
+        )
+        .await
+        {
+            Ok(result) => {
+                let is_error = result.is_error.unwrap_or(false);
+                let value = tool_result_to_value(result);
+                if is_error {
+                    diagnostics.push(json!({"source": "project_resolution", "error": value}));
+                } else {
+                    if value.get("status").and_then(Value::as_str) == Some("resolved") {
+                        effective_project_id = value
+                            .get("matched_project_id")
+                            .and_then(Value::as_str)
+                            .map(str::to_string);
+                    }
+                    sources.insert("project_resolution".to_string(), value);
+                }
+            }
+            Err(err) => diagnostics.push(json!({
+                "source": "project_resolution",
+                "error": err.to_string()
+            })),
+        }
+    }
+
     if args.include_project.unwrap_or(true) {
-        let payload = if let Some(project_id) = args.project_id.as_deref() {
+        let payload = if let Some(project_id) = effective_project_id.as_deref() {
             json!({"action": "get", "id": project_id})
         } else {
             json!({"action": "list"})
@@ -184,7 +220,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     }
 
     if args.include_ssot.unwrap_or(true) {
-        let payload = if let Some(project_id) = args.project_id.as_deref() {
+        let payload = if let Some(project_id) = effective_project_id.as_deref() {
             json!({"action": "summary", "project": project_id})
         } else {
             json!({"action": "list"})
@@ -208,7 +244,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 json!({
                     "action": "search",
                     "query": query,
-                    "project": args.project_id,
+                    "project": effective_project_id,
                     "limit": limit,
                     "include_archived": false
                 }),
@@ -228,7 +264,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 json!({
                     "action": "resolve",
                     "query": query,
-                    "project_id": args.project_id,
+                    "project_id": effective_project_id,
                     "skill": args.skill,
                     "include_kb": false,
                     "include_board": false
@@ -279,7 +315,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 json!({
                     "action": "search",
                     "query": query,
-                    "project": args.project_id,
+                    "project": effective_project_id,
                     "scope": "active",
                     "limit": limit
                 }),
@@ -299,7 +335,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 json!({
                     "action": "search",
                     "query": query,
-                        "project": args.project_id.clone(),
+                        "project": effective_project_id.clone(),
                         "limit": limit,
                         "user_id": args.user_id.clone(),
                         "tenant_id": args.tenant_id.clone(),
@@ -338,7 +374,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     let user_id = normalized_scope_value(args.user_id.as_deref());
     let tenant_id = normalized_scope_value(args.tenant_id.as_deref());
     let application_id = normalized_scope_value(args.application_id.as_deref())
-        .or_else(|| normalized_scope_value(args.project_id.as_deref()))
+        .or_else(|| normalized_scope_value(effective_project_id.as_deref()))
         .or_else(|| Some("missiond".to_string()));
     let channel =
         normalized_scope_value(args.channel.as_deref()).unwrap_or_else(|| "cli".to_string());
@@ -357,7 +393,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             "ok": diagnostics.is_empty(),
             "schema": "missiond.context-gather.v1",
             "query": query,
-            "project_id": args.project_id.clone(),
+            "project_id": effective_project_id.clone(),
+            "requested_project_id": args.project_id.clone(),
             "skill": args.skill.clone(),
             "infra_target": args.infra_target.clone(),
             "task_id": args.task_id.clone(),

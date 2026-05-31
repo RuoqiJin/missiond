@@ -20,6 +20,7 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
     match action {
         "list" => registry::handle_list(state).await,
         "get" => registry::handle_get(state, args).await,
+        "resolve" => registry::handle_resolve(state, args).await,
         "set_active" => registry::handle_set_active(state, args).await,
         "sync" => registry::handle_sync(state).await,
         "init" => registry::handle_init(state, args).await,
@@ -31,7 +32,7 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
         "vault_sync" => vault::handle_vault_sync(state, args).await,
         "import_universe" => registry::handle_import_universe(state, args).await,
         _ => Ok(ToolResult::error(format!(
-            "Unknown project action: {}. Use: list, get, set_active, sync, init, context, memories, universe, reconcile, vault_sync, import_universe, survey",
+            "Unknown project action: {}. Use: list, get, resolve, set_active, sync, init, context, memories, universe, reconcile, vault_sync, import_universe, survey",
             action
         ))),
     }

@@ -8,6 +8,23 @@
        "mission_project import_universe MUST project its default manifest from project-registry-policy; UNIVERSE_MANIFEST is only an explicit override."
        "A real MissionD project with .missiond but no project-registry-policy MUST return V3_BLUEPRINT_CONFIG_ERROR rather than silently using embedded defaults."])
 
+(project-discovery-contract
+    :schema "missiond.project-discovery-contract.v1"
+    :entrypoint mission_project.resolve
+    :resolver-statuses [resolved ambiguous unregistered_candidate not_found stale_runtime]
+    :lookup-sources [missiond-db compiled-project-universe service-runtime-universe cwd-root-prefix explicit-domain explicit-url unregistered-root-candidate]
+    :compiled-universe-fields [aliases service_ids domains public_base_url frontend_url api_base_url]
+    :rule "External agents MUST resolve project identity from names, aliases, domains, URLs, and cwd before querying KB, Board, conversations, SSOT summaries, or dispatching workers."
+    :result-contract
+      [:status :query :normalized :matched_project_id :matched_project :candidate_projects :candidate_roots :registration_proposal :diagnostics :next_actions]
+    :invariants
+      ["mission_project resolve is read-only and MUST NOT register or mutate projects."
+       "Exact project id/domain/alias matches outrank fuzzy path or conversation evidence."
+       "Compiled project-universe MUST expose aliases and service-runtime domains/URLs so ClaudeCode and Codex do not need ad-hoc filesystem grep to identify projects."
+       "If compiled project-universe is stale or unavailable, resolve MUST return a structured stale_runtime diagnostic and continue with DB/explicit query facts instead of hard-failing ordinary project discovery."
+       "Unknown domains such as a new product site MUST return unregistered_candidate with a registration_proposal rather than treating the project as absent."
+       "mission_context_gather MUST call mission_project resolve when query text is present and no explicit project_id is supplied."])
+
 (project-identity-contract
     :schema "missiond.project-identity-contract.v1"
     :fields [project_id canonical_root repo_remote ssot_paths deploy_center_slug forge_project_name service_ids aliases status management_domain runtime_layer]
@@ -259,7 +276,7 @@
       :status v3-runtime-ssot
       :surface project-registry)
     (project :id asr
-      :aliases ["ASR" "XJP ASR" speech-recognition subtitle-service asr-web "语音转写"]
+      :aliases ["ASR" "XJP ASR" speech-recognition subtitle-service asr-web "语音转写" "speechscribe.top" "asr.xiaojinpro.top"]
       :kind rust-nextjs-service
       :management-domain product-service-layer
       :runtime-layer product-fullstack
@@ -270,7 +287,7 @@
       :operations ".missiond/operations/asr-operations-blueprint.lisp"
       :status project-ssot-owned
       :checks ["bash .missiond/check.sh"]
-      :missiond-role "registered XJP ASR product; independent Next.js frontend at asr.xiaojinpro.top, Rust ASR backend routed through auth.xiaojinpro.com/asr, XJP Auth + Payments membership, and deploy-center/GCP runtime boundaries"
+      :missiond-role "registered XJP ASR / SpeechScribe product; independent Next.js global frontend at speechscribe.top with asr.xiaojinpro.top as compatibility alias, Rust ASR backend routed through auth.xiaojinpro.com/asr, XJP Auth + Stripe/Payments credits, and deploy-center/GCP runtime boundaries"
       :surface project-registry)
     (project :id timeline
       :kind rust-service

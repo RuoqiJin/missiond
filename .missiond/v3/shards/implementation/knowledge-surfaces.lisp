@@ -98,7 +98,7 @@
 
 (surface project-registry
       :status "code-aligned"
-      :implements [project-registry project-root-resolution service-runtime-universe]
+      :implements [project-registry project-root-resolution project-context-resolver service-runtime-universe]
       :code ["crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/registry.rs"
@@ -112,7 +112,7 @@
              "crates/missiond-mcp/src/tools/knowledge/project.rs"
              "scripts/check-v3-project-registry-isomorphism.mjs"
              "scripts/check-project-maturity.mjs"]
-      :note "Code-aligned destination for project registry/root resolution. project.rs is the mission_project facade; project/registry.rs owns list/get/set_active/sync/init/import_universe; project/universe.rs owns mission_project(action=universe) and projects service-runtime-universe entries such as auth production domain/deployment/DNS capability to master, workers, and Board System. ProjectRegistry::resolve owns longest path-component project lookup; inactive project aliases never participate in cwd resolution, and mission_project init archives inactive path aliases before upsert so stale aliases cannot block canonical root correction. check-project-maturity.mjs is the project-universe maturity gate: --min-level M5 proves worker-operational SSOT closure; --min-level M6 proves Auth-grade domain/policy/flow/event/runtime/compatibility depth. It resolves the MissionD blueprint from the checker script directory so external-project workers can run it from the target root."
+      :note "project.rs is the mission_project facade. project/registry.rs owns list/get/resolve/set_active/sync/init/import_universe; resolve is the read-only project-context-resolver for id/alias/domain/URL/cwd plus compiled project-universe and service-runtime domains/URLs, returning unregistered_candidate proposals. project/universe.rs owns mission_project(action=universe). ProjectRegistryRuntimeConfig loads V3 project-registry-policy. ProjectRegistry::resolve owns longest path-component project lookup; inactive project aliases never participate in cwd resolution, and mission_project init archives inactive path aliases before upsert. resolve_target_project_root owns project-root spawn cwd policy. check-project-maturity.mjs is the project-universe maturity gate: --min-level M5 proves worker-operational SSOT closure; --min-level M6 proves Auth-grade depth. It resolves the MissionD blueprint from the checker script directory so external-project workers can run it from the target root."
       :evidence-sidecar ".missiond/v3/evidence/blueprint-notes.lisp#note-016")
 
 (surface data-residency-universe

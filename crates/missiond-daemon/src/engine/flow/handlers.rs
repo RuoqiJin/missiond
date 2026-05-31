@@ -102,7 +102,7 @@ async fn execute_slot_task(
     _model: &str,
     prompt: &str,
     timeout_secs: u64,
-    task_id: &str,
+    _task_id: &str,
 ) -> Result<String> {
     let slot = state
         .mission
@@ -274,9 +274,8 @@ async fn execute_mcp_tool(
     let text = result
         .content
         .iter()
-        .filter_map(|c| match c {
-            missiond_mcp::tools::ToolContent::Text { text } => Some(text.as_str()),
-            _ => None,
+        .map(|c| match c {
+            missiond_mcp::tools::ToolContent::Text { text } => text.as_str(),
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -342,9 +341,8 @@ fn extract_tool_text(result: &missiond_mcp::tools::ToolResult) -> Result<String>
     let text = result
         .content
         .iter()
-        .filter_map(|c| match c {
-            missiond_mcp::tools::ToolContent::Text { text } => Some(text.as_str()),
-            _ => None,
+        .map(|c| match c {
+            missiond_mcp::tools::ToolContent::Text { text } => text.as_str(),
         })
         .collect::<Vec<_>>()
         .join("\n");

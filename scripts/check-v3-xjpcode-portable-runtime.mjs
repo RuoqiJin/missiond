@@ -57,13 +57,13 @@ push("xjpcode write worker active-gated", has(workstationRuntime, "xjpcode-code-
 push("registry forbids write bypass", has(workstationRuntime, "write_lease_id") && has(workstationRuntime, "artifact-first") && has(workstationRuntime, "git apply --check"));
 push("text-only paid CLI registry exists", has(workstationRuntime, "text-only-paid-cli-provider-registry"));
 push("text-only registry disabled by default", has(workstationRuntime, ":default-enabled false") && has(workstationRuntime, "XJPCODE_TEXT_ONLY_CLI_ENABLED"));
-push("MissionD direct answer defaults to paid CLI text lane", has(workstationRuntime, ":direct_answer_default_text_provider codex_cli") && has(workstationRuntime, ":missiond-default-provider codex_cli"));
+push("MissionD direct answer defaults to provider-box Codex lane", has(workstationRuntime, ":direct_answer_provider provider-interaction-box") && has(workstationRuntime, ":direct_answer_default_text_provider codex_cli"));
 push(
-  "MissionD intent/plan authoring can use xjpcode text-only provider",
-  has(workstationRuntime, "MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_PROVIDER") &&
-    has(requestSurfaces, "MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_PROVIDER") &&
-    has(serverRs, "MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_PROVIDER") &&
-    has(serverRs, "run_jarvis_xjpcode_text_only_author_exec"),
+  "MissionD intent/plan authoring uses provider-box Codex lanes",
+  has(workstationRuntime, "provider-interaction-box mode=semantic-authoring") &&
+    has(requestSurfaces, "provider-interaction-box mode=semantic-authoring") &&
+    has(serverRs, "run_jarvis_codex_author_turn") &&
+    has(serverRs, "call_provider_box_turn"),
 );
 push("text-only registry forbids tools", has(workstationRuntime, "tool_use") && has(workstationRuntime, "apply_patch") && has(workstationRuntime, "approval_prompt"));
 push("text-only registry pins xjpcode endpoint", has(workstationRuntime, "/provider/v1/text-only/completions") && has(workstationRuntime, "xjpcode.text-only-provider.v1"));
@@ -106,21 +106,16 @@ push("xjpcode dispatch smoke rejects non-success artifacts by default", has(live
 push("xjpcode dispatch smoke keeps diagnostic escape hatch explicit", has(liveSmoke, "--allow-blocked-artifact") && has(workstationRuntime, "--allow-blocked-artifact"));
 push("deploy-daemon propagates xjpcode worker env", has(deployDaemon, "MISSIOND_XJPCODE_WORKER_URL"));
 push(
-  "deploy-daemon propagates xjpcode text-only env",
-  has(deployDaemon, "MISSIOND_XJPCODE_TEXT_ONLY_URL") &&
-    has(deployDaemon, "MISSIOND_XJPCODE_TEXT_ONLY_ENDPOINT") &&
-    has(deployDaemon, "MISSIOND_XJPCODE_BASE_URL"),
-);
-push(
   "deploy-daemon propagates Jarvis direct-answer provider env",
   has(deployDaemon, "MISSIOND_JARVIS_DIRECT_ANSWER_PROVIDER") &&
     has(deployDaemon, "MISSIOND_JARVIS_DIRECT_ANSWER_MODEL") &&
     has(deployDaemon, "MISSIOND_JARVIS_DIRECT_ANSWER_TIMEOUT_SECS"),
 );
 push(
-  "deploy-daemon propagates Jarvis xjpcode author provider env",
-  has(deployDaemon, "MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_PROVIDER") &&
-    has(deployDaemon, "MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_MODEL"),
+  "deploy-daemon configures provider-box internal auth",
+  has(deployDaemon, "MISSIOND_PROVIDER_BOX_INTERNAL_TOKEN") &&
+    has(deployDaemon, "ensure_provider_box_internal_token") &&
+    has(deployDaemon, "plist_delete_env_if_present"),
 );
 
 for (const token of [

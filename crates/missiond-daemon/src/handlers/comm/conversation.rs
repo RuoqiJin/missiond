@@ -38,6 +38,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         | "mission_conversation_message_role_audit"
         | "mission_conversation_message_role_backfill"
         | "mission_conversation_turn_backfill"
+        | "mission_conversation_label_audit"
+        | "mission_conversation_label_backfill"
         | "mission_conversation_gemini_reconcile" => {
             maintenance::handle_maintenance(state, name, args).await
         }

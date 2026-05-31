@@ -57,7 +57,7 @@
 #[cfg(test)]
 use missiond_core::event::events::QuestionEvent;
 #[cfg(test)]
-use serde_json::{json, Value};
+use serde_json::json;
 
 mod auto_answer;
 mod created;
@@ -114,9 +114,6 @@ pub(crate) use llm_approval::{
     LlmAutoApproveProposalStatus, ProposalHashStatus, APPLY_GATE_INVALID_PARAM,
     APPLY_GATE_MISSING_PROPOSAL_HASH, APPLY_GATE_PROPOSAL_HASH_MISMATCH,
 };
-#[cfg(test)]
-use llm_approval::{proposal_json_kind, strip_proposal_code_fence};
-
 // ───────────────────────────────────────────────────────────────────────
 // tests — pure helpers only (no bus, no DB).
 // ───────────────────────────────────────────────────────────────────────

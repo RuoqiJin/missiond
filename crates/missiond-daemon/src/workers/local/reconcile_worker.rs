@@ -322,6 +322,8 @@ async fn reconcile_file_gap(
             }
             // Small file fully scanned with no assistant messages → garbage
             if !has_assistant && scanned <= 20 {
+                events_sync::record_empty_claude_raw_only_session(state, session_id, jsonl_path)
+                    .await;
                 debug!(session = %session_id, lines = scanned, "Reconcile: skipping garbage session (no assistant content)");
                 return 0;
             }

@@ -627,4 +627,5 @@ pub(super) use workstation::{
 
 pub(super) use bridge::{action_execute_bridge, attach_inference_block};
 pub(super) use internal::action_execute_internal;
+#[cfg(test)]
 pub(super) use internal::PLAN_RUNNER_EVENT_REF_UNAVAILABLE_REASON;

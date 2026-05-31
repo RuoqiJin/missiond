@@ -787,8 +787,10 @@ let project_entry_to_json node =
     | None -> []
   in
   Printf.sprintf
-    {|{"id":%s,"kind":%s,"management_domain":%s,"runtime_layer":%s,"root":%s,"path":%s,"intent":%s,"backend":%s,"frontend":%s,"operations":%s,"status":%s,"surface":%s,"checks":%s}|}
+    {|{"id":%s,"aliases":%s,"service_ids":%s,"kind":%s,"management_domain":%s,"runtime_layer":%s,"root":%s,"path":%s,"intent":%s,"backend":%s,"frontend":%s,"operations":%s,"status":%s,"surface":%s,"missiond_role":%s,"checks":%s}|}
     (json_opt_string (prop_text ":id" props))
+    (json_string_list_token [ ":aliases" ] props)
+    (json_string_list_token [ ":service-ids"; ":service_ids" ] props)
     (json_opt_string (prop_text ":kind" props))
     (json_opt_string (prop_text ":management-domain" props))
     (json_opt_string (prop_text ":runtime-layer" props))
@@ -800,7 +802,29 @@ let project_entry_to_json node =
     (json_opt_string (prop_text ":operations" props))
     (json_opt_string (prop_text ":status" props))
     (json_opt_string (prop_text ":surface" props))
+    (json_opt_string (prop_text ":missiond-role" props))
     (json_string_list checks)
+
+let service_entry_to_json node =
+  let props = keyword_props ~start:1 node in
+  Printf.sprintf
+    {|{"id":%s,"project":%s,"root":%s,"intent":%s,"backend":%s,"frontend":%s,"operations":%s,"environment":%s,"public_base_url":%s,"frontend_url":%s,"api_base_url":%s,"domains":%s,"health":%s,"dependencies":%s,"ops_capability":%s,"surface":%s}|}
+    (json_opt_string (prop_text ":id" props))
+    (json_opt_string (prop_text ":project" props))
+    (json_opt_string (prop_text ":root" props))
+    (json_opt_string (prop_text ":intent" props))
+    (json_opt_string (prop_text ":backend" props))
+    (json_opt_string (prop_text ":frontend" props))
+    (json_opt_string (prop_text ":operations" props))
+    (json_opt_string (prop_text ":environment" props))
+    (json_opt_string (prop_text ":public-base-url" props))
+    (json_opt_string (prop_text ":frontend-url" props))
+    (json_opt_string (prop_text ":api-base-url" props))
+    (json_string_list_token [ ":domains" ] props)
+    (json_string_list_token [ ":health" ] props)
+    (json_string_list_token [ ":dependencies" ] props)
+    (json_opt_string (prop_text ":ops-capability" props))
+    (json_opt_string (prop_text ":surface" props))
 
 let maturity_entry_to_json node =
   let props = keyword_props ~start:1 node in
@@ -2297,10 +2321,19 @@ let compiled_universe_for_resolved blueprint resolved =
   let maturity_registry =
     Option.bind root (fun root -> find_child root "project-maturity-registry")
   in
+  let service_runtime =
+    Option.bind root (fun root -> find_child root "service-runtime-universe")
+  in
   let projects =
     project_registry
     |> Option.map (fun node ->
            list_forms "project" node |> List.map project_entry_to_json)
+    |> Option.value ~default:[]
+  in
+  let services =
+    service_runtime
+    |> Option.map (fun node ->
+           list_forms "service" node |> List.map service_entry_to_json)
     |> Option.value ~default:[]
   in
   let maturities =
@@ -2311,13 +2344,15 @@ let compiled_universe_for_resolved blueprint resolved =
   in
   let payload =
     Printf.sprintf
-      {|{"blueprint":%s,"source_units":%s,"source_domains":%s,"project_registry_present":%s,"maturity_registry_present":%s,"projects":[%s],"maturity":[%s]}|}
+      {|{"blueprint":%s,"source_units":%s,"source_domains":%s,"project_registry_present":%s,"maturity_registry_present":%s,"service_runtime_present":%s,"projects":[%s],"services":[%s],"maturity":[%s]}|}
       (json_string blueprint)
       (Source_resolver.source_units_to_json resolved.source_units)
       (Source_resolver.source_domains_to_json resolved.source_domains)
       (if project_registry <> None then "true" else "false")
       (if maturity_registry <> None then "true" else "false")
+      (if service_runtime <> None then "true" else "false")
       (String.concat "," projects)
+      (String.concat "," services)
       (String.concat "," maturities)
   in
   ( compiled_envelope "missiond.compiled-project-universe.v1"
@@ -2634,9 +2669,15 @@ let emit_universe blueprint =
     in
     let project_registry = Option.bind root (fun root -> find_child root "project-blueprint-registry") in
     let maturity_registry = Option.bind root (fun root -> find_child root "project-maturity-registry") in
+    let service_runtime = Option.bind root (fun root -> find_child root "service-runtime-universe") in
     let projects =
       project_registry
       |> Option.map (fun node -> list_forms "project" node |> List.map project_entry_to_json)
+      |> Option.value ~default:[]
+    in
+    let services =
+      service_runtime
+      |> Option.map (fun node -> list_forms "service" node |> List.map service_entry_to_json)
       |> Option.value ~default:[]
     in
     let maturities =
@@ -2645,13 +2686,15 @@ let emit_universe blueprint =
       |> Option.value ~default:[]
     in
     let payload =
-      Printf.sprintf {|{"blueprint":%s,"source_units":%s,"source_domains":%s,"project_registry_present":%s,"maturity_registry_present":%s,"projects":[%s],"maturity":[%s]}|}
+      Printf.sprintf {|{"blueprint":%s,"source_units":%s,"source_domains":%s,"project_registry_present":%s,"maturity_registry_present":%s,"service_runtime_present":%s,"projects":[%s],"services":[%s],"maturity":[%s]}|}
         (json_string blueprint)
         (Source_resolver.source_units_to_json resolved.source_units)
         (Source_resolver.source_domains_to_json resolved.source_domains)
         (if project_registry <> None then "true" else "false")
         (if maturity_registry <> None then "true" else "false")
+        (if service_runtime <> None then "true" else "false")
         (String.concat "," projects)
+        (String.concat "," services)
         (String.concat "," maturities)
     in
     print_endline

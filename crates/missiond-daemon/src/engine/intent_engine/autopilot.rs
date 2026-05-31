@@ -930,6 +930,268 @@ async fn materialize_and_settle_readonly_durable_completion(
     Ok(true)
 }
 
+async fn fail_provider_box_board_task(
+    state: &AppState,
+    task: &missiond_core::types::BoardTask,
+    slot_id: &str,
+    reason: &str,
+) {
+    let _ = state
+        .store
+        .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+            task_id: task.id.to_string(),
+            content: format!(
+                "**Provider-box 执行失败**\n\nslot: `{}`\n\n{}",
+                slot_id,
+                truncate_safe(reason, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES)
+            ),
+            note_type: Some("note".to_string()),
+            author: Some("provider-box".to_string()),
+        })
+        .await;
+    let _ = state
+        .store
+        .fail_board_task_and_release_claim(task.id.as_str())
+        .await;
+    let _ = state
+        .bus
+        .publish_board(BoardEvent::StatusChanged {
+            task_id: task.id.to_string(),
+            old_status: format!("{:?}", task.status),
+            new_status: "failed".to_string(),
+        })
+        .await;
+    let _ = state
+        .store
+        .update_prompt_snapshot_outcome(task.id.as_str(), "failed")
+        .await;
+    notify_jarvis_failure(state, task, reason).await;
+}
+
+async fn dispatch_codex_provider_box_board_task(
+    state: &AppState,
+    task: &missiond_core::types::BoardTask,
+    slot_id: &str,
+    full_prompt: &str,
+    runtime_contract: &TaskRuntimeContract,
+) {
+    let started = std::time::Instant::now();
+    let slot_config = state.mission.get_slot(slot_id).map(|slot| slot.config);
+    let cwd = slot_config
+        .as_ref()
+        .and_then(|config| config.project_root.clone().or_else(|| config.cwd.clone()))
+        .or_else(|| runtime_contract.project_id.clone())
+        .or_else(|| task.project.clone());
+    let timeout_secs = task
+        .timeout_secs
+        .and_then(|value| u64::try_from(value).ok())
+        .unwrap_or(1_800)
+        .clamp(10, 7_200);
+
+    let mut request = crate::provider_box::ProviderInteractionRequest::new(
+        crate::provider_box::BoxCommand::WorkerTurn,
+        missiond_core::types::CliEngine::Codex,
+    );
+    request.provider = Some("codex_cli".to_string());
+    request.prompt = Some(full_prompt.to_string());
+    request.timeout_secs = Some(timeout_secs);
+    request.correlation_id = format!("boardtask-{}-{}", task.id, uuid::Uuid::new_v4().simple());
+    request.task_id = Some(task.id.to_string());
+    request.project_id = runtime_contract
+        .project_id
+        .clone()
+        .or_else(|| task.project.clone());
+    request.slot_id = Some(slot_id.to_string());
+    request.cwd = cwd.clone();
+    request.project_root = cwd;
+    if let Some(config) = slot_config.as_ref() {
+        request.model = config.model.clone();
+        request.model_profile = config
+            .reasoning_effort
+            .clone()
+            .or_else(|| config.model_profile.clone());
+        request.tool_policy = Some(serde_json::json!({
+            "sandbox": config.sandbox.clone().unwrap_or_else(|| "read-only".to_string()),
+            "approval_policy": config.approval_policy.clone().unwrap_or_else(|| "never".to_string()),
+            "search_enabled": config.search_enabled.unwrap_or(true),
+            "source": "autopilot-boardtask"
+        }));
+    }
+    request.output_contract = Some(task_contract_runtime_envelope(runtime_contract).into());
+
+    let result = match state.provider_box.execute(request).await {
+        Ok(result) => result,
+        Err(err) => {
+            fail_provider_box_board_task(
+                state,
+                task,
+                slot_id,
+                &format!("PROVIDER_BOX_EXECUTE_FAILED: {err:#}"),
+            )
+            .await;
+            return;
+        }
+    };
+
+    if result.status != crate::provider_box::ProviderBoxStatus::Completed {
+        let reason = result
+            .diagnostics
+            .iter()
+            .map(|diag| format!("{}: {}", diag.code, diag.message))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fail_provider_box_board_task(
+            state,
+            task,
+            slot_id,
+            if reason.trim().is_empty() {
+                "PROVIDER_BOX_TURN_FAILED"
+            } else {
+                reason.as_str()
+            },
+        )
+        .await;
+        return;
+    }
+
+    let final_summary = result.final_text.unwrap_or_default();
+    if final_summary.trim().is_empty() {
+        fail_provider_box_board_task(
+            state,
+            task,
+            slot_id,
+            "PROVIDER_BOX_EMPTY_FINAL: provider-box completed without final_text",
+        )
+        .await;
+        return;
+    }
+    let durable_completion = DurableProviderCompletion {
+        session_id: result
+            .provider_conversation_id
+            .unwrap_or_else(|| result.turn_id.clone()),
+        source: result
+            .durable_source
+            .unwrap_or_else(|| "provider_box:codex".to_string()),
+        summary: final_summary.clone(),
+    };
+
+    if settle_autopilot_done_from_existing_artifact(
+        state,
+        task,
+        slot_id,
+        &final_summary,
+        "provider-box-existing-artifact",
+    )
+    .await
+    .unwrap_or_else(|err| {
+        warn!(
+            task_id = %task.id,
+            slot_id,
+            error = %err,
+            "Autopilot provider-box: existing canonical artifact settle failed"
+        );
+        false
+    }) {
+        settle_worker_conversation(state, slot_id, task).await;
+        let _ = state
+            .store
+            .update_prompt_snapshot_outcome(task.id.as_str(), "success")
+            .await;
+        return;
+    }
+
+    let mut task_result_artifact_hash = observe_autopilot_task_result_candidate(
+        state,
+        task,
+        slot_id,
+        Some(&durable_completion),
+        &final_summary,
+        "completed",
+        started.elapsed().as_millis() as u64,
+    )
+    .await;
+    if task_result_artifact_hash.is_none() {
+        task_result_artifact_hash = materialize_read_only_task_result_artifact_from_durable_final(
+            state,
+            task,
+            slot_id,
+            Some(&durable_completion),
+            &final_summary,
+            "completed",
+        )
+        .await;
+    }
+    let Some(artifact_hash) = task_result_artifact_hash else {
+        let _ = state
+            .store
+            .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+                task_id: task.id.to_string(),
+                content: format!(
+                    "⚠️ **Provider-box observation** — Codex durable final 已记录，但没有 canonical completed task_result_artifact；任务保持 running，不从 PTY screen 合成结果。\n\n{}",
+                    truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES)
+                ),
+                note_type: Some("note".to_string()),
+                author: Some("provider-box".to_string()),
+            })
+            .await;
+        return;
+    };
+
+    let artifact =
+        completed_task_result_artifact_hash_for_task(state, task, Some(&artifact_hash)).await;
+    let Some(artifact) = artifact else {
+        fail_provider_box_board_task(
+            state,
+            task,
+            slot_id,
+            "PROVIDER_BOX_ARTIFACT_RESOLUTION_FAILED: completed artifact hash no longer resolves",
+        )
+        .await;
+        return;
+    };
+    let summary_for_note = truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES);
+    let _ = state
+        .store
+        .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+            task_id: task.id.to_string(),
+            content: format!(
+                "**Provider-box Codex 执行完成** ({}ms; durable final {} / {})\n\n{}\
+                 \n\ntask_result_artifact: `{}`",
+                started.elapsed().as_millis(),
+                durable_completion.source,
+                durable_completion.session_id,
+                summary_for_note,
+                artifact.artifact_hash
+            ),
+            note_type: Some("summary".to_string()),
+            author: Some("provider-box".to_string()),
+        })
+        .await;
+    if let Err(err) = settle_autopilot_done_with_artifact(
+        state,
+        task,
+        slot_id,
+        artifact.artifact_hash.as_str(),
+        artifact.attempt_id.as_deref(),
+        &summary_for_note,
+    )
+    .await
+    {
+        warn!(
+            task_id = %task.id,
+            slot_id,
+            error = %err,
+            "Autopilot provider-box: worker_settle(done) refused task close"
+        );
+        return;
+    }
+    settle_worker_conversation(state, slot_id, task).await;
+    let _ = state
+        .store
+        .update_prompt_snapshot_outcome(task.id.as_str(), "success")
+        .await;
+}
+
 fn task_result_artifact_hash_from_text(text: &str) -> Option<String> {
     text.lines().find_map(|line| {
         let idx = line.find("task_result_artifact:")?;
@@ -1699,6 +1961,14 @@ fn codex_slot_project_root(state: &AppState, slot_id: &str) -> Option<String> {
         .or(slot.config.cwd)
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn slot_engine_is_codex(state: &AppState, slot_id: &str) -> bool {
+    state
+        .mission
+        .get_slot(slot_id)
+        .map(|slot| matches!(slot.config.engine, missiond_core::types::CliEngine::Codex))
+        .unwrap_or_else(|| slot_id.to_ascii_lowercase().contains("codex"))
 }
 
 async fn append_unbound_codex_rollout_candidates(
@@ -4665,8 +4935,29 @@ async fn dispatch_board_tasks_with_config(
         let task_env = determine_llm_env(&task, &slot_role, &router_config);
 
         // Check if PTY session exists, spawn if needed
-        if !ensure_autopilot_pty(state, &task, &slot_id, task_env).await {
-            let _ = state.store.unclaim_board_task(task.id.as_str()).await;
+        let dispatch_via_provider_box = slot_engine_is_codex(state, &slot_id);
+        if !dispatch_via_provider_box
+            && !ensure_autopilot_pty(state, &task, &slot_id, task_env).await
+        {
+            let terminal_after_ensure_failure = state
+                .store
+                .get_board_task(task.id.as_str())
+                .await
+                .ok()
+                .flatten()
+                .map(|current| {
+                    matches!(
+                        current.status,
+                        missiond_core::types::BoardTaskStatus::Done
+                            | missiond_core::types::BoardTaskStatus::Failed
+                            | missiond_core::types::BoardTaskStatus::Blocked
+                            | missiond_core::types::BoardTaskStatus::Skipped
+                    )
+                })
+                .unwrap_or(false);
+            if !terminal_after_ensure_failure {
+                let _ = state.store.unclaim_board_task(task.id.as_str()).await;
+            }
             continue;
         }
 
@@ -4923,6 +5214,17 @@ async fn dispatch_board_tasks_with_config(
                     );
                     return;
                 }
+            }
+            if slot_engine_is_codex(state, &slot_id) {
+                dispatch_codex_provider_box_board_task(
+                    state,
+                    task,
+                    &slot_id,
+                    &full_prompt,
+                    &runtime_contract,
+                )
+                .await;
+                return;
             }
             match state.pty.send(&slot_id, &full_prompt, timeout_ms).await {
                 Ok(res) => {
@@ -8957,17 +9259,28 @@ Review only.
     }
 
     #[test]
-    fn dispatch_board_tasks_unclaims_when_pty_not_ready() {
+    fn dispatch_board_tasks_ensures_pty_only_for_non_codex_slots() {
         let src = include_str!("./autopilot.rs");
-        let ensure_call = "if !ensure_autopilot_pty(state, &task, &slot_id, task_env).await";
+        let codex_provider_box_flag =
+            "let dispatch_via_provider_box = slot_engine_is_codex(state, &slot_id);";
+        let guarded_ensure_call = "if !dispatch_via_provider_box\n            && !ensure_autopilot_pty(state, &task, &slot_id, task_env).await";
+        let codex_dispatch_call = "dispatch_codex_provider_box_board_task(";
         let unclaim_call = "state.store.unclaim_board_task(task.id.as_str()).await";
         assert!(
-            src.contains(ensure_call),
-            "dispatch must check ensure_autopilot_pty before sending"
+            src.contains(codex_provider_box_flag),
+            "dispatch must identify Codex slots before PTY readiness checks"
+        );
+        assert!(
+            src.contains(guarded_ensure_call),
+            "dispatch must skip legacy PTY readiness checks for Codex provider_box slots"
+        );
+        assert!(
+            src.contains(codex_dispatch_call),
+            "Codex BoardTask dispatch must go through provider_box"
         );
         assert!(
             src.contains(unclaim_call),
-            "a claimed BoardTask must be released when PTY spawn/readiness is transiently unavailable"
+            "a claimed non-Codex BoardTask must be released when PTY spawn/readiness is transiently unavailable"
         );
     }
 

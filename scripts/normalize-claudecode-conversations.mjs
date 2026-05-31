@@ -202,7 +202,7 @@ function applySourceState(db, rawRows) {
       has_assistant boolean,
       local_command_only boolean
     );
-    \\copy tmp_claude_raw_scan FROM ${quoteLiteral(file)} WITH (FORMAT text)
+    \\copy tmp_claude_raw_scan FROM ${quoteLiteral(file)} WITH (FORMAT text, NULL '')
 
     INSERT INTO conversation_source_state (
       conversation_id, source, raw_path, raw_state, raw_first_seen_at, raw_last_seen_at,
@@ -216,15 +216,19 @@ function applySourceState(db, rawRows) {
         WHEN c.conversation_type = 'history_prompt' AND c.chat_type = 'history_jsonl' THEN 'current'
         WHEN COALESCE(c.jsonl_path, '') = '' THEN 'unknown'
         WHEN r.session_id IS NOT NULL AND r.raw_path = c.jsonl_path THEN
-          CASE WHEN r.local_command_only AND NOT r.has_assistant THEN 'skipped-local-only' ELSE 'current' END
+          CASE
+            WHEN r.local_command_only AND NOT r.has_assistant THEN 'raw-only-local-command'
+            WHEN NOT r.has_assistant THEN 'raw-only-provider-prompt'
+            ELSE 'current'
+          END
         WHEN r.session_id IS NOT NULL AND r.raw_path <> c.jsonl_path THEN 'path-mismatch'
         ELSE 'missing-stale'
       END AS raw_state,
       CASE WHEN c.conversation_type = 'history_prompt' THEN
-        (SELECT MIN(m.timestamp) FROM conversation_messages m WHERE m.session_id = c.id)
+        (SELECT MIN(m.timestamp)::timestamptz FROM conversation_messages m WHERE m.session_id = c.id)
       ELSE r.raw_first_seen_at END,
       CASE WHEN c.conversation_type = 'history_prompt' THEN
-        (SELECT MAX(m.timestamp) FROM conversation_messages m WHERE m.session_id = c.id)
+        (SELECT MAX(m.timestamp)::timestamptz FROM conversation_messages m WHERE m.session_id = c.id)
       ELSE r.raw_last_seen_at END,
       CASE WHEN c.conversation_type = 'history_prompt' THEN 1 ELSE r.raw_line_count END,
       CASE WHEN c.conversation_type = 'history_prompt' THEN 1 ELSE r.raw_message_line_count END,
@@ -235,6 +239,7 @@ function applySourceState(db, rawRows) {
         WHEN c.conversation_type = 'history_prompt' AND c.chat_type = 'history_jsonl' THEN 'prompt-only record from ~/.claude/history.jsonl'
         WHEN COALESCE(c.jsonl_path, '') = '' THEN 'conversation has no raw path'
         WHEN r.session_id IS NOT NULL AND r.raw_path = c.jsonl_path AND r.local_command_only AND NOT r.has_assistant THEN 'raw file contains only local command/no assistant material'
+        WHEN r.session_id IS NOT NULL AND r.raw_path = c.jsonl_path AND NOT r.has_assistant THEN 'raw file contains no assistant transcript material'
         WHEN r.session_id IS NOT NULL AND r.raw_path = c.jsonl_path THEN 'raw path exists and matches current scan'
         WHEN r.session_id IS NOT NULL AND r.raw_path <> c.jsonl_path THEN 'same session id found at a different path'
         ELSE 'recorded raw path is not present in current ~/.claude/projects scan'

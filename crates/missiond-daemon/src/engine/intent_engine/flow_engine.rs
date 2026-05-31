@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use serde_json::json;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::context::v3_blueprint_runtime::{RouterRuntimeConfig, WorkstationRuntimeConfig};
 use crate::decision_harvest::harvest_decisions_for_task;
@@ -17,6 +17,7 @@ use crate::engine::control_plane_kernel::{ControlPlaneKernel, RequireCapabilityC
 use crate::llm_gateway::{call_gemini_for_flow, determine_llm_env};
 use crate::state::AppState;
 use crate::supervisor::{is_auth_error, is_quota_exhausted, strip_prompt_echo, truncate_safe};
+use missiond_core::event::events::{BoardEvent, SessionEvent};
 use missiond_core::PTYSpawnOptions;
 use missiond_core::SessionState;
 
@@ -158,6 +159,124 @@ pub(crate) fn plan_review_gate_decision(review: &str) -> PlanReviewGateDecision 
     }
 
     PlanReviewGateDecision::Ambiguous
+}
+
+async fn notify_jarvis_failure(
+    state: &AppState,
+    task: &missiond_core::types::BoardTask,
+    reason: &str,
+) {
+    if task.category != "jarvis" {
+        return;
+    }
+    let conv_id = ControlPlaneKernel::new(state)
+        .task_runtime_contract(task.id.as_str())
+        .await
+        .ok()
+        .and_then(|contract| contract.conversation_id)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if let Some(conv_id) = conv_id {
+        let error_msg = format!("❌ 后台任务快速失败：{}", reason);
+        let _ = state
+            .store
+            .router_chat_append_messages(&conv_id, &[("assistant".to_string(), error_msg)])
+            .await;
+        let _ = state
+            .bus
+            .publish_session(SessionEvent::JarvisTaskCompleted {
+                conversation_id: conv_id.clone(),
+                task_id: task.id.to_string(),
+            })
+            .await;
+        warn!(task_id = %task.id, conv_id = %conv_id, "Jarvis async: fast-failure notification sent");
+    }
+}
+
+async fn fail_board_task_fast(
+    state: &AppState,
+    task: &missiond_core::types::BoardTask,
+    reason: impl Into<String>,
+) {
+    let reason = reason.into();
+    let summary = format!(
+        "❌ 后台任务快速失败\n\n{}\n\nNo fallback was attempted.",
+        reason
+    );
+    let _ = state
+        .store
+        .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+            task_id: task.id.to_string(),
+            content: summary.clone(),
+            note_type: Some("summary".to_string()),
+            author: Some("autopilot".to_string()),
+        })
+        .await;
+    if let Err(err) = state
+        .store
+        .fail_board_task_and_release_claim(task.id.as_str())
+        .await
+    {
+        error!(task_id = %task.id, error = %err, "Autopilot: failed to mark BoardTask failed fast");
+    }
+    let _ = state
+        .bus
+        .publish_board(BoardEvent::StatusChanged {
+            task_id: task.id.to_string(),
+            old_status: format!("{:?}", task.status),
+            new_status: "failed".to_string(),
+        })
+        .await;
+    notify_jarvis_failure(state, task, &reason).await;
+    warn!(task_id = %task.id, reason = %reason, "Autopilot: BoardTask failed fast");
+}
+
+async fn retry_or_fail_board_task_after_spawn_failure(
+    state: &AppState,
+    task: &missiond_core::types::BoardTask,
+    reason: impl Into<String>,
+) {
+    let reason = reason.into();
+    let new_retry = task.retry_count + 1;
+    if new_retry >= task.max_retries {
+        fail_board_task_fast(
+            state,
+            task,
+            format!(
+                "{}\n\n已达到最大重试次数 ({}/{})。",
+                reason, new_retry, task.max_retries
+            ),
+        )
+        .await;
+        return;
+    }
+
+    let _ = state
+        .store
+        .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+            task_id: task.id.to_string(),
+            content: format!(
+                "⏳ PTY spawn 暂时失败，已释放任务等待重试 ({}/{}).\n\n{}",
+                new_retry, task.max_retries, reason
+            ),
+            note_type: Some("note".to_string()),
+            author: Some("autopilot".to_string()),
+        })
+        .await;
+
+    if let Err(err) = state
+        .store
+        .increment_board_task_retry(task.id.as_str(), new_retry)
+        .await
+    {
+        warn!(
+            task_id = %task.id,
+            retry = new_retry,
+            error = %err,
+            "Autopilot: failed to increment retry after PTY spawn failure; unclaiming task"
+        );
+        let _ = state.store.unclaim_board_task(task.id.as_str()).await;
+    }
 }
 
 fn contains_any(haystack: &str, needles: &[&str]) -> bool {
@@ -859,51 +978,15 @@ pub(crate) async fn ensure_autopilot_pty(
 
     let Some(slot) = slot else {
         warn!(task_id = %task.id, slot_id, "Autopilot: slot not found, skipping");
-        // Record failure note + increment retry
-        let _ = state
-            .store
-            .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
-                task_id: task.id.to_string(),
-                content: format!(
-                    "❌ Slot `{}` 不存在，无法执行任务。请检查 slots.yaml 配置。",
-                    slot_id
-                ),
-                note_type: Some("note".to_string()),
-                author: Some("autopilot".to_string()),
-            })
-            .await;
-        let new_retry = task.retry_count + 1;
-        if new_retry >= task.max_retries {
-            let _ = state
-                .store
-                .update_board_task(
-                    task.id.as_str(),
-                    &missiond_core::types::UpdateBoardTaskInput {
-                        status: Some("failed".to_string()),
-                        ..Default::default()
-                    },
-                )
-                .await;
-            let _ = state
-                .store
-                .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
-                    task_id: task.id.to_string(),
-                    content: format!(
-                        "🛑 Slot `{}` 连续 {} 次不可用，任务标记为 failed。",
-                        slot_id, new_retry
-                    ),
-                    note_type: Some("note".to_string()),
-                    author: Some("autopilot".to_string()),
-                })
-                .await;
-            warn!(task_id = %task.id, retries = new_retry, "Autopilot: task failed — slot not found after max retries");
-        } else {
-            let _ = state
-                .store
-                .increment_board_task_retry(task.id.as_str(), new_retry)
-                .await;
-            let _ = state.store.unclaim_board_task(task.id.as_str()).await;
-        }
+        fail_board_task_fast(
+            state,
+            task,
+            format!(
+                "Slot `{}` 不存在，无法执行任务。请检查 slots.yaml 配置。",
+                slot_id
+            ),
+        )
+        .await;
         return false;
     };
 
@@ -939,18 +1022,15 @@ pub(crate) async fn ensure_autopilot_pty(
                     error = %err,
                     "Autopilot: failed to load V3 workstation runtime config for PTY spawn"
                 );
-                let _ = state
-                    .store
-                    .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
-                        task_id: task.id.to_string(),
-                        content: format!(
-                            "❌ V3 workstation runtime config 加载失败，无法安全启动 PTY。\n\n{}",
-                            err
-                        ),
-                        note_type: Some("note".to_string()),
-                        author: Some("autopilot".to_string()),
-                    })
-                    .await;
+                fail_board_task_fast(
+                    state,
+                    task,
+                    format!(
+                        "V3 workstation runtime config 加载失败，无法安全启动 PTY。\n\n{}",
+                        err
+                    ),
+                )
+                .await;
                 return false;
             }
         };
@@ -1032,50 +1112,15 @@ pub(crate) async fn ensure_autopilot_pty(
                 }
             }
             warn!(task_id = %task.id, slot_id, error = %e, "Autopilot: failed to spawn PTY (process may still be loading)");
-            let _ = state
-                .store
-                .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
-                    task_id: task.id.to_string(),
-                    content: format!(
-                        "⏳ PTY spawn 失败（{}s 超时）。\n\n{}",
-                        spawn_timeout_secs, e
-                    ),
-                    note_type: Some("note".to_string()),
-                    author: Some("autopilot".to_string()),
-                })
-                .await;
-            // Retry with backoff or fail
-            let new_retry = task.retry_count + 1;
-            if new_retry >= task.max_retries {
-                let _ = state
-                    .store
-                    .update_board_task(
-                        task.id.as_str(),
-                        &missiond_core::types::UpdateBoardTaskInput {
-                            status: Some("failed".to_string()),
-                            ..Default::default()
-                        },
-                    )
-                    .await;
-                let _ = state
-                    .store
-                    .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
-                        task_id: task.id.to_string(),
-                        content: format!(
-                            "🛑 PTY spawn 连续 {} 次失败，任务标记为 failed。",
-                            new_retry
-                        ),
-                        note_type: Some("note".to_string()),
-                        author: Some("autopilot".to_string()),
-                    })
-                    .await;
-            } else {
-                let _ = state
-                    .store
-                    .increment_board_task_retry(task.id.as_str(), new_retry)
-                    .await;
-                let _ = state.store.unclaim_board_task(task.id.as_str()).await;
-            }
+            retry_or_fail_board_task_after_spawn_failure(
+                state,
+                task,
+                format!(
+                    "PTY spawn 失败（{}s 超时）。\n\n错误：{}",
+                    spawn_timeout_secs, e
+                ),
+            )
+            .await;
             false
         }
     }

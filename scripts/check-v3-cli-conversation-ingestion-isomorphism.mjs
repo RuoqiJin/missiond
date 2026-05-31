@@ -29,6 +29,7 @@ const DEFAULT_FILES = {
   // alongside the existing ConversationQuery filter type so all
   // conversation classification logic stays in one read path.
   conversationClassifier: 'crates/missiond-core/src/db/conversation_query.rs',
+  messageLabeler: 'crates/missiond-daemon/src/workers/local/message_labeler.rs',
   taggerChunker: 'crates/missiond-daemon/src/workers/local/tagger_chunker.rs',
   slotHandler: 'crates/missiond-daemon/src/handlers/compute/slot.rs',
   slotEnv: 'crates/missiond-daemon/src/context/slot_env.rs',
@@ -170,6 +171,8 @@ function checkFiles(root, files) {
     'mission_conversation_query(action=audit_message_roles)',
     'mission_conversation_query(action=backfill_message_roles, apply=true)',
     'mission_conversation_query(action=turn_backfill, sessionId=...)',
+    'message_label_evidence',
+    'mission_conversation_query(action=label_audit|label_backfill)',
     'mission_conversation_query(action=gemini_reconcile)',
     'codex_user_without_slot',
     'codex_raw_role_missing',
@@ -328,6 +331,8 @@ function checkFiles(root, files) {
     '"audit_message_roles" => "mission_conversation_message_role_audit"',
     '"backfill_message_roles" => "mission_conversation_message_role_backfill"',
     '"turn_backfill" => "mission_conversation_turn_backfill"',
+    '"label_audit" => "mission_conversation_label_audit"',
+    '"label_backfill" => "mission_conversation_label_backfill"',
     '"gemini_reconcile" => "mission_conversation_gemini_reconcile"',
   ]);
 
@@ -349,6 +354,8 @@ function checkFiles(root, files) {
     'mission_conversation_message_role_audit',
     'mission_conversation_message_role_backfill',
     'mission_conversation_turn_backfill',
+    'mission_conversation_label_audit',
+    'mission_conversation_label_backfill',
     'mission_conversation_gemini_reconcile',
   ]);
 
@@ -358,6 +365,8 @@ function checkFiles(root, files) {
     '"audit_message_roles"',
     '"backfill_message_roles"',
     '"turn_backfill"',
+    '"label_audit"',
+    '"label_backfill"',
     '"gemini_reconcile"',
     '"minConfidence"',
     '"rebuildTurns"',
@@ -369,6 +378,8 @@ function checkFiles(root, files) {
     'audit_message_roles',
     'backfill_message_roles',
     'turn_backfill',
+    'label_audit',
+    'label_backfill',
     'gemini_reconcile',
     'minConfidence',
     'rebuildTurns',
@@ -377,6 +388,16 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.taggerChunker, sources.taggerChunker, [
     'worker_user',
     '"user" | "worker_user" | "agent_user"',
+  ]);
+
+  requireAll(diagnostics, files.messageLabeler, sources.messageLabeler, [
+    'message_label_evidence_upsert_batch',
+    'message_label_projection_refresh',
+    'CONSUMER_NAME',
+    'message_labeler:v1',
+    'claudecode.origin.local_command',
+    'claudecode.origin.file_context',
+    'image_context_has_human_tail',
   ]);
 
   requireAll(diagnostics, files.geminiWatcher, sources.geminiWatcher, [

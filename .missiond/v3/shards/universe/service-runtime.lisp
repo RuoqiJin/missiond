@@ -161,16 +161,19 @@
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/search-center-backend-blueprint.lisp"
       :environment production
-      :public-base-url "https://search-center.xiaojinpro.com"
-      :frontend-url "https://search.xiaojinpro.com"
-      :domains ["search.xiaojinpro.com" "search-center.xiaojinpro.com" "auth.xiaojinpro.com"]
+      :public-base-url "https://search-center.xiaojinpro.top"
+      :frontend-url "https://search.xiaojinpro.top"
+      :domains ["search.xiaojinpro.top" "search-center.xiaojinpro.top" "auth.xiaojinpro.com"]
       :dns-provider cloudflare
+      :dns-records [(:type CNAME :name "search.xiaojinpro.top" :content "cname.vercel-dns.com" :proxied false :ttl 60 :authority cloudflare)
+                    (:type A :name "search-center.xiaojinpro.top" :content "34.104.147.118" :proxied false :ttl 60 :authority cloudflare)]
       :deployment (:substrate deploy-center :dc_slug "xjp-search-center" :runtime-target gcp-runtime :executor gcp-agent :container "xjp-search-center" :default-port 3120 :authority release-provenance)
-      :proxy (:kind caddy :domain "search-center.xiaojinpro.com" :routes ["/health/live" "/health/ready" "/v1/health" "/v1/me" "/v1/search" "/v1/search/*" "/v1/research" "/v1/research/*" "/v1/history" "/v1/history/*"])
+      :proxy (:kind caddy :domain "search-center.xiaojinpro.top" :routes ["/health/live" "/health/ready" "/v1/health" "/v1/me" "/v1/search" "/v1/search/*" "/v1/research" "/v1/research/*" "/v1/history" "/v1/history/*"])
       :ports (:http 3120)
       :health ["/v1/health"]
-      :dependencies [xjp-auth xjp-router xjp-pg-prod secret-store missiond-jarvis-edge anysearch bocha tavily? brave? dataforseo? exa?]
-      :llm-provider (:synthesis-channel missiond-xjpcode-text-only :authority missiond-jarvis-edge :provider claude_code :model claude-opus-4-6 :global-enable-env SEARCH_CENTER_LLM_PROVIDER :json-enable-env SEARCH_CENTER_JSON_PROVIDER :synthesis-enable-env SEARCH_CENTER_SYNTHESIS_PROVIDER :endpoint-env SEARCH_CENTER_MISSIOND_TEXT_ONLY_URL :migration-target provider-interaction-box :rule "Search Center retrieval remains xjp-router/provider fan-out. Deep Research JSON planning/repair and long-form synthesis may route through MissionD/xjpcode text-only on the managed Mac node while migration is incomplete. This lane must become a MissionD provider-interaction-box HTTP adapter backed by interactive PTY plus durable provider-log final extraction, stay no-tools/no-MCP/no-filesystem, and be protected by internal service auth or a tunnel.")
+      :dependencies [xjp-auth xjp-payments xjp-router xjp-pg-prod secret-store missiond-jarvis-edge anysearch bocha tavily? brave? dataforseo? exa?]
+      :billing (:authority xjp-payments :credit-guard before-provider-call :spend-endpoint "/payments/internal/credits/spend" :required-secret INTERNAL_API_TOKEN :quick-search-cost-credits 1 :deep-research-cost-credits 300)
+      :llm-provider (:synthesis-channel missiond-xjpcode-text-only :authority missiond-jarvis-edge :provider claude_code :model claude-opus-4-6 :global-enable-env SEARCH_CENTER_LLM_PROVIDER :json-enable-env SEARCH_CENTER_JSON_PROVIDER :synthesis-enable-env SEARCH_CENTER_SYNTHESIS_PROVIDER :endpoint-env SEARCH_CENTER_MISSIOND_TEXT_ONLY_URL :migration-target provider-interaction-box :rule "Search Center retrieval remains xjp-router/provider fan-out. Deep Research JSON planning/repair and long-form synthesis currently may route through MissionD/xjpcode text-only ClaudeCode on the managed Mac node when SEARCH_CENTER_LLM_PROVIDER=missiond_text_only, or by narrower SEARCH_CENTER_JSON_PROVIDER / SEARCH_CENTER_SYNTHESIS_PROVIDER switches; this text-only lane is migration-only and must become a MissionD provider-interaction-box HTTP adapter backed by interactive PTY plus durable provider-log final extraction. The lane must stay no-tools/no-MCP/no-filesystem and must be protected by internal service auth or a tunnel, never exposed as an unauthenticated public provider.")
       :ops-capability deploy-ops
       :source-evidence [skill:search-center skill:services/search-center]
       :risks [deep-research-live-300-source-artifact-pending cross-domain-benchmark-suite-pending production-browser-oauth-flow-pending provider-secret-activation-pending final-promotion-artifact-verification-pending]

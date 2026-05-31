@@ -2,7 +2,7 @@
 //!
 //! Listens to SessionOrganized events from S2 Organizer, then:
 //! 1. Extracts structured Turns from flat conversation_messages
-//! 2. Applies noise labels to overlong/binary tool results
+//! 2. Emits contextual commit events
 //! 3. Emits TurnExtracted events for downstream S4 Embedder
 //!
 //! Pure rules, zero LLM calls.
@@ -17,6 +17,7 @@ use tracing::{debug, info, warn};
 
 use super::{BackgroundWorker, WorkerContext, WorkerKind};
 use crate::state::{AppState, EmbeddingTask};
+use crate::workers::local::message_labeler;
 use missiond_core::event::events::{MemoryEvent, SessionEvent, SystemEvent};
 use missiond_core::event::subscription::SubscriptionOpts;
 use missiond_core::types::{ConversationMessage, RawTurn};
@@ -38,38 +39,6 @@ const MAX_MESSAGES_PER_SESSION: i64 = 10_000;
 
 /// Truncate user_content to this many chars.
 const USER_CONTENT_MAX_CHARS: usize = 2000;
-
-/// Noise threshold: tool_result content longer than this is marked as noise.
-const NOISE_TOOL_RESULT_CHARS: usize = 10_000;
-
-/// Noise threshold: thinking content longer than this is marked as long thinking.
-const NOISE_THINKING_CHARS: usize = 5_000;
-
-/// Binary detection: if more than 30% of first 500 chars are non-printable.
-const BINARY_RATIO_THRESHOLD: f64 = 0.3;
-
-/// Source tag for message_labels written by this worker.
-const LABEL_SOURCE: &str = "tagger_chunker";
-
-const USER_PREVIEW_MAX_BYTES: usize = 80;
-
-/// Regex to extract branch, commit hash, and summary from git commit output.
-/// Matches standard:      `[main 9facdfa] refactor: some changes`
-/// Matches root:          `[main (root-commit) 9facdfa] initial commit`
-/// Matches detached HEAD: `[detached HEAD 56cbfdd] fix something`
-/// Captures: (1) branch/ref, (2) hash, (3) summary
-static GIT_COMMIT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\[([a-zA-Z0-9_\-/\.\s]+?)\s+(?:\([^\)]+\)\s+)?([a-f0-9]{7,40})\]\s+(.*)").unwrap()
-});
-
-/// A git commit detected from conversation content.
-struct CommitDetection {
-    session_id: String,
-    message_id: i64,
-    branch: String,
-    commit_hash: String,
-    summary: String,
-}
 
 pub struct TaggerChunkerWorker;
 
@@ -287,49 +256,15 @@ pub(crate) async fn rebuild_session_turns(
 /// This pipeline is independent of turn extraction and must always run,
 /// even when the session is active and turns are incomplete.
 async fn analyze_messages(state: &AppState, session_id: &str, messages: &[ConversationMessage]) {
-    let user_msgs: Vec<_> = messages
-        .iter()
-        .filter(|m| m.role == "user")
-        .map(|m| (m.id, user_preview(&m.content)))
-        .collect();
+    let user_count = messages.iter().filter(|m| m.role == "user").count();
     info!(
         session_id,
         total = messages.len(),
-        user_count = user_msgs.len(),
+        user_count,
         "TaggerChunker: analyze_messages batch"
     );
-    for (id, preview) in &user_msgs {
-        if GIT_COMMIT_RE.is_match(preview) {
-            info!(
-                message_id = id,
-                preview, "TaggerChunker: commit regex MATCH"
-            );
-        }
-    }
 
-    // Noise labels
-    let noise_labels = collect_noise_labels(messages);
-    if !noise_labels.is_empty() {
-        let label_refs: Vec<(i64, &str, &str, &str)> = noise_labels
-            .iter()
-            .map(|(id, label, value)| (*id, label.as_str(), value.as_str(), LABEL_SOURCE))
-            .collect();
-        if let Err(e) = state.store.insert_message_labels_batch(&label_refs).await {
-            warn!(error = %e, "TaggerChunker: label insert failed");
-        }
-    }
-
-    // Tool classification + commit detection
-    let (tool_labels, detected_commits) = collect_tool_labels(messages, session_id);
-    if !tool_labels.is_empty() {
-        let label_refs: Vec<(i64, &str, &str, &str)> = tool_labels
-            .iter()
-            .map(|(id, label, value)| (*id, label.as_str(), value.as_str(), LABEL_SOURCE))
-            .collect();
-        if let Err(e) = state.store.insert_message_labels_batch(&label_refs).await {
-            warn!(error = %e, "TaggerChunker: tool label insert failed");
-        }
-    }
+    let detected_commits = message_labeler::detect_git_commits(messages, session_id);
 
     // Emit commit events
     if !detected_commits.is_empty() {
@@ -363,10 +298,6 @@ async fn analyze_messages(state: &AppState, session_id: &str, messages: &[Conver
                 .await;
         }
     }
-}
-
-fn user_preview(content: &str) -> &str {
-    missiond_core::util::safe_byte_truncate(content, USER_PREVIEW_MAX_BYTES)
 }
 
 /// Stage 3: Turn chunking — extract structured turns, trim active tail, persist.
@@ -708,136 +639,8 @@ fn extract_file_short_name(content: &str) -> Option<String> {
     Some(short.to_string())
 }
 
-// ─── Tagger (noise labels) ─────────────────────────────────────────────
-
-/// Collect noise labels for messages that should be filtered by downstream consumers.
-fn collect_noise_labels(messages: &[ConversationMessage]) -> Vec<(i64, String, String)> {
-    let mut labels = Vec::new();
-
-    for msg in messages {
-        match msg.role.as_str() {
-            "tool_result" => {
-                if msg.content.len() > NOISE_TOOL_RESULT_CHARS {
-                    labels.push((msg.id, "noise_long_output".to_string(), "true".to_string()));
-                }
-                if is_binary_like(&msg.content) {
-                    labels.push((msg.id, "noise_binary".to_string(), "true".to_string()));
-                }
-            }
-            "thinking" => {
-                if msg.content.len() > NOISE_THINKING_CHARS {
-                    labels.push((msg.id, "thinking_long".to_string(), "true".to_string()));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    labels
-}
-
-// ─── Tagger (tool labels + commit detection) ─────────────────────────────
-
-/// Classify tool calls and detect git commits from conversation messages.
-///
-/// Returns (labels_to_write, detected_commits).
-fn collect_tool_labels(
-    messages: &[ConversationMessage],
-    session_id: &str,
-) -> (Vec<(i64, String, String)>, Vec<CommitDetection>) {
-    let mut labels = Vec::new();
-    let mut commits = Vec::new();
-
-    for msg in messages {
-        // Tool classification: assistant messages with has_tool_use
-        if msg.has_tool_use {
-            if let Some(ref tool_name) = msg.tool_name {
-                let class = match tool_name.as_str() {
-                    "Bash" => classify_bash_command(&msg.content),
-                    other => other.to_lowercase(),
-                };
-                labels.push((msg.id, "tool_class".to_string(), class));
-            }
-        }
-
-        // Git commit detection: user messages (tool_results come as user messages)
-        if msg.role == "user" {
-            if let Some(caps) = GIT_COMMIT_RE.captures(&msg.content) {
-                let branch = caps[1].to_string();
-                let commit_hash = caps[2].to_string();
-                let summary = caps[3].trim().to_string();
-
-                labels.push((msg.id, "tool_action".to_string(), "commit".to_string()));
-                labels.push((msg.id, "commit_hash".to_string(), commit_hash.clone()));
-                labels.push((msg.id, "commit_branch".to_string(), branch.clone()));
-
-                commits.push(CommitDetection {
-                    session_id: session_id.to_string(),
-                    message_id: msg.id,
-                    branch,
-                    commit_hash,
-                    summary,
-                });
-            }
-        }
-    }
-
-    (labels, commits)
-}
-
-/// Classify a Bash command by its prefix.
-/// Content format: `[Tool: Bash] command: "actual command here", description: "..."`
-fn classify_bash_command(content: &str) -> String {
-    // Extract the actual command from the content format
-    let cmd = extract_bash_command(content);
-    let cmd = cmd.trim_start();
-
-    // Strip common prefixes like `cd /path &&` or `LC_ALL=C`
-    let cmd = if let Some(pos) = cmd.find("&& ") {
-        cmd[pos + 3..].trim_start()
-    } else {
-        cmd
-    };
-
-    if cmd.starts_with("git ") {
-        "git".to_string()
-    } else if cmd.starts_with("grep ") || cmd.starts_with("rg ") {
-        "search".to_string()
-    } else if cmd.starts_with("cargo ")
-        || cmd.starts_with("npm ")
-        || cmd.starts_with("make ")
-        || cmd.starts_with("docker ")
-    {
-        "build".to_string()
-    } else if cmd.starts_with("cat ")
-        || cmd.starts_with("ls ")
-        || cmd.starts_with("mkdir ")
-        || cmd.starts_with("rm ")
-        || cmd.starts_with("cp ")
-        || cmd.starts_with("mv ")
-    {
-        "fs".to_string()
-    } else {
-        "shell".to_string()
-    }
-}
-
-/// Extract the actual command string from `[Tool: Bash] command: "...", description: "..."`
 fn extract_bash_command(content: &str) -> &str {
-    // Try to find `command: "` pattern
-    if let Some(start) = content.find("command: \"") {
-        let after = &content[start + 10..]; // skip `command: "`
-                                            // Find the closing quote (handle escaped quotes)
-        if let Some(end) = after.find("\", description:") {
-            return &after[..end];
-        }
-        // Fallback: just take the rest
-        if let Some(end) = after.rfind('"') {
-            return &after[..end];
-        }
-    }
-    // Fallback: raw content (plain command text)
-    content
+    message_labeler::extract_bash_command(content)
 }
 
 /// Detect thinking/reasoning content leaked into assistant messages.
@@ -854,28 +657,8 @@ fn is_thinking_leak(content: &str) -> bool {
         || (t.starts_with("**") && t.contains("CRITICAL INSTRUCTION"))
 }
 
-/// Detect system command noise that should never be a turn boundary.
-/// These are Claude Code internal commands (/compact, etc.) stored as role="user".
 fn is_system_command_noise(content: &str) -> bool {
-    let t = content.trim();
-    t.is_empty()
-        || t.starts_with("<local-command-")
-        || t.starts_with("<command-name>")
-        || t.starts_with("<command-message>")
-        || t.starts_with("<command-args>")
-}
-
-/// Quick heuristic: high ratio of non-printable chars in first 500 bytes suggests binary/base64.
-fn is_binary_like(content: &str) -> bool {
-    let sample = missiond_core::util::safe_byte_truncate(content, 500);
-    if sample.is_empty() {
-        return false;
-    }
-    let non_text = sample
-        .chars()
-        .filter(|c| !c.is_ascii_graphic() && !c.is_whitespace())
-        .count();
-    (non_text as f64) / (sample.len() as f64) > BINARY_RATIO_THRESHOLD
+    message_labeler::is_system_command_noise(content)
 }
 
 /// Truncate a string to max_chars, respecting char boundaries.
@@ -1009,130 +792,12 @@ mod tests {
     }
 
     #[test]
-    fn test_is_binary_like() {
-        assert!(!is_binary_like("Hello world"));
-        assert!(!is_binary_like("fn main() { println!(\"hello\"); }"));
-        // Many non-printable chars
-        let binary = "\x00\x01\x02\x03\x04\x05\x06\x07\x08".repeat(60);
-        assert!(is_binary_like(&binary));
-    }
-
-    #[test]
-    fn test_noise_labels() {
-        let long_output = "x".repeat(15_000);
-        let msgs = vec![
-            make_msg(1, "tool_result", &long_output),
-            make_msg(2, "thinking", &"y".repeat(6000)),
-            make_msg(3, "assistant", "short"),
-        ];
-        let labels = collect_noise_labels(&msgs);
-        assert_eq!(labels.len(), 2);
-        assert_eq!(labels[0].1, "noise_long_output");
-        assert_eq!(labels[1].1, "thinking_long");
-    }
-
-    #[test]
-    fn test_tool_labels_bash_git() {
-        let mut msg = make_msg(
-            1,
-            "assistant",
-            r#"[Tool: Bash] command: "git status", description: "Show working tree status""#,
-        );
-        msg.has_tool_use = true;
-        msg.tool_name = Some("Bash".to_string());
-
-        let msgs = vec![msg];
-        let (labels, commits) = collect_tool_labels(&msgs, "test-session");
-
-        assert_eq!(labels.len(), 1);
-        assert_eq!(labels[0].0, 1);
-        assert_eq!(labels[0].1, "tool_class");
-        assert_eq!(labels[0].2, "git");
-        assert!(commits.is_empty());
-    }
-
-    #[test]
-    fn test_tool_labels_bash_cd_then_git() {
-        let mut msg = make_msg(
-            1,
-            "assistant",
-            r#"[Tool: Bash] command: "cd /Users/jinchen/Projects/missiond && git log --oneline -5", description: "Show recent commits""#,
-        );
-        msg.has_tool_use = true;
-        msg.tool_name = Some("Bash".to_string());
-
-        let msgs = vec![msg];
-        let (labels, _) = collect_tool_labels(&msgs, "test-session");
-
-        assert_eq!(labels[0].2, "git");
-    }
-
-    #[test]
     fn test_extract_bash_command() {
         assert_eq!(
             extract_bash_command(r#"[Tool: Bash] command: "cargo build", description: "Build""#),
             "cargo build"
         );
         assert_eq!(extract_bash_command("plain command"), "plain command");
-    }
-
-    #[test]
-    fn test_tool_labels_commit_detection() {
-        let msg = make_msg(
-            10,
-            "user",
-            "[main 9facdfa] refactor: unify workers\n 3 files changed, 42 insertions(+)",
-        );
-        let msgs = vec![msg];
-        let (labels, commits) = collect_tool_labels(&msgs, "test-session");
-
-        // Should produce 3 labels: tool_action, commit_hash, commit_branch
-        assert_eq!(labels.len(), 3);
-        assert_eq!(
-            labels[0],
-            (10, "tool_action".to_string(), "commit".to_string())
-        );
-        assert_eq!(
-            labels[1],
-            (10, "commit_hash".to_string(), "9facdfa".to_string())
-        );
-        assert_eq!(
-            labels[2],
-            (10, "commit_branch".to_string(), "main".to_string())
-        );
-
-        assert_eq!(commits.len(), 1);
-        assert_eq!(commits[0].commit_hash, "9facdfa");
-        assert_eq!(commits[0].branch, "main");
-        assert_eq!(commits[0].summary, "refactor: unify workers");
-        assert_eq!(commits[0].session_id, "test-session");
-        assert_eq!(commits[0].message_id, 10);
-    }
-
-    #[test]
-    fn test_tool_labels_no_false_positive() {
-        let msg = make_msg(
-            5,
-            "user",
-            "cargo build\n   Compiling missiond v0.1.0\n    Finished `dev` profile in 12.3s",
-        );
-        let msgs = vec![msg];
-        let (labels, commits) = collect_tool_labels(&msgs, "test-session");
-
-        // No commit labels, no commits detected
-        assert!(labels.is_empty());
-        assert!(commits.is_empty());
-    }
-
-    #[test]
-    fn test_user_preview_respects_cjk_byte_boundary() {
-        let content = "wave27-00 archive agent slot这个 wave27 之前还有很多个 wave,在同一个会话里,看看能找到吗";
-
-        let preview = user_preview(content);
-
-        assert!(preview.len() <= USER_PREVIEW_MAX_BYTES);
-        assert!(content.is_char_boundary(preview.len()));
-        assert!(content.starts_with(preview));
     }
 
     #[test]

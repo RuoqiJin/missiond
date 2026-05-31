@@ -8,6 +8,7 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 
 use crate::state::{AppState, EmbeddingTask};
+use crate::workers::local::message_labeler;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -629,6 +630,101 @@ pub(super) async fn handle_maintenance(
             Ok(ToolResult::json_pretty(&serde_json::json!({
                 "sessionId": session_id,
                 "insertedTurns": inserted,
+            })))
+        }
+        "mission_conversation_label_audit" => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                source: Option<String>,
+                limit: Option<i64>,
+            }
+            let Args { source, limit } = serde_json::from_value(args).unwrap_or(Args {
+                source: None,
+                limit: Some(20),
+            });
+            let mut audit = message_labeler::audit(state, source.as_deref())
+                .await
+                .map_err(|e| anyhow!("DB error: {e}"))?;
+            let pending = message_labeler::pending_sessions(
+                state,
+                source.as_deref(),
+                limit.unwrap_or(20).clamp(1, 200),
+            )
+            .await
+            .map_err(|e| anyhow!("DB error: {e}"))?;
+            audit["pendingSample"] = serde_json::json!(pending);
+            Ok(ToolResult::json_pretty(&audit))
+        }
+        "mission_conversation_label_backfill" => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                #[serde(alias = "session_id")]
+                session_id: Option<String>,
+                source: Option<String>,
+                limit: Option<i64>,
+                apply: Option<bool>,
+            }
+            let Args {
+                session_id,
+                source,
+                limit,
+                apply,
+            } = serde_json::from_value(args).unwrap_or(Args {
+                session_id: None,
+                source: None,
+                limit: Some(50),
+                apply: Some(false),
+            });
+            let apply = apply.unwrap_or(false);
+            if let Some(sid) = session_id {
+                if !apply {
+                    return Ok(ToolResult::json_pretty(&serde_json::json!({
+                        "mode": "dry-run",
+                        "sessionId": sid,
+                        "action": "label_backfill",
+                        "wouldReplayFromMessageId": 0,
+                    })));
+                }
+                let outcome = message_labeler::replay_session(state, &sid)
+                    .await
+                    .map_err(|e| anyhow!("label replay failed: {e}"))?;
+                return Ok(ToolResult::json_pretty(&serde_json::json!({
+                    "mode": "apply",
+                    "outcomes": [outcome],
+                })));
+            }
+
+            let candidates = message_labeler::pending_sessions(
+                state,
+                source.as_deref(),
+                limit.unwrap_or(50).clamp(1, 500),
+            )
+            .await
+            .map_err(|e| anyhow!("DB error: {e}"))?;
+
+            if !apply {
+                return Ok(ToolResult::json_pretty(&serde_json::json!({
+                    "mode": "dry-run",
+                    "source": source,
+                    "candidateCount": candidates.len(),
+                    "sessions": candidates,
+                })));
+            }
+
+            let mut outcomes = Vec::new();
+            for sid in candidates {
+                outcomes.push(
+                    message_labeler::label_session(state, &sid)
+                        .await
+                        .map_err(|e| anyhow!("label session {sid} failed: {e}"))?,
+                );
+            }
+            Ok(ToolResult::json_pretty(&serde_json::json!({
+                "mode": "apply",
+                "source": source,
+                "outcomes": outcomes,
             })))
         }
         "mission_conversation_gemini_reconcile" => {

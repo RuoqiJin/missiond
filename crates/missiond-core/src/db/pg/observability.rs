@@ -12,7 +12,7 @@ use crate::db::error::DbResult;
 use crate::db::traits::{ConversationStore, ObservabilityStore};
 use crate::types::*;
 use async_trait::async_trait;
-use sqlx::Column;
+use sqlx::{Column, Row};
 use std::collections::HashMap;
 
 #[cfg(feature = "postgres")]
@@ -718,6 +718,215 @@ impl ObservabilityStore for PgMissionStore {
                     .await?;
             Ok(rows.into_iter().map(|r| r.0).collect())
         }
+    }
+
+    async fn message_label_evidence_upsert_batch(
+        &self,
+        evidence: &[MessageLabelEvidenceInput],
+    ) -> DbResult<usize> {
+        if evidence.is_empty() {
+            return Ok(0);
+        }
+
+        let mut changed = 0usize;
+        for item in evidence {
+            let result = sqlx::query(
+                "INSERT INTO message_label_evidence
+                    (message_id, label, value, source, rule_id, rule_version, confidence, priority, reason, evidence)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                 ON CONFLICT (message_id, label, value, source, rule_id, rule_version)
+                 DO UPDATE SET
+                    confidence = EXCLUDED.confidence,
+                    priority = EXCLUDED.priority,
+                    reason = EXCLUDED.reason,
+                    evidence = EXCLUDED.evidence,
+                    updated_at = (NOW() AT TIME ZONE 'UTC')::TEXT",
+            )
+            .bind(item.message_id)
+            .bind(&item.label)
+            .bind(&item.value)
+            .bind(&item.source)
+            .bind(&item.rule_id)
+            .bind(&item.rule_version)
+            .bind(item.confidence)
+            .bind(item.priority)
+            .bind(&item.reason)
+            .bind(&item.evidence)
+            .execute(&self.pool)
+            .await?;
+            changed += result.rows_affected() as usize;
+        }
+        Ok(changed)
+    }
+
+    async fn message_label_projection_refresh(&self, message_ids: &[i64]) -> DbResult<usize> {
+        if message_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let result = sqlx::query(
+            "WITH ranked AS (
+                SELECT DISTINCT ON (message_id, label)
+                    message_id, label, value, source
+                FROM message_label_evidence
+                WHERE message_id = ANY($1)
+                ORDER BY
+                    message_id,
+                    label,
+                    priority DESC,
+                    confidence DESC,
+                    updated_at DESC,
+                    source ASC,
+                    rule_id ASC,
+                    value ASC
+             )
+             INSERT INTO message_labels (message_id, label, value, source)
+             SELECT message_id, label, value, source FROM ranked
+             ON CONFLICT (message_id, label) DO UPDATE SET
+                value = EXCLUDED.value,
+                source = EXCLUDED.source",
+        )
+        .bind(message_ids)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() as usize)
+    }
+
+    async fn message_labeler_pending_sessions(
+        &self,
+        consumer: &str,
+        source: Option<&str>,
+        limit: i64,
+    ) -> DbResult<Vec<String>> {
+        let rows = sqlx::query_scalar::<_, String>(
+            "WITH session_max AS (
+                SELECT session_id, MAX(id) AS max_message_id, COUNT(*) AS message_count
+                FROM conversation_messages
+                GROUP BY session_id
+             )
+             SELECT c.id
+             FROM conversations c
+             JOIN session_max sm ON sm.session_id = c.id
+             LEFT JOIN consumer_watermarks w
+               ON w.consumer_name = $1 AND w.session_id = c.id
+             WHERE sm.message_count > 0
+               AND ($2::TEXT IS NULL OR c.source = $2)
+               AND COALESCE(w.last_processed_msg_id, 0) < sm.max_message_id
+             ORDER BY COALESCE(c.updated_at, c.started_at) DESC NULLS LAST, c.id ASC
+             LIMIT $3",
+        )
+        .bind(consumer)
+        .bind(source)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    async fn message_labeler_audit(
+        &self,
+        consumer: &str,
+        source: Option<&str>,
+    ) -> DbResult<serde_json::Value> {
+        let total_messages: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)
+             FROM conversation_messages m
+             JOIN conversations c ON c.id = m.session_id
+             WHERE ($1::TEXT IS NULL OR c.source = $1)",
+        )
+        .bind(source)
+        .fetch_one(&self.pool)
+        .await?;
+
+        let evidence_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)
+             FROM message_label_evidence e
+             JOIN conversation_messages m ON m.id = e.message_id
+             JOIN conversations c ON c.id = m.session_id
+             WHERE ($1::TEXT IS NULL OR c.source = $1)",
+        )
+        .bind(source)
+        .fetch_one(&self.pool)
+        .await?;
+
+        let projected_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)
+             FROM message_labels ml
+             JOIN conversation_messages m ON m.id = ml.message_id
+             JOIN conversations c ON c.id = m.session_id
+             WHERE ml.source = 'message_labeler'
+               AND ($1::TEXT IS NULL OR c.source = $1)",
+        )
+        .bind(source)
+        .fetch_one(&self.pool)
+        .await?;
+
+        let pending_sessions_count: i64 = sqlx::query_scalar(
+            "WITH session_max AS (
+                SELECT session_id, MAX(id) AS max_message_id, COUNT(*) AS message_count
+                FROM conversation_messages
+                GROUP BY session_id
+             )
+             SELECT COUNT(*)
+             FROM conversations c
+             JOIN session_max sm ON sm.session_id = c.id
+             LEFT JOIN consumer_watermarks w
+               ON w.consumer_name = $1 AND w.session_id = c.id
+             WHERE sm.message_count > 0
+               AND ($2::TEXT IS NULL OR c.source = $2)
+               AND COALESCE(w.last_processed_msg_id, 0) < sm.max_message_id",
+        )
+        .bind(consumer)
+        .bind(source)
+        .fetch_one(&self.pool)
+        .await?;
+
+        let watermarked_sessions: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)
+             FROM consumer_watermarks w
+             JOIN conversations c ON c.id = w.session_id
+             WHERE w.consumer_name = $1
+               AND ($2::TEXT IS NULL OR c.source = $2)",
+        )
+        .bind(consumer)
+        .bind(source)
+        .fetch_one(&self.pool)
+        .await?;
+
+        let label_rows = sqlx::query(
+            "SELECT e.label, e.value, COUNT(*) AS count
+             FROM message_label_evidence e
+             JOIN conversation_messages m ON m.id = e.message_id
+             JOIN conversations c ON c.id = m.session_id
+             WHERE ($1::TEXT IS NULL OR c.source = $1)
+             GROUP BY e.label, e.value
+             ORDER BY count DESC, e.label ASC, e.value ASC
+             LIMIT 50",
+        )
+        .bind(source)
+        .fetch_all(&self.pool)
+        .await?;
+        let labels = label_rows
+            .into_iter()
+            .map(|row| {
+                serde_json::json!({
+                    "label": row.get::<String, _>("label"),
+                    "value": row.get::<String, _>("value"),
+                    "count": row.get::<i64, _>("count"),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        Ok(serde_json::json!({
+            "consumer": consumer,
+            "source": source,
+            "totalMessages": total_messages,
+            "evidenceRows": evidence_rows,
+            "projectedRows": projected_rows,
+            "watermarkedSessions": watermarked_sessions,
+            "pendingSessions": pending_sessions_count,
+            "labels": labels,
+        }))
     }
 
     // ── conversation labels (EAV) ──────────────────────────────────

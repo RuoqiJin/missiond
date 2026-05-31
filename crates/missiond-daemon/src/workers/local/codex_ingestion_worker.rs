@@ -119,6 +119,15 @@ struct ParsedMessage {
     timestamp: String,
     line_no: usize,
     source_event_hash: String,
+    origin: CodexMessageOrigin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexMessageOrigin {
+    EventUserMessage,
+    EventAgentMessage,
+    ResponseItemMessage,
+    EventTaskComplete,
 }
 
 // ── Worker ──
@@ -1072,6 +1081,7 @@ fn parse_jsonl(path: &Path, _thread_id: &str, skip_before_line: usize) -> Result
                                 timestamp: event.timestamp,
                                 line_no: physical_line_no,
                                 source_event_hash: source_event_hash.clone(),
+                                origin: CodexMessageOrigin::ResponseItemMessage,
                             });
                             message_line_count += 1;
                         }
@@ -1096,6 +1106,7 @@ fn parse_jsonl(path: &Path, _thread_id: &str, skip_before_line: usize) -> Result
                                 timestamp: event.timestamp,
                                 line_no: physical_line_no,
                                 source_event_hash: source_event_hash.clone(),
+                                origin: CodexMessageOrigin::EventUserMessage,
                             });
                             message_line_count += 1;
                         }
@@ -1114,6 +1125,7 @@ fn parse_jsonl(path: &Path, _thread_id: &str, skip_before_line: usize) -> Result
                                 timestamp: event.timestamp,
                                 line_no: physical_line_no,
                                 source_event_hash: source_event_hash.clone(),
+                                origin: CodexMessageOrigin::EventAgentMessage,
                             });
                             message_line_count += 1;
                         }
@@ -1133,6 +1145,7 @@ fn parse_jsonl(path: &Path, _thread_id: &str, skip_before_line: usize) -> Result
                                 timestamp: event.timestamp,
                                 line_no: physical_line_no,
                                 source_event_hash: source_event_hash.clone(),
+                                origin: CodexMessageOrigin::EventTaskComplete,
                             });
                             message_line_count += 1;
                         }
@@ -1144,6 +1157,8 @@ fn parse_jsonl(path: &Path, _thread_id: &str, skip_before_line: usize) -> Result
         }
     }
 
+    let messages = dedupe_codex_projected_messages(messages);
+
     Ok(ParsedThread {
         tool_calls: calls,
         messages,
@@ -1153,6 +1168,69 @@ fn parse_jsonl(path: &Path, _thread_id: &str, skip_before_line: usize) -> Result
         last_timestamp,
         reached_line_limit,
     })
+}
+
+fn dedupe_codex_projected_messages(messages: Vec<ParsedMessage>) -> Vec<ParsedMessage> {
+    let mut deduped = Vec::with_capacity(messages.len());
+    for message in messages {
+        push_codex_message_deduped(&mut deduped, message);
+    }
+    deduped
+}
+
+fn push_codex_message_deduped(messages: &mut Vec<ParsedMessage>, message: ParsedMessage) {
+    let Some(existing_idx) = find_codex_projected_duplicate(messages, &message) else {
+        messages.push(message);
+        return;
+    };
+
+    if codex_message_origin_priority(message.origin)
+        > codex_message_origin_priority(messages[existing_idx].origin)
+    {
+        messages[existing_idx] = message;
+    }
+}
+
+fn find_codex_projected_duplicate(
+    messages: &[ParsedMessage],
+    candidate: &ParsedMessage,
+) -> Option<usize> {
+    if candidate.role != "assistant" {
+        return None;
+    }
+
+    for (idx, existing) in messages.iter().enumerate().rev() {
+        if existing.role == "user" {
+            break;
+        }
+        if existing.role != "assistant" || existing.content != candidate.content {
+            continue;
+        }
+        if codex_message_timestamps_within_projection_window(
+            existing.timestamp.as_str(),
+            candidate.timestamp.as_str(),
+        ) {
+            return Some(idx);
+        }
+    }
+    None
+}
+
+fn codex_message_origin_priority(origin: CodexMessageOrigin) -> u8 {
+    match origin {
+        CodexMessageOrigin::ResponseItemMessage => 3,
+        CodexMessageOrigin::EventAgentMessage => 2,
+        CodexMessageOrigin::EventTaskComplete => 1,
+        CodexMessageOrigin::EventUserMessage => 0,
+    }
+}
+
+fn codex_message_timestamps_within_projection_window(a: &str, b: &str) -> bool {
+    const PROJECTION_DUPLICATE_WINDOW_SECS: i64 = 5;
+    match (parse_rfc3339_epoch(a), parse_rfc3339_epoch(b)) {
+        (Some(a), Some(b)) => (a - b).abs() <= PROJECTION_DUPLICATE_WINDOW_SECS,
+        _ => true,
+    }
 }
 
 fn same_file_watermark(a: FileWatermark, b: FileWatermark) -> bool {
@@ -1256,6 +1334,7 @@ mod tests {
             timestamp: "2026-05-03T00:00:00Z".to_string(),
             line_no: 42,
             source_event_hash: short_sha256(r#"{"type":"response_item"}"#, 16),
+            origin: CodexMessageOrigin::ResponseItemMessage,
         };
         let first = codex_message_uuid("thread-123", &message);
         let second = codex_message_uuid("thread-123", &message);
@@ -1376,6 +1455,59 @@ mod tests {
     }
 
     #[test]
+    fn parse_jsonl_dedupes_codex_projected_assistant_messages() {
+        let path = std::env::temp_dir().join(format!(
+            "missiond-codex-projected-message-dedupe-test-{}-{}.jsonl",
+            std::process::id(),
+            short_sha256("projected-message-dedupe", 8)
+        ));
+        let final_text = "final answer";
+        let agent_message = serde_json::json!({
+            "timestamp": "2026-05-24T12:17:11.900Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "agent_message",
+                "message": final_text,
+                "phase": "final_answer"
+            }
+        });
+        let response_message = serde_json::json!({
+            "timestamp": "2026-05-24T12:17:11.910Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": final_text}],
+                "phase": "final_answer"
+            }
+        });
+        let task_complete = serde_json::json!({
+            "timestamp": "2026-05-24T12:17:12.100Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "task_complete",
+                "last_agent_message": final_text
+            }
+        });
+        std::fs::write(
+            &path,
+            format!("{agent_message}\n{response_message}\n{task_complete}\n"),
+        )
+        .expect("write codex fixture");
+
+        let parsed = parse_jsonl(&path, "thread-projected-message-dedupe", 0).expect("parse jsonl");
+
+        assert_eq!(parsed.message_line_count, 3);
+        assert_eq!(parsed.messages.len(), 1);
+        let message = &parsed.messages[0];
+        assert_eq!(message.content, final_text);
+        assert_eq!(message.line_no, 2);
+        assert_eq!(message.origin, CodexMessageOrigin::ResponseItemMessage);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn codex_status_distinguishes_archived_slot_and_historical_threads() {
         assert_eq!(codex_thread_status(true, false, None, Some(1)), "archived");
         assert_eq!(
@@ -1445,6 +1577,7 @@ mod tests {
             timestamp: "2026-05-03T00:00:00Z".to_string(),
             line_no: 1,
             source_event_hash: short_sha256("a", 16),
+            origin: CodexMessageOrigin::EventAgentMessage,
         };
         let user = ParsedMessage {
             role: "user".to_string(),
@@ -1452,6 +1585,7 @@ mod tests {
             timestamp: "2026-05-03T00:00:01Z".to_string(),
             line_no: 2,
             source_event_hash: short_sha256("b", 16),
+            origin: CodexMessageOrigin::EventUserMessage,
         };
         let raw_role_assistant = Some(assistant.role.clone());
         let raw_role_user = Some(user.role.clone());

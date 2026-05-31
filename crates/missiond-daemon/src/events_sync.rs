@@ -4,8 +4,14 @@
 //! - handle_new_events: routes raw JSONL values to conversation_messages / conversation_events
 //! - backfill_conversation_events: one-time historical data backfill on startup
 
-use missiond_core::types::ToolCallRecord;
+use missiond_core::types::{
+    ConversationSourceStateInput, ToolCallRecord, CONVERSATION_SOURCE_STATE_RAW_ONLY_LOCAL_COMMAND,
+    CONVERSATION_SOURCE_STATE_RAW_ONLY_PROVIDER_PROMPT,
+    CONVERSATION_SOURCE_STATE_RAW_ONLY_UNINGESTED,
+};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::fmt::Write as _;
 use tracing::{info, warn};
 
 use crate::state::AppState;
@@ -232,6 +238,178 @@ pub fn normalize_claude_message_role(
 /// Full preservation including base64 images — user requires complete data capture.
 pub fn sanitize_raw_content(content: &Value) -> Option<String> {
     serde_json::to_string(content).ok()
+}
+
+#[derive(Debug, Default)]
+struct ClaudeJsonlSourceSnapshot {
+    raw_line_count: i64,
+    raw_message_line_count: i64,
+    raw_first_seen_at: Option<String>,
+    raw_last_seen_at: Option<String>,
+    raw_hash: Option<String>,
+    has_assistant: bool,
+    local_command_only: bool,
+}
+
+/// Track a ClaudeCode JSONL file that should not become a durable conversation.
+///
+/// Some ClaudeCode sessions contain only local command control messages such as
+/// `/exit`, `/model`, or `/effort`. These are useful source evidence, but they
+/// are not conversations. Keep the evidence in conversation_source_state and
+/// close any empty placeholder row that may have been created by slot/session
+/// registration.
+pub(crate) async fn record_empty_claude_raw_only_session(
+    state: &AppState,
+    session_id: &str,
+    jsonl_path: &str,
+) {
+    let existing = state
+        .store
+        .get_conversation(session_id)
+        .await
+        .unwrap_or(None);
+    if existing.as_ref().is_some_and(|conv| conv.message_count > 0) {
+        return;
+    }
+
+    record_claude_raw_only_source_state(state, session_id, jsonl_path).await;
+
+    if let Some(conv) = existing {
+        if conv.source == "claude_code" && conv.status == "active" && conv.message_count == 0 {
+            if let Err(e) = state.store.complete_conversation(session_id).await {
+                warn!(
+                    session = %session_id,
+                    error = %e,
+                    "ClaudeCode raw-only session: failed to complete empty placeholder"
+                );
+            }
+        }
+    }
+}
+
+async fn record_claude_raw_only_source_state(state: &AppState, session_id: &str, jsonl_path: &str) {
+    let snapshot = scan_claude_jsonl_source(jsonl_path)
+        .await
+        .unwrap_or_default();
+    let raw_state = if !snapshot.has_assistant && snapshot.local_command_only {
+        CONVERSATION_SOURCE_STATE_RAW_ONLY_LOCAL_COMMAND
+    } else if !snapshot.has_assistant {
+        CONVERSATION_SOURCE_STATE_RAW_ONLY_PROVIDER_PROMPT
+    } else {
+        CONVERSATION_SOURCE_STATE_RAW_ONLY_UNINGESTED
+    };
+    let reason = match raw_state {
+        CONVERSATION_SOURCE_STATE_RAW_ONLY_LOCAL_COMMAND => {
+            "raw file contains only ClaudeCode local-command/no-assistant material"
+        }
+        CONVERSATION_SOURCE_STATE_RAW_ONLY_PROVIDER_PROMPT => {
+            "raw file contains provider prompt or sidechain material without assistant content"
+        }
+        _ => "raw file exists but no conversation row has been ingested yet",
+    };
+
+    let input = ConversationSourceStateInput {
+        conversation_id: session_id.to_string(),
+        source: "claude_code".to_string(),
+        raw_path: Some(jsonl_path.to_string()),
+        raw_state: raw_state.to_string(),
+        raw_first_seen_at: snapshot.raw_first_seen_at,
+        raw_last_seen_at: snapshot.raw_last_seen_at,
+        raw_line_count: Some(snapshot.raw_line_count),
+        raw_message_line_count: Some(snapshot.raw_message_line_count),
+        raw_hash: snapshot.raw_hash,
+        reason: Some(reason.to_string()),
+    };
+    if let Err(e) = state.store.upsert_conversation_source_state(&input).await {
+        warn!(
+            session = %session_id,
+            path = %jsonl_path,
+            error = %e,
+            "ClaudeCode raw-only session: failed to upsert conversation_source_state"
+        );
+    }
+}
+
+async fn scan_claude_jsonl_source(jsonl_path: &str) -> Option<ClaudeJsonlSourceSnapshot> {
+    let bytes = tokio::fs::read(jsonl_path).await.ok()?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let digest = hasher.finalize();
+    let mut raw_hash = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(&mut raw_hash, "{byte:02x}");
+    }
+
+    let text = String::from_utf8_lossy(&bytes);
+    let mut snapshot = ClaudeJsonlSourceSnapshot {
+        raw_hash: Some(raw_hash),
+        ..Default::default()
+    };
+    let mut has_message = false;
+    let mut only_local_command_like = true;
+
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        snapshot.raw_line_count += 1;
+        let value = match serde_json::from_str::<Value>(line) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+
+        if let Some(ts) = value.get("timestamp").and_then(|v| v.as_str()) {
+            if snapshot
+                .raw_first_seen_at
+                .as_deref()
+                .map_or(true, |first| ts < first)
+            {
+                snapshot.raw_first_seen_at = Some(ts.to_string());
+            }
+            if snapshot
+                .raw_last_seen_at
+                .as_deref()
+                .map_or(true, |last| ts > last)
+            {
+                snapshot.raw_last_seen_at = Some(ts.to_string());
+            }
+        }
+
+        let role = value
+            .pointer("/message/role")
+            .and_then(|v| v.as_str())
+            .or_else(|| value.get("type").and_then(|v| v.as_str()));
+        if !matches!(role, Some("user") | Some("assistant")) {
+            continue;
+        }
+
+        has_message = true;
+        snapshot.raw_message_line_count += 1;
+        if role == Some("assistant") {
+            snapshot.has_assistant = true;
+            only_local_command_like = false;
+            continue;
+        }
+
+        let content = value
+            .pointer("/message/content")
+            .or_else(|| value.get("content"))
+            .unwrap_or(&Value::Null);
+        if !is_claude_local_command_like(&extract_text_content(content)) {
+            only_local_command_like = false;
+        }
+    }
+
+    snapshot.local_command_only = has_message && only_local_command_like;
+    Some(snapshot)
+}
+
+fn is_claude_local_command_like(text: &str) -> bool {
+    let trimmed = text.trim();
+    trimmed.starts_with("<local-command-")
+        || trimmed.starts_with("<command-name>")
+        || trimmed.starts_with("<command-message>")
+        || trimmed.starts_with("<command-args>")
+        || trimmed.starts_with("[Request interrupted")
+        || trimmed.starts_with("(Bash completed")
+        || trimmed.contains("<local-command-stdout>")
 }
 
 /// Stable replacement for str::floor_char_boundary (unstable).

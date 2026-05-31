@@ -696,10 +696,15 @@ pub(crate) async fn execute(state: &AppState, req: &PrefetchRequest) -> Prefetch
 
     let routed_by = intent_result.source;
 
-    let token_budget = match intent {
+    let intent_token_budget = match intent {
         QueryIntent::Code => CODE_TOKEN_BUDGET,
         QueryIntent::General => GENERAL_TOKEN_BUDGET,
         QueryIntent::Chat => 0,
+    };
+    let token_budget = if req.token_budget == 0 {
+        intent_token_budget
+    } else {
+        intent_token_budget.min(req.token_budget)
     };
 
     let assembled = assemble_budgeted(

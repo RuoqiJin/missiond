@@ -34,23 +34,21 @@
 #   MISSIOND_XJPCODE_WORKER_URL  optional portable xjpcode worker base URL
 #                               injected into launchd for MissionD delegated
 #                               xjpcode read-only worker dispatch.
-#   MISSIOND_XJPCODE_TEXT_ONLY_URL optional xjpcode text-only completion URL
-#                               used by Jarvis grounded_direct_answer.
-#   MISSIOND_XJPCODE_TEXT_ONLY_ENDPOINT compatibility alias for text-only URL.
-#   MISSIOND_XJPCODE_BASE_URL    optional xjpcode server base URL; MissionD
-#                               derives /provider/v1/text-only/completions.
-#   MISSIOND_JARVIS_DIRECT_ANSWER_PROVIDER optional xjpcode text-only provider
-#                               id. Defaults to codex_cli to prefer paid CLI
-#                               lanes over router usage for simple Q&A.
+#   MISSIOND_PROVIDER_BOX_INTERNAL_TOKEN optional bearer token for internal
+#                               provider-box HTTP calls. Generated for launchd
+#                               when neither this nor MISSIOND_AGY_INTERNAL_TOKEN
+#                               is supplied or already present in launchd.
+#   MISSIOND_PROVIDER_BOX_PROXY_BASE_URL optional public base URL for the
+#                               managed provider-box proxy, e.g.
+#                               https://auth.xiaojinpro.com/tunnel/proxy/rickyhqmac-mini/missiond.
+#   MISSIOND_AGY_PROVIDER_BOX_BASE_URL optional AGY-specific alias for the
+#                               managed provider-box proxy base URL.
+#   MISSIOND_JARVIS_DIRECT_ANSWER_PROVIDER optional provider-box provider id.
+#                               Defaults to codex_cli.
 #   MISSIOND_JARVIS_DIRECT_ANSWER_MODEL optional model passed to the selected
-#                               xjpcode text-only provider.
-#   MISSIOND_JARVIS_DIRECT_ANSWER_TIMEOUT_SECS optional timeout for xjpcode
+#                               provider-box provider.
+#   MISSIOND_JARVIS_DIRECT_ANSWER_TIMEOUT_SECS optional timeout for provider-box
 #                               direct-answer calls.
-#   MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_PROVIDER optional provider id for Jarvis
-#                               intent/plan authoring through xjpcode text-only.
-#                               When unset, MissionD uses local codex exec.
-#   MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_MODEL optional model override passed to
-#                               xjpcode text-only authoring.
 #   MISSIOND_DEPLOY_ENSURE_JARVIS_SLOT  1/0/auto. In auto mode, call the
 #                               localhost-only Jarvis slot ensure endpoint
 #                               after restart when launchd/current env enables
@@ -246,18 +244,50 @@ update_stable_entrypoints() {
 
 ensure_default_mcp_config() {
   local config_path="$INSTALL_ROOT/xjp-mcp-config.json"
-  if [ -f "$config_path" ]; then
-    log "mcp-config: keep existing $config_path"
-    validate_default_mcp_config "$config_path"
-    return 0
-  fi
   mkdir -p "$INSTALL_ROOT"
-  cat > "$config_path" <<EOF
-{"mcpServers":{"missiond":{"command":"$MCP_BIN_PATH","args":[],"env":{"MISSIOND_SOCKET_PATH":"$SOCK_PATH"}}}}
-EOF
+  MISSIOND_MCP_BIN_PATH_VALUE="$MCP_BIN_PATH" \
+    MISSIOND_SOCKET_PATH_VALUE="$SOCK_PATH" \
+    node - "$config_path" <<'NODE'
+const fs = require("node:fs");
+const path = process.argv[2];
+const missiond = {
+  command: process.env.MISSIOND_MCP_BIN_PATH_VALUE,
+  args: [],
+  env: { MISSIOND_SOCKET_PATH: process.env.MISSIOND_SOCKET_PATH_VALUE },
+};
+
+let config = {};
+if (fs.existsSync(path)) {
+  const text = fs.readFileSync(path, "utf8").trim();
+  if (text.length > 0) {
+    config = JSON.parse(text);
+  }
+}
+if (!config || Array.isArray(config) || typeof config !== "object") {
+  throw new Error("MCP config root must be a JSON object");
+}
+if (config.mcpServers == null) {
+  config.mcpServers = {};
+}
+if (
+  !config.mcpServers ||
+  Array.isArray(config.mcpServers) ||
+  typeof config.mcpServers !== "object"
+) {
+  throw new Error("mcpServers must be a JSON object");
+}
+const previous = JSON.stringify(config.mcpServers.missiond ?? null);
+const next = JSON.stringify(missiond);
+if (previous !== next) {
+  config.mcpServers.missiond = missiond;
+  const tmp = `${path}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+  fs.renameSync(tmp, path);
+}
+NODE
   chmod 600 "$config_path"
   validate_default_mcp_config "$config_path"
-  log "mcp-config: created default MissionD MCP config $config_path"
+  log "mcp-config: ensured MissionD MCP server in $config_path"
 }
 
 validate_default_mcp_config() {
@@ -360,6 +390,41 @@ plist_set_env_from_current_env() {
   fi
 }
 
+plist_delete_env_if_present() {
+  local plist="$1"
+  local key="$2"
+  local buddy="/usr/libexec/PlistBuddy"
+  if "$buddy" -c "Print :EnvironmentVariables:${key}" "$plist" >/dev/null 2>&1; then
+    "$buddy" -c "Delete :EnvironmentVariables:${key}" "$plist" >/dev/null
+  fi
+}
+
+ensure_provider_box_internal_token() {
+  if [ -n "${MISSIOND_PROVIDER_BOX_INTERNAL_TOKEN:-}" ] || [ -n "${MISSIOND_AGY_INTERNAL_TOKEN:-}" ]; then
+    return 0
+  fi
+  local existing_token=""
+  existing_token="$(plist_read_string "$LAUNCHD_PLIST" "EnvironmentVariables:MISSIOND_PROVIDER_BOX_INTERNAL_TOKEN" || true)"
+  if [ -n "$existing_token" ]; then
+    MISSIOND_PROVIDER_BOX_INTERNAL_TOKEN="$existing_token"
+    export MISSIOND_PROVIDER_BOX_INTERNAL_TOKEN
+    log "launchd: preserved existing MISSIOND_PROVIDER_BOX_INTERNAL_TOKEN for provider-box internal HTTP auth"
+    return 0
+  fi
+  existing_token="$(plist_read_string "$LAUNCHD_PLIST" "EnvironmentVariables:MISSIOND_AGY_INTERNAL_TOKEN" || true)"
+  if [ -n "$existing_token" ]; then
+    MISSIOND_AGY_INTERNAL_TOKEN="$existing_token"
+    export MISSIOND_AGY_INTERNAL_TOKEN
+    log "launchd: preserved existing MISSIOND_AGY_INTERNAL_TOKEN for provider-box internal HTTP auth"
+    return 0
+  fi
+  command -v uuidgen >/dev/null 2>&1 ||
+    fail "uuidgen not on PATH; cannot generate MISSIOND_PROVIDER_BOX_INTERNAL_TOKEN" 1
+  MISSIOND_PROVIDER_BOX_INTERNAL_TOKEN="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+  export MISSIOND_PROVIDER_BOX_INTERNAL_TOKEN
+  log "launchd: generated MISSIOND_PROVIDER_BOX_INTERNAL_TOKEN for provider-box internal HTTP auth"
+}
+
 ensure_launchd_runtime_root() {
   if [ ! -f "$LAUNCHD_PLIST" ]; then
     log "launchd: plist not found at $LAUNCHD_PLIST; deploy will only kickstart loaded label if present"
@@ -369,6 +434,7 @@ ensure_launchd_runtime_root() {
     fail "launchd project root lacks .missiond/v3: $LAUNCHD_PROJECT_ROOT" 1
   command -v plutil >/dev/null 2>&1 || fail "plutil not on PATH; cannot verify launchd plist" 1
   [ -x /usr/libexec/PlistBuddy ] || fail "PlistBuddy missing; cannot update launchd plist" 1
+  ensure_provider_box_internal_token
 
   plist_set_or_add_string "$LAUNCHD_PLIST" "WorkingDirectory" "$LAUNCHD_PROJECT_ROOT"
   plist_set_or_add_env_string "$LAUNCHD_PLIST" "MISSIOND_PROJECT_ROOT" "$LAUNCHD_PROJECT_ROOT"
@@ -392,14 +458,18 @@ ensure_launchd_runtime_root() {
   plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_INTERACTION_AUTH_USERINFO_URL"
   plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_INTERACTION_AUTH_TIMEOUT_MS"
   plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_XJPCODE_WORKER_URL"
-  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_XJPCODE_TEXT_ONLY_URL"
-  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_XJPCODE_TEXT_ONLY_ENDPOINT"
-  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_XJPCODE_BASE_URL"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_PROVIDER_BOX_INTERNAL_TOKEN"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_AGY_INTERNAL_TOKEN"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_PROVIDER_BOX_PROXY_BASE_URL"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_AGY_PROVIDER_BOX_BASE_URL"
   plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_JARVIS_DIRECT_ANSWER_PROVIDER"
   plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_JARVIS_DIRECT_ANSWER_MODEL"
   plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_JARVIS_DIRECT_ANSWER_TIMEOUT_SECS"
-  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_PROVIDER"
-  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_MODEL"
+  plist_delete_env_if_present "$LAUNCHD_PLIST" "MISSIOND_XJPCODE_TEXT_ONLY_URL"
+  plist_delete_env_if_present "$LAUNCHD_PLIST" "MISSIOND_XJPCODE_TEXT_ONLY_ENDPOINT"
+  plist_delete_env_if_present "$LAUNCHD_PLIST" "MISSIOND_XJPCODE_BASE_URL"
+  plist_delete_env_if_present "$LAUNCHD_PLIST" "MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_PROVIDER"
+  plist_delete_env_if_present "$LAUNCHD_PLIST" "MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_MODEL"
   plutil -lint "$LAUNCHD_PLIST" >/dev/null
   log "launchd: runtime root $LAUNCHD_PROJECT_ROOT written to $LAUNCHD_PLIST"
   log "launchd: artifact runtime dir $RUNTIME_DIR written to $LAUNCHD_PLIST"
@@ -532,7 +602,8 @@ post_switch_jarvis_slot_ensure() {
     return 0
   fi
   command -v curl >/dev/null 2>&1 || fail "curl not on PATH; cannot run Jarvis slot ensure smoke" 6
-  local url body status elapsed start
+  local url body status elapsed start ensure_mode
+  ensure_mode="$(printf '%s' "$MISSIOND_DEPLOY_ENSURE_JARVIS_SLOT" | tr '[:upper:]' '[:lower:]')"
   url="http://127.0.0.1:${MISSION_WS_PORT}/internal/jarvis/slot/ensure"
   log "jarvis-slot: ensure $url"
   start="$(date +%s)"
@@ -551,6 +622,12 @@ post_switch_jarvis_slot_ensure() {
   done
   log "jarvis-slot: ensure failed -- response below"
   printf '%s\n' "$body" | sed 's/^/[jarvis-slot] /' >&2
+  if { [ "$ensure_mode" = "auto" ] || [ -z "$ensure_mode" ]; } &&
+    [ "$status" = "409" ] &&
+    printf '%s' "$body" | grep -q '"overall":"busy"'; then
+    log "jarvis-slot: default slot is busy; continuing because ensure mode is auto"
+    return 0
+  fi
   return 1
 }
 

@@ -14,6 +14,5 @@ pub(super) use evaluator::evaluate_node_acceptance;
 pub(super) use fan_in::apply_acceptance_fan_in;
 pub(super) use pause::derive_acceptance_pause_id;
 pub(super) use types::{
-    AcceptanceEvaluation, AcceptanceFanInOutcome, AcceptanceMode, AcceptanceRequires,
-    AcceptanceStatus,
+    AcceptanceEvaluation, AcceptanceMode, AcceptanceRequires, AcceptanceStatus,
 };

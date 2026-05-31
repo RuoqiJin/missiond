@@ -197,16 +197,33 @@ function auditDb(db) {
     pty_user_contamination: Object.fromEntries(
       psql(db, `
         WITH p AS (
-          SELECT m.content
+          SELECT m.id, m.content
           FROM conversations c JOIN conversation_messages m ON m.session_id=c.id
           WHERE c.source='claude_code'
             AND c.conversation_type IN ('user','chat')
             AND c.chat_type='pty'
             AND m.role='user'
             AND COALESCE(m.raw_role,'user')='user'
+        ), local_artifacts AS (
+          SELECT id
+          FROM p
+          WHERE content ~ '^(<local-command-|<command-name>|\\[Request interrupted|\\(Bash completed|total [0-9]+ |---$)'
+             OR content LIKE '%<local-command-stdout>%'
         )
         SELECT 'total', COUNT(*)::text FROM p
-        UNION ALL SELECT 'local_command_or_terminal_artifact', COUNT(*)::text FROM p WHERE content ~ '^(<local-command-|<command-name>|\\[Request interrupted|\\(Bash completed|total [0-9]+ |---$)' OR content LIKE '%<local-command-stdout>%'
+        UNION ALL SELECT 'local_command_or_terminal_artifact', COUNT(*)::text FROM local_artifacts
+        UNION ALL SELECT 'local_command_or_terminal_artifact_unlabeled', COUNT(*)::text
+          FROM local_artifacts la
+          WHERE NOT EXISTS (
+            SELECT 1
+            FROM message_labels ml
+            WHERE ml.message_id = la.id
+              AND ml.source IN ('claudecode-origin-labeler', 'message_labeler')
+              AND (
+                (ml.label = 'origin_layer' AND ml.value = 'local_command')
+                OR (ml.label = 'speaker' AND ml.value = 'terminal_artifact')
+              )
+          )
         UNION ALL SELECT 'board_or_worker_prompt', COUNT(*)::text FROM p WHERE content LIKE '%BoardTask ID%' OR content LIKE '%## Swarm metadata%' OR content LIKE '%## Completion protocol%' OR content LIKE 'Execute MissionD task%'
         UNION ALL SELECT 'image_or_file_context', COUNT(*)::text FROM p WHERE content LIKE '[Image:%' OR content LIKE '[Image #%'
       `)
@@ -219,7 +236,7 @@ function auditDb(db) {
       db,
       `SELECT label, value, source, COUNT(*)::int AS messages
        FROM message_labels
-       WHERE source='claudecode-origin-labeler'
+       WHERE source IN ('claudecode-origin-labeler', 'message_labeler')
        GROUP BY 1,2,3
        ORDER BY 1,2,3`,
     ),
@@ -271,7 +288,17 @@ function auditDb(db) {
       SELECT conversation_id
       FROM conversation_source_state
       WHERE source='claude_code'
-        AND raw_state IN ('raw-only-local-command','raw-only-provider-prompt')
+        AND raw_state IN ('raw-only-local-command','raw-only-provider-prompt','raw-only-uningested')
+      ORDER BY conversation_id
+    `)
+      .trim()
+      .split('\n')
+      .filter(Boolean),
+    missing_stale_source_ids: psql(db, `
+      SELECT conversation_id
+      FROM conversation_source_state
+      WHERE source='claude_code'
+        AND raw_state='missing-stale'
       ORDER BY conversation_id
     `)
       .trim()
@@ -287,6 +314,8 @@ function buildAudit(db) {
   const rawOnlyTracked = new Set(dbAudit.raw_only_source_ids);
   const rawMissingUntracked = rawMissingInDb.filter((id) => !rawOnlyTracked.has(id));
   const dbMissingInRaw = setDiff(dbAudit.db_session_ids, raw.session_ids);
+  const missingStaleTracked = new Set(dbAudit.missing_stale_source_ids);
+  const dbMissingUntracked = dbMissingInRaw.filter((id) => !missingStaleTracked.has(id));
   const missingDetails = rawMissingUntracked.map((id) => ({
     session_id: id,
     raw_lines: raw.line_counts.get(id) ?? 0,
@@ -318,12 +347,12 @@ function buildAudit(db) {
       why: 'bad timestamp parsing can break ordering and old-active detection',
     });
   }
-  if (Number(dbAudit.pty_user_contamination.local_command_or_terminal_artifact ?? 0) > 0) {
+  if (Number(dbAudit.pty_user_contamination.local_command_or_terminal_artifact_unlabeled ?? 0) > 0) {
     issues.push({
       severity: 'high',
       code: 'pty_user_contamination',
-      count: Number(dbAudit.pty_user_contamination.local_command_or_terminal_artifact),
-      why: 'ClaudeCode PTY user rows contain terminal/local-command artifacts',
+      count: Number(dbAudit.pty_user_contamination.local_command_or_terminal_artifact_unlabeled),
+      why: 'ClaudeCode PTY user rows contain terminal/local-command artifacts without origin labels',
     });
   }
   if (rawMissingUntracked.length > 0) {
@@ -334,11 +363,11 @@ function buildAudit(db) {
       why: 'some current raw JSONL sessions are not represented in conversations or source-state overlay',
     });
   }
-  if (dbMissingInRaw.length > 0) {
+  if (dbMissingUntracked.length > 0) {
     issues.push({
       severity: 'medium',
       code: 'db_sessions_missing_raw_file',
-      count: dbMissingInRaw.length,
+      count: dbMissingUntracked.length,
       why: 'historical DB conversations no longer have local raw JSONL evidence; audits need a stale-source state',
     });
   }
@@ -371,6 +400,8 @@ function buildAudit(db) {
       raw_missing_untracked: rawMissingUntracked.length,
       raw_only_tracked: rawMissingInDb.length - rawMissingUntracked.length,
       db_missing_in_raw: dbMissingInRaw.length,
+      db_missing_untracked: dbMissingUntracked.length,
+      db_missing_stale_tracked: dbMissingInRaw.length - dbMissingUntracked.length,
       raw_missing_sample: missingDetails.slice(0, 20),
       db_missing_sample: dbMissingInRaw.slice(0, 20),
     },

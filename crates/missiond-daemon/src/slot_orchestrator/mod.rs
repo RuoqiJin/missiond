@@ -19,6 +19,7 @@ pub mod gemini_controller;
 pub mod generic_cli;
 pub mod perm_injector;
 pub mod project_root;
+pub mod provider_box_cli;
 pub mod spawner;
 pub mod types;
 
@@ -26,7 +27,8 @@ pub use agent::AgentSlotManager;
 pub use claude_code::ClaudeCodeSlotManager;
 pub use gemini_cli::GeminiCliSlotManager;
 pub use generic_cli::GenericCliSlotManager;
-pub use types::{EngineSlotManager, EngineStatus, SlotTaskConfig, SlotTaskRequest};
+pub use provider_box_cli::ProviderBoxSlotManager;
+pub use types::{EngineSlotManager, SlotTaskConfig};
 
 use missiond_core::db::traits::MissionStore;
 use missiond_core::types::CliEngine;

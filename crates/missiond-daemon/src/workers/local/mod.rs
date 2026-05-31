@@ -9,6 +9,7 @@ pub(crate) mod conversation_organizer;
 pub(crate) mod experience_harvester;
 pub(crate) mod gemini_logger;
 pub(crate) mod gemini_reconcile_worker;
+pub(crate) mod message_labeler;
 pub(crate) mod pty_event_worker;
 pub(crate) mod reconcile_worker;
 pub(crate) mod tagger_chunker;

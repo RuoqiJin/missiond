@@ -22,6 +22,7 @@ const DEFAULT_FILES = {
   facade: 'crates/missiond-daemon/src/handlers/knowledge/project.rs',
   registry: 'crates/missiond-daemon/src/handlers/knowledge/project/registry.rs',
   context: 'crates/missiond-daemon/src/handlers/knowledge/project/context.rs',
+  contextGather: 'crates/missiond-daemon/src/handlers/knowledge/context_gather.rs',
   reconcile: 'crates/missiond-daemon/src/handlers/knowledge/project/reconcile.rs',
   universe: 'crates/missiond-daemon/src/handlers/knowledge/project/universe.rs',
   survey: 'crates/missiond-daemon/src/handlers/knowledge/project/survey.rs',
@@ -93,6 +94,11 @@ function checkFiles(root, files) {
     '(v2-item project-registry',
     ':status runtime-projected',
     '(project-registry-policy',
+    '(project-discovery-contract',
+    ':entrypoint mission_project.resolve',
+    ':resolver-statuses [resolved ambiguous unregistered_candidate not_found stale_runtime]',
+    ':compiled-universe-fields [aliases service_ids domains public_base_url frontend_url api_base_url]',
+    'mission_context_gather MUST call mission_project resolve',
     ':intent-path-candidates [".missiond/intent.lisp" ".jarvis/intent.lisp" "intent.lisp"]',
     ':default-universe-manifest "$MISSIOND_PROJECTS_DIR/universe.intent.lisp"',
     '(surface project-registry',
@@ -101,6 +107,7 @@ function checkFiles(root, files) {
     'crates/missiond-daemon/src/handlers/knowledge/project.rs',
     'crates/missiond-daemon/src/handlers/knowledge/project/registry.rs',
     'crates/missiond-daemon/src/handlers/knowledge/project/context.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/context_gather.rs',
     'crates/missiond-daemon/src/handlers/knowledge/project/reconcile.rs',
     'crates/missiond-daemon/src/handlers/knowledge/project/survey.rs',
     'crates/missiond-daemon/src/handlers/knowledge/project/vault.rs',
@@ -109,7 +116,9 @@ function checkFiles(root, files) {
     'crates/missiond-mcp/src/tools/knowledge/project.rs',
     'scripts/check-v3-project-registry-isomorphism.mjs',
     'scripts/check-project-maturity.mjs',
-    'project.rs is the thin mission_project facade',
+    'project.rs is the mission_project facade',
+    'project/registry.rs owns list/get/resolve/set_active/sync/init/import_universe',
+    'project-context-resolver',
     'ProjectRegistryRuntimeConfig loads V3 project-registry-policy',
 	    'ProjectRegistry::resolve owns longest path-component project lookup',
 	    'inactive project aliases never participate in cwd resolution',
@@ -186,8 +195,9 @@ function checkFiles(root, files) {
 	    ':deployment-confirmation (:checker "node scripts/check-m6-deployment-status.mjs --json"',
 	    ':source auth-audit-events',
 	    ':token-env MISSIOND_EXTERNAL_WEBHOOK_TOKEN',
-	    'mission_project(action=universe)',
-	    'node scripts/check-v3-project-registry-isomorphism.mjs',
+    'mission_project(action=universe)',
+    'mission_project resolve',
+    'node scripts/check-v3-project-registry-isomorphism.mjs',
 	  ]);
   if (sources.blueprint.includes('(project :id xjp-deploy-center')) {
     diagnostics.push({
@@ -222,6 +232,7 @@ function checkFiles(root, files) {
     'mod vault;',
     '"list" => registry::handle_list(state).await',
     '"get" => registry::handle_get(state, args).await',
+    '"resolve" => registry::handle_resolve(state, args).await',
     '"set_active" => registry::handle_set_active(state, args).await',
     '"sync" => registry::handle_sync(state).await',
     '"init" => registry::handle_init(state, args).await',
@@ -238,11 +249,18 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.registry, sources.registry, [
     'handle_list',
     'handle_get',
+    'handle_resolve',
+    'missiond.project-resolution.v1',
+    'unregistered_candidate',
+    'compiled_service_runtime',
+    'registration_proposal',
+    'project_resolution_next_actions',
     'handle_set_active',
     'handle_sync',
     'handle_init',
     'handle_import_universe',
     'load_compiled_project_universe',
+    'CompiledServiceRuntimeEntry',
     'compiled_project_to_config',
     '"source": "compiled-project-universe"',
     '"schema": "missiond.project-import.compiled-universe.v1"',
@@ -259,6 +277,13 @@ function checkFiles(root, files) {
     'github_url_for_path',
     'backfill_project_id',
     'ProjectRegistry::new(projects)',
+  ]);
+
+  requireAll(diagnostics, files.contextGather, sources.contextGather, [
+    'project_resolution',
+    '"action": "resolve"',
+    'effective_project_id',
+    '"requested_project_id"',
   ]);
 
   requireAll(diagnostics, files.context, sources.context, [
@@ -353,6 +378,10 @@ function checkFiles(root, files) {
     '"mission_project"',
     '"list"',
     '"get"',
+    '"resolve"',
+    '"query"',
+    '"cwd"',
+    '"include_unregistered_candidates"',
     '"set_active"',
     '"sync"',
     '"init"',
@@ -405,6 +434,11 @@ function buildFixture() {
 	    (maturity :id missiond :current M6 :target M6)
 	    (maturity :id auth :current M6 :target M6 :gap []))
 	  (project-identity-contract :reconcile-action mission_project.reconcile)
+	  (project-discovery-contract
+	    :entrypoint mission_project.resolve
+	    :resolver-statuses [resolved ambiguous unregistered_candidate not_found stale_runtime]
+	    :compiled-universe-fields [aliases service_ids domains public_base_url frontend_url api_base_url]
+	    :rule "mission_context_gather MUST call mission_project resolve")
 	  (registry-authority-map :authorities ((missiond) (deploy-center) (forge)))
 	  (project-blueprint-registry
 	    (project :id jarvis-forge :root "/Users/jinchen/Projects/jarvis-forge" :backend ".missiond/backend/forge-backend-blueprint.lisp" :frontend ".missiond/frontend/forge-ui-blueprint.lisp")
@@ -419,10 +453,24 @@ function buildFixture() {
 	    (project :id pcea :root "/Users/jinchen/Downloads/PCEA develop" :backend ".missiond/backend/pcea-backend-blueprint.lisp" :frontend ".missiond/frontend/pcea-frontend-blueprint.lisp"))
     (service-runtime-universe
       :schema "missiond.service-runtime-universe.v1"
+      :rule "mission_project(action=universe)"
       (service :id auth :public-base-url "https://auth.xiaojinpro.com" :dns-provider cloudflare :deployment (:substrate kubernetes :namespace production :deployment "xjp-auth-center") :event-ingest (:endpoint "/webhooks/auth-event" :domain system :event ExternalServiceEvent :source auth-audit-events :token-env MISSIOND_EXTERNAL_WEBHOOK_TOKEN))
       (service :id deploy-center :event-ingest (:endpoint "/webhooks/deploy-center-event" :domain system :event ExternalServiceEvent) :deployment-confirmation (:checker "node scripts/check-m6-deployment-status.mjs --json"))
       ;; mission_project(action=universe)
       )
+    (data-residency-universe
+      :schema "missiond.data-residency-universe.v1"
+      (data-region-partition-contract)
+      (regional-auth-issuer-contract)
+      (regional-storage-contract)
+      (regional-payment-ledger-contract)
+      (regional-router-model-policy)
+      (cross-region-data-policy)
+      (project-region-declaration :project pcea
+        :data-regions [cn global]
+        :contains-spi true
+        :contains-important-data unknown
+        :cross-region-default deny))
     (m6-deployment-confirmation
       :schema "missiond.m6-deployment-confirmation.v1"
       :surfaces ["scripts/check-m6-deployment-status.mjs" ".missiond/workflows/m6-deployment-rollout.lisp"])
@@ -433,6 +481,7 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/project.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/registry.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/context.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/context_gather.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/reconcile.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/universe.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/survey.rs"
@@ -442,7 +491,7 @@ function buildFixture() {
 	             "crates/missiond-mcp/src/tools/knowledge/project.rs"
 	             "scripts/check-v3-project-registry-isomorphism.mjs"
 	             "scripts/check-project-maturity.mjs"]
-      :note "project.rs is the thin mission_project facade. ProjectRegistryRuntimeConfig loads V3 project-registry-policy. ProjectRegistry::resolve owns longest path-component project lookup; inactive project aliases never participate in cwd resolution, and mission_project init archives inactive path aliases before upsert. resolve_target_project_root owns project-root spawn cwd policy."))
+      :note "project.rs is the mission_project facade. project/registry.rs owns list/get/resolve/set_active/sync/init/import_universe. resolve is the project-context-resolver. ProjectRegistryRuntimeConfig loads V3 project-registry-policy. ProjectRegistry::resolve owns longest path-component project lookup; inactive project aliases never participate in cwd resolution, and mission_project init archives inactive path aliases before upsert. resolve_target_project_root owns project-root spawn cwd policy. mission_project resolve."))
   (compression-contract
     :checks ["node scripts/check-v3-project-registry-isomorphism.mjs"]))`);
 
@@ -462,6 +511,7 @@ mod universe;
 mod vault;
 "list" => registry::handle_list(state).await
 "get" => registry::handle_get(state, args).await
+"resolve" => registry::handle_resolve(state, args).await
 "set_active" => registry::handle_set_active(state, args).await
 "sync" => registry::handle_sync(state).await
 "init" => registry::handle_init(state, args).await
@@ -477,7 +527,8 @@ Unknown project action
 
   writeFixture(root, DEFAULT_FILES.registry, `
 handle_list handle_get handle_set_active handle_sync handle_init handle_import_universe
-load_compiled_project_universe compiled_project_to_config
+handle_resolve missiond.project-resolution.v1 unregistered_candidate compiled_service_runtime registration_proposal project_resolution_next_actions
+load_compiled_project_universe CompiledServiceRuntimeEntry compiled_project_to_config
 "source": "compiled-project-universe"
 "schema": "missiond.project-import.compiled-universe.v1"
 "manifestFallback": false
@@ -494,8 +545,12 @@ conversation_stats_by_project recent_conversations_by_project kb_stats_by_projec
 build_slots_info project_memory::list_memories project_memory::read_memory_index
 `);
 
+  writeFixture(root, DEFAULT_FILES.contextGather, `
+project_resolution "action": "resolve" effective_project_id "requested_project_id"
+`);
+
   writeFixture(root, DEFAULT_FILES.reconcile, `
-project-registry-reconcile.v1 root_mismatch deploy_fact_missing alias_conflict missing_in_missiond
+handle_reconcile missiond.project-registry-reconcile.v1 root_mismatch deploy_fact_missing alias_conflict missing_in_missiond
 `);
 
   writeFixture(root, DEFAULT_FILES.universe, `
@@ -553,7 +608,7 @@ fallback_project_id_used_when_no_explicit
   writeFixture(root, DEFAULT_FILES.mcp, `
 ToolDefinition::new
 "mission_project"
-"list" "get" "set_active" "sync" "init" "context" "memories" "universe" "reconcile" "vault_sync" "import_universe" "survey"
+"list" "get" "resolve" "query" "cwd" "include_unregistered_candidates" "set_active" "sync" "init" "context" "memories" "universe" "reconcile" "vault_sync" "import_universe" "survey"
 `);
 
   writeFixture(root, DEFAULT_FILES.maturityChecker, `

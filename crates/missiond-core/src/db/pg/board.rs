@@ -1547,6 +1547,71 @@ impl BoardStore for PgMissionStore {
         Ok(result.rows_affected() as usize)
     }
 
+    async fn fail_board_task_and_release_claim(
+        &self,
+        task_id: &str,
+    ) -> DbResult<Option<BoardTask>> {
+        let full_id = match self.resolve_board_task_id(task_id).await? {
+            Some(fid) => fid,
+            None => return Ok(None),
+        };
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1::text || ':' || $2::text, 0))",
+        )
+        .bind("board_task")
+        .bind(&full_id)
+        .execute(&mut *tx)
+        .await?;
+        let existing = sqlx::query(
+            r#"
+            SELECT id
+            FROM board_tasks
+            WHERE id = $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(&full_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if existing.is_none() {
+            tx.commit().await?;
+            return Ok(None);
+        }
+        sqlx::query(
+            r#"
+            UPDATE work_leases
+            SET status = 'released',
+                released_at = now()
+            WHERE status = 'active'
+              AND scope_kind = 'board_task'
+              AND (scope_key = $1 OR task_id = $1)
+            "#,
+        )
+        .bind(&full_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"
+            UPDATE board_tasks
+            SET status = 'failed',
+                claim_executor_id = NULL,
+                claim_executor_type = NULL,
+                claimed_at = NULL,
+                lease_expires_at = NULL,
+                updated_at = $1::timestamptz
+            WHERE id = $2
+            "#,
+        )
+        .bind(&now)
+        .bind(&full_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        self.get_board_task(&full_id).await
+    }
+
     async fn release_board_claims_by_executor(&self, executor_id: &str) -> DbResult<usize> {
         let now = chrono::Utc::now().to_rfc3339();
         let mut tx = self.pool.begin().await?;

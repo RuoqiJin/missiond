@@ -1,5 +1,4 @@
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::Path;
 
 use anyhow::{anyhow, Result};
@@ -8,16 +7,16 @@ use tracing::info;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FileOperation {
     Write,
+    #[cfg(test)]
     Append,
-    Delete,
 }
 
 impl FileOperation {
     fn as_str(self) -> &'static str {
         match self {
             Self::Write => "write",
+            #[cfg(test)]
             Self::Append => "append",
-            Self::Delete => "delete",
         }
     }
 }
@@ -125,28 +124,6 @@ pub(crate) fn atomic_write_text(
         return Err(err.into());
     }
     audit(ctx, FileOperation::Write, path);
-    Ok(())
-}
-
-pub(crate) fn append_text(
-    ctx: EffectContext,
-    path: &Path,
-    content: impl AsRef<[u8]>,
-) -> Result<()> {
-    validate_file_effect(ctx, FileOperation::Append, path, EFFECT_CONTRACTS)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    file.write_all(content.as_ref())?;
-    audit(ctx, FileOperation::Append, path);
-    Ok(())
-}
-
-pub(crate) fn remove_file(ctx: EffectContext, path: &Path) -> Result<()> {
-    validate_file_effect(ctx, FileOperation::Delete, path, EFFECT_CONTRACTS)?;
-    fs::remove_file(path)?;
-    audit(ctx, FileOperation::Delete, path);
     Ok(())
 }
 

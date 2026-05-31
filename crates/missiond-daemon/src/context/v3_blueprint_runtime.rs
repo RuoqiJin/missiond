@@ -501,6 +501,7 @@ struct CompiledV3LispSourceLoad {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CompiledProjectUniverse {
     pub projects: Vec<CompiledProjectUniverseEntry>,
+    pub services: Vec<CompiledServiceRuntimeEntry>,
     pub maturity: Vec<CompiledProjectMaturityEntry>,
 }
 
@@ -508,6 +509,10 @@ pub(crate) struct CompiledProjectUniverse {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub(crate) struct CompiledProjectUniverseEntry {
     pub id: Option<String>,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    #[serde(default)]
+    pub service_ids: Vec<String>,
     pub kind: Option<String>,
     pub management_domain: Option<String>,
     pub runtime_layer: Option<String>,
@@ -516,10 +521,36 @@ pub(crate) struct CompiledProjectUniverseEntry {
     pub intent: Option<String>,
     pub backend: Option<String>,
     pub frontend: Option<String>,
+    pub operations: Option<String>,
     pub status: Option<String>,
     pub surface: Option<String>,
+    pub missiond_role: Option<String>,
     #[serde(default)]
     pub checks: Vec<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub(crate) struct CompiledServiceRuntimeEntry {
+    pub id: Option<String>,
+    pub project: Option<String>,
+    pub root: Option<String>,
+    pub intent: Option<String>,
+    pub backend: Option<String>,
+    pub frontend: Option<String>,
+    pub operations: Option<String>,
+    pub environment: Option<String>,
+    pub public_base_url: Option<String>,
+    pub frontend_url: Option<String>,
+    pub api_base_url: Option<String>,
+    #[serde(default)]
+    pub domains: Vec<String>,
+    #[serde(default)]
+    pub health: Vec<String>,
+    #[serde(default)]
+    pub dependencies: Vec<String>,
+    pub ops_capability: Option<String>,
+    pub surface: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -583,6 +614,8 @@ struct CompiledProjectUniversePayload {
     source_domains: Vec<CompiledSourceDomain>,
     #[serde(default)]
     projects: Vec<CompiledProjectUniverseEntry>,
+    #[serde(default)]
+    services: Vec<CompiledServiceRuntimeEntry>,
     #[serde(default)]
     maturity: Vec<CompiledProjectMaturityEntry>,
 }
@@ -2984,6 +3017,7 @@ pub(crate) fn load_compiled_project_universe(
     CompiledPayloadLoad {
         payload: loaded.payload.map(|payload| CompiledProjectUniverse {
             projects: payload.projects,
+            services: payload.services,
             maturity: payload.maturity,
         }),
         snapshot: loaded.snapshot,

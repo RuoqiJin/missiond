@@ -112,6 +112,9 @@ pub const CONVERSATION_SOURCE_STATE_MISSING_STALE: &str = "missing-stale";
 pub const CONVERSATION_SOURCE_STATE_PATH_MISMATCH: &str = "path-mismatch";
 pub const CONVERSATION_SOURCE_STATE_ARCHIVED: &str = "archived";
 pub const CONVERSATION_SOURCE_STATE_PTY_PLACEHOLDER: &str = "pty-placeholder";
+pub const CONVERSATION_SOURCE_STATE_RAW_ONLY_LOCAL_COMMAND: &str = "raw-only-local-command";
+pub const CONVERSATION_SOURCE_STATE_RAW_ONLY_PROVIDER_PROMPT: &str = "raw-only-provider-prompt";
+pub const CONVERSATION_SOURCE_STATE_RAW_ONLY_UNINGESTED: &str = "raw-only-uningested";
 
 pub const CONVERSATION_SOURCE_LABEL_CODEX_LOCAL_INDEX: &str = "codex_local_index";
 pub const LEGACY_CONVERSATION_SOURCE_STATE_SQLITE_MISSING: &str = "sqlite-missing";
@@ -202,6 +205,28 @@ pub struct ConversationMessage {
     /// Human-readable role display name (Rust match mapping)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role_display: Option<String>,
+}
+
+/// Deterministic evidence for a projected `message_labels` row.
+///
+/// The compatibility table can only store one value per `(message_id, label)`.
+/// This evidence record preserves rule provenance and ranking so projection can
+/// be replayed without losing competing evidence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageLabelEvidenceInput {
+    pub message_id: i64,
+    pub label: String,
+    pub value: String,
+    pub source: String,
+    pub rule_id: String,
+    pub rule_version: String,
+    pub confidence: f64,
+    pub priority: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub evidence: serde_json::Value,
 }
 
 fn is_false(v: &bool) -> bool {

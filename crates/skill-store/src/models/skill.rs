@@ -71,6 +71,4 @@ pub struct UpdateSkillRequest {
 #[serde(rename_all = "camelCase")]
 pub struct InvokeSkillRequest {
     pub inputs: serde_json::Value,
-    #[serde(default)]
-    pub stream: bool,
 }

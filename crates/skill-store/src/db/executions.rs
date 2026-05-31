@@ -1,4 +1,4 @@
-use crate::models::{ExecStatus, Execution};
+use crate::models::ExecStatus;
 use sqlx::{PgPool, Row};
 
 pub async fn record_execution(
@@ -50,25 +50,6 @@ pub async fn record_execution(
     Ok(())
 }
 
-pub async fn list_user_executions(
-    pool: &PgPool,
-    user_id: &str,
-    limit: i64,
-    offset: i64,
-) -> Result<Vec<Execution>, sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT id, user_id, skill_id, status, input_tokens, output_tokens, cost, creator_revenue, created_at
-         FROM executions WHERE user_id = $1
-         ORDER BY created_at DESC LIMIT $2 OFFSET $3",
-    )
-    .bind(user_id)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await?;
-    rows.iter().map(row_to_execution).collect()
-}
-
 pub async fn get_creator_stats(
     pool: &PgPool,
     creator_id: &str,
@@ -107,19 +88,4 @@ pub struct CreatorStats {
     pub total_invocations: i64,
     pub total_revenue: f64,
     pub unsettled_revenue: f64,
-}
-
-fn row_to_execution(row: &sqlx::postgres::PgRow) -> Result<Execution, sqlx::Error> {
-    let status: String = row.try_get("status")?;
-    Ok(Execution {
-        id: row.try_get("id")?,
-        user_id: row.try_get("user_id")?,
-        skill_id: row.try_get("skill_id")?,
-        status: ExecStatus::from_str(&status),
-        input_tokens: row.try_get("input_tokens")?,
-        output_tokens: row.try_get("output_tokens")?,
-        cost: row.try_get("cost")?,
-        creator_revenue: row.try_get("creator_revenue")?,
-        created_at: crate::db::ts_string(row, "created_at")?,
-    })
 }

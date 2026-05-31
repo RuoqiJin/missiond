@@ -9,15 +9,15 @@ pub fn definitions() -> Vec<ToolDefinition> {
         // ===== mission_conversation_query =====
         ToolDefinition::new(
             "mission_conversation_query",
-            "对话统一查询。list/get/search/message_search/context/events/audit_classification/backfill_classification/audit_message_roles/backfill_message_roles/turn_backfill/gemini_reconcile",
+            "对话统一查询。list/get/search/message_search/context/events/audit_classification/backfill_classification/audit_message_roles/backfill_message_roles/turn_backfill/label_audit/label_backfill/gemini_reconcile",
             json!({
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["list", "get", "search", "message_search", "context", "events", "audit_classification", "backfill_classification", "audit_message_roles", "backfill_message_roles", "turn_backfill", "gemini_reconcile"], "default": "list"},
+                    "action": {"type": "string", "enum": ["list", "get", "search", "message_search", "context", "events", "audit_classification", "backfill_classification", "audit_message_roles", "backfill_message_roles", "turn_backfill", "label_audit", "label_backfill", "gemini_reconcile"], "default": "list"},
                     "status": {"type": "string", "description": "[list] active/completed"},
                     "conversationType": {"type": "string", "description": "[list] user/worker/meta/system/all"},
                     "taskId": {"type": "string", "description": "[list] 按 Board 任务 ID 过滤"},
-                    "sessionId": {"type": "string", "description": "[get/search/events/audit_message_roles/backfill_message_roles/turn_backfill] 会话 ID"},
+                    "sessionId": {"type": "string", "description": "[get/search/events/audit_message_roles/backfill_message_roles/turn_backfill/label_backfill] 会话 ID"},
                     "tail": {"type": "integer", "description": "[get] 最近 N 条消息", "default": 50},
                     "sinceId": {"type": "integer", "description": "[get] 增量拉取(ID 大于此值)"},
                     "includeRaw": {"type": "boolean", "description": "[get] 完整消息含 rawContent/model", "default": false},
@@ -36,9 +36,9 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "limit": {"type": "integer", "description": "[list/search/message_search/events] 最大返回数"},
                     "since": {"type": "string", "description": "[list] 起始时间(ISO/相对格式)"},
                     "until": {"type": "string", "description": "[list] 结束时间"},
-                    "source": {"type": "string", "description": "[audit_classification/backfill_classification] provider source filter, e.g. claude_code"},
+                    "source": {"type": "string", "description": "[audit_classification/backfill_classification/label_audit/label_backfill] provider source filter, e.g. claude_code"},
                     "minConfidence": {"type": "number", "description": "[audit_classification/backfill_classification] minimum confidence threshold"},
-                    "apply": {"type": "boolean", "description": "[backfill_classification/backfill_message_roles] true to write reviewed repairs"},
+                    "apply": {"type": "boolean", "description": "[backfill_classification/backfill_message_roles/label_backfill] true to write reviewed repairs"},
                     "rebuildTurns": {"type": "boolean", "description": "[backfill_classification/backfill_message_roles] rebuild conversation_turns after repair"}
                 }
             }),

@@ -19,7 +19,9 @@ const FILES = {
   main: 'crates/missiond-daemon/src/main.rs',
   runtime: 'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
   controlTree: 'crates/missiond-daemon/src/control_tree.rs',
-  genTypes: 'crates/missiond-core/src/types/gen_types.rs',
+  sharedTypes: 'crates/missiond-shared/src/lib.rs',
+  slotTypes: 'crates/missiond-core/src/types/slot.rs',
+  coreTypes: 'crates/missiond-core/src/types/mod.rs',
   frontendBlueprint: '.missiond/frontend/board-blueprint.lisp',
   codexIngestion: 'crates/missiond-daemon/src/workers/local/codex_ingestion_worker.rs',
 };
@@ -135,16 +137,27 @@ function main() {
       'Self::Agy => "agy"',
       'Self::Agy => None',
     ]);
-    requireAll(diagnostics, FILES.genTypes, sources.genTypes, [
-      'pub enum CliEngine',
-      'ClaudeCode',
-      'Gemini',
-      'Codex',
-      'Agy',
-      's.replace',
-      '"gemini_cli"',
-      '"codex_cli"',
-      '"agy_cli"',
+    requireAll(diagnostics, FILES.sharedTypes, sources.sharedTypes, [
+      'pub use semantic_terminal::CliEngine',
+    ]);
+    requireAll(diagnostics, FILES.slotTypes, sources.slotTypes, [
+      'pub use missiond_shared::CliEngine',
+      'CliEngine::ClaudeCode',
+      'CliEngine::Gemini',
+      'CliEngine::Codex',
+      'CliEngine::Agy',
+    ]);
+    requireAll(diagnostics, FILES.coreTypes, sources.coreTypes, [
+      'test_cli_engine_backward_compat',
+      'test_cli_engine_display',
+      'CliEngine::ClaudeCode',
+      'CliEngine::Gemini',
+      'CliEngine::Codex',
+      'CliEngine::Agy',
+      '"claude_code"',
+      '"gemini"',
+      '"codex"',
+      '"agy"',
     ]);
     requireAll(diagnostics, FILES.codexIngestion, sources.codexIngestion, [
       'existing_task_id: Option<String>',

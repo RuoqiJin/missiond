@@ -53,6 +53,43 @@
       :calls "spawn Gemini CLI file watcher event handler"))
 
   (behavior
+    :id agy-cli-watcher-background-tasks
+    :kind scheduler
+    :owner conversation-ingestion
+    :observed ["background-task:crates/missiond-core/src/agy_cli/watcher.rs:67"
+               "background-task:crates/missiond-core/src/agy_cli/watcher.rs:148"
+               "scheduler:crates/missiond-core/src/agy_cli/watcher.rs:300"]
+    :code ["crates/missiond-core/src/agy_cli/watcher.rs"]
+    :effects []
+    (anchor
+      :role scheduler
+      :observed "background-task:crates/missiond-core/src/agy_cli/watcher.rs:67"
+      :file "crates/missiond-core/src/agy_cli/watcher.rs"
+      :symbol "new")
+    (anchor
+      :role scheduler
+      :observed "background-task:crates/missiond-core/src/agy_cli/watcher.rs:148"
+      :file "crates/missiond-core/src/agy_cli/watcher.rs"
+      :symbol "start")
+    (anchor
+      :role scheduler
+      :observed "scheduler:crates/missiond-core/src/agy_cli/watcher.rs:300"
+      :file "crates/missiond-core/src/agy_cli/watcher.rs"
+      :symbol "agy_cursor_persist_loop")
+    (trigger
+      :from-file "crates/missiond-core/src/agy_cli/watcher.rs"
+      :from-symbol "AgyCliWatcher::new"
+      :calls "spawn ack-based Agy cursor persistence loop")
+    (trigger
+      :from-file "crates/missiond-core/src/agy_cli/watcher.rs"
+      :from-symbol "AgyCliWatcher::start"
+      :calls "spawn Agy CLI file watcher event handler")
+    (trigger
+      :from-file "crates/missiond-core/src/agy_cli/watcher.rs"
+      :from-symbol "agy_cursor_persist_loop"
+      :calls "tokio interval batches Agy cursor watermark persistence"))
+
+  (behavior
     :id missiond-public-tools
     :kind mcp-tool
     :owner mcp-gateway
@@ -144,29 +181,6 @@
       :from-file "scripts/check-v3-autopilot-runtime-isomorphism.mjs"
       :from-symbol "delegated"
       :calls "static-source-needle"))
-
-  (behavior
-    :id v3-code-isomorphism-aggregate-subprocess
-    :kind subprocess
-    :owner typed-lisp-compiler
-    :observed ["subprocess:scripts/check-v3-code-isomorphism-complete.mjs:179"
-               "subprocess:scripts/check-v3-code-isomorphism-complete.mjs:517"]
-    :code ["scripts/check-v3-code-isomorphism-complete.mjs"]
-    :effects []
-    (anchor
-      :role subprocess
-      :observed "subprocess:scripts/check-v3-code-isomorphism-complete.mjs:179"
-      :file "scripts/check-v3-code-isomorphism-complete.mjs"
-      :symbol "has")
-    (anchor
-      :role subprocess
-      :observed "subprocess:scripts/check-v3-code-isomorphism-complete.mjs:517"
-      :file "scripts/check-v3-code-isomorphism-complete.mjs"
-      :symbol "runPerSurfaceCheckers")
-    (trigger
-      :from-file "scripts/check-v3-code-isomorphism-complete.mjs"
-      :from-symbol "runPerSurfaceCheckers"
-      :calls "per-surface-checker-subprocess"))
 
   (behavior
     :id final-convergence-runtime-bootstrap-subprocess

@@ -35,14 +35,6 @@ pub enum SubStatus {
 }
 
 impl SubStatus {
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::Active => "active",
-            Self::Expired => "expired",
-            Self::Cancelled => "cancelled",
-        }
-    }
-
     pub fn from_str(s: &str) -> Self {
         match s {
             "active" => Self::Active,

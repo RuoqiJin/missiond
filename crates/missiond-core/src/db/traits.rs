@@ -948,6 +948,8 @@ pub trait BoardStore: Send + Sync {
         task_id: &str,
         expected_assignee: &str,
     ) -> DbResult<usize>;
+    async fn fail_board_task_and_release_claim(&self, task_id: &str)
+        -> DbResult<Option<BoardTask>>;
     async fn release_board_claims_by_executor(&self, executor_id: &str) -> DbResult<usize>;
     async fn recover_stale_running_tasks(&self, fallback_stale_minutes: i64) -> DbResult<usize>;
     /// Null out `assignee` on board_tasks whose assignee references a
@@ -1257,6 +1259,22 @@ pub trait ObservabilityStore: Send + Sync {
         value: Option<&str>,
         limit: i64,
     ) -> DbResult<Vec<i64>>;
+    async fn message_label_evidence_upsert_batch(
+        &self,
+        evidence: &[MessageLabelEvidenceInput],
+    ) -> DbResult<usize>;
+    async fn message_label_projection_refresh(&self, message_ids: &[i64]) -> DbResult<usize>;
+    async fn message_labeler_pending_sessions(
+        &self,
+        consumer: &str,
+        source: Option<&str>,
+        limit: i64,
+    ) -> DbResult<Vec<String>>;
+    async fn message_labeler_audit(
+        &self,
+        consumer: &str,
+        source: Option<&str>,
+    ) -> DbResult<serde_json::Value>;
 
     // -- conversation labels (EAV, same pattern as message_labels) --
     async fn conversation_label_set(

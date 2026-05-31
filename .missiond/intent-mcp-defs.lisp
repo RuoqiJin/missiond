@@ -653,13 +653,13 @@
   :target "crates/missiond-mcp/src/tools/comm/conversation.rs"
 
   (tool mission_conversation_query
-    :description "对话统一查询。list/get/search/message_search/context/events/audit_classification/backfill_classification/audit_message_roles/backfill_message_roles/turn_backfill/gemini_reconcile"
+    :description "对话统一查询。list/get/search/message_search/context/events/audit_classification/backfill_classification/audit_message_roles/backfill_message_roles/turn_backfill/label_audit/label_backfill/gemini_reconcile"
     (input
-      (action   string :enum (list get search message_search context events audit_classification backfill_classification audit_message_roles backfill_message_roles turn_backfill gemini_reconcile) :default "list")
+      (action   string :enum (list get search message_search context events audit_classification backfill_classification audit_message_roles backfill_message_roles turn_backfill label_audit label_backfill gemini_reconcile) :default "list")
       (status   string :description "[list] active/completed")
       (conversationType string :description "[list] user/worker/meta/system/all")
       (taskId   string :description "[list] 按 Board 任务 ID 过滤")
-      (sessionId string :description "[get/search/events/audit_message_roles/backfill_message_roles/turn_backfill] 会话 ID")
+      (sessionId string :description "[get/search/events/audit_message_roles/backfill_message_roles/turn_backfill/label_backfill] 会话 ID")
       (tail     integer :default 50 :description "[get] 最近 N 条消息")
       (sinceId  integer :description "[get] 增量拉取(ID 大于此值)")
       (includeRaw boolean :default false :description "[get] 完整消息含 rawContent/model")
@@ -678,9 +678,9 @@
       (limit    integer :description "[list/search/message_search/events] 最大返回数")
       (since    string :description "[list] 起始时间(ISO/相对格式)")
       (until    string :description "[list] 结束时间")
-      (source   string :description "[audit_classification/backfill_classification] provider source filter, e.g. claude_code")
+      (source   string :description "[audit_classification/backfill_classification/label_audit/label_backfill] provider source filter, e.g. claude_code")
       (minConfidence number :description "[audit_classification/backfill_classification] minimum confidence threshold")
-      (apply    boolean :description "[backfill_classification/backfill_message_roles] true to write reviewed repairs")
+      (apply    boolean :description "[backfill_classification/backfill_message_roles/label_backfill] true to write reviewed repairs")
       (rebuildTurns boolean :description "[backfill_classification/backfill_message_roles] rebuild conversation_turns after repair"))
     :returns "Value"
     :dispatch-on action)
