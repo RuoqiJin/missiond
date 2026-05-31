@@ -2405,6 +2405,7 @@ impl PTYWebSocketServer {
     async fn handle_interaction_events(
         mut stream: TcpStream,
         request_line: &str,
+        db: Option<Arc<dyn crate::db::traits::MissionStore>>,
     ) -> anyhow::Result<()> {
         let _ = Self::read_http_request(&mut stream).await;
         let interaction_id = request_line
@@ -2425,17 +2426,55 @@ impl PTYWebSocketServer {
             Access-Control-Allow-Origin: *\r\n\
             \r\n";
         stream.write_all(sse_headers.as_bytes()).await?;
+        let Some(db) = db else {
+            Self::write_sse_event(
+                &mut stream,
+                "diagnostic",
+                &serde_json::json!({
+                    "schema": "missiond.interaction-event-stream.v1",
+                    "interaction_id": interaction_id,
+                    "phase": "replay_unavailable",
+                    "error": {
+                        "code": "MISSIOND_DB_UNAVAILABLE",
+                        "message": "MissionD DB is unavailable; cannot replay interaction ledger."
+                    }
+                }),
+            )
+            .await?;
+            Self::finish_sse(&mut stream).await?;
+            return Ok(());
+        };
+        let events = db.get_interaction_events(interaction_id, 500).await?;
         Self::write_sse_event(
             &mut stream,
             "status",
             &serde_json::json!({
                 "schema": "missiond.interaction-event-stream.v1",
                 "interaction_id": interaction_id,
-                "phase": "event_stream_ready",
-                "message": "Live interaction receive streams are authoritative in this release; durable replay is reached through BoardTask/result-artifact ids returned by the interaction."
+                "phase": "replay_ready",
+                "event_count": events.len(),
             }),
         )
         .await?;
+        for event in events {
+            let payload = event
+                .raw_data
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                .unwrap_or_else(|| {
+                    serde_json::json!({
+                        "interaction_id": interaction_id,
+                        "event_type": event.event_type,
+                        "content": event.content,
+                        "timestamp": event.timestamp,
+                    })
+                });
+            let event_name = event
+                .event_type
+                .strip_prefix("interaction.")
+                .unwrap_or(event.event_type.as_str());
+            Self::write_sse_event(&mut stream, event_name, &payload).await?;
+        }
         Self::finish_sse(&mut stream).await?;
         Ok(())
     }
@@ -2599,27 +2638,19 @@ impl PTYWebSocketServer {
             "attachments_count": envelope.attachments.len(),
             "remote_addr": addr.to_string(),
         });
+        let authenticated = serde_json::json!({
+            "interaction_id": interaction_id,
+            "channel": channel,
+            "authenticated": auth_token.is_some(),
+            "authority": "auth",
+        });
+        let permission_resolved = serde_json::json!({
+            "interaction_id": interaction_id,
+            "permission_context": permission_context.clone(),
+        });
         Self::write_sse_event(&mut stream, "received", &received).await?;
-        Self::write_sse_event(
-            &mut stream,
-            "authenticated",
-            &serde_json::json!({
-                "interaction_id": interaction_id,
-                "channel": channel,
-                "authenticated": auth_token.is_some(),
-                "authority": "auth",
-            }),
-        )
-        .await?;
-        Self::write_sse_event(
-            &mut stream,
-            "permission_resolved",
-            &serde_json::json!({
-                "interaction_id": interaction_id,
-                "permission_context": permission_context.clone(),
-            }),
-        )
-        .await?;
+        Self::write_sse_event(&mut stream, "authenticated", &authenticated).await?;
+        Self::write_sse_event(&mut stream, "permission_resolved", &permission_resolved).await?;
         Self::write_jarvis_progress(
             &mut stream,
             &jarvis_progress_bus,
@@ -2739,16 +2770,44 @@ impl PTYWebSocketServer {
             None
         };
         if let Some(ref cid) = jarvis_conv_id {
-            Self::write_sse_event(
-                &mut stream,
-                "meta",
-                &serde_json::json!({
-                    "interaction_id": interaction_id,
-                    "conversation_id": cid,
-                    "chat_id": chat_id
-                }),
+            Self::persist_interaction_event(
+                db.as_ref(),
+                Some(cid),
+                Some(&interaction_id),
+                "received",
+                &received,
             )
-            .await?;
+            .await;
+            Self::persist_interaction_event(
+                db.as_ref(),
+                Some(cid),
+                Some(&interaction_id),
+                "authenticated",
+                &authenticated,
+            )
+            .await;
+            Self::persist_interaction_event(
+                db.as_ref(),
+                Some(cid),
+                Some(&interaction_id),
+                "permission_resolved",
+                &permission_resolved,
+            )
+            .await;
+            let meta = serde_json::json!({
+                "interaction_id": interaction_id,
+                "conversation_id": cid,
+                "chat_id": chat_id
+            });
+            Self::write_sse_event(&mut stream, "meta", &meta).await?;
+            Self::persist_interaction_event(
+                db.as_ref(),
+                Some(cid),
+                Some(&interaction_id),
+                "meta",
+                &meta,
+            )
+            .await;
         }
 
         if !interaction_metadata_bool(&envelope, "missiond_intent_confirmed")
@@ -2890,6 +2949,27 @@ impl PTYWebSocketServer {
             }),
         )
         .await?;
+        let grounding_ledger_event = serde_json::json!({
+            "interaction_id": interaction_id,
+            "phase": "grounding",
+            "grounding_context_id": grounding_context_id,
+            "context_pack_path": context_pack_path,
+            "context_pack_file": context_pack_file,
+            "context_capsule_hash": context_capsule_hash,
+            "context_capsule_file": context_capsule_file,
+            "topic_id": resolved_topic_id,
+            "topic_label": resolved_topic_label,
+            "sources_used": sources_used,
+            "diagnostics": grounding.diagnostics,
+        });
+        Self::persist_interaction_event(
+            db.as_ref(),
+            jarvis_conv_id.as_deref(),
+            Some(&interaction_id),
+            "grounding",
+            &grounding_ledger_event,
+        )
+        .await;
         Self::write_jarvis_progress(
             &mut stream,
             &jarvis_progress_bus,
@@ -3059,6 +3139,14 @@ impl PTYWebSocketServer {
                 );
             }
             Self::write_sse_event(&mut stream, "intent_draft", &intent).await?;
+            Self::persist_interaction_event(
+                db.as_ref(),
+                jarvis_conv_id.as_deref(),
+                Some(&interaction_id),
+                "intent_draft",
+                &intent,
+            )
+            .await;
             Self::write_sse_openai_missiond_projection(
                 &mut stream,
                 &chat_id,
@@ -3080,6 +3168,14 @@ impl PTYWebSocketServer {
                 }
             });
             Self::write_sse_event(&mut stream, "confirm_required", &confirm).await?;
+            Self::persist_interaction_event(
+                db.as_ref(),
+                jarvis_conv_id.as_deref(),
+                Some(&interaction_id),
+                "confirm_required",
+                &confirm,
+            )
+            .await;
             Self::persist_jarvis_pending_confirmation(
                 db.as_ref(),
                 jarvis_conv_id.as_deref(),
@@ -3284,6 +3380,14 @@ impl PTYWebSocketServer {
                 );
             }
             Self::write_sse_event(&mut stream, "plan_draft", &plan).await?;
+            Self::persist_interaction_event(
+                db.as_ref(),
+                jarvis_conv_id.as_deref(),
+                Some(&interaction_id),
+                "plan_draft",
+                &plan,
+            )
+            .await;
             Self::write_sse_openai_missiond_projection(
                 &mut stream,
                 &chat_id,
@@ -3315,6 +3419,14 @@ impl PTYWebSocketServer {
                 }
             });
             Self::write_sse_event(&mut stream, "confirm_required", &confirm).await?;
+            Self::persist_interaction_event(
+                db.as_ref(),
+                jarvis_conv_id.as_deref(),
+                Some(&interaction_id),
+                "confirm_required",
+                &confirm,
+            )
+            .await;
             Self::persist_jarvis_pending_confirmation(
                 db.as_ref(),
                 jarvis_conv_id.as_deref(),
@@ -3539,72 +3651,93 @@ impl PTYWebSocketServer {
                     "interaction_id": interaction_id,
                     "stream": true
                 });
-                Self::write_sse_event(
-                    &mut stream,
+                let board_task_created = serde_json::json!({
+                    "interaction_id": interaction_id,
+                    "task_id": task.id,
+                    "title": task.title,
+                    "grounding_context_id": grounding_context_id,
+                    "intent_artifact_id": intent_artifact_id,
+                    "plan_artifact_id": plan_artifact_id,
+                });
+                Self::write_sse_event(&mut stream, "board_task_created", &board_task_created)
+                    .await?;
+                Self::persist_interaction_event(
+                    Some(db),
+                    jarvis_conv_id.as_deref(),
+                    Some(&interaction_id),
                     "board_task_created",
-                    &serde_json::json!({
-                        "interaction_id": interaction_id,
-                        "task_id": task.id,
-                        "title": task.title,
-                        "grounding_context_id": grounding_context_id,
-                        "intent_artifact_id": intent_artifact_id,
-                        "plan_artifact_id": plan_artifact_id,
-                    }),
+                    &board_task_created,
                 )
-                .await?;
-                Self::write_sse_event(
-                    &mut stream,
+                .await;
+                let worker_dispatched = serde_json::json!({
+                    "interaction_id": interaction_id,
+                    "phase": "workers_running",
+                    "task_id": task.id,
+                    "slot_id": serde_json::Value::Null,
+                    "dispatch_state": "pending_autopilot_claim",
+                    "status": task.status.as_str(),
+                    "terminal_task_result": false,
+                    "follow_payload": follow_payload.clone(),
+                    "message": "BoardTask is queued for Autopilot/provider claim; concrete slot attribution will arrive through follow-up supervision."
+                });
+                Self::write_sse_event(&mut stream, "worker_dispatched", &worker_dispatched).await?;
+                Self::persist_interaction_event(
+                    Some(db),
+                    jarvis_conv_id.as_deref(),
+                    Some(&interaction_id),
                     "worker_dispatched",
-                    &serde_json::json!({
-                        "interaction_id": interaction_id,
-                        "phase": "workers_running",
-                        "task_id": task.id,
-                        "slot_id": serde_json::Value::Null,
-                        "dispatch_state": "pending_autopilot_claim",
-                        "status": task.status.as_str(),
-                        "terminal_task_result": false,
-                        "follow_payload": follow_payload.clone(),
-                        "message": "BoardTask is queued for Autopilot/provider claim; concrete slot attribution will arrive through follow-up supervision."
-                    }),
+                    &worker_dispatched,
                 )
-                .await?;
-                Self::write_sse_event(
-                    &mut stream,
+                .await;
+                let worker_status = serde_json::json!({
+                    "interaction_id": interaction_id,
+                    "phase": "workers_running",
+                    "task_id": task.id,
+                    "status": task.status.as_str(),
+                    "terminal_task_result": false,
+                });
+                Self::write_sse_event(&mut stream, "worker_status", &worker_status).await?;
+                Self::persist_interaction_event(
+                    Some(db),
+                    jarvis_conv_id.as_deref(),
+                    Some(&interaction_id),
                     "worker_status",
-                    &serde_json::json!({
-                        "interaction_id": interaction_id,
-                        "phase": "workers_running",
-                        "task_id": task.id,
-                        "status": task.status.as_str(),
-                        "terminal_task_result": false,
-                    }),
+                    &worker_status,
                 )
-                .await?;
-                Self::write_sse_event(
-                    &mut stream,
+                .await;
+                let dispatch_accepted = serde_json::json!({
+                    "interaction_id": interaction_id,
+                    "phase": "board_tasks_created",
+                    "task_id": task.id,
+                    "terminal_task_result": false,
+                    "follow_payload": follow_payload.clone(),
+                    "message": "BoardTask was created and accepted for asynchronous worker dispatch; this is not a terminal task result."
+                });
+                Self::write_sse_event(&mut stream, "dispatch_accepted", &dispatch_accepted).await?;
+                Self::persist_interaction_event(
+                    Some(db),
+                    jarvis_conv_id.as_deref(),
+                    Some(&interaction_id),
                     "dispatch_accepted",
-                    &serde_json::json!({
-                        "interaction_id": interaction_id,
-                        "phase": "board_tasks_created",
-                        "task_id": task.id,
-                        "terminal_task_result": false,
-                        "follow_payload": follow_payload.clone(),
-                        "message": "BoardTask was created and accepted for asynchronous worker dispatch; this is not a terminal task result."
-                    }),
+                    &dispatch_accepted,
                 )
-                .await?;
-                Self::write_sse_event(
-                    &mut stream,
+                .await;
+                let result_pending = serde_json::json!({
+                    "interaction_id": interaction_id,
+                    "phase": "result_pending",
+                    "task_id": task.id,
+                    "terminal_task_result": false,
+                    "follow_payload": follow_payload,
+                });
+                Self::write_sse_event(&mut stream, "result_pending", &result_pending).await?;
+                Self::persist_interaction_event(
+                    Some(db),
+                    jarvis_conv_id.as_deref(),
+                    Some(&interaction_id),
                     "result_pending",
-                    &serde_json::json!({
-                        "interaction_id": interaction_id,
-                        "phase": "result_pending",
-                        "task_id": task.id,
-                        "terminal_task_result": false,
-                        "follow_payload": follow_payload,
-                    }),
+                    &result_pending,
                 )
-                .await?;
+                .await;
                 let accepted_text = format!(
                     "计划已确认，BoardTask 已创建。后续用 missiond_follow_task_id={} 读取 task-result-artifact。",
                     task.id
@@ -4218,6 +4351,61 @@ impl PTYWebSocketServer {
             .await?;
         stream.flush().await?;
         Ok(())
+    }
+
+    async fn persist_interaction_event(
+        db: Option<&Arc<dyn crate::db::traits::MissionStore>>,
+        conversation_id: Option<&str>,
+        interaction_id: Option<&str>,
+        event: &str,
+        payload: &serde_json::Value,
+    ) {
+        let (Some(db), Some(conversation_id), Some(interaction_id)) =
+            (db, conversation_id, interaction_id)
+        else {
+            return;
+        };
+        if conversation_id.trim().is_empty() || interaction_id.trim().is_empty() {
+            return;
+        }
+        let mut raw_data = payload.clone();
+        if let Some(object) = raw_data.as_object_mut() {
+            object
+                .entry("interaction_id".to_string())
+                .or_insert_with(|| serde_json::Value::String(interaction_id.to_string()));
+            object
+                .entry("event_kind".to_string())
+                .or_insert_with(|| serde_json::Value::String(event.to_string()));
+        }
+        let content = raw_data
+            .get("message")
+            .or_else(|| raw_data.get("text"))
+            .or_else(|| raw_data.get("phase"))
+            .and_then(|value| value.as_str())
+            .map(|value| value.chars().take(400).collect::<String>());
+        let row = crate::types::ConversationEvent {
+            id: 0,
+            session_id: conversation_id.to_string(),
+            event_uuid: Some(format!(
+                "interaction-{}-{}-{}",
+                interaction_id,
+                event,
+                uuid::Uuid::new_v4().simple()
+            )),
+            event_type: format!("interaction.{event}"),
+            content,
+            raw_data: Some(raw_data.to_string()),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        };
+        if let Err(error) = db.insert_conversation_events_batch(&[row]).await {
+            warn!(
+                %conversation_id,
+                %interaction_id,
+                %event,
+                error = %error,
+                "failed to persist interaction event"
+            );
+        }
     }
 
     async fn write_sse_openai_text(
@@ -6095,6 +6283,24 @@ JSON 字段必须是：\n\
             }),
         )
         .await?;
+        let result_artifact_event = serde_json::json!({
+            "phase": "result_ready",
+            "interaction_id": interaction_id,
+            "artifact_id": &artifact.artifact_id,
+            "artifact_hash": &artifact.artifact_hash,
+            "artifact_path": &artifact.path,
+            "execution_mode": "grounded_direct_answer",
+            "terminal_task_result": true,
+            "board_task_created": false,
+        });
+        Self::persist_interaction_event(
+            db,
+            conversation_id,
+            interaction_id,
+            "result_artifact",
+            &result_artifact_event,
+        )
+        .await;
         Self::write_sse_event(
             stream,
             "final",
@@ -6109,6 +6315,17 @@ JSON 字段必须是：\n\
             }),
         )
         .await?;
+        let final_event = serde_json::json!({
+            "phase": "done",
+            "interaction_id": interaction_id,
+            "status": "done",
+            "execution_mode": "grounded_direct_answer",
+            "terminal_task_result": true,
+            "result_artifact_id": &artifact.artifact_id,
+            "result_artifact_hash": &artifact.artifact_hash,
+        });
+        Self::persist_interaction_event(db, conversation_id, interaction_id, "final", &final_event)
+            .await;
         Self::write_sse_openai_text(stream, chat_id, "", Some("stop")).await?;
         Ok(())
     }
@@ -9414,7 +9631,12 @@ JSON 字段必须是：\n\
             }
             // GET /interactions/v1/{interaction_id}/events
             if method == "GET" && normalized_path.starts_with("/interactions/v1/") && !is_upgrade {
-                return Self::handle_interaction_events(stream, &normalized_request_line).await;
+                return Self::handle_interaction_events(
+                    stream,
+                    &normalized_request_line,
+                    db.clone(),
+                )
+                .await;
             }
             // Jarvis durable conversation history for authenticated mobile clients.
             if method == "GET"

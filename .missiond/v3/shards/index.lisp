@@ -30,7 +30,7 @@
     :domain memory-knowledge-runtime
     :path "shards/memory-knowledge-runtime.lisp"
     :root-include "(include \"shards/memory-knowledge-runtime.lisp\")"
-    :surfaces [memory-kb memory-provider-boundary skill-runtime conversation-ingestion capability-governance incident-governance evidence-governance-view])
+    :surfaces [memory-kb memory-provider-boundary skill-runtime conversation-ingestion conversation-session-management interaction-ledger conversation-control-plane capability-governance incident-governance evidence-governance-view])
 
   (shard agent-navigation
     :status compiler-active
@@ -114,7 +114,7 @@
     :domain implementation-map
     :path "shards/implementation/request-surfaces.lisp"
     :root-include "(include \"shards/implementation/request-surfaces.lisp\")"
-    :surfaces [mission_request unified-entry-runtime file-artifacts mission_directive mission_plan review-gate])
+    :surfaces [mission_request unified-entry-runtime interaction-gateway interaction-ledger file-artifacts mission_directive mission_plan review-gate])
 
   (shard implementation-execution-surfaces
     :status compiler-active

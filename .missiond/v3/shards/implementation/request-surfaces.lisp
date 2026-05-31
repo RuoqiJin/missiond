@@ -78,6 +78,25 @@
       :events [received authenticated permission_resolved grounding intent_draft plan_draft confirm_required board_task_created worker_status result_artifact diagnostic final]
       :note "Unified external channel entry for Web, iOS, Jarvis, WeChat bridge, and service triggers. The HTTP adapter converts every external message to InteractionEnvelope, resolves Auth-derived PermissionContext, persists grounding through mission_context_gather, writes intent/plan artifacts, requires confirmation for broad human requests, creates BoardTasks only after confirmation, and returns status/result through channel response sinks. mission_interaction is the MCP facade for receive/confirm_intent/confirm_plan/follow/status; legacy Jarvis chat remains wire-compatible but is treated as a channel adapter, not a direct PTY path.")
 
+(surface interaction-ledger
+      :status "code-aligned"
+      :implements [interaction-ledger interaction-run-correlation interaction-event-ledger interaction-replay-api conversation-control-plane]
+      :code ["crates/missiond-core/src/ws/server.rs"
+             "crates/missiond-core/src/db/traits.rs"
+             "crates/missiond-core/src/db/pg/conversation.rs"
+             "crates/missiond-core/src/types/conversation.rs"
+             "scripts/check-v3-interaction-ledger-isomorphism.mjs"]
+      :storage ["conversation_events.event_type=interaction.*"
+                "conversation_events.raw_data.interaction_id"]
+      :public-routes ["/interactions/v1/{interaction_id}/events"]
+      :runtime-functions [persist_interaction_event get_interaction_events insert_conversation_events_batch handle_interaction_events]
+      :event-schema "missiond.interaction-event-stream.v1"
+      :artifact-schemas ["missiond.interaction-ledger.v1"
+                         "missiond.interaction-result-artifact.v1"
+                         "missiond.jarvis-pending-confirmation.v1"]
+      :rule "All client-visible interaction lifecycle events must be persisted into conversation_events with event_type prefixed by interaction. before or alongside SSE projection. The replay route must query durable rows by interaction_id and stream them back in order. A static placeholder is not an acceptable implementation because mobile/web clients need durable recovery after network loss."
+      :note "First-wave durable interaction replay uses existing conversation_events as the ledger table so the feature is additive and deployable without a schema cutover. The long-term normalized shape is interaction_runs plus interaction_events, but the runtime contract is already stable: every SSE-visible interaction milestone must carry the same interaction_id and be replayable through /interactions/v1/{interaction_id}/events.")
+
 (surface file-artifacts
       :status "code-aligned"
       :implements [file-artifacts request-local-artifacts compat-artifact-paths]

@@ -424,6 +424,15 @@
                (step s7 :logic "create BoardTask metadata with interaction_id, PermissionContext, grounding_context_id, intent_artifact_id, plan_artifact_id, and dispatch contract")
                (step s8 :logic "stream response sink events for status, BoardTask, worker, task-result-artifact, final, and typed diagnostics; PTY output remains diagnostic only"))
         :egress [InteractionEventStream PermissionContext grounding_context_id intent_artifact plan_artifact BoardTask task-result-artifact response-sink interaction-audit])
+      (function interaction-ledger
+        :surface interaction-ledger
+        :entry [InteractionEnvelope SSEEvent conversation_events shared_artifacts BoardTask.runtime_metadata task-result-artifact]
+        :core ((step s1 :logic "correlate each client-channel request to one stable interaction_id and scoped conversation_id")
+               (step s2 :logic "persist every user-visible interaction lifecycle event into conversation_events as interaction.* raw_data before or alongside channel projection")
+               (step s3 :logic "bind grounding, intent, plan, BoardTask, worker conversation, and task-result-artifact ids into runtime_metadata or event raw_data")
+               (step s4 :logic "replay /interactions/v1/{interaction_id}/events from durable ledger rows in insertion order instead of static placeholder text")
+               (step s5 :logic "merge messages, interaction events, shared artifacts, and BoardTask metadata into a conversation-control-plane replay view"))
+        :egress [interaction-event-stream conversation-replay interaction-audit-view task-result-artifact])
       (function router-policy
         :surface router-policy
         :entry [mission_router_chat mission_router_chat_manage router-policy-dry-run]

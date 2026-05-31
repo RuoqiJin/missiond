@@ -24,6 +24,13 @@
       :v3-function interaction-gateway
       :surface interaction-gateway
       :note "External human/service channels now normalize to InteractionEnvelope before Auth identity, permission context, grounding, intent/plan confirmation, BoardTask dispatch, task-result-artifact collection, and channel response sinks.")
+    (v2-item external-channel-interaction-ledger
+      :status code-aligned
+      :v2-source ".missiond/v2/intent.lisp :: Jarvis/web/mobile/external user entry durable trace"
+      :v3-pillar communication
+      :v3-function interaction-ledger
+      :surface interaction-ledger
+      :note "V2 external-channel durable trace requirements are now the V3 interaction-ledger: client-visible lifecycle events are persisted as interaction.* conversation_events and replayed through /interactions/v1/{interaction_id}/events.")
     (v2-item file-first-artifacts
       :status code-aligned
       :v2-source ".missiond/v2/architecture-dsl.lisp :: l2-shard-split-plan/intent-directive-artifacts"

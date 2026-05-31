@@ -429,6 +429,16 @@ pub trait ConversationStore: Send + Sync {
         event_type: Option<&str>,
         limit: i64,
     ) -> DbResult<Vec<ConversationEvent>>;
+    /// Replay interaction-gateway events by durable interaction id.
+    /// This is the first interaction ledger read model: Jarvis/iOS/Web/WeChat
+    /// visible SSE milestones are mirrored into conversation_events with
+    /// `raw_data.interaction_id`, so operators can reconstruct a client-channel
+    /// run without relying on a live SSE stream or PTY buffer.
+    async fn get_interaction_events(
+        &self,
+        interaction_id: &str,
+        limit: i64,
+    ) -> DbResult<Vec<ConversationEvent>>;
     async fn is_compact_boundary_event(&self, session_id: &str, event_uuid: &str)
         -> DbResult<bool>;
     async fn get_agent_trajectory(

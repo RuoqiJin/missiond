@@ -401,3 +401,66 @@
        "Jarvis chat completions and interaction-envelope gateways MUST persist visible assistant completion text; PTY/provider logs alone are not sufficient mobile conversation history."
        "Legacy CLI sessions without Auth context MUST default to user_id=NULL, tenant_id=NULL, application_id=NULL, channel=cli and remain queryable."]
     :checker "node scripts/check-v3-conversation-session-management.mjs")
+
+  (interaction-ledger
+    :desc "Durable replay ledger for external/client-channel interaction runs. Conversation messages are the human read model; interaction-ledger is the event-level execution trace."
+    :schema "missiond.interaction-ledger.v1"
+
+    (interaction-run-correlation
+      :entry [InteractionEnvelope AuthPermissionContext conversation-session-management mission_context_gather]
+      :core
+        [(step 1 "Resolve or create the scoped conversation using user_id, tenant_id, application_id, channel, and topic_id.")
+         (step 2 "Mint one stable interaction_id for the client request and carry it through intent, plan, BoardTask, worker, artifact, follow, and replay.")
+         (step 3 "Bind conversation_id, grounding_context_id, intent_artifact_id, plan_artifact_id, BoardTask ids, and result artifact hash into runtime_metadata or raw_data.")
+         (step 4 "Do not let confirmation text such as 确认意图 or 确认 plan overwrite topic identity.")]
+      :egress [interaction_run_metadata runtime_metadata topic_binding]
+      :surfaces ["/interactions/v1/messages" "/jarvis/v1/chat/completions" mission_interaction])
+
+    (interaction-event-ledger
+      :entry [SSEEvent SharedArtifact BoardTaskEvent TaskResultArtifact TypedDiagnostic]
+      :core
+        [(step 1 "Persist every user-visible lifecycle event before or alongside streaming it to the channel response sink.")
+         (step 2 "Store first-wave events in conversation_events with event_type prefixed by interaction. and raw_data containing interaction_id, event_kind, phase, artifact ids, task ids, and diagnostics.")
+         (step 3 "Treat PTY and provider screen state as diagnostic evidence only; completion authority is task-result-artifact or terminal typed diagnostic.")
+         (step 4 "Use final only for terminal task result or terminal diagnostic; dispatch_accepted and result_pending are non-terminal.")]
+      :egress [conversation_events interaction_event_stream task_result_artifact]
+      :surfaces [persist_interaction_event insert_conversation_events_batch])
+
+    (interaction-replay-api
+      :entry [interaction_id PermissionContext conversation_events]
+      :core
+        [(step 1 "GET /interactions/v1/:interaction_id/events queries the durable ledger rather than returning a static placeholder.")
+         (step 2 "Replay events in insertion order with schema missiond.interaction-event-stream.v1 and exact event names stripped from interaction.*.")
+         (step 3 "When DB is unavailable, return a typed replay_unavailable diagnostic without fabricating state.")
+         (step 4 "MCP mission_interaction status/follow must converge on the same ledger-backed view as the HTTP replay API.")]
+      :egress [SSEReplay InteractionStatus ConversationAudit]
+      :surfaces ["/interactions/v1/{interaction_id}/events" get_interaction_events mission_interaction])
+
+    (conversation-control-plane
+      :entry [conversation_messages conversation_events shared_artifacts board_task_runtime_metadata task_result_artifact]
+      :core
+        [(step 1 "Merge user/assistant messages, interaction events, context-gather artifacts, intent/plan artifacts, BoardTask metadata, worker conversation ids, and final artifacts by conversation_id and interaction_id.")
+         (step 2 "Default list/get/search to the caller's Auth-derived isolation scope and expose legacy_unscoped rows only as explicitly labeled migration evidence.")
+         (step 3 "Generate compact Lisp context capsules from related conversation/topic history plus SSOT, active KB, project registry, skill evidence, and infra facts.")
+         (step 4 "Expose a replayable audit timeline for mobile/web/debug without forcing the user to manually create a conversation.")]
+      :egress [conversation_replay topic_context_capsule interaction_audit_view]
+      :surfaces [mission_conversation_query mission_context_gather mission_interaction])
+
+    :storage
+      (:first-wave "conversation_events"
+       :event-type-prefix "interaction."
+       :interaction-id-path "raw_data.interaction_id"
+       :future-normalized-tables [interaction_runs interaction_events])
+
+    :events [received authenticated permission_resolved grounding intent_draft plan_draft confirm_required board_task_created worker_dispatched worker_status dispatch_accepted result_pending result_artifact diagnostic final]
+
+    :invariants
+      ["Every Jarvis/Web/iOS/WeChat interaction milestone visible to a client MUST be persisted into interaction-ledger with the same interaction_id."
+       "GET /interactions/v1/{interaction_id}/events MUST replay durable conversation_events rows and MUST NOT return a static placeholder."
+       "Final means terminal task-result-artifact or terminal typed diagnostic; non-terminal dispatch/result_pending events MUST NOT be projected as final."
+       "confirm_required and confirmation progress events MUST be ledgered so clients can resume after network loss."
+       "BoardTask runtime_metadata and interaction raw_data MUST preserve grounding_context_id, intent_artifact_id, plan_artifact_id, worker_conversation_id, and task_result_artifact_hash when available."
+       "Topic labels MUST be derived from the user request/topic, not from conservative confirmation text."
+       "PTY output, provider screen state, and Board notes are evidence/projection only and are never the interaction completion authority."
+       "The interaction replay API and mission_interaction status/follow MUST converge on the same durable ledger."]
+    :checker "node scripts/check-v3-interaction-ledger-isomorphism.mjs --json")

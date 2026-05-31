@@ -2705,6 +2705,43 @@ impl ConversationStore for PgMissionStore {
         Ok(results)
     }
 
+    async fn get_interaction_events(
+        &self,
+        interaction_id: &str,
+        limit: i64,
+    ) -> DbResult<Vec<ConversationEvent>> {
+        let needle = format!(
+            "%{}%",
+            interaction_id.replace('%', "\\%").replace('_', "\\_")
+        );
+        let rows = sqlx::query(
+            "SELECT id, session_id, event_uuid, event_type, content, raw_data, timestamp
+             FROM conversation_events
+             WHERE event_type LIKE 'interaction.%'
+               AND raw_data LIKE $1 ESCAPE '\\'
+             ORDER BY id ASC
+             LIMIT $2",
+        )
+        .bind(needle)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let results: Vec<ConversationEvent> = rows
+            .iter()
+            .map(|row| ConversationEvent {
+                id: row.get("id"),
+                session_id: row.get("session_id"),
+                event_uuid: row.get("event_uuid"),
+                event_type: row.get("event_type"),
+                content: row.get("content"),
+                raw_data: row.get("raw_data"),
+                timestamp: row.get("timestamp"),
+            })
+            .collect();
+        Ok(results)
+    }
+
     async fn is_compact_boundary_event(
         &self,
         session_id: &str,
