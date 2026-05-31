@@ -479,6 +479,7 @@ impl ProviderDriver for CodexProviderDriver {
             usage_probe: false,
             model_catalog: false,
             pure_text_guard: false,
+            control_action: false,
         }
     }
 
