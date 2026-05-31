@@ -29,6 +29,7 @@ use super::types::{
 
 const DEFAULT_AGY_SLOT: &str = "slot-agy-provider-box";
 const AGY_CTRL_D: &str = "\x1b[100;5u";
+const AGY_EXIT_COMMAND: &str = "/exit";
 const MODEL_PICKER_MAX_DOWN: usize = 96;
 const MODEL_CATALOG_MAX_DOWN: usize = 128;
 const OBSERVE_SETTLE_MS: u64 = 220;
@@ -363,13 +364,22 @@ impl AgyProviderDriver {
         slot_id: &str,
     ) -> Option<AgyObservation> {
         self.ensure_composer_ready(result, slot_id).await?;
+        let _ = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::text("/model"),
+                "/model",
+                Some("type AGY /model command".to_string()),
+            )
+            .await;
         let after = self
             .write_step(
                 result,
                 slot_id,
-                PtyStepAction::text("/model + enter"),
-                "/model\r",
-                Some("open AGY model picker".to_string()),
+                PtyStepAction::key("enter"),
+                "\r",
+                Some("execute AGY /model command".to_string()),
             )
             .await;
         let observation = if is_model_picker(&after) {
@@ -716,7 +726,7 @@ impl AgyProviderDriver {
         let send_result = self.pty.send_fire_and_forget(slot_id, prompt).await;
         tokio::time::sleep(Duration::from_millis(OBSERVE_SETTLE_MS)).await;
         let after = self.observe(slot_id).await;
-        let mut action = PtyStepAction::text("<pure text prompt paste + enter>");
+        let mut action = PtyStepAction::text("<pure text prompt paste then enter>");
         action.redacted = true;
         let status = if send_result.is_err() {
             PtyStepVerificationStatus::Failed
@@ -1013,13 +1023,22 @@ impl AgyProviderDriver {
         if self.ensure_composer_ready(result, slot_id).await.is_none() {
             return;
         }
+        let _ = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::text("/usage"),
+                "/usage",
+                Some("type AGY /usage command".to_string()),
+            )
+            .await;
         let after = self
             .write_step(
                 result,
                 slot_id,
-                PtyStepAction::text("/usage + enter"),
-                "/usage\r",
-                Some("open refreshed AGY usage screen".to_string()),
+                PtyStepAction::key("enter"),
+                "\r",
+                Some("execute AGY /usage command".to_string()),
             )
             .await;
         let usage = if usage_screen_value(&after).is_some() {
@@ -1126,7 +1145,7 @@ impl AgyProviderDriver {
             return;
         }
 
-        observation = self
+        let mut observation = self
             .write_step(
                 result,
                 slot_id,
@@ -1152,7 +1171,7 @@ impl AgyProviderDriver {
             return;
         }
 
-        observation = self
+        let observation = self
             .write_step(
                 result,
                 slot_id,
@@ -1171,7 +1190,7 @@ impl AgyProviderDriver {
             return;
         }
 
-        observation = self
+        let mut observation = self
             .write_step(
                 result,
                 slot_id,
@@ -1229,9 +1248,81 @@ impl AgyProviderDriver {
             result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &initial));
             return;
         }
+        if is_exit_confirm_pending(&initial) {
+            self.confirm_ctrl_d_exit_locked(result, slot_id).await;
+            return;
+        }
 
         if self.ensure_composer_ready(result, slot_id).await.is_none() {
             return;
+        }
+
+        let _ = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::text("/exit"),
+                AGY_EXIT_COMMAND,
+                Some("type AGY /exit command".to_string()),
+            )
+            .await;
+        let mut observation = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::key("enter"),
+                "\r",
+                Some("execute AGY /exit command".to_string()),
+            )
+            .await;
+        if !is_shell_prompt_after_exit(&observation) {
+            observation = self
+                .wait_until(slot_id, Duration::from_secs(5), is_shell_prompt_after_exit)
+                .await;
+        }
+        if is_shell_prompt_after_exit(&observation) {
+            result.status = ProviderBoxStatus::Completed;
+            return;
+        }
+
+        if is_exit_confirm_pending(&observation) || is_ready_for_text(&observation) {
+            self.confirm_ctrl_d_exit_locked(result, slot_id).await;
+        } else {
+            mark_control_unverified(
+                result,
+                slot_id,
+                "AGY /exit command did not return to shell prompt",
+                &observation,
+            );
+        }
+    }
+
+    async fn confirm_ctrl_d_exit_locked(&self, result: &mut ProviderBoxResult, slot_id: &str) {
+        let mut observation = self.observe(slot_id).await;
+        if !is_exit_confirm_pending(&observation) {
+            observation = self
+                .write_step(
+                    result,
+                    slot_id,
+                    PtyStepAction::key("ctrl+d"),
+                    AGY_CTRL_D,
+                    Some("request AGY Ctrl+D exit confirmation fallback".to_string()),
+                )
+                .await;
+            if !is_exit_confirm_pending(&observation) {
+                observation = self
+                    .wait_until(slot_id, Duration::from_secs(3), is_exit_confirm_pending)
+                    .await;
+            }
+            if !is_exit_confirm_pending(&observation) {
+                mark_control_unverified(
+                    result,
+                    slot_id,
+                    "AGY /exit failed and Ctrl+D fallback did not show exit confirmation",
+                    &observation,
+                );
+                return;
+            }
         }
 
         let mut observation = self
@@ -1240,31 +1331,7 @@ impl AgyProviderDriver {
                 slot_id,
                 PtyStepAction::key("ctrl+d"),
                 AGY_CTRL_D,
-                Some("request AGY exit confirmation".to_string()),
-            )
-            .await;
-        if !is_exit_confirm_pending(&observation) {
-            observation = self
-                .wait_until(slot_id, Duration::from_secs(3), is_exit_confirm_pending)
-                .await;
-        }
-        if !is_exit_confirm_pending(&observation) {
-            mark_control_unverified(
-                result,
-                slot_id,
-                "AGY first Ctrl+D did not show exit confirmation",
-                &observation,
-            );
-            return;
-        }
-
-        observation = self
-            .write_step(
-                result,
-                slot_id,
-                PtyStepAction::key("ctrl+d"),
-                AGY_CTRL_D,
-                Some("confirm AGY exit".to_string()),
+                Some("confirm AGY Ctrl+D exit fallback".to_string()),
             )
             .await;
         if !is_shell_prompt_after_exit(&observation) {
@@ -1278,7 +1345,7 @@ impl AgyProviderDriver {
             mark_control_unverified(
                 result,
                 slot_id,
-                "AGY second Ctrl+D did not return to shell prompt",
+                "AGY Ctrl+D exit fallback did not return to shell prompt",
                 &observation,
             );
         }
@@ -1313,30 +1380,28 @@ impl AgyProviderDriver {
         }
 
         let submit = Self::request_submit_input(request);
-        let bytes = if submit {
-            format!("{input}\r")
-        } else {
-            input.to_string()
-        };
-        let mut action = PtyStepAction::text(if submit {
-            "<input text + enter>"
-        } else {
-            "<input text>"
-        });
+        let mut action = PtyStepAction::text("<input text>");
         action.redacted = true;
-        let after = self
+        let mut after = self
             .write_step(
                 result,
                 slot_id,
                 action,
-                &bytes,
-                Some(if submit {
-                    "write text into AGY composer and press Enter".to_string()
-                } else {
-                    "write text into AGY composer".to_string()
-                }),
+                input,
+                Some("write text into AGY composer".to_string()),
             )
             .await;
+        if submit {
+            after = self
+                .write_step(
+                    result,
+                    slot_id,
+                    PtyStepAction::key("enter"),
+                    "\r",
+                    Some("press Enter to submit AGY input".to_string()),
+                )
+                .await;
+        }
         let failed = result
             .step_records
             .last()
@@ -2427,7 +2492,12 @@ mod tests {
     }
 
     #[test]
-    fn agy_driver_requires_second_ctrl_d_or_recovery_before_more_input() {
+    fn agy_driver_prefers_exit_slash_command_bytes() {
+        assert_eq!(AGY_EXIT_COMMAND, "/exit");
+    }
+
+    #[test]
+    fn agy_driver_keeps_ctrl_d_confirmation_as_exit_fallback_state() {
         let obs = observation(&[
             "Antigravity CLI 1.0.3",
             "jjrrqqq@gmail.com (Google AI Ultra)",
