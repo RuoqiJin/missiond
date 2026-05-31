@@ -51,7 +51,8 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use missiond_core::{
-    CCTasksWatcher, CCTasksWatcherOptions, GeminiCliWatcher, GeminiCliWatcherOptions,
+    AgyCliWatcher, AgyCliWatcherOptions, CCTasksWatcher, CCTasksWatcherOptions, GeminiCliWatcher,
+    GeminiCliWatcherOptions,
 };
 use missiond_core::{
     InfraConfig, JarvisIntentAuthorConfig, JarvisPlanAuthorConfig, LearnedPermissions,
@@ -651,8 +652,28 @@ async fn main() -> Result<()> {
         );
     }
 
+    // Antigravity (agy) CLI watcher: shares the same broadcast channel as the
+    // CC watcher; ingests brain/<id>/.system_generated/logs/transcript_full.jsonl
+    // into the durable conversation store like every other provider.
+    let mut agy_watcher = AgyCliWatcher::new(AgyCliWatcherOptions {
+        agy_home: None,
+        event_tx: cc.event_sender(),
+        store: Some(Arc::clone(&store)),
+    });
+    if provider_diagnostics_enabled {
+        if let Err(e) = agy_watcher.start().await {
+            warn!(error = %e, "Failed to start AgyCliWatcher (non-fatal)");
+        }
+    } else {
+        info!(
+            env = feature_gates::CONVERSATIONS_ENV,
+            "agy CLI watcher disabled in kernel-core mode"
+        );
+    }
+
     let cc_tasks = Arc::new(Mutex::new(cc));
     let gemini_tasks = Arc::new(Mutex::new(gemini_watcher));
+    let agy_tasks = Arc::new(Mutex::new(agy_watcher));
 
     // Conversation logger: subscribe to watcher events (processed in main select loop)
     // IMPORTANT: subscribe BEFORE run_startup_catchup() — catchup sends to broadcast channel,
@@ -1313,6 +1334,7 @@ async fn main() -> Result<()> {
             let map_task = Arc::clone(&map);
             let cc_tasks_ref = Arc::clone(&state_cc_tasks);
             let gemini_tasks_ref = Arc::clone(&gemini_tasks);
+            let agy_tasks_ref = Arc::clone(&agy_tasks);
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
                 loop {
@@ -1323,7 +1345,14 @@ async fn main() -> Result<()> {
                         guard.drain().collect()
                     };
                     for (path, offset) in entries {
-                        if path.ends_with(".json") {
+                        // agy transcripts also end in .jsonl, so route them by
+                        // their distinctive path before the generic checks.
+                        if path.ends_with("transcript_full.jsonl")
+                            || path.contains("antigravity-cli")
+                        {
+                            let watcher = agy_tasks_ref.lock().await;
+                            watcher.persist_cursor_ack(&path, offset);
+                        } else if path.ends_with(".json") {
                             let watcher = gemini_tasks_ref.lock().await;
                             watcher.persist_cursor_ack(&path, offset);
                         } else {
@@ -2343,6 +2372,7 @@ async fn main() -> Result<()> {
     {
         let catchup_cc = Arc::clone(&state.cc_tasks);
         let catchup_gemini = Arc::clone(&gemini_tasks);
+        let catchup_agy = Arc::clone(&agy_tasks);
         let catchup_provider_diagnostics_enabled = provider_diagnostics_enabled;
         tokio::spawn(async move {
             // Yield to let ConversationLoggerWorker's run_loop reach its first recv()
@@ -2350,6 +2380,7 @@ async fn main() -> Result<()> {
             catchup_cc.lock().await.run_startup_catchup().await;
             if catchup_provider_diagnostics_enabled {
                 catchup_gemini.lock().await.run_startup_catchup().await;
+                catchup_agy.lock().await.run_startup_catchup().await;
             }
         });
     }

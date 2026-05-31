@@ -9,6 +9,7 @@
 //! - WebSocket communication
 //! - Claude Code Tasks monitoring
 
+pub mod agy_cli;
 pub mod ast;
 pub mod cc_tasks;
 pub mod core;
@@ -67,6 +68,9 @@ pub use cc_tasks::{
 
 // Re-export Gemini CLI types
 pub use gemini_cli::{GeminiCliWatcher, GeminiCliWatcherOptions};
+
+// Re-export Antigravity (agy) CLI types
+pub use agy_cli::{AgyCliWatcher, AgyCliWatcherOptions};
 
 // Re-export WebSocket types
 pub use ws::{

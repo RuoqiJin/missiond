@@ -71,11 +71,14 @@ pub(crate) async fn classify(
     let mut is_pty = state.pty_session_uuids.read().await.contains(session_id);
     let mut compaction = CompactionInfo::default();
 
-    // Expectation ticket claim: if this is a new claude_code session, check if a slot
+    // Expectation ticket claim: if this is a new provider session, check if a slot
     // recently spawned in the same project. Late-binding resolves the cross-process race
-    // where Claude Code generates a UUID that MissionD cannot predict.
+    // where the CLI generates a session UUID (Claude Code) or conversationId (Antigravity)
+    // that MissionD cannot predict.
     if !is_pty
-        && (canonical_event_source == "claude_code" || canonical_event_source == "gemini_cli")
+        && (canonical_event_source == "claude_code"
+            || canonical_event_source == "gemini_cli"
+            || canonical_event_source == "agy_cli")
     {
         if let Some(slot_id) = claim_pending_spawn(state, resolved_project, messages).await {
             info!(
