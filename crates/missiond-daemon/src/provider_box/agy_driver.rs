@@ -1938,6 +1938,18 @@ fn slug_model(value: &str) -> String {
         .collect()
 }
 
+fn agy_slot_ids_for_model(model: &str) -> Vec<String> {
+    let slug = slug_model(model);
+    if slug == "claude-opus-46-thinking" {
+        vec![
+            "slot-agy-claude-opus-46-thinking-a".to_string(),
+            "slot-agy-claude-opus-46-thinking-b".to_string(),
+        ]
+    } else {
+        vec![format!("slot-agy-{slug}")]
+    }
+}
+
 fn extract_model_from_agy_line(line: &str) -> Option<String> {
     let regex = Regex::new(
         r"\b((?:Gemini|Claude|GPT(?:-OSS)?|OpenAI|Grok|Llama|Mistral|Qwen|DeepSeek)[A-Za-z0-9 ._/\-+]*(?:\([^)]+\))?)",
@@ -2250,7 +2262,11 @@ fn build_router_export(
     let mut blocked_entries = Vec::new();
     for entry in &catalog.entries {
         let slug = slug_model(&entry.display_name);
-        let slot_id = format!("slot-agy-{slug}");
+        let slot_ids = agy_slot_ids_for_model(&entry.display_name);
+        let slot_id = slot_ids
+            .first()
+            .cloned()
+            .unwrap_or_else(|| format!("slot-agy-{slug}"));
         let route = json!({
             "model_id": format!("agy-{slug}"),
             "primary": {
@@ -2258,11 +2274,24 @@ fn build_router_export(
                 "provider_model_id": base_url.clone().unwrap_or_default(),
                 "billing_id": format!("missiond/agy/{slug}"),
                 "timeouts_ms": 300000,
+                "capabilities": {
+                    "text": true,
+                    "tools": false,
+                    "vision": false,
+                    "files": false,
+                    "mcp": false,
+                    "shell": false
+                },
                 "extra": {
                     "provider": "agy_cli",
                     "model": entry.display_name,
                     "slot_id": slot_id,
-                    "pure_text": true
+                    "slot_ids": slot_ids,
+                    "pure_text": true,
+                    "allow_model_switch": false,
+                    "requires_current_model_verification": true,
+                    "completion_endpoint": "/provider-box/v1/text-only/completions",
+                    "slot_completion_endpoint": format!("/provider-box/v1/slots/{slot_id}/completions")
                 }
             }
         });
@@ -2591,5 +2620,44 @@ mod tests {
 
         assert!(export.routeable_entries.is_empty());
         assert_eq!(export.blocked_entries.len(), 1);
+    }
+
+    #[test]
+    fn router_export_uses_fixed_text_only_replica_slots_for_opus() {
+        let mut request = ProviderInteractionRequest::new(
+            super::super::types::BoxCommand::ModelCatalogExport,
+            CliEngine::Agy,
+        );
+        request.router_export_policy = Some(json!({
+            "provider_box_base_url": "https://missiond.example/provider-box"
+        }));
+        let catalog = ProviderModelCatalog {
+            schema: "missiond.provider-model-catalog.v1".to_string(),
+            catalog_id: "catalog-1".to_string(),
+            provider: Some("agy_cli".to_string()),
+            engine: CliEngine::Agy,
+            account_ref: None,
+            discovered_at: "2026-05-31T00:00:00Z".to_string(),
+            source: Some("agy:/model".to_string()),
+            entries: vec![ProviderModelCatalogEntry {
+                provider_model_id: "agy:claude-opus-46-thinking".to_string(),
+                display_name: "Claude Opus 4.6 (Thinking)".to_string(),
+                family: Some("Claude".to_string()),
+                routeable_default: true,
+                switch_capability: "interactive_model_picker".to_string(),
+                usage_probe_capability: "interactive_usage_screen".to_string(),
+                confidence: 0.9,
+            }],
+            diagnostics: Vec::new(),
+        };
+
+        let export = build_router_export(&request, &catalog);
+
+        assert_eq!(export.routeable_entries.len(), 1);
+        let extra = &export.routeable_entries[0]["primary"]["extra"];
+        assert_eq!(extra["slot_id"], "slot-agy-claude-opus-46-thinking-a");
+        assert_eq!(extra["slot_ids"].as_array().expect("slot ids").len(), 2);
+        assert_eq!(extra["allow_model_switch"], false);
+        assert_eq!(extra["requires_current_model_verification"], true);
     }
 }

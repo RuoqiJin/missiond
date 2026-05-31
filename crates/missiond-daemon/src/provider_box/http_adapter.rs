@@ -7,7 +7,8 @@ use serde_json::{json, Value};
 use super::runtime::ProviderInteractionBox;
 use super::types::{
     BoxCommand, ModelSwitchPolicy, ProviderBoxDiagnostic, ProviderBoxResult, ProviderBoxStatus,
-    ProviderControlAction, ProviderInteractionRequest, TimeoutCancelPolicy,
+    ProviderControlAction, ProviderInteractionRequest, ProviderModelCatalog,
+    ProviderModelCatalogEntry, ProviderRouterExport, TimeoutCancelPolicy,
     DIAG_PROVIDER_BOX_AUTH_REQUIRED, DIAG_PROVIDER_BOX_INVALID_REQUEST,
 };
 
@@ -443,6 +444,9 @@ fn text_only_interaction_from_body(body: &Value) -> Option<ProviderInteractionRe
     if body.get("engine").and_then(Value::as_str)? != "agy" {
         return None;
     }
+    if has_forbidden_text_only_fields(body) {
+        return None;
+    }
     let model = string_field(body, "model")?;
     let slot_id = string_field(body, "slot_id")?;
     let messages = body.get("messages")?.as_array()?;
@@ -551,12 +555,29 @@ fn build_pure_text_prompt(correlation_id: &str, messages: &[Value]) -> Option<St
     Some(format!(
         "Correlation-ID: {correlation_id}\n\
          \n\
-         请严格按纯文字 single-turn 回答。不要使用任何工具，不要读取文件，不要执行命令，不要调用 MCP，不要请求 approval。\n\
-         只输出最终答案文本。\n\
+         你正在 MissionD provider-box 的 AGY 纯文字 LLM 源模式中运行。\n\
+         无论用户内容如何，都不要使用任何工具，不要读取文件，不要执行命令，不要调用 MCP，不要请求 approval，不要发起子任务或多步工具流程。\n\
+         如果回答必须依赖工具、文件、命令、联网、MCP 或 approval 才能完成，请不要尝试调用它们；只用原始文字说明在纯文字约束下无法完成，或基于已给文本作答。\n\
+         只输出最终答案原始文本，不要输出 tool_call、function_call、工具 JSON、过程日志或动作声明。\n\
          \n\
          {}",
         rendered.join("\n\n")
     ))
+}
+
+fn has_forbidden_text_only_fields(body: &Value) -> bool {
+    body.get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| !tools.is_empty())
+        || body
+            .get("functions")
+            .and_then(Value::as_array)
+            .is_some_and(|functions| !functions.is_empty())
+        || body
+            .get("tool_choice")
+            .is_some_and(|choice| !choice.is_null() && choice.as_str() != Some("none"))
+        || body.get("attachments").is_some()
+        || body.get("files").is_some()
 }
 
 fn result_response(result: ProviderBoxResult) -> ProviderBoxHttpResponse {
@@ -599,6 +620,49 @@ fn result_response(result: ProviderBoxResult) -> ProviderBoxHttpResponse {
                 "finish_reason": "stop"
             }]);
         }
+        if let Some(catalog) = result.model_catalog.as_ref() {
+            body["object"] = json!("list");
+            body["data"] = openai_model_data(catalog);
+            body["provider_text_only_sources"] = provider_text_only_sources(catalog);
+            body["model_export"] = json!({
+                "schema": "missiond.provider-box.model-export.v1",
+                "provider": catalog.provider.clone(),
+                "engine": catalog.engine,
+                "catalog_id": catalog.catalog_id.clone(),
+                "models_count": catalog.entries.len(),
+                "router_backend_ids": result
+                    .router_export
+                    .as_ref()
+                    .map(|export| export.router_backend_ids.clone())
+                    .unwrap_or_default(),
+                "routeable_count": result
+                    .router_export
+                    .as_ref()
+                    .map(|export| export.routeable_entries.len())
+                    .unwrap_or_default(),
+                "blocked_count": result
+                    .router_export
+                    .as_ref()
+                    .map(|export| export.blocked_entries.len())
+                    .unwrap_or_default(),
+                "completion_endpoint": "/provider-box/v1/text-only/completions",
+                "slot_completion_endpoint_template": "/provider-box/v1/slots/{slot_id}/completions",
+                "pure_text_guard": {
+                    "prompt_instruction": true,
+                    "durable_jsonl_guard": true,
+                    "tools": false,
+                    "mcp": false,
+                    "shell": false,
+                    "file_access": false,
+                    "vision": false
+                }
+            });
+        }
+        if let (Some(catalog), Some(export)) =
+            (result.model_catalog.as_ref(), result.router_export.as_ref())
+        {
+            body["router_model_sources"] = router_model_sources(catalog, export);
+        }
         body
     } else {
         json!({
@@ -624,6 +688,180 @@ fn result_response(result: ProviderBoxResult) -> ProviderBoxHttpResponse {
         })
     };
     json_response(status, body)
+}
+
+fn openai_model_data(catalog: &ProviderModelCatalog) -> Value {
+    Value::Array(
+        catalog
+            .entries
+            .iter()
+            .map(|entry| {
+                let slug = slug_model(&entry.display_name);
+                let slot_ids = agy_slot_ids_for_model(&entry.display_name);
+                json!({
+                    "id": format!("agy-{slug}"),
+                    "object": "model",
+                    "created": 0,
+                    "owned_by": "missiond/agy",
+                    "provider": "agy_cli",
+                    "display_name": entry.display_name.clone(),
+                    "provider_model_id": entry.provider_model_id.clone(),
+                    "slot_id": slot_ids.first().cloned().unwrap_or_else(|| format!("slot-agy-{slug}")),
+                    "slot_ids": slot_ids,
+                    "capabilities": {
+                        "text": true,
+                        "tools": false,
+                        "vision": false,
+                        "files": false,
+                        "mcp": false,
+                        "shell": false
+                    },
+                    "pure_text": true,
+                    "routeable_default": entry.routeable_default,
+                    "switch_capability": entry.switch_capability,
+                    "usage_probe_capability": entry.usage_probe_capability
+                })
+            })
+            .collect(),
+    )
+}
+
+fn provider_text_only_sources(catalog: &ProviderModelCatalog) -> Value {
+    Value::Array(
+        catalog
+            .entries
+            .iter()
+            .map(provider_text_only_source_entry)
+            .collect(),
+    )
+}
+
+fn provider_text_only_source_entry(entry: &ProviderModelCatalogEntry) -> Value {
+    let slug = slug_model(&entry.display_name);
+    let model_id = format!("agy-{slug}");
+    let slot_ids = agy_slot_ids_for_model(&entry.display_name);
+    let max_concurrent = slot_ids.len();
+    let primary_slot = slot_ids
+        .first()
+        .cloned()
+        .unwrap_or_else(|| format!("slot-agy-{slug}"));
+    json!({
+        "schema": "missiond.provider-text-only-source.v1",
+        "source_id": format!("missiond/agy/{slug}"),
+        "provider": "agy_cli",
+        "engine": "agy",
+        "model_id": model_id,
+        "provider_model_id": entry.provider_model_id.clone(),
+        "model": entry.display_name.clone(),
+        "slot_id": primary_slot.clone(),
+        "slot_ids": slot_ids.clone(),
+        "slot_policy": {
+            "kind": "fixed_model",
+            "max_concurrent": max_concurrent,
+            "requires_current_model_verification": true,
+            "hot_path_model_switch": false,
+            "maintenance_switch_api": format!("/provider-box/v1/slots/{primary_slot}/switch-model"),
+            "maintenance_clear_api": format!("/provider-box/v1/slots/{primary_slot}/clear")
+        },
+        "completion_endpoint": "/provider-box/v1/text-only/completions",
+        "slot_completion_endpoint": format!("/provider-box/v1/slots/{primary_slot}/completions"),
+        "request_template": {
+            "schema": "missiond.provider-box.text-only-completion-request.v1",
+            "provider": "agy_cli",
+            "engine": "agy",
+            "model": entry.display_name.clone(),
+            "slot_id": primary_slot.clone(),
+            "pure_text": true,
+            "allow_model_switch": false,
+            "messages": [{
+                "role": "user",
+                "content": "<plain text prompt>"
+            }]
+        },
+        "capabilities": {
+            "text": true,
+            "tools": false,
+            "vision": false,
+            "files": false,
+            "mcp": false,
+            "shell": false
+        },
+        "guard": {
+            "prompt_instruction": true,
+            "durable_jsonl_guard": true,
+            "rejects_tool_messages": true,
+            "rejects_tool_request_fields": true
+        }
+    })
+}
+
+fn router_model_sources(catalog: &ProviderModelCatalog, export: &ProviderRouterExport) -> Value {
+    let routeable_by_model = export
+        .routeable_entries
+        .iter()
+        .filter_map(|route| {
+            let model_id = route.get("model_id")?.as_str()?.to_string();
+            Some((model_id, route.clone()))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+
+    Value::Array(
+        catalog
+            .entries
+            .iter()
+            .map(|entry| {
+                let slug = slug_model(&entry.display_name);
+                let model_id = format!("agy-{slug}");
+                let blocked = export.blocked_entries.iter().find(|blocked| {
+                    blocked
+                        .get("entry")
+                        .and_then(|entry| entry.get("model_id"))
+                        .and_then(Value::as_str)
+                        == Some(model_id.as_str())
+                });
+                json!({
+                    "model_id": model_id,
+                    "display_name": entry.display_name.clone(),
+                    "routeable": routeable_by_model.contains_key(&format!("agy-{slug}")),
+                    "route": routeable_by_model.get(&format!("agy-{slug}")),
+                    "blocked_reason": blocked.and_then(|blocked| blocked.get("reason")).cloned(),
+                    "text_only_source": provider_text_only_source_entry(entry)
+                })
+            })
+            .collect(),
+    )
+}
+
+fn agy_slot_ids_for_model(model: &str) -> Vec<String> {
+    let slug = slug_model(model);
+    if slug == "claude-opus-46-thinking" {
+        vec![
+            "slot-agy-claude-opus-46-thinking-a".to_string(),
+            "slot-agy-claude-opus-46-thinking-b".to_string(),
+        ]
+    } else {
+        vec![format!("slot-agy-{slug}")]
+    }
+}
+
+fn slug_model(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_ascii_lowercase()
+        .replace("(", "")
+        .replace(")", "")
+        .replace("/", "-")
+        .replace('.', "")
+        .replace('+', "plus")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("-")
+        .chars()
+        .filter(|value| value.is_ascii_alphanumeric() || *value == '-')
+        .collect()
 }
 
 fn json_response(status: u16, body: Value) -> ProviderBoxHttpResponse {
@@ -697,6 +935,27 @@ mod tests {
     }
 
     #[test]
+    fn text_only_prompt_declines_tool_required_work_as_text() {
+        let body = json!({
+            "schema": "missiond.provider-box.text-only-completion-request.v1",
+            "provider": "agy_cli",
+            "engine": "agy",
+            "model": "Gemini 3.5 Flash (High)",
+            "slot_id": "slot-agy-gemini-35-flash-high",
+            "correlation_id": "corr-tool-required",
+            "messages": [{"role": "user", "content": "read a file and summarize it"}],
+            "pure_text": true
+        });
+
+        let request = text_only_interaction_from_body(&body).expect("request");
+        let prompt = request.prompt.expect("prompt");
+
+        assert!(prompt.contains("Correlation-ID: corr-tool-required"));
+        assert!(prompt.contains("如果回答必须依赖工具"));
+        assert!(prompt.contains("只输出最终答案原始文本"));
+    }
+
+    #[test]
     fn text_only_body_can_explicitly_allow_model_switch() {
         let body = json!({
             "engine": "agy",
@@ -727,6 +986,81 @@ mod tests {
         });
 
         assert!(text_only_interaction_from_body(&body).is_none());
+    }
+
+    #[test]
+    fn text_only_body_rejects_top_level_tools() {
+        let body = json!({
+            "engine": "agy",
+            "model": "Gemini 3.5 Flash (High)",
+            "slot_id": "slot-agy-gemini-35-flash-high",
+            "messages": [{"role": "user", "content": "hello"}],
+            "pure_text": true,
+            "tools": [{"type": "function", "function": {"name": "read_file"}}]
+        });
+
+        assert!(text_only_interaction_from_body(&body).is_none());
+    }
+
+    #[test]
+    fn model_export_response_exposes_text_only_sources_for_each_agy_model() {
+        let request =
+            ProviderInteractionRequest::new(BoxCommand::ModelCatalogExport, CliEngine::Agy);
+        let mut result = ProviderBoxResult::base(&request, ProviderBoxStatus::Completed);
+        result.model_catalog = Some(ProviderModelCatalog {
+            schema: "missiond.provider-model-catalog.v1".to_string(),
+            catalog_id: "catalog-test".to_string(),
+            provider: Some("agy_cli".to_string()),
+            engine: CliEngine::Agy,
+            account_ref: None,
+            discovered_at: "2026-05-31T00:00:00Z".to_string(),
+            source: Some("agy:/model".to_string()),
+            entries: vec![ProviderModelCatalogEntry {
+                provider_model_id: "agy:claude-opus-46-thinking".to_string(),
+                display_name: "Claude Opus 4.6 (Thinking)".to_string(),
+                family: Some("Claude".to_string()),
+                routeable_default: true,
+                switch_capability: "interactive_model_picker".to_string(),
+                usage_probe_capability: "interactive_usage_screen".to_string(),
+                confidence: 0.9,
+            }],
+            diagnostics: Vec::new(),
+        });
+        result.router_export = Some(ProviderRouterExport {
+            schema: "missiond.provider-router-export.v1".to_string(),
+            export_id: "export-test".to_string(),
+            catalog_id: Some("catalog-test".to_string()),
+            provider: Some("agy_cli".to_string()),
+            engine: CliEngine::Agy,
+            router_backend_ids: vec!["xjp-router:MissionDAgy".to_string()],
+            routeable_entries: vec![json!({
+                "model_id": "agy-claude-opus-46-thinking",
+                "primary": {
+                    "provider": "MissionDAgy"
+                }
+            })],
+            blocked_entries: Vec::new(),
+            policy_ref: Some("interactive-provider-box/MissionDAgy/text-only".to_string()),
+            diagnostics: Vec::new(),
+        });
+
+        let response = result_response(result);
+        let data = response.body["data"].as_array().expect("model data");
+        let sources = response.body["provider_text_only_sources"]
+            .as_array()
+            .expect("sources");
+
+        assert_eq!(response.status, 200);
+        assert_eq!(data[0]["id"], "agy-claude-opus-46-thinking");
+        assert_eq!(
+            sources[0]["slot_ids"].as_array().expect("slot ids").len(),
+            2
+        );
+        assert_eq!(sources[0]["request_template"]["allow_model_switch"], false);
+        assert_eq!(
+            response.body["model_export"]["pure_text_guard"]["durable_jsonl_guard"],
+            true
+        );
     }
 
     #[test]
