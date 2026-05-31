@@ -35,6 +35,24 @@ const MODEL_CATALOG_MAX_DOWN: usize = 128;
 const OBSERVE_SETTLE_MS: u64 = 220;
 const AGY_STARTUP_SIGN_IN_WAIT_SECS: u64 = 10;
 const AGY_STARTUP_READY_WAIT_SECS: u64 = 30;
+const AGY_MANUAL_TEXT_LIMIT: usize = 4096;
+const AGY_MANUAL_KEY_NAMES: &[&str] = &[
+    "enter",
+    "escape",
+    "up",
+    "down",
+    "left",
+    "right",
+    "tab",
+    "backspace",
+    "delete",
+    "ctrl+c",
+    "ctrl+d",
+    "pageup",
+    "pagedown",
+    "home",
+    "end",
+];
 
 #[derive(Clone)]
 pub(crate) struct AgyProviderDriver {
@@ -102,6 +120,15 @@ enum AgyTrustSelection {
     Unknown,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgyManualPtyStep {
+    action_type: String,
+    key: Option<String>,
+    text: Option<String>,
+    expected_change: Option<String>,
+    redacted: bool,
+}
+
 impl AgyProviderDriver {
     pub(crate) fn new(pty: Arc<PTYManager>) -> Self {
         Self {
@@ -152,6 +179,134 @@ impl AgyProviderDriver {
                     .and_then(Value::as_bool)
             })
             .unwrap_or(false)
+    }
+
+    fn request_manual_pty_step(
+        request: &ProviderInteractionRequest,
+    ) -> Result<AgyManualPtyStep, ProviderBoxDiagnostic> {
+        let step = request
+            .desired_worker
+            .as_ref()
+            .and_then(|worker| worker.get("pty_step").or(Some(worker)))
+            .ok_or_else(|| {
+                ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                    "AGY PTY step requires desired_worker.pty_step",
+                    json!({
+                        "slot_id": request.slot_id,
+                        "command": request.command,
+                    }),
+                )
+            })?;
+        let action_type = step
+            .get("action_type")
+            .or_else(|| step.get("type"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .or_else(|| {
+                if step.get("key").is_some() {
+                    Some("key".to_string())
+                } else if step.get("text").is_some() {
+                    Some("text".to_string())
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| {
+                ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                    "AGY PTY step requires action_type=key or action_type=text",
+                    json!({
+                        "slot_id": request.slot_id,
+                        "allowed_action_types": ["key", "text"],
+                    }),
+                )
+            })?;
+        let redacted = step
+            .get("redacted")
+            .and_then(Value::as_bool)
+            .unwrap_or(action_type == "text" || action_type == "paste");
+        let expected_change = step
+            .get("expected_change")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+
+        match action_type.as_str() {
+            "key" => {
+                let key = step
+                    .get("key")
+                    .or_else(|| step.get("human_input"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        ProviderBoxDiagnostic::error(
+                            DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                            "AGY key PTY step requires a key name",
+                            json!({
+                                "slot_id": request.slot_id,
+                                "allowed_keys": AGY_MANUAL_KEY_NAMES,
+                            }),
+                        )
+                    })?;
+                if agy_manual_key_bytes(&key).is_none() {
+                    return Err(ProviderBoxDiagnostic::error(
+                        DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                        "AGY key PTY step uses an unsupported key",
+                        json!({
+                            "slot_id": request.slot_id,
+                            "key": key,
+                            "allowed_keys": AGY_MANUAL_KEY_NAMES,
+                        }),
+                    ));
+                }
+                Ok(AgyManualPtyStep {
+                    action_type,
+                    key: Some(key),
+                    text: None,
+                    expected_change,
+                    redacted: false,
+                })
+            }
+            "text" | "paste" => {
+                let text = step
+                    .get("text")
+                    .or_else(|| step.get("human_input"))
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        ProviderBoxDiagnostic::error(
+                            DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                            "AGY text PTY step requires text",
+                            json!({
+                                "slot_id": request.slot_id,
+                            }),
+                        )
+                    })?;
+                validate_manual_text_step(request.slot_id.as_deref(), &text)?;
+                Ok(AgyManualPtyStep {
+                    action_type: "text".to_string(),
+                    key: None,
+                    text: Some(text),
+                    expected_change,
+                    redacted,
+                })
+            }
+            _ => Err(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                "AGY PTY step action_type is unsupported",
+                json!({
+                    "slot_id": request.slot_id,
+                    "action_type": action_type,
+                    "allowed_action_types": ["key", "text"],
+                }),
+            )),
+        }
     }
 
     fn slot_for_request(request: &ProviderInteractionRequest, slot_id: &str) -> PTYSlot {
@@ -1813,6 +1968,7 @@ impl ProviderDriver for AgyProviderDriver {
             model_catalog: true,
             pure_text_guard: true,
             control_action: true,
+            pty_step: true,
             status: true,
         }
     }
@@ -1861,6 +2017,124 @@ impl ProviderDriver for AgyProviderDriver {
         )
         .await;
         result.status = ProviderBoxStatus::Completed;
+        result
+    }
+
+    async fn pty_step(&self, request: &ProviderInteractionRequest) -> ProviderBoxResult {
+        let mut result = ProviderBoxResult::base(request, ProviderBoxStatus::Unknown);
+        let step = match Self::request_manual_pty_step(request) {
+            Ok(step) => step,
+            Err(diagnostic) => {
+                result.status = ProviderBoxStatus::Failed;
+                result.add_diagnostic(diagnostic);
+                return result;
+            }
+        };
+
+        let slot_id = if Self::request_spawn_if_missing(request) {
+            let Some(slot_id) = self.ensure_slot(request, &mut result).await else {
+                return result;
+            };
+            slot_id
+        } else {
+            let slot_id = Self::request_slot_id(request);
+            result.slot_id = Some(slot_id.clone());
+            let Some(status) = self.pty.get_status(&slot_id).await else {
+                result.status = ProviderBoxStatus::Failed;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                    "Cannot send a PTY step to an unavailable AGY slot",
+                    json!({
+                        "slot_id": slot_id,
+                        "spawn_if_missing": false,
+                    }),
+                ));
+                return result;
+            };
+            if status.engine != CliEngine::Agy {
+                result.status = ProviderBoxStatus::Failed;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                    "Requested slot is not an AGY slot",
+                    json!({
+                        "slot_id": slot_id,
+                        "engine": status.engine.to_string(),
+                    }),
+                ));
+                return result;
+            }
+            if matches!(status.state, SessionState::Exited | SessionState::Error) {
+                let observation = self.observe(&slot_id).await;
+                result.slot_status = Some(slot_status_value(&slot_id, Some(&status), &observation));
+                result.status = ProviderBoxStatus::Failed;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                    "Cannot send a PTY step to an exited or errored AGY slot",
+                    json!({
+                        "slot_id": slot_id,
+                        "session_state": status.state,
+                    }),
+                ));
+                return result;
+            }
+            slot_id
+        };
+        result.slot_id = Some(slot_id.clone());
+
+        let (action, bytes) = if step.action_type == "key" {
+            let key = step.key.as_deref().unwrap_or_default();
+            let Some((canonical, bytes)) = agy_manual_key_bytes(key) else {
+                result.status = ProviderBoxStatus::Failed;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                    "AGY key PTY step uses an unsupported key",
+                    json!({
+                        "slot_id": slot_id,
+                        "key": key,
+                        "allowed_keys": AGY_MANUAL_KEY_NAMES,
+                    }),
+                ));
+                return result;
+            };
+            (PtyStepAction::key(canonical), bytes.to_string())
+        } else {
+            let text = step.text.as_deref().unwrap_or_default();
+            if let Err(diagnostic) = validate_manual_text_step(Some(&slot_id), text) {
+                result.status = ProviderBoxStatus::Failed;
+                result.add_diagnostic(diagnostic);
+                return result;
+            }
+            let mut action = if step.redacted {
+                PtyStepAction::text("<manual text>")
+            } else {
+                PtyStepAction::text(text)
+            };
+            action.redacted = step.redacted;
+            (action, text.to_string())
+        };
+
+        let lock = self.slot_lock(&slot_id).await;
+        let _guard = lock.lock().await;
+        let after = self
+            .write_step(
+                &mut result,
+                &slot_id,
+                action,
+                &bytes,
+                step.expected_change.clone(),
+            )
+            .await;
+        let status = self.pty.get_status(&slot_id).await;
+        result.slot_status = Some(slot_status_value(&slot_id, status.as_ref(), &after));
+        let failed = result
+            .step_records
+            .last()
+            .is_some_and(|step| step.verification_status == PtyStepVerificationStatus::Failed);
+        result.status = if failed {
+            ProviderBoxStatus::Failed
+        } else {
+            ProviderBoxStatus::Completed
+        };
         result
     }
 
@@ -2622,6 +2896,61 @@ fn usage_screen_value(observation: &AgyObservation) -> Option<Value> {
         .and_then(|usage| serde_json::to_value(usage).ok())
 }
 
+fn agy_manual_key_bytes(key: &str) -> Option<(&'static str, &'static str)> {
+    let normalized = key
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['_', '-'], "")
+        .replace(['+', '/'], "")
+        .replace("control", "ctrl")
+        .replace(' ', "");
+    match normalized.as_str() {
+        "enter" | "return" => Some(("enter", "\r")),
+        "esc" | "escape" => Some(("escape", "\x1b")),
+        "up" | "arrowup" => Some(("up", "\x1b[A")),
+        "down" | "arrowdown" => Some(("down", "\x1b[B")),
+        "right" | "arrowright" => Some(("right", "\x1b[C")),
+        "left" | "arrowleft" => Some(("left", "\x1b[D")),
+        "tab" => Some(("tab", "\t")),
+        "backspace" => Some(("backspace", "\x7f")),
+        "delete" | "del" => Some(("delete", "\x1b[3~")),
+        "ctrlc" => Some(("ctrl+c", "\x03")),
+        "ctrld" => Some(("ctrl+d", AGY_CTRL_D)),
+        "pageup" => Some(("pageup", "\x1b[5~")),
+        "pagedown" => Some(("pagedown", "\x1b[6~")),
+        "home" => Some(("home", "\x1b[H")),
+        "end" => Some(("end", "\x1b[F")),
+        _ => None,
+    }
+}
+
+fn validate_manual_text_step(
+    slot_id: Option<&str>,
+    text: &str,
+) -> Result<(), ProviderBoxDiagnostic> {
+    if text.chars().count() > AGY_MANUAL_TEXT_LIMIT {
+        return Err(ProviderBoxDiagnostic::error(
+            DIAG_PROVIDER_BOX_INVALID_REQUEST,
+            "AGY text PTY step exceeds the maximum length",
+            json!({
+                "slot_id": slot_id,
+                "max_chars": AGY_MANUAL_TEXT_LIMIT,
+            }),
+        ));
+    }
+    if text.contains('\n') || text.contains('\r') {
+        return Err(ProviderBoxDiagnostic::error(
+            DIAG_PROVIDER_BOX_INVALID_REQUEST,
+            "AGY text PTY step must not include Enter; send text and Enter as separate steps",
+            json!({
+                "slot_id": slot_id,
+                "rule": "text_and_enter_are_separate_observe_act_observe_steps",
+            }),
+        ));
+    }
+    Ok(())
+}
+
 fn extract_correlated_turn(
     session: &AgySession,
     correlation_id: &str,
@@ -2991,6 +3320,24 @@ mod tests {
     #[test]
     fn agy_driver_prefers_exit_slash_command_bytes() {
         assert_eq!(AGY_EXIT_COMMAND, "/exit");
+    }
+
+    #[test]
+    fn agy_manual_key_bytes_are_allowlisted() {
+        assert_eq!(agy_manual_key_bytes("enter"), Some(("enter", "\r")));
+        assert_eq!(agy_manual_key_bytes("esc"), Some(("escape", "\x1b")));
+        assert_eq!(agy_manual_key_bytes("down"), Some(("down", "\x1b[B")));
+        assert_eq!(agy_manual_key_bytes("ctrl+d"), Some(("ctrl+d", AGY_CTRL_D)));
+        assert!(agy_manual_key_bytes("f13").is_none());
+    }
+
+    #[test]
+    fn agy_manual_text_step_rejects_embedded_enter() {
+        let err = validate_manual_text_step(Some("slot-agy-test"), "/exit\r")
+            .expect_err("enter must be separate");
+
+        assert_eq!(err.code, DIAG_PROVIDER_BOX_INVALID_REQUEST);
+        assert!(err.message.contains("separate steps"));
     }
 
     #[test]

@@ -490,6 +490,7 @@ impl ProviderDriver for CodexProviderDriver {
             model_catalog: false,
             pure_text_guard: false,
             control_action: false,
+            pty_step: false,
             status: false,
         }
     }

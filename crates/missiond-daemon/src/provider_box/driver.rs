@@ -6,8 +6,8 @@ use super::types::{
     BoxCommand, ModelSwitchResult, ProviderBoxResult, ProviderBoxStatus,
     ProviderInteractionRequest, ProviderModelCatalog, ProviderUsageSnapshot,
     DIAG_AGY_MODEL_CATALOG_UNSUPPORTED, DIAG_MODEL_SWITCH_UNSUPPORTED,
-    DIAG_PROVIDER_CONTROL_ACTION_UNSUPPORTED, DIAG_PURE_TEXT_GUARD_UNSUPPORTED,
-    DIAG_SUBMIT_TURN_UNSUPPORTED,
+    DIAG_PROVIDER_CONTROL_ACTION_UNSUPPORTED, DIAG_PROVIDER_PTY_STEP_UNSUPPORTED,
+    DIAG_PURE_TEXT_GUARD_UNSUPPORTED, DIAG_SUBMIT_TURN_UNSUPPORTED,
 };
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -19,6 +19,7 @@ pub(crate) struct ProviderDriverCapabilities {
     pub(crate) model_catalog: bool,
     pub(crate) pure_text_guard: bool,
     pub(crate) control_action: bool,
+    pub(crate) pty_step: bool,
     pub(crate) status: bool,
 }
 
@@ -89,6 +90,14 @@ pub(crate) trait ProviderDriver: Send + Sync {
         )
     }
 
+    async fn pty_step(&self, request: &ProviderInteractionRequest) -> ProviderBoxResult {
+        ProviderBoxResult::unsupported(
+            request,
+            DIAG_PROVIDER_PTY_STEP_UNSUPPORTED,
+            "Provider driver has not been taught guarded PTY single-step control yet",
+        )
+    }
+
     async fn status(&self, request: &ProviderInteractionRequest) -> ProviderBoxResult {
         ProviderBoxResult::base(request, ProviderBoxStatus::Unknown)
     }
@@ -120,6 +129,7 @@ pub(crate) fn command_requires_driver(command: BoxCommand) -> bool {
                 | BoxCommand::UsageProbe
                 | BoxCommand::ModelCatalogExport
                 | BoxCommand::ControlAction
+                | BoxCommand::PtyStep
                 | BoxCommand::Status
         )
 }

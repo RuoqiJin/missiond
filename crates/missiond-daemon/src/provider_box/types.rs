@@ -21,6 +21,7 @@ pub(crate) const DIAG_PROVIDER_CONTROL_ACTION_UNSUPPORTED: &str =
     "PROVIDER_CONTROL_ACTION_UNSUPPORTED";
 pub(crate) const DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED: &str =
     "PROVIDER_CONTROL_ACTION_UNVERIFIED";
+pub(crate) const DIAG_PROVIDER_PTY_STEP_UNSUPPORTED: &str = "PROVIDER_PTY_STEP_UNSUPPORTED";
 pub(crate) const DIAG_PROVIDER_STATUS_UNAVAILABLE: &str = "PROVIDER_STATUS_UNAVAILABLE";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +37,7 @@ pub(crate) enum BoxCommand {
     RunnerOneShot,
     Vision,
     ControlAction,
+    PtyStep,
     Status,
 }
 

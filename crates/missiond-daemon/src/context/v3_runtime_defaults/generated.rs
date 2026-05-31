@@ -4,7 +4,7 @@
 // Do not edit by hand.
 
 pub const SCHEMA_VERSION: &str = "missiond.compiled-runtime-config.v1";
-pub const SOURCE_HASH: &str = "dba194fdb7aa364289e62fe7b431cb67";
+pub const SOURCE_HASH: &str = "a88412bea9e12102cb4ce2a1d5162de9";
 pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
   "blueprint": ".missiond/v3/missiond-blueprint.lisp",
   "source_units": [
@@ -27,14 +27,14 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
       "kind": "multi-section-shard",
       "included_by": ".missiond/v3/shards/index.lisp",
       "include_line": 7,
-      "source_hash": "97158eb5fd5c8fa885e42b6e83d36cc2"
+      "source_hash": "64422e0efb43dafec825b50ce864a152"
     },
     {
       "file": ".missiond/v3/shards/workstation-runtime.lisp",
       "kind": "multi-section-shard",
       "included_by": ".missiond/v3/shards/index.lisp",
       "include_line": 14,
-      "source_hash": "7dfb82ee2f162c221933f8522151242e"
+      "source_hash": "3df11c03739431f51f42b09cab1992c1"
     },
     {
       "file": ".missiond/v3/shards/control-plane-runtime.lisp",
@@ -186,14 +186,14 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
     },
     {
       "id": "control-plane-runtime",
-      "source_hash": "8d33d1e9369ff0356dc6e89aaef7d48e",
+      "source_hash": "7357603c7cfd4ff3e59998479db3da4e",
       "source_units": [
         {
           "file": ".missiond/v3/shards/request-runtime.lisp",
           "kind": "multi-section-shard",
           "included_by": ".missiond/v3/shards/index.lisp",
           "include_line": 7,
-          "source_hash": "97158eb5fd5c8fa885e42b6e83d36cc2"
+          "source_hash": "64422e0efb43dafec825b50ce864a152"
         },
         {
           "file": ".missiond/v3/shards/control-plane-runtime.lisp",
@@ -206,14 +206,14 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
     },
     {
       "id": "workstation-runtime",
-      "source_hash": "795ba124a60c0a132cf48f6aaee1ba71",
+      "source_hash": "6cec2d5a809429b852358376c1cff525",
       "source_units": [
         {
           "file": ".missiond/v3/shards/workstation-runtime.lisp",
           "kind": "multi-section-shard",
           "included_by": ".missiond/v3/shards/index.lisp",
           "include_line": 14,
-          "source_hash": "7dfb82ee2f162c221933f8522151242e"
+          "source_hash": "3df11c03739431f51f42b09cab1992c1"
         }
       ]
     },
@@ -407,7 +407,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 323,
         "source_column": 3,
-        "source_hash": "dba194fdb7aa364289e62fe7b431cb67"
+        "source_hash": "a88412bea9e12102cb4ce2a1d5162de9"
       }
     },
     {
@@ -432,7 +432,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 344,
         "source_column": 3,
-        "source_hash": "dba194fdb7aa364289e62fe7b431cb67"
+        "source_hash": "a88412bea9e12102cb4ce2a1d5162de9"
       }
     },
     {
@@ -454,7 +454,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 357,
         "source_column": 3,
-        "source_hash": "dba194fdb7aa364289e62fe7b431cb67"
+        "source_hash": "a88412bea9e12102cb4ce2a1d5162de9"
       }
     },
     {
@@ -473,7 +473,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 369,
         "source_column": 3,
-        "source_hash": "dba194fdb7aa364289e62fe7b431cb67"
+        "source_hash": "a88412bea9e12102cb4ce2a1d5162de9"
       }
     },
     {
@@ -494,7 +494,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 379,
         "source_column": 3,
-        "source_hash": "dba194fdb7aa364289e62fe7b431cb67"
+        "source_hash": "a88412bea9e12102cb4ce2a1d5162de9"
       }
     },
     {
@@ -537,7 +537,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 390,
         "source_column": 3,
-        "source_hash": "dba194fdb7aa364289e62fe7b431cb67"
+        "source_hash": "a88412bea9e12102cb4ce2a1d5162de9"
       }
     },
     {
@@ -559,7 +559,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/universe/project-registry.lisp",
         "source_line": 1,
         "source_column": 1,
-        "source_hash": "dba194fdb7aa364289e62fe7b431cb67"
+        "source_hash": "a88412bea9e12102cb4ce2a1d5162de9"
       }
     },
     {
@@ -579,7 +579,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 1,
         "source_column": 3,
-        "source_hash": "dba194fdb7aa364289e62fe7b431cb67"
+        "source_hash": "a88412bea9e12102cb4ce2a1d5162de9"
       }
     },
     {
@@ -606,7 +606,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 118,
         "source_column": 3,
-        "source_hash": "dba194fdb7aa364289e62fe7b431cb67"
+        "source_hash": "a88412bea9e12102cb4ce2a1d5162de9"
       }
     },
     {
@@ -643,7 +643,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 185,
         "source_column": 3,
-        "source_hash": "dba194fdb7aa364289e62fe7b431cb67"
+        "source_hash": "a88412bea9e12102cb4ce2a1d5162de9"
       }
     },
     {
@@ -687,7 +687,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 141,
         "source_column": 3,
-        "source_hash": "dba194fdb7aa364289e62fe7b431cb67"
+        "source_hash": "a88412bea9e12102cb4ce2a1d5162de9"
       }
     }
   ],

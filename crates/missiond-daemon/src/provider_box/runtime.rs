@@ -54,6 +54,7 @@ impl ProviderInteractionBox {
             BoxCommand::ModelCatalogExport => driver.discover_models(&request).await,
             BoxCommand::PureTextSingleTurn => driver.pure_text_single_turn(&request).await,
             BoxCommand::ControlAction => driver.control_action(&request).await,
+            BoxCommand::PtyStep => driver.pty_step(&request).await,
             BoxCommand::Status => driver.status(&request).await,
         };
 
@@ -106,8 +107,8 @@ mod tests {
     use crate::provider_box::types::{
         BoxCommand, ProviderBoxStatus, ProviderInteractionRequest,
         DIAG_AGY_MODEL_CATALOG_UNSUPPORTED, DIAG_MODEL_SWITCH_UNSUPPORTED,
-        DIAG_PROVIDER_CONTROL_ACTION_UNSUPPORTED, DIAG_PURE_TEXT_GUARD_UNSUPPORTED,
-        DIAG_USAGE_UNKNOWN,
+        DIAG_PROVIDER_CONTROL_ACTION_UNSUPPORTED, DIAG_PROVIDER_PTY_STEP_UNSUPPORTED,
+        DIAG_PURE_TEXT_GUARD_UNSUPPORTED, DIAG_USAGE_UNKNOWN,
     };
 
     #[tokio::test]
@@ -184,5 +185,19 @@ mod tests {
             .diagnostics
             .iter()
             .any(|diag| diag.code == DIAG_PROVIDER_CONTROL_ACTION_UNSUPPORTED));
+    }
+
+    #[tokio::test]
+    async fn pty_step_fails_closed_until_driver_is_taught() {
+        let boxed = ProviderInteractionBox::without_artifacts();
+        let request = ProviderInteractionRequest::new(BoxCommand::PtyStep, CliEngine::Codex);
+
+        let result = boxed.execute(request).await.expect("box result");
+
+        assert_eq!(result.status, ProviderBoxStatus::Unsupported);
+        assert!(result
+            .diagnostics
+            .iter()
+            .any(|diag| diag.code == DIAG_PROVIDER_PTY_STEP_UNSUPPORTED));
     }
 }

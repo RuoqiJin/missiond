@@ -12,6 +12,29 @@ use super::types::{
     DIAG_PROVIDER_BOX_AUTH_REQUIRED, DIAG_PROVIDER_BOX_INVALID_REQUEST,
 };
 
+const PTY_STEP_TEXT_LIMIT: usize = 4096;
+const PTY_STEP_ALLOWED_KEYS: &[&str] = &[
+    "enter",
+    "return",
+    "esc",
+    "escape",
+    "up",
+    "down",
+    "left",
+    "right",
+    "tab",
+    "backspace",
+    "delete",
+    "ctrl+c",
+    "ctrl+d",
+    "pageup",
+    "page_up",
+    "pagedown",
+    "page_down",
+    "home",
+    "end",
+];
+
 #[derive(Clone)]
 pub(crate) struct ProviderBoxHttpAdapter {
     boxed: Arc<ProviderInteractionBox>,
@@ -47,9 +70,21 @@ impl ProviderBoxHttpAdapter {
                 ("GET", "status") | ("POST", "status") => {
                     self.handle_slot_status(request, slot_id, false).await
                 }
+                ("GET", "screen")
+                | ("POST", "screen")
+                | ("GET", "observe")
+                | ("POST", "observe")
+                | ("GET", "actions/observe")
+                | ("POST", "actions/observe") => {
+                    self.handle_slot_status(request, slot_id, false).await
+                }
                 ("POST", "input") | ("POST", "actions/input") => {
                     self.handle_slot_input(request, slot_id).await
                 }
+                ("POST", "pty-step")
+                | ("POST", "actions/pty-step")
+                | ("POST", "key")
+                | ("POST", "actions/key") => self.handle_slot_pty_step(request, slot_id).await,
                 ("POST", "clear")
                 | ("POST", "clear-screen")
                 | ("POST", "actions/clear")
@@ -213,6 +248,47 @@ impl ProviderBoxHttpAdapter {
                 .or_else(|| bool_field(&request.body, "enter"))
                 .or_else(|| bool_field(&request.body, "append_enter"))
                 .unwrap_or(false),
+        }));
+        let result = self
+            .boxed
+            .execute(interaction)
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok(result_response(result))
+    }
+
+    async fn handle_slot_pty_step(
+        &self,
+        request: ProviderBoxHttpRequest,
+        slot_id: String,
+    ) -> Result<ProviderBoxHttpResponse, String> {
+        let mut interaction =
+            ProviderInteractionRequest::new(BoxCommand::PtyStep, engine_from_body(&request.body));
+        interaction.provider = string_field(&request.body, "provider").or_else(|| {
+            if interaction.engine == CliEngine::Agy {
+                Some("agy_cli".to_string())
+            } else {
+                None
+            }
+        });
+        interaction.slot_id = Some(slot_id);
+        interaction.cwd = string_field(&request.body, "cwd");
+        interaction.project_root = string_field(&request.body, "project_root");
+        interaction.correlation_id = string_field(&request.body, "correlation_id")
+            .unwrap_or_else(|| interaction.correlation_id.clone());
+        let pty_step = match pty_step_payload_from_body(&request.body) {
+            Ok(value) => value,
+            Err(diagnostic) => {
+                let mut result = ProviderBoxResult::base(&interaction, ProviderBoxStatus::Failed);
+                result.add_diagnostic(diagnostic);
+                return Ok(result_response(result));
+            }
+        };
+        interaction.desired_worker = Some(json!({
+            "spawn_if_missing": bool_field(&request.body, "spawn_if_missing")
+                .or_else(|| bool_field(&request.body, "spawn"))
+                .unwrap_or(false),
+            "pty_step": pty_step,
         }));
         let result = self
             .boxed
@@ -425,7 +501,8 @@ impl ProviderBoxHttpAdapter {
                                 "engine",
                                 "prompt",
                                 "correlation_id",
-                                "control_action when command=control-action"
+                                "control_action when command=control-action",
+                                "desired_worker.pty_step when command=pty-step"
                             ]
                         }),
                     ));
@@ -491,6 +568,120 @@ fn text_only_interaction_from_body(body: &Value) -> Option<ProviderInteractionRe
         require_verification: bool_field(body, "require_verification").unwrap_or(true),
     });
     Some(interaction)
+}
+
+fn pty_step_payload_from_body(body: &Value) -> Result<Value, ProviderBoxDiagnostic> {
+    let action = body.get("action").unwrap_or(body);
+    let action_type = action
+        .get("action_type")
+        .or_else(|| action.get("type"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .or_else(|| {
+            if action.get("key").is_some() || body.get("key").is_some() {
+                Some("key".to_string())
+            } else if action.get("text").is_some() || body.get("text").is_some() {
+                Some("text".to_string())
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| {
+            ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                "PTY step requires action.type=key or action.type=text",
+                json!({
+                    "allowed_action_types": ["key", "text"],
+                    "examples": [
+                        {"action": {"type": "key", "key": "down"}},
+                        {"action": {"type": "text", "text": "/model"}}
+                    ]
+                }),
+            )
+        })?;
+    let expected_change = raw_string_field(action, "expected_change")
+        .or_else(|| raw_string_field(body, "expected_change"));
+    let redacted = bool_field(action, "redacted")
+        .or_else(|| bool_field(body, "redacted"))
+        .unwrap_or(action_type == "text" || action_type == "paste");
+
+    match action_type.as_str() {
+        "key" => {
+            let key = string_field(action, "key")
+                .or_else(|| string_field(body, "key"))
+                .or_else(|| string_field(action, "human_input"))
+                .ok_or_else(|| {
+                    ProviderBoxDiagnostic::error(
+                        DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                        "PTY key step requires a key name",
+                        json!({
+                            "allowed_keys": PTY_STEP_ALLOWED_KEYS,
+                        }),
+                    )
+                })?;
+            if !pty_step_key_allowed(&key) {
+                return Err(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                    "PTY key step uses an unsupported key",
+                    json!({
+                        "key": key,
+                        "allowed_keys": PTY_STEP_ALLOWED_KEYS,
+                    }),
+                ));
+            }
+            Ok(json!({
+                "action_type": "key",
+                "key": key,
+                "redacted": false,
+                "expected_change": expected_change,
+            }))
+        }
+        "text" | "paste" => {
+            let text = raw_string_field(action, "text")
+                .or_else(|| raw_string_field(body, "text"))
+                .or_else(|| raw_string_field(action, "human_input"))
+                .ok_or_else(|| {
+                    ProviderBoxDiagnostic::error(
+                        DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                        "PTY text step requires text",
+                        json!({}),
+                    )
+                })?;
+            if text.chars().count() > PTY_STEP_TEXT_LIMIT {
+                return Err(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                    "PTY text step exceeds the maximum length",
+                    json!({
+                        "max_chars": PTY_STEP_TEXT_LIMIT,
+                    }),
+                ));
+            }
+            if text.contains('\n') || text.contains('\r') {
+                return Err(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                    "PTY text step must not include Enter; send text and Enter as separate API calls",
+                    json!({
+                        "rule": "text_and_enter_are_separate_observe_act_observe_steps",
+                    }),
+                ));
+            }
+            Ok(json!({
+                "action_type": "text",
+                "text": text,
+                "redacted": redacted,
+                "expected_change": expected_change,
+            }))
+        }
+        _ => Err(ProviderBoxDiagnostic::error(
+            DIAG_PROVIDER_BOX_INVALID_REQUEST,
+            "PTY step action type is unsupported",
+            json!({
+                "action_type": action_type,
+                "allowed_action_types": ["key", "text"],
+            }),
+        )),
+    }
 }
 
 fn parse_slot_endpoint(path: &str) -> Option<(String, String)> {
@@ -596,6 +787,7 @@ fn result_response(result: ProviderBoxResult) -> ProviderBoxHttpResponse {
         ProviderBoxStatus::Blocked => 409,
         ProviderBoxStatus::Failed => 502,
     };
+    let screen = latest_screen_observation(&result);
     let body = if status == 200 {
         let final_text = result.final_text.clone().unwrap_or_default();
         let mut body = json!({
@@ -610,6 +802,7 @@ fn result_response(result: ProviderBoxResult) -> ProviderBoxHttpResponse {
             "durable_source": result.durable_source,
             "final_text": final_text,
             "slot_status": result.slot_status,
+            "screen": screen,
             "usage_snapshot": result.usage_snapshot,
             "model_catalog": result.model_catalog,
             "router_export": result.router_export,
@@ -687,6 +880,7 @@ fn result_response(result: ProviderBoxResult) -> ProviderBoxHttpResponse {
                 "diagnostics": result.diagnostics
             },
             "slot_status": result.slot_status,
+            "screen": screen,
             "step_records": result.step_records,
             "usage_snapshot": result.usage_snapshot,
             "model_catalog": result.model_catalog,
@@ -696,6 +890,14 @@ fn result_response(result: ProviderBoxResult) -> ProviderBoxHttpResponse {
         })
     };
     json_response(status, body)
+}
+
+fn latest_screen_observation(result: &ProviderBoxResult) -> Value {
+    result
+        .step_records
+        .last()
+        .and_then(|step| serde_json::to_value(&step.after).ok())
+        .unwrap_or(Value::Null)
 }
 
 fn openai_model_data(catalog: &ProviderModelCatalog) -> Value {
@@ -923,8 +1125,50 @@ fn string_field(body: &Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+fn raw_string_field(body: &Value, key: &str) -> Option<String> {
+    body.get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 fn bool_field(body: &Value, key: &str) -> Option<bool> {
     body.get(key).and_then(Value::as_bool)
+}
+
+fn pty_step_key_allowed(key: &str) -> bool {
+    let normalized = key
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['_', '-'], "")
+        .replace(['+', '/'], "")
+        .replace("control", "ctrl")
+        .replace(' ', "");
+    matches!(
+        normalized.as_str(),
+        "enter"
+            | "return"
+            | "esc"
+            | "escape"
+            | "up"
+            | "arrowup"
+            | "down"
+            | "arrowdown"
+            | "left"
+            | "arrowleft"
+            | "right"
+            | "arrowright"
+            | "tab"
+            | "backspace"
+            | "delete"
+            | "del"
+            | "ctrlc"
+            | "ctrld"
+            | "pageup"
+            | "pagedown"
+            | "home"
+            | "end"
+    )
 }
 
 fn provider_box_internal_token() -> Option<String> {
@@ -1059,6 +1303,69 @@ mod tests {
         });
 
         assert!(text_only_interaction_from_body(&body).is_none());
+    }
+
+    #[test]
+    fn pty_step_payload_accepts_single_key_action() {
+        let body = json!({
+            "action": {
+                "type": "key",
+                "key": "down"
+            },
+            "expected_change": "selection moves down"
+        });
+
+        let payload = pty_step_payload_from_body(&body).expect("pty step payload");
+
+        assert_eq!(payload["action_type"], "key");
+        assert_eq!(payload["key"], "down");
+        assert_eq!(payload["expected_change"], "selection moves down");
+    }
+
+    #[test]
+    fn pty_step_payload_accepts_text_without_enter() {
+        let body = json!({
+            "action": {
+                "type": "text",
+                "text": "/model"
+            }
+        });
+
+        let payload = pty_step_payload_from_body(&body).expect("pty step payload");
+
+        assert_eq!(payload["action_type"], "text");
+        assert_eq!(payload["text"], "/model");
+        assert_eq!(payload["redacted"], true);
+    }
+
+    #[test]
+    fn pty_step_payload_rejects_text_with_enter() {
+        let body = json!({
+            "action": {
+                "type": "text",
+                "text": "/exit\n"
+            }
+        });
+
+        let err = pty_step_payload_from_body(&body).expect_err("enter must be separate");
+
+        assert_eq!(err.code, DIAG_PROVIDER_BOX_INVALID_REQUEST);
+        assert!(err.message.contains("separate API calls"));
+    }
+
+    #[test]
+    fn pty_step_payload_rejects_unknown_key() {
+        let body = json!({
+            "action": {
+                "type": "key",
+                "key": "f13"
+            }
+        });
+
+        let err = pty_step_payload_from_body(&body).expect_err("unsupported key");
+
+        assert_eq!(err.code, DIAG_PROVIDER_BOX_INVALID_REQUEST);
+        assert!(err.details["allowed_keys"].is_array());
     }
 
     #[test]
