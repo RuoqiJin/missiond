@@ -60,6 +60,14 @@ const SAFE_TEXT_ACTIONS = [
   { text: '/clear', label: '/clear', icon: Eraser },
 ] as const;
 
+const FALLBACK_AGY_SLOT: SlotDef = {
+  id: 'slot-agy-research',
+  label: 'slot-agy-research',
+  role: 'researcher',
+  provider: 'agy',
+  engine: 'agy',
+};
+
 function isAgySlot(slot: SlotDef) {
   return `${slot.id} ${slot.provider || ''} ${slot.engine || ''}`.toLowerCase().includes('agy');
 }
@@ -95,7 +103,10 @@ function isDangerousText(value: string) {
 }
 
 export function PtyTeachingPanel({ slots, refreshSlots }: PtyTeachingPanelProps) {
-  const agySlots = useMemo(() => slots.filter(isAgySlot), [slots]);
+  const agySlots = useMemo(() => {
+    const projected = slots.filter(isAgySlot);
+    return projected.length > 0 ? projected : [FALLBACK_AGY_SLOT];
+  }, [slots]);
   const [slotId, setSlotId] = useState(() => {
     if (typeof window === 'undefined') return '';
     return localStorage.getItem('board:teachSlot') || '';
@@ -105,6 +116,11 @@ export function PtyTeachingPanel({ slots, refreshSlots }: PtyTeachingPanelProps)
   const [busy, setBusy] = useState(false);
   const [dangerArmed, setDangerArmed] = useState<string | null>(null);
   const [steps, setSteps] = useState<TeachingStep[]>([]);
+  const [screenText, setScreenText] = useState('');
+  const [controlsCollapsed, setControlsCollapsed] = useState(() => {
+    if (typeof window === 'undefined') return true;
+    return localStorage.getItem('board:teachControlsCollapsed') !== 'false';
+  });
 
   const selectedSlot = useMemo(
     () => agySlots.find((slot) => slot.id === slotId) ?? agySlots[0] ?? null,
@@ -121,6 +137,10 @@ export function PtyTeachingPanel({ slots, refreshSlots }: PtyTeachingPanelProps)
     setSlotId(selectedSlotId);
     localStorage.setItem('board:teachSlot', selectedSlotId);
   }, [selectedSlotId]);
+
+  useEffect(() => {
+    localStorage.setItem('board:teachControlsCollapsed', controlsCollapsed ? 'true' : 'false');
+  }, [controlsCollapsed]);
 
   const recordStep = useCallback((step: Omit<TeachingStep, 'id' | 'at'>) => {
     setSteps((prev) => [
@@ -144,6 +164,7 @@ export function PtyTeachingPanel({ slots, refreshSlots }: PtyTeachingPanelProps)
       const screenRes = await fetch(`/api/pty/screen?slotId=${encodeURIComponent(selectedSlotId)}&lines=40`);
       const screenData = await screenRes.json();
       if (typeof screenData?.screen === 'string' && !screenData.screen.includes('"error"')) {
+        setScreenText(screenData.screen);
         screenTail = compactScreenTail(screenData.screen);
       }
     } catch {
@@ -168,9 +189,9 @@ export function PtyTeachingPanel({ slots, refreshSlots }: PtyTeachingPanelProps)
 
   useEffect(() => {
     void refreshStatus();
-    const id = setInterval(() => void refreshStatus(), 5000);
+    const id = setInterval(() => void refreshStatus(), controlsCollapsed ? 1000 : 5000);
     return () => clearInterval(id);
-  }, [refreshStatus]);
+  }, [controlsCollapsed, refreshStatus]);
 
   async function sendInput(input: { text?: string; key?: string; label: string }) {
     if (!selectedSlotId || busy) return;
@@ -255,6 +276,40 @@ export function PtyTeachingPanel({ slots, refreshSlots }: PtyTeachingPanelProps)
     );
   }
 
+  if (controlsCollapsed) {
+    return (
+      <div className="mx-4 mb-4 flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-neutral-800 bg-neutral-950 sm:mx-8">
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-neutral-800 bg-neutral-950/95 px-3 py-2">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className={cn('h-2 w-2 shrink-0 rounded-full', isRunning ? 'bg-emerald-400' : 'bg-neutral-600')} />
+            <span className="truncate font-mono text-xs text-neutral-400" title={selectedSlotId}>{selectedSlotId || 'no-slot'}</span>
+            <span className={cn('shrink-0 font-mono text-[10px]', stateTone(currentState))}>{currentState || 'unknown'}</span>
+            {currentReason ? (
+              <span className="hidden truncate text-[10px] text-neutral-600 sm:block" title={currentReason}>{currentReason}</span>
+            ) : null}
+          </div>
+          <button
+            onClick={() => setControlsCollapsed(false)}
+            className="shrink-0 rounded-md border border-neutral-800 bg-neutral-900 px-2 py-1 text-[10px] text-neutral-500 hover:text-neutral-200"
+          >
+            Controls
+          </button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-hidden bg-black">
+          {screenText ? (
+            <pre className="h-full overflow-hidden whitespace-pre-wrap break-words p-3 font-mono text-[13px] leading-5 text-neutral-200">
+              {screenText}
+            </pre>
+          ) : selectedSlot ? (
+            <div className="flex h-full items-center justify-center text-sm text-neutral-600">Waiting for PTY screen...</div>
+          ) : (
+            <div className="flex h-full items-center justify-center text-sm text-neutral-500">No slot selected.</div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="mx-4 mb-4 grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-hidden sm:mx-8 xl:grid-cols-[320px_minmax(0,1fr)]">
       <aside className="flex min-h-0 flex-col rounded-lg border border-neutral-800 bg-neutral-950/70">
@@ -271,6 +326,13 @@ export function PtyTeachingPanel({ slots, refreshSlots }: PtyTeachingPanelProps)
               className="rounded-md border border-neutral-800 bg-neutral-900 p-2 text-neutral-400 hover:text-white disabled:opacity-50"
             >
               <RefreshCw className="h-4 w-4" />
+            </button>
+            <button
+              onClick={() => setControlsCollapsed(true)}
+              title="Show live only"
+              className="rounded-md border border-neutral-800 bg-neutral-900 px-2 py-2 text-[10px] text-neutral-500 hover:text-neutral-200"
+            >
+              Live
             </button>
           </div>
           <div className="mt-3">

@@ -55,8 +55,8 @@
       :entry ["packages/board/src/components/PtyTeachingPanel.tsx"
               "packages/board/src/components/Terminal.tsx"
               "packages/board/src/app/api/pty/input/route.ts"]
-      :fields [slotId text key stepLog websocketScreen afterStepState afterStepScreen guardedAction]
-      :rule "Operator teaching uses the dedicated Teach cockpit instead of generic Terminal controls or tmp live pages. Text and safe key controls write to the selected PTY through MissionD-owned mission_pty_send; the embedded xterm is read-only live screen. Every operator action samples PTY state/screen after execution and appends a visible step record. Exit/stop/restart controls must be visually separated and require an explicit second confirmation.")
+      :fields [slotId text key stepLog websocketScreen afterStepState afterStepScreen guardedAction collapsedLiveMode]
+      :rule "Operator teaching uses the dedicated Teach cockpit instead of generic Terminal controls or tmp live pages. Text and safe key controls write to the selected PTY through MissionD-owned mission_pty_send. The default/collapsed operator view hides controls and renders a stable read-only PTY live screen from mission_pty_screen so the human only watches the CLI. Every operator action samples PTY state/screen after execution and appends a visible step record when controls are expanded. Exit/stop/restart controls must be visually separated and require an explicit second confirmation.")
     (projection eventbus-cache-invalidation
       :source [eventbus-ws]
       :entry ["packages/board/src/eventStream.ts"]
