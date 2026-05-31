@@ -459,6 +459,8 @@
       :argv ["scripts/check-v3-interaction-gateway-isomorphism.mjs" "--json"] :json true :timeout-ms 60000)
     (live-check interaction-ledger
       :argv ["scripts/check-v3-interaction-ledger-isomorphism.mjs" "--json"] :json true :timeout-ms 60000)
+    (live-check interactive-provider-box
+      :argv ["scripts/check-v3-interactive-provider-box.mjs" "--json"] :json true :timeout-ms 60000)
     (live-check project-maturity
       :argv ["scripts/check-project-maturity.mjs" "--min-level" "M5"] :timeout-ms 60000)
     (live-check auth-m6-depth
@@ -606,6 +608,7 @@
              "node scripts/check-v3-incident-governance-isomorphism.mjs"
              "node scripts/check-v3-source-hygiene-isomorphism.mjs"
              "node scripts/check-v3-context-pack-isomorphism.mjs"
+             "node scripts/check-v3-interactive-provider-box.mjs"
 	             "node scripts/check-v3-workstation-config-isomorphism.mjs"
 	             "node scripts/check-v3-workstation-pool-isomorphism.mjs"
 	             "node scripts/check-v3-control-plane-m6-split.mjs"

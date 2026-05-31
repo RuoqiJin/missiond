@@ -58,7 +58,7 @@
        :sandbox read-only
        :approval-policy never
        :write-policy read-only
-       :runtime-rule "Jarvis intent.lisp authoring lane. It performs every user-intent semantic read before confirmation through headless `codex exec --json --output-last-message`, returns structured intent fields for MissionD schema normalization, must not use interactive PTY screen text as semantic output, and must fail closed instead of allowing deterministic Rust fallback.")
+       :runtime-rule "Jarvis intent.lisp authoring lane. Legacy implementation performs every user-intent semantic read before confirmation through headless `codex exec --json --output-last-message`; this is now a provider-interaction-box migration target. Final design keeps the same structured intent fields and fail-closed behavior but submits through an interactive PTY lane and reads the artifact from durable Codex rollout JSONL, never from interactive PTY screen text.")
      (codex-plan-author
        :account current-codex-cli-login
        :model "gpt-5.5"
@@ -67,7 +67,7 @@
        :sandbox read-only
        :approval-policy never
        :write-policy read-only
-       :runtime-rule "Jarvis plan.lisp authoring lane. It runs after user intent confirmation through headless `codex exec --json --output-last-message`, returns structured plan fields and concrete review steps for MissionD schema normalization, must not create BoardTasks or execute implementation, and must fail closed instead of allowing deterministic Rust fallback.")
+       :runtime-rule "Jarvis plan.lisp authoring lane. Legacy implementation runs after user intent confirmation through headless `codex exec --json --output-last-message`; this is now a provider-interaction-box migration target. Final design keeps the same structured plan fields, review steps, non-execution boundary, and fail-closed behavior but submits through an interactive PTY lane and reads the artifact from durable Codex rollout JSONL, never from interactive PTY screen text.")
      (claude-code-fast-patch
        :account current-claude-code-default
        :model "Sonnet only when explicitly selected"
@@ -91,7 +91,7 @@
     ["mission_compute_slot action=list exposes workstation_pool."
      "Each pool row reports runtime_slot_present and status."
      "mission_slots exposes ClaudeCode/Gemini/Codex/Agy provider, modelProfile, reasoningEffort, PTY recognition, latestConversation, and mismatch diagnostics."
-     "Autopilot logs selected V3 workstation-pool slot before claim."])
+     "Autopilot logs selected V3 workstation-pool slot before claim."]
   :next-account-isolation
     ["Add auth/env profile fields after single-login smoke is stable."
      "Split claude-code-default into claude-max-a and claude-max-b with disjoint env/profile roots."])

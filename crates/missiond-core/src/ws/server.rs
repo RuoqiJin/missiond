@@ -23,7 +23,6 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::process::Stdio;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -152,6 +151,42 @@ pub type JarvisArtifactFn = Arc<
 >;
 
 pub type JarvisArtifactSlot = Arc<tokio::sync::RwLock<Option<JarvisArtifactFn>>>;
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProviderBoxHttpRequest {
+    pub method: String,
+    pub path: String,
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+    #[serde(default)]
+    pub body: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProviderBoxHttpResponse {
+    pub status: u16,
+    #[serde(default = "default_provider_box_content_type")]
+    pub content_type: String,
+    #[serde(default)]
+    pub body: serde_json::Value,
+}
+
+fn default_provider_box_content_type() -> String {
+    "application/json".to_string()
+}
+
+pub type ProviderBoxHttpFn = Arc<
+    dyn Fn(
+            ProviderBoxHttpRequest,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<ProviderBoxHttpResponse, String>> + Send>,
+        > + Send
+        + Sync,
+>;
+
+pub type ProviderBoxHttpSlot = Arc<tokio::sync::RwLock<Option<ProviderBoxHttpFn>>>;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -296,27 +331,6 @@ struct JarvisAuthoredPlanDraft {
     confidence: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "type")]
-enum XjpcodeTextOnlyFrame {
-    Accepted {
-        #[serde(default, rename = "provider")]
-        _provider: Option<String>,
-    },
-    TextDelta {
-        content: String,
-    },
-    Diagnostic {
-        code: String,
-        message: String,
-    },
-    Final {
-        status: String,
-        #[serde(default, rename = "provider")]
-        _provider: Option<String>,
-    },
-}
-
 #[derive(Clone, Default)]
 struct JarvisProgressBus {
     system_event_tx: Option<tokio::sync::mpsc::Sender<SystemEvent>>,
@@ -347,6 +361,8 @@ pub struct WSServerOptions {
     pub jarvis_grounding: JarvisGroundingSlot,
     /// Shared artifact writer for Jarvis intent/plan gate.
     pub jarvis_artifact_writer: JarvisArtifactSlot,
+    /// Provider-box HTTP adapter, late-bound by daemon after provider drivers are assembled.
+    pub provider_box_http: ProviderBoxHttpSlot,
     /// Number of native MCP tools (injected into Jarvis system prompt)
     pub tool_count: usize,
     /// V3-projected default slot for OpenAI-compatible chat completions.
@@ -372,6 +388,7 @@ pub struct PTYWebSocketServer {
     context_enricher: ContextEnricherSlot,
     jarvis_grounding: JarvisGroundingSlot,
     jarvis_artifact_writer: JarvisArtifactSlot,
+    provider_box_http: ProviderBoxHttpSlot,
     tool_count: usize,
     default_chat_slot: String,
     jarvis_intent_author: JarvisIntentAuthorConfig,
@@ -1489,6 +1506,37 @@ fn close_frame(code: u16, reason: impl Into<String>) -> CloseFrame<'static> {
     }
 }
 
+fn parse_http_headers(headers: &str) -> HashMap<String, String> {
+    headers
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split_once(':'))
+        .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_string()))
+        .collect()
+}
+
+fn http_reason(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        201 => "Created",
+        202 => "Accepted",
+        204 => "No Content",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        408 => "Request Timeout",
+        409 => "Conflict",
+        422 => "Unprocessable Entity",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
+        _ => "OK",
+    }
+}
+
 async fn send_json<S: Serialize>(
     ws_tx: &mut futures_util::stream::SplitSink<
         tokio_tungstenite::WebSocketStream<TcpStream>,
@@ -1603,6 +1651,7 @@ impl PTYWebSocketServer {
             context_enricher: Arc::clone(&options.context_enricher),
             jarvis_grounding: Arc::clone(&options.jarvis_grounding),
             jarvis_artifact_writer: Arc::clone(&options.jarvis_artifact_writer),
+            provider_box_http: Arc::clone(&options.provider_box_http),
             tool_count: options.tool_count,
             default_chat_slot: options.default_chat_slot,
             jarvis_intent_author: options.jarvis_intent_author,
@@ -1628,6 +1677,11 @@ impl PTYWebSocketServer {
     /// Get the Jarvis artifact writer slot for late-binding by daemon.
     pub fn jarvis_artifact_writer_slot(&self) -> &JarvisArtifactSlot {
         &self.jarvis_artifact_writer
+    }
+
+    /// Get the provider-box HTTP adapter slot for late-binding by daemon.
+    pub fn provider_box_http_slot(&self) -> &ProviderBoxHttpSlot {
+        &self.provider_box_http
     }
 
     /// Start the server
@@ -1679,6 +1733,7 @@ impl PTYWebSocketServer {
         let context_enricher = self.context_enricher.clone();
         let jarvis_grounding = self.jarvis_grounding.clone();
         let jarvis_artifact_writer = self.jarvis_artifact_writer.clone();
+        let provider_box_http = self.provider_box_http.clone();
         let tool_count = self.tool_count;
         let default_chat_slot = self.default_chat_slot.clone();
         let jarvis_intent_author = self.jarvis_intent_author.clone();
@@ -1702,12 +1757,13 @@ impl PTYWebSocketServer {
                                 let context_enricher = context_enricher.clone();
                                 let jarvis_grounding = jarvis_grounding.clone();
                                 let jarvis_artifact_writer = jarvis_artifact_writer.clone();
+                                let provider_box_http = provider_box_http.clone();
                                 let tool_count = tool_count;
                                 let default_chat_slot = default_chat_slot.clone();
                                 let jarvis_intent_author = jarvis_intent_author.clone();
                                 let jarvis_plan_author = jarvis_plan_author.clone();
                                 tokio::spawn(async move {
-                                    if let Err(e) = Self::handle_connection(stream, addr, pty_manager, cc_tasks_watcher, screenshot_broker, jarvis_trace, incident_tx, system_event_tx, frontend_events_tx, db, context_enricher, jarvis_grounding, jarvis_artifact_writer, tool_count, default_chat_slot, jarvis_intent_author, jarvis_plan_author).await {
+                                    if let Err(e) = Self::handle_connection(stream, addr, pty_manager, cc_tasks_watcher, screenshot_broker, jarvis_trace, incident_tx, system_event_tx, frontend_events_tx, db, context_enricher, jarvis_grounding, jarvis_artifact_writer, provider_box_http, tool_count, default_chat_slot, jarvis_intent_author, jarvis_plan_author).await {
                                         error!(?e, ?addr, "WebSocket connection error");
                                     }
                                 });
@@ -2488,6 +2544,7 @@ impl PTYWebSocketServer {
         jarvis_plan_author: JarvisPlanAuthorConfig,
         jarvis_grounding: JarvisGroundingSlot,
         jarvis_artifact_writer: JarvisArtifactSlot,
+        provider_box_http: ProviderBoxHttpSlot,
         db: Option<Arc<dyn crate::db::traits::MissionStore>>,
     ) -> anyhow::Result<()> {
         stream.set_nodelay(true)?;
@@ -2520,6 +2577,7 @@ impl PTYWebSocketServer {
             jarvis_plan_author,
             jarvis_grounding,
             jarvis_artifact_writer,
+            provider_box_http,
             db,
         )
         .await
@@ -2535,6 +2593,7 @@ impl PTYWebSocketServer {
         jarvis_plan_author: JarvisPlanAuthorConfig,
         jarvis_grounding: JarvisGroundingSlot,
         jarvis_artifact_writer: JarvisArtifactSlot,
+        provider_box_http: ProviderBoxHttpSlot,
         db: Option<Arc<dyn crate::db::traits::MissionStore>>,
     ) -> anyhow::Result<()> {
         stream.set_nodelay(true)?;
@@ -2577,6 +2636,7 @@ impl PTYWebSocketServer {
             jarvis_plan_author,
             jarvis_grounding,
             jarvis_artifact_writer,
+            provider_box_http,
             db,
         )
         .await
@@ -2587,12 +2647,13 @@ impl PTYWebSocketServer {
         addr: SocketAddr,
         headers: String,
         mut envelope: InteractionEnvelope,
-        pty_manager: Option<Arc<PTYManager>>,
+        _pty_manager: Option<Arc<PTYManager>>,
         jarvis_progress_bus: JarvisProgressBus,
         jarvis_intent_author: JarvisIntentAuthorConfig,
         jarvis_plan_author: JarvisPlanAuthorConfig,
         jarvis_grounding: JarvisGroundingSlot,
         jarvis_artifact_writer: JarvisArtifactSlot,
+        provider_box_http: ProviderBoxHttpSlot,
         db: Option<Arc<dyn crate::db::traits::MissionStore>>,
     ) -> anyhow::Result<()> {
         stream.set_nodelay(true)?;
@@ -2993,7 +3054,7 @@ impl PTYWebSocketServer {
                 &jarvis_progress_bus,
                 &chat_id,
                 Some(&interaction_id),
-                pty_manager.as_ref(),
+                &provider_box_http,
                 &jarvis_intent_author,
                 "missiond.interaction-intent-artifact.v1",
                 &channel,
@@ -3228,7 +3289,7 @@ impl PTYWebSocketServer {
                 &jarvis_progress_bus,
                 &chat_id,
                 Some(&interaction_id),
-                pty_manager.as_ref(),
+                &provider_box_http,
                 &jarvis_plan_author,
                 "missiond.interaction-plan-artifact.v1",
                 &channel,
@@ -3502,6 +3563,7 @@ impl PTYWebSocketServer {
                 &plan_artifact_id,
                 &permission_context,
                 &sources_used,
+                &provider_box_http,
                 db.as_ref(),
                 jarvis_conv_id.as_deref(),
             )
@@ -3941,6 +4003,106 @@ impl PTYWebSocketServer {
         stream.write_all(response.as_bytes()).await?;
         stream.shutdown().await?;
         Ok(())
+    }
+
+    async fn send_provider_box_response(
+        stream: &mut TcpStream,
+        response: ProviderBoxHttpResponse,
+    ) -> anyhow::Result<()> {
+        let body = response.body.to_string();
+        let reason = http_reason(response.status);
+        let content_type = if response.content_type.trim().is_empty() {
+            "application/json"
+        } else {
+            response.content_type.trim()
+        };
+        let response_text = format!(
+            "HTTP/1.1 {} {}\r\n\
+             Content-Type: {}\r\n\
+             Access-Control-Allow-Origin: *\r\n\
+             Access-Control-Allow-Headers: Content-Type, Authorization, X-Slot-Id, X-Trace-Id\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\
+             \r\n{}",
+            response.status,
+            reason,
+            content_type,
+            body.len(),
+            body
+        );
+        stream.write_all(response_text.as_bytes()).await?;
+        stream.shutdown().await?;
+        Ok(())
+    }
+
+    async fn handle_provider_box_http(
+        mut stream: TcpStream,
+        method: &str,
+        path: &str,
+        provider_box_http: ProviderBoxHttpSlot,
+    ) -> anyhow::Result<()> {
+        let adapter = {
+            let guard = provider_box_http.read().await;
+            guard.clone()
+        };
+        let Some(adapter) = adapter else {
+            let err = serde_json::json!({
+                "error": {
+                    "message": "Provider-box adapter is not configured"
+                }
+            });
+            return Self::send_http_error(
+                &mut stream,
+                503,
+                "Service Unavailable",
+                &err.to_string(),
+            )
+            .await;
+        };
+
+        let (headers_str, body_text) = Self::read_http_request(&mut stream).await?;
+        let headers = parse_http_headers(&headers_str);
+        let body = if body_text.trim().is_empty() {
+            serde_json::Value::Null
+        } else {
+            match serde_json::from_str::<serde_json::Value>(&body_text) {
+                Ok(value) => value,
+                Err(err) => {
+                    let body = serde_json::json!({
+                        "error": {
+                            "message": format!("Invalid JSON body: {err}")
+                        }
+                    });
+                    return Self::send_http_error(
+                        &mut stream,
+                        400,
+                        "Bad Request",
+                        &body.to_string(),
+                    )
+                    .await;
+                }
+            }
+        };
+
+        let request = ProviderBoxHttpRequest {
+            method: method.to_string(),
+            path: path.to_string(),
+            headers,
+            body,
+        };
+
+        match adapter(request).await {
+            Ok(response) => Self::send_provider_box_response(&mut stream, response).await,
+            Err(message) => {
+                let body = serde_json::json!({
+                    "error": {
+                        "message": message
+                    }
+                });
+                Self::send_http_error(&mut stream, 500, "Internal Server Error", &body.to_string())
+                    .await
+            }
+        }
     }
 
     fn request_path_without_query(path: &str) -> &str {
@@ -4727,7 +4889,7 @@ impl PTYWebSocketServer {
             }
         });
         format!(
-            "你是 MissionD 的 Jarvis intent.lisp 语义作者，运行在 Codex CLI GPT-5.5 xhigh headless 工位。\n\
+            "你是 MissionD 的 Jarvis intent.lisp 语义作者，运行在 provider_box 管理的 Codex CLI GPT-5.5 xhigh 交互工位。\n\
 任务：识别用户真实意图，并输出一个可供用户确认的 intent draft。不要创建任务、不要改文件、不要派工位。\n\
 只返回一个严格 JSON object，不要 Markdown，不要代码围栏，不要额外解释。JSON key 必须使用双引号。\n\
 JSON 字段必须是：\n\
@@ -4777,7 +4939,7 @@ JSON 字段必须是：\n\
             }
         });
         format!(
-            "你是 MissionD 的 Jarvis plan.lisp 语义作者，运行在 Codex CLI GPT-5.5 xhigh headless 工位。\n\
+            "你是 MissionD 的 Jarvis plan.lisp 语义作者，运行在 provider_box 管理的 Codex CLI GPT-5.5 xhigh 交互工位。\n\
 任务：基于已确认的 intent.lisp 目标，生成可供用户确认的 plan draft。不要创建 BoardTask、不要派工位、不要执行实现、不要改文件。\n\
 计划必须声明用户确认 plan 后的 execution_mode。现阶段即使是聊天/问答也必须先经过 intent.lisp 和 plan.lisp，但简单问答应选择 grounded_direct_answer，不应污染 BoardTask。\n\
 只返回一个严格 JSON object，不要 Markdown，不要代码围栏，不要额外解释。JSON key 必须使用双引号。\n\
@@ -4787,8 +4949,8 @@ JSON 字段必须是：\n\
   execution_mode: string，只能是 grounded_direct_answer、work_order、investigation_only 三者之一。普通问答/解释/身份确认/状态说明选 grounded_direct_answer；需要改代码、部署、长期运行或多工位任务选 work_order；只读调查但需要工位证据选 investigation_only。\n\
   requires_board_task: boolean。grounded_direct_answer 必须是 false；work_order 和 investigation_only 必须是 true。\n\
   steps: string[]，2 到 6 个中文步骤，每步是可审阅的计划动作，不是执行结果。\n\
-  answer_policy: string，说明直接回答或工位结果如何使用 grounding sources；grounded_direct_answer 时必须说明使用 xjpcode text-only 且不调用工具/不改文件。\n\
-  provider_hint: string，例如 xjpcode-text-only、codex-review-worker、claude-code-default。\n\
+  answer_policy: string，说明直接回答或工位结果如何使用 grounding sources；grounded_direct_answer 时必须说明使用 provider_box grounded-direct-answer 且不创建 BoardTask。\n\
+  provider_hint: string，例如 provider-box-codex、codex-review-worker、claude-code-default。\n\
   boundary: string，计划确认边界和不执行承诺。\n\
   assumptions: string[]，你做出的假设。\n\
   non_goals: string[]，明确不做什么。\n\
@@ -4800,54 +4962,76 @@ JSON 字段必须是：\n\
         )
     }
 
-    fn extract_codex_exec_message(stdout: &str) -> Option<String> {
-        let mut content_parts = Vec::new();
-        for line in stdout.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
-                continue;
-            };
-            let event_type = event
-                .get("type")
-                .and_then(|value| value.as_str())
-                .unwrap_or("");
-            if event_type != "item.completed" {
-                continue;
-            }
-            if let Some(text) = event.pointer("/item/text").and_then(|value| value.as_str()) {
-                if !text.trim().is_empty() {
-                    content_parts.push(text.to_string());
-                    continue;
-                }
-            }
-            if let Some(content) = event
-                .pointer("/item/content")
-                .and_then(|value| value.as_array())
-            {
-                for part in content {
-                    if let Some(text) = part.get("text").and_then(|value| value.as_str()) {
-                        if !text.trim().is_empty() {
-                            content_parts.push(text.to_string());
-                        }
-                    }
-                }
-            }
-        }
-        if content_parts.is_empty() {
-            None
-        } else {
-            Some(content_parts.join("\n"))
-        }
-    }
-
     fn jarvis_codex_output_sample(text: &str) -> String {
         text.chars().take(500).collect::<String>()
     }
 
-    async fn run_jarvis_codex_author_exec(
+    fn provider_box_internal_authorization_header() -> Option<String> {
+        std::env::var("MISSIOND_PROVIDER_BOX_INTERNAL_TOKEN")
+            .ok()
+            .or_else(|| std::env::var("MISSIOND_AGY_INTERNAL_TOKEN").ok())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(|token| format!("Bearer {token}"))
+    }
+
+    async fn call_provider_box_turn(
+        provider_box_http: &ProviderBoxHttpSlot,
+        body: serde_json::Value,
+        timeout_secs: u64,
+        error_prefix: &str,
+    ) -> anyhow::Result<String> {
+        let callback = {
+            let guard = provider_box_http.read().await;
+            guard.clone()
+        };
+        let Some(callback) = callback else {
+            anyhow::bail!("{error_prefix}_UNAVAILABLE: provider-box adapter is not configured");
+        };
+        let mut headers = HashMap::new();
+        if let Some(authorization) = Self::provider_box_internal_authorization_header() {
+            headers.insert("authorization".to_string(), authorization);
+        }
+        let request = ProviderBoxHttpRequest {
+            method: "POST".to_string(),
+            path: "/provider-box/v1/turns".to_string(),
+            headers,
+            body,
+        };
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(timeout_secs.saturating_add(15)),
+            callback(request),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!("{error_prefix}_TIMEOUT: provider-box turn exceeded {timeout_secs}s")
+        })?
+        .map_err(|err| anyhow::anyhow!("{error_prefix}_UNAVAILABLE: provider-box failed: {err}"))?;
+        if !(200..300).contains(&response.status) {
+            anyhow::bail!(
+                "{}_FAILED: provider-box returned {}: {}",
+                error_prefix,
+                response.status,
+                Self::jarvis_codex_output_sample(&response.body.to_string())
+            );
+        }
+        response
+            .body
+            .get("final_text")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{}_FAILED: provider-box completed without final_text: {}",
+                    error_prefix,
+                    Self::jarvis_codex_output_sample(&response.body.to_string())
+                )
+            })
+    }
+
+    async fn run_jarvis_codex_author_turn(
+        provider_box_http: &ProviderBoxHttpSlot,
         slot_id: &str,
         model: &str,
         reasoning_effort: &str,
@@ -4860,214 +5044,47 @@ JSON 字段必须是：\n\
         error_prefix: &str,
         prompt: &str,
     ) -> anyhow::Result<String> {
-        if let Some(provider) = Self::jarvis_author_text_only_provider() {
-            return Self::run_jarvis_xjpcode_text_only_author_exec(
-                &provider,
-                model,
-                timeout_secs,
-                output_prefix,
-                error_prefix,
-                prompt,
-            )
-            .await;
-        }
-
         let cwd = Self::jarvis_slot_runtime_cwd();
-        let cwd_arg = cwd.display().to_string();
-        let output_path = std::env::temp_dir().join(format!(
-            "missiond-jarvis-{}-{}.json",
-            output_prefix,
-            uuid::Uuid::new_v4()
-        ));
-        let output_path_arg = output_path.display().to_string();
-        let reasoning_config = format!("model_reasoning_effort=\"{}\"", reasoning_effort);
-
-        let mut cmd = tokio::process::Command::new("codex");
-        cmd.kill_on_drop(true);
-        if search_enabled {
-            cmd.arg("--search");
-        }
-        cmd.arg("--model").arg(model);
-        cmd.arg("-c").arg(reasoning_config);
-        cmd.arg("--sandbox").arg(sandbox);
-        cmd.arg("--ask-for-approval").arg(approval_policy);
-        cmd.arg("--cd").arg(cwd_arg);
-        cmd.arg("exec");
-        cmd.arg("--json");
-        cmd.arg("--ephemeral");
-        cmd.arg("--skip-git-repo-check");
-        cmd.arg("--color").arg("never");
-        cmd.arg("--output-last-message").arg(&output_path_arg);
-        cmd.arg(prompt);
-        cmd.env("MISSIOND_SLOT_ID", slot_id);
-        cmd.env(env_marker, chrono::Utc::now().to_rfc3339());
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
-
-        let output =
-            match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output())
-                .await
-            {
-                Ok(result) => result.map_err(|err| {
-                    anyhow::anyhow!(
-                        "{}_UNAVAILABLE: spawn codex exec failed: {err}",
-                        error_prefix
-                    )
-                })?,
-                Err(_) => {
-                    let _ = tokio::fs::remove_file(&output_path).await;
-                    anyhow::bail!(
-                        "{}_TIMEOUT: codex exec did not finish within {}s",
-                        error_prefix,
-                        timeout_secs
-                    );
-                }
-            };
-
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        if !output.status.success() {
-            let _ = tokio::fs::remove_file(&output_path).await;
-            anyhow::bail!(
-                "{}_FAILED: codex exec exited with {}: {}",
-                error_prefix,
-                output.status,
-                Self::jarvis_codex_output_sample(&stderr)
-            );
-        }
-
-        let last_message = tokio::fs::read_to_string(&output_path)
-            .await
-            .unwrap_or_default();
-        let _ = tokio::fs::remove_file(&output_path).await;
-        if !last_message.trim().is_empty() {
-            return Ok(last_message);
-        }
-        Self::extract_codex_exec_message(&stdout).ok_or_else(|| {
-            anyhow::anyhow!(
-                "{}_FAILED: codex exec produced no final message; stdout={}",
-                error_prefix,
-                Self::jarvis_codex_output_sample(&stdout)
-            )
-        })
-    }
-
-    fn jarvis_author_text_only_provider() -> Option<String> {
-        std::env::var("MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_PROVIDER")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-    }
-
-    async fn run_jarvis_xjpcode_text_only_author_exec(
-        provider: &str,
-        model: &str,
-        timeout_secs: u64,
-        output_prefix: &str,
-        error_prefix: &str,
-        prompt: &str,
-    ) -> anyhow::Result<String> {
-        let Some(endpoint) = Self::jarvis_direct_answer_endpoint() else {
-            anyhow::bail!(
-                "{}_UNAVAILABLE: MISSIOND_XJPCODE_TEXT_ONLY_URL or MISSIOND_XJPCODE_BASE_URL is required for xjpcode text-only authoring",
-                error_prefix
-            );
-        };
-        let system_prompt = format!(
-            "You are MissionD Jarvis {output_prefix}. Return only the requested Lisp artifact body. Do not call tools, do not read files, and do not add commentary outside the artifact."
-        );
-        let model_override = std::env::var("MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_MODEL")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| (provider == "codex_cli").then_some(model.to_string()));
+        let correlation_id = format!("jarvis-{}-{}", output_prefix, uuid::Uuid::new_v4().simple());
         let body = serde_json::json!({
-            "provider": provider,
+            "schema": "missiond.provider-interaction-request.v1",
+            "command": "semantic-authoring",
+            "provider": "codex_cli",
+            "engine": "codex",
+            "model": model,
+            "model_profile": reasoning_effort,
+            "cwd": cwd.display().to_string(),
+            "project_root": cwd.display().to_string(),
             "prompt": prompt,
-            "system_prompt": system_prompt,
-            "model": model_override,
-            "timeout_secs": timeout_secs
+            "timeout_secs": timeout_secs,
+            "correlation_id": correlation_id,
+            "slot_id": slot_id,
+            "no_tools": true,
+            "no_mcp": true,
+            "no_shell": true,
+            "no_file_access": true,
+            "tool_policy": {
+                "sandbox": sandbox,
+                "approval_policy": approval_policy,
+                "search_enabled": search_enabled,
+                "env_marker": env_marker,
+                "started_at": chrono::Utc::now().to_rfc3339()
+            },
+            "output_contract": {
+                "media_type": "application/json",
+                "artifact": output_prefix
+            }
         });
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(timeout_secs + 5))
-            .build()?;
-        let response = client
-            .post(&endpoint)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|err| {
-                anyhow::anyhow!(
-                    "{}_UNAVAILABLE: xjpcode text-only author provider failed: {err}",
-                    error_prefix
-                )
-            })?;
-        if !response.status().is_success() {
-            anyhow::bail!(
-                "{}_FAILED: xjpcode text-only author endpoint returned {}",
-                error_prefix,
-                response.status()
-            );
-        }
-
-        let response_text = response.text().await.map_err(|err| {
-            anyhow::anyhow!(
-                "{}_FAILED: xjpcode text-only author stream failed: {err}",
-                error_prefix
-            )
-        })?;
-        let mut artifact = String::new();
-        let mut saw_final = false;
-        for line in response_text.lines().map(str::trim) {
-            if !line.starts_with("data:") {
-                continue;
-            }
-            let data = line.trim_start_matches("data:").trim();
-            if data.is_empty() {
-                continue;
-            }
-            let frame: XjpcodeTextOnlyFrame = serde_json::from_str(data).map_err(|err| {
-                anyhow::anyhow!(
-                    "{}_FAILED: bad xjpcode text-only author frame: {err}: {data}",
-                    error_prefix
-                )
-            })?;
-            match frame {
-                XjpcodeTextOnlyFrame::Accepted { .. } => {}
-                XjpcodeTextOnlyFrame::TextDelta { content } => artifact.push_str(&content),
-                XjpcodeTextOnlyFrame::Diagnostic { code, message } => {
-                    anyhow::bail!("{}_FAILED: {code}: {message}", error_prefix);
-                }
-                XjpcodeTextOnlyFrame::Final { status, .. } => {
-                    saw_final = true;
-                    if status != "completed" {
-                        anyhow::bail!(
-                            "{}_FAILED: xjpcode text-only author final status={status}",
-                            error_prefix
-                        );
-                    }
-                }
-            }
-        }
-        if !saw_final {
-            anyhow::bail!(
-                "{}_FAILED: xjpcode text-only author stream ended without final",
-                error_prefix
-            );
-        }
-        if artifact.trim().is_empty() {
-            anyhow::bail!(
-                "{}_FAILED: xjpcode text-only author returned empty artifact",
-                error_prefix
-            );
-        }
-        Ok(artifact)
+        Self::call_provider_box_turn(provider_box_http, body, timeout_secs, error_prefix).await
     }
 
     async fn run_jarvis_codex_intent_exec(
+        provider_box_http: &ProviderBoxHttpSlot,
         config: &JarvisIntentAuthorConfig,
         prompt: &str,
     ) -> anyhow::Result<String> {
-        Self::run_jarvis_codex_author_exec(
+        Self::run_jarvis_codex_author_turn(
+            provider_box_http,
             &config.slot_id,
             &config.model,
             &config.reasoning_effort,
@@ -5084,10 +5101,12 @@ JSON 字段必须是：\n\
     }
 
     async fn run_jarvis_codex_plan_exec(
+        provider_box_http: &ProviderBoxHttpSlot,
         config: &JarvisPlanAuthorConfig,
         prompt: &str,
     ) -> anyhow::Result<String> {
-        Self::run_jarvis_codex_author_exec(
+        Self::run_jarvis_codex_author_turn(
+            provider_box_http,
             &config.slot_id,
             &config.model,
             &config.reasoning_effort,
@@ -5234,7 +5253,7 @@ JSON 字段必须是：\n\
     }
 
     async fn author_jarvis_intent_draft(
-        _pty_manager: Option<&Arc<PTYManager>>,
+        provider_box_http: &ProviderBoxHttpSlot,
         config: &JarvisIntentAuthorConfig,
         schema: &str,
         channel: &str,
@@ -5256,7 +5275,8 @@ JSON 字段必须是：\n\
             sources_used,
             permission_context,
         );
-        let response = Self::run_jarvis_codex_intent_exec(config, &prompt).await?;
+        let response =
+            Self::run_jarvis_codex_intent_exec(provider_box_http, config, &prompt).await?;
         let parsed = Self::parse_codex_intent_response(&response)?;
         let artifact_body = Self::jarvis_authored_intent_lisp_body(
             schema,
@@ -5287,7 +5307,7 @@ JSON 字段必须是：\n\
         progress_bus: &JarvisProgressBus,
         chat_id: &str,
         interaction_id: Option<&str>,
-        pty_manager: Option<&Arc<PTYManager>>,
+        provider_box_http: &ProviderBoxHttpSlot,
         config: &JarvisIntentAuthorConfig,
         schema: &str,
         channel: &str,
@@ -5306,7 +5326,7 @@ JSON 字段必须是：\n\
             chat_id,
             interaction_id,
             "intent_authoring",
-            "codex_exec_start",
+            "provider_box_semantic_authoring_start",
             "running",
             "正在调用 codex-intent-author 生成 intent.lisp。",
             None,
@@ -5316,7 +5336,7 @@ JSON 字段必须是：\n\
         .await?;
         let started = tokio::time::Instant::now();
         let mut authoring = Box::pin(Self::author_jarvis_intent_draft(
-            pty_manager,
+            provider_box_http,
             config,
             schema,
             channel,
@@ -5341,7 +5361,7 @@ JSON 字段必须是：\n\
                                 chat_id,
                                 interaction_id,
                                 "intent_authoring",
-                                "codex_exec_completed",
+                                "provider_box_semantic_authoring_completed",
                                 "completed",
                                 "intent.lisp 已由 Codex 生成并通过结构校验，正在写入 artifact。",
                                 Some(started.elapsed().as_secs()),
@@ -5359,7 +5379,7 @@ JSON 字段必须是：\n\
                                 chat_id,
                                 interaction_id,
                                 "intent_authoring_failed",
-                                "codex_exec_failed",
+                                "provider_box_semantic_authoring_failed",
                                 "failed",
                                 &format!("失败在 intent.lisp 生成：{error_message}"),
                                 Some(started.elapsed().as_secs()),
@@ -5379,7 +5399,7 @@ JSON 字段必须是：\n\
                         chat_id,
                         interaction_id,
                         "intent_authoring",
-                        "codex_exec_waiting",
+                        "provider_box_semantic_authoring_waiting",
                         "running",
                         &format!("Codex intent author 仍在运行，已等待 {elapsed}s；当前步骤：生成并校验 intent.lisp。"),
                         Some(elapsed),
@@ -5456,7 +5476,7 @@ JSON 字段必须是：\n\
             .collect::<Vec<_>>()
             .join("\n");
         format!(
-            "(plan-draft\n  :schema {}\n  :authority codex-cli-gpt-5.5-xhigh\n  :semantic-author (:engine codex-cli :slot-id {} :model {} :reasoning-effort xhigh :sandbox {} :approval-policy {})\n  :channel {}\n  :objective {}\n  :confidence {}\n  :grounding-context-id {}\n  :intent-artifact-id {}\n  :topic-id {}\n  :topic-label {}\n  :sources-used {}\n  :execution\n    (:mode {}\n     :requires-board-task {}\n     :answer-policy {}\n     :provider-hint {}\n     :direct-answer-provider xjpcode-text-only\n     :completion-authority {})\n  :steps [\n{}\n  ]\n  :boundary {}\n  :assumptions {}\n  :non-goals {}\n  :acceptance-signals {}\n  :approval (:state awaiting-plan-confirmation :required true))",
+            "(plan-draft\n  :schema {}\n  :authority codex-cli-gpt-5.5-xhigh\n  :semantic-author (:engine codex-cli :slot-id {} :model {} :reasoning-effort xhigh :sandbox {} :approval-policy {})\n  :channel {}\n  :objective {}\n  :confidence {}\n  :grounding-context-id {}\n  :intent-artifact-id {}\n  :topic-id {}\n  :topic-label {}\n  :sources-used {}\n  :execution\n    (:mode {}\n     :requires-board-task {}\n     :answer-policy {}\n     :provider-hint {}\n     :direct-answer-provider provider-box\n     :completion-authority {})\n  :steps [\n{}\n  ]\n  :boundary {}\n  :assumptions {}\n  :non-goals {}\n  :acceptance-signals {}\n  :approval (:state awaiting-plan-confirmation :required true))",
             Self::jarvis_lisp_string(schema),
             Self::jarvis_lisp_string(&config.slot_id),
             Self::jarvis_lisp_string(&config.model),
@@ -5492,7 +5512,7 @@ JSON 字段必须是：\n\
     }
 
     async fn author_jarvis_plan_draft(
-        _pty_manager: Option<&Arc<PTYManager>>,
+        provider_box_http: &ProviderBoxHttpSlot,
         config: &JarvisPlanAuthorConfig,
         schema: &str,
         channel: &str,
@@ -5516,7 +5536,7 @@ JSON 字段必须是：\n\
             sources_used,
             permission_context,
         );
-        let response = Self::run_jarvis_codex_plan_exec(config, &prompt).await?;
+        let response = Self::run_jarvis_codex_plan_exec(provider_box_http, config, &prompt).await?;
         let parsed = Self::parse_codex_plan_response(&response)?;
         let artifact_body = Self::jarvis_authored_plan_lisp_body(
             schema,
@@ -5551,7 +5571,7 @@ JSON 字段必须是：\n\
         progress_bus: &JarvisProgressBus,
         chat_id: &str,
         interaction_id: Option<&str>,
-        pty_manager: Option<&Arc<PTYManager>>,
+        provider_box_http: &ProviderBoxHttpSlot,
         config: &JarvisPlanAuthorConfig,
         schema: &str,
         channel: &str,
@@ -5571,7 +5591,7 @@ JSON 字段必须是：\n\
             chat_id,
             interaction_id,
             "plan_authoring",
-            "codex_exec_start",
+            "provider_box_semantic_authoring_start",
             "running",
             "正在调用 codex-plan-author 生成 plan.lisp。",
             None,
@@ -5581,7 +5601,7 @@ JSON 字段必须是：\n\
         .await?;
         let started = tokio::time::Instant::now();
         let mut authoring = Box::pin(Self::author_jarvis_plan_draft(
-            pty_manager,
+            provider_box_http,
             config,
             schema,
             channel,
@@ -5607,7 +5627,7 @@ JSON 字段必须是：\n\
                                 chat_id,
                                 interaction_id,
                                 "plan_authoring",
-                                "codex_exec_completed",
+                                "provider_box_semantic_authoring_completed",
                                 "completed",
                                 "plan.lisp 已由 Codex 生成并通过结构校验，正在写入 artifact。",
                                 Some(started.elapsed().as_secs()),
@@ -5625,7 +5645,7 @@ JSON 字段必须是：\n\
                                 chat_id,
                                 interaction_id,
                                 "plan_authoring_failed",
-                                "codex_exec_failed",
+                                "provider_box_semantic_authoring_failed",
                                 "failed",
                                 &format!("失败在 plan.lisp 生成：{error_message}"),
                                 Some(started.elapsed().as_secs()),
@@ -5645,7 +5665,7 @@ JSON 字段必须是：\n\
                         chat_id,
                         interaction_id,
                         "plan_authoring",
-                        "codex_exec_waiting",
+                        "provider_box_semantic_authoring_waiting",
                         "running",
                         &format!("Codex plan author 仍在运行，已等待 {elapsed}s；当前步骤：生成并校验 plan.lisp。"),
                         Some(elapsed),
@@ -6006,31 +6026,24 @@ JSON 字段必须是：\n\
         })
     }
 
-    fn jarvis_direct_answer_endpoint() -> Option<String> {
-        for key in [
-            "MISSIOND_XJPCODE_TEXT_ONLY_URL",
-            "MISSIOND_XJPCODE_TEXT_ONLY_ENDPOINT",
-        ] {
-            if let Ok(value) = std::env::var(key) {
-                let trimmed = value.trim();
-                if !trimmed.is_empty() {
-                    return Some(trimmed.to_string());
-                }
-            }
-        }
-        std::env::var("MISSIOND_XJPCODE_BASE_URL")
-            .ok()
-            .map(|value| value.trim().trim_end_matches('/').to_string())
-            .filter(|value| !value.is_empty())
-            .map(|base| format!("{base}/provider/v1/text-only/completions"))
-    }
-
     fn jarvis_direct_answer_provider() -> String {
         std::env::var("MISSIOND_JARVIS_DIRECT_ANSWER_PROVIDER")
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "codex_cli".to_string())
+    }
+
+    fn provider_box_engine_for_provider(provider: &str) -> anyhow::Result<&'static str> {
+        match provider {
+            "codex" | "codex_cli" | "codex-cli" => Ok("codex"),
+            "agy" | "agy_cli" | "agy-cli" => Ok("agy"),
+            "claude_code" | "claude-code" | "claude" => Ok("claude_code"),
+            "gemini" | "gemini_cli" | "gemini-cli" => Ok("gemini"),
+            other => anyhow::bail!(
+                "unsupported provider_box provider for Jarvis direct answer: {other}"
+            ),
+        }
     }
 
     fn jarvis_direct_answer_timeout_secs() -> u64 {
@@ -6102,13 +6115,12 @@ JSON 字段必须是：\n\
         plan_artifact_id: &str,
         permission_context: &serde_json::Value,
         sources_used: &[String],
+        provider_box_http: &ProviderBoxHttpSlot,
         db: Option<&Arc<dyn crate::db::traits::MissionStore>>,
         conversation_id: Option<&str>,
     ) -> anyhow::Result<()> {
-        let Some(endpoint) = Self::jarvis_direct_answer_endpoint() else {
-            anyhow::bail!("MISSIOND_XJPCODE_TEXT_ONLY_URL or MISSIOND_XJPCODE_BASE_URL is required for grounded_direct_answer; refusing to create a BoardTask fallback.");
-        };
         let provider = Self::jarvis_direct_answer_provider();
+        let engine = Self::provider_box_engine_for_provider(provider.as_str())?;
         let timeout_secs = Self::jarvis_direct_answer_timeout_secs();
         Self::write_jarvis_progress(
             stream,
@@ -6116,12 +6128,12 @@ JSON 字段必须是：\n\
             chat_id,
             interaction_id,
             "direct_answer",
-            "xjpcode_text_only_start",
+            "provider_box_grounded_direct_answer_start",
             "running",
-            "plan 已确认为 grounded_direct_answer，正在调用 xjpcode text-only 生成直接回答，不创建 BoardTask。",
+            "plan 已确认为 grounded_direct_answer，正在通过 provider_box 生成直接回答，不创建 BoardTask。",
             None,
             None,
-            Some("xjpcode-text-only"),
+            Some("provider-box"),
         )
         .await?;
 
@@ -6137,100 +6149,65 @@ JSON 字段必须是：\n\
             permission_context,
             sources_used,
         );
+        let prompt = format!("{system_prompt}\n\n{prompt}");
+        let correlation_id = format!(
+            "jarvis-direct-answer-{}",
+            uuid::Uuid::new_v4().simple()
+        );
         let body = serde_json::json!({
+            "schema": "missiond.provider-interaction-request.v1",
+            "command": "grounded-direct-answer",
             "provider": &provider,
+            "engine": engine,
             "prompt": prompt,
-            "system_prompt": system_prompt,
             "model": std::env::var("MISSIOND_JARVIS_DIRECT_ANSWER_MODEL").ok(),
-            "timeout_secs": timeout_secs
+            "timeout_secs": timeout_secs,
+            "correlation_id": correlation_id,
+            "slot_id": std::env::var("MISSIOND_JARVIS_DIRECT_ANSWER_SLOT_ID")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "slot-codex-review-worker".to_string()),
+            "no_tools": true,
+            "no_mcp": true,
+            "no_shell": true,
+            "no_file_access": true,
+            "output_contract": {
+                "media_type": "text/plain",
+                "single_turn": true
+            },
+            "tool_policy": {
+                "sandbox": "read-only",
+                "approval_policy": "never"
+            }
         });
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(timeout_secs + 5))
-            .build()?;
-        let response = client
-            .post(&endpoint)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|err| anyhow::anyhow!("JARVIS_DIRECT_ANSWER_PROVIDER_UNAVAILABLE: {err}"))?;
-        if !response.status().is_success() {
-            anyhow::bail!(
-                "JARVIS_DIRECT_ANSWER_PROVIDER_FAILED: xjpcode text-only endpoint returned {}",
-                response.status()
-            );
-        }
-
-        let mut answer = String::new();
-        let mut saw_final = false;
-        let response_text = response
-            .text()
-            .await
-            .map_err(|err| anyhow::anyhow!("JARVIS_DIRECT_ANSWER_STREAM_FAILED: {err}"))?;
-        for line in response_text.lines().map(str::trim) {
-            if !line.starts_with("data:") {
-                continue;
-            }
-            let data = line.trim_start_matches("data:").trim();
-            if data.is_empty() {
-                continue;
-            }
-            let frame: XjpcodeTextOnlyFrame = serde_json::from_str(data)
-                .map_err(|err| anyhow::anyhow!("JARVIS_DIRECT_ANSWER_BAD_FRAME: {err}: {data}"))?;
-            match frame {
-                XjpcodeTextOnlyFrame::Accepted { .. } => {
-                    Self::write_sse_event(
-                        stream,
-                        "worker_status",
-                        &serde_json::json!({
-                            "phase": "direct_answer",
-                            "provider": &provider,
-                            "status": "accepted",
-                            "terminal_task_result": false,
-                        }),
-                    )
-                    .await?;
-                }
-                XjpcodeTextOnlyFrame::TextDelta { content } => {
-                    answer.push_str(&content);
-                    Self::write_sse_event(
-                        stream,
-                        "answer_delta",
-                        &serde_json::json!({
-                            "phase": "direct_answer",
-                            "provider": &provider,
-                            "content": content.clone(),
-                        }),
-                    )
-                    .await?;
-                    Self::write_sse_openai_text(stream, chat_id, &content, None).await?;
-                }
-                XjpcodeTextOnlyFrame::Diagnostic { code, message } => {
-                    Self::write_sse_event(
-                        stream,
-                        "diagnostic",
-                        &serde_json::json!({
-                            "phase": "direct_answer",
-                            "error": {"code": code, "message": message},
-                        }),
-                    )
-                    .await?;
-                }
-                XjpcodeTextOnlyFrame::Final { status, .. } => {
-                    saw_final = true;
-                    if status != "completed" {
-                        anyhow::bail!(
-                            "JARVIS_DIRECT_ANSWER_PROVIDER_FAILED: xjpcode final status={status}"
-                        );
-                    }
-                }
-            }
-        }
-        if !saw_final {
-            anyhow::bail!("JARVIS_DIRECT_ANSWER_NO_FINAL: xjpcode stream ended without final");
-        }
+        let answer =
+            Self::call_provider_box_turn(provider_box_http, body, timeout_secs, "JARVIS_DIRECT_ANSWER")
+                .await?;
         if answer.trim().is_empty() {
-            anyhow::bail!("JARVIS_DIRECT_ANSWER_EMPTY: xjpcode returned no visible answer");
+            anyhow::bail!("JARVIS_DIRECT_ANSWER_EMPTY: provider-box returned no visible answer");
         }
+        Self::write_sse_event(
+            stream,
+            "worker_status",
+            &serde_json::json!({
+                "phase": "direct_answer",
+                "provider": &provider,
+                "status": "completed",
+                "terminal_task_result": false,
+            }),
+        )
+        .await?;
+        Self::write_sse_event(
+            stream,
+            "answer_delta",
+            &serde_json::json!({
+                "phase": "direct_answer",
+                "provider": &provider,
+                "content": answer.clone(),
+            }),
+        )
+        .await?;
+        Self::write_sse_openai_text(stream, chat_id, &answer, None).await?;
 
         Self::persist_jarvis_visible_assistant_message(db, conversation_id, &answer).await;
         let payload = serde_json::json!({
@@ -7175,6 +7152,7 @@ JSON 字段必须是：\n\
         context_enricher: ContextEnricherSlot,
         jarvis_grounding: JarvisGroundingSlot,
         jarvis_artifact_writer: JarvisArtifactSlot,
+        provider_box_http: ProviderBoxHttpSlot,
         db: Option<Arc<dyn crate::db::traits::MissionStore>>,
         cc_tasks_watcher: Option<Arc<Mutex<CCTasksWatcher>>>,
         tool_count: usize,
@@ -7626,7 +7604,7 @@ JSON 字段必须是：\n\
                 &jarvis_progress_bus,
                 &chat_id,
                 None,
-                Some(&pty_manager),
+                &provider_box_http,
                 &jarvis_intent_author,
                 "missiond.jarvis-intent-artifact.v1",
                 "jarvis",
@@ -7787,7 +7765,7 @@ JSON 字段必须是：\n\
                 &jarvis_progress_bus,
                 &chat_id,
                 None,
-                Some(&pty_manager),
+                &provider_box_http,
                 &jarvis_plan_author,
                 "missiond.jarvis-plan-artifact.v1",
                 "jarvis",
@@ -7988,6 +7966,7 @@ JSON 字段必须是：\n\
                     &plan_artifact_id,
                     &permission_context,
                     &sources_used,
+                    &provider_box_http,
                     db.as_ref(),
                     jarvis_conv_id.as_deref(),
                 )
@@ -9523,6 +9502,7 @@ JSON 字段必须是：\n\
         _context_enricher: ContextEnricherSlot,
         jarvis_grounding: JarvisGroundingSlot,
         jarvis_artifact_writer: JarvisArtifactSlot,
+        provider_box_http: ProviderBoxHttpSlot,
         _tool_count: usize,
         default_chat_slot: String,
         jarvis_intent_author: JarvisIntentAuthorConfig,
@@ -9569,6 +9549,32 @@ JSON 字段必须是：\n\
             // Health check
             if method == "GET" && normalized_path == "/health" && !is_upgrade {
                 return Self::handle_health(stream).await;
+            }
+            if method == "OPTIONS" && normalized_path.starts_with("/provider-box/v1/") {
+                let mut s = stream;
+                let response = "HTTP/1.1 204 No Content\r\n\
+                    Access-Control-Allow-Origin: *\r\n\
+                    Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
+                    Access-Control-Allow-Headers: Content-Type, Authorization, X-Slot-Id, X-Trace-Id\r\n\
+                    Access-Control-Max-Age: 86400\r\n\
+                    Content-Length: 0\r\n\
+                    Connection: close\r\n\
+                    \r\n";
+                s.write_all(response.as_bytes()).await?;
+                s.shutdown().await?;
+                return Ok(());
+            }
+            if !is_upgrade
+                && normalized_path.starts_with("/provider-box/v1/")
+                && matches!(method, "GET" | "POST")
+            {
+                return Self::handle_provider_box_http(
+                    stream,
+                    method,
+                    normalized_path.as_ref(),
+                    provider_box_http,
+                )
+                .await;
             }
             // Jarvis readiness: daemon/proxy health plus default slot availability.
             if method == "GET" && normalized_path == "/api/readiness" && !is_upgrade {
@@ -9625,6 +9631,7 @@ JSON 字段必须是：\n\
                     jarvis_plan_author.clone(),
                     jarvis_grounding,
                     jarvis_artifact_writer,
+                    provider_box_http.clone(),
                     db,
                 )
                 .await;
@@ -9663,6 +9670,7 @@ JSON 字段必须是：\n\
                     jarvis_plan_author.clone(),
                     jarvis_grounding,
                     jarvis_artifact_writer,
+                    provider_box_http.clone(),
                     db,
                 )
                 .await;
@@ -10537,17 +10545,6 @@ done"#;
     }
 
     #[test]
-    fn jarvis_codex_exec_jsonl_extracts_final_message() {
-        let stdout = r#"{"type":"thread.started","thread_id":"t"}
-{"type":"item.completed","item":{"type":"message","text":"{\"recognized_objective\":\"展示 intent.lisp 正文\",\"intent_kind\":\"review\",\"understanding\":\"用户只想先看到可确认的 intent。\",\"review_text\":\"目标: 展示 intent.lisp 正文\",\"assumptions\":[\"只读\"],\"non_goals\":[\"创建任务\"],\"acceptance_signals\":[\"看到正文\"],\"confidence\":\"high\"}"}}
-{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":2}}"#;
-        let message = PTYWebSocketServer::extract_codex_exec_message(stdout).unwrap();
-        let parsed = PTYWebSocketServer::parse_codex_intent_response(&message).unwrap();
-        assert_eq!(parsed.recognized_objective, "展示 intent.lisp 正文");
-        assert_eq!(parsed.non_goals, vec!["创建任务"]);
-    }
-
-    #[test]
     fn jarvis_codex_plan_response_parses_from_wrapped_output() {
         let output = r#"noise
 {"objective":"修复 plan.lisp 作者链路","review_text":"目标: 修复 plan.lisp 作者链路\n边界: 确认 plan 后才创建 BoardTask。","execution_mode":"work_order","requires_board_task":true,"steps":["确认已批准 intent","生成 Codex-authored plan.lisp","等待用户确认 plan"],"answer_policy":"结果来自 task-result-artifact。","provider_hint":"codex-review-worker","boundary":"不创建 BoardTask，直到用户确认 plan。","assumptions":["intent 已确认"],"non_goals":["Rust deterministic plan"],"acceptance_signals":["plan 标出 Codex author"],"confidence":"high"}
@@ -10568,8 +10565,8 @@ done"#;
             "execution_mode":"grounded_direct_answer",
             "requires_board_task":true,
             "steps":["基于 grounding 回答"],
-            "answer_policy":"xjpcode text-only",
-            "provider_hint":"xjpcode-text-only",
+            "answer_policy":"provider_box grounded-direct-answer",
+            "provider_hint":"provider-box-codex",
             "boundary":"不改代码",
             "assumptions":[],
             "non_goals":[],
@@ -10638,8 +10635,8 @@ done"#;
                 "创建可审阅 plan draft".to_string(),
                 "等待用户确认 plan".to_string(),
             ],
-            answer_policy: Some("使用 xjpcode text-only 基于 grounding 直接回答。".to_string()),
-            provider_hint: Some("xjpcode-text-only".to_string()),
+            answer_policy: Some("使用 provider_box 基于 grounding 直接回答。".to_string()),
+            provider_hint: Some("provider-box-codex".to_string()),
             boundary: Some("确认 plan 后才创建 BoardTask。".to_string()),
             assumptions: vec!["intent 已确认".to_string()],
             non_goals: vec!["Rust 自行拼接 plan".to_string()],

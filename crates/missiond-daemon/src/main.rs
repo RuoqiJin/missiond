@@ -24,6 +24,8 @@ mod helpers;
 mod lenient;
 mod organism;
 mod permission_extract;
+#[allow(dead_code)]
+mod provider_box;
 mod runtime_actors;
 mod slot_dispatch;
 mod slot_orchestrator;
@@ -718,6 +720,8 @@ async fn main() -> Result<()> {
         Arc::new(tokio::sync::RwLock::new(None));
     let jarvis_artifact_writer_slot: missiond_core::JarvisArtifactSlot =
         Arc::new(tokio::sync::RwLock::new(None));
+    let provider_box_http_slot: missiond_core::ProviderBoxHttpSlot =
+        Arc::new(tokio::sync::RwLock::new(None));
     let workstation_config_for_ws =
         context::v3_blueprint_runtime::WorkstationRuntimeConfig::load_for_project_root(Some(
             missiond_project_root.to_string_lossy().as_ref(),
@@ -746,6 +750,7 @@ async fn main() -> Result<()> {
         context_enricher: Arc::clone(&context_enricher_slot),
         jarvis_grounding: Arc::clone(&jarvis_grounding_slot),
         jarvis_artifact_writer: Arc::clone(&jarvis_artifact_writer_slot),
+        provider_box_http: Arc::clone(&provider_box_http_slot),
         tool_count: all_tools().len(),
         default_chat_slot,
         jarvis_intent_author,
@@ -930,6 +935,31 @@ async fn main() -> Result<()> {
             Arc::clone(&bus_services),
             missiond_root,
         ))
+    };
+
+    let provider_box_runtime = {
+        let mut provider_runtime = provider_box::ProviderInteractionBox::new(
+            provider_box::ProviderBoxArtifactWriter::new(Arc::clone(&shared_memory)),
+        );
+        provider_runtime.register_driver(Arc::new(provider_box::AgyProviderDriver::new(
+            Arc::clone(&pty),
+        )));
+        provider_runtime.register_driver(Arc::new(provider_box::CodexProviderDriver::new(
+            Arc::clone(&pty),
+            Arc::clone(&store),
+            pty_session_uuids_arc.clone(),
+            project_registry.clone(),
+            learned.clone(),
+        )));
+        let provider_runtime = Arc::new(provider_runtime);
+        let adapter = provider_box::ProviderBoxHttpAdapter::new(Arc::clone(&provider_runtime));
+        let callback: missiond_core::ProviderBoxHttpFn = Arc::new(move |request| {
+            let adapter = adapter.clone();
+            Box::pin(async move { adapter.handle(request).await })
+        });
+        *provider_box_http_slot.write().await = Some(callback);
+        info!("Provider-box HTTP adapter registered");
+        provider_runtime
     };
 
     let codex_replay = {
@@ -1149,6 +1179,7 @@ async fn main() -> Result<()> {
             bus: Arc::clone(&bus_services),
             shared_memory: Arc::clone(&shared_memory),
             codex_replay: Arc::clone(&codex_replay),
+            provider_box: Arc::clone(&provider_box_runtime),
         },
         state::SlotContext {
             mission: Arc::clone(&mission),
@@ -1307,6 +1338,7 @@ async fn main() -> Result<()> {
         embedding_tx: embedding_tx,
         bus: Arc::clone(&bus_services),
         codex_replay,
+        provider_box: Arc::clone(&provider_box_runtime),
         shared_memory,
         stats: Arc::clone(&daemon_stats),
         prompts: Arc::clone(&prompts_store),

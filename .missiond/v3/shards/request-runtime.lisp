@@ -82,13 +82,37 @@
          :id-field artifact_hash
          :storage "shared_artifacts(kind=interaction-direct-answer)"
          :fields [interaction_id grounding_context_id intent_artifact_id plan_artifact_id execution_mode requires_board_task answer_policy provider content sources_used]
-        :rule "After mandatory intent.lisp and plan.lisp confirmation, execution_mode=grounded_direct_answer with requires_board_task=false MUST answer through xjpcode text-only using MISSIOND_XJPCODE_TEXT_ONLY_URL or MISSIOND_XJPCODE_BASE_URL/provider/v1/text-only/completions, stream answer_delta events, and write this interaction result artifact. The default text provider is codex_cli via MISSIOND_JARVIS_DIRECT_ANSWER_PROVIDER so existing paid CLI lanes are preferred over router spend; router is allowed only when explicitly selected. Missing provider configuration or failed provider final is a typed diagnostic; MissionD MUST NOT create a fallback BoardTask, run local code search, or fabricate an answer.")
+        :rule "After mandatory intent.lisp and plan.lisp confirmation, execution_mode=grounded_direct_answer with requires_board_task=false currently answers through xjpcode text-only using MISSIOND_XJPCODE_TEXT_ONLY_URL or MISSIOND_XJPCODE_BASE_URL/provider/v1/text-only/completions, streams answer_delta events, and writes this interaction result artifact. That text-only provider is migration-only: the target path answers through provider-interaction-box mode=grounded-direct-answer, still writes this artifact before terminal final, and still refuses fallback BoardTask/local code search/fabricated answers. The default text provider is codex_cli via MISSIOND_JARVIS_DIRECT_ANSWER_PROVIDER only while the legacy adapter remains enabled; router is allowed only when explicitly selected.")
+      (kind provider-interaction-turn
+         :schema "missiond.provider-interaction-turn.v1"
+         :id-field turn_id
+         :storage "shared_artifacts(kind=provider-interaction-turn)"
+         :fields [turn_id lease_id interaction_id task_id provider engine slot_id mode prompt_hash attachment_refs correlation_id durable_source provider_conversation_id final_text artifact_hash diagnostics step_records screen_identity screen_usage model model_profile output_contract single_turn_policy timeout_cancel_policy usage_snapshot_ref model_catalog_ref router_export_ref model_switch_result]
+         :rule "Every MissionD-owned provider CLI call that is not a normal BoardTask worker prompt MUST pass through interactive-provider-box and persist a provider-interaction-turn record. External worker turns, runner one-shots, grounded direct answers, semantic authoring, pure-text single turns, model-switch control turns, usage probes, and model-catalog exports all normalize through this record. Prompt turns and interactive control turns must include step_records: each PTY action records before observation, action, after observation, expected change, and verification status. Observations include screen_identity when visible, including Agy cli_version/account/plan/current_model/selected_model/cwd, and screen_usage when an Agy /usage Model Quota page is visible, including model_quotas percent/status entries. Agy prompt turns treat bottom/recent Braille spinner status lines such as Generating.../Working.../Loading... plus esc to cancel as active; `>` alone is not idle or completion until the active indicator disappears and the durable final matches the turn. The box sends input through an interactive PTY only when the mode is a prompt/control turn, correlates the turn against durable provider logs, emits diagnostics when no durable final exists, and may project interaction-direct-answer or task-result-artifact only after a matched durable final or canonical artifact is available.")
+      (kind provider-usage-snapshot
+         :schema "missiond.provider-usage-snapshot.v1"
+         :id-field snapshot_id
+         :storage "shared_artifacts(kind=provider-usage-snapshot)"
+         :fields [snapshot_id provider engine slot_id account_ref model observed_at status remaining limit reset_at source confidence block_kind model_quotas diagnostics]
+         :rule "Usage information is observational and confidence-scored. exact requires structured provider data, durable log metadata, a recognized usage meter, or a provider account/status surface. Agy usage-probe reads screen_usage from the /usage Model Quota page after the refresh sequence Esc -> /usage -> Enter when needed. blocked captures auth_missing, billing_or_account, usage_limit, or rate_limit. unknown is required when the provider exposes only vague text or no stable surface; MissionD must not invent remaining counters.")
+      (kind provider-model-catalog
+         :schema "missiond.provider-model-catalog.v1"
+         :id-field catalog_id
+         :storage "shared_artifacts(kind=provider-model-catalog)"
+         :fields [catalog_id provider engine account_ref discovered_at source entries diagnostics]
+         :rule "Model catalogs are discovered by provider-specific box drivers from stable catalog sources, recognized model pickers, provider config, or account metadata. Each entry must include provider_model_id, display_name, family, routeable_default, switch_capability, usage_probe_capability, and confidence. Agy transcript messages with model=nil/usage=nil are not catalog evidence.")
+      (kind provider-router-export
+         :schema "missiond.provider-router-export.v1"
+         :id-field export_id
+         :storage "shared_artifacts(kind=provider-router-export)"
+         :fields [export_id catalog_id provider engine router_backend_ids routeable_entries blocked_entries policy_ref diagnostics]
+         :rule "Router export consumes provider-model-catalog plus usage/model-switch evidence from the box. An entry becomes routeable only when it has a stable provider_model_id, a supported switch or spawn policy, a current usage status that is not blocked, and router policy approval. Router code must not scrape provider CLIs directly. Agy router export emits xjp-router MissionDAgy provider routes modeled after the Meow61 provider-source pattern, with text=true/tools=false/vision=false and provider_model_id set to the MissionD provider-box base URL from the self-built proxy deployment program. MissionD serves the internal adapter as GET /provider-box/v1/models, POST /provider-box/v1/usage/refresh, POST /provider-box/v1/turns, and POST /provider-box/v1/text-only/completions behind bearer-token auth.")
       (kind provider-text-only-source
          :schema "missiond.provider-text-only-source.v1"
          :id-field source_call_id
          :storage "shared_artifacts(kind=provider-text-only-source)"
          :fields [source_call_id provider_id engine_id model input_text output_text no_tools no_mcp no_shell no_file_access proposal_kind proposal_artifact_hash]
-         :rule "ClaudeCode, Codex CLI, Agy, or any paid CLI used as a proposal source for xjpcode/MissionD planning MUST run in no-tools text-only mode. They may propose intent, plan, decomposition, risks, or review text, but MUST NOT execute shell, MCP tools, file reads, file writes, hidden subagents, or PTY tool loops inside this source role.")
+         :rule "Legacy ClaudeCode, Codex CLI, Agy, or any paid CLI used as a proposal source for xjpcode/MissionD planning MUST run in no-tools text-only mode while migration is incomplete. They may propose intent, plan, decomposition, risks, or review text, but MUST NOT execute shell, MCP tools, file reads, file writes, hidden subagents, or PTY tool loops inside this source role. New proposal sources MUST use provider-interaction-turn through interactive-provider-box instead of direct text-only/headless provider CLI.")
       (kind plan-atomization-graph
          :schema "missiond.plan-atomization-graph.v1"
          :id-field atom_graph_id
@@ -108,7 +132,7 @@
        (function plan-atomization-compiler
          :entry [confirmed-plan.lisp grounding_context_id intent_artifact_id plan_artifact_id provider-text-only-source]
          :core ((step s1 :logic "treat plan.lisp as a high-level forecast of the route, risks, evidence, and expected implementation surfaces; never dispatch it directly to a worker")
-                (step s2 :logic "optionally ask ClaudeCode/Codex/Agy text-only sources for decomposition proposals with no tools, no shell, no file reads, no MCP, and no hidden subagents")
+                (step s2 :logic "optionally ask ClaudeCode/Codex/Agy proposal sources through provider-interaction-box mode=pure-text-single-turn with no tools, no shell, no file reads, no MCP, and no hidden subagents; legacy provider-text-only-source remains migration-only")
                 (step s3 :logic "compile the accepted plan into shard_nodes, then recursively split each shard into atom_tasks whose objective is small enough for a low-skill worker to execute or verify")
                 (step s4 :logic "attach context_sources, predicted_tool_sequence, acceptance, read_scope, write_scope, and detour_budget to each atom")
                 (step s5 :logic "derive dependency_edges, serial_groups, and parallel_groups; serial atoms lower to BoardTask dependsOn, while parallel atoms lower to independent BoardTasks sharing a parallel_group")
@@ -129,6 +153,34 @@
                 (step s3 :logic "write telemetry to worker-capability-telemetry and attach improvement candidates to the parent plan-atomization-graph")
                 (step s4 :logic "when detours recur, create a workflow/checker/SSOT optimization task rather than blaming the worker prompt"))
          :egress [worker-capability-telemetry decomposition-gap-report workflow-improvement-candidate])
+       (function provider-interaction-box-turn
+         :entry [JarvisSSE runner worker external-app provider-interaction-request]
+         :core ((step s1 :logic "normalize every non-BoardTask provider CLI request into missiond.provider-interaction-turn.v1 with provider, mode, prompt_hash, attachment_refs, timeout, cwd/project_root, and correlation_id")
+                (step s2 :logic "validate caller capability, read/write scope, desired_worker lease, no_tools/no_mcp/no_shell/no_file_access guard, and requested model/profile against workstation-pool and router policy")
+                (step s3 :logic "select or spawn an interactive PTY slot from workstation-pool; direct `claude --print`, `codex exec`, Agy print/prompt modes, Gemini `-p -o stream-json`, and stdin-closed provider subprocesses are forbidden outside the legacy migration inventory")
+                (step s4 :logic "dispatch by mode: prompt turns call driver submit-turn, model-switch calls driver switch-model or respawn, usage-probe calls driver usage-probe, model-catalog-export calls driver model-catalog and router exporter, pure-text-single-turn additionally installs the pure-text guard")
+                (step s5 :logic "for every provider UI action, run observe -> act -> observe -> verify -> record; do not send the next key/input until the previous step has a verified or explicitly handled ambiguous/unchanged/failed status")
+                (step s6 :logic "for prompt turns, submit input as human-like terminal input and use provider-specific interactive attach UI when attachments are present, or return PROVIDER_INTERACTIVE_ATTACHMENT_UNSUPPORTED")
+                (step s7 :logic "wait for provider idle/complete state after provider-specific active indicators disappear; for Agy, `>` alone is not completion while a bottom/recent Braille spinner with Generating.../Working.../Loading... or esc to cancel is still visible. If timeout_cancel_policy detects running_timeout_secs or no_progress_grace_secs exhaustion, record PROVIDER_TURN_STALLED, send the configured cancel key such as escape, verify Interrupted · What should Antigravity CLI do instead? plus ? for shortcuts/current model or another provider-ready surface, then retry only within max_retries. Then read durable provider logs such as ClaudeCode JSONL, Codex rollout JSONL, Agy transcript_full.jsonl/history.jsonl, or Gemini session files for the matching correlation_id")
+                (step s8 :logic "write provider-interaction-turn plus interaction-direct-answer, task-result-artifact, provider-usage-snapshot, provider-model-catalog, or provider-router-export projection only after matched evidence exists")
+                (step s9 :logic "on timeout, PROVIDER_TURN_TIMEOUT_CANCEL_FAILED, provider auth/billing/quota block, unsupported driver capability, missing durable final, stale final mismatch, model-switch unverified, usage unknown, step verification failure, or pure-text guard violation, emit typed diagnostics without synthesizing an answer from PTY screen text"))
+         :egress [provider-interaction-turn interaction-direct-answer task-result-artifact provider-usage-snapshot provider-model-catalog provider-router-export diagnostic])
+       (function provider-box-model-control
+         :entry [external-app runner worker provider-interaction-turn model-switch-request]
+         :core ((step s1 :logic "load the active lease/slot and provider driver capability for the target provider/model")
+                (step s2 :logic "if the provider supports launch_arg only, stop/recreate the PTY under the same lease with the requested model/profile and mark previous provider_conversation_id closed for routing")
+                (step s3 :logic "if the provider supports interactive_ui or conversation_setting, invoke the driver and verify the new model through durable metadata, recognized UI/footer, provider settings export, or a fresh launch record")
+                (step s4 :logic "if verification is missing, return MODEL_SWITCH_UNVERIFIED and do not update router routeability or slot_current_model projections")
+                (step s5 :logic "if unsupported, return MODEL_SWITCH_UNSUPPORTED with provider/model/capability diagnostics"))
+         :egress [provider-interaction-turn model_switch_result diagnostic])
+       (function provider-box-usage-and-catalog-export
+         :entry [router provider-interaction-request usage-probe model-catalog-export]
+         :core ((step s1 :logic "ask the provider driver for a usage snapshot; classify exact, estimated, blocked, or unknown with source and confidence")
+                (step s2 :logic "ask the provider driver for a model catalog only from stable catalog/config/model-picker/account sources; for Agy, open /model interactively, scroll the picker, and collect display names from recognized screen_identity/model-picker observations")
+                (step s3 :logic "write provider-model-catalog even when some entries are blocked or unsupported, but keep routeable=false until switch/test/usage evidence exists")
+                (step s4 :logic "publish provider-router-export only through router policy, never by letting router scrape a provider CLI")
+                (step s5 :logic "for Agy, emit MissionDAgy TOML route entries only for observed model-picker entries with a fixed slot_id, pure_text=true, usage status not blocked, and provider_model_id equal to the managed proxy URL for MissionD provider-box; do not infer all models from transcript JSONL"))
+         :egress [provider-usage-snapshot provider-model-catalog provider-router-export diagnostic])
        (function task-delegate-grounding-gate
          :entry [mission_task_delegate mission_swarm_run mission_plan_execute]
          :core ((step s1 :logic "classify dispatch as exact shard, emergency code-first, or broad objective")
@@ -185,10 +237,10 @@
          :core ((step s1 :logic "read execution_mode and requires_board_task from confirmed plan metadata")
                 (step s2 :logic "allow only execution_mode=grounded_direct_answer with requires_board_task=false")
                 (step s3 :logic "load bounded grounding context preview and source refs from context_pack_file/shared artifact")
-                (step s4 :logic "call xjpcode text-only provider with no tool schema, no write scope, and no BoardTask authority")
+                (step s4 :logic "current migration path may call xjpcode text-only provider with no tool schema, no write scope, and no BoardTask authority; target path calls provider-interaction-box mode=grounded-direct-answer and reads the durable provider final")
                 (step s5 :logic "stream answer_delta chunks and provider diagnostics to the client")
                 (step s6 :logic "write interaction-direct-answer artifact with schema missiond.interaction-result-artifact.v1 before terminal final")
-                (step s7 :logic "if MISSIOND_XJPCODE_TEXT_ONLY_URL/MISSIOND_XJPCODE_BASE_URL is missing or provider final is not completed, fail fast with typed diagnostic and no fallback BoardTask"))
+                (step s7 :logic "if MISSIOND_XJPCODE_TEXT_ONLY_URL/MISSIOND_XJPCODE_BASE_URL is missing on the legacy path, or provider-interaction-box cannot produce a matched durable final, fail fast with typed diagnostic and no fallback BoardTask"))
          :egress [answer_delta result_artifact_event final_event diagnostic]))
     :invariants
       ["All non-exact worker dispatch must carry grounding_context_id before a provider PTY receives the prompt."
@@ -222,7 +274,8 @@
        "Plan.lisp MUST NOT be dispatched directly as a worker prompt; confirmed plans first compile to plan-atomization-graph, then to atom-level BoardTasks."
        "Each worker BoardTask created from a plan atom MUST carry atom_task_id, atom_path, execution_order, dependency_policy, and either dependsOn serial edges or a parallel_group in runtime_metadata/task_contracts."
        "Board parallel execution is explicit: execution_order=parallel tasks have no mutual dependsOn edge and share a parallel_group; execution_order=serial tasks are gated by dependsOn or by the atom graph root order."
-       "ClaudeCode, Codex CLI, and Agy used as planning/decomposition proposal sources MUST be text-only no-tools sources; xjpcode remains the governed worker runtime and may gather scoped context through its own atom tool policy."
+       "Provider CLI access outside normal BoardTask worker dispatch MUST route through interactive-provider-box and persist missiond.provider-interaction-turn.v1; direct `claude --print`, `codex exec`, Agy print/prompt modes, Gemini `-p -o stream-json`, and stdin-closed provider subprocesses are allowed only as explicitly inventoried legacy migration targets."
+       "ClaudeCode, Codex CLI, and Agy used as planning/decomposition proposal sources are legacy text-only no-tools sources only until migrated to provider-interaction-turn; xjpcode remains the governed worker runtime and may gather scoped context through its own atom tool policy."
        "Worker detours are first-class telemetry. If a worker had to discover missing context, invent a subplan, or widen search beyond predicted_tool_sequence, MissionD records a decomposition/context infrastructure gap for workflow improvement."]
     :checks ["node scripts/check-v3-grounded-dispatch-isomorphism.mjs --json"])
 

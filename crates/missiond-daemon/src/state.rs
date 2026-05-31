@@ -93,6 +93,7 @@ pub(crate) struct StorageContext {
     pub(crate) bus: Arc<BusServices>,
     pub(crate) shared_memory: Arc<crate::engine::shared_memory::SharedMemoryService>,
     pub(crate) codex_replay: Arc<crate::engine::codex_replay::CodexReplayService>,
+    pub(crate) provider_box: Arc<crate::provider_box::ProviderInteractionBox>,
 }
 
 #[derive(Clone)]
@@ -140,6 +141,7 @@ pub(crate) struct StoragePlane {
     pub(crate) ports: StorePorts,
     pub(crate) shared_memory: Arc<crate::engine::shared_memory::SharedMemoryService>,
     pub(crate) codex_replay: Arc<crate::engine::codex_replay::CodexReplayService>,
+    pub(crate) provider_box: Arc<crate::provider_box::ProviderInteractionBox>,
 }
 
 #[derive(Clone)]
@@ -580,6 +582,8 @@ pub(crate) struct AppState {
     pub(crate) bus: Arc<BusServices>,
     /// Codex app-server protocol replay runner for fixed Plan Mode automation loops.
     pub(crate) codex_replay: Arc<crate::engine::codex_replay::CodexReplayService>,
+    /// Single provider CLI interaction boundary. Codex/Agy provider turns must enter here.
+    pub(crate) provider_box: Arc<crate::provider_box::ProviderInteractionBox>,
     /// Durable multi-agent shared memory: event stream, artifacts, write leases,
     /// and agent cursors. This supersedes direct concurrent writes to
     /// `.missiond/tasks/**/shared-memory.lisp`; those files remain a
@@ -688,6 +692,7 @@ impl AppState {
             ports: StorePorts::new(Arc::clone(&self.store)),
             shared_memory: Arc::clone(&self.shared_memory),
             codex_replay: Arc::clone(&self.codex_replay),
+            provider_box: Arc::clone(&self.provider_box),
         }
     }
 

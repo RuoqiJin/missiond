@@ -6,6 +6,8 @@
 //! turns visible PTY text into a stable MissionD recognition snapshot.
 
 use missiond_shared::CliEngine;
+use once_cell::sync::Lazy;
+use regex::Regex;
 use semantic_terminal::{ParserContext, ParserMeta, State, StateDetectionResult, StateParser};
 use serde::{Deserialize, Serialize};
 
@@ -36,8 +38,101 @@ pub struct PtyRecognitionSnapshot {
     pub elapsed_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocked_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_identity: Option<ProviderScreenIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_usage: Option<ProviderUsageScreen>,
     pub source: String,
 }
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderScreenIdentity {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cli_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+}
+
+impl ProviderScreenIdentity {
+    fn is_empty(&self) -> bool {
+        self.cli_version.is_none()
+            && self.account.is_none()
+            && self.plan.is_none()
+            && self.current_model.is_none()
+            && self.selected_model.is_none()
+            && self.cwd.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderUsageScreen {
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_quotas: Vec<ProviderModelQuota>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visible_range: Option<ProviderVisibleRange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderModelQuota {
+    pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub percent: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderVisibleRange {
+    pub start: u16,
+    pub end: u16,
+    pub total: u16,
+}
+
+static AGY_VERSION_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)\bAntigravity(?:\s+CLI)?\s+([0-9]+(?:\.[0-9]+)+(?:[-+._A-Za-z0-9]*)?)")
+        .expect("valid agy version regex")
+});
+
+static ACCOUNT_PLAN_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})\s*\(([^)]+)\)")
+        .expect("valid account plan regex")
+});
+
+static AGY_MODEL_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"\b((?:Gemini|Claude|GPT(?:-OSS)?|OpenAI|Grok|Llama|Mistral|Qwen|DeepSeek)[A-Za-z0-9 ._/\-+]*(?:\([^)]+\))?)",
+    )
+    .expect("valid agy model regex")
+});
+
+static AGY_CWD_ONLY_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^(?P<cwd>(?:~|/[A-Za-z0-9_.-]+)/(?:[^\s|]+/?)+)$")
+        .expect("valid agy cwd-only regex")
+});
+
+static AGY_CWD_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?P<cwd>(?:~|/[A-Za-z0-9_.-]+)/(?:[^\s|]+/?)+)").expect("valid agy cwd regex")
+});
+
+static PERCENT_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\b([0-9]{1,3})%").expect("valid percent regex"));
+
+static VISIBLE_RANGE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"\((\d+)\s*[–-]\s*(\d+)\s+of\s+(\d+)\s+lines\)").expect("valid visible range regex")
+});
 
 impl PtyRecognitionSnapshot {
     fn new(provider: CliEngine, state: PtyCanonicalState, confidence: f64, reason: &str) -> Self {
@@ -50,6 +145,8 @@ impl PtyRecognitionSnapshot {
             active_tool: None,
             elapsed_secs: None,
             blocked_kind: None,
+            screen_identity: None,
+            screen_usage: None,
             source: "screen_fallback".to_string(),
         }
     }
@@ -76,6 +173,16 @@ impl PtyRecognitionSnapshot {
 
     fn with_source(mut self, source: impl Into<String>) -> Self {
         self.source = source.into();
+        self
+    }
+
+    fn with_screen_identity(mut self, identity: Option<ProviderScreenIdentity>) -> Self {
+        self.screen_identity = identity;
+        self
+    }
+
+    fn with_screen_usage(mut self, usage: Option<ProviderUsageScreen>) -> Self {
+        self.screen_usage = usage;
         self
     }
 }
@@ -242,13 +349,7 @@ fn active_running_evidence(
             }
         }
         CliEngine::Agy => {
-            if lower.contains("working")
-                || lower.contains("thinking")
-                || lower.contains("running command")
-                || lower.contains("tool running")
-                || lower.contains(" esc to interrupt")
-                || has_spinner(lines)
-            {
+            if has_agy_active_status_line(lines) {
                 let mut snapshot = PtyRecognitionSnapshot::new(
                     CliEngine::Agy,
                     PtyCanonicalState::Running,
@@ -463,6 +564,8 @@ fn recognize_agy(lines: &[String]) -> PtyRecognitionSnapshot {
     let text = joined_text(lines);
     let lower = text.to_ascii_lowercase();
     let elapsed = extract_elapsed_secs(&text);
+    let identity = extract_agy_screen_identity(lines);
+    let usage = extract_agy_usage_screen(lines);
 
     if let Some((kind, reason)) = provider_unavailable_match(&lower) {
         return PtyRecognitionSnapshot::new(
@@ -473,7 +576,8 @@ fn recognize_agy(lines: &[String]) -> PtyRecognitionSnapshot {
         )
         .with_blocked_kind(kind)
         .with_elapsed(elapsed)
-        .with_source("provider_error_signature");
+        .with_source("provider_error_signature")
+        .with_screen_identity(identity);
     }
 
     if lower.contains("how's the cli experience so far")
@@ -486,7 +590,37 @@ fn recognize_agy(lines: &[String]) -> PtyRecognitionSnapshot {
             0.9,
             "agy:feedback_prompt_after_complete",
         )
-        .with_elapsed(elapsed);
+        .with_elapsed(elapsed)
+        .with_screen_identity(identity);
+    }
+
+    if usage.is_some() {
+        return PtyRecognitionSnapshot::new(
+            CliEngine::Agy,
+            PtyCanonicalState::Complete,
+            0.92,
+            "agy:usage_meter",
+        )
+        .with_phase("usage_meter")
+        .with_elapsed(elapsed)
+        .with_source("tui_source_signature")
+        .with_screen_identity(identity)
+        .with_screen_usage(usage);
+    }
+
+    if lower.contains("switch model")
+        && (lower.contains("enter select") || lower.contains("navigate"))
+    {
+        return PtyRecognitionSnapshot::new(
+            CliEngine::Agy,
+            PtyCanonicalState::Blocked,
+            0.9,
+            "agy:model_picker",
+        )
+        .with_blocked_kind("model_picker")
+        .with_elapsed(elapsed)
+        .with_source("tui_source_signature")
+        .with_screen_identity(identity);
     }
 
     if lower.contains("approval request")
@@ -507,7 +641,8 @@ fn recognize_agy(lines: &[String]) -> PtyRecognitionSnapshot {
         )
         .with_blocked_kind("approval")
         .with_elapsed(elapsed)
-        .with_source("tui_source_signature");
+        .with_source("tui_source_signature")
+        .with_screen_identity(identity);
     }
 
     if lower.contains("file access")
@@ -522,16 +657,11 @@ fn recognize_agy(lines: &[String]) -> PtyRecognitionSnapshot {
         )
         .with_blocked_kind("approval")
         .with_elapsed(elapsed)
-        .with_source("tui_source_signature");
+        .with_source("tui_source_signature")
+        .with_screen_identity(identity);
     }
 
-    if lower.contains("working")
-        || lower.contains("thinking")
-        || lower.contains("running command")
-        || lower.contains("tool running")
-        || lower.contains(" esc to interrupt")
-        || has_spinner(lines)
-    {
+    if has_agy_active_status_line(lines) {
         let mut snapshot = PtyRecognitionSnapshot::new(
             CliEngine::Agy,
             PtyCanonicalState::Running,
@@ -544,7 +674,22 @@ fn recognize_agy(lines: &[String]) -> PtyRecognitionSnapshot {
         } else {
             snapshot = snapshot.with_phase("thinking");
         }
-        return snapshot;
+        return snapshot.with_screen_identity(identity);
+    }
+
+    if lower.contains("interrupted")
+        && lower.contains("what should antigravity cli do instead")
+        && has_idle_prompt(lines)
+    {
+        return PtyRecognitionSnapshot::new(
+            CliEngine::Agy,
+            PtyCanonicalState::Idle,
+            0.88,
+            "agy:interrupted_ready_for_retry",
+        )
+        .with_phase("interrupted")
+        .with_source("tui_source_signature")
+        .with_screen_identity(identity);
     }
 
     if has_completion_line(lines) && has_idle_prompt(lines) {
@@ -554,7 +699,8 @@ fn recognize_agy(lines: &[String]) -> PtyRecognitionSnapshot {
             0.84,
             "agy:turn_complete_prompt_returned",
         )
-        .with_elapsed(elapsed);
+        .with_elapsed(elapsed)
+        .with_screen_identity(identity);
     }
 
     if lower.contains("type your message")
@@ -567,7 +713,8 @@ fn recognize_agy(lines: &[String]) -> PtyRecognitionSnapshot {
             PtyCanonicalState::Idle,
             0.86,
             "agy:composer_idle",
-        );
+        )
+        .with_screen_identity(identity);
     }
 
     PtyRecognitionSnapshot::new(
@@ -576,6 +723,7 @@ fn recognize_agy(lines: &[String]) -> PtyRecognitionSnapshot {
         0.2,
         "agy:no_match",
     )
+    .with_screen_identity(identity)
 }
 
 fn recognize_claude_code(lines: &[String]) -> PtyRecognitionSnapshot {
@@ -666,6 +814,273 @@ fn recognize_claude_code(lines: &[String]) -> PtyRecognitionSnapshot {
         0.2,
         "claude_code:no_match",
     )
+}
+
+fn extract_agy_screen_identity(lines: &[String]) -> Option<ProviderScreenIdentity> {
+    let text = joined_text(lines);
+    let mut identity = ProviderScreenIdentity {
+        cli_version: AGY_VERSION_RE
+            .captures(&text)
+            .and_then(|captures| captures.get(1))
+            .map(|value| normalize_identity_value(value.as_str())),
+        account: None,
+        plan: None,
+        current_model: extract_agy_current_model(lines),
+        selected_model: extract_agy_selected_model(lines),
+        cwd: extract_agy_cwd(lines),
+    };
+
+    if let Some(captures) = ACCOUNT_PLAN_RE.captures(&text) {
+        identity.account = captures
+            .get(1)
+            .map(|value| normalize_identity_value(value.as_str()));
+        identity.plan = captures
+            .get(2)
+            .map(|value| normalize_identity_value(value.as_str()));
+    }
+
+    if identity.is_empty() {
+        None
+    } else {
+        Some(identity)
+    }
+}
+
+fn extract_agy_usage_screen(lines: &[String]) -> Option<ProviderUsageScreen> {
+    let quota_start = lines.iter().position(|line| {
+        normalize_identity_value(&clean_agy_identity_line(line))
+            .to_ascii_lowercase()
+            .contains("model quota")
+    })?;
+
+    let visible_range = lines
+        .iter()
+        .filter_map(|line| parse_visible_range(&clean_agy_identity_line(line)))
+        .next();
+
+    let mut model_quotas = Vec::new();
+    let mut index = quota_start + 1;
+    while index < lines.len() {
+        let cleaned = normalize_identity_value(&clean_agy_identity_line(&lines[index]));
+        let lower = cleaned.to_ascii_lowercase();
+        if cleaned.is_empty()
+            || lower.contains("scroll")
+            || lower.contains("pgup/pgdown")
+            || lower.contains("ctrl+end")
+            || lower.contains("ctrl+home")
+            || lower == "close"
+            || lower.contains("esc to cancel")
+            || parse_visible_range(&cleaned).is_some()
+        {
+            break;
+        }
+
+        if let Some(model) = extract_agy_model_from_line(&cleaned) {
+            let mut percent = None;
+            let mut status = None;
+            let mut lookahead = index + 1;
+            while lookahead < lines.len() && lookahead <= index + 5 {
+                let next = normalize_identity_value(&clean_agy_identity_line(&lines[lookahead]));
+                let next_lower = next.to_ascii_lowercase();
+                if next.is_empty()
+                    || next_lower.contains("scroll")
+                    || next_lower.contains("pgup/pgdown")
+                    || next_lower.contains("ctrl+end")
+                    || next_lower.contains("ctrl+home")
+                    || next_lower == "close"
+                    || next_lower.contains("esc to cancel")
+                    || parse_visible_range(&next).is_some()
+                {
+                    break;
+                }
+                if percent.is_none() {
+                    percent = parse_percent(&next);
+                } else if status.is_none()
+                    && !is_agy_meter_bar(&next)
+                    && extract_agy_model_from_line(&next).is_none()
+                {
+                    status = Some(next);
+                    break;
+                }
+                lookahead += 1;
+            }
+            model_quotas.push(ProviderModelQuota {
+                model,
+                percent,
+                status,
+            });
+            index = lookahead;
+            continue;
+        }
+
+        index += 1;
+    }
+
+    if model_quotas.is_empty() {
+        None
+    } else {
+        Some(ProviderUsageScreen {
+            title: "Model Quota".to_string(),
+            model_quotas,
+            visible_range,
+        })
+    }
+}
+
+fn parse_percent(line: &str) -> Option<u8> {
+    let raw = PERCENT_RE
+        .captures(line)
+        .and_then(|captures| captures.get(1))?
+        .as_str()
+        .parse::<u16>()
+        .ok()?;
+    Some(raw.min(100) as u8)
+}
+
+fn parse_visible_range(line: &str) -> Option<ProviderVisibleRange> {
+    let captures = VISIBLE_RANGE_RE.captures(line)?;
+    Some(ProviderVisibleRange {
+        start: captures.get(1)?.as_str().parse().ok()?,
+        end: captures.get(2)?.as_str().parse().ok()?,
+        total: captures.get(3)?.as_str().parse().ok()?,
+    })
+}
+
+fn is_agy_meter_bar(line: &str) -> bool {
+    line.chars()
+        .filter(|value| !value.is_whitespace())
+        .all(|value| {
+            matches!(
+                value,
+                '█' | '▉' | '▊' | '▋' | '▌' | '▍' | '▎' | '▏' | '░' | '▒' | '▓'
+            )
+        })
+}
+
+fn extract_agy_current_model(lines: &[String]) -> Option<String> {
+    for line in lines {
+        if line.to_ascii_lowercase().contains("(current)") {
+            if let Some(model) = extract_agy_model_from_line(line) {
+                return Some(model);
+            }
+        }
+    }
+
+    let is_model_picker = lines
+        .iter()
+        .any(|line| line.to_ascii_lowercase().contains("switch model"));
+    if is_model_picker {
+        for line in lines.iter().rev() {
+            if line.to_ascii_lowercase().contains("esc to cancel") {
+                if let Some(model) = extract_agy_model_from_line(line) {
+                    return Some(model);
+                }
+            }
+        }
+        return None;
+    }
+
+    lines
+        .iter()
+        .rev()
+        .find_map(|line| extract_agy_model_from_line(line))
+}
+
+fn extract_agy_selected_model(lines: &[String]) -> Option<String> {
+    let is_model_picker = lines
+        .iter()
+        .any(|line| line.to_ascii_lowercase().contains("switch model"));
+    if !is_model_picker {
+        return None;
+    }
+
+    for line in lines {
+        if agy_line_has_selection_cursor(line) {
+            if let Some(model) = extract_agy_model_from_line(line) {
+                return Some(model);
+            }
+        }
+    }
+    None
+}
+
+fn extract_agy_model_from_line(line: &str) -> Option<String> {
+    let cleaned = clean_agy_identity_line(line)
+        .replace("(current)", "")
+        .replace("[current]", "");
+    let normalized = normalize_identity_value(&cleaned);
+    if normalized.eq_ignore_ascii_case("switch model")
+        || normalized.eq_ignore_ascii_case("keyboard:")
+        || normalized
+            .to_ascii_lowercase()
+            .contains("navigate enter select")
+    {
+        return None;
+    }
+
+    AGY_MODEL_RE
+        .captures(&normalized)
+        .and_then(|captures| captures.get(1))
+        .map(|value| normalize_model_value(value.as_str()))
+        .filter(|value| !value.is_empty())
+}
+
+fn extract_agy_cwd(lines: &[String]) -> Option<String> {
+    for line in lines {
+        let cleaned = clean_agy_identity_line(line);
+        if let Some(captures) = AGY_CWD_ONLY_RE.captures(&cleaned) {
+            return captures
+                .name("cwd")
+                .map(|value| normalize_identity_value(value.as_str()));
+        }
+    }
+
+    for line in lines {
+        let cleaned = clean_agy_identity_line(line);
+        let lower = cleaned.to_ascii_lowercase();
+        if !(lower.contains("cwd") || lower.contains("directory") || lower.contains("project")) {
+            continue;
+        }
+        if let Some(captures) = AGY_CWD_RE.captures(&cleaned) {
+            return captures
+                .name("cwd")
+                .map(|value| normalize_identity_value(value.as_str()));
+        }
+    }
+
+    None
+}
+
+fn clean_agy_identity_line(line: &str) -> String {
+    line.trim()
+        .trim_matches(|c: char| matches!(c, '│' | '┃' | '║' | '┆' | '┊'))
+        .trim_start_matches(|c: char| {
+            c.is_whitespace()
+                || matches!(
+                    c,
+                    '>' | '›' | '❯' | '|' | ':' | '-' | '*' | '·' | '╭' | '╰' | '╮' | '╯' | '─'
+                )
+        })
+        .trim()
+        .to_string()
+}
+
+fn agy_line_has_selection_cursor(line: &str) -> bool {
+    let trimmed = line.trim_start().trim_start_matches(|c: char| {
+        matches!(c, '│' | '┃' | '║' | '┆' | '┊') || c.is_whitespace()
+    });
+    trimmed.starts_with("> ") || trimmed.starts_with("› ") || trimmed.starts_with("❯ ")
+}
+
+fn normalize_identity_value(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn normalize_model_value(value: &str) -> String {
+    normalize_identity_value(value)
+        .trim_end_matches('-')
+        .trim()
+        .to_string()
 }
 
 fn provider_unavailable_match(lower: &str) -> Option<(&'static str, &'static str)> {
@@ -836,14 +1251,62 @@ fn joined_text(lines: &[String]) -> String {
 }
 
 fn has_spinner(lines: &[String]) -> bool {
-    lines.iter().any(|line| {
-        line.chars().any(|c| {
-            matches!(
-                c,
-                '\u{2800}'..='\u{28FF}' | '◐' | '◑' | '◒' | '◓' | '◴' | '◵' | '◶' | '◷'
-            )
-        })
+    lines.iter().any(|line| has_spinner_in_line(line))
+}
+
+fn has_spinner_in_line(line: &str) -> bool {
+    line.chars().any(|c| {
+        matches!(
+            c,
+            '\u{2800}'..='\u{28FF}' | '◐' | '◑' | '◒' | '◓' | '◴' | '◵' | '◶' | '◷'
+        )
     })
+}
+
+fn has_agy_active_status_line(lines: &[String]) -> bool {
+    let recent: Vec<_> = lines
+        .iter()
+        .rev()
+        .filter(|line| !line.trim().is_empty())
+        .take(10)
+        .collect();
+
+    let has_cancel_footer = recent.iter().any(|line| {
+        normalize_identity_value(&clean_agy_identity_line(line))
+            .to_ascii_lowercase()
+            .contains("esc to cancel")
+    });
+    let bottom_has_idle_footer = recent.iter().take(4).any(|line| {
+        let lower = normalize_identity_value(&clean_agy_identity_line(line)).to_ascii_lowercase();
+        lower.contains("? for shortcuts")
+            || lower.contains("type your message")
+            || lower.contains("welcome back")
+    });
+
+    if bottom_has_idle_footer && !has_cancel_footer {
+        return false;
+    }
+
+    let has_status_spinner = recent.iter().any(|line| {
+        let cleaned = normalize_identity_value(&clean_agy_identity_line(line));
+        let lower = cleaned.to_ascii_lowercase();
+        let status_text = lower.contains("generating")
+            || lower.contains("working")
+            || lower.contains("loading")
+            || lower.contains("thinking...");
+        status_text && has_spinner_in_line(line)
+    });
+
+    if has_status_spinner {
+        return true;
+    }
+
+    has_cancel_footer
+        && recent.iter().any(|line| {
+            let cleaned = normalize_identity_value(&clean_agy_identity_line(line));
+            let lower = cleaned.to_ascii_lowercase();
+            lower.contains("running command") || lower.contains("tool running")
+        })
 }
 
 fn has_active_claude_spinner(lines: &[String]) -> bool {
@@ -1051,6 +1514,155 @@ mod tests {
         ]));
         assert_eq!(result.state, PtyCanonicalState::Idle);
         assert_eq!(result.reason, "agy:composer_idle");
+    }
+
+    #[test]
+    fn agy_idle_screen_identity_extracts_logged_in_state() {
+        let result = recognize_agy(&lines(&[
+            "Antigravity CLI 1.0.3",
+            "jjrrqqq@gmail.com (Google AI Ultra)",
+            "Gemini 3.5 Flash (Medium)",
+            "~/Projects/missiond",
+            "Welcome back",
+            "> Type your message",
+        ]));
+        let identity = result.screen_identity.expect("screen identity");
+        assert_eq!(identity.cli_version.as_deref(), Some("1.0.3"));
+        assert_eq!(identity.account.as_deref(), Some("jjrrqqq@gmail.com"));
+        assert_eq!(identity.plan.as_deref(), Some("Google AI Ultra"));
+        assert_eq!(
+            identity.current_model.as_deref(),
+            Some("Gemini 3.5 Flash (Medium)")
+        );
+        assert_eq!(identity.cwd.as_deref(), Some("~/Projects/missiond"));
+        assert_eq!(identity.selected_model, None);
+    }
+
+    #[test]
+    fn agy_model_picker_tracks_current_and_selected_model() {
+        let result = recognize_agy(&lines(&[
+            "Switch Model",
+            "Gemini 3.5 Flash (Medium) (current)",
+            "> Gemini 3.5 Flash (High)",
+            "Gemini 3.5 Flash (Low)",
+            "Gemini 3.1 Pro (Low)",
+            "Gemini 3.1 Pro (High)",
+            "Claude Sonnet 4.6 (Thinking)",
+            "Claude Opus 4.6 (Thinking)",
+            "GPT-OSS 120B (Medium)",
+            "Keyboard:",
+            "Up/Down Navigate enter Select esc Go Back",
+            "esc to cancel                                                                                    Gemini 3.5 Flash (Medium)",
+        ]));
+        assert_eq!(result.state, PtyCanonicalState::Blocked);
+        assert_eq!(result.reason, "agy:model_picker");
+        assert_eq!(result.blocked_kind.as_deref(), Some("model_picker"));
+
+        let identity = result.screen_identity.expect("screen identity");
+        assert_eq!(
+            identity.current_model.as_deref(),
+            Some("Gemini 3.5 Flash (Medium)")
+        );
+        assert_eq!(
+            identity.selected_model.as_deref(),
+            Some("Gemini 3.5 Flash (High)")
+        );
+    }
+
+    #[test]
+    fn agy_usage_meter_extracts_visible_model_quotas() {
+        let result = recognize_agy(&lines(&[
+            "└ Model Quota",
+            "Gemini 3.5 Flash (Medium)",
+            "███████████ ███████████ ███████████ ███████████ ███████████",
+            "100%",
+            "Quota available",
+            "Gemini 3.5 Flash (High)",
+            "███████████ ███████████ ███████████ ███████████ ███████████",
+            "100%",
+            "Quota available",
+            "Claude Sonnet 4.6 (Thinking)",
+            "███████████ ███████████ ███████████ ███████████ ███████████",
+            "100%",
+            "Quota available",
+            "(1–28 of 33 lines)",
+            "↑/↓ Scroll · pgup/pgdown Page · ctrl+end Bottom · ctrl+home Top · esc Close",
+            "esc to cancel                                                                                    Gemini 3.5 Flash (High)",
+        ]));
+        assert_eq!(result.state, PtyCanonicalState::Complete);
+        assert_eq!(result.reason, "agy:usage_meter");
+        assert_eq!(result.phase.as_deref(), Some("usage_meter"));
+        let identity = result.screen_identity.expect("screen identity");
+        assert_eq!(
+            identity.current_model.as_deref(),
+            Some("Gemini 3.5 Flash (High)")
+        );
+
+        let usage = result.screen_usage.expect("screen usage");
+        assert_eq!(usage.title, "Model Quota");
+        assert_eq!(
+            usage.visible_range,
+            Some(ProviderVisibleRange {
+                start: 1,
+                end: 28,
+                total: 33
+            })
+        );
+        assert_eq!(usage.model_quotas.len(), 3);
+        assert_eq!(usage.model_quotas[0].model, "Gemini 3.5 Flash (Medium)");
+        assert_eq!(usage.model_quotas[0].percent, Some(100));
+        assert_eq!(
+            usage.model_quotas[0].status.as_deref(),
+            Some("Quota available")
+        );
+        assert_eq!(usage.model_quotas[2].model, "Claude Sonnet 4.6 (Thinking)");
+    }
+
+    #[test]
+    fn agy_generating_spinner_is_running_even_when_prompt_visible() {
+        let result = recognize_agy(&lines(&[
+            "请写 20 行很短的中文句子，主题是 PTY 队列状态识别，每行编号。",
+            "⣽ Generating...",
+            "⣷ Working...",
+            ">",
+            "esc to cancel                                                                                    Gemini 3.5 Flash (High)",
+        ]));
+        assert_eq!(result.state, PtyCanonicalState::Running);
+        assert_eq!(result.reason, "agy:active_status");
+        assert_eq!(result.phase.as_deref(), Some("thinking"));
+    }
+
+    #[test]
+    fn agy_stale_spinner_with_ready_footer_is_idle() {
+        let result = recognize_agy(&lines(&[
+            "请写 20 行很短的中文句子，主题是 PTY 队列状态识别，每行编号。",
+            "⣽ Generating...",
+            "⣷ Working...",
+            "1. PTY 队列需要观察状态。",
+            "2. 工位一次只处理一个请求。",
+            "────────────────────────────────────────",
+            ">",
+            "────────────────────────────────────────",
+            "? for shortcuts                                                                                  Gemini 3.5 Flash (High)",
+        ]));
+        assert_ne!(result.state, PtyCanonicalState::Running);
+        assert_eq!(result.state, PtyCanonicalState::Idle);
+        assert_eq!(result.reason, "agy:composer_idle");
+    }
+
+    #[test]
+    fn agy_interrupted_prompt_is_idle_ready_for_retry() {
+        let result = recognize_agy(&lines(&[
+            "20. 队列清理完成无遗留。",
+            "⎿ Interrupted · What should Antigravity CLI do instead?",
+            "────────────────────────────────────────",
+            ">",
+            "────────────────────────────────────────",
+            "? for shortcuts                                                                                  Gemini 3.5 Flash (High)",
+        ]));
+        assert_eq!(result.state, PtyCanonicalState::Idle);
+        assert_eq!(result.reason, "agy:interrupted_ready_for_retry");
+        assert_eq!(result.phase.as_deref(), Some("interrupted"));
     }
 
     #[test]

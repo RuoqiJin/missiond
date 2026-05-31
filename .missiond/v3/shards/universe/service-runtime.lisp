@@ -169,7 +169,8 @@
       :proxy (:kind caddy :domain "search-center.xiaojinpro.com" :routes ["/health/live" "/health/ready" "/v1/health" "/v1/me" "/v1/search" "/v1/search/*" "/v1/research" "/v1/research/*" "/v1/history" "/v1/history/*"])
       :ports (:http 3120)
       :health ["/v1/health"]
-      :dependencies [xjp-auth xjp-router xjp-pg-prod secret-store anysearch bocha tavily? brave? dataforseo? exa?]
+      :dependencies [xjp-auth xjp-router xjp-pg-prod secret-store missiond-jarvis-edge anysearch bocha tavily? brave? dataforseo? exa?]
+      :llm-provider (:synthesis-channel missiond-xjpcode-text-only :authority missiond-jarvis-edge :provider claude_code :model claude-opus-4-6 :global-enable-env SEARCH_CENTER_LLM_PROVIDER :json-enable-env SEARCH_CENTER_JSON_PROVIDER :synthesis-enable-env SEARCH_CENTER_SYNTHESIS_PROVIDER :endpoint-env SEARCH_CENTER_MISSIOND_TEXT_ONLY_URL :migration-target provider-interaction-box :rule "Search Center retrieval remains xjp-router/provider fan-out. Deep Research JSON planning/repair and long-form synthesis may route through MissionD/xjpcode text-only on the managed Mac node while migration is incomplete. This lane must become a MissionD provider-interaction-box HTTP adapter backed by interactive PTY plus durable provider-log final extraction, stay no-tools/no-MCP/no-filesystem, and be protected by internal service auth or a tunnel.")
       :ops-capability deploy-ops
       :source-evidence [skill:search-center skill:services/search-center]
       :risks [deep-research-live-300-source-artifact-pending cross-domain-benchmark-suite-pending production-browser-oauth-flow-pending provider-secret-activation-pending final-promotion-artifact-verification-pending]
