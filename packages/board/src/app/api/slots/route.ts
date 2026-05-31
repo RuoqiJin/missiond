@@ -46,6 +46,7 @@ interface MasterStatus {
 interface PtyStatus {
   state?: string;
   running?: boolean;
+  pid?: number;
   provider?: string;
   engine?: string;
   confidence?: number;
@@ -119,6 +120,11 @@ function normalizeState(state?: string | null) {
     : null;
 }
 
+function normalizeLiveState(state: string | null, status: PtyStatus | null) {
+  if (state === 'unknown' && status?.pid != null) return 'starting';
+  return state;
+}
+
 function labelForSlot(slot: SlotInfo) {
   return slot.description || slot.id.replace(/^slot-/, '').replace(/-\d+$/, '');
 }
@@ -162,7 +168,7 @@ export async function GET() {
     const slots = filtered.map((s, i) => {
       const status = statuses[i].status === 'fulfilled' ? (statuses[i] as PromiseFulfilledResult<PtyStatus | null>).value : null;
       const recognition = status?.recognition;
-      const state = normalizeState(recognition?.state ?? status?.state);
+      const state = normalizeLiveState(normalizeState(recognition?.state ?? status?.state), status);
       const running = !!state && RUNNING_STATES.has(state);
       const active = !!state && !INACTIVE_STATES.has(state);
       const isMasterSlot = s.id === 'slot-codex-master-control' || s.id === master?.slotId || s.id === master?.slot_id;

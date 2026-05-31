@@ -9,6 +9,8 @@ const RUNNING_STATES = new Set([
   'confirming',
   'blocked',
   'starting',
+  'idle',
+  'slash_menu',
 ]);
 
 function normalizeState(state: unknown) {
@@ -17,13 +19,18 @@ function normalizeState(state: unknown) {
     : null;
 }
 
+function normalizeLiveState(state: string | null, result: Record<string, unknown> | null) {
+  if (state === 'unknown' && result?.pid != null) return 'starting';
+  return state;
+}
+
 export async function GET(req: NextRequest) {
   try {
     const slotId = req.nextUrl.searchParams.get('slotId');
     if (!slotId) return NextResponse.json({ error: 'Missing slotId' }, { status: 400 });
     const result = await callTool('mission_pty_status', { slotId }) as Record<string, unknown> | null;
     const recognition = result?.recognition as Record<string, unknown> | undefined;
-    const state = normalizeState(recognition?.state ?? result?.state);
+    const state = normalizeLiveState(normalizeState(recognition?.state ?? result?.state), result);
     if (result && state) {
       return NextResponse.json({ running: RUNNING_STATES.has(state), ...result, state });
     }

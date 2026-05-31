@@ -50,6 +50,12 @@
               "packages/board/src/components/Terminal.tsx"]
       :fields [id label role running state provider taskClass acceptsBoardTask activeSlot]
       :rule "Terminal slot selection lives inside the Terminal cockpit, lists all projected slots by provider group, keeps labels bounded/truncated, and pairs the PTY with durable conversation/evidence diagnostics.")
+    (projection pty-teaching-control
+      :source [mission_pty_send pty-websocket-live-screen operator-lesson]
+      :entry ["packages/board/src/components/Terminal.tsx"
+              "packages/board/src/app/api/pty/input/route.ts"]
+      :fields [slotId text key stepLog websocketScreen]
+      :rule "Operator teaching uses the MissionD Terminal cockpit instead of tmp live pages. Text and key controls write to the selected PTY through MissionD-owned mission_pty_send, while the xterm WebSocket remains the live screen; each operator action appends a visible step record so watch-operate-watch teaching can continue in the official frontend.")
     (projection eventbus-cache-invalidation
       :source [eventbus-ws]
       :entry ["packages/board/src/eventStream.ts"]
