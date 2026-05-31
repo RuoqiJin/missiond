@@ -72,6 +72,19 @@ enum AgyMonitorOutcome {
     Failed(ProviderBoxResult),
 }
 
+#[derive(Debug, Clone)]
+struct ModelPickerEntry {
+    model: String,
+    selected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModelPickerNavigationPlan {
+    direction: &'static str,
+    key: &'static str,
+    expected_models: Vec<String>,
+}
+
 impl AgyProviderDriver {
     pub(crate) fn new(pty: Arc<PTYManager>) -> Self {
         Self {
@@ -411,6 +424,30 @@ impl AgyProviderDriver {
             None => return false,
         };
 
+        if let Some(ok) = self
+            .select_current_picker_model(request, result, slot_id, target_model, &observation)
+            .await
+        {
+            return ok;
+        }
+
+        if let Some(plan) = plan_model_picker_navigation(&observation, target_model) {
+            let (planned_result, planned_observation) = self
+                .execute_model_picker_navigation_plan(
+                    request,
+                    result,
+                    slot_id,
+                    target_model,
+                    &observation,
+                    &plan,
+                )
+                .await;
+            observation = planned_observation;
+            if let Some(ok) = planned_result {
+                return ok;
+            }
+        }
+
         let mut all_seen_selected = HashSet::new();
         for (direction, key, label) in [
             ("up", "\x1b[A", "move AGY model picker selection up"),
@@ -478,6 +515,85 @@ impl AgyProviderDriver {
             }),
         ));
         false
+    }
+
+    async fn execute_model_picker_navigation_plan(
+        &self,
+        request: &ProviderInteractionRequest,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+        target_model: &str,
+        initial_observation: &AgyObservation,
+        plan: &ModelPickerNavigationPlan,
+    ) -> (Option<bool>, AgyObservation) {
+        let mut observation = initial_observation.clone();
+        for expected_model in &plan.expected_models {
+            observation = self
+                .write_step(
+                    result,
+                    slot_id,
+                    PtyStepAction::key(plan.direction),
+                    plan.key,
+                    Some(format!(
+                        "move AGY model picker selection {} to {}",
+                        plan.direction, expected_model
+                    )),
+                )
+                .await;
+            if !is_model_picker(&observation) {
+                result.status = ProviderBoxStatus::Unverified;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_MODEL_SWITCH_UNVERIFIED,
+                    "AGY model picker closed during planned navigation",
+                    json!({
+                        "slot_id": slot_id,
+                        "target_model": target_model,
+                        "expected_model": expected_model,
+                        "direction": plan.direction,
+                        "reason": observation.snapshot.reason,
+                    }),
+                ));
+                return (Some(false), observation);
+            }
+            let selected = observation
+                .snapshot
+                .screen_identity
+                .as_ref()
+                .and_then(|identity| identity.selected_model.clone());
+            if !model_eq(selected.as_deref(), expected_model) {
+                result.add_diagnostic(ProviderBoxDiagnostic::warning(
+                    DIAG_MODEL_SWITCH_UNVERIFIED,
+                    "AGY planned model-picker navigation did not land on the expected row; falling back to bounded scan",
+                    json!({
+                        "slot_id": slot_id,
+                        "target_model": target_model,
+                        "expected_model": expected_model,
+                        "selected_model": selected,
+                        "direction": plan.direction,
+                    }),
+                ));
+                return (None, observation);
+            }
+        }
+
+        if let Some(ok) = self
+            .select_current_picker_model(request, result, slot_id, target_model, &observation)
+            .await
+        {
+            return (Some(ok), observation);
+        }
+
+        result.add_diagnostic(ProviderBoxDiagnostic::warning(
+            DIAG_MODEL_SWITCH_UNVERIFIED,
+            "AGY planned model-picker navigation reached the expected rows but target was not selected; falling back to bounded scan",
+            json!({
+                "slot_id": slot_id,
+                "target_model": target_model,
+                "direction": plan.direction,
+                "planned_steps": plan.expected_models.len(),
+            }),
+        ));
+        (None, observation)
     }
 
     async fn select_current_picker_model(
@@ -1822,11 +1938,29 @@ fn slug_model(value: &str) -> String {
         .collect()
 }
 
-fn extract_models_from_screen(text: &str) -> Vec<String> {
+fn extract_model_from_agy_line(line: &str) -> Option<String> {
     let regex = Regex::new(
         r"\b((?:Gemini|Claude|GPT(?:-OSS)?|OpenAI|Grok|Llama|Mistral|Qwen|DeepSeek)[A-Za-z0-9 ._/\-+]*(?:\([^)]+\))?)",
     )
     .expect("valid AGY model regex");
+    let cleaned = clean_agy_line(line);
+    let value = regex
+        .captures(&cleaned)
+        .and_then(|captures| captures.get(1))
+        .map(|value| value.as_str().trim())?;
+    let model = value
+        .replace("(current)", "")
+        .replace("[current]", "")
+        .trim()
+        .to_string();
+    if model.is_empty() {
+        None
+    } else {
+        Some(model)
+    }
+}
+
+fn extract_models_from_screen(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     for line in text.lines() {
@@ -1835,15 +1969,7 @@ fn extract_models_from_screen(text: &str) -> Vec<String> {
         if lower.contains("antigravity cli") || lower.contains("switch model") {
             continue;
         }
-        if let Some(captures) = regex.captures(&cleaned) {
-            let Some(value) = captures.get(1).map(|value| value.as_str().trim()) else {
-                continue;
-            };
-            let model = value
-                .replace("(current)", "")
-                .replace("[current]", "")
-                .trim()
-                .to_string();
+        if let Some(model) = extract_model_from_agy_line(&cleaned) {
             let normalized = normalize_model(&model);
             if !model.is_empty() && seen.insert(normalized) {
                 out.push(model);
@@ -1851,6 +1977,111 @@ fn extract_models_from_screen(text: &str) -> Vec<String> {
         }
     }
     out
+}
+
+fn extract_model_picker_entries_from_screen(text: &str) -> Vec<ModelPickerEntry> {
+    let mut entries = Vec::new();
+    let mut seen = HashSet::new();
+    let mut in_latest_picker = false;
+    for line in text.lines() {
+        let cleaned = clean_agy_line(line);
+        let lower = cleaned.to_ascii_lowercase();
+        if lower == "switch model" {
+            entries.clear();
+            seen.clear();
+            in_latest_picker = true;
+            continue;
+        }
+        if !in_latest_picker {
+            continue;
+        }
+        if lower.contains("keyboard:")
+            || lower.contains("navigate enter select")
+            || lower.contains("esc to cancel")
+        {
+            break;
+        }
+        let Some(model) = extract_model_from_agy_line(line) else {
+            continue;
+        };
+        let normalized = normalize_model(&model);
+        if seen.insert(normalized) {
+            entries.push(ModelPickerEntry {
+                model,
+                selected: picker_line_selected(line),
+            });
+        }
+    }
+    entries
+}
+
+fn picker_line_selected(line: &str) -> bool {
+    line.trim_start()
+        .trim_start_matches(|c: char| matches!(c, '│' | '┃' | '║' | '┆' | '┊'))
+        .trim_start()
+        .chars()
+        .next()
+        .map(|value| matches!(value, '>' | '›' | '❯' | '▸' | '▶' | '➜' | '→'))
+        .unwrap_or(false)
+}
+
+fn plan_model_picker_navigation(
+    observation: &AgyObservation,
+    target_model: &str,
+) -> Option<ModelPickerNavigationPlan> {
+    let entries = extract_model_picker_entries_from_screen(&observation.text);
+    let selected_model = observation
+        .snapshot
+        .screen_identity
+        .as_ref()
+        .and_then(|identity| identity.selected_model.as_deref());
+    plan_model_picker_navigation_from_entries(&entries, selected_model, target_model)
+}
+
+fn plan_model_picker_navigation_from_entries(
+    entries: &[ModelPickerEntry],
+    selected_model: Option<&str>,
+    target_model: &str,
+) -> Option<ModelPickerNavigationPlan> {
+    let selected_index = selected_model
+        .and_then(|selected| {
+            entries
+                .iter()
+                .position(|entry| model_eq(Some(entry.model.as_str()), selected))
+        })
+        .or_else(|| entries.iter().position(|entry| entry.selected))?;
+    let target_index = entries
+        .iter()
+        .position(|entry| model_eq(Some(entry.model.as_str()), target_model))?;
+
+    if selected_index == target_index {
+        return Some(ModelPickerNavigationPlan {
+            direction: "down",
+            key: "\x1b[B",
+            expected_models: Vec::new(),
+        });
+    }
+
+    if target_index > selected_index {
+        Some(ModelPickerNavigationPlan {
+            direction: "down",
+            key: "\x1b[B",
+            expected_models: entries[selected_index + 1..=target_index]
+                .iter()
+                .map(|entry| entry.model.clone())
+                .collect(),
+        })
+    } else {
+        Some(ModelPickerNavigationPlan {
+            direction: "up",
+            key: "\x1b[A",
+            expected_models: entries[target_index..selected_index]
+                .iter()
+                .rev()
+                .map(|entry| entry.model.clone())
+                .collect(),
+        })
+    }
 }
 
 fn clean_agy_line(line: &str) -> String {
@@ -2263,6 +2494,68 @@ mod tests {
             vec![
                 "Gemini 3.5 Flash (High)".to_string(),
                 "Claude Sonnet 4.6 (Thinking)".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn model_picker_navigation_plan_counts_visible_down_steps() {
+        let entries = extract_model_picker_entries_from_screen(
+            "Antigravity CLI 1.0.3\n\
+             Gemini 3.5 Flash (Medium)\n\
+             Switch Model\n\
+             > Gemini 3.5 Flash (Medium)    (current)\n\
+               Gemini 3.5 Flash (High)\n\
+               Gemini 3.5 Flash (Low)\n\
+               Gemini 3.1 Pro (Low)\n\
+               Gemini 3.1 Pro (High)\n\
+               Claude Sonnet 4.6 (Thinking)\n\
+               Claude Opus 4.6 (Thinking)\n\
+               GPT-OSS 120B (Medium)\n\
+             Keyboard: up/down\n\
+             esc to cancel Gemini 3.5 Flash (Medium)",
+        );
+
+        let plan = plan_model_picker_navigation_from_entries(
+            &entries,
+            Some("Gemini 3.5 Flash (Medium)"),
+            "Claude Opus 4.6 (Thinking)",
+        )
+        .expect("navigation plan");
+
+        assert_eq!(plan.direction, "down");
+        assert_eq!(plan.expected_models.len(), 6);
+        assert_eq!(
+            plan.expected_models.last().map(String::as_str),
+            Some("Claude Opus 4.6 (Thinking)")
+        );
+    }
+
+    #[test]
+    fn model_picker_navigation_plan_counts_visible_up_steps() {
+        let entries = extract_model_picker_entries_from_screen(
+            "Switch Model\n\
+               Gemini 3.5 Flash (Medium)\n\
+               Gemini 3.5 Flash (High)\n\
+               Gemini 3.5 Flash (Low)\n\
+             > Gemini 3.1 Pro (Low)\n\
+               Gemini 3.1 Pro (High)\n\
+             Keyboard: up/down",
+        );
+
+        let plan = plan_model_picker_navigation_from_entries(
+            &entries,
+            Some("Gemini 3.1 Pro (Low)"),
+            "Gemini 3.5 Flash (High)",
+        )
+        .expect("navigation plan");
+
+        assert_eq!(plan.direction, "up");
+        assert_eq!(
+            plan.expected_models,
+            vec![
+                "Gemini 3.5 Flash (Low)".to_string(),
+                "Gemini 3.5 Flash (High)".to_string()
             ]
         );
     }
