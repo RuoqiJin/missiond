@@ -316,7 +316,14 @@
       :mcp-config-resolution host-relative
       :mcp-config-placeholders ["$MISSION_HOME"]
       :registered-project-roots-allowed true
-      :db-integer-portability [ttl_seconds extend_count message_count])
+      :db-integer-portability [ttl_seconds extend_count message_count]
+      :bootstrap-package-manager homebrew
+      :required-diagnostic-clis [psql]
+      :postgres-client-package libpq
+      :postgres-client-paths ["/opt/homebrew/opt/libpq/bin" "/usr/local/opt/libpq/bin" "/opt/homebrew/bin" "/usr/local/bin"]
+      :bootstrap-script "scripts/bootstrap-managed-mac-node.sh"
+      :shell-path-bootstrap zshenv-managed-block
+      :rule "Managed Mac nodes that run MissionD must bootstrap Homebrew plus libpq/psql before being treated as operational. psql is a diagnostic and backfill client dependency for interaction ledgers, Board runtime metadata, and Postgres verification; bootstrap-managed-mac-node.sh installs Homebrew when missing, installs libpq, links psql, and writes a managed zshenv PATH block. deploy-daemon must also expose libpq bin directories in PATH so launchd and smoke scripts do not depend on an operator shell profile.")
     (pty-provider-unavailable-policy provider-blocked-diagnostics
       (state auth_missing
         :state blocked

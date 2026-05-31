@@ -132,7 +132,9 @@ augment_managed_node_path() {
     "${HOME}/.opam/missiond/bin"
     "${HOME}/.opam/default/bin"
     "${HOME}/.local/bin"
+    "/opt/homebrew/opt/libpq/bin"
     "/opt/homebrew/bin"
+    "/usr/local/opt/libpq/bin"
     "/usr/local/bin"
   )
   local dir

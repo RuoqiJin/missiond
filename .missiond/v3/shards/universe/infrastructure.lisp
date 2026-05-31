@@ -221,7 +221,7 @@
       :owner_authority missiond
       :deploy_center_executor macmini
       :agent_url rickyhqmac-mini
-      :capabilities [missiond-daemon mission-mcp claude-code codex-cli gemini-cli local-rust-build codebase-runner local-blue-green]
+      :capabilities [missiond-daemon mission-mcp claude-code codex-cli gemini-cli local-rust-build codebase-runner local-blue-green homebrew-managed-toolchain postgres-client]
       :service_ids [missiond]
       :network_profile mac-managed-node
       :artifact_lanes [macmini-codebase-local-build-lane manual-break-glass-lane]
@@ -233,6 +233,10 @@
                       health "http://127.0.0.1:9120/health"
                       launchd_label "com.missiond.daemon"
                       local_build_capability true
+                      bootstrap_package_manager "homebrew"
+                      required_diagnostic_clis [psql]
+                      postgres_client_package "libpq"
+                      postgres_client_paths ["/opt/homebrew/opt/libpq/bin" "/usr/local/opt/libpq/bin" "/opt/homebrew/bin" "/usr/local/bin"]
                       bootstrap_note "direct binary transfer is allowed only for initial repair; steady state should use codebase sync plus local build")
       :credential_refs [secret-store://managed-node/rickyhq-macmini/ssh secret-store://managed-node/rickyhq-macmini/claude]
       :diagnostic_profiles [deploy_provenance_snapshot container_inventory dependency_manifest_scan supply_chain_ioc_scan]

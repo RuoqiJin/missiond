@@ -13,6 +13,8 @@ const files = {
   mcpInfra: 'crates/missiond-mcp/src/tools/sysinfra/infra.rs',
   frontendRoute: 'packages/board/src/app/api/infra/route.ts',
   frontendSystem: 'packages/board/src/components/SystemDashboard.tsx',
+  deployDaemon: 'scripts/deploy-daemon.sh',
+  macBootstrap: 'scripts/bootstrap-managed-mac-node.sh',
 };
 
 const required = [
@@ -27,6 +29,17 @@ const required = [
   ['blueprint', 'artifact-delivery-lane-contract'],
   ['blueprint', 'managed-source-sync-policy'],
   ['blueprint', 'macmini-codebase-local-build-lane'],
+  ['blueprint', 'homebrew-managed-toolchain'],
+  ['blueprint', 'postgres-client'],
+  ['blueprint', 'bootstrap_package_manager'],
+  ['blueprint', 'required_diagnostic_clis'],
+  ['blueprint', 'postgres_client_package'],
+  ['blueprint', 'bootstrap-managed-mac-node.sh'],
+  ['blueprint', 'zshenv-managed-block'],
+  ['blueprint', 'libpq'],
+  ['blueprint', 'psql'],
+  ['blueprint', '/opt/homebrew/opt/libpq/bin'],
+  ['blueprint', '/usr/local/opt/libpq/bin'],
   ['blueprint', 'GitHub or XJP codebase'],
   ['blueprint', 'rsync/scp'],
   ['blueprint', 'operator-laptop file mirroring'],
@@ -101,6 +114,11 @@ const required = [
   ['frontendSystem', 'Credential Refs'],
   ['frontendSystem', 'Read-only Diagnostic Profiles'],
   ['frontendSystem', 'Runtime Targets'],
+  ['deployDaemon', '/opt/homebrew/opt/libpq/bin'],
+  ['deployDaemon', '/usr/local/opt/libpq/bin'],
+  ['macBootstrap', 'install Homebrew'],
+  ['macBootstrap', 'brew install libpq'],
+  ['macBootstrap', 'psql --version'],
 ];
 
 const diagnostics = [];

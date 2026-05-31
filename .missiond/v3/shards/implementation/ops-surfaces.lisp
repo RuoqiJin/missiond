@@ -176,13 +176,14 @@
       :status "code-aligned"
       :implements [ops-infra]
       :code ["scripts/deploy-daemon.sh"
+             "scripts/bootstrap-managed-mac-node.sh"
              "scripts/rustfmt-missiond.sh"
              "scripts/cargo-fmt-touched.sh"
              "crates/missiond-daemon/src/main.rs"
              "crates/missiond-daemon/src/workers/local/ast_sync_worker.rs"
              "scripts/check-v3-ops-infra-isomorphism.mjs"
              "scripts/check-missiond-blue-green-deploy.mjs"]
-      :note "ops-infra owns deploy-daemon.sh plus formatter-converged Rust hygiene and restart-time background CPU policy. deploy-daemon.sh builds paired missiond/mission-mcp releases under ~/.xjp-mission/releases/<release-id>, writes release-manifest.json, switches active, rewrites launchd WorkingDirectory plus MISSIOND_PROJECT_ROOT/MISSIOND_ORCHESTRATOR_ROOT to the current Git/codebase root, reloads launchd through bootout/bootstrap before kickstart, runs MCP smoke, rolls back, cleans releases, discovers managed-node Node.js/OCaml paths, and defaults CARGO_INCREMENTAL=0 for disk-bounded deploys. rustfmt-missiond.sh is the M6 formatter gate; cargo-fmt-touched.sh remains a scoped fallback. AST startup full sync is opt-in, and ast_sync_worker skips topology KB rewrites when no stale files were synced.")
+      :note "ops-infra owns deploy-daemon.sh, bootstrap-managed-mac-node.sh, formatter-converged Rust hygiene, and restart-time background CPU policy. bootstrap-managed-mac-node.sh is the default managed Mac node bootstrap action: install Homebrew when absent, install/link libpq, add Homebrew/libpq to the managed shell PATH, and verify psql. deploy-daemon.sh builds paired missiond/mission-mcp releases under ~/.xjp-mission/releases/<release-id>, writes release-manifest.json, switches active, rewrites launchd WorkingDirectory plus MISSIOND_PROJECT_ROOT/MISSIOND_ORCHESTRATOR_ROOT to the current Git/codebase root, reloads launchd through bootout/bootstrap before kickstart, runs MCP smoke, rolls back, cleans releases, discovers managed-node Node.js/OCaml/Homebrew libpq Postgres client paths, and defaults CARGO_INCREMENTAL=0 for disk-bounded deploys. Managed Mac node bootstrap must install Homebrew plus libpq/psql before the node is considered operational, because psql is the standard Postgres diagnostic and backfill client for Board runtime metadata and interaction-ledger repair. rustfmt-missiond.sh is the M6 formatter gate; cargo-fmt-touched.sh remains a scoped fallback. AST startup full sync is opt-in, and ast_sync_worker skips topology KB rewrites when no stale files were synced.")
 
 (surface missiond-blue-green-self-update
       :status "code-aligned"
