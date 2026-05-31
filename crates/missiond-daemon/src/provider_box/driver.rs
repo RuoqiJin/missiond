@@ -6,7 +6,8 @@ use super::types::{
     BoxCommand, ModelSwitchResult, ProviderBoxResult, ProviderBoxStatus,
     ProviderInteractionRequest, ProviderModelCatalog, ProviderUsageSnapshot,
     DIAG_AGY_MODEL_CATALOG_UNSUPPORTED, DIAG_MODEL_SWITCH_UNSUPPORTED,
-    DIAG_PURE_TEXT_GUARD_UNSUPPORTED, DIAG_SUBMIT_TURN_UNSUPPORTED,
+    DIAG_PROVIDER_CONTROL_ACTION_UNSUPPORTED, DIAG_PURE_TEXT_GUARD_UNSUPPORTED,
+    DIAG_SUBMIT_TURN_UNSUPPORTED,
 };
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -17,6 +18,7 @@ pub(crate) struct ProviderDriverCapabilities {
     pub(crate) usage_probe: bool,
     pub(crate) model_catalog: bool,
     pub(crate) pure_text_guard: bool,
+    pub(crate) control_action: bool,
 }
 
 #[async_trait]
@@ -77,6 +79,14 @@ pub(crate) trait ProviderDriver: Send + Sync {
             "Provider driver has not been taught enforceable pure-text guard semantics yet",
         )
     }
+
+    async fn control_action(&self, request: &ProviderInteractionRequest) -> ProviderBoxResult {
+        ProviderBoxResult::unsupported(
+            request,
+            DIAG_PROVIDER_CONTROL_ACTION_UNSUPPORTED,
+            "Provider driver has not been taught interactive control actions yet",
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +111,9 @@ pub(crate) fn command_requires_driver(command: BoxCommand) -> bool {
     command.is_prompt_turn()
         || matches!(
             command,
-            BoxCommand::ModelSwitch | BoxCommand::UsageProbe | BoxCommand::ModelCatalogExport
+            BoxCommand::ModelSwitch
+                | BoxCommand::UsageProbe
+                | BoxCommand::ModelCatalogExport
+                | BoxCommand::ControlAction
         )
 }

@@ -16,14 +16,14 @@ use tracing::{debug, warn};
 use super::driver::{ProviderDriver, ProviderDriverCapabilities};
 use super::types::{
     ModelSwitchResult, ModelSwitchStatus, ProviderBoxDiagnostic, ProviderBoxResult,
-    ProviderBoxStatus, ProviderInteractionRequest, ProviderModelCatalog, ProviderModelCatalogEntry,
-    ProviderModelUsage, ProviderRouterExport, ProviderUsageSnapshot, ProviderUsageStatus,
-    PtyObservation, PtyStepAction, PtyStepRecord, PtyStepVerificationStatus, TimeoutCancelPolicy,
-    DIAG_MODEL_SWITCH_UNVERIFIED, DIAG_PROVIDER_BOX_INVALID_REQUEST,
-    DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE, DIAG_PROVIDER_DURABLE_FINAL_MISSING,
-    DIAG_PROVIDER_TEXT_ONLY_VIOLATION, DIAG_PROVIDER_TURN_STALLED,
-    DIAG_PROVIDER_TURN_TIMEOUT_CANCELLED, DIAG_PROVIDER_TURN_TIMEOUT_CANCEL_FAILED,
-    DIAG_USAGE_UNKNOWN,
+    ProviderBoxStatus, ProviderControlAction, ProviderInteractionRequest, ProviderModelCatalog,
+    ProviderModelCatalogEntry, ProviderModelUsage, ProviderRouterExport, ProviderUsageSnapshot,
+    ProviderUsageStatus, PtyObservation, PtyStepAction, PtyStepRecord, PtyStepVerificationStatus,
+    TimeoutCancelPolicy, DIAG_MODEL_SWITCH_UNVERIFIED, DIAG_PROVIDER_BOX_INVALID_REQUEST,
+    DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE, DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+    DIAG_PROVIDER_DURABLE_FINAL_MISSING, DIAG_PROVIDER_TEXT_ONLY_VIOLATION,
+    DIAG_PROVIDER_TURN_STALLED, DIAG_PROVIDER_TURN_TIMEOUT_CANCELLED,
+    DIAG_PROVIDER_TURN_TIMEOUT_CANCEL_FAILED, DIAG_USAGE_UNKNOWN,
 };
 
 const DEFAULT_AGY_SLOT: &str = "slot-agy-provider-box";
@@ -850,6 +850,185 @@ impl AgyProviderDriver {
             ));
         }
     }
+
+    async fn clear_screen_locked(&self, result: &mut ProviderBoxResult, slot_id: &str) {
+        if self.ensure_composer_ready(result, slot_id).await.is_none() {
+            return;
+        }
+
+        let mut observation = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::text("/"),
+                "/",
+                Some("open AGY slash command menu".to_string()),
+            )
+            .await;
+        if !is_slash_command_surface(&observation) {
+            observation = self
+                .wait_until(slot_id, Duration::from_secs(3), is_slash_command_surface)
+                .await;
+        }
+        if !is_slash_command_surface(&observation) {
+            mark_control_unverified(
+                result,
+                slot_id,
+                "AGY slash command menu did not open before clear",
+                &observation,
+            );
+            return;
+        }
+
+        observation = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::text("c"),
+                "c",
+                Some("filter AGY slash commands by c".to_string()),
+            )
+            .await;
+        if !observation.text.contains("/clear") {
+            observation = self
+                .wait_until(slot_id, Duration::from_secs(3), |obs| {
+                    is_slash_command_surface(obs) && obs.text.contains("/clear")
+                })
+                .await;
+        }
+        if !observation.text.contains("/clear") {
+            mark_control_unverified(
+                result,
+                slot_id,
+                "AGY /clear command was not visible after /c filter",
+                &observation,
+            );
+            return;
+        }
+
+        observation = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::key("down"),
+                "\x1b[B",
+                Some("select AGY /clear command".to_string()),
+            )
+            .await;
+        if !selected_clear_command(&observation) {
+            mark_control_unverified(
+                result,
+                slot_id,
+                "AGY /clear command was not selected after one down arrow",
+                &observation,
+            );
+            return;
+        }
+
+        observation = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::key("enter"),
+                "\r",
+                Some("complete AGY /clear into composer".to_string()),
+            )
+            .await;
+        if !is_pending_clear_command(&observation) {
+            observation = self
+                .wait_until(slot_id, Duration::from_secs(3), is_pending_clear_command)
+                .await;
+        }
+        if !is_pending_clear_command(&observation) {
+            mark_control_unverified(
+                result,
+                slot_id,
+                "AGY first enter did not complete /clear into the composer",
+                &observation,
+            );
+            return;
+        }
+
+        observation = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::key("enter"),
+                "\r",
+                Some("execute AGY /clear command".to_string()),
+            )
+            .await;
+        if !is_home_identity_ready(&observation) {
+            observation = self
+                .wait_until(slot_id, Duration::from_secs(5), is_home_identity_ready)
+                .await;
+        }
+        if is_home_identity_ready(&observation) {
+            result.status = ProviderBoxStatus::Completed;
+        } else {
+            mark_control_unverified(
+                result,
+                slot_id,
+                "AGY /clear execution did not return to the home identity screen",
+                &observation,
+            );
+        }
+    }
+
+    async fn exit_locked(&self, result: &mut ProviderBoxResult, slot_id: &str) {
+        if self.ensure_composer_ready(result, slot_id).await.is_none() {
+            return;
+        }
+
+        let mut observation = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::key("ctrl+d"),
+                "\x04",
+                Some("request AGY exit confirmation".to_string()),
+            )
+            .await;
+        if !is_exit_confirm_pending(&observation) {
+            observation = self
+                .wait_until(slot_id, Duration::from_secs(3), is_exit_confirm_pending)
+                .await;
+        }
+        if !is_exit_confirm_pending(&observation) {
+            mark_control_unverified(
+                result,
+                slot_id,
+                "AGY first Ctrl+D did not show exit confirmation",
+                &observation,
+            );
+            return;
+        }
+
+        observation = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::key("ctrl+d"),
+                "\x04",
+                Some("confirm AGY exit".to_string()),
+            )
+            .await;
+        if !is_shell_prompt_after_exit(&observation) {
+            observation = self
+                .wait_until(slot_id, Duration::from_secs(5), is_shell_prompt_after_exit)
+                .await;
+        }
+        if is_shell_prompt_after_exit(&observation) {
+            result.status = ProviderBoxStatus::Completed;
+        } else {
+            mark_control_unverified(
+                result,
+                slot_id,
+                "AGY second Ctrl+D did not return to shell prompt",
+                &observation,
+            );
+        }
+    }
 }
 
 #[async_trait]
@@ -865,6 +1044,7 @@ impl ProviderDriver for AgyProviderDriver {
             usage_probe: true,
             model_catalog: true,
             pure_text_guard: true,
+            control_action: false,
         }
     }
 
@@ -1118,6 +1298,38 @@ impl ProviderDriver for AgyProviderDriver {
         ));
         result
     }
+
+    async fn control_action(&self, request: &ProviderInteractionRequest) -> ProviderBoxResult {
+        let mut result = ProviderBoxResult::base(request, ProviderBoxStatus::Unknown);
+        let Some(action) = request.control_action else {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                "AGY control action request requires control_action",
+                json!({
+                    "slot_id": request.slot_id,
+                    "command": request.command,
+                }),
+            ));
+            return result;
+        };
+        let Some(slot_id) = self.ensure_slot(request, &mut result).await else {
+            return result;
+        };
+        result.slot_id = Some(slot_id.clone());
+        let lock = self.slot_lock(&slot_id).await;
+        let _guard = lock.lock().await;
+
+        match action {
+            ProviderControlAction::ClearScreen => {
+                self.clear_screen_locked(&mut result, &slot_id).await;
+            }
+            ProviderControlAction::Exit => {
+                self.exit_locked(&mut result, &slot_id).await;
+            }
+        }
+        result
+    }
 }
 
 fn is_model_picker(observation: &AgyObservation) -> bool {
@@ -1135,7 +1347,9 @@ fn is_usage_screen(observation: &AgyObservation) -> bool {
 }
 
 fn is_overlay_screen(observation: &AgyObservation) -> bool {
-    is_model_picker(observation) || is_usage_screen(observation)
+    is_model_picker(observation)
+        || is_usage_screen(observation)
+        || is_slash_command_surface(observation)
 }
 
 fn is_ready_for_text(observation: &AgyObservation) -> bool {
@@ -1144,10 +1358,86 @@ fn is_ready_for_text(observation: &AgyObservation) -> bool {
         PtyCanonicalState::Idle | PtyCanonicalState::Complete
     ) && !is_model_picker(observation)
         && !is_usage_screen(observation)
+        && !is_slash_command_surface(observation)
+        && !is_exit_confirm_pending(observation)
+        && !is_shell_prompt_after_exit(observation)
 }
 
 fn is_hard_blocked(observation: &AgyObservation) -> bool {
-    observation.snapshot.state == PtyCanonicalState::Blocked && !is_model_picker(observation)
+    observation.snapshot.state == PtyCanonicalState::Blocked
+        && !is_model_picker(observation)
+        && !is_slash_command_surface(observation)
+}
+
+fn is_slash_command_surface(observation: &AgyObservation) -> bool {
+    matches!(
+        observation.snapshot.blocked_kind.as_deref(),
+        Some("slash_command_menu" | "slash_command_input")
+    ) || matches!(
+        observation.snapshot.reason.as_str(),
+        "agy:slash_command_menu" | "agy:slash_command_pending"
+    )
+}
+
+fn is_exit_confirm_pending(observation: &AgyObservation) -> bool {
+    observation.snapshot.reason == "agy:exit_confirm_pending"
+        || observation.snapshot.blocked_kind.as_deref() == Some("exit_confirmation")
+}
+
+fn is_shell_prompt_after_exit(observation: &AgyObservation) -> bool {
+    observation.snapshot.reason == "agy:shell_prompt_after_exit"
+}
+
+fn selected_clear_command(observation: &AgyObservation) -> bool {
+    is_slash_command_surface(observation)
+        && observation.text.lines().any(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("> /clear")
+                || trimmed.starts_with("› /clear")
+                || trimmed.starts_with("❯ /clear")
+        })
+}
+
+fn is_pending_clear_command(observation: &AgyObservation) -> bool {
+    observation.snapshot.reason == "agy:slash_command_pending"
+        && observation.text.lines().any(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("> /clear")
+                || trimmed.starts_with("› /clear")
+                || trimmed.starts_with("❯ /clear")
+        })
+}
+
+fn is_home_identity_ready(observation: &AgyObservation) -> bool {
+    if !is_ready_for_text(observation) {
+        return false;
+    }
+    let Some(identity) = observation.snapshot.screen_identity.as_ref() else {
+        return false;
+    };
+    identity.cli_version.is_some()
+        && identity.account.is_some()
+        && identity.current_model.is_some()
+        && identity.cwd.is_some()
+}
+
+fn mark_control_unverified(
+    result: &mut ProviderBoxResult,
+    slot_id: &str,
+    message: &'static str,
+    observation: &AgyObservation,
+) {
+    result.status = ProviderBoxStatus::Unverified;
+    result.add_diagnostic(ProviderBoxDiagnostic::error(
+        DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+        message,
+        json!({
+            "slot_id": slot_id,
+            "reason": observation.snapshot.reason,
+            "state": observation.snapshot.state,
+            "blocked_kind": observation.snapshot.blocked_kind,
+        }),
+    ));
 }
 
 fn current_model_eq(observation: &AgyObservation, target: &str) -> bool {
@@ -1454,6 +1744,20 @@ mod tests {
 
     use super::*;
 
+    fn observation(input: &[&str]) -> AgyObservation {
+        let lines = input
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>();
+        let snapshot = recognize_screen(CliEngine::Agy, &lines, missiond_core::SessionState::Idle);
+        let text = lines.join("\n");
+        AgyObservation {
+            lines,
+            text,
+            snapshot,
+        }
+    }
+
     fn step(index: i64, step_type: &str, content: Option<Value>) -> AgyStep {
         AgyStep {
             step_index: index,
@@ -1465,6 +1769,99 @@ mod tests {
             thinking: None,
             tool_calls: None,
         }
+    }
+
+    #[test]
+    fn agy_driver_does_not_treat_slash_menu_as_ready_text_surface() {
+        let obs = observation(&[
+            "────────────────────────────────────────",
+            "> /c",
+            "────────────────────────────────────────",
+            "/changelog        Show release notes and changes",
+            "> /clear          Clear conversation and start a new one",
+            "/config           Open settings panel",
+            "↑/↓ Navigate · enter Select · tab Complete",
+            "esc to cancel                                                                                    Gemini 3.5 Flash (High)",
+        ]);
+
+        assert!(is_overlay_screen(&obs));
+        assert!(is_slash_command_surface(&obs));
+        assert!(!is_ready_for_text(&obs));
+        assert!(!is_hard_blocked(&obs));
+    }
+
+    #[test]
+    fn agy_driver_treats_completed_slash_command_as_pending_input() {
+        let obs = observation(&[
+            "────────────────────────────────────────",
+            "> /clear",
+            "────────────────────────────────────────",
+            "? for shortcuts                                                                                  Gemini 3.5 Flash (High)",
+        ]);
+
+        assert!(is_overlay_screen(&obs));
+        assert!(is_slash_command_surface(&obs));
+        assert!(!is_ready_for_text(&obs));
+    }
+
+    #[test]
+    fn agy_driver_verifies_clear_selection_and_home_identity() {
+        let selected = observation(&[
+            "────────────────────────────────────────",
+            "> /c",
+            "────────────────────────────────────────",
+            "/changelog        Show release notes and changes",
+            "> /clear          Clear conversation and start a new one",
+            "/config           Open settings panel",
+            "↑/↓ Navigate · enter Select · tab Complete",
+            "esc to cancel                                                                                    Gemini 3.5 Flash (High)",
+        ]);
+        let home = observation(&[
+            "Antigravity CLI 1.0.3",
+            "jjrrqqq@gmail.com (Google AI Ultra)",
+            "Gemini 3.5 Flash (High)",
+            "~/Projects/missiond",
+            "────────────────────────────────────────",
+            ">",
+            "────────────────────────────────────────",
+            "? for shortcuts                                                                                  Gemini 3.5 Flash (High)",
+        ]);
+
+        assert!(selected_clear_command(&selected));
+        assert!(is_home_identity_ready(&home));
+    }
+
+    #[test]
+    fn agy_driver_requires_second_ctrl_d_or_recovery_before_more_input() {
+        let obs = observation(&[
+            "Antigravity CLI 1.0.3",
+            "jjrrqqq@gmail.com (Google AI Ultra)",
+            "Gemini 3.5 Flash (High)",
+            "~/Projects/missiond",
+            "────────────────────────────────────────",
+            ">",
+            "────────────────────────────────────────",
+            "press ctrl+d again to exit                                                                        Gemini 3.5 Flash (High)",
+        ]);
+
+        assert!(is_exit_confirm_pending(&obs));
+        assert!(!is_overlay_screen(&obs));
+        assert!(!is_ready_for_text(&obs));
+        assert!(is_hard_blocked(&obs));
+    }
+
+    #[test]
+    fn agy_driver_recognizes_shell_prompt_after_exit_as_not_ready() {
+        let obs = observation(&[
+            "Resume with:",
+            "  agy --conversation=917a5c67-e5b7-467a-8cfa-0d142faa474a",
+            "  agy -c",
+            "Resume: agy --conversation=917a5c67-e5b7-467a-8cfa-0d142faa474a (or -c)",
+            "(base) jinchen@Mac missiond %",
+        ]);
+
+        assert!(is_shell_prompt_after_exit(&obs));
+        assert!(!is_ready_for_text(&obs));
     }
 
     #[test]

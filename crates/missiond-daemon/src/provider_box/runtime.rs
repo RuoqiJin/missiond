@@ -53,6 +53,7 @@ impl ProviderInteractionBox {
             BoxCommand::UsageProbe => driver.probe_usage(&request).await,
             BoxCommand::ModelCatalogExport => driver.discover_models(&request).await,
             BoxCommand::PureTextSingleTurn => driver.pure_text_single_turn(&request).await,
+            BoxCommand::ControlAction => driver.control_action(&request).await,
         };
 
         if let Some(writer) = &self.artifact_writer {
@@ -104,7 +105,8 @@ mod tests {
     use crate::provider_box::types::{
         BoxCommand, ProviderBoxStatus, ProviderInteractionRequest,
         DIAG_AGY_MODEL_CATALOG_UNSUPPORTED, DIAG_MODEL_SWITCH_UNSUPPORTED,
-        DIAG_PURE_TEXT_GUARD_UNSUPPORTED, DIAG_USAGE_UNKNOWN,
+        DIAG_PROVIDER_CONTROL_ACTION_UNSUPPORTED, DIAG_PURE_TEXT_GUARD_UNSUPPORTED,
+        DIAG_USAGE_UNKNOWN,
     };
 
     #[tokio::test]
@@ -167,5 +169,19 @@ mod tests {
             .diagnostics
             .iter()
             .any(|diag| diag.code == DIAG_PURE_TEXT_GUARD_UNSUPPORTED));
+    }
+
+    #[tokio::test]
+    async fn control_action_fails_closed_until_driver_is_taught() {
+        let boxed = ProviderInteractionBox::without_artifacts();
+        let request = ProviderInteractionRequest::new(BoxCommand::ControlAction, CliEngine::Codex);
+
+        let result = boxed.execute(request).await.expect("box result");
+
+        assert_eq!(result.status, ProviderBoxStatus::Unsupported);
+        assert!(result
+            .diagnostics
+            .iter()
+            .any(|diag| diag.code == DIAG_PROVIDER_CONTROL_ACTION_UNSUPPORTED));
     }
 }

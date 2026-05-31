@@ -134,6 +134,11 @@ static VISIBLE_RANGE_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"\((\d+)\s*[–-]\s*(\d+)\s+of\s+(\d+)\s+lines\)").expect("valid visible range regex")
 });
 
+static SHELL_PROMPT_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^(?:\([^)]+\)\s*)?[A-Za-z0-9._-]+@[^%\n$#]+[%$#]\s*$")
+        .expect("valid shell prompt regex")
+});
+
 impl PtyRecognitionSnapshot {
     fn new(provider: CliEngine, state: PtyCanonicalState, confidence: f64, reason: &str) -> Self {
         Self {
@@ -567,6 +572,19 @@ fn recognize_agy(lines: &[String]) -> PtyRecognitionSnapshot {
     let identity = extract_agy_screen_identity(lines);
     let usage = extract_agy_usage_screen(lines);
 
+    if is_agy_shell_prompt_after_exit(lines, &lower) {
+        return PtyRecognitionSnapshot::new(
+            CliEngine::Agy,
+            PtyCanonicalState::Complete,
+            0.94,
+            "agy:shell_prompt_after_exit",
+        )
+        .with_phase("exited")
+        .with_elapsed(elapsed)
+        .with_source("tui_source_signature")
+        .with_screen_identity(identity);
+    }
+
     if let Some((kind, reason)) = provider_unavailable_match(&lower) {
         return PtyRecognitionSnapshot::new(
             CliEngine::Agy,
@@ -623,6 +641,20 @@ fn recognize_agy(lines: &[String]) -> PtyRecognitionSnapshot {
         .with_screen_identity(identity);
     }
 
+    if lower.contains("press ctrl+d again to exit") {
+        return PtyRecognitionSnapshot::new(
+            CliEngine::Agy,
+            PtyCanonicalState::Blocked,
+            0.9,
+            "agy:exit_confirm_pending",
+        )
+        .with_blocked_kind("exit_confirmation")
+        .with_phase("exit_confirm")
+        .with_elapsed(elapsed)
+        .with_source("tui_source_signature")
+        .with_screen_identity(identity);
+    }
+
     if lower.contains("approval request")
         || lower.contains("allow command")
         || lower.contains("requires approval")
@@ -656,6 +688,34 @@ fn recognize_agy(lines: &[String]) -> PtyRecognitionSnapshot {
             "agy:file_access_approval",
         )
         .with_blocked_kind("approval")
+        .with_elapsed(elapsed)
+        .with_source("tui_source_signature")
+        .with_screen_identity(identity);
+    }
+
+    if is_agy_slash_command_menu(lines) {
+        return PtyRecognitionSnapshot::new(
+            CliEngine::Agy,
+            PtyCanonicalState::Blocked,
+            0.9,
+            "agy:slash_command_menu",
+        )
+        .with_blocked_kind("slash_command_menu")
+        .with_phase("command_menu")
+        .with_elapsed(elapsed)
+        .with_source("tui_source_signature")
+        .with_screen_identity(identity);
+    }
+
+    if is_agy_pending_slash_command(lines) {
+        return PtyRecognitionSnapshot::new(
+            CliEngine::Agy,
+            PtyCanonicalState::Blocked,
+            0.86,
+            "agy:slash_command_pending",
+        )
+        .with_blocked_kind("slash_command_input")
+        .with_phase("command_input")
         .with_elapsed(elapsed)
         .with_source("tui_source_signature")
         .with_screen_identity(identity);
@@ -1309,6 +1369,50 @@ fn has_agy_active_status_line(lines: &[String]) -> bool {
         })
 }
 
+fn is_agy_slash_command_menu(lines: &[String]) -> bool {
+    let lower = joined_text(lines).to_ascii_lowercase();
+    lower.contains("enter")
+        && lower.contains("select")
+        && lower.contains("tab")
+        && lower.contains("complete")
+        && lower.contains("esc to cancel")
+        && lines.iter().any(|line| {
+            let cleaned = normalize_identity_value(&clean_agy_identity_line(line));
+            cleaned.starts_with('/')
+                || cleaned.starts_with("> /")
+                || cleaned.starts_with("› /")
+                || cleaned.starts_with("❯ /")
+        })
+}
+
+fn is_agy_pending_slash_command(lines: &[String]) -> bool {
+    let recent = lines
+        .iter()
+        .rev()
+        .filter(|line| !line.trim().is_empty())
+        .take(6)
+        .collect::<Vec<_>>();
+    let has_ready_footer = recent.iter().any(|line| {
+        normalize_identity_value(&clean_agy_identity_line(line))
+            .to_ascii_lowercase()
+            .contains("? for shortcuts")
+    });
+    has_ready_footer
+        && recent.iter().any(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("> /") || trimmed.starts_with("› /") || trimmed.starts_with("❯ /")
+        })
+}
+
+fn is_agy_shell_prompt_after_exit(lines: &[String], lower: &str) -> bool {
+    if !lower.contains("resume with:") && !lower.contains("resume: agy --conversation=") {
+        return false;
+    }
+    lines.iter().rev().take(8).any(|line| {
+        SHELL_PROMPT_RE.is_match(&normalize_identity_value(&clean_agy_identity_line(line)))
+    })
+}
+
 fn has_active_claude_spinner(lines: &[String]) -> bool {
     lines.iter().any(|line| {
         let trimmed = line.trim_start();
@@ -1663,6 +1767,80 @@ mod tests {
         assert_eq!(result.state, PtyCanonicalState::Idle);
         assert_eq!(result.reason, "agy:interrupted_ready_for_retry");
         assert_eq!(result.phase.as_deref(), Some("interrupted"));
+    }
+
+    #[test]
+    fn agy_slash_command_menu_is_not_ready_for_prompt_input() {
+        let result = recognize_agy(&lines(&[
+            "────────────────────────────────────────",
+            "> /c",
+            "────────────────────────────────────────",
+            "/changelog        Show release notes and changes",
+            "> /clear          Clear conversation and start a new one",
+            "/config           Open settings panel",
+            "/context          Visualize current context usage",
+            "/copy             Copy the last planner response to the clipboard",
+            "↓ 2 more",
+            "↑/↓ Navigate · enter Select · tab Complete",
+            "esc to cancel                                                                                    Gemini 3.5 Flash (High)",
+        ]));
+
+        assert_eq!(result.state, PtyCanonicalState::Blocked);
+        assert_eq!(result.reason, "agy:slash_command_menu");
+        assert_eq!(result.blocked_kind.as_deref(), Some("slash_command_menu"));
+        assert_eq!(result.phase.as_deref(), Some("command_menu"));
+    }
+
+    #[test]
+    fn agy_completed_slash_command_input_is_pending_not_executed() {
+        let result = recognize_agy(&lines(&[
+            "────────────────────────────────────────",
+            "> /clear",
+            "────────────────────────────────────────",
+            "? for shortcuts                                                                                  Gemini 3.5 Flash (High)",
+        ]));
+
+        assert_eq!(result.state, PtyCanonicalState::Blocked);
+        assert_eq!(result.reason, "agy:slash_command_pending");
+        assert_eq!(result.blocked_kind.as_deref(), Some("slash_command_input"));
+        assert_eq!(result.phase.as_deref(), Some("command_input"));
+    }
+
+    #[test]
+    fn agy_ctrl_d_first_press_waits_for_second_press() {
+        let result = recognize_agy(&lines(&[
+            "Antigravity CLI 1.0.3",
+            "jjrrqqq@gmail.com (Google AI Ultra)",
+            "Gemini 3.5 Flash (High)",
+            "~/Projects/missiond",
+            "────────────────────────────────────────",
+            ">",
+            "────────────────────────────────────────",
+            "press ctrl+d again to exit                                                                        Gemini 3.5 Flash (High)",
+        ]));
+
+        assert_eq!(result.state, PtyCanonicalState::Blocked);
+        assert_eq!(result.reason, "agy:exit_confirm_pending");
+        assert_eq!(result.blocked_kind.as_deref(), Some("exit_confirmation"));
+    }
+
+    #[test]
+    fn agy_ctrl_d_second_press_returns_to_shell_prompt() {
+        let result = recognize_agy(&lines(&[
+            "Resume with:",
+            "  agy --conversation=917a5c67-e5b7-467a-8cfa-0d142faa474a",
+            "  agy -c",
+            "Antigravity CLI 1.0.3",
+            "jjrrqqq@gmail.com (Google AI Ultra)",
+            "Gemini 3.5 Flash (High)",
+            "~/Projects/missiond",
+            "Resume: agy --conversation=917a5c67-e5b7-467a-8cfa-0d142faa474a (or -c)",
+            "(base) jinchen@Mac missiond %",
+        ]));
+
+        assert_eq!(result.state, PtyCanonicalState::Complete);
+        assert_eq!(result.reason, "agy:shell_prompt_after_exit");
+        assert_eq!(result.phase.as_deref(), Some("exited"));
     }
 
     #[test]

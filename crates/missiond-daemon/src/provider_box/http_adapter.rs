@@ -185,10 +185,7 @@ impl ProviderBoxHttpAdapter {
                 Ok(value) => value,
                 Err(err) => {
                     let mut result = ProviderBoxResult::base(
-                        &ProviderInteractionRequest::new(
-                            BoxCommand::WorkerTurn,
-                            CliEngine::Codex,
-                        ),
+                        &ProviderInteractionRequest::new(BoxCommand::WorkerTurn, CliEngine::Codex),
                         ProviderBoxStatus::Failed,
                     );
                     result.add_diagnostic(ProviderBoxDiagnostic::error(
@@ -202,7 +199,8 @@ impl ProviderBoxHttpAdapter {
                                 "command",
                                 "engine",
                                 "prompt",
-                                "correlation_id"
+                                "correlation_id",
+                                "control_action when command=control-action"
                             ]
                         }),
                     ));

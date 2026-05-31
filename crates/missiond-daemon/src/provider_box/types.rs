@@ -17,6 +17,10 @@ pub(crate) const DIAG_PROVIDER_BOX_INVALID_REQUEST: &str = "PROVIDER_BOX_INVALID
 pub(crate) const DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE: &str = "PROVIDER_BOX_SLOT_UNAVAILABLE";
 pub(crate) const DIAG_PROVIDER_TEXT_ONLY_VIOLATION: &str = "PROVIDER_TEXT_ONLY_VIOLATION";
 pub(crate) const DIAG_PROVIDER_DURABLE_FINAL_MISSING: &str = "PROVIDER_DURABLE_FINAL_MISSING";
+pub(crate) const DIAG_PROVIDER_CONTROL_ACTION_UNSUPPORTED: &str =
+    "PROVIDER_CONTROL_ACTION_UNSUPPORTED";
+pub(crate) const DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED: &str =
+    "PROVIDER_CONTROL_ACTION_UNVERIFIED";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -30,6 +34,7 @@ pub(crate) enum BoxCommand {
     GroundedDirectAnswer,
     RunnerOneShot,
     Vision,
+    ControlAction,
 }
 
 impl BoxCommand {
@@ -44,6 +49,13 @@ impl BoxCommand {
                 | Self::Vision
         )
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ProviderControlAction {
+    ClearScreen,
+    Exit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -203,6 +215,7 @@ pub(crate) struct ProviderInteractionRequest {
     pub(crate) model_switch_policy: Option<ModelSwitchPolicy>,
     pub(crate) single_turn_policy: Option<SingleTurnPolicy>,
     pub(crate) router_export_policy: Option<Value>,
+    pub(crate) control_action: Option<ProviderControlAction>,
 }
 
 impl ProviderInteractionRequest {
@@ -239,6 +252,7 @@ impl ProviderInteractionRequest {
             model_switch_policy: None,
             single_turn_policy: None,
             router_export_policy: None,
+            control_action: None,
         }
     }
 
