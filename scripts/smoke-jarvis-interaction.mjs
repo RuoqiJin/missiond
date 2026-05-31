@@ -117,8 +117,9 @@ function hasReviewableArtifactDraft(events, expectedEvent) {
       && typeof data.artifact_body === 'string'
       && data.artifact_body.includes(expectedForm)
       && (expectedEvent !== 'intent_draft'
-        || (data.author === 'codex-cli-gpt-5.5-xhigh'
-          && data.artifact_body.includes(':authority codex-cli-gpt-5.5-xhigh')));
+        || (typeof data.author === 'string'
+          && data.author.trim().length > 0
+          && data.artifact_body.includes(':authority')));
   });
 }
 

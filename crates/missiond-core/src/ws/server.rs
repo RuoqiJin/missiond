@@ -4919,6 +4919,22 @@ impl PTYWebSocketServer {
         }
     }
 
+    fn jarvis_author_progress_identity(
+        default_slot: &str,
+        default_model: &str,
+        reasoning_effort: &str,
+    ) -> (String, String, String) {
+        let provider = Self::jarvis_author_text_provider();
+        let slot_id = Self::jarvis_author_text_slot_id(provider.as_str(), default_slot);
+        let model = Self::jarvis_author_text_model(provider.as_str(), default_model);
+        let authority = Self::jarvis_author_text_authority(
+            provider.as_str(),
+            model.as_deref(),
+            reasoning_effort,
+        );
+        (provider, slot_id, authority)
+    }
+
     fn jarvis_codex_intent_prompt(
         config: &JarvisIntentAuthorConfig,
         schema: &str,
@@ -5420,7 +5436,11 @@ JSON 字段必须是：\n\
         permission_context: Option<&serde_json::Value>,
     ) -> anyhow::Result<JarvisAuthoredIntentDraft> {
         const HEARTBEAT_SECS: u64 = 8;
-        let author = "codex-cli-gpt-5.5-xhigh";
+        let (provider, slot_id, author) = Self::jarvis_author_progress_identity(
+            &config.slot_id,
+            &config.model,
+            &config.reasoning_effort,
+        );
         Self::write_jarvis_progress(
             stream,
             progress_bus,
@@ -5429,10 +5449,10 @@ JSON 字段必须是：\n\
             "intent_authoring",
             "provider_box_semantic_authoring_start",
             "running",
-            "正在调用 codex-intent-author 生成 intent.lisp。",
+            &format!("正在调用 {provider} 文本作者工位生成 intent.lisp。"),
             None,
-            Some(&config.slot_id),
-            Some(author),
+            Some(&slot_id),
+            Some(author.as_str()),
         )
         .await?;
         let started = tokio::time::Instant::now();
@@ -5464,10 +5484,10 @@ JSON 字段必须是：\n\
                                 "intent_authoring",
                                 "provider_box_semantic_authoring_completed",
                                 "completed",
-                                "intent.lisp 已由 Codex 生成并通过结构校验，正在写入 artifact。",
+                                &format!("intent.lisp 已由 {provider} 生成并通过结构校验，正在写入 artifact。"),
                                 Some(started.elapsed().as_secs()),
-                                Some(&config.slot_id),
-                                Some(author),
+                                Some(&slot_id),
+                                Some(author.as_str()),
                             )
                             .await?;
                             Ok(draft)
@@ -5484,8 +5504,8 @@ JSON 字段必须是：\n\
                                 "failed",
                                 &format!("失败在 intent.lisp 生成：{error_message}"),
                                 Some(started.elapsed().as_secs()),
-                                Some(&config.slot_id),
-                                Some(author),
+                                Some(&slot_id),
+                                Some(author.as_str()),
                             )
                             .await?;
                             Err(error)
@@ -5502,10 +5522,10 @@ JSON 字段必须是：\n\
                         "intent_authoring",
                         "provider_box_semantic_authoring_waiting",
                         "running",
-                        &format!("Codex intent author 仍在运行，已等待 {elapsed}s；当前步骤：生成并校验 intent.lisp。"),
+                        &format!("{provider} intent author 仍在运行，已等待 {elapsed}s；当前步骤：生成并校验 intent.lisp。"),
                         Some(elapsed),
-                        Some(&config.slot_id),
-                        Some(author),
+                        Some(&slot_id),
+                        Some(author.as_str()),
                     )
                     .await?;
                     heartbeat.as_mut().reset(
@@ -5698,7 +5718,11 @@ JSON 字段必须是：\n\
         permission_context: Option<&serde_json::Value>,
     ) -> anyhow::Result<JarvisAuthoredPlanDraft> {
         const HEARTBEAT_SECS: u64 = 8;
-        let author = "codex-cli-gpt-5.5-xhigh";
+        let (provider, slot_id, author) = Self::jarvis_author_progress_identity(
+            &config.slot_id,
+            &config.model,
+            &config.reasoning_effort,
+        );
         Self::write_jarvis_progress(
             stream,
             progress_bus,
@@ -5707,10 +5731,10 @@ JSON 字段必须是：\n\
             "plan_authoring",
             "provider_box_semantic_authoring_start",
             "running",
-            "正在调用 codex-plan-author 生成 plan.lisp。",
+            &format!("正在调用 {provider} 文本作者工位生成 plan.lisp。"),
             None,
-            Some(&config.slot_id),
-            Some(author),
+            Some(&slot_id),
+            Some(author.as_str()),
         )
         .await?;
         let started = tokio::time::Instant::now();
@@ -5743,10 +5767,10 @@ JSON 字段必须是：\n\
                                 "plan_authoring",
                                 "provider_box_semantic_authoring_completed",
                                 "completed",
-                                "plan.lisp 已由 Codex 生成并通过结构校验，正在写入 artifact。",
+                                &format!("plan.lisp 已由 {provider} 生成并通过结构校验，正在写入 artifact。"),
                                 Some(started.elapsed().as_secs()),
-                                Some(&config.slot_id),
-                                Some(author),
+                                Some(&slot_id),
+                                Some(author.as_str()),
                             )
                             .await?;
                             Ok(draft)
@@ -5763,8 +5787,8 @@ JSON 字段必须是：\n\
                                 "failed",
                                 &format!("失败在 plan.lisp 生成：{error_message}"),
                                 Some(started.elapsed().as_secs()),
-                                Some(&config.slot_id),
-                                Some(author),
+                                Some(&slot_id),
+                                Some(author.as_str()),
                             )
                             .await?;
                             Err(error)
@@ -5781,10 +5805,10 @@ JSON 字段必须是：\n\
                         "plan_authoring",
                         "provider_box_semantic_authoring_waiting",
                         "running",
-                        &format!("Codex plan author 仍在运行，已等待 {elapsed}s；当前步骤：生成并校验 plan.lisp。"),
+                        &format!("{provider} plan author 仍在运行，已等待 {elapsed}s；当前步骤：生成并校验 plan.lisp。"),
                         Some(elapsed),
-                        Some(&config.slot_id),
-                        Some(author),
+                        Some(&slot_id),
+                        Some(author.as_str()),
                     )
                     .await?;
                     heartbeat.as_mut().reset(
