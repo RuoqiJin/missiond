@@ -5,7 +5,13 @@ export async function POST(req: NextRequest) {
   try {
     const slotId = req.nextUrl.searchParams.get('slotId');
     if (!slotId) return NextResponse.json({ error: 'Missing slotId' }, { status: 400 });
-    const result = await callTool('mission_pty_spawn', { slotId, operatorConfirm: true });
+    const body = await req.json().catch(() => ({}));
+    const operatorShell = body?.operatorShell === true || body?.operator_shell === true;
+    const result = await callTool('mission_pty_spawn', {
+      slotId,
+      operatorConfirm: true,
+      ...(operatorShell ? { operatorShell: true } : {}),
+    });
     return NextResponse.json(result);
   } catch (err) {
     return NextResponse.json({ error: String(err) }, { status: 502 });

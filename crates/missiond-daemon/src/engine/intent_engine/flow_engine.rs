@@ -982,6 +982,7 @@ pub(crate) async fn ensure_autopilot_pty(
             tool_policy_path,
             extra_env: HashMap::new(),
             initial_prompt: None,
+            command_override: None,
         },
         Some(&final_slot_env),
     )

@@ -137,15 +137,32 @@ function checkGeneratedAbi(repo, diagnostics) {
     timeout: 60_000,
     maxBuffer: 1024 * 1024 * 8,
   });
+
+  let payload = null;
+  if (proc.stdout?.trim()) {
+    try {
+      payload = JSON.parse(proc.stdout);
+    } catch (err) {
+      if (proc.status === 0 && !proc.error) {
+        diagnostics.push(diag('scripts/project-v3-contracts.mjs', `generated V3 ABI check returned invalid JSON: ${err.message}`));
+        return;
+      }
+    }
+  }
+
   if (proc.status !== 0 || proc.error) {
-    diagnostics.push(diag('scripts/project-v3-contracts.mjs', proc.error?.message ?? proc.stderr?.trim() ?? 'generated V3 ABI check failed'));
+    const message = payload?.diagnostics
+      ? `generated V3 ABI check failed: ${JSON.stringify(payload.diagnostics)}`
+      : proc.error?.message
+        ?? proc.stderr?.trim()
+        ?? proc.stdout?.trim()
+        ?? 'generated V3 ABI check failed';
+    diagnostics.push(diag('scripts/project-v3-contracts.mjs', message));
     return;
   }
-  let payload;
-  try {
-    payload = JSON.parse(proc.stdout);
-  } catch (err) {
-    diagnostics.push(diag('scripts/project-v3-contracts.mjs', `generated V3 ABI check returned invalid JSON: ${err.message}`));
+
+  if (!payload) {
+    diagnostics.push(diag('scripts/project-v3-contracts.mjs', 'generated V3 ABI check returned no JSON payload'));
     return;
   }
   if (payload.ok !== true) {

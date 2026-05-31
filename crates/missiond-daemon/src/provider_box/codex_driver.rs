@@ -183,8 +183,12 @@ impl CodexProviderDriver {
             mcp_config: None,
             dangerously_skip_permissions: false,
             model: request.model.clone(),
-            reasoning_effort: request.model_profile.clone().or_else(|| request.model.clone()),
-            search_enabled: true,
+            reasoning_effort: request.model_profile.clone(),
+            search_enabled: request
+                .tool_policy
+                .as_ref()
+                .and_then(|policy| policy.get("search_enabled").and_then(Value::as_bool))
+                .unwrap_or(true),
             sandbox: Some(
                 request
                     .tool_policy
@@ -194,10 +198,18 @@ impl CodexProviderDriver {
                     .or_else(|| Some("read-only".to_string()))
                     .unwrap(),
             ),
-            approval_policy: Some("never".to_string()),
+            approval_policy: Some(
+                request
+                    .tool_policy
+                    .as_ref()
+                    .and_then(|policy| policy.get("approval_policy").and_then(Value::as_str))
+                    .unwrap_or("never")
+                    .to_string(),
+            ),
             tool_policy_path: None,
             extra_env: HashMap::new(),
             initial_prompt: None,
+            command_override: None,
         };
         match crate::slot_orchestrator::spawner::spawn_tracked_slot(
             &self.pty,
@@ -256,11 +268,7 @@ impl CodexProviderDriver {
         )
     }
 
-    async fn ensure_ready_for_prompt(
-        &self,
-        result: &mut ProviderBoxResult,
-        slot_id: &str,
-    ) -> bool {
+    async fn ensure_ready_for_prompt(&self, result: &mut ProviderBoxResult, slot_id: &str) -> bool {
         let started = Instant::now();
         loop {
             let observation = self.observe(slot_id).await;
@@ -340,7 +348,9 @@ impl CodexProviderDriver {
         let mut idle_seen_at: Option<Instant> = None;
 
         loop {
-            if let Some(final_turn) = self.extract_turn_from_rollouts(&request.correlation_id).await
+            if let Some(final_turn) = self
+                .extract_turn_from_rollouts(&request.correlation_id)
+                .await
             {
                 result.status = ProviderBoxStatus::Completed;
                 result.provider_conversation_id = Some(final_turn.session_id);
@@ -479,6 +489,8 @@ impl ProviderDriver for CodexProviderDriver {
             usage_probe: false,
             model_catalog: false,
             pure_text_guard: false,
+            control_action: false,
+            status: false,
         }
     }
 
@@ -528,7 +540,11 @@ fn default_codex_home() -> PathBuf {
         .ok()
         .map(PathBuf::from)
         .or_else(|| std::env::var("MISSIOND_CODEX_HOME").ok().map(PathBuf::from))
-        .or_else(|| std::env::var("HOME").ok().map(|home| PathBuf::from(home).join(".codex")))
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|home| PathBuf::from(home).join(".codex"))
+        })
         .unwrap_or_else(|| PathBuf::from(".codex"))
 }
 

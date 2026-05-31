@@ -19,6 +19,7 @@ pub(crate) struct ProviderDriverCapabilities {
     pub(crate) model_catalog: bool,
     pub(crate) pure_text_guard: bool,
     pub(crate) control_action: bool,
+    pub(crate) status: bool,
 }
 
 #[async_trait]
@@ -87,6 +88,10 @@ pub(crate) trait ProviderDriver: Send + Sync {
             "Provider driver has not been taught interactive control actions yet",
         )
     }
+
+    async fn status(&self, request: &ProviderInteractionRequest) -> ProviderBoxResult {
+        ProviderBoxResult::base(request, ProviderBoxStatus::Unknown)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -115,5 +120,6 @@ pub(crate) fn command_requires_driver(command: BoxCommand) -> bool {
                 | BoxCommand::UsageProbe
                 | BoxCommand::ModelCatalogExport
                 | BoxCommand::ControlAction
+                | BoxCommand::Status
         )
 }

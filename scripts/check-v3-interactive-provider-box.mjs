@@ -11,8 +11,8 @@ Checks the MissionD interactive provider box contract:
   - V3 declares provider CLI access as PTY + durable-log final extraction.
   - V3 declares worker-turn, model-switch, usage-probe, model-catalog-export,
     and pure-text-single-turn as box modes rather than caller-owned PTY scripts.
-  - Known headless/text-only provider CLI implementations are inventoried as
-    migration targets.
+  - Remaining headless/text-only provider CLI implementations are inventoried
+    as migration targets.
   - Normal worker PTY command construction stays interactive.
 `;
 
@@ -50,24 +50,6 @@ const INVENTORIED_LEGACY = [
     id: 'missiond-runner-claude-print',
     files: [FILES.runner, FILES.runnerLib],
     needles: ['--print', 'claude --print --output-format stream-json'],
-  },
-  {
-    id: 'jarvis-codex-author-exec',
-    files: [FILES.jarvisServer],
-    needles: [
-      'run_jarvis_codex_author_exec',
-      'codex exec --json --output-last-message',
-      'MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_PROVIDER',
-    ],
-  },
-  {
-    id: 'jarvis-grounded-direct-answer-text-only',
-    files: [FILES.jarvisServer, FILES.deployDaemon],
-    needles: [
-      'MISSIOND_XJPCODE_TEXT_ONLY_URL',
-      'MISSIOND_JARVIS_DIRECT_ANSWER_PROVIDER',
-      '/provider/v1/text-only/completions',
-    ],
   },
   {
     id: 'codex-vision-exec',
@@ -187,8 +169,6 @@ function main() {
       '? for shortcuts',
       ':legacy-headless-migration-targets',
       'missiond-runner-claude-print',
-      'jarvis-codex-author-exec',
-      'jarvis-grounded-direct-answer-text-only',
       'codex-vision-exec',
       'gemini-router-subprocess',
       'search-center-missiond-text-only',
@@ -250,10 +230,10 @@ function main() {
     ]);
     requireAll(diagnostics, FILES.requestSurfaces, sources.requestSurfaces, [
       ':interactive-provider-box "provider-interaction-box"',
-      ':headless-legacy-status migration-only',
+      ':headless-legacy-status retired-for-jarvis',
       'provider-interaction-box mode=semantic-authoring',
       'provider-interaction-box mode=grounded-direct-answer',
-      'codex exec --json --output-last-message',
+      'MUST NOT silently fall back to deterministic intent generation, `codex exec`, xjpcode text-only, or interactive TUI screen text as semantic output',
     ]);
     requireAll(diagnostics, FILES.workstationEvidence, sources.workstationEvidence, [
       'provider-interaction-box migration target',

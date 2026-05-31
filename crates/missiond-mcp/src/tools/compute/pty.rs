@@ -23,7 +23,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "waitForIdle": {"type": "boolean", "description": "等待 Claude 就绪", "default": false},
                     "timeoutSecs": {"type": "number", "description": "Idle 超时秒数(waitForIdle=true 时生效)", "default": 60},
                     "autoRestart": {"type": "boolean", "description": "崩溃后自动重启"},
-                    "mcpConfigPath": {"type": "string", "description": "MCP 配置文件路径(JSON)"}
+                    "mcpConfigPath": {"type": "string", "description": "MCP 配置文件路径(JSON)"},
+                    "operatorShell": {"type": "boolean", "description": "operatorConfirm 专用诊断 shell；用于 CLI 教学/help，不用于任务工位", "default": false}
                 }
             }),
         ),

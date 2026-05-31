@@ -177,6 +177,7 @@ impl EngineController for GenericCliController {
                 tool_policy_path: req.tool_policy_path.clone(),
                 extra_env: std::collections::HashMap::new(),
                 initial_prompt: None,
+                command_override: None,
             },
             None,
         )

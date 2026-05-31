@@ -122,6 +122,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                         .map(std::path::PathBuf::from),
                     extra_env: std::collections::HashMap::new(),
                     initial_prompt: None,
+                    command_override: None,
                 },
                 slot.config.env.as_ref(),
             )
@@ -201,6 +202,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                         .map(std::path::PathBuf::from),
                     extra_env: std::collections::HashMap::new(),
                     initial_prompt: None,
+                    command_override: None,
                 },
                 slot.config.env.as_ref(),
             )

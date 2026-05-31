@@ -11,8 +11,6 @@ use crate::engine::control_plane_kernel::{
 };
 use crate::helpers::default_mission_home;
 use crate::lenient;
-use crate::slot_env::build_slot_tracking_env;
-use crate::slot_env::capture_slot_session_uuid;
 use crate::state::AppState;
 use missiond_core::PTYSpawnOptions;
 use std::path::PathBuf;
@@ -59,6 +57,13 @@ struct PTYSpawnArgs {
     auto_restart: Option<bool>,
     #[serde(rename = "mcpConfigPath", default)]
     mcp_config_path: Option<String>,
+    #[serde(
+        rename = "operatorShell",
+        alias = "operator_shell",
+        default,
+        deserialize_with = "lenient::option_bool"
+    )]
+    operator_shell: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -155,6 +160,16 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     handle_inner(state, name, args).await
 }
 
+fn operator_shell_command() -> String {
+    concat!(
+        "exec env ",
+        "PATH=\"$HOME/.local/bin:$HOME/.antigravity/antigravity/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH\" ",
+        "PS1='(missiond-teach) %1~ %# ' ",
+        "/bin/zsh -f -i"
+    )
+    .to_string()
+}
+
 async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     match name {
         // ===== PTY =====
@@ -170,7 +185,25 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 timeout_secs,
                 auto_restart,
                 mcp_config_path,
+                operator_shell,
             } = serde_json::from_value(args)?;
+            let operator_shell = operator_shell.unwrap_or(false);
+            if operator_shell && task_id.is_some() {
+                return Ok(ToolResult::structured_error(
+                    ToolError::new(
+                        error_codes::CAPABILITY_DENIED,
+                        "operatorShell PTY spawn is diagnostic-only and cannot be task-bound",
+                    )
+                    .with_details(json!({
+                        "slot_id": slot_id,
+                        "operation": "spawn",
+                        "operator_shell": true
+                    }))
+                    .with_suggestion(
+                        "use operatorConfirm=true without taskId for CLI teaching or provider help inspection",
+                    ),
+                ));
+            }
             let slot = state
                 .mission
                 .list_slots()
@@ -342,7 +375,11 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 .or(slot.config.mcp_config.clone())
                 .map(PathBuf::from);
 
-            let wait = wait_for_idle.unwrap_or(false);
+            let wait = if operator_shell {
+                false
+            } else {
+                wait_for_idle.unwrap_or(false)
+            };
             let info = crate::slot_orchestrator::spawner::spawn_tracked_slot(
                 &state.pty,
                 &state.store,
@@ -351,7 +388,11 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 state.permission.learned(),
                 &pty_slot,
                 PTYSpawnOptions {
-                    auto_restart: auto_restart.unwrap_or(false),
+                    auto_restart: if operator_shell {
+                        false
+                    } else {
+                        auto_restart.unwrap_or(false)
+                    },
                     wait_for_idle: wait,
                     timeout_secs,
                     mcp_config,
@@ -370,7 +411,16 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                         .clone()
                         .map(std::path::PathBuf::from),
                     extra_env: std::collections::HashMap::new(),
-                    initial_prompt: slot.config.initial_prompt.clone(),
+                    initial_prompt: if operator_shell {
+                        None
+                    } else {
+                        slot.config.initial_prompt.clone()
+                    },
+                    command_override: if operator_shell {
+                        Some(operator_shell_command())
+                    } else {
+                        None
+                    },
                 },
                 slot.config.env.as_ref(),
             )

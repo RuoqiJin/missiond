@@ -21,6 +21,7 @@ pub(crate) const DIAG_PROVIDER_CONTROL_ACTION_UNSUPPORTED: &str =
     "PROVIDER_CONTROL_ACTION_UNSUPPORTED";
 pub(crate) const DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED: &str =
     "PROVIDER_CONTROL_ACTION_UNVERIFIED";
+pub(crate) const DIAG_PROVIDER_STATUS_UNAVAILABLE: &str = "PROVIDER_STATUS_UNAVAILABLE";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -35,6 +36,7 @@ pub(crate) enum BoxCommand {
     RunnerOneShot,
     Vision,
     ControlAction,
+    Status,
 }
 
 impl BoxCommand {
@@ -54,6 +56,7 @@ impl BoxCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ProviderControlAction {
+    Input,
     ClearScreen,
     Exit,
 }
@@ -597,6 +600,7 @@ pub(crate) struct ProviderBoxResult {
     pub(crate) durable_source: Option<String>,
     pub(crate) final_text: Option<String>,
     pub(crate) artifact_hash: Option<String>,
+    pub(crate) slot_status: Option<Value>,
     pub(crate) correlation_id: String,
     #[serde(default)]
     pub(crate) diagnostics: Vec<ProviderBoxDiagnostic>,
@@ -623,6 +627,7 @@ impl ProviderBoxResult {
             durable_source: None,
             final_text: None,
             artifact_hash: None,
+            slot_status: None,
             correlation_id: request.correlation_id.clone(),
             diagnostics: Vec::new(),
             step_records: Vec::new(),

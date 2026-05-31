@@ -385,7 +385,8 @@
       (waitForIdle boolean :default false :description "等待 Claude 就绪")
       (timeoutSecs number :default 60 :description "Idle 超时秒数(waitForIdle=true 时生效)")
       (autoRestart boolean :description "崩溃后自动重启")
-      (mcpConfigPath string :description "MCP 配置文件路径(JSON)"))
+      (mcpConfigPath string :description "MCP 配置文件路径(JSON)")
+      (operatorShell boolean :default false :description "operatorConfirm 专用诊断 shell；用于 CLI 教学/help，不用于任务工位"))
     :returns "Value")
 
   (tool mission_pty_send

@@ -160,6 +160,7 @@ impl GeminiPtyDriver {
                 tool_policy_path: None,
                 extra_env,
                 initial_prompt: None,
+                command_override: None,
             },
             None, // No slot_env provided here, could be passed if needed
         )

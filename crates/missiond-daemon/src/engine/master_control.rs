@@ -794,6 +794,7 @@ impl MasterControlService {
                 tool_policy_path: slot.config.tool_policy_path.clone().map(PathBuf::from),
                 extra_env: std::collections::HashMap::new(),
                 initial_prompt: slot.config.initial_prompt.clone(),
+                command_override: None,
             },
             slot.config.env.as_ref(),
         )

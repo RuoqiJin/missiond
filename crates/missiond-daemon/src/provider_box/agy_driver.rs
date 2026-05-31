@@ -21,12 +21,14 @@ use super::types::{
     ProviderUsageStatus, PtyObservation, PtyStepAction, PtyStepRecord, PtyStepVerificationStatus,
     TimeoutCancelPolicy, DIAG_MODEL_SWITCH_UNVERIFIED, DIAG_PROVIDER_BOX_INVALID_REQUEST,
     DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE, DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
-    DIAG_PROVIDER_DURABLE_FINAL_MISSING, DIAG_PROVIDER_TEXT_ONLY_VIOLATION,
-    DIAG_PROVIDER_TURN_STALLED, DIAG_PROVIDER_TURN_TIMEOUT_CANCELLED,
-    DIAG_PROVIDER_TURN_TIMEOUT_CANCEL_FAILED, DIAG_USAGE_UNKNOWN,
+    DIAG_PROVIDER_DURABLE_FINAL_MISSING, DIAG_PROVIDER_STATUS_UNAVAILABLE,
+    DIAG_PROVIDER_TEXT_ONLY_VIOLATION, DIAG_PROVIDER_TURN_STALLED,
+    DIAG_PROVIDER_TURN_TIMEOUT_CANCELLED, DIAG_PROVIDER_TURN_TIMEOUT_CANCEL_FAILED,
+    DIAG_USAGE_UNKNOWN,
 };
 
 const DEFAULT_AGY_SLOT: &str = "slot-agy-provider-box";
+const AGY_CTRL_D: &str = "\x1b[100;5u";
 const MODEL_PICKER_MAX_DOWN: usize = 96;
 const MODEL_CATALOG_MAX_DOWN: usize = 128;
 const OBSERVE_SETTLE_MS: u64 = 220;
@@ -95,6 +97,33 @@ impl AgyProviderDriver {
             .unwrap_or_else(|| DEFAULT_AGY_SLOT.to_string())
     }
 
+    fn request_spawn_if_missing(request: &ProviderInteractionRequest) -> bool {
+        request
+            .desired_worker
+            .as_ref()
+            .and_then(|worker| {
+                worker
+                    .get("spawn_if_missing")
+                    .or_else(|| worker.get("spawn"))
+                    .and_then(Value::as_bool)
+            })
+            .unwrap_or(false)
+    }
+
+    fn request_submit_input(request: &ProviderInteractionRequest) -> bool {
+        request
+            .desired_worker
+            .as_ref()
+            .and_then(|worker| {
+                worker
+                    .get("submit")
+                    .or_else(|| worker.get("enter"))
+                    .or_else(|| worker.get("append_enter"))
+                    .and_then(Value::as_bool)
+            })
+            .unwrap_or(false)
+    }
+
     async fn ensure_slot(
         &self,
         request: &ProviderInteractionRequest,
@@ -154,6 +183,26 @@ impl AgyProviderDriver {
                 None
             }
         }
+    }
+
+    async fn attach_status_observation(
+        &self,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+        expected_change: impl Into<Option<String>>,
+    ) -> AgyObservation {
+        let observation = self.observe(slot_id).await;
+        let status = self.pty.get_status(slot_id).await;
+        result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
+        let pty_observation = Self::pty_observation(slot_id, &observation);
+        result.record_step(PtyStepRecord::new(
+            pty_observation.clone(),
+            PtyStepAction::key("observe"),
+            pty_observation,
+            expected_change.into(),
+            PtyStepVerificationStatus::Skipped,
+        ));
+        observation
     }
 
     async fn observe(&self, slot_id: &str) -> AgyObservation {
@@ -362,78 +411,48 @@ impl AgyProviderDriver {
             None => return false,
         };
 
-        let mut seen_selected = HashSet::new();
-        for _ in 0..MODEL_PICKER_MAX_DOWN {
-            let selected = observation
-                .snapshot
-                .screen_identity
-                .as_ref()
-                .and_then(|identity| identity.selected_model.clone());
-            if model_eq(selected.as_deref(), target_model) {
-                let after_enter = self
-                    .write_step(
+        let mut all_seen_selected = HashSet::new();
+        for (direction, key, label) in [
+            ("up", "\x1b[A", "move AGY model picker selection up"),
+            ("down", "\x1b[B", "move AGY model picker selection down"),
+        ] {
+            let mut phase_seen_selected = HashSet::new();
+            for _ in 0..MODEL_PICKER_MAX_DOWN {
+                if let Some(ok) = self
+                    .select_current_picker_model(
+                        request,
                         result,
                         slot_id,
-                        PtyStepAction::key("enter"),
-                        "\r",
-                        Some("select AGY model".to_string()),
+                        target_model,
+                        &observation,
                     )
-                    .await;
-                let verified = if current_model_eq(&after_enter, target_model) {
-                    after_enter
-                } else {
-                    self.wait_until(slot_id, Duration::from_secs(8), |obs| {
-                        current_model_eq(obs, target_model) && !is_model_picker(obs)
-                    })
                     .await
-                };
-                let verified_model = verified
+                {
+                    return ok;
+                }
+
+                if let Some(value) = observation
                     .snapshot
                     .screen_identity
                     .as_ref()
-                    .and_then(|identity| identity.current_model.clone());
-                let ok = model_eq(verified_model.as_deref(), target_model);
-                result.model_switch_result = Some(ModelSwitchResult {
-                    status: if ok {
-                        ModelSwitchStatus::Verified
-                    } else {
-                        ModelSwitchStatus::Unverified
-                    },
-                    requested_model: Some(target_model.to_string()),
-                    requested_model_profile: request.model_profile.clone(),
-                    verified_model,
-                    verification_source: Some("agy:screen_identity".to_string()),
-                });
-                if !ok {
-                    result.status = ProviderBoxStatus::Unverified;
-                    result.add_diagnostic(ProviderBoxDiagnostic::error(
-                        DIAG_MODEL_SWITCH_UNVERIFIED,
-                        "AGY model switch could not be verified from header/footer model lines",
-                        json!({
-                            "target_model": target_model,
-                            "slot_id": slot_id,
-                            "reason": verified.snapshot.reason,
-                        }),
-                    ));
+                    .and_then(|identity| identity.selected_model.clone())
+                {
+                    let normalized = normalize_model(&value);
+                    all_seen_selected.insert(normalized.clone());
+                    if !phase_seen_selected.insert(normalized) {
+                        break;
+                    }
                 }
-                return ok;
+                observation = self
+                    .write_step(
+                        result,
+                        slot_id,
+                        PtyStepAction::key(direction),
+                        key,
+                        Some(label.to_string()),
+                    )
+                    .await;
             }
-
-            if let Some(value) = selected {
-                let normalized = normalize_model(&value);
-                if !seen_selected.insert(normalized) && seen_selected.len() > 1 {
-                    break;
-                }
-            }
-            observation = self
-                .write_step(
-                    result,
-                    slot_id,
-                    PtyStepAction::key("down"),
-                    "\x1b[B",
-                    Some("move AGY model picker selection down".to_string()),
-                )
-                .await;
         }
 
         result.status = ProviderBoxStatus::Unverified;
@@ -454,10 +473,77 @@ impl AgyProviderDriver {
             json!({
                 "target_model": target_model,
                 "slot_id": slot_id,
-                "seen_selected_count": seen_selected.len(),
+                "seen_selected_count": all_seen_selected.len(),
+                "scan_directions": ["up", "down"],
             }),
         ));
         false
+    }
+
+    async fn select_current_picker_model(
+        &self,
+        request: &ProviderInteractionRequest,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+        target_model: &str,
+        observation: &AgyObservation,
+    ) -> Option<bool> {
+        let selected = observation
+            .snapshot
+            .screen_identity
+            .as_ref()
+            .and_then(|identity| identity.selected_model.clone());
+        if !model_eq(selected.as_deref(), target_model) {
+            return None;
+        }
+
+        let after_enter = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::key("enter"),
+                "\r",
+                Some("select AGY model".to_string()),
+            )
+            .await;
+        let verified = if current_model_eq(&after_enter, target_model) {
+            after_enter
+        } else {
+            self.wait_until(slot_id, Duration::from_secs(8), |obs| {
+                current_model_eq(obs, target_model) && !is_model_picker(obs)
+            })
+            .await
+        };
+        let verified_model = verified
+            .snapshot
+            .screen_identity
+            .as_ref()
+            .and_then(|identity| identity.current_model.clone());
+        let ok = model_eq(verified_model.as_deref(), target_model);
+        result.model_switch_result = Some(ModelSwitchResult {
+            status: if ok {
+                ModelSwitchStatus::Verified
+            } else {
+                ModelSwitchStatus::Unverified
+            },
+            requested_model: Some(target_model.to_string()),
+            requested_model_profile: request.model_profile.clone(),
+            verified_model,
+            verification_source: Some("agy:screen_identity".to_string()),
+        });
+        if !ok {
+            result.status = ProviderBoxStatus::Unverified;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_MODEL_SWITCH_UNVERIFIED,
+                "AGY model switch could not be verified from header/footer model lines",
+                json!({
+                    "target_model": target_model,
+                    "slot_id": slot_id,
+                    "reason": verified.snapshot.reason,
+                }),
+            ));
+        }
+        Some(ok)
     }
 
     async fn submit_prompt_step(
@@ -976,6 +1062,14 @@ impl AgyProviderDriver {
     }
 
     async fn exit_locked(&self, result: &mut ProviderBoxResult, slot_id: &str) {
+        let initial = self.observe(slot_id).await;
+        if is_shell_prompt_after_exit(&initial) {
+            result.status = ProviderBoxStatus::Completed;
+            let status = self.pty.get_status(slot_id).await;
+            result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &initial));
+            return;
+        }
+
         if self.ensure_composer_ready(result, slot_id).await.is_none() {
             return;
         }
@@ -985,7 +1079,7 @@ impl AgyProviderDriver {
                 result,
                 slot_id,
                 PtyStepAction::key("ctrl+d"),
-                "\x04",
+                AGY_CTRL_D,
                 Some("request AGY exit confirmation".to_string()),
             )
             .await;
@@ -1009,7 +1103,7 @@ impl AgyProviderDriver {
                 result,
                 slot_id,
                 PtyStepAction::key("ctrl+d"),
-                "\x04",
+                AGY_CTRL_D,
                 Some("confirm AGY exit".to_string()),
             )
             .await;
@@ -1029,6 +1123,72 @@ impl AgyProviderDriver {
             );
         }
     }
+
+    async fn input_locked(
+        &self,
+        request: &ProviderInteractionRequest,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+    ) {
+        let Some(input) = request
+            .prompt
+            .as_ref()
+            .map(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+        else {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                "AGY input control action requires prompt or text",
+                json!({
+                    "slot_id": slot_id,
+                    "control_action": "input",
+                }),
+            ));
+            return;
+        };
+
+        if self.ensure_composer_ready(result, slot_id).await.is_none() {
+            return;
+        }
+
+        let submit = Self::request_submit_input(request);
+        let bytes = if submit {
+            format!("{input}\r")
+        } else {
+            input.to_string()
+        };
+        let mut action = PtyStepAction::text(if submit {
+            "<input text + enter>"
+        } else {
+            "<input text>"
+        });
+        action.redacted = true;
+        let after = self
+            .write_step(
+                result,
+                slot_id,
+                action,
+                &bytes,
+                Some(if submit {
+                    "write text into AGY composer and press Enter".to_string()
+                } else {
+                    "write text into AGY composer".to_string()
+                }),
+            )
+            .await;
+        let failed = result
+            .step_records
+            .last()
+            .is_some_and(|step| step.verification_status == PtyStepVerificationStatus::Failed);
+        let status = self.pty.get_status(slot_id).await;
+        result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &after));
+        result.status = if failed {
+            ProviderBoxStatus::Failed
+        } else {
+            ProviderBoxStatus::Completed
+        };
+    }
 }
 
 #[async_trait]
@@ -1044,8 +1204,56 @@ impl ProviderDriver for AgyProviderDriver {
             usage_probe: true,
             model_catalog: true,
             pure_text_guard: true,
-            control_action: false,
+            control_action: true,
+            status: true,
         }
+    }
+
+    async fn status(&self, request: &ProviderInteractionRequest) -> ProviderBoxResult {
+        let mut result = ProviderBoxResult::base(request, ProviderBoxStatus::Unknown);
+        let slot_id = Self::request_slot_id(request);
+        result.slot_id = Some(slot_id.clone());
+
+        if Self::request_spawn_if_missing(request) {
+            let Some(slot_id) = self.ensure_slot(request, &mut result).await else {
+                return result;
+            };
+            result.slot_id = Some(slot_id.clone());
+        } else {
+            let Some(status) = self.pty.get_status(&slot_id).await else {
+                result.status = ProviderBoxStatus::Unknown;
+                result.add_diagnostic(ProviderBoxDiagnostic::warning(
+                    DIAG_PROVIDER_STATUS_UNAVAILABLE,
+                    "AGY slot status is unavailable",
+                    json!({
+                        "slot_id": slot_id,
+                        "spawn_if_missing": false,
+                    }),
+                ));
+                return result;
+            };
+            if status.engine != CliEngine::Agy {
+                result.status = ProviderBoxStatus::Failed;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                    "Requested slot is not an AGY slot",
+                    json!({
+                        "slot_id": slot_id,
+                        "engine": status.engine.to_string(),
+                    }),
+                ));
+                return result;
+            }
+        }
+
+        self.attach_status_observation(
+            &mut result,
+            &slot_id,
+            Some("observe current AGY CLI state".to_string()),
+        )
+        .await;
+        result.status = ProviderBoxStatus::Completed;
+        result
     }
 
     async fn switch_model(&self, request: &ProviderInteractionRequest) -> ProviderBoxResult {
@@ -1313,6 +1521,53 @@ impl ProviderDriver for AgyProviderDriver {
             ));
             return result;
         };
+        if matches!(action, ProviderControlAction::Exit) {
+            let slot_id = Self::request_slot_id(request);
+            result.slot_id = Some(slot_id.clone());
+            let Some(status) = self.pty.get_status(&slot_id).await else {
+                result.status = ProviderBoxStatus::Failed;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                    "Cannot exit an unavailable AGY slot",
+                    json!({
+                        "slot_id": slot_id,
+                    }),
+                ));
+                return result;
+            };
+            if status.engine != CliEngine::Agy {
+                result.status = ProviderBoxStatus::Failed;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                    "Requested slot is not an AGY slot",
+                    json!({
+                        "slot_id": slot_id,
+                        "engine": status.engine.to_string(),
+                    }),
+                ));
+                return result;
+            }
+            if status.state == SessionState::Exited {
+                let observation = self.observe(&slot_id).await;
+                result.slot_status = Some(slot_status_value(&slot_id, Some(&status), &observation));
+                result.status = ProviderBoxStatus::Completed;
+                return result;
+            }
+
+            let lock = self.slot_lock(&slot_id).await;
+            let _guard = lock.lock().await;
+            self.exit_locked(&mut result, &slot_id).await;
+            if result.slot_status.is_none() {
+                self.attach_status_observation(
+                    &mut result,
+                    &slot_id,
+                    Some("observe AGY state after exit control action".to_string()),
+                )
+                .await;
+            }
+            return result;
+        }
+
         let Some(slot_id) = self.ensure_slot(request, &mut result).await else {
             return result;
         };
@@ -1321,12 +1576,23 @@ impl ProviderDriver for AgyProviderDriver {
         let _guard = lock.lock().await;
 
         match action {
+            ProviderControlAction::Input => {
+                self.input_locked(request, &mut result, &slot_id).await;
+            }
             ProviderControlAction::ClearScreen => {
                 self.clear_screen_locked(&mut result, &slot_id).await;
             }
             ProviderControlAction::Exit => {
                 self.exit_locked(&mut result, &slot_id).await;
             }
+        }
+        if result.slot_status.is_none() {
+            self.attach_status_observation(
+                &mut result,
+                &slot_id,
+                Some("observe AGY state after control action".to_string()),
+            )
+            .await;
         }
         result
     }
@@ -1419,6 +1685,33 @@ fn is_home_identity_ready(observation: &AgyObservation) -> bool {
         && identity.account.is_some()
         && identity.current_model.is_some()
         && identity.cwd.is_some()
+}
+
+fn slot_status_value(
+    slot_id: &str,
+    status: Option<&missiond_core::PTYAgentInfo>,
+    observation: &AgyObservation,
+) -> Value {
+    json!({
+        "slot_id": slot_id,
+        "engine": status.map(|info| info.engine.to_string()),
+        "session_state": status.map(|info| info.state),
+        "running": status
+            .map(|info| !matches!(info.state, SessionState::Exited | SessionState::Error))
+            .unwrap_or(false),
+        "pid": status.and_then(|info| info.pid),
+        "started_at": status.and_then(|info| info.started_at),
+        "status_text": status.and_then(|info| info.status_text.clone()),
+        "current_task_id": status.and_then(|info| info.current_task_id.clone()),
+        "log_file": status.map(|info| info.log_file.display().to_string()),
+        "pty_canonical_state": observation.snapshot.state,
+        "reason": observation.snapshot.reason.clone(),
+        "phase": observation.snapshot.phase.clone(),
+        "blocked_kind": observation.snapshot.blocked_kind.clone(),
+        "screen_identity": observation.snapshot.screen_identity.clone(),
+        "screen_usage": observation.snapshot.screen_usage.clone(),
+        "screen_hash": PtyObservation::text("pty-screen", &observation.text).screen_hash,
+    })
 }
 
 fn mark_control_unverified(

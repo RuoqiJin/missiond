@@ -626,6 +626,18 @@ fn recognize_agy(lines: &[String]) -> PtyRecognitionSnapshot {
         .with_screen_usage(usage);
     }
 
+    if is_agy_cli_help_output(lines) {
+        return PtyRecognitionSnapshot::new(
+            CliEngine::Agy,
+            PtyCanonicalState::Complete,
+            0.92,
+            "agy:cli_help",
+        )
+        .with_phase("cli_help")
+        .with_source("cli_help_signature")
+        .with_screen_identity(identity);
+    }
+
     if lower.contains("switch model")
         && (lower.contains("enter select") || lower.contains("navigate"))
     {
@@ -1390,18 +1402,55 @@ fn is_agy_pending_slash_command(lines: &[String]) -> bool {
         .iter()
         .rev()
         .filter(|line| !line.trim().is_empty())
-        .take(6)
+        .take(8)
+        .map(|line| normalize_identity_value(&clean_agy_identity_line(line)))
         .collect::<Vec<_>>();
-    let has_ready_footer = recent.iter().any(|line| {
-        normalize_identity_value(&clean_agy_identity_line(line))
-            .to_ascii_lowercase()
-            .contains("? for shortcuts")
+    let has_ready_footer = recent
+        .iter()
+        .any(|line| line.to_ascii_lowercase().contains("? for shortcuts"));
+    if !has_ready_footer {
+        return false;
+    }
+
+    for line in recent {
+        let trimmed = line.trim_start();
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.contains("? for shortcuts") || is_separator_line(trimmed) {
+            continue;
+        }
+        if matches!(trimmed, ">" | "›" | "❯") {
+            return false;
+        }
+        if trimmed.starts_with("> /")
+            || trimmed.starts_with("› /")
+            || trimmed.starts_with("❯ /")
+            || trimmed.starts_with('/')
+        {
+            return true;
+        }
+        if trimmed.starts_with("⎿") || trimmed.starts_with("└") || trimmed.starts_with("╰") {
+            return false;
+        }
+    }
+    false
+}
+
+fn is_separator_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    !trimmed.is_empty() && trimmed.chars().all(|ch| ch == '─' || ch == '-')
+}
+
+fn is_agy_cli_help_output(lines: &[String]) -> bool {
+    let lower = joined_text(lines).to_ascii_lowercase();
+    let has_usage = lines.iter().any(|line| {
+        let line = normalize_identity_value(line).to_ascii_lowercase();
+        line.starts_with("usage of ") && line.trim_end().ends_with("agy:")
     });
-    has_ready_footer
-        && recent.iter().any(|line| {
-            let trimmed = line.trim_start();
-            trimmed.starts_with("> /") || trimmed.starts_with("› /") || trimmed.starts_with("❯ /")
-        })
+    has_usage
+        && lower.contains("--dangerously-skip-permissions")
+        && lower.contains("--print")
+        && lower.contains("--prompt-interactive")
+        && lower.contains("available subcommands:")
 }
 
 fn is_agy_shell_prompt_after_exit(lines: &[String], lower: &str) -> bool {
@@ -1723,6 +1772,45 @@ mod tests {
     }
 
     #[test]
+    fn agy_help_output_is_completed_diagnostic_evidence() {
+        let result = recognize_screen(
+            CliEngine::Agy,
+            &lines(&[
+                "(missiond-teach) missiond % /Users/jinchen/.local/bin/agy --help",
+                "Usage of /Users/jinchen/.local/bin/agy:",
+                "  --add-dir                       Add a directory to the workspace (repeatable) (default [])",
+                "  -c                              Short alias for --continue",
+                "  --continue                      Continue the most recent conversation",
+                "  --conversation                  Resume a previous conversation by ID",
+                "  --dangerously-skip-permissions  Auto-approve all tool permission requests without prompting",
+                "  -i                              Short alias for --prompt-interactive",
+                "  --log-file                      Override CLI log file path",
+                "  -p                              Short alias for --print",
+                "  --print                         Run a single prompt non-interactively and print the response",
+                "  --print-timeout                 Timeout for print mode wait (default 5m0s)",
+                "  --prompt                        Alias for --print",
+                "  --prompt-interactive            Run an initial prompt interactively and continue the session",
+                "  --sandbox                       Run in a sandbox with terminal restrictions enabled",
+                "",
+                "Available subcommands:",
+                "  changelog       Show changelog and release notes",
+                "  help            Show help for subcommands",
+                "  install         Configure environment paths and shell settings",
+                "  plugin          Manage plugins (install, uninstall, list, enable, disable)",
+                "  plugins         Alias for plugin",
+                "  update          Update CLI",
+                "(missiond-teach) missiond %",
+            ]),
+            SessionState::Starting,
+        );
+
+        assert_eq!(result.state, PtyCanonicalState::Complete);
+        assert_eq!(result.reason, "agy:cli_help");
+        assert_eq!(result.phase.as_deref(), Some("cli_help"));
+        assert_eq!(result.source, "cli_help_signature");
+    }
+
+    #[test]
     fn agy_generating_spinner_is_running_even_when_prompt_visible() {
         let result = recognize_agy(&lines(&[
             "请写 20 行很短的中文句子，主题是 PTY 队列状态识别，每行编号。",
@@ -1804,6 +1892,26 @@ mod tests {
         assert_eq!(result.reason, "agy:slash_command_pending");
         assert_eq!(result.blocked_kind.as_deref(), Some("slash_command_input"));
         assert_eq!(result.phase.as_deref(), Some("command_input"));
+    }
+
+    #[test]
+    fn agy_completed_slash_command_history_with_empty_prompt_is_ready() {
+        let result = recognize_agy(&lines(&[
+            "      ▄▀▀▄        Antigravity CLI 1.0.3",
+            "     ▀▀▀▀▀▀       jjrrqqq@gmail.com (Google AI Ultra)",
+            "    ▀▀▀▀▀▀▀▀      Gemini 3.1 Pro (High)",
+            "   ▄▀▀    ▀▀▄     ~/Projects/missiond",
+            "> /model",
+            "  ⎿  Model set to Gemini 3.1 Pro (High)",
+            "────────────────────────────────────────",
+            ">",
+            "────────────────────────────────────────",
+            "? for shortcuts                                                                                    Gemini 3.1 Pro (High)",
+        ]));
+
+        assert_eq!(result.state, PtyCanonicalState::Idle);
+        assert_eq!(result.reason, "agy:composer_idle");
+        assert_eq!(result.blocked_kind, None);
     }
 
     #[test]

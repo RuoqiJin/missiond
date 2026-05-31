@@ -197,7 +197,7 @@ export function PtyTeachingPanel({ slots, refreshSlots }: PtyTeachingPanelProps)
     if (!selectedSlotId || busy) return;
     setBusy(true);
     try {
-      const res = await fetch('/api/pty/input', {
+      const res = await fetch('/api/pty/raw', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ slotId: selectedSlotId, text: input.text, key: input.key }),
@@ -213,15 +213,19 @@ export function PtyTeachingPanel({ slots, refreshSlots }: PtyTeachingPanelProps)
     }
   }
 
-  async function startSlot() {
+  async function startSlot(operatorShell = false) {
     if (!selectedSlotId || busy) return;
     setBusy(true);
     try {
-      const res = await fetch(`/api/pty/spawn?slotId=${encodeURIComponent(selectedSlotId)}`, { method: 'POST' });
+      const res = await fetch(`/api/pty/spawn?slotId=${encodeURIComponent(selectedSlotId)}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(operatorShell ? { operatorShell: true } : {}),
+      });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data?.error) throw new Error(String(data?.error || res.statusText));
       await new Promise((resolve) => setTimeout(resolve, 800));
-      await observe('start PTY', 'observed');
+      await observe(operatorShell ? 'start operator shell' : 'start PTY', 'observed');
     } catch (err) {
       recordStep({ action: 'start PTY', result: 'failed', reason: String(err) });
     } finally {
@@ -366,17 +370,24 @@ export function PtyTeachingPanel({ slots, refreshSlots }: PtyTeachingPanelProps)
         <div className="space-y-3 border-b border-neutral-800 p-3">
           <div className="flex gap-2">
             <button
-              onClick={() => void startSlot()}
+              onClick={() => void startSlot(false)}
               disabled={busy || isRunning}
               className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-md border border-emerald-500/20 bg-emerald-500/10 px-2 py-1.5 text-xs text-emerald-300 hover:bg-emerald-500/15 disabled:opacity-40"
             >
               <Play className="h-3.5 w-3.5" /> Start
             </button>
             <button
+              onClick={() => void startSlot(true)}
+              disabled={busy || isRunning}
+              className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-md border border-sky-500/20 bg-sky-500/10 px-2 py-1.5 text-xs text-sky-300 hover:bg-sky-500/15 disabled:opacity-40"
+            >
+              <Keyboard className="h-3.5 w-3.5" /> Shell
+            </button>
+            <button
               onClick={() => void guarded('restart', async () => {
                 await stopSlot();
                 await new Promise((resolve) => setTimeout(resolve, 600));
-                await startSlot();
+                await startSlot(false);
               })}
               disabled={busy}
               className={cn(

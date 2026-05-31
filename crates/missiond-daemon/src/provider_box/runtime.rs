@@ -54,6 +54,7 @@ impl ProviderInteractionBox {
             BoxCommand::ModelCatalogExport => driver.discover_models(&request).await,
             BoxCommand::PureTextSingleTurn => driver.pure_text_single_turn(&request).await,
             BoxCommand::ControlAction => driver.control_action(&request).await,
+            BoxCommand::Status => driver.status(&request).await,
         };
 
         if let Some(writer) = &self.artifact_writer {

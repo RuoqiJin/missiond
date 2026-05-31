@@ -188,6 +188,7 @@ impl EngineController for ClaudeCodeController {
                 tool_policy_path: None,
                 extra_env: HashMap::new(),
                 initial_prompt: None,
+                command_override: None,
             },
             None, // Pass the custom environment from the request if it had one
         )

@@ -693,6 +693,7 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
                     .map(std::path::PathBuf::from),
                 extra_env: HashMap::new(),
                 initial_prompt: initial_prompt_for_spawn,
+                command_override: None,
             },
             slot_config.env.as_ref(),
         )

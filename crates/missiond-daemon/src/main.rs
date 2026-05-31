@@ -2592,6 +2592,7 @@ async fn main() -> Result<()> {
                                             .map(std::path::PathBuf::from),
                                         extra_env: std::collections::HashMap::new(),
                                         initial_prompt: slot.config.initial_prompt.clone(),
+                                        command_override: None,
                                     },
                                     slot.config.env.as_ref(),
                                 )

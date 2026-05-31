@@ -86,6 +86,7 @@ pub(crate) async fn ensure_memory_slot_by_id(state: &AppState, slot_id: &str) ->
                 .map(std::path::PathBuf::from),
             extra_env: std::collections::HashMap::new(),
             initial_prompt: None,
+            command_override: None,
         },
         slot_env,
     )

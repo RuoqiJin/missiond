@@ -218,6 +218,9 @@ pub struct PTYSessionOptions {
     pub approval_policy: Option<String>,
     /// Provider tool policy file when supported, e.g. Gemini CLI `--policy`.
     pub tool_policy_path: Option<PathBuf>,
+    /// Operator-confirmed diagnostic launch command. Normal provider workers
+    /// leave this unset and use the engine-specific command builder.
+    pub command_override: Option<String>,
 }
 
 impl Default for PTYSessionOptions {
@@ -238,6 +241,7 @@ impl Default for PTYSessionOptions {
             sandbox: None,
             approval_policy: None,
             tool_policy_path: None,
+            command_override: None,
         }
     }
 }
@@ -315,6 +319,7 @@ pub struct PTYSession {
     sandbox: Option<String>,
     approval_policy: Option<String>,
     tool_policy_path: Option<PathBuf>,
+    command_override: Option<String>,
 
     // Extra environment variables (slot tracking, etc.)
     env: Option<HashMap<String, String>>,
@@ -490,7 +495,9 @@ fn build_cli_command(
         CliEngine::Agy => {
             // Antigravity (`agy`) CLI: bare invocation opens the interactive
             // TUI. `--prompt-interactive` currently requires an argument and
-            // exits before MissionD can attach the worker PTY.
+            // exits before MissionD can attach the worker PTY. AGY 1.0.3 help
+            // also exposes print and prompt one-shot modes;
+            // provider-box lanes must not use those non-interactive modes.
             let mut parts = "agy".to_string();
             if let Some(m) = model {
                 // Current agy help does not advertise a model flag. Keep the
@@ -626,6 +633,7 @@ impl PTYSession {
             sandbox: options.sandbox,
             approval_policy: options.approval_policy,
             tool_policy_path: options.tool_policy_path,
+            command_override: options.command_override,
             env: options.env,
             log_file: options.log_file,
 
@@ -771,32 +779,55 @@ impl PTYSession {
             pixel_height: 0,
         })?;
 
-        // Build CLI command based on engine type
+        // Build CLI command based on engine type. Operator-shell teaching
+        // lanes may override this with an explicitly confirmed diagnostic
+        // shell; provider-box worker lanes must keep this unset.
         let resolved_mcp_config = resolve_mcp_config_path(self.mcp_config.as_deref());
-        let cli_cmd = build_cli_command(
-            self.engine,
-            &self.cwd,
-            resolved_mcp_config.as_deref(),
-            self.dangerously_skip_permissions,
-            self.model.as_deref(),
-            self.reasoning_effort.as_deref(),
-            self.search_enabled,
-            self.sandbox.as_deref(),
-            self.approval_policy.as_deref(),
-            self.tool_policy_path.as_deref(),
-        );
+        let uses_command_override = self.command_override.is_some();
+        let cli_cmd = if let Some(command) = self.command_override.as_deref() {
+            info!(
+                slot_id = %self.slot_id,
+                engine = %self.engine,
+                "PTY operator command override enabled"
+            );
+            command.to_string()
+        } else {
+            build_cli_command(
+                self.engine,
+                &self.cwd,
+                resolved_mcp_config.as_deref(),
+                self.dangerously_skip_permissions,
+                self.model.as_deref(),
+                self.reasoning_effort.as_deref(),
+                self.search_enabled,
+                self.sandbox.as_deref(),
+                self.approval_policy.as_deref(),
+                self.tool_policy_path.as_deref(),
+            )
+        };
 
         #[cfg(unix)]
         let mut cmd = {
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-            info!(shell = %shell, engine = %self.engine, cwd = %self.cwd.display(), "Spawning CLI via login shell");
+            let c = if uses_command_override {
+                // Operator teaching shells must be deterministic and should
+                // not block on user shell startup files before the live PTY is
+                // visible.
+                info!(engine = %self.engine, cwd = %self.cwd.display(), "Spawning CLI via no-rc operator shell");
+                let mut c = CommandBuilder::new("/bin/zsh");
+                c.args(["-f", "-i", "-c", &cli_cmd]);
+                c
+            } else {
+                let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+                info!(shell = %shell, engine = %self.engine, cwd = %self.cwd.display(), "Spawning CLI via login shell");
 
-            let mut c = CommandBuilder::new(&shell);
-            c.args([
-                "-l", // login shell (loads .zprofile, .zshrc)
-                "-i", // interactive (needed for proper PTY behavior)
-                "-c", &cli_cmd,
-            ]);
+                let mut c = CommandBuilder::new(&shell);
+                c.args([
+                    "-l", // login shell (loads .zprofile, .zshrc)
+                    "-i", // interactive (needed for proper PTY behavior)
+                    "-c", &cli_cmd,
+                ]);
+                c
+            };
             c
         };
 
@@ -3179,5 +3210,39 @@ Some prose.
             explicit,
             "gemini --approval-mode 'plan' --policy '.missiond/v3/policies/gemini-readonly-policy.toml'"
         );
+    }
+
+    #[test]
+    fn agy_command_uses_interactive_tui_with_help_confirmed_launch_toggles() {
+        let baseline = build_cli_command(
+            CliEngine::Agy,
+            std::path::Path::new("/tmp/project"),
+            None,
+            false,
+            Some("Gemini 3.5 Flash (High)"),
+            None,
+            false,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(baseline, "agy");
+
+        let privileged = build_cli_command(
+            CliEngine::Agy,
+            std::path::Path::new("/tmp/project"),
+            None,
+            true,
+            None,
+            None,
+            false,
+            Some("restricted"),
+            None,
+            None,
+        );
+        assert_eq!(privileged, "agy --dangerously-skip-permissions --sandbox");
+        assert!(!privileged.contains(&format!("--{}", "print")));
+        assert!(!privileged.contains(&format!(" -{}", "p")));
+        assert!(!privileged.contains(&format!("--{}", "prompt")));
     }
 }

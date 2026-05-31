@@ -78,6 +78,9 @@ pub struct PTYSpawnOptions {
     pub extra_env: HashMap<String, String>,
     /// Prompt to send after the session reaches Idle state.
     pub initial_prompt: Option<String>,
+    /// Operator-confirmed diagnostic launch command. This is intentionally not
+    /// part of normal worker/provider dispatch.
+    pub command_override: Option<String>,
 }
 
 /// Result of executing a message
@@ -358,6 +361,7 @@ impl PTYManager {
             sandbox: options.sandbox.clone(),
             approval_policy: options.approval_policy.clone(),
             tool_policy_path: options.tool_policy_path.clone(),
+            command_override: options.command_override.clone(),
         })?;
 
         // Set up permission check
@@ -657,6 +661,7 @@ impl PTYManager {
                             sandbox: restart_options.sandbox.clone(),
                             approval_policy: restart_options.approval_policy.clone(),
                             tool_policy_path: restart_options.tool_policy_path.clone(),
+                            command_override: restart_options.command_override.clone(),
                         }) {
                             // Set up permission check
                             let policy = manager_policy.read().await.clone();
@@ -1342,6 +1347,8 @@ mod tests {
                 active_tool: None,
                 elapsed_secs: None,
                 blocked_kind: None,
+                screen_identity: None,
+                screen_usage: None,
                 source: "session_state".to_string(),
             }),
             started_at: Some(1),
@@ -1375,6 +1382,8 @@ mod tests {
                 active_tool: None,
                 elapsed_secs: None,
                 blocked_kind: Some("billing_or_account".to_string()),
+                screen_identity: None,
+                screen_usage: None,
                 source: "screen_final".to_string(),
             }),
             started_at: Some(1),
