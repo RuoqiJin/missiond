@@ -362,6 +362,9 @@ impl ProviderBoxHttpAdapter {
         &self,
         request: ProviderBoxHttpRequest,
     ) -> Result<ProviderBoxHttpResponse, String> {
+        let logical_model_request =
+            header_slot_id(&request).is_none() && string_field(&request.body, "slot_id").is_none();
+        let requested_model = string_field(&request.body, "model");
         let Some(mut interaction) = text_only_interaction_from_body(&request.body) else {
             let mut result = ProviderBoxResult::base(
                 &ProviderInteractionRequest::new(BoxCommand::PureTextSingleTurn, CliEngine::Agy),
@@ -376,7 +379,6 @@ impl ProviderBoxHttpAdapter {
                         "pure_text=true",
                         "engine=agy",
                         "model",
-                        "slot_id",
                         "messages[]"
                     ]
                 }),
@@ -386,11 +388,16 @@ impl ProviderBoxHttpAdapter {
         if interaction.slot_id.is_none() {
             interaction.slot_id = header_slot_id(&request);
         }
-        let result = self
+        let mut result = self
             .boxed
             .execute(interaction)
             .await
             .map_err(|err| err.to_string())?;
+        if logical_model_request {
+            if let Some(model) = requested_model.as_deref() {
+                redact_private_slot_details(&mut result, model);
+            }
+        }
         Ok(result_response(result))
     }
 
@@ -448,7 +455,8 @@ fn text_only_interaction_from_body(body: &Value) -> Option<ProviderInteractionRe
         return None;
     }
     let model = string_field(body, "model")?;
-    let slot_id = string_field(body, "slot_id")?;
+    let slot_id =
+        string_field(body, "slot_id").unwrap_or_else(|| private_agy_slot_for_model(&model));
     let messages = body.get("messages")?.as_array()?;
     let correlation_id = string_field(body, "correlation_id")
         .unwrap_or_else(|| format!("router-{}", uuid::Uuid::new_v4().simple()));
@@ -646,7 +654,7 @@ fn result_response(result: ProviderBoxResult) -> ProviderBoxHttpResponse {
                     .map(|export| export.blocked_entries.len())
                     .unwrap_or_default(),
                 "completion_endpoint": "/provider-box/v1/text-only/completions",
-                "slot_completion_endpoint_template": "/provider-box/v1/slots/{slot_id}/completions",
+                "slot_scoped_apis": "internal_maintenance_only",
                 "pure_text_guard": {
                     "prompt_instruction": true,
                     "durable_jsonl_guard": true,
@@ -697,17 +705,17 @@ fn openai_model_data(catalog: &ProviderModelCatalog) -> Value {
             .iter()
             .map(|entry| {
                 let slug = slug_model(&entry.display_name);
-                let slot_ids = agy_slot_ids_for_model(&entry.display_name);
+                let slot_pool_id = agy_slot_pool_id(&entry.display_name);
                 json!({
                     "id": format!("agy-{slug}"),
                     "object": "model",
                     "created": 0,
                     "owned_by": "missiond/agy",
                     "provider": "agy_cli",
+                    "source_id": format!("missiond/agy/{slug}"),
                     "display_name": entry.display_name.clone(),
                     "provider_model_id": entry.provider_model_id.clone(),
-                    "slot_id": slot_ids.first().cloned().unwrap_or_else(|| format!("slot-agy-{slug}")),
-                    "slot_ids": slot_ids,
+                    "slot_pool_id": slot_pool_id,
                     "capabilities": {
                         "text": true,
                         "tools": false,
@@ -739,12 +747,7 @@ fn provider_text_only_sources(catalog: &ProviderModelCatalog) -> Value {
 fn provider_text_only_source_entry(entry: &ProviderModelCatalogEntry) -> Value {
     let slug = slug_model(&entry.display_name);
     let model_id = format!("agy-{slug}");
-    let slot_ids = agy_slot_ids_for_model(&entry.display_name);
-    let max_concurrent = slot_ids.len();
-    let primary_slot = slot_ids
-        .first()
-        .cloned()
-        .unwrap_or_else(|| format!("slot-agy-{slug}"));
+    let slot_pool_id = agy_slot_pool_id(&entry.display_name);
     json!({
         "schema": "missiond.provider-text-only-source.v1",
         "source_id": format!("missiond/agy/{slug}"),
@@ -753,24 +756,21 @@ fn provider_text_only_source_entry(entry: &ProviderModelCatalogEntry) -> Value {
         "model_id": model_id,
         "provider_model_id": entry.provider_model_id.clone(),
         "model": entry.display_name.clone(),
-        "slot_id": primary_slot.clone(),
-        "slot_ids": slot_ids.clone(),
+        "slot_pool_id": slot_pool_id,
         "slot_policy": {
-            "kind": "fixed_model",
-            "max_concurrent": max_concurrent,
+            "kind": "provider_box_managed_pool",
+            "public_max_concurrent": 1,
+            "replicas_hidden": true,
             "requires_current_model_verification": true,
             "hot_path_model_switch": false,
-            "maintenance_switch_api": format!("/provider-box/v1/slots/{primary_slot}/switch-model"),
-            "maintenance_clear_api": format!("/provider-box/v1/slots/{primary_slot}/clear")
+            "queue_owner": "provider-box"
         },
         "completion_endpoint": "/provider-box/v1/text-only/completions",
-        "slot_completion_endpoint": format!("/provider-box/v1/slots/{primary_slot}/completions"),
         "request_template": {
             "schema": "missiond.provider-box.text-only-completion-request.v1",
             "provider": "agy_cli",
             "engine": "agy",
             "model": entry.display_name.clone(),
-            "slot_id": primary_slot.clone(),
             "pure_text": true,
             "allow_model_switch": false,
             "messages": [{
@@ -832,7 +832,7 @@ fn router_model_sources(catalog: &ProviderModelCatalog, export: &ProviderRouterE
     )
 }
 
-fn agy_slot_ids_for_model(model: &str) -> Vec<String> {
+fn private_agy_slot_ids_for_model(model: &str) -> Vec<String> {
     let slug = slug_model(model);
     if slug == "claude-opus-46-thinking" {
         vec![
@@ -841,6 +841,41 @@ fn agy_slot_ids_for_model(model: &str) -> Vec<String> {
         ]
     } else {
         vec![format!("slot-agy-{slug}")]
+    }
+}
+
+fn private_agy_slot_for_model(model: &str) -> String {
+    private_agy_slot_ids_for_model(model)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| format!("slot-agy-{}", slug_model(model)))
+}
+
+fn agy_slot_pool_id(model: &str) -> String {
+    format!("slot-pool-agy-{}", slug_model(model))
+}
+
+fn redact_private_slot_details(result: &mut ProviderBoxResult, _model: &str) {
+    result.slot_id = None;
+    result.slot_status = None;
+    result.step_records.clear();
+    for diagnostic in &mut result.diagnostics {
+        diagnostic.details = redact_slot_ids_in_value(diagnostic.details.clone());
+    }
+}
+
+fn redact_slot_ids_in_value(value: Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .filter(|(key, _)| key != "slot_id" && key != "slot_ids")
+                .map(|(key, value)| (key, redact_slot_ids_in_value(value)))
+                .collect(),
+        ),
+        Value::Array(items) => {
+            Value::Array(items.into_iter().map(redact_slot_ids_in_value).collect())
+        }
+        other => other,
     }
 }
 
@@ -976,6 +1011,30 @@ mod tests {
     }
 
     #[test]
+    fn text_only_body_can_omit_slot_id_for_logical_model_source() {
+        let body = json!({
+            "engine": "agy",
+            "model": "Claude Opus 4.6 (Thinking)",
+            "messages": [{"role": "user", "content": "hello"}],
+            "pure_text": true
+        });
+
+        let request = text_only_interaction_from_body(&body).expect("request");
+
+        assert_eq!(
+            request.slot_id.as_deref(),
+            Some("slot-agy-claude-opus-46-thinking-a")
+        );
+        assert_eq!(
+            request
+                .model_switch_policy
+                .expect("model policy")
+                .target_model,
+            Some("Claude Opus 4.6 (Thinking)".to_string())
+        );
+    }
+
+    #[test]
     fn text_only_body_rejects_tool_role() {
         let body = json!({
             "engine": "agy",
@@ -1053,14 +1112,68 @@ mod tests {
         assert_eq!(response.status, 200);
         assert_eq!(data[0]["id"], "agy-claude-opus-46-thinking");
         assert_eq!(
-            sources[0]["slot_ids"].as_array().expect("slot ids").len(),
-            2
+            data[0]["slot_pool_id"],
+            "slot-pool-agy-claude-opus-46-thinking"
         );
+        assert!(data[0].get("slot_id").is_none());
+        assert!(data[0].get("slot_ids").is_none());
+        assert_eq!(
+            sources[0]["slot_pool_id"],
+            "slot-pool-agy-claude-opus-46-thinking"
+        );
+        assert!(sources[0].get("slot_id").is_none());
+        assert!(sources[0].get("slot_ids").is_none());
+        assert!(sources[0]["request_template"].get("slot_id").is_none());
+        assert_eq!(sources[0]["slot_policy"]["replicas_hidden"], true);
+        assert_eq!(sources[0]["slot_policy"]["public_max_concurrent"], 1);
         assert_eq!(sources[0]["request_template"]["allow_model_switch"], false);
+        assert_eq!(
+            response.body["model_export"]["slot_scoped_apis"],
+            "internal_maintenance_only"
+        );
         assert_eq!(
             response.body["model_export"]["pure_text_guard"]["durable_jsonl_guard"],
             true
         );
+    }
+
+    #[test]
+    fn logical_text_only_response_redacts_private_slot_details() {
+        let request =
+            ProviderInteractionRequest::new(BoxCommand::PureTextSingleTurn, CliEngine::Agy);
+        let mut result = ProviderBoxResult::base(&request, ProviderBoxStatus::Completed);
+        result.slot_id = Some("slot-agy-claude-opus-46-thinking-a".to_string());
+        result.slot_status = Some(json!({
+            "slot_id": "slot-agy-claude-opus-46-thinking-a",
+            "state": "idle"
+        }));
+        result.add_diagnostic(ProviderBoxDiagnostic::error(
+            "TEST",
+            "test",
+            json!({
+                "slot_id": "slot-agy-claude-opus-46-thinking-a",
+                "slot_ids": [
+                    "slot-agy-claude-opus-46-thinking-a",
+                    "slot-agy-claude-opus-46-thinking-b"
+                ],
+                "nested": {
+                    "slot_id": "slot-agy-claude-opus-46-thinking-b",
+                    "kept": true
+                }
+            }),
+        ));
+
+        redact_private_slot_details(&mut result, "Claude Opus 4.6 (Thinking)");
+
+        assert!(result.slot_id.is_none());
+        assert!(result.slot_status.is_none());
+        assert!(result.step_records.is_empty());
+        assert!(result.diagnostics[0].details.get("slot_id").is_none());
+        assert!(result.diagnostics[0].details.get("slot_ids").is_none());
+        assert!(result.diagnostics[0].details["nested"]
+            .get("slot_id")
+            .is_none());
+        assert_eq!(result.diagnostics[0].details["nested"]["kept"], true);
     }
 
     #[test]

@@ -1938,16 +1938,8 @@ fn slug_model(value: &str) -> String {
         .collect()
 }
 
-fn agy_slot_ids_for_model(model: &str) -> Vec<String> {
-    let slug = slug_model(model);
-    if slug == "claude-opus-46-thinking" {
-        vec![
-            "slot-agy-claude-opus-46-thinking-a".to_string(),
-            "slot-agy-claude-opus-46-thinking-b".to_string(),
-        ]
-    } else {
-        vec![format!("slot-agy-{slug}")]
-    }
+fn agy_slot_pool_id(model: &str) -> String {
+    format!("slot-pool-agy-{}", slug_model(model))
 }
 
 fn extract_model_from_agy_line(line: &str) -> Option<String> {
@@ -2262,11 +2254,7 @@ fn build_router_export(
     let mut blocked_entries = Vec::new();
     for entry in &catalog.entries {
         let slug = slug_model(&entry.display_name);
-        let slot_ids = agy_slot_ids_for_model(&entry.display_name);
-        let slot_id = slot_ids
-            .first()
-            .cloned()
-            .unwrap_or_else(|| format!("slot-agy-{slug}"));
+        let slot_pool_id = agy_slot_pool_id(&entry.display_name);
         let route = json!({
             "model_id": format!("agy-{slug}"),
             "primary": {
@@ -2285,13 +2273,17 @@ fn build_router_export(
                 "extra": {
                     "provider": "agy_cli",
                     "model": entry.display_name,
-                    "slot_id": slot_id,
-                    "slot_ids": slot_ids,
+                    "slot_pool_id": slot_pool_id,
+                    "slot_policy": {
+                        "kind": "provider_box_managed_pool",
+                        "public_max_concurrent": 1,
+                        "replicas_hidden": true,
+                        "queue_owner": "provider-box"
+                    },
                     "pure_text": true,
                     "allow_model_switch": false,
                     "requires_current_model_verification": true,
-                    "completion_endpoint": "/provider-box/v1/text-only/completions",
-                    "slot_completion_endpoint": format!("/provider-box/v1/slots/{slot_id}/completions")
+                    "completion_endpoint": "/provider-box/v1/text-only/completions"
                 }
             }
         });
@@ -2623,7 +2615,7 @@ mod tests {
     }
 
     #[test]
-    fn router_export_uses_fixed_text_only_replica_slots_for_opus() {
+    fn router_export_hides_text_only_replica_slots_for_opus() {
         let mut request = ProviderInteractionRequest::new(
             super::super::types::BoxCommand::ModelCatalogExport,
             CliEngine::Agy,
@@ -2655,8 +2647,15 @@ mod tests {
 
         assert_eq!(export.routeable_entries.len(), 1);
         let extra = &export.routeable_entries[0]["primary"]["extra"];
-        assert_eq!(extra["slot_id"], "slot-agy-claude-opus-46-thinking-a");
-        assert_eq!(extra["slot_ids"].as_array().expect("slot ids").len(), 2);
+        assert!(extra.get("slot_id").is_none());
+        assert!(extra.get("slot_ids").is_none());
+        assert_eq!(
+            extra["slot_pool_id"],
+            "slot-pool-agy-claude-opus-46-thinking"
+        );
+        assert_eq!(extra["slot_policy"]["replicas_hidden"], true);
+        assert_eq!(extra["slot_policy"]["public_max_concurrent"], 1);
+        assert_eq!(extra["slot_policy"]["queue_owner"], "provider-box");
         assert_eq!(extra["allow_model_switch"], false);
         assert_eq!(extra["requires_current_model_verification"], true);
     }
