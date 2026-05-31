@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import type { ElementType } from 'react';
-import { Plus, ClipboardList, Loader2, MonitorUp, Brain, MessageSquareText, Gauge, Crosshair, Sparkles, Repeat2, Compass } from 'lucide-react';
+import { Plus, ClipboardList, Loader2, MonitorUp, Brain, MessageSquareText, Gauge, Crosshair, Sparkles, Repeat2, Compass, GraduationCap } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
@@ -17,6 +17,7 @@ import { JarvisChat } from './components/JarvisChat';
 import { CodexReplayDashboard } from './components/CodexReplayDashboard';
 import { AgentNavigationDashboard } from './components/AgentNavigationDashboard';
 import { OperationsOverview } from './components/OperationsOverview';
+import { PtyTeachingPanel } from './components/PtyTeachingPanel';
 import { useEventStream, useConnectionState, useEventInvalidation } from './hooks/useEventStream';
 import { BOARD_TABS, DEFAULT_TAB, TAB_MIGRATION, type BoardTabId } from './generated/board-frontend-config';
 import type { SlotDef } from './types';
@@ -29,6 +30,7 @@ const TAB_ICON_MAP: Record<string, ElementType> = {
   ClipboardList,
   Crosshair,
   Gauge,
+  GraduationCap,
   MessageSquareText,
   MonitorUp,
   Repeat2,
@@ -180,12 +182,12 @@ export default function App() {
   // EventBus drives slot refresh; the interval is only a bounded fallback
   // when a backend event is missed or the browser reconnects late.
   useEffect(() => {
-    if (tab !== 'terminal' && tab !== 'exec') return;
+    if (tab !== 'terminal' && tab !== 'exec' && tab !== 'teach') return;
     fetchSlots();
   }, [tab, slotVersion, fetchSlots]);
 
   useEffect(() => {
-    if (tab !== 'terminal' && tab !== 'exec') return;
+    if (tab !== 'terminal' && tab !== 'exec' && tab !== 'teach') return;
     const id = setInterval(fetchSlots, 30000);
     return () => clearInterval(id);
   }, [tab, fetchSlots]);
@@ -271,6 +273,8 @@ export default function App() {
         </>
       ) : tab === 'navigator' ? (
         <AgentNavigationDashboard />
+      ) : tab === 'teach' ? (
+        <PtyTeachingPanel slots={slots} refreshSlots={fetchSlots} />
       ) : tab === 'terminal' ? (
         <div className="mx-4 mb-4 flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-neutral-800 bg-neutral-950/60 sm:mx-8 lg:flex-row">
           <aside className="flex max-h-48 shrink-0 flex-col border-b border-neutral-800 bg-neutral-950/80 lg:max-h-none lg:w-72 lg:border-b-0 lg:border-r">

@@ -1,7 +1,6 @@
 'use client';
 
 import { useEffect, useRef, useState, useCallback, Component, type ReactNode } from 'react';
-import { ArrowDown, ArrowUp, CornerDownLeft, Eraser, Gauge, Keyboard, Power, Send, Slash, X } from 'lucide-react';
 import type { SlotDef } from '../types';
 
 const WS_PORT = parseInt(process.env.NEXT_PUBLIC_WS_PORT || '9120', 10);
@@ -16,13 +15,8 @@ interface TerminalProps {
   slotId: string;
   slot?: SlotDef;
   activeTask?: TerminalActiveTask | null;
-}
-
-interface TeachingStep {
-  id: number;
-  label: string;
-  status: 'sent' | 'failed';
-  at: string;
+  showHeaderActions?: boolean;
+  enableDirectInput?: boolean;
 }
 
 const STATUS_TEXT_MAX = 80;
@@ -76,7 +70,7 @@ class TerminalErrorBoundary extends Component<
 }
 
 // --- Terminal Inner ---
-function TerminalInner({ slotId, slot, activeTask }: TerminalProps) {
+function TerminalInner({ slotId, slot, activeTask, showHeaderActions = true, enableDirectInput = true }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<import('@xterm/xterm').Terminal | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -87,10 +81,6 @@ function TerminalInner({ slotId, slot, activeTask }: TerminalProps) {
   const [statusText, setStatusText] = useState<string | null>(null);
   const [spawning, setSpawning] = useState(false);
   const [ready, setReady] = useState(false); // xterm initialized
-  const [teachingOpen, setTeachingOpen] = useState(false);
-  const [teachingText, setTeachingText] = useState('');
-  const [teachingSteps, setTeachingSteps] = useState<TeachingStep[]>([]);
-  const [teachingBusy, setTeachingBusy] = useState(false);
   const providerLabel = slotId.includes('gemini')
     ? 'Gemini CLI'
     : slotId.includes('agy')
@@ -153,7 +143,7 @@ function TerminalInner({ slotId, slot, activeTask }: TerminalProps) {
       termRef.current = term;
 
       term.onData((data) => {
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
+        if (enableDirectInput && wsRef.current?.readyState === WebSocket.OPEN) {
           wsRef.current.send(JSON.stringify({ type: 'input', data }));
         }
       });
@@ -189,7 +179,7 @@ function TerminalInner({ slotId, slot, activeTask }: TerminalProps) {
       termRef.current = null;
       setReady(false);
     };
-  }, []); // Only init once
+  }, [enableDirectInput]);
 
   // --- Connect WS when slotId changes and xterm is ready ---
   useEffect(() => {
@@ -286,38 +276,6 @@ function TerminalInner({ slotId, slot, activeTask }: TerminalProps) {
       if (isTermReady(term)) term.clear();
     } catch { /* swallow dimensions error */ }
   }
-
-  function recordTeachingStep(label: string, status: TeachingStep['status']) {
-    setTeachingSteps((prev) => [
-      { id: Date.now(), label, status, at: new Date().toLocaleTimeString() },
-      ...prev,
-    ].slice(0, 8));
-  }
-
-  async function sendTeachingInput(input: { text?: string; key?: string; label: string }) {
-    setTeachingBusy(true);
-    try {
-      const res = await fetch('/api/pty/input', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ slotId, text: input.text, key: input.key }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || data?.error) throw new Error(String(data?.error || res.statusText));
-      recordTeachingStep(input.label, 'sent');
-    } catch (err) {
-      recordTeachingStep(`${input.label} failed: ${err}`, 'failed');
-    } finally {
-      setTeachingBusy(false);
-    }
-  }
-
-  const submitTeachingText = useCallback(async () => {
-    const text = teachingText;
-    if (!text) return;
-    await sendTeachingInput({ text, label: `type ${JSON.stringify(text)}` });
-    setTeachingText('');
-  }, [slotId, teachingText]);
 
   function connectWs(term: import('@xterm/xterm').Terminal, slot: string) {
     if (wsRef.current?.readyState === WebSocket.OPEN ||
@@ -519,32 +477,28 @@ function TerminalInner({ slotId, slot, activeTask }: TerminalProps) {
             {headerStatus ?? stateText}
           </span>
         </div>
-        <div className="flex gap-1.5 shrink-0">
-          {isRunning && (
-            <button onClick={() => setTeachingOpen((value) => !value)}
-              className="text-[10px] px-2 py-0.5 rounded bg-neutral-800 text-neutral-400 hover:text-white hover:bg-neutral-700 transition-colors">
-              Teach
-            </button>
-          )}
-          {!isRunning && (
-            <button onClick={handleSpawn} disabled={spawning}
-              className="text-[10px] px-2 py-0.5 rounded bg-green-900/50 text-green-400 hover:bg-green-800/50 hover:text-green-300 transition-colors disabled:opacity-50">
-              {spawning ? 'Starting...' : 'Start'}
-            </button>
-          )}
-          {isRunning && wsStatus === 'disconnected' && (
-            <button onClick={handleConnect}
-              className="text-[10px] px-2 py-0.5 rounded bg-neutral-800 text-neutral-400 hover:text-white hover:bg-neutral-700 transition-colors">
-              Reconnect
-            </button>
-          )}
-          {isRunning && (
-            <button onClick={handleKill}
-              className="text-[10px] px-2 py-0.5 rounded bg-red-900/30 text-red-400 hover:bg-red-800/40 hover:text-red-300 transition-colors">
-              Stop
-            </button>
-          )}
-        </div>
+        {showHeaderActions && (
+          <div className="flex gap-1.5 shrink-0">
+            {!isRunning && (
+              <button onClick={handleSpawn} disabled={spawning}
+                className="text-[10px] px-2 py-0.5 rounded bg-green-900/50 text-green-400 hover:bg-green-800/50 hover:text-green-300 transition-colors disabled:opacity-50">
+                {spawning ? 'Starting...' : 'Start'}
+              </button>
+            )}
+            {isRunning && wsStatus === 'disconnected' && (
+              <button onClick={handleConnect}
+                className="text-[10px] px-2 py-0.5 rounded bg-neutral-800 text-neutral-400 hover:text-white hover:bg-neutral-700 transition-colors">
+                Reconnect
+              </button>
+            )}
+            {isRunning && (
+              <button onClick={handleKill}
+                className="text-[10px] px-2 py-0.5 rounded bg-red-900/30 text-red-400 hover:bg-red-800/40 hover:text-red-300 transition-colors">
+                Stop
+              </button>
+            )}
+          </div>
+        )}
         </div>
         {showInfoRow && (
           <div className="flex items-center gap-2 min-w-0 text-[10px] text-neutral-500">
@@ -584,79 +538,13 @@ function TerminalInner({ slotId, slot, activeTask }: TerminalProps) {
           </div>
         )}
       </div>
-      {teachingOpen && (
-        <div className="border-b border-neutral-800 bg-neutral-950 px-3 py-2">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <div className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md border border-neutral-800 bg-neutral-900/70 px-2 py-1">
-              <Keyboard className="h-3.5 w-3.5 shrink-0 text-neutral-500" />
-              <input
-                value={teachingText}
-                onChange={(event) => setTeachingText(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') {
-                    event.preventDefault();
-                    void submitTeachingText();
-                  }
-                }}
-                placeholder="type text into PTY"
-                className="min-w-40 flex-1 bg-transparent text-xs text-neutral-200 outline-none placeholder:text-neutral-600"
-              />
-              <button
-                onClick={() => void submitTeachingText()}
-                disabled={teachingBusy || !teachingText}
-                title="Send typed text"
-                className="rounded p-1 text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200 disabled:opacity-40"
-              >
-                <Send className="h-3.5 w-3.5" />
-              </button>
-            </div>
-            <button title="Enter" onClick={() => void sendTeachingInput({ key: 'enter', label: 'press Enter' })} className="rounded-md border border-neutral-800 bg-neutral-900 px-2 py-1 text-neutral-400 hover:text-white">
-              <CornerDownLeft className="h-3.5 w-3.5" />
-            </button>
-            <button title="Escape" onClick={() => void sendTeachingInput({ key: 'escape', label: 'press Esc' })} className="rounded-md border border-neutral-800 bg-neutral-900 px-2 py-1 text-neutral-400 hover:text-white">
-              <X className="h-3.5 w-3.5" />
-            </button>
-            <button title="Up" onClick={() => void sendTeachingInput({ key: 'up', label: 'press Up' })} className="rounded-md border border-neutral-800 bg-neutral-900 px-2 py-1 text-neutral-400 hover:text-white">
-              <ArrowUp className="h-3.5 w-3.5" />
-            </button>
-            <button title="Down" onClick={() => void sendTeachingInput({ key: 'down', label: 'press Down' })} className="rounded-md border border-neutral-800 bg-neutral-900 px-2 py-1 text-neutral-400 hover:text-white">
-              <ArrowDown className="h-3.5 w-3.5" />
-            </button>
-            <button title="Ctrl-D" onClick={() => void sendTeachingInput({ key: 'ctrl-d', label: 'press Ctrl-D' })} className="rounded-md border border-neutral-800 bg-neutral-900 px-2 py-1 text-neutral-400 hover:text-white">
-              <Power className="h-3.5 w-3.5" />
-            </button>
-            <button title="/model" onClick={() => void sendTeachingInput({ text: '/model', label: 'type /model' })} className="inline-flex items-center gap-1 rounded-md border border-neutral-800 bg-neutral-900 px-2 py-1 text-[10px] text-neutral-400 hover:text-white">
-              <Slash className="h-3 w-3" />model
-            </button>
-            <button title="/usage" onClick={() => void sendTeachingInput({ text: '/usage', label: 'type /usage' })} className="inline-flex items-center gap-1 rounded-md border border-neutral-800 bg-neutral-900 px-2 py-1 text-[10px] text-neutral-400 hover:text-white">
-              <Gauge className="h-3 w-3" />usage
-            </button>
-            <button title="/clear" onClick={() => void sendTeachingInput({ text: '/clear', label: 'type /clear' })} className="inline-flex items-center gap-1 rounded-md border border-neutral-800 bg-neutral-900 px-2 py-1 text-[10px] text-neutral-400 hover:text-white">
-              <Eraser className="h-3 w-3" />clear
-            </button>
-          </div>
-          {teachingSteps.length > 0 && (
-            <div className="mt-2 flex gap-2 overflow-x-auto text-[10px] text-neutral-500">
-              {teachingSteps.map((step) => (
-                <span
-                  key={step.id}
-                  className={step.status === 'failed' ? 'shrink-0 text-red-300' : 'shrink-0 text-neutral-500'}
-                  title={`${step.at} ${step.label}`}
-                >
-                  {step.status === 'failed' ? '!' : '✓'} {step.label}
-                </span>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
       <div ref={containerRef} className="flex-1 min-h-0" />
     </div>
   );
 }
 
 // --- Export with SSR guard + error boundary ---
-export function Terminal({ slotId, slot, activeTask }: TerminalProps) {
+export function Terminal({ slotId, slot, activeTask, showHeaderActions = true, enableDirectInput = true }: TerminalProps) {
   const [key, setKey] = useState(0);
   const [mounted, setMounted] = useState(false);
   useEffect(() => { setMounted(true); }, []);
@@ -675,7 +563,14 @@ export function Terminal({ slotId, slot, activeTask }: TerminalProps) {
 
   return (
     <TerminalErrorBoundary onReset={() => setKey((k) => k + 1)}>
-      <TerminalInner key={`${slotId}-${key}`} slotId={slotId} slot={slot} activeTask={activeTask} />
+      <TerminalInner
+        key={`${slotId}-${key}`}
+        slotId={slotId}
+        slot={slot}
+        activeTask={activeTask}
+        showHeaderActions={showHeaderActions}
+        enableDirectInput={enableDirectInput}
+      />
     </TerminalErrorBoundary>
   );
 }

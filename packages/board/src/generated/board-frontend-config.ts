@@ -5,7 +5,7 @@
 
 import type { FlowPhase, GroupBy, TaskCategory, TaskPriority, TaskStatus } from '../types';
 
-export type BoardTabId = "jarvis" | "board" | "navigator" | "terminal" | "exec" | "codex" | "system" | "knowledge" | "logs";
+export type BoardTabId = "jarvis" | "board" | "navigator" | "teach" | "terminal" | "exec" | "codex" | "system" | "knowledge" | "logs";
 export type EventVersionKey = "slotVersion" | "taskVersion" | "questionVersion" | "decisionVersion" | "memoryVersion" | "deployVersion" | "engineVersion" | "timelineVersion";
 
 export interface BoardTabConfig {
@@ -74,6 +74,7 @@ export const BOARD_TABS = [
   { id: "jarvis", label: "Jarvis", icon: "Sparkles" },
   { id: "board", label: "Board", icon: "ClipboardList" },
   { id: "navigator", label: "Navigator", icon: "Compass" },
+  { id: "teach", label: "Teach", icon: "GraduationCap" },
   { id: "terminal", label: "Terminal", icon: "MonitorUp" },
   { id: "exec", label: "Exec", icon: "Crosshair" },
   { id: "codex", label: "Codex Loop", icon: "Repeat2" },
@@ -333,6 +334,7 @@ export const EVENT_CUSTOM_EVENTS = [
   { event: "jarvis_confirm_required", name: "jarvis-confirm-required", detail: [
   "conversation_id",
   "confirmation_type",
+  "confirm_payload",
 ] },
   { event: "jarvis_worker_status", name: "jarvis-worker-status", detail: [
   "conversation_id",
@@ -342,6 +344,38 @@ export const EVENT_CUSTOM_EVENTS = [
 ] },
   { event: "jarvis_result_artifact", name: "jarvis-result-artifact", detail: [
   "conversation_id",
+  "task_id",
+  "artifact_id",
+] },
+  { event: "interaction_received", name: "interaction-received", detail: [
+  "interaction_id",
+  "channel",
+  "external_user_id",
+] },
+  { event: "interaction_permission_resolved", name: "interaction-permission-resolved", detail: [
+  "interaction_id",
+  "channel",
+  "user_id",
+  "tenant_id",
+  "application_id",
+  "capabilities",
+] },
+  { event: "interaction_intent_draft", name: "interaction-intent-draft", detail: [
+  "interaction_id",
+  "grounding_context_id",
+  "intent_artifact_id",
+] },
+  { event: "interaction_plan_draft", name: "interaction-plan-draft", detail: [
+  "interaction_id",
+  "grounding_context_id",
+  "plan_artifact_id",
+] },
+  { event: "interaction_board_task_created", name: "interaction-board-task-created", detail: [
+  "interaction_id",
+  "task_id",
+] },
+  { event: "interaction_result_artifact", name: "interaction-result-artifact", detail: [
+  "interaction_id",
   "task_id",
   "artifact_id",
 ] },

@@ -51,11 +51,12 @@
       :fields [id label role running state provider taskClass acceptsBoardTask activeSlot]
       :rule "Terminal slot selection lives inside the Terminal cockpit, lists all projected slots by provider group, keeps labels bounded/truncated, and pairs the PTY with durable conversation/evidence diagnostics.")
     (projection pty-teaching-control
-      :source [mission_pty_send pty-websocket-live-screen operator-lesson]
-      :entry ["packages/board/src/components/Terminal.tsx"
+      :source [mission_pty_send mission_pty_status mission_pty_screen pty-websocket-live-screen operator-lesson]
+      :entry ["packages/board/src/components/PtyTeachingPanel.tsx"
+              "packages/board/src/components/Terminal.tsx"
               "packages/board/src/app/api/pty/input/route.ts"]
-      :fields [slotId text key stepLog websocketScreen]
-      :rule "Operator teaching uses the MissionD Terminal cockpit instead of tmp live pages. Text and key controls write to the selected PTY through MissionD-owned mission_pty_send, while the xterm WebSocket remains the live screen; each operator action appends a visible step record so watch-operate-watch teaching can continue in the official frontend.")
+      :fields [slotId text key stepLog websocketScreen afterStepState afterStepScreen guardedAction]
+      :rule "Operator teaching uses the dedicated Teach cockpit instead of generic Terminal controls or tmp live pages. Text and safe key controls write to the selected PTY through MissionD-owned mission_pty_send; the embedded xterm is read-only live screen. Every operator action samples PTY state/screen after execution and appends a visible step record. Exit/stop/restart controls must be visually separated and require an explicit second confirmation.")
     (projection eventbus-cache-invalidation
       :source [eventbus-ws]
       :entry ["packages/board/src/eventStream.ts"]
@@ -102,6 +103,7 @@
       (tab :id jarvis :label "Jarvis" :icon Sparkles)
       (tab :id board :label "Board" :icon ClipboardList)
       (tab :id navigator :label "Navigator" :icon Compass)
+      (tab :id teach :label "Teach" :icon GraduationCap)
       (tab :id terminal :label "Terminal" :icon MonitorUp)
       (tab :id exec :label "Exec" :icon Crosshair)
       (tab :id codex :label "Codex Loop" :icon Repeat2)
