@@ -2251,8 +2251,11 @@ impl PTYSession {
 
         info!("Closing PTY session");
 
-        // Try graceful exit
-        let _ = self.write("/exit\r").await;
+        // Try graceful exit. Keep command text and Enter split because some
+        // provider TUIs can drop or wedge a combined `/exit\r` write.
+        let _ = self.write("/exit").await;
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let _ = self.write("\r").await;
 
         // Wait for exit or timeout
         let timeout_result = timeout(Duration::from_secs(3), async {

@@ -33,6 +33,8 @@ const AGY_EXIT_COMMAND: &str = "/exit";
 const MODEL_PICKER_MAX_DOWN: usize = 96;
 const MODEL_CATALOG_MAX_DOWN: usize = 128;
 const OBSERVE_SETTLE_MS: u64 = 220;
+const AGY_STARTUP_SIGN_IN_WAIT_SECS: u64 = 10;
+const AGY_STARTUP_READY_WAIT_SECS: u64 = 30;
 
 #[derive(Clone)]
 pub(crate) struct AgyProviderDriver {
@@ -84,6 +86,20 @@ struct ModelPickerNavigationPlan {
     direction: &'static str,
     key: &'static str,
     expected_models: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgyStartupOutcome {
+    Ready,
+    RestartRequired,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgyTrustSelection {
+    Trust,
+    Exit,
+    Unknown,
 }
 
 impl AgyProviderDriver {
@@ -138,12 +154,38 @@ impl AgyProviderDriver {
             .unwrap_or(false)
     }
 
+    fn slot_for_request(request: &ProviderInteractionRequest, slot_id: &str) -> PTYSlot {
+        let cwd = request
+            .cwd
+            .as_ref()
+            .or(request.project_root.as_ref())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
+        PTYSlot {
+            id: slot_id.to_string(),
+            role: "provider-box-agy".to_string(),
+            cwd: Some(cwd),
+            engine: CliEngine::Agy,
+        }
+    }
+
+    fn spawn_options() -> PTYSpawnOptions {
+        PTYSpawnOptions {
+            auto_restart: true,
+            wait_for_idle: false,
+            timeout_secs: Some(90),
+            ..Default::default()
+        }
+    }
+
     async fn ensure_slot(
         &self,
         request: &ProviderInteractionRequest,
         result: &mut ProviderBoxResult,
     ) -> Option<String> {
         let slot_id = Self::request_slot_id(request);
+        let slot = Self::slot_for_request(request, &slot_id);
+        let options = Self::spawn_options();
         if let Some(status) = self.pty.get_status(&slot_id).await {
             if status.engine != CliEngine::Agy {
                 result.status = ProviderBoxStatus::Failed;
@@ -158,45 +200,79 @@ impl AgyProviderDriver {
                 return None;
             }
             if !matches!(status.state, SessionState::Exited | SessionState::Error) {
+                let observation = self.observe(&slot_id).await;
+                if should_resolve_agy_startup_surface(status.state, &observation) {
+                    let lock = self.slot_lock(&slot_id).await;
+                    let guard = lock.lock().await;
+                    match self.ensure_startup_ready_locked(result, &slot_id).await {
+                        AgyStartupOutcome::Ready => {}
+                        AgyStartupOutcome::RestartRequired => {
+                            self.abort_startup_for_restart_locked(result, &slot_id)
+                                .await;
+                            drop(guard);
+                            return self.spawn_slot_with_bootstrap(&slot, options, result).await;
+                        }
+                        AgyStartupOutcome::Failed => return None,
+                    }
+                }
                 return Some(slot_id);
             }
         }
 
-        let cwd = request
-            .cwd
-            .as_ref()
-            .or(request.project_root.as_ref())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
-        let slot = PTYSlot {
-            id: slot_id.clone(),
-            role: "provider-box-agy".to_string(),
-            cwd: Some(cwd),
-            engine: CliEngine::Agy,
-        };
-        self.pty.init_slot(&slot).await;
+        self.spawn_slot_with_bootstrap(&slot, options, result).await
+    }
 
-        let options = PTYSpawnOptions {
-            auto_restart: true,
-            wait_for_idle: true,
-            timeout_secs: Some(90),
-            ..Default::default()
-        };
-        match self.pty.spawn(&slot, options).await {
-            Ok(_) => Some(slot_id),
-            Err(err) => {
-                result.status = ProviderBoxStatus::Failed;
-                result.add_diagnostic(ProviderBoxDiagnostic::error(
-                    DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
-                    "AGY PTY slot could not be spawned",
-                    json!({
-                        "slot_id": slot_id,
-                        "error": err.to_string(),
-                    }),
-                ));
-                None
+    async fn spawn_slot_with_bootstrap(
+        &self,
+        slot: &PTYSlot,
+        options: PTYSpawnOptions,
+        result: &mut ProviderBoxResult,
+    ) -> Option<String> {
+        self.pty.init_slot(slot).await;
+        for attempt in 0..2 {
+            match self.pty.spawn(slot, options.clone()).await {
+                Ok(_) => {}
+                Err(err) => {
+                    result.status = ProviderBoxStatus::Failed;
+                    result.add_diagnostic(ProviderBoxDiagnostic::error(
+                        DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                        "AGY PTY slot could not be spawned",
+                        json!({
+                            "slot_id": slot.id,
+                            "attempt": attempt,
+                            "error": err.to_string(),
+                        }),
+                    ));
+                    return None;
+                }
+            }
+
+            let lock = self.slot_lock(&slot.id).await;
+            let guard = lock.lock().await;
+            match self.ensure_startup_ready_locked(result, &slot.id).await {
+                AgyStartupOutcome::Ready => return Some(slot.id.clone()),
+                AgyStartupOutcome::Failed => return None,
+                AgyStartupOutcome::RestartRequired if attempt == 0 => {
+                    self.abort_startup_for_restart_locked(result, &slot.id)
+                        .await;
+                    drop(guard);
+                    continue;
+                }
+                AgyStartupOutcome::RestartRequired => {
+                    result.status = ProviderBoxStatus::Failed;
+                    result.add_diagnostic(ProviderBoxDiagnostic::error(
+                        DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                        "AGY startup sign-in did not complete after restart",
+                        json!({
+                            "slot_id": slot.id,
+                            "attempt": attempt,
+                        }),
+                    ));
+                    return None;
+                }
             }
         }
+        None
     }
 
     async fn attach_status_observation(
@@ -306,12 +382,319 @@ impl AgyProviderDriver {
         }
     }
 
+    async fn wait_step_until<F>(
+        &self,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+        timeout: Duration,
+        expected_change: impl Into<Option<String>>,
+        mut predicate: F,
+    ) -> AgyObservation
+    where
+        F: FnMut(&AgyObservation) -> bool,
+    {
+        let before = self.observe(slot_id).await;
+        let after = self
+            .wait_until(slot_id, timeout, |obs| predicate(obs))
+            .await;
+        let status = if predicate(&after) {
+            PtyStepVerificationStatus::Verified
+        } else if before.text != after.text {
+            PtyStepVerificationStatus::Ambiguous
+        } else {
+            PtyStepVerificationStatus::Unchanged
+        };
+        result.record_step(PtyStepRecord::new(
+            Self::pty_observation(slot_id, &before),
+            PtyStepAction {
+                action_type: "wait".to_string(),
+                human_input: format!("wait {}s", timeout.as_secs()),
+                redacted: false,
+            },
+            Self::pty_observation(slot_id, &after),
+            expected_change.into(),
+            status,
+        ));
+        after
+    }
+
+    async fn ensure_startup_ready_locked(
+        &self,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+    ) -> AgyStartupOutcome {
+        let mut observation = self.observe(slot_id).await;
+        if is_starting_or_unknown(&observation) {
+            observation = self
+                .wait_step_until(
+                    result,
+                    slot_id,
+                    Duration::from_secs(AGY_STARTUP_READY_WAIT_SECS),
+                    Some("wait for AGY startup surface".to_string()),
+                    |obs| {
+                        is_ready_for_text(obs)
+                            || is_agy_startup_signing_in(obs)
+                            || is_workspace_trust_prompt(obs)
+                            || is_shell_prompt_after_exit(obs)
+                            || obs.snapshot.state == PtyCanonicalState::Blocked
+                    },
+                )
+                .await;
+        }
+
+        if is_agy_startup_signing_in(&observation) {
+            observation = self
+                .wait_step_until(
+                    result,
+                    slot_id,
+                    Duration::from_secs(AGY_STARTUP_SIGN_IN_WAIT_SECS),
+                    Some("wait for AGY sign-in bootstrap to leave signing-in screen".to_string()),
+                    |obs| !is_agy_startup_signing_in(obs),
+                )
+                .await;
+            if is_agy_startup_signing_in(&observation) {
+                result.add_diagnostic(ProviderBoxDiagnostic::warning(
+                    DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                    "AGY startup sign-in screen stayed active past the grace window; slot will be restarted",
+                    json!({
+                        "slot_id": slot_id,
+                        "timeout_secs": AGY_STARTUP_SIGN_IN_WAIT_SECS,
+                        "reason": observation.snapshot.reason,
+                    }),
+                ));
+                return AgyStartupOutcome::RestartRequired;
+            }
+        }
+
+        if is_workspace_trust_prompt(&observation) {
+            observation = match self
+                .accept_workspace_trust_locked(result, slot_id, observation)
+                .await
+            {
+                Some(observation) => observation,
+                None => return AgyStartupOutcome::Failed,
+            };
+        }
+
+        if is_ready_for_text(&observation) {
+            return AgyStartupOutcome::Ready;
+        }
+
+        if observation.snapshot.state == PtyCanonicalState::Running {
+            observation = self
+                .wait_step_until(
+                    result,
+                    slot_id,
+                    Duration::from_secs(3),
+                    Some("wait for AGY startup processing to settle".to_string()),
+                    |obs| is_ready_for_text(obs) || is_workspace_trust_prompt(obs),
+                )
+                .await;
+            if is_workspace_trust_prompt(&observation) {
+                observation = match self
+                    .accept_workspace_trust_locked(result, slot_id, observation)
+                    .await
+                {
+                    Some(observation) => observation,
+                    None => return AgyStartupOutcome::Failed,
+                };
+            }
+            if is_ready_for_text(&observation) {
+                return AgyStartupOutcome::Ready;
+            }
+        }
+
+        result.status = ProviderBoxStatus::Blocked;
+        result.add_diagnostic(ProviderBoxDiagnostic::error(
+            DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+            "AGY startup did not reach a ready composer",
+            json!({
+                "slot_id": slot_id,
+                "state": observation.snapshot.state,
+                "reason": observation.snapshot.reason,
+                "blocked_kind": observation.snapshot.blocked_kind,
+            }),
+        ));
+        AgyStartupOutcome::Failed
+    }
+
+    async fn accept_workspace_trust_locked(
+        &self,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+        mut observation: AgyObservation,
+    ) -> Option<AgyObservation> {
+        match selected_workspace_trust_option(&observation) {
+            AgyTrustSelection::Trust => {}
+            AgyTrustSelection::Exit => {
+                let mut selected_trust = false;
+                for (key_name, bytes, label) in [
+                    ("up", "\x1b[A", "move AGY workspace trust selection up"),
+                    ("down", "\x1b[B", "move AGY workspace trust selection down"),
+                ] {
+                    observation = self
+                        .write_step(
+                            result,
+                            slot_id,
+                            PtyStepAction::key(key_name),
+                            bytes,
+                            Some(label.to_string()),
+                        )
+                        .await;
+                    if selected_workspace_trust_option(&observation) == AgyTrustSelection::Trust {
+                        selected_trust = true;
+                        break;
+                    }
+                }
+                if !selected_trust {
+                    result.status = ProviderBoxStatus::Unverified;
+                    result.add_diagnostic(ProviderBoxDiagnostic::error(
+                        DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+                        "AGY workspace trust prompt could not be moved to the trust option",
+                        json!({
+                            "slot_id": slot_id,
+                            "reason": observation.snapshot.reason,
+                        }),
+                    ));
+                    return None;
+                }
+            }
+            AgyTrustSelection::Unknown => {
+                result.status = ProviderBoxStatus::Unverified;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+                    "AGY workspace trust prompt selection was not recognizable",
+                    json!({
+                        "slot_id": slot_id,
+                        "reason": observation.snapshot.reason,
+                    }),
+                ));
+                return None;
+            }
+        }
+
+        observation = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::key("enter"),
+                "\r",
+                Some("confirm AGY workspace trust selection".to_string()),
+            )
+            .await;
+        if !is_ready_for_text(&observation) {
+            observation = self
+                .wait_step_until(
+                    result,
+                    slot_id,
+                    Duration::from_secs(AGY_STARTUP_READY_WAIT_SECS),
+                    Some("wait for AGY composer after workspace trust confirmation".to_string()),
+                    is_ready_for_text,
+                )
+                .await;
+        }
+        if is_ready_for_text(&observation) {
+            Some(observation)
+        } else {
+            result.status = ProviderBoxStatus::Unverified;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+                "AGY workspace trust confirmation did not reach the composer",
+                json!({
+                    "slot_id": slot_id,
+                    "reason": observation.snapshot.reason,
+                    "blocked_kind": observation.snapshot.blocked_kind,
+                }),
+            ));
+            None
+        }
+    }
+
+    async fn abort_startup_for_restart_locked(
+        &self,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+    ) {
+        let mut observation = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::key("ctrl+c"),
+                "\x03",
+                Some("interrupt stalled AGY startup sign-in".to_string()),
+            )
+            .await;
+        if !is_shell_prompt_after_exit(&observation) {
+            observation = self
+                .wait_step_until(
+                    result,
+                    slot_id,
+                    Duration::from_secs(2),
+                    Some("wait for AGY startup interrupt to settle".to_string()),
+                    |obs| {
+                        is_shell_prompt_after_exit(obs)
+                            || obs.snapshot.state == PtyCanonicalState::Complete
+                    },
+                )
+                .await;
+        }
+        if !is_shell_prompt_after_exit(&observation) {
+            let _ = self
+                .write_step(
+                    result,
+                    slot_id,
+                    PtyStepAction::key("ctrl+d"),
+                    AGY_CTRL_D,
+                    Some("send Ctrl+D fallback for stalled AGY startup".to_string()),
+                )
+                .await;
+        }
+        if let Err(err) = self.pty.kill(slot_id).await {
+            result.add_diagnostic(ProviderBoxDiagnostic::warning(
+                DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                "AGY stalled startup slot did not close cleanly before restart",
+                json!({
+                    "slot_id": slot_id,
+                    "error": err.to_string(),
+                }),
+            ));
+        }
+    }
+
     async fn ensure_composer_ready(
         &self,
         result: &mut ProviderBoxResult,
         slot_id: &str,
     ) -> Option<AgyObservation> {
         let mut observation = self.observe(slot_id).await;
+        if should_resolve_agy_startup_surface(
+            self.pty
+                .get_status(slot_id)
+                .await
+                .as_ref()
+                .map(|status| status.state)
+                .unwrap_or(SessionState::Idle),
+            &observation,
+        ) {
+            match self.ensure_startup_ready_locked(result, slot_id).await {
+                AgyStartupOutcome::Ready => {
+                    observation = self.observe(slot_id).await;
+                }
+                AgyStartupOutcome::RestartRequired => {
+                    result.status = ProviderBoxStatus::Blocked;
+                    result.add_diagnostic(ProviderBoxDiagnostic::error(
+                        DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                        "AGY startup requires a restart before text input is safe",
+                        json!({
+                            "slot_id": slot_id,
+                        }),
+                    ));
+                    return None;
+                }
+                AgyStartupOutcome::Failed => return None,
+            }
+        }
+
         if is_overlay_screen(&observation) {
             let _ = self
                 .write_step(
@@ -1834,6 +2217,70 @@ fn is_model_picker(observation: &AgyObservation) -> bool {
         || observation.snapshot.reason == "agy:model_picker"
 }
 
+fn is_starting_or_unknown(observation: &AgyObservation) -> bool {
+    observation.snapshot.state == PtyCanonicalState::Unknown
+        || observation
+            .snapshot
+            .reason
+            .starts_with("session_state:Starting")
+}
+
+fn is_agy_startup_signing_in(observation: &AgyObservation) -> bool {
+    observation.snapshot.reason == "agy:startup_signing_in" || {
+        let lower = observation.text.to_ascii_lowercase();
+        lower.contains("welcome to the")
+            && lower.contains("antigravity cli")
+            && lower.contains("not signed in")
+            && lower.contains("signing in")
+    }
+}
+
+fn is_workspace_trust_prompt(observation: &AgyObservation) -> bool {
+    observation.snapshot.reason == "agy:workspace_trust_prompt"
+        || observation.snapshot.blocked_kind.as_deref() == Some("workspace_trust")
+        || {
+            let lower = observation.text.to_ascii_lowercase();
+            lower.contains("accessing workspace")
+                && lower.contains("do you trust the contents of this project")
+                && lower.contains("yes, i trust this folder")
+                && lower.contains("no, exit")
+        }
+}
+
+fn should_resolve_agy_startup_surface(state: SessionState, observation: &AgyObservation) -> bool {
+    matches!(state, SessionState::Starting)
+        || is_starting_or_unknown(observation)
+        || is_agy_startup_signing_in(observation)
+        || is_workspace_trust_prompt(observation)
+}
+
+fn selected_workspace_trust_option(observation: &AgyObservation) -> AgyTrustSelection {
+    for line in observation.text.lines() {
+        let trimmed = line
+            .trim_start()
+            .trim_start_matches(|c: char| matches!(c, '│' | '┃' | '║' | '┆' | '┊'))
+            .trim_start();
+        let selected = trimmed.starts_with('>')
+            || trimmed.starts_with('›')
+            || trimmed.starts_with('❯')
+            || trimmed.starts_with('▸')
+            || trimmed.starts_with('▶')
+            || trimmed.starts_with('➜')
+            || trimmed.starts_with('→');
+        if !selected {
+            continue;
+        }
+        let lower = clean_agy_line(trimmed).to_ascii_lowercase();
+        if lower.starts_with("yes, i trust this folder") {
+            return AgyTrustSelection::Trust;
+        }
+        if lower.starts_with("no, exit") {
+            return AgyTrustSelection::Exit;
+        }
+    }
+    AgyTrustSelection::Unknown
+}
+
 fn is_usage_screen(observation: &AgyObservation) -> bool {
     observation.snapshot.reason == "agy:usage_meter"
         || observation.snapshot.screen_usage.is_some()
@@ -2489,6 +2936,56 @@ mod tests {
 
         assert!(selected_clear_command(&selected));
         assert!(is_home_identity_ready(&home));
+    }
+
+    #[test]
+    fn agy_driver_recognizes_startup_signing_in_as_not_ready() {
+        let obs = observation(&[
+            "Welcome to the Antigravity CLI. You are currently not signed in.",
+            "⣷  Signing in...",
+        ]);
+
+        assert!(is_agy_startup_signing_in(&obs));
+        assert!(!is_ready_for_text(&obs));
+        assert!(should_resolve_agy_startup_surface(
+            SessionState::Starting,
+            &obs
+        ));
+    }
+
+    #[test]
+    fn agy_driver_workspace_trust_requires_selected_yes_before_enter() {
+        let yes = observation(&[
+            "Accessing workspace:",
+            "/Users/jinchen",
+            "Do you trust the contents of this project?",
+            "Antigravity CLI requires permission to read, edit, and execute files here.",
+            "> Yes, I trust this folder",
+            "  No, exit",
+            "↑/↓ Navigate · enter Confirm",
+            "Claude Opus 4.6 (Thinking)",
+        ]);
+        let no = observation(&[
+            "Accessing workspace:",
+            "/Users/jinchen",
+            "Do you trust the contents of this project?",
+            "Antigravity CLI requires permission to read, edit, and execute files here.",
+            "  Yes, I trust this folder",
+            "> No, exit",
+            "↑/↓ Navigate · enter Confirm",
+            "Claude Opus 4.6 (Thinking)",
+        ]);
+
+        assert!(is_workspace_trust_prompt(&yes));
+        assert_eq!(
+            selected_workspace_trust_option(&yes),
+            AgyTrustSelection::Trust
+        );
+        assert_eq!(
+            selected_workspace_trust_option(&no),
+            AgyTrustSelection::Exit
+        );
+        assert!(!is_ready_for_text(&yes));
     }
 
     #[test]

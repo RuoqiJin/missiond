@@ -585,6 +585,33 @@ fn recognize_agy(lines: &[String]) -> PtyRecognitionSnapshot {
         .with_screen_identity(identity);
     }
 
+    if is_agy_startup_signing_in(lines, &lower) {
+        return PtyRecognitionSnapshot::new(
+            CliEngine::Agy,
+            PtyCanonicalState::Running,
+            0.9,
+            "agy:startup_signing_in",
+        )
+        .with_phase("auth_signing_in")
+        .with_elapsed(elapsed)
+        .with_source("tui_source_signature")
+        .with_screen_identity(identity);
+    }
+
+    if is_agy_workspace_trust_prompt(lines, &lower) {
+        return PtyRecognitionSnapshot::new(
+            CliEngine::Agy,
+            PtyCanonicalState::Blocked,
+            0.92,
+            "agy:workspace_trust_prompt",
+        )
+        .with_blocked_kind("workspace_trust")
+        .with_phase("startup_trust")
+        .with_elapsed(elapsed)
+        .with_source("tui_source_signature")
+        .with_screen_identity(identity);
+    }
+
     if let Some((kind, reason)) = provider_unavailable_match(&lower) {
         return PtyRecognitionSnapshot::new(
             CliEngine::Agy,
@@ -1462,6 +1489,23 @@ fn is_agy_shell_prompt_after_exit(lines: &[String], lower: &str) -> bool {
     })
 }
 
+fn is_agy_startup_signing_in(lines: &[String], lower: &str) -> bool {
+    lower.contains("welcome to the")
+        && lower.contains("antigravity cli")
+        && lower.contains("not signed in")
+        && lower.contains("signing in")
+        && lines.iter().any(|line| has_spinner_in_line(line))
+}
+
+fn is_agy_workspace_trust_prompt(_lines: &[String], lower: &str) -> bool {
+    lower.contains("accessing workspace")
+        && lower.contains("do you trust the contents of this project")
+        && lower.contains("yes, i trust this folder")
+        && lower.contains("no, exit")
+        && lower.contains("enter")
+        && lower.contains("confirm")
+}
+
 fn has_active_claude_spinner(lines: &[String]) -> bool {
     lines.iter().any(|line| {
         let trimmed = line.trim_start();
@@ -1689,6 +1733,37 @@ mod tests {
         );
         assert_eq!(identity.cwd.as_deref(), Some("~/Projects/missiond"));
         assert_eq!(identity.selected_model, None);
+    }
+
+    #[test]
+    fn agy_startup_signing_in_is_running() {
+        let result = recognize_agy(&lines(&[
+            "Welcome to the Antigravity CLI. You are currently not signed in.",
+            "⣷  Signing in...",
+        ]));
+
+        assert_eq!(result.state, PtyCanonicalState::Running);
+        assert_eq!(result.reason, "agy:startup_signing_in");
+        assert_eq!(result.phase.as_deref(), Some("auth_signing_in"));
+    }
+
+    #[test]
+    fn agy_workspace_trust_prompt_is_blocked() {
+        let result = recognize_agy(&lines(&[
+            "Accessing workspace:",
+            "/Users/jinchen",
+            "Do you trust the contents of this project?",
+            "Antigravity CLI requires permission to read, edit, and execute files here.",
+            "> Yes, I trust this folder",
+            "  No, exit",
+            "↑/↓ Navigate · enter Confirm",
+            "Claude Opus 4.6 (Thinking)",
+        ]));
+
+        assert_eq!(result.state, PtyCanonicalState::Blocked);
+        assert_eq!(result.reason, "agy:workspace_trust_prompt");
+        assert_eq!(result.blocked_kind.as_deref(), Some("workspace_trust"));
+        assert_eq!(result.phase.as_deref(), Some("startup_trust"));
     }
 
     #[test]
