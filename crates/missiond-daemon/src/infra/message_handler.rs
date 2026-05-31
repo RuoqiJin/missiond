@@ -22,7 +22,7 @@ pub(crate) async fn handle_new_messages(
     jsonl_path: String,
     messages: Vec<missiond_core::CCMessageLine>,
     route: &crate::infra::ingestion_router::IngestionRoute,
-) {
+) -> bool {
     // All routing decisions come from the IngestionRoute (the "waybill").
     // This handler is a "blind executor" — it does not make classification decisions.
     let source = route.source.as_str();
@@ -51,8 +51,13 @@ pub(crate) async fn handle_new_messages(
         uuid_to_id,
         semantic_roles,
     } = match ingest_result {
-        Some(r) if !r.inserted_ids.is_empty() => r,
-        _ => return, // Nothing inserted, nothing to classify/emit
+        IngestOutcome::Inserted(r) => r,
+        IngestOutcome::AlreadyDurable | IngestOutcome::NoPersistableMessages => {
+            return true;
+        }
+        IngestOutcome::Failed => {
+            return false;
+        }
     };
 
     // ── Layer 2: Classifier (audit + labels) ──
@@ -78,6 +83,7 @@ pub(crate) async fn handle_new_messages(
         parent_session_id,
     )
     .await;
+    true
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -97,6 +103,16 @@ struct IngestResult {
     semantic_roles: std::collections::HashMap<String, String>,
 }
 
+enum IngestOutcome {
+    Inserted(IngestResult),
+    /// The source cursor can advance because every persistable message UUID is
+    /// already present in the durable store.
+    AlreadyDurable,
+    /// The source batch carried no conversation rows after structural filtering.
+    NoPersistableMessages,
+    Failed,
+}
+
 async fn ingest(
     state: &AppState,
     session_id: &str,
@@ -108,7 +124,7 @@ async fn ingest(
     parent_session_id: Option<&str>,
     is_slot_session: bool,
     conversation_type: &str,
-) -> Option<IngestResult> {
+) -> IngestOutcome {
     // Ensure conversation exists; re-activate if completed
     let existing_conv = state
         .store
@@ -175,7 +191,7 @@ async fn ingest(
         };
         if let Err(e) = state.store.upsert_conversation(&conv).await {
             error!(session = %session_id, error = %e, "Failed to create conversation");
-            return None;
+            return IngestOutcome::Failed;
         }
     }
 
@@ -279,6 +295,10 @@ async fn ingest(
         });
     }
 
+    if batch.is_empty() {
+        return IngestOutcome::NoPersistableMessages;
+    }
+
     match state.store.insert_conversation_messages_batch(&batch).await {
         Ok(inserted_ids) if !inserted_ids.is_empty() => {
             info!(session = %session_id, count = inserted_ids.len(), "Logged conversation messages");
@@ -296,7 +316,7 @@ async fn ingest(
                 }
             }
 
-            Some(IngestResult {
+            IngestOutcome::Inserted(IngestResult {
                 inserted_ids,
                 inserted_uuids,
                 uuid_to_id,
@@ -305,9 +325,35 @@ async fn ingest(
         }
         Err(e) => {
             error!(session = %session_id, error = %e, "Failed to insert conversation messages");
-            None
+            IngestOutcome::Failed
         }
-        _ => None,
+        Ok(_) => {
+            let mut uuids: Vec<&str> = batch
+                .iter()
+                .filter_map(|msg| msg.message_uuid.as_deref())
+                .collect();
+            uuids.sort_unstable();
+            uuids.dedup();
+            if uuids.is_empty() {
+                return IngestOutcome::Failed;
+            }
+            match state.store.check_message_uuids_exist(&uuids).await {
+                Ok(existing) if existing.len() == uuids.len() => IngestOutcome::AlreadyDurable,
+                Ok(existing) => {
+                    warn!(
+                        session = %session_id,
+                        expected = uuids.len(),
+                        found = existing.len(),
+                        "Conversation batch inserted no rows but not all UUIDs are durable"
+                    );
+                    IngestOutcome::Failed
+                }
+                Err(e) => {
+                    warn!(session = %session_id, error = %e, "Failed to verify duplicate conversation UUIDs");
+                    IngestOutcome::Failed
+                }
+            }
+        }
     }
 }
 

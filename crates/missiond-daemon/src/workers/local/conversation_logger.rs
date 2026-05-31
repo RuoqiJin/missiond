@@ -56,7 +56,7 @@ async fn run_loop(
                     Some(300),
                 );
                 ctx.progress(format!("ingesting {} new messages", messages.len()));
-                handle_new_messages_event(
+                let ack_safe = handle_new_messages_event(
                     s,
                     session_id,
                     project_path,
@@ -65,13 +65,22 @@ async fn run_loop(
                     source,
                 )
                 .await;
-                // Ack: cursor is safe to persist — messages have been written to PG.
-                // Internalized from the old `cursor_ack_tx` MPSC per Phase 8 I005.
-                s.conversation_cursor_map
-                    .lock()
-                    .await
-                    .insert(jsonl_path, read_end_offset);
-                ctx.record_success();
+                if ack_safe {
+                    // Ack: cursor is safe to persist — messages have been written to PG
+                    // or verified as already durable.
+                    // Internalized from the old `cursor_ack_tx` MPSC per Phase 8 I005.
+                    s.conversation_cursor_map
+                        .lock()
+                        .await
+                        .insert(jsonl_path, read_end_offset);
+                    ctx.record_success();
+                } else {
+                    ctx.retrying("message ingestion failed; cursor not acknowledged");
+                    warn!(
+                        path = %jsonl_path,
+                        "Conversation logger did not ack cursor because DB ingestion failed"
+                    );
+                }
             }
             Ok(WatcherEvent::NewEvents {
                 session_id,
@@ -132,7 +141,7 @@ async fn handle_new_messages_event(
     jsonl_path: String,
     messages: Vec<CCMessageLine>,
     event_source: String,
-) {
+) -> bool {
     // ── Step 1: IngestionRouter classifies the batch (sole decision point) ──
     let (route, compaction) = ingestion_router::classify(
         s,
@@ -210,12 +219,13 @@ async fn handle_new_messages_event(
         .filter(|m| m.message_type != "tool_use")
         .collect();
     if is_garbage_session(&db_messages) {
+        events_sync::record_empty_claude_raw_only_session(s, &session_id, &jsonl_path).await;
         debug!(session = %session_id, msgs = db_messages.len(), "Garbage session filtered (no assistant content)");
-        return;
+        return true;
     }
 
     // ── Step 5: Hand off to message_handler with the pre-computed route ──
-    handle_new_messages(
+    let ack_safe = handle_new_messages(
         s,
         session_id.clone(),
         project_path,
@@ -224,11 +234,16 @@ async fn handle_new_messages_event(
         &route,
     )
     .await;
+    if !ack_safe {
+        return false;
+    }
 
     // ── Step 6: Compaction task inheritance ──
     if let Some(tid) = compaction.task_id {
         let _ = s.store.set_conversation_task_id(&session_id, &tid).await;
     }
+
+    true
 }
 
 /// Ghost session detector: returns true if the batch has no business value.

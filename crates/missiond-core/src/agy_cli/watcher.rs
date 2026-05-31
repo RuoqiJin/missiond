@@ -85,13 +85,20 @@ impl AgyCliWatcher {
     /// ConversationLoggerWorker confirms the PG insert. This is the ONLY path
     /// that advances the agy cursor in the database.
     pub fn persist_cursor_ack(&self, file_path: &str, step_count: u64) {
+        let path = file_path.to_string();
+        let step_cursors = Arc::clone(&self.step_cursors);
+        tokio::spawn(async move {
+            let mut cursors = step_cursors.write().await;
+            let entry = cursors.entry(path).or_insert(0);
+            *entry = (*entry).max(step_count as usize);
+        });
         let _ = self
             .cursor_persist_tx
             .send((file_path.to_string(), step_count));
     }
 
-    /// Start the watcher. Loads the history index, restores cursors, anchors
-    /// existing files, then starts fsevents monitoring.
+    /// Start the watcher. Loads the history index, restores persisted cursors,
+    /// records startup visibility, then starts fsevents monitoring.
     pub async fn start(&mut self) -> anyhow::Result<()> {
         if !self.brain_root.exists() {
             info!(
@@ -121,7 +128,7 @@ impl AgyCliWatcher {
             }
         }
 
-        // 3. Initial scan — anchor cursors on existing files (no events emitted)
+        // 3. Initial scan — keep uncursored files open for startup catchup.
         self.initial_scan().await;
 
         // 4. Start fsevents watcher over the brain root (recursive: transcripts
@@ -160,23 +167,29 @@ impl AgyCliWatcher {
         Ok(())
     }
 
-    /// Anchor cursors for existing files without emitting events.
+    /// Record startup visibility without marking existing transcript steps as
+    /// consumed. On a first boot of the AGY watcher there is no DB watermark
+    /// yet, so anchoring to the current step count here would cause
+    /// run_startup_catchup() to skip the existing conversation entirely.
     async fn initial_scan(&self) {
         let sessions = discover_sessions(&self.brain_root).await;
-        let mut cursors = self.step_cursors.write().await;
-        let mut anchored = 0usize;
-        for (_, transcript) in sessions {
+        let cursors = self.step_cursors.read().await;
+        let mut known = 0usize;
+        let mut uncursored = 0usize;
+        for (_, transcript) in &sessions {
             let key = transcript.to_string_lossy().to_string();
             if cursors.contains_key(&key) {
+                known += 1;
                 continue;
             }
-            if let Some(session) = parse_session(&transcript).await {
-                cursors.insert(key, session.steps.len());
-                anchored += 1;
-            }
+            uncursored += 1;
         }
-        if anchored > 0 {
-            info!(anchored, "agy CLI initial scan: anchored new file cursors");
+        if !sessions.is_empty() {
+            info!(
+                known,
+                uncursored,
+                "agy CLI initial scan: uncursored files will be replayed by startup catchup"
+            );
         }
     }
 
@@ -185,7 +198,7 @@ impl AgyCliWatcher {
     pub async fn run_startup_catchup(&self) {
         let sessions = discover_sessions(&self.brain_root).await;
         let history = self.history.read().await;
-        let mut cursors = self.step_cursors.write().await;
+        let cursors = self.step_cursors.read().await;
         let mut caught_up = 0usize;
 
         for (session_id, transcript) in sessions {
@@ -216,7 +229,6 @@ impl AgyCliWatcher {
                 });
                 caught_up += new_steps.len();
             }
-            cursors.insert(key, session.steps.len());
         }
 
         if caught_up > 0 {
@@ -286,8 +298,6 @@ async fn process_file_change(
             source: AGY_CURSOR_CONSUMER.to_string(),
         });
     }
-
-    step_cursors.write().await.insert(key, total);
 }
 
 /// Ack-based cursor persistence loop: micro-batches every 10s into the generic
@@ -362,6 +372,134 @@ mod tests {
         // Falls back to ~/.gemini/antigravity-cli when env is unset; exact path
         // is host-dependent, so just assert the suffix shape.
         let home = default_agy_home();
-        assert!(home.ends_with("antigravity-cli") || home.to_string_lossy().contains("antigravity"));
+        assert!(
+            home.ends_with("antigravity-cli") || home.to_string_lossy().contains("antigravity")
+        );
+    }
+
+    #[tokio::test]
+    async fn initial_scan_does_not_anchor_uncursored_transcripts() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir
+            .path()
+            .join("brain")
+            .join("c1")
+            .join(".system_generated")
+            .join("logs")
+            .join("transcript_full.jsonl");
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(
+            &transcript,
+            r#"{"step_index":0,"type":"USER_INPUT","content":"hello"}"#,
+        )
+        .unwrap();
+
+        let (tx, _) = broadcast::channel(4);
+        let watcher = AgyCliWatcher::new(AgyCliWatcherOptions {
+            agy_home: Some(dir.path().to_path_buf()),
+            event_tx: tx,
+            store: None,
+        });
+
+        watcher.initial_scan().await;
+
+        let key = transcript.to_string_lossy().to_string();
+        let cursors = watcher.step_cursors.read().await;
+        assert!(
+            !cursors.contains_key(&key),
+            "uncursored AGY transcript must remain eligible for startup catchup"
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_catchup_replays_uncursored_transcripts() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir
+            .path()
+            .join("brain")
+            .join("c1")
+            .join(".system_generated")
+            .join("logs")
+            .join("transcript_full.jsonl");
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(
+            &transcript,
+            concat!(
+                r#"{"step_index":0,"type":"USER_INPUT","content":"hello"}"#,
+                "\n",
+                r#"{"step_index":1,"type":"PLANNER_RESPONSE","content":"hi"}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let (tx, mut rx) = broadcast::channel(4);
+        let watcher = AgyCliWatcher::new(AgyCliWatcherOptions {
+            agy_home: Some(dir.path().to_path_buf()),
+            event_tx: tx,
+            store: None,
+        });
+
+        watcher.initial_scan().await;
+        watcher.run_startup_catchup().await;
+
+        match rx.try_recv().unwrap() {
+            WatcherEvent::NewMessages {
+                session_id,
+                jsonl_path,
+                messages,
+                read_end_offset,
+                source,
+                ..
+            } => {
+                assert_eq!(session_id, "c1");
+                assert_eq!(jsonl_path, transcript.to_string_lossy());
+                assert_eq!(messages.len(), 2);
+                assert_eq!(read_end_offset, 2);
+                assert_eq!(source, AGY_CURSOR_CONSUMER);
+            }
+            other => panic!("unexpected watcher event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_catchup_does_not_advance_memory_cursor_before_ack() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir
+            .path()
+            .join("brain")
+            .join("c1")
+            .join(".system_generated")
+            .join("logs")
+            .join("transcript_full.jsonl");
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(
+            &transcript,
+            concat!(
+                r#"{"step_index":0,"type":"USER_INPUT","content":"hello"}"#,
+                "\n",
+                r#"{"step_index":1,"type":"PLANNER_RESPONSE","content":"hi"}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let (tx, _rx) = broadcast::channel(4);
+        let watcher = AgyCliWatcher::new(AgyCliWatcherOptions {
+            agy_home: Some(dir.path().to_path_buf()),
+            event_tx: tx,
+            store: None,
+        });
+        let key = transcript.to_string_lossy().to_string();
+
+        watcher.run_startup_catchup().await;
+        assert!(
+            !watcher.step_cursors.read().await.contains_key(&key),
+            "emitting to the broadcast channel must not mark AGY steps consumed"
+        );
+
+        watcher.persist_cursor_ack(&key, 2);
+        tokio::task::yield_now().await;
+        assert_eq!(watcher.step_cursors.read().await.get(&key), Some(&2));
     }
 }

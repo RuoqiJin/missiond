@@ -65,7 +65,11 @@ impl InfraStore for PgMissionStore {
         sqlx::query(
             "INSERT INTO consumer_watermarks (consumer_name, session_id, last_processed_msg_id)
              VALUES ($1, $2, $3)
-             ON CONFLICT(consumer_name, session_id) DO UPDATE SET last_processed_msg_id = $3",
+             ON CONFLICT(consumer_name, session_id) DO UPDATE SET
+                last_processed_msg_id = CASE
+                    WHEN consumer_watermarks.last_processed_msg_id IS NULL THEN EXCLUDED.last_processed_msg_id
+                    ELSE GREATEST(consumer_watermarks.last_processed_msg_id, EXCLUDED.last_processed_msg_id)
+                END",
         )
         .bind(consumer)
         .bind(session_id)
@@ -87,7 +91,11 @@ impl InfraStore for PgMissionStore {
             "INSERT INTO consumer_watermarks (consumer_name, session_id, last_processed_msg_id, last_processed_time, extra)
              VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT(consumer_name, session_id) DO UPDATE SET
-                last_processed_msg_id = COALESCE($3, consumer_watermarks.last_processed_msg_id),
+                last_processed_msg_id = CASE
+                    WHEN $3 IS NULL THEN consumer_watermarks.last_processed_msg_id
+                    WHEN consumer_watermarks.last_processed_msg_id IS NULL THEN $3
+                    ELSE GREATEST(consumer_watermarks.last_processed_msg_id, $3)
+                END,
                 last_processed_time = COALESCE($4, consumer_watermarks.last_processed_time),
                 extra = COALESCE($5, consumer_watermarks.extra)"
         )
