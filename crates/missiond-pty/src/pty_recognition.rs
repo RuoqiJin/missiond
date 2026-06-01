@@ -304,6 +304,11 @@ impl PtyRecognitionSnapshot {
         self
     }
 
+    fn with_reason(mut self, reason: impl Into<String>) -> Self {
+        self.reason = reason.into();
+        self
+    }
+
     fn with_tool(mut self, tool: impl Into<String>) -> Self {
         self.active_tool = Some(tool.into());
         self
@@ -482,6 +487,10 @@ fn active_running_evidence(
                 .with_source("screen_fused");
                 snapshot = if let Some(tool) = extract_tool_name(lines) {
                     snapshot.with_tool(tool).with_phase("tool")
+                } else if is_claude_code_logout_command_visible(lines) {
+                    snapshot
+                        .with_reason("claude_code:logout_running")
+                        .with_phase("logout")
                 } else {
                     snapshot.with_phase("thinking")
                 };
@@ -1813,14 +1822,45 @@ fn recognize_claude_code(lines: &[String]) -> PtyRecognitionSnapshot {
     }
 
     if startup_signals.is_some() {
+        let startup_kind = startup_signals
+            .as_ref()
+            .and_then(|signals| signals.startup_prompt_kind.as_deref())
+            .unwrap_or("startup_config");
+        let (reason, blocked_kind, phase) = match startup_kind {
+            "oauth_authorization" => (
+                "claude_code:oauth_authorization_prompt",
+                "auth_code_required",
+                "auth_oauth",
+            ),
+            "login_success_continue" => (
+                "claude_code:login_success_continue",
+                "startup_continue",
+                "auth_login_success",
+            ),
+            "security_notes_continue" => (
+                "claude_code:security_notes_continue",
+                "startup_continue",
+                "startup_security_notes",
+            ),
+            "login_method" => (
+                "claude_code:login_method_prompt",
+                "auth_missing",
+                "auth_login_method",
+            ),
+            _ => (
+                "claude_code:first_run_theme_prompt",
+                "startup_config",
+                "startup_theme",
+            ),
+        };
         return PtyRecognitionSnapshot::new(
             CliEngine::ClaudeCode,
             PtyCanonicalState::Blocked,
             0.94,
-            "claude_code:first_run_theme_prompt",
+            reason,
         )
-        .with_blocked_kind("startup_config")
-        .with_phase("startup_theme")
+        .with_blocked_kind(blocked_kind)
+        .with_phase(phase)
         .with_elapsed(elapsed)
         .with_screen_identity(identity)
         .with_screen_signals(startup_signals)
@@ -1889,6 +1929,10 @@ fn recognize_claude_code(lines: &[String]) -> PtyRecognitionSnapshot {
         .with_screen_identity(identity);
         if let Some(tool) = extract_tool_name(lines) {
             snapshot = snapshot.with_tool(tool).with_phase("tool");
+        } else if is_claude_code_logout_command_visible(lines) {
+            snapshot = snapshot
+                .with_reason("claude_code:logout_running")
+                .with_phase("logout");
         } else {
             snapshot = snapshot.with_phase("thinking");
         }
@@ -1926,6 +1970,16 @@ fn extract_claude_code_screen_identity(lines: &[String]) -> Option<ProviderScree
                 .name("plan")
                 .map(|value| normalize_identity_value(value.as_str()));
             continue;
+        }
+        if identity.account.is_none() {
+            if let Some(account) = cleaned
+                .strip_prefix("Logged in as ")
+                .map(normalize_identity_value)
+                .filter(|value| value.contains('@'))
+            {
+                identity.account = Some(account);
+                continue;
+            }
         }
         if identity.cwd.is_none() && !cleaned.contains("://") {
             if let Some(captures) = AGY_CWD_RE.captures(&cleaned) {
@@ -1979,13 +2033,38 @@ fn extract_claude_code_startup_config_signals(
     let theme_prompt_visible = lower.contains("welcome to claude code")
         && lower.contains("choose the text style")
         && lower.contains("terminal");
-    if !theme_prompt_visible {
+    let login_method_visible = lower.contains("welcome to claude code")
+        && lower.contains("select login method")
+        && lower.contains("claude account with subscription")
+        && lower.contains("anthropic console account")
+        && lower.contains("3rd-party platform");
+    let oauth_authorization_visible = lower.contains("browser didn't open?")
+        && lower.contains("use the url below to sign in")
+        && lower.contains("paste code here if prompted");
+    let login_success_continue_visible = lower.contains("logged in as ")
+        && lower.contains("login successful")
+        && lower.contains("press enter to continue");
+    let security_notes_continue_visible = lower.contains("security notes:")
+        && lower.contains("claude can make mistakes")
+        && lower.contains("prompt injection")
+        && lower.contains("press enter to continue");
+    let startup_prompt_kind = if theme_prompt_visible {
+        "theme_picker"
+    } else if login_method_visible {
+        "login_method"
+    } else if oauth_authorization_visible {
+        "oauth_authorization"
+    } else if login_success_continue_visible {
+        "login_success_continue"
+    } else if security_notes_continue_visible {
+        "security_notes_continue"
+    } else {
         return None;
-    }
+    };
 
     let mut signals = ProviderScreenSignals {
         startup_prompt_visible: true,
-        startup_prompt_kind: Some("theme_picker".to_string()),
+        startup_prompt_kind: Some(startup_prompt_kind.to_string()),
         ..ProviderScreenSignals::default()
     };
 
@@ -2777,6 +2856,21 @@ fn is_claude_user_prompt_with_input(line: &str) -> bool {
         return true;
     }
     false
+}
+
+fn is_claude_code_logout_command_visible(lines: &[String]) -> bool {
+    lines.iter().rev().take(20).any(|line| {
+        let trimmed = line.trim();
+        for marker in ["❯", "›", ">"] {
+            let Some(rest) = trimmed.strip_prefix(marker) else {
+                continue;
+            };
+            if rest.trim_start().starts_with("/logout") {
+                return true;
+            }
+        }
+        false
+    })
 }
 
 fn is_claude_plain_idle_prompt(line: &str) -> bool {
@@ -4059,8 +4153,8 @@ mod tests {
             "⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt",
         ]));
         assert_eq!(result.state, PtyCanonicalState::Running);
-        assert_eq!(result.reason, "claude_code:active_spinner");
-        assert_eq!(result.phase.as_deref(), Some("thinking"));
+        assert_eq!(result.reason, "claude_code:logout_running");
+        assert_eq!(result.phase.as_deref(), Some("logout"));
     }
 
     #[test]
@@ -4355,6 +4449,111 @@ mod tests {
         assert!(signals
             .visible_startup_options
             .contains(&"Auto (match terminal)".to_string()));
+    }
+
+    #[test]
+    fn claude_code_login_method_prompt_is_auth_missing_blocked() {
+        let result = recognize_claude_code(&lines(&[
+            "Welcome to Claude Code v2.1.159",
+            "Claude Code can be used with your Claude subscription or billed based on API usage through your Console account.",
+            "Select login method:",
+            "❯ 1. Claude account with subscription · Pro, Max, Team, or Enterprise",
+            "  2. Anthropic Console account · API usage billing",
+            "  3. 3rd-party platform · Amazon Bedrock, Microsoft Foundry, or Vertex AI",
+        ]));
+        assert_eq!(result.state, PtyCanonicalState::Blocked);
+        assert_eq!(result.reason, "claude_code:login_method_prompt");
+        assert_eq!(result.blocked_kind.as_deref(), Some("auth_missing"));
+        assert_eq!(result.phase.as_deref(), Some("auth_login_method"));
+        let identity = result.screen_identity.expect("claude code identity");
+        assert_eq!(identity.cli_version.as_deref(), Some("2.1.159"));
+        let signals = result.screen_signals.expect("startup signals");
+        assert_eq!(signals.startup_prompt_kind.as_deref(), Some("login_method"));
+        assert_eq!(signals.selected_startup_option_index, Some(1));
+        assert_eq!(
+            signals.selected_startup_option.as_deref(),
+            Some("Claude account with subscription · Pro, Max, Team, or Enterprise")
+        );
+        assert!(!signals.selected_startup_option_checked);
+    }
+
+    #[test]
+    fn claude_code_oauth_authorization_prompt_is_auth_code_blocked() {
+        let result = recognize_claude_code(&lines(&[
+            "Welcome to Claude Code v2.1.159",
+            "Browser didn't open? Use the url below to sign in (c to copy)",
+            "https://claude.com/cai/oauth/authorize?client_id=[REDACTED]&code_challenge=[REDACTED]&state=[REDACTED]",
+            "",
+            "Paste code here if prompted >",
+        ]));
+        assert_eq!(result.state, PtyCanonicalState::Blocked);
+        assert_eq!(result.reason, "claude_code:oauth_authorization_prompt");
+        assert_eq!(result.blocked_kind.as_deref(), Some("auth_code_required"));
+        assert_eq!(result.phase.as_deref(), Some("auth_oauth"));
+        let identity = result.screen_identity.expect("claude code identity");
+        assert_eq!(identity.cli_version.as_deref(), Some("2.1.159"));
+        let signals = result.screen_signals.expect("startup signals");
+        assert!(signals.startup_prompt_visible);
+        assert_eq!(
+            signals.startup_prompt_kind.as_deref(),
+            Some("oauth_authorization")
+        );
+        assert!(signals.visible_startup_options.is_empty());
+    }
+
+    #[test]
+    fn claude_code_login_success_continue_extracts_account() {
+        let result = recognize_claude_code(&lines(&[
+            "Welcome to Claude Code v2.1.159",
+            "..........................................................",
+            "",
+            " Logged in as user@example.com",
+            " Login successful. Press Enter to continue…",
+        ]));
+        assert_eq!(result.state, PtyCanonicalState::Blocked);
+        assert_eq!(result.reason, "claude_code:login_success_continue");
+        assert_eq!(result.blocked_kind.as_deref(), Some("startup_continue"));
+        assert_eq!(result.phase.as_deref(), Some("auth_login_success"));
+        let identity = result.screen_identity.expect("claude code identity");
+        assert_eq!(identity.cli_version.as_deref(), Some("2.1.159"));
+        assert_eq!(identity.account.as_deref(), Some("user@example.com"));
+        let signals = result.screen_signals.expect("startup signals");
+        assert!(signals.startup_prompt_visible);
+        assert_eq!(
+            signals.startup_prompt_kind.as_deref(),
+            Some("login_success_continue")
+        );
+        assert!(signals.visible_startup_options.is_empty());
+    }
+
+    #[test]
+    fn claude_code_security_notes_continue_is_startup_blocked() {
+        let result = recognize_claude_code(&lines(&[
+            "Welcome to Claude Code v2.1.159",
+            "",
+            " Security notes:",
+            "",
+            " 1. Claude can make mistakes.",
+            "    You're responsible for Claude's actions and should always",
+            "    review them, especially when running code.",
+            "",
+            " 2. Due to prompt injection risks, only use it with code you trust",
+            "    Learn more: https://code.claude.com/docs/en/security",
+            "",
+            " Press Enter to continue…",
+        ]));
+        assert_eq!(result.state, PtyCanonicalState::Blocked);
+        assert_eq!(result.reason, "claude_code:security_notes_continue");
+        assert_eq!(result.blocked_kind.as_deref(), Some("startup_continue"));
+        assert_eq!(result.phase.as_deref(), Some("startup_security_notes"));
+        let identity = result.screen_identity.expect("claude code identity");
+        assert_eq!(identity.cli_version.as_deref(), Some("2.1.159"));
+        let signals = result.screen_signals.expect("startup signals");
+        assert!(signals.startup_prompt_visible);
+        assert_eq!(
+            signals.startup_prompt_kind.as_deref(),
+            Some("security_notes_continue")
+        );
     }
 
     #[test]

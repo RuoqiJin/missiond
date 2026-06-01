@@ -22,11 +22,11 @@ use super::types::{
     ProviderInteractionRequest, ProviderModelUsage, ProviderSessionIdentity, ProviderUsageSnapshot,
     ProviderUsageStatus, PtyObservation, PtyStepAction, PtyStepRecord, PtyStepVerificationStatus,
     DIAG_PROVIDER_BOX_INVALID_REQUEST, DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
-    DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED, DIAG_PROVIDER_DURABLE_FINAL_MISSING,
-    DIAG_PROVIDER_MCP_RECONNECT_UNSUPPORTED, DIAG_PROVIDER_MCP_STATUS_UNAVAILABLE,
-    DIAG_PROVIDER_SESSION_ID_UNKNOWN, DIAG_PROVIDER_TEXT_ONLY_VIOLATION,
-    DIAG_PROVIDER_TURN_TIMEOUT_CANCELLED, DIAG_PROVIDER_TURN_TIMEOUT_CANCEL_FAILED,
-    DIAG_USAGE_UNKNOWN,
+    DIAG_PROVIDER_CONTROL_ACTION_UNSUPPORTED, DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+    DIAG_PROVIDER_DURABLE_FINAL_MISSING, DIAG_PROVIDER_MCP_RECONNECT_UNSUPPORTED,
+    DIAG_PROVIDER_MCP_STATUS_UNAVAILABLE, DIAG_PROVIDER_SESSION_ID_UNKNOWN,
+    DIAG_PROVIDER_TEXT_ONLY_VIOLATION, DIAG_PROVIDER_TURN_TIMEOUT_CANCELLED,
+    DIAG_PROVIDER_TURN_TIMEOUT_CANCEL_FAILED, DIAG_USAGE_UNKNOWN,
 };
 
 const DEFAULT_CODEX_SLOT: &str = "slot-codex-provider-box";
@@ -2917,6 +2917,17 @@ impl ProviderDriver for CodexProviderDriver {
             }
             ProviderControlAction::Exit => {
                 self.exit_locked(&mut result, &slot_id).await;
+            }
+            ProviderControlAction::Logout => {
+                result.status = ProviderBoxStatus::Unsupported;
+                result.add_diagnostic(ProviderBoxDiagnostic::unsupported(
+                    DIAG_PROVIDER_CONTROL_ACTION_UNSUPPORTED,
+                    "Codex logout is not a taught provider-box control action",
+                    json!({
+                        "slot_id": slot_id,
+                        "control_action": "logout",
+                    }),
+                ));
             }
         }
         if result.slot_status.is_none() {

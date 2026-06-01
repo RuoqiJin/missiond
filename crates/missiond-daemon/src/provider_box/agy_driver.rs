@@ -2431,7 +2431,7 @@ impl AgyProviderDriver {
             return;
         }
 
-        let _ = self
+        let mut observation = self
             .write_step(
                 result,
                 slot_id,
@@ -2440,27 +2440,55 @@ impl AgyProviderDriver {
                 Some("type AGY /clear command".to_string()),
             )
             .await;
-        let mut observation = self
-            .write_step(
-                result,
-                slot_id,
-                PtyStepAction::key("enter"),
-                "\r",
-                Some("execute AGY /clear command".to_string()),
-            )
-            .await;
-        if !is_home_identity_ready(&observation) {
+
+        let mut clear_command_verified = false;
+        if selected_clear_command(&observation) {
+            clear_command_verified = true;
             observation = self
-                .wait_until(slot_id, Duration::from_secs(5), is_home_identity_ready)
+                .write_step(
+                    result,
+                    slot_id,
+                    PtyStepAction::key("enter"),
+                    "\r",
+                    Some("complete AGY /clear command into the composer".to_string()),
+                )
                 .await;
         }
-        if is_home_identity_ready(&observation) {
+        if is_pending_clear_command(&observation) {
+            clear_command_verified = true;
+            observation = self
+                .write_step(
+                    result,
+                    slot_id,
+                    PtyStepAction::key("enter"),
+                    "\r",
+                    Some("execute AGY /clear command".to_string()),
+                )
+                .await;
+        }
+
+        if !clear_command_verified {
+            mark_control_unverified(
+                result,
+                slot_id,
+                "AGY /clear command was not selected or staged before execution",
+                &observation,
+            );
+            return;
+        }
+
+        if !is_clear_completed_ready(&observation) {
+            observation = self
+                .wait_until(slot_id, Duration::from_secs(5), is_clear_completed_ready)
+                .await;
+        }
+        if is_clear_completed_ready(&observation) {
             result.status = ProviderBoxStatus::Completed;
         } else {
             mark_control_unverified(
                 result,
                 slot_id,
-                "AGY /clear execution did not return to the home identity screen",
+                "AGY /clear execution did not return to a verified clean composer",
                 &observation,
             );
         }
@@ -3403,6 +3431,17 @@ impl ProviderDriver for AgyProviderDriver {
             ProviderControlAction::Exit => {
                 self.exit_locked(&mut result, &slot_id).await;
             }
+            ProviderControlAction::Logout => {
+                result.status = ProviderBoxStatus::Unsupported;
+                result.add_diagnostic(ProviderBoxDiagnostic::unsupported(
+                    DIAG_PROVIDER_CONTROL_ACTION_UNSUPPORTED,
+                    "AGY logout is not a taught provider-box control action",
+                    json!({
+                        "slot_id": slot_id,
+                        "control_action": "logout",
+                    }),
+                ));
+            }
         }
         if result.slot_status.is_none() {
             self.attach_status_observation(
@@ -3588,6 +3627,13 @@ fn is_pending_clear_command(observation: &AgyObservation) -> bool {
                 || trimmed.starts_with("› /clear")
                 || trimmed.starts_with("❯ /clear")
         })
+}
+
+fn is_clear_completed_ready(observation: &AgyObservation) -> bool {
+    is_home_identity_ready(observation)
+        || (observation.snapshot.reason == "agy:composer_idle"
+            && is_ready_for_text(observation)
+            && !is_pending_clear_command(observation))
 }
 
 fn is_home_identity_ready(observation: &AgyObservation) -> bool {
@@ -5017,6 +5063,16 @@ mod tests {
             "↑/↓ Navigate · enter Select · tab Complete",
             "esc to cancel                                                                                    Gemini 3.5 Flash (High)",
         ]);
+        let pending = observation(&[
+            "Antigravity CLI 1.0.3",
+            "jjrrqqq@gmail.com (Google AI Ultra)",
+            "Claude Opus 4.6 (Thinking)",
+            "~/Projects/missiond",
+            "────────────────────────────────────────",
+            "> /clear",
+            "────────────────────────────────────────",
+            "? for shortcuts                                                                      Claude Opus 4.6 (Thinking)",
+        ]);
         let home = observation(&[
             "Antigravity CLI 1.0.3",
             "jjrrqqq@gmail.com (Google AI Ultra)",
@@ -5027,9 +5083,19 @@ mod tests {
             "────────────────────────────────────────",
             "? for shortcuts                                                                                  Gemini 3.5 Flash (High)",
         ]);
+        let composer = observation(&[
+            "────────────────────────────────────────",
+            ">",
+            "────────────────────────────────────────",
+            "? for shortcuts                                                                      Claude Opus 4.6 (Thinking)",
+        ]);
 
         assert!(selected_clear_command(&selected));
+        assert!(is_pending_clear_command(&pending));
         assert!(is_home_identity_ready(&home));
+        assert!(is_clear_completed_ready(&home));
+        assert!(is_clear_completed_ready(&composer));
+        assert!(!is_clear_completed_ready(&pending));
     }
 
     #[test]

@@ -162,6 +162,14 @@ impl ClaudeCodeProviderDriver {
             || bool_any(request.desired_worker.as_ref(), KEYS)
     }
 
+    fn request_allow_hidden_logout(request: &ProviderInteractionRequest) -> bool {
+        request
+            .desired_worker
+            .as_ref()
+            .and_then(|worker| worker.get("allow_hidden_logout").and_then(Value::as_bool))
+            .unwrap_or(false)
+    }
+
     fn request_launch_model(request: &ProviderInteractionRequest) -> Option<String> {
         request.model.as_deref().map(|model| {
             normalize_claude_code_model_target(model)
@@ -821,6 +829,128 @@ impl ClaudeCodeProviderDriver {
             ));
         }
     }
+
+    async fn logout_locked(
+        &self,
+        request: &ProviderInteractionRequest,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+    ) {
+        let mut observation = self.observe(slot_id).await;
+        if is_claude_code_logout_success(&observation) {
+            let status = self.pty.get_status(slot_id).await;
+            result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
+            result.status = ProviderBoxStatus::Completed;
+            result.final_text =
+                Some("ClaudeCode slot is already logged out or in first-run setup".to_string());
+            result.durable_source = Some("claude_code_logout_state".to_string());
+            return;
+        }
+
+        if !is_ready_for_claude_code_text(&observation) {
+            observation = self
+                .wait_step_until(
+                    result,
+                    slot_id,
+                    Duration::from_secs(8),
+                    Some("wait for ClaudeCode prompt idle before /logout".to_string()),
+                    is_ready_for_claude_code_text,
+                )
+                .await;
+        }
+        if !is_ready_for_claude_code_text(&observation) {
+            result.status = ProviderBoxStatus::Blocked;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+                "ClaudeCode /logout requires an idle composer or an already logged-out startup/auth screen",
+                json!({
+                    "slot_id": slot_id,
+                    "reason": observation.snapshot.reason,
+                    "state": observation.snapshot.state,
+                    "blocked_kind": observation.snapshot.blocked_kind,
+                }),
+            ));
+            let status = self.pty.get_status(slot_id).await;
+            result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
+            return;
+        }
+        if let Some(text) = claude_code_composer_text(&observation) {
+            if !text.trim().is_empty() {
+                result.status = ProviderBoxStatus::Blocked;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+                    "ClaudeCode composer is not empty; refusing to append /logout command",
+                    json!({
+                        "slot_id": slot_id,
+                        "composer_text_preview": text.chars().take(120).collect::<String>(),
+                        "safe_alternative": "clear the composer before logging out",
+                    }),
+                ));
+                let status = self.pty.get_status(slot_id).await;
+                result.slot_status =
+                    Some(slot_status_value(slot_id, status.as_ref(), &observation));
+                return;
+            }
+        }
+
+        let command = "/logout";
+        let _ = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::text(command.to_string()),
+                command,
+                Some("type ClaudeCode /logout command".to_string()),
+            )
+            .await;
+        observation = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::key("enter"),
+                "\r",
+                Some("execute ClaudeCode /logout command".to_string()),
+            )
+            .await;
+
+        if !is_claude_code_logout_success(&observation) {
+            let timeout = Duration::from_secs(request.timeout_secs.unwrap_or(45).clamp(5, 180));
+            observation = self
+                .wait_step_until(
+                    result,
+                    slot_id,
+                    timeout,
+                    Some(
+                        "wait for ClaudeCode /logout to reach auth or startup setup screen"
+                            .to_string(),
+                    ),
+                    is_claude_code_logout_success,
+                )
+                .await;
+        }
+
+        let status = self.pty.get_status(slot_id).await;
+        result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
+        if is_claude_code_logout_success(&observation) {
+            result.status = ProviderBoxStatus::Completed;
+            result.final_text =
+                Some("ClaudeCode /logout reached auth or startup setup screen".to_string());
+            result.durable_source = Some("claude_code_logout_state".to_string());
+        } else {
+            result.status = ProviderBoxStatus::Unverified;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+                "ClaudeCode /logout did not verify an auth/startup screen",
+                json!({
+                    "slot_id": slot_id,
+                    "reason": observation.snapshot.reason,
+                    "state": observation.snapshot.state,
+                    "blocked_kind": observation.snapshot.blocked_kind,
+                    "success_condition": "blocked_kind is auth_missing or startup_config; ordinary composer idle is not success",
+                }),
+            ));
+        }
+    }
 }
 
 #[async_trait]
@@ -1028,6 +1158,23 @@ impl ProviderDriver for ClaudeCodeProviderDriver {
                 self.set_permissions_locked(request, &mut result, &slot_id)
                     .await;
             }
+            ProviderControlAction::Logout => {
+                if Self::request_allow_hidden_logout(request) {
+                    self.logout_locked(request, &mut result, &slot_id).await;
+                } else {
+                    result.status = ProviderBoxStatus::Unsupported;
+                    result.add_diagnostic(ProviderBoxDiagnostic::unsupported(
+                        DIAG_PROVIDER_CONTROL_ACTION_UNSUPPORTED,
+                        "ClaudeCode logout control is implemented but hidden because re-login is sensitive",
+                        json!({
+                            "slot_id": slot_id,
+                            "control_action": "logout",
+                            "exposed": false,
+                            "safe_alternative": "operate /logout manually through the teaching PTY only when the human explicitly wants to log out",
+                        }),
+                    ));
+                }
+            }
             _ => {
                 result.status = ProviderBoxStatus::Unsupported;
                 result.add_diagnostic(ProviderBoxDiagnostic::error(
@@ -1036,7 +1183,7 @@ impl ProviderDriver for ClaudeCodeProviderDriver {
                     json!({
                         "slot_id": slot_id,
                         "action": action,
-                        "supported_actions": ["set_permissions"],
+                        "supported_actions": ["set_permissions", "logout"],
                     }),
                 ));
             }
@@ -1086,6 +1233,16 @@ fn is_ready_for_claude_code_text(observation: &ClaudeCodeObservation) -> bool {
     observation.snapshot.state == PtyCanonicalState::Idle
         && observation.snapshot.blocked_kind.is_none()
         && observation.snapshot.reason != "session_state:Exited"
+}
+
+fn is_claude_code_logout_success(observation: &ClaudeCodeObservation) -> bool {
+    matches!(
+        observation.snapshot.blocked_kind.as_deref(),
+        Some("auth_missing" | "startup_config")
+    ) || matches!(
+        observation.snapshot.reason.as_str(),
+        "provider:auth_missing" | "claude_code:first_run_theme_prompt"
+    )
 }
 
 fn claude_code_current_model(observation: &ClaudeCodeObservation) -> Option<String> {
@@ -1214,10 +1371,27 @@ fn bool_any(value: Option<&Value>, keys: &[&str]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use missiond_core::pty::recognize_screen;
+    use missiond_core::types::CliEngine;
+    use missiond_core::SessionState;
+
     use super::{
-        claude_code_permission_cycle_steps, normalize_claude_code_model_target,
-        normalize_claude_code_permission_mode, ClaudeCodeModelTarget, ClaudeCodePermissionMode,
+        claude_code_permission_cycle_steps, is_claude_code_logout_success,
+        normalize_claude_code_model_target, normalize_claude_code_permission_mode,
+        ClaudeCodeModelTarget, ClaudeCodeObservation, ClaudeCodePermissionMode,
     };
+
+    fn observation(lines: &[&str]) -> ClaudeCodeObservation {
+        let owned = lines
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>();
+        ClaudeCodeObservation {
+            lines: owned.clone(),
+            text: owned.join("\n"),
+            snapshot: recognize_screen(CliEngine::ClaudeCode, &owned, SessionState::Idle),
+        }
+    }
 
     #[test]
     fn normalizes_claude_code_opus_model_command_aliases() {
@@ -1306,5 +1480,32 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn claude_code_logout_success_requires_auth_or_startup_screen() {
+        let startup = observation(&[
+            "Welcome to Claude Code v2.1.159",
+            "Let's get started.",
+            "Choose the text style that looks best with your terminal",
+            "  1. Auto (match terminal)",
+            "❯ 2. Dark mode ✔",
+        ]);
+        assert!(is_claude_code_logout_success(&startup));
+
+        let auth_missing = observation(&[
+            "Credentials file not found — Claude Code may require interactive login",
+            "Please log in to continue.",
+        ]);
+        assert!(is_claude_code_logout_success(&auth_missing));
+
+        let idle = observation(&[
+            "Claude Code v2.1.159",
+            "Sonnet 4.6 with high effort · Claude Max",
+            "~/Projects/missiond",
+            "❯",
+            "⏵⏵ auto mode on (shift+tab to cycle)",
+        ]);
+        assert!(!is_claude_code_logout_success(&idle));
     }
 }

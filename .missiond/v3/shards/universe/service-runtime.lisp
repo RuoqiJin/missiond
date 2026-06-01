@@ -202,18 +202,20 @@
       :frontend ".missiond/frontend/asr-web-blueprint.lisp"
       :operations ".missiond/operations/asr-operations-blueprint.lisp"
       :environment production
-      :public-base-url "https://asr.xiaojinpro.top"
-      :frontend-url "https://asr.xiaojinpro.top"
+      :public-base-url "https://speechscribe.top"
+      :frontend-url "https://speechscribe.top"
       :api-base-url "https://auth.xiaojinpro.com/asr"
-      :domains ["asr.xiaojinpro.top" "xjp-asr-web.vercel.app" "auth.xiaojinpro.com"]
+      :domains ["speechscribe.top" "www.speechscribe.top" "asr.xiaojinpro.top" "xjp-asr-web.vercel.app" "auth.xiaojinpro.com"]
       :dns-provider cloudflare
-      :dns-record (:type A :name "asr.xiaojinpro.top" :content "76.76.21.21" :proxied false :authority cloudflare)
+      :dns-records [(:type A :name "speechscribe.top" :content "76.76.21.21" :proxied false :authority cloudflare)
+                    (:type CNAME :name "www.speechscribe.top" :content "cname.vercel-dns.com" :proxied false :authority cloudflare)
+                    (:type A :name "asr.xiaojinpro.top" :content "76.76.21.21" :proxied false :authority cloudflare)]
       :deployment (:substrate deploy-center :dc_slug "asr" :runtime-target gcp-runtime :executor gcp-agent :container "xjp-asr" :default-port 8090 :host-bind "127.0.0.1:8089" :authority release-provenance)
-      :frontend-deployment (:substrate vercel :project "rickyjim626s-projects/xjp-asr-web" :production-domain "asr.xiaojinpro.top" :fallback-domain "xjp-asr-web.vercel.app")
+      :frontend-deployment (:substrate vercel :project "rickyjim626s-projects/xjp-asr-web" :production-domain "speechscribe.top" :fallback-domain "xjp-asr-web.vercel.app")
       :proxy (:kind caddy :domain "auth.xiaojinpro.com" :routes ["/asr" "/asr/*"] :upstream "localhost:8089")
       :ports (:host 8089 :container 8090)
-      :health ["/health" "/health/live" "/health/ready" "/api/asr/health"]
-      :auth (:provider xjp-auth :client_id "xjp-asr" :redirect_uri "https://asr.xiaojinpro.top/auth/callback")
+      :health ["/health/live" "/health/ready" "/api/asr/health"]
+      :auth (:provider xjp-auth :client_id "xjp-asr" :redirect_uri "https://speechscribe.top/auth/callback")
       :dependencies [xjp-auth payments xjp-pg-prod redis secret-store volcengine-seed-asr cloudflare-r2 aliyun-oss vercel cloudflare]
       :ops-capability deploy-ops
       :source-evidence [skill:services/asr asr-web-vercel-20260528 cloudflare-dns-asr-20260528]

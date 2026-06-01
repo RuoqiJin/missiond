@@ -77,6 +77,7 @@ pub(crate) enum ProviderControlAction {
     SetPermissions,
     SetFastMode,
     Exit,
+    Logout,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

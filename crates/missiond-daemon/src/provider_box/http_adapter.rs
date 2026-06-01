@@ -1913,6 +1913,7 @@ fn provider_slot_capabilities_value(
             "pty_step": driver.pty_step,
             "clear_screen": driver.control_action,
             "exit": driver.control_action,
+            "logout": false,
             "usage_refresh": driver.usage_probe,
             "mcp_status": driver.mcp_status,
             "mcp_reconnect": driver.mcp_reconnect,
@@ -3642,6 +3643,7 @@ mod tests {
         );
         assert_eq!(caps["slot_controls"]["status"], true);
         assert_eq!(caps["slot_controls"]["input"], false);
+        assert!(caps["slot_controls"].get("logout").is_none());
         assert_eq!(caps["slot_controls"]["permissions"]["supported"], true);
         assert_eq!(caps["slot_controls"]["permissions"]["cycle"][0], "auto");
         assert_eq!(
