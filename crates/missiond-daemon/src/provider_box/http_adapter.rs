@@ -1093,7 +1093,9 @@ fn engine_from_body_or_slot(body: &Value, slot_id: &str) -> CliEngine {
         return engine_from_body(body);
     }
     let normalized = slot_id.trim().to_ascii_lowercase();
-    if normalized.contains("codex") {
+    if normalized.starts_with("slot-agy-") || normalized.contains("-agy-") {
+        CliEngine::Agy
+    } else if normalized.contains("codex") {
         CliEngine::Codex
     } else if normalized.contains("claude") || normalized.contains("cc-") {
         CliEngine::ClaudeCode
@@ -2665,6 +2667,10 @@ mod tests {
         assert_eq!(
             engine_from_body_or_slot(&json!({}), "slot-codex-code-worker"),
             CliEngine::Codex
+        );
+        assert_eq!(
+            engine_from_body_or_slot(&json!({}), "slot-agy-claude-opus-46-thinking-a"),
+            CliEngine::Agy
         );
         assert_eq!(
             engine_from_body_or_slot(&json!({"engine": "agy"}), "slot-codex-code-worker"),

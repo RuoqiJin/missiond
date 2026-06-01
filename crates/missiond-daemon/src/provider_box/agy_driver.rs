@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
 use missiond_core::agy_cli::{discover_sessions, parse_session, AgySession, AgyStep, HistoryIndex};
@@ -91,6 +91,7 @@ struct AgyTurnFinal {
 struct AgyTranscriptCursor {
     workspace: Option<PathBuf>,
     sessions: HashMap<String, AgySessionCursor>,
+    captured_at: SystemTime,
 }
 
 #[derive(Debug, Clone)]
@@ -1823,6 +1824,7 @@ impl AgyProviderDriver {
         slot_id: &str,
     ) -> AgyTranscriptCursor {
         let workspace = text_only_workspace_for_request(request, slot_id);
+        let captured_at = SystemTime::now();
         let history = HistoryIndex::load(&self.agy_home).await;
         let brain = self.agy_home.join("brain");
         let mut sessions = HashMap::new();
@@ -1844,6 +1846,7 @@ impl AgyProviderDriver {
         AgyTranscriptCursor {
             workspace,
             sessions,
+            captured_at,
         }
     }
 
@@ -1860,12 +1863,14 @@ impl AgyProviderDriver {
             let workspace_match =
                 session_workspace_matches(&history, &session_id, cursor.workspace.as_deref());
             if !workspace_match && cursor.workspace.is_some() && cursor_for_session.is_none() {
-                if !cursor.sessions.is_empty() {
+                let prompt_fallback_allowed =
+                    transcript_modified_after_cursor(&transcript, cursor.captured_at).await;
+                if !prompt_fallback_allowed {
                     continue;
                 }
                 debug!(
                     session_id,
-                    "AGY text-only cursor has no baseline sessions; allowing prompt match fallback before history catches up"
+                    "AGY text-only transcript was modified after cursor capture; allowing prompt match fallback before history catches up"
                 );
             }
             let Some(session) = parse_session(&transcript).await else {
@@ -3616,6 +3621,29 @@ fn session_workspace_matches(
         .is_some_and(|cwd| paths_match(cwd, workspace))
 }
 
+async fn transcript_modified_after_cursor(transcript: &Path, captured_at: SystemTime) -> bool {
+    let Some(modified_at) = tokio::fs::metadata(transcript)
+        .await
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+    else {
+        return false;
+    };
+    transcript_modified_at_or_after_cursor(modified_at, captured_at)
+}
+
+fn transcript_modified_at_or_after_cursor(
+    modified_at: SystemTime,
+    captured_at: SystemTime,
+) -> bool {
+    if modified_at.duration_since(captured_at).is_ok() {
+        return true;
+    }
+    captured_at
+        .duration_since(modified_at)
+        .is_ok_and(|skew| skew <= Duration::from_secs(2))
+}
+
 fn paths_match(observed: &str, expected: &Path) -> bool {
     let observed = PathBuf::from(observed);
     if observed == expected {
@@ -4905,6 +4933,24 @@ mod tests {
         let outcome = extract_cursor_turn(&session, 0, &prompt, true).expect("matched by anchors");
 
         assert!(matches!(outcome, AgyTranscriptOutcome::Completed(_)));
+    }
+
+    #[test]
+    fn transcript_cursor_allows_fresh_workspace_index_lag() {
+        let captured_at = std::time::UNIX_EPOCH + Duration::from_secs(100);
+
+        assert!(transcript_modified_at_or_after_cursor(
+            captured_at + Duration::from_secs(1),
+            captured_at
+        ));
+        assert!(transcript_modified_at_or_after_cursor(
+            captured_at - Duration::from_secs(1),
+            captured_at
+        ));
+        assert!(!transcript_modified_at_or_after_cursor(
+            captured_at - Duration::from_secs(10),
+            captured_at
+        ));
     }
 
     #[test]
