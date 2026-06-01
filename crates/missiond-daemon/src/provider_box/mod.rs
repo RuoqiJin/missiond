@@ -9,6 +9,7 @@
 
 mod agy_driver;
 mod artifact;
+mod claude_code_driver;
 mod codex_driver;
 mod driver;
 mod http_adapter;
@@ -17,6 +18,7 @@ mod types;
 
 pub(crate) use agy_driver::AgyProviderDriver;
 pub(crate) use artifact::ProviderBoxArtifactWriter;
+pub(crate) use claude_code_driver::ClaudeCodeProviderDriver;
 pub(crate) use codex_driver::CodexProviderDriver;
 pub(crate) use driver::{ProviderDriver, ProviderDriverCapabilities, UnsupportedProviderDriver};
 pub(crate) use http_adapter::ProviderBoxHttpAdapter;

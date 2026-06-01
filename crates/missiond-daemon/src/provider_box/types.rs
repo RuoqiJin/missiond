@@ -29,6 +29,7 @@ pub(crate) const DIAG_PROVIDER_MCP_RECONNECT_UNSUPPORTED: &str =
     "PROVIDER_MCP_RECONNECT_UNSUPPORTED";
 pub(crate) const DIAG_PROVIDER_MCP_STATUS_UNAVAILABLE: &str = "PROVIDER_MCP_STATUS_UNAVAILABLE";
 pub(crate) const DIAG_PROVIDER_MCP_RECONNECT_UNVERIFIED: &str = "PROVIDER_MCP_RECONNECT_UNVERIFIED";
+pub(crate) const DIAG_PROVIDER_SESSION_ID_UNKNOWN: &str = "PROVIDER_SESSION_ID_UNKNOWN";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -74,6 +75,7 @@ pub(crate) enum ProviderControlAction {
     ClearInput,
     ClearScreen,
     SetPermissions,
+    SetFastMode,
     Exit,
 }
 
@@ -209,6 +211,8 @@ pub(crate) struct ProviderInteractionRequest {
     pub(crate) model: Option<String>,
     #[serde(alias = "reasoning_effort", alias = "model_reasoning_effort")]
     pub(crate) model_profile: Option<String>,
+    pub(crate) provider_box_lane: Option<String>,
+    pub(crate) xjp_request_stage: Option<String>,
     #[serde(
         default,
         alias = "dangerously_skip_permissions",
@@ -255,6 +259,8 @@ impl ProviderInteractionRequest {
             engine,
             model: None,
             model_profile: None,
+            provider_box_lane: None,
+            xjp_request_stage: None,
             dangerously_bypass_approvals_and_sandbox: false,
             cwd: None,
             project_root: None,
@@ -621,6 +627,91 @@ impl PtyStepRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub(crate) struct ProviderSessionIdentity {
+    pub(crate) schema: String,
+    pub(crate) provider: Option<String>,
+    pub(crate) engine: CliEngine,
+    pub(crate) slot_id: Option<String>,
+    pub(crate) provider_session_id: Option<String>,
+    pub(crate) provider_session_ref: Option<String>,
+    pub(crate) resume_command: Option<String>,
+    pub(crate) identity_source: String,
+    pub(crate) durable_source: Option<String>,
+    pub(crate) workspace: Option<String>,
+    pub(crate) confidence: String,
+    pub(crate) observed_at: String,
+    #[serde(default)]
+    pub(crate) diagnostics: Vec<ProviderBoxDiagnostic>,
+}
+
+impl ProviderSessionIdentity {
+    pub(crate) fn resolved(
+        provider: impl Into<Option<String>>,
+        engine: CliEngine,
+        slot_id: impl Into<Option<String>>,
+        provider_session_id: impl Into<String>,
+        identity_source: impl Into<String>,
+        durable_source: impl Into<Option<String>>,
+        workspace: impl Into<Option<String>>,
+        confidence: impl Into<String>,
+    ) -> Self {
+        let provider_session_id = provider_session_id.into();
+        let provider_prefix = match engine {
+            CliEngine::Agy => "AGY",
+            CliEngine::Codex => "CODEX",
+            CliEngine::ClaudeCode => "CLAUDECODE",
+            CliEngine::Gemini => "GEMINI",
+        };
+        let resume_command = match engine {
+            CliEngine::Agy => Some(format!("agy --conversation {provider_session_id}")),
+            CliEngine::Codex => Some(format!("codex resume {provider_session_id}")),
+            CliEngine::ClaudeCode | CliEngine::Gemini => None,
+        };
+        Self {
+            schema: "missiond.provider-session-identity.v1".to_string(),
+            provider: provider.into(),
+            engine,
+            slot_id: slot_id.into(),
+            provider_session_ref: Some(format!("{provider_prefix}-{provider_session_id}")),
+            provider_session_id: Some(provider_session_id),
+            resume_command,
+            identity_source: identity_source.into(),
+            durable_source: durable_source.into(),
+            workspace: workspace.into(),
+            confidence: confidence.into(),
+            observed_at: chrono::Utc::now().to_rfc3339(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    pub(crate) fn unknown(
+        provider: impl Into<Option<String>>,
+        engine: CliEngine,
+        slot_id: impl Into<Option<String>>,
+        identity_source: impl Into<String>,
+        workspace: impl Into<Option<String>>,
+        diagnostic: ProviderBoxDiagnostic,
+    ) -> Self {
+        Self {
+            schema: "missiond.provider-session-identity.v1".to_string(),
+            provider: provider.into(),
+            engine,
+            slot_id: slot_id.into(),
+            provider_session_id: None,
+            provider_session_ref: None,
+            resume_command: None,
+            identity_source: identity_source.into(),
+            durable_source: None,
+            workspace: workspace.into(),
+            confidence: "unknown".to_string(),
+            observed_at: chrono::Utc::now().to_rfc3339(),
+            diagnostics: vec![diagnostic],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) struct ProviderBoxResult {
     pub(crate) schema: String,
     pub(crate) turn_id: String,
@@ -630,10 +721,13 @@ pub(crate) struct ProviderBoxResult {
     pub(crate) engine: CliEngine,
     pub(crate) model: Option<String>,
     pub(crate) model_profile: Option<String>,
+    pub(crate) provider_box_lane: Option<String>,
+    pub(crate) xjp_request_stage: Option<String>,
     pub(crate) dangerously_bypass_approvals_and_sandbox: bool,
     pub(crate) lease_id: Option<String>,
     pub(crate) slot_id: Option<String>,
     pub(crate) provider_conversation_id: Option<String>,
+    pub(crate) provider_session_identity: Option<ProviderSessionIdentity>,
     pub(crate) durable_source: Option<String>,
     pub(crate) final_text: Option<String>,
     pub(crate) artifact_hash: Option<String>,
@@ -648,6 +742,7 @@ pub(crate) struct ProviderBoxResult {
     pub(crate) router_export: Option<ProviderRouterExport>,
     pub(crate) model_switch_result: Option<ModelSwitchResult>,
     pub(crate) mcp_status: Option<Value>,
+    pub(crate) capabilities: Option<Value>,
 }
 
 impl ProviderBoxResult {
@@ -661,11 +756,14 @@ impl ProviderBoxResult {
             engine: request.engine,
             model: request.model.clone(),
             model_profile: request.model_profile.clone(),
+            provider_box_lane: request.provider_box_lane.clone(),
+            xjp_request_stage: request.xjp_request_stage.clone(),
             dangerously_bypass_approvals_and_sandbox: request
                 .dangerously_bypass_approvals_and_sandbox,
             lease_id: request.lease_id.clone(),
             slot_id: request.slot_id.clone(),
             provider_conversation_id: None,
+            provider_session_identity: None,
             durable_source: None,
             final_text: None,
             artifact_hash: None,
@@ -678,6 +776,7 @@ impl ProviderBoxResult {
             router_export: None,
             model_switch_result: None,
             mcp_status: None,
+            capabilities: None,
         }
     }
 

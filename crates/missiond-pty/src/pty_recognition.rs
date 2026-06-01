@@ -62,6 +62,10 @@ pub struct ProviderScreenIdentity {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
@@ -84,6 +88,18 @@ pub struct ProviderScreenSignals {
     pub visible_permission_modes: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_permission_mode: Option<String>,
+    #[serde(default)]
+    pub startup_prompt_visible: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub startup_prompt_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub visible_startup_options: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_startup_option: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_startup_option_index: Option<u16>,
+    #[serde(default)]
+    pub selected_startup_option_checked: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_user_message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -109,6 +125,12 @@ impl ProviderScreenSignals {
             && !self.permission_picker_visible
             && self.visible_permission_modes.is_empty()
             && self.selected_permission_mode.is_none()
+            && !self.startup_prompt_visible
+            && self.startup_prompt_kind.is_none()
+            && self.visible_startup_options.is_empty()
+            && self.selected_startup_option.is_none()
+            && self.selected_startup_option_index.is_none()
+            && !self.selected_startup_option_checked
             && self.last_user_message.is_none()
             && self.last_assistant_message.is_none()
             && self.last_tool_kind.is_none()
@@ -129,6 +151,8 @@ impl ProviderScreenIdentity {
             && self.account.is_none()
             && self.plan.is_none()
             && self.current_model.is_none()
+            && self.reasoning_effort.is_none()
+            && self.permission_mode.is_none()
             && self.selected_model.is_none()
             && self.cwd.is_none()
     }
@@ -237,6 +261,23 @@ static SHELL_PROMPT_RE: Lazy<Regex> = Lazy::new(|| {
 
 static CODEX_VERSION_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"OpenAI\s+Codex\s+\(v(?P<version>[^)]+)\)").expect("valid codex version regex")
+});
+
+static CLAUDE_CODE_VERSION_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"Claude\s+Code\s+v(?P<version>[0-9]+(?:\.[0-9]+)+(?:[-+._A-Za-z0-9]*)?)")
+        .expect("valid Claude Code version regex")
+});
+
+static CLAUDE_CODE_MODEL_PLAN_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(?P<model>(?:Claude\s+)?(?:Opus|Sonnet|Haiku)\s+[0-9]+(?:\.[0-9]+)?)\b(?:\s+\([^)]+\))?\s+with\s+(?P<effort>[A-Za-z0-9_-]+)\s+effort\s*·\s*(?P<plan>[^│\n]+)",
+    )
+    .expect("valid Claude Code model/plan regex")
+});
+
+static CLAUDE_CODE_STARTUP_OPTION_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^\s*(?P<selected>[❯>])?\s*(?P<index>\d+)\.\s+(?P<label>.+?)\s*$")
+        .expect("valid Claude Code startup option regex")
 });
 
 impl PtyRecognitionSnapshot {
@@ -369,7 +410,11 @@ fn recognize_screen_inner(
         CliEngine::ClaudeCode => recognize_claude_code(lines),
     };
     if snapshot.state == PtyCanonicalState::Unknown {
+        let screen_identity = snapshot.screen_identity.clone();
         snapshot = session_state_snapshot(provider, current_state);
+        if snapshot.screen_identity.is_none() {
+            snapshot.screen_identity = screen_identity;
+        }
     }
     fuse_with_session_state(provider, lines, styled_screen, current_state, snapshot)
 }
@@ -433,6 +478,7 @@ fn active_running_evidence(
                     "claude_code:active_spinner",
                 )
                 .with_elapsed(elapsed)
+                .with_screen_identity(extract_claude_code_screen_identity(lines))
                 .with_source("screen_fused");
                 snapshot = if let Some(tool) = extract_tool_name(lines) {
                     snapshot.with_tool(tool).with_phase("tool")
@@ -1750,6 +1796,8 @@ fn recognize_claude_code(lines: &[String]) -> PtyRecognitionSnapshot {
     let lower = text.to_ascii_lowercase();
     let elapsed = extract_elapsed_secs(&text);
     let current_activity = has_current_claude_activity_line(lines);
+    let identity = extract_claude_code_screen_identity(lines);
+    let startup_signals = extract_claude_code_startup_config_signals(lines, &lower);
 
     if let Some((kind, reason)) = provider_unavailable_match(&lower) {
         return PtyRecognitionSnapshot::new(
@@ -1760,7 +1808,23 @@ fn recognize_claude_code(lines: &[String]) -> PtyRecognitionSnapshot {
         )
         .with_blocked_kind(kind)
         .with_elapsed(elapsed)
+        .with_screen_identity(identity)
         .with_source("provider_error_signature");
+    }
+
+    if startup_signals.is_some() {
+        return PtyRecognitionSnapshot::new(
+            CliEngine::ClaudeCode,
+            PtyCanonicalState::Blocked,
+            0.94,
+            "claude_code:first_run_theme_prompt",
+        )
+        .with_blocked_kind("startup_config")
+        .with_phase("startup_theme")
+        .with_elapsed(elapsed)
+        .with_screen_identity(identity)
+        .with_screen_signals(startup_signals)
+        .with_source("tui_source_signature");
     }
 
     // Only explicit confirmation / model-picker UI surfaces count. Generic
@@ -1784,7 +1848,8 @@ fn recognize_claude_code(lines: &[String]) -> PtyRecognitionSnapshot {
             "claude_code:confirmation_or_picker",
         )
         .with_blocked_kind("confirmation")
-        .with_elapsed(elapsed);
+        .with_elapsed(elapsed)
+        .with_screen_identity(identity);
     }
 
     if has_completion_line(lines) && has_idle_prompt(lines) {
@@ -1794,7 +1859,8 @@ fn recognize_claude_code(lines: &[String]) -> PtyRecognitionSnapshot {
             0.86,
             "claude_code:turn_completion_verb",
         )
-        .with_elapsed(elapsed);
+        .with_elapsed(elapsed)
+        .with_screen_identity(identity);
     }
 
     if (lower.contains("auto mode on") || has_idle_prompt(lines)) && !current_activity {
@@ -1803,7 +1869,8 @@ fn recognize_claude_code(lines: &[String]) -> PtyRecognitionSnapshot {
             PtyCanonicalState::Idle,
             0.9,
             "claude_code:prompt_idle",
-        );
+        )
+        .with_screen_identity(identity);
     }
 
     if lower.contains("esc to interrupt")
@@ -1818,7 +1885,8 @@ fn recognize_claude_code(lines: &[String]) -> PtyRecognitionSnapshot {
             0.9,
             "claude_code:active_spinner",
         )
-        .with_elapsed(elapsed);
+        .with_elapsed(elapsed)
+        .with_screen_identity(identity);
         if let Some(tool) = extract_tool_name(lines) {
             snapshot = snapshot.with_tool(tool).with_phase("tool");
         } else {
@@ -1833,6 +1901,75 @@ fn recognize_claude_code(lines: &[String]) -> PtyRecognitionSnapshot {
         0.2,
         "claude_code:no_match",
     )
+    .with_screen_identity(identity)
+}
+
+fn extract_claude_code_screen_identity(lines: &[String]) -> Option<ProviderScreenIdentity> {
+    let mut identity = ProviderScreenIdentity::default();
+    identity.permission_mode = extract_claude_code_permission_mode(lines);
+    for line in lines {
+        let cleaned = normalize_identity_value(line);
+        if let Some(captures) = CLAUDE_CODE_VERSION_RE.captures(&cleaned) {
+            identity.cli_version = captures
+                .name("version")
+                .map(|value| normalize_identity_value(value.as_str()));
+            continue;
+        }
+        if let Some(captures) = CLAUDE_CODE_MODEL_PLAN_RE.captures(&cleaned) {
+            identity.current_model = captures
+                .name("model")
+                .map(|value| normalize_model_value(value.as_str()));
+            identity.reasoning_effort = captures
+                .name("effort")
+                .map(|value| normalize_identity_value(value.as_str()));
+            identity.plan = captures
+                .name("plan")
+                .map(|value| normalize_identity_value(value.as_str()));
+            continue;
+        }
+        if identity.cwd.is_none() && !cleaned.contains("://") {
+            if let Some(captures) = AGY_CWD_RE.captures(&cleaned) {
+                identity.cwd = captures
+                    .name("cwd")
+                    .and_then(|value| normalize_agy_cwd(value.as_str()));
+            }
+        }
+    }
+
+    if identity.is_empty() {
+        None
+    } else {
+        Some(identity)
+    }
+}
+
+fn extract_claude_code_permission_mode(lines: &[String]) -> Option<String> {
+    lines.iter().rev().find_map(|line| {
+        let cleaned = normalize_identity_value(line);
+        let lower = cleaned.to_ascii_lowercase();
+        let looks_like_footer = lower.contains("shift+tab to cycle")
+            || lower.contains("? for shortcuts")
+            || lower.contains("← for agents");
+        if !looks_like_footer {
+            return None;
+        }
+        if lower.contains("bypass permissions on") {
+            return Some("bypass_permissions".to_string());
+        }
+        if lower.contains("auto mode on") {
+            return Some("auto".to_string());
+        }
+        if lower.contains("accept edits on") {
+            return Some("accept_edits".to_string());
+        }
+        if lower.contains("plan mode on") {
+            return Some("plan".to_string());
+        }
+        if lower.contains("? for shortcuts") {
+            return Some("default".to_string());
+        }
+        None
+    })
 }
 
 fn extract_agy_screen_identity(lines: &[String]) -> Option<ProviderScreenIdentity> {
@@ -1845,6 +1982,8 @@ fn extract_agy_screen_identity(lines: &[String]) -> Option<ProviderScreenIdentit
         account: None,
         plan: None,
         current_model: extract_agy_current_model(lines),
+        reasoning_effort: None,
+        permission_mode: None,
         selected_model: extract_agy_selected_model(lines),
         cwd: extract_agy_cwd(lines),
     };
@@ -3756,6 +3895,85 @@ mod tests {
             "› auto mode on (shift+tab to cycle)",
         ]));
         assert_eq!(result.state, PtyCanonicalState::Complete);
+    }
+
+    #[test]
+    fn claude_code_idle_screen_extracts_identity() {
+        let result = recognize_claude_code(&lines(&[
+            " ▐▛███▜▌   Claude Code v2.1.159",
+            "▝▜█████▛▘  Opus 4.8 (1M context) with xhigh effort · Claude Max",
+            "  ▘▘ ▝▝    ~/Projects/missiond",
+            "",
+            "────────────────────────────────────────────────────────────────",
+            "❯",
+            "────────────────────────────────────────────────────────────────",
+            "⏵⏵ auto mode on (shift+tab to cycle) · ← for agents",
+        ]));
+
+        assert_eq!(result.state, PtyCanonicalState::Idle);
+        let identity = result.screen_identity.expect("claude code identity");
+        assert_eq!(identity.cli_version.as_deref(), Some("2.1.159"));
+        assert_eq!(identity.current_model.as_deref(), Some("Opus 4.8"));
+        assert_eq!(identity.reasoning_effort.as_deref(), Some("xhigh"));
+        assert_eq!(identity.plan.as_deref(), Some("Claude Max"));
+        assert_eq!(identity.cwd.as_deref(), Some("~/Projects/missiond"));
+        assert_eq!(identity.permission_mode.as_deref(), Some("auto"));
+    }
+
+    #[test]
+    fn claude_code_permission_footer_modes_are_structured_identity() {
+        for (footer, expected) in [
+            ("? for shortcuts · ← for agents", "default"),
+            (
+                "⏵⏵ accept edits on (shift+tab to cycle) · ← for agents",
+                "accept_edits",
+            ),
+            ("⏸ plan mode on (shift+tab to cycle) · ← for agents", "plan"),
+            (
+                "⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents",
+                "bypass_permissions",
+            ),
+        ] {
+            let result = recognize_claude_code(&lines(&[
+                " ▐▛███▜▌   Claude Code v2.1.159",
+                "▝▜█████▛▘  Opus 4.8 (1M context) with xhigh effort · Claude Max",
+                "  ▘▘ ▝▝    ~/Projects/missiond",
+                "❯",
+                footer,
+            ]));
+            let identity = result.screen_identity.expect("claude code identity");
+            assert_eq!(
+                identity.permission_mode.as_deref(),
+                Some(expected),
+                "footer: {footer}"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_code_slash_menu_preserves_identity_when_session_state_fallbacks() {
+        let result = recognize_screen(
+            CliEngine::ClaudeCode,
+            &lines(&[
+                " ▐▛███▜▌   Claude Code v2.1.159",
+                "▝▜█████▛▘  Opus 4.8 (1M context) with xhigh effort · Claude Max",
+                "  ▘▘ ▝▝    ~/Projects/missiond",
+                "",
+                "❯ /l",
+                "/loop                                  Run a prompt or slash command on a recurring interval",
+                "/login                                 Sign in with your Anthropic account",
+                "/logout                                Sign out from your Anthropic account",
+            ]),
+            SessionState::Idle,
+        );
+
+        assert_eq!(result.state, PtyCanonicalState::Idle);
+        let identity = result.screen_identity.expect("claude code identity");
+        assert_eq!(identity.cli_version.as_deref(), Some("2.1.159"));
+        assert_eq!(identity.current_model.as_deref(), Some("Opus 4.8"));
+        assert_eq!(identity.reasoning_effort.as_deref(), Some("xhigh"));
+        assert_eq!(identity.plan.as_deref(), Some("Claude Max"));
+        assert_eq!(identity.cwd.as_deref(), Some("~/Projects/missiond"));
     }
 
     #[test]

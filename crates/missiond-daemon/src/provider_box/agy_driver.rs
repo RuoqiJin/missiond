@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
@@ -17,12 +17,13 @@ use super::driver::{ProviderDriver, ProviderDriverCapabilities};
 use super::types::{
     BoxCommand, ModelSwitchResult, ModelSwitchStatus, ProviderBoxDiagnostic, ProviderBoxResult,
     ProviderBoxStatus, ProviderControlAction, ProviderInteractionRequest, ProviderModelCatalog,
-    ProviderModelCatalogEntry, ProviderModelUsage, ProviderRouterExport, ProviderUsageSnapshot,
-    ProviderUsageStatus, PtyObservation, PtyStepAction, PtyStepRecord, PtyStepVerificationStatus,
-    TimeoutCancelPolicy, DIAG_MODEL_SWITCH_UNVERIFIED, DIAG_PROVIDER_BOX_INVALID_REQUEST,
-    DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE, DIAG_PROVIDER_CONTROL_ACTION_UNSUPPORTED,
-    DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED, DIAG_PROVIDER_DURABLE_FINAL_MISSING,
-    DIAG_PROVIDER_MCP_RECONNECT_UNVERIFIED, DIAG_PROVIDER_MCP_STATUS_UNAVAILABLE,
+    ProviderModelCatalogEntry, ProviderModelUsage, ProviderRouterExport, ProviderSessionIdentity,
+    ProviderUsageSnapshot, ProviderUsageStatus, PtyObservation, PtyStepAction, PtyStepRecord,
+    PtyStepVerificationStatus, TimeoutCancelPolicy, DIAG_MODEL_SWITCH_UNVERIFIED,
+    DIAG_PROVIDER_BOX_INVALID_REQUEST, DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+    DIAG_PROVIDER_CONTROL_ACTION_UNSUPPORTED, DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+    DIAG_PROVIDER_DURABLE_FINAL_MISSING, DIAG_PROVIDER_MCP_RECONNECT_UNVERIFIED,
+    DIAG_PROVIDER_MCP_STATUS_UNAVAILABLE, DIAG_PROVIDER_SESSION_ID_UNKNOWN,
     DIAG_PROVIDER_STATUS_UNAVAILABLE, DIAG_PROVIDER_TEXT_ONLY_VIOLATION,
     DIAG_PROVIDER_TURN_STALLED, DIAG_PROVIDER_TURN_TIMEOUT_CANCELLED,
     DIAG_PROVIDER_TURN_TIMEOUT_CANCEL_FAILED, DIAG_USAGE_UNKNOWN,
@@ -58,6 +59,9 @@ const AGY_MANUAL_KEY_NAMES: &[&str] = &[
     "left",
     "right",
     "tab",
+    "shift-tab",
+    "shift+tab",
+    "backtab",
     "backspace",
     "delete",
     "ctrl+c",
@@ -595,6 +599,8 @@ impl AgyProviderDriver {
         let observation = self.observe(slot_id).await;
         let status = self.pty.get_status(slot_id).await;
         result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
+        self.attach_session_identity(result, slot_id, &observation)
+            .await;
         let pty_observation = Self::pty_observation(slot_id, &observation);
         result.record_step(PtyStepRecord::new(
             pty_observation.clone(),
@@ -604,6 +610,100 @@ impl AgyProviderDriver {
             PtyStepVerificationStatus::Skipped,
         ));
         observation
+    }
+
+    async fn attach_session_identity(
+        &self,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+        observation: &AgyObservation,
+    ) {
+        let identity = self.resolve_session_identity(slot_id, observation).await;
+        if let Some(session_id) = identity.provider_session_id.clone() {
+            result.provider_conversation_id = Some(session_id);
+        }
+        if result.durable_source.is_none() {
+            result.durable_source = identity.durable_source.clone();
+        }
+        if let Some(slot_status) = result.slot_status.as_mut() {
+            slot_status["provider_session_identity"] = json!(identity.clone());
+        }
+        result.provider_session_identity = Some(identity);
+    }
+
+    async fn resolve_session_identity(
+        &self,
+        slot_id: &str,
+        observation: &AgyObservation,
+    ) -> ProviderSessionIdentity {
+        let workspace = agy_workspace_candidates(slot_id, observation)
+            .into_iter()
+            .next()
+            .map(|path| path.display().to_string());
+
+        if let Some(session_id) = agy_resume_id_from_screen(&observation.text) {
+            return ProviderSessionIdentity::resolved(
+                Some("agy_cli".to_string()),
+                CliEngine::Agy,
+                Some(slot_id.to_string()),
+                session_id.clone(),
+                "agy_exit_resume_screen",
+                agy_session_durable_source(&self.agy_home, &session_id),
+                workspace,
+                "exact",
+            );
+        }
+
+        if let Some((session_id, matched_workspace, source)) =
+            agy_last_conversation_for_slot(&self.agy_home, slot_id, observation).await
+        {
+            return ProviderSessionIdentity::resolved(
+                Some("agy_cli".to_string()),
+                CliEngine::Agy,
+                Some(slot_id.to_string()),
+                session_id.clone(),
+                source,
+                agy_session_durable_source(&self.agy_home, &session_id),
+                Some(matched_workspace),
+                "workspace_cache",
+            );
+        }
+
+        if let Some((session_id, matched_workspace, source)) =
+            agy_history_conversation_for_slot(&self.agy_home, slot_id, observation).await
+        {
+            return ProviderSessionIdentity::resolved(
+                Some("agy_cli".to_string()),
+                CliEngine::Agy,
+                Some(slot_id.to_string()),
+                session_id.clone(),
+                source,
+                agy_session_durable_source(&self.agy_home, &session_id),
+                Some(matched_workspace),
+                "workspace_history",
+            );
+        }
+
+        ProviderSessionIdentity::unknown(
+            Some("agy_cli".to_string()),
+            CliEngine::Agy,
+            Some(slot_id.to_string()),
+            "agy_session_identity_probe",
+            workspace,
+            ProviderBoxDiagnostic::warning(
+                DIAG_PROVIDER_SESSION_ID_UNKNOWN,
+                "AGY conversation id is not visible yet for this slot",
+                json!({
+                    "slot_id": slot_id,
+                    "sources_checked": [
+                        "agy_exit_resume_screen",
+                        "cache/last_conversations.json",
+                        "history.jsonl"
+                    ],
+                    "rule": "slot_id is operational identity; provider_session_id must come from AGY durable conversation metadata"
+                }),
+            ),
+        )
     }
 
     async fn observe(&self, slot_id: &str) -> AgyObservation {
@@ -2389,6 +2489,32 @@ impl AgyProviderDriver {
                 "blocked_kind": observation.snapshot.blocked_kind,
             }),
         ));
+        if is_private_agy_text_slot_id(slot_id) {
+            match self.pty.kill(slot_id).await {
+                Ok(()) => {
+                    self.slot_last_used.lock().await.remove(slot_id);
+                    result.add_diagnostic(ProviderBoxDiagnostic::warning(
+                        DIAG_PROVIDER_TURN_STALLED,
+                        "AGY private text-only slot was recycled after unverified cleanup",
+                        json!({
+                            "slot_id": slot_id,
+                            "recovery": "kill_hidden_replica_before_next_turn",
+                            "next_request": "cold_start_and_reverify_pinned_model",
+                        }),
+                    ));
+                }
+                Err(err) => {
+                    result.add_diagnostic(ProviderBoxDiagnostic::error(
+                        DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                        "AGY private text-only slot cleanup was unverified and recycle failed",
+                        json!({
+                            "slot_id": slot_id,
+                            "error": err.to_string(),
+                        }),
+                    ));
+                }
+            }
+        }
     }
 
     async fn exit_locked(&self, result: &mut ProviderBoxResult, slot_id: &str) {
@@ -3066,7 +3192,23 @@ impl ProviderDriver for AgyProviderDriver {
             {
                 AgyMonitorOutcome::Completed(final_turn) => {
                     result.status = ProviderBoxStatus::Completed;
-                    result.provider_conversation_id = Some(final_turn.session_id);
+                    result.provider_conversation_id = Some(final_turn.session_id.clone());
+                    result.provider_session_identity = Some(ProviderSessionIdentity::resolved(
+                        request
+                            .provider
+                            .clone()
+                            .or_else(|| Some("agy_cli".to_string())),
+                        CliEngine::Agy,
+                        Some(slot_id.clone()),
+                        final_turn.session_id.clone(),
+                        "agy_transcript_full_jsonl",
+                        Some(final_turn.transcript_path.clone()),
+                        cursor
+                            .workspace
+                            .as_ref()
+                            .map(|workspace| workspace.display().to_string()),
+                        "durable_final",
+                    ));
                     result.durable_source = Some(final_turn.transcript_path);
                     result.final_text = Some(final_turn.final_text);
                     self.cleanup_after_pure_text_locked(request, &mut result, &slot_id)
@@ -3244,6 +3386,17 @@ impl ProviderDriver for AgyProviderDriver {
                     json!({
                         "slot_id": slot_id,
                         "control_action": "set_permissions",
+                    }),
+                ));
+            }
+            ProviderControlAction::SetFastMode => {
+                result.status = ProviderBoxStatus::Unsupported;
+                result.add_diagnostic(ProviderBoxDiagnostic::unsupported(
+                    DIAG_PROVIDER_CONTROL_ACTION_UNSUPPORTED,
+                    "AGY does not support the Codex /fast control action",
+                    json!({
+                        "slot_id": slot_id,
+                        "control_action": "set_fast_mode",
                     }),
                 ));
             }
@@ -4161,6 +4314,7 @@ fn agy_manual_key_bytes(key: &str) -> Option<(&'static str, &'static str)> {
         "right" | "arrowright" => Some(("right", "\x1b[C")),
         "left" | "arrowleft" => Some(("left", "\x1b[D")),
         "tab" => Some(("tab", "\t")),
+        "shifttab" | "backtab" => Some(("shift-tab", "\x1b[Z")),
         "backspace" => Some(("backspace", "\x7f")),
         "delete" | "del" => Some(("delete", "\x1b[3~")),
         "ctrlc" => Some(("ctrl+c", "\x03")),
@@ -4509,6 +4663,167 @@ fn default_agy_home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+fn agy_resume_id_from_screen(text: &str) -> Option<String> {
+    fn resume_re() -> &'static Regex {
+        static RE: OnceLock<Regex> = OnceLock::new();
+        RE.get_or_init(|| {
+            Regex::new(
+                r"agy\s+--conversation(?:=|\s+)([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})",
+            )
+            .expect("valid AGY resume regex")
+        })
+    }
+    resume_re()
+        .captures(text)
+        .and_then(|captures| captures.get(1))
+        .map(|value| value.as_str().to_ascii_lowercase())
+}
+
+async fn agy_last_conversation_for_slot(
+    agy_home: &Path,
+    slot_id: &str,
+    observation: &AgyObservation,
+) -> Option<(String, String, String)> {
+    let path = agy_home.join("cache").join("last_conversations.json");
+    let data = tokio::fs::read_to_string(&path).await.ok()?;
+    let value = serde_json::from_str::<Value>(&data).ok()?;
+    let object = value.as_object()?;
+    let candidates = agy_workspace_candidate_strings(slot_id, observation);
+    for candidate in candidates {
+        if let Some(session_id) = object.get(&candidate).and_then(Value::as_str) {
+            if is_uuid_like(session_id) {
+                return Some((
+                    session_id.to_ascii_lowercase(),
+                    candidate,
+                    "agy_last_conversations_cache".to_string(),
+                ));
+            }
+        }
+    }
+    None
+}
+
+async fn agy_history_conversation_for_slot(
+    agy_home: &Path,
+    slot_id: &str,
+    observation: &AgyObservation,
+) -> Option<(String, String, String)> {
+    let path = agy_home.join("history.jsonl");
+    let data = tokio::fs::read_to_string(&path).await.ok()?;
+    let candidates = agy_workspace_candidate_strings(slot_id, observation);
+    let mut matched = None;
+    for line in data.lines().filter(|line| !line.trim().is_empty()) {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(session_id) = value.get("conversationId").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(workspace) = value.get("workspace").and_then(Value::as_str) else {
+            continue;
+        };
+        if candidates.iter().any(|candidate| candidate == workspace) && is_uuid_like(session_id) {
+            matched = Some((
+                session_id.to_ascii_lowercase(),
+                workspace.to_string(),
+                "agy_history_jsonl".to_string(),
+            ));
+        }
+    }
+    matched
+}
+
+fn agy_session_durable_source(agy_home: &Path, session_id: &str) -> Option<String> {
+    let pb = agy_home
+        .join("conversations")
+        .join(format!("{session_id}.pb"));
+    if pb.exists() {
+        return Some(pb.display().to_string());
+    }
+    let transcript = agy_home
+        .join("brain")
+        .join(session_id)
+        .join(".system_generated")
+        .join("logs")
+        .join("transcript_full.jsonl");
+    if transcript.exists() {
+        return Some(transcript.display().to_string());
+    }
+    None
+}
+
+fn agy_workspace_candidate_strings(slot_id: &str, observation: &AgyObservation) -> Vec<String> {
+    let mut values = Vec::new();
+    for candidate in agy_workspace_candidates(slot_id, observation) {
+        push_unique_workspace_string(&mut values, candidate.display().to_string());
+        if let Ok(canonical) = candidate.canonicalize() {
+            push_unique_workspace_string(&mut values, canonical.display().to_string());
+        }
+    }
+    values
+}
+
+fn agy_workspace_candidates(slot_id: &str, observation: &AgyObservation) -> Vec<PathBuf> {
+    let mut values = Vec::new();
+    if is_private_agy_text_slot_id(slot_id) {
+        push_unique_workspace_path(&mut values, agy_text_only_workspace(slot_id));
+    }
+    if let Some(cwd) = observation
+        .snapshot
+        .screen_identity
+        .as_ref()
+        .and_then(|identity| identity.cwd.as_deref())
+    {
+        push_unique_workspace_path(&mut values, expand_provider_cwd(cwd));
+    }
+    values
+}
+
+fn expand_provider_cwd(raw: &str) -> PathBuf {
+    let trimmed = raw.trim();
+    if trimmed == "~" {
+        return dirs::home_dir().unwrap_or_else(|| PathBuf::from(trimmed));
+    }
+    if let Some(rest) = trimmed.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest);
+        }
+    }
+    let path = PathBuf::from(trimmed);
+    if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    }
+}
+
+fn push_unique_workspace_path(values: &mut Vec<PathBuf>, path: PathBuf) {
+    if !values.iter().any(|existing| existing == &path) {
+        values.push(path);
+    }
+}
+
+fn push_unique_workspace_string(values: &mut Vec<String>, value: String) {
+    if !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
+}
+
+fn is_uuid_like(value: &str) -> bool {
+    fn uuid_re() -> &'static Regex {
+        static RE: OnceLock<Regex> = OnceLock::new();
+        RE.get_or_init(|| {
+            Regex::new(
+                r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            )
+            .expect("valid UUID regex")
+        })
+    }
+    uuid_re().is_match(value.trim())
+}
+
 #[cfg(test)]
 mod tests {
     use missiond_core::agy_cli::{AgySession, AgyStep, AgyToolCall};
@@ -4542,6 +4857,43 @@ mod tests {
             thinking: None,
             tool_calls: None,
         }
+    }
+
+    #[test]
+    fn agy_provider_session_identity_reads_exit_resume_line() {
+        let text = "Resume: agy --conversation=917a5c67-e5b7-467a-8cfa-0d142faa474a (or -c)";
+
+        assert_eq!(
+            agy_resume_id_from_screen(text).as_deref(),
+            Some("917a5c67-e5b7-467a-8cfa-0d142faa474a")
+        );
+    }
+
+    #[tokio::test]
+    async fn agy_provider_session_identity_reads_last_conversation_cache() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("cache")).expect("cache dir");
+        let slot_id = "slot-agy-claude-opus-46-thinking-a";
+        let workspace = agy_text_only_workspace(slot_id).display().to_string();
+        let mut cache = serde_json::Map::new();
+        cache.insert(
+            workspace.clone(),
+            Value::String("66c734c2-3da2-4d92-bd63-454af851f57e".to_string()),
+        );
+        std::fs::write(
+            dir.path().join("cache").join("last_conversations.json"),
+            Value::Object(cache).to_string(),
+        )
+        .expect("cache");
+        let obs = observation(&[]);
+
+        let resolved = agy_last_conversation_for_slot(dir.path(), slot_id, &obs)
+            .await
+            .expect("session identity");
+
+        assert_eq!(resolved.0, "66c734c2-3da2-4d92-bd63-454af851f57e");
+        assert_eq!(resolved.1, workspace);
+        assert_eq!(resolved.2, "agy_last_conversations_cache");
     }
 
     #[test]

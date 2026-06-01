@@ -6,7 +6,7 @@ use missiond_core::types::CliEngine;
 use serde_json::json;
 
 use super::artifact::ProviderBoxArtifactWriter;
-use super::driver::{ProviderDriver, UnsupportedProviderDriver};
+use super::driver::{ProviderDriver, ProviderDriverCapabilities, UnsupportedProviderDriver};
 use super::types::{
     BoxCommand, ProviderBoxDiagnostic, ProviderBoxResult, ProviderInteractionRequest,
 };
@@ -82,6 +82,10 @@ impl ProviderInteractionBox {
         }
 
         Ok(result)
+    }
+
+    pub(crate) fn driver_capabilities(&self, engine: CliEngine) -> ProviderDriverCapabilities {
+        self.driver_for(engine).capabilities()
     }
 
     fn driver_for(&self, engine: CliEngine) -> Arc<dyn ProviderDriver> {

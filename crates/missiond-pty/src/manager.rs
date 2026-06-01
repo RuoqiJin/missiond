@@ -1430,12 +1430,26 @@ fn enforce_core_spawn_sandbox_policy(slot: &Slot, options: &mut PTYSpawnOptions)
                 .approval_policy
                 .get_or_insert_with(|| "plan".to_string());
         }
-        CliEngine::ClaudeCode | CliEngine::Agy => {
+        CliEngine::ClaudeCode => {
+            let explicit_allow = options
+                .extra_env
+                .get("MISSIOND_ALLOW_BROAD_SKIP_PERMISSIONS")
+                .is_some_and(|value| value == "true");
+            if options.dangerously_skip_permissions && !privileged_role && !explicit_allow {
+                warn!(
+                    slot_id = %slot.id,
+                    role = %slot.role,
+                    "PTY core spawn policy: disabling Claude Code broad skip-permissions without an explicit capability override"
+                );
+                options.dangerously_skip_permissions = false;
+            }
+        }
+        CliEngine::Agy => {
             if options.dangerously_skip_permissions && !privileged_role {
                 warn!(
                     slot_id = %slot.id,
                     role = %slot.role,
-                    "PTY core spawn policy: disabling broad skip-permissions for non-privileged worker"
+                    "PTY core spawn policy: disabling Agy broad skip-permissions for non-privileged worker"
                 );
                 options.dangerously_skip_permissions = false;
             }
@@ -1548,6 +1562,23 @@ mod tests {
         enforce_core_spawn_sandbox_policy(&slot, &mut options);
 
         assert!(!options.dangerously_skip_permissions);
+    }
+
+    #[test]
+    fn core_spawn_policy_allows_claude_provider_box_explicit_skip_permissions() {
+        let slot = test_slot("provider-box-claude-code", CliEngine::ClaudeCode);
+        let mut options = PTYSpawnOptions {
+            dangerously_skip_permissions: true,
+            extra_env: HashMap::from([(
+                "MISSIOND_ALLOW_BROAD_SKIP_PERMISSIONS".to_string(),
+                "true".to_string(),
+            )]),
+            ..Default::default()
+        };
+
+        enforce_core_spawn_sandbox_policy(&slot, &mut options);
+
+        assert!(options.dangerously_skip_permissions);
     }
 
     #[test]

@@ -6,6 +6,7 @@ use missiond_core::{ProviderBoxHttpRequest, ProviderBoxHttpResponse};
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
+use super::driver::ProviderDriverCapabilities;
 use super::runtime::ProviderInteractionBox;
 use super::types::{
     BoxCommand, ModelSwitchPolicy, ProviderBoxDiagnostic, ProviderBoxResult, ProviderBoxStatus,
@@ -36,6 +37,9 @@ const PTY_STEP_ALLOWED_KEYS: &[&str] = &[
     "left",
     "right",
     "tab",
+    "shift-tab",
+    "shift+tab",
+    "backtab",
     "backspace",
     "delete",
     "ctrl+c",
@@ -89,6 +93,14 @@ impl ProviderBoxHttpAdapter {
                 ("GET", "status") | ("POST", "status") => {
                     self.handle_slot_status(request, slot_id, false).await
                 }
+                ("GET", "session")
+                | ("POST", "session")
+                | ("GET", "session/identity")
+                | ("POST", "session/identity")
+                | ("GET", "actions/session")
+                | ("POST", "actions/session") => {
+                    self.handle_slot_status(request, slot_id, false).await
+                }
                 ("GET", "screen")
                 | ("POST", "screen")
                 | ("GET", "observe")
@@ -108,6 +120,16 @@ impl ProviderBoxHttpAdapter {
                 | ("POST", "actions/pty-step")
                 | ("POST", "key")
                 | ("POST", "actions/key") => self.handle_slot_pty_step(request, slot_id).await,
+                ("GET", "capabilities")
+                | ("POST", "capabilities")
+                | ("GET", "actions/capabilities")
+                | ("POST", "actions/capabilities") => {
+                    self.handle_slot_capabilities(request, slot_id).await
+                }
+                ("POST", "restart")
+                | ("POST", "respawn")
+                | ("POST", "actions/restart")
+                | ("POST", "actions/respawn") => self.handle_slot_restart(request, slot_id).await,
                 ("POST", "clear")
                 | ("POST", "clear-screen")
                 | ("POST", "actions/clear")
@@ -125,11 +147,21 @@ impl ProviderBoxHttpAdapter {
                 | ("POST", "actions/permission") => {
                     self.handle_slot_permissions(request, slot_id, None).await
                 }
+                ("POST", "fast") | ("POST", "actions/fast") => {
+                    self.handle_slot_fast_mode(request, slot_id, None).await
+                }
                 _ if request.method == "POST"
-                    && slot_permission_mode_from_suffix(&suffix).is_some() =>
+                    && slot_permission_mode_raw_from_suffix(&suffix).is_some() =>
                 {
-                    let mode = slot_permission_mode_from_suffix(&suffix);
+                    let engine = engine_from_body_or_slot(&request.body, &slot_id);
+                    let mode = slot_permission_mode_raw_from_suffix(&suffix).and_then(|raw| {
+                        normalize_provider_box_permission_mode_for_engine(engine, &raw)
+                    });
                     self.handle_slot_permissions(request, slot_id, mode).await
+                }
+                _ if request.method == "POST" && slot_fast_mode_from_suffix(&suffix).is_some() => {
+                    let mode = slot_fast_mode_from_suffix(&suffix);
+                    self.handle_slot_fast_mode(request, slot_id, mode).await
                 }
                 ("POST", "switch-model") | ("POST", "actions/switch-model") => {
                     self.handle_slot_switch_model(request, slot_id).await
@@ -294,6 +326,109 @@ impl ProviderBoxHttpAdapter {
             .execute(interaction)
             .await
             .map_err(|err| err.to_string())?;
+        let mut result = result;
+        result.capabilities = Some(provider_slot_capabilities_value(
+            result.engine,
+            &self.boxed.driver_capabilities(result.engine),
+        ));
+        Ok(result_response(result))
+    }
+
+    async fn handle_slot_capabilities(
+        &self,
+        request: ProviderBoxHttpRequest,
+        slot_id: String,
+    ) -> Result<ProviderBoxHttpResponse, String> {
+        let engine = engine_from_body_or_slot(&request.body, &slot_id);
+        Ok(json_response(
+            200,
+            json!({
+                "schema": "missiond.provider-box.slot-capabilities.v1",
+                "status": "completed",
+                "slot_id": slot_id,
+                "engine": engine,
+                "capabilities": provider_slot_capabilities_value(
+                    engine,
+                    &self.boxed.driver_capabilities(engine),
+                )
+            }),
+        ))
+    }
+
+    async fn handle_slot_restart(
+        &self,
+        request: ProviderBoxHttpRequest,
+        slot_id: String,
+    ) -> Result<ProviderBoxHttpResponse, String> {
+        let engine = engine_from_body_or_slot(&request.body, &slot_id);
+        let mut interaction = ProviderInteractionRequest::new(BoxCommand::Status, engine);
+        interaction.provider = string_field(&request.body, "provider").or_else(|| {
+            Some(
+                match interaction.engine {
+                    CliEngine::Codex => "codex_cli",
+                    CliEngine::Agy => "agy_cli",
+                    CliEngine::ClaudeCode => "claude_code",
+                    CliEngine::Gemini => "gemini_cli",
+                }
+                .to_string(),
+            )
+        });
+        interaction.slot_id = Some(slot_id.clone());
+        interaction.model = string_field(&request.body, "model");
+        interaction.model_profile = string_field(&request.body, "model_profile")
+            .or_else(|| string_field(&request.body, "reasoning_effort"))
+            .or_else(|| string_field(&request.body, "model_reasoning_effort"));
+        interaction.dangerously_bypass_approvals_and_sandbox =
+            bool_field(&request.body, "dangerously_bypass_approvals_and_sandbox")
+                .or_else(|| bool_field(&request.body, "dangerously_skip_permissions"))
+                .or_else(|| bool_field(&request.body, "dangerously_bypass"))
+                .or_else(|| bool_field(&request.body, "bypass_approvals_and_sandbox"))
+                .or_else(|| bool_field(&request.body, "bypass_mode"))
+                .unwrap_or(false);
+        interaction.cwd = string_field(&request.body, "cwd");
+        interaction.project_root = string_field(&request.body, "project_root");
+        interaction.tool_policy = tool_policy_from_body(&request.body);
+        interaction.correlation_id = string_field(&request.body, "correlation_id")
+            .unwrap_or_else(|| interaction.correlation_id.clone());
+        interaction.desired_worker = Some(json!({
+            "spawn_if_missing": true,
+            "force_restart": true,
+        }));
+
+        if !bool_field(&request.body, "confirm_destroy_context")
+            .or_else(|| bool_field(&request.body, "confirm_restart"))
+            .or_else(|| bool_field(&request.body, "destroy_context_confirmed"))
+            .unwrap_or(false)
+        {
+            let mut result = ProviderBoxResult::base(&interaction, ProviderBoxStatus::Blocked);
+            result.slot_id = Some(slot_id);
+            result.capabilities = Some(provider_slot_capabilities_value(
+                result.engine,
+                &self.boxed.driver_capabilities(result.engine),
+            ));
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                "Slot restart requires confirm_destroy_context=true because the provider context may be valuable",
+                json!({
+                    "required": {
+                        "confirm_destroy_context": true
+                    },
+                    "safe_alternative": "Call status/session/capabilities first, or ask the operator/user before destroying context."
+                }),
+            ));
+            return Ok(result_response(result));
+        }
+
+        let result = self
+            .boxed
+            .execute(interaction)
+            .await
+            .map_err(|err| err.to_string())?;
+        let mut result = result;
+        result.capabilities = Some(provider_slot_capabilities_value(
+            result.engine,
+            &self.boxed.driver_capabilities(result.engine),
+        ));
         Ok(result_response(result))
     }
 
@@ -437,12 +572,72 @@ impl ProviderBoxHttpAdapter {
         interaction.control_action = Some(ProviderControlAction::SetPermissions);
         interaction.correlation_id = string_field(&request.body, "correlation_id")
             .unwrap_or_else(|| interaction.correlation_id.clone());
-        let permission_mode = mode_from_path
+        let raw_permission_mode = mode_from_path
             .or_else(|| string_field(&request.body, "permission_mode"))
             .or_else(|| string_field(&request.body, "mode"))
             .or_else(|| string_field(&request.body, "target_permission_mode"));
+        let permission_mode = raw_permission_mode
+            .as_deref()
+            .and_then(|value| {
+                normalize_provider_box_permission_mode_for_engine(interaction.engine, value)
+            })
+            .or(raw_permission_mode);
         interaction.desired_worker = Some(json!({
             "permission_mode": permission_mode,
+            "spawn_if_missing": bool_field(&request.body, "spawn_if_missing")
+                .or_else(|| bool_field(&request.body, "spawn"))
+                .unwrap_or(true),
+            "force_restart": bool_field(&request.body, "force_restart")
+                .or_else(|| bool_field(&request.body, "restart"))
+                .or_else(|| bool_field(&request.body, "respawn"))
+                .unwrap_or(false),
+        }));
+        let result = self
+            .boxed
+            .execute(interaction)
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok(result_response(result))
+    }
+
+    async fn handle_slot_fast_mode(
+        &self,
+        request: ProviderBoxHttpRequest,
+        slot_id: String,
+        mode_from_path: Option<String>,
+    ) -> Result<ProviderBoxHttpResponse, String> {
+        let mut interaction = ProviderInteractionRequest::new(
+            BoxCommand::ControlAction,
+            engine_from_body_or_slot(&request.body, &slot_id),
+        );
+        interaction.provider = string_field(&request.body, "provider").or_else(|| {
+            Some(
+                match interaction.engine {
+                    CliEngine::Codex => "codex_cli",
+                    CliEngine::Agy => "agy_cli",
+                    CliEngine::ClaudeCode => "claude_code",
+                    CliEngine::Gemini => "gemini_cli",
+                }
+                .to_string(),
+            )
+        });
+        interaction.slot_id = Some(slot_id);
+        interaction.cwd = string_field(&request.body, "cwd");
+        interaction.project_root = string_field(&request.body, "project_root");
+        interaction.control_action = Some(ProviderControlAction::SetFastMode);
+        interaction.correlation_id = string_field(&request.body, "correlation_id")
+            .unwrap_or_else(|| interaction.correlation_id.clone());
+        let fast_mode = mode_from_path
+            .map(Value::String)
+            .or_else(|| request.body.get("fast_mode").cloned())
+            .or_else(|| request.body.get("target_fast_mode").cloned())
+            .or_else(|| request.body.get("service_tier").cloned())
+            .or_else(|| request.body.get("fast_enabled").cloned())
+            .or_else(|| request.body.get("enabled").cloned())
+            .or_else(|| request.body.get("fast").cloned())
+            .or_else(|| request.body.get("mode").cloned());
+        interaction.desired_worker = Some(json!({
+            "fast_mode": fast_mode,
             "spawn_if_missing": bool_field(&request.body, "spawn_if_missing")
                 .or_else(|| bool_field(&request.body, "spawn"))
                 .unwrap_or(true),
@@ -479,8 +674,16 @@ impl ProviderBoxHttpAdapter {
         interaction.model = string_field(&request.body, "model")
             .or_else(|| string_field(&request.body, "target_model"));
         interaction.model_profile = string_field(&request.body, "model_profile");
+        interaction.dangerously_bypass_approvals_and_sandbox =
+            bool_field(&request.body, "dangerously_bypass_approvals_and_sandbox")
+                .or_else(|| bool_field(&request.body, "dangerously_skip_permissions"))
+                .or_else(|| bool_field(&request.body, "dangerously_bypass"))
+                .or_else(|| bool_field(&request.body, "bypass_approvals_and_sandbox"))
+                .or_else(|| bool_field(&request.body, "bypass_mode"))
+                .unwrap_or(false);
         interaction.cwd = string_field(&request.body, "cwd");
         interaction.project_root = string_field(&request.body, "project_root");
+        interaction.tool_policy = tool_policy_from_body(&request.body);
         interaction.correlation_id = string_field(&request.body, "correlation_id")
             .unwrap_or_else(|| interaction.correlation_id.clone());
         interaction.model_switch_policy = Some(ModelSwitchPolicy {
@@ -491,6 +694,17 @@ impl ProviderBoxHttpAdapter {
             allow_respawn: bool_field(&request.body, "allow_respawn").unwrap_or(true),
             require_verification: bool_field(&request.body, "require_verification").unwrap_or(true),
         });
+        interaction.desired_worker = Some(json!({
+            "spawn_if_missing": bool_field(&request.body, "spawn_if_missing")
+                .or_else(|| bool_field(&request.body, "spawn"))
+                .or_else(|| bool_field(&request.body, "allow_respawn"))
+                .unwrap_or(true),
+            "force_restart": bool_field(&request.body, "force_restart")
+                .or_else(|| bool_field(&request.body, "restart"))
+                .or_else(|| bool_field(&request.body, "respawn"))
+                .unwrap_or(false),
+            "dangerously_skip_permissions": interaction.dangerously_bypass_approvals_and_sandbox,
+        }));
         let result = self
             .boxed
             .execute(interaction)
@@ -767,7 +981,11 @@ impl ProviderBoxHttpAdapter {
                     ));
                     return Ok(result_response(result));
                 }
-                interaction.slot_id = Some(self.next_private_agy_slot_for_model(model).await);
+                let lane = provider_box_lane(&request.body);
+                interaction.slot_id = Some(
+                    self.next_private_agy_slot_for_model_and_lane(model, lane.as_deref())
+                        .await,
+                );
             }
         } else if has_explicit_slot && interaction.slot_id.is_none() {
             interaction.slot_id = header_slot_id(&request);
@@ -821,7 +1039,16 @@ impl ProviderBoxHttpAdapter {
     }
 
     async fn next_private_agy_slot_for_model(&self, model: &str) -> String {
-        let slot_ids = private_agy_slot_ids_for_model(model);
+        self.next_private_agy_slot_for_model_and_lane(model, None)
+            .await
+    }
+
+    async fn next_private_agy_slot_for_model_and_lane(
+        &self,
+        model: &str,
+        lane: Option<&str>,
+    ) -> String {
+        let slot_ids = private_agy_slot_ids_for_model_and_lane(model, lane);
         if slot_ids.len() <= 1 {
             return slot_ids
                 .into_iter()
@@ -829,7 +1056,7 @@ impl ProviderBoxHttpAdapter {
                 .unwrap_or_else(|| format!("slot-agy-{}", slug_model(model)));
         }
 
-        let pool_id = agy_slot_pool_id(model);
+        let pool_id = agy_slot_pool_id_for_lane(model, lane);
         let mut cursors = self.agy_slot_pool_cursors.lock().await;
         let cursor = cursors.entry(pool_id).or_insert(0);
         let slot_id = slot_ids[*cursor % slot_ids.len()].clone();
@@ -914,6 +1141,10 @@ fn text_only_interaction_from_body(body: &Value) -> Option<ProviderInteractionRe
     interaction.model_profile = string_field(body, "model_profile")
         .or_else(|| string_field(body, "reasoning_effort"))
         .or_else(|| string_field(body, "model_reasoning_effort"));
+    interaction.provider_box_lane = provider_box_lane(body);
+    interaction.xjp_request_stage = string_field(body, "xjp_request_stage")
+        .or_else(|| string_field(body, "pipeline_stage"))
+        .or_else(|| string_field(body, "stage"));
     interaction.slot_id = slot_id;
     interaction.dangerously_bypass_approvals_and_sandbox =
         bool_field(body, "dangerously_bypass_approvals_and_sandbox")
@@ -1190,6 +1421,11 @@ fn parse_slot_endpoint(path: &str) -> Option<(String, String)> {
 }
 
 fn slot_permission_mode_from_suffix(suffix: &str) -> Option<String> {
+    let mode = slot_permission_mode_raw_from_suffix(suffix)?;
+    normalize_provider_box_permission_mode(&mode)
+}
+
+fn slot_permission_mode_raw_from_suffix(suffix: &str) -> Option<String> {
     let normalized = suffix.trim().trim_matches('/').to_ascii_lowercase();
     let mode = normalized
         .strip_prefix("permissions/")
@@ -1210,7 +1446,41 @@ fn slot_permission_mode_from_suffix(suffix: &str) -> Option<String> {
     if mode.is_empty() {
         return None;
     }
-    normalize_provider_box_permission_mode(mode)
+    Some(mode.to_string())
+}
+
+fn slot_fast_mode_from_suffix(suffix: &str) -> Option<String> {
+    let normalized = suffix.trim().trim_matches('/').to_ascii_lowercase();
+    let mode = normalized
+        .strip_prefix("fast/")
+        .or_else(|| normalized.strip_prefix("actions/fast/"))
+        .or_else(|| {
+            if matches!(normalized.as_str(), "fast" | "actions/fast") {
+                Some("")
+            } else {
+                None
+            }
+        })?;
+    let mode = mode.trim();
+    if mode.is_empty() {
+        return None;
+    }
+    normalize_provider_box_fast_mode(mode)
+}
+
+fn normalize_provider_box_fast_mode(value: &str) -> Option<String> {
+    let normalized = value
+        .trim()
+        .to_ascii_lowercase()
+        .replace('_', "-")
+        .replace(' ', "-");
+    match normalized.as_str() {
+        "enable" | "enabled" | "on" | "true" | "fast" | "priority" => Some("enabled".to_string()),
+        "disable" | "disabled" | "off" | "false" | "default" | "normal" | "standard" => {
+            Some("disabled".to_string())
+        }
+        _ => None,
+    }
 }
 
 fn normalize_provider_box_permission_mode(value: &str) -> Option<String> {
@@ -1223,6 +1493,38 @@ fn normalize_provider_box_permission_mode(value: &str) -> Option<String> {
         "default" => Some("Default".to_string()),
         "auto-review" | "autoreview" | "auto" => Some("Auto-review".to_string()),
         "full-access" | "fullaccess" | "full" => Some("Full Access".to_string()),
+        _ => None,
+    }
+}
+
+fn normalize_provider_box_permission_mode_for_engine(
+    engine: CliEngine,
+    value: &str,
+) -> Option<String> {
+    match engine {
+        CliEngine::ClaudeCode => normalize_provider_box_claude_code_permission_mode(value),
+        CliEngine::Codex => normalize_provider_box_permission_mode(value),
+        _ => normalize_provider_box_permission_mode(value)
+            .or_else(|| normalize_provider_box_claude_code_permission_mode(value)),
+    }
+}
+
+fn normalize_provider_box_claude_code_permission_mode(value: &str) -> Option<String> {
+    let normalized = value
+        .trim()
+        .to_ascii_lowercase()
+        .replace('_', "-")
+        .replace(' ', "-");
+    match normalized.as_str() {
+        "auto" | "auto-mode" | "automode" | "auto-review" => Some("auto".to_string()),
+        "default" | "ask" | "ask-first" | "normal" => Some("default".to_string()),
+        "accept-edits" | "accept-edits-mode" | "acceptedits" | "accept" | "edits" => {
+            Some("accept_edits".to_string())
+        }
+        "plan" | "plan-mode" => Some("plan".to_string()),
+        "bypass" | "bypass-permissions" | "bypasspermissions" | "dangerously-skip-permissions" => {
+            Some("bypass_permissions".to_string())
+        }
         _ => None,
     }
 }
@@ -1370,6 +1672,7 @@ fn result_response(result: ProviderBoxResult) -> ProviderBoxHttpResponse {
             "engine": result.engine,
             "slot_id": result.slot_id,
             "provider_conversation_id": result.provider_conversation_id,
+            "provider_session_identity": result.provider_session_identity,
             "durable_source": result.durable_source,
             "final_text": final_text,
             "slot_status": result.slot_status,
@@ -1379,6 +1682,7 @@ fn result_response(result: ProviderBoxResult) -> ProviderBoxHttpResponse {
             "router_export": result.router_export,
             "model_switch_result": result.model_switch_result,
             "mcp_status": result.mcp_status,
+            "capabilities": result.capabilities,
             "diagnostics": result.diagnostics,
             "step_records": result.step_records,
             "artifact_hash": result.artifact_hash
@@ -1467,6 +1771,9 @@ fn result_response(result: ProviderBoxResult) -> ProviderBoxHttpResponse {
                 "diagnostics": result.diagnostics
             },
             "slot_status": result.slot_status,
+            "provider_conversation_id": result.provider_conversation_id,
+            "provider_session_identity": result.provider_session_identity,
+            "durable_source": result.durable_source,
             "screen": screen,
             "step_records": result.step_records,
             "usage_snapshot": result.usage_snapshot,
@@ -1474,10 +1781,154 @@ fn result_response(result: ProviderBoxResult) -> ProviderBoxHttpResponse {
             "router_export": result.router_export,
             "model_switch_result": result.model_switch_result,
             "mcp_status": result.mcp_status,
+            "capabilities": result.capabilities,
             "artifact_hash": result.artifact_hash
         })
     };
     json_response(status, body)
+}
+
+fn provider_slot_capabilities_value(
+    engine: CliEngine,
+    driver: &ProviderDriverCapabilities,
+) -> Value {
+    let slot_controls = match engine {
+        CliEngine::Codex => json!({
+            "spawn": true,
+            "restart": {
+                "supported": true,
+                "requires": {
+                    "confirm_destroy_context": true
+                }
+            },
+            "status": true,
+            "session_identity": true,
+            "observe": true,
+            "input": true,
+            "pty_step": true,
+            "clear_input": true,
+            "clear_screen": true,
+            "exit": {
+                "supported": true,
+                "command": "/exit",
+                "verification": "previous_pid_exited_or_slot_restarted"
+            },
+            "permissions": ["Default", "Auto-review", "Full Access"],
+            "fast": ["enabled", "disabled"],
+            "usage_refresh": true,
+            "mcp_status": true,
+            "mcp_reconnect": {
+                "supported": false,
+                "restart_required": true,
+                "hint": "Codex CLI does not hot-reload MCP config from /mcp; restart the PTY slot explicitly when context loss is acceptable."
+            },
+            "switch_model": false,
+            "model_catalog": false
+        }),
+        CliEngine::Agy => json!({
+            "spawn": true,
+            "restart": {
+                "supported": true,
+                "requires": {
+                    "confirm_destroy_context": true
+                }
+            },
+            "status": true,
+            "session_identity": true,
+            "observe": true,
+            "input": true,
+            "pty_step": true,
+            "clear_input": true,
+            "clear_screen": true,
+            "exit": {
+                "supported": true,
+                "command": "/exit"
+            },
+            "usage_refresh": true,
+            "mcp_status": true,
+            "mcp_reconnect": driver.mcp_reconnect,
+            "switch_model": driver.switch_model,
+            "model_catalog": driver.model_catalog
+        }),
+        CliEngine::ClaudeCode => json!({
+            "spawn": true,
+            "restart": {
+                "supported": true,
+                "requires": {
+                    "confirm_destroy_context": true
+                }
+            },
+            "status": driver.status,
+            "session_identity": true,
+            "observe": true,
+            "input": false,
+            "pty_step": false,
+            "clear_input": false,
+            "clear_screen": false,
+            "exit": false,
+            "permissions": {
+                "supported": driver.control_action,
+                "modes": ["auto", "default", "accept_edits", "plan"],
+                "cycle_key": "shift-tab",
+                "cycle": ["auto", "default", "accept_edits", "plan"],
+                "verification": "screen_identity.permission_mode",
+                "bypass_permissions": {
+                    "recognized": true,
+                    "set_by": "spawn/restart with dangerously_skip_permissions=true",
+                    "switch_supported": false
+                }
+            },
+            "usage_refresh": driver.usage_probe,
+            "mcp_status": driver.mcp_status,
+            "mcp_reconnect": driver.mcp_reconnect,
+            "dangerously_skip_permissions": {
+                "supported": true,
+                "launch_command": "claude --dangerously-skip-permissions",
+                "request_fields": [
+                    "dangerously_skip_permissions",
+                    "dangerously_bypass",
+                    "dangerously_bypass_approvals_and_sandbox",
+                    "bypass_mode"
+                ],
+                "scope": "provider-box ClaudeCode PTY spawn/restart only"
+            },
+            "switch_model": {
+                "supported": driver.switch_model,
+                "command": "/model <model_id>",
+                "allowed_model_ids": ["claude-opus-4-6", "claude-sonnet-4-6"],
+                "verification": "screen_identity.current_model"
+            },
+            "model_catalog": driver.model_catalog
+        }),
+        _ => json!({
+            "spawn": true,
+            "restart": {
+                "supported": true,
+                "requires": {
+                    "confirm_destroy_context": true
+                }
+            },
+            "status": driver.status,
+            "input": driver.control_action,
+            "pty_step": driver.pty_step,
+            "clear_screen": driver.control_action,
+            "exit": driver.control_action,
+            "usage_refresh": driver.usage_probe,
+            "mcp_status": driver.mcp_status,
+            "mcp_reconnect": driver.mcp_reconnect,
+            "switch_model": driver.switch_model,
+            "model_catalog": driver.model_catalog
+        }),
+    };
+
+    json!({
+        "schema": "missiond.provider-box.slot-capabilities.v1",
+        "engine": engine,
+        "driver": driver,
+        "slot_controls": slot_controls,
+        "router_public": false,
+        "public_rule": "slot-scoped controls are internal/operator surfaces; router-facing callers use logical model/task APIs."
+    })
 }
 
 fn latest_screen_observation(result: &ProviderBoxResult) -> Value {
@@ -2047,8 +2498,17 @@ fn router_model_sources(catalog: &ProviderModelCatalog, export: &ProviderRouterE
 }
 
 fn private_agy_slot_ids_for_model(model: &str) -> Vec<String> {
+    private_agy_slot_ids_for_model_and_lane(model, None)
+}
+
+fn private_agy_slot_ids_for_model_and_lane(model: &str, lane: Option<&str>) -> Vec<String> {
     let slug = slug_model(model);
-    vec![format!("slot-agy-{slug}-a"), format!("slot-agy-{slug}-b")]
+    let lane = lane.and_then(sanitize_slot_lane);
+    let base = match lane {
+        Some(lane) => format!("slot-agy-{slug}-{lane}"),
+        None => format!("slot-agy-{slug}"),
+    };
+    vec![format!("{base}-a"), format!("{base}-b")]
 }
 
 fn is_agy_text_model_exportable(model: &str) -> bool {
@@ -2056,7 +2516,43 @@ fn is_agy_text_model_exportable(model: &str) -> bool {
 }
 
 fn agy_slot_pool_id(model: &str) -> String {
-    format!("slot-pool-agy-{}", slug_model(model))
+    agy_slot_pool_id_for_lane(model, None)
+}
+
+fn agy_slot_pool_id_for_lane(model: &str, lane: Option<&str>) -> String {
+    let mut pool_id = format!("slot-pool-agy-{}", slug_model(model));
+    if let Some(lane) = lane.and_then(sanitize_slot_lane) {
+        pool_id.push('-');
+        pool_id.push_str(&lane);
+    }
+    pool_id
+}
+
+fn provider_box_lane(body: &Value) -> Option<String> {
+    string_field(body, "provider_box_lane")
+        .or_else(|| string_field(body, "xjp_request_stage"))
+        .or_else(|| string_field(body, "pipeline_stage"))
+        .or_else(|| string_field(body, "stage"))
+        .and_then(|value| sanitize_slot_lane(&value))
+}
+
+fn sanitize_slot_lane(value: &str) -> Option<String> {
+    let mut slug = String::new();
+    let mut last_was_sep = false;
+    for ch in value.trim().to_ascii_lowercase().chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch);
+            last_was_sep = false;
+        } else if !last_was_sep {
+            slug.push('-');
+            last_was_sep = true;
+        }
+    }
+    let slug = slug.trim_matches('-').to_string();
+    if slug.is_empty() || slug == "default" {
+        return None;
+    }
+    Some(slug.chars().take(48).collect())
 }
 
 fn redact_private_slot_details(result: &mut ProviderBoxResult, _model: &str) {
@@ -2213,6 +2709,8 @@ fn pty_step_key_allowed(key: &str) -> bool {
             | "right"
             | "arrowright"
             | "tab"
+            | "shifttab"
+            | "backtab"
             | "backspace"
             | "delete"
             | "del"
@@ -2246,6 +2744,8 @@ mod tests {
             "model": "Gemini 3.5 Flash (High)",
             "slot_id": "slot-agy-gemini-35-flash-high",
             "correlation_id": "corr-test",
+            "provider_box_lane": "chat_json_planning",
+            "xjp_request_stage": "chat_json_planning",
             "messages": [{"role": "user", "content": "hello"}],
             "pure_text": true
         });
@@ -2258,6 +2758,14 @@ mod tests {
             Some("slot-agy-gemini-35-flash-high")
         );
         assert_eq!(request.correlation_id, "corr-test");
+        assert_eq!(
+            request.provider_box_lane.as_deref(),
+            Some("chat-json-planning")
+        );
+        assert_eq!(
+            request.xjp_request_stage.as_deref(),
+            Some("chat_json_planning")
+        );
         assert_eq!(request.prompt.as_deref(), Some("hello"));
         assert!(request.no_tools);
         let policy = request.model_switch_policy.expect("model policy");
@@ -2645,6 +3153,41 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn logical_private_agy_slot_pool_isolates_request_lanes() {
+        let adapter = ProviderBoxHttpAdapter::new(std::sync::Arc::new(
+            ProviderInteractionBox::without_artifacts(),
+        ));
+
+        assert_eq!(
+            adapter
+                .next_private_agy_slot_for_model_and_lane(
+                    "Claude Opus 4.6 (Thinking)",
+                    Some("chat_json_planning"),
+                )
+                .await,
+            "slot-agy-claude-opus-46-thinking-chat-json-planning-a"
+        );
+        assert_eq!(
+            adapter
+                .next_private_agy_slot_for_model_and_lane(
+                    "Claude Opus 4.6 (Thinking)",
+                    Some("chat_json_planning"),
+                )
+                .await,
+            "slot-agy-claude-opus-46-thinking-chat-json-planning-b"
+        );
+        assert_eq!(
+            adapter
+                .next_private_agy_slot_for_model_and_lane(
+                    "Claude Opus 4.6 (Thinking)",
+                    Some("chat_plain"),
+                )
+                .await,
+            "slot-agy-claude-opus-46-thinking-chat-plain-a"
+        );
+    }
+
     #[test]
     fn usage_refresh_defaults_to_dedicated_probe_slot() {
         let request = ProviderBoxHttpRequest {
@@ -2709,6 +3252,57 @@ mod tests {
         );
         assert!(slot_permission_mode_from_suffix("permissions").is_none());
         assert!(slot_permission_mode_from_suffix("permissions/not-a-mode").is_none());
+    }
+
+    #[test]
+    fn permission_mode_suffixes_are_engine_aware() {
+        assert_eq!(
+            slot_permission_mode_raw_from_suffix("permissions/auto").as_deref(),
+            Some("auto")
+        );
+        assert_eq!(
+            normalize_provider_box_permission_mode_for_engine(CliEngine::Codex, "auto").as_deref(),
+            Some("Auto-review")
+        );
+        assert_eq!(
+            normalize_provider_box_permission_mode_for_engine(CliEngine::ClaudeCode, "auto")
+                .as_deref(),
+            Some("auto")
+        );
+        assert_eq!(
+            normalize_provider_box_permission_mode_for_engine(
+                CliEngine::ClaudeCode,
+                "accept-edits"
+            )
+            .as_deref(),
+            Some("accept_edits")
+        );
+        assert_eq!(
+            normalize_provider_box_permission_mode_for_engine(CliEngine::ClaudeCode, "plan")
+                .as_deref(),
+            Some("plan")
+        );
+        assert!(
+            normalize_provider_box_permission_mode_for_engine(CliEngine::Codex, "plan").is_none()
+        );
+    }
+
+    #[test]
+    fn slot_fast_mode_suffixes_map_to_codex_fast_modes() {
+        assert_eq!(
+            slot_fast_mode_from_suffix("fast/enable").as_deref(),
+            Some("enabled")
+        );
+        assert_eq!(
+            slot_fast_mode_from_suffix("fast/disable").as_deref(),
+            Some("disabled")
+        );
+        assert_eq!(
+            slot_fast_mode_from_suffix("actions/fast/off").as_deref(),
+            Some("disabled")
+        );
+        assert!(slot_fast_mode_from_suffix("fast").is_none());
+        assert!(slot_fast_mode_from_suffix("fast/unknown").is_none());
     }
 
     #[tokio::test]
@@ -3003,6 +3597,124 @@ mod tests {
         assert_eq!(
             engine_from_body_or_slot(&json!({"engine": "agy"}), "slot-codex-code-worker"),
             CliEngine::Agy
+        );
+    }
+
+    #[test]
+    fn slot_endpoint_engine_infers_claude_code_from_slot_id_when_body_is_empty() {
+        assert_eq!(
+            engine_from_body_or_slot(&json!({}), "slot-claude-code-default"),
+            CliEngine::ClaudeCode
+        );
+        assert_eq!(
+            engine_from_body_or_slot(&json!({}), "slot-cc-research"),
+            CliEngine::ClaudeCode
+        );
+    }
+
+    #[test]
+    fn claude_code_slot_capabilities_expose_taught_model_and_permission_controls() {
+        let caps = provider_slot_capabilities_value(
+            CliEngine::ClaudeCode,
+            &ProviderDriverCapabilities {
+                submit_turn: false,
+                switch_model: true,
+                usage_probe: false,
+                model_catalog: false,
+                pure_text_guard: false,
+                control_action: true,
+                pty_step: false,
+                status: true,
+                mcp_status: false,
+                mcp_reconnect: false,
+            },
+        );
+
+        assert_eq!(caps["slot_controls"]["spawn"], true);
+        assert_eq!(caps["slot_controls"]["restart"]["supported"], true);
+        assert_eq!(
+            caps["slot_controls"]["restart"]["requires"]["confirm_destroy_context"],
+            true
+        );
+        assert_eq!(
+            caps["slot_controls"]["dangerously_skip_permissions"]["supported"],
+            true
+        );
+        assert_eq!(caps["slot_controls"]["status"], true);
+        assert_eq!(caps["slot_controls"]["input"], false);
+        assert_eq!(caps["slot_controls"]["permissions"]["supported"], true);
+        assert_eq!(caps["slot_controls"]["permissions"]["cycle"][0], "auto");
+        assert_eq!(
+            caps["slot_controls"]["permissions"]["verification"],
+            "screen_identity.permission_mode"
+        );
+        assert_eq!(caps["slot_controls"]["switch_model"]["supported"], true);
+        assert_eq!(
+            caps["slot_controls"]["switch_model"]["allowed_model_ids"][0],
+            "claude-opus-4-6"
+        );
+    }
+
+    #[test]
+    fn codex_slot_capabilities_are_explicit_about_restart_and_mcp_reconnect() {
+        let caps = provider_slot_capabilities_value(
+            CliEngine::Codex,
+            &ProviderDriverCapabilities {
+                submit_turn: true,
+                switch_model: false,
+                usage_probe: true,
+                model_catalog: false,
+                pure_text_guard: true,
+                control_action: true,
+                pty_step: true,
+                status: true,
+                mcp_status: true,
+                mcp_reconnect: false,
+            },
+        );
+
+        assert_eq!(caps["slot_controls"]["exit"]["supported"], true);
+        assert_eq!(caps["slot_controls"]["exit"]["command"], "/exit");
+        assert_eq!(
+            caps["slot_controls"]["restart"]["requires"]["confirm_destroy_context"],
+            true
+        );
+        assert_eq!(caps["slot_controls"]["mcp_reconnect"]["supported"], false);
+        assert_eq!(
+            caps["slot_controls"]["mcp_reconnect"]["restart_required"],
+            true
+        );
+        assert_eq!(caps["driver"]["mcp_reconnect"], false);
+    }
+
+    #[tokio::test]
+    async fn slot_restart_requires_explicit_context_destroy_confirmation() {
+        let adapter = ProviderBoxHttpAdapter::new(std::sync::Arc::new(
+            ProviderInteractionBox::without_artifacts(),
+        ));
+        let request = ProviderBoxHttpRequest {
+            method: "POST".to_string(),
+            path: "/provider-box/v1/slots/slot-codex-code-worker/restart".to_string(),
+            headers: HashMap::new(),
+            body: json!({
+                "engine": "codex"
+            }),
+        };
+
+        let response = adapter
+            .handle_slot_restart(request, "slot-codex-code-worker".to_string())
+            .await
+            .expect("restart response");
+
+        assert_eq!(response.status, 409);
+        assert_eq!(
+            response.body["error"]["diagnostics"][0]["code"],
+            DIAG_PROVIDER_BOX_INVALID_REQUEST
+        );
+        assert_eq!(
+            response.body["capabilities"]["slot_controls"]["restart"]["requires"]
+                ["confirm_destroy_context"],
+            true
         );
     }
 }

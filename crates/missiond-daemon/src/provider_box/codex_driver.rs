@@ -19,12 +19,12 @@ use tokio::sync::{Mutex, RwLock, Semaphore};
 use super::driver::{ProviderDriver, ProviderDriverCapabilities};
 use super::types::{
     BoxCommand, ProviderBoxDiagnostic, ProviderBoxResult, ProviderBoxStatus, ProviderControlAction,
-    ProviderInteractionRequest, ProviderModelUsage, ProviderUsageSnapshot, ProviderUsageStatus,
-    PtyObservation, PtyStepAction, PtyStepRecord, PtyStepVerificationStatus,
+    ProviderInteractionRequest, ProviderModelUsage, ProviderSessionIdentity, ProviderUsageSnapshot,
+    ProviderUsageStatus, PtyObservation, PtyStepAction, PtyStepRecord, PtyStepVerificationStatus,
     DIAG_PROVIDER_BOX_INVALID_REQUEST, DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
-    DIAG_PROVIDER_CONTROL_ACTION_UNSUPPORTED, DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
-    DIAG_PROVIDER_DURABLE_FINAL_MISSING, DIAG_PROVIDER_MCP_RECONNECT_UNSUPPORTED,
-    DIAG_PROVIDER_MCP_STATUS_UNAVAILABLE, DIAG_PROVIDER_TEXT_ONLY_VIOLATION,
+    DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED, DIAG_PROVIDER_DURABLE_FINAL_MISSING,
+    DIAG_PROVIDER_MCP_RECONNECT_UNSUPPORTED, DIAG_PROVIDER_MCP_STATUS_UNAVAILABLE,
+    DIAG_PROVIDER_SESSION_ID_UNKNOWN, DIAG_PROVIDER_TEXT_ONLY_VIOLATION,
     DIAG_PROVIDER_TURN_TIMEOUT_CANCELLED, DIAG_PROVIDER_TURN_TIMEOUT_CANCEL_FAILED,
     DIAG_USAGE_UNKNOWN,
 };
@@ -40,7 +40,7 @@ const CODEX_EXEC_TEXT_MODEL: &str = "gpt-5.5";
 const CODEX_EXEC_TEXT_DEFAULT_MAX_CONCURRENT: usize = 4;
 const CODEX_EXEC_TEXT_XHIGH_MAX_CONCURRENT: usize = 2;
 const CODEX_EXEC_TASK_MAX_CONCURRENT: usize = 1;
-const CODEX_STARTUP_READY_WAIT_SECS: u64 = 20;
+const CODEX_STARTUP_READY_WAIT_SECS: u64 = 60;
 const CODEX_TRUST_READY_WAIT_SECS: u64 = 12;
 const CODEX_MANUAL_TEXT_LIMIT: usize = 4096;
 const CODEX_MANUAL_KEY_NAMES: &[&str] = &[
@@ -51,6 +51,9 @@ const CODEX_MANUAL_KEY_NAMES: &[&str] = &[
     "left",
     "right",
     "tab",
+    "shift-tab",
+    "shift+tab",
+    "backtab",
     "backspace",
     "delete",
     "ctrl+c",
@@ -171,6 +174,28 @@ impl CodexPermissionMode {
             Self::Default => "Default",
             Self::AutoReview => "Auto-review",
             Self::FullAccess => "Full Access",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexFastMode {
+    Enabled,
+    Disabled,
+}
+
+impl CodexFastMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Enabled => "enabled",
+            Self::Disabled => "disabled",
+        }
+    }
+
+    fn service_tier(self) -> &'static str {
+        match self {
+            Self::Enabled => "priority",
+            Self::Disabled => "default",
         }
     }
 }
@@ -379,6 +404,45 @@ impl CodexProviderDriver {
                     "slot_id": request.slot_id,
                     "permission_mode": raw,
                     "allowed_permission_modes": ["Default", "Auto-review", "Full Access"],
+                }),
+            )
+        })
+    }
+
+    fn request_fast_mode(
+        request: &ProviderInteractionRequest,
+    ) -> Result<CodexFastMode, ProviderBoxDiagnostic> {
+        let raw = request
+            .desired_worker
+            .as_ref()
+            .and_then(|worker| {
+                worker
+                    .get("fast_mode")
+                    .or_else(|| worker.get("target_fast_mode"))
+                    .or_else(|| worker.get("service_tier"))
+                    .or_else(|| worker.get("fast_enabled"))
+                    .or_else(|| worker.get("enabled"))
+                    .or_else(|| worker.get("fast"))
+                    .or_else(|| worker.get("mode"))
+            })
+            .ok_or_else(|| {
+                ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                    "Codex fast-mode control action requires fast_mode or enabled",
+                    json!({
+                        "slot_id": request.slot_id,
+                        "allowed_fast_modes": ["enabled", "disabled"],
+                    }),
+                )
+            })?;
+        normalize_codex_fast_mode(raw).ok_or_else(|| {
+            ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                "Codex fast-mode control action uses an unsupported fast_mode",
+                json!({
+                    "slot_id": request.slot_id,
+                    "fast_mode": raw,
+                    "allowed_fast_modes": ["enabled", "disabled"],
                 }),
             )
         })
@@ -746,6 +810,8 @@ impl CodexProviderDriver {
         let observation = self.observe(slot_id).await;
         let status = self.pty.get_status(slot_id).await;
         result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
+        self.attach_session_identity(result, slot_id, status.as_ref(), &observation)
+            .await;
         let pty_observation = Self::pty_observation(slot_id, &observation);
         result.record_step(PtyStepRecord::new(
             pty_observation.clone(),
@@ -755,6 +821,73 @@ impl CodexProviderDriver {
             PtyStepVerificationStatus::Skipped,
         ));
         observation
+    }
+
+    async fn attach_session_identity(
+        &self,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+        status: Option<&missiond_core::PTYAgentInfo>,
+        observation: &CodexObservation,
+    ) {
+        let identity = self
+            .resolve_session_identity(slot_id, status, observation)
+            .await;
+        if let Some(session_id) = identity.provider_session_id.clone() {
+            result.provider_conversation_id = Some(session_id);
+        }
+        if result.durable_source.is_none() {
+            result.durable_source = identity.durable_source.clone();
+        }
+        if let Some(slot_status) = result.slot_status.as_mut() {
+            slot_status["provider_session_identity"] = json!(identity.clone());
+        }
+        result.provider_session_identity = Some(identity);
+    }
+
+    async fn resolve_session_identity(
+        &self,
+        slot_id: &str,
+        status: Option<&missiond_core::PTYAgentInfo>,
+        observation: &CodexObservation,
+    ) -> ProviderSessionIdentity {
+        let workspace = codex_workspace_candidates(observation)
+            .into_iter()
+            .next()
+            .map(|path| path.display().to_string());
+        if let Some(meta) =
+            find_latest_codex_session_identity(&self.codex_home, observation, status).await
+        {
+            return ProviderSessionIdentity::resolved(
+                Some("codex_cli".to_string()),
+                CliEngine::Codex,
+                Some(slot_id.to_string()),
+                meta.session_id,
+                meta.identity_source,
+                Some(meta.rollout_path),
+                meta.cwd,
+                meta.confidence,
+            );
+        }
+        ProviderSessionIdentity::unknown(
+            Some("codex_cli".to_string()),
+            CliEngine::Codex,
+            Some(slot_id.to_string()),
+            "codex_rollout_session_meta_probe",
+            workspace,
+            ProviderBoxDiagnostic::warning(
+                DIAG_PROVIDER_SESSION_ID_UNKNOWN,
+                "Codex session id is not visible yet for this slot",
+                json!({
+                    "slot_id": slot_id,
+                    "sources_checked": [
+                        "Codex rollout session_meta.payload.id",
+                        "Codex rollout filename suffix"
+                    ],
+                    "rule": "slot_id is operational identity; provider_session_id must come from Codex durable session metadata"
+                }),
+            ),
+        )
     }
 
     async fn observe(&self, slot_id: &str) -> CodexObservation {
@@ -1146,7 +1279,20 @@ impl CodexProviderDriver {
                 .await
             {
                 result.status = ProviderBoxStatus::Completed;
-                result.provider_conversation_id = Some(final_turn.session_id);
+                result.provider_conversation_id = Some(final_turn.session_id.clone());
+                result.provider_session_identity = Some(ProviderSessionIdentity::resolved(
+                    request
+                        .provider
+                        .clone()
+                        .or_else(|| Some("codex_cli".to_string())),
+                    CliEngine::Codex,
+                    request.slot_id.clone(),
+                    final_turn.session_id.clone(),
+                    "codex_correlated_rollout_jsonl",
+                    Some(final_turn.rollout_path.clone()),
+                    None,
+                    "durable_final",
+                ));
                 result.durable_source = Some(final_turn.rollout_path);
                 result.final_text = Some(final_turn.final_text);
                 return result.clone();
@@ -1402,6 +1548,103 @@ impl CodexProviderDriver {
         }
     }
 
+    async fn exit_locked(&self, result: &mut ProviderBoxResult, slot_id: &str) {
+        if !self.ensure_ready_for_prompt(result, slot_id).await {
+            return;
+        }
+        self.clear_input_locked(result, slot_id).await;
+        if matches!(
+            result.status,
+            ProviderBoxStatus::Blocked | ProviderBoxStatus::Failed
+        ) {
+            return;
+        }
+
+        let before_status = self.pty.get_status(slot_id).await;
+        let before_pid = before_status.as_ref().and_then(|status| status.pid);
+        let before_started_at = before_status.as_ref().and_then(|status| status.started_at);
+
+        let _ = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::text("/exit"),
+                "/exit",
+                Some("type Codex /exit command".to_string()),
+            )
+            .await;
+        let _ = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::key("enter"),
+                "\r",
+                Some("execute Codex /exit command".to_string()),
+            )
+            .await;
+
+        let started = Instant::now();
+        let mut last_status = self.pty.get_status(slot_id).await;
+        while started.elapsed() < Duration::from_secs(8) {
+            let exited_or_restarted = match last_status.as_ref() {
+                None => true,
+                Some(status) => {
+                    matches!(status.state, SessionState::Exited | SessionState::Error)
+                        || (before_pid.is_some() && status.pid != before_pid)
+                        || (before_started_at.is_some() && status.started_at != before_started_at)
+                }
+            };
+            if exited_or_restarted {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            last_status = self.pty.get_status(slot_id).await;
+        }
+
+        let observation = self.observe(slot_id).await;
+        let exited_or_restarted = match last_status.as_ref() {
+            None => true,
+            Some(status) => {
+                matches!(status.state, SessionState::Exited | SessionState::Error)
+                    || (before_pid.is_some() && status.pid != before_pid)
+                    || (before_started_at.is_some() && status.started_at != before_started_at)
+            }
+        };
+        result.slot_status = Some(slot_status_value(
+            slot_id,
+            last_status.as_ref(),
+            &observation,
+        ));
+        if exited_or_restarted {
+            result.status = ProviderBoxStatus::Completed;
+            result.final_text = Some(match last_status.as_ref() {
+                Some(status)
+                    if status.pid.is_some()
+                        && (status.pid != before_pid || status.started_at != before_started_at) =>
+                {
+                    "Codex /exit completed; the slot was restarted by the PTY supervisor"
+                        .to_string()
+                }
+                _ => "Codex /exit completed".to_string(),
+            });
+            result.durable_source = Some("codex_exit_command".to_string());
+        } else {
+            result.status = ProviderBoxStatus::Unverified;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+                "Codex /exit did not verify that the previous process exited or restarted",
+                json!({
+                    "slot_id": slot_id,
+                    "before_pid": before_pid,
+                    "after_pid": last_status.as_ref().and_then(|status| status.pid),
+                    "before_started_at": before_started_at,
+                    "after_started_at": last_status.as_ref().and_then(|status| status.started_at),
+                    "reason": observation.snapshot.reason,
+                }),
+            ));
+        }
+    }
+
     async fn set_permissions_locked(
         &self,
         request: &ProviderInteractionRequest,
@@ -1605,6 +1848,117 @@ impl CodexProviderDriver {
                 json!({
                     "slot_id": slot_id,
                     "target_permission_mode": target.label(),
+                    "reason": observation.snapshot.reason,
+                }),
+            ));
+        }
+    }
+
+    async fn set_fast_mode_locked(
+        &self,
+        request: &ProviderInteractionRequest,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+    ) {
+        let target = match Self::request_fast_mode(request) {
+            Ok(mode) => mode,
+            Err(diagnostic) => {
+                result.status = ProviderBoxStatus::Failed;
+                result.add_diagnostic(diagnostic);
+                return;
+            }
+        };
+
+        if !self.ensure_ready_for_prompt(result, slot_id).await {
+            return;
+        }
+        self.clear_input_locked(result, slot_id).await;
+        if matches!(
+            result.status,
+            ProviderBoxStatus::Blocked | ProviderBoxStatus::Failed
+        ) {
+            return;
+        }
+
+        let mut observation = self.observe(slot_id).await;
+        let Some(current) = codex_fast_mode(&observation) else {
+            result.status = ProviderBoxStatus::Unverified;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+                "Codex current fast-mode state could not be read before /fast toggle",
+                json!({
+                    "slot_id": slot_id,
+                    "target_fast_mode": target.label(),
+                    "current_model": codex_current_model(&observation),
+                    "reason": observation.snapshot.reason,
+                }),
+            ));
+            let status = self.pty.get_status(slot_id).await;
+            result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
+            return;
+        };
+
+        if current == target {
+            let status = self.pty.get_status(slot_id).await;
+            result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
+            result.status = ProviderBoxStatus::Completed;
+            result.final_text = Some(format!("Codex fast mode already {}", target.label()));
+            result.durable_source = Some("codex_screen_identity_current_model".to_string());
+            return;
+        }
+
+        let _ = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::text("/fast"),
+                "/fast",
+                Some("type Codex /fast command".to_string()),
+            )
+            .await;
+        observation = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::key("enter"),
+                "\r",
+                Some(format!(
+                    "toggle Codex /fast service tier to {}",
+                    target.service_tier()
+                )),
+            )
+            .await;
+        if codex_fast_mode(&observation) != Some(target) {
+            observation = self
+                .wait_step_until(
+                    result,
+                    slot_id,
+                    Duration::from_secs(5),
+                    Some(format!(
+                        "wait for Codex fast mode to become {}",
+                        target.label()
+                    )),
+                    |obs| is_ready_for_codex_text(obs) && codex_fast_mode(obs) == Some(target),
+                )
+                .await;
+        }
+
+        let status = self.pty.get_status(slot_id).await;
+        result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
+        if is_ready_for_codex_text(&observation) && codex_fast_mode(&observation) == Some(target) {
+            result.status = ProviderBoxStatus::Completed;
+            result.final_text = Some(format!("Codex fast mode {}", target.label()));
+            result.durable_source = Some("codex_fast_toggle_screen_identity".to_string());
+        } else {
+            result.status = ProviderBoxStatus::Unverified;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+                "Codex /fast toggle did not verify the requested service tier",
+                json!({
+                    "slot_id": slot_id,
+                    "target_fast_mode": target.label(),
+                    "observed_fast_mode": codex_fast_mode(&observation).map(|mode| mode.label()),
+                    "current_model": codex_current_model(&observation),
                     "reason": observation.snapshot.reason,
                 }),
             ));
@@ -2294,6 +2648,22 @@ impl CodexProviderDriver {
             .display()
             .to_string(),
         );
+        if let Some(session_id) = result.provider_conversation_id.clone() {
+            result.provider_session_identity = Some(ProviderSessionIdentity::resolved(
+                Some(kind.provider().to_string()),
+                CliEngine::Codex,
+                None,
+                session_id,
+                if image_evidence.is_some() {
+                    "codex_rollout_jsonl_image_generation_end"
+                } else {
+                    "codex_exec_jsonl_thread_id"
+                },
+                result.durable_source.clone(),
+                Some(workspace.display().to_string()),
+                "durable_exec_result",
+            ));
+        }
         result.slot_status = Some(json!({
             "kind": "codex_exec_task",
             "task_kind": kind.label(),
@@ -2396,7 +2766,7 @@ impl ProviderDriver for CodexProviderDriver {
             pty_step: true,
             status: true,
             mcp_status: true,
-            mcp_reconnect: true,
+            mcp_reconnect: false,
         }
     }
 
@@ -2520,19 +2890,6 @@ impl ProviderDriver for CodexProviderDriver {
             ));
             return result;
         };
-        if matches!(action, ProviderControlAction::Exit) {
-            result.status = ProviderBoxStatus::Unsupported;
-            result.add_diagnostic(ProviderBoxDiagnostic::unsupported(
-                DIAG_PROVIDER_CONTROL_ACTION_UNSUPPORTED,
-                "Codex exit control has not been exposed through provider-box yet",
-                json!({
-                    "slot_id": request.slot_id,
-                    "safe_alternative": "Use slot restart/kill APIs only from an explicit operator flow."
-                }),
-            ));
-            return result;
-        }
-
         let Some(slot_id) = self.ensure_slot(request, &mut result).await else {
             return result;
         };
@@ -2554,7 +2911,13 @@ impl ProviderDriver for CodexProviderDriver {
                 self.set_permissions_locked(request, &mut result, &slot_id)
                     .await;
             }
-            ProviderControlAction::Exit => unreachable!("handled above"),
+            ProviderControlAction::SetFastMode => {
+                self.set_fast_mode_locked(request, &mut result, &slot_id)
+                    .await;
+            }
+            ProviderControlAction::Exit => {
+                self.exit_locked(&mut result, &slot_id).await;
+            }
         }
         if result.slot_status.is_none() {
             self.attach_status_observation(
@@ -3058,6 +3421,56 @@ fn normalize_codex_permission_mode(value: &str) -> Option<CodexPermissionMode> {
     }
 }
 
+fn normalize_codex_fast_mode(value: &Value) -> Option<CodexFastMode> {
+    if let Some(enabled) = value.as_bool() {
+        return Some(if enabled {
+            CodexFastMode::Enabled
+        } else {
+            CodexFastMode::Disabled
+        });
+    }
+    let normalized = value
+        .as_str()?
+        .trim()
+        .to_ascii_lowercase()
+        .replace('_', "-")
+        .replace(' ', "-");
+    match normalized.as_str() {
+        "enable" | "enabled" | "on" | "true" | "fast" | "priority" => Some(CodexFastMode::Enabled),
+        "disable" | "disabled" | "off" | "false" | "default" | "normal" | "standard" => {
+            Some(CodexFastMode::Disabled)
+        }
+        _ => None,
+    }
+}
+
+fn codex_current_model(observation: &CodexObservation) -> Option<String> {
+    observation
+        .snapshot
+        .screen_identity
+        .as_ref()
+        .and_then(|identity| identity.current_model.clone())
+}
+
+fn codex_fast_mode_from_current_model(current_model: Option<&str>) -> Option<CodexFastMode> {
+    let current_model = current_model?.trim();
+    if current_model.is_empty() {
+        return None;
+    }
+    let has_fast_token = current_model
+        .split_whitespace()
+        .any(|token| token.eq_ignore_ascii_case("fast"));
+    Some(if has_fast_token {
+        CodexFastMode::Enabled
+    } else {
+        CodexFastMode::Disabled
+    })
+}
+
+fn codex_fast_mode(observation: &CodexObservation) -> Option<CodexFastMode> {
+    codex_fast_mode_from_current_model(codex_current_model(observation).as_deref())
+}
+
 fn codex_permission_picker_modes(
     observation: &CodexObservation,
 ) -> Option<(Vec<CodexPermissionMode>, CodexPermissionMode)> {
@@ -3103,6 +3516,7 @@ fn codex_manual_key_bytes(key: &str) -> Option<(&'static str, &'static str)> {
         "right" | "arrowright" => Some(("right", "\x1b[C")),
         "left" | "arrowleft" => Some(("left", "\x1b[D")),
         "tab" => Some(("tab", "\t")),
+        "shifttab" | "backtab" => Some(("shift-tab", "\x1b[Z")),
         "backspace" => Some(("backspace", "\x7f")),
         "delete" | "del" => Some(("delete", "\x1b[3~")),
         "ctrlc" => Some(("ctrl+c", "\x03")),
@@ -3660,6 +4074,228 @@ fn codex_exec_type_is_image_tool(value: &str) -> bool {
     )
 }
 
+#[derive(Debug, Clone)]
+struct CodexSessionIdentityCandidate {
+    session_id: String,
+    rollout_path: String,
+    cwd: Option<String>,
+    identity_source: String,
+    confidence: String,
+    modified_ms: i64,
+}
+
+async fn find_latest_codex_session_identity(
+    codex_home: &Path,
+    observation: &CodexObservation,
+    status: Option<&missiond_core::PTYAgentInfo>,
+) -> Option<CodexSessionIdentityCandidate> {
+    let candidates = codex_workspace_candidate_strings(observation);
+    if candidates.is_empty() {
+        return None;
+    }
+    let roots = [
+        codex_home.join("sessions"),
+        codex_home.join("archived_sessions"),
+    ];
+    let started_at = status.and_then(|info| info.started_at);
+    tokio::task::spawn_blocking(move || {
+        let mut files = Vec::new();
+        for root in roots {
+            collect_jsonl_files(&root, &mut files);
+        }
+        files.sort_by(|a, b| modified_at(b).cmp(&modified_at(a)));
+        files.truncate(200);
+        let mut matches = files
+            .iter()
+            .filter_map(|path| extract_codex_session_identity_candidate(path))
+            .filter(|candidate| {
+                candidate
+                    .cwd
+                    .as_ref()
+                    .is_some_and(|cwd| candidates.iter().any(|candidate| candidate == cwd))
+            })
+            .collect::<Vec<_>>();
+        if matches.is_empty() {
+            return None;
+        }
+        matches.sort_by(|a, b| b.modified_ms.cmp(&a.modified_ms));
+        if let Some(started_at) = started_at {
+            if let Some(candidate) = matches
+                .iter()
+                .find(|candidate| candidate.modified_ms + 120_000 >= started_at)
+                .cloned()
+            {
+                return Some(CodexSessionIdentityCandidate {
+                    confidence: "slot_started_workspace_rollout".to_string(),
+                    ..candidate
+                });
+            }
+        }
+        matches
+            .into_iter()
+            .next()
+            .map(|candidate| CodexSessionIdentityCandidate {
+                confidence: "workspace_latest_rollout".to_string(),
+                ..candidate
+            })
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+fn extract_codex_session_identity_candidate(path: &Path) -> Option<CodexSessionIdentityCandidate> {
+    let file = fs::File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    let mut fallback_session_id = codex_session_id_from_rollout_filename(path);
+    for line in reader.lines().take(20).map_while(Result::ok) {
+        let Ok(event) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if event.get("type").and_then(Value::as_str) != Some("session_meta") {
+            continue;
+        }
+        let session_id = event
+            .pointer("/payload/id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| fallback_session_id.take())?;
+        let cwd = event
+            .pointer("/payload/cwd")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        return Some(CodexSessionIdentityCandidate {
+            session_id,
+            rollout_path: path.display().to_string(),
+            cwd,
+            identity_source: "codex_rollout_session_meta_jsonl".to_string(),
+            confidence: "workspace_rollout".to_string(),
+            modified_ms: system_time_ms(modified_at(path)),
+        });
+    }
+    let session_id = fallback_session_id?;
+    Some(CodexSessionIdentityCandidate {
+        session_id,
+        rollout_path: path.display().to_string(),
+        cwd: None,
+        identity_source: "codex_rollout_filename".to_string(),
+        confidence: "filename_only".to_string(),
+        modified_ms: system_time_ms(modified_at(path)),
+    })
+}
+
+fn codex_session_id_from_rollout_filename(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_str()?;
+    let tail = stem
+        .chars()
+        .rev()
+        .take(36)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    if uuid::Uuid::parse_str(&tail).is_ok() {
+        Some(tail)
+    } else {
+        None
+    }
+}
+
+fn codex_workspace_candidate_strings(observation: &CodexObservation) -> Vec<String> {
+    let mut values = Vec::new();
+    for candidate in codex_workspace_candidates(observation) {
+        push_unique_workspace_string(&mut values, candidate.display().to_string());
+        if let Ok(canonical) = candidate.canonicalize() {
+            push_unique_workspace_string(&mut values, canonical.display().to_string());
+        }
+    }
+    values
+}
+
+fn codex_workspace_candidates(observation: &CodexObservation) -> Vec<PathBuf> {
+    let mut values = Vec::new();
+    if let Some(cwd) = observation
+        .snapshot
+        .screen_identity
+        .as_ref()
+        .and_then(|identity| identity.cwd.as_deref())
+    {
+        push_unique_workspace_path(&mut values, expand_provider_cwd(cwd));
+    }
+    for cwd in codex_cwd_candidates_from_lines(&observation.lines) {
+        push_unique_workspace_path(&mut values, expand_provider_cwd(&cwd));
+    }
+    values
+}
+
+fn codex_cwd_candidates_from_lines(lines: &[String]) -> Vec<String> {
+    let mut values = Vec::new();
+    for line in lines {
+        let cleaned = line.trim();
+        if let Some(rest) = cleaned.strip_prefix("directory:") {
+            push_unique_workspace_string(&mut values, rest.trim().to_string());
+            continue;
+        }
+        if cleaned.contains('·') {
+            let parts = cleaned
+                .split('·')
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>();
+            if parts.len() >= 2 {
+                let cwd = parts[1].to_string();
+                if cwd.starts_with('/')
+                    || cwd.starts_with("~/")
+                    || cwd == "~"
+                    || cwd.contains("/Projects/")
+                {
+                    push_unique_workspace_string(&mut values, cwd);
+                }
+            }
+        }
+    }
+    values
+}
+
+fn expand_provider_cwd(raw: &str) -> PathBuf {
+    let trimmed = raw.trim();
+    if trimmed == "~" {
+        return dirs::home_dir().unwrap_or_else(|| PathBuf::from(trimmed));
+    }
+    if let Some(rest) = trimmed.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest);
+        }
+    }
+    let path = PathBuf::from(trimmed);
+    if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    }
+}
+
+fn push_unique_workspace_path(values: &mut Vec<PathBuf>, path: PathBuf) {
+    if !values.iter().any(|existing| existing == &path) {
+        values.push(path);
+    }
+}
+
+fn push_unique_workspace_string(values: &mut Vec<String>, value: String) {
+    if !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
+}
+
+fn system_time_ms(value: std::time::SystemTime) -> i64 {
+    value
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 fn collect_jsonl_files(root: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(root) else {
         return;
@@ -3893,6 +4529,100 @@ mod tests {
             Some(CodexPermissionMode::FullAccess)
         );
         assert_eq!(normalize_codex_permission_mode("danger"), None);
+    }
+
+    #[test]
+    fn codex_fast_mode_aliases_normalize() {
+        assert_eq!(
+            normalize_codex_fast_mode(&json!(true)),
+            Some(CodexFastMode::Enabled)
+        );
+        assert_eq!(
+            normalize_codex_fast_mode(&json!("priority")),
+            Some(CodexFastMode::Enabled)
+        );
+        assert_eq!(
+            normalize_codex_fast_mode(&json!("off")),
+            Some(CodexFastMode::Disabled)
+        );
+        assert_eq!(normalize_codex_fast_mode(&json!("turbo")), None);
+    }
+
+    #[test]
+    fn codex_fast_mode_reads_current_model_suffix() {
+        assert_eq!(
+            codex_fast_mode_from_current_model(Some("gpt-5.5 xhigh fast")),
+            Some(CodexFastMode::Enabled)
+        );
+        assert_eq!(
+            codex_fast_mode_from_current_model(Some("gpt-5.5 xhigh")),
+            Some(CodexFastMode::Disabled)
+        );
+        assert_eq!(codex_fast_mode_from_current_model(None), None);
+    }
+
+    #[test]
+    fn codex_provider_session_identity_reads_rollout_filename_suffix() {
+        let path = PathBuf::from(
+            "/tmp/rollout-2026-06-01T21-28-19-019e835e-f90d-7681-afc5-bc92092aeade.jsonl",
+        );
+
+        assert_eq!(
+            codex_session_id_from_rollout_filename(&path).as_deref(),
+            Some("019e835e-f90d-7681-afc5-bc92092aeade")
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_provider_session_identity_matches_rollout_cwd() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let workspace = dir.path().join("workspace");
+        let sessions = dir
+            .path()
+            .join("sessions")
+            .join("2026")
+            .join("06")
+            .join("01");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        std::fs::create_dir_all(&sessions).expect("sessions");
+        let rollout =
+            sessions.join("rollout-2026-06-01T21-28-19-019e835e-f90d-7681-afc5-bc92092aeade.jsonl");
+        std::fs::write(
+            &rollout,
+            serde_json::json!({
+                "type": "session_meta",
+                "timestamp": "2026-06-01T13:28:19.000Z",
+                "payload": {
+                    "id": "019e835e-f90d-7681-afc5-bc92092aeade",
+                    "cwd": workspace.display().to_string(),
+                    "cli_version": "0.135.0-alpha.1"
+                }
+            })
+            .to_string(),
+        )
+        .expect("rollout");
+        let lines = vec![
+            ">_ OpenAI Codex (v0.135.0-alpha.1)".to_string(),
+            "model:     gpt-5.5 xhigh   /model to change".to_string(),
+            format!("directory: {}", workspace.display()),
+            format!("gpt-5.5 xhigh · {}", workspace.display()),
+        ];
+        let observation = CodexObservation {
+            text: lines.join("\n"),
+            snapshot: recognize_screen(CliEngine::Codex, &lines, SessionState::Idle),
+            lines,
+        };
+        assert!(codex_workspace_candidate_strings(&observation)
+            .iter()
+            .any(|candidate| candidate == workspace.to_str().unwrap()));
+
+        let identity = find_latest_codex_session_identity(dir.path(), &observation, None)
+            .await
+            .expect("identity");
+
+        assert_eq!(identity.session_id, "019e835e-f90d-7681-afc5-bc92092aeade");
+        assert_eq!(identity.cwd.as_deref(), Some(workspace.to_str().unwrap()));
+        assert_eq!(identity.identity_source, "codex_rollout_session_meta_jsonl");
     }
 
     #[test]

@@ -909,6 +909,9 @@ const PTY_KEY_NAMES: &[&str] = &[
     "esc",
     "escape",
     "tab",
+    "shift-tab",
+    "shift+tab",
+    "backtab",
     "up",
     "down",
     "right",
@@ -962,6 +965,10 @@ fn pty_key_spec(key: &str) -> Option<PtyKeySpec> {
         "tab" => Some(PtyKeySpec {
             canonical: "tab",
             bytes: "\t",
+        }),
+        "shift-tab" | "shift+tab" | "backtab" => Some(PtyKeySpec {
+            canonical: "shift-tab",
+            bytes: "\x1b[Z",
         }),
         "up" => Some(PtyKeySpec {
             canonical: "up",
@@ -1093,6 +1100,10 @@ mod tests {
 
         let down = pty_key_spec("down").expect("down key");
         assert_eq!(down.bytes, "\x1b[B");
+
+        let shift_tab = pty_key_spec("shift+tab").expect("shift-tab key");
+        assert_eq!(shift_tab.canonical, "shift-tab");
+        assert_eq!(shift_tab.bytes, "\x1b[Z");
 
         let agy_ctrl_d = pty_key_spec("ctrl-d").expect("agy ctrl-d key");
         assert_eq!(agy_ctrl_d.bytes, "\x1b[100;5u");
