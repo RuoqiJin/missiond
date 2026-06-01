@@ -19,13 +19,14 @@ use tokio::sync::{Mutex, RwLock, Semaphore};
 use super::driver::{ProviderDriver, ProviderDriverCapabilities};
 use super::types::{
     BoxCommand, ProviderBoxDiagnostic, ProviderBoxResult, ProviderBoxStatus, ProviderControlAction,
-    ProviderInteractionRequest, PtyObservation, PtyStepAction, PtyStepRecord,
-    PtyStepVerificationStatus, DIAG_PROVIDER_BOX_INVALID_REQUEST,
-    DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE, DIAG_PROVIDER_CONTROL_ACTION_UNSUPPORTED,
-    DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED, DIAG_PROVIDER_DURABLE_FINAL_MISSING,
-    DIAG_PROVIDER_MCP_RECONNECT_UNSUPPORTED, DIAG_PROVIDER_MCP_STATUS_UNAVAILABLE,
-    DIAG_PROVIDER_TEXT_ONLY_VIOLATION, DIAG_PROVIDER_TURN_TIMEOUT_CANCELLED,
-    DIAG_PROVIDER_TURN_TIMEOUT_CANCEL_FAILED,
+    ProviderInteractionRequest, ProviderModelUsage, ProviderUsageSnapshot, ProviderUsageStatus,
+    PtyObservation, PtyStepAction, PtyStepRecord, PtyStepVerificationStatus,
+    DIAG_PROVIDER_BOX_INVALID_REQUEST, DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+    DIAG_PROVIDER_CONTROL_ACTION_UNSUPPORTED, DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+    DIAG_PROVIDER_DURABLE_FINAL_MISSING, DIAG_PROVIDER_MCP_RECONNECT_UNSUPPORTED,
+    DIAG_PROVIDER_MCP_STATUS_UNAVAILABLE, DIAG_PROVIDER_TEXT_ONLY_VIOLATION,
+    DIAG_PROVIDER_TURN_TIMEOUT_CANCELLED, DIAG_PROVIDER_TURN_TIMEOUT_CANCEL_FAILED,
+    DIAG_USAGE_UNKNOWN,
 };
 
 const DEFAULT_CODEX_SLOT: &str = "slot-codex-provider-box";
@@ -164,6 +165,12 @@ struct CodexManualPtyStep {
     text: Option<String>,
     expected_change: Option<String>,
     redacted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodexUsageLines {
+    five_hour: String,
+    weekly: String,
 }
 
 impl CodexProviderDriver {
@@ -1005,10 +1012,7 @@ impl CodexProviderDriver {
                     None => return false,
                 };
             }
-            if matches!(
-                observation.snapshot.state,
-                PtyCanonicalState::Idle | PtyCanonicalState::Complete
-            ) {
+            if is_ready_for_codex_text(&observation) {
                 return true;
             }
             if started.elapsed() > Duration::from_secs(8) {
@@ -1243,6 +1247,12 @@ impl CodexProviderDriver {
             result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &before));
             return;
         }
+        if is_codex_empty_composer(&before) {
+            let status = self.pty.get_status(slot_id).await;
+            result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &before));
+            result.status = ProviderBoxStatus::Completed;
+            return;
+        }
 
         let mut after = self
             .write_step(
@@ -1389,6 +1399,80 @@ impl CodexProviderDriver {
             result.add_diagnostic(ProviderBoxDiagnostic::error(
                 DIAG_PROVIDER_MCP_STATUS_UNAVAILABLE,
                 "Codex /mcp output was not recognized as an MCP status screen",
+                json!({
+                    "slot_id": slot_id,
+                    "reason": observation.snapshot.reason,
+                }),
+            ));
+        }
+        observation
+    }
+
+    async fn refresh_usage_status_locked(
+        &self,
+        request: &ProviderInteractionRequest,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+    ) -> CodexObservation {
+        if !self.ensure_ready_for_prompt(result, slot_id).await {
+            let observation = self.observe(slot_id).await;
+            result.usage_snapshot = Some(codex_unknown_usage_snapshot(
+                request,
+                slot_id,
+                Some(&observation),
+                "Codex slot was not ready for /status usage probing",
+            ));
+            return observation;
+        }
+        self.clear_input_locked(result, slot_id).await;
+
+        let _ = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::text("/status"),
+                "/status",
+                Some("type Codex /status command".to_string()),
+            )
+            .await;
+        let mut observation = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::key("enter"),
+                "\r",
+                Some("execute Codex /status command".to_string()),
+            )
+            .await;
+        if extract_codex_usage_lines(&observation.text).is_none() {
+            observation = self
+                .wait_step_until(
+                    result,
+                    slot_id,
+                    Duration::from_secs(8),
+                    Some("wait for Codex /status quota lines".to_string()),
+                    |obs| extract_codex_usage_lines(&obs.text).is_some(),
+                )
+                .await;
+        }
+        let status = self.pty.get_status(slot_id).await;
+        result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
+        if let Some(usage) = extract_codex_usage_lines(&observation.text) {
+            result.status = ProviderBoxStatus::Completed;
+            result.final_text = Some(usage.as_text());
+            result.usage_snapshot =
+                Some(codex_usage_snapshot(request, slot_id, &observation, &usage));
+        } else {
+            result.status = ProviderBoxStatus::Unverified;
+            result.usage_snapshot = Some(codex_unknown_usage_snapshot(
+                request,
+                slot_id,
+                Some(&observation),
+                "Codex /status output did not include recognizable 5h and Weekly limit lines",
+            ));
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_USAGE_UNKNOWN,
+                "Codex /status usage lines were not recognized",
                 json!({
                     "slot_id": slot_id,
                     "reason": observation.snapshot.reason,
@@ -2041,7 +2125,7 @@ impl ProviderDriver for CodexProviderDriver {
         ProviderDriverCapabilities {
             submit_turn: true,
             switch_model: false,
-            usage_probe: false,
+            usage_probe: true,
             model_catalog: false,
             pure_text_guard: true,
             control_action: true,
@@ -2096,6 +2180,19 @@ impl ProviderDriver for CodexProviderDriver {
         )
         .await;
         result.status = ProviderBoxStatus::Completed;
+        result
+    }
+
+    async fn probe_usage(&self, request: &ProviderInteractionRequest) -> ProviderBoxResult {
+        let mut result = ProviderBoxResult::base(request, ProviderBoxStatus::Unknown);
+        let Some(slot_id) = self.ensure_slot(request, &mut result).await else {
+            return result;
+        };
+        result.slot_id = Some(slot_id.clone());
+        let lock = self.slot_lock(&slot_id).await;
+        let _guard = lock.lock().await;
+        self.refresh_usage_status_locked(request, &mut result, &slot_id)
+            .await;
         result
     }
 
@@ -2464,6 +2561,167 @@ fn codex_mcp_status_value(
     })
 }
 
+impl CodexUsageLines {
+    fn as_text(&self) -> String {
+        format!("{}\n{}", self.five_hour, self.weekly)
+    }
+
+    fn model_quotas(&self) -> Vec<ProviderModelUsage> {
+        vec![
+            ProviderModelUsage {
+                model: "5h limit".to_string(),
+                percent: codex_usage_percent(&self.five_hour),
+                status: Some(self.five_hour.clone()),
+            },
+            ProviderModelUsage {
+                model: "Weekly limit".to_string(),
+                percent: codex_usage_percent(&self.weekly),
+                status: Some(self.weekly.clone()),
+            },
+        ]
+    }
+}
+
+fn codex_usage_snapshot(
+    request: &ProviderInteractionRequest,
+    slot_id: &str,
+    observation: &CodexObservation,
+    usage: &CodexUsageLines,
+) -> ProviderUsageSnapshot {
+    ProviderUsageSnapshot {
+        schema: "missiond.provider-usage-snapshot.v1".to_string(),
+        snapshot_id: format!("usage-{}", uuid::Uuid::new_v4().simple()),
+        provider: request
+            .provider
+            .clone()
+            .or_else(|| Some("codex_cli".to_string())),
+        engine: CliEngine::Codex,
+        slot_id: Some(slot_id.to_string()),
+        account_ref: codex_status_field(&observation.text, "Account"),
+        model: codex_status_field(&observation.text, "Model")
+            .or_else(|| {
+                observation
+                    .snapshot
+                    .screen_identity
+                    .as_ref()
+                    .and_then(|identity| identity.current_model.clone())
+            })
+            .or_else(|| request.model.clone()),
+        observed_at: chrono::Utc::now().to_rfc3339(),
+        status: ProviderUsageStatus::Exact,
+        remaining: None,
+        limit: None,
+        reset_at: None,
+        source: Some("codex:/status".to_string()),
+        confidence: observation.snapshot.confidence as f32,
+        block_kind: None,
+        model_quotas: usage.model_quotas(),
+        diagnostics: Vec::new(),
+    }
+}
+
+fn codex_unknown_usage_snapshot(
+    request: &ProviderInteractionRequest,
+    slot_id: &str,
+    observation: Option<&CodexObservation>,
+    message: &str,
+) -> ProviderUsageSnapshot {
+    ProviderUsageSnapshot {
+        schema: "missiond.provider-usage-snapshot.v1".to_string(),
+        snapshot_id: format!("usage-{}", uuid::Uuid::new_v4().simple()),
+        provider: request
+            .provider
+            .clone()
+            .or_else(|| Some("codex_cli".to_string())),
+        engine: CliEngine::Codex,
+        slot_id: Some(slot_id.to_string()),
+        account_ref: None,
+        model: request.model.clone(),
+        observed_at: chrono::Utc::now().to_rfc3339(),
+        status: ProviderUsageStatus::Unknown,
+        remaining: None,
+        limit: None,
+        reset_at: None,
+        source: Some("codex:/status".to_string()),
+        confidence: observation
+            .map(|observation| observation.snapshot.confidence as f32)
+            .unwrap_or(0.0),
+        block_kind: observation.and_then(|observation| observation.snapshot.blocked_kind.clone()),
+        model_quotas: Vec::new(),
+        diagnostics: vec![ProviderBoxDiagnostic::warning(
+            DIAG_USAGE_UNKNOWN,
+            message,
+            json!({
+                "slot_id": slot_id,
+                "reason": observation.map(|observation| observation.snapshot.reason.clone()),
+            }),
+        )],
+    }
+}
+
+fn extract_codex_usage_lines(text: &str) -> Option<CodexUsageLines> {
+    let status_slice = text
+        .rfind("/status")
+        .map(|index| &text[index..])
+        .unwrap_or(text);
+    let mut five_hour = None;
+    let mut weekly = None;
+
+    for raw_line in status_slice.lines() {
+        let line = clean_codex_status_line(raw_line);
+        if line.starts_with("GPT-") && line.contains("limit:") && five_hour.is_some() {
+            break;
+        }
+        if line.starts_with("5h limit:") && five_hour.is_none() {
+            five_hour = Some(line);
+            continue;
+        }
+        if line.starts_with("Weekly limit:") && weekly.is_none() {
+            weekly = Some(line);
+            continue;
+        }
+        if five_hour.is_some() && weekly.is_some() {
+            break;
+        }
+    }
+
+    Some(CodexUsageLines {
+        five_hour: five_hour?,
+        weekly: weekly?,
+    })
+}
+
+fn clean_codex_status_line(line: &str) -> String {
+    line.trim().trim_matches('│').trim().to_string()
+}
+
+fn codex_usage_percent(line: &str) -> Option<u8> {
+    let prefix = line.split("% left").next()?;
+    let digits = prefix
+        .chars()
+        .rev()
+        .skip_while(|ch| ch.is_whitespace())
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    let digits = digits.chars().rev().collect::<String>();
+    digits.parse::<u8>().ok().map(|value| value.min(100))
+}
+
+fn codex_status_field(text: &str, field: &str) -> Option<String> {
+    let prefix = format!("{field}:");
+    let status_slice = text
+        .rfind("/status")
+        .map(|index| &text[index..])
+        .unwrap_or(text);
+    status_slice.lines().find_map(|line| {
+        let line = clean_codex_status_line(line);
+        line.strip_prefix(&prefix)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    })
+}
+
 fn should_resolve_codex_startup_surface(observation: &CodexObservation) -> bool {
     is_codex_workspace_trust_prompt(observation)
         || observation.snapshot.reason == "codex:mcp_startup_running"
@@ -2471,10 +2729,17 @@ fn should_resolve_codex_startup_surface(observation: &CodexObservation) -> bool 
 }
 
 fn is_ready_for_codex_text(observation: &CodexObservation) -> bool {
-    matches!(
-        observation.snapshot.state,
-        PtyCanonicalState::Idle | PtyCanonicalState::Complete
-    ) && observation.snapshot.blocked_kind.is_none()
+    observation.snapshot.state == PtyCanonicalState::Idle
+        && observation.snapshot.blocked_kind.is_none()
+        && observation.snapshot.reason != "session_state:Exited"
+}
+
+fn is_codex_empty_composer(observation: &CodexObservation) -> bool {
+    observation
+        .snapshot
+        .screen_signals
+        .as_ref()
+        .is_some_and(|signals| signals.placeholder_visible)
 }
 
 fn is_codex_workspace_trust_prompt(observation: &CodexObservation) -> bool {
@@ -2676,10 +2941,6 @@ fn codex_exec_args_for_kind(
                 "web_search=\"disabled\"".to_string(),
                 "-c".to_string(),
                 "tools.web_search=false".to_string(),
-                "-c".to_string(),
-                "apps._default.enabled=false".to_string(),
-                "-c".to_string(),
-                "apps._default.default_tools_enabled=false".to_string(),
                 "-c".to_string(),
                 "features.image_generation=true".to_string(),
                 "-c".to_string(),
@@ -3396,10 +3657,11 @@ mod tests {
         assert!(args.contains(&"approval_policy=\"never\"".to_string()));
         assert!(args.contains(&"web_search=\"disabled\"".to_string()));
         assert!(args.contains(&"tools.web_search=false".to_string()));
-        assert!(args.contains(&"apps._default.enabled=false".to_string()));
-        assert!(args.contains(&"apps._default.default_tools_enabled=false".to_string()));
+        assert!(!args.contains(&"apps._default.enabled=false".to_string()));
+        assert!(!args.contains(&"apps._default.default_tools_enabled=false".to_string()));
         assert!(args.contains(&"features.image_generation=true".to_string()));
         assert!(args.contains(&"tools.image_generation=true".to_string()));
+        assert!(args.contains(&"tools.view_image=false".to_string()));
     }
 
     #[test]
@@ -3474,6 +3736,89 @@ mod tests {
     }
 
     #[test]
+    fn codex_placeholder_composer_is_treated_as_empty_input() {
+        use missiond_core::pty::{
+            CapturedCellFlags, StyledScreenLine, StyledScreenSnapshot, StyledScreenSpan,
+        };
+
+        let styled_span = |text: &str, dim: bool, bold: bool| StyledScreenSpan {
+            text: text.to_string(),
+            fg: [205, 214, 244],
+            bg: [30, 30, 46],
+            fg_hex: "#cdd6f4".to_string(),
+            bg_hex: "#1e1e2e".to_string(),
+            flags: CapturedCellFlags {
+                bold,
+                dim,
+                ..CapturedCellFlags::default()
+            },
+        };
+        let styled_line = |spans: Vec<StyledScreenSpan>| StyledScreenLine {
+            text: spans.iter().map(|span| span.text.as_str()).collect(),
+            spans,
+        };
+        let styled_screen = StyledScreenSnapshot {
+            rows: 5,
+            cols: 120,
+            lines: vec![
+                styled_line(vec![styled_span(
+                    "│ >_ OpenAI Codex (v0.135.0-alpha.1) │",
+                    false,
+                    false,
+                )]),
+                styled_line(vec![styled_span(
+                    "│ model:     gpt-5.5 xhigh   /model to change │",
+                    false,
+                    false,
+                )]),
+                styled_line(vec![styled_span(
+                    "│ directory: ~/Projects/missiond │",
+                    false,
+                    false,
+                )]),
+                styled_line(vec![
+                    styled_span("›", false, true),
+                    styled_span(" ", false, false),
+                    styled_span("Improve documentation in @filename", true, false),
+                ]),
+                styled_line(vec![styled_span(
+                    "  gpt-5.5 xhigh · ~/Projects/missiond",
+                    false,
+                    false,
+                )]),
+            ],
+        };
+        let lines = styled_screen
+            .lines
+            .iter()
+            .map(|line| line.text.clone())
+            .collect::<Vec<_>>();
+        let snapshot =
+            recognize_styled_screen(CliEngine::Codex, &styled_screen, SessionState::Idle);
+        let observation = CodexObservation {
+            text: lines.join("\n"),
+            lines,
+            snapshot,
+        };
+
+        assert!(is_ready_for_codex_text(&observation));
+        assert!(is_codex_empty_composer(&observation));
+    }
+
+    #[test]
+    fn codex_exited_session_is_not_ready_for_text_input() {
+        let lines = vec!["/status".to_string()];
+        let snapshot = recognize_screen(CliEngine::Codex, &lines, SessionState::Exited);
+        let observation = CodexObservation {
+            text: lines.join("\n"),
+            lines,
+            snapshot,
+        };
+
+        assert!(!is_ready_for_codex_text(&observation));
+    }
+
+    #[test]
     fn codex_mcp_status_value_marks_reconnect_as_restart_required() {
         let request = ProviderInteractionRequest::new(BoxCommand::McpStatus, CliEngine::Codex);
         let lines = vec![
@@ -3498,6 +3843,36 @@ mod tests {
         assert_eq!(value["status"], "connected");
         assert_eq!(value["hot_reconnect_supported"], false);
         assert_eq!(value["restart_required_for_reconnect"], true);
+    }
+
+    #[test]
+    fn codex_status_usage_extracts_current_limit_pair_only() {
+        let text = r#"
+› /status
+
+Model: gpt-5.5 (reasoning xhigh, summaries auto)
+Account: citrobridegroom967@gmail.com (Pro)
+
+5h limit:                    [████░░░░░░░░░░░░░░░░] 18% left (resets 22:58)
+Weekly limit:                [█████████████░░░░░░░] 66% left (resets 23:22 on 7 Jun)
+
+GPT-5.3-Codex-Spark limit:
+5h limit:                    [████████████████████] 0% left (resets tomorrow)
+Weekly limit:                [████████████████████] 0% left (resets next week)
+"#;
+
+        let usage = extract_codex_usage_lines(text).expect("usage lines");
+
+        assert_eq!(
+            usage.five_hour,
+            "5h limit:                    [████░░░░░░░░░░░░░░░░] 18% left (resets 22:58)"
+        );
+        assert_eq!(
+            usage.weekly,
+            "Weekly limit:                [█████████████░░░░░░░] 66% left (resets 23:22 on 7 Jun)"
+        );
+        assert_eq!(usage.model_quotas()[0].percent, Some(18));
+        assert_eq!(usage.model_quotas()[1].percent, Some(66));
     }
 
     #[test]

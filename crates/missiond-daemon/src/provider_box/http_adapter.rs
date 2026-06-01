@@ -16,6 +16,7 @@ use super::types::{
 
 const PTY_STEP_TEXT_LIMIT: usize = 4096;
 const AGY_USAGE_PROBE_SLOT: &str = "slot-agy-usage-probe";
+const CODEX_USAGE_PROBE_SLOT: &str = "slot-codex-usage-probe";
 const CODEX_RESEARCH_PROVIDER: &str = "codex_research";
 const CODEX_IMAGE_PROVIDER: &str = "codex_image_generation";
 const CODEX_RESEARCH_PROMPT_PREFIX: &str = "帮我在互联网上进行详细调研以下问题：";
@@ -53,6 +54,7 @@ pub(crate) struct ProviderBoxHttpAdapter {
     internal_token: Option<String>,
     agy_slot_pool_cursors: Arc<Mutex<HashMap<String, usize>>>,
     agy_usage_cache: Arc<Mutex<Option<Value>>>,
+    codex_usage_cache: Arc<Mutex<Option<Value>>>,
 }
 
 impl ProviderBoxHttpAdapter {
@@ -62,6 +64,7 @@ impl ProviderBoxHttpAdapter {
             internal_token: provider_box_internal_token(),
             agy_slot_pool_cursors: Arc::new(Mutex::new(HashMap::new())),
             agy_usage_cache: Arc::new(Mutex::new(None)),
+            codex_usage_cache: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -151,7 +154,7 @@ impl ProviderBoxHttpAdapter {
         }
         match (request.method.as_str(), path) {
             ("GET", "/provider-box/v1/models") => self.handle_models(request).await,
-            ("GET", "/provider-box/v1/usage") => self.handle_usage_cache().await,
+            ("GET", "/provider-box/v1/usage") => self.handle_usage_cache(request).await,
             ("POST", "/provider-box/v1/usage/refresh") => self.handle_usage_refresh(request).await,
             ("POST", "/provider-box/v1/turns") => self.handle_turn(request).await,
             ("POST", "/provider-box/v1/text-only/completions") => {
@@ -559,13 +562,33 @@ impl ProviderBoxHttpAdapter {
         &self,
         request: ProviderBoxHttpRequest,
     ) -> Result<ProviderBoxHttpResponse, String> {
-        let mut interaction =
-            ProviderInteractionRequest::new(BoxCommand::UsageProbe, CliEngine::Agy);
-        interaction.provider = Some("agy_cli".to_string());
-        interaction.slot_id = Some(usage_refresh_slot_id(&request));
+        let engine = usage_request_engine(&request);
+        let mut interaction = ProviderInteractionRequest::new(BoxCommand::UsageProbe, engine);
+        interaction.provider = Some(
+            match engine {
+                CliEngine::Codex => "codex_cli",
+                CliEngine::Agy => "agy_cli",
+                CliEngine::ClaudeCode => "claude_code",
+                CliEngine::Gemini => "gemini_cli",
+            }
+            .to_string(),
+        );
+        interaction.slot_id = Some(usage_refresh_slot_id(&request, engine));
         interaction.model = string_field(&request.body, "model");
+        interaction.model_profile = string_field(&request.body, "model_profile")
+            .or_else(|| string_field(&request.body, "reasoning_effort"));
+        interaction.cwd = string_field(&request.body, "cwd");
+        interaction.project_root = string_field(&request.body, "project_root");
         interaction.correlation_id = string_field(&request.body, "correlation_id")
             .unwrap_or_else(|| interaction.correlation_id.clone());
+        interaction.desired_worker = Some(json!({
+            "spawn_if_missing": bool_field(&request.body, "spawn_if_missing")
+                .or_else(|| bool_field(&request.body, "spawn"))
+                .unwrap_or(true),
+            "force_restart": bool_field(&request.body, "force_restart")
+                .or_else(|| bool_field(&request.body, "restart"))
+                .unwrap_or(false),
+        }));
         let result = self
             .boxed
             .execute(interaction)
@@ -576,33 +599,59 @@ impl ProviderBoxHttpAdapter {
             .as_ref()
             .and_then(|snapshot| serde_json::to_value(snapshot).ok())
         {
-            *self.agy_usage_cache.lock().await = Some(snapshot);
+            match engine {
+                CliEngine::Codex => *self.codex_usage_cache.lock().await = Some(snapshot),
+                _ => *self.agy_usage_cache.lock().await = Some(snapshot),
+            }
         }
         Ok(result_response(result))
     }
 
-    async fn handle_usage_cache(&self) -> Result<ProviderBoxHttpResponse, String> {
-        let cached = self.agy_usage_cache.lock().await.clone();
+    async fn handle_usage_cache(
+        &self,
+        request: ProviderBoxHttpRequest,
+    ) -> Result<ProviderBoxHttpResponse, String> {
+        let engine = usage_request_engine(&request);
+        let cached = match engine {
+            CliEngine::Codex => self.codex_usage_cache.lock().await.clone(),
+            _ => self.agy_usage_cache.lock().await.clone(),
+        };
         let cached_hit = cached.is_some();
+        let (provider, engine_label, probe_slot, message_hit, message_miss) = match engine {
+            CliEngine::Codex => (
+                "codex_cli",
+                "codex",
+                CODEX_USAGE_PROBE_SLOT,
+                "Returning the latest cached Codex usage snapshot.",
+                "No cached Codex usage snapshot is available yet; call POST /provider-box/v1/usage/refresh with engine=codex.",
+            ),
+            _ => (
+                "agy_cli",
+                "agy",
+                AGY_USAGE_PROBE_SLOT,
+                "Returning the latest cached AGY usage snapshot.",
+                "No cached AGY usage snapshot is available yet; call POST /provider-box/v1/usage/refresh.",
+            ),
+        };
         Ok(json_response(
             200,
             json!({
                 "schema": "missiond.provider-box.usage-cache.v1",
                 "status": if cached_hit { "completed" } else { "unknown" },
                 "cached": cached_hit,
-                "provider": "agy_cli",
-                "engine": "agy",
+                "provider": provider,
+                "engine": engine_label,
                 "usage_snapshot": cached,
                 "refresh_endpoint": "/provider-box/v1/usage/refresh",
                 "probe_slot_policy": {
-                    "slot_id": AGY_USAGE_PROBE_SLOT,
+                    "slot_id": probe_slot,
                     "owned_by": "provider-box",
                     "interferes_with_text_only_slots": false
                 },
                 "message": if cached_hit {
-                    "Returning the latest cached AGY usage snapshot."
+                    message_hit
                 } else {
-                    "No cached AGY usage snapshot is available yet; call POST /provider-box/v1/usage/refresh."
+                    message_miss
                 }
             }),
         ))
@@ -1085,6 +1134,10 @@ fn engine_from_body(body: &Value) -> CliEngine {
         .and_then(Value::as_str)
         .or_else(|| body.get("provider").and_then(Value::as_str))
         .unwrap_or("agy");
+    cli_engine_from_hint(raw)
+}
+
+fn cli_engine_from_hint(raw: &str) -> CliEngine {
     match raw.to_ascii_lowercase().as_str() {
         "claude-code" | "claude_code" | "claudecode" | "claude" => CliEngine::ClaudeCode,
         "codex"
@@ -1101,6 +1154,13 @@ fn engine_from_body(body: &Value) -> CliEngine {
         "gemini" | "gemini_cli" | "gemini-cli" => CliEngine::Gemini,
         _ => CliEngine::Agy,
     }
+}
+
+fn usage_request_engine(request: &ProviderBoxHttpRequest) -> CliEngine {
+    query_field(&request.path, "engine")
+        .or_else(|| query_field(&request.path, "provider"))
+        .map(|value| cli_engine_from_hint(&value))
+        .unwrap_or_else(|| engine_from_body(&request.body))
 }
 
 fn engine_from_body_or_slot(body: &Value, slot_id: &str) -> CliEngine {
@@ -1960,10 +2020,25 @@ fn header_slot_id(request: &ProviderBoxHttpRequest) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn usage_refresh_slot_id(request: &ProviderBoxHttpRequest) -> String {
+fn usage_refresh_slot_id(request: &ProviderBoxHttpRequest, engine: CliEngine) -> String {
     header_slot_id(request)
         .or_else(|| string_field(&request.body, "slot_id"))
-        .unwrap_or_else(|| AGY_USAGE_PROBE_SLOT.to_string())
+        .unwrap_or_else(|| match engine {
+            CliEngine::Codex => CODEX_USAGE_PROBE_SLOT.to_string(),
+            _ => AGY_USAGE_PROBE_SLOT.to_string(),
+        })
+}
+
+fn query_field(path: &str, key: &str) -> Option<String> {
+    let query = path.split_once('?')?.1;
+    query.split('&').find_map(|pair| {
+        let (pair_key, pair_value) = pair.split_once('=').unwrap_or((pair, ""));
+        if pair_key == key {
+            Some(pair_value.trim().to_string()).filter(|value| !value.is_empty())
+        } else {
+            None
+        }
+    })
 }
 
 fn string_field(body: &Value, key: &str) -> Option<String> {
@@ -2480,7 +2555,26 @@ mod tests {
             body: json!({}),
         };
 
-        assert_eq!(usage_refresh_slot_id(&request), AGY_USAGE_PROBE_SLOT);
+        assert_eq!(
+            usage_refresh_slot_id(&request, CliEngine::Agy),
+            AGY_USAGE_PROBE_SLOT
+        );
+        assert_eq!(
+            usage_refresh_slot_id(&request, CliEngine::Codex),
+            CODEX_USAGE_PROBE_SLOT
+        );
+    }
+
+    #[test]
+    fn usage_request_engine_can_be_selected_from_query() {
+        let request = ProviderBoxHttpRequest {
+            method: "GET".to_string(),
+            path: "/provider-box/v1/usage?engine=codex".to_string(),
+            headers: HashMap::new(),
+            body: json!({}),
+        };
+
+        assert_eq!(usage_request_engine(&request), CliEngine::Codex);
     }
 
     #[test]
@@ -2494,7 +2588,10 @@ mod tests {
             body: json!({"slot_id": "slot-agy-body-ignored"}),
         };
 
-        assert_eq!(usage_refresh_slot_id(&request), "slot-agy-debug-usage");
+        assert_eq!(
+            usage_refresh_slot_id(&request, CliEngine::Codex),
+            "slot-agy-debug-usage"
+        );
     }
 
     #[tokio::test]
@@ -2502,8 +2599,17 @@ mod tests {
         let adapter = ProviderBoxHttpAdapter::new(std::sync::Arc::new(
             ProviderInteractionBox::without_artifacts(),
         ));
+        let request = ProviderBoxHttpRequest {
+            method: "GET".to_string(),
+            path: "/provider-box/v1/usage".to_string(),
+            headers: HashMap::new(),
+            body: json!({}),
+        };
 
-        let response = adapter.handle_usage_cache().await.expect("usage cache");
+        let response = adapter
+            .handle_usage_cache(request)
+            .await
+            .expect("usage cache");
 
         assert_eq!(response.status, 200);
         assert_eq!(response.body["status"], "unknown");
@@ -2511,6 +2617,33 @@ mod tests {
         assert_eq!(
             response.body["probe_slot_policy"]["slot_id"],
             AGY_USAGE_PROBE_SLOT
+        );
+    }
+
+    #[tokio::test]
+    async fn usage_cache_get_can_select_codex_probe_policy() {
+        let adapter = ProviderBoxHttpAdapter::new(std::sync::Arc::new(
+            ProviderInteractionBox::without_artifacts(),
+        ));
+        let request = ProviderBoxHttpRequest {
+            method: "GET".to_string(),
+            path: "/provider-box/v1/usage?engine=codex".to_string(),
+            headers: HashMap::new(),
+            body: json!({}),
+        };
+
+        let response = adapter
+            .handle_usage_cache(request)
+            .await
+            .expect("usage cache");
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body["status"], "unknown");
+        assert_eq!(response.body["provider"], "codex_cli");
+        assert_eq!(response.body["engine"], "codex");
+        assert_eq!(
+            response.body["probe_slot_policy"]["slot_id"],
+            CODEX_USAGE_PROBE_SLOT
         );
     }
 
