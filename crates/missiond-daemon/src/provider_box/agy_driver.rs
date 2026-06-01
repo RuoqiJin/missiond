@@ -33,7 +33,9 @@ const AGY_CTRL_D: &str = "\x1b[100;5u";
 const AGY_EXIT_COMMAND: &str = "/exit";
 const MODEL_PICKER_MAX_DOWN: usize = 96;
 const MODEL_CATALOG_MAX_DOWN: usize = 128;
-const OBSERVE_SETTLE_MS: u64 = 220;
+const OBSERVE_SETTLE_MS: u64 = 320;
+const OBSERVE_STABLE_POLL_MS: u64 = 120;
+const OBSERVE_STABLE_MAX_MS: u64 = 1_000;
 const AGY_STARTUP_SIGN_IN_WAIT_SECS: u64 = 10;
 const AGY_STARTUP_READY_WAIT_SECS: u64 = 30;
 const AGY_DURABLE_FINAL_IDLE_GRACE_DEFAULT_SECS: u64 = 90;
@@ -619,6 +621,36 @@ impl AgyProviderDriver {
         }
     }
 
+    fn observations_equivalent(left: &AgyObservation, right: &AgyObservation) -> bool {
+        left.text == right.text
+            && left.snapshot.state == right.snapshot.state
+            && left.snapshot.reason == right.snapshot.reason
+            && left.snapshot.blocked_kind == right.snapshot.blocked_kind
+    }
+
+    fn observations_changed(before: &AgyObservation, after: &AgyObservation) -> bool {
+        !Self::observations_equivalent(before, after)
+    }
+
+    async fn observe_after_action(&self, slot_id: &str) -> AgyObservation {
+        let started = Instant::now();
+        tokio::time::sleep(Duration::from_millis(OBSERVE_SETTLE_MS)).await;
+        let mut previous = self.observe(slot_id).await;
+
+        loop {
+            if started.elapsed() >= Duration::from_millis(OBSERVE_STABLE_MAX_MS) {
+                return previous;
+            }
+
+            tokio::time::sleep(Duration::from_millis(OBSERVE_STABLE_POLL_MS)).await;
+            let current = self.observe(slot_id).await;
+            if Self::observations_equivalent(&previous, &current) {
+                return current;
+            }
+            previous = current;
+        }
+    }
+
     fn pty_observation(slot_id: &str, observation: &AgyObservation) -> PtyObservation {
         PtyObservation::structured(
             format!("pty:{slot_id}"),
@@ -637,11 +669,10 @@ impl AgyProviderDriver {
     ) -> AgyObservation {
         let before = self.observe(slot_id).await;
         let write_result = self.pty.write(slot_id, bytes).await;
-        tokio::time::sleep(Duration::from_millis(OBSERVE_SETTLE_MS)).await;
-        let after = self.observe(slot_id).await;
+        let after = self.observe_after_action(slot_id).await;
         let status = if write_result.is_err() {
             PtyStepVerificationStatus::Failed
-        } else if before.text != after.text {
+        } else if Self::observations_changed(&before, &after) {
             PtyStepVerificationStatus::Verified
         } else {
             PtyStepVerificationStatus::Unchanged
@@ -2528,10 +2559,7 @@ impl AgyProviderDriver {
             return false;
         };
         if status.engine != CliEngine::Agy
-            || matches!(
-                status.state,
-                SessionState::Idle | SessionState::Exited | SessionState::Error
-            )
+            || matches!(status.state, SessionState::Exited | SessionState::Error)
         {
             return false;
         }
@@ -3165,6 +3193,27 @@ impl ProviderDriver for AgyProviderDriver {
             ProviderControlAction::Input => {
                 self.input_locked(request, &mut result, &slot_id).await;
             }
+            ProviderControlAction::ClearInput => {
+                let after = self
+                    .write_step(
+                        &mut result,
+                        &slot_id,
+                        PtyStepAction::key("ctrl+c"),
+                        "\x03",
+                        Some("clear AGY composer input with Ctrl-C".to_string()),
+                    )
+                    .await;
+                let failed = result.step_records.last().is_some_and(|step| {
+                    step.verification_status == PtyStepVerificationStatus::Failed
+                });
+                result.status = if failed {
+                    ProviderBoxStatus::Failed
+                } else {
+                    ProviderBoxStatus::Completed
+                };
+                let status = self.pty.get_status(&slot_id).await;
+                result.slot_status = Some(slot_status_value(&slot_id, status.as_ref(), &after));
+            }
             ProviderControlAction::ClearScreen => {
                 self.clear_screen_locked(&mut result, &slot_id).await;
             }
@@ -3583,10 +3632,7 @@ fn should_restart_private_text_slot_before_turn(
     observation: &AgyObservation,
 ) -> bool {
     is_private_agy_text_slot_id(slot_id)
-        && !matches!(
-            session_state,
-            SessionState::Idle | SessionState::Exited | SessionState::Error
-        )
+        && !matches!(session_state, SessionState::Exited | SessionState::Error)
         && !is_ready_for_text(observation)
 }
 
@@ -5039,6 +5085,20 @@ mod tests {
             "slot-agy-claude-opus-46-thinking-b",
             SessionState::Thinking,
             &stale
+        ));
+        assert!(should_restart_private_text_slot_before_turn(
+            "slot-agy-claude-opus-46-thinking-b",
+            SessionState::Idle,
+            &observation(&[
+                "────────────────────────────────────────",
+                "> /c",
+                "────────────────────────────────────────",
+                "/changelog        Show release notes and changes",
+                "> /clear          Clear conversation and start a new one",
+                "/config           Open settings panel",
+                "↑/↓ Navigate · enter Select · tab Complete",
+                "esc to cancel                                                                                    Gemini 3.5 Flash (High)",
+            ])
         ));
 
         let ready = observation(&[
