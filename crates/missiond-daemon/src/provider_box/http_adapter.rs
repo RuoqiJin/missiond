@@ -1653,7 +1653,7 @@ fn codex_exec_router_sources() -> Vec<Value> {
                 "blocked_reason": if def.routeable {
                     Value::Null
                 } else {
-                    json!("codex_exec_text requires live guarded smoke before router publication")
+                    json!(def.routeable_status)
                 },
                 "text_only_source": codex_exec_text_only_sources()
                     .into_iter()
@@ -1686,7 +1686,7 @@ fn codex_task_router_sources() -> Vec<Value> {
                 "blocked_reason": if def.routeable {
                     Value::Null
                 } else {
-                    json!("codex task source requires live guarded smoke before router publication")
+                    json!(def.routeable_status)
                 },
                 "task_source": codex_task_sources()
                     .into_iter()
@@ -1748,16 +1748,16 @@ fn codex_exec_text_source_defs() -> Vec<CodexExecTextSourceDef> {
             source_id: "missiond/codex-exec-text/gpt-55-xhigh",
             display_name: "Codex GPT-5.5 (xhigh)",
             model_profile: Some("xhigh"),
-            routeable: false,
-            routeable_status: "guarded_pending_live_smoke",
+            routeable: true,
+            routeable_status: "live_smoke_passed",
         },
         CodexExecTextSourceDef {
             model_id: "codex-gpt-55-default",
             source_id: "missiond/codex-exec-text/gpt-55-default",
             display_name: "Codex GPT-5.5 (default reasoning)",
             model_profile: None,
-            routeable: false,
-            routeable_status: "guarded_pending_live_smoke",
+            routeable: true,
+            routeable_status: "live_smoke_passed",
         },
     ]
 }
@@ -1774,8 +1774,8 @@ fn codex_task_source_defs() -> Vec<CodexTaskSourceDef> {
             request_schema: "missiond.provider-box.research-completion-request.v1",
             prompt_prefix: CODEX_RESEARCH_PROMPT_PREFIX,
             model_profile: Some("xhigh"),
-            routeable: false,
-            routeable_status: "guarded_pending_live_smoke",
+            routeable: true,
+            routeable_status: "live_smoke_passed",
         },
         CodexTaskSourceDef {
             model_id: "codex-image-generation-gpt-55-default",
@@ -1788,7 +1788,7 @@ fn codex_task_source_defs() -> Vec<CodexTaskSourceDef> {
             prompt_prefix: CODEX_IMAGE_PROMPT_PREFIX,
             model_profile: None,
             routeable: false,
-            routeable_status: "guarded_pending_live_smoke",
+            routeable_status: "blocked_codex_cli_image_generation_uses_dummy_mcp",
         },
     ]
 }
@@ -2207,7 +2207,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_exec_text_sources_are_exported_but_not_routeable_until_smoked() {
+    fn codex_sources_export_live_smoke_routeability() {
         let mut body = json!({
             "data": [],
             "provider_text_only_sources": [],
@@ -2238,11 +2238,23 @@ mod tests {
             .iter()
             .any(|entry| entry["provider"] == "codex_exec_text"
                 && entry["guard"]["shell_tool_disabled"] == true));
-        assert!(body["router_model_sources"]
+        let router_sources = body["router_model_sources"]
             .as_array()
-            .expect("router sources")
+            .expect("router sources");
+        assert!(router_sources
             .iter()
-            .all(|entry| entry["routeable"] == false));
+            .any(|entry| entry["model_id"] == "codex-gpt-55-xhigh"
+                && entry["routeable"] == true
+                && entry["routeable_status"] == "live_smoke_passed"));
+        assert!(router_sources
+            .iter()
+            .any(|entry| entry["model_id"] == "codex-research-gpt-55-xhigh"
+                && entry["routeable"] == true
+                && entry["routeable_status"] == "live_smoke_passed"));
+        assert!(router_sources.iter().any(|entry| entry["model_id"]
+            == "codex-image-generation-gpt-55-default"
+            && entry["routeable"] == false
+            && entry["routeable_status"] == "blocked_codex_cli_image_generation_uses_dummy_mcp"));
         assert!(body["provider_task_sources"]
             .as_array()
             .expect("task sources")
