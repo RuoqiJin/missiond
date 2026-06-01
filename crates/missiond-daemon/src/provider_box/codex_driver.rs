@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -14,7 +14,7 @@ use missiond_core::{LearnedPermissions, PTYManager, PTYSlot, PTYSpawnOptions, Se
 use serde_json::{json, Value};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, Semaphore};
 
 use super::driver::{ProviderDriver, ProviderDriverCapabilities};
 use super::types::{
@@ -36,6 +36,9 @@ const CODEX_EXEC_TEXT_PROVIDER: &str = "codex_exec_text";
 const CODEX_RESEARCH_PROVIDER: &str = "codex_research";
 const CODEX_IMAGE_PROVIDER: &str = "codex_image_generation";
 const CODEX_EXEC_TEXT_MODEL: &str = "gpt-5.5";
+const CODEX_EXEC_TEXT_DEFAULT_MAX_CONCURRENT: usize = 4;
+const CODEX_EXEC_TEXT_XHIGH_MAX_CONCURRENT: usize = 2;
+const CODEX_EXEC_TASK_MAX_CONCURRENT: usize = 1;
 const CODEX_STARTUP_READY_WAIT_SECS: u64 = 20;
 const CODEX_TRUST_READY_WAIT_SECS: u64 = 12;
 const CODEX_MANUAL_TEXT_LIMIT: usize = 4096;
@@ -64,6 +67,7 @@ pub(crate) struct CodexProviderDriver {
     project_registry: SharedProjectRegistry,
     learned: Option<Arc<LearnedPermissions>>,
     slot_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    exec_lane_locks: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
     codex_home: PathBuf,
 }
 
@@ -82,9 +86,20 @@ struct CodexTurnFinal {
 }
 
 #[derive(Debug, Clone)]
+struct CodexImageGenerationEvidence {
+    session_id: String,
+    rollout_path: String,
+    image_paths: Vec<String>,
+    revised_prompts: Vec<String>,
+    final_text: Option<String>,
+    image_event_count: usize,
+}
+
+#[derive(Debug, Clone)]
 struct CodexExecJsonlAnalysis {
     event_count: usize,
     allowed_tool_event_count: usize,
+    thread_id: Option<String>,
     final_text: Option<String>,
     violation: Option<Value>,
 }
@@ -167,6 +182,7 @@ impl CodexProviderDriver {
             project_registry,
             learned,
             slot_locks: Arc::new(Mutex::new(HashMap::new())),
+            exec_lane_locks: Arc::new(Mutex::new(HashMap::new())),
             codex_home: default_codex_home(),
         }
     }
@@ -176,6 +192,14 @@ impl CodexProviderDriver {
         locks
             .entry(slot_id.to_string())
             .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    async fn exec_lane_semaphore(&self, queue_key: &str, max_concurrent: usize) -> Arc<Semaphore> {
+        let mut locks = self.exec_lane_locks.lock().await;
+        locks
+            .entry(queue_key.to_string())
+            .or_insert_with(|| Arc::new(Semaphore::new(max_concurrent)))
             .clone()
     }
 
@@ -1655,6 +1679,30 @@ impl CodexProviderDriver {
         reasoning: Option<&str>,
         prompt: &str,
     ) -> bool {
+        let queue_key = codex_exec_queue_key(kind, model, reasoning);
+        let queue_max_concurrent = codex_exec_queue_max_concurrent(kind, reasoning);
+        let queue_semaphore = self
+            .exec_lane_semaphore(&queue_key, queue_max_concurrent)
+            .await;
+        let queued_at = Instant::now();
+        let Ok(_queue_guard) = queue_semaphore.acquire_owned().await else {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                format!("Codex exec {} queue is unavailable", kind.label()),
+                json!({
+                    "provider": kind.provider(),
+                    "kind": kind.label(),
+                    "queue": {
+                        "key": queue_key,
+                        "max_concurrent": queue_max_concurrent,
+                    },
+                }),
+            ));
+            return false;
+        };
+        let queue_wait_ms = u64::try_from(queued_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+
         let Some(codex_binary) = self.locate_codex_binary(request, result).await else {
             return false;
         };
@@ -1766,6 +1814,19 @@ impl CodexProviderDriver {
         let _ = tokio::fs::write(&events_file, stdout_text.as_bytes()).await;
         let _ = tokio::fs::write(&stderr_file, stderr_text.as_bytes()).await;
         let analysis = analyze_codex_exec_jsonl_for_kind(&stdout_text, kind);
+        let image_evidence = if kind == CodexExecTaskKind::ImageGeneration {
+            if let Some(thread_id) = analysis.thread_id.as_deref() {
+                self.extract_image_generation_from_rollouts(thread_id).await
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let allowed_tool_event_count = image_evidence
+            .as_ref()
+            .map(|evidence| evidence.image_event_count)
+            .unwrap_or(analysis.allowed_tool_event_count);
 
         if let Some(violation) = analysis.violation {
             result.status = ProviderBoxStatus::Failed;
@@ -1780,7 +1841,7 @@ impl CodexProviderDriver {
                     "kind": kind.label(),
                     "event": violation,
                     "stdout_event_count": analysis.event_count,
-                    "allowed_tool_event_count": analysis.allowed_tool_event_count,
+                    "allowed_tool_event_count": allowed_tool_event_count,
                     "rule": "provider-box task results are not returned after disallowed provider tool activity"
                 }),
             ));
@@ -1799,13 +1860,13 @@ impl CodexProviderDriver {
                     "stdout_excerpt": stdout_text.chars().take(1200).collect::<String>(),
                     "stderr_excerpt": stderr_text.chars().take(1200).collect::<String>(),
                     "stdout_event_count": analysis.event_count,
-                    "allowed_tool_event_count": analysis.allowed_tool_event_count,
+                    "allowed_tool_event_count": allowed_tool_event_count,
                 }),
             ));
             return false;
         }
 
-        if kind != CodexExecTaskKind::TextOnly && analysis.allowed_tool_event_count == 0 {
+        if kind != CodexExecTaskKind::TextOnly && allowed_tool_event_count == 0 {
             result.status = ProviderBoxStatus::Failed;
             result.add_diagnostic(ProviderBoxDiagnostic::error(
                 DIAG_PROVIDER_DURABLE_FINAL_MISSING,
@@ -1819,8 +1880,9 @@ impl CodexProviderDriver {
                     "expected_tool_family": kind.required_tool_family(),
                     "output_last_message": output_file.display().to_string(),
                     "events_jsonl": events_file.display().to_string(),
+                    "codex_thread_id": analysis.thread_id.as_deref(),
                     "stdout_event_count": analysis.event_count,
-                    "allowed_tool_event_count": analysis.allowed_tool_event_count,
+                    "allowed_tool_event_count": allowed_tool_event_count,
                     "rule": "provider-box task sources require durable JSONL evidence that the lane-specific tool actually ran"
                 }),
             ));
@@ -1835,6 +1897,10 @@ impl CodexProviderDriver {
                 .filter(|value| !value.is_empty())
                 .or_else(|| analysis.final_text.map(|value| value.trim().to_string()))
                 .filter(|value| !value.is_empty())
+        } else if kind == CodexExecTaskKind::ImageGeneration {
+            image_evidence
+                .as_ref()
+                .and_then(codex_image_generation_final_text)
         } else {
             analysis
                 .final_text
@@ -1855,8 +1921,9 @@ impl CodexProviderDriver {
                     "kind": kind.label(),
                     "output_last_message": output_file.display().to_string(),
                     "events_jsonl": events_file.display().to_string(),
+                    "codex_thread_id": analysis.thread_id.as_deref(),
                     "stdout_event_count": analysis.event_count,
-                    "allowed_tool_event_count": analysis.allowed_tool_event_count,
+                    "allowed_tool_event_count": allowed_tool_event_count,
                 }),
             ));
             return false;
@@ -1864,9 +1931,14 @@ impl CodexProviderDriver {
 
         result.status = ProviderBoxStatus::Completed;
         result.provider = Some(kind.provider().to_string());
-        result.provider_conversation_id = Some(request.correlation_id.clone());
+        result.provider_conversation_id = analysis
+            .thread_id
+            .clone()
+            .or_else(|| Some(request.correlation_id.clone()));
         result.durable_source = Some(
-            if kind == CodexExecTaskKind::TextOnly {
+            if let Some(evidence) = image_evidence.as_ref() {
+                Path::new(&evidence.rollout_path)
+            } else if kind == CodexExecTaskKind::TextOnly {
                 &output_file
             } else {
                 &events_file
@@ -1883,9 +1955,25 @@ impl CodexProviderDriver {
             "stderr_log": stderr_file.display().to_string(),
             "model": model,
             "reasoning_effort": reasoning,
+            "queue": {
+                "owner": "provider-box",
+                "key": queue_key.as_str(),
+                "max_concurrent": queue_max_concurrent,
+                "wait_ms": queue_wait_ms,
+                "policy": "per_logical_codex_exec_source"
+            },
             "output_media_type": kind.output_media_type(),
             "stdout_event_count": analysis.event_count,
-            "allowed_tool_event_count": analysis.allowed_tool_event_count,
+            "allowed_tool_event_count": allowed_tool_event_count,
+            "codex_thread_id": analysis.thread_id.as_deref(),
+            "image_generation_evidence": image_evidence.as_ref().map(|evidence| json!({
+                "session_id": evidence.session_id,
+                "rollout_path": evidence.rollout_path,
+                "image_paths": evidence.image_paths,
+                "revised_prompts": evidence.revised_prompts,
+                "image_event_count": evidence.image_event_count,
+                "assistant_final": evidence.final_text,
+            })),
             "exit_status": status.code(),
         }));
         result.final_text = Some(final_text);
@@ -1908,6 +1996,33 @@ impl CodexProviderDriver {
             files
                 .iter()
                 .filter_map(|path| extract_correlated_rollout(path, &correlation_id))
+                .max_by_key(|turn| modified_at(Path::new(&turn.rollout_path)))
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    async fn extract_image_generation_from_rollouts(
+        &self,
+        thread_id: &str,
+    ) -> Option<CodexImageGenerationEvidence> {
+        let roots = [
+            self.codex_home.join("sessions"),
+            self.codex_home.join("archived_sessions"),
+        ];
+        let codex_home = self.codex_home.clone();
+        let thread_id = thread_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let mut files = Vec::new();
+            for root in roots {
+                collect_jsonl_files(&root, &mut files);
+            }
+            files.sort_by(|a, b| modified_at(b).cmp(&modified_at(a)));
+            files.truncate(120);
+            files
+                .iter()
+                .filter_map(|path| extract_image_generation_rollout(path, &thread_id, &codex_home))
                 .max_by_key(|turn| modified_at(Path::new(&turn.rollout_path)))
         })
         .await
@@ -2467,6 +2582,33 @@ fn codex_exec_text_args(output_file: &Path, model: &str, reasoning: Option<&str>
     codex_exec_args_for_kind(CodexExecTaskKind::TextOnly, output_file, model, reasoning)
 }
 
+fn codex_exec_queue_key(kind: CodexExecTaskKind, model: &str, reasoning: Option<&str>) -> String {
+    format!(
+        "{}:{}:{}",
+        kind.provider(),
+        model.trim(),
+        reasoning
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("default")
+    )
+}
+
+fn codex_exec_queue_max_concurrent(kind: CodexExecTaskKind, reasoning: Option<&str>) -> usize {
+    if kind != CodexExecTaskKind::TextOnly {
+        return CODEX_EXEC_TASK_MAX_CONCURRENT;
+    }
+    let reasoning = reasoning
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("default");
+    if reasoning.eq_ignore_ascii_case("xhigh") {
+        CODEX_EXEC_TEXT_XHIGH_MAX_CONCURRENT
+    } else {
+        CODEX_EXEC_TEXT_DEFAULT_MAX_CONCURRENT
+    }
+}
+
 fn codex_exec_args_for_kind(
     kind: CodexExecTaskKind,
     output_file: &Path,
@@ -2480,9 +2622,15 @@ fn codex_exec_args_for_kind(
         output_file.display().to_string(),
         "--color".to_string(),
         "never".to_string(),
-        "--ephemeral".to_string(),
-        "--ignore-user-config".to_string(),
-        "--ignore-rules".to_string(),
+    ];
+    if kind != CodexExecTaskKind::ImageGeneration {
+        args.extend([
+            "--ephemeral".to_string(),
+            "--ignore-user-config".to_string(),
+            "--ignore-rules".to_string(),
+        ]);
+    }
+    args.extend([
         "--skip-git-repo-check".to_string(),
         "--sandbox".to_string(),
         "read-only".to_string(),
@@ -2492,7 +2640,7 @@ fn codex_exec_args_for_kind(
         "approval_policy=\"never\"".to_string(),
         "-c".to_string(),
         "features.shell_tool=false".to_string(),
-    ];
+    ]);
     match kind {
         CodexExecTaskKind::TextOnly => {
             args.extend([
@@ -2529,9 +2677,9 @@ fn codex_exec_args_for_kind(
                 "-c".to_string(),
                 "tools.web_search=false".to_string(),
                 "-c".to_string(),
-                "apps._default.enabled=true".to_string(),
+                "apps._default.enabled=false".to_string(),
                 "-c".to_string(),
-                "apps._default.default_tools_enabled=true".to_string(),
+                "apps._default.default_tools_enabled=false".to_string(),
                 "-c".to_string(),
                 "features.image_generation=true".to_string(),
                 "-c".to_string(),
@@ -2653,6 +2801,7 @@ fn analyze_codex_exec_jsonl_for_kind(
     let mut analysis = CodexExecJsonlAnalysis {
         event_count: 0,
         allowed_tool_event_count: 0,
+        thread_id: None,
         final_text: None,
         violation: None,
     };
@@ -2665,6 +2814,11 @@ fn analyze_codex_exec_jsonl_for_kind(
             continue;
         };
         analysis.event_count += 1;
+        if analysis.thread_id.is_none() {
+            if let Some(thread_id) = event.get("thread_id").and_then(Value::as_str) {
+                analysis.thread_id = Some(thread_id.to_string());
+            }
+        }
         if analysis.violation.is_none() && codex_exec_event_is_tool_violation_for_kind(&event, kind)
         {
             analysis.violation = Some(event.clone());
@@ -2698,6 +2852,18 @@ fn codex_exec_event_is_tool_violation_for_kind(event: &Value, kind: CodexExecTas
         .flatten()
         .any(|value| matches!(*value, "mcp_tool_call" | "approval_request" | "approval"))
     {
+        if kind == CodexExecTaskKind::ImageGeneration
+            && codex_exec_event_is_imagegen_skill_bootstrap(event)
+        {
+            return false;
+        }
+        return true;
+    }
+    if type_fields
+        .iter()
+        .flatten()
+        .any(|value| matches!(*value, "command_execution"))
+    {
         return true;
     }
     if kind == CodexExecTaskKind::TextOnly {
@@ -2711,6 +2877,12 @@ fn codex_exec_event_is_tool_violation_for_kind(event: &Value, kind: CodexExecTas
         .find(|value| !value.is_empty());
     let tool_name = codex_exec_tool_name(event).map(|value| value.to_ascii_lowercase());
 
+    if type_name
+        .as_deref()
+        .is_some_and(|value| matches!(value, "command_execution"))
+    {
+        return true;
+    }
     if tool_name
         .as_deref()
         .is_some_and(codex_exec_tool_name_is_always_forbidden)
@@ -2757,6 +2929,7 @@ fn codex_exec_event_is_tool_violation_for_kind(event: &Value, kind: CodexExecTas
 fn codex_exec_event_is_allowed_tool_event_for_kind(event: &Value, kind: CodexExecTaskKind) -> bool {
     kind != CodexExecTaskKind::TextOnly
         && codex_exec_event_is_tool_like(event)
+        && !codex_exec_event_is_imagegen_skill_bootstrap(event)
         && !codex_exec_event_is_tool_violation_for_kind(event, kind)
 }
 
@@ -2776,6 +2949,7 @@ fn codex_exec_event_is_tool_like(event: &Value) -> bool {
                 | "mcp_tool_call"
                 | "approval_request"
                 | "approval"
+                | "command_execution"
                 | "web_search_call"
                 | "web_search_result"
                 | "search_query"
@@ -2783,6 +2957,7 @@ fn codex_exec_event_is_tool_like(event: &Value) -> bool {
                 | "image_generation_call"
                 | "image_generation_result"
                 | "image_generation"
+                | "image_generation_end"
         )
     }) || codex_exec_tool_name(event).is_some()
 }
@@ -2815,7 +2990,29 @@ fn codex_exec_tool_name_is_always_forbidden(name: &str) -> bool {
             | "mcp"
             | "mcp_tool_call"
             | "approval_request"
+            | "command_execution"
     )
+}
+
+fn codex_exec_event_is_imagegen_skill_bootstrap(event: &Value) -> bool {
+    let is_node_repl = event.pointer("/item/type").and_then(Value::as_str) == Some("mcp_tool_call")
+        && event.pointer("/item/server").and_then(Value::as_str) == Some("node_repl")
+        && event.pointer("/item/tool").and_then(Value::as_str) == Some("js");
+    if !is_node_repl {
+        return false;
+    }
+    let title = event
+        .pointer("/item/arguments/title")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let code = event
+        .pointer("/item/arguments/code")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    title.contains("imagegen")
+        && code.contains("/.codex/skills/.system/imagegen/SKILL.md")
+        && code.contains("readFile")
 }
 
 fn codex_exec_tool_name_is_research_allowed(name: &str) -> bool {
@@ -2849,7 +3046,11 @@ fn codex_exec_tool_name_is_image_allowed(name: &str) -> bool {
 fn codex_exec_type_is_image_tool(value: &str) -> bool {
     matches!(
         value,
-        "image_generation" | "image_generation_call" | "image_generation_result" | "image_gen_call"
+        "image_generation"
+            | "image_generation_call"
+            | "image_generation_result"
+            | "image_generation_end"
+            | "image_gen_call"
     )
 }
 
@@ -2956,6 +3157,115 @@ fn value_text(value: &Value) -> String {
         Value::Null => String::new(),
         other => other.to_string(),
     }
+}
+
+fn extract_image_generation_rollout(
+    path: &Path,
+    thread_id: &str,
+    codex_home: &Path,
+) -> Option<CodexImageGenerationEvidence> {
+    let file = fs::File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    let mut session_id = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("codex-rollout")
+        .to_string();
+    let mut matched = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.contains(thread_id));
+    let mut final_text = None;
+    let mut image_paths = Vec::new();
+    let mut revised_prompts = Vec::new();
+    let mut image_event_count = 0;
+
+    for line in reader.lines().map_while(Result::ok) {
+        let Ok(event) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if event.get("type").and_then(Value::as_str) == Some("session_meta") {
+            if let Some(id) = event.pointer("/payload/id").and_then(Value::as_str) {
+                session_id = id.to_string();
+                if id == thread_id {
+                    matched = true;
+                }
+            }
+        }
+        match event.pointer("/payload/type").and_then(Value::as_str) {
+            Some("image_generation_end") | Some("image_generation_call") => {
+                image_event_count += 1;
+                if let Some(path) = event.pointer("/payload/saved_path").and_then(Value::as_str) {
+                    if codex_generated_png_is_valid(codex_home, path) {
+                        image_paths.push(path.to_string());
+                    }
+                }
+                if let Some(prompt) = event
+                    .pointer("/payload/revised_prompt")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                {
+                    revised_prompts.push(prompt.to_string());
+                }
+            }
+            _ => {}
+        }
+        if let Some(text) = codex_assistant_text(&event) {
+            if !text.trim().is_empty() {
+                final_text = Some(text);
+            }
+        }
+    }
+
+    image_paths.sort();
+    image_paths.dedup();
+    revised_prompts.dedup();
+    if matched && !image_paths.is_empty() {
+        Some(CodexImageGenerationEvidence {
+            session_id,
+            rollout_path: path.display().to_string(),
+            image_paths,
+            revised_prompts,
+            final_text,
+            image_event_count,
+        })
+    } else {
+        None
+    }
+}
+
+fn codex_generated_png_is_valid(codex_home: &Path, value: &str) -> bool {
+    let path = Path::new(value);
+    if path.extension().and_then(|value| value.to_str()) != Some("png") {
+        return false;
+    }
+    let Ok(canonical) = fs::canonicalize(path) else {
+        return false;
+    };
+    let Ok(root) = fs::canonicalize(codex_home.join("generated_images")) else {
+        return false;
+    };
+    if !canonical.starts_with(root) {
+        return false;
+    }
+    let Ok(metadata) = fs::metadata(&canonical) else {
+        return false;
+    };
+    if metadata.len() < 1024 {
+        return false;
+    }
+    let Ok(mut file) = fs::File::open(&canonical) else {
+        return false;
+    };
+    let mut signature = [0_u8; 8];
+    file.read_exact(&mut signature).is_ok() && signature == *b"\x89PNG\r\n\x1a\n"
+}
+
+fn codex_image_generation_final_text(evidence: &CodexImageGenerationEvidence) -> Option<String> {
+    evidence
+        .image_paths
+        .first()
+        .map(|path| format!("IMAGE_DONE {path}"))
 }
 
 #[cfg(test)]
@@ -3079,10 +3389,15 @@ mod tests {
         let args =
             codex_exec_args_for_kind(CodexExecTaskKind::ImageGeneration, output, "gpt-5.5", None);
 
+        assert!(!args.contains(&"--ephemeral".to_string()));
+        assert!(!args.contains(&"--ignore-user-config".to_string()));
+        assert!(!args.contains(&"--ignore-rules".to_string()));
         assert!(args.contains(&"features.shell_tool=false".to_string()));
         assert!(args.contains(&"approval_policy=\"never\"".to_string()));
         assert!(args.contains(&"web_search=\"disabled\"".to_string()));
         assert!(args.contains(&"tools.web_search=false".to_string()));
+        assert!(args.contains(&"apps._default.enabled=false".to_string()));
+        assert!(args.contains(&"apps._default.default_tools_enabled=false".to_string()));
         assert!(args.contains(&"features.image_generation=true".to_string()));
         assert!(args.contains(&"tools.image_generation=true".to_string()));
     }
@@ -3095,6 +3410,50 @@ mod tests {
         assert!(!args
             .iter()
             .any(|arg| arg.starts_with("model_reasoning_effort=")));
+    }
+
+    #[test]
+    fn codex_exec_queue_key_distinguishes_exported_lanes() {
+        assert_eq!(
+            codex_exec_queue_key(CodexExecTaskKind::TextOnly, "gpt-5.5", None),
+            "codex_exec_text:gpt-5.5:default"
+        );
+        assert_eq!(
+            codex_exec_queue_key(CodexExecTaskKind::TextOnly, "gpt-5.5", Some("xhigh")),
+            "codex_exec_text:gpt-5.5:xhigh"
+        );
+        assert_eq!(
+            codex_exec_queue_key(CodexExecTaskKind::Research, "gpt-5.5", Some("xhigh")),
+            "codex_research:gpt-5.5:xhigh"
+        );
+        assert_eq!(
+            codex_exec_queue_key(CodexExecTaskKind::ImageGeneration, "gpt-5.5", None),
+            "codex_image_generation:gpt-5.5:default"
+        );
+    }
+
+    #[test]
+    fn codex_exec_queue_max_concurrent_matches_export_policy() {
+        assert_eq!(
+            codex_exec_queue_max_concurrent(CodexExecTaskKind::TextOnly, Some("default")),
+            4
+        );
+        assert_eq!(
+            codex_exec_queue_max_concurrent(CodexExecTaskKind::TextOnly, None),
+            4
+        );
+        assert_eq!(
+            codex_exec_queue_max_concurrent(CodexExecTaskKind::TextOnly, Some("xhigh")),
+            2
+        );
+        assert_eq!(
+            codex_exec_queue_max_concurrent(CodexExecTaskKind::Research, Some("xhigh")),
+            1
+        );
+        assert_eq!(
+            codex_exec_queue_max_concurrent(CodexExecTaskKind::ImageGeneration, None),
+            1
+        );
     }
 
     #[test]
@@ -3185,6 +3544,49 @@ mod tests {
 
         assert_eq!(analysis.event_count, 1);
         assert!(analysis.violation.is_some());
+    }
+
+    #[test]
+    fn codex_exec_jsonl_analysis_detects_command_execution_violation() {
+        let stdout = json!({
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "command": "pwd",
+                "status": "completed"
+            }
+        })
+        .to_string();
+
+        let analysis = analyze_codex_exec_jsonl_for_kind(&stdout, CodexExecTaskKind::Research);
+
+        assert!(analysis.violation.is_some());
+    }
+
+    #[test]
+    fn codex_exec_image_analysis_allows_only_imagegen_skill_bootstrap_mcp() {
+        let bootstrap = json!({
+            "type": "item.completed",
+            "item": {
+                "type": "mcp_tool_call",
+                "server": "node_repl",
+                "tool": "js",
+                "arguments": {
+                    "title": "Read imagegen skill",
+                    "code": "var fs = await import('node:fs/promises'); await fs.readFile('/Users/jinchen/.codex/skills/.system/imagegen/SKILL.md', 'utf8');"
+                }
+            }
+        })
+        .to_string();
+
+        let image_analysis =
+            analyze_codex_exec_jsonl_for_kind(&bootstrap, CodexExecTaskKind::ImageGeneration);
+        assert!(image_analysis.violation.is_none());
+        assert_eq!(image_analysis.allowed_tool_event_count, 0);
+
+        let research_analysis =
+            analyze_codex_exec_jsonl_for_kind(&bootstrap, CodexExecTaskKind::Research);
+        assert!(research_analysis.violation.is_some());
     }
 
     #[test]
@@ -3298,5 +3700,58 @@ mod tests {
         assert_eq!(analysis.allowed_tool_event_count, 1);
         assert_eq!(analysis.final_text.as_deref(), Some("durable final"));
         assert!(analysis.violation.is_none());
+    }
+
+    #[test]
+    fn codex_image_generation_rollout_extracts_saved_png_even_when_final_lacks_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "missiond-codex-image-rollout-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let codex_home = dir.join("codex-home");
+        let thread_id = "019e82df-test";
+        let image_dir = codex_home.join("generated_images").join(thread_id);
+        fs::create_dir_all(&image_dir).expect("image dir");
+        let image_path = image_dir.join("ig_test.png");
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.resize(2048, 0);
+        fs::write(&image_path, png).expect("png");
+        let rollout_path = dir.join(format!("rollout-2026-06-01T19-08-54-{thread_id}.jsonl"));
+        let session = json!({
+            "type": "session_meta",
+            "payload": {"id": thread_id}
+        });
+        let image_end = json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "image_generation_end",
+                "saved_path": image_path.display().to_string(),
+                "revised_prompt": "green apple"
+            }
+        });
+        let bad_final = json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "agent_message",
+                "message": "IMAGE_FAILED imagegen generated an image but did not expose a path"
+            }
+        });
+        fs::write(
+            &rollout_path,
+            format!("{session}\n{image_end}\n{bad_final}\n"),
+        )
+        .expect("rollout");
+
+        let evidence = extract_image_generation_rollout(&rollout_path, thread_id, &codex_home)
+            .expect("evidence");
+
+        assert_eq!(evidence.image_event_count, 1);
+        assert_eq!(evidence.image_paths, vec![image_path.display().to_string()]);
+        let expected_final = format!("IMAGE_DONE {}", image_path.display());
+        assert_eq!(
+            codex_image_generation_final_text(&evidence).as_deref(),
+            Some(expected_final.as_str())
+        );
+        let _ = fs::remove_dir_all(dir);
     }
 }

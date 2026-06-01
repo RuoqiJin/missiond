@@ -20,7 +20,11 @@ const CODEX_RESEARCH_PROVIDER: &str = "codex_research";
 const CODEX_IMAGE_PROVIDER: &str = "codex_image_generation";
 const CODEX_RESEARCH_PROMPT_PREFIX: &str = "帮我在互联网上进行详细调研以下问题：";
 const CODEX_IMAGE_PROMPT_PREFIX: &str = "帮我生成一张图片，要求如下：";
+const CODEX_IMAGE_STABLE_PROMPT_SUFFIX: &str = "执行要求：请直接使用 imagegen 技能实际生成图片，不要只描述图片。图片是预览用途，保留在 Codex 默认 generated_images 路径即可；不要复制、移动或写入当前工作区。生成完成后只回复 IMAGE_DONE。";
 const CODEX_TASK_MODEL: &str = "gpt-5.5";
+const CODEX_EXEC_TEXT_DEFAULT_MAX_CONCURRENT: usize = 4;
+const CODEX_EXEC_TEXT_XHIGH_MAX_CONCURRENT: usize = 2;
+const CODEX_EXEC_TASK_MAX_CONCURRENT: usize = 1;
 const PTY_STEP_ALLOWED_KEYS: &[&str] = &[
     "enter",
     "return",
@@ -881,7 +885,14 @@ fn codex_task_interaction_from_body(
     interaction.model_profile = string_field(body, "model_profile")
         .or_else(|| string_field(body, "reasoning_effort"))
         .or_else(|| string_field(body, "model_reasoning_effort"));
-    interaction.prompt = Some(format!("{prompt_prefix}\n\n{}", user_prompt.trim()));
+    interaction.prompt = Some(if command == BoxCommand::ImageGeneration {
+        format!(
+            "{prompt_prefix}\n\n{}\n\n{CODEX_IMAGE_STABLE_PROMPT_SUFFIX}",
+            user_prompt.trim()
+        )
+    } else {
+        format!("{prompt_prefix}\n\n{}", user_prompt.trim())
+    });
     interaction.correlation_id = correlation_id;
     interaction.timeout_secs = body.get("timeout_secs").and_then(Value::as_u64);
     interaction.no_tools = false;
@@ -891,7 +902,11 @@ fn codex_task_interaction_from_body(
     interaction.output_contract = Some(json!({
         "media_type": media_type,
         "single_turn": true,
-        "durable_source": "codex_exec_jsonl"
+        "durable_source": if command == BoxCommand::ImageGeneration {
+            "codex_rollout_jsonl_image_generation_end"
+        } else {
+            "codex_exec_jsonl"
+        }
     }));
     interaction.tool_policy = Some(json!({
         "provider_task_kind": task_kind,
@@ -1572,6 +1587,12 @@ fn codex_exec_text_only_sources() -> Vec<Value> {
                     "jsonl_tool_event_guard": true,
                     "rejects_tool_messages": true,
                     "rejects_tool_request_fields": true
+                },
+                "queue": {
+                    "owner": "provider-box",
+                    "key": codex_export_queue_key("codex_exec_text", "gpt-5.5", def.model_profile),
+                    "max_concurrent": codex_export_queue_max_concurrent("codex_exec_text", def.model_profile),
+                    "policy": "per_logical_codex_exec_source"
                 }
             })
         })
@@ -1616,8 +1637,8 @@ fn codex_task_sources() -> Vec<Value> {
                     "codex_exec_json": true,
                     "output_last_message": true,
                     "jsonl_final_required": true,
-                    "ignore_user_config": true,
-                    "ignore_rules": true,
+                    "ignore_user_config": def.task_kind != "image_generation",
+                    "ignore_rules": def.task_kind != "image_generation",
                     "isolated_runtime_workspace": true,
                     "read_only_sandbox": true,
                     "approval_policy": "never",
@@ -1627,10 +1648,43 @@ fn codex_task_sources() -> Vec<Value> {
                     "jsonl_tool_allowlist_guard": true,
                     "rejects_external_tool_schemas": true,
                     "rejects_file_attachments": true
+                },
+                "queue": {
+                    "owner": "provider-box",
+                    "key": codex_export_queue_key(def.provider, CODEX_TASK_MODEL, def.model_profile),
+                    "max_concurrent": codex_export_queue_max_concurrent(def.provider, def.model_profile),
+                    "policy": "per_logical_codex_exec_source"
                 }
             })
         })
         .collect()
+}
+
+fn codex_export_queue_key(provider: &str, model: &str, profile: Option<&str>) -> String {
+    format!(
+        "{}:{}:{}",
+        provider,
+        model,
+        profile
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("default")
+    )
+}
+
+fn codex_export_queue_max_concurrent(provider: &str, profile: Option<&str>) -> usize {
+    if provider != "codex_exec_text" {
+        return CODEX_EXEC_TASK_MAX_CONCURRENT;
+    }
+    let profile = profile
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("default");
+    if profile.eq_ignore_ascii_case("xhigh") {
+        CODEX_EXEC_TEXT_XHIGH_MAX_CONCURRENT
+    } else {
+        CODEX_EXEC_TEXT_DEFAULT_MAX_CONCURRENT
+    }
 }
 
 fn codex_exec_router_sources() -> Vec<Value> {
@@ -1789,8 +1843,8 @@ fn codex_task_source_defs() -> Vec<CodexTaskSourceDef> {
             request_schema: "missiond.provider-box.image-generation-completion-request.v1",
             prompt_prefix: CODEX_IMAGE_PROMPT_PREFIX,
             model_profile: None,
-            routeable: false,
-            routeable_status: "blocked_codex_cli_image_generation_uses_dummy_mcp",
+            routeable: true,
+            routeable_status: "live_smoke_passed",
         },
     ]
 }
@@ -2159,6 +2213,11 @@ mod tests {
             .as_deref()
             .expect("prompt")
             .starts_with(CODEX_IMAGE_PROMPT_PREFIX));
+        assert!(request
+            .prompt
+            .as_deref()
+            .expect("prompt")
+            .contains("只回复 IMAGE_DONE"));
         assert_eq!(
             request.tool_policy.as_ref().unwrap()["allowed_tools"],
             json!(["image_generation"])
@@ -2166,6 +2225,10 @@ mod tests {
         assert_eq!(
             request.output_contract.as_ref().unwrap()["media_type"],
             "text/markdown+image"
+        );
+        assert_eq!(
+            request.output_contract.as_ref().unwrap()["durable_source"],
+            "codex_rollout_jsonl_image_generation_end"
         );
     }
 
@@ -2240,6 +2303,16 @@ mod tests {
             .iter()
             .any(|entry| entry["provider"] == "codex_exec_text"
                 && entry["guard"]["shell_tool_disabled"] == true));
+        assert!(sources
+            .iter()
+            .any(|entry| entry["model_id"] == "codex-gpt-55-default"
+                && entry["queue"]["key"] == "codex_exec_text:gpt-5.5:default"
+                && entry["queue"]["max_concurrent"] == 4));
+        assert!(sources
+            .iter()
+            .any(|entry| entry["model_id"] == "codex-gpt-55-xhigh"
+                && entry["queue"]["key"] == "codex_exec_text:gpt-5.5:xhigh"
+                && entry["queue"]["max_concurrent"] == 2));
         let router_sources = body["router_model_sources"]
             .as_array()
             .expect("router sources");
@@ -2255,20 +2328,25 @@ mod tests {
                 && entry["routeable_status"] == "live_smoke_passed"));
         assert!(router_sources.iter().any(|entry| entry["model_id"]
             == "codex-image-generation-gpt-55-default"
-            && entry["routeable"] == false
-            && entry["routeable_status"] == "blocked_codex_cli_image_generation_uses_dummy_mcp"));
+            && entry["routeable"] == true
+            && entry["routeable_status"] == "live_smoke_passed"));
         assert!(body["provider_task_sources"]
             .as_array()
             .expect("task sources")
             .iter()
             .any(|entry| entry["provider"] == "codex_research"
-                && entry["capabilities"]["web_search"] == true));
+                && entry["capabilities"]["web_search"] == true
+                && entry["queue"]["key"] == "codex_research:gpt-5.5:xhigh"
+                && entry["queue"]["max_concurrent"] == 1));
         assert!(body["provider_task_sources"]
             .as_array()
             .expect("task sources")
             .iter()
             .any(|entry| entry["provider"] == "codex_image_generation"
-                && entry["capabilities"]["image_generation"] == true));
+                && entry["capabilities"]["image_generation"] == true
+                && entry["queue"]["key"] == "codex_image_generation:gpt-5.5:default"
+                && entry["queue"]["max_concurrent"] == 1
+                && entry["guard"]["ignore_user_config"] == false));
     }
 
     #[test]
