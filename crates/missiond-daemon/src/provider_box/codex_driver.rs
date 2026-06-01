@@ -2467,7 +2467,7 @@ fn codex_exec_args_for_kind(
         CodexExecTaskKind::TextOnly => {
             args.extend([
                 "-c".to_string(),
-                "features.web_search=false".to_string(),
+                "web_search=\"disabled\"".to_string(),
                 "-c".to_string(),
                 "tools.web_search=false".to_string(),
                 "-c".to_string(),
@@ -2481,7 +2481,7 @@ fn codex_exec_args_for_kind(
         CodexExecTaskKind::Research => {
             args.extend([
                 "-c".to_string(),
-                "features.web_search=true".to_string(),
+                "web_search=\"live\"".to_string(),
                 "-c".to_string(),
                 "tools.web_search=true".to_string(),
                 "-c".to_string(),
@@ -2495,7 +2495,7 @@ fn codex_exec_args_for_kind(
         CodexExecTaskKind::ImageGeneration => {
             args.extend([
                 "-c".to_string(),
-                "features.web_search=false".to_string(),
+                "web_search=\"disabled\"".to_string(),
                 "-c".to_string(),
                 "tools.web_search=false".to_string(),
                 "-c".to_string(),
@@ -2749,8 +2749,10 @@ fn codex_exec_event_is_tool_like(event: &Value) -> bool {
                 | "web_search_call"
                 | "web_search_result"
                 | "search_query"
+                | "web_search"
                 | "image_generation_call"
                 | "image_generation_result"
+                | "image_generation"
         )
     }) || codex_exec_tool_name(event).is_some()
 }
@@ -2796,7 +2798,7 @@ fn codex_exec_tool_name_is_research_allowed(name: &str) -> bool {
 fn codex_exec_type_is_research_tool(value: &str) -> bool {
     matches!(
         value,
-        "web_search_call" | "web_search_result" | "search_query"
+        "web_search" | "web_search_call" | "web_search_result" | "search_query"
     )
 }
 
@@ -2817,7 +2819,7 @@ fn codex_exec_tool_name_is_image_allowed(name: &str) -> bool {
 fn codex_exec_type_is_image_tool(value: &str) -> bool {
     matches!(
         value,
-        "image_generation_call" | "image_generation_result" | "image_gen_call"
+        "image_generation" | "image_generation_call" | "image_generation_result" | "image_gen_call"
     )
 }
 
@@ -2895,6 +2897,13 @@ fn event_contains_text(event: &Value, needle: &str) -> bool {
 }
 
 fn codex_assistant_text(event: &Value) -> Option<String> {
+    if event.pointer("/item/type").and_then(Value::as_str) == Some("agent_message") {
+        return event
+            .pointer("/item/text")
+            .and_then(Value::as_str)
+            .or_else(|| event.pointer("/item/message").and_then(Value::as_str))
+            .map(str::to_string);
+    }
     match event.pointer("/payload/type").and_then(Value::as_str) {
         Some("task_complete") => event
             .pointer("/payload/last_agent_message")
@@ -3007,6 +3016,7 @@ mod tests {
         assert!(args.contains(&"--ignore-rules".to_string()));
         assert!(args.contains(&"approval_policy=\"never\"".to_string()));
         assert!(args.contains(&"features.shell_tool=false".to_string()));
+        assert!(args.contains(&"web_search=\"disabled\"".to_string()));
         assert!(args.contains(&"tools.web_search=false".to_string()));
         assert!(args.contains(&"apps._default.enabled=false".to_string()));
         assert!(args.contains(&"apps._default.default_tools_enabled=false".to_string()));
@@ -3026,7 +3036,7 @@ mod tests {
 
         assert!(args.contains(&"features.shell_tool=false".to_string()));
         assert!(args.contains(&"approval_policy=\"never\"".to_string()));
-        assert!(args.contains(&"features.web_search=true".to_string()));
+        assert!(args.contains(&"web_search=\"live\"".to_string()));
         assert!(args.contains(&"tools.web_search=true".to_string()));
         assert!(args.contains(&"apps._default.enabled=false".to_string()));
         assert!(args.contains(&"apps._default.default_tools_enabled=false".to_string()));
@@ -3041,7 +3051,7 @@ mod tests {
 
         assert!(args.contains(&"features.shell_tool=false".to_string()));
         assert!(args.contains(&"approval_policy=\"never\"".to_string()));
-        assert!(args.contains(&"features.web_search=false".to_string()));
+        assert!(args.contains(&"web_search=\"disabled\"".to_string()));
         assert!(args.contains(&"tools.web_search=false".to_string()));
         assert!(args.contains(&"features.image_generation=true".to_string()));
         assert!(args.contains(&"tools.image_generation=true".to_string()));
@@ -3150,10 +3160,10 @@ mod tests {
     #[test]
     fn codex_exec_research_analysis_allows_search_and_rejects_shell() {
         let search_event = json!({
-            "type": "response_item",
-            "payload": {
-                "type": "function_call",
-                "name": "web_search"
+            "type": "item.completed",
+            "item": {
+                "type": "web_search",
+                "query": "weather: Beijing"
             }
         })
         .to_string();
@@ -3177,10 +3187,10 @@ mod tests {
     #[test]
     fn codex_exec_image_analysis_allows_image_tool_and_rejects_file_read() {
         let image_event = json!({
-            "type": "response_item",
-            "payload": {
-                "type": "function_call",
-                "name": "image_generation"
+            "type": "item.completed",
+            "item": {
+                "type": "image_generation",
+                "prompt": "red circle"
             }
         })
         .to_string();
@@ -3216,6 +3226,47 @@ mod tests {
         let analysis = analyze_codex_exec_jsonl(&stdout);
 
         assert_eq!(analysis.final_text.as_deref(), Some("plain final"));
+        assert!(analysis.violation.is_none());
+    }
+
+    #[test]
+    fn codex_exec_jsonl_analysis_accepts_item_completed_agent_message_final() {
+        let stdout = [
+            json!({
+                "type": "item.completed",
+                "item": {
+                    "id": "item_1",
+                    "type": "agent_message",
+                    "text": "thinking preface"
+                }
+            })
+            .to_string(),
+            json!({
+                "type": "item.completed",
+                "item": {
+                    "id": "item_2",
+                    "type": "web_search",
+                    "query": "weather: Beijing"
+                }
+            })
+            .to_string(),
+            json!({
+                "type": "item.completed",
+                "item": {
+                    "id": "item_3",
+                    "type": "agent_message",
+                    "text": "durable final"
+                }
+            })
+            .to_string(),
+        ]
+        .join("\n");
+
+        let analysis = analyze_codex_exec_jsonl_for_kind(&stdout, CodexExecTaskKind::Research);
+
+        assert_eq!(analysis.event_count, 3);
+        assert_eq!(analysis.allowed_tool_event_count, 1);
+        assert_eq!(analysis.final_text.as_deref(), Some("durable final"));
         assert!(analysis.violation.is_none());
     }
 }
