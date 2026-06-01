@@ -80,7 +80,7 @@ pub(crate) const DEFAULT_PROJECT_INTENT_PATH_CANDIDATES: [&str; 3] = [
 ];
 pub(crate) const DEFAULT_CAPABILITY_REVIEW_SIDECAR: &str =
     ".missiond/v3/runtime/capability-usage-review.json";
-pub(crate) const DEFAULT_PROTECTED_TOOL_PATTERNS: [&str; 12] = [
+pub(crate) const DEFAULT_PROTECTED_TOOL_PATTERNS: [&str; 14] = [
     "mission_execution",
     "mission_intent",
     "mission_forge_",
@@ -91,6 +91,8 @@ pub(crate) const DEFAULT_PROTECTED_TOOL_PATTERNS: [&str; 12] = [
     "mission_kb_ops",
     "mission_audit",
     "mission_pty_signal",
+    "mission_pty_key",
+    "mission_pty_text",
     "mission_pty_confirm",
     "mission_incident",
 ];
@@ -3790,7 +3792,7 @@ pub(crate) mod tests {
     :default-universe-manifest "$MISSIOND_PROJECTS_DIR/universe.intent.lisp")
   (capability-governance-policy
     :review-sidecar ".missiond/v3/runtime/capability-usage-review.json"
-    :protected-tool-patterns ["mission_execution" "mission_intent" "mission_forge_" "mission_sys_" "mission_daemon_update" "mission_health" "mission_power_control" "mission_kb_ops" "mission_audit" "mission_pty_signal" "mission_pty_confirm" "mission_incident"]
+    :protected-tool-patterns ["mission_execution" "mission_intent" "mission_forge_" "mission_sys_" "mission_daemon_update" "mission_health" "mission_power_control" "mission_kb_ops" "mission_audit" "mission_pty_signal" "mission_pty_key" "mission_pty_text" "mission_pty_confirm" "mission_incident"]
     :protected-flow-patterns ["engineering" "F-execution-log-governance" "F-incident-reaction" "F-capability-usage-monitoring"])
 	  (memory-kb-policy
 	    :pending-message-limit 60

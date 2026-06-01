@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowDown,
   ArrowUp,
@@ -149,6 +149,12 @@ export function PtyTeachingPanel({ slots, refreshSlots }: PtyTeachingPanelProps)
     if (typeof window === 'undefined') return true;
     return localStorage.getItem('board:teachControlsCollapsed') !== 'false';
   });
+  const [keepAlive, setKeepAlive] = useState(() => {
+    if (typeof window === 'undefined') return true;
+    return localStorage.getItem('board:teachKeepAlive') !== 'false';
+  });
+  const keepAliveInflightRef = useRef(false);
+  const lastKeepAliveSpawnAtRef = useRef(0);
 
   const selectedSlot = useMemo(
     () => teachSlots.find((slot) => slot.id === slotId) ?? teachSlots[0] ?? null,
@@ -169,6 +175,10 @@ export function PtyTeachingPanel({ slots, refreshSlots }: PtyTeachingPanelProps)
   useEffect(() => {
     localStorage.setItem('board:teachControlsCollapsed', controlsCollapsed ? 'true' : 'false');
   }, [controlsCollapsed]);
+
+  useEffect(() => {
+    localStorage.setItem('board:teachKeepAlive', keepAlive ? 'true' : 'false');
+  }, [keepAlive]);
 
   const recordStep = useCallback((step: Omit<TeachingStep, 'id' | 'at'>) => {
     setSteps((prev) => [
@@ -241,28 +251,61 @@ export function PtyTeachingPanel({ slots, refreshSlots }: PtyTeachingPanelProps)
     }
   }
 
-  async function startSlot(operatorShell = false) {
+  async function startSlot(operatorShell = false, options: { autoRestart?: boolean; action?: string } = {}) {
     if (!selectedSlotId || busy) return;
     setBusy(true);
     try {
       const res = await fetch(`/api/pty/spawn?slotId=${encodeURIComponent(selectedSlotId)}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(operatorShell ? { operatorShell: true } : {}),
+        body: JSON.stringify({
+          ...(operatorShell ? { operatorShell: true } : {}),
+          ...(options.autoRestart ? { autoRestart: true } : {}),
+        }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data?.error) throw new Error(String(data?.error || res.statusText));
       await new Promise((resolve) => setTimeout(resolve, 800));
-      await observe(operatorShell ? 'start operator shell' : 'start PTY', 'observed');
+      if (!operatorShell) setKeepAlive(true);
+      await observe(options.action || (operatorShell ? 'start operator shell' : 'start PTY'), 'observed');
     } catch (err) {
-      recordStep({ action: 'start PTY', result: 'failed', reason: String(err) });
+      recordStep({ action: options.action || 'start PTY', result: 'failed', reason: String(err) });
     } finally {
       setBusy(false);
     }
   }
 
+  const keepAliveSpawn = useCallback(async () => {
+    if (!selectedSlotId || keepAliveInflightRef.current) return;
+    const now = Date.now();
+    if (now - lastKeepAliveSpawnAtRef.current < 5000) return;
+    keepAliveInflightRef.current = true;
+    lastKeepAliveSpawnAtRef.current = now;
+    try {
+      const res = await fetch(`/api/pty/spawn?slotId=${encodeURIComponent(selectedSlotId)}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ autoRestart: true }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.error) throw new Error(String(data?.error || res.statusText));
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      await observe('keep alive restart', 'observed');
+    } catch (err) {
+      recordStep({ action: 'keep alive restart', result: 'failed', reason: String(err) });
+    } finally {
+      keepAliveInflightRef.current = false;
+    }
+  }, [observe, recordStep, selectedSlotId]);
+
+  useEffect(() => {
+    if (!keepAlive || busy || !selectedSlotId || status === null || isRunning) return;
+    void keepAliveSpawn();
+  }, [busy, isRunning, keepAlive, keepAliveSpawn, selectedSlotId, status]);
+
   async function stopSlot() {
     if (!selectedSlotId || busy) return;
+    setKeepAlive(false);
     setBusy(true);
     try {
       const res = await fetch(`/api/pty/kill?slotId=${encodeURIComponent(selectedSlotId)}`, { method: 'POST' });
@@ -316,6 +359,7 @@ export function PtyTeachingPanel({ slots, refreshSlots }: PtyTeachingPanelProps)
             <span className={cn('h-2 w-2 shrink-0 rounded-full', isRunning ? 'bg-emerald-400' : 'bg-neutral-600')} />
             <span className="truncate font-mono text-xs text-neutral-400" title={selectedSlotId}>{selectedSlotId || 'no-slot'}</span>
             <span className={cn('shrink-0 font-mono text-[10px]', stateTone(currentState))}>{currentState || 'unknown'}</span>
+            {keepAlive ? <span className="shrink-0 rounded border border-emerald-500/20 px-1.5 py-0.5 text-[10px] text-emerald-300">keep</span> : null}
             {currentReason ? (
               <span className="hidden truncate text-[10px] text-neutral-600 sm:block" title={currentReason}>{currentReason}</span>
             ) : null}
@@ -398,7 +442,7 @@ export function PtyTeachingPanel({ slots, refreshSlots }: PtyTeachingPanelProps)
         <div className="space-y-3 border-b border-neutral-800 p-3">
           <div className="flex gap-2">
             <button
-              onClick={() => void startSlot(false)}
+              onClick={() => void startSlot(false, { autoRestart: true })}
               disabled={busy || isRunning}
               className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-md border border-emerald-500/20 bg-emerald-500/10 px-2 py-1.5 text-xs text-emerald-300 hover:bg-emerald-500/15 disabled:opacity-40"
             >
@@ -415,7 +459,8 @@ export function PtyTeachingPanel({ slots, refreshSlots }: PtyTeachingPanelProps)
               onClick={() => void guarded('restart', async () => {
                 await stopSlot();
                 await new Promise((resolve) => setTimeout(resolve, 600));
-                await startSlot(false);
+                setKeepAlive(true);
+                await startSlot(false, { autoRestart: true, action: 'restart PTY' });
               })}
               disabled={busy}
               className={cn(
@@ -428,6 +473,17 @@ export function PtyTeachingPanel({ slots, refreshSlots }: PtyTeachingPanelProps)
               <RotateCcw className="h-3.5 w-3.5" /> {dangerArmed === 'restart' ? 'Confirm' : 'Restart'}
             </button>
           </div>
+          <button
+            onClick={() => setKeepAlive((value) => !value)}
+            className={cn(
+              'mt-2 inline-flex w-full items-center justify-center gap-1.5 rounded-md border px-2 py-1.5 text-xs',
+              keepAlive
+                ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/15'
+                : 'border-neutral-800 bg-neutral-900 text-neutral-500 hover:text-neutral-200',
+            )}
+          >
+            <RefreshCw className="h-3.5 w-3.5" /> Keep Alive {keepAlive ? 'On' : 'Off'}
+          </button>
         </div>
 
         <div className="space-y-3 border-b border-neutral-800 p-3">

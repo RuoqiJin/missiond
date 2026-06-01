@@ -53,6 +53,8 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
         "mission_agent" => process::handle(state, name, args).await,
         "mission_pty_spawn"
         | "mission_pty_send"
+        | "mission_pty_key"
+        | "mission_pty_text"
         | "mission_pty_read"
         | "mission_pty_signal"
         | "mission_pty_confirm"

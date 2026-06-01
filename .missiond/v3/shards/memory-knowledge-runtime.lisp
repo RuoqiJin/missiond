@@ -11,6 +11,8 @@
                               "mission_kb_ops"
                               "mission_audit"
                               "mission_pty_signal"
+                              "mission_pty_key"
+                              "mission_pty_text"
                               "mission_pty_confirm"
                               "mission_incident"]
     :protected-flow-patterns ["engineering"

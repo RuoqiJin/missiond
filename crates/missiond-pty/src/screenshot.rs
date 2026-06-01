@@ -13,6 +13,7 @@ use alacritty_terminal::term::Term;
 use alacritty_terminal::vte::ansi::{Color, NamedColor};
 use image::{ImageBuffer, Rgba, RgbaImage};
 use once_cell::sync::OnceCell;
+use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 /// Cell dimensions in pixels
@@ -38,8 +39,65 @@ struct CapturedCell {
     c: char,
     fg: [u8; 3],
     bg: [u8; 3],
+    flags: CapturedCellFlags,
     is_wide: bool,
     is_spacer: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapturedCellFlags {
+    pub bold: bool,
+    pub dim: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub inverse: bool,
+    pub hidden: bool,
+    pub strikeout: bool,
+}
+
+/// A run of adjacent cells with the same terminal style.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StyledScreenSpan {
+    pub text: String,
+    pub fg: [u8; 3],
+    pub bg: [u8; 3],
+    pub fg_hex: String,
+    pub bg_hex: String,
+    pub flags: CapturedCellFlags,
+}
+
+/// One visible terminal row with trailing blank cells trimmed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StyledScreenLine {
+    pub text: String,
+    pub spans: Vec<StyledScreenSpan>,
+}
+
+/// Visible terminal snapshot including text plus terminal cell styles.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StyledScreenSnapshot {
+    pub rows: usize,
+    pub cols: usize,
+    pub lines: Vec<StyledScreenLine>,
+}
+
+impl StyledScreenSnapshot {
+    pub fn text(&self) -> String {
+        self.lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    pub fn tail_lines(mut self, n: usize) -> Self {
+        if self.lines.len() > n {
+            let keep_from = self.lines.len() - n;
+            self.lines = self.lines.split_off(keep_from);
+            self.rows = self.lines.len();
+        }
+        self
+    }
 }
 
 /// Full grid capture
@@ -47,6 +105,21 @@ pub struct CapturedGrid {
     rows: usize,
     cols: usize,
     cells: Vec<Vec<CapturedCell>>,
+}
+
+impl CapturedGrid {
+    pub fn to_styled_snapshot(&self) -> StyledScreenSnapshot {
+        let lines = self
+            .cells
+            .iter()
+            .map(|row| styled_line_from_cells(row))
+            .collect();
+        StyledScreenSnapshot {
+            rows: self.rows,
+            cols: self.cols,
+            lines,
+        }
+    }
 }
 
 // ========== Color Resolution ==========
@@ -169,6 +242,15 @@ pub fn capture_grid<T>(term: &Term<T>) -> CapturedGrid {
                 c: cell.c,
                 fg,
                 bg,
+                flags: CapturedCellFlags {
+                    bold: flags.contains(Flags::BOLD),
+                    dim: flags.contains(Flags::DIM),
+                    italic: flags.contains(Flags::ITALIC),
+                    underline: flags.intersects(Flags::ALL_UNDERLINES),
+                    inverse,
+                    hidden: flags.contains(Flags::HIDDEN),
+                    strikeout: flags.contains(Flags::STRIKEOUT),
+                },
                 is_wide: flags.contains(Flags::WIDE_CHAR),
                 is_spacer: flags.contains(Flags::WIDE_CHAR_SPACER),
             });
@@ -177,6 +259,44 @@ pub fn capture_grid<T>(term: &Term<T>) -> CapturedGrid {
     }
 
     CapturedGrid { rows, cols, cells }
+}
+
+pub fn capture_styled_screen<T>(term: &Term<T>) -> StyledScreenSnapshot {
+    capture_grid(term).to_styled_snapshot()
+}
+
+fn styled_line_from_cells(cells: &[CapturedCell]) -> StyledScreenLine {
+    let end = cells
+        .iter()
+        .rposition(|cell| cell.c != ' ' && !cell.is_spacer)
+        .map(|idx| idx + 1)
+        .unwrap_or(0);
+    let cells = &cells[..end];
+    let text = cells.iter().map(|cell| cell.c).collect::<String>();
+    let mut spans: Vec<StyledScreenSpan> = Vec::new();
+
+    for cell in cells {
+        if let Some(last) = spans.last_mut() {
+            if last.fg == cell.fg && last.bg == cell.bg && last.flags == cell.flags {
+                last.text.push(cell.c);
+                continue;
+            }
+        }
+        spans.push(StyledScreenSpan {
+            text: cell.c.to_string(),
+            fg: cell.fg,
+            bg: cell.bg,
+            fg_hex: rgb_hex(cell.fg),
+            bg_hex: rgb_hex(cell.bg),
+            flags: cell.flags,
+        });
+    }
+
+    StyledScreenLine { text, spans }
+}
+
+fn rgb_hex(rgb: [u8; 3]) -> String {
+    format!("#{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2])
 }
 
 // ========== Font Loading ==========

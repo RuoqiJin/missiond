@@ -47,6 +47,7 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use super::extractor::{IncrementalExtractor, StableTextOp, TextAssembler};
+use super::screenshot::{capture_styled_screen, StyledScreenSnapshot};
 use semantic_terminal::{
     default_compiled, maybe_reload_global_patterns, registry_from, ClaudeCodeConfirmParser,
     ClaudeCodeStateParser, ClaudeCodeStatus, ClaudeCodeStatusParser, ClaudeCodeTitle,
@@ -56,8 +57,8 @@ use semantic_terminal::{
 };
 
 use crate::pty_recognition::{
-    recognize_screen, AgyCliStateParser, CodexCliStateParser, GeminiCliUpstreamStateParser,
-    PtyCanonicalState, PtyRecognitionSnapshot,
+    recognize_screen, recognize_styled_screen, AgyCliStateParser, CodexCliStateParser,
+    GeminiCliUpstreamStateParser, PtyCanonicalState, PtyRecognitionSnapshot,
 };
 
 // ========== Types ==========
@@ -715,6 +716,11 @@ impl PTYSession {
         lines.join("\n")
     }
 
+    pub async fn get_styled_screen(&self) -> StyledScreenSnapshot {
+        let term = self.term.lock().await;
+        capture_styled_screen(&*term)
+    }
+
     /// Get raw output replay buffer for late-joining WebSocket clients
     pub fn get_replay_buffer(&self) -> Vec<u8> {
         let buf = self
@@ -1182,43 +1188,30 @@ impl PTYSession {
                 extractor_guard.extract(&*term_guard)
             };
 
-            // Get screen text for state detection (read ALL visible lines)
-            let (last_lines, is_alt_screen) = {
+            // Get styled screen for provider-aware recognition, then project text for semantic parsers.
+            let (styled_screen, is_alt_screen) = {
                 let term_guard = term.lock().await;
                 let is_alt = term_guard
                     .mode()
                     .contains(alacritty_terminal::term::TermMode::ALT_SCREEN);
-                let grid = term_guard.grid();
-                let mut lines = Vec::new();
-                let rows = grid.screen_lines();
-                // Read visible area only: Line(0) to Line(screen_lines - 1)
-                for y in 0..rows {
-                    let Ok(line_idx) = i32::try_from(y) else {
-                        break;
-                    };
-                    let line = alacritty_terminal::index::Line(line_idx);
-                    let row = &grid[line];
-                    // Skip wide-char spacer cells (CJK/emoji second cells)
-                    let text: String = row
-                        .into_iter()
-                        .filter(|cell| {
-                            !cell
-                                .flags
-                                .contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER)
-                        })
-                        .map(|cell| cell.c)
-                        .collect();
-                    lines.push(text.trim_end().to_string());
-                }
-                (lines, is_alt)
+                (capture_styled_screen(&*term_guard), is_alt)
             };
+            let last_lines = styled_screen
+                .lines
+                .iter()
+                .map(|line| line.text.clone())
+                .collect::<Vec<_>>();
 
             // Create ParserContext with current state
             let current_state = *state.read().await;
             let context = ParserContext::new(last_lines.clone())
                 .with_state(current_state_to_semantic(current_state));
 
-            let recognition = recognize_screen(engine, &last_lines, current_state);
+            let recognition = if styled_screen.lines.is_empty() {
+                recognize_screen(engine, &last_lines, current_state)
+            } else {
+                recognize_styled_screen(engine, &styled_screen, current_state)
+            };
             if last_recognition.as_ref() != Some(&recognition) {
                 let _ = event_tx.send(SessionEvent::RecognitionUpdate(recognition.clone()));
                 last_recognition = Some(recognition);

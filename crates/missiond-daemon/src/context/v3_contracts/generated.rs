@@ -13,9 +13,9 @@ pub struct SourceUnit {
 }
 
 pub const SCHEMA_VERSION: &str = "missiond.contract-abi.v1";
-pub const SOURCE_HASH: &str = "d2ef5d87c53604f47cbd3d1d742f7981";
-pub const RUNTIME_CONFIG_SOURCE_HASH: &str = "69cbd62e4a5411306dd9490b234c0372";
-pub const PROJECT_UNIVERSE_SOURCE_HASH: &str = "69cbd62e4a5411306dd9490b234c0372";
+pub const SOURCE_HASH: &str = "d5a486032c6ba431e9fc456349151dca";
+pub const RUNTIME_CONFIG_SOURCE_HASH: &str = "26f7a93d231aa92900c21ec81d4e6104";
+pub const PROJECT_UNIVERSE_SOURCE_HASH: &str = "26f7a93d231aa92900c21ec81d4e6104";
 #[rustfmt::skip]
 pub const RUNTIME_DOMAIN_FILES: &[(&str, &str)] = &[
     (
@@ -75,55 +75,55 @@ pub const RUNTIME_DOMAIN_FILES: &[(&str, &str)] = &[
 pub const RUNTIME_DOMAIN_SOURCE_HASHES: &[(&str, &str)] = &[
     (
         "workstation",
-        "69cbd62e4a5411306dd9490b234c0372",
+        "26f7a93d231aa92900c21ec81d4e6104",
     ),
     (
         "flow",
-        "69cbd62e4a5411306dd9490b234c0372",
+        "26f7a93d231aa92900c21ec81d4e6104",
     ),
     (
         "compute",
-        "69cbd62e4a5411306dd9490b234c0372",
+        "26f7a93d231aa92900c21ec81d4e6104",
     ),
     (
         "minimax",
-        "69cbd62e4a5411306dd9490b234c0372",
+        "26f7a93d231aa92900c21ec81d4e6104",
     ),
     (
         "router",
-        "69cbd62e4a5411306dd9490b234c0372",
+        "26f7a93d231aa92900c21ec81d4e6104",
     ),
     (
         "cascade",
-        "69cbd62e4a5411306dd9490b234c0372",
+        "26f7a93d231aa92900c21ec81d4e6104",
     ),
     (
         "project-registry",
-        "69cbd62e4a5411306dd9490b234c0372",
+        "26f7a93d231aa92900c21ec81d4e6104",
     ),
     (
         "capability-governance",
-        "69cbd62e4a5411306dd9490b234c0372",
+        "26f7a93d231aa92900c21ec81d4e6104",
     ),
     (
         "memory-kb",
-        "69cbd62e4a5411306dd9490b234c0372",
+        "26f7a93d231aa92900c21ec81d4e6104",
     ),
     (
         "conversation-ingestion",
-        "69cbd62e4a5411306dd9490b234c0372",
+        "26f7a93d231aa92900c21ec81d4e6104",
     ),
     (
         "autopilot",
-        "69cbd62e4a5411306dd9490b234c0372",
+        "26f7a93d231aa92900c21ec81d4e6104",
     ),
     (
         "control-plane-kernel",
-        "69cbd62e4a5411306dd9490b234c0372",
+        "26f7a93d231aa92900c21ec81d4e6104",
     ),
     (
         "learning-engine",
-        "69cbd62e4a5411306dd9490b234c0372",
+        "26f7a93d231aa92900c21ec81d4e6104",
     ),
 ];
 
@@ -168,7 +168,7 @@ pub const SOURCE_UNITS: &[SourceUnit] = &[
         kind: "multi-section-shard",
         included_by: Some(".missiond/v3/shards/index.lisp"),
         include_line: Some(28u32),
-        source_hash: "a79d7bf1a9d2349b7541568515d1bd59",
+        source_hash: "8aac242dfadfd1d37710e4d53dab5c83",
     },
     SourceUnit {
         file: ".missiond/v3/shards/agent-navigation.lisp",
@@ -189,14 +189,14 @@ pub const SOURCE_UNITS: &[SourceUnit] = &[
         kind: "v2-convergence-map",
         included_by: Some(".missiond/v3/shards/index.lisp"),
         include_line: Some(49u32),
-        source_hash: "d1daf08af29a17e029012dbcb97c6724",
+        source_hash: "3c62fd9f8d884097afc12c5c00373b0f",
     },
     SourceUnit {
         file: ".missiond/v3/shards/pillar-flow-map.lisp",
         kind: "pillar-flow-map",
         included_by: Some(".missiond/v3/shards/index.lisp"),
         include_line: Some(56u32),
-        source_hash: "b676ecd5ec9d978c3d0c43c7679d50e7",
+        source_hash: "eacd5fa2c880e6731c32fbf5e555df14",
     },
     SourceUnit {
         file: ".missiond/v3/shards/universe/service-runtime.lisp",
@@ -345,13 +345,13 @@ pub const SOURCE_DOMAINS: &[SourceDomain] = &[
     },
     SourceDomain {
         id: "memory-knowledge-runtime",
-        source_hash: "da02fba45f859896a39083e8c03d437a",
+        source_hash: "59c16ac93d3ebeb0fdcf7753a6a5c379",
         source_units: &[SourceUnit {
             file: ".missiond/v3/shards/memory-knowledge-runtime.lisp",
             kind: "multi-section-shard",
             included_by: Some(".missiond/v3/shards/index.lisp"),
             include_line: Some(28u32),
-            source_hash: "a79d7bf1a9d2349b7541568515d1bd59",
+            source_hash: "8aac242dfadfd1d37710e4d53dab5c83",
         }],
     },
     SourceDomain {
@@ -378,24 +378,24 @@ pub const SOURCE_DOMAINS: &[SourceDomain] = &[
     },
     SourceDomain {
         id: "v2-convergence",
-        source_hash: "a5d55bbff6c7dd3ec58bc1efe8348a91",
+        source_hash: "70f6c18ae0b889cde87ef48936b90de6",
         source_units: &[SourceUnit {
             file: ".missiond/v3/shards/v2-convergence-map.lisp",
             kind: "v2-convergence-map",
             included_by: Some(".missiond/v3/shards/index.lisp"),
             include_line: Some(49u32),
-            source_hash: "d1daf08af29a17e029012dbcb97c6724",
+            source_hash: "3c62fd9f8d884097afc12c5c00373b0f",
         }],
     },
     SourceDomain {
         id: "pillar-flow",
-        source_hash: "8e44c75ed1114f1b04458852fa19c387",
+        source_hash: "fa7b27ab7f4edb9e5b1a60324130c8d7",
         source_units: &[SourceUnit {
             file: ".missiond/v3/shards/pillar-flow-map.lisp",
             kind: "pillar-flow-map",
             included_by: Some(".missiond/v3/shards/index.lisp"),
             include_line: Some(56u32),
-            source_hash: "b676ecd5ec9d978c3d0c43c7679d50e7",
+            source_hash: "eacd5fa2c880e6731c32fbf5e555df14",
         }],
     },
     SourceDomain {
@@ -826,7 +826,7 @@ pub const RUNTIME_POLICIES: &[RuntimePolicyDescriptor] = &[
         ],
         nested_forms: &[],
         source_file: ".missiond/v3/shards/memory-knowledge-runtime.lisp",
-        source_line: 185u32,
+        source_line: 187u32,
     },
     RuntimePolicyDescriptor {
         id: "flow-runtime-policy",
@@ -884,7 +884,7 @@ pub const RUNTIME_POLICIES: &[RuntimePolicyDescriptor] = &[
         ],
         nested_forms: &[],
         source_file: ".missiond/v3/shards/memory-knowledge-runtime.lisp",
-        source_line: 141u32,
+        source_line: 143u32,
     },
     RuntimePolicyDescriptor {
         id: "memory-kb-policy",
@@ -904,7 +904,7 @@ pub const RUNTIME_POLICIES: &[RuntimePolicyDescriptor] = &[
         ],
         nested_forms: &["architecture:module", "active"],
         source_file: ".missiond/v3/shards/memory-knowledge-runtime.lisp",
-        source_line: 118u32,
+        source_line: 120u32,
     },
     RuntimePolicyDescriptor {
         id: "minimax-runtime-policy",

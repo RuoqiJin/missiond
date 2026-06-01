@@ -16,6 +16,11 @@ use super::types::{
 
 const PTY_STEP_TEXT_LIMIT: usize = 4096;
 const AGY_USAGE_PROBE_SLOT: &str = "slot-agy-usage-probe";
+const CODEX_RESEARCH_PROVIDER: &str = "codex_research";
+const CODEX_IMAGE_PROVIDER: &str = "codex_image_generation";
+const CODEX_RESEARCH_PROMPT_PREFIX: &str = "帮我在互联网上进行详细调研以下问题：";
+const CODEX_IMAGE_PROMPT_PREFIX: &str = "帮我生成一张图片，要求如下：";
+const CODEX_TASK_MODEL: &str = "gpt-5.5";
 const PTY_STEP_ALLOWED_KEYS: &[&str] = &[
     "enter",
     "return",
@@ -88,6 +93,10 @@ impl ProviderBoxHttpAdapter {
                 ("POST", "input") | ("POST", "actions/input") => {
                     self.handle_slot_input(request, slot_id).await
                 }
+                ("POST", "clear-input") | ("POST", "actions/clear-input") => {
+                    self.handle_slot_control(request, slot_id, ProviderControlAction::ClearInput)
+                        .await
+                }
                 ("POST", "pty-step")
                 | ("POST", "actions/pty-step")
                 | ("POST", "key")
@@ -143,6 +152,19 @@ impl ProviderBoxHttpAdapter {
             ("POST", "/provider-box/v1/turns") => self.handle_turn(request).await,
             ("POST", "/provider-box/v1/text-only/completions") => {
                 self.handle_text_only_completion(request).await
+            }
+            ("POST", "/provider-box/v1/research")
+            | ("POST", "/provider-box/v1/research/completions")
+            | ("POST", "/provider-box/v1/research/chat/completions") => {
+                self.handle_codex_task_completion(request, BoxCommand::Research)
+                    .await
+            }
+            ("POST", "/provider-box/v1/image")
+            | ("POST", "/provider-box/v1/image-generation")
+            | ("POST", "/provider-box/v1/image/completions")
+            | ("POST", "/provider-box/v1/image-generation/completions") => {
+                self.handle_codex_task_completion(request, BoxCommand::ImageGeneration)
+                    .await
             }
             _ => Ok(json_response(
                 404,
@@ -210,8 +232,10 @@ impl ProviderBoxHttpAdapter {
         slot_id: String,
         spawn_if_missing: bool,
     ) -> Result<ProviderBoxHttpResponse, String> {
-        let mut interaction =
-            ProviderInteractionRequest::new(BoxCommand::Status, engine_from_body(&request.body));
+        let mut interaction = ProviderInteractionRequest::new(
+            BoxCommand::Status,
+            engine_from_body_or_slot(&request.body, &slot_id),
+        );
         interaction.provider = string_field(&request.body, "provider").or_else(|| {
             if interaction.engine == CliEngine::Agy {
                 Some("agy_cli".to_string())
@@ -261,7 +285,7 @@ impl ProviderBoxHttpAdapter {
     ) -> Result<ProviderBoxHttpResponse, String> {
         let mut interaction = ProviderInteractionRequest::new(
             BoxCommand::ControlAction,
-            engine_from_body(&request.body),
+            engine_from_body_or_slot(&request.body, &slot_id),
         );
         interaction.provider = string_field(&request.body, "provider").or_else(|| {
             if interaction.engine == CliEngine::Agy {
@@ -298,8 +322,10 @@ impl ProviderBoxHttpAdapter {
         request: ProviderBoxHttpRequest,
         slot_id: String,
     ) -> Result<ProviderBoxHttpResponse, String> {
-        let mut interaction =
-            ProviderInteractionRequest::new(BoxCommand::PtyStep, engine_from_body(&request.body));
+        let mut interaction = ProviderInteractionRequest::new(
+            BoxCommand::PtyStep,
+            engine_from_body_or_slot(&request.body, &slot_id),
+        );
         interaction.provider = string_field(&request.body, "provider").or_else(|| {
             if interaction.engine == CliEngine::Agy {
                 Some("agy_cli".to_string())
@@ -342,7 +368,7 @@ impl ProviderBoxHttpAdapter {
     ) -> Result<ProviderBoxHttpResponse, String> {
         let mut interaction = ProviderInteractionRequest::new(
             BoxCommand::ControlAction,
-            engine_from_body(&request.body),
+            engine_from_body_or_slot(&request.body, &slot_id),
         );
         interaction.provider = string_field(&request.body, "provider").or_else(|| {
             if interaction.engine == CliEngine::Agy {
@@ -372,7 +398,7 @@ impl ProviderBoxHttpAdapter {
     ) -> Result<ProviderBoxHttpResponse, String> {
         let mut interaction = ProviderInteractionRequest::new(
             BoxCommand::ModelSwitch,
-            engine_from_body(&request.body),
+            engine_from_body_or_slot(&request.body, &slot_id),
         );
         interaction.provider = string_field(&request.body, "provider").or_else(|| {
             if interaction.engine == CliEngine::Agy {
@@ -420,8 +446,10 @@ impl ProviderBoxHttpAdapter {
         request: ProviderBoxHttpRequest,
         slot_id: String,
     ) -> Result<ProviderBoxHttpResponse, String> {
-        let mut interaction =
-            ProviderInteractionRequest::new(BoxCommand::McpStatus, engine_from_body(&request.body));
+        let mut interaction = ProviderInteractionRequest::new(
+            BoxCommand::McpStatus,
+            engine_from_body_or_slot(&request.body, &slot_id),
+        );
         interaction.provider = string_field(&request.body, "provider").or_else(|| {
             if interaction.engine == CliEngine::Agy {
                 Some("agy_cli".to_string())
@@ -457,7 +485,7 @@ impl ProviderBoxHttpAdapter {
     ) -> Result<ProviderBoxHttpResponse, String> {
         let mut interaction = ProviderInteractionRequest::new(
             BoxCommand::McpReconnect,
-            engine_from_body(&request.body),
+            engine_from_body_or_slot(&request.body, &slot_id),
         );
         interaction.provider = string_field(&request.body, "provider").or_else(|| {
             if interaction.engine == CliEngine::Agy {
@@ -643,6 +671,41 @@ impl ProviderBoxHttpAdapter {
         Ok(result_response(result))
     }
 
+    async fn handle_codex_task_completion(
+        &self,
+        request: ProviderBoxHttpRequest,
+        command: BoxCommand,
+    ) -> Result<ProviderBoxHttpResponse, String> {
+        let Some(interaction) = codex_task_interaction_from_body(&request.body, command) else {
+            let mut result = ProviderBoxResult::base(
+                &ProviderInteractionRequest::new(command, CliEngine::Codex),
+                ProviderBoxStatus::Failed,
+            );
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                "Invalid provider-box Codex task completion request",
+                json!({
+                    "schema": request.body.get("schema"),
+                    "required": [
+                        "engine=codex",
+                        "model=gpt-5.5",
+                        "messages[] or prompt",
+                        "no external tools/files/attachments"
+                    ],
+                    "command": command,
+                }),
+            ));
+            return Ok(result_response(result));
+        };
+
+        let result = self
+            .boxed
+            .execute(interaction)
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok(result_response(result))
+    }
+
     async fn next_private_agy_slot_for_model(&self, model: &str) -> String {
         let slot_ids = private_agy_slot_ids_for_model(model);
         if slot_ids.len() <= 1 {
@@ -770,6 +833,104 @@ fn text_only_interaction_from_body(body: &Value) -> Option<ProviderInteractionRe
         });
     }
     Some(interaction)
+}
+
+fn codex_task_interaction_from_body(
+    body: &Value,
+    command: BoxCommand,
+) -> Option<ProviderInteractionRequest> {
+    if !matches!(command, BoxCommand::Research | BoxCommand::ImageGeneration) {
+        return None;
+    }
+    if matches_forbidden_codex_task_fields(body) {
+        return None;
+    }
+    let engine = if body.get("engine").is_none() && body.get("provider").is_none() {
+        CliEngine::Codex
+    } else {
+        engine_from_body(body)
+    };
+    if engine != CliEngine::Codex {
+        return None;
+    }
+    let user_prompt = codex_task_user_prompt_from_body(body)?;
+    let (provider, prompt_prefix, task_kind, media_type, allowed_tools) = match command {
+        BoxCommand::Research => (
+            CODEX_RESEARCH_PROVIDER,
+            CODEX_RESEARCH_PROMPT_PREFIX,
+            "research",
+            "text/markdown",
+            json!(["web_search"]),
+        ),
+        BoxCommand::ImageGeneration => (
+            CODEX_IMAGE_PROVIDER,
+            CODEX_IMAGE_PROMPT_PREFIX,
+            "image_generation",
+            "text/markdown+image",
+            json!(["image_generation"]),
+        ),
+        _ => unreachable!("checked above"),
+    };
+    let correlation_id = string_field(body, "correlation_id")
+        .unwrap_or_else(|| format!("router-{}", uuid::Uuid::new_v4().simple()));
+    let mut interaction = ProviderInteractionRequest::new(command, CliEngine::Codex);
+    interaction.schema = "missiond.provider-interaction-request.v1".to_string();
+    interaction.provider = Some(provider.to_string());
+    interaction.model =
+        Some(string_field(body, "model").unwrap_or_else(|| CODEX_TASK_MODEL.to_string()));
+    interaction.model_profile = string_field(body, "model_profile")
+        .or_else(|| string_field(body, "reasoning_effort"))
+        .or_else(|| string_field(body, "model_reasoning_effort"));
+    interaction.prompt = Some(format!("{prompt_prefix}\n\n{}", user_prompt.trim()));
+    interaction.correlation_id = correlation_id;
+    interaction.timeout_secs = body.get("timeout_secs").and_then(Value::as_u64);
+    interaction.no_tools = false;
+    interaction.no_mcp = true;
+    interaction.no_shell = true;
+    interaction.no_file_access = true;
+    interaction.output_contract = Some(json!({
+        "media_type": media_type,
+        "single_turn": true,
+        "durable_source": "codex_exec_jsonl"
+    }));
+    interaction.tool_policy = Some(json!({
+        "provider_task_kind": task_kind,
+        "allowed_tools": allowed_tools,
+        "sandbox": "read-only",
+        "approval_policy": "never",
+        "search_enabled": command == BoxCommand::Research,
+        "image_generation_enabled": command == BoxCommand::ImageGeneration,
+        "no_mcp": true,
+        "no_shell": true,
+        "no_file_access": true,
+    }));
+    Some(interaction)
+}
+
+fn codex_task_user_prompt_from_body(body: &Value) -> Option<String> {
+    if let Some(messages) = body.get("messages").and_then(Value::as_array) {
+        return build_pure_text_prompt(messages);
+    }
+    raw_string_field(body, "prompt")
+        .or_else(|| raw_string_field(body, "input"))
+        .or_else(|| raw_string_field(body, "text"))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn matches_forbidden_codex_task_fields(body: &Value) -> bool {
+    body.get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| !tools.is_empty())
+        || body
+            .get("functions")
+            .and_then(Value::as_array)
+            .is_some_and(|functions| !functions.is_empty())
+        || body
+            .get("tool_choice")
+            .is_some_and(|choice| !choice.is_null() && choice.as_str() != Some("none"))
+        || body.get("attachments").is_some()
+        || body.get("files").is_some()
 }
 
 fn pty_step_payload_from_body(body: &Value) -> Result<Value, ProviderBoxDiagnostic> {
@@ -911,11 +1072,35 @@ fn engine_from_body(body: &Value) -> CliEngine {
         .unwrap_or("agy");
     match raw.to_ascii_lowercase().as_str() {
         "claude-code" | "claude_code" | "claudecode" | "claude" => CliEngine::ClaudeCode,
-        "codex" | "codex_cli" | "codex-cli" | "codex_exec_text" | "codex-exec-text" => {
-            CliEngine::Codex
-        }
+        "codex"
+        | "codex_cli"
+        | "codex-cli"
+        | "codex_exec_text"
+        | "codex-exec-text"
+        | "codex_research"
+        | "codex-research"
+        | "codex_image_generation"
+        | "codex-image-generation"
+        | "codex_image"
+        | "codex-image" => CliEngine::Codex,
         "gemini" | "gemini_cli" | "gemini-cli" => CliEngine::Gemini,
         _ => CliEngine::Agy,
+    }
+}
+
+fn engine_from_body_or_slot(body: &Value, slot_id: &str) -> CliEngine {
+    if body.get("engine").is_some() || body.get("provider").is_some() {
+        return engine_from_body(body);
+    }
+    let normalized = slot_id.trim().to_ascii_lowercase();
+    if normalized.contains("codex") {
+        CliEngine::Codex
+    } else if normalized.contains("claude") || normalized.contains("cc-") {
+        CliEngine::ClaudeCode
+    } else if normalized.contains("gemini") {
+        CliEngine::Gemini
+    } else {
+        CliEngine::Agy
     }
 }
 
@@ -1041,6 +1226,7 @@ fn result_response(result: ProviderBoxResult) -> ProviderBoxHttpResponse {
             body["data"] = openai_model_data(catalog);
             body["provider_text_only_sources"] = provider_text_only_sources(catalog);
             append_codex_exec_text_exports(&mut body);
+            append_codex_task_exports(&mut body);
             body["model_export"] = json!({
                 "schema": "missiond.provider-box.model-export.v1",
                 "provider": catalog.provider.clone(),
@@ -1065,6 +1251,7 @@ fn result_response(result: ProviderBoxResult) -> ProviderBoxHttpResponse {
                 "completion_endpoint": "/provider-box/v1/text-only/completions",
                 "slot_scoped_apis": "internal_maintenance_only",
                 "codex_exec_text_sources": "exported_guarded_static_sources",
+                "codex_task_sources": "exported_guarded_static_sources",
                 "pure_text_guard": {
                     "prompt_instruction": false,
                     "sidecar_correlation": true,
@@ -1086,6 +1273,7 @@ fn result_response(result: ProviderBoxResult) -> ProviderBoxHttpResponse {
         {
             body["router_model_sources"] = router_model_sources(catalog, export);
             append_codex_exec_router_sources(&mut body);
+            append_codex_task_router_sources(&mut body);
         }
         body
     } else {
@@ -1240,12 +1428,36 @@ fn append_codex_exec_text_exports(body: &mut Value) {
     }
 }
 
+fn append_codex_task_exports(body: &mut Value) {
+    if let Some(data) = body.get_mut("data").and_then(Value::as_array_mut) {
+        data.extend(codex_task_openai_model_data());
+    }
+    if body.get("provider_task_sources").is_none() {
+        body["provider_task_sources"] = json!([]);
+    }
+    if let Some(sources) = body
+        .get_mut("provider_task_sources")
+        .and_then(Value::as_array_mut)
+    {
+        sources.extend(codex_task_sources());
+    }
+}
+
 fn append_codex_exec_router_sources(body: &mut Value) {
     if let Some(sources) = body
         .get_mut("router_model_sources")
         .and_then(Value::as_array_mut)
     {
         sources.extend(codex_exec_router_sources());
+    }
+}
+
+fn append_codex_task_router_sources(body: &mut Value) {
+    if let Some(sources) = body
+        .get_mut("router_model_sources")
+        .and_then(Value::as_array_mut)
+    {
+        sources.extend(codex_task_router_sources());
     }
 }
 
@@ -1273,6 +1485,33 @@ fn codex_exec_openai_model_data() -> Vec<Value> {
                     "shell": false
                 },
                 "pure_text": true,
+                "routeable_default": def.routeable,
+                "routeable_status": def.routeable_status,
+                "guarded": true
+            })
+        })
+        .collect()
+}
+
+fn codex_task_openai_model_data() -> Vec<Value> {
+    codex_task_source_defs()
+        .into_iter()
+        .map(|def| {
+            json!({
+                "id": def.model_id,
+                "object": "model",
+                "created": 0,
+                "owned_by": "missiond/codex-task",
+                "provider": def.provider,
+                "source_id": def.source_id,
+                "display_name": def.display_name,
+                "provider_model_id": CODEX_TASK_MODEL,
+                "model": CODEX_TASK_MODEL,
+                "model_profile": def.model_profile,
+                "capabilities": def.capabilities(),
+                "pure_text": false,
+                "task_source": true,
+                "task_kind": def.task_kind,
                 "routeable_default": def.routeable,
                 "routeable_status": def.routeable_status,
                 "guarded": true
@@ -1337,6 +1576,61 @@ fn codex_exec_text_only_sources() -> Vec<Value> {
         .collect()
 }
 
+fn codex_task_sources() -> Vec<Value> {
+    codex_task_source_defs()
+        .into_iter()
+        .map(|def| {
+            let mut template = json!({
+                "schema": def.request_schema,
+                "provider": def.provider,
+                "engine": "codex",
+                "model": CODEX_TASK_MODEL,
+                "messages": [{
+                    "role": "user",
+                    "content": "<task prompt>"
+                }]
+            });
+            if let Some(profile) = def.model_profile {
+                template["model_profile"] = json!(profile);
+            }
+            json!({
+                "schema": "missiond.provider-task-source.v1",
+                "source_id": def.source_id,
+                "provider": def.provider,
+                "engine": "codex",
+                "model_id": def.model_id,
+                "provider_model_id": CODEX_TASK_MODEL,
+                "model": CODEX_TASK_MODEL,
+                "display_name": def.display_name,
+                "model_profile": def.model_profile,
+                "task_kind": def.task_kind,
+                "completion_endpoint": def.endpoint,
+                "routeable": def.routeable,
+                "routeable_status": def.routeable_status,
+                "request_template": template,
+                "prompt_prefix": def.prompt_prefix,
+                "capabilities": def.capabilities(),
+                "guard": {
+                    "codex_exec_json": true,
+                    "output_last_message": true,
+                    "jsonl_final_required": true,
+                    "ignore_user_config": true,
+                    "ignore_rules": true,
+                    "isolated_runtime_workspace": true,
+                    "read_only_sandbox": true,
+                    "approval_policy": "never",
+                    "shell_tool_disabled": true,
+                    "mcp_disabled": true,
+                    "file_access_disabled": true,
+                    "jsonl_tool_allowlist_guard": true,
+                    "rejects_external_tool_schemas": true,
+                    "rejects_file_attachments": true
+                }
+            })
+        })
+        .collect()
+}
+
 fn codex_exec_router_sources() -> Vec<Value> {
     codex_exec_text_source_defs()
         .into_iter()
@@ -1369,6 +1663,39 @@ fn codex_exec_router_sources() -> Vec<Value> {
         .collect()
 }
 
+fn codex_task_router_sources() -> Vec<Value> {
+    codex_task_source_defs()
+        .into_iter()
+        .map(|def| {
+            json!({
+                "model_id": def.model_id,
+                "display_name": def.display_name,
+                "routeable": def.routeable,
+                "routeable_status": def.routeable_status,
+                "route": if def.routeable {
+                    json!({
+                        "provider": def.provider,
+                        "provider_model_id": CODEX_TASK_MODEL,
+                        "model_profile": def.model_profile,
+                        "completion_endpoint": def.endpoint,
+                        "task_kind": def.task_kind
+                    })
+                } else {
+                    Value::Null
+                },
+                "blocked_reason": if def.routeable {
+                    Value::Null
+                } else {
+                    json!("codex task source requires live guarded smoke before router publication")
+                },
+                "task_source": codex_task_sources()
+                    .into_iter()
+                    .find(|source| source.get("model_id") == Some(&json!(def.model_id)))
+            })
+        })
+        .collect()
+}
+
 #[derive(Clone, Copy)]
 struct CodexExecTextSourceDef {
     model_id: &'static str,
@@ -1377,6 +1704,41 @@ struct CodexExecTextSourceDef {
     model_profile: Option<&'static str>,
     routeable: bool,
     routeable_status: &'static str,
+}
+
+#[derive(Clone, Copy)]
+struct CodexTaskSourceDef {
+    model_id: &'static str,
+    source_id: &'static str,
+    display_name: &'static str,
+    provider: &'static str,
+    task_kind: &'static str,
+    endpoint: &'static str,
+    request_schema: &'static str,
+    prompt_prefix: &'static str,
+    model_profile: Option<&'static str>,
+    routeable: bool,
+    routeable_status: &'static str,
+}
+
+impl CodexTaskSourceDef {
+    fn capabilities(self) -> Value {
+        json!({
+            "text": true,
+            "tools": true,
+            "tool_allowlist": match self.task_kind {
+                "research" => json!(["web_search"]),
+                "image_generation" => json!(["image_generation"]),
+                _ => json!([]),
+            },
+            "web_search": self.task_kind == "research",
+            "image_generation": self.task_kind == "image_generation",
+            "vision": false,
+            "files": false,
+            "mcp": false,
+            "shell": false
+        })
+    }
 }
 
 fn codex_exec_text_source_defs() -> Vec<CodexExecTextSourceDef> {
@@ -1393,6 +1755,37 @@ fn codex_exec_text_source_defs() -> Vec<CodexExecTextSourceDef> {
             model_id: "codex-gpt-55-default",
             source_id: "missiond/codex-exec-text/gpt-55-default",
             display_name: "Codex GPT-5.5 (default reasoning)",
+            model_profile: None,
+            routeable: false,
+            routeable_status: "guarded_pending_live_smoke",
+        },
+    ]
+}
+
+fn codex_task_source_defs() -> Vec<CodexTaskSourceDef> {
+    vec![
+        CodexTaskSourceDef {
+            model_id: "codex-research-gpt-55-xhigh",
+            source_id: "missiond/codex-research/gpt-55-xhigh",
+            display_name: "Codex Research GPT-5.5 (xhigh)",
+            provider: CODEX_RESEARCH_PROVIDER,
+            task_kind: "research",
+            endpoint: "/provider-box/v1/research/completions",
+            request_schema: "missiond.provider-box.research-completion-request.v1",
+            prompt_prefix: CODEX_RESEARCH_PROMPT_PREFIX,
+            model_profile: Some("xhigh"),
+            routeable: false,
+            routeable_status: "guarded_pending_live_smoke",
+        },
+        CodexTaskSourceDef {
+            model_id: "codex-image-generation-gpt-55-default",
+            source_id: "missiond/codex-image-generation/gpt-55-default",
+            display_name: "Codex Image Generation GPT-5.5 (default reasoning)",
+            provider: CODEX_IMAGE_PROVIDER,
+            task_kind: "image_generation",
+            endpoint: "/provider-box/v1/image-generation/completions",
+            request_schema: "missiond.provider-box.image-generation-completion-request.v1",
+            prompt_prefix: CODEX_IMAGE_PROMPT_PREFIX,
             model_profile: None,
             routeable: false,
             routeable_status: "guarded_pending_live_smoke",
@@ -1710,6 +2103,97 @@ mod tests {
     }
 
     #[test]
+    fn research_body_builds_prefixed_codex_task_request() {
+        let body = json!({
+            "schema": "missiond.provider-box.research-completion-request.v1",
+            "provider": "codex_research",
+            "engine": "codex",
+            "model": "gpt-5.5",
+            "model_profile": "xhigh",
+            "correlation_id": "corr-research",
+            "messages": [{"role": "user", "content": "上海今天有什么科技新闻？"}]
+        });
+
+        let request = codex_task_interaction_from_body(&body, BoxCommand::Research)
+            .expect("research request");
+
+        assert_eq!(request.engine, CliEngine::Codex);
+        assert_eq!(request.command, BoxCommand::Research);
+        assert_eq!(request.provider.as_deref(), Some("codex_research"));
+        assert_eq!(request.model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(request.model_profile.as_deref(), Some("xhigh"));
+        assert!(request
+            .prompt
+            .as_deref()
+            .expect("prompt")
+            .starts_with(CODEX_RESEARCH_PROMPT_PREFIX));
+        assert!(!request.no_tools);
+        assert!(request.no_shell);
+        assert!(request.no_mcp);
+        assert!(request.no_file_access);
+        assert_eq!(
+            request.tool_policy.as_ref().unwrap()["allowed_tools"],
+            json!(["web_search"])
+        );
+    }
+
+    #[test]
+    fn image_generation_body_builds_prefixed_codex_task_request() {
+        let body = json!({
+            "schema": "missiond.provider-box.image-generation-completion-request.v1",
+            "provider": "codex_image_generation",
+            "engine": "codex",
+            "prompt": "画一张雨夜赛博朋克城市海报"
+        });
+
+        let request = codex_task_interaction_from_body(&body, BoxCommand::ImageGeneration)
+            .expect("image request");
+
+        assert_eq!(request.command, BoxCommand::ImageGeneration);
+        assert_eq!(request.provider.as_deref(), Some("codex_image_generation"));
+        assert_eq!(request.model.as_deref(), Some("gpt-5.5"));
+        assert!(request
+            .prompt
+            .as_deref()
+            .expect("prompt")
+            .starts_with(CODEX_IMAGE_PROMPT_PREFIX));
+        assert_eq!(
+            request.tool_policy.as_ref().unwrap()["allowed_tools"],
+            json!(["image_generation"])
+        );
+        assert_eq!(
+            request.output_contract.as_ref().unwrap()["media_type"],
+            "text/markdown+image"
+        );
+    }
+
+    #[test]
+    fn codex_task_endpoint_defaults_to_codex_engine_from_path() {
+        let body = json!({
+            "prompt": "研究 MissionD provider-box 的测试策略"
+        });
+
+        let request = codex_task_interaction_from_body(&body, BoxCommand::Research)
+            .expect("research request");
+
+        assert_eq!(request.engine, CliEngine::Codex);
+        assert_eq!(request.provider.as_deref(), Some("codex_research"));
+        assert_eq!(request.model.as_deref(), Some("gpt-5.5"));
+    }
+
+    #[test]
+    fn codex_task_body_rejects_external_tool_schema() {
+        let body = json!({
+            "provider": "codex_research",
+            "engine": "codex",
+            "prompt": "查资料",
+            "tools": [{"type": "function", "function": {"name": "do_anything"}}]
+        });
+
+        assert!(codex_task_interaction_from_body(&body, BoxCommand::Research).is_none());
+    }
+
+    #[test]
     fn codex_exec_text_only_body_rejects_search_tool_request() {
         let body = json!({
             "engine": "codex",
@@ -1727,17 +2211,26 @@ mod tests {
         let mut body = json!({
             "data": [],
             "provider_text_only_sources": [],
+            "provider_task_sources": [],
             "router_model_sources": []
         });
 
         append_codex_exec_text_exports(&mut body);
         append_codex_exec_router_sources(&mut body);
+        append_codex_task_exports(&mut body);
+        append_codex_task_router_sources(&mut body);
 
         assert!(body["data"]
             .as_array()
             .expect("data")
             .iter()
             .any(|entry| entry["id"] == "codex-gpt-55-xhigh"));
+        assert!(body["data"]
+            .as_array()
+            .expect("data")
+            .iter()
+            .filter(|entry| entry["provider"] == "codex_exec_text")
+            .all(|entry| entry["provider_model_id"] == "gpt-5.5" && entry["model"] == "gpt-5.5"));
         let sources = body["provider_text_only_sources"]
             .as_array()
             .expect("sources");
@@ -1750,6 +2243,18 @@ mod tests {
             .expect("router sources")
             .iter()
             .all(|entry| entry["routeable"] == false));
+        assert!(body["provider_task_sources"]
+            .as_array()
+            .expect("task sources")
+            .iter()
+            .any(|entry| entry["provider"] == "codex_research"
+                && entry["capabilities"]["web_search"] == true));
+        assert!(body["provider_task_sources"]
+            .as_array()
+            .expect("task sources")
+            .iter()
+            .any(|entry| entry["provider"] == "codex_image_generation"
+                && entry["capabilities"]["image_generation"] == true));
     }
 
     #[test]
@@ -2140,6 +2645,18 @@ mod tests {
         assert_eq!(
             engine_from_body(&json!({"engine": "codex-cli"})),
             CliEngine::Codex
+        );
+    }
+
+    #[test]
+    fn slot_endpoint_engine_infers_codex_from_slot_id_when_body_is_empty() {
+        assert_eq!(
+            engine_from_body_or_slot(&json!({}), "slot-codex-code-worker"),
+            CliEngine::Codex
+        );
+        assert_eq!(
+            engine_from_body_or_slot(&json!({"engine": "agy"}), "slot-codex-code-worker"),
+            CliEngine::Agy
         );
     }
 }

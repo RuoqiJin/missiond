@@ -398,6 +398,21 @@
       (timeoutMs number :default 300000 :description "[waitForResponse=true] 默认/上下限由 V3 workstation-config timeout-policy pty-send-blocking 投影"))
     :returns "Value")
 
+  (tool mission_pty_key
+    :description "向 PTY 发送一个 allowlist 语义按键；每次只发一个按键，发送后调用 status/read 观察"
+    (input
+      (slotId string :required)
+      (key string :required :enum (enter return esc escape tab up down right left backspace delete del home end pageup page-up pagedown page-down ctrl-c ctrl-d eof)
+           :description "一次只发送一个人类按键；ctrl-d 对 AGY TUI 使用 kitty CSI 100;5u，plain EOT 用 eof"))
+    :returns "Value")
+
+  (tool mission_pty_text
+    :description "向 PTY 输入可打印文本但不按回车；Enter/Esc/Tab/Ctrl/方向键必须走 mission_pty_key"
+    (input
+      (slotId string :required)
+      (text string :required :description "只允许可打印文本；不能包含换行、回车、ESC 或其他控制字符"))
+    :returns "Value")
+
   (tool mission_pty_read
     :description "读取 PTY 内容。screen/history/logs"
     (input

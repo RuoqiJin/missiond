@@ -664,6 +664,14 @@ impl PTYManager {
                             tool_policy_path: restart_options.tool_policy_path.clone(),
                             command_override: restart_options.command_override.clone(),
                         }) {
+                            let session_rx = new_session.subscribe();
+                            spawn_session_event_forwarder(
+                                manager_event_tx.clone(),
+                                slot_for_restart.id.clone(),
+                                Arc::clone(&manager_info),
+                                session_rx,
+                            );
+
                             // Set up permission check
                             let policy = manager_policy.read().await.clone();
                             let slot_id = slot_for_restart.id.clone();
@@ -945,6 +953,23 @@ impl PTYManager {
         Ok(session.get_screen_text().await)
     }
 
+    /// Get visible screen content with terminal cell style runs.
+    pub async fn get_styled_screen(
+        &self,
+        slot_id: &str,
+    ) -> Result<crate::screenshot::StyledScreenSnapshot> {
+        let session = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .get(slot_id)
+                .cloned()
+                .ok_or_else(|| anyhow!("No PTY session for slot: {}", slot_id))?
+        };
+
+        let session = session.read().await;
+        Ok(session.get_styled_screen().await)
+    }
+
     /// Get raw output replay buffer for late-joining WebSocket clients
     pub async fn get_replay_buffer(&self, slot_id: &str) -> Result<Vec<u8>> {
         let session = {
@@ -1206,6 +1231,121 @@ fn normalize_agent_info(mut info: PTYAgentInfo) -> PTYAgentInfo {
     info
 }
 
+fn spawn_session_event_forwarder(
+    event_tx: broadcast::Sender<ManagerEvent>,
+    slot_id_for_events: String,
+    agent_info_for_forward: Arc<RwLock<HashMap<String, PTYAgentInfo>>>,
+    mut session_rx: broadcast::Receiver<SessionEvent>,
+) {
+    tokio::spawn(async move {
+        while let Ok(event) = session_rx.recv().await {
+            match event {
+                SessionEvent::StateChange {
+                    new_state,
+                    prev_state,
+                } => {
+                    {
+                        let mut info = agent_info_for_forward.write().await;
+                        if let Some(entry) = info.get_mut(&slot_id_for_events) {
+                            entry.state = new_state;
+                            if !entry.recognition.as_ref().is_some_and(|recognition| {
+                                preserve_screen_recognition_on_state_change(recognition, new_state)
+                            }) {
+                                entry.recognition =
+                                    Some(session_state_snapshot(entry.engine, new_state));
+                            }
+                            if !new_state.is_processing() {
+                                entry.status_text = None;
+                            }
+                        }
+                    }
+                    let _ = event_tx.send(ManagerEvent::StateChange {
+                        slot_id: slot_id_for_events.clone(),
+                        new_state,
+                        prev_state,
+                    });
+                }
+                SessionEvent::StatusUpdate(status) => {
+                    let text = format!("{} {}", status.spinner, status.status_text);
+                    let mut info = agent_info_for_forward.write().await;
+                    if let Some(entry) = info.get_mut(&slot_id_for_events) {
+                        entry.status_text = Some(text);
+                    }
+                }
+                SessionEvent::RecognitionUpdate(snapshot) => {
+                    let mut info = agent_info_for_forward.write().await;
+                    if let Some(entry) = info.get_mut(&slot_id_for_events) {
+                        entry.recognition = Some(snapshot);
+                    }
+                }
+                SessionEvent::ConfirmRequired { prompt, info } => {
+                    let _ = event_tx.send(ManagerEvent::ConfirmRequired {
+                        slot_id: slot_id_for_events.clone(),
+                        prompt,
+                        tool_info: info,
+                    });
+                }
+                SessionEvent::Exit(code) => {
+                    {
+                        let mut info = agent_info_for_forward.write().await;
+                        if let Some(entry) = info.get_mut(&slot_id_for_events) {
+                            entry.state = SessionState::Exited;
+                            entry.pid = None;
+                            entry.status_text = None;
+                            if !entry
+                                .recognition
+                                .as_ref()
+                                .is_some_and(is_provider_unavailable_snapshot)
+                            {
+                                entry.recognition =
+                                    Some(session_state_snapshot(entry.engine, entry.state));
+                            }
+                        }
+                    }
+                    let _ = event_tx.send(ManagerEvent::Exited {
+                        slot_id: slot_id_for_events.clone(),
+                        exit_code: code,
+                    });
+                    break;
+                }
+                SessionEvent::TextOutput(TextOutputEvent::Complete {
+                    turn_id,
+                    content,
+                    timestamp,
+                }) => {
+                    let _ = event_tx.send(ManagerEvent::TextComplete {
+                        slot_id: slot_id_for_events.clone(),
+                        turn_id,
+                        content,
+                        timestamp,
+                    });
+                }
+                SessionEvent::ToolOutput(tool_output) => {
+                    if let Some(ref output) = tool_output.output {
+                        if output.contains("No such tool available")
+                            || output.contains("tool_use_error")
+                            || output.contains("MCP error")
+                        {
+                            let error_msg = output.chars().take(500).collect::<String>();
+                            tracing::warn!(
+                                slot_id = %slot_id_for_events,
+                                tool = %tool_output.tool_name,
+                                "MCP tool error detected in PTY"
+                            );
+                            let _ = event_tx.send(ManagerEvent::McpToolError {
+                                slot_id: slot_id_for_events.clone(),
+                                tool_name: tool_output.tool_name.clone(),
+                                error: error_msg,
+                            });
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+}
+
 fn preserve_screen_recognition_on_state_change(
     recognition: &PtyRecognitionSnapshot,
     new_state: SessionState,
@@ -1436,6 +1576,8 @@ mod tests {
             blocked_kind: Some("auth_missing".to_string()),
             screen_identity: None,
             screen_usage: None,
+            screen_mcp: None,
+            screen_signals: None,
             source: "tui_source_signature".to_string(),
         };
 
@@ -1462,6 +1604,8 @@ mod tests {
             blocked_kind: None,
             screen_identity: None,
             screen_usage: None,
+            screen_mcp: None,
+            screen_signals: None,
             source: "screen_fused".to_string(),
         };
 
@@ -1491,6 +1635,8 @@ mod tests {
                 blocked_kind: None,
                 screen_identity: None,
                 screen_usage: None,
+                screen_mcp: None,
+                screen_signals: None,
                 source: "session_state".to_string(),
             }),
             started_at: Some(1),
@@ -1526,6 +1672,8 @@ mod tests {
                 blocked_kind: Some("billing_or_account".to_string()),
                 screen_identity: None,
                 screen_usage: None,
+                screen_mcp: None,
+                screen_signals: None,
                 source: "screen_final".to_string(),
             }),
             started_at: Some(1),

@@ -11,6 +11,7 @@ use regex::Regex;
 use semantic_terminal::{ParserContext, ParserMeta, State, StateDetectionResult, StateParser};
 use serde::{Deserialize, Serialize};
 
+use crate::screenshot::{StyledScreenLine, StyledScreenSnapshot, StyledScreenSpan};
 use crate::session::SessionState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +43,10 @@ pub struct PtyRecognitionSnapshot {
     pub screen_identity: Option<ProviderScreenIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen_usage: Option<ProviderUsageScreen>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_mcp: Option<ProviderMcpScreen>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_signals: Option<ProviderScreenSignals>,
     pub source: String,
 }
 
@@ -60,6 +65,53 @@ pub struct ProviderScreenIdentity {
     pub selected_model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderScreenSignals {
+    #[serde(default)]
+    pub placeholder_visible: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placeholder_text: Option<String>,
+    #[serde(default)]
+    pub model_picker_visible: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub visible_models: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_user_message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_assistant_message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_tool_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_tool_label: Option<String>,
+    #[serde(default)]
+    pub web_search_active: bool,
+    #[serde(default)]
+    pub folded_tool_output: bool,
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub separator_count: usize,
+}
+
+impl ProviderScreenSignals {
+    fn is_empty(&self) -> bool {
+        !self.placeholder_visible
+            && self.placeholder_text.is_none()
+            && !self.model_picker_visible
+            && self.visible_models.is_empty()
+            && self.last_user_message.is_none()
+            && self.last_assistant_message.is_none()
+            && self.last_tool_kind.is_none()
+            && self.last_tool_label.is_none()
+            && !self.web_search_active
+            && !self.folded_tool_output
+            && self.separator_count == 0
+    }
+}
+
+fn is_zero_usize(value: &usize) -> bool {
+    *value == 0
 }
 
 impl ProviderScreenIdentity {
@@ -101,6 +153,41 @@ pub struct ProviderVisibleRange {
     pub total: u16,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderMcpScreen {
+    pub title: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub servers: Vec<ProviderMcpServer>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed_servers: Vec<String>,
+    #[serde(default)]
+    pub startup_incomplete: bool,
+    #[serde(default)]
+    pub startup_running: bool,
+    #[serde(default)]
+    pub verbose: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderMcpServer {
+    pub name: String,
+    pub status: String,
+    pub connected: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resources_summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_templates_summary: Option<String>,
+}
+
 static AGY_VERSION_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)\bAntigravity(?:\s+CLI)?\s+([0-9]+(?:\.[0-9]+)+(?:[-+._A-Za-z0-9]*)?)")
         .expect("valid agy version regex")
@@ -119,12 +206,12 @@ static AGY_MODEL_RE: Lazy<Regex> = Lazy::new(|| {
 });
 
 static AGY_CWD_ONLY_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^(?P<cwd>(?:~|/[A-Za-z0-9_.-]+)/(?:[^\s|]+/?)+)$")
+    Regex::new(r"^(?P<cwd>(?:~|/[A-Za-z0-9_-]+)/(?:[^\s|]+/?)+)$")
         .expect("valid agy cwd-only regex")
 });
 
 static AGY_CWD_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?P<cwd>(?:~|/[A-Za-z0-9_.-]+)/(?:[^\s|]+/?)+)").expect("valid agy cwd regex")
+    Regex::new(r"(?P<cwd>(?:~|/[A-Za-z0-9_-]+)/(?:[^\s|]+/?)+)").expect("valid agy cwd regex")
 });
 
 static PERCENT_RE: Lazy<Regex> =
@@ -137,6 +224,10 @@ static VISIBLE_RANGE_RE: Lazy<Regex> = Lazy::new(|| {
 static SHELL_PROMPT_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"^(?:\([^)]+\)\s*)?[A-Za-z0-9._-]+@[^%\n$#]+[%$#]\s*$")
         .expect("valid shell prompt regex")
+});
+
+static CODEX_VERSION_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"OpenAI\s+Codex\s+\(v(?P<version>[^)]+)\)").expect("valid codex version regex")
 });
 
 impl PtyRecognitionSnapshot {
@@ -152,6 +243,8 @@ impl PtyRecognitionSnapshot {
             blocked_kind: None,
             screen_identity: None,
             screen_usage: None,
+            screen_mcp: None,
+            screen_signals: None,
             source: "screen_fallback".to_string(),
         }
     }
@@ -188,6 +281,16 @@ impl PtyRecognitionSnapshot {
 
     fn with_screen_usage(mut self, usage: Option<ProviderUsageScreen>) -> Self {
         self.screen_usage = usage;
+        self
+    }
+
+    fn with_screen_mcp(mut self, mcp: Option<ProviderMcpScreen>) -> Self {
+        self.screen_mcp = mcp;
+        self
+    }
+
+    fn with_screen_signals(mut self, signals: Option<ProviderScreenSignals>) -> Self {
+        self.screen_signals = signals;
         self
     }
 }
@@ -228,8 +331,30 @@ pub fn recognize_screen(
     lines: &[String],
     current_state: SessionState,
 ) -> PtyRecognitionSnapshot {
+    recognize_screen_inner(provider, lines, None, current_state)
+}
+
+pub fn recognize_styled_screen(
+    provider: CliEngine,
+    screen: &StyledScreenSnapshot,
+    current_state: SessionState,
+) -> PtyRecognitionSnapshot {
+    let lines = screen
+        .lines
+        .iter()
+        .map(|line| line.text.clone())
+        .collect::<Vec<_>>();
+    recognize_screen_inner(provider, &lines, Some(screen), current_state)
+}
+
+fn recognize_screen_inner(
+    provider: CliEngine,
+    lines: &[String],
+    styled_screen: Option<&StyledScreenSnapshot>,
+    current_state: SessionState,
+) -> PtyRecognitionSnapshot {
     let mut snapshot = match provider {
-        CliEngine::Codex => recognize_codex(lines),
+        CliEngine::Codex => recognize_codex_with_style(lines, styled_screen),
         CliEngine::Gemini => recognize_gemini(lines),
         CliEngine::Agy => recognize_agy(lines),
         CliEngine::ClaudeCode => recognize_claude_code(lines),
@@ -237,7 +362,7 @@ pub fn recognize_screen(
     if snapshot.state == PtyCanonicalState::Unknown {
         snapshot = session_state_snapshot(provider, current_state);
     }
-    fuse_with_session_state(provider, lines, current_state, snapshot)
+    fuse_with_session_state(provider, lines, styled_screen, current_state, snapshot)
 }
 
 /// Provider-aware state fusion: a `screen_fallback` Blocked snapshot that
@@ -250,6 +375,7 @@ pub fn recognize_screen(
 fn fuse_with_session_state(
     provider: CliEngine,
     lines: &[String],
+    styled_screen: Option<&StyledScreenSnapshot>,
     current_state: SessionState,
     snapshot: PtyRecognitionSnapshot,
 ) -> PtyRecognitionSnapshot {
@@ -266,7 +392,7 @@ fn fuse_with_session_state(
         && snapshot.source == "screen_fallback"
         && current_state.is_processing()
     {
-        if let Some(active) = active_running_evidence(provider, lines) {
+        if let Some(active) = active_running_evidence(provider, lines, styled_screen) {
             return active;
         }
         return session_state_snapshot(provider, current_state);
@@ -277,6 +403,7 @@ fn fuse_with_session_state(
 fn active_running_evidence(
     provider: CliEngine,
     lines: &[String],
+    styled_screen: Option<&StyledScreenSnapshot>,
 ) -> Option<PtyRecognitionSnapshot> {
     let text = joined_text(lines);
     let lower = text.to_ascii_lowercase();
@@ -309,12 +436,8 @@ fn active_running_evidence(
             }
         }
         CliEngine::Codex => {
-            if lower.contains("working (")
-                || lower.contains(" esc to interrupt")
-                || lower.contains("running command")
-                || lower.contains("command running")
-                || has_spinner(lines)
-            {
+            if has_codex_current_running_status(lines, &lower, styled_screen) {
+                let signals = extract_codex_screen_signals_with_style(lines, styled_screen);
                 let mut snapshot = PtyRecognitionSnapshot::new(
                     CliEngine::Codex,
                     PtyCanonicalState::Running,
@@ -322,9 +445,13 @@ fn active_running_evidence(
                     "codex:status_indicator_widget",
                 )
                 .with_elapsed(elapsed)
-                .with_source("screen_fused");
-                if let Some(tool) = extract_tool_name(lines) {
-                    snapshot = snapshot.with_tool(tool);
+                .with_source("screen_fused")
+                .with_screen_identity(extract_codex_screen_identity(lines))
+                .with_screen_signals(signals.clone());
+                if let Some((phase, tool)) =
+                    extract_codex_active_tool(lines, styled_screen, signals.as_ref())
+                {
+                    snapshot = snapshot.with_phase(phase).with_tool(tool);
                 }
                 Some(snapshot)
             } else {
@@ -377,9 +504,19 @@ fn active_running_evidence(
 }
 
 fn recognize_codex(lines: &[String]) -> PtyRecognitionSnapshot {
+    recognize_codex_with_style(lines, None)
+}
+
+fn recognize_codex_with_style(
+    lines: &[String],
+    styled_screen: Option<&StyledScreenSnapshot>,
+) -> PtyRecognitionSnapshot {
     let text = joined_text(lines);
     let lower = text.to_ascii_lowercase();
     let elapsed = extract_elapsed_secs(&text);
+    let identity = extract_codex_screen_identity(lines);
+    let signals = extract_codex_screen_signals_with_style(lines, styled_screen);
+    let mcp = extract_codex_mcp_screen(lines);
 
     if let Some((kind, reason)) = provider_unavailable_match(&lower) {
         return PtyRecognitionSnapshot::new(
@@ -390,7 +527,24 @@ fn recognize_codex(lines: &[String]) -> PtyRecognitionSnapshot {
         )
         .with_blocked_kind(kind)
         .with_elapsed(elapsed)
-        .with_source("provider_error_signature");
+        .with_source("provider_error_signature")
+        .with_screen_identity(identity)
+        .with_screen_signals(signals);
+    }
+
+    if is_codex_workspace_trust_prompt(lines, &lower) {
+        return PtyRecognitionSnapshot::new(
+            CliEngine::Codex,
+            PtyCanonicalState::Blocked,
+            0.94,
+            "codex:workspace_trust_prompt",
+        )
+        .with_blocked_kind("workspace_trust")
+        .with_phase("startup_trust")
+        .with_elapsed(elapsed)
+        .with_source("tui_source_signature")
+        .with_screen_identity(identity)
+        .with_screen_signals(signals);
     }
 
     if is_codex_approval_menu(&lower) {
@@ -402,7 +556,9 @@ fn recognize_codex(lines: &[String]) -> PtyRecognitionSnapshot {
         )
         .with_blocked_kind("approval")
         .with_elapsed(elapsed)
-        .with_source("tui_source_signature");
+        .with_source("tui_source_signature")
+        .with_screen_identity(identity)
+        .with_screen_signals(signals);
     }
 
     if lower.contains("approval request")
@@ -420,27 +576,72 @@ fn recognize_codex(lines: &[String]) -> PtyRecognitionSnapshot {
             "codex:approval_or_user_input",
         )
         .with_blocked_kind("approval")
-        .with_elapsed(elapsed);
+        .with_elapsed(elapsed)
+        .with_screen_identity(identity)
+        .with_screen_signals(signals);
     }
 
-    if lower.contains("working (")
-        || lower.contains(" esc to interrupt")
-        || lower.contains("reviewing approval request")
-        || lower.contains("running command")
-        || lower.contains("command running")
-        || has_spinner(lines)
-    {
+    if is_codex_model_picker(lines, &lower) {
+        return PtyRecognitionSnapshot::new(
+            CliEngine::Codex,
+            PtyCanonicalState::Blocked,
+            0.92,
+            "codex:model_picker",
+        )
+        .with_blocked_kind("model_picker")
+        .with_phase("model_switch")
+        .with_elapsed(elapsed)
+        .with_source("tui_source_signature")
+        .with_screen_identity(identity)
+        .with_screen_signals(signals);
+    }
+
+    if let Some(mcp) = mcp.clone().filter(|mcp| mcp.startup_running) {
+        return PtyRecognitionSnapshot::new(
+            CliEngine::Codex,
+            PtyCanonicalState::Running,
+            0.9,
+            "codex:mcp_startup_running",
+        )
+        .with_phase("mcp_startup")
+        .with_elapsed(elapsed)
+        .with_source("tui_source_signature")
+        .with_screen_identity(identity)
+        .with_screen_mcp(Some(mcp))
+        .with_screen_signals(signals);
+    }
+
+    if has_codex_current_running_status(lines, &lower, styled_screen) {
         let mut snapshot = PtyRecognitionSnapshot::new(
             CliEngine::Codex,
             PtyCanonicalState::Running,
             0.9,
             "codex:status_indicator_widget",
         )
-        .with_elapsed(elapsed);
-        if let Some(tool) = extract_tool_name(lines) {
-            snapshot = snapshot.with_tool(tool);
+        .with_elapsed(elapsed)
+        .with_screen_identity(identity)
+        .with_screen_signals(signals.clone());
+        if let Some((phase, tool)) =
+            extract_codex_active_tool(lines, styled_screen, signals.as_ref())
+        {
+            snapshot = snapshot.with_phase(phase).with_tool(tool);
         }
         return snapshot;
+    }
+
+    if let Some(mcp) = mcp {
+        let (state, reason) = if mcp.startup_incomplete {
+            (PtyCanonicalState::Idle, "codex:mcp_startup_incomplete")
+        } else {
+            (PtyCanonicalState::Complete, "codex:mcp_inventory")
+        };
+        return PtyRecognitionSnapshot::new(CliEngine::Codex, state, 0.9, reason)
+            .with_phase("mcp_status")
+            .with_elapsed(elapsed)
+            .with_source("tui_source_signature")
+            .with_screen_identity(identity)
+            .with_screen_mcp(Some(mcp))
+            .with_screen_signals(signals);
     }
 
     if has_completion_line(lines) && has_idle_prompt(lines) {
@@ -450,7 +651,9 @@ fn recognize_codex(lines: &[String]) -> PtyRecognitionSnapshot {
             0.86,
             "codex:turn_complete_prompt_returned",
         )
-        .with_elapsed(elapsed);
+        .with_elapsed(elapsed)
+        .with_screen_identity(identity)
+        .with_screen_signals(signals);
     }
 
     if has_idle_prompt(lines)
@@ -463,7 +666,9 @@ fn recognize_codex(lines: &[String]) -> PtyRecognitionSnapshot {
             PtyCanonicalState::Idle,
             0.88,
             "codex:composer_idle",
-        );
+        )
+        .with_screen_identity(identity)
+        .with_screen_signals(signals);
     }
 
     PtyRecognitionSnapshot::new(
@@ -472,6 +677,8 @@ fn recognize_codex(lines: &[String]) -> PtyRecognitionSnapshot {
         0.2,
         "codex:no_match",
     )
+    .with_screen_identity(identity)
+    .with_screen_signals(signals)
 }
 
 fn is_codex_approval_menu(lower: &str) -> bool {
@@ -480,6 +687,592 @@ fn is_codex_approval_menu(lower: &str) -> bool {
         && lower.contains("allow for this session")
         && lower.contains("enter to submit")
         && lower.contains("esc to cancel")
+}
+
+fn is_codex_workspace_trust_prompt(_lines: &[String], lower: &str) -> bool {
+    lower.contains("do you trust the contents of this directory")
+        && lower.contains("yes, continue")
+        && lower.contains("no, quit")
+        && lower.contains("press enter to continue")
+}
+
+fn extract_codex_mcp_screen(lines: &[String]) -> Option<ProviderMcpScreen> {
+    let mut failed_servers: Vec<String> = Vec::new();
+    let mut startup_incomplete = false;
+    let mut startup_running = false;
+    for line in lines {
+        let cleaned = normalize_identity_value(line);
+        let lower = cleaned.to_ascii_lowercase();
+        if lower.contains("starting mcp servers") {
+            startup_running = true;
+        }
+        if lower.contains("mcp startup incomplete") {
+            startup_incomplete = true;
+            for name in extract_codex_failed_mcp_servers(&cleaned) {
+                if !failed_servers
+                    .iter()
+                    .any(|existing: &String| existing.eq_ignore_ascii_case(name.as_str()))
+                {
+                    failed_servers.push(name);
+                }
+            }
+        }
+    }
+
+    let mut servers = Vec::new();
+    let mut in_mcp_tools = false;
+    let mut current: Option<ProviderMcpServer> = None;
+    for line in lines {
+        let cleaned = normalize_identity_value(line);
+        let trimmed = cleaned.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.contains("mcp tools") {
+            if let Some(server) = current.take() {
+                servers.push(finalize_codex_mcp_server(server, &failed_servers));
+            }
+            in_mcp_tools = true;
+            servers.clear();
+            continue;
+        }
+        if !in_mcp_tools {
+            continue;
+        }
+        if trimmed.is_empty() || strip_codex_prompt_marker(trimmed).is_some() {
+            continue;
+        }
+        let Some(rest) = trimmed.strip_prefix("• ") else {
+            continue;
+        };
+        let rest = rest.trim();
+        if let Some(value) = rest.strip_prefix("Auth:") {
+            if let Some(server) = current.as_mut() {
+                server.auth = Some(value.trim().to_string()).filter(|value| !value.is_empty());
+            }
+            continue;
+        }
+        if let Some(value) = rest.strip_prefix("Tools:") {
+            if let Some(server) = current.as_mut() {
+                let summary = value.trim().to_string();
+                server.tools = codex_mcp_tools_from_summary(&summary);
+                server.tools_summary = Some(summary).filter(|value| !value.is_empty());
+            }
+            continue;
+        }
+        if let Some(value) = rest.strip_prefix("Resources:") {
+            if let Some(server) = current.as_mut() {
+                server.resources_summary =
+                    Some(value.trim().to_string()).filter(|value| !value.is_empty());
+            }
+            continue;
+        }
+        if let Some(value) = rest.strip_prefix("Resource templates:") {
+            if let Some(server) = current.as_mut() {
+                server.resource_templates_summary =
+                    Some(value.trim().to_string()).filter(|value| !value.is_empty());
+            }
+            continue;
+        }
+        if let Some(server) = current.take() {
+            servers.push(finalize_codex_mcp_server(server, &failed_servers));
+        }
+        current = Some(ProviderMcpServer {
+            name: rest.to_string(),
+            status: "unknown".to_string(),
+            connected: false,
+            ..ProviderMcpServer::default()
+        });
+    }
+    if let Some(server) = current.take() {
+        servers.push(finalize_codex_mcp_server(server, &failed_servers));
+    }
+
+    if !startup_running && !startup_incomplete && servers.is_empty() {
+        return None;
+    }
+
+    let status = if startup_running {
+        "starting"
+    } else if startup_incomplete || servers.iter().any(|server| server.status == "failed") {
+        "degraded"
+    } else if servers.iter().any(|server| server.connected) {
+        "connected"
+    } else {
+        "unknown"
+    }
+    .to_string();
+
+    Some(ProviderMcpScreen {
+        title: "MCP Tools".to_string(),
+        status,
+        servers,
+        failed_servers,
+        startup_incomplete,
+        startup_running,
+        verbose: lines.iter().any(|line| {
+            let lower = normalize_identity_value(line).to_ascii_lowercase();
+            lower.contains("resource templates:") || lower.contains("resources:")
+        }),
+    })
+}
+
+fn extract_codex_failed_mcp_servers(line: &str) -> Vec<String> {
+    let lower = line.to_ascii_lowercase();
+    let Some(start) = lower.find("failed:") else {
+        return Vec::new();
+    };
+    let rest = &line[start + "failed:".len()..];
+    let end = rest.find(')').unwrap_or(rest.len());
+    rest[..end]
+        .split(',')
+        .map(|value| value.trim().trim_matches(&['`', '\'', '"'][..]))
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn finalize_codex_mcp_server(
+    mut server: ProviderMcpServer,
+    failed_servers: &[String],
+) -> ProviderMcpServer {
+    let failed = failed_servers
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case(&server.name));
+    let tools_none = server
+        .tools_summary
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| value.eq_ignore_ascii_case("(none)"));
+    server.connected = !failed && !tools_none && server.tools_summary.is_some();
+    server.status = if failed {
+        "failed"
+    } else if server.connected {
+        "connected"
+    } else {
+        "unknown"
+    }
+    .to_string();
+    server
+}
+
+fn codex_mcp_tools_from_summary(summary: &str) -> Vec<String> {
+    if summary.trim().eq_ignore_ascii_case("(none)") {
+        return Vec::new();
+    }
+    summary
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.starts_with('+'))
+        .map(str::to_string)
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodexModelPickerRow {
+    model: String,
+    selected: bool,
+    current: bool,
+}
+
+fn is_codex_model_picker(lines: &[String], lower: &str) -> bool {
+    (lower.contains("select model and effort")
+        && lower.contains("press enter to confirm or esc to go back"))
+        || (lower.contains("access legacy models by running codex -m")
+            && codex_model_picker_rows(lines).len() >= 2)
+}
+
+fn codex_model_picker_rows(lines: &[String]) -> Vec<CodexModelPickerRow> {
+    lines
+        .iter()
+        .filter_map(|line| parse_codex_model_picker_row(line))
+        .collect()
+}
+
+fn parse_codex_model_picker_row(line: &str) -> Option<CodexModelPickerRow> {
+    let mut trimmed = line.trim_start();
+    let selected = trimmed.starts_with('›') || trimmed.starts_with('>') || trimmed.starts_with('❯');
+    if selected {
+        trimmed = trimmed
+            .trim_start_matches(|ch| matches!(ch, '›' | '>' | '❯'))
+            .trim_start();
+    }
+
+    let (number, body) = trimmed.split_once('.')?;
+    if number.trim().parse::<usize>().is_err() {
+        return None;
+    }
+
+    let body = body.trim_start();
+    let model_part = body
+        .split("  ")
+        .next()
+        .unwrap_or(body)
+        .replace("(current)", "");
+    let model = normalize_model_value(&model_part);
+    if !looks_like_codex_model(&model) {
+        return None;
+    }
+
+    Some(CodexModelPickerRow {
+        model,
+        selected,
+        current: body.contains("(current)"),
+    })
+}
+
+fn extract_codex_screen_identity(lines: &[String]) -> Option<ProviderScreenIdentity> {
+    let mut identity = ProviderScreenIdentity::default();
+    for line in lines {
+        let cleaned = normalize_identity_value(line);
+        if let Some(caps) = CODEX_VERSION_RE.captures(&cleaned) {
+            identity.cli_version = Some(caps["version"].trim().to_string());
+            continue;
+        }
+        if let Some(rest) = cleaned.trim_start().strip_prefix("model:") {
+            let model = rest
+                .split("/model")
+                .next()
+                .unwrap_or(rest)
+                .trim()
+                .to_string();
+            if !model.is_empty() {
+                identity.current_model = Some(model);
+            }
+            continue;
+        }
+        if let Some(rest) = cleaned.trim_start().strip_prefix("directory:") {
+            let cwd = rest.trim().to_string();
+            if !cwd.is_empty() {
+                identity.cwd = Some(cwd);
+            }
+            continue;
+        }
+        if cleaned.contains('·') {
+            let parts = cleaned
+                .split('·')
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>();
+            if parts.len() >= 2 && looks_like_codex_model(parts[0]) && looks_like_cwd(parts[1]) {
+                identity
+                    .current_model
+                    .get_or_insert_with(|| parts[0].to_string());
+                identity.cwd.get_or_insert_with(|| parts[1].to_string());
+            }
+        }
+    }
+    let picker_rows = codex_model_picker_rows(lines);
+    if !picker_rows.is_empty() {
+        if let Some(row) = picker_rows.iter().find(|row| row.current) {
+            identity.current_model = Some(row.model.clone());
+        }
+        if let Some(row) = picker_rows.iter().find(|row| row.selected) {
+            identity.selected_model = Some(row.model.clone());
+        }
+    }
+    if identity.is_empty() {
+        None
+    } else {
+        Some(identity)
+    }
+}
+
+fn extract_codex_screen_signals_with_style(
+    lines: &[String],
+    styled_screen: Option<&StyledScreenSnapshot>,
+) -> Option<ProviderScreenSignals> {
+    let mut signals = ProviderScreenSignals::default();
+    let mut last_explored_idx: Option<usize> = None;
+    let lower = joined_text(lines).to_ascii_lowercase();
+    let model_picker_visible = is_codex_model_picker(lines, &lower);
+    if model_picker_visible {
+        signals.model_picker_visible = true;
+        signals.visible_models = codex_model_picker_rows(lines)
+            .into_iter()
+            .map(|row| row.model)
+            .collect();
+    }
+
+    for (idx, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if is_separator_line(trimmed) {
+            signals.separator_count += 1;
+        }
+        if trimmed.contains("(ctrl + t to view transcript)") {
+            signals.folded_tool_output = true;
+        }
+
+        if !model_picker_visible {
+            if let Some(prompt_text) = strip_codex_prompt_marker(trimmed) {
+                let styled_prompt = styled_screen
+                    .and_then(|screen| screen.lines.get(idx))
+                    .and_then(styled_codex_prompt_line);
+                if styled_prompt
+                    .as_ref()
+                    .is_some_and(|prompt| prompt.is_placeholder)
+                    || (styled_prompt.is_none() && is_codex_placeholder_text(prompt_text))
+                {
+                    let placeholder_text = styled_prompt
+                        .map(|prompt| prompt.text)
+                        .unwrap_or_else(|| prompt_text.to_string());
+                    signals.placeholder_visible = true;
+                    signals.placeholder_text = Some(placeholder_text);
+                } else if !prompt_text.is_empty() {
+                    let user_text = styled_prompt
+                        .map(|prompt| prompt.text)
+                        .unwrap_or_else(|| prompt_text.to_string());
+                    if !user_text.is_empty() {
+                        signals.last_user_message = Some(user_text);
+                    }
+                }
+            }
+        }
+
+        if let Some(tool_label) = trimmed.strip_prefix("└ ") {
+            if last_explored_idx.is_some() {
+                signals.last_tool_kind = Some("explore".to_string());
+                signals.last_tool_label = Some(tool_label.trim().to_string());
+                last_explored_idx = None;
+            }
+            continue;
+        }
+
+        if let Some(rest) = trimmed.strip_prefix("• ") {
+            let lower = rest.to_ascii_lowercase();
+            if let Some(command) = rest.strip_prefix("Ran ") {
+                signals.last_tool_kind = Some("shell".to_string());
+                signals.last_tool_label = Some(command.trim().to_string());
+                last_explored_idx = None;
+                continue;
+            }
+            if rest == "Explored" {
+                signals.last_tool_kind = Some("explore".to_string());
+                signals.last_tool_label = None;
+                last_explored_idx = Some(idx);
+                continue;
+            }
+            if lower == "searching the web" {
+                signals.web_search_active = true;
+                signals.last_tool_kind = Some("web_search".to_string());
+                signals.last_tool_label = Some("Searching the web".to_string());
+                last_explored_idx = None;
+                continue;
+            }
+            if let Some(query) = rest.strip_prefix("Searched ") {
+                signals.last_tool_kind = Some("web_search".to_string());
+                signals.last_tool_label = Some(query.trim().to_string());
+                last_explored_idx = None;
+                continue;
+            }
+            if !rest.trim().is_empty() {
+                signals.last_assistant_message = Some(rest.trim().to_string());
+            }
+        } else if trimmed == "◦ Searching the web" {
+            signals.web_search_active = true;
+            signals.last_tool_kind = Some("web_search".to_string());
+            signals.last_tool_label = Some("Searching the web".to_string());
+            last_explored_idx = None;
+        }
+    }
+
+    if signals.is_empty() {
+        None
+    } else {
+        Some(signals)
+    }
+}
+
+fn has_codex_current_running_status(
+    lines: &[String],
+    lower: &str,
+    styled_screen: Option<&StyledScreenSnapshot>,
+) -> bool {
+    if lower.contains("reviewing approval request") {
+        return true;
+    }
+    for line in codex_recent_content_lines_with_style(lines, styled_screen) {
+        if codex_line_is_active_status(line) {
+            return true;
+        }
+        let trimmed = line.trim();
+        if is_separator_line(trimmed)
+            || (trimmed.starts_with("• ")
+                && trimmed != "• Searching the web"
+                && !trimmed.starts_with("• Ran ")
+                && trimmed != "• Explored")
+        {
+            return false;
+        }
+    }
+    false
+}
+
+fn extract_codex_active_tool(
+    lines: &[String],
+    styled_screen: Option<&StyledScreenSnapshot>,
+    signals: Option<&ProviderScreenSignals>,
+) -> Option<(&'static str, String)> {
+    if codex_recent_content_lines_with_style(lines, styled_screen)
+        .into_iter()
+        .any(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower == "◦ searching the web" || lower == "• searching the web"
+        })
+    {
+        return Some(("web_search", "web_search".to_string()));
+    }
+    if let Some(signals) = signals {
+        match signals.last_tool_kind.as_deref() {
+            Some("shell") => {
+                return Some((
+                    "tool",
+                    signals
+                        .last_tool_label
+                        .clone()
+                        .unwrap_or_else(|| "shell".to_string()),
+                ));
+            }
+            Some("explore") => {
+                return Some((
+                    "tool",
+                    signals
+                        .last_tool_label
+                        .clone()
+                        .unwrap_or_else(|| "explore".to_string()),
+                ));
+            }
+            Some("web_search") if signals.web_search_active => {
+                return Some(("web_search", "web_search".to_string()));
+            }
+            _ => {}
+        }
+    }
+    extract_tool_name(lines).map(|tool| ("tool", tool))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodexPromptLine {
+    text: String,
+    is_placeholder: bool,
+}
+
+fn styled_codex_prompt_line(line: &StyledScreenLine) -> Option<CodexPromptLine> {
+    let marker_index = line
+        .text
+        .chars()
+        .position(|ch| !ch.is_whitespace())
+        .filter(|idx| {
+            line.text
+                .chars()
+                .nth(*idx)
+                .is_some_and(|ch| ch == '›' || ch == '>')
+        })?;
+
+    let text = line
+        .text
+        .chars()
+        .skip(marker_index + 1)
+        .collect::<String>()
+        .trim()
+        .to_string();
+    if text.is_empty() {
+        return Some(CodexPromptLine {
+            text,
+            is_placeholder: false,
+        });
+    }
+
+    let mut cell_index = 0usize;
+    let mut saw_placeholder_style = false;
+    let mut saw_non_placeholder_style = false;
+    for span in &line.spans {
+        for ch in span.text.chars() {
+            if cell_index > marker_index && !ch.is_whitespace() {
+                if codex_span_is_placeholder_style(span) {
+                    saw_placeholder_style = true;
+                } else {
+                    saw_non_placeholder_style = true;
+                }
+            }
+            cell_index += 1;
+        }
+    }
+
+    Some(CodexPromptLine {
+        text,
+        is_placeholder: saw_placeholder_style && !saw_non_placeholder_style,
+    })
+}
+
+fn codex_span_is_placeholder_style(span: &StyledScreenSpan) -> bool {
+    span.flags.dim && !span.flags.bold && !span.flags.inverse && !span.flags.hidden
+}
+
+fn strip_codex_prompt_marker(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    trimmed
+        .strip_prefix('›')
+        .or_else(|| trimmed.strip_prefix('>'))
+        .map(str::trim)
+}
+
+fn codex_recent_content_lines_with_style<'a>(
+    lines: &'a [String],
+    styled_screen: Option<&StyledScreenSnapshot>,
+) -> Vec<&'a str> {
+    lines
+        .iter()
+        .enumerate()
+        .rev()
+        .map(|(idx, line)| (idx, line.trim()))
+        .filter(|(_, line)| !line.is_empty())
+        .filter(|(idx, line)| {
+            let is_styled_placeholder = styled_screen
+                .and_then(|screen| screen.lines.get(*idx))
+                .and_then(styled_codex_prompt_line)
+                .is_some_and(|prompt| prompt.is_placeholder);
+            !is_codex_footer_line(line)
+                && !is_styled_placeholder
+                && !strip_codex_prompt_marker(line).is_some_and(is_codex_placeholder_text)
+        })
+        .map(|(_, line)| line)
+        .take(14)
+        .collect()
+}
+
+fn codex_line_is_active_status(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("working (")
+        || lower.contains(" esc to interrupt")
+        || lower.contains("running command")
+        || lower.contains("command running")
+        || lower == "◦ searching the web"
+        || lower == "• searching the web"
+        || has_spinner_in_line(line)
+}
+
+fn is_codex_placeholder_text(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase();
+    normalized == "find and fix a bug in @filename"
+        || normalized == "find and fix a bug in filename"
+}
+
+fn is_codex_footer_line(value: &str) -> bool {
+    let parts = value
+        .split('·')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    parts.len() >= 2 && looks_like_codex_model(parts[0]) && looks_like_cwd(parts[1])
+}
+
+fn looks_like_codex_model(value: &str) -> bool {
+    let lower = value.trim().to_ascii_lowercase();
+    lower.starts_with("gpt-") || lower.starts_with("codex") || lower.contains(" xhigh")
+}
+
+fn looks_like_cwd(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.starts_with("~/") || trimmed.starts_with('/')
 }
 
 fn recognize_gemini(lines: &[String]) -> PtyRecognitionSnapshot {
@@ -1176,15 +1969,21 @@ fn extract_agy_model_from_line(line: &str) -> Option<String> {
 fn extract_agy_cwd(lines: &[String]) -> Option<String> {
     for line in lines {
         let cleaned = clean_agy_identity_line(line);
+        if cleaned.contains("://") || is_probable_wrapped_url_path(&cleaned) {
+            continue;
+        }
         if let Some(captures) = AGY_CWD_ONLY_RE.captures(&cleaned) {
             return captures
                 .name("cwd")
-                .map(|value| normalize_identity_value(value.as_str()));
+                .and_then(|value| normalize_agy_cwd(value.as_str()));
         }
     }
 
     for line in lines {
         let cleaned = clean_agy_identity_line(line);
+        if cleaned.contains("://") || is_probable_wrapped_url_path(&cleaned) {
+            continue;
+        }
         let lower = cleaned.to_ascii_lowercase();
         if !(lower.contains("cwd") || lower.contains("directory") || lower.contains("project")) {
             continue;
@@ -1192,11 +1991,28 @@ fn extract_agy_cwd(lines: &[String]) -> Option<String> {
         if let Some(captures) = AGY_CWD_RE.captures(&cleaned) {
             return captures
                 .name("cwd")
-                .map(|value| normalize_identity_value(value.as_str()));
+                .and_then(|value| normalize_agy_cwd(value.as_str()));
         }
     }
 
     None
+}
+
+fn normalize_agy_cwd(value: &str) -> Option<String> {
+    let cwd = normalize_identity_value(value);
+    if is_probable_wrapped_url_path(&cwd) {
+        None
+    } else {
+        Some(cwd)
+    }
+}
+
+fn is_probable_wrapped_url_path(cwd: &str) -> bool {
+    let Some(rest) = cwd.strip_prefix('/') else {
+        return false;
+    };
+    let first = rest.split('/').next().unwrap_or_default();
+    first.contains('.')
 }
 
 fn clean_agy_identity_line(line: &str) -> String {
@@ -1377,7 +2193,7 @@ impl StateParser for AgyCliStateParser {
 }
 
 fn snapshot_to_detection(snapshot: PtyRecognitionSnapshot) -> Option<StateDetectionResult> {
-    if snapshot.provider == CliEngine::Agy
+    if matches!(snapshot.provider, CliEngine::Agy | CliEngine::Codex)
         && matches!(
             snapshot.blocked_kind.as_deref(),
             Some("model_picker" | "slash_command_menu" | "slash_command_input" | "mcp_servers")
@@ -1756,9 +2572,40 @@ fn extract_elapsed_secs(text: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::screenshot::CapturedCellFlags;
 
     fn lines(input: &[&str]) -> Vec<String> {
         input.iter().map(|line| line.to_string()).collect()
+    }
+
+    fn styled_span(text: &str, dim: bool, bold: bool) -> StyledScreenSpan {
+        StyledScreenSpan {
+            text: text.to_string(),
+            fg: [205, 214, 244],
+            bg: [30, 30, 46],
+            fg_hex: "#cdd6f4".to_string(),
+            bg_hex: "#1e1e2e".to_string(),
+            flags: CapturedCellFlags {
+                bold,
+                dim,
+                ..CapturedCellFlags::default()
+            },
+        }
+    }
+
+    fn styled_line(spans: Vec<StyledScreenSpan>) -> StyledScreenLine {
+        StyledScreenLine {
+            text: spans.iter().map(|span| span.text.as_str()).collect(),
+            spans,
+        }
+    }
+
+    fn styled_screen(lines: Vec<StyledScreenLine>) -> StyledScreenSnapshot {
+        StyledScreenSnapshot {
+            rows: lines.len(),
+            cols: 120,
+            lines,
+        }
     }
 
     #[test]
@@ -1776,6 +2623,351 @@ mod tests {
     fn codex_composer_prompt_is_idle() {
         let result = recognize_codex(&lines(&[">", "ctrl+c to quit"]));
         assert_eq!(result.state, PtyCanonicalState::Idle);
+    }
+
+    #[test]
+    fn codex_idle_screen_extracts_identity_and_placeholder() {
+        let result = recognize_codex(&lines(&[
+            "╭─────────────────────────────────────────────╮",
+            "│ >_ OpenAI Codex (v0.135.0-alpha.1)          │",
+            "│                                             │",
+            "│ model:     gpt-5.5 xhigh   /model to change │",
+            "│ directory: ~/Projects/missiond              │",
+            "╰─────────────────────────────────────────────╯",
+            "",
+            "› Find and fix a bug in @filename",
+            "",
+            "  gpt-5.5 xhigh · ~/Projects/missiond",
+        ]));
+        assert_eq!(result.state, PtyCanonicalState::Idle);
+        let identity = result.screen_identity.expect("codex identity");
+        assert_eq!(identity.cli_version.as_deref(), Some("0.135.0-alpha.1"));
+        assert_eq!(identity.current_model.as_deref(), Some("gpt-5.5 xhigh"));
+        assert_eq!(identity.cwd.as_deref(), Some("~/Projects/missiond"));
+        let signals = result.screen_signals.expect("codex signals");
+        assert!(signals.placeholder_visible);
+        assert_eq!(
+            signals.placeholder_text.as_deref(),
+            Some("Find and fix a bug in @filename")
+        );
+    }
+
+    #[test]
+    fn codex_model_picker_tracks_current_selected_and_visible_models() {
+        let result = recognize_codex(&lines(&[
+            "Select Model and Effort",
+            "Access legacy models by running codex -m <model_name> or in your config.toml",
+            "",
+            "› 1. gpt-5.5 (current)    Frontier model for coding tasks",
+            "  2. gpt-5.4              Previous frontier model",
+            "  3. gpt-5.4-mini         Smaller model",
+            "  4. gpt-5.3-codex        Legacy coding model",
+            "",
+            "Press enter to confirm or esc to go back",
+        ]));
+
+        assert_eq!(result.state, PtyCanonicalState::Blocked);
+        assert_eq!(result.reason, "codex:model_picker");
+        assert_eq!(result.blocked_kind.as_deref(), Some("model_picker"));
+        assert_eq!(result.phase.as_deref(), Some("model_switch"));
+
+        let identity = result.screen_identity.expect("codex identity");
+        assert_eq!(identity.current_model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(identity.selected_model.as_deref(), Some("gpt-5.5"));
+
+        let signals = result.screen_signals.expect("codex signals");
+        assert!(signals.model_picker_visible);
+        assert_eq!(
+            signals.visible_models,
+            vec![
+                "gpt-5.5".to_string(),
+                "gpt-5.4".to_string(),
+                "gpt-5.4-mini".to_string(),
+                "gpt-5.3-codex".to_string()
+            ]
+        );
+        assert!(signals.last_user_message.is_none());
+    }
+
+    #[test]
+    fn codex_model_picker_maps_to_slash_menu_not_confirmation() {
+        let result = snapshot_to_detection(recognize_codex(&lines(&[
+            "Select Model and Effort",
+            "› 1. gpt-5.5 (current)    Frontier model for coding tasks",
+            "  2. gpt-5.4              Previous frontier model",
+            "Press enter to confirm or esc to go back",
+        ])))
+        .expect("detection");
+
+        assert_eq!(result.state, State::SlashMenu);
+    }
+
+    #[test]
+    fn codex_workspace_trust_prompt_is_blocked() {
+        let result = recognize_codex(&lines(&[
+            "› You are in /Users/jinchen",
+            "",
+            "  Do you trust the contents of this directory? Working with untrusted contents",
+            "  comes with higher risk of prompt injection. Trusting the directory allows",
+            "  project-local config, hooks, and exec policies to load.",
+            "",
+            "› 1. Yes, continue",
+            "  2. No, quit",
+            "",
+            "  Press enter to continue",
+        ]));
+
+        assert_eq!(result.state, PtyCanonicalState::Blocked);
+        assert_eq!(result.reason, "codex:workspace_trust_prompt");
+        assert_eq!(result.blocked_kind.as_deref(), Some("workspace_trust"));
+        assert_eq!(result.phase.as_deref(), Some("startup_trust"));
+    }
+
+    #[test]
+    fn codex_mcp_inventory_extracts_server_statuses() {
+        let result = recognize_codex(&lines(&[
+            "⚠ MCP startup incomplete (failed: missiond_broken)",
+            "",
+            "🔌 MCP Tools",
+            "",
+            "  • missiond",
+            "    • Auth: Unsupported",
+            "    • Tools: mission_board_query, mission_board_create, mission_pty_status",
+            "",
+            "  • missiond_broken",
+            "    • Auth: Unsupported",
+            "    • Tools: (none)",
+            "",
+            "› Use /skills to list available skills",
+            "",
+            "  gpt-5.5 xhigh · ~/Projects/missiond",
+        ]));
+
+        assert_eq!(result.state, PtyCanonicalState::Idle);
+        assert_eq!(result.reason, "codex:mcp_startup_incomplete");
+        assert_eq!(result.phase.as_deref(), Some("mcp_status"));
+
+        let mcp = result.screen_mcp.expect("mcp screen");
+        assert_eq!(mcp.status, "degraded");
+        assert_eq!(mcp.failed_servers, vec!["missiond_broken".to_string()]);
+        assert!(mcp.startup_incomplete);
+        assert_eq!(mcp.servers.len(), 2);
+        assert_eq!(mcp.servers[0].name, "missiond");
+        assert_eq!(mcp.servers[0].status, "connected");
+        assert_eq!(mcp.servers[1].name, "missiond_broken");
+        assert_eq!(mcp.servers[1].status, "failed");
+    }
+
+    #[test]
+    fn codex_mcp_startup_running_is_running() {
+        let result = recognize_codex(&lines(&[
+            "• Starting MCP servers (4/6): codex_apps, mac-auto-bridge (1s • esc to interrupt)",
+            "",
+            "› Find and fix a bug in @filename",
+            "",
+            "  gpt-5.5 xhigh · ~/Projects/missiond",
+        ]));
+
+        assert_eq!(result.state, PtyCanonicalState::Running);
+        assert_eq!(result.reason, "codex:mcp_startup_running");
+        assert_eq!(result.phase.as_deref(), Some("mcp_startup"));
+        assert!(result
+            .screen_mcp
+            .as_ref()
+            .is_some_and(|mcp| mcp.startup_running));
+    }
+
+    #[test]
+    fn codex_styled_placeholder_does_not_depend_on_fixed_text() {
+        let result = recognize_styled_screen(
+            CliEngine::Codex,
+            &styled_screen(vec![
+                styled_line(vec![styled_span(
+                    "│ >_ OpenAI Codex (v0.135.0-alpha.1) │",
+                    false,
+                    false,
+                )]),
+                styled_line(vec![styled_span(
+                    "│ model:     gpt-5.5 xhigh   /model to change │",
+                    false,
+                    false,
+                )]),
+                styled_line(vec![styled_span(
+                    "│ directory: ~/Projects/missiond │",
+                    false,
+                    false,
+                )]),
+                styled_line(vec![
+                    styled_span("›", false, true),
+                    styled_span(" ", false, false),
+                    styled_span("Improve documentation in @filename", true, false),
+                ]),
+                styled_line(vec![styled_span(
+                    "  gpt-5.5 xhigh · ~/Projects/missiond",
+                    false,
+                    false,
+                )]),
+            ]),
+            SessionState::Idle,
+        );
+        assert_eq!(result.state, PtyCanonicalState::Idle);
+        let signals = result.screen_signals.expect("codex signals");
+        assert!(signals.placeholder_visible);
+        assert_eq!(
+            signals.placeholder_text.as_deref(),
+            Some("Improve documentation in @filename")
+        );
+        assert_eq!(signals.last_user_message, None);
+    }
+
+    #[test]
+    fn codex_styled_user_text_wins_over_placeholder_content_match() {
+        let result = recognize_styled_screen(
+            CliEngine::Codex,
+            &styled_screen(vec![
+                styled_line(vec![
+                    styled_span("›", false, true),
+                    styled_span(" ", false, false),
+                    styled_span("Find and fix a bug in @filename", false, false),
+                ]),
+                styled_line(vec![styled_span(
+                    "  gpt-5.5 xhigh · ~/Projects/missiond",
+                    false,
+                    false,
+                )]),
+            ]),
+            SessionState::Idle,
+        );
+        assert_eq!(result.state, PtyCanonicalState::Idle);
+        let signals = result.screen_signals.expect("codex signals");
+        assert!(!signals.placeholder_visible);
+        assert_eq!(
+            signals.last_user_message.as_deref(),
+            Some("Find and fix a bug in @filename")
+        );
+    }
+
+    #[test]
+    fn codex_user_and_assistant_messages_are_screen_signals() {
+        let result = recognize_codex(&lines(&[
+            "› hi",
+            "",
+            "• Hi. What are we working on in missiond today?",
+            "",
+            "› Find and fix a bug in @filename",
+            "",
+            "  gpt-5.5 xhigh · ~/Projects/missiond",
+        ]));
+        assert_eq!(result.state, PtyCanonicalState::Idle);
+        let signals = result.screen_signals.expect("codex signals");
+        assert_eq!(signals.last_user_message.as_deref(), Some("hi"));
+        assert_eq!(
+            signals.last_assistant_message.as_deref(),
+            Some("Hi. What are we working on in missiond today?")
+        );
+        assert!(signals.placeholder_visible);
+    }
+
+    #[test]
+    fn codex_shell_tool_call_is_structured_signal() {
+        let result = recognize_codex(&lines(&[
+            "› Run pwd using shell.",
+            "",
+            "• Ran pwd",
+            "  └ /Users/jinchen/Projects/missiond",
+            "  … +12 lines (ctrl + t to view transcript)",
+            "",
+            "────────────────────────────────────────────────",
+            "",
+            "• /Users/jinchen/Projects/missiond",
+            "",
+            "› Find and fix a bug in @filename",
+            "  gpt-5.5 xhigh · ~/Projects/missiond",
+        ]));
+        assert_eq!(result.state, PtyCanonicalState::Idle);
+        let signals = result.screen_signals.expect("codex signals");
+        assert_eq!(signals.last_tool_kind.as_deref(), Some("shell"));
+        assert_eq!(signals.last_tool_label.as_deref(), Some("pwd"));
+        assert_eq!(
+            signals.last_assistant_message.as_deref(),
+            Some("/Users/jinchen/Projects/missiond")
+        );
+        assert!(signals.folded_tool_output);
+        assert_eq!(signals.separator_count, 1);
+    }
+
+    #[test]
+    fn codex_explore_search_tool_call_is_structured_signal() {
+        let result = recognize_codex(&lines(&[
+            "› Search for mission_pty_screen.",
+            "",
+            "• I’ll search the workspace for mission_pty_screen and report where it appears.",
+            "",
+            "• Explored",
+            "  └ Search mission_pty_screen",
+            "",
+            "────────────────────────────────────────────────",
+            "",
+            "• Found mission_pty_screen in these places:",
+            "",
+            "› Find and fix a bug in @filename",
+            "  gpt-5.5 xhigh · ~/Projects/missiond",
+        ]));
+        assert_eq!(result.state, PtyCanonicalState::Idle);
+        let signals = result.screen_signals.expect("codex signals");
+        assert_eq!(signals.last_tool_kind.as_deref(), Some("explore"));
+        assert_eq!(
+            signals.last_tool_label.as_deref(),
+            Some("Search mission_pty_screen")
+        );
+        assert_eq!(
+            signals.last_assistant_message.as_deref(),
+            Some("Found mission_pty_screen in these places:")
+        );
+    }
+
+    #[test]
+    fn codex_web_search_running_uses_current_status_line_only() {
+        let result = recognize_codex(&lines(&[
+            "› Search the internet for today's weather in Shanghai.",
+            "",
+            "◦ Searching the web",
+            "",
+            "› Find and fix a bug in @filename",
+            "  gpt-5.5 xhigh · ~/Projects/missiond",
+        ]));
+        assert_eq!(result.state, PtyCanonicalState::Running);
+        assert_eq!(result.phase.as_deref(), Some("web_search"));
+        assert_eq!(result.active_tool.as_deref(), Some("web_search"));
+    }
+
+    #[test]
+    fn codex_web_search_history_does_not_keep_screen_running() {
+        let result = recognize_codex(&lines(&[
+            "› Search the internet for today's weather in Shanghai.",
+            "",
+            "◦ Searching the web",
+            "",
+            "• Searched https://www.qweather.com/en/weather/shanghai-101020100.html",
+            "",
+            "────────────────────────────────────────────────",
+            "",
+            "• Shanghai weather today, June 1, 2026: cloudy.",
+            "",
+            "› Find and fix a bug in @filename",
+            "  gpt-5.5 xhigh · ~/Projects/missiond",
+        ]));
+        assert_eq!(result.state, PtyCanonicalState::Idle);
+        let signals = result.screen_signals.expect("codex signals");
+        assert_eq!(signals.last_tool_kind.as_deref(), Some("web_search"));
+        assert_eq!(
+            signals.last_tool_label.as_deref(),
+            Some("https://www.qweather.com/en/weather/shanghai-101020100.html")
+        );
+        assert_eq!(
+            signals.last_assistant_message.as_deref(),
+            Some("Shanghai weather today, June 1, 2026: cloudy.")
+        );
     }
 
     #[test]
@@ -2276,6 +3468,30 @@ mod tests {
         assert_eq!(result.state, PtyCanonicalState::Idle);
         assert_eq!(result.reason, "agy:composer_idle");
         assert_eq!(result.blocked_kind, None);
+    }
+
+    #[test]
+    fn agy_wrapped_url_path_is_not_misread_as_cwd() {
+        let result = recognize_agy(&lines(&[
+            "Antigravity CLI 1.0.3",
+            "jjrrqqq@gmail.com (Google AI Ultra)",
+            "Claude Opus 4.6 Thinking",
+            "https://www.m1-project.com/blog/research-source-that-wrapped",
+            "/www.m1-project.com/blog/research-source-that-wrapped",
+            "────────────────────────────────────────",
+            ">",
+            "────────────────────────────────────────",
+            "? for shortcuts                                                                                  Claude Opus 4.6 Thinking",
+        ]));
+
+        assert_eq!(result.state, PtyCanonicalState::Idle);
+        assert_eq!(
+            result
+                .screen_identity
+                .as_ref()
+                .and_then(|identity| identity.cwd.as_deref()),
+            None
+        );
     }
 
     #[test]

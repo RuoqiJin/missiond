@@ -457,7 +457,7 @@
         :v3-function compute-primitives
         :surface compute-primitives
         :tools [mission_task_submit mission_task_query mission_task_cancel mission_job_poll mission_flow_run
-                mission_pty_spawn mission_pty_send mission_pty_read mission_pty_signal mission_pty_confirm
+                mission_pty_spawn mission_pty_send mission_pty_key mission_pty_text mission_pty_read mission_pty_signal mission_pty_confirm
                 mission_pty_status mission_pty_screenshot mission_slots mission_slot_history mission_agent
                 mission_inbox mission_sonnet_process mission_minimax_process mission_cc_query mission_cc_swarm
                 mission_worker mission_control mission_pause mission_forge_build mission_forge_lint])

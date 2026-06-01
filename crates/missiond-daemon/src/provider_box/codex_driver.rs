@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use missiond_core::db::traits::MissionStore;
-use missiond_core::pty::{recognize_screen, PtyCanonicalState};
+use missiond_core::pty::{recognize_screen, recognize_styled_screen, PtyCanonicalState};
 use missiond_core::types::{CliEngine, SharedProjectRegistry};
 use missiond_core::{LearnedPermissions, PTYManager, PTYSlot, PTYSpawnOptions, SessionState};
 use serde_json::{json, Value};
@@ -18,16 +18,43 @@ use tokio::sync::{Mutex, RwLock};
 
 use super::driver::{ProviderDriver, ProviderDriverCapabilities};
 use super::types::{
-    ProviderBoxDiagnostic, ProviderBoxResult, ProviderBoxStatus, ProviderInteractionRequest,
-    PtyObservation, PtyStepAction, PtyStepRecord, PtyStepVerificationStatus,
-    DIAG_PROVIDER_BOX_INVALID_REQUEST, DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
-    DIAG_PROVIDER_DURABLE_FINAL_MISSING, DIAG_PROVIDER_TEXT_ONLY_VIOLATION,
-    DIAG_PROVIDER_TURN_TIMEOUT_CANCELLED, DIAG_PROVIDER_TURN_TIMEOUT_CANCEL_FAILED,
+    BoxCommand, ProviderBoxDiagnostic, ProviderBoxResult, ProviderBoxStatus, ProviderControlAction,
+    ProviderInteractionRequest, PtyObservation, PtyStepAction, PtyStepRecord,
+    PtyStepVerificationStatus, DIAG_PROVIDER_BOX_INVALID_REQUEST,
+    DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE, DIAG_PROVIDER_CONTROL_ACTION_UNSUPPORTED,
+    DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED, DIAG_PROVIDER_DURABLE_FINAL_MISSING,
+    DIAG_PROVIDER_MCP_RECONNECT_UNSUPPORTED, DIAG_PROVIDER_MCP_STATUS_UNAVAILABLE,
+    DIAG_PROVIDER_TEXT_ONLY_VIOLATION, DIAG_PROVIDER_TURN_TIMEOUT_CANCELLED,
+    DIAG_PROVIDER_TURN_TIMEOUT_CANCEL_FAILED,
 };
 
 const DEFAULT_CODEX_SLOT: &str = "slot-codex-provider-box";
-const OBSERVE_SETTLE_MS: u64 = 250;
+const OBSERVE_SETTLE_MS: u64 = 350;
+const OBSERVE_STABLE_POLL_MS: u64 = 120;
+const OBSERVE_STABLE_MAX_MS: u64 = 1_000;
 const CODEX_EXEC_TEXT_PROVIDER: &str = "codex_exec_text";
+const CODEX_RESEARCH_PROVIDER: &str = "codex_research";
+const CODEX_IMAGE_PROVIDER: &str = "codex_image_generation";
+const CODEX_EXEC_TEXT_MODEL: &str = "gpt-5.5";
+const CODEX_STARTUP_READY_WAIT_SECS: u64 = 20;
+const CODEX_TRUST_READY_WAIT_SECS: u64 = 12;
+const CODEX_MANUAL_TEXT_LIMIT: usize = 4096;
+const CODEX_MANUAL_KEY_NAMES: &[&str] = &[
+    "enter",
+    "escape",
+    "up",
+    "down",
+    "left",
+    "right",
+    "tab",
+    "backspace",
+    "delete",
+    "ctrl+c",
+    "pageup",
+    "pagedown",
+    "home",
+    "end",
+];
 
 #[derive(Clone)]
 pub(crate) struct CodexProviderDriver {
@@ -57,8 +84,63 @@ struct CodexTurnFinal {
 #[derive(Debug, Clone)]
 struct CodexExecJsonlAnalysis {
     event_count: usize,
+    allowed_tool_event_count: usize,
     final_text: Option<String>,
     violation: Option<Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexExecTaskKind {
+    TextOnly,
+    Research,
+    ImageGeneration,
+}
+
+impl CodexExecTaskKind {
+    fn provider(self) -> &'static str {
+        match self {
+            Self::TextOnly => CODEX_EXEC_TEXT_PROVIDER,
+            Self::Research => CODEX_RESEARCH_PROVIDER,
+            Self::ImageGeneration => CODEX_IMAGE_PROVIDER,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::TextOnly => "text-only",
+            Self::Research => "research",
+            Self::ImageGeneration => "image-generation",
+        }
+    }
+
+    fn output_media_type(self) -> &'static str {
+        match self {
+            Self::TextOnly | Self::Research => "text/markdown",
+            Self::ImageGeneration => "text/markdown+image",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexStartupOutcome {
+    Ready,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexTrustSelection {
+    Continue,
+    Quit,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodexManualPtyStep {
+    action_type: String,
+    key: Option<String>,
+    text: Option<String>,
+    expected_change: Option<String>,
+    redacted: bool,
 }
 
 impl CodexProviderDriver {
@@ -178,6 +260,164 @@ impl CodexProviderDriver {
         )
     }
 
+    fn request_submit_input(request: &ProviderInteractionRequest) -> bool {
+        request
+            .desired_worker
+            .as_ref()
+            .and_then(|worker| {
+                worker
+                    .get("submit")
+                    .or_else(|| worker.get("enter"))
+                    .or_else(|| worker.get("append_enter"))
+                    .and_then(Value::as_bool)
+            })
+            .unwrap_or(false)
+    }
+
+    fn request_mcp_server(request: &ProviderInteractionRequest) -> String {
+        request
+            .desired_worker
+            .as_ref()
+            .and_then(|worker| {
+                worker
+                    .get("mcp_server")
+                    .or_else(|| worker.get("server"))
+                    .and_then(Value::as_str)
+            })
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("missiond")
+            .to_string()
+    }
+
+    fn request_manual_pty_step(
+        request: &ProviderInteractionRequest,
+    ) -> Result<CodexManualPtyStep, ProviderBoxDiagnostic> {
+        let step = request
+            .desired_worker
+            .as_ref()
+            .and_then(|worker| worker.get("pty_step").or(Some(worker)))
+            .ok_or_else(|| {
+                ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                    "Codex PTY step requires desired_worker.pty_step",
+                    json!({
+                        "slot_id": request.slot_id,
+                        "command": request.command,
+                    }),
+                )
+            })?;
+        let action_type = step
+            .get("action_type")
+            .or_else(|| step.get("type"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .or_else(|| {
+                if step.get("key").is_some() {
+                    Some("key".to_string())
+                } else if step.get("text").is_some() {
+                    Some("text".to_string())
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| {
+                ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                    "Codex PTY step requires action_type=key or action_type=text",
+                    json!({
+                        "slot_id": request.slot_id,
+                        "allowed_action_types": ["key", "text"],
+                    }),
+                )
+            })?;
+        let redacted = step
+            .get("redacted")
+            .and_then(Value::as_bool)
+            .unwrap_or(action_type == "text" || action_type == "paste");
+        let expected_change = step
+            .get("expected_change")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+
+        match action_type.as_str() {
+            "key" => {
+                let key = step
+                    .get("key")
+                    .or_else(|| step.get("human_input"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        ProviderBoxDiagnostic::error(
+                            DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                            "Codex key PTY step requires a key name",
+                            json!({
+                                "slot_id": request.slot_id,
+                                "allowed_keys": CODEX_MANUAL_KEY_NAMES,
+                            }),
+                        )
+                    })?;
+                if codex_manual_key_bytes(&key).is_none() {
+                    return Err(ProviderBoxDiagnostic::error(
+                        DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                        "Codex key PTY step uses an unsupported key",
+                        json!({
+                            "slot_id": request.slot_id,
+                            "key": key,
+                            "allowed_keys": CODEX_MANUAL_KEY_NAMES,
+                        }),
+                    ));
+                }
+                Ok(CodexManualPtyStep {
+                    action_type,
+                    key: Some(key),
+                    text: None,
+                    expected_change,
+                    redacted: false,
+                })
+            }
+            "text" | "paste" => {
+                let text = step
+                    .get("text")
+                    .or_else(|| step.get("human_input"))
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        ProviderBoxDiagnostic::error(
+                            DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                            "Codex text PTY step requires text",
+                            json!({
+                                "slot_id": request.slot_id,
+                            }),
+                        )
+                    })?;
+                validate_codex_manual_text_step(request.slot_id.as_deref(), &text)?;
+                Ok(CodexManualPtyStep {
+                    action_type: "text".to_string(),
+                    key: None,
+                    text: Some(text),
+                    expected_change,
+                    redacted,
+                })
+            }
+            _ => Err(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                "Codex PTY step action_type is unsupported",
+                json!({
+                    "slot_id": request.slot_id,
+                    "action_type": action_type,
+                    "allowed_action_types": ["key", "text"],
+                }),
+            )),
+        }
+    }
+
     async fn existing_slot_matches_request(
         &self,
         slot_id: &str,
@@ -283,9 +523,6 @@ impl CodexProviderDriver {
         result: &mut ProviderBoxResult,
     ) -> Option<String> {
         let slot_id = Self::request_slot_id(request);
-        if Self::request_force_restart(request) {
-            let _ = self.pty.kill(&slot_id).await;
-        }
         if let Some(status) = self.pty.get_status(&slot_id).await {
             if status.engine != CliEngine::Codex {
                 result.status = ProviderBoxStatus::Failed;
@@ -299,8 +536,19 @@ impl CodexProviderDriver {
                 ));
                 return None;
             }
-            if !matches!(status.state, SessionState::Exited | SessionState::Error) {
+            if Self::request_force_restart(request) {
+                let _ = self.pty.kill(&slot_id).await;
+            } else if !matches!(status.state, SessionState::Exited | SessionState::Error) {
                 if self.existing_slot_matches_request(&slot_id, request).await {
+                    let observation = self.observe(&slot_id).await;
+                    if should_resolve_codex_startup_surface(&observation) {
+                        let lock = self.slot_lock(&slot_id).await;
+                        let _guard = lock.lock().await;
+                        match self.ensure_startup_ready_locked(result, &slot_id).await {
+                            CodexStartupOutcome::Ready => {}
+                            CodexStartupOutcome::Failed => return None,
+                        }
+                    }
                     return Some(slot_id);
                 }
                 let _ = self.pty.kill(&slot_id).await;
@@ -328,7 +576,7 @@ impl CodexProviderDriver {
         let dangerous_bypass = Self::request_dangerous_bypass(request);
         let options = PTYSpawnOptions {
             auto_restart: true,
-            wait_for_idle: true,
+            wait_for_idle: false,
             timeout_secs: Some(90),
             mcp_config: None,
             dangerously_skip_permissions: dangerous_bypass,
@@ -350,6 +598,15 @@ impl CodexProviderDriver {
             initial_prompt: None,
             command_override: None,
         };
+        self.spawn_slot_with_bootstrap(slot, options, result).await
+    }
+
+    async fn spawn_slot_with_bootstrap(
+        &self,
+        slot: PTYSlot,
+        options: PTYSpawnOptions,
+        result: &mut ProviderBoxResult,
+    ) -> Option<String> {
         match crate::slot_orchestrator::spawner::spawn_tracked_slot(
             &self.pty,
             &self.store,
@@ -362,14 +619,21 @@ impl CodexProviderDriver {
         )
         .await
         {
-            Ok(_) => Some(slot_id),
+            Ok(_) => {
+                let lock = self.slot_lock(&slot.id).await;
+                let _guard = lock.lock().await;
+                match self.ensure_startup_ready_locked(result, &slot.id).await {
+                    CodexStartupOutcome::Ready => Some(slot.id),
+                    CodexStartupOutcome::Failed => None,
+                }
+            }
             Err(err) => {
                 result.status = ProviderBoxStatus::Failed;
                 result.add_diagnostic(ProviderBoxDiagnostic::error(
                     DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
                     "Codex PTY slot could not be spawned by provider-box",
                     json!({
-                        "slot_id": slot_id,
+                        "slot_id": slot.id,
                         "error": err.to_string(),
                         "rule": "fast-fail; no direct GenericCli fallback is allowed"
                     }),
@@ -400,22 +664,64 @@ impl CodexProviderDriver {
     }
 
     async fn observe(&self, slot_id: &str) -> CodexObservation {
-        let lines = self
-            .pty
-            .get_last_lines(slot_id, 180)
-            .await
-            .unwrap_or_else(|_| Vec::new());
+        let styled_screen = self.pty.get_styled_screen(slot_id).await.ok();
+        let lines = if let Some(screen) = styled_screen.as_ref() {
+            screen
+                .lines
+                .iter()
+                .map(|line| line.text.clone())
+                .collect::<Vec<_>>()
+        } else {
+            self.pty
+                .get_last_lines(slot_id, 180)
+                .await
+                .unwrap_or_else(|_| Vec::new())
+        };
         let status = self.pty.get_status(slot_id).await;
         let state = status
             .as_ref()
             .map(|info| info.state)
             .unwrap_or(SessionState::Idle);
-        let snapshot = recognize_screen(CliEngine::Codex, &lines, state);
+        let snapshot = if let Some(screen) = styled_screen.as_ref() {
+            recognize_styled_screen(CliEngine::Codex, screen, state)
+        } else {
+            recognize_screen(CliEngine::Codex, &lines, state)
+        };
         let text = lines.join("\n");
         CodexObservation {
             lines,
             text,
             snapshot,
+        }
+    }
+
+    fn observations_equivalent(left: &CodexObservation, right: &CodexObservation) -> bool {
+        left.text == right.text
+            && left.snapshot.state == right.snapshot.state
+            && left.snapshot.reason == right.snapshot.reason
+            && left.snapshot.blocked_kind == right.snapshot.blocked_kind
+    }
+
+    fn observations_changed(before: &CodexObservation, after: &CodexObservation) -> bool {
+        !Self::observations_equivalent(before, after)
+    }
+
+    async fn observe_after_action(&self, slot_id: &str) -> CodexObservation {
+        let started = Instant::now();
+        tokio::time::sleep(Duration::from_millis(OBSERVE_SETTLE_MS)).await;
+        let mut previous = self.observe(slot_id).await;
+
+        loop {
+            if started.elapsed() >= Duration::from_millis(OBSERVE_STABLE_MAX_MS) {
+                return previous;
+            }
+
+            tokio::time::sleep(Duration::from_millis(OBSERVE_STABLE_POLL_MS)).await;
+            let current = self.observe(slot_id).await;
+            if Self::observations_equivalent(&previous, &current) {
+                return current;
+            }
+            previous = current;
         }
     }
 
@@ -427,10 +733,246 @@ impl CodexProviderDriver {
         )
     }
 
-    async fn ensure_ready_for_prompt(&self, result: &mut ProviderBoxResult, slot_id: &str) -> bool {
+    async fn write_step(
+        &self,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+        action: PtyStepAction,
+        bytes: &str,
+        expected_change: impl Into<Option<String>>,
+    ) -> CodexObservation {
+        let before = self.observe(slot_id).await;
+        let write_result = self.pty.write(slot_id, bytes).await;
+        let after = self.observe_after_action(slot_id).await;
+        let status = if write_result.is_err() {
+            PtyStepVerificationStatus::Failed
+        } else if Self::observations_changed(&before, &after) {
+            PtyStepVerificationStatus::Verified
+        } else {
+            PtyStepVerificationStatus::Unchanged
+        };
+        let mut step = PtyStepRecord::new(
+            Self::pty_observation(slot_id, &before),
+            action,
+            Self::pty_observation(slot_id, &after),
+            expected_change.into(),
+            status,
+        );
+        if let Err(err) = write_result {
+            step.diagnostics.push(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                "Codex PTY write failed",
+                json!({
+                    "slot_id": slot_id,
+                    "error": err.to_string(),
+                }),
+            ));
+        }
+        result.record_step(step);
+        after
+    }
+
+    async fn wait_until<F>(
+        &self,
+        slot_id: &str,
+        timeout: Duration,
+        mut predicate: F,
+    ) -> CodexObservation
+    where
+        F: FnMut(&CodexObservation) -> bool,
+    {
         let started = Instant::now();
         loop {
             let observation = self.observe(slot_id).await;
+            if predicate(&observation) || started.elapsed() >= timeout {
+                return observation;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    async fn wait_step_until<F>(
+        &self,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+        timeout: Duration,
+        expected_change: impl Into<Option<String>>,
+        mut predicate: F,
+    ) -> CodexObservation
+    where
+        F: FnMut(&CodexObservation) -> bool,
+    {
+        let before = self.observe(slot_id).await;
+        let after = self
+            .wait_until(slot_id, timeout, |obs| predicate(obs))
+            .await;
+        let status = if predicate(&after) {
+            PtyStepVerificationStatus::Verified
+        } else if before.text != after.text {
+            PtyStepVerificationStatus::Ambiguous
+        } else {
+            PtyStepVerificationStatus::Unchanged
+        };
+        result.record_step(PtyStepRecord::new(
+            Self::pty_observation(slot_id, &before),
+            PtyStepAction {
+                action_type: "wait".to_string(),
+                human_input: format!("wait {}s", timeout.as_secs()),
+                redacted: false,
+            },
+            Self::pty_observation(slot_id, &after),
+            expected_change.into(),
+            status,
+        ));
+        after
+    }
+
+    async fn ensure_startup_ready_locked(
+        &self,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+    ) -> CodexStartupOutcome {
+        let mut observation = self
+            .wait_step_until(
+                result,
+                slot_id,
+                Duration::from_secs(CODEX_STARTUP_READY_WAIT_SECS),
+                Some("wait for Codex startup surface".to_string()),
+                |obs| is_ready_for_codex_text(obs) || is_codex_workspace_trust_prompt(obs),
+            )
+            .await;
+
+        if is_codex_workspace_trust_prompt(&observation) {
+            observation = match self
+                .accept_workspace_trust_locked(result, slot_id, observation)
+                .await
+            {
+                Some(observation) => observation,
+                None => return CodexStartupOutcome::Failed,
+            };
+        }
+
+        if is_ready_for_codex_text(&observation) {
+            CodexStartupOutcome::Ready
+        } else {
+            result.status = ProviderBoxStatus::Blocked;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                "Codex startup did not reach a ready composer",
+                json!({
+                    "slot_id": slot_id,
+                    "state": observation.snapshot.state,
+                    "reason": observation.snapshot.reason,
+                    "blocked_kind": observation.snapshot.blocked_kind,
+                }),
+            ));
+            CodexStartupOutcome::Failed
+        }
+    }
+
+    async fn accept_workspace_trust_locked(
+        &self,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+        mut observation: CodexObservation,
+    ) -> Option<CodexObservation> {
+        match selected_codex_workspace_trust_option(&observation) {
+            CodexTrustSelection::Continue => {}
+            CodexTrustSelection::Quit => {
+                let mut selected_continue = false;
+                for (key_name, bytes) in [("up", "\x1b[A"), ("down", "\x1b[B")] {
+                    observation = self
+                        .write_step(
+                            result,
+                            slot_id,
+                            PtyStepAction::key(key_name),
+                            bytes,
+                            Some("move Codex workspace trust selection to Yes".to_string()),
+                        )
+                        .await;
+                    if selected_codex_workspace_trust_option(&observation)
+                        == CodexTrustSelection::Continue
+                    {
+                        selected_continue = true;
+                        break;
+                    }
+                }
+                if !selected_continue {
+                    result.status = ProviderBoxStatus::Failed;
+                    result.add_diagnostic(ProviderBoxDiagnostic::error(
+                        DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+                        "Codex workspace trust prompt could not be moved to Yes",
+                        json!({
+                            "slot_id": slot_id,
+                            "reason": observation.snapshot.reason,
+                        }),
+                    ));
+                    return None;
+                }
+            }
+            CodexTrustSelection::Unknown => {
+                result.status = ProviderBoxStatus::Failed;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+                    "Codex workspace trust prompt selection was not recognizable",
+                    json!({
+                        "slot_id": slot_id,
+                    }),
+                ));
+                return None;
+            }
+        }
+
+        observation = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::key("enter"),
+                "\r",
+                Some("confirm Codex workspace trust selection".to_string()),
+            )
+            .await;
+        if !is_ready_for_codex_text(&observation) {
+            observation = self
+                .wait_step_until(
+                    result,
+                    slot_id,
+                    Duration::from_secs(CODEX_TRUST_READY_WAIT_SECS),
+                    Some("wait for Codex composer after workspace trust confirmation".to_string()),
+                    is_ready_for_codex_text,
+                )
+                .await;
+        }
+        if is_ready_for_codex_text(&observation) {
+            Some(observation)
+        } else {
+            result.status = ProviderBoxStatus::Blocked;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+                "Codex workspace trust confirmation did not reach the composer",
+                json!({
+                    "slot_id": slot_id,
+                    "state": observation.snapshot.state,
+                    "reason": observation.snapshot.reason,
+                }),
+            ));
+            None
+        }
+    }
+
+    async fn ensure_ready_for_prompt(&self, result: &mut ProviderBoxResult, slot_id: &str) -> bool {
+        let started = Instant::now();
+        loop {
+            let mut observation = self.observe(slot_id).await;
+            if is_codex_workspace_trust_prompt(&observation) {
+                observation = match self
+                    .accept_workspace_trust_locked(result, slot_id, observation)
+                    .await
+                {
+                    Some(observation) => observation,
+                    None => return false,
+                };
+            }
             if matches!(
                 observation.snapshot.state,
                 PtyCanonicalState::Idle | PtyCanonicalState::Complete
@@ -463,13 +1005,14 @@ impl CodexProviderDriver {
     ) -> bool {
         let before = self.observe(slot_id).await;
         let send_result = self.pty.send_fire_and_forget(slot_id, prompt).await;
-        tokio::time::sleep(Duration::from_millis(OBSERVE_SETTLE_MS)).await;
-        let after = self.observe(slot_id).await;
+        let after = self.observe_after_action(slot_id).await;
         let mut action = PtyStepAction::text("<codex prompt paste + enter>");
         action.redacted = true;
         let status = if send_result.is_err() {
             PtyStepVerificationStatus::Failed
-        } else if after.snapshot.state == PtyCanonicalState::Running || before.text != after.text {
+        } else if after.snapshot.state == PtyCanonicalState::Running
+            || Self::observations_changed(&before, &after)
+        {
             PtyStepVerificationStatus::Verified
         } else {
             PtyStepVerificationStatus::Ambiguous
@@ -587,6 +1130,242 @@ impl CodexProviderDriver {
         }
     }
 
+    async fn input_locked(
+        &self,
+        request: &ProviderInteractionRequest,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+    ) {
+        let Some(input) = request
+            .prompt
+            .as_ref()
+            .map(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+        else {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                "Codex input control action requires prompt or text",
+                json!({
+                    "slot_id": slot_id,
+                    "control_action": "input",
+                }),
+            ));
+            return;
+        };
+
+        if !self.ensure_ready_for_prompt(result, slot_id).await {
+            return;
+        }
+
+        let submit = Self::request_submit_input(request);
+        let mut action = PtyStepAction::text("<input text>");
+        action.redacted = true;
+        let mut after = self
+            .write_step(
+                result,
+                slot_id,
+                action,
+                input,
+                Some("write text into Codex composer".to_string()),
+            )
+            .await;
+        if submit {
+            after = self
+                .write_step(
+                    result,
+                    slot_id,
+                    PtyStepAction::key("enter"),
+                    "\r",
+                    Some("press Enter to submit Codex input".to_string()),
+                )
+                .await;
+        }
+        let failed = result
+            .step_records
+            .last()
+            .is_some_and(|step| step.verification_status == PtyStepVerificationStatus::Failed);
+        let status = self.pty.get_status(slot_id).await;
+        result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &after));
+        result.status = if failed {
+            ProviderBoxStatus::Failed
+        } else {
+            ProviderBoxStatus::Completed
+        };
+    }
+
+    async fn clear_input_locked(&self, result: &mut ProviderBoxResult, slot_id: &str) {
+        let before = self.observe(slot_id).await;
+        if before.snapshot.state == PtyCanonicalState::Running {
+            result.status = ProviderBoxStatus::Blocked;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+                "Codex clear-input refused because the slot is currently running",
+                json!({
+                    "slot_id": slot_id,
+                    "reason": before.snapshot.reason,
+                    "rule": "clear_input sends Ctrl-C only when Codex is not actively working"
+                }),
+            ));
+            let status = self.pty.get_status(slot_id).await;
+            result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &before));
+            return;
+        }
+
+        let mut after = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::key("ctrl+c"),
+                "\x03",
+                Some("clear Codex composer input with Ctrl-C".to_string()),
+            )
+            .await;
+        if !is_ready_for_codex_text(&after) {
+            after = self
+                .wait_step_until(
+                    result,
+                    slot_id,
+                    Duration::from_secs(2),
+                    Some("wait for Codex composer after Ctrl-C".to_string()),
+                    is_ready_for_codex_text,
+                )
+                .await;
+        }
+        let status = self.pty.get_status(slot_id).await;
+        result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &after));
+        if is_ready_for_codex_text(&after) {
+            result.status = ProviderBoxStatus::Completed;
+        } else {
+            result.status = ProviderBoxStatus::Unverified;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+                "Codex Ctrl-C clear-input did not return to a ready composer",
+                json!({
+                    "slot_id": slot_id,
+                    "reason": after.snapshot.reason,
+                }),
+            ));
+        }
+    }
+
+    async fn clear_screen_locked(&self, result: &mut ProviderBoxResult, slot_id: &str) {
+        if !self.ensure_ready_for_prompt(result, slot_id).await {
+            return;
+        }
+        self.clear_input_locked(result, slot_id).await;
+        if result.status == ProviderBoxStatus::Blocked || result.status == ProviderBoxStatus::Failed
+        {
+            return;
+        }
+
+        let _ = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::text("/clear"),
+                "/clear",
+                Some("type Codex /clear command".to_string()),
+            )
+            .await;
+        let mut observation = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::key("enter"),
+                "\r",
+                Some("execute Codex /clear command".to_string()),
+            )
+            .await;
+        if !is_ready_for_codex_text(&observation) {
+            observation = self
+                .wait_step_until(
+                    result,
+                    slot_id,
+                    Duration::from_secs(5),
+                    Some("wait for Codex composer after /clear".to_string()),
+                    is_ready_for_codex_text,
+                )
+                .await;
+        }
+        let status = self.pty.get_status(slot_id).await;
+        result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
+        if is_ready_for_codex_text(&observation) {
+            result.status = ProviderBoxStatus::Completed;
+        } else {
+            result.status = ProviderBoxStatus::Unverified;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+                "Codex /clear execution did not return to a ready composer",
+                json!({
+                    "slot_id": slot_id,
+                    "reason": observation.snapshot.reason,
+                }),
+            ));
+        }
+    }
+
+    async fn refresh_mcp_status_locked(
+        &self,
+        request: &ProviderInteractionRequest,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+    ) -> CodexObservation {
+        if !self.ensure_ready_for_prompt(result, slot_id).await {
+            let observation = self.observe(slot_id).await;
+            result.mcp_status = Some(codex_mcp_status_value(request, slot_id, &observation));
+            return observation;
+        }
+        self.clear_input_locked(result, slot_id).await;
+
+        let _ = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::text("/mcp"),
+                "/mcp",
+                Some("type Codex /mcp command".to_string()),
+            )
+            .await;
+        let mut observation = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::key("enter"),
+                "\r",
+                Some("execute Codex /mcp command".to_string()),
+            )
+            .await;
+        if observation.snapshot.screen_mcp.is_none() {
+            observation = self
+                .wait_step_until(
+                    result,
+                    slot_id,
+                    Duration::from_secs(8),
+                    Some("wait for Codex MCP status output".to_string()),
+                    |obs| obs.snapshot.screen_mcp.is_some(),
+                )
+                .await;
+        }
+        let status = self.pty.get_status(slot_id).await;
+        result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
+        result.mcp_status = Some(codex_mcp_status_value(request, slot_id, &observation));
+        if observation.snapshot.screen_mcp.is_some() {
+            result.status = ProviderBoxStatus::Completed;
+        } else {
+            result.status = ProviderBoxStatus::Unverified;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_MCP_STATUS_UNAVAILABLE,
+                "Codex /mcp output was not recognized as an MCP status screen",
+                json!({
+                    "slot_id": slot_id,
+                    "reason": observation.snapshot.reason,
+                }),
+            ));
+        }
+        observation
+    }
+
     fn validate_prompt_turn(
         request: &ProviderInteractionRequest,
         result: &mut ProviderBoxResult,
@@ -665,6 +1444,22 @@ impl CodexProviderDriver {
             ));
             return None;
         };
+        let model = match normalize_codex_exec_model(&model) {
+            Ok(value) => value,
+            Err(value) => {
+                result.status = ProviderBoxStatus::Failed;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                    "Codex exec text-only source only exports GPT-5.5",
+                    json!({
+                        "model": value,
+                        "allowed_models": [CODEX_EXEC_TEXT_MODEL],
+                        "profiles": ["default", "xhigh"]
+                    }),
+                ));
+                return None;
+            }
+        };
 
         let reasoning = match normalize_codex_reasoning_effort(request.model_profile.as_deref()) {
             Ok(value) => value,
@@ -686,6 +1481,144 @@ impl CodexProviderDriver {
         Some((model, reasoning, prompt))
     }
 
+    fn request_exec_task_kind(request: &ProviderInteractionRequest) -> Option<CodexExecTaskKind> {
+        match request.command {
+            BoxCommand::Research => return Some(CodexExecTaskKind::Research),
+            BoxCommand::ImageGeneration => return Some(CodexExecTaskKind::ImageGeneration),
+            _ => {}
+        }
+
+        match request.provider.as_deref().map(str::trim) {
+            Some(value)
+                if value.eq_ignore_ascii_case(CODEX_RESEARCH_PROVIDER)
+                    || value.eq_ignore_ascii_case("codex-research") =>
+            {
+                Some(CodexExecTaskKind::Research)
+            }
+            Some(value)
+                if value.eq_ignore_ascii_case(CODEX_IMAGE_PROVIDER)
+                    || value.eq_ignore_ascii_case("codex-image-generation")
+                    || value.eq_ignore_ascii_case("codex_image")
+                    || value.eq_ignore_ascii_case("codex-image") =>
+            {
+                Some(CodexExecTaskKind::ImageGeneration)
+            }
+            _ => None,
+        }
+    }
+
+    fn validate_codex_exec_task_request(
+        request: &ProviderInteractionRequest,
+        result: &mut ProviderBoxResult,
+        kind: CodexExecTaskKind,
+    ) -> Option<(String, Option<String>, String)> {
+        if !Self::validate_prompt_turn(request, result) {
+            return None;
+        }
+        if request.dangerously_bypass_approvals_and_sandbox {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                "Codex task source does not allow bypassing approvals and sandbox",
+                json!({
+                    "provider": kind.provider(),
+                    "kind": kind.label(),
+                    "rule": "task sources run in isolated read-only workspaces with explicit tool allowlists"
+                }),
+            ));
+            return None;
+        }
+        if !(request.no_mcp && request.no_shell && request.no_file_access) {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                "Codex task source requires no_mcp/no_shell/no_file_access guards",
+                json!({
+                    "provider": kind.provider(),
+                    "kind": kind.label(),
+                    "no_mcp": request.no_mcp,
+                    "no_shell": request.no_shell,
+                    "no_file_access": request.no_file_access,
+                }),
+            ));
+            return None;
+        }
+        if request.no_tools {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                "Codex task source must use the provider-box task tool allowlist instead of no_tools=true",
+                json!({
+                    "provider": kind.provider(),
+                    "kind": kind.label(),
+                    "allowed_tool_policy": match kind {
+                        CodexExecTaskKind::Research => json!(["web_search"]),
+                        CodexExecTaskKind::ImageGeneration => json!(["image_generation"]),
+                        CodexExecTaskKind::TextOnly => json!([]),
+                    },
+                }),
+            ));
+            return None;
+        }
+
+        let Some(model) = request
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+        else {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                "Codex task source requires an explicit model",
+                json!({
+                    "provider": kind.provider(),
+                    "allowed_models": [CODEX_EXEC_TEXT_MODEL],
+                }),
+            ));
+            return None;
+        };
+        let model = match normalize_codex_exec_model(&model) {
+            Ok(value) => value,
+            Err(value) => {
+                result.status = ProviderBoxStatus::Failed;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                    "Codex task source only exports GPT-5.5",
+                    json!({
+                        "provider": kind.provider(),
+                        "kind": kind.label(),
+                        "model": value,
+                        "allowed_models": [CODEX_EXEC_TEXT_MODEL],
+                    }),
+                ));
+                return None;
+            }
+        };
+
+        let reasoning = match normalize_codex_reasoning_effort(request.model_profile.as_deref()) {
+            Ok(value) => value,
+            Err(value) => {
+                result.status = ProviderBoxStatus::Failed;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                    "Codex task source received an unsupported reasoning effort",
+                    json!({
+                        "provider": kind.provider(),
+                        "kind": kind.label(),
+                        "model_profile": value,
+                        "allowed": ["minimal", "low", "medium", "high", "xhigh", "default"]
+                    }),
+                ));
+                return None;
+            }
+        };
+
+        let prompt = request.prompt.clone().unwrap_or_default();
+        Some((model, reasoning, prompt))
+    }
+
     async fn run_codex_exec_text(
         &self,
         request: &ProviderInteractionRequest,
@@ -694,16 +1627,38 @@ impl CodexProviderDriver {
         reasoning: Option<&str>,
         prompt: &str,
     ) -> bool {
+        self.run_codex_exec_task(
+            request,
+            result,
+            CodexExecTaskKind::TextOnly,
+            model,
+            reasoning,
+            prompt,
+        )
+        .await
+    }
+
+    async fn run_codex_exec_task(
+        &self,
+        request: &ProviderInteractionRequest,
+        result: &mut ProviderBoxResult,
+        kind: CodexExecTaskKind,
+        model: &str,
+        reasoning: Option<&str>,
+        prompt: &str,
+    ) -> bool {
         let Some(codex_binary) = self.locate_codex_binary(request, result).await else {
             return false;
         };
-        let workspace = codex_exec_workspace(&request.correlation_id);
+        let workspace = codex_exec_workspace_for_kind(kind, &request.correlation_id);
         if let Err(err) = tokio::fs::create_dir_all(&workspace).await {
             result.status = ProviderBoxStatus::Failed;
             result.add_diagnostic(ProviderBoxDiagnostic::error(
                 DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
-                "Codex exec text-only workspace could not be created",
+                format!("Codex exec {} workspace could not be created", kind.label()),
                 json!({
+                    "provider": kind.provider(),
+                    "kind": kind.label(),
                     "workspace": workspace.display().to_string(),
                     "error": err.to_string(),
                 }),
@@ -711,7 +1666,9 @@ impl CodexProviderDriver {
             return false;
         }
         let output_file = workspace.join("last-message.txt");
-        let args = codex_exec_text_args(&output_file, model, reasoning);
+        let events_file = workspace.join("events.jsonl");
+        let stderr_file = workspace.join("stderr.log");
+        let args = codex_exec_args_for_kind(kind, &output_file, model, reasoning);
         let timeout_secs = request.timeout_secs.unwrap_or(180).clamp(10, 7_200);
 
         let mut command = Command::new(&codex_binary);
@@ -730,8 +1687,10 @@ impl CodexProviderDriver {
                 result.status = ProviderBoxStatus::Failed;
                 result.add_diagnostic(ProviderBoxDiagnostic::error(
                     DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
-                    "Codex exec text-only process could not be started",
+                    format!("Codex exec {} process could not be started", kind.label()),
                     json!({
+                        "provider": kind.provider(),
+                        "kind": kind.label(),
                         "codex_binary": codex_binary.display().to_string(),
                         "error": err.to_string(),
                     }),
@@ -762,8 +1721,10 @@ impl CodexProviderDriver {
                     result.status = ProviderBoxStatus::Failed;
                     result.add_diagnostic(ProviderBoxDiagnostic::error(
                         DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
-                        "Codex exec text-only process wait failed",
+                        format!("Codex exec {} process wait failed", kind.label()),
                         json!({
+                            "provider": kind.provider(),
+                            "kind": kind.label(),
                             "error": err.to_string(),
                         }),
                     ));
@@ -775,8 +1736,13 @@ impl CodexProviderDriver {
                     result.status = ProviderBoxStatus::Failed;
                     result.add_diagnostic(ProviderBoxDiagnostic::error(
                         DIAG_PROVIDER_TURN_TIMEOUT_CANCEL_FAILED,
-                        "Codex exec text-only process timed out and was killed",
+                        format!(
+                            "Codex exec {} process timed out and was killed",
+                            kind.label()
+                        ),
                         json!({
+                            "provider": kind.provider(),
+                            "kind": kind.label(),
                             "timeout_secs": timeout_secs,
                             "cancel": DIAG_PROVIDER_TURN_TIMEOUT_CANCELLED,
                         }),
@@ -789,18 +1755,25 @@ impl CodexProviderDriver {
         let stderr = join_output_task(stderr_task).await;
         let stdout_text = String::from_utf8_lossy(&stdout).to_string();
         let stderr_text = String::from_utf8_lossy(&stderr).to_string();
-        let analysis = analyze_codex_exec_jsonl(&stdout_text);
+        let _ = tokio::fs::write(&events_file, stdout_text.as_bytes()).await;
+        let _ = tokio::fs::write(&stderr_file, stderr_text.as_bytes()).await;
+        let analysis = analyze_codex_exec_jsonl_for_kind(&stdout_text, kind);
 
         if let Some(violation) = analysis.violation {
             result.status = ProviderBoxStatus::Failed;
             result.add_diagnostic(ProviderBoxDiagnostic::error(
                 DIAG_PROVIDER_TEXT_ONLY_VIOLATION,
-                "Codex exec text-only turn attempted a tool, shell, MCP, or function call",
+                format!(
+                    "Codex exec {} turn attempted a disallowed tool, shell, file, MCP, or approval action",
+                    kind.label()
+                ),
                 json!({
-                    "provider": CODEX_EXEC_TEXT_PROVIDER,
+                    "provider": kind.provider(),
+                    "kind": kind.label(),
                     "event": violation,
                     "stdout_event_count": analysis.event_count,
-                    "rule": "pure text source results are not returned after provider tool activity"
+                    "allowed_tool_event_count": analysis.allowed_tool_event_count,
+                    "rule": "provider-box task results are not returned after disallowed provider tool activity"
                 }),
             ));
             return false;
@@ -810,48 +1783,79 @@ impl CodexProviderDriver {
             result.status = ProviderBoxStatus::Failed;
             result.add_diagnostic(ProviderBoxDiagnostic::error(
                 DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
-                "Codex exec text-only process exited unsuccessfully",
+                format!("Codex exec {} process exited unsuccessfully", kind.label()),
                 json!({
+                    "provider": kind.provider(),
+                    "kind": kind.label(),
                     "exit_status": status.code(),
                     "stdout_excerpt": stdout_text.chars().take(1200).collect::<String>(),
                     "stderr_excerpt": stderr_text.chars().take(1200).collect::<String>(),
                     "stdout_event_count": analysis.event_count,
+                    "allowed_tool_event_count": analysis.allowed_tool_event_count,
                 }),
             ));
             return false;
         }
 
-        let final_text = tokio::fs::read_to_string(&output_file)
-            .await
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .or_else(|| analysis.final_text.map(|value| value.trim().to_string()))
-            .filter(|value| !value.is_empty());
+        let final_text = if kind == CodexExecTaskKind::TextOnly {
+            tokio::fs::read_to_string(&output_file)
+                .await
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .or_else(|| analysis.final_text.map(|value| value.trim().to_string()))
+                .filter(|value| !value.is_empty())
+        } else {
+            analysis
+                .final_text
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        };
 
         let Some(final_text) = final_text else {
             result.status = ProviderBoxStatus::Failed;
             result.add_diagnostic(ProviderBoxDiagnostic::error(
                 DIAG_PROVIDER_DURABLE_FINAL_MISSING,
-                "Codex exec completed without a usable output-last-message final",
+                format!(
+                    "Codex exec {} completed without a usable JSONL assistant final",
+                    kind.label()
+                ),
                 json!({
+                    "provider": kind.provider(),
+                    "kind": kind.label(),
                     "output_last_message": output_file.display().to_string(),
+                    "events_jsonl": events_file.display().to_string(),
                     "stdout_event_count": analysis.event_count,
+                    "allowed_tool_event_count": analysis.allowed_tool_event_count,
                 }),
             ));
             return false;
         };
 
         result.status = ProviderBoxStatus::Completed;
-        result.provider = Some(CODEX_EXEC_TEXT_PROVIDER.to_string());
+        result.provider = Some(kind.provider().to_string());
         result.provider_conversation_id = Some(request.correlation_id.clone());
-        result.durable_source = Some(output_file.display().to_string());
+        result.durable_source = Some(
+            if kind == CodexExecTaskKind::TextOnly {
+                &output_file
+            } else {
+                &events_file
+            }
+            .display()
+            .to_string(),
+        );
         result.slot_status = Some(json!({
-            "kind": "codex_exec_text",
+            "kind": "codex_exec_task",
+            "task_kind": kind.label(),
             "workspace": workspace.display().to_string(),
+            "output_last_message": output_file.display().to_string(),
+            "events_jsonl": events_file.display().to_string(),
+            "stderr_log": stderr_file.display().to_string(),
             "model": model,
             "reasoning_effort": reasoning,
+            "output_media_type": kind.output_media_type(),
             "stdout_event_count": analysis.event_count,
+            "allowed_tool_event_count": analysis.allowed_tool_event_count,
             "exit_status": status.code(),
         }));
         result.final_text = Some(final_text);
@@ -895,11 +1899,11 @@ impl ProviderDriver for CodexProviderDriver {
             usage_probe: false,
             model_catalog: false,
             pure_text_guard: true,
-            control_action: false,
-            pty_step: false,
+            control_action: true,
+            pty_step: true,
             status: true,
-            mcp_status: false,
-            mcp_reconnect: false,
+            mcp_status: true,
+            mcp_reconnect: true,
         }
     }
 
@@ -952,6 +1956,26 @@ impl ProviderDriver for CodexProviderDriver {
 
     async fn submit_turn(&self, request: &ProviderInteractionRequest) -> ProviderBoxResult {
         let mut result = ProviderBoxResult::base(request, ProviderBoxStatus::Unknown);
+        if let Some(kind) = Self::request_exec_task_kind(request) {
+            result.provider = Some(kind.provider().to_string());
+            result.slot_id = None;
+            let Some((model, reasoning, prompt)) =
+                Self::validate_codex_exec_task_request(request, &mut result, kind)
+            else {
+                return result;
+            };
+            self.run_codex_exec_task(
+                request,
+                &mut result,
+                kind,
+                &model,
+                reasoning.as_deref(),
+                &prompt,
+            )
+            .await;
+            return result;
+        }
+
         if !Self::validate_prompt_turn(request, &mut result) {
             return result;
         }
@@ -974,6 +1998,204 @@ impl ProviderDriver for CodexProviderDriver {
             return result;
         }
         self.monitor_turn(request, &mut result, &slot_id).await
+    }
+
+    async fn control_action(&self, request: &ProviderInteractionRequest) -> ProviderBoxResult {
+        let mut result = ProviderBoxResult::base(request, ProviderBoxStatus::Unknown);
+        let Some(action) = request.control_action else {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                "Codex control action request requires control_action",
+                json!({
+                    "slot_id": request.slot_id,
+                    "command": request.command,
+                }),
+            ));
+            return result;
+        };
+        if matches!(action, ProviderControlAction::Exit) {
+            result.status = ProviderBoxStatus::Unsupported;
+            result.add_diagnostic(ProviderBoxDiagnostic::unsupported(
+                DIAG_PROVIDER_CONTROL_ACTION_UNSUPPORTED,
+                "Codex exit control has not been exposed through provider-box yet",
+                json!({
+                    "slot_id": request.slot_id,
+                    "safe_alternative": "Use slot restart/kill APIs only from an explicit operator flow."
+                }),
+            ));
+            return result;
+        }
+
+        let Some(slot_id) = self.ensure_slot(request, &mut result).await else {
+            return result;
+        };
+        result.slot_id = Some(slot_id.clone());
+        let lock = self.slot_lock(&slot_id).await;
+        let _guard = lock.lock().await;
+
+        match action {
+            ProviderControlAction::Input => {
+                self.input_locked(request, &mut result, &slot_id).await;
+            }
+            ProviderControlAction::ClearInput => {
+                self.clear_input_locked(&mut result, &slot_id).await;
+            }
+            ProviderControlAction::ClearScreen => {
+                self.clear_screen_locked(&mut result, &slot_id).await;
+            }
+            ProviderControlAction::Exit => unreachable!("handled above"),
+        }
+        if result.slot_status.is_none() {
+            self.attach_status_observation(
+                &mut result,
+                &slot_id,
+                Some("observe Codex state after control action".to_string()),
+            )
+            .await;
+        }
+        result
+    }
+
+    async fn pty_step(&self, request: &ProviderInteractionRequest) -> ProviderBoxResult {
+        let mut result = ProviderBoxResult::base(request, ProviderBoxStatus::Unknown);
+        let step = match Self::request_manual_pty_step(request) {
+            Ok(step) => step,
+            Err(diagnostic) => {
+                result.status = ProviderBoxStatus::Failed;
+                result.add_diagnostic(diagnostic);
+                return result;
+            }
+        };
+
+        let slot_id = if Self::request_spawn_if_missing(request) {
+            let Some(slot_id) = self.ensure_slot(request, &mut result).await else {
+                return result;
+            };
+            slot_id
+        } else {
+            let slot_id = Self::request_slot_id(request);
+            result.slot_id = Some(slot_id.clone());
+            let Some(status) = self.pty.get_status(&slot_id).await else {
+                result.status = ProviderBoxStatus::Failed;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                    "Cannot send a PTY step to an unavailable Codex slot",
+                    json!({
+                        "slot_id": slot_id,
+                        "spawn_if_missing": false,
+                    }),
+                ));
+                return result;
+            };
+            if status.engine != CliEngine::Codex {
+                result.status = ProviderBoxStatus::Failed;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                    "Requested slot is not a Codex slot",
+                    json!({
+                        "slot_id": slot_id,
+                        "engine": status.engine.to_string(),
+                    }),
+                ));
+                return result;
+            }
+            slot_id
+        };
+        result.slot_id = Some(slot_id.clone());
+
+        let (action, bytes) = if step.action_type == "key" {
+            let key = step.key.as_deref().unwrap_or_default();
+            let Some((canonical, bytes)) = codex_manual_key_bytes(key) else {
+                result.status = ProviderBoxStatus::Failed;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                    "Codex key PTY step uses an unsupported key",
+                    json!({
+                        "slot_id": slot_id,
+                        "key": key,
+                        "allowed_keys": CODEX_MANUAL_KEY_NAMES,
+                    }),
+                ));
+                return result;
+            };
+            (PtyStepAction::key(canonical), bytes.to_string())
+        } else {
+            let text = step.text.as_deref().unwrap_or_default();
+            if let Err(diagnostic) = validate_codex_manual_text_step(Some(&slot_id), text) {
+                result.status = ProviderBoxStatus::Failed;
+                result.add_diagnostic(diagnostic);
+                return result;
+            }
+            let mut action = if step.redacted {
+                PtyStepAction::text("<manual text>")
+            } else {
+                PtyStepAction::text(text)
+            };
+            action.redacted = step.redacted;
+            (action, text.to_string())
+        };
+
+        let lock = self.slot_lock(&slot_id).await;
+        let _guard = lock.lock().await;
+        let after = self
+            .write_step(
+                &mut result,
+                &slot_id,
+                action,
+                &bytes,
+                step.expected_change.clone(),
+            )
+            .await;
+        let status = self.pty.get_status(&slot_id).await;
+        result.slot_status = Some(slot_status_value(&slot_id, status.as_ref(), &after));
+        let failed = result
+            .step_records
+            .last()
+            .is_some_and(|step| step.verification_status == PtyStepVerificationStatus::Failed);
+        result.status = if failed {
+            ProviderBoxStatus::Failed
+        } else {
+            ProviderBoxStatus::Completed
+        };
+        result
+    }
+
+    async fn mcp_status(&self, request: &ProviderInteractionRequest) -> ProviderBoxResult {
+        let mut result = ProviderBoxResult::base(request, ProviderBoxStatus::Unknown);
+        let Some(slot_id) = self.ensure_slot(request, &mut result).await else {
+            return result;
+        };
+        result.slot_id = Some(slot_id.clone());
+        let lock = self.slot_lock(&slot_id).await;
+        let _guard = lock.lock().await;
+        self.refresh_mcp_status_locked(request, &mut result, &slot_id)
+            .await;
+        result
+    }
+
+    async fn mcp_reconnect(&self, request: &ProviderInteractionRequest) -> ProviderBoxResult {
+        let mut result = ProviderBoxResult::base(request, ProviderBoxStatus::Unknown);
+        let Some(slot_id) = self.ensure_slot(request, &mut result).await else {
+            return result;
+        };
+        result.slot_id = Some(slot_id.clone());
+        let lock = self.slot_lock(&slot_id).await;
+        let _guard = lock.lock().await;
+        self.refresh_mcp_status_locked(request, &mut result, &slot_id)
+            .await;
+        result.status = ProviderBoxStatus::Unsupported;
+        result.add_diagnostic(ProviderBoxDiagnostic::unsupported(
+            DIAG_PROVIDER_MCP_RECONNECT_UNSUPPORTED,
+            "Codex CLI does not support hot MCP reload through /mcp; restart the PTY slot after fixing MCP config",
+            json!({
+                "slot_id": slot_id,
+                "server": Self::request_mcp_server(request),
+                "destructive_restart_performed": false,
+                "operator_hint": "Provider-box intentionally does not restart Codex from mcp/reconnect because the PTY conversation context may be valuable. External LLM callers should ask for an explicit slot restart if losing context is acceptable."
+            }),
+        ));
+        result
     }
 
     async fn pure_text_single_turn(
@@ -1059,8 +2281,143 @@ fn slot_status_value(
         "blocked_kind": observation.snapshot.blocked_kind.clone(),
         "screen_identity": observation.snapshot.screen_identity.clone(),
         "screen_usage": observation.snapshot.screen_usage.clone(),
+        "screen_mcp": observation.snapshot.screen_mcp.clone(),
         "screen_hash": PtyObservation::text("pty-screen", &observation.text).screen_hash,
     })
+}
+
+fn codex_mcp_status_value(
+    request: &ProviderInteractionRequest,
+    slot_id: &str,
+    observation: &CodexObservation,
+) -> Value {
+    let target = CodexProviderDriver::request_mcp_server(request);
+    let screen = observation.snapshot.screen_mcp.clone();
+    let target_status = screen.as_ref().and_then(|screen| {
+        screen
+            .servers
+            .iter()
+            .find(|server| server.name.eq_ignore_ascii_case(&target))
+            .map(|server| server.status.clone())
+    });
+    json!({
+        "schema": "missiond.provider-box.codex-mcp-status.v1",
+        "provider": request.provider.clone().or_else(|| Some("codex_cli".to_string())),
+        "engine": CliEngine::Codex,
+        "slot_id": slot_id,
+        "source": "codex:/mcp",
+        "observed_at": chrono::Utc::now().to_rfc3339(),
+        "status": screen
+            .as_ref()
+            .map(|screen| screen.status.clone())
+            .unwrap_or_else(|| "unknown".to_string()),
+        "target_server": target,
+        "target_status": target_status,
+        "hot_reconnect_supported": false,
+        "restart_required_for_reconnect": true,
+        "screen_mcp": screen,
+    })
+}
+
+fn should_resolve_codex_startup_surface(observation: &CodexObservation) -> bool {
+    is_codex_workspace_trust_prompt(observation)
+        || observation.snapshot.reason == "codex:mcp_startup_running"
+        || observation.snapshot.state == PtyCanonicalState::Unknown
+}
+
+fn is_ready_for_codex_text(observation: &CodexObservation) -> bool {
+    matches!(
+        observation.snapshot.state,
+        PtyCanonicalState::Idle | PtyCanonicalState::Complete
+    ) && observation.snapshot.blocked_kind.is_none()
+}
+
+fn is_codex_workspace_trust_prompt(observation: &CodexObservation) -> bool {
+    observation.snapshot.reason == "codex:workspace_trust_prompt"
+        || observation.snapshot.blocked_kind.as_deref() == Some("workspace_trust")
+        || {
+            let lower = observation.text.to_ascii_lowercase();
+            lower.contains("do you trust the contents of this directory")
+                && lower.contains("yes, continue")
+                && lower.contains("no, quit")
+                && lower.contains("press enter to continue")
+        }
+}
+
+fn selected_codex_workspace_trust_option(observation: &CodexObservation) -> CodexTrustSelection {
+    for line in &observation.lines {
+        let trimmed = line.trim_start();
+        let selected =
+            trimmed.starts_with('›') || trimmed.starts_with('>') || trimmed.starts_with('❯');
+        if !selected {
+            continue;
+        }
+        let body = trimmed
+            .trim_start_matches(|ch| matches!(ch, '›' | '>' | '❯'))
+            .trim_start()
+            .to_ascii_lowercase();
+        if body.starts_with("1. yes, continue") || body.starts_with("yes, continue") {
+            return CodexTrustSelection::Continue;
+        }
+        if body.starts_with("2. no, quit") || body.starts_with("no, quit") {
+            return CodexTrustSelection::Quit;
+        }
+    }
+    CodexTrustSelection::Unknown
+}
+
+fn codex_manual_key_bytes(key: &str) -> Option<(&'static str, &'static str)> {
+    let normalized = key
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['_', '-'], "")
+        .replace(['+', '/'], "")
+        .replace("control", "ctrl")
+        .replace(' ', "");
+    match normalized.as_str() {
+        "enter" | "return" => Some(("enter", "\r")),
+        "esc" | "escape" => Some(("escape", "\x1b")),
+        "up" | "arrowup" => Some(("up", "\x1b[A")),
+        "down" | "arrowdown" => Some(("down", "\x1b[B")),
+        "right" | "arrowright" => Some(("right", "\x1b[C")),
+        "left" | "arrowleft" => Some(("left", "\x1b[D")),
+        "tab" => Some(("tab", "\t")),
+        "backspace" => Some(("backspace", "\x7f")),
+        "delete" | "del" => Some(("delete", "\x1b[3~")),
+        "ctrlc" => Some(("ctrl+c", "\x03")),
+        "pageup" => Some(("pageup", "\x1b[5~")),
+        "pagedown" => Some(("pagedown", "\x1b[6~")),
+        "home" => Some(("home", "\x1b[H")),
+        "end" => Some(("end", "\x1b[F")),
+        _ => None,
+    }
+}
+
+fn validate_codex_manual_text_step(
+    slot_id: Option<&str>,
+    text: &str,
+) -> Result<(), ProviderBoxDiagnostic> {
+    if text.chars().count() > CODEX_MANUAL_TEXT_LIMIT {
+        return Err(ProviderBoxDiagnostic::error(
+            DIAG_PROVIDER_BOX_INVALID_REQUEST,
+            "Codex text PTY step exceeds the maximum length",
+            json!({
+                "slot_id": slot_id,
+                "max_chars": CODEX_MANUAL_TEXT_LIMIT,
+            }),
+        ));
+    }
+    if text.contains('\n') || text.contains('\r') {
+        return Err(ProviderBoxDiagnostic::error(
+            DIAG_PROVIDER_BOX_INVALID_REQUEST,
+            "Codex text PTY step must not include Enter; send text and Enter as separate steps",
+            json!({
+                "slot_id": slot_id,
+                "rule": "text_and_enter_are_separate_observe_act_observe_steps",
+            }),
+        ));
+    }
+    Ok(())
 }
 
 fn default_codex_home() -> PathBuf {
@@ -1077,6 +2434,15 @@ fn default_codex_home() -> PathBuf {
 }
 
 fn codex_exec_text_args(output_file: &Path, model: &str, reasoning: Option<&str>) -> Vec<String> {
+    codex_exec_args_for_kind(CodexExecTaskKind::TextOnly, output_file, model, reasoning)
+}
+
+fn codex_exec_args_for_kind(
+    kind: CodexExecTaskKind,
+    output_file: &Path,
+    model: &str,
+    reasoning: Option<&str>,
+) -> Vec<String> {
     let mut args = vec![
         "exec".to_string(),
         "--json".to_string(),
@@ -1096,17 +2462,55 @@ fn codex_exec_text_args(output_file: &Path, model: &str, reasoning: Option<&str>
         "approval_policy=\"never\"".to_string(),
         "-c".to_string(),
         "features.shell_tool=false".to_string(),
-        "-c".to_string(),
-        "features.web_search=false".to_string(),
-        "-c".to_string(),
-        "tools.web_search=false".to_string(),
-        "-c".to_string(),
-        "apps._default.enabled=false".to_string(),
-        "-c".to_string(),
-        "apps._default.default_tools_enabled=false".to_string(),
-        "-c".to_string(),
-        "tools.view_image=false".to_string(),
     ];
+    match kind {
+        CodexExecTaskKind::TextOnly => {
+            args.extend([
+                "-c".to_string(),
+                "features.web_search=false".to_string(),
+                "-c".to_string(),
+                "tools.web_search=false".to_string(),
+                "-c".to_string(),
+                "apps._default.enabled=false".to_string(),
+                "-c".to_string(),
+                "apps._default.default_tools_enabled=false".to_string(),
+                "-c".to_string(),
+                "tools.view_image=false".to_string(),
+            ]);
+        }
+        CodexExecTaskKind::Research => {
+            args.extend([
+                "-c".to_string(),
+                "features.web_search=true".to_string(),
+                "-c".to_string(),
+                "tools.web_search=true".to_string(),
+                "-c".to_string(),
+                "apps._default.enabled=false".to_string(),
+                "-c".to_string(),
+                "apps._default.default_tools_enabled=false".to_string(),
+                "-c".to_string(),
+                "tools.view_image=false".to_string(),
+            ]);
+        }
+        CodexExecTaskKind::ImageGeneration => {
+            args.extend([
+                "-c".to_string(),
+                "features.web_search=false".to_string(),
+                "-c".to_string(),
+                "tools.web_search=false".to_string(),
+                "-c".to_string(),
+                "apps._default.enabled=true".to_string(),
+                "-c".to_string(),
+                "apps._default.default_tools_enabled=true".to_string(),
+                "-c".to_string(),
+                "features.image_generation=true".to_string(),
+                "-c".to_string(),
+                "tools.image_generation=true".to_string(),
+                "-c".to_string(),
+                "tools.view_image=false".to_string(),
+            ]);
+        }
+    }
     if let Some(reasoning) = reasoning {
         args.push("-c".to_string());
         args.push(format!("model_reasoning_effort=\"{reasoning}\""));
@@ -1128,6 +2532,15 @@ fn normalize_codex_reasoning_effort(value: Option<&str>) -> Result<Option<String
     }
 }
 
+fn normalize_codex_exec_model(value: &str) -> Result<String, String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized == CODEX_EXEC_TEXT_MODEL {
+        Ok(CODEX_EXEC_TEXT_MODEL.to_string())
+    } else {
+        Err(value.trim().to_string())
+    }
+}
+
 fn codex_exec_workspace(correlation_id: &str) -> PathBuf {
     let root = std::env::var("MISSIOND_PROVIDER_BOX_CODEX_EXEC_ROOT")
         .ok()
@@ -1143,6 +2556,34 @@ fn codex_exec_workspace(correlation_id: &str) -> PathBuf {
             })
         })
         .unwrap_or_else(|| PathBuf::from(".missiond/runtime/provider-box/codex-exec-text"));
+    root.join(sanitize_path_segment(correlation_id))
+}
+
+fn codex_exec_workspace_for_kind(kind: CodexExecTaskKind, correlation_id: &str) -> PathBuf {
+    if kind == CodexExecTaskKind::TextOnly {
+        return codex_exec_workspace(correlation_id);
+    }
+    let root = std::env::var("MISSIOND_PROVIDER_BOX_CODEX_EXEC_ROOT")
+        .ok()
+        .map(PathBuf::from)
+        .map(|root| root.join(kind.label()))
+        .or_else(|| {
+            std::env::var("MISSIOND_RUNTIME_DIR").ok().map(|root| {
+                PathBuf::from(root)
+                    .join("provider-box/codex-exec")
+                    .join(kind.label())
+            })
+        })
+        .or_else(|| {
+            std::env::var("HOME").ok().map(|home| {
+                PathBuf::from(home)
+                    .join(".missiond/runtime/missiond/provider-box/codex-exec")
+                    .join(kind.label())
+            })
+        })
+        .unwrap_or_else(|| {
+            PathBuf::from(".missiond/runtime/provider-box/codex-exec").join(kind.label())
+        });
     root.join(sanitize_path_segment(correlation_id))
 }
 
@@ -1172,8 +2613,16 @@ async fn join_output_task(task: Option<tokio::task::JoinHandle<Vec<u8>>>) -> Vec
 }
 
 fn analyze_codex_exec_jsonl(stdout: &str) -> CodexExecJsonlAnalysis {
+    analyze_codex_exec_jsonl_for_kind(stdout, CodexExecTaskKind::TextOnly)
+}
+
+fn analyze_codex_exec_jsonl_for_kind(
+    stdout: &str,
+    kind: CodexExecTaskKind,
+) -> CodexExecJsonlAnalysis {
     let mut analysis = CodexExecJsonlAnalysis {
         event_count: 0,
+        allowed_tool_event_count: 0,
         final_text: None,
         violation: None,
     };
@@ -1186,8 +2635,11 @@ fn analyze_codex_exec_jsonl(stdout: &str) -> CodexExecJsonlAnalysis {
             continue;
         };
         analysis.event_count += 1;
-        if analysis.violation.is_none() && codex_exec_event_is_tool_violation(&event) {
+        if analysis.violation.is_none() && codex_exec_event_is_tool_violation_for_kind(&event, kind)
+        {
             analysis.violation = Some(event.clone());
+        } else if codex_exec_event_is_allowed_tool_event_for_kind(&event, kind) {
+            analysis.allowed_tool_event_count += 1;
         }
         if let Some(text) = codex_assistant_text(&event) {
             if !text.trim().is_empty() {
@@ -1199,12 +2651,92 @@ fn analyze_codex_exec_jsonl(stdout: &str) -> CodexExecJsonlAnalysis {
 }
 
 fn codex_exec_event_is_tool_violation(event: &Value) -> bool {
+    codex_exec_event_is_tool_violation_for_kind(event, CodexExecTaskKind::TextOnly)
+}
+
+fn codex_exec_event_is_tool_violation_for_kind(event: &Value, kind: CodexExecTaskKind) -> bool {
+    if !codex_exec_event_is_tool_like(event) {
+        return false;
+    }
     let type_fields = [
         event.get("type").and_then(Value::as_str),
         event.pointer("/payload/type").and_then(Value::as_str),
         event.pointer("/item/type").and_then(Value::as_str),
     ];
-    if type_fields.into_iter().flatten().any(|value| {
+    if type_fields
+        .iter()
+        .flatten()
+        .any(|value| matches!(*value, "mcp_tool_call" | "approval_request" | "approval"))
+    {
+        return true;
+    }
+    if kind == CodexExecTaskKind::TextOnly {
+        return true;
+    }
+
+    let type_name = type_fields
+        .into_iter()
+        .flatten()
+        .map(str::to_ascii_lowercase)
+        .find(|value| !value.is_empty());
+    let tool_name = codex_exec_tool_name(event).map(|value| value.to_ascii_lowercase());
+
+    if tool_name
+        .as_deref()
+        .is_some_and(codex_exec_tool_name_is_always_forbidden)
+    {
+        return true;
+    }
+    if tool_name.is_none()
+        && type_name
+            .as_deref()
+            .is_some_and(|value| matches!(value, "function_call" | "tool_call"))
+    {
+        return true;
+    }
+
+    match kind {
+        CodexExecTaskKind::Research => {
+            if type_name
+                .as_deref()
+                .is_some_and(codex_exec_type_is_research_tool)
+            {
+                return false;
+            }
+            if let Some(name) = tool_name.as_deref() {
+                return !codex_exec_tool_name_is_research_allowed(name);
+            }
+            false
+        }
+        CodexExecTaskKind::ImageGeneration => {
+            if type_name
+                .as_deref()
+                .is_some_and(codex_exec_type_is_image_tool)
+            {
+                return false;
+            }
+            if let Some(name) = tool_name.as_deref() {
+                return !codex_exec_tool_name_is_image_allowed(name);
+            }
+            false
+        }
+        CodexExecTaskKind::TextOnly => true,
+    }
+}
+
+fn codex_exec_event_is_allowed_tool_event_for_kind(event: &Value, kind: CodexExecTaskKind) -> bool {
+    kind != CodexExecTaskKind::TextOnly
+        && codex_exec_event_is_tool_like(event)
+        && !codex_exec_event_is_tool_violation_for_kind(event, kind)
+}
+
+fn codex_exec_event_is_tool_like(event: &Value) -> bool {
+    let type_fields = [
+        event.get("type").and_then(Value::as_str),
+        event.pointer("/payload/type").and_then(Value::as_str),
+        event.pointer("/item/type").and_then(Value::as_str),
+    ];
+    type_fields.into_iter().flatten().any(|value| {
         matches!(
             value,
             "function_call"
@@ -1213,15 +2745,30 @@ fn codex_exec_event_is_tool_violation(event: &Value) -> bool {
                 | "tool_result"
                 | "mcp_tool_call"
                 | "approval_request"
+                | "approval"
+                | "web_search_call"
+                | "web_search_result"
+                | "search_query"
+                | "image_generation_call"
+                | "image_generation_result"
         )
-    }) {
-        return true;
-    }
-    let name = event
-        .pointer("/payload/name")
+    }) || codex_exec_tool_name(event).is_some()
+}
+
+fn codex_exec_tool_name(event: &Value) -> Option<&str> {
+    event
+        .get("name")
+        .or_else(|| event.pointer("/payload/name"))
+        .or_else(|| event.pointer("/payload/tool_name"))
+        .or_else(|| event.pointer("/payload/tool/name"))
         .or_else(|| event.pointer("/item/name"))
+        .or_else(|| event.pointer("/item/tool_name"))
         .and_then(Value::as_str)
-        .unwrap_or("");
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn codex_exec_tool_name_is_always_forbidden(name: &str) -> bool {
     matches!(
         name,
         "exec_command"
@@ -1229,8 +2776,48 @@ fn codex_exec_event_is_tool_violation(event: &Value) -> bool {
             | "apply_patch"
             | "read_file"
             | "write_file"
+            | "edit_file"
+            | "list_files"
+            | "grep"
             | "view_image"
             | "mcp"
+            | "mcp_tool_call"
+            | "approval_request"
+    )
+}
+
+fn codex_exec_tool_name_is_research_allowed(name: &str) -> bool {
+    matches!(
+        name,
+        "web_search" | "web.run" | "web_search_call" | "search_query" | "search" | "browser.search"
+    )
+}
+
+fn codex_exec_type_is_research_tool(value: &str) -> bool {
+    matches!(
+        value,
+        "web_search_call" | "web_search_result" | "search_query"
+    )
+}
+
+fn codex_exec_tool_name_is_image_allowed(name: &str) -> bool {
+    matches!(
+        name,
+        "image_gen"
+            | "image_generation"
+            | "image_generation_call"
+            | "generate_image"
+            | "create_image"
+            | "openai_image_generation"
+            | "imagegen"
+            | "images.generate"
+    )
+}
+
+fn codex_exec_type_is_image_tool(value: &str) -> bool {
+    matches!(
+        value,
+        "image_generation_call" | "image_generation_result" | "image_gen_call"
     )
 }
 
@@ -1428,6 +3015,39 @@ mod tests {
     }
 
     #[test]
+    fn codex_exec_research_args_allow_web_search_without_shell_or_apps() {
+        let output = Path::new("/tmp/missiond-codex-last.txt");
+        let args = codex_exec_args_for_kind(
+            CodexExecTaskKind::Research,
+            output,
+            "gpt-5.5",
+            Some("xhigh"),
+        );
+
+        assert!(args.contains(&"features.shell_tool=false".to_string()));
+        assert!(args.contains(&"approval_policy=\"never\"".to_string()));
+        assert!(args.contains(&"features.web_search=true".to_string()));
+        assert!(args.contains(&"tools.web_search=true".to_string()));
+        assert!(args.contains(&"apps._default.enabled=false".to_string()));
+        assert!(args.contains(&"apps._default.default_tools_enabled=false".to_string()));
+        assert!(args.contains(&"tools.view_image=false".to_string()));
+    }
+
+    #[test]
+    fn codex_exec_image_args_allow_image_generation_without_shell_or_search() {
+        let output = Path::new("/tmp/missiond-codex-last.txt");
+        let args =
+            codex_exec_args_for_kind(CodexExecTaskKind::ImageGeneration, output, "gpt-5.5", None);
+
+        assert!(args.contains(&"features.shell_tool=false".to_string()));
+        assert!(args.contains(&"approval_policy=\"never\"".to_string()));
+        assert!(args.contains(&"features.web_search=false".to_string()));
+        assert!(args.contains(&"tools.web_search=false".to_string()));
+        assert!(args.contains(&"features.image_generation=true".to_string()));
+        assert!(args.contains(&"tools.image_generation=true".to_string()));
+    }
+
+    #[test]
     fn codex_exec_text_default_reasoning_omits_override() {
         let output = Path::new("/tmp/missiond-codex-last.txt");
         let args = codex_exec_text_args(output, "gpt-5.5", None);
@@ -1435,6 +3055,78 @@ mod tests {
         assert!(!args
             .iter()
             .any(|arg| arg.starts_with("model_reasoning_effort=")));
+    }
+
+    #[test]
+    fn codex_manual_key_bytes_are_allowlisted() {
+        assert_eq!(codex_manual_key_bytes("enter"), Some(("enter", "\r")));
+        assert_eq!(codex_manual_key_bytes("esc"), Some(("escape", "\x1b")));
+        assert_eq!(codex_manual_key_bytes("ctrl-c"), Some(("ctrl+c", "\x03")));
+        assert_eq!(codex_manual_key_bytes("down"), Some(("down", "\x1b[B")));
+        assert!(codex_manual_key_bytes("f13").is_none());
+    }
+
+    #[test]
+    fn codex_manual_text_step_rejects_enter() {
+        let err = validate_codex_manual_text_step(Some("slot-codex-test"), "/clear\r")
+            .expect_err("enter rejected");
+
+        assert_eq!(err.code, DIAG_PROVIDER_BOX_INVALID_REQUEST);
+    }
+
+    #[test]
+    fn codex_mcp_status_value_marks_reconnect_as_restart_required() {
+        let request = ProviderInteractionRequest::new(BoxCommand::McpStatus, CliEngine::Codex);
+        let lines = vec![
+            "🔌 MCP Tools".to_string(),
+            "".to_string(),
+            "  • missiond".to_string(),
+            "    • Auth: Unsupported".to_string(),
+            "    • Tools: mission_board_query".to_string(),
+            "".to_string(),
+            "› Use /skills to list available skills".to_string(),
+            "  gpt-5.5 xhigh · ~/Projects/missiond".to_string(),
+        ];
+        let snapshot = recognize_screen(CliEngine::Codex, &lines, SessionState::Idle);
+        let observation = CodexObservation {
+            lines,
+            text: "fixture".to_string(),
+            snapshot,
+        };
+
+        let value = codex_mcp_status_value(&request, "slot-codex-test", &observation);
+
+        assert_eq!(value["status"], "connected");
+        assert_eq!(value["hot_reconnect_supported"], false);
+        assert_eq!(value["restart_required_for_reconnect"], true);
+    }
+
+    #[test]
+    fn codex_exec_text_model_policy_only_allows_gpt_55() {
+        assert_eq!(
+            normalize_codex_exec_model(" gpt-5.5 ").expect("gpt-5.5"),
+            "gpt-5.5"
+        );
+        assert!(normalize_codex_exec_model("gpt-5.4").is_err());
+        assert!(normalize_codex_exec_model("gpt-5.5 xhigh").is_err());
+    }
+
+    #[test]
+    fn codex_exec_text_validation_rejects_non_gpt_55_model() {
+        let mut request = ProviderInteractionRequest::pure_text(CliEngine::Codex, "hello");
+        request.command = super::super::types::BoxCommand::PureTextSingleTurn;
+        request.provider = Some(CODEX_EXEC_TEXT_PROVIDER.to_string());
+        request.model = Some("gpt-5.4".to_string());
+        let mut result = ProviderBoxResult::base(&request, ProviderBoxStatus::Unknown);
+
+        assert!(
+            CodexProviderDriver::validate_pure_text_exec_request(&request, &mut result).is_none()
+        );
+        assert_eq!(result.status, ProviderBoxStatus::Failed);
+        assert_eq!(
+            result.diagnostics[0].message,
+            "Codex exec text-only source only exports GPT-5.5"
+        );
     }
 
     #[test]
@@ -1452,6 +3144,61 @@ mod tests {
         let analysis = analyze_codex_exec_jsonl(&stdout);
 
         assert_eq!(analysis.event_count, 1);
+        assert!(analysis.violation.is_some());
+    }
+
+    #[test]
+    fn codex_exec_research_analysis_allows_search_and_rejects_shell() {
+        let search_event = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "web_search"
+            }
+        })
+        .to_string();
+        let analysis =
+            analyze_codex_exec_jsonl_for_kind(&search_event, CodexExecTaskKind::Research);
+        assert_eq!(analysis.allowed_tool_event_count, 1);
+        assert!(analysis.violation.is_none());
+
+        let shell_event = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "shell_command"
+            }
+        })
+        .to_string();
+        let analysis = analyze_codex_exec_jsonl_for_kind(&shell_event, CodexExecTaskKind::Research);
+        assert!(analysis.violation.is_some());
+    }
+
+    #[test]
+    fn codex_exec_image_analysis_allows_image_tool_and_rejects_file_read() {
+        let image_event = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "image_generation"
+            }
+        })
+        .to_string();
+        let analysis =
+            analyze_codex_exec_jsonl_for_kind(&image_event, CodexExecTaskKind::ImageGeneration);
+        assert_eq!(analysis.allowed_tool_event_count, 1);
+        assert!(analysis.violation.is_none());
+
+        let read_event = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "read_file"
+            }
+        })
+        .to_string();
+        let analysis =
+            analyze_codex_exec_jsonl_for_kind(&read_event, CodexExecTaskKind::ImageGeneration);
         assert!(analysis.violation.is_some());
     }
 

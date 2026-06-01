@@ -83,6 +83,20 @@ struct PTYSendArgs {
 }
 
 #[derive(Deserialize)]
+struct PTYKeyArgs {
+    #[serde(rename = "slotId")]
+    slot_id: String,
+    key: String,
+}
+
+#[derive(Deserialize)]
+struct PTYTextArgs {
+    #[serde(rename = "slotId")]
+    slot_id: String,
+    text: String,
+}
+
+#[derive(Deserialize)]
 struct PTYKillArgs {
     #[serde(rename = "slotId")]
     slot_id: String,
@@ -94,6 +108,8 @@ struct PTYScreenArgs {
     slot_id: String,
     #[serde(default)]
     lines: Option<usize>,
+    #[serde(default, deserialize_with = "lenient::option_bool")]
+    styled: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -487,6 +503,62 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 })))
             }
         }
+        "mission_pty_key" => {
+            let PTYKeyArgs { slot_id, key } = serde_json::from_value(args)?;
+            let requested_key = key.trim().to_string();
+            let Some(key_spec) = pty_key_spec(&requested_key) else {
+                return Ok(ToolResult::structured_error(
+                    ToolError::new(
+                        error_codes::INVALID_PARAM,
+                        format!("Unsupported PTY key: {requested_key}"),
+                    )
+                    .with_details(json!({
+                        "slot_id": slot_id,
+                        "requested_key": requested_key,
+                        "allowed_keys": PTY_KEY_NAMES,
+                    }))
+                    .with_suggestion(
+                        "send one allowlisted semantic key such as enter, esc, up, down, ctrl-c, ctrl-d, or eof",
+                    ),
+                ));
+            };
+
+            state.pty.write(&slot_id, key_spec.bytes).await?;
+            Ok(ToolResult::json(&json!({
+                "delivered": true,
+                "slotId": slot_id,
+                "key": key_spec.canonical,
+                "requestedKey": requested_key,
+                "mode": "raw-key",
+                "byteLength": key_spec.bytes.len(),
+                "hint": "Use mission_pty_status and mission_pty_read(action=screen) to observe the result before sending the next action",
+            })))
+        }
+        "mission_pty_text" => {
+            let PTYTextArgs { slot_id, text } = serde_json::from_value(args)?;
+            if let Err(err) = validate_pty_text(&text) {
+                return Ok(ToolResult::structured_error(
+                    ToolError::new(error_codes::INVALID_PARAM, err).with_details(json!({
+                        "slot_id": slot_id,
+                        "byte_length": text.len(),
+                        "char_length": text.chars().count(),
+                    }))
+                    .with_suggestion(
+                        "send printable text only; send Enter, Escape, Tab, arrows, Ctrl-C, Ctrl-D, or EOF through mission_pty_key",
+                    ),
+                ));
+            }
+
+            state.pty.write(&slot_id, &text).await?;
+            Ok(ToolResult::json(&json!({
+                "delivered": true,
+                "slotId": slot_id,
+                "mode": "raw-text",
+                "byteLength": text.len(),
+                "charLength": text.chars().count(),
+                "hint": "Use mission_pty_key(slotId, key='enter') as a separate action when the text should be submitted",
+            })))
+        }
         "mission_pty_kill" => {
             let PTYKillArgs { slot_id } = serde_json::from_value(args)?;
             state.pty.kill(&slot_id).await?;
@@ -513,7 +585,22 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             ))
         }
         "mission_pty_screen" => {
-            let PTYScreenArgs { slot_id, lines } = serde_json::from_value(args)?;
+            let PTYScreenArgs {
+                slot_id,
+                lines,
+                styled,
+            } = serde_json::from_value(args)?;
+            if styled.unwrap_or(false) {
+                let mut styled_screen = state.pty.get_styled_screen(&slot_id).await?;
+                if let Some(n) = lines {
+                    styled_screen = styled_screen.tail_lines(n);
+                }
+                return Ok(ToolResult::json(&json!({
+                    "slotId": slot_id,
+                    "screen": styled_screen.text(),
+                    "styled": styled_screen,
+                })));
+            }
             if let Some(n) = lines {
                 let last = state.pty.get_last_lines(&slot_id, n).await?;
                 Ok(ToolResult::text(redact_auth_sensitive_text(
@@ -811,6 +898,129 @@ fn control_plane_tool_error(err: anyhow::Error, fallback_suggestion: &str) -> To
     ToolError::new(error_codes::DB_ERROR, err.to_string()).with_suggestion(fallback_suggestion)
 }
 
+struct PtyKeySpec {
+    canonical: &'static str,
+    bytes: &'static str,
+}
+
+const PTY_KEY_NAMES: &[&str] = &[
+    "enter",
+    "return",
+    "esc",
+    "escape",
+    "tab",
+    "up",
+    "down",
+    "right",
+    "left",
+    "backspace",
+    "delete",
+    "del",
+    "home",
+    "end",
+    "pageup",
+    "page-up",
+    "pagedown",
+    "page-down",
+    "ctrl-c",
+    "ctrl-d",
+    "eof",
+];
+
+const MAX_PTY_TEXT_BYTES: usize = 64 * 1024;
+
+fn validate_pty_text(text: &str) -> std::result::Result<(), String> {
+    if text.is_empty() {
+        return Err("mission_pty_text requires non-empty text".to_string());
+    }
+    if text.len() > MAX_PTY_TEXT_BYTES {
+        return Err(format!(
+            "mission_pty_text text is too large: {} bytes exceeds {} bytes",
+            text.len(),
+            MAX_PTY_TEXT_BYTES
+        ));
+    }
+    if let Some(ch) = text.chars().find(|ch| ch.is_control()) {
+        let escaped: String = ch.escape_default().collect();
+        return Err(format!(
+            "mission_pty_text rejects control character `{escaped}`; use mission_pty_key for keys"
+        ));
+    }
+    Ok(())
+}
+
+fn pty_key_spec(key: &str) -> Option<PtyKeySpec> {
+    match key.trim().to_ascii_lowercase().as_str() {
+        "enter" | "return" => Some(PtyKeySpec {
+            canonical: "enter",
+            bytes: "\r",
+        }),
+        "esc" | "escape" => Some(PtyKeySpec {
+            canonical: "esc",
+            bytes: "\x1b",
+        }),
+        "tab" => Some(PtyKeySpec {
+            canonical: "tab",
+            bytes: "\t",
+        }),
+        "up" => Some(PtyKeySpec {
+            canonical: "up",
+            bytes: "\x1b[A",
+        }),
+        "down" => Some(PtyKeySpec {
+            canonical: "down",
+            bytes: "\x1b[B",
+        }),
+        "right" => Some(PtyKeySpec {
+            canonical: "right",
+            bytes: "\x1b[C",
+        }),
+        "left" => Some(PtyKeySpec {
+            canonical: "left",
+            bytes: "\x1b[D",
+        }),
+        "backspace" => Some(PtyKeySpec {
+            canonical: "backspace",
+            bytes: "\x7f",
+        }),
+        "delete" | "del" => Some(PtyKeySpec {
+            canonical: "delete",
+            bytes: "\x1b[3~",
+        }),
+        "home" => Some(PtyKeySpec {
+            canonical: "home",
+            bytes: "\x1b[H",
+        }),
+        "end" => Some(PtyKeySpec {
+            canonical: "end",
+            bytes: "\x1b[F",
+        }),
+        "pageup" | "page-up" => Some(PtyKeySpec {
+            canonical: "pageup",
+            bytes: "\x1b[5~",
+        }),
+        "pagedown" | "page-down" => Some(PtyKeySpec {
+            canonical: "pagedown",
+            bytes: "\x1b[6~",
+        }),
+        "ctrl-c" => Some(PtyKeySpec {
+            canonical: "ctrl-c",
+            bytes: "\x03",
+        }),
+        // AGY 1.0.x enables kitty keyboard protocol, so human Ctrl-D arrives
+        // as CSI 100;5u while the TUI is active. Use `eof` for a plain EOT.
+        "ctrl-d" => Some(PtyKeySpec {
+            canonical: "ctrl-d",
+            bytes: "\x1b[100;5u",
+        }),
+        "eof" => Some(PtyKeySpec {
+            canonical: "eof",
+            bytes: "\x04",
+        }),
+        _ => None,
+    }
+}
+
 fn slot_project_root(state: &AppState, slot_id: &str) -> Option<String> {
     state
         .mission
@@ -870,6 +1080,47 @@ mod tests {
     use crate::permission_extract::extract_confirm;
     use std::sync::Arc;
     use tempfile::tempdir;
+
+    #[test]
+    fn pty_key_spec_maps_human_keys_to_raw_sequences() {
+        let enter = pty_key_spec("Enter").expect("enter key");
+        assert_eq!(enter.canonical, "enter");
+        assert_eq!(enter.bytes, "\r");
+
+        let esc = pty_key_spec("escape").expect("escape key");
+        assert_eq!(esc.canonical, "esc");
+        assert_eq!(esc.bytes, "\x1b");
+
+        let down = pty_key_spec("down").expect("down key");
+        assert_eq!(down.bytes, "\x1b[B");
+
+        let agy_ctrl_d = pty_key_spec("ctrl-d").expect("agy ctrl-d key");
+        assert_eq!(agy_ctrl_d.bytes, "\x1b[100;5u");
+
+        let eof = pty_key_spec("eof").expect("plain eof key");
+        assert_eq!(eof.bytes, "\x04");
+    }
+
+    #[test]
+    fn pty_key_spec_rejects_non_allowlisted_text() {
+        assert!(pty_key_spec("hello").is_none());
+        assert!(pty_key_spec("/exit").is_none());
+    }
+
+    #[test]
+    fn validate_pty_text_accepts_printable_text_only() {
+        validate_pty_text("/model").expect("slash command text is printable");
+        validate_pty_text("中文 prompt 123").expect("unicode printable text is allowed");
+    }
+
+    #[test]
+    fn validate_pty_text_rejects_empty_control_chars_and_oversize() {
+        assert!(validate_pty_text("").is_err());
+        assert!(validate_pty_text("hello\n").is_err());
+        assert!(validate_pty_text("hello\r").is_err());
+        assert!(validate_pty_text("hello\x1b").is_err());
+        assert!(validate_pty_text(&"x".repeat(MAX_PTY_TEXT_BYTES + 1)).is_err());
+    }
 
     /// E2E: verify that selecting option 2 as caller intent maps to
     /// ConfirmResponse::Option(2), extracts the "don't ask" pattern from the

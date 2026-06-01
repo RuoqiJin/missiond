@@ -516,6 +516,8 @@ mod tests {
             "mission_task_submit",
             "mission_task_query",
             "mission_pty_spawn",
+            "mission_pty_key",
+            "mission_pty_text",
             "mission_kb_remember",
             "mission_cc_query",
         ] {
@@ -530,6 +532,8 @@ mod tests {
     fn test_get_tool() {
         assert!(get_tool("mission_task_submit").is_some());
         assert!(get_tool("mission_pty_send").is_some());
+        assert!(get_tool("mission_pty_key").is_some());
+        assert!(get_tool("mission_pty_text").is_some());
         assert!(get_tool("mission_interaction").is_some());
         assert!(get_tool("unknown_tool").is_none());
     }

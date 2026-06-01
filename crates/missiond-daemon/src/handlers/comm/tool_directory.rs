@@ -123,6 +123,8 @@ const FAMILIES: &[ToolFamily] = &[
             "mission_pty_status",
             "mission_pty_read",
             "mission_pty_send",
+            "mission_pty_key",
+            "mission_pty_text",
             "mission_compute_slot",
             "mission_master_status",
         ],

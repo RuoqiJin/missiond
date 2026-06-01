@@ -48,6 +48,8 @@ impl ProviderInteractionBox {
             | BoxCommand::SemanticAuthoring
             | BoxCommand::GroundedDirectAnswer
             | BoxCommand::RunnerOneShot
+            | BoxCommand::Research
+            | BoxCommand::ImageGeneration
             | BoxCommand::Vision => driver.submit_turn(&request).await,
             BoxCommand::ModelSwitch => driver.switch_model(&request).await,
             BoxCommand::UsageProbe => driver.probe_usage(&request).await,

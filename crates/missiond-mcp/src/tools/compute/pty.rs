@@ -43,6 +43,48 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
+        // ===== mission_pty_key =====
+        ToolDefinition::new(
+            "mission_pty_key",
+            "向 PTY 发送一个 allowlist 语义按键。文本输入请使用逐步 raw/write 教学路径；完整消息提交请使用 mission_pty_send。",
+            json!({
+                "type": "object",
+                "required": ["slotId", "key"],
+                "properties": {
+                    "slotId": {"type": "string"},
+                    "key": {
+                        "type": "string",
+                        "enum": [
+                            "enter", "return", "esc", "escape", "tab",
+                            "up", "down", "right", "left",
+                            "backspace", "delete", "del",
+                            "home", "end",
+                            "pageup", "page-up", "pagedown", "page-down",
+                            "ctrl-c", "ctrl-d", "eof"
+                        ],
+                        "description": "一次只发送一个人类按键；发送后调用 mission_pty_status/read 观察结果。ctrl-d 对 AGY TUI 使用 kitty CSI 100;5u，plain EOT 用 eof。"
+                    }
+                }
+            }),
+        ),
+        // ===== mission_pty_text =====
+        ToolDefinition::new(
+            "mission_pty_text",
+            "向 PTY 输入一段可打印文本，但不按回车、不提交消息。Enter/Esc/Tab/Ctrl/方向键必须使用 mission_pty_key。",
+            json!({
+                "type": "object",
+                "required": ["slotId", "text"],
+                "properties": {
+                    "slotId": {"type": "string"},
+                    "text": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 65536,
+                        "description": "只允许可打印文本；不能包含换行、回车、ESC 或其他控制字符。提交时另行调用 mission_pty_key(key='enter')。"
+                    }
+                }
+            }),
+        ),
         // ===== mission_pty_read =====
         ToolDefinition::new(
             "mission_pty_read",

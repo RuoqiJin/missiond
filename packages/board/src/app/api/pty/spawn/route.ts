@@ -7,9 +7,11 @@ export async function POST(req: NextRequest) {
     if (!slotId) return NextResponse.json({ error: 'Missing slotId' }, { status: 400 });
     const body = await req.json().catch(() => ({}));
     const operatorShell = body?.operatorShell === true || body?.operator_shell === true;
+    const autoRestart = body?.autoRestart === true || body?.auto_restart === true;
     const result = await callTool('mission_pty_spawn', {
       slotId,
       operatorConfirm: true,
+      ...(autoRestart ? { autoRestart: true } : {}),
       ...(operatorShell ? { operatorShell: true } : {}),
     });
     return NextResponse.json(result);

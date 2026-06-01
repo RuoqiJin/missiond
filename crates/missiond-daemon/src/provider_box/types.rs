@@ -41,6 +41,8 @@ pub(crate) enum BoxCommand {
     SemanticAuthoring,
     GroundedDirectAnswer,
     RunnerOneShot,
+    Research,
+    ImageGeneration,
     Vision,
     ControlAction,
     PtyStep,
@@ -58,6 +60,8 @@ impl BoxCommand {
                 | Self::SemanticAuthoring
                 | Self::GroundedDirectAnswer
                 | Self::RunnerOneShot
+                | Self::Research
+                | Self::ImageGeneration
                 | Self::Vision
         )
     }
@@ -67,6 +71,7 @@ impl BoxCommand {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ProviderControlAction {
     Input,
+    ClearInput,
     ClearScreen,
     Exit,
 }
