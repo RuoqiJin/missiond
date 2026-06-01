@@ -221,8 +221,19 @@ impl ProviderBoxHttpAdapter {
         });
         interaction.slot_id = Some(slot_id);
         interaction.model = string_field(&request.body, "model");
+        interaction.model_profile = string_field(&request.body, "model_profile")
+            .or_else(|| string_field(&request.body, "reasoning_effort"))
+            .or_else(|| string_field(&request.body, "model_reasoning_effort"));
+        interaction.dangerously_bypass_approvals_and_sandbox =
+            bool_field(&request.body, "dangerously_bypass_approvals_and_sandbox")
+                .or_else(|| bool_field(&request.body, "dangerously_skip_permissions"))
+                .or_else(|| bool_field(&request.body, "dangerously_bypass"))
+                .or_else(|| bool_field(&request.body, "bypass_approvals_and_sandbox"))
+                .or_else(|| bool_field(&request.body, "bypass_mode"))
+                .unwrap_or(false);
         interaction.cwd = string_field(&request.body, "cwd");
         interaction.project_root = string_field(&request.body, "project_root");
+        interaction.tool_policy = tool_policy_from_body(&request.body);
         interaction.correlation_id = string_field(&request.body, "correlation_id")
             .unwrap_or_else(|| interaction.correlation_id.clone());
         let body_spawn = bool_field(&request.body, "spawn_if_missing")
@@ -230,6 +241,10 @@ impl ProviderBoxHttpAdapter {
             .unwrap_or(spawn_if_missing);
         interaction.desired_worker = Some(json!({
             "spawn_if_missing": body_spawn,
+            "force_restart": bool_field(&request.body, "force_restart")
+                .or_else(|| bool_field(&request.body, "restart"))
+                .or_else(|| bool_field(&request.body, "respawn"))
+                .unwrap_or(false),
         }));
         let result = self
             .boxed
@@ -565,12 +580,14 @@ impl ProviderBoxHttpAdapter {
         &self,
         request: ProviderBoxHttpRequest,
     ) -> Result<ProviderBoxHttpResponse, String> {
-        let logical_model_request =
-            header_slot_id(&request).is_none() && string_field(&request.body, "slot_id").is_none();
+        let requested_engine = engine_from_body(&request.body);
+        let has_explicit_slot =
+            header_slot_id(&request).is_some() || string_field(&request.body, "slot_id").is_some();
+        let logical_model_request = requested_engine == CliEngine::Agy && !has_explicit_slot;
         let requested_model = string_field(&request.body, "model");
         let Some(mut interaction) = text_only_interaction_from_body(&request.body) else {
             let mut result = ProviderBoxResult::base(
-                &ProviderInteractionRequest::new(BoxCommand::PureTextSingleTurn, CliEngine::Agy),
+                &ProviderInteractionRequest::new(BoxCommand::PureTextSingleTurn, requested_engine),
                 ProviderBoxStatus::Failed,
             );
             result.add_diagnostic(ProviderBoxDiagnostic::error(
@@ -580,7 +597,7 @@ impl ProviderBoxHttpAdapter {
                     "schema": request.body.get("schema"),
                     "required": [
                         "pure_text=true",
-                        "engine=agy",
+                        "engine=agy or engine=codex",
                         "model",
                         "messages[]"
                     ]
@@ -610,7 +627,7 @@ impl ProviderBoxHttpAdapter {
                 }
                 interaction.slot_id = Some(self.next_private_agy_slot_for_model(model).await);
             }
-        } else if interaction.slot_id.is_none() {
+        } else if has_explicit_slot && interaction.slot_id.is_none() {
             interaction.slot_id = header_slot_id(&request);
         }
         let mut result = self
@@ -691,7 +708,8 @@ fn text_only_interaction_from_body(body: &Value) -> Option<ProviderInteractionRe
     if body.get("pure_text").and_then(Value::as_bool) != Some(true) {
         return None;
     }
-    if body.get("engine").and_then(Value::as_str)? != "agy" {
+    let engine = engine_from_body(body);
+    if !matches!(engine, CliEngine::Agy | CliEngine::Codex) {
         return None;
     }
     if has_forbidden_text_only_fields(body) {
@@ -704,11 +722,28 @@ fn text_only_interaction_from_body(body: &Value) -> Option<ProviderInteractionRe
         .unwrap_or_else(|| format!("router-{}", uuid::Uuid::new_v4().simple()));
     let prompt = build_pure_text_prompt(messages)?;
 
-    let mut interaction = ProviderInteractionRequest::pure_text(CliEngine::Agy, prompt);
+    let mut interaction = ProviderInteractionRequest::pure_text(engine, prompt);
     interaction.schema = "missiond.provider-interaction-request.v1".to_string();
-    interaction.provider = string_field(body, "provider").or_else(|| Some("agy_cli".to_string()));
+    interaction.provider = string_field(body, "provider").or_else(|| {
+        Some(
+            match engine {
+                CliEngine::Codex => "codex_exec_text",
+                _ => "agy_cli",
+            }
+            .to_string(),
+        )
+    });
     interaction.model = Some(model.clone());
+    interaction.model_profile = string_field(body, "model_profile")
+        .or_else(|| string_field(body, "reasoning_effort"))
+        .or_else(|| string_field(body, "model_reasoning_effort"));
     interaction.slot_id = slot_id;
+    interaction.dangerously_bypass_approvals_and_sandbox =
+        bool_field(body, "dangerously_bypass_approvals_and_sandbox")
+            .or_else(|| bool_field(body, "dangerously_bypass"))
+            .or_else(|| bool_field(body, "bypass_approvals_and_sandbox"))
+            .or_else(|| bool_field(body, "bypass_mode"))
+            .unwrap_or(false);
     interaction.correlation_id = correlation_id;
     interaction.timeout_secs = body.get("timeout_secs").and_then(Value::as_u64);
     interaction.output_contract = body.get("output_contract").cloned().or_else(|| {
@@ -723,15 +758,17 @@ fn text_only_interaction_from_body(body: &Value) -> Option<ProviderInteractionRe
             interaction.timeout_cancel_policy = Some(policy);
         }
     }
-    interaction.model_switch_policy = Some(ModelSwitchPolicy {
-        target_model: Some(model),
-        target_model_profile: string_field(body, "target_model_profile")
-            .or_else(|| string_field(body, "model_profile")),
-        allow_respawn: bool_field(body, "allow_model_switch")
-            .or_else(|| bool_field(body, "allow_respawn"))
-            .unwrap_or(false),
-        require_verification: bool_field(body, "require_verification").unwrap_or(true),
-    });
+    if engine == CliEngine::Agy {
+        interaction.model_switch_policy = Some(ModelSwitchPolicy {
+            target_model: Some(model),
+            target_model_profile: string_field(body, "target_model_profile")
+                .or_else(|| string_field(body, "model_profile")),
+            allow_respawn: bool_field(body, "allow_model_switch")
+                .or_else(|| bool_field(body, "allow_respawn"))
+                .unwrap_or(false),
+            require_verification: bool_field(body, "require_verification").unwrap_or(true),
+        });
+    }
     Some(interaction)
 }
 
@@ -867,15 +904,16 @@ fn parse_slot_endpoint(path: &str) -> Option<(String, String)> {
 }
 
 fn engine_from_body(body: &Value) -> CliEngine {
-    match body
+    let raw = body
         .get("engine")
         .and_then(Value::as_str)
-        .unwrap_or("agy")
-        .to_ascii_lowercase()
-        .as_str()
-    {
+        .or_else(|| body.get("provider").and_then(Value::as_str))
+        .unwrap_or("agy");
+    match raw.to_ascii_lowercase().as_str() {
         "claude-code" | "claude_code" | "claudecode" | "claude" => CliEngine::ClaudeCode,
-        "codex" | "codex_cli" | "codex-cli" => CliEngine::Codex,
+        "codex" | "codex_cli" | "codex-cli" | "codex_exec_text" | "codex-exec-text" => {
+            CliEngine::Codex
+        }
         "gemini" | "gemini_cli" | "gemini-cli" => CliEngine::Gemini,
         _ => CliEngine::Agy,
     }
@@ -939,6 +977,14 @@ fn has_forbidden_text_only_fields(body: &Value) -> bool {
         || body
             .get("tool_choice")
             .is_some_and(|choice| !choice.is_null() && choice.as_str() != Some("none"))
+        || body
+            .get("search_enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        || body
+            .get("web_search")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
         || body.get("attachments").is_some()
         || body.get("files").is_some()
 }
@@ -976,6 +1022,10 @@ fn result_response(result: ProviderBoxResult) -> ProviderBoxHttpResponse {
             "step_records": result.step_records,
             "artifact_hash": result.artifact_hash
         });
+        body["model"] = json!(result.model);
+        body["model_profile"] = json!(result.model_profile);
+        body["dangerously_bypass_approvals_and_sandbox"] =
+            json!(result.dangerously_bypass_approvals_and_sandbox);
         if result.final_text.is_some() {
             body["choices"] = json!([{
                 "index": 0,
@@ -990,6 +1040,7 @@ fn result_response(result: ProviderBoxResult) -> ProviderBoxHttpResponse {
             body["object"] = json!("list");
             body["data"] = openai_model_data(catalog);
             body["provider_text_only_sources"] = provider_text_only_sources(catalog);
+            append_codex_exec_text_exports(&mut body);
             body["model_export"] = json!({
                 "schema": "missiond.provider-box.model-export.v1",
                 "provider": catalog.provider.clone(),
@@ -1013,6 +1064,7 @@ fn result_response(result: ProviderBoxResult) -> ProviderBoxHttpResponse {
                     .unwrap_or_default(),
                 "completion_endpoint": "/provider-box/v1/text-only/completions",
                 "slot_scoped_apis": "internal_maintenance_only",
+                "codex_exec_text_sources": "exported_guarded_static_sources",
                 "pure_text_guard": {
                     "prompt_instruction": false,
                     "sidecar_correlation": true,
@@ -1033,6 +1085,7 @@ fn result_response(result: ProviderBoxResult) -> ProviderBoxHttpResponse {
             (result.model_catalog.as_ref(), result.router_export.as_ref())
         {
             body["router_model_sources"] = router_model_sources(catalog, export);
+            append_codex_exec_router_sources(&mut body);
         }
         body
     } else {
@@ -1175,6 +1228,178 @@ fn provider_text_only_source_entry(entry: &ProviderModelCatalogEntry) -> Value {
     })
 }
 
+fn append_codex_exec_text_exports(body: &mut Value) {
+    if let Some(data) = body.get_mut("data").and_then(Value::as_array_mut) {
+        data.extend(codex_exec_openai_model_data());
+    }
+    if let Some(sources) = body
+        .get_mut("provider_text_only_sources")
+        .and_then(Value::as_array_mut)
+    {
+        sources.extend(codex_exec_text_only_sources());
+    }
+}
+
+fn append_codex_exec_router_sources(body: &mut Value) {
+    if let Some(sources) = body
+        .get_mut("router_model_sources")
+        .and_then(Value::as_array_mut)
+    {
+        sources.extend(codex_exec_router_sources());
+    }
+}
+
+fn codex_exec_openai_model_data() -> Vec<Value> {
+    codex_exec_text_source_defs()
+        .into_iter()
+        .map(|def| {
+            json!({
+                "id": def.model_id,
+                "object": "model",
+                "created": 0,
+                "owned_by": "missiond/codex-exec-text",
+                "provider": "codex_exec_text",
+                "source_id": def.source_id,
+                "display_name": def.display_name,
+                "provider_model_id": "gpt-5.5",
+                "model": "gpt-5.5",
+                "model_profile": def.model_profile,
+                "capabilities": {
+                    "text": true,
+                    "tools": false,
+                    "vision": false,
+                    "files": false,
+                    "mcp": false,
+                    "shell": false
+                },
+                "pure_text": true,
+                "routeable_default": def.routeable,
+                "routeable_status": def.routeable_status,
+                "guarded": true
+            })
+        })
+        .collect()
+}
+
+fn codex_exec_text_only_sources() -> Vec<Value> {
+    codex_exec_text_source_defs()
+        .into_iter()
+        .map(|def| {
+            let mut template = json!({
+                "schema": "missiond.provider-box.text-only-completion-request.v1",
+                "provider": "codex_exec_text",
+                "engine": "codex",
+                "model": "gpt-5.5",
+                "pure_text": true,
+                "messages": [{
+                    "role": "user",
+                    "content": "<plain text prompt>"
+                }]
+            });
+            if let Some(profile) = def.model_profile {
+                template["model_profile"] = json!(profile);
+            }
+            json!({
+                "schema": "missiond.provider-text-only-source.v1",
+                "source_id": def.source_id,
+                "provider": "codex_exec_text",
+                "engine": "codex",
+                "model_id": def.model_id,
+                "provider_model_id": "gpt-5.5",
+                "model": "gpt-5.5",
+                "display_name": def.display_name,
+                "model_profile": def.model_profile,
+                "completion_endpoint": "/provider-box/v1/text-only/completions",
+                "routeable": def.routeable,
+                "routeable_status": def.routeable_status,
+                "request_template": template,
+                "capabilities": {
+                    "text": true,
+                    "tools": false,
+                    "vision": false,
+                    "files": false,
+                    "mcp": false,
+                    "shell": false
+                },
+                "guard": {
+                    "codex_exec_json": true,
+                    "output_last_message": true,
+                    "ignore_user_config": true,
+                    "ignore_rules": true,
+                    "isolated_runtime_workspace": true,
+                    "shell_tool_disabled": true,
+                    "jsonl_tool_event_guard": true,
+                    "rejects_tool_messages": true,
+                    "rejects_tool_request_fields": true
+                }
+            })
+        })
+        .collect()
+}
+
+fn codex_exec_router_sources() -> Vec<Value> {
+    codex_exec_text_source_defs()
+        .into_iter()
+        .map(|def| {
+            json!({
+                "model_id": def.model_id,
+                "display_name": def.display_name,
+                "routeable": def.routeable,
+                "routeable_status": def.routeable_status,
+                "route": if def.routeable {
+                    json!({
+                        "provider": "codex_exec_text",
+                        "provider_model_id": "gpt-5.5",
+                        "model_profile": def.model_profile,
+                        "completion_endpoint": "/provider-box/v1/text-only/completions"
+                    })
+                } else {
+                    Value::Null
+                },
+                "blocked_reason": if def.routeable {
+                    Value::Null
+                } else {
+                    json!("codex_exec_text requires live guarded smoke before router publication")
+                },
+                "text_only_source": codex_exec_text_only_sources()
+                    .into_iter()
+                    .find(|source| source.get("model_id") == Some(&json!(def.model_id)))
+            })
+        })
+        .collect()
+}
+
+#[derive(Clone, Copy)]
+struct CodexExecTextSourceDef {
+    model_id: &'static str,
+    source_id: &'static str,
+    display_name: &'static str,
+    model_profile: Option<&'static str>,
+    routeable: bool,
+    routeable_status: &'static str,
+}
+
+fn codex_exec_text_source_defs() -> Vec<CodexExecTextSourceDef> {
+    vec![
+        CodexExecTextSourceDef {
+            model_id: "codex-gpt-55-xhigh",
+            source_id: "missiond/codex-exec-text/gpt-55-xhigh",
+            display_name: "Codex GPT-5.5 (xhigh)",
+            model_profile: Some("xhigh"),
+            routeable: false,
+            routeable_status: "guarded_pending_live_smoke",
+        },
+        CodexExecTextSourceDef {
+            model_id: "codex-gpt-55-default",
+            source_id: "missiond/codex-exec-text/gpt-55-default",
+            display_name: "Codex GPT-5.5 (default reasoning)",
+            model_profile: None,
+            routeable: false,
+            routeable_status: "guarded_pending_live_smoke",
+        },
+    ]
+}
+
 fn router_model_sources(catalog: &ProviderModelCatalog, export: &ProviderRouterExport) -> Value {
     let routeable_by_model = export
         .routeable_entries
@@ -1311,6 +1536,37 @@ fn bool_field(body: &Value, key: &str) -> Option<bool> {
     body.get(key).and_then(Value::as_bool)
 }
 
+fn tool_policy_from_body(body: &Value) -> Option<Value> {
+    if let Some(policy) = body.get("tool_policy") {
+        if policy.is_object() {
+            return Some(policy.clone());
+        }
+    }
+
+    let mut policy = serde_json::Map::new();
+    for key in [
+        "search_enabled",
+        "sandbox",
+        "approval_policy",
+        "dangerously_bypass_approvals_and_sandbox",
+        "dangerously_skip_permissions",
+        "dangerously_bypass",
+        "bypass_approvals_and_sandbox",
+        "bypass_mode",
+        "bypass",
+    ] {
+        if let Some(value) = body.get(key) {
+            policy.insert(key.to_string(), value.clone());
+        }
+    }
+
+    if policy.is_empty() {
+        None
+    } else {
+        Some(Value::Object(policy))
+    }
+}
+
 fn pty_step_key_allowed(key: &str) -> bool {
     let normalized = key
         .trim()
@@ -1387,6 +1643,25 @@ mod tests {
     }
 
     #[test]
+    fn tool_policy_from_body_collects_codex_launch_toggles() {
+        let policy = tool_policy_from_body(&json!({
+            "engine": "codex",
+            "model": "gpt-5.5",
+            "reasoning_effort": "xhigh",
+            "dangerously_bypass_approvals_and_sandbox": true,
+            "search_enabled": true,
+        }))
+        .expect("tool policy");
+
+        assert_eq!(
+            policy["dangerously_bypass_approvals_and_sandbox"],
+            Value::Bool(true)
+        );
+        assert_eq!(policy["search_enabled"], Value::Bool(true));
+        assert!(policy.get("reasoning_effort").is_none());
+    }
+
+    #[test]
     fn text_only_prompt_keeps_tool_policy_out_of_model_text() {
         let body = json!({
             "schema": "missiond.provider-box.text-only-completion-request.v1",
@@ -1407,6 +1682,74 @@ mod tests {
         assert!(!prompt.contains("不要使用工具"));
         assert!(!prompt.contains("请求编号"));
         assert!(request.no_tools);
+    }
+
+    #[test]
+    fn codex_exec_text_only_body_builds_guarded_request() {
+        let body = json!({
+            "schema": "missiond.provider-box.text-only-completion-request.v1",
+            "provider": "codex_exec_text",
+            "engine": "codex",
+            "model": "gpt-5.5",
+            "model_profile": "xhigh",
+            "correlation_id": "corr-codex-text",
+            "messages": [{"role": "user", "content": "hello"}],
+            "pure_text": true
+        });
+
+        let request = text_only_interaction_from_body(&body).expect("request");
+
+        assert_eq!(request.engine, CliEngine::Codex);
+        assert_eq!(request.provider.as_deref(), Some("codex_exec_text"));
+        assert_eq!(request.model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(request.model_profile.as_deref(), Some("xhigh"));
+        assert_eq!(request.prompt.as_deref(), Some("hello"));
+        assert!(request.no_tools);
+        assert!(request.no_shell);
+        assert!(request.model_switch_policy.is_none());
+    }
+
+    #[test]
+    fn codex_exec_text_only_body_rejects_search_tool_request() {
+        let body = json!({
+            "engine": "codex",
+            "model": "gpt-5.5",
+            "messages": [{"role": "user", "content": "hello"}],
+            "pure_text": true,
+            "search_enabled": true
+        });
+
+        assert!(text_only_interaction_from_body(&body).is_none());
+    }
+
+    #[test]
+    fn codex_exec_text_sources_are_exported_but_not_routeable_until_smoked() {
+        let mut body = json!({
+            "data": [],
+            "provider_text_only_sources": [],
+            "router_model_sources": []
+        });
+
+        append_codex_exec_text_exports(&mut body);
+        append_codex_exec_router_sources(&mut body);
+
+        assert!(body["data"]
+            .as_array()
+            .expect("data")
+            .iter()
+            .any(|entry| entry["id"] == "codex-gpt-55-xhigh"));
+        let sources = body["provider_text_only_sources"]
+            .as_array()
+            .expect("sources");
+        assert!(sources
+            .iter()
+            .any(|entry| entry["provider"] == "codex_exec_text"
+                && entry["guard"]["shell_tool_disabled"] == true));
+        assert!(body["router_model_sources"]
+            .as_array()
+            .expect("router sources")
+            .iter()
+            .all(|entry| entry["routeable"] == false));
     }
 
     #[test]

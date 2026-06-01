@@ -68,8 +68,36 @@ const FALLBACK_AGY_SLOT: SlotDef = {
   engine: 'agy',
 };
 
-function isAgySlot(slot: SlotDef) {
-  return `${slot.id} ${slot.provider || ''} ${slot.engine || ''}`.toLowerCase().includes('agy');
+const FALLBACK_CODEX_SLOT: SlotDef = {
+  id: 'slot-codex-code-worker',
+  label: 'slot-codex-code-worker',
+  role: 'coder',
+  provider: 'codex',
+  engine: 'codex',
+};
+
+const TEACHABLE_ENGINES = new Set(['agy', 'codex', 'claude_code', 'claude-code', 'gemini']);
+
+function normalizedSlotText(slot: SlotDef) {
+  return `${slot.id} ${slot.provider || ''} ${slot.engine || ''} ${slot.label || ''}`.toLowerCase();
+}
+
+function isTeachableCliSlot(slot: SlotDef) {
+  const engine = `${slot.engine || slot.provider || ''}`.toLowerCase();
+  const text = normalizedSlotText(slot);
+  return TEACHABLE_ENGINES.has(engine) || [...TEACHABLE_ENGINES].some((value) => text.includes(value));
+}
+
+function sortTeachSlots(a: SlotDef, b: SlotDef) {
+  const order = (slot: SlotDef) => {
+    const text = normalizedSlotText(slot);
+    if (text.includes('codex')) return 0;
+    if (text.includes('agy')) return 1;
+    if (text.includes('claude')) return 2;
+    if (text.includes('gemini')) return 3;
+    return 4;
+  };
+  return order(a) - order(b) || a.id.localeCompare(b.id);
 }
 
 function statusState(status: PtyStatus | null, slot?: SlotDef | null) {
@@ -103,9 +131,9 @@ function isDangerousText(value: string) {
 }
 
 export function PtyTeachingPanel({ slots, refreshSlots }: PtyTeachingPanelProps) {
-  const agySlots = useMemo(() => {
-    const projected = slots.filter(isAgySlot);
-    return projected.length > 0 ? projected : [FALLBACK_AGY_SLOT];
+  const teachSlots = useMemo(() => {
+    const projected = slots.filter(isTeachableCliSlot).sort(sortTeachSlots);
+    return projected.length > 0 ? projected : [FALLBACK_CODEX_SLOT, FALLBACK_AGY_SLOT];
   }, [slots]);
   const [slotId, setSlotId] = useState(() => {
     if (typeof window === 'undefined') return '';
@@ -123,8 +151,8 @@ export function PtyTeachingPanel({ slots, refreshSlots }: PtyTeachingPanelProps)
   });
 
   const selectedSlot = useMemo(
-    () => agySlots.find((slot) => slot.id === slotId) ?? agySlots[0] ?? null,
-    [agySlots, slotId],
+    () => teachSlots.find((slot) => slot.id === slotId) ?? teachSlots[0] ?? null,
+    [teachSlots, slotId],
   );
   const selectedSlotId = selectedSlot?.id ?? '';
   const currentState = statusState(status, selectedSlot);
@@ -272,10 +300,10 @@ export function PtyTeachingPanel({ slots, refreshSlots }: PtyTeachingPanelProps)
     await sendInput({ text: value, label: `type ${JSON.stringify(value)}` });
   }
 
-  if (agySlots.length === 0) {
+  if (teachSlots.length === 0) {
     return (
       <div className="mx-4 mb-4 flex min-h-0 flex-1 items-center justify-center rounded-lg border border-neutral-800 bg-neutral-950/60 text-sm text-neutral-500 sm:mx-8">
-        No AGY slots projected.
+        No teachable CLI slots projected.
       </div>
     );
   }
@@ -340,13 +368,13 @@ export function PtyTeachingPanel({ slots, refreshSlots }: PtyTeachingPanelProps)
             </button>
           </div>
           <div className="mt-3">
-            <label className="text-[10px] uppercase tracking-wide text-neutral-600">AGY slot</label>
+            <label className="text-[10px] uppercase tracking-wide text-neutral-600">CLI slot</label>
             <select
               value={selectedSlotId}
               onChange={(event) => setSlotId(event.target.value)}
               className="mt-1 w-full rounded-md border border-neutral-800 bg-neutral-900 px-2 py-1.5 text-xs text-neutral-200 outline-none"
             >
-              {agySlots.map((slot) => (
+              {teachSlots.map((slot) => (
                 <option key={slot.id} value={slot.id}>{slot.label || slot.id}</option>
               ))}
             </select>

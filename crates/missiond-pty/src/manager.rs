@@ -19,7 +19,8 @@ use super::session::{
     PermissionDecision, SessionEvent, SessionState, TextOutputEvent,
 };
 use crate::pty_recognition::{
-    is_provider_unavailable_snapshot, session_state_snapshot, PtyRecognitionSnapshot,
+    is_provider_unavailable_snapshot, session_state_snapshot, PtyCanonicalState,
+    PtyRecognitionSnapshot,
 };
 
 // ========== Types ==========
@@ -399,12 +400,12 @@ impl PTYManager {
                             let mut info = agent_info_for_forward.write().await;
                             if let Some(entry) = info.get_mut(&slot_id_for_events) {
                                 entry.state = new_state;
-                                if !matches!(new_state, SessionState::Exited | SessionState::Error)
-                                    || !entry
-                                        .recognition
-                                        .as_ref()
-                                        .is_some_and(is_provider_unavailable_snapshot)
-                                {
+                                if !entry.recognition.as_ref().is_some_and(|recognition| {
+                                    preserve_screen_recognition_on_state_change(
+                                        recognition,
+                                        new_state,
+                                    )
+                                }) {
                                     entry.recognition =
                                         Some(session_state_snapshot(entry.engine, new_state));
                                 }
@@ -1033,6 +1034,15 @@ impl PTYManager {
         self.spawn(slot, options).await
     }
 
+    /// Return the launch options last used for a slot, if MissionD spawned it.
+    pub async fn get_spawn_options(&self, slot_id: &str) -> Option<PTYSpawnOptions> {
+        self.spawn_options_by_slot
+            .read()
+            .await
+            .get(slot_id)
+            .cloned()
+    }
+
     /// Get pending confirmation info for a slot
     pub async fn get_pending_confirm(&self, slot_id: &str) -> Option<ConfirmInfo> {
         let session = {
@@ -1196,6 +1206,37 @@ fn normalize_agent_info(mut info: PTYAgentInfo) -> PTYAgentInfo {
     info
 }
 
+fn preserve_screen_recognition_on_state_change(
+    recognition: &PtyRecognitionSnapshot,
+    new_state: SessionState,
+) -> bool {
+    if recognition.source == "session_state" {
+        return false;
+    }
+    if is_provider_unavailable_snapshot(recognition) {
+        return true;
+    }
+    match new_state {
+        SessionState::Idle => recognition.state == PtyCanonicalState::Idle,
+        SessionState::SlashMenu => {
+            recognition.state == PtyCanonicalState::Blocked
+                && matches!(
+                    recognition.blocked_kind.as_deref(),
+                    Some("model_picker" | "slash_command_menu" | "slash_command_input")
+                )
+        }
+        SessionState::Confirming => recognition.state == PtyCanonicalState::Blocked,
+        SessionState::Thinking | SessionState::Responding | SessionState::ToolRunning => {
+            recognition.state == PtyCanonicalState::Running
+        }
+        SessionState::Starting => matches!(
+            recognition.state,
+            PtyCanonicalState::Running | PtyCanonicalState::Blocked | PtyCanonicalState::Unknown
+        ),
+        SessionState::Exited | SessionState::Error => false,
+    }
+}
+
 fn enforce_core_spawn_sandbox_policy(slot: &Slot, options: &mut PTYSpawnOptions) {
     use missiond_shared::CliEngine;
 
@@ -1207,7 +1248,21 @@ fn enforce_core_spawn_sandbox_policy(slot: &Slot, options: &mut PTYSpawnOptions)
 
     match slot.engine {
         CliEngine::Codex => {
-            if options.sandbox.as_deref() == Some("danger-full-access") && !privileged_role {
+            if options.dangerously_skip_permissions
+                && !privileged_role
+                && !role.contains("provider-box-codex")
+            {
+                warn!(
+                    slot_id = %slot.id,
+                    role = %slot.role,
+                    "PTY core spawn policy: refusing Codex approval/sandbox bypass for non-privileged worker"
+                );
+                options.dangerously_skip_permissions = false;
+            }
+            if options.dangerously_skip_permissions {
+                options.sandbox = None;
+                options.approval_policy = None;
+            } else if options.sandbox.as_deref() == Some("danger-full-access") && !privileged_role {
                 warn!(
                     slot_id = %slot.id,
                     role = %slot.role,
@@ -1217,8 +1272,7 @@ fn enforce_core_spawn_sandbox_policy(slot: &Slot, options: &mut PTYSpawnOptions)
                 options
                     .approval_policy
                     .get_or_insert_with(|| "never".to_string());
-            }
-            if options.sandbox.is_none() && !privileged_role {
+            } else if options.sandbox.is_none() && !privileged_role {
                 options.sandbox = Some("read-only".to_string());
             }
         }
@@ -1299,6 +1353,37 @@ mod tests {
     }
 
     #[test]
+    fn core_spawn_policy_disables_codex_worker_bypass() {
+        let slot = test_slot("coder", CliEngine::Codex);
+        let mut options = PTYSpawnOptions {
+            dangerously_skip_permissions: true,
+            ..Default::default()
+        };
+
+        enforce_core_spawn_sandbox_policy(&slot, &mut options);
+
+        assert!(!options.dangerously_skip_permissions);
+        assert_eq!(options.sandbox.as_deref(), Some("read-only"));
+    }
+
+    #[test]
+    fn core_spawn_policy_allows_codex_provider_box_bypass() {
+        let slot = test_slot("provider-box-codex", CliEngine::Codex);
+        let mut options = PTYSpawnOptions {
+            dangerously_skip_permissions: true,
+            sandbox: Some("danger-full-access".to_string()),
+            approval_policy: Some("never".to_string()),
+            ..Default::default()
+        };
+
+        enforce_core_spawn_sandbox_policy(&slot, &mut options);
+
+        assert!(options.dangerously_skip_permissions);
+        assert!(options.sandbox.is_none());
+        assert!(options.approval_policy.is_none());
+    }
+
+    #[test]
     fn core_spawn_policy_disables_gemini_worker_yolo() {
         let slot = test_slot("gemini_worker", CliEngine::Gemini);
         let mut options = PTYSpawnOptions {
@@ -1336,6 +1421,54 @@ mod tests {
         enforce_core_spawn_sandbox_policy(&slot, &mut options);
 
         assert!(options.dangerously_skip_permissions);
+    }
+
+    #[test]
+    fn state_change_preserves_specific_auth_missing_screen_recognition() {
+        let recognition = PtyRecognitionSnapshot {
+            provider: CliEngine::Agy,
+            state: PtyCanonicalState::Blocked,
+            confidence: 0.94,
+            reason: "agy:login_method_prompt".to_string(),
+            phase: Some("auth_login_method".to_string()),
+            active_tool: None,
+            elapsed_secs: None,
+            blocked_kind: Some("auth_missing".to_string()),
+            screen_identity: None,
+            screen_usage: None,
+            source: "tui_source_signature".to_string(),
+        };
+
+        assert!(preserve_screen_recognition_on_state_change(
+            &recognition,
+            SessionState::Confirming
+        ));
+        assert!(preserve_screen_recognition_on_state_change(
+            &recognition,
+            SessionState::Exited
+        ));
+    }
+
+    #[test]
+    fn state_change_replaces_stale_running_screen_recognition_on_idle() {
+        let recognition = PtyRecognitionSnapshot {
+            provider: CliEngine::Codex,
+            state: PtyCanonicalState::Running,
+            confidence: 0.9,
+            reason: "codex:status_indicator_widget".to_string(),
+            phase: Some("thinking".to_string()),
+            active_tool: None,
+            elapsed_secs: None,
+            blocked_kind: None,
+            screen_identity: None,
+            screen_usage: None,
+            source: "screen_fused".to_string(),
+        };
+
+        assert!(!preserve_screen_recognition_on_state_change(
+            &recognition,
+            SessionState::Idle
+        ));
     }
 
     #[test]

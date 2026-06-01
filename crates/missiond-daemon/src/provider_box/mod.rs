@@ -22,13 +22,13 @@ pub(crate) use driver::{ProviderDriver, ProviderDriverCapabilities, UnsupportedP
 pub(crate) use http_adapter::ProviderBoxHttpAdapter;
 pub(crate) use runtime::ProviderInteractionBox;
 pub(crate) use types::{
-    BoxCommand, ModelSwitchPolicy, ModelSwitchResult, ModelSwitchStatus, ProviderAttachmentRef,
-    ProviderBoxDiagnostic, ProviderBoxResult, ProviderBoxStatus, ProviderControlAction,
-    ProviderInteractionRequest, ProviderModelCatalog, ProviderModelCatalogEntry,
-    ProviderModelUsage, ProviderRouterExport, ProviderUsageSnapshot, ProviderUsageStatus,
-    PtyObservation, PtyStepAction, PtyStepRecord, PtyStepVerificationStatus, SingleTurnPolicy,
-    TimeoutCancelPolicy, DIAG_AGY_MODEL_CATALOG_UNSUPPORTED, DIAG_MODEL_SWITCH_UNSUPPORTED,
-    DIAG_MODEL_SWITCH_UNVERIFIED, DIAG_PROVIDER_BOX_AUTH_REQUIRED,
+    redact_auth_sensitive_text, BoxCommand, ModelSwitchPolicy, ModelSwitchResult,
+    ModelSwitchStatus, ProviderAttachmentRef, ProviderBoxDiagnostic, ProviderBoxResult,
+    ProviderBoxStatus, ProviderControlAction, ProviderInteractionRequest, ProviderModelCatalog,
+    ProviderModelCatalogEntry, ProviderModelUsage, ProviderRouterExport, ProviderUsageSnapshot,
+    ProviderUsageStatus, PtyObservation, PtyStepAction, PtyStepRecord, PtyStepVerificationStatus,
+    SingleTurnPolicy, TimeoutCancelPolicy, DIAG_AGY_MODEL_CATALOG_UNSUPPORTED,
+    DIAG_MODEL_SWITCH_UNSUPPORTED, DIAG_MODEL_SWITCH_UNVERIFIED, DIAG_PROVIDER_BOX_AUTH_REQUIRED,
     DIAG_PROVIDER_BOX_INVALID_REQUEST, DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
     DIAG_PROVIDER_DURABLE_FINAL_MISSING, DIAG_PROVIDER_PTY_STEP_UNSUPPORTED,
     DIAG_PROVIDER_STATUS_UNAVAILABLE, DIAG_PROVIDER_TEXT_ONLY_VIOLATION,

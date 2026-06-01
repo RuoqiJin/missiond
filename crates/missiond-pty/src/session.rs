@@ -455,13 +455,18 @@ fn build_cli_command(
                 parts.push_str(" --search");
                 info!("Codex CLI: search enabled");
             }
-            if let Some(profile) = sandbox {
-                parts.push_str(&format!(" --sandbox {}", shell_quote(profile)));
-                info!(sandbox = %profile, "Codex CLI: sandbox override");
-            }
-            if let Some(policy) = approval_policy {
-                parts.push_str(&format!(" --ask-for-approval {}", shell_quote(policy)));
-                info!(approval_policy = %policy, "Codex CLI: approval policy override");
+            if dangerously_skip_permissions {
+                parts.push_str(" --dangerously-bypass-approvals-and-sandbox");
+                info!("Codex CLI: dangerous bypass of approvals and sandbox enabled");
+            } else {
+                if let Some(profile) = sandbox {
+                    parts.push_str(&format!(" --sandbox {}", shell_quote(profile)));
+                    info!(sandbox = %profile, "Codex CLI: sandbox override");
+                }
+                if let Some(policy) = approval_policy {
+                    parts.push_str(&format!(" --ask-for-approval {}", shell_quote(policy)));
+                    info!(approval_policy = %policy, "Codex CLI: approval policy override");
+                }
             }
             // Codex CLI treats MCP tool calls as a separate approval surface
             // from shell command approval. Worker lanes must be unattended once
@@ -3157,6 +3162,48 @@ Some prose.
         assert!(cmd.contains(
             "-c 'mcp_servers.missiond.tools.mission_claim_status.approval_mode=\"approve\"'"
         ));
+    }
+
+    #[test]
+    fn codex_command_supports_approval_sandbox_bypass() {
+        let cmd = build_cli_command(
+            CliEngine::Codex,
+            std::path::Path::new("/tmp/project"),
+            None,
+            true,
+            Some("gpt-5.5"),
+            Some("xhigh"),
+            true,
+            Some("danger-full-access"),
+            Some("never"),
+            None,
+        );
+
+        assert!(cmd.contains("codex --cd '/tmp/project'"));
+        assert!(cmd.contains("--model 'gpt-5.5'"));
+        assert!(cmd.contains("-c 'model_reasoning_effort=\"xhigh\"'"));
+        assert!(cmd.contains("--dangerously-bypass-approvals-and-sandbox"));
+        assert!(!cmd.contains("--sandbox"));
+        assert!(!cmd.contains("--ask-for-approval"));
+    }
+
+    #[test]
+    fn codex_command_omits_reasoning_override_for_default_reasoning() {
+        let cmd = build_cli_command(
+            CliEngine::Codex,
+            std::path::Path::new("/tmp/project"),
+            None,
+            false,
+            Some("gpt-5.5"),
+            None,
+            false,
+            Some("workspace-write"),
+            Some("never"),
+            None,
+        );
+
+        assert!(cmd.contains("--model 'gpt-5.5'"));
+        assert!(!cmd.contains("model_reasoning_effort"));
     }
 
     #[test]

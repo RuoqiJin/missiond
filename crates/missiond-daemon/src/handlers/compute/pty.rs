@@ -11,6 +11,7 @@ use crate::engine::control_plane_kernel::{
 };
 use crate::helpers::default_mission_home;
 use crate::lenient;
+use crate::provider_box::redact_auth_sensitive_text;
 use crate::state::AppState;
 use missiond_core::PTYSpawnOptions;
 use std::path::PathBuf;
@@ -163,7 +164,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 fn operator_shell_command() -> String {
     concat!(
         "exec env ",
-        "PATH=\"$HOME/.local/bin:$HOME/.antigravity/antigravity/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH\" ",
+        "PATH=\"$HOME/.local/bin:$HOME/.antigravity/antigravity/bin:/Applications/Codex.app/Contents/Resources:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH\" ",
         "PS1='(missiond-teach) %1~ %# ' ",
         "/bin/zsh -f -i"
     )
@@ -515,9 +516,13 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             let PTYScreenArgs { slot_id, lines } = serde_json::from_value(args)?;
             if let Some(n) = lines {
                 let last = state.pty.get_last_lines(&slot_id, n).await?;
-                Ok(ToolResult::text(last.join("\n")))
+                Ok(ToolResult::text(redact_auth_sensitive_text(
+                    &last.join("\n"),
+                )))
             } else {
-                Ok(ToolResult::text(state.pty.get_screen(&slot_id).await?))
+                Ok(ToolResult::text(redact_auth_sensitive_text(
+                    &state.pty.get_screen(&slot_id).await?,
+                )))
             }
         }
         "mission_pty_history" => {

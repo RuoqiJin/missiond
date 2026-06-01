@@ -35,6 +35,7 @@ const FILES = {
   providerBoxDriver: 'crates/missiond-daemon/src/provider_box/driver.rs',
   providerBoxRuntime: 'crates/missiond-daemon/src/provider_box/runtime.rs',
   providerBoxArtifact: 'crates/missiond-daemon/src/provider_box/artifact.rs',
+  providerBoxCodexDriver: 'crates/missiond-daemon/src/provider_box/codex_driver.rs',
   jarvisServer: 'crates/missiond-core/src/ws/server.rs',
   runner: 'crates/missiond-runner/src/runner.rs',
   runnerLib: 'crates/missiond-runner/src/lib.rs',
@@ -227,6 +228,8 @@ function main() {
       'Meow61 provider-source pattern',
       'text=true/tools=false/vision=false',
       'self-built proxy deployment program',
+      'codex_exec_text',
+      'output-last-message alone is never treated as proof that no tools ran',
     ]);
     requireAll(diagnostics, FILES.requestSurfaces, sources.requestSurfaces, [
       ':interactive-provider-box "provider-interaction-box"',
@@ -412,9 +415,29 @@ function checkSuspiciousRustCoverage(repo, diagnostics) {
     for (const pattern of SUSPICIOUS_RUST_PATTERNS) {
       if (!pattern.re.test(source)) continue;
       if (allowedFiles.has(rel)) continue;
+      if (isApprovedCodexExecTextLane(rel, pattern.id, source)) continue;
       diagnostics.push(diag(rel, `un-inventoried provider CLI headless marker: ${pattern.id}`));
     }
   }
+}
+
+function isApprovedCodexExecTextLane(rel, patternId, source) {
+  if (rel !== FILES.providerBoxCodexDriver) return false;
+  if (patternId !== 'codex-exec') return false;
+  const required = [
+    'CODEX_EXEC_TEXT_PROVIDER',
+    'codex_exec_text',
+    '--output-last-message',
+    '--ignore-user-config',
+    '--ignore-rules',
+    '--sandbox',
+    'read-only',
+    'features.shell_tool=false',
+    'analyze_codex_exec_jsonl',
+    'DIAG_PROVIDER_TEXT_ONLY_VIOLATION',
+  ];
+  return required.every((needle) => source.includes(needle))
+    && (source.includes('approval_policy="never"') || source.includes('approval_policy=\\"never\\"'));
 }
 
 function listFiles(dir, suffix, repo) {

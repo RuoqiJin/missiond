@@ -4464,6 +4464,44 @@ mod tests {
     }
 
     #[test]
+    fn agy_driver_treats_login_prompt_ctrl_d_confirmation_as_exit_fallback_state() {
+        let obs = observation(&[
+            " Welcome to the Antigravity CLI. You are currently not signed in.",
+            "",
+            " Select login method:",
+            " > 1. Google OAuth",
+            "   2. Use a Google Cloud project",
+            "",
+            " [Use arrow keys to navigate, Enter to select]",
+            "press ctrl+d again to exit",
+        ]);
+
+        assert!(is_exit_confirm_pending(&obs));
+        assert!(!is_overlay_screen(&obs));
+        assert!(!is_ready_for_text(&obs));
+        assert!(is_hard_blocked(&obs));
+    }
+
+    #[test]
+    fn agy_driver_treats_oauth_authorization_prompt_as_hard_auth_block() {
+        let obs = observation(&[
+            " Open this link in the browser (be sure to copy-paste the whole URL):",
+            " https://accounts.google.com/o/oauth2/auth?access_type=offline&client_id=redacted",
+            " If you aren't automatically redirected, paste the authorization code below:",
+            " authorization code...",
+        ]);
+
+        assert_eq!(obs.snapshot.reason, "agy:oauth_authorization_prompt");
+        assert_eq!(
+            obs.snapshot.blocked_kind.as_deref(),
+            Some("auth_code_required")
+        );
+        assert!(!is_overlay_screen(&obs));
+        assert!(!is_ready_for_text(&obs));
+        assert!(is_hard_blocked(&obs));
+    }
+
+    #[test]
     fn agy_driver_recognizes_shell_prompt_after_exit_as_not_ready() {
         let obs = observation(&[
             "Resume with:",

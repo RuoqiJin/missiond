@@ -219,7 +219,7 @@ pub fn is_provider_unavailable_snapshot(snapshot: &PtyRecognitionSnapshot) -> bo
     snapshot.state == PtyCanonicalState::Blocked
         && matches!(
             snapshot.blocked_kind.as_deref(),
-            Some("auth_missing" | "billing_or_account" | "usage_limit")
+            Some("auth_missing" | "auth_code_required" | "billing_or_account" | "usage_limit")
         )
 }
 
@@ -598,6 +598,48 @@ fn recognize_agy(lines: &[String]) -> PtyRecognitionSnapshot {
         .with_screen_identity(identity);
     }
 
+    if is_agy_oauth_authorization_prompt(lines, &lower) {
+        return PtyRecognitionSnapshot::new(
+            CliEngine::Agy,
+            PtyCanonicalState::Blocked,
+            0.94,
+            "agy:oauth_authorization_prompt",
+        )
+        .with_blocked_kind("auth_code_required")
+        .with_phase("auth_oauth_code")
+        .with_elapsed(elapsed)
+        .with_source("tui_source_signature")
+        .with_screen_identity(identity);
+    }
+
+    if lower.contains("press ctrl+d again to exit") {
+        return PtyRecognitionSnapshot::new(
+            CliEngine::Agy,
+            PtyCanonicalState::Blocked,
+            0.9,
+            "agy:exit_confirm_pending",
+        )
+        .with_blocked_kind("exit_confirmation")
+        .with_phase("exit_confirm")
+        .with_elapsed(elapsed)
+        .with_source("tui_source_signature")
+        .with_screen_identity(identity);
+    }
+
+    if is_agy_login_method_prompt(lines, &lower) {
+        return PtyRecognitionSnapshot::new(
+            CliEngine::Agy,
+            PtyCanonicalState::Blocked,
+            0.94,
+            "agy:login_method_prompt",
+        )
+        .with_blocked_kind("auth_missing")
+        .with_phase("auth_login_method")
+        .with_elapsed(elapsed)
+        .with_source("tui_source_signature")
+        .with_screen_identity(identity);
+    }
+
     if is_agy_workspace_trust_prompt(lines, &lower) {
         return PtyRecognitionSnapshot::new(
             CliEngine::Agy,
@@ -689,20 +731,6 @@ fn recognize_agy(lines: &[String]) -> PtyRecognitionSnapshot {
             "agy:model_picker",
         )
         .with_blocked_kind("model_picker")
-        .with_elapsed(elapsed)
-        .with_source("tui_source_signature")
-        .with_screen_identity(identity);
-    }
-
-    if lower.contains("press ctrl+d again to exit") {
-        return PtyRecognitionSnapshot::new(
-            CliEngine::Agy,
-            PtyCanonicalState::Blocked,
-            0.9,
-            "agy:exit_confirm_pending",
-        )
-        .with_blocked_kind("exit_confirmation")
-        .with_phase("exit_confirm")
         .with_elapsed(elapsed)
         .with_source("tui_source_signature")
         .with_screen_identity(identity);
@@ -1575,6 +1603,22 @@ fn is_agy_startup_signing_in(lines: &[String], lower: &str) -> bool {
         && lines.iter().any(|line| has_spinner_in_line(line))
 }
 
+fn is_agy_oauth_authorization_prompt(_lines: &[String], lower: &str) -> bool {
+    lower.contains("open this link in the browser")
+        && lower.contains("accounts.google.com/o/oauth2/auth")
+        && lower.contains("paste the authorization code below")
+        && lower.contains("authorization code")
+}
+
+fn is_agy_login_method_prompt(_lines: &[String], lower: &str) -> bool {
+    lower.contains("welcome to the")
+        && lower.contains("antigravity cli")
+        && lower.contains("not signed in")
+        && lower.contains("select login method")
+        && lower.contains("google oauth")
+        && lower.contains("use a google cloud project")
+}
+
 fn is_agy_workspace_trust_prompt(_lines: &[String], lower: &str) -> bool {
     lower.contains("accessing workspace")
         && lower.contains("do you trust the contents of this project")
@@ -1823,6 +1867,98 @@ mod tests {
         assert_eq!(result.state, PtyCanonicalState::Running);
         assert_eq!(result.reason, "agy:startup_signing_in");
         assert_eq!(result.phase.as_deref(), Some("auth_signing_in"));
+    }
+
+    #[test]
+    fn agy_oauth_authorization_prompt_is_auth_code_blocked() {
+        let result = recognize_screen(
+            CliEngine::Agy,
+            &lines(&[
+                "     ▄▀▀▄",
+                "",
+                " Open this link in the browser (be sure to copy-paste the whole URL):",
+                " ─────────────────────────────────────────────────────────────────",
+                " https://accounts.google.com/o/oauth2/auth?access_type=offline&client_id=redacted",
+                " .apps.googleusercontent.com&code_challenge=redacted&state=redacted",
+                " ─────────────────────────────────────────────────────────────────",
+                "",
+                " If you aren't automatically redirected, paste the authorization code below:",
+                "",
+                " authorization code...",
+                "",
+                "  shift+up/down Navigate",
+            ]),
+            SessionState::Confirming,
+        );
+
+        assert_eq!(result.state, PtyCanonicalState::Blocked);
+        assert_eq!(result.reason, "agy:oauth_authorization_prompt");
+        assert_eq!(result.blocked_kind.as_deref(), Some("auth_code_required"));
+        assert_eq!(result.phase.as_deref(), Some("auth_oauth_code"));
+        assert_eq!(result.source, "tui_source_signature");
+    }
+
+    #[test]
+    fn agy_login_method_prompt_is_auth_missing_blocked() {
+        let result = recognize_agy(&lines(&[
+            "     ▄▀▀▄",
+            "    ▀▀▀▀▀▀",
+            "   ▀▀▀▀▀▀▀▀",
+            "  ▄▀▀    ▀▀▄",
+            " ▄▀▀      ▀▀▄",
+            "",
+            " Welcome to the Antigravity CLI. You are currently not signed in.",
+            "",
+            " Select login method:",
+            " > 1. Google OAuth",
+            "   2. Use a Google Cloud project",
+            "",
+            " [Use arrow keys to navigate, Enter to select]",
+        ]));
+
+        assert_eq!(result.state, PtyCanonicalState::Blocked);
+        assert_eq!(result.reason, "agy:login_method_prompt");
+        assert_eq!(result.blocked_kind.as_deref(), Some("auth_missing"));
+        assert_eq!(result.phase.as_deref(), Some("auth_login_method"));
+        assert_eq!(result.source, "tui_source_signature");
+    }
+
+    #[test]
+    fn agy_login_method_prompt_overrides_idle_session_state() {
+        let result = recognize_screen(
+            CliEngine::Agy,
+            &lines(&[
+                " Welcome to the Antigravity CLI. You are currently not signed in.",
+                " Select login method:",
+                " > 1. Google OAuth",
+                "   2. Use a Google Cloud project",
+                " [Use arrow keys to navigate, Enter to select]",
+            ]),
+            SessionState::Idle,
+        );
+
+        assert_eq!(result.state, PtyCanonicalState::Blocked);
+        assert_eq!(result.reason, "agy:login_method_prompt");
+        assert_eq!(result.blocked_kind.as_deref(), Some("auth_missing"));
+    }
+
+    #[test]
+    fn agy_login_method_ctrl_d_confirm_overrides_auth_prompt() {
+        let result = recognize_agy(&lines(&[
+            " Welcome to the Antigravity CLI. You are currently not signed in.",
+            "",
+            " Select login method:",
+            " > 1. Google OAuth",
+            "   2. Use a Google Cloud project",
+            "",
+            " [Use arrow keys to navigate, Enter to select]",
+            "press ctrl+d again to exit",
+        ]));
+
+        assert_eq!(result.state, PtyCanonicalState::Blocked);
+        assert_eq!(result.reason, "agy:exit_confirm_pending");
+        assert_eq!(result.blocked_kind.as_deref(), Some("exit_confirmation"));
+        assert_eq!(result.phase.as_deref(), Some("exit_confirm"));
     }
 
     #[test]
