@@ -119,6 +119,18 @@ impl ProviderBoxHttpAdapter {
                     self.handle_slot_control(request, slot_id, ProviderControlAction::Exit)
                         .await
                 }
+                ("POST", "permissions")
+                | ("POST", "permission")
+                | ("POST", "actions/permissions")
+                | ("POST", "actions/permission") => {
+                    self.handle_slot_permissions(request, slot_id, None).await
+                }
+                _ if request.method == "POST"
+                    && slot_permission_mode_from_suffix(&suffix).is_some() =>
+                {
+                    let mode = slot_permission_mode_from_suffix(&suffix);
+                    self.handle_slot_permissions(request, slot_id, mode).await
+                }
                 ("POST", "switch-model") | ("POST", "actions/switch-model") => {
                     self.handle_slot_switch_model(request, slot_id).await
                 }
@@ -390,6 +402,55 @@ impl ProviderBoxHttpAdapter {
         interaction.control_action = Some(action);
         interaction.correlation_id = string_field(&request.body, "correlation_id")
             .unwrap_or_else(|| interaction.correlation_id.clone());
+        let result = self
+            .boxed
+            .execute(interaction)
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok(result_response(result))
+    }
+
+    async fn handle_slot_permissions(
+        &self,
+        request: ProviderBoxHttpRequest,
+        slot_id: String,
+        mode_from_path: Option<String>,
+    ) -> Result<ProviderBoxHttpResponse, String> {
+        let mut interaction = ProviderInteractionRequest::new(
+            BoxCommand::ControlAction,
+            engine_from_body_or_slot(&request.body, &slot_id),
+        );
+        interaction.provider = string_field(&request.body, "provider").or_else(|| {
+            Some(
+                match interaction.engine {
+                    CliEngine::Codex => "codex_cli",
+                    CliEngine::Agy => "agy_cli",
+                    CliEngine::ClaudeCode => "claude_code",
+                    CliEngine::Gemini => "gemini_cli",
+                }
+                .to_string(),
+            )
+        });
+        interaction.slot_id = Some(slot_id);
+        interaction.cwd = string_field(&request.body, "cwd");
+        interaction.project_root = string_field(&request.body, "project_root");
+        interaction.control_action = Some(ProviderControlAction::SetPermissions);
+        interaction.correlation_id = string_field(&request.body, "correlation_id")
+            .unwrap_or_else(|| interaction.correlation_id.clone());
+        let permission_mode = mode_from_path
+            .or_else(|| string_field(&request.body, "permission_mode"))
+            .or_else(|| string_field(&request.body, "mode"))
+            .or_else(|| string_field(&request.body, "target_permission_mode"));
+        interaction.desired_worker = Some(json!({
+            "permission_mode": permission_mode,
+            "spawn_if_missing": bool_field(&request.body, "spawn_if_missing")
+                .or_else(|| bool_field(&request.body, "spawn"))
+                .unwrap_or(true),
+            "force_restart": bool_field(&request.body, "force_restart")
+                .or_else(|| bool_field(&request.body, "restart"))
+                .or_else(|| bool_field(&request.body, "respawn"))
+                .unwrap_or(false),
+        }));
         let result = self
             .boxed
             .execute(interaction)
@@ -1126,6 +1187,44 @@ fn parse_slot_endpoint(path: &str) -> Option<(String, String)> {
         return None;
     }
     Some((slot_id.to_string(), suffix))
+}
+
+fn slot_permission_mode_from_suffix(suffix: &str) -> Option<String> {
+    let normalized = suffix.trim().trim_matches('/').to_ascii_lowercase();
+    let mode = normalized
+        .strip_prefix("permissions/")
+        .or_else(|| normalized.strip_prefix("permission/"))
+        .or_else(|| normalized.strip_prefix("actions/permissions/"))
+        .or_else(|| normalized.strip_prefix("actions/permission/"))
+        .or_else(|| {
+            if matches!(
+                normalized.as_str(),
+                "permissions" | "permission" | "actions/permissions" | "actions/permission"
+            ) {
+                Some("")
+            } else {
+                None
+            }
+        })?;
+    let mode = mode.trim();
+    if mode.is_empty() {
+        return None;
+    }
+    normalize_provider_box_permission_mode(mode)
+}
+
+fn normalize_provider_box_permission_mode(value: &str) -> Option<String> {
+    let normalized = value
+        .trim()
+        .to_ascii_lowercase()
+        .replace('_', "-")
+        .replace(' ', "-");
+    match normalized.as_str() {
+        "default" => Some("Default".to_string()),
+        "auto-review" | "autoreview" | "auto" => Some("Auto-review".to_string()),
+        "full-access" | "fullaccess" | "full" => Some("Full Access".to_string()),
+        _ => None,
+    }
 }
 
 fn engine_from_body(body: &Value) -> CliEngine {
@@ -2592,6 +2691,24 @@ mod tests {
             usage_refresh_slot_id(&request, CliEngine::Codex),
             "slot-agy-debug-usage"
         );
+    }
+
+    #[test]
+    fn slot_permission_mode_suffixes_map_to_codex_permission_modes() {
+        assert_eq!(
+            slot_permission_mode_from_suffix("permissions/default").as_deref(),
+            Some("Default")
+        );
+        assert_eq!(
+            slot_permission_mode_from_suffix("permissions/auto-review").as_deref(),
+            Some("Auto-review")
+        );
+        assert_eq!(
+            slot_permission_mode_from_suffix("actions/permissions/full-access").as_deref(),
+            Some("Full Access")
+        );
+        assert!(slot_permission_mode_from_suffix("permissions").is_none());
+        assert!(slot_permission_mode_from_suffix("permissions/not-a-mode").is_none());
     }
 
     #[tokio::test]

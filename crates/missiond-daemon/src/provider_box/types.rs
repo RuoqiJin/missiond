@@ -73,6 +73,7 @@ pub(crate) enum ProviderControlAction {
     Input,
     ClearInput,
     ClearScreen,
+    SetPermissions,
     Exit,
 }
 

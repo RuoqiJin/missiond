@@ -20,12 +20,12 @@ use super::types::{
     ProviderModelCatalogEntry, ProviderModelUsage, ProviderRouterExport, ProviderUsageSnapshot,
     ProviderUsageStatus, PtyObservation, PtyStepAction, PtyStepRecord, PtyStepVerificationStatus,
     TimeoutCancelPolicy, DIAG_MODEL_SWITCH_UNVERIFIED, DIAG_PROVIDER_BOX_INVALID_REQUEST,
-    DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE, DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
-    DIAG_PROVIDER_DURABLE_FINAL_MISSING, DIAG_PROVIDER_MCP_RECONNECT_UNVERIFIED,
-    DIAG_PROVIDER_MCP_STATUS_UNAVAILABLE, DIAG_PROVIDER_STATUS_UNAVAILABLE,
-    DIAG_PROVIDER_TEXT_ONLY_VIOLATION, DIAG_PROVIDER_TURN_STALLED,
-    DIAG_PROVIDER_TURN_TIMEOUT_CANCELLED, DIAG_PROVIDER_TURN_TIMEOUT_CANCEL_FAILED,
-    DIAG_USAGE_UNKNOWN,
+    DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE, DIAG_PROVIDER_CONTROL_ACTION_UNSUPPORTED,
+    DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED, DIAG_PROVIDER_DURABLE_FINAL_MISSING,
+    DIAG_PROVIDER_MCP_RECONNECT_UNVERIFIED, DIAG_PROVIDER_MCP_STATUS_UNAVAILABLE,
+    DIAG_PROVIDER_STATUS_UNAVAILABLE, DIAG_PROVIDER_TEXT_ONLY_VIOLATION,
+    DIAG_PROVIDER_TURN_STALLED, DIAG_PROVIDER_TURN_TIMEOUT_CANCELLED,
+    DIAG_PROVIDER_TURN_TIMEOUT_CANCEL_FAILED, DIAG_USAGE_UNKNOWN,
 };
 
 const DEFAULT_AGY_SLOT: &str = "slot-agy-provider-box";
@@ -3235,6 +3235,17 @@ impl ProviderDriver for AgyProviderDriver {
             }
             ProviderControlAction::ClearScreen => {
                 self.clear_screen_locked(&mut result, &slot_id).await;
+            }
+            ProviderControlAction::SetPermissions => {
+                result.status = ProviderBoxStatus::Unsupported;
+                result.add_diagnostic(ProviderBoxDiagnostic::unsupported(
+                    DIAG_PROVIDER_CONTROL_ACTION_UNSUPPORTED,
+                    "AGY does not support the Codex /permissions control action",
+                    json!({
+                        "slot_id": slot_id,
+                        "control_action": "set_permissions",
+                    }),
+                ));
             }
             ProviderControlAction::Exit => {
                 self.exit_locked(&mut result, &slot_id).await;

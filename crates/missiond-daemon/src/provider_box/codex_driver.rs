@@ -158,6 +158,23 @@ enum CodexTrustSelection {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexPermissionMode {
+    Default,
+    AutoReview,
+    FullAccess,
+}
+
+impl CodexPermissionMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Default => "Default",
+            Self::AutoReview => "Auto-review",
+            Self::FullAccess => "Full Access",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CodexManualPtyStep {
     action_type: String,
@@ -327,6 +344,44 @@ impl CodexProviderDriver {
             .filter(|value| !value.is_empty())
             .unwrap_or("missiond")
             .to_string()
+    }
+
+    fn request_permission_mode(
+        request: &ProviderInteractionRequest,
+    ) -> Result<CodexPermissionMode, ProviderBoxDiagnostic> {
+        let raw = request
+            .desired_worker
+            .as_ref()
+            .and_then(|worker| {
+                worker
+                    .get("permission_mode")
+                    .or_else(|| worker.get("mode"))
+                    .or_else(|| worker.get("target_permission_mode"))
+                    .and_then(Value::as_str)
+            })
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                    "Codex permissions control action requires permission_mode",
+                    json!({
+                        "slot_id": request.slot_id,
+                        "allowed_permission_modes": ["Default", "Auto-review", "Full Access"],
+                    }),
+                )
+            })?;
+        normalize_codex_permission_mode(raw).ok_or_else(|| {
+            ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                "Codex permissions control action uses an unsupported permission_mode",
+                json!({
+                    "slot_id": request.slot_id,
+                    "permission_mode": raw,
+                    "allowed_permission_modes": ["Default", "Auto-review", "Full Access"],
+                }),
+            )
+        })
     }
 
     fn request_manual_pty_step(
@@ -1347,6 +1402,215 @@ impl CodexProviderDriver {
         }
     }
 
+    async fn set_permissions_locked(
+        &self,
+        request: &ProviderInteractionRequest,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+    ) {
+        let target = match Self::request_permission_mode(request) {
+            Ok(mode) => mode,
+            Err(diagnostic) => {
+                result.status = ProviderBoxStatus::Failed;
+                result.add_diagnostic(diagnostic);
+                return;
+            }
+        };
+
+        let mut observation = self.observe(slot_id).await;
+        if !is_codex_permission_picker_observation(&observation) {
+            if !self.ensure_ready_for_prompt(result, slot_id).await {
+                return;
+            }
+            self.clear_input_locked(result, slot_id).await;
+            if matches!(
+                result.status,
+                ProviderBoxStatus::Blocked | ProviderBoxStatus::Failed
+            ) {
+                return;
+            }
+
+            let _ = self
+                .write_step(
+                    result,
+                    slot_id,
+                    PtyStepAction::text("/permissions"),
+                    "/permissions",
+                    Some("type Codex /permissions command".to_string()),
+                )
+                .await;
+            observation = self
+                .write_step(
+                    result,
+                    slot_id,
+                    PtyStepAction::key("enter"),
+                    "\r",
+                    Some("open Codex permissions picker".to_string()),
+                )
+                .await;
+            if !is_codex_permission_picker_observation(&observation) {
+                observation = self
+                    .wait_step_until(
+                        result,
+                        slot_id,
+                        Duration::from_secs(5),
+                        Some("wait for Codex permissions picker".to_string()),
+                        is_codex_permission_picker_observation,
+                    )
+                    .await;
+            }
+        }
+
+        let Some((modes, mut selected)) = codex_permission_picker_modes(&observation) else {
+            result.status = ProviderBoxStatus::Unverified;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+                "Codex permissions picker was not recognized",
+                json!({
+                    "slot_id": slot_id,
+                    "target_permission_mode": target.label(),
+                    "reason": observation.snapshot.reason,
+                }),
+            ));
+            let status = self.pty.get_status(slot_id).await;
+            result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
+            return;
+        };
+
+        let selected_index = modes.iter().position(|mode| *mode == selected);
+        let target_index = modes.iter().position(|mode| *mode == target);
+        let (Some(selected_index), Some(target_index)) = (selected_index, target_index) else {
+            result.status = ProviderBoxStatus::Unverified;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+                "Codex permissions picker did not include the target or selected mode",
+                json!({
+                    "slot_id": slot_id,
+                    "target_permission_mode": target.label(),
+                    "selected_permission_mode": selected.label(),
+                    "visible_permission_modes": modes.iter().map(|mode| mode.label()).collect::<Vec<_>>(),
+                }),
+            ));
+            let status = self.pty.get_status(slot_id).await;
+            result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
+            return;
+        };
+
+        let (key_name, bytes, steps) = if target_index >= selected_index {
+            ("down", "\x1b[B", target_index - selected_index)
+        } else {
+            ("up", "\x1b[A", selected_index - target_index)
+        };
+
+        for step_index in 0..steps {
+            observation = self
+                .write_step(
+                    result,
+                    slot_id,
+                    PtyStepAction::key(key_name),
+                    bytes,
+                    Some(format!(
+                        "move Codex permissions selection toward {}",
+                        target.label()
+                    )),
+                )
+                .await;
+            let Some((_visible, next_selected)) = codex_permission_picker_modes(&observation)
+            else {
+                result.status = ProviderBoxStatus::Unverified;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+                    "Codex permissions picker disappeared during navigation",
+                    json!({
+                        "slot_id": slot_id,
+                        "target_permission_mode": target.label(),
+                        "step_index": step_index,
+                    }),
+                ));
+                let status = self.pty.get_status(slot_id).await;
+                result.slot_status =
+                    Some(slot_status_value(slot_id, status.as_ref(), &observation));
+                return;
+            };
+            if next_selected == selected {
+                result.status = ProviderBoxStatus::Unverified;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+                    "Codex permissions selection did not move after arrow key",
+                    json!({
+                        "slot_id": slot_id,
+                        "target_permission_mode": target.label(),
+                        "selected_permission_mode": selected.label(),
+                        "key": key_name,
+                        "step_index": step_index,
+                    }),
+                ));
+                let status = self.pty.get_status(slot_id).await;
+                result.slot_status =
+                    Some(slot_status_value(slot_id, status.as_ref(), &observation));
+                return;
+            }
+            selected = next_selected;
+        }
+
+        if selected != target {
+            result.status = ProviderBoxStatus::Unverified;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+                "Codex permissions navigation ended on the wrong mode",
+                json!({
+                    "slot_id": slot_id,
+                    "target_permission_mode": target.label(),
+                    "selected_permission_mode": selected.label(),
+                }),
+            ));
+            let status = self.pty.get_status(slot_id).await;
+            result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
+            return;
+        }
+
+        observation = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::key("enter"),
+                "\r",
+                Some(format!("confirm Codex permissions mode {}", target.label())),
+            )
+            .await;
+        if !is_ready_for_codex_text(&observation) {
+            observation = self
+                .wait_step_until(
+                    result,
+                    slot_id,
+                    Duration::from_secs(5),
+                    Some("wait for Codex composer after permissions confirmation".to_string()),
+                    is_ready_for_codex_text,
+                )
+                .await;
+        }
+
+        let status = self.pty.get_status(slot_id).await;
+        result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
+        if is_ready_for_codex_text(&observation) {
+            result.status = ProviderBoxStatus::Completed;
+            result.final_text = Some(format!("Codex permissions set to {}", target.label()));
+            result.durable_source =
+                Some("codex_permission_picker_selection_before_confirm".to_string());
+        } else {
+            result.status = ProviderBoxStatus::Unverified;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+                "Codex permissions confirmation did not return to a ready composer",
+                json!({
+                    "slot_id": slot_id,
+                    "target_permission_mode": target.label(),
+                    "reason": observation.snapshot.reason,
+                }),
+            ));
+        }
+    }
+
     async fn refresh_mcp_status_locked(
         &self,
         request: &ProviderInteractionRequest,
@@ -2286,6 +2550,10 @@ impl ProviderDriver for CodexProviderDriver {
             ProviderControlAction::ClearScreen => {
                 self.clear_screen_locked(&mut result, &slot_id).await;
             }
+            ProviderControlAction::SetPermissions => {
+                self.set_permissions_locked(request, &mut result, &slot_id)
+                    .await;
+            }
             ProviderControlAction::Exit => unreachable!("handled above"),
         }
         if result.slot_status.is_none() {
@@ -2774,6 +3042,49 @@ fn selected_codex_workspace_trust_option(observation: &CodexObservation) -> Code
         }
     }
     CodexTrustSelection::Unknown
+}
+
+fn normalize_codex_permission_mode(value: &str) -> Option<CodexPermissionMode> {
+    let normalized = value
+        .trim()
+        .to_ascii_lowercase()
+        .replace('_', "-")
+        .replace(' ', "-");
+    match normalized.as_str() {
+        "default" => Some(CodexPermissionMode::Default),
+        "auto-review" | "autoreview" | "auto" => Some(CodexPermissionMode::AutoReview),
+        "full-access" | "fullaccess" | "full" => Some(CodexPermissionMode::FullAccess),
+        _ => None,
+    }
+}
+
+fn codex_permission_picker_modes(
+    observation: &CodexObservation,
+) -> Option<(Vec<CodexPermissionMode>, CodexPermissionMode)> {
+    let signals = observation.snapshot.screen_signals.as_ref()?;
+    if !signals.permission_picker_visible {
+        return None;
+    }
+    let modes = signals
+        .visible_permission_modes
+        .iter()
+        .filter_map(|mode| normalize_codex_permission_mode(mode))
+        .collect::<Vec<_>>();
+    let selected = signals
+        .selected_permission_mode
+        .as_deref()
+        .and_then(normalize_codex_permission_mode)?;
+    if modes.is_empty() {
+        None
+    } else {
+        Some((modes, selected))
+    }
+}
+
+fn is_codex_permission_picker_observation(observation: &CodexObservation) -> bool {
+    codex_permission_picker_modes(observation).is_some()
+        || observation.snapshot.blocked_kind.as_deref() == Some("permission_picker")
+        || observation.snapshot.reason == "codex:permission_picker"
 }
 
 fn codex_manual_key_bytes(key: &str) -> Option<(&'static str, &'static str)> {
@@ -3566,6 +3877,23 @@ fn codex_image_generation_final_text(evidence: &CodexImageGenerationEvidence) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_permission_mode_aliases_normalize() {
+        assert_eq!(
+            normalize_codex_permission_mode("default"),
+            Some(CodexPermissionMode::Default)
+        );
+        assert_eq!(
+            normalize_codex_permission_mode("auto_review"),
+            Some(CodexPermissionMode::AutoReview)
+        );
+        assert_eq!(
+            normalize_codex_permission_mode("full access"),
+            Some(CodexPermissionMode::FullAccess)
+        );
+        assert_eq!(normalize_codex_permission_mode("danger"), None);
+    }
 
     #[test]
     fn rollout_extractor_prefers_task_complete_after_correlation() {

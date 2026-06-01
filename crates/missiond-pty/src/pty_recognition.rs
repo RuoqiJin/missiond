@@ -78,6 +78,12 @@ pub struct ProviderScreenSignals {
     pub model_picker_visible: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub visible_models: Vec<String>,
+    #[serde(default)]
+    pub permission_picker_visible: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub visible_permission_modes: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_user_message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -100,6 +106,9 @@ impl ProviderScreenSignals {
             && self.placeholder_text.is_none()
             && !self.model_picker_visible
             && self.visible_models.is_empty()
+            && !self.permission_picker_visible
+            && self.visible_permission_modes.is_empty()
+            && self.selected_permission_mode.is_none()
             && self.last_user_message.is_none()
             && self.last_assistant_message.is_none()
             && self.last_tool_kind.is_none()
@@ -547,6 +556,21 @@ fn recognize_codex_with_style(
         .with_screen_signals(signals);
     }
 
+    if is_codex_permission_picker(lines, &lower) {
+        return PtyRecognitionSnapshot::new(
+            CliEngine::Codex,
+            PtyCanonicalState::Blocked,
+            0.92,
+            "codex:permission_picker",
+        )
+        .with_blocked_kind("permission_picker")
+        .with_phase("permission_mode")
+        .with_elapsed(elapsed)
+        .with_source("tui_source_signature")
+        .with_screen_identity(identity)
+        .with_screen_signals(signals);
+    }
+
     if is_codex_approval_menu(&lower) {
         return PtyRecognitionSnapshot::new(
             CliEngine::Codex,
@@ -873,11 +897,23 @@ struct CodexModelPickerRow {
     current: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodexPermissionPickerRow {
+    mode: String,
+    selected: bool,
+}
+
 fn is_codex_model_picker(lines: &[String], lower: &str) -> bool {
     (lower.contains("select model and effort")
         && lower.contains("press enter to confirm or esc to go back"))
         || (lower.contains("access legacy models by running codex -m")
             && codex_model_picker_rows(lines).len() >= 2)
+}
+
+fn is_codex_permission_picker(lines: &[String], lower: &str) -> bool {
+    lower.contains("update model permissions")
+        && lower.contains("press enter to confirm or esc to go back")
+        && codex_permission_picker_rows(lines).len() >= 3
 }
 
 fn codex_model_picker_rows(lines: &[String]) -> Vec<CodexModelPickerRow> {
@@ -917,6 +953,45 @@ fn parse_codex_model_picker_row(line: &str) -> Option<CodexModelPickerRow> {
         selected,
         current: body.contains("(current)"),
     })
+}
+
+fn codex_permission_picker_rows(lines: &[String]) -> Vec<CodexPermissionPickerRow> {
+    lines
+        .iter()
+        .filter_map(|line| parse_codex_permission_picker_row(line))
+        .collect()
+}
+
+fn parse_codex_permission_picker_row(line: &str) -> Option<CodexPermissionPickerRow> {
+    let mut trimmed = line.trim_start();
+    let selected = trimmed.starts_with('›') || trimmed.starts_with('>') || trimmed.starts_with('❯');
+    if selected {
+        trimmed = trimmed
+            .trim_start_matches(|ch| matches!(ch, '›' | '>' | '❯'))
+            .trim_start();
+    }
+
+    let (number, body) = trimmed.split_once('.')?;
+    if number.trim().parse::<usize>().is_err() {
+        return None;
+    }
+
+    let body = body.trim_start();
+    let mode = normalize_codex_permission_mode(body)?;
+    Some(CodexPermissionPickerRow { mode, selected })
+}
+
+fn normalize_codex_permission_mode(value: &str) -> Option<String> {
+    let lower = normalize_identity_value(value).to_ascii_lowercase();
+    if lower.starts_with("default") {
+        Some("Default".to_string())
+    } else if lower.starts_with("auto-review") || lower.starts_with("auto review") {
+        Some("Auto-review".to_string())
+    } else if lower.starts_with("full access") {
+        Some("Full Access".to_string())
+    } else {
+        None
+    }
 }
 
 fn extract_codex_screen_identity(lines: &[String]) -> Option<ProviderScreenIdentity> {
@@ -984,12 +1059,22 @@ fn extract_codex_screen_signals_with_style(
     let mut last_explored_idx: Option<usize> = None;
     let lower = joined_text(lines).to_ascii_lowercase();
     let model_picker_visible = is_codex_model_picker(lines, &lower);
+    let permission_picker_visible = is_codex_permission_picker(lines, &lower);
     if model_picker_visible {
         signals.model_picker_visible = true;
         signals.visible_models = codex_model_picker_rows(lines)
             .into_iter()
             .map(|row| row.model)
             .collect();
+    }
+    if permission_picker_visible {
+        signals.permission_picker_visible = true;
+        let rows = codex_permission_picker_rows(lines);
+        signals.visible_permission_modes = rows.iter().map(|row| row.mode.clone()).collect();
+        signals.selected_permission_mode = rows
+            .iter()
+            .find(|row| row.selected)
+            .map(|row| row.mode.clone());
     }
 
     for (idx, line) in lines.iter().enumerate() {
@@ -1001,7 +1086,7 @@ fn extract_codex_screen_signals_with_style(
             signals.folded_tool_output = true;
         }
 
-        if !model_picker_visible {
+        if !model_picker_visible && !permission_picker_visible {
             if let Some(prompt_text) = strip_codex_prompt_marker(trimmed) {
                 let styled_prompt = styled_screen
                     .and_then(|screen| screen.lines.get(idx))
@@ -2196,7 +2281,13 @@ fn snapshot_to_detection(snapshot: PtyRecognitionSnapshot) -> Option<StateDetect
     if matches!(snapshot.provider, CliEngine::Agy | CliEngine::Codex)
         && matches!(
             snapshot.blocked_kind.as_deref(),
-            Some("model_picker" | "slash_command_menu" | "slash_command_input" | "mcp_servers")
+            Some(
+                "model_picker"
+                    | "permission_picker"
+                    | "slash_command_menu"
+                    | "slash_command_input"
+                    | "mcp_servers"
+            )
         )
     {
         return Some(StateDetectionResult::new(
@@ -2695,6 +2786,54 @@ mod tests {
             "Select Model and Effort",
             "› 1. gpt-5.5 (current)    Frontier model for coding tasks",
             "  2. gpt-5.4              Previous frontier model",
+            "Press enter to confirm or esc to go back",
+        ])))
+        .expect("detection");
+
+        assert_eq!(result.state, State::SlashMenu);
+    }
+
+    #[test]
+    fn codex_permission_picker_tracks_selected_and_visible_modes() {
+        let result = recognize_codex(&lines(&[
+            "Update Model Permissions",
+            "",
+            "› 1. Default      Codex can read and edit files in the current workspace, and run commands. Approval is required to",
+            "                  access the internet or edit other files.",
+            "  2. Auto-review  Same workspace-write permissions as Default, but eligible `on-request` approvals are routed through",
+            "                  the auto-reviewer subagent.",
+            "  3. Full Access  Codex can edit files outside this workspace and access the internet without asking for approval.",
+            "                  Exercise caution when using.",
+            "",
+            "  Press enter to confirm or esc to go back",
+        ]));
+
+        assert_eq!(result.state, PtyCanonicalState::Blocked);
+        assert_eq!(result.reason, "codex:permission_picker");
+        assert_eq!(result.blocked_kind.as_deref(), Some("permission_picker"));
+        assert_eq!(result.phase.as_deref(), Some("permission_mode"));
+
+        let signals = result.screen_signals.expect("codex signals");
+        assert!(signals.permission_picker_visible);
+        assert_eq!(
+            signals.visible_permission_modes,
+            vec![
+                "Default".to_string(),
+                "Auto-review".to_string(),
+                "Full Access".to_string()
+            ]
+        );
+        assert_eq!(signals.selected_permission_mode.as_deref(), Some("Default"));
+        assert!(signals.last_user_message.is_none());
+    }
+
+    #[test]
+    fn codex_permission_picker_maps_to_slash_menu_not_confirmation() {
+        let result = snapshot_to_detection(recognize_codex(&lines(&[
+            "Update Model Permissions",
+            "› 1. Default      Codex can read and edit files in the current workspace, and run commands.",
+            "  2. Auto-review  Same workspace-write permissions as Default",
+            "  3. Full Access  Codex can edit files outside this workspace",
             "Press enter to confirm or esc to go back",
         ])))
         .expect("detection");
