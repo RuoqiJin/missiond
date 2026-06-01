@@ -1972,6 +1972,58 @@ fn extract_claude_code_permission_mode(lines: &[String]) -> Option<String> {
     })
 }
 
+fn extract_claude_code_startup_config_signals(
+    lines: &[String],
+    lower: &str,
+) -> Option<ProviderScreenSignals> {
+    let theme_prompt_visible = lower.contains("welcome to claude code")
+        && lower.contains("choose the text style")
+        && lower.contains("terminal");
+    if !theme_prompt_visible {
+        return None;
+    }
+
+    let mut signals = ProviderScreenSignals {
+        startup_prompt_visible: true,
+        startup_prompt_kind: Some("theme_picker".to_string()),
+        ..ProviderScreenSignals::default()
+    };
+
+    for line in lines {
+        let cleaned = normalize_identity_value(line);
+        let trimmed = cleaned.trim();
+        let Some(captures) = CLAUDE_CODE_STARTUP_OPTION_RE.captures(trimmed) else {
+            continue;
+        };
+        let Some(index) = captures
+            .name("index")
+            .and_then(|value| value.as_str().parse::<u16>().ok())
+        else {
+            continue;
+        };
+        let selected = captures.name("selected").is_some();
+        let mut label = captures
+            .name("label")
+            .map(|value| value.as_str().trim().to_string())
+            .unwrap_or_default();
+        let checked = label.ends_with('✔');
+        if checked {
+            label = label.trim_end_matches('✔').trim().to_string();
+        }
+        if label.is_empty() {
+            continue;
+        }
+        signals.visible_startup_options.push(label.clone());
+        if selected {
+            signals.selected_startup_option = Some(label);
+            signals.selected_startup_option_index = Some(index);
+            signals.selected_startup_option_checked = checked;
+        }
+    }
+
+    Some(signals)
+}
+
 fn extract_agy_screen_identity(lines: &[String]) -> Option<ProviderScreenIdentity> {
     let text = joined_text(lines);
     let mut identity = ProviderScreenIdentity {
@@ -2674,29 +2726,123 @@ fn is_agy_workspace_trust_prompt(_lines: &[String], lower: &str) -> bool {
         && lower.contains("confirm")
 }
 
+fn is_claude_spinner_glyph(c: char) -> bool {
+    "·✻✽✶✳✢*⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".contains(c)
+}
+
+fn strip_claude_spinner_prefix(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    let first = trimmed.chars().next()?;
+    if !is_claude_spinner_glyph(first) {
+        return None;
+    }
+    Some(trimmed[first.len_utf8()..].trim_start())
+}
+
+fn is_claude_spinner_status_line(line: &str) -> bool {
+    let Some(rest) = strip_claude_spinner_prefix(line) else {
+        return false;
+    };
+    if !(rest.contains("...") || rest.contains('…')) {
+        return false;
+    }
+    let lower = rest.to_ascii_lowercase();
+    !lower.starts_with("idle") && !is_claude_completion_text(rest)
+}
+
+fn is_claude_explicit_active_spinner_line(line: &str) -> bool {
+    if !is_claude_spinner_status_line(line) {
+        return false;
+    }
+    let lower = line.to_ascii_lowercase();
+    lower.contains("esc to interrupt")
+        || lower.contains("almost done thinking")
+        || lower.contains("thinking with")
+}
+
+fn is_claude_user_prompt_with_input(line: &str) -> bool {
+    let trimmed = line.trim();
+    for marker in ["❯", "›", ">"] {
+        let Some(rest) = trimmed.strip_prefix(marker) else {
+            continue;
+        };
+        let rest = rest.trim();
+        if rest.is_empty()
+            || rest.contains("shift+tab to cycle")
+            || rest.contains("? for shortcuts")
+            || rest.contains("← for agents")
+        {
+            return false;
+        }
+        return true;
+    }
+    false
+}
+
+fn is_claude_plain_idle_prompt(line: &str) -> bool {
+    matches!(line.trim(), "❯" | "›" | ">")
+}
+
 fn has_active_claude_spinner(lines: &[String]) -> bool {
-    lines.iter().any(|line| {
-        let trimmed = line.trim_start();
-        let starts_with_spinner = trimmed
-            .chars()
-            .next()
-            .is_some_and(|c| "·✻✽✶✳✢*⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".contains(c));
-        starts_with_spinner && (trimmed.contains("...") || trimmed.contains('…'))
-    })
+    lines.iter().any(|line| is_claude_spinner_status_line(line))
 }
 
 fn has_current_claude_activity_line(lines: &[String]) -> bool {
-    lines.iter().rev().take(6).any(|line| {
-        let trimmed = line.trim_start();
-        let starts_with_spinner = trimmed
-            .chars()
-            .next()
-            .is_some_and(|c| "·✻✽✶✳✢*⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".contains(c));
-        starts_with_spinner
-            && (trimmed.contains("esc to interrupt")
-                || trimmed.contains("almost done thinking")
-                || trimmed.contains("thinking with"))
-    })
+    let Some((spinner_idx, spinner_line)) = lines
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, line)| is_claude_spinner_status_line(line))
+    else {
+        return false;
+    };
+
+    if is_claude_explicit_active_spinner_line(spinner_line) {
+        return true;
+    }
+
+    if lines
+        .iter()
+        .skip(spinner_idx + 1)
+        .any(|line| is_claude_completion_text(line))
+    {
+        return false;
+    }
+
+    let prompt_with_input_before_spinner = lines
+        .iter()
+        .take(spinner_idx)
+        .rev()
+        .take(12)
+        .any(|line| is_claude_user_prompt_with_input(line));
+    let has_active_footer = lines
+        .iter()
+        .rev()
+        .take(8)
+        .any(|line| line.to_ascii_lowercase().contains("esc to interrupt"));
+    if prompt_with_input_before_spinner && has_active_footer {
+        return true;
+    }
+
+    let non_empty_after_spinner = lines
+        .iter()
+        .skip(spinner_idx + 1)
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    let idle_prompt_after_spinner = non_empty_after_spinner
+        .iter()
+        .any(|line| is_claude_plain_idle_prompt(line));
+    if idle_prompt_after_spinner {
+        return false;
+    }
+
+    lines
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, line)| !line.trim().is_empty())
+        .take(6)
+        .any(|(idx, _)| idx == spinner_idx)
 }
 
 fn has_idle_prompt(lines: &[String]) -> bool {
@@ -2720,15 +2866,25 @@ fn has_idle_prompt(lines: &[String]) -> bool {
 }
 
 fn has_completion_line(lines: &[String]) -> bool {
-    lines.iter().rev().take(8).any(|line| {
-        let trimmed = line
-            .trim_start()
-            .trim_start_matches(|c: char| "·✻✽✶✳✢*⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ ".contains(c));
-        trimmed.starts_with("Worked for")
-            || trimmed.starts_with("Churned for")
-            || trimmed.starts_with("Baked for")
-            || trimmed.starts_with("Cooked for")
-    })
+    lines
+        .iter()
+        .rev()
+        .take(8)
+        .any(|line| is_claude_completion_text(line))
+}
+
+fn is_claude_completion_text(line: &str) -> bool {
+    let trimmed = line
+        .trim_start()
+        .trim_start_matches(|c: char| "·✻✽✶✳✢*⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ ".contains(c));
+    trimmed.starts_with("Worked for")
+        || trimmed.starts_with("Baked for")
+        || trimmed.starts_with("Brewed for")
+        || trimmed.starts_with("Churned for")
+        || trimmed.starts_with("Cogitated for")
+        || trimmed.starts_with("Cooked for")
+        || trimmed.starts_with("Crunched for")
+        || trimmed.starts_with("Sautéed for")
 }
 
 fn extract_tool_name(lines: &[String]) -> Option<String> {
@@ -3889,6 +4045,25 @@ mod tests {
     }
 
     #[test]
+    fn claude_code_spinner_verb_with_active_footer_is_running() {
+        // ClaudeCode's spinner text comes from src/constants/spinnerVerbs.ts
+        // and can be any randomized "<verb>…" phrase, e.g. Whirlpooling.
+        // The current-turn evidence is the user prompt plus active footer,
+        // not the specific verb.
+        let result = recognize_claude_code(&lines(&[
+            "❯ /logout",
+            "· Whirlpooling…",
+            "────────────────────────────────────────",
+            "❯",
+            "────────────────────────────────────────",
+            "⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt",
+        ]));
+        assert_eq!(result.state, PtyCanonicalState::Running);
+        assert_eq!(result.reason, "claude_code:active_spinner");
+        assert_eq!(result.phase.as_deref(), Some("thinking"));
+    }
+
+    #[test]
     fn claude_completion_and_prompt_is_complete() {
         let result = recognize_claude_code(&lines(&[
             "* Worked for 10s",
@@ -4147,6 +4322,39 @@ mod tests {
         ]));
         assert_eq!(result.state, PtyCanonicalState::Idle);
         assert_eq!(result.reason, "claude_code:prompt_idle");
+    }
+
+    #[test]
+    fn claude_code_first_run_theme_prompt_is_startup_blocked() {
+        let result = recognize_claude_code(&lines(&[
+            "Welcome to Claude Code v2.1.159",
+            "Let's get started.",
+            "Choose the text style that looks best with your terminal",
+            "  1. Auto (match terminal)",
+            "❯ 2. Dark mode ✔",
+            "  3. Light mode",
+            "  4. Dark mode (colorblind-friendly)",
+            "",
+            "Syntax theme: Monokai Extended (ctrl+t to disable)",
+        ]));
+        assert_eq!(result.state, PtyCanonicalState::Blocked);
+        assert_eq!(result.reason, "claude_code:first_run_theme_prompt");
+        assert_eq!(result.blocked_kind.as_deref(), Some("startup_config"));
+        assert_eq!(result.phase.as_deref(), Some("startup_theme"));
+        let identity = result.screen_identity.expect("claude code identity");
+        assert_eq!(identity.cli_version.as_deref(), Some("2.1.159"));
+        let signals = result.screen_signals.expect("startup signals");
+        assert!(signals.startup_prompt_visible);
+        assert_eq!(signals.startup_prompt_kind.as_deref(), Some("theme_picker"));
+        assert_eq!(signals.selected_startup_option_index, Some(2));
+        assert_eq!(
+            signals.selected_startup_option.as_deref(),
+            Some("Dark mode")
+        );
+        assert!(signals.selected_startup_option_checked);
+        assert!(signals
+            .visible_startup_options
+            .contains(&"Auto (match terminal)".to_string()));
     }
 
     #[test]
