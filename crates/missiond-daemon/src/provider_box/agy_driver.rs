@@ -36,7 +36,9 @@ const MODEL_CATALOG_MAX_DOWN: usize = 128;
 const OBSERVE_SETTLE_MS: u64 = 220;
 const AGY_STARTUP_SIGN_IN_WAIT_SECS: u64 = 10;
 const AGY_STARTUP_READY_WAIT_SECS: u64 = 30;
-const AGY_DURABLE_FINAL_IDLE_GRACE_SECS: u64 = 10;
+const AGY_DURABLE_FINAL_IDLE_GRACE_DEFAULT_SECS: u64 = 90;
+const AGY_DURABLE_FINAL_IDLE_GRACE_MIN_SECS: u64 = 10;
+const AGY_DURABLE_FINAL_IDLE_GRACE_MAX_SECS: u64 = 300;
 const AGY_PROMPT_SEND_READY_WAIT_SECS: u64 = 8;
 const AGY_MANUAL_TEXT_LIMIT: usize = 4096;
 const AGY_USAGE_MAX_PAGES: usize = 8;
@@ -209,6 +211,20 @@ impl AgyProviderDriver {
                 worker
                     .get("spawn_if_missing")
                     .or_else(|| worker.get("spawn"))
+                    .and_then(Value::as_bool)
+            })
+            .unwrap_or(false)
+    }
+
+    fn request_force_restart(request: &ProviderInteractionRequest) -> bool {
+        request
+            .desired_worker
+            .as_ref()
+            .and_then(|worker| {
+                worker
+                    .get("force_restart")
+                    .or_else(|| worker.get("restart"))
+                    .or_else(|| worker.get("respawn"))
                     .and_then(Value::as_bool)
             })
             .unwrap_or(false)
@@ -463,6 +479,29 @@ impl AgyProviderDriver {
                     }),
                 ));
                 return None;
+            }
+            if Self::request_force_restart(request) {
+                result.add_diagnostic(ProviderBoxDiagnostic::warning(
+                    DIAG_PROVIDER_TURN_STALLED,
+                    "AGY slot force_restart requested; restarting slot before use",
+                    json!({
+                        "slot_id": slot_id,
+                        "session_state": status.state,
+                    }),
+                ));
+                if let Err(err) = self.pty.kill(&slot_id).await {
+                    result.status = ProviderBoxStatus::Failed;
+                    result.add_diagnostic(ProviderBoxDiagnostic::error(
+                        DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                        "AGY force_restart failed while killing the existing slot",
+                        json!({
+                            "slot_id": slot_id,
+                            "error": err.to_string(),
+                        }),
+                    ));
+                    return None;
+                }
+                return self.spawn_slot_with_bootstrap(&slot, options, result).await;
             }
             if !matches!(status.state, SessionState::Exited | SessionState::Error) {
                 let observation = self.observe(&slot_id).await;
@@ -1581,6 +1620,7 @@ impl AgyProviderDriver {
         attempt: u8,
     ) -> AgyMonitorOutcome {
         let timeout_secs = request.timeout_secs.unwrap_or(policy.running_timeout_secs);
+        let durable_final_idle_grace_secs = durable_final_idle_grace_secs();
         let started = Instant::now();
         let mut last_screen_hash: Option<String> = None;
         let mut last_progress = Instant::now();
@@ -1630,7 +1670,7 @@ impl AgyProviderDriver {
 
             if is_ready_for_text(&observation) {
                 if let Some(seen_at) = idle_seen_at {
-                    if seen_at.elapsed() >= Duration::from_secs(AGY_DURABLE_FINAL_IDLE_GRACE_SECS) {
+                    if seen_at.elapsed() >= Duration::from_secs(durable_final_idle_grace_secs) {
                         let mut failed =
                             ProviderBoxResult::base(request, ProviderBoxStatus::Failed);
                         failed.slot_id = Some(slot_id.to_string());
@@ -1643,6 +1683,7 @@ impl AgyProviderDriver {
                                 "correlation_id": request.correlation_id,
                                 "extraction": "workspace_cursor",
                                 "agy_home": self.agy_home.display().to_string(),
+                                "idle_grace_secs": durable_final_idle_grace_secs,
                             }),
                         ));
                         return AgyMonitorOutcome::Failed(failed);
@@ -1799,7 +1840,10 @@ impl AgyProviderDriver {
             let start_index = cursor_for_session
                 .map(|value| value.step_count)
                 .unwrap_or(0);
-            if let Some(outcome) = extract_cursor_turn(&session, start_index, prompt) {
+            let require_prompt_match = cursor_for_session.is_none();
+            if let Some(outcome) =
+                extract_cursor_turn(&session, start_index, prompt, require_prompt_match)
+            {
                 return match outcome {
                     AgyTranscriptOutcome::Completed(mut final_turn) => {
                         final_turn.transcript_path = cursor_for_session
@@ -2471,6 +2515,57 @@ impl AgyProviderDriver {
             ProviderBoxStatus::Completed
         };
     }
+
+    async fn recover_private_text_slot_before_turn(
+        &self,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+    ) -> bool {
+        if !is_private_agy_text_slot_id(slot_id) {
+            return false;
+        }
+        let Some(status) = self.pty.get_status(slot_id).await else {
+            return false;
+        };
+        if status.engine != CliEngine::Agy
+            || matches!(
+                status.state,
+                SessionState::Idle | SessionState::Exited | SessionState::Error
+            )
+        {
+            return false;
+        }
+        let observation = self.observe(slot_id).await;
+        if !should_restart_private_text_slot_before_turn(slot_id, status.state, &observation) {
+            return false;
+        }
+
+        result.add_diagnostic(ProviderBoxDiagnostic::warning(
+            DIAG_PROVIDER_TURN_STALLED,
+            "AGY private text-only slot was not ready at turn start; restarting stale replica",
+            json!({
+                "slot_id": slot_id,
+                "session_state": status.state,
+                "screen_state": observation.snapshot.state,
+                "reason": observation.snapshot.reason,
+            }),
+        ));
+        match self.pty.kill(slot_id).await {
+            Ok(()) => true,
+            Err(err) => {
+                result.status = ProviderBoxStatus::Failed;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                    "AGY stale private text-only slot could not be killed before restart",
+                    json!({
+                        "slot_id": slot_id,
+                        "error": err.to_string(),
+                    }),
+                ));
+                false
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -2852,10 +2947,16 @@ impl ProviderDriver for AgyProviderDriver {
         self.reclaim_idle_text_slots().await;
         let _text_turn_guard = self.text_turn_global_lock.lock().await;
         let requested_slot_id = Self::request_slot_id(request);
-        let cold_start_slot = match self.pty.get_status(&requested_slot_id).await {
+        let mut cold_start_slot = match self.pty.get_status(&requested_slot_id).await {
             Some(status) => matches!(status.state, SessionState::Exited | SessionState::Error),
             None => true,
         };
+        if self
+            .recover_private_text_slot_before_turn(&mut result, &requested_slot_id)
+            .await
+        {
+            cold_start_slot = true;
+        }
         let Some(slot_id) = self.ensure_slot(request, &mut result).await else {
             return result;
         };
@@ -3476,6 +3577,19 @@ fn should_switch_model_for_pure_text_slot(
     allow_model_switch || (cold_start_slot && is_private_agy_text_slot_id(slot_id))
 }
 
+fn should_restart_private_text_slot_before_turn(
+    slot_id: &str,
+    session_state: SessionState,
+    observation: &AgyObservation,
+) -> bool {
+    is_private_agy_text_slot_id(slot_id)
+        && !matches!(
+            session_state,
+            SessionState::Idle | SessionState::Exited | SessionState::Error
+        )
+        && !is_ready_for_text(observation)
+}
+
 fn idle_agy_text_slot_reclaim_candidates(
     last_used: &HashMap<String, Instant>,
     now: Instant,
@@ -3979,10 +4093,22 @@ fn is_retryable_text_turn_failure(result: &ProviderBoxResult) -> bool {
         })
 }
 
+fn durable_final_idle_grace_secs() -> u64 {
+    std::env::var("MISSIOND_AGY_DURABLE_FINAL_IDLE_GRACE_SECS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(AGY_DURABLE_FINAL_IDLE_GRACE_DEFAULT_SECS)
+        .clamp(
+            AGY_DURABLE_FINAL_IDLE_GRACE_MIN_SECS,
+            AGY_DURABLE_FINAL_IDLE_GRACE_MAX_SECS,
+        )
+}
+
 fn extract_cursor_turn(
     session: &AgySession,
     start_index: usize,
     prompt: &str,
+    require_prompt_match: bool,
 ) -> Option<AgyTranscriptOutcome> {
     let start = session
         .steps
@@ -3990,7 +4116,9 @@ fn extract_cursor_turn(
         .enumerate()
         .skip(start_index)
         .find_map(|(index, step)| {
-            (step.step_type == "USER_INPUT" && step_contains_prompt(step, prompt)).then_some(index)
+            (step.step_type == "USER_INPUT"
+                && (!require_prompt_match || step_contains_prompt(step, prompt)))
+            .then_some(index)
         })?;
 
     let mut final_text = None;
@@ -4091,11 +4219,54 @@ fn step_contains_prompt(step: &AgyStep, prompt: &str) -> bool {
     if content_trimmed.contains(prompt) {
         return true;
     }
-    normalize_prompt_match_text(content_trimmed).contains(&normalize_prompt_match_text(prompt))
+    let content_normalized = normalize_prompt_match_text(content_trimmed);
+    let prompt_normalized = normalize_prompt_match_text(prompt);
+    content_normalized.contains(&prompt_normalized)
+        || prompt_anchor_match(&content_normalized, &prompt_normalized)
 }
 
 fn normalize_prompt_match_text(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn prompt_anchor_match(content: &str, prompt: &str) -> bool {
+    if prompt.chars().count() < 512 {
+        return false;
+    }
+    let mut anchors = Vec::new();
+    for anchor in [
+        prompt_anchor_prefix(prompt, 384),
+        prompt_anchor_middle(prompt, 384),
+        prompt_anchor_suffix(prompt, 384),
+    ] {
+        if anchor.chars().count() >= 96 && !anchors.iter().any(|existing| existing == &anchor) {
+            anchors.push(anchor);
+        }
+    }
+    anchors
+        .iter()
+        .filter(|anchor| content.contains(anchor.as_str()))
+        .count()
+        >= 2
+}
+
+fn prompt_anchor_prefix(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
+}
+
+fn prompt_anchor_middle(value: &str, max_chars: usize) -> String {
+    let chars = value.chars().collect::<Vec<_>>();
+    if chars.len() <= max_chars {
+        return chars.into_iter().collect();
+    }
+    let start = chars.len().saturating_sub(max_chars) / 2;
+    chars[start..start + max_chars].iter().collect()
+}
+
+fn prompt_anchor_suffix(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars().rev().take(max_chars).collect::<Vec<_>>();
+    chars.reverse();
+    chars.into_iter().collect()
 }
 
 fn value_text(value: &Value) -> String {
@@ -4527,7 +4698,7 @@ mod tests {
             ],
         };
 
-        let outcome = extract_cursor_turn(&session, 2, "hello from router").expect("matched");
+        let outcome = extract_cursor_turn(&session, 2, "hello from router", true).expect("matched");
 
         match outcome {
             AgyTranscriptOutcome::Completed(turn) => {
@@ -4550,7 +4721,7 @@ mod tests {
             steps: vec![step(1, "USER_INPUT", Some(json!("read a file"))), tool_step],
         };
 
-        let outcome = extract_cursor_turn(&session, 0, "read a file").expect("matched");
+        let outcome = extract_cursor_turn(&session, 0, "read a file", true).expect("matched");
 
         assert!(matches!(outcome, AgyTranscriptOutcome::Violation { .. }));
     }
@@ -4566,7 +4737,7 @@ mod tests {
             ],
         };
 
-        let outcome = extract_cursor_turn(&session, 0, "short prompt").expect("matched");
+        let outcome = extract_cursor_turn(&session, 0, "short prompt", true).expect("matched");
 
         match outcome {
             AgyTranscriptOutcome::Completed(turn) => {
@@ -4586,7 +4757,58 @@ mod tests {
             ],
         };
 
-        let outcome = extract_cursor_turn(&session, 0, "line one\nline two").expect("matched");
+        let outcome =
+            extract_cursor_turn(&session, 0, "line one\nline two", true).expect("matched");
+
+        assert!(matches!(outcome, AgyTranscriptOutcome::Completed(_)));
+    }
+
+    #[test]
+    fn cursor_turn_accepts_first_user_after_baseline_without_prompt_match() {
+        let session = AgySession {
+            session_id: "conv-1".to_string(),
+            steps: vec![
+                step(1, "USER_INPUT", Some(json!("previous turn"))),
+                step(2, "PLANNER_RESPONSE", Some(json!("previous final"))),
+                step(
+                    3,
+                    "USER_INPUT",
+                    Some(json!("truncated transcript user payload")),
+                ),
+                step(4, "PLANNER_RESPONSE", Some(json!("final answer"))),
+            ],
+        };
+
+        let outcome =
+            extract_cursor_turn(&session, 2, "long prompt that is not fully logged", false)
+                .expect("matched first new user turn");
+
+        match outcome {
+            AgyTranscriptOutcome::Completed(turn) => {
+                assert_eq!(turn.final_text, "final answer");
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prompt_match_accepts_large_prompt_by_stable_anchors() {
+        let prompt = format!(
+            "{}\n{}\n{}",
+            "alpha ".repeat(120),
+            "middle unique source catalog batch 7 ".repeat(30),
+            "omega unique citation bounds ".repeat(80)
+        );
+        let logged = format!("<USER_REQUEST>\n{prompt}\n</USER_REQUEST>");
+        let session = AgySession {
+            session_id: "conv-1".to_string(),
+            steps: vec![
+                step(1, "USER_INPUT", Some(json!(logged))),
+                step(2, "PLANNER_RESPONSE", Some(json!("final answer"))),
+            ],
+        };
+
+        let outcome = extract_cursor_turn(&session, 0, &prompt, true).expect("matched by anchors");
 
         assert!(matches!(outcome, AgyTranscriptOutcome::Completed(_)));
     }
@@ -4808,6 +5030,48 @@ mod tests {
             false,
             true
         ));
+    }
+
+    #[test]
+    fn private_text_slot_restart_detects_stale_thinking_replica() {
+        let stale = observation(&["⣻", "for 2s", "? for shortcuts"]);
+        assert!(should_restart_private_text_slot_before_turn(
+            "slot-agy-claude-opus-46-thinking-b",
+            SessionState::Thinking,
+            &stale
+        ));
+
+        let ready = observation(&[
+            "      ▄▀▀▄        Antigravity CLI 1.0.3",
+            "     ▀▀▀▀▀▀       jjrrqqq@gmail.com (Google AI Ultra)",
+            "    ▀▀▀▀▀▀▀▀      Claude Opus 4.6 (Thinking)",
+            "   ▄▀▀    ▀▀▄     ~/Projects/missiond",
+            ">",
+            "? for shortcuts                                                                               Claude Opus 4.6 (Thinking)",
+        ]);
+        assert!(!should_restart_private_text_slot_before_turn(
+            "slot-agy-claude-opus-46-thinking-b",
+            SessionState::Starting,
+            &ready
+        ));
+        assert!(!should_restart_private_text_slot_before_turn(
+            "slot-agy-usage-probe",
+            SessionState::Thinking,
+            &stale
+        ));
+    }
+
+    #[test]
+    fn request_force_restart_reads_status_spawn_aliases() {
+        let mut request = ProviderInteractionRequest::new(BoxCommand::Status, CliEngine::Agy);
+        request.desired_worker = Some(json!({"force_restart": true}));
+        assert!(AgyProviderDriver::request_force_restart(&request));
+
+        request.desired_worker = Some(json!({"respawn": true}));
+        assert!(AgyProviderDriver::request_force_restart(&request));
+
+        request.desired_worker = Some(json!({"spawn_if_missing": true}));
+        assert!(!AgyProviderDriver::request_force_restart(&request));
     }
 
     #[test]
