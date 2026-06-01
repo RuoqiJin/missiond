@@ -32,6 +32,10 @@ const DEFAULT_AGY_SLOT: &str = "slot-agy-provider-box";
 const AGY_CTRL_D: &str = "\x1b[100;5u";
 const AGY_EXIT_COMMAND: &str = "/exit";
 const MODEL_PICKER_MAX_DOWN: usize = 96;
+const MODEL_PICKER_SCAN_DIRECTIONS: &[(&str, &str, &str)] = &[
+    ("down", "\x1b[B", "move AGY model picker selection down"),
+    ("up", "\x1b[A", "move AGY model picker selection up"),
+];
 const MODEL_CATALOG_MAX_DOWN: usize = 128;
 const OBSERVE_SETTLE_MS: u64 = 320;
 const OBSERVE_STABLE_POLL_MS: u64 = 120;
@@ -1315,8 +1319,9 @@ impl AgyProviderDriver {
         }
 
         let mut all_seen_selected = HashSet::new();
-        for (direction, key, label) in [("down", "\x1b[B", "move AGY model picker selection down")]
-        {
+        let mut scan_directions = Vec::<&str>::new();
+        for (direction, key, label) in MODEL_PICKER_SCAN_DIRECTIONS {
+            scan_directions.push(*direction);
             let mut phase_seen_selected = HashSet::new();
             for _ in 0..MODEL_PICKER_MAX_DOWN {
                 if !is_model_picker(&observation) {
@@ -1355,9 +1360,9 @@ impl AgyProviderDriver {
                     .write_step(
                         result,
                         slot_id,
-                        PtyStepAction::key(direction),
-                        key,
-                        Some(label.to_string()),
+                        PtyStepAction::key(*direction),
+                        *key,
+                        Some((*label).to_string()),
                     )
                     .await;
                 if current_model_eq(&observation, target_model) {
@@ -1396,7 +1401,7 @@ impl AgyProviderDriver {
                 "target_model": target_model,
                 "slot_id": slot_id,
                 "seen_selected_count": all_seen_selected.len(),
-                "scan_directions": ["down"],
+                "scan_directions": scan_directions,
             }),
         ));
         false
@@ -5078,6 +5083,16 @@ mod tests {
                 "Gemini 3.5 Flash (Medium)".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn model_picker_bounded_scan_uses_up_after_down_fallback() {
+        let directions = MODEL_PICKER_SCAN_DIRECTIONS
+            .iter()
+            .map(|(direction, _, _)| *direction)
+            .collect::<Vec<_>>();
+
+        assert_eq!(directions, vec!["down", "up"]);
     }
 
     #[test]
