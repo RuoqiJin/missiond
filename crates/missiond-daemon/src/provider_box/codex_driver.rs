@@ -3272,8 +3272,42 @@ fn codex_exec_event_is_imagegen_skill_bootstrap(event: &Value) -> bool {
         .and_then(Value::as_str)
         .unwrap_or_default();
     title.contains("imagegen")
-        && code.contains("/.codex/skills/.system/imagegen/SKILL.md")
-        && code.contains("readFile")
+        && (codex_exec_imagegen_skill_read_code(code)
+            || codex_exec_imagegen_skill_continuation_code(code))
+}
+
+fn codex_exec_imagegen_skill_read_code(code: &str) -> bool {
+    code.contains("/.codex/skills/.system/imagegen/SKILL.md") && code.contains("readFile")
+}
+
+fn codex_exec_imagegen_skill_continuation_code(code: &str) -> bool {
+    let normalized = code.split_whitespace().collect::<String>();
+    let Some(inner) = normalized
+        .strip_prefix("nodeRepl.write(")
+        .and_then(|value| value.strip_suffix(");"))
+    else {
+        return false;
+    };
+    let Some((var_name, range)) = inner.split_once(".slice(") else {
+        return false;
+    };
+    if !var_name.starts_with("skillText")
+        || !var_name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return false;
+    }
+    let Some(range) = range.strip_suffix(')') else {
+        return false;
+    };
+    let Some((start, end)) = range.split_once(',') else {
+        return false;
+    };
+    !start.is_empty()
+        && !end.is_empty()
+        && start.chars().all(|ch| ch.is_ascii_digit())
+        && end.chars().all(|ch| ch.is_ascii_digit())
 }
 
 fn codex_exec_tool_name_is_research_allowed(name: &str) -> bool {
@@ -3962,6 +3996,53 @@ Weekly limit:                [████████████████�
         let research_analysis =
             analyze_codex_exec_jsonl_for_kind(&bootstrap, CodexExecTaskKind::Research);
         assert!(research_analysis.violation.is_some());
+    }
+
+    #[test]
+    fn codex_exec_image_analysis_allows_imagegen_skill_continuation_mcp() {
+        let continuation = json!({
+            "type": "item.started",
+            "item": {
+                "type": "mcp_tool_call",
+                "server": "node_repl",
+                "tool": "js",
+                "arguments": {
+                    "title": "Read imagegen skill continuation",
+                    "code": "nodeRepl.write(skillText1.slice(4000, 8000));"
+                }
+            }
+        })
+        .to_string();
+
+        let image_analysis =
+            analyze_codex_exec_jsonl_for_kind(&continuation, CodexExecTaskKind::ImageGeneration);
+        assert!(image_analysis.violation.is_none());
+        assert_eq!(image_analysis.allowed_tool_event_count, 0);
+
+        let research_analysis =
+            analyze_codex_exec_jsonl_for_kind(&continuation, CodexExecTaskKind::Research);
+        assert!(research_analysis.violation.is_some());
+    }
+
+    #[test]
+    fn codex_exec_image_analysis_rejects_arbitrary_node_repl_imagegen_mcp() {
+        let arbitrary = json!({
+            "type": "item.started",
+            "item": {
+                "type": "mcp_tool_call",
+                "server": "node_repl",
+                "tool": "js",
+                "arguments": {
+                    "title": "Read imagegen skill continuation",
+                    "code": "nodeRepl.write(process.env.HOME);"
+                }
+            }
+        })
+        .to_string();
+
+        let image_analysis =
+            analyze_codex_exec_jsonl_for_kind(&arbitrary, CodexExecTaskKind::ImageGeneration);
+        assert!(image_analysis.violation.is_some());
     }
 
     #[test]
