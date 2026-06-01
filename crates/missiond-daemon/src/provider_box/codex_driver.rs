@@ -119,6 +119,14 @@ impl CodexExecTaskKind {
             Self::ImageGeneration => "text/markdown+image",
         }
     }
+
+    fn required_tool_family(self) -> Option<&'static str> {
+        match self {
+            Self::TextOnly => None,
+            Self::Research => Some("web_search"),
+            Self::ImageGeneration => Some("image_generation"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1792,6 +1800,28 @@ impl CodexProviderDriver {
                     "stderr_excerpt": stderr_text.chars().take(1200).collect::<String>(),
                     "stdout_event_count": analysis.event_count,
                     "allowed_tool_event_count": analysis.allowed_tool_event_count,
+                }),
+            ));
+            return false;
+        }
+
+        if kind != CodexExecTaskKind::TextOnly && analysis.allowed_tool_event_count == 0 {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_DURABLE_FINAL_MISSING,
+                format!(
+                    "Codex exec {} completed without required tool evidence",
+                    kind.label()
+                ),
+                json!({
+                    "provider": kind.provider(),
+                    "kind": kind.label(),
+                    "expected_tool_family": kind.required_tool_family(),
+                    "output_last_message": output_file.display().to_string(),
+                    "events_jsonl": events_file.display().to_string(),
+                    "stdout_event_count": analysis.event_count,
+                    "allowed_tool_event_count": analysis.allowed_tool_event_count,
+                    "rule": "provider-box task sources require durable JSONL evidence that the lane-specific tool actually ran"
                 }),
             ));
             return false;
