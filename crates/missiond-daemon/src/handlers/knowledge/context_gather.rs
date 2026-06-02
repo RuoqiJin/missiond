@@ -361,8 +361,12 @@ async fn search_evidence_item_read_model(
     match state.store.search_evidence_items(&input).await {
         Ok(items) => {
             let raw_hit_count = items.len();
-            let (items, freshness_filtered_count) =
+            let (items, compiled_policy_filtered_count) =
                 filter_stale_compiled_policy_evidence_items(items);
+            let (items, runtime_environment_filtered_count) =
+                filter_stale_runtime_environment_evidence_items(items);
+            let freshness_filtered_count =
+                compiled_policy_filtered_count + runtime_environment_filtered_count;
             let (items, incomplete_filtered_count) =
                 filter_incomplete_deployment_closure_evidence_items(items);
             let (items, deduplicated_count, truncated_count) =
@@ -383,6 +387,8 @@ async fn search_evidence_item_read_model(
                     "read_limit": input.limit,
                     "raw_hit_count": raw_hit_count,
                     "freshness_filtered_count": freshness_filtered_count,
+                    "compiled_policy_filtered_count": compiled_policy_filtered_count,
+                    "runtime_environment_filtered_count": runtime_environment_filtered_count,
                     "incomplete_filtered_count": incomplete_filtered_count,
                     "deduplicated_count": deduplicated_count,
                     "truncated_count": truncated_count,
@@ -406,6 +412,8 @@ async fn search_evidence_item_read_model(
                 "limit": input.limit,
                 "raw_hit_count": 0,
                 "freshness_filtered_count": 0,
+                "compiled_policy_filtered_count": 0,
+                "runtime_environment_filtered_count": 0,
                 "incomplete_filtered_count": 0,
                 "deduplicated_count": 0,
                 "truncated_count": 0,
@@ -431,6 +439,15 @@ fn filter_stale_compiled_policy_evidence_items(
         return (items, 0);
     };
     filter_stale_compiled_policy_evidence_items_with_fingerprint(items, &fingerprint)
+}
+
+fn filter_stale_runtime_environment_evidence_items(
+    items: Vec<EvidenceItemInput>,
+) -> (Vec<EvidenceItemInput>, usize) {
+    let Some(compiled_runtime_dir) = active_compiled_runtime_dir() else {
+        return (items, 0);
+    };
+    filter_stale_runtime_environment_evidence_items_with_dir(items, &compiled_runtime_dir)
 }
 
 fn filter_incomplete_deployment_closure_evidence_items(
@@ -466,6 +483,25 @@ fn evidence_item_has_incomplete_deployment_closure_placeholder(item: &EvidenceIt
     .any(|marker| text.contains(marker))
 }
 
+fn filter_stale_runtime_environment_evidence_items_with_dir(
+    items: Vec<EvidenceItemInput>,
+    compiled_runtime_dir: &Path,
+) -> (Vec<EvidenceItemInput>, usize) {
+    let mut filtered_count = 0usize;
+    let filtered = items
+        .into_iter()
+        .filter(|item| {
+            if evidence_item_has_stale_runtime_environment_ref(item, compiled_runtime_dir) {
+                filtered_count += 1;
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    (filtered, filtered_count)
+}
+
 fn filter_stale_compiled_policy_evidence_items_with_fingerprint(
     items: Vec<EvidenceItemInput>,
     fingerprint: &CompiledDeploymentPolicyFingerprint,
@@ -486,11 +522,7 @@ fn filter_stale_compiled_policy_evidence_items_with_fingerprint(
 }
 
 fn active_compiled_deployment_policy_fingerprint() -> Option<CompiledDeploymentPolicyFingerprint> {
-    let dir = env::var("MISSIOND_COMPILED_RUNTIME_DIR")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)?;
+    let dir = active_compiled_runtime_dir()?;
     let path = dir.join("compiled-deployment-policy.json");
     let source_hash = fs::read_to_string(&path)
         .ok()
@@ -505,6 +537,14 @@ fn active_compiled_deployment_policy_fingerprint() -> Option<CompiledDeploymentP
         compiled_runtime_dir: dir,
         source_hash,
     })
+}
+
+fn active_compiled_runtime_dir() -> Option<PathBuf> {
+    env::var("MISSIOND_COMPILED_RUNTIME_DIR")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 fn evidence_item_has_stale_compiled_policy_ref(
@@ -528,6 +568,19 @@ fn evidence_item_has_stale_compiled_policy_ref(
     stale_path || stale_hash
 }
 
+fn evidence_item_has_stale_runtime_environment_ref(
+    item: &EvidenceItemInput,
+    active_compiled_runtime_dir: &Path,
+) -> bool {
+    if !evidence_item_references_runtime_environment(item) {
+        return false;
+    }
+    evidence_item_runtime_environment_compiled_dir(item)
+        .as_deref()
+        .map(|compiled_dir| !Path::new(compiled_dir).starts_with(active_compiled_runtime_dir))
+        .unwrap_or(false)
+}
+
 fn evidence_item_references_compiled_policy(item: &EvidenceItemInput) -> bool {
     item.source_type == "deployment_closure_policy"
         || evidence_ref_text(&item.evidence_refs, &["source"]) == Some("compiled-deployment-policy")
@@ -535,6 +588,12 @@ fn evidence_item_references_compiled_policy(item: &EvidenceItemInput) -> bool {
             == Some("compiled-deployment-policy")
         || evidence_item_compiled_policy_path(item).is_some()
         || evidence_item_compiled_policy_hash(item).is_some()
+}
+
+fn evidence_item_references_runtime_environment(item: &EvidenceItemInput) -> bool {
+    item.source_type == "runtime_environment"
+        || evidence_ref_text(&item.evidence_refs, &["source"]) == Some("runtime_environment")
+        || evidence_item_runtime_environment_compiled_dir(item).is_some()
 }
 
 fn evidence_item_compiled_policy_path(item: &EvidenceItemInput) -> Option<String> {
@@ -549,6 +608,24 @@ fn evidence_item_compiled_policy_hash(item: &EvidenceItemInput) -> Option<String
         .or_else(|| evidence_ref_text(&item.evidence_refs, &["source_hash"]))
         .or_else(|| evidence_ref_text(&item.evidence_refs, &["policy_hash"]))
         .map(ToOwned::to_owned)
+}
+
+fn evidence_item_runtime_environment_compiled_dir(item: &EvidenceItemInput) -> Option<String> {
+    evidence_ref_text(
+        &item.evidence_refs,
+        &["runtime_environment", "compiled_runtime_dir"],
+    )
+    .or_else(|| evidence_ref_text(&item.evidence_refs, &["compiled_runtime_dir"]))
+    .or_else(|| evidence_ref_text(&item.evidence_refs, &["compiledRuntimeDir"]))
+    .map(ToOwned::to_owned)
+    .or_else(|| {
+        serde_json::from_str::<Value>(&item.summary)
+            .ok()
+            .and_then(|value| {
+                text_field(&value, "compiled_runtime_dir")
+                    .or_else(|| text_field(&value, "compiledRuntimeDir"))
+            })
+    })
 }
 
 fn evidence_ref_text<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
@@ -3963,6 +4040,7 @@ mod tests {
         deployment_event_item_from_timeline_row, diagnostics_have_hard_failures,
         filter_incomplete_deployment_closure_evidence_items,
         filter_stale_compiled_policy_evidence_items_with_fingerprint,
+        filter_stale_runtime_environment_evidence_items_with_dir,
         optional_infra_os_disabled_diagnostic, optional_infra_os_disabled_source, response_sources,
         source_selection, CompiledDeploymentPolicyFingerprint, ContextGatherArgs, SourceProfile,
     };
@@ -4272,6 +4350,56 @@ mod tests {
         assert_eq!(filtered_count, 1);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id, "evi-current");
+    }
+
+    #[test]
+    fn evidence_search_filters_stale_runtime_environment_refs() {
+        let active_dir = Path::new("/Users/jinchen/.xjp-mission/releases/current/compiled-runtime");
+        let stale = missiond_core::types::EvidenceItemInput {
+            id: "evi-runtime-stale".to_string(),
+            lane_id: "runtime_truth".to_string(),
+            source_type: "runtime_environment".to_string(),
+            source_id: None,
+            source_ref: None,
+            project_id: Some("missiond".to_string()),
+            task_id: None,
+            title: "Runtime truth".to_string(),
+            summary: json!({
+                "compiled_runtime_dir": "/Users/jinchen/.xjp-mission/releases/old/compiled-runtime",
+                "runtime_dir": "/Users/jinchen/.missiond/runtime/missiond"
+            })
+            .to_string(),
+            authority_class: "runtime-env-and-monitor".to_string(),
+            validity: "current_rule".to_string(),
+            privacy_class: "operational".to_string(),
+            freshness: "hot_runtime".to_string(),
+            score: Some(3.0),
+            raw_policy: "compact_only".to_string(),
+            evidence_refs: json!([]),
+            metadata: json!({}),
+        };
+        let mut current = stale.clone();
+        current.id = "evi-runtime-current".to_string();
+        current.summary = json!({
+            "compiled_runtime_dir": "/Users/jinchen/.xjp-mission/releases/current/compiled-runtime",
+            "runtime_dir": "/Users/jinchen/.missiond/runtime/missiond"
+        })
+        .to_string();
+
+        let mut deploy_event = stale.clone();
+        deploy_event.id = "evi-deploy-event".to_string();
+        deploy_event.source_type = "deploy_center_event".to_string();
+        deploy_event.summary = "Deploy Center smoke failed".to_string();
+
+        let (items, filtered_count) = filter_stale_runtime_environment_evidence_items_with_dir(
+            vec![stale, current, deploy_event],
+            active_dir,
+        );
+
+        assert_eq!(filtered_count, 1);
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().any(|item| item.id == "evi-runtime-current"));
+        assert!(items.iter().any(|item| item.id == "evi-deploy-event"));
     }
 
     #[test]
