@@ -29,6 +29,7 @@
                      "crates/missiond-daemon/src/handlers/knowledge/project/registry.rs"
                      "crates/missiond-daemon/src/handlers/sysinfra/infra.rs"
                      "crates/missiond-daemon/src/handlers/comm/timeline.rs"
+                     "crates/missiond-mcp/src/tools/knowledge/context_gather.rs"
                      "crates/missiond-mcp/src/tools/knowledge/memory.rs"
                      "scripts/check-v3-memory-kb-isomorphism.mjs"
                      "scripts/check-v3-runtime-path-hygiene.mjs"

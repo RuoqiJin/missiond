@@ -45,6 +45,9 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "includeCredentials": {"type": "boolean", "default": false, "description": "include_credentials alias"},
                     "include_raw_sources": {"type": "boolean", "default": false, "description": "Include raw legacy sources in response/context pack; default artifact uses compact evidence_lanes/evidence_items/support_catalog only"},
                     "includeRawSources": {"type": "boolean", "default": false, "description": "include_raw_sources alias"},
+                    "persist": {"type": "boolean", "default": false, "description": "Persist a worker context artifact/capsule. This also writes compact context_gather_runs/evidence_items read-model projections."},
+                    "persist_read_model": {"type": "boolean", "default": true, "description": "Persist compact context_gather_runs/evidence_items read-model projections without creating a worker context artifact. persist=true forces this on."},
+                    "persistReadModel": {"type": "boolean", "default": true, "description": "persist_read_model alias"},
                     "conversation_time_range": {"type": "string", "default": "last_30d", "description": "Conversation search window: last_24h, last_7d, last_30d"},
                     "conversationTimeRange": {"type": "string", "default": "last_30d", "description": "conversation_time_range alias"},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 25, "default": 8}

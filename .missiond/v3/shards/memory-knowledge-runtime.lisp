@@ -264,7 +264,7 @@
          :rule "All searchable compact evidence lands here; raw conversations, raw skills, and cold archives remain in their original stores.")
        (table context_gather_runs
          :fields [source_profile lane_counts filtered_hits raw_sources_included credential_opt_in conversation_opt_in resolver_source runtime_root_consistent artifact_hash diagnostics]
-         :rule "Every persisted context gather records lane counts, raw-source injection state, semantic filtering, credential opt-in, resolver source, and runtime/root consistency.")
+         :rule "Every mission_context_gather call with persist_read_model=true records lane counts, raw-source injection state, semantic filtering, credential opt-in, resolver source, and runtime/root consistency; persist=true additionally binds the artifact_hash.")
        (table conversation_episodes
          :rule "Reusable conversation summaries are searchable; conversation_messages remains the raw audit layer.")
        (table conversation_fact_extracts
@@ -277,6 +277,7 @@
        "conversation_message_raw and cold_archive data MUST NOT enter intent_default or deploy_ops retrieval. conversation_audit may use bounded episode/fact extracts; raw messages require explicit opt-in."
        "skill_evidence is evidence-only unless a review/promotion workflow promotes an item into reviewed_kb with TTL or version bounds for deploy/config/dependency facts."
        "support_refs MUST expose secret_ref namespace/key/provenance/availability only; secret values are never indexed, embedded, or injected."
+       "mission_context_gather persist_read_model defaults true so compact context_gather_runs/evidence_items projections are available to the next search without requiring worker artifact creation."
        "context_gather_runs MUST persist lane counts, raw source inclusion, conversation cross-project drops when available, filtered semantic hit counts, credential opt-in, low-confidence skill evidence drops when available, resolver source, and runtime/root consistency."]
     :checker "node scripts/check-v3-memory-kb-isomorphism.mjs")
 

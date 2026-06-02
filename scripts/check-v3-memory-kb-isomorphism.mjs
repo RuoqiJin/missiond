@@ -223,6 +223,7 @@ function checkFiles(root, files) {
     'noise_diagnostics',
     'context_noise_metrics',
     'include_raw_sources',
+    'persist_read_model',
     'credential_refs MUST NOT be emitted unless include_credentials=true',
     'skill-edit-delegation-policy',
     'task-record-indexing',
@@ -230,7 +231,8 @@ function checkFiles(root, files) {
     'bounded conversation logs',
     'Worker context packs MUST include evidence_lanes, evidence_items, and support_catalog lane summaries by default and omit raw sources',
     'mission_context_gather MUST normalize legacy source calls into typed EvidenceItem lanes',
-    'mission_context_gather(persist=true) MUST persist context_gather_runs metrics and evidence_items compact projections',
+    'mission_context_gather(persist_read_model=true, the default) MUST persist context_gather_runs metrics and evidence_items compact projections',
+    'persist=true additionally creates the context-pack artifact/capsule and forces read-model persistence',
     'mission_context_gather source_profile=deploy_ops infra skill_evidence MUST recognize deployment-closure evidence anchors',
     'skill-file context fallback may admit sibling evidence only when the returned line itself carries a strong closure anchor',
     'source_summaries.infra.status=feature_disabled',
@@ -281,6 +283,8 @@ function checkFiles(root, files) {
     'build_support_catalog',
     'build_evidence_items',
     'persist_evidence_lane_projection',
+    'context_gather_persist_read_model',
+    'persistReadModel',
     'record_context_gather_run',
     'upsert_evidence_items',
     'runtime_truth',
@@ -328,6 +332,9 @@ function checkFiles(root, files) {
     'includeCredentials',
     'include_raw_sources',
     'includeRawSources',
+    'persist',
+    'persist_read_model',
+    'persistReadModel',
     'include_board',
     'include_conversations',
     'conversation_time_range',
@@ -972,11 +979,12 @@ function buildFixture() {
 	                 "Timeline Analyst MUST check the Gemini provider gate before collecting timeline evidence or calling Gemini"])
 	  (grounding-search-aggregate
 	    :source_profile [intent_default deploy_ops conversation_audit full_debug]
-	    :fields [evidence_lanes evidence_items support_catalog authority_order noise_diagnostics context_noise_metrics include_raw_sources]
+	    :fields [evidence_lanes evidence_items support_catalog authority_order noise_diagnostics context_noise_metrics include_raw_sources persist_read_model]
 	    :invariants ["credential_refs MUST NOT be emitted unless include_credentials=true"
 		                 "Worker context packs MUST include evidence_lanes, evidence_items, and support_catalog lane summaries by default and omit raw sources"
 		                 "mission_context_gather MUST normalize legacy source calls into typed EvidenceItem lanes"
-		                 "mission_context_gather(persist=true) MUST persist context_gather_runs metrics and evidence_items compact projections"
+		                 "mission_context_gather(persist_read_model=true, the default) MUST persist context_gather_runs metrics and evidence_items compact projections"
+		                 "persist=true additionally creates the context-pack artifact/capsule and forces read-model persistence"
 		                 "mission_context_gather source_profile=deploy_ops infra skill_evidence MUST recognize deployment-closure evidence anchors"
 		                 "skill-file context fallback may admit sibling evidence only when the returned line itself carries a strong closure anchor"
 		                 "source_summaries.infra.status=feature_disabled"
@@ -1003,6 +1011,10 @@ function buildFixture() {
 	  (task-record-indexing :records ["active Board task records" "bounded conversation logs"])
 	  (fixture-contract-text
 	    "deployment-monitor covers deploy/build/smoke/rollback/agent-update/provenance diagnostics"
+	    "ReleaseLease"
+	    "RuntimeObservation"
+	    "ReleaseEvidence"
+	    "ClosureVerdict"
 	    "mission_kb_query MUST support excludeCategory / exclude_category"
 	    "mission_kb_query MUST support excludeCategory / exclude_category for explicit category suppression"
 	    "mission_kb_mutate(action=batch_remember) MUST accept a bounded entries array"
@@ -1104,16 +1116,17 @@ CREATE TABLE IF NOT EXISTS skill_evidence_items;
 'runtime_truth'; 'project_ssot'; 'reviewed_kb'; 'active_board'; 'skill_evidence'; 'conversation_audit'; 'cold_archive'; 'support_refs';
 `);
   writeFixture(root, DEFAULT_FILES.contextGather, `
-SourceProfile; source_profile; source_selection; include_credentials; include_raw_sources;
+SourceProfile; source_profile; source_selection; include_credentials; include_raw_sources; persist_read_model; persistReadModel; context_gather_persist_read_model;
 include_board; include_conversations; conversation_time_range;
-evidence_lanes; evidence_items; support_catalog; authority_order; noise_diagnostics; context_noise_metrics; build_support_catalog; build_evidence_items; persist_evidence_lane_projection; record_context_gather_run; upsert_evidence_items; runtime_truth; project_ssot; reviewed_kb; active_board; skill_evidence; conversation_audit; cold_archive; support_refs; context_pack_artifact_payload;
-load_compiled_project_universe; compiled_service_runtime_payload_for_project; supportCatalog;
+evidence_lanes; evidence_items; support_catalog; deployment_closure; deployment_closure_policy; authority_order; noise_diagnostics; context_noise_metrics; build_support_catalog; build_evidence_items; build_deployment_closure_support; persist_evidence_lane_projection; record_context_gather_run; upsert_evidence_items; runtime_truth; project_ssot; reviewed_kb; active_board; skill_evidence; conversation_audit; cold_archive; support_refs; context_pack_artifact_payload;
+load_compiled_project_universe; compiled_service_runtime_payload_for_project; supportCatalog; compiled_deployment_policy_for_service;
 credential_lane_opt_in; selection.include_credentials; selection.include_raw_sources; raw_sources_omitted;
 "board_tasks"; "conversation_logs"; "credential_refs"; "mission_board_query"; "mission_conversation_query"; "scope": "active"; "time_range"; last_30d;
 `);
   writeFixture(root, DEFAULT_FILES.mcpContextGather, `
 runtime_truth; project_ssot; reviewed_kb; active_board; support_refs; skill_evidence; conversation_audit; cold_archive; evidence_lanes; evidence_items; support_catalog; source_profile; sourceProfile; intent_default; deploy_ops; conversation_audit; full_debug;
 include_credentials; includeCredentials; include_raw_sources; includeRawSources;
+persist; persist_read_model; persistReadModel;
 include_board; include_conversations; conversation_time_range;
 `);
   writeFixture(root, DEFAULT_FILES.toolDirectory, `

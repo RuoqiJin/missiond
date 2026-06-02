@@ -93,6 +93,12 @@ struct ContextGatherArgs {
     permission_context: Option<Value>,
     #[serde(default, deserialize_with = "crate::lenient::option_bool")]
     persist: Option<bool>,
+    #[serde(
+        default,
+        alias = "persistReadModel",
+        deserialize_with = "crate::lenient::option_bool"
+    )]
+    persist_read_model: Option<bool>,
     #[serde(default = "default_limit")]
     limit: usize,
 }
@@ -170,6 +176,14 @@ fn source_selection(args: &ContextGatherArgs, profile: SourceProfile) -> SourceS
     let policy = EvidenceLaneRuntimeConfig::default();
     let allowed_lanes = allowed_lanes_for_profile(&policy, profile);
     source_selection_with_allowed_lanes(args, profile, &allowed_lanes)
+}
+
+fn context_gather_persist_artifact(args: &ContextGatherArgs) -> bool {
+    args.persist.unwrap_or(false)
+}
+
+fn context_gather_persist_read_model(args: &ContextGatherArgs) -> bool {
+    context_gather_persist_artifact(args) || args.persist_read_model.unwrap_or(true)
 }
 
 fn source_selection_with_allowed_lanes(
@@ -462,6 +476,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         load_evidence_lane_policy();
     let allowed_lanes = allowed_lanes_for_profile(&evidence_lane_policy, profile);
     let selection = source_selection_with_allowed_lanes(&args, profile, &allowed_lanes);
+    let persist_artifact = context_gather_persist_artifact(&args);
+    let persist_read_model = context_gather_persist_read_model(&args);
     let query = normalized_query(&args);
     if query.is_empty()
         && args.project_id.is_none()
@@ -810,6 +826,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "raw_sources_omitted": !selection.include_raw_sources,
         "raw_sources_policy": raw_sources_policy(selection.include_raw_sources),
         "source_profile": profile.as_str(),
+        "persist_artifact": persist_artifact,
+        "persist_read_model": persist_read_model,
         "evidence_lane_policy": {
             "schema": "missiond.evidence-lane-policy-runtime.v1",
             "source": evidence_lane_policy_source,
@@ -828,7 +846,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "next_action": "Synthesize grounded intent. If intent is confirmed, assign a plan-authoring worker to compile plan.lisp from the confirmed intent plus tool/resource inventory."
     });
 
-    if args.persist.unwrap_or(false) {
+    let mut artifact_hash_for_run: Option<String> = None;
+
+    if persist_artifact {
         let artifact_payload =
             context_pack_artifact_payload(&payload, selection.include_raw_sources);
         let metadata = json!({
@@ -962,11 +982,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             .as_ref()
             .map(|(hash, _)| hash.as_str())
             .or_else(|| artifact.get("hash").and_then(Value::as_str));
-        let context_gather_run =
-            build_context_gather_run_input(&payload, profile, selection, artifact_hash);
-        let evidence_lane_persistence =
-            persist_evidence_lane_projection(state, &context_gather_run, &evidence_item_inputs)
-                .await;
+        artifact_hash_for_run = artifact_hash.map(ToOwned::to_owned);
 
         if let Some(object) = payload.as_object_mut() {
             if let Some((hash, context_pack_file)) = context_pack_file.as_ref() {
@@ -993,10 +1009,6 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 "context_capsule_hash".to_string(),
                 Value::String(capsule_hash),
             );
-            object.insert(
-                "evidence_lane_persistence".to_string(),
-                evidence_lane_persistence,
-            );
             if let Ok(path) = capsule_path {
                 object.insert(
                     "context_capsule_file".to_string(),
@@ -1004,6 +1016,33 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 );
             }
         }
+    }
+
+    let evidence_lane_persistence = if persist_read_model {
+        let context_gather_run = build_context_gather_run_input(
+            &payload,
+            profile,
+            selection,
+            artifact_hash_for_run.as_deref(),
+        );
+        persist_evidence_lane_projection(state, &context_gather_run, &evidence_item_inputs).await
+    } else {
+        json!({
+            "schema": "missiond.evidence-lane-persistence.v1",
+            "ok": true,
+            "status": "disabled",
+            "reason": "persist_read_model=false",
+            "evidence_item_count": evidence_item_inputs.len(),
+            "evidence_items_written": 0,
+            "errors": [],
+        })
+    };
+
+    if let Some(object) = payload.as_object_mut() {
+        object.insert(
+            "evidence_lane_persistence".to_string(),
+            evidence_lane_persistence,
+        );
     }
 
     Ok(ToolResult::json_pretty(&payload))
@@ -3231,7 +3270,8 @@ mod tests {
 
     use super::{
         build_evidence_items, build_evidence_lanes, build_source_summaries, build_support_catalog,
-        collect_evidence_refs_from_value, context_gather_worker_visible_dir_for,
+        collect_evidence_refs_from_value, context_gather_persist_artifact,
+        context_gather_persist_read_model, context_gather_worker_visible_dir_for,
         context_noise_metrics, context_pack_artifact_payload, diagnostics_have_hard_failures,
         optional_infra_os_disabled_diagnostic, optional_infra_os_disabled_source, response_sources,
         source_selection, ContextGatherArgs, SourceProfile,
@@ -3256,6 +3296,37 @@ mod tests {
         assert!(!selection.include_conversations);
         assert!(!selection.include_credentials);
         assert!(!selection.include_raw_sources);
+    }
+
+    #[test]
+    fn default_context_gather_persists_read_model_without_artifact() {
+        let args = args(json!({"query": "MissionD noise"}));
+
+        assert!(!context_gather_persist_artifact(&args));
+        assert!(context_gather_persist_read_model(&args));
+    }
+
+    #[test]
+    fn artifact_persistence_forces_read_model_projection() {
+        let args = args(json!({
+            "query": "MissionD noise",
+            "persist": true,
+            "persist_read_model": false
+        }));
+
+        assert!(context_gather_persist_artifact(&args));
+        assert!(context_gather_persist_read_model(&args));
+    }
+
+    #[test]
+    fn explicit_read_model_disable_only_applies_without_artifact() {
+        let args = args(json!({
+            "query": "MissionD noise",
+            "persist_read_model": false
+        }));
+
+        assert!(!context_gather_persist_artifact(&args));
+        assert!(!context_gather_persist_read_model(&args));
     }
 
     #[test]
