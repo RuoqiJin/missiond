@@ -74,6 +74,14 @@ pub struct PTYSpawnOptions {
     pub approval_policy: Option<String>,
     /// Provider tool policy file when supported, e.g. Gemini CLI `--policy`.
     pub tool_policy_path: Option<PathBuf>,
+    /// ClaudeCode-only `--tools` value. Text-only lanes pass an empty string.
+    pub claude_code_tools: Option<String>,
+    /// ClaudeCode-only `--strict-mcp-config` toggle.
+    pub claude_code_strict_mcp_config: bool,
+    /// ClaudeCode-only `--disable-slash-commands` toggle.
+    pub claude_code_disable_slash_commands: bool,
+    /// Provider-native session id when the CLI supports explicit session binding.
+    pub provider_session_id: Option<String>,
     /// Extra environment variables to inject into the PTY child process
     /// Used for slot tracking (MISSIOND_SLOT_ID, MISSIOND_SESSION_FILE)
     pub extra_env: HashMap<String, String>,
@@ -362,6 +370,10 @@ impl PTYManager {
             sandbox: options.sandbox.clone(),
             approval_policy: options.approval_policy.clone(),
             tool_policy_path: options.tool_policy_path.clone(),
+            claude_code_tools: options.claude_code_tools.clone(),
+            claude_code_strict_mcp_config: options.claude_code_strict_mcp_config,
+            claude_code_disable_slash_commands: options.claude_code_disable_slash_commands,
+            provider_session_id: options.provider_session_id.clone(),
             command_override: options.command_override.clone(),
         })?;
 
@@ -662,6 +674,12 @@ impl PTYManager {
                             sandbox: restart_options.sandbox.clone(),
                             approval_policy: restart_options.approval_policy.clone(),
                             tool_policy_path: restart_options.tool_policy_path.clone(),
+                            claude_code_tools: restart_options.claude_code_tools.clone(),
+                            claude_code_strict_mcp_config: restart_options
+                                .claude_code_strict_mcp_config,
+                            claude_code_disable_slash_commands: restart_options
+                                .claude_code_disable_slash_commands,
+                            provider_session_id: restart_options.provider_session_id.clone(),
                             command_override: restart_options.command_override.clone(),
                         }) {
                             let session_rx = new_session.subscribe();

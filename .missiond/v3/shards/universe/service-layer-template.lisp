@@ -133,6 +133,32 @@
          (step s4 :id no-local-ledger-authority :logic "local project tables may cache payment state but payments service remains authority"))
       :env [PAYMENTS_API_BASE_URL PAYMENTS_SERVICE_TOKEN PAYMENTS_WEBHOOK_SECRET])
 
+    (support-mail-standard
+      :schema "missiond.service-layer-support-mail-standard.v1"
+      :default-provider xjp-mail-service
+      :mailbox-model hybrid
+      :rule "Every public product service declares a support mailbox plan before production promotion. MissionD logical mailbox ownership is per service; physical Google Workspace mailbox may be dedicated_user or alias."
+      :required-contracts [support-address mailbox-kind target-user domain-readiness dns-requirements agent-policy]
+      :provider
+        (:initial google-workspace
+         :domain-service xjp-domain-service
+         :mail-service-api "https://mail.xiaojins.com/v1/mail"
+         :dns-records [MX TXT]
+         :required-dns [gmail_mx spf dmarc_monitoring]
+         :dkim "generated in Google Admin after Gmail activation; store requirement/manual step, not private key material")
+      :agent-policy
+        (:default-mode draft-only
+         :default-actions [read draft_reply]
+         :auto-send "disabled unless mail_agent_policies explicitly enables it for the service"
+         :audit-table mail_audits)
+      :provisioning-steps
+        ((step s1 :id choose-support-address :logic "Choose support/help/legal/privacy addresses and decide dedicated_user vs alias using traffic, brand, and access-boundary needs.")
+         (step s2 :id plan-mailbox :logic "Call xjp-mail-service POST /v1/mail/services/:service_id/mailboxes/plan; persist DNS requirements and mailbox ledger.")
+         (step s3 :id plan-domain-dns :logic "Use xjp-domain-service /records/plan for MX/SPF/DMARC; direct Cloudflare mutation is break-glass only.")
+         (step s4 :id apply-approved-mailbox :logic "Apply mailbox only with x-mail-approval-token; Google Workspace provider actions remain explicit and audited.")
+         (step s5 :id verify-readiness :logic "Check /v1/mail/domains/:domain/readiness and /v1/domains/services/:service_id/readiness before production promotion."))
+      :env [MAIL_API_BASE_URL MAIL_SERVICE_TOKEN SUPPORT_MAILBOX_ADDRESS SUPPORT_MAILBOX_KIND SUPPORT_MAILBOX_TARGET_USER])
+
     (database-standard
       :schema "missiond.service-layer-database-standard.v1"
       :default supabase-postgres
@@ -222,10 +248,11 @@
          (step s4 :id scaffold-repo :logic "Create or update repo layout, package files, backend layout, frontend layout, migrations, env examples without secret values, and root vercel.json when applicable.")
          (step s5 :id write-project-ssot :logic "Write project-local .missiond intent/backend/frontend/operations/evidence/behavior/check files from the scaffold contract.")
          (step s6 :id configure-auth :logic "Create XJP Auth client via Admin API/MCP, set redirect URIs, implement frontend callback/proxy and backend JWKS verification.")
-         (step s7 :id configure-data-payment-secrets :logic "Provision DB/migrations, payment product/entitlements when needed, and secret-store refs/env names without writing secret values.")
-         (step s8 :id configure-deploy :logic "Configure Vercel/deploy-center, domains, health checks, and release provenance; production migrations remain explicit operations.")
-         (step s9 :id register-missiond-universe :logic "Add central project-registry, maturity, service-runtime, and checker entries with management-domain=product-service-layer.")
-         (step s10 :id verify :logic "Run project checker, behavior closure, MissionD project universe, runtime compile, contract generation, and maturity gate. Report remaining gaps instead of promoting maturity silently."))
+         (step s7 :id configure-support-mail :logic "Plan support mailbox through xjp-mail-service, route DNS requirements through xjp-domain-service, and record readiness checks in operations SSOT.")
+         (step s8 :id configure-data-payment-secrets :logic "Provision DB/migrations, payment product/entitlements when needed, and secret-store refs/env names without writing secret values.")
+         (step s9 :id configure-deploy :logic "Configure Vercel/deploy-center, domains, health checks, and release provenance; production migrations remain explicit operations.")
+         (step s10 :id register-missiond-universe :logic "Add central project-registry, maturity, service-runtime, and checker entries with management-domain=product-service-layer.")
+         (step s11 :id verify :logic "Run project checker, behavior closure, MissionD project universe, runtime compile, contract generation, auth redirect smoke, domain readiness, support mailbox readiness, and maturity gate. Report remaining gaps instead of promoting maturity silently."))
       :egress [repo-scaffold project-local-ssot missiond-registration auth-client db-migrations secret-refs vercel-config verification-report])
 
     :forbidden-shortcuts
@@ -234,6 +261,7 @@
        "Do not write secret values into generated files."
        "Do not bypass XJP Auth with ad-hoc local JWT parsing for protected products."
        "Do not make payment UI before product_code, entitlement, and webhook verification are declared."
+       "Do not create support mailboxes by directly mutating Google Admin or Cloudflare outside xjp-mail-service and xjp-domain-service, except through an audited break-glass path."
        "Do not run production migrations automatically during cold start."
        "Do not mark a new service M5/M6 without local SSOT, behavior closure, deployment provenance, and regression evidence."]
     :checker "node scripts/check-project-ssot-universe.mjs --engine=ocaml")

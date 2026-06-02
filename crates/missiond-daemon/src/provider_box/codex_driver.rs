@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use missiond_core::db::traits::MissionStore;
 use missiond_core::pty::{recognize_screen, recognize_styled_screen, PtyCanonicalState};
 use missiond_core::types::{CliEngine, SharedProjectRegistry};
@@ -97,6 +98,12 @@ struct CodexImageGenerationEvidence {
     revised_prompts: Vec<String>,
     final_text: Option<String>,
     image_event_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct CodexImageUploadResult {
+    artifact: Value,
+    final_text: String,
 }
 
 #[derive(Debug, Clone)]
@@ -755,6 +762,7 @@ impl CodexProviderDriver {
             extra_env: HashMap::new(),
             initial_prompt: None,
             command_override: None,
+            ..Default::default()
         };
         self.spawn_slot_with_bootstrap(slot, options, result).await
     }
@@ -2591,6 +2599,35 @@ impl CodexProviderDriver {
             return false;
         }
 
+        let image_upload = if kind == CodexExecTaskKind::ImageGeneration {
+            let Some(evidence) = image_evidence.as_ref() else {
+                result.status = ProviderBoxStatus::Failed;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_DURABLE_FINAL_MISSING,
+                    "Codex image generation completed without validated image evidence",
+                    json!({
+                        "provider": kind.provider(),
+                        "kind": kind.label(),
+                        "rule": "image generation results must have rollout JSONL evidence and validated PNG before media upload"
+                    }),
+                ));
+                return false;
+            };
+            match self
+                .upload_image_generation_artifact(request, evidence)
+                .await
+            {
+                Ok(upload) => Some(upload),
+                Err(diagnostic) => {
+                    result.status = ProviderBoxStatus::Failed;
+                    result.add_diagnostic(diagnostic);
+                    return false;
+                }
+            }
+        } else {
+            None
+        };
+
         let final_text = if kind == CodexExecTaskKind::TextOnly {
             tokio::fs::read_to_string(&output_file)
                 .await
@@ -2600,9 +2637,9 @@ impl CodexProviderDriver {
                 .or_else(|| analysis.final_text.map(|value| value.trim().to_string()))
                 .filter(|value| !value.is_empty())
         } else if kind == CodexExecTaskKind::ImageGeneration {
-            image_evidence
+            image_upload
                 .as_ref()
-                .and_then(codex_image_generation_final_text)
+                .map(|upload| upload.final_text.clone())
         } else {
             analysis
                 .final_text
@@ -2687,11 +2724,12 @@ impl CodexProviderDriver {
             "image_generation_evidence": image_evidence.as_ref().map(|evidence| json!({
                 "session_id": evidence.session_id,
                 "rollout_path": evidence.rollout_path,
-                "image_paths": evidence.image_paths,
+                "validated_image_count": evidence.image_paths.len(),
                 "revised_prompts": evidence.revised_prompts,
                 "image_event_count": evidence.image_event_count,
                 "assistant_final": evidence.final_text,
             })),
+            "media_artifact": image_upload.as_ref().map(|upload| upload.artifact.clone()),
             "exit_status": status.code(),
         }));
         result.final_text = Some(final_text);
@@ -2746,6 +2784,143 @@ impl CodexProviderDriver {
         .await
         .ok()
         .flatten()
+    }
+
+    async fn upload_image_generation_artifact(
+        &self,
+        request: &ProviderInteractionRequest,
+        evidence: &CodexImageGenerationEvidence,
+    ) -> Result<CodexImageUploadResult, ProviderBoxDiagnostic> {
+        let base_url = std::env::var("XJP_IMAGE_SERVICE_URL")
+            .or_else(|_| std::env::var("XJP_MEDIA_IMAGE_SERVICE_URL"))
+            .map_err(|_| {
+                ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                    "XJP image service URL is required for codex_image_generation",
+                    json!({
+                        "required_env": ["XJP_IMAGE_SERVICE_URL", "XJP_MEDIA_IMAGE_SERVICE_URL"],
+                        "rule": "codex_image_generation must upload to xjp-image-service and must not return local paths"
+                    }),
+                )
+            })?;
+        let internal_token = std::env::var("XJP_MEDIA_INTERNAL_TOKEN")
+            .or_else(|_| std::env::var("XJP_IMAGE_SERVICE_INTERNAL_TOKEN"))
+            .map_err(|_| {
+                ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                    "XJP media internal token is required for codex_image_generation",
+                    json!({
+                        "required_env": ["XJP_MEDIA_INTERNAL_TOKEN", "XJP_IMAGE_SERVICE_INTERNAL_TOKEN"],
+                        "rule": "provider-box must authenticate to xjp-image-service import endpoint"
+                    }),
+                )
+            })?;
+        let tenant_id = media_tenant_id_from_request(request).ok_or_else(|| {
+            ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                "tenant_id is required for codex_image_generation media import",
+                json!({
+                    "accepted_sources": [
+                        "output_contract.tenant_id",
+                        "write_scope.tenant_id",
+                        "desired_worker.tenant_id",
+                        "XJP_MEDIA_DEFAULT_TENANT_ID"
+                    ],
+                    "rule": "media artifacts are tenant-scoped and cannot be uploaded to a default implicit tenant"
+                }),
+            )
+        })?;
+        let image_path = evidence.image_paths.first().ok_or_else(|| {
+            ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_DURABLE_FINAL_MISSING,
+                "Codex image generation evidence has no validated PNG path",
+                json!({ "image_event_count": evidence.image_event_count }),
+            )
+        })?;
+        let bytes = tokio::fs::read(image_path).await.map_err(|err| {
+            ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_DURABLE_FINAL_MISSING,
+                "Failed to read validated Codex generated image for upload",
+                json!({
+                    "error": err.to_string(),
+                    "rule": "validated local PNG must be readable before xjp-image-service import"
+                }),
+            )
+        })?;
+        let url = image_import_url(&base_url);
+        let body = json!({
+            "tenant_id": tenant_id,
+            "owner_user_id": media_owner_user_id_from_request(request),
+            "content_type": "image/png",
+            "bytes_base64": BASE64_STANDARD.encode(&bytes),
+            "prompt": evidence.revised_prompts.first().or(evidence.final_text.as_ref()),
+            "metadata": {
+                "source": "missiond_provider_box",
+                "provider": CODEX_IMAGE_PROVIDER,
+                "codex_session_id": evidence.session_id,
+                "codex_rollout_path": evidence.rollout_path,
+                "correlation_id": request.correlation_id,
+                "project_id": request.project_id,
+                "validated_image_count": evidence.image_paths.len()
+            }
+        });
+        let response = reqwest::Client::new()
+            .post(&url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header("x-internal-token", internal_token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| {
+                ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                    "xjp-image-service import request failed",
+                    json!({
+                        "url": url,
+                        "error": err.to_string(),
+                    }),
+                )
+            })?;
+        let status = response.status();
+        let artifact = response.json::<Value>().await.map_err(|err| {
+            ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_DURABLE_FINAL_MISSING,
+                "xjp-image-service import response was not valid JSON",
+                json!({
+                    "status": status.as_u16(),
+                    "error": err.to_string(),
+                }),
+            )
+        })?;
+        if !status.is_success() {
+            return Err(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                "xjp-image-service rejected generated image import",
+                json!({
+                    "status": status.as_u16(),
+                    "response": artifact,
+                }),
+            ));
+        }
+        let signed_url = artifact
+            .pointer("/signed_url/url")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_DURABLE_FINAL_MISSING,
+                    "xjp-image-service import response did not include signed_url.url",
+                    json!({
+                        "artifact_id": artifact.get("artifact_id"),
+                        "rule": "image-generation final_text must point to the platform media URL, not a local path"
+                    }),
+                )
+            })?;
+        Ok(CodexImageUploadResult {
+            artifact,
+            final_text: format!("IMAGE_DONE {signed_url}"),
+        })
     }
 }
 
@@ -4514,11 +4689,64 @@ fn codex_generated_png_is_valid(codex_home: &Path, value: &str) -> bool {
     file.read_exact(&mut signature).is_ok() && signature == *b"\x89PNG\r\n\x1a\n"
 }
 
-fn codex_image_generation_final_text(evidence: &CodexImageGenerationEvidence) -> Option<String> {
-    evidence
-        .image_paths
-        .first()
-        .map(|path| format!("IMAGE_DONE {path}"))
+fn image_import_url(base_url: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    if base.ends_with("/v1/images") {
+        format!("{base}/import")
+    } else {
+        format!("{base}/v1/images/import")
+    }
+}
+
+fn media_tenant_id_from_request(request: &ProviderInteractionRequest) -> Option<String> {
+    json_string_at(
+        request.output_contract.as_ref(),
+        &["/tenant_id", "/owner/tenant_id"],
+    )
+    .or_else(|| {
+        json_string_at(
+            request.write_scope.as_ref(),
+            &["/tenant_id", "/owner/tenant_id"],
+        )
+    })
+    .or_else(|| {
+        json_string_at(
+            request.desired_worker.as_ref(),
+            &["/tenant_id", "/owner/tenant_id"],
+        )
+    })
+    .or_else(|| std::env::var("XJP_MEDIA_DEFAULT_TENANT_ID").ok())
+    .map(|value| value.trim().to_string())
+    .filter(|value| !value.is_empty())
+}
+
+fn media_owner_user_id_from_request(request: &ProviderInteractionRequest) -> Option<String> {
+    json_string_at(
+        request.output_contract.as_ref(),
+        &["/owner_user_id", "/user_id", "/owner/user_id"],
+    )
+    .or_else(|| {
+        json_string_at(
+            request.write_scope.as_ref(),
+            &["/owner_user_id", "/user_id", "/owner/user_id"],
+        )
+    })
+    .or_else(|| {
+        json_string_at(
+            request.desired_worker.as_ref(),
+            &["/owner_user_id", "/user_id", "/owner/user_id"],
+        )
+    })
+    .map(|value| value.trim().to_string())
+    .filter(|value| !value.is_empty())
+}
+
+fn json_string_at(value: Option<&Value>, paths: &[&str]) -> Option<String> {
+    let value = value?;
+    paths
+        .iter()
+        .find_map(|path| value.pointer(path).and_then(Value::as_str))
+        .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -5228,7 +5456,7 @@ Weekly limit:                [████████████████�
     }
 
     #[test]
-    fn codex_image_generation_rollout_extracts_saved_png_even_when_final_lacks_path() {
+    fn codex_image_generation_rollout_extracts_saved_png_without_returning_local_path() {
         let dir = std::env::temp_dir().join(format!(
             "missiond-codex-image-rollout-test-{}",
             uuid::Uuid::new_v4().simple()
@@ -5272,10 +5500,13 @@ Weekly limit:                [████████████████�
 
         assert_eq!(evidence.image_event_count, 1);
         assert_eq!(evidence.image_paths, vec![image_path.display().to_string()]);
-        let expected_final = format!("IMAGE_DONE {}", image_path.display());
         assert_eq!(
-            codex_image_generation_final_text(&evidence).as_deref(),
-            Some(expected_final.as_str())
+            image_import_url("https://images.xiaojins.com"),
+            "https://images.xiaojins.com/v1/images/import"
+        );
+        assert_eq!(
+            image_import_url("https://images.xiaojins.com/v1/images/"),
+            "https://images.xiaojins.com/v1/images/import"
         );
         let _ = fs::remove_dir_all(dir);
     }

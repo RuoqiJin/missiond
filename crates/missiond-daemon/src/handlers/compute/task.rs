@@ -251,6 +251,7 @@ async fn handle_submit(state: &AppState, args: Value) -> Result<ToolResult> {
                     extra_env: std::collections::HashMap::new(),
                     initial_prompt: None,
                     command_override: None,
+                    ..Default::default()
                 },
                 slot.config.env.as_ref(),
             )

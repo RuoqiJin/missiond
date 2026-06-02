@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::fs;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -9,18 +11,24 @@ use missiond_core::pty::{recognize_screen, recognize_styled_screen, PtyCanonical
 use missiond_core::types::{CliEngine, SharedProjectRegistry};
 use missiond_core::{LearnedPermissions, PTYManager, PTYSlot, PTYSpawnOptions, SessionState};
 use serde_json::{json, Value};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, Semaphore};
 
 use super::driver::{ProviderDriver, ProviderDriverCapabilities};
 use super::types::{
     ModelSwitchResult, ModelSwitchStatus, ProviderBoxDiagnostic, ProviderBoxResult,
-    ProviderBoxStatus, ProviderControlAction, ProviderInteractionRequest, PtyObservation,
-    PtyStepAction, PtyStepRecord, PtyStepVerificationStatus, DIAG_MODEL_SWITCH_UNVERIFIED,
-    DIAG_PROVIDER_BOX_INVALID_REQUEST, DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+    ProviderBoxStatus, ProviderControlAction, ProviderInteractionRequest, ProviderSessionIdentity,
+    PtyObservation, PtyStepAction, PtyStepRecord, PtyStepVerificationStatus,
+    DIAG_MODEL_SWITCH_UNVERIFIED, DIAG_PROVIDER_BOX_INVALID_REQUEST,
+    DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE, DIAG_PROVIDER_DURABLE_FINAL_MISSING,
     DIAG_PROVIDER_CONTROL_ACTION_UNSUPPORTED, DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+    DIAG_PROVIDER_TEXT_ONLY_VIOLATION,
 };
 
 const DEFAULT_CLAUDE_CODE_SLOT: &str = "slot-claude-code-default";
+const CLAUDE_CODE_TEXT_PROVIDER: &str = "claude_code_text";
+const CLAUDE_CODE_TEXT_RUNTIME_DIR: &str = ".missiond/runtime/claude-code-text-only";
+const CLAUDE_CODE_TEXT_EMPTY_MCP_CONFIG: &str = "empty-mcp-config.json";
+const CLAUDE_CODE_TEXT_MAX_CONCURRENT: usize = 1;
 const OBSERVE_SETTLE_MS: u64 = 350;
 const OBSERVE_STABLE_POLL_MS: u64 = 120;
 const OBSERVE_STABLE_MAX_MS: u64 = 1_000;
@@ -33,6 +41,8 @@ pub(crate) struct ClaudeCodeProviderDriver {
     project_registry: SharedProjectRegistry,
     learned: Option<Arc<LearnedPermissions>>,
     slot_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    text_lane_locks: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
+    claude_home: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +56,29 @@ struct ClaudeCodeObservation {
 struct ClaudeCodeModelTarget {
     command_id: &'static str,
     display_name: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ClaudeCodeTextSourceDef {
+    model_id: &'static str,
+    source_id: &'static str,
+    display_name: &'static str,
+    provider_model_id: &'static str,
+    effort: &'static str,
+}
+
+#[derive(Debug, Clone)]
+struct ClaudeCodeJsonlCursor {
+    path: Option<PathBuf>,
+    offset: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ClaudeCodeJsonlAnalysis {
+    jsonl_path: Option<PathBuf>,
+    line_count: usize,
+    final_text: Option<String>,
+    violation: Option<Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +131,8 @@ impl ClaudeCodeProviderDriver {
             project_registry,
             learned,
             slot_locks: Arc::new(Mutex::new(HashMap::new())),
+            text_lane_locks: Arc::new(Mutex::new(HashMap::new())),
+            claude_home: default_claude_home(),
         }
     }
 
@@ -106,6 +141,14 @@ impl ClaudeCodeProviderDriver {
         locks
             .entry(slot_id.to_string())
             .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    async fn text_lane_semaphore(&self, queue_key: &str) -> Arc<Semaphore> {
+        let mut locks = self.text_lane_locks.lock().await;
+        locks
+            .entry(queue_key.to_string())
+            .or_insert_with(|| Arc::new(Semaphore::new(CLAUDE_CODE_TEXT_MAX_CONCURRENT)))
             .clone()
     }
 
@@ -211,7 +254,182 @@ impl ClaudeCodeProviderDriver {
     }
 
     fn allowed_model_ids() -> Vec<&'static str> {
-        vec!["claude-opus-4-6", "claude-sonnet-4-6"]
+        vec!["claude-opus-4-8", "claude-opus-4-6", "claude-sonnet-4-6"]
+    }
+
+    fn text_source_defs() -> &'static [ClaudeCodeTextSourceDef] {
+        &[
+            ClaudeCodeTextSourceDef {
+                model_id: "claude-code-opus-4-8-xhigh",
+                source_id: "missiond/claude-code-text/opus-4-8-xhigh",
+                display_name: "ClaudeCode Opus 4.8 (xhigh)",
+                provider_model_id: "claude-opus-4-8",
+                effort: "xhigh",
+            },
+            ClaudeCodeTextSourceDef {
+                model_id: "claude-code-opus-4-6-high",
+                source_id: "missiond/claude-code-text/opus-4-6-high",
+                display_name: "ClaudeCode Opus 4.6 (high)",
+                provider_model_id: "claude-opus-4-6",
+                effort: "high",
+            },
+            ClaudeCodeTextSourceDef {
+                model_id: "claude-code-sonnet-4-6-high",
+                source_id: "missiond/claude-code-text/sonnet-4-6-high",
+                display_name: "ClaudeCode Sonnet 4.6 (high)",
+                provider_model_id: "claude-sonnet-4-6",
+                effort: "high",
+            },
+        ]
+    }
+
+    fn request_text_source(
+        request: &ProviderInteractionRequest,
+        result: &mut ProviderBoxResult,
+    ) -> Option<ClaudeCodeTextSourceDef> {
+        let provider = request
+            .provider
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(CLAUDE_CODE_TEXT_PROVIDER);
+        if !provider.eq_ignore_ascii_case(CLAUDE_CODE_TEXT_PROVIDER)
+            && !provider.eq_ignore_ascii_case("claude-code-text")
+        {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                "ClaudeCode text-only export requires provider=claude_code_text",
+                json!({
+                    "provider": provider,
+                    "allowed_provider": CLAUDE_CODE_TEXT_PROVIDER,
+                }),
+            ));
+            return None;
+        }
+
+        if request.slot_id.is_some() {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                "ClaudeCode text-only export does not accept external slot_id",
+                json!({
+                    "rule": "provider-box generates a private ephemeral PTY slot per request and hides it from callers",
+                }),
+            ));
+            return None;
+        }
+
+        if request.dangerously_bypass_approvals_and_sandbox {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                "ClaudeCode text-only export does not use dangerously-skip-permissions",
+                json!({
+                    "provider": CLAUDE_CODE_TEXT_PROVIDER,
+                    "rule": "text-only lanes run without bypass and with --tools '' plus durable JSONL violation checks",
+                }),
+            ));
+            return None;
+        }
+
+        if !(request.no_tools && request.no_mcp && request.no_shell && request.no_file_access) {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                "ClaudeCode text-only export requires no_tools/no_mcp/no_shell/no_file_access guards",
+                json!({
+                    "no_tools": request.no_tools,
+                    "no_mcp": request.no_mcp,
+                    "no_shell": request.no_shell,
+                    "no_file_access": request.no_file_access,
+                }),
+            ));
+            return None;
+        }
+
+        if !request
+            .prompt
+            .as_ref()
+            .is_some_and(|prompt| !prompt.trim().is_empty())
+        {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                "ClaudeCode text-only export requires a non-empty prompt",
+                json!({
+                    "provider": CLAUDE_CODE_TEXT_PROVIDER,
+                }),
+            ));
+            return None;
+        }
+
+        if !request.attachments.is_empty() {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                "ClaudeCode text-only export does not accept attachments",
+                json!({
+                    "attachments": request.attachments.len(),
+                }),
+            ));
+            return None;
+        }
+
+        let Some(model) = request
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                "ClaudeCode text-only export requires one of the explicit exported model ids",
+                json!({
+                    "allowed_model_ids": Self::text_source_defs()
+                        .iter()
+                        .map(|def| def.model_id)
+                        .collect::<Vec<_>>(),
+                    "default_model_exported": false,
+                }),
+            ));
+            return None;
+        };
+
+        let requested_profile = request
+            .model_profile
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let Some(def) = Self::text_source_defs().iter().copied().find(|def| {
+            claude_code_text_model_ref_matches(model, *def)
+                && requested_profile
+                    .map(|profile| profile.eq_ignore_ascii_case(def.effort))
+                    .unwrap_or(true)
+        }) else {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                "Requested ClaudeCode text-only model is not exported",
+                json!({
+                    "requested_model": model,
+                    "requested_model_profile": requested_profile,
+                    "allowed_sources": Self::text_source_defs()
+                        .iter()
+                        .map(|def| json!({
+                            "model_id": def.model_id,
+                            "provider_model_id": def.provider_model_id,
+                            "model_profile": def.effort,
+                        }))
+                        .collect::<Vec<_>>(),
+                    "default_model_exported": false,
+                }),
+            ));
+            return None;
+        };
+
+        Some(def)
     }
 
     fn request_permission_mode(
@@ -332,6 +550,7 @@ impl ClaudeCodeProviderDriver {
             extra_env,
             initial_prompt: None,
             command_override: None,
+            ..Default::default()
         };
 
         match crate::slot_orchestrator::spawner::spawn_tracked_slot(
@@ -951,6 +1170,519 @@ impl ClaudeCodeProviderDriver {
             ));
         }
     }
+
+    async fn ensure_text_only_runtime(
+        &self,
+        result: &mut ProviderBoxResult,
+    ) -> Option<(PathBuf, PathBuf)> {
+        let runtime_dir = claude_code_text_runtime_dir();
+        if let Err(err) = tokio::fs::create_dir_all(&runtime_dir).await {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                "ClaudeCode text-only runtime directory could not be created",
+                json!({
+                    "runtime_dir": runtime_dir.display().to_string(),
+                    "error": err.to_string(),
+                }),
+            ));
+            return None;
+        }
+
+        let readme = runtime_dir.join("README.missiond-claude-code-text-only.txt");
+        let _ = tokio::fs::write(
+            &readme,
+            "MissionD provider-box ClaudeCode text-only runtime.\nThis directory is fixed and pre-trusted; each request uses an independent ClaudeCode --session-id.\n",
+        )
+        .await;
+
+        let mcp_config = runtime_dir.join(CLAUDE_CODE_TEXT_EMPTY_MCP_CONFIG);
+        if let Err(err) = tokio::fs::write(&mcp_config, r#"{"mcpServers":{}}"#).await {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                "ClaudeCode text-only empty MCP config could not be written",
+                json!({
+                    "mcp_config": mcp_config.display().to_string(),
+                    "error": err.to_string(),
+                }),
+            ));
+            return None;
+        }
+        Some((runtime_dir, mcp_config))
+    }
+
+    async fn accept_workspace_trust_locked(
+        &self,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+        mut observation: ClaudeCodeObservation,
+    ) -> Option<ClaudeCodeObservation> {
+        let selected = selected_claude_code_workspace_trust_option(&observation);
+        match selected.as_deref() {
+            Some("yes") => {}
+            Some("no") => {
+                observation = self
+                    .write_step(
+                        result,
+                        slot_id,
+                        PtyStepAction::key("up"),
+                        "\x1b[A",
+                        Some("move ClaudeCode workspace trust selection to Yes".to_string()),
+                    )
+                    .await;
+                if selected_claude_code_workspace_trust_option(&observation).as_deref()
+                    != Some("yes")
+                {
+                    result.status = ProviderBoxStatus::Blocked;
+                    result.add_diagnostic(ProviderBoxDiagnostic::error(
+                        DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+                        "ClaudeCode workspace trust prompt could not be moved to Yes",
+                        json!({
+                            "slot_id": slot_id,
+                            "reason": observation.snapshot.reason,
+                        }),
+                    ));
+                    return None;
+                }
+            }
+            _ => {
+                result.status = ProviderBoxStatus::Blocked;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+                    "ClaudeCode workspace trust prompt selection was not recognizable",
+                    json!({
+                        "slot_id": slot_id,
+                        "rule": "provider-box only confirms trust after observing the selected option",
+                    }),
+                ));
+                return None;
+            }
+        }
+
+        observation = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::key("enter"),
+                "\r",
+                Some("confirm ClaudeCode workspace trust selection".to_string()),
+            )
+            .await;
+        if !is_ready_for_claude_code_text(&observation) {
+            observation = self
+                .wait_step_until(
+                    result,
+                    slot_id,
+                    Duration::from_secs(12),
+                    Some("wait for ClaudeCode composer after workspace trust confirmation".to_string()),
+                    is_ready_for_claude_code_text,
+                )
+                .await;
+        }
+        Some(observation)
+    }
+
+    async fn ensure_ready_for_text_only_prompt(
+        &self,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+        timeout: Duration,
+    ) -> bool {
+        let started = Instant::now();
+        loop {
+            let mut observation = self.observe(slot_id).await;
+            if is_claude_code_workspace_trust_prompt(&observation) {
+                observation = match self
+                    .accept_workspace_trust_locked(result, slot_id, observation)
+                    .await
+                {
+                    Some(observation) => observation,
+                    None => return false,
+                };
+            }
+
+            if is_ready_for_claude_code_text(&observation) {
+                return true;
+            }
+
+            if observation.snapshot.state == PtyCanonicalState::Blocked {
+                result.status = ProviderBoxStatus::Blocked;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                    "ClaudeCode text-only slot is blocked during startup",
+                    json!({
+                        "slot_id": slot_id,
+                        "reason": observation.snapshot.reason,
+                        "blocked_kind": observation.snapshot.blocked_kind,
+                        "rule": "auth and first-run setup must be handled before router-facing text-only export"
+                    }),
+                ));
+                let status = self.pty.get_status(slot_id).await;
+                result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
+                return false;
+            }
+
+            if started.elapsed() >= timeout {
+                result.status = ProviderBoxStatus::Blocked;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                    "ClaudeCode text-only slot did not reach an idle composer before timeout",
+                    json!({
+                        "slot_id": slot_id,
+                        "reason": observation.snapshot.reason,
+                        "state": observation.snapshot.state,
+                        "blocked_kind": observation.snapshot.blocked_kind,
+                    }),
+                ));
+                let status = self.pty.get_status(slot_id).await;
+                result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
+                return false;
+            }
+
+            tokio::time::sleep(Duration::from_millis(350)).await;
+        }
+    }
+
+    async fn submit_text_only_prompt(
+        &self,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+        prompt: &str,
+    ) -> bool {
+        let mut action = PtyStepAction::text("<claude-code text-only prompt>");
+        action.redacted = true;
+        let _ = self
+            .write_step(
+                result,
+                slot_id,
+                action,
+                prompt,
+                Some("write ClaudeCode text-only prompt into composer".to_string()),
+            )
+            .await;
+        let _ = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::key("enter"),
+                "\r",
+                Some("submit ClaudeCode text-only prompt".to_string()),
+            )
+            .await;
+        !result
+            .step_records
+            .last()
+            .is_some_and(|step| step.verification_status == PtyStepVerificationStatus::Failed)
+    }
+
+    async fn monitor_text_only_turn(
+        &self,
+        request: &ProviderInteractionRequest,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+        session_id: &str,
+        cursor: ClaudeCodeJsonlCursor,
+        source: ClaudeCodeTextSourceDef,
+        queue_key: &str,
+        queue_wait_ms: u64,
+    ) -> bool {
+        let timeout_secs = request.timeout_secs.unwrap_or(180).clamp(10, 7_200);
+        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+        let mut idle_seen_at: Option<Instant> = None;
+
+        loop {
+            let analysis = analyze_claude_code_jsonl_after_cursor(
+                &self.claude_home,
+                session_id,
+                &cursor,
+            );
+            if let Some(violation) = analysis.violation {
+                result.status = ProviderBoxStatus::Failed;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_TEXT_ONLY_VIOLATION,
+                    "ClaudeCode text-only turn attempted a disallowed provider action",
+                    json!({
+                        "provider": CLAUDE_CODE_TEXT_PROVIDER,
+                        "model_id": source.model_id,
+                        "provider_model_id": source.provider_model_id,
+                        "event": violation,
+                        "line_count": analysis.line_count,
+                        "rule": "provider-box returns no final after tool/MCP/shell/file/search evidence appears in durable ClaudeCode JSONL"
+                    }),
+                ));
+                return false;
+            }
+
+            if let Some(final_text) = analysis
+                .final_text
+                .as_ref()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+            {
+                let durable_source = analysis
+                    .jsonl_path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "claude_code_session_jsonl".to_string());
+                result.status = ProviderBoxStatus::Completed;
+                result.provider = Some(CLAUDE_CODE_TEXT_PROVIDER.to_string());
+                result.model = Some(source.model_id.to_string());
+                result.model_profile = Some(source.effort.to_string());
+                result.provider_conversation_id = Some(session_id.to_string());
+                result.provider_session_identity = Some(ProviderSessionIdentity::resolved(
+                    Some(CLAUDE_CODE_TEXT_PROVIDER.to_string()),
+                    CliEngine::ClaudeCode,
+                    Some(slot_id.to_string()),
+                    session_id.to_string(),
+                    "claude_code_session_jsonl",
+                    Some(durable_source.clone()),
+                    Some(claude_code_text_runtime_dir().display().to_string()),
+                    "durable_final",
+                ));
+                result.durable_source = Some(durable_source.clone());
+                result.slot_status = Some(json!({
+                    "kind": "claude_code_text_only",
+                    "provider": CLAUDE_CODE_TEXT_PROVIDER,
+                    "private_slot_id": slot_id,
+                    "session_id": session_id,
+                    "model_id": source.model_id,
+                    "provider_model_id": source.provider_model_id,
+                    "model_profile": source.effort,
+                    "durable_jsonl": durable_source,
+                    "line_count": analysis.line_count,
+                    "queue": {
+                        "owner": "provider-box",
+                        "key": queue_key,
+                        "max_concurrent": CLAUDE_CODE_TEXT_MAX_CONCURRENT,
+                        "wait_ms": queue_wait_ms,
+                        "policy": "per_logical_claude_code_text_source"
+                    }
+                }));
+                result.final_text = Some(final_text.to_string());
+                return true;
+            }
+
+            let observation = self.observe(slot_id).await;
+            if observation.snapshot.state == PtyCanonicalState::Blocked {
+                result.status = ProviderBoxStatus::Blocked;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                    "ClaudeCode text-only turn entered a blocked provider surface",
+                    json!({
+                        "slot_id": slot_id,
+                        "reason": observation.snapshot.reason,
+                        "blocked_kind": observation.snapshot.blocked_kind,
+                    }),
+                ));
+                let status = self.pty.get_status(slot_id).await;
+                result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
+                return false;
+            }
+
+            if matches!(
+                observation.snapshot.state,
+                PtyCanonicalState::Idle | PtyCanonicalState::Complete
+            ) {
+                if let Some(seen_at) = idle_seen_at {
+                    if seen_at.elapsed() >= Duration::from_secs(4) {
+                        result.status = ProviderBoxStatus::Failed;
+                        result.add_diagnostic(ProviderBoxDiagnostic::error(
+                            DIAG_PROVIDER_DURABLE_FINAL_MISSING,
+                            "ClaudeCode returned to input but no durable assistant end_turn final was found",
+                            json!({
+                                "provider": CLAUDE_CODE_TEXT_PROVIDER,
+                                "model_id": source.model_id,
+                                "provider_model_id": source.provider_model_id,
+                                "session_id": session_id,
+                                "line_count": analysis.line_count,
+                                "rule": "PTY screen text is diagnostic only; no fallback final was synthesized"
+                            }),
+                        ));
+                        return false;
+                    }
+                } else {
+                    idle_seen_at = Some(Instant::now());
+                }
+            } else {
+                idle_seen_at = None;
+            }
+
+            if Instant::now() >= deadline {
+                let _ = self.pty.write(slot_id, "\x1b").await;
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                result.status = ProviderBoxStatus::Failed;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_DURABLE_FINAL_MISSING,
+                    "ClaudeCode text-only turn timed out before durable final appeared",
+                    json!({
+                        "provider": CLAUDE_CODE_TEXT_PROVIDER,
+                        "model_id": source.model_id,
+                        "provider_model_id": source.provider_model_id,
+                        "session_id": session_id,
+                        "timeout_secs": timeout_secs,
+                    }),
+                ));
+                return false;
+            }
+
+            tokio::time::sleep(Duration::from_millis(750)).await;
+        }
+    }
+
+    async fn run_text_only_source(
+        &self,
+        request: &ProviderInteractionRequest,
+        result: &mut ProviderBoxResult,
+        source: ClaudeCodeTextSourceDef,
+    ) -> bool {
+        let queue_key = format!("{}:{}", CLAUDE_CODE_TEXT_PROVIDER, source.model_id);
+        let queue_semaphore = self.text_lane_semaphore(&queue_key).await;
+        let queued_at = Instant::now();
+        let Ok(_queue_guard) = queue_semaphore.acquire_owned().await else {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                "ClaudeCode text-only queue is unavailable",
+                json!({
+                    "provider": CLAUDE_CODE_TEXT_PROVIDER,
+                    "queue": {
+                        "key": queue_key,
+                        "max_concurrent": CLAUDE_CODE_TEXT_MAX_CONCURRENT,
+                    },
+                }),
+            ));
+            return false;
+        };
+        let queue_wait_ms = u64::try_from(queued_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+        let Some((runtime_dir, mcp_config)) = self.ensure_text_only_runtime(result).await else {
+            return false;
+        };
+
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let slot_id = format!(
+            "slot-claude-code-text-{}-{}",
+            source
+                .model_id
+                .strip_prefix("claude-code-")
+                .unwrap_or(source.model_id),
+            &session_id[..8]
+        );
+        let slot = PTYSlot {
+            id: slot_id.clone(),
+            role: "provider-box-claude-code-text-only".to_string(),
+            cwd: Some(runtime_dir.clone()),
+            engine: CliEngine::ClaudeCode,
+        };
+        self.pty.init_slot(&slot).await;
+
+        let mut extra_env = HashMap::new();
+        extra_env.insert("MISSIOND_PROVIDER_BOX_TEXT_ONLY".to_string(), "1".to_string());
+        extra_env.insert(
+            "MISSIOND_PROVIDER_BOX_TEXT_PROVIDER".to_string(),
+            CLAUDE_CODE_TEXT_PROVIDER.to_string(),
+        );
+
+        let options = PTYSpawnOptions {
+            auto_restart: false,
+            wait_for_idle: false,
+            timeout_secs: Some(90),
+            mcp_config: Some(mcp_config),
+            dangerously_skip_permissions: false,
+            model: Some(source.provider_model_id.to_string()),
+            reasoning_effort: Some(source.effort.to_string()),
+            search_enabled: false,
+            sandbox: None,
+            approval_policy: None,
+            tool_policy_path: None,
+            claude_code_tools: Some(String::new()),
+            claude_code_strict_mcp_config: true,
+            claude_code_disable_slash_commands: true,
+            provider_session_id: Some(session_id.clone()),
+            extra_env,
+            initial_prompt: None,
+            command_override: None,
+        };
+
+        if let Err(err) = self.pty.spawn(&slot, options).await {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                "ClaudeCode text-only PTY could not be spawned",
+                json!({
+                    "provider": CLAUDE_CODE_TEXT_PROVIDER,
+                    "model_id": source.model_id,
+                    "provider_model_id": source.provider_model_id,
+                    "error": err.to_string(),
+                }),
+            ));
+            let _ = self.pty.kill(&slot_id).await;
+            return false;
+        }
+
+        let ok = self
+            .run_spawned_text_only_source(
+                request,
+                result,
+                source,
+                &slot_id,
+                &session_id,
+                &queue_key,
+                queue_wait_ms,
+            )
+            .await;
+        let _ = self.pty.kill(&slot_id).await;
+        ok
+    }
+
+    async fn run_spawned_text_only_source(
+        &self,
+        request: &ProviderInteractionRequest,
+        result: &mut ProviderBoxResult,
+        source: ClaudeCodeTextSourceDef,
+        slot_id: &str,
+        session_id: &str,
+        queue_key: &str,
+        queue_wait_ms: u64,
+    ) -> bool {
+        if !self
+            .ensure_ready_for_text_only_prompt(result, slot_id, Duration::from_secs(90))
+            .await
+        {
+            return false;
+        }
+
+        let cursor = claude_code_jsonl_cursor_for_session(&self.claude_home, session_id);
+        let prompt = claude_code_text_prompt(request.prompt.as_deref().unwrap_or_default());
+        if !self
+            .submit_text_only_prompt(result, slot_id, &prompt)
+            .await
+        {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                "ClaudeCode text-only prompt submission failed",
+                json!({
+                    "provider": CLAUDE_CODE_TEXT_PROVIDER,
+                    "model_id": source.model_id,
+                }),
+            ));
+            return false;
+        }
+
+        self.monitor_text_only_turn(
+            request,
+            result,
+            slot_id,
+            session_id,
+            cursor,
+            source,
+            queue_key,
+            queue_wait_ms,
+        )
+        .await
+    }
 }
 
 #[async_trait]
@@ -965,7 +1697,7 @@ impl ProviderDriver for ClaudeCodeProviderDriver {
             switch_model: true,
             usage_probe: false,
             model_catalog: false,
-            pure_text_guard: false,
+            pure_text_guard: true,
             control_action: true,
             pty_step: false,
             status: true,
@@ -1071,6 +1803,21 @@ impl ProviderDriver for ClaudeCodeProviderDriver {
                 Some(format!("execute ClaudeCode {command} command")),
             )
             .await;
+        if !claude_code_model_matches(&observation, target)
+            && claude_code_staged_command_matches(&observation, &command)
+        {
+            observation = self
+                .write_step(
+                    &mut result,
+                    &slot_id,
+                    PtyStepAction::key("enter"),
+                    "\r",
+                    Some(format!(
+                        "execute staged ClaudeCode {command} command after slash completion"
+                    )),
+                )
+                .await;
+        }
         if !claude_code_model_matches(&observation, target) {
             observation = self
                 .wait_step_until(
@@ -1129,6 +1876,21 @@ impl ProviderDriver for ClaudeCodeProviderDriver {
                 verification_source: Some("claude_code_screen_identity_current_model".to_string()),
             });
         }
+        result
+    }
+
+    async fn pure_text_single_turn(
+        &self,
+        request: &ProviderInteractionRequest,
+    ) -> ProviderBoxResult {
+        let mut result = ProviderBoxResult::base(request, ProviderBoxStatus::Unknown);
+        let Some(source) = Self::request_text_source(request, &mut result) else {
+            return result;
+        };
+        result.provider = Some(CLAUDE_CODE_TEXT_PROVIDER.to_string());
+        result.model = Some(source.model_id.to_string());
+        result.model_profile = Some(source.effort.to_string());
+        self.run_text_only_source(request, &mut result, source).await;
         result
     }
 
@@ -1299,6 +2061,10 @@ fn claude_code_composer_text(observation: &ClaudeCodeObservation) -> Option<Stri
     })
 }
 
+fn claude_code_staged_command_matches(observation: &ClaudeCodeObservation, command: &str) -> bool {
+    claude_code_composer_text(observation).is_some_and(|text| text == command)
+}
+
 fn claude_code_current_model_from_result(result: &ProviderBoxResult) -> Option<String> {
     result
         .slot_status
@@ -1325,6 +2091,12 @@ fn normalize_claude_code_model_target(value: &str) -> Option<ClaudeCodeModelTarg
         .replace('.', "-")
         .replace(' ', "-");
     match normalized.as_str() {
+        "claude-opus-4-8" | "opus-4-8" | "opus4-8" | "claude-opus-48" | "opus-48" => {
+            Some(ClaudeCodeModelTarget {
+                command_id: "claude-opus-4-8",
+                display_name: "Opus 4.8",
+            })
+        }
         "claude-opus-4-6" | "opus-4-6" | "opus4-6" | "claude-opus-46" | "opus-46" => {
             Some(ClaudeCodeModelTarget {
                 command_id: "claude-opus-4-6",
@@ -1369,6 +2141,269 @@ fn bool_any(value: Option<&Value>, keys: &[&str]) -> bool {
         .any(|key| value.get(*key).and_then(Value::as_bool).unwrap_or(false))
 }
 
+fn claude_code_text_model_ref_matches(model: &str, def: ClaudeCodeTextSourceDef) -> bool {
+    let normalized = model.trim().to_ascii_lowercase().replace('_', "-");
+    normalized == def.model_id
+        || normalized == def.provider_model_id
+        || normalized == def.display_name.to_ascii_lowercase().replace('_', "-")
+}
+
+fn claude_code_text_prompt(prompt: &str) -> String {
+    format!(
+        "请直接用纯文本回答，不要调用工具、命令、MCP、网页搜索或读写文件。\n\n{}",
+        prompt.trim()
+    )
+}
+
+fn claude_code_text_runtime_dir() -> PathBuf {
+    if let Ok(root) = std::env::var("MISSIOND_RUNTIME_DIR") {
+        let root = root.trim();
+        if !root.is_empty() {
+            return PathBuf::from(root).join("claude-code-text-only");
+        }
+    }
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(CLAUDE_CODE_TEXT_RUNTIME_DIR)
+}
+
+fn default_claude_home() -> PathBuf {
+    if let Ok(root) = std::env::var("CLAUDE_CONFIG_DIR") {
+        let root = root.trim();
+        if !root.is_empty() {
+            return PathBuf::from(root);
+        }
+    }
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".claude")
+}
+
+fn is_claude_code_workspace_trust_prompt(observation: &ClaudeCodeObservation) -> bool {
+    observation
+        .text
+        .contains("Do you trust the contents of this directory?")
+        || observation
+            .text
+            .contains("Do you trust the contents of this project?")
+}
+
+fn selected_claude_code_workspace_trust_option(observation: &ClaudeCodeObservation) -> Option<String> {
+    observation.lines.iter().find_map(|line| {
+        let trimmed = line.trim_start();
+        if !(trimmed.starts_with('❯') || trimmed.starts_with('>')) {
+            return None;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.contains("yes") || lower.contains("trust") || lower.contains("continue") {
+            Some("yes".to_string())
+        } else if lower.contains("no") || lower.contains("quit") || lower.contains("exit") {
+            Some("no".to_string())
+        } else {
+            None
+        }
+    })
+}
+
+fn claude_code_jsonl_cursor_for_session(
+    claude_home: &Path,
+    session_id: &str,
+) -> ClaudeCodeJsonlCursor {
+    let path = find_claude_code_session_jsonl(claude_home, session_id);
+    let offset = path
+        .as_ref()
+        .and_then(|path| fs::metadata(path).ok())
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    ClaudeCodeJsonlCursor { path, offset }
+}
+
+fn analyze_claude_code_jsonl_after_cursor(
+    claude_home: &Path,
+    session_id: &str,
+    cursor: &ClaudeCodeJsonlCursor,
+) -> ClaudeCodeJsonlAnalysis {
+    let path = cursor
+        .path
+        .clone()
+        .filter(|path| path.exists())
+        .or_else(|| find_claude_code_session_jsonl(claude_home, session_id));
+    let Some(path) = path else {
+        return ClaudeCodeJsonlAnalysis::default();
+    };
+
+    let mut file = match fs::File::open(&path) {
+        Ok(file) => file,
+        Err(_) => return ClaudeCodeJsonlAnalysis::default(),
+    };
+    let len = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+    let offset = if cursor
+        .path
+        .as_ref()
+        .is_some_and(|cursor_path| cursor_path == &path)
+        && cursor.offset <= len
+    {
+        cursor.offset
+    } else {
+        0
+    };
+    if offset > 0 {
+        let _ = file.seek(SeekFrom::Start(offset));
+    }
+    let mut bytes = Vec::new();
+    if file.read_to_end(&mut bytes).is_err() {
+        return ClaudeCodeJsonlAnalysis::default();
+    }
+
+    let mut analysis = ClaudeCodeJsonlAnalysis {
+        jsonl_path: Some(path),
+        ..Default::default()
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        analysis.line_count += 1;
+        if analysis.violation.is_none() && claude_code_jsonl_event_is_text_only_violation(&event) {
+            analysis.violation = Some(event.clone());
+            continue;
+        }
+        if let Some(final_text) = claude_code_assistant_end_turn_text(&event) {
+            if !final_text.trim().is_empty() {
+                analysis.final_text = Some(final_text.trim().to_string());
+            }
+        }
+    }
+    analysis
+}
+
+fn find_claude_code_session_jsonl(claude_home: &Path, session_id: &str) -> Option<PathBuf> {
+    let filename = format!("{session_id}.jsonl");
+    let roots = [claude_home.join("projects"), claude_home.to_path_buf()];
+    roots
+        .iter()
+        .filter(|root| root.exists())
+        .filter_map(|root| find_named_jsonl(root, &filename, 0, 5))
+        .max_by_key(|path| {
+            fs::metadata(path)
+                .and_then(|metadata| metadata.modified())
+                .ok()
+        })
+}
+
+fn find_named_jsonl(root: &Path, filename: &str, depth: usize, max_depth: usize) -> Option<PathBuf> {
+    if depth > max_depth {
+        return None;
+    }
+    let mut matches = Vec::new();
+    let entries = fs::read_dir(root).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.file_name().and_then(|value| value.to_str()) == Some(filename) {
+            matches.push(path);
+            continue;
+        }
+        if path.is_dir() {
+            if let Some(path) = find_named_jsonl(&path, filename, depth + 1, max_depth) {
+                matches.push(path);
+            }
+        }
+    }
+    matches.into_iter().max_by_key(|path| {
+        fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+    })
+}
+
+fn claude_code_jsonl_event_is_text_only_violation(event: &Value) -> bool {
+    if event
+        .pointer("/message/stop_reason")
+        .and_then(Value::as_str)
+        == Some("tool_use")
+    {
+        return true;
+    }
+    json_value_has_disallowed_claude_code_tool_evidence(event)
+}
+
+fn json_value_has_disallowed_claude_code_tool_evidence(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => {
+            if map.get("toolUseResult").is_some() {
+                return true;
+            }
+            if map
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|value| {
+                    matches!(
+                        value,
+                        "tool_use"
+                            | "tool_result"
+                            | "toolUseResult"
+                            | "web_search"
+                            | "web_search_result"
+                            | "web_search_request"
+                            | "mcp_tool_call"
+                    )
+                })
+            {
+                return true;
+            }
+            if map
+                .get("web_search_requests")
+                .and_then(Value::as_array)
+                .is_some_and(|items| !items.is_empty())
+            {
+                return true;
+            }
+            map.iter().any(|(key, value)| {
+                let key_lower = key.to_ascii_lowercase();
+                (key_lower.contains("mcp") && !value.is_null())
+                    || json_value_has_disallowed_claude_code_tool_evidence(value)
+            })
+        }
+        Value::Array(items) => items
+            .iter()
+            .any(json_value_has_disallowed_claude_code_tool_evidence),
+        _ => false,
+    }
+}
+
+fn claude_code_assistant_end_turn_text(event: &Value) -> Option<String> {
+    let message = event.get("message")?;
+    if message.get("role").and_then(Value::as_str) != Some("assistant") {
+        return None;
+    }
+    if message.get("stop_reason").and_then(Value::as_str) != Some("end_turn") {
+        return None;
+    }
+    claude_code_message_content_text(message.get("content")?)
+}
+
+fn claude_code_message_content_text(content: &Value) -> Option<String> {
+    match content {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(parts) => {
+            let text = parts
+                .iter()
+                .filter_map(|part| {
+                    if part.get("type").and_then(Value::as_str) == Some("text") {
+                        part.get("text").and_then(Value::as_str)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            Some(text).filter(|text| !text.trim().is_empty())
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use missiond_core::pty::recognize_screen;
@@ -1376,9 +2411,10 @@ mod tests {
     use missiond_core::SessionState;
 
     use super::{
-        claude_code_permission_cycle_steps, is_claude_code_logout_success,
-        normalize_claude_code_model_target, normalize_claude_code_permission_mode,
-        ClaudeCodeModelTarget, ClaudeCodeObservation, ClaudeCodePermissionMode,
+        claude_code_permission_cycle_steps, claude_code_staged_command_matches,
+        is_claude_code_logout_success, normalize_claude_code_model_target,
+        normalize_claude_code_permission_mode, ClaudeCodeModelTarget, ClaudeCodeObservation,
+        ClaudeCodePermissionMode,
     };
 
     fn observation(lines: &[&str]) -> ClaudeCodeObservation {
@@ -1395,6 +2431,21 @@ mod tests {
 
     #[test]
     fn normalizes_claude_code_opus_model_command_aliases() {
+        let target = normalize_claude_code_model_target("/model claude-opus-4-8")
+            .expect("opus 4.8 command target");
+        assert_eq!(
+            target,
+            ClaudeCodeModelTarget {
+                command_id: "claude-opus-4-8",
+                display_name: "Opus 4.8"
+            }
+        );
+
+        let target =
+            normalize_claude_code_model_target("Opus 4.8").expect("opus 4.8 display target");
+        assert_eq!(target.command_id, "claude-opus-4-8");
+        assert_eq!(target.display_name, "Opus 4.8");
+
         let target = normalize_claude_code_model_target("/model claude-opus-4-6")
             .expect("opus command target");
         assert_eq!(
@@ -1430,7 +2481,28 @@ mod tests {
 
     #[test]
     fn rejects_unknown_claude_code_model_alias() {
-        assert!(normalize_claude_code_model_target("claude-opus-4-8").is_none());
+        assert!(normalize_claude_code_model_target("claude-opus-4-9").is_none());
+    }
+
+    #[test]
+    fn recognizes_exact_staged_claude_code_model_command() {
+        let obs = observation(&[
+            " ▐▛███▜▌   Claude Code v2.1.160",
+            "▝▜█████▛▘  Sonnet 4.6 with high effort · Claude Max",
+            "  ▘▘ ▝▝    ~/Projects/missiond",
+            "────────────────────────────────────────────────────────────────",
+            "❯ /model claude-opus-4-8",
+            "────────────────────────────────────────────────────────────────",
+            "  ⏵⏵ auto mode on (shift+tab to cycle)",
+        ]);
+        assert!(claude_code_staged_command_matches(
+            &obs,
+            "/model claude-opus-4-8"
+        ));
+        assert!(!claude_code_staged_command_matches(
+            &obs,
+            "/model claude-opus-4-6"
+        ));
     }
 
     #[test]

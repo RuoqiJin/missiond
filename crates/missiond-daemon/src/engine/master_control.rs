@@ -797,6 +797,7 @@ impl MasterControlService {
                 extra_env: std::collections::HashMap::new(),
                 initial_prompt: slot.config.initial_prompt.clone(),
                 command_override: None,
+                ..Default::default()
             },
             slot.config.env.as_ref(),
         )

@@ -207,8 +207,8 @@
       :owner_authority deploy-center
       :deploy_center_executor windows
       :agent_url windows
-      :capabilities [gpu github-runner embedding rerank deploy-agent]
-      :service_ids [router]
+      :capabilities [gpu github-runner embedding rerank deploy-agent video-transcode-runner]
+      :service_ids [router xjp-video-transcode-runner]
       :network_profile privatecloud-build-lan
       :lan_group xjp-zibo-lan
       :freshness skill-derived-unverified

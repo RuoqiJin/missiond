@@ -221,6 +221,83 @@
       :source-evidence [skill:services/asr asr-web-vercel-20260528 cloudflare-dns-asr-20260528]
       :risks [full-browser-oauth-callback-smoke-pending provider-cost-quota-regression-pending]
       :surface service-runtime-universe)
+    (service :id xjp-image-service
+      :project xjp-image-service
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/image"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/xjp-image-service-blueprint.lisp"
+      :environment production
+      :api-base-url "https://images.xiaojins.com/v1/images"
+      :domains ["images.xiaojins.com"]
+      :dns-provider cloudflare
+      :dns-record (:type A :name "images.xiaojins.com" :content "34.104.147.118" :proxied false :ttl 60 :authority xjp-domain-service)
+      :deployment (:substrate deploy-center :dc_slug "xjp-image-service" :runtime-target gcp-runtime :executor gcp-agent :container "xjp-image-service" :default-port 8095 :authority release-provenance)
+      :proxy (:kind caddy :domain "images.xiaojins.com" :routes ["/health" "/health/*" "/v1/images" "/v1/images/*"])
+      :ports (:http 8095)
+      :health ["/health/live" "/health/ready" "/v1/images/uploads/presign"]
+      :media-policy (:partition xjp-global :visibility-default private-signed-service-url :public-mode explicit-publish :signed-url-domain "images.xiaojins.com" :variants [original thumbnail preview])
+      :dependencies [xjp-auth xjp-pg-prod secret-store object-storage cloudflare-r2 xjp-eventhub? xjp-domain-service]
+      :ops-capability deploy-ops
+      :source-evidence [xjp-media-service-plan-20260602 xjp-domain-service-media-subdomains-20260602]
+      :surface service-runtime-universe)
+    (service :id xjp-video-service
+      :project xjp-video-service
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/video"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/xjp-video-service-blueprint.lisp"
+      :environment production
+      :api-base-url "https://videos.xiaojins.com/v1/videos"
+      :domains ["videos.xiaojins.com"]
+      :dns-provider cloudflare
+      :dns-record (:type A :name "videos.xiaojins.com" :content "34.104.147.118" :proxied false :ttl 60 :authority xjp-domain-service)
+      :deployment (:substrate deploy-center :dc_slug "xjp-video-service" :runtime-target gcp-runtime :executor gcp-agent :container "xjp-video-service" :default-port 8096 :authority release-provenance)
+      :runner (:kind deploy-agent-hosted-service :project xjp-video-transcode-runner :binary "xjp-video-transcode-runner" :runtime-target windows-12900kf :agent_url windows :transport self-built-proxy-deploy-program :queue video_jobs :ffmpeg cpu-required :profiles [poster_jpeg mp4_passthrough hls_720p])
+      :proxy (:kind caddy :domain "videos.xiaojins.com" :routes ["/health" "/health/*" "/v1/videos" "/v1/videos/*"])
+      :ports (:http 8096)
+      :health ["/health/live" "/health/ready"]
+      :media-policy (:partition xjp-global :visibility-default private-signed-service-url :public-mode explicit-publish :signed-url-domain "videos.xiaojins.com" :transcode-baseline [poster_jpeg mp4_passthrough hls_720p])
+      :dependencies [xjp-auth xjp-pg-prod secret-store object-storage cloudflare-r2 ffmpeg xjp-eventhub? xjp-domain-service deploy-agent windows-12900kf]
+      :ops-capability deploy-ops
+      :source-evidence [xjp-media-service-plan-20260602 xjp-domain-service-media-subdomains-20260602]
+      :surface service-runtime-universe)
+    (service :id xjp-domain-service
+      :project xjp-domain-service
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/domain"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/xjp-domain-service-blueprint.lisp"
+      :environment production
+      :api-base-url "https://domains.xiaojins.com/v1/domains"
+      :domains ["domains.xiaojins.com"]
+      :dns-provider cloudflare
+      :dns-record (:type A :name "domains.xiaojins.com" :content "34.104.147.118" :proxied false :ttl 60 :authority xjp-domain-service)
+      :deployment (:substrate deploy-center :dc_slug "xjp-domain-service" :runtime-target gcp-runtime :executor gcp-agent :container "xjp-domain-service" :default-port 8097 :authority release-provenance)
+      :proxy (:kind caddy :domain "domains.xiaojins.com" :routes ["/health" "/health/*" "/v1/domains" "/v1/domains/*"])
+      :ports (:http 8097)
+      :health ["/health/live" "/health/ready"]
+      :domain-policy (:zone "xiaojins.com" :provider cloudflare :mutation approval-required :apply-authority xjp-domain-service :audit-table domain_apply_audits)
+      :dependencies [xjp-auth xjp-pg-prod secret-store cloudflare-dns deploy-center]
+      :ops-capability deploy-ops
+      :source-evidence [xjp-domain-service-media-subdomains-20260602]
+      :surface service-runtime-universe)
+    (service :id xjp-mail-service
+      :project xjp-mail-service
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/mail"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/xjp-mail-service-blueprint.lisp"
+      :environment production
+      :api-base-url "https://mail.xiaojins.com/v1/mail"
+      :domains ["mail.xiaojins.com"]
+      :dns-provider cloudflare
+      :dns-record (:type A :name "mail.xiaojins.com" :content "34.104.147.118" :proxied false :ttl 60 :authority xjp-domain-service)
+      :deployment (:substrate deploy-center :dc_slug "xjp-mail-service" :runtime-target gcp-runtime :executor gcp-agent :container "xjp-mail-service" :default-port 8098 :authority release-provenance)
+      :proxy (:kind caddy :domain "mail.xiaojins.com" :routes ["/health" "/health/*" "/v1/mail" "/v1/mail/*"])
+      :ports (:http 8098)
+      :health ["/health/live" "/health/ready"]
+      :mail-policy (:provider google-workspace :mailbox-model hybrid :default-agent-mode draft-only :dns-authority xjp-domain-service :audit-table mail_audits)
+      :dependencies [xjp-auth xjp-domain-service xjp-pg-prod secret-store deploy-center google-workspace-admin-sdk gmail-api cloud-pubsub]
+      :ops-capability deploy-ops
+      :source-evidence [xjp-mail-service-google-workspace-plan-20260602]
+      :surface service-runtime-universe)
     (service :id wepub
       :project wechat-publisher
       :root "/Users/jinchen/Projects/wechat-publisher"
@@ -322,6 +399,6 @@
     (capability :id cloudflare-dns
       :provider cloudflare
       :default-mode read-only-inventory
-      :mutating-policy "Cloudflare DNS mutation requires env/secret binding, deploy-ops capability, and explicit Board approval; workers must report unavailable rather than pretend they can operate DNS when credentials are absent."
-      :secrets [CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_ZONE_ID]
+      :mutating-policy "Cloudflare DNS mutation requires xjp-domain-service, Secret Store / Deploy Center secret binding, deploy-ops capability, and explicit Board approval; workers must report unavailable rather than pretend they can operate DNS when credentials or approval are absent."
+      :secrets [CLOUDFLARE_API_TOKEN_REF CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_ZONE_ID DOMAIN_APPROVAL_TOKEN_REF DOMAIN_APPROVAL_TOKEN]
       :surface service-runtime-universe))

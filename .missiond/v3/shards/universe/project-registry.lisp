@@ -266,6 +266,61 @@
       :checks ["bash .missiond/check.sh"]
       :missiond-role "registered EventHub service; owns cross-service durable event envelopes while MissionD local EventBus remains offline-safe"
       :surface project-registry)
+    (project :id xjp-image-service
+      :aliases [xjp-image "图床" "图片服务" image-service]
+      :kind rust-service
+      :management-domain xiaojinpro-core-backend
+      :runtime-layer support-backend
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/image"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/xjp-image-service-blueprint.lisp"
+      :status contract-first-service
+      :missiond-role "registered media platform service; owns image artifacts, private signed image delivery, thumbnail/preview variants, and provider-box generated image ingestion"
+      :surface project-registry)
+    (project :id xjp-video-service
+      :aliases [xjp-video "视频服务" video-service]
+      :kind rust-service
+      :management-domain xiaojinpro-core-backend
+      :runtime-layer support-backend
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/video"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/xjp-video-service-blueprint.lisp"
+      :status contract-first-service
+      :missiond-role "registered media platform service; owns video artifacts, private signed playback, poster generation, durable transcode jobs, and the internal 12900kf transcode runner protocol"
+      :surface project-registry)
+    (project :id xjp-domain-service
+      :aliases [xjp-domain "域名服务" domain-service dns-service]
+      :kind rust-service
+      :management-domain xiaojinpro-core-backend
+      :runtime-layer support-backend
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/domain"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/xjp-domain-service-blueprint.lisp"
+      :status contract-first-service
+      :missiond-role "registered XJP domain management service; owns Cloudflare DNS inventory, approval-gated DNS apply, durable audit, and service-domain bindings for xiaojins.com"
+      :surface project-registry)
+    (project :id xjp-mail-service
+      :aliases [xjp-mail "邮箱服务" mail-service support-mail customer-mail google-workspace-mail]
+      :kind rust-service
+      :management-domain xiaojinpro-core-backend
+      :runtime-layer support-backend
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/mail"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/xjp-mail-service-blueprint.lisp"
+      :status contract-first-service
+      :missiond-role "registered XJP support mailbox service; owns per-service logical mailboxes, Google Workspace onboarding plans, Gmail Pub/Sub sync ledger, agent draft/send approval policy, and delegates DNS mutation to xjp-domain-service"
+      :surface project-registry)
+    (project :id xjp-video-transcode-runner
+      :aliases [xjp-video-runner "视频转码runner" 12900kf-video-runner]
+      :kind rust-daemon
+      :management-domain xiaojinpro-core-backend
+      :runtime-layer support-agent
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/video"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/xjp-video-service-blueprint.lisp"
+      :status contract-first-runner
+      :missiond-role "registered 12900kf Rust video transcode runner; managed by xjp-deploy-agent HostedServiceManager and communicates with xjp-video-service through the self-built proxy deployment program"
+      :surface project-registry)
     (project :id payments
       :kind rust-workspace-service
       :management-domain xiaojinpro-core-backend

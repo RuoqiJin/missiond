@@ -427,6 +427,10 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                         .tool_policy_path
                         .clone()
                         .map(std::path::PathBuf::from),
+                    claude_code_tools: None,
+                    claude_code_strict_mcp_config: false,
+                    claude_code_disable_slash_commands: false,
+                    provider_session_id: None,
                     extra_env: std::collections::HashMap::new(),
                     initial_prompt: if operator_shell {
                         None
@@ -438,6 +442,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                     } else {
                         None
                     },
+                    ..Default::default()
                 },
                 slot.config.env.as_ref(),
             )

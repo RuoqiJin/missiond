@@ -20,6 +20,7 @@ const AGY_USAGE_PROBE_SLOT: &str = "slot-agy-usage-probe";
 const CODEX_USAGE_PROBE_SLOT: &str = "slot-codex-usage-probe";
 const CODEX_RESEARCH_PROVIDER: &str = "codex_research";
 const CODEX_IMAGE_PROVIDER: &str = "codex_image_generation";
+const CLAUDE_CODE_TEXT_PROVIDER: &str = "claude_code_text";
 const CODEX_RESEARCH_PROMPT_PREFIX: &str = "帮我在互联网上进行详细调研以下问题：";
 const CODEX_IMAGE_PROMPT_PREFIX: &str = "帮我生成一张图片，要求如下：";
 const CODEX_IMAGE_STABLE_PROMPT_SUFFIX: &str = "执行要求：请直接使用 imagegen 技能实际生成图片，不要只描述图片。图片是预览用途，保留在 Codex 默认 generated_images 路径即可；不要复制、移动或写入当前工作区。生成完成后只回复 IMAGE_DONE。";
@@ -27,6 +28,7 @@ const CODEX_TASK_MODEL: &str = "gpt-5.5";
 const CODEX_EXEC_TEXT_DEFAULT_MAX_CONCURRENT: usize = 4;
 const CODEX_EXEC_TEXT_XHIGH_MAX_CONCURRENT: usize = 2;
 const CODEX_EXEC_TASK_MAX_CONCURRENT: usize = 1;
+const CLAUDE_CODE_TEXT_MAX_CONCURRENT: usize = 1;
 const PTY_STEP_ALLOWED_KEYS: &[&str] = &[
     "enter",
     "return",
@@ -940,6 +942,7 @@ impl ProviderBoxHttpAdapter {
         let has_explicit_slot =
             header_slot_id(&request).is_some() || string_field(&request.body, "slot_id").is_some();
         let logical_model_request = requested_engine == CliEngine::Agy && !has_explicit_slot;
+        let logical_claude_code_text_request = requested_engine == CliEngine::ClaudeCode;
         let requested_model = string_field(&request.body, "model");
         let Some(mut interaction) = text_only_interaction_from_body(&request.body) else {
             let mut result = ProviderBoxResult::base(
@@ -953,7 +956,7 @@ impl ProviderBoxHttpAdapter {
                     "schema": request.body.get("schema"),
                     "required": [
                         "pure_text=true",
-                        "engine=agy or engine=codex",
+                        "engine=agy, engine=codex, or provider=claude_code_text",
                         "model",
                         "messages[]"
                     ]
@@ -961,6 +964,21 @@ impl ProviderBoxHttpAdapter {
             ));
             return Ok(result_response(result));
         };
+        if logical_claude_code_text_request && has_explicit_slot {
+            let mut result = ProviderBoxResult::base(
+                &ProviderInteractionRequest::new(BoxCommand::PureTextSingleTurn, CliEngine::ClaudeCode),
+                ProviderBoxStatus::Failed,
+            );
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                "ClaudeCode text-only provider does not accept external slot_id",
+                json!({
+                    "provider": CLAUDE_CODE_TEXT_PROVIDER,
+                    "rule": "provider-box owns private ephemeral PTY slots for ClaudeCode text-only requests"
+                }),
+            ));
+            return Ok(result_response(result));
+        }
         if logical_model_request {
             if let Some(model) = requested_model.as_deref() {
                 if !is_agy_text_model_exportable(model) {
@@ -999,6 +1017,8 @@ impl ProviderBoxHttpAdapter {
             if let Some(model) = requested_model.as_deref() {
                 redact_private_slot_details(&mut result, model);
             }
+        } else if logical_claude_code_text_request {
+            redact_private_claude_code_text_details(&mut result);
         }
         Ok(result_response(result))
     }
@@ -1113,7 +1133,7 @@ fn text_only_interaction_from_body(body: &Value) -> Option<ProviderInteractionRe
         return None;
     }
     let engine = engine_from_body(body);
-    if !matches!(engine, CliEngine::Agy | CliEngine::Codex) {
+    if !matches!(engine, CliEngine::Agy | CliEngine::Codex | CliEngine::ClaudeCode) {
         return None;
     }
     if has_forbidden_text_only_fields(body) {
@@ -1132,6 +1152,7 @@ fn text_only_interaction_from_body(body: &Value) -> Option<ProviderInteractionRe
         Some(
             match engine {
                 CliEngine::Codex => "codex_exec_text",
+                CliEngine::ClaudeCode => CLAUDE_CODE_TEXT_PROVIDER,
                 _ => "agy_cli",
             }
             .to_string(),
@@ -1540,7 +1561,12 @@ fn engine_from_body(body: &Value) -> CliEngine {
 
 fn cli_engine_from_hint(raw: &str) -> CliEngine {
     match raw.to_ascii_lowercase().as_str() {
-        "claude-code" | "claude_code" | "claudecode" | "claude" => CliEngine::ClaudeCode,
+        "claude-code"
+        | "claude_code"
+        | "claudecode"
+        | "claude"
+        | "claude_code_text"
+        | "claude-code-text" => CliEngine::ClaudeCode,
         "codex"
         | "codex_cli"
         | "codex-cli"
@@ -1661,6 +1687,19 @@ fn result_response(result: ProviderBoxResult) -> ProviderBoxHttpResponse {
         ProviderBoxStatus::Failed => 502,
     };
     let screen = latest_screen_observation(&result);
+    let media_artifact = response_media_artifact(result.slot_status.as_ref());
+    let media_kind = media_artifact
+        .as_ref()
+        .and_then(|artifact| artifact.get("kind"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let media_url = media_artifact
+        .as_ref()
+        .and_then(response_media_signed_url)
+        .map(str::to_string);
+    let media_content_parts = media_artifact
+        .as_ref()
+        .and_then(response_media_content_parts);
     let body = if status == 200 {
         let final_text = result.final_text.clone().unwrap_or_default();
         let mut body = json!({
@@ -1687,17 +1726,58 @@ fn result_response(result: ProviderBoxResult) -> ProviderBoxHttpResponse {
             "step_records": result.step_records,
             "artifact_hash": result.artifact_hash
         });
+        if let Some(artifact) = media_artifact.as_ref() {
+            body["media_artifact"] = artifact.clone();
+            match media_kind.as_deref() {
+                Some("image") => {
+                    body["image_artifact"] = artifact.clone();
+                }
+                Some("video") => {
+                    body["video_artifact"] = artifact.clone();
+                }
+                _ => {}
+            }
+        }
+        if let Some(url) = media_url.as_ref() {
+            match media_kind.as_deref() {
+                Some("image") => {
+                    body["imageUrl"] = json!(url);
+                }
+                Some("video") => {
+                    body["videoUrl"] = json!(url);
+                }
+                _ => {}
+            }
+        }
+        if let Some(parts) = media_content_parts.as_ref() {
+            body["content_parts"] = parts.clone();
+        }
         body["model"] = json!(result.model);
         body["model_profile"] = json!(result.model_profile);
         body["dangerously_bypass_approvals_and_sandbox"] =
             json!(result.dangerously_bypass_approvals_and_sandbox);
         if result.final_text.is_some() {
+            let mut message = json!({
+                "role": "assistant",
+                "content": final_text
+            });
+            if let Some(parts) = media_content_parts.as_ref() {
+                message["content_parts"] = parts.clone();
+            }
+            if let Some(artifact) = media_artifact.as_ref() {
+                match media_kind.as_deref() {
+                    Some("image") => {
+                        message["image_artifact"] = artifact.clone();
+                    }
+                    Some("video") => {
+                        message["video_artifact"] = artifact.clone();
+                    }
+                    _ => {}
+                }
+            }
             body["choices"] = json!([{
                 "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": final_text
-                },
+                "message": message,
                 "finish_reason": "stop"
             }]);
         }
@@ -1707,6 +1787,7 @@ fn result_response(result: ProviderBoxResult) -> ProviderBoxHttpResponse {
             body["provider_text_only_sources"] = provider_text_only_sources(catalog);
             append_codex_exec_text_exports(&mut body);
             append_codex_task_exports(&mut body);
+            append_claude_code_text_exports(&mut body);
             body["model_export"] = json!({
                 "schema": "missiond.provider-box.model-export.v1",
                 "provider": catalog.provider.clone(),
@@ -1732,6 +1813,7 @@ fn result_response(result: ProviderBoxResult) -> ProviderBoxHttpResponse {
                 "slot_scoped_apis": "internal_maintenance_only",
                 "codex_exec_text_sources": "exported_guarded_static_sources",
                 "codex_task_sources": "exported_guarded_static_sources",
+                "claude_code_text_sources": "exported_guarded_static_sources",
                 "pure_text_guard": {
                     "prompt_instruction": false,
                     "sidecar_correlation": true,
@@ -1754,6 +1836,7 @@ fn result_response(result: ProviderBoxResult) -> ProviderBoxHttpResponse {
             body["router_model_sources"] = router_model_sources(catalog, export);
             append_codex_exec_router_sources(&mut body);
             append_codex_task_router_sources(&mut body);
+            append_claude_code_text_router_sources(&mut body);
         }
         body
     } else {
@@ -1786,6 +1869,36 @@ fn result_response(result: ProviderBoxResult) -> ProviderBoxHttpResponse {
         })
     };
     json_response(status, body)
+}
+
+fn response_media_artifact(slot_status: Option<&Value>) -> Option<Value> {
+    slot_status?
+        .get("media_artifact")
+        .filter(|artifact| !artifact.is_null())
+        .cloned()
+}
+
+fn response_media_signed_url(artifact: &Value) -> Option<&str> {
+    artifact
+        .pointer("/signed_url/url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+}
+
+fn response_media_content_parts(artifact: &Value) -> Option<Value> {
+    let url = response_media_signed_url(artifact)?;
+    match artifact.get("kind").and_then(Value::as_str) {
+        Some("image") => Some(json!([{
+            "type": "imageUrl",
+            "imageUrl": url
+        }])),
+        Some("video") => Some(json!([{
+            "type": "videoUrl",
+            "videoUrl": url
+        }])),
+        _ => None,
+    }
 }
 
 fn provider_slot_capabilities_value(
@@ -1895,7 +2008,7 @@ fn provider_slot_capabilities_value(
             "switch_model": {
                 "supported": driver.switch_model,
                 "command": "/model <model_id>",
-                "allowed_model_ids": ["claude-opus-4-6", "claude-sonnet-4-6"],
+                "allowed_model_ids": ["claude-opus-4-8", "claude-opus-4-6", "claude-sonnet-4-6"],
                 "verification": "screen_identity.current_model"
             },
             "model_catalog": driver.model_catalog
@@ -2086,6 +2199,27 @@ fn append_codex_task_router_sources(body: &mut Value) {
         .and_then(Value::as_array_mut)
     {
         sources.extend(codex_task_router_sources());
+    }
+}
+
+fn append_claude_code_text_exports(body: &mut Value) {
+    if let Some(data) = body.get_mut("data").and_then(Value::as_array_mut) {
+        data.extend(claude_code_text_openai_model_data());
+    }
+    if let Some(sources) = body
+        .get_mut("provider_text_only_sources")
+        .and_then(Value::as_array_mut)
+    {
+        sources.extend(claude_code_text_only_sources());
+    }
+}
+
+fn append_claude_code_text_router_sources(body: &mut Value) {
+    if let Some(sources) = body
+        .get_mut("router_model_sources")
+        .and_then(Value::as_array_mut)
+    {
+        sources.extend(claude_code_text_router_sources());
     }
 }
 
@@ -2363,6 +2497,137 @@ fn codex_task_router_sources() -> Vec<Value> {
         .collect()
 }
 
+fn claude_code_text_openai_model_data() -> Vec<Value> {
+    claude_code_text_source_defs()
+        .into_iter()
+        .map(|def| {
+            json!({
+                "id": def.model_id,
+                "object": "model",
+                "created": 0,
+                "owned_by": "missiond/claude-code-text",
+                "provider": CLAUDE_CODE_TEXT_PROVIDER,
+                "source_id": def.source_id,
+                "display_name": def.display_name,
+                "provider_model_id": def.provider_model_id,
+                "model": def.provider_model_id,
+                "model_profile": def.model_profile,
+                "capabilities": {
+                    "text": true,
+                    "tools": false,
+                    "vision": false,
+                    "files": false,
+                    "mcp": false,
+                    "shell": false
+                },
+                "pure_text": true,
+                "routeable_default": true,
+                "routeable_status": "pending_live_smoke",
+                "guarded": true
+            })
+        })
+        .collect()
+}
+
+fn claude_code_text_only_sources() -> Vec<Value> {
+    claude_code_text_source_defs()
+        .into_iter()
+        .map(|def| {
+            json!({
+                "schema": "missiond.provider-text-only-source.v1",
+                "source_id": def.source_id,
+                "provider": CLAUDE_CODE_TEXT_PROVIDER,
+                "engine": "claude_code",
+                "model_id": def.model_id,
+                "provider_model_id": def.provider_model_id,
+                "model": def.provider_model_id,
+                "display_name": def.display_name,
+                "model_profile": def.model_profile,
+                "completion_endpoint": "/provider-box/v1/text-only/completions",
+                "routeable": true,
+                "routeable_status": "pending_live_smoke",
+                "request_template": {
+                    "schema": "missiond.provider-box.text-only-completion-request.v1",
+                    "provider": CLAUDE_CODE_TEXT_PROVIDER,
+                    "engine": "claude_code",
+                    "model": def.model_id,
+                    "provider_model_id": def.provider_model_id,
+                    "model_profile": def.model_profile,
+                    "pure_text": true,
+                    "messages": [{
+                        "role": "user",
+                        "content": "<plain text prompt>"
+                    }]
+                },
+                "capabilities": {
+                    "text": true,
+                    "tools": false,
+                    "vision": false,
+                    "files": false,
+                    "mcp": false,
+                    "shell": false
+                },
+                "guard": {
+                    "interactive_pty": true,
+                    "uses_print_mode": false,
+                    "per_request_session_id": true,
+                    "isolated_runtime_workspace": true,
+                    "mcp_config_empty": true,
+                    "strict_mcp_config": true,
+                    "tools_flag": "--tools ''",
+                    "slash_commands_disabled": true,
+                    "dangerously_skip_permissions": false,
+                    "durable_jsonl_guard": true,
+                    "rejects_tool_messages": true,
+                    "rejects_tool_request_fields": true,
+                    "fail_closed_on_tool_use": true
+                },
+                "queue": {
+                    "owner": "provider-box",
+                    "key": claude_code_text_queue_key(def.model_id),
+                    "max_concurrent": CLAUDE_CODE_TEXT_MAX_CONCURRENT,
+                    "policy": "per_logical_claude_code_text_source"
+                },
+                "slot_policy": {
+                    "kind": "provider_box_managed_ephemeral_private_slot",
+                    "public_max_concurrent": 1,
+                    "private_slot_exposed": false,
+                    "restart_after_request": true,
+                    "queue_owner": "provider-box"
+                }
+            })
+        })
+        .collect()
+}
+
+fn claude_code_text_router_sources() -> Vec<Value> {
+    claude_code_text_source_defs()
+        .into_iter()
+        .map(|def| {
+            json!({
+                "model_id": def.model_id,
+                "display_name": def.display_name,
+                "routeable": true,
+                "routeable_status": "pending_live_smoke",
+                "route": {
+                    "provider": CLAUDE_CODE_TEXT_PROVIDER,
+                    "provider_model_id": def.provider_model_id,
+                    "model_profile": def.model_profile,
+                    "completion_endpoint": "/provider-box/v1/text-only/completions"
+                },
+                "blocked_reason": Value::Null,
+                "text_only_source": claude_code_text_only_sources()
+                    .into_iter()
+                    .find(|source| source.get("model_id") == Some(&json!(def.model_id)))
+            })
+        })
+        .collect()
+}
+
+fn claude_code_text_queue_key(model_id: &str) -> String {
+    format!("{CLAUDE_CODE_TEXT_PROVIDER}:{model_id}")
+}
+
 #[derive(Clone, Copy)]
 struct CodexExecTextSourceDef {
     model_id: &'static str,
@@ -2386,6 +2651,15 @@ struct CodexTaskSourceDef {
     model_profile: Option<&'static str>,
     routeable: bool,
     routeable_status: &'static str,
+}
+
+#[derive(Clone, Copy)]
+struct ClaudeCodeTextSourceDef {
+    model_id: &'static str,
+    source_id: &'static str,
+    display_name: &'static str,
+    provider_model_id: &'static str,
+    model_profile: &'static str,
 }
 
 impl CodexTaskSourceDef {
@@ -2456,6 +2730,32 @@ fn codex_task_source_defs() -> Vec<CodexTaskSourceDef> {
             model_profile: None,
             routeable: true,
             routeable_status: "live_smoke_passed",
+        },
+    ]
+}
+
+fn claude_code_text_source_defs() -> Vec<ClaudeCodeTextSourceDef> {
+    vec![
+        ClaudeCodeTextSourceDef {
+            model_id: "claude-code-opus-4-8-xhigh",
+            source_id: "missiond/claude-code-text/opus-4-8-xhigh",
+            display_name: "ClaudeCode Opus 4.8 (xhigh)",
+            provider_model_id: "claude-opus-4-8",
+            model_profile: "xhigh",
+        },
+        ClaudeCodeTextSourceDef {
+            model_id: "claude-code-opus-4-6-high",
+            source_id: "missiond/claude-code-text/opus-4-6-high",
+            display_name: "ClaudeCode Opus 4.6 (high)",
+            provider_model_id: "claude-opus-4-6",
+            model_profile: "high",
+        },
+        ClaudeCodeTextSourceDef {
+            model_id: "claude-code-sonnet-4-6-high",
+            source_id: "missiond/claude-code-text/sonnet-4-6-high",
+            display_name: "ClaudeCode Sonnet 4.6 (high)",
+            provider_model_id: "claude-sonnet-4-6",
+            model_profile: "high",
         },
     ]
 }
@@ -2565,6 +2865,25 @@ fn redact_private_slot_details(result: &mut ProviderBoxResult, _model: &str) {
     }
 }
 
+fn redact_private_claude_code_text_details(result: &mut ProviderBoxResult) {
+    result.slot_id = None;
+    result.slot_status = None;
+    result.step_records.clear();
+    if let Some(identity) = result.provider_session_identity.as_mut() {
+        identity.slot_id = None;
+        identity.durable_source = Some("claude_code_session_jsonl_cursor".to_string());
+        identity.workspace = None;
+    }
+    if result.durable_source.is_some() {
+        result.durable_source = Some("claude_code_session_jsonl_cursor".to_string());
+    }
+    for diagnostic in &mut result.diagnostics {
+        diagnostic.details = redact_private_paths_in_value(redact_slot_ids_in_value(
+            diagnostic.details.clone(),
+        ));
+    }
+}
+
 fn redact_slot_ids_in_value(value: Value) -> Value {
     match value {
         Value::Object(map) => Value::Object(
@@ -2575,6 +2894,32 @@ fn redact_slot_ids_in_value(value: Value) -> Value {
         ),
         Value::Array(items) => {
             Value::Array(items.into_iter().map(redact_slot_ids_in_value).collect())
+        }
+        other => other,
+    }
+}
+
+fn redact_private_paths_in_value(value: Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .filter(|(key, _)| {
+                    !matches!(
+                        key.as_str(),
+                        "jsonl_path"
+                            | "durable_jsonl"
+                            | "workspace"
+                            | "runtime_dir"
+                            | "mcp_config"
+                            | "path"
+                            | "file"
+                    )
+                })
+                .map(|(key, value)| (key, redact_private_paths_in_value(value)))
+                .collect(),
+        ),
+        Value::Array(items) => {
+            Value::Array(items.into_iter().map(redact_private_paths_in_value).collect())
         }
         other => other,
     }
@@ -3526,6 +3871,38 @@ mod tests {
     }
 
     #[test]
+    fn image_generation_response_exposes_media_artifact_and_image_url() {
+        let request =
+            ProviderInteractionRequest::new(BoxCommand::ImageGeneration, CliEngine::Codex);
+        let mut result = ProviderBoxResult::base(&request, ProviderBoxStatus::Completed);
+        let image_url = "https://images.xiaojins.com/v1/images/img_test/content?exp=1&sig=abc";
+        result.final_text = Some(format!("IMAGE_DONE {image_url}"));
+        result.slot_status = Some(json!({
+            "kind": "codex_exec_task",
+            "task_kind": "image-generation",
+            "media_artifact": {
+                "artifact_id": "img_test",
+                "kind": "image",
+                "signed_url": {
+                    "url": image_url,
+                    "expires_at": "2026-06-02T00:00:00Z"
+                }
+            }
+        }));
+
+        let response = result_response(result);
+        let message = &response.body["choices"][0]["message"];
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body["imageUrl"], image_url);
+        assert_eq!(response.body["image_artifact"]["artifact_id"], "img_test");
+        assert_eq!(response.body["content_parts"][0]["type"], "imageUrl");
+        assert_eq!(response.body["content_parts"][0]["imageUrl"], image_url);
+        assert_eq!(message["content_parts"][0]["imageUrl"], image_url);
+        assert_eq!(message["image_artifact"]["artifact_id"], "img_test");
+    }
+
+    #[test]
     fn logical_text_only_response_redacts_private_slot_details() {
         let request =
             ProviderInteractionRequest::new(BoxCommand::PureTextSingleTurn, CliEngine::Agy);
@@ -3653,7 +4030,7 @@ mod tests {
         assert_eq!(caps["slot_controls"]["switch_model"]["supported"], true);
         assert_eq!(
             caps["slot_controls"]["switch_model"]["allowed_model_ids"][0],
-            "claude-opus-4-6"
+            "claude-opus-4-8"
         );
     }
 

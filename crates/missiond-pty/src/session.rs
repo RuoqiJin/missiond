@@ -219,6 +219,14 @@ pub struct PTYSessionOptions {
     pub approval_policy: Option<String>,
     /// Provider tool policy file when supported, e.g. Gemini CLI `--policy`.
     pub tool_policy_path: Option<PathBuf>,
+    /// ClaudeCode-only `--tools` value. Text-only lanes pass an empty string.
+    pub claude_code_tools: Option<String>,
+    /// ClaudeCode-only `--strict-mcp-config` toggle.
+    pub claude_code_strict_mcp_config: bool,
+    /// ClaudeCode-only `--disable-slash-commands` toggle.
+    pub claude_code_disable_slash_commands: bool,
+    /// Provider-native session id when the CLI supports explicit session binding.
+    pub provider_session_id: Option<String>,
     /// Operator-confirmed diagnostic launch command. Normal provider workers
     /// leave this unset and use the engine-specific command builder.
     pub command_override: Option<String>,
@@ -242,6 +250,10 @@ impl Default for PTYSessionOptions {
             sandbox: None,
             approval_policy: None,
             tool_policy_path: None,
+            claude_code_tools: None,
+            claude_code_strict_mcp_config: false,
+            claude_code_disable_slash_commands: false,
+            provider_session_id: None,
             command_override: None,
         }
     }
@@ -320,6 +332,10 @@ pub struct PTYSession {
     sandbox: Option<String>,
     approval_policy: Option<String>,
     tool_policy_path: Option<PathBuf>,
+    claude_code_tools: Option<String>,
+    claude_code_strict_mcp_config: bool,
+    claude_code_disable_slash_commands: bool,
+    provider_session_id: Option<String>,
     command_override: Option<String>,
 
     // Extra environment variables (slot tracking, etc.)
@@ -381,22 +397,82 @@ fn build_cli_command(
     approval_policy: Option<&str>,
     tool_policy_path: Option<&std::path::Path>,
 ) -> String {
+    build_cli_command_with_claude_options(
+        engine,
+        cwd,
+        mcp_config,
+        dangerously_skip_permissions,
+        model,
+        reasoning_effort,
+        search_enabled,
+        sandbox,
+        approval_policy,
+        tool_policy_path,
+        ClaudeCodeLaunchOptions::default(),
+    )
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ClaudeCodeLaunchOptions<'a> {
+    tools: Option<&'a str>,
+    strict_mcp_config: bool,
+    disable_slash_commands: bool,
+    session_id: Option<&'a str>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_cli_command_with_claude_options(
+    engine: missiond_shared::CliEngine,
+    cwd: &std::path::Path,
+    mcp_config: Option<&std::path::Path>,
+    dangerously_skip_permissions: bool,
+    model: Option<&str>,
+    reasoning_effort: Option<&str>,
+    search_enabled: bool,
+    sandbox: Option<&str>,
+    approval_policy: Option<&str>,
+    tool_policy_path: Option<&std::path::Path>,
+    claude_options: ClaudeCodeLaunchOptions<'_>,
+) -> String {
     use missiond_shared::CliEngine;
 
     match engine {
         CliEngine::ClaudeCode => {
-            let mut parts = format!("claude --add-dir \"{}\"", cwd.display());
+            let mut parts = format!("claude --add-dir {}", shell_quote(&cwd.display().to_string()));
             if let Some(mcp) = mcp_config {
-                parts.push_str(&format!(" --mcp-config \"{}\"", mcp.display()));
+                parts.push_str(&format!(
+                    " --mcp-config {}",
+                    shell_quote(&mcp.display().to_string())
+                ));
                 info!(mcp_config = %mcp.display(), "MCP config will be injected");
+            }
+            if claude_options.strict_mcp_config {
+                parts.push_str(" --strict-mcp-config");
+                info!("ClaudeCode strict MCP config enabled");
             }
             if dangerously_skip_permissions {
                 parts.push_str(" --dangerously-skip-permissions");
                 info!("Dangerous mode: skipping all permission prompts");
             }
             if let Some(m) = model {
-                parts.push_str(&format!(" --model {}", m));
+                parts.push_str(&format!(" --model {}", shell_quote(m)));
                 info!(model = %m, "Model override for session");
+            }
+            if let Some(effort) = reasoning_effort {
+                parts.push_str(&format!(" --effort {}", shell_quote(effort)));
+                info!(reasoning_effort = %effort, "ClaudeCode reasoning effort override");
+            }
+            if let Some(tools) = claude_options.tools {
+                parts.push_str(&format!(" --tools {}", shell_quote(tools)));
+                info!(tools = %tools, "ClaudeCode tools override");
+            }
+            if claude_options.disable_slash_commands {
+                parts.push_str(" --disable-slash-commands");
+                info!("ClaudeCode slash commands disabled");
+            }
+            if let Some(session_id) = claude_options.session_id {
+                parts.push_str(&format!(" --session-id {}", shell_quote(session_id)));
+                info!(session_id = %session_id, "ClaudeCode explicit session id");
             }
             parts
         }
@@ -639,6 +715,10 @@ impl PTYSession {
             sandbox: options.sandbox,
             approval_policy: options.approval_policy,
             tool_policy_path: options.tool_policy_path,
+            claude_code_tools: options.claude_code_tools,
+            claude_code_strict_mcp_config: options.claude_code_strict_mcp_config,
+            claude_code_disable_slash_commands: options.claude_code_disable_slash_commands,
+            provider_session_id: options.provider_session_id,
             command_override: options.command_override,
             env: options.env,
             log_file: options.log_file,
@@ -803,7 +883,7 @@ impl PTYSession {
             );
             command.to_string()
         } else {
-            build_cli_command(
+            build_cli_command_with_claude_options(
                 self.engine,
                 &self.cwd,
                 resolved_mcp_config.as_deref(),
@@ -814,6 +894,12 @@ impl PTYSession {
                 self.sandbox.as_deref(),
                 self.approval_policy.as_deref(),
                 self.tool_policy_path.as_deref(),
+                ClaudeCodeLaunchOptions {
+                    tools: self.claude_code_tools.as_deref(),
+                    strict_mcp_config: self.claude_code_strict_mcp_config,
+                    disable_slash_commands: self.claude_code_disable_slash_commands,
+                    session_id: self.provider_session_id.as_deref(),
+                },
             )
         };
 
@@ -3118,6 +3204,38 @@ Some prose.
         assert!(!has_fix_verification_closeout(
             "We need to Fix: something. Verification: ok\n"
         ));
+    }
+
+    #[test]
+    fn claude_code_command_projects_text_only_launch_flags() {
+        let cmd = build_cli_command_with_claude_options(
+            CliEngine::ClaudeCode,
+            std::path::Path::new("/tmp/missiond text"),
+            Some(std::path::Path::new("/tmp/empty-mcp.json")),
+            false,
+            Some("claude-opus-4-8"),
+            Some("xhigh"),
+            false,
+            None,
+            None,
+            None,
+            ClaudeCodeLaunchOptions {
+                tools: Some(""),
+                strict_mcp_config: true,
+                disable_slash_commands: true,
+                session_id: Some("019e-test-session"),
+            },
+        );
+
+        assert!(cmd.contains("claude --add-dir '/tmp/missiond text'"));
+        assert!(cmd.contains("--mcp-config '/tmp/empty-mcp.json'"));
+        assert!(cmd.contains("--strict-mcp-config"));
+        assert!(cmd.contains("--model 'claude-opus-4-8'"));
+        assert!(cmd.contains("--effort 'xhigh'"));
+        assert!(cmd.contains("--tools ''"));
+        assert!(cmd.contains("--disable-slash-commands"));
+        assert!(cmd.contains("--session-id '019e-test-session'"));
+        assert!(!cmd.contains("--dangerously-skip-permissions"));
     }
 
     #[test]

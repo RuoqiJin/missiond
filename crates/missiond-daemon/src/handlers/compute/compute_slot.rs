@@ -694,6 +694,7 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
                 extra_env: HashMap::new(),
                 initial_prompt: initial_prompt_for_spawn,
                 command_override: None,
+                ..Default::default()
             },
             slot_config.env.as_ref(),
         )
