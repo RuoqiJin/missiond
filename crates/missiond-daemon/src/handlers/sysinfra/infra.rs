@@ -925,7 +925,8 @@ struct InfraEvidenceFilter {
 
 fn collect_skill_evidence(state: &AppState, filter: InfraEvidenceFilter) -> Vec<Value> {
     let target = filter.target_id.as_deref().map(str::to_ascii_lowercase);
-    let mut items = Vec::new();
+    let mut candidates: Vec<(i64, usize, Value)> = Vec::new();
+    let mut ordinal = 0usize;
     for skill in state.skills.list() {
         let skill_name = skill.name.as_str();
         if filter
@@ -939,9 +940,6 @@ fn collect_skill_evidence(state: &AppState, filter: InfraEvidenceFilter) -> Vec<
             continue;
         };
         for (idx, line) in content.lines().enumerate() {
-            if items.len() >= filter.limit {
-                return items;
-            }
             if !is_infra_evidence_line(line) {
                 continue;
             }
@@ -955,19 +953,31 @@ fn collect_skill_evidence(state: &AppState, filter: InfraEvidenceFilter) -> Vec<
             {
                 continue;
             }
+            let score =
+                evidence_scope_score(skill_name, &skill.path.display().to_string(), line, &filter);
             let (excerpt, credential_risk) = redact_skill_evidence_line(line);
-            items.push(json!({
-                "sourceSkill": skill_name,
-                "sourcePath": skill.path.display().to_string(),
-                "sourceLine": idx + 1,
-                "confidence": evidence_confidence(line),
-                "promoteTo": evidence_promotion_target(line),
-                "credentialInlineRisk": credential_risk,
-                "excerpt": excerpt
-            }));
+            candidates.push((
+                score,
+                ordinal,
+                json!({
+                    "sourceSkill": skill_name,
+                    "sourcePath": skill.path.display().to_string(),
+                    "sourceLine": idx + 1,
+                    "confidence": evidence_confidence(line),
+                    "promoteTo": evidence_promotion_target(line),
+                    "credentialInlineRisk": credential_risk,
+                    "excerpt": excerpt
+                }),
+            ));
+            ordinal += 1;
         }
     }
-    items
+    candidates.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+    candidates
+        .into_iter()
+        .take(filter.limit)
+        .map(|(_, _, item)| item)
+        .collect()
 }
 
 fn evidence_matches_scope(
@@ -987,12 +997,64 @@ fn evidence_matches_scope(
     {
         return true;
     }
-    let terms = scoped_evidence_terms(filter.query.as_deref(), filter.project_id.as_deref(), true);
-    if terms.is_empty() {
-        return true;
+    evidence_scope_score(skill_name, skill_path, line, filter) > 0
+}
+
+fn evidence_scope_score(
+    skill_name: &str,
+    skill_path: &str,
+    line: &str,
+    filter: &InfraEvidenceFilter,
+) -> i64 {
+    if filter
+        .target_id
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+        || filter
+            .skill
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+    {
+        return 100;
     }
     let haystack = format!("{skill_name}\n{skill_path}\n{line}").to_ascii_lowercase();
-    terms.iter().any(|term| haystack.contains(term))
+    let line_haystack = line.to_ascii_lowercase();
+    let skill_haystack = format!("{skill_name}\n{skill_path}").to_ascii_lowercase();
+    let mut score = 0i64;
+
+    if let Some(project) = normalized_evidence_token(filter.project_id.as_deref()) {
+        if project != "missiond" && haystack.contains(&project) {
+            score += if line_haystack.contains(&project) {
+                6
+            } else {
+                3
+            };
+        }
+    }
+    for term in filter
+        .query
+        .as_deref()
+        .map(evidence_query_tokens)
+        .unwrap_or_default()
+    {
+        if line_haystack.contains(&term) {
+            score += 4;
+        } else if skill_haystack.contains(&term) {
+            score += 2;
+        }
+    }
+    if score == 0
+        && normalized_evidence_token(filter.project_id.as_deref()).is_none()
+        && filter
+            .query
+            .as_deref()
+            .map(evidence_query_tokens)
+            .unwrap_or_default()
+            .is_empty()
+    {
+        return 1;
+    }
+    score
 }
 
 fn is_infra_evidence_line(line: &str) -> bool {
@@ -1313,6 +1375,9 @@ fn credential_refs_filtered(
         return Vec::new();
     }
     let required_capability = credential_required_capability(query);
+    if required_capability.is_none() && !credential_query_mentions_target(query) {
+        return Vec::new();
+    }
     refs.into_iter()
         .filter(|item| {
             if let Some(required_capability) = required_capability {
@@ -1354,28 +1419,23 @@ fn credential_required_capability(query: Option<&str>) -> Option<&'static str> {
     None
 }
 
-fn scoped_evidence_terms(
-    query: Option<&str>,
-    project_id: Option<&str>,
-    prefer_project_scope: bool,
-) -> Vec<String> {
-    let mut terms = Vec::new();
-    if let Some(project) = normalized_evidence_token(project_id) {
-        if project != "missiond" {
-            terms.push(project);
-            if prefer_project_scope {
-                return terms;
-            }
-        }
-    }
-    if let Some(query) = query {
-        for token in evidence_query_tokens(query) {
-            if !terms.iter().any(|existing| existing == &token) {
-                terms.push(token);
-            }
-        }
-    }
-    terms
+fn credential_query_mentions_target(query: Option<&str>) -> bool {
+    let Some(query) = query.map(str::to_ascii_lowercase) else {
+        return false;
+    };
+    [
+        "gcp",
+        "ecs",
+        "windows",
+        "privatecloud",
+        "hostvds",
+        "synology",
+        "bwg",
+        "cloudflare",
+        "dns",
+    ]
+    .iter()
+    .any(|token| query.contains(token))
 }
 
 fn evidence_query_tokens(query: &str) -> Vec<String> {
@@ -1427,20 +1487,6 @@ fn is_generic_evidence_token(token: &str) -> bool {
             | "github"
             | "center"
             | "production"
-            | "image"
-            | "binary"
-            | "compose"
-            | "entrypoint"
-            | "volume"
-            | "manifest"
-            | "migration"
-            | "schema"
-            | "gate"
-            | "missing"
-            | "verify"
-            | "skipping"
-            | "backward"
-            | "compat"
             | "key"
             | "keys"
             | "secret"
@@ -1451,10 +1497,6 @@ fn is_generic_evidence_token(token: &str) -> bool {
             | "diagnostics"
             | "canary"
             | "access"
-            | "health"
-            | "ready"
-            | "old"
-            | "new"
     )
 }
 
@@ -1681,6 +1723,29 @@ mod tests {
             "/Users/jinchen/.claude/skills/deploy-ops/SKILL.md",
             "Payments deploy-agent canary evidence and manifest gate notes",
             &filter,
+        ));
+
+        let deploy_runtime_filter = InfraEvidenceFilter {
+            target_id: None,
+            skill: None,
+            query: Some(
+                "Payments CI image marker but Deploy Center canary old binary compose entrypoint volume override"
+                    .to_string(),
+            ),
+            project_id: Some("payments".to_string()),
+            limit: 10,
+        };
+        assert!(evidence_matches_scope(
+            "xjp-deploy-center",
+            "/Users/jinchen/.claude/skills/xjp-deploy-center/SKILL.md",
+            "compose volume override kept the old binary image running after canary",
+            &deploy_runtime_filter,
+        ));
+        assert!(!evidence_matches_scope(
+            "tiermate",
+            "/Users/jinchen/.claude/skills/tiermate/SKILL.md",
+            "GCP deploy-agent endpoint and secret-store references",
+            &deploy_runtime_filter,
         ));
     }
 
