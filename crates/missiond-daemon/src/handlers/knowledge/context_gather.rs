@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     env, fs,
     path::{Path, PathBuf},
 };
@@ -3113,8 +3113,49 @@ fn evidence_item_uses_stable_projection_id(source_type: &str) -> bool {
 }
 
 fn dedupe_evidence_items(items: &mut Vec<EvidenceItemInput>) {
-    let mut seen = HashSet::new();
-    items.retain(|item| seen.insert(item.id.clone()));
+    let mut positions = HashMap::new();
+    let mut deduped = Vec::with_capacity(items.len());
+    for item in items.drain(..) {
+        let key = evidence_item_projection_dedupe_key(&item);
+        if let Some(index) = positions.get(&key).copied() {
+            if evidence_item_should_replace_duplicate(&item, &deduped[index]) {
+                deduped[index] = item;
+            }
+        } else {
+            positions.insert(key, deduped.len());
+            deduped.push(item);
+        }
+    }
+    *items = deduped;
+}
+
+fn evidence_item_projection_dedupe_key(item: &EvidenceItemInput) -> String {
+    if evidence_item_uses_stable_projection_id(item.source_type.as_str()) {
+        format!(
+            "projection|{}|{}|project:{}|task:{}|source_id:{}|source_ref:{}",
+            item.lane_id,
+            item.source_type,
+            item.project_id.as_deref().unwrap_or(""),
+            item.task_id.as_deref().unwrap_or(""),
+            item.source_id.as_deref().unwrap_or(""),
+            item.source_ref.as_deref().unwrap_or("")
+        )
+    } else {
+        format!("id|{}", item.id)
+    }
+}
+
+fn evidence_item_should_replace_duplicate(
+    candidate: &EvidenceItemInput,
+    existing: &EvidenceItemInput,
+) -> bool {
+    evidence_item_is_current_context_projection(candidate)
+        && !evidence_item_is_current_context_projection(existing)
+}
+
+fn evidence_item_is_current_context_projection(item: &EvidenceItemInput) -> bool {
+    item.metadata.get("projection").and_then(Value::as_str)
+        == Some("mission_context_gather.compact_evidence")
 }
 
 fn short_sha256(input: &str, hex_chars: usize) -> String {
@@ -4486,9 +4527,9 @@ mod tests {
         build_evidence_lanes_from_policy_with_support_catalog, build_source_summaries,
         build_support_catalog, collect_evidence_refs_from_value, context_gather_persist_artifact,
         context_gather_persist_read_model, context_gather_worker_visible_dir_for,
-        context_noise_metrics, context_pack_artifact_payload, dedupe_evidence_search_items,
-        deployment_event_filter_timeline_row, deployment_event_item_from_timeline_row,
-        diagnostics_have_hard_failures, evidence_item_id,
+        context_noise_metrics, context_pack_artifact_payload, dedupe_evidence_items,
+        dedupe_evidence_search_items, deployment_event_filter_timeline_row,
+        deployment_event_item_from_timeline_row, diagnostics_have_hard_failures, evidence_item_id,
         evidence_item_read_model_scope_allows_search, evidence_item_uses_stable_projection_id,
         filter_incomplete_deployment_closure_evidence_items,
         filter_stale_compiled_policy_evidence_items_with_fingerprint,
@@ -4843,6 +4884,42 @@ mod tests {
         assert_eq!(first, second);
         assert_ne!(first, deploy_ops);
         assert_ne!(conversation_first, conversation_second);
+    }
+
+    #[test]
+    fn evidence_items_dedupe_current_projection_over_backfill() {
+        let backfill = missiond_core::types::EvidenceItemInput {
+            id: "evi-backfill".to_string(),
+            lane_id: "support_refs".to_string(),
+            source_type: "support_catalog".to_string(),
+            source_id: Some("payments".to_string()),
+            source_ref: None,
+            project_id: Some("payments".to_string()),
+            task_id: None,
+            title: "Support catalog: payments".to_string(),
+            summary: "older compiled backfill".to_string(),
+            authority_class: "redacted-support-catalog".to_string(),
+            validity: "current_reference".to_string(),
+            privacy_class: "reference".to_string(),
+            freshness: "runtime_or_catalog_bound".to_string(),
+            score: Some(1.0),
+            raw_policy: "secret_refs_only".to_string(),
+            evidence_refs: json!({}),
+            metadata: json!({"projection": "mission_memory.evidence_backfill.compiled_authority"}),
+        };
+        let mut current = backfill.clone();
+        current.id = "evi-current".to_string();
+        current.title = "Support catalog".to_string();
+        current.summary = "current context projection".to_string();
+        current.score = None;
+        current.metadata = json!({"projection": "mission_context_gather.compact_evidence"});
+
+        let mut items = vec![backfill, current];
+        dedupe_evidence_items(&mut items);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "evi-current");
+        assert_eq!(items[0].summary, "current context projection");
     }
 
     #[test]
