@@ -453,14 +453,14 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 json!({
                     "action": "search",
                     "query": query,
-                        "project": effective_project_id.clone(),
-                        "limit": limit,
-                        "user_id": args.user_id.clone(),
-                        "tenant_id": args.tenant_id.clone(),
-                        "application_id": args.application_id.clone(),
-                        "channel": args.channel.clone(),
-                        "time_range": args
-                            .conversation_time_range
+                    "project": effective_project_id.clone(),
+                    "limit": limit,
+                    "user_id": args.user_id.clone(),
+                    "tenant_id": args.tenant_id.clone(),
+                    "application_id": args.application_id.clone(),
+                    "channel": args.channel.clone(),
+                    "time_range": args
+                        .conversation_time_range
                         .as_deref()
                         .unwrap_or("last_30d"),
                     "query_mode": "hybrid"
@@ -864,6 +864,8 @@ fn noise_diagnostics(
         "raw_sources_in_artifact": selection.include_raw_sources,
         "raw_sources_in_response": selection.include_raw_sources,
         "raw_sources_omitted": !selection.include_raw_sources,
+        "conversation_project_diagnostics": conversation_project_diagnostics(sources),
+        "conversation_cross_project_warning": conversation_project_diagnostic_field(sources, "warning"),
         "rule": "Default grounding is authority-aware and does not preload conversations, infra skill evidence, or credential refs unless the source profile or explicit include flag opts in."
     })
 }
@@ -892,6 +894,7 @@ fn context_noise_metrics(
                 .collect::<serde_json::Map<_, _>>()
         })
         .unwrap_or_default();
+    let conversation_project_diagnostics = conversation_project_diagnostics(sources);
     json!({
         "schema": "missiond.context-noise-metrics.v1",
         "source_profile": profile.as_str(),
@@ -903,6 +906,23 @@ fn context_noise_metrics(
         "raw_sources_in_response": selection.include_raw_sources,
         "raw_sources_omitted": !selection.include_raw_sources,
         "filtered_semantic_conversation_hits": filtered_semantic_conversation_hits(sources),
+        "conversation_project_lanes": conversation_project_diagnostics
+            .get("distinctProjectLanes")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "conversation_project_filter_applied": conversation_project_diagnostics
+            .get("projectFilterApplied")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "conversation_project_warning": conversation_project_diagnostics
+            .get("warning")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "conversation_suggested_project_filters": conversation_project_diagnostics
+            .get("suggestedProjectFilters")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "conversation_project_diagnostics": conversation_project_diagnostics,
         "conversation_filtering": "conversation search owns project/time/type filter metrics; context-gather records whether the lane was enabled."
     })
 }
@@ -915,6 +935,26 @@ fn filtered_semantic_conversation_hits(sources: &serde_json::Map<String, Value>)
                 .get("filteredSemanticHits")
                 .or_else(|| value.get("filtered_semantic_hits"))
         })
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+fn conversation_project_diagnostics(sources: &serde_json::Map<String, Value>) -> Value {
+    sources
+        .get("conversation_logs")
+        .and_then(|value| value.get("projectDiagnostics"))
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+fn conversation_project_diagnostic_field(
+    sources: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Value {
+    sources
+        .get("conversation_logs")
+        .and_then(|value| value.get("projectDiagnostics"))
+        .and_then(|value| value.get(key))
         .cloned()
         .unwrap_or(Value::Null)
 }
@@ -1151,6 +1191,18 @@ fn summarize_array_source(key: &str, value: &Value, limit: usize) -> Value {
 
 fn summarize_conversation_source(key: &str, value: &Value) -> Value {
     let mut map = summary_base(key);
+    for meta_key in [
+        "query",
+        "mode",
+        "totalHits",
+        "ftsHits",
+        "vecHits",
+        "filteredSemanticHits",
+        "filtered_semantic_hits",
+        "projectDiagnostics",
+    ] {
+        insert_field(&mut map, value, meta_key);
+    }
     for item_key in ["results", "items", "data"] {
         if value.get(item_key).and_then(Value::as_array).is_some() {
             map.insert(
@@ -1166,8 +1218,16 @@ fn summarize_conversation_source(key: &str, value: &Value) -> Value {
                     insert_field(&mut item_map, item, "session_id");
                     insert_field(&mut item_map, item, "sessionId");
                     insert_field(&mut item_map, item, "project");
+                    insert_field(&mut item_map, item, "projectId");
+                    insert_field(&mut item_map, item, "canonicalProjectId");
+                    insert_field(&mut item_map, item, "canonicalProjectPath");
+                    insert_field(&mut item_map, item, "projectMatchReason");
                     insert_field(&mut item_map, item, "conversation_type");
+                    insert_field(&mut item_map, item, "conversationType");
                     insert_field(&mut item_map, item, "timestamp");
+                    insert_field(&mut item_map, item, "startedAt");
+                    insert_compact_field(&mut item_map, item, "summary", 260);
+                    insert_compact_field(&mut item_map, item, "matchReason", 260);
                     insert_compact_field(&mut item_map, item, "snippet", 260);
                     insert_compact_field(&mut item_map, item, "content", 260);
                     Value::Object(item_map)
@@ -1591,7 +1651,7 @@ mod tests {
     use super::{
         build_evidence_lanes, build_source_summaries, collect_evidence_refs_from_value,
         context_noise_metrics, context_pack_artifact_payload, response_sources, source_selection,
-        ContextGatherArgs, SourceProfile,
+        summarize_conversation_source, ContextGatherArgs, SourceProfile,
     };
 
     fn args(value: serde_json::Value) -> ContextGatherArgs {
@@ -1744,7 +1804,18 @@ mod tests {
         let mut sources = serde_json::Map::new();
         sources.insert(
             "conversation_logs".to_string(),
-            json!({"results": [], "filteredSemanticHits": 4}),
+            json!({
+                "results": [],
+                "filteredSemanticHits": 4,
+                "projectDiagnostics": {
+                    "schema": "missiond.conversation-search-project-diagnostics.v1",
+                    "projectFilterApplied": false,
+                    "scope": "global_unscoped",
+                    "distinctProjectLanes": 2,
+                    "suggestedProjectFilters": ["missiond", "router"],
+                    "warning": "Unscoped conversation search returned multiple project lanes; pass project=<id> to make the audit bounded."
+                }
+            }),
         );
         let lanes = build_evidence_lanes(&sources);
         let args = args(json!({"query": "audit", "source_profile": "conversation_audit"}));
@@ -1756,6 +1827,82 @@ mod tests {
                 .get("filtered_semantic_conversation_hits")
                 .and_then(|value| value.as_u64()),
             Some(4)
+        );
+        assert_eq!(
+            metrics
+                .get("conversation_project_lanes")
+                .and_then(|value| value.as_u64()),
+            Some(2)
+        );
+        assert_eq!(
+            metrics
+                .get("conversation_project_filter_applied")
+                .and_then(|value| value.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            metrics
+                .get("conversation_suggested_project_filters")
+                .and_then(|value| value.as_array())
+                .map(Vec::len),
+            Some(2)
+        );
+        assert!(metrics
+            .get("conversation_project_warning")
+            .and_then(|value| value.as_str())
+            .is_some_and(|warning| warning.contains("multiple project lanes")));
+    }
+
+    #[test]
+    fn conversation_source_summary_preserves_project_diagnostics() {
+        let source = json!({
+            "results": [{
+                "sessionId": "s1",
+                "project": "/Users/jinchen/.claude/projects/-Users-jinchen-Projects-missiond",
+                "projectId": "/Users/jinchen/Projects/missiond",
+                "canonicalProjectId": "missiond",
+                "canonicalProjectPath": "/Users/jinchen/Projects/missiond",
+                "projectMatchReason": "claude_encoded_project_leaf",
+                "conversationType": "codex_chat",
+                "startedAt": "2026-06-02T10:00:00Z",
+                "matchReason": "Manifest Gate skipping verify backward compat"
+            }],
+            "filteredSemanticHits": 1,
+            "projectDiagnostics": {
+                "schema": "missiond.conversation-search-project-diagnostics.v1",
+                "projectFilterApplied": true,
+                "requestedProject": "missiond",
+                "scope": "explicit_project",
+                "distinctProjectLanes": 1,
+                "suggestedProjectFilters": ["missiond"],
+                "warning": null
+            }
+        });
+        let summary = summarize_conversation_source("conversation_logs", &source);
+        assert_eq!(
+            summary
+                .get("projectDiagnostics")
+                .and_then(|value| value.get("distinctProjectLanes"))
+                .and_then(|value| value.as_u64()),
+            Some(1)
+        );
+        assert_eq!(
+            summary
+                .get("items")
+                .and_then(|value| value.as_array())
+                .and_then(|items| items.first())
+                .and_then(|item| item.get("canonicalProjectPath"))
+                .and_then(|value| value.as_str()),
+            Some("/Users/jinchen/Projects/missiond")
+        );
+        assert_eq!(
+            summary
+                .get("items")
+                .and_then(|value| value.as_array())
+                .and_then(|items| items.first())
+                .and_then(|item| item.get("conversationType"))
+                .and_then(|value| value.as_str()),
+            Some("codex_chat")
         );
     }
 }
