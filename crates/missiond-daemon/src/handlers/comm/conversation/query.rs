@@ -96,6 +96,28 @@ fn encoded_project_path(path: &str) -> String {
     path.trim_end_matches('/').replace('/', "-")
 }
 
+fn decoded_claude_projects_path(raw: &str) -> Option<String> {
+    let marker = "/.claude/projects/";
+    let encoded = raw.split_once(marker)?.1.split('/').next()?.trim();
+    if let Some(rest) = encoded.strip_prefix("-Users-jinchen-Projects-") {
+        if !rest.is_empty() {
+            return Some(format!("/Users/jinchen/Projects/{rest}"));
+        }
+    }
+    None
+}
+
+fn raw_conversation_project_path(raw_project: Option<&str>) -> Option<String> {
+    let raw = raw_project.map(str::trim).filter(|p| !p.is_empty())?;
+    if raw.contains("/.claude/projects/") {
+        return decoded_claude_projects_path(raw);
+    }
+    if raw.starts_with('/') {
+        return Some(raw.to_string());
+    }
+    None
+}
+
 fn canonical_conversation_project(
     raw_project: Option<&str>,
     raw_project_id: Option<&str>,
@@ -106,9 +128,11 @@ fn canonical_conversation_project(
             .iter()
             .find(|project| project.active && project.id == project_id)
         {
+            let path =
+                raw_conversation_project_path(raw_project).unwrap_or_else(|| project.path.clone());
             return Some(CanonicalProjectMatch {
                 id: project.id.clone(),
-                path: project.path.clone(),
+                path,
                 reason: "conversation_project_id",
             });
         }
@@ -139,6 +163,23 @@ fn canonical_conversation_project(
                 path: project.path.clone(),
                 reason: "claude_encoded_project_path",
             });
+        }
+    }
+    if let Some(decoded_path) = decoded_claude_projects_path(raw) {
+        if let Some(decoded_name) = std::path::Path::new(&decoded_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+        {
+            if let Some(project) = projects
+                .iter()
+                .find(|project| project.active && project.id == decoded_name)
+            {
+                return Some(CanonicalProjectMatch {
+                    id: project.id.clone(),
+                    path: decoded_path,
+                    reason: "claude_encoded_project_leaf",
+                });
+            }
         }
     }
     None
@@ -1504,6 +1545,34 @@ mod tests {
             .map(|project| (project.id, project.reason)),
             Some(("router".into(), "claude_encoded_project_path"))
         );
+    }
+
+    #[test]
+    fn canonical_project_id_prefers_raw_conversation_path_over_runtime_root() {
+        let projects = vec![project(
+            "missiond",
+            "/private/tmp/missiond-search-noise-fix",
+        )];
+
+        let canonical = canonical_conversation_project(
+            Some("/Users/jinchen/Projects/missiond"),
+            Some("missiond"),
+            &projects,
+        )
+        .expect("canonical project");
+        assert_eq!(canonical.id, "missiond");
+        assert_eq!(canonical.path, "/Users/jinchen/Projects/missiond");
+        assert_eq!(canonical.reason, "conversation_project_id");
+
+        let legacy = canonical_conversation_project(
+            Some("/Users/jinchen/.claude/projects/-Users-jinchen-Projects-missiond"),
+            None,
+            &projects,
+        )
+        .expect("legacy canonical project");
+        assert_eq!(legacy.id, "missiond");
+        assert_eq!(legacy.path, "/Users/jinchen/Projects/missiond");
+        assert_eq!(legacy.reason, "claude_encoded_project_leaf");
     }
 
     #[test]
