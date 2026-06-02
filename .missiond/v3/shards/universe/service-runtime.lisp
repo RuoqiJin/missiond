@@ -421,7 +421,7 @@
       :backend ".missiond/backend/good-things-daily-backend-blueprint.lisp"
       :frontend ".missiond/frontend/good-things-daily-frontend-blueprint.lisp"
       :operations ".missiond/operations/good-things-daily-operations-blueprint.lisp"
-      :environment planned-production
+      :environment production
       :public-base-url "https://goodnews.xiaojinpro.top"
       :frontend-url "https://goodnews.xiaojinpro.top"
       :api-base-url "https://goodnews-api.xiaojinpro.top/api"
@@ -431,12 +431,12 @@
                     (:type A :name "goodnews-api.xiaojinpro.top" :content "34.104.147.118" :proxied false :authority xjp-domain-service :status planned)]
       :deployment (:substrate gcp-vm :runtime-target gcp-runtime :container "good-things-daily-backend" :local-bind "127.0.0.1:4017" :proxy caddy :database "xjp-pg-prod/good_things_daily" :authority deploy-center-provenance)
       :frontend-deployment (:substrate vercel :project "rickyjim626/good-things-daily" :root-directory "frontend" :production-domain "goodnews.xiaojinpro.top")
-      :health ["https://goodnews.xiaojinpro.top/" "https://goodnews-api.xiaojinpro.top/api/health" "https://goodnews-api.xiaojinpro.top/api/v1/digests/today?lang=zh"]
+      :health ["https://goodnews.xiaojinpro.top/" "https://goodnews-api.xiaojinpro.top/api/health" "https://goodnews-api.xiaojinpro.top/api/v1/feed/today?lang=zh" "https://goodnews-api.xiaojinpro.top/api/v1/digests/today?lang=zh"]
       :dependencies [xjp-router xjp-pg-prod secret-store vercel cloudflare xjp-domain-service]
-      :llm-provider (:authority xjp-router :endpoint "/v1/chat/completions" :model "claude-opus-4-6" :env [XJP_ROUTER_BASE_URL XJP_ROUTER_SERVICE_TOKEN GOOD_THINGS_TITLE_MODEL] :rule "Public headlines are generated_title values created through xjp-router claude-opus-4-6; source_title remains evidence only and must not be rendered as the primary public title.")
+      :llm-provider (:authority xjp-router :endpoint "/v1/chat/completions" :model "claude-opus-4-6" :env [XJP_ROUTER_BASE_URL XJP_ROUTER_SERVICE_TOKEN GOOD_THINGS_TITLE_MODEL] :rule "Home feed headlines are story_presentations.what_happened values created through xjp-router claude-opus-4-6 prompt open-door-joy-presentation-v1; generated_title is the fallback/detail headline; source_title remains evidence only and must not be rendered as the primary public title.")
       :ops-capability deploy-ops
       :source-evidence ["/Users/jinchen/Projects/good-things-daily/.missiond/intent.lisp" "/Users/jinchen/Projects/good-things-daily/.missiond/check.sh"]
-      :risks [production-postgres-provision-pending xjp-router-live-smoke-pending vercel-domain-cutover-pending api-domain-cutover-pending scheduled-job-runner-pending]
+      :risks [presentation-layer-regression-pending feedback-event-regression-pending feed-browser-smoke-pending scheduled-job-runner-pending]
       :surface service-runtime-universe)
     (capability :id cloudflare-dns
       :provider cloudflare

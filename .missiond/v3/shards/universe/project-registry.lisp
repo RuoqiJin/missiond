@@ -546,7 +546,7 @@
       :missiond-role "registered independent app; Daily Spark production runs on Vercel frontend spark.xiaojinpro.top plus GCP VM self-hosted Supabase-compatible backend/database at api.spark.xiaojinpro.top"
       :surface project-registry)
     (project :id good-things-daily
-      :aliases ["世界好事日报" "Good Things Daily" goodnews "goodnews.xiaojinpro.top" "goodnews-api.xiaojinpro.top"]
+      :aliases ["开门见喜" "世界好事日报" "Good Things Daily" goodnews "goodnews.xiaojinpro.top" "goodnews-api.xiaojinpro.top"]
       :kind rust-nextjs-service
       :management-domain product-service-layer
       :runtime-layer product-fullstack
@@ -557,5 +557,5 @@
       :operations ".missiond/operations/good-things-daily-operations-blueprint.lisp"
       :status incubating-project
       :checks ["bash .missiond/check.sh"]
-      :missiond-role "registered independent app; public evidence-backed world good news daily with RSS/GDELT ingest, xjp-router claude-opus-4-6 generated titles, Vercel frontend at goodnews.xiaojinpro.top, and GCP VM Rust API/Postgres at goodnews-api.xiaojinpro.top"
+      :missiond-role "registered independent app; 开门见喜 public evidence-backed good news feed with RSS/GDELT ingest, xjp-router claude-opus-4-6 generated titles and presentation copy, anonymous feedback, Vercel frontend at goodnews.xiaojinpro.top, and GCP VM Rust API/Postgres at goodnews-api.xiaojinpro.top"
       :surface project-registry))
