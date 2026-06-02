@@ -360,6 +360,8 @@ async fn search_evidence_item_read_model(
 
     match state.store.search_evidence_items(&input).await {
         Ok(items) => {
+            let raw_hit_count = items.len();
+            let (items, deduplicated_count) = dedupe_evidence_search_items(items, limit);
             let lane_counts = lane_counts_for_evidence_items(&items);
             (
                 items,
@@ -370,12 +372,15 @@ async fn search_evidence_item_read_model(
                     "query": query,
                     "allowed_lanes": allowed_lanes,
                     "project_id": project_id,
-                    "task_id": task_id,
-                    "include_global": true,
-                    "limit": input.limit,
-                    "hit_count": lane_counts.values().filter_map(Value::as_u64).sum::<u64>(),
-                    "lane_counts": lane_counts,
-                    "filter_before_vector": true,
+                        "task_id": task_id,
+                        "include_global": true,
+                        "limit": limit,
+                        "read_limit": input.limit,
+                        "raw_hit_count": raw_hit_count,
+                        "deduplicated_count": deduplicated_count,
+                        "hit_count": lane_counts.values().filter_map(Value::as_u64).sum::<u64>(),
+                        "lane_counts": lane_counts,
+                        "filter_before_vector": true,
                 }),
             )
         }
@@ -398,6 +403,40 @@ async fn search_evidence_item_read_model(
             }),
         ),
     }
+}
+
+fn dedupe_evidence_search_items(
+    items: Vec<EvidenceItemInput>,
+    limit: usize,
+) -> (Vec<EvidenceItemInput>, usize) {
+    let mut seen = HashSet::new();
+    let mut deduplicated_count = 0usize;
+    let mut out = Vec::new();
+    for item in items {
+        let key = evidence_search_dedupe_key(&item);
+        if !seen.insert(key) {
+            deduplicated_count += 1;
+            continue;
+        }
+        out.push(item);
+        if out.len() >= limit {
+            break;
+        }
+    }
+    (out, deduplicated_count)
+}
+
+fn evidence_search_dedupe_key(item: &EvidenceItemInput) -> String {
+    format!(
+        "{}|{}|{}|{}",
+        item.lane_id,
+        item.source_type,
+        item.project_id
+            .as_deref()
+            .or(item.source_id.as_deref())
+            .unwrap_or(""),
+        item.task_id.as_deref().unwrap_or("")
+    )
 }
 
 fn lane_counts_for_evidence_items(items: &[EvidenceItemInput]) -> serde_json::Map<String, Value> {
@@ -732,6 +771,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         );
     }
 
+    attach_infra_os_disabled_support_fallback(&mut sources);
     let evidence_lanes = build_evidence_lanes_from_policy(&sources, &evidence_lane_policy);
     let authority_order = authority_order();
     let noise_diagnostics = noise_diagnostics(profile, selection, &sources);
@@ -1332,81 +1372,170 @@ fn build_deployment_closure_support(
     }
     let policy = deployment_policy.and_then(|value| value.get("policy"));
     json!({
-        "schema": "missiond.deployment-closure-support.v1",
-        "authority": "compiled-service-runtime-plus-compiled-deployment-policy",
-        "project_id": project_id,
-        "service_id": service_id,
-        "deploy_center_slug": deploy_center_slug,
-        "runtime_target": runtime_target,
-        "executor": text_from_sources(&[service_catalog, service], &["executor"]),
-        "container": text_from_sources(&[service_catalog, service], &["container"]),
-        "manifest_refs": service_manifest_refs,
-        "health_endpoints": health_endpoints,
-        "smoke_endpoints": smoke_endpoints,
-        "policy_source": deployment_policy
-            .and_then(|value| value.get("source"))
-            .cloned()
-            .unwrap_or(Value::Null),
-        "policy_path": deployment_policy
-            .and_then(|value| value.get("path"))
-            .cloned()
-            .unwrap_or(Value::Null),
-        "policy_hash": deployment_policy
-            .and_then(|value| value.get("source_hash"))
-            .cloned()
-            .unwrap_or(Value::Null),
-        "runtime_fact_authority": text_from_sources(&[policy], &["runtime_fact_authority", "runtimeFactAuthority"])
-            .or_else(|| Some("deploy-center".to_string())),
-        "closure_authority": text_from_sources(&[policy], &["closure_authority", "closureAuthority"])
-            .or_else(|| Some("ReleaseEvidence+ClosureVerdict".to_string())),
-        "required_gates": {
-            "manifest_required": bool_from_sources(&[policy], &["manifest_required", "manifestRequired"]),
-            "immutable_image_required": bool_from_sources(&[policy], &["immutable_image_required", "immutableImageRequired"]),
-            "runtime_digest_required": bool_from_sources(&[policy], &["runtime_digest_required", "runtimeDigestRequired"]),
-            "smoke_required": bool_from_sources(&[policy], &["smoke_required", "smokeRequired"]),
-            "db_adoption_required": bool_from_sources(&[policy], &["db_adoption_required", "dbAdoptionRequired"]),
-            "release_lease_required": bool_from_sources(&[policy], &["release_lease_required", "releaseLeaseRequired"]),
-        },
-        "artifact_lane": text_from_sources(&[policy], &["artifact_lane", "artifactLane"]),
-        "target_side_build_allowed": bool_from_sources(&[policy], &["target_side_build_allowed", "targetSideBuildAllowed"]),
-        "approval_policy": text_from_sources(&[policy], &["approval_policy", "approvalPolicy"]),
-        "closure_required_fields": string_list_from_sources(&[policy], &["closure_required_fields", "closureRequiredFields"]),
-        "fail_closed_blockers": string_list_from_sources(&[policy], &["fail_closed_blockers", "failClosedBlockers"]),
-        "diagnostic_profiles": string_list_from_sources(&[policy], &["diagnostic_profiles", "diagnosticProfiles"]),
-        "closure_state_machine": deployment_policy
-            .and_then(|value| value.get("closure_state_machine"))
-            .cloned()
-            .unwrap_or(Value::Null),
-        "closure_verdicts": deployment_policy
-            .and_then(|value| value.get("closure_verdicts"))
-            .cloned()
-            .unwrap_or(Value::Null),
-        "typed_diagnostics": deployment_policy
-            .and_then(|value| value.get("typed_diagnostics"))
-            .cloned()
-            .unwrap_or(Value::Null),
-        "diagnostic_terms": [
-            "service.manifest.toml",
-            "manifest gate",
-            "Deploy Center canary",
-            "smoke",
-            "runtime digest",
-            "running image digest",
-            "binary marker",
-            "image marker",
-            "entrypoint",
-            "old binary",
-            "compose",
-            "volume override",
-            "_sqlx_migrations",
-            "db adoption",
-            "ReleaseLease",
-            "RuntimeObservation",
-            "ReleaseEvidence",
-            "ClosureVerdict",
-        ],
-        "rule": "GitHub workflow success, curl probes, and local git state are diagnostic only; Deploy Center ReleaseEvidence plus ClosureVerdict is the closure authority."
+    "schema": "missiond.deployment-closure-support.v1",
+    "authority": "compiled-service-runtime-plus-compiled-deployment-policy",
+    "project_id": project_id,
+    "service_id": service_id,
+    "deploy_center_slug": deploy_center_slug,
+    "runtime_target": runtime_target,
+    "executor": text_from_sources(&[service_catalog, service], &["executor"]),
+    "container": text_from_sources(&[service_catalog, service], &["container"]),
+    "manifest_refs": service_manifest_refs,
+    "health_endpoints": health_endpoints,
+    "smoke_endpoints": smoke_endpoints,
+    "policy_source": deployment_policy
+        .and_then(|value| value.get("source"))
+        .cloned()
+        .unwrap_or(Value::Null),
+    "policy_path": deployment_policy
+        .and_then(|value| value.get("path"))
+        .cloned()
+        .unwrap_or(Value::Null),
+    "policy_hash": deployment_policy
+        .and_then(|value| value.get("source_hash"))
+        .cloned()
+        .unwrap_or(Value::Null),
+    "runtime_fact_authority": text_from_sources(&[policy], &["runtime_fact_authority", "runtimeFactAuthority"])
+        .or_else(|| Some("deploy-center".to_string())),
+    "closure_authority": text_from_sources(&[policy], &["closure_authority", "closureAuthority"])
+        .or_else(|| Some("ReleaseEvidence+ClosureVerdict".to_string())),
+    "required_gates": {
+        "manifest_required": bool_from_sources(&[policy], &["manifest_required", "manifestRequired"]),
+        "immutable_image_required": bool_from_sources(&[policy], &["immutable_image_required", "immutableImageRequired"]),
+        "runtime_digest_required": bool_from_sources(&[policy], &["runtime_digest_required", "runtimeDigestRequired"]),
+        "smoke_required": bool_from_sources(&[policy], &["smoke_required", "smokeRequired"]),
+        "db_adoption_required": bool_from_sources(&[policy], &["db_adoption_required", "dbAdoptionRequired"]),
+        "release_lease_required": bool_from_sources(&[policy], &["release_lease_required", "releaseLeaseRequired"]),
+    },
+    "artifact_lane": text_from_sources(&[policy], &["artifact_lane", "artifactLane"]),
+    "target_side_build_allowed": bool_from_sources(&[policy], &["target_side_build_allowed", "targetSideBuildAllowed"]),
+    "approval_policy": text_from_sources(&[policy], &["approval_policy", "approvalPolicy"]),
+    "closure_required_fields": string_list_from_sources(&[policy], &["closure_required_fields", "closureRequiredFields"]),
+    "fail_closed_blockers": string_list_from_sources(&[policy], &["fail_closed_blockers", "failClosedBlockers"]),
+    "diagnostic_profiles": string_list_from_sources(&[policy], &["diagnostic_profiles", "diagnosticProfiles"]),
+    "closure_state_machine": deployment_policy
+        .and_then(|value| value.get("closure_state_machine"))
+        .cloned()
+        .unwrap_or(Value::Null),
+    "closure_verdicts": deployment_policy
+        .and_then(|value| value.get("closure_verdicts"))
+        .cloned()
+        .unwrap_or(Value::Null),
+    "typed_diagnostics": deployment_policy
+        .and_then(|value| value.get("typed_diagnostics"))
+        .cloned()
+        .unwrap_or(Value::Null),
+    "diagnostic_terms": [
+        "service.manifest.toml",
+        "manifest gate",
+        "Deploy Center canary",
+        "smoke",
+        "runtime digest",
+        "running image digest",
+        "binary marker",
+        "image marker",
+        "entrypoint",
+        "old binary",
+        "compose",
+        "volume override",
+        "_sqlx_migrations",
+        "db adoption",
+        "ReleaseLease",
+        "RuntimeObservation",
+        "ReleaseEvidence",
+        "ClosureVerdict",
+    ],
+    "rule": "GitHub workflow success, curl probes, and local git state are diagnostic only; Deploy Center ReleaseEvidence plus ClosureVerdict is the closure authority."
     })
+}
+
+fn attach_infra_os_disabled_support_fallback(sources: &mut serde_json::Map<String, Value>) {
+    let support_catalog = build_support_catalog(sources);
+    if !support_catalog_has_content(&support_catalog) {
+        return;
+    }
+    let Some(infra_source) = sources.get_mut("infra") else {
+        return;
+    };
+    if infra_source.get("status").and_then(Value::as_str) != Some("feature_disabled") {
+        return;
+    }
+    let fallback_items = infra_os_disabled_support_fallback_items(&support_catalog);
+    if fallback_items.is_empty() {
+        return;
+    }
+    let Some(object) = infra_source.as_object_mut() else {
+        return;
+    };
+    object.insert(
+        "fallback_status".to_string(),
+        json!("support_catalog_available"),
+    );
+    object.insert(
+        "fallback_source".to_string(),
+        json!("support_catalog.deployment_closure"),
+    );
+    object.insert(
+        "authority".to_string(),
+        json!("infra-os optional layer is disabled; using scoped support_catalog/deployment_closure fallback facts as evidence-only deploy facts"),
+    );
+    object.insert("item_count".to_string(), json!(fallback_items.len()));
+    object.insert("items".to_string(), Value::Array(fallback_items.clone()));
+    object.insert("fallback_items".to_string(), Value::Array(fallback_items));
+}
+
+fn infra_os_disabled_support_fallback_items(support_catalog: &Value) -> Vec<Value> {
+    let project_id = text_field(support_catalog, "project_id");
+    let service_id = text_field(support_catalog, "service_id");
+    let deploy_center_slug = text_field(support_catalog, "deploy_center_slug");
+    let runtime_target = support_catalog
+        .get("runtime_target")
+        .and_then(|value| text_field(value, "target"));
+    let manifest_refs = support_catalog
+        .get("manifest_refs")
+        .map(|value| string_list_field(value, "service_manifest_refs"))
+        .unwrap_or_default();
+    let health_endpoints = support_catalog
+        .get("endpoints")
+        .map(|value| string_list_field(value, "health"))
+        .unwrap_or_default();
+
+    let mut items = Vec::new();
+    if deploy_center_slug.is_some() || runtime_target.is_some() || !manifest_refs.is_empty() {
+        items.push(json!({
+            "sourceType": "support_catalog",
+            "source": "support_catalog",
+            "authority": "support_refs fallback while infra-os is feature_disabled",
+            "title": "Scoped deploy support catalog",
+            "project_id": project_id,
+            "service_id": service_id,
+            "deploy_center_slug": deploy_center_slug,
+            "runtime_target": runtime_target,
+            "manifest_refs": manifest_refs,
+            "health_endpoints": health_endpoints,
+            "excerpt": "Compiled support catalog supplies scoped deploy facts while infra-os live skill evidence is disabled."
+        }));
+    }
+
+    if let Some(closure) = support_catalog
+        .get("deployment_closure")
+        .filter(|value| !json_value_is_empty(value))
+    {
+        items.push(json!({
+            "sourceType": "deployment_closure_policy",
+            "source": "support_catalog.deployment_closure",
+            "authority": "compiled deployment closure fallback while infra-os is feature_disabled",
+            "title": "Scoped deployment closure policy",
+            "project_id": text_field(closure, "project_id"),
+            "service_id": text_field(closure, "service_id"),
+            "deploy_center_slug": text_field(closure, "deploy_center_slug"),
+            "runtime_target": text_field(closure, "runtime_target"),
+            "manifest_refs": string_list_field(closure, "manifest_refs"),
+            "diagnostic_terms": string_list_field(closure, "diagnostic_terms"),
+            "excerpt": deployment_closure_summary(closure),
+        }));
+    }
+    items
 }
 
 fn compiled_deployment_policy_for_service(
@@ -2302,11 +2431,19 @@ fn context_noise_metrics(
                 .get("ok")
                 .cloned()
                 .unwrap_or(Value::Bool(false)),
-            "hit_count": evidence_item_search
-                .get("hit_count")
-                .cloned()
-                .unwrap_or_else(|| json!(0)),
-            "lane_counts": evidence_item_search
+                "hit_count": evidence_item_search
+                    .get("hit_count")
+                    .cloned()
+                    .unwrap_or_else(|| json!(0)),
+                "raw_hit_count": evidence_item_search
+                    .get("raw_hit_count")
+                    .cloned()
+                    .unwrap_or_else(|| json!(0)),
+                "deduplicated_count": evidence_item_search
+                    .get("deduplicated_count")
+                    .cloned()
+                    .unwrap_or_else(|| json!(0)),
+                "lane_counts": evidence_item_search
                 .get("lane_counts")
                 .cloned()
                 .unwrap_or_else(|| json!({})),
@@ -2517,6 +2654,8 @@ fn summarize_source(key: &str, value: &Value) -> Value {
             insert_field(&mut map, value, "layer");
             insert_field(&mut map, value, "enable_env");
             insert_field(&mut map, value, "enable_all_env");
+            insert_field(&mut map, value, "fallback_status");
+            insert_field(&mut map, value, "fallback_source");
             insert_compact_field(&mut map, value, "reason", 220);
             insert_field(&mut map, value, "authority");
             insert_field(&mut map, value, "redaction");
@@ -2526,17 +2665,11 @@ fn summarize_source(key: &str, value: &Value) -> Value {
             );
             map.insert(
                 "items".to_string(),
-                summarize_items(value.get("items"), 5, |item| {
-                    let mut item_map = serde_json::Map::new();
-                    insert_field(&mut item_map, item, "sourceSkill");
-                    insert_field(&mut item_map, item, "sourcePath");
-                    insert_field(&mut item_map, item, "sourceLine");
-                    insert_field(&mut item_map, item, "confidence");
-                    insert_field(&mut item_map, item, "promoteTo");
-                    insert_field(&mut item_map, item, "credentialInlineRisk");
-                    insert_compact_field(&mut item_map, item, "excerpt", 360);
-                    Value::Object(item_map)
-                }),
+                summarize_items(value.get("items"), 5, summarize_infra_item),
+            );
+            map.insert(
+                "fallback_items".to_string(),
+                summarize_items(value.get("fallback_items"), 5, summarize_infra_item),
             );
             Value::Object(map)
         }
@@ -2692,6 +2825,27 @@ where
         return Value::Array(Vec::new());
     };
     Value::Array(items.iter().take(limit).map(mapper).collect())
+}
+
+fn summarize_infra_item(item: &Value) -> Value {
+    let mut item_map = serde_json::Map::new();
+    insert_field(&mut item_map, item, "sourceType");
+    insert_field(&mut item_map, item, "source");
+    insert_field(&mut item_map, item, "title");
+    insert_field(&mut item_map, item, "authority");
+    insert_field(&mut item_map, item, "project_id");
+    insert_field(&mut item_map, item, "service_id");
+    insert_field(&mut item_map, item, "deploy_center_slug");
+    insert_field(&mut item_map, item, "runtime_target");
+    insert_field(&mut item_map, item, "manifest_refs");
+    insert_field(&mut item_map, item, "sourceSkill");
+    insert_field(&mut item_map, item, "sourcePath");
+    insert_field(&mut item_map, item, "sourceLine");
+    insert_field(&mut item_map, item, "confidence");
+    insert_field(&mut item_map, item, "promoteTo");
+    insert_field(&mut item_map, item, "credentialInlineRisk");
+    insert_compact_field(&mut item_map, item, "excerpt", 360);
+    Value::Object(item_map)
 }
 
 fn array_len(value: Option<&Value>) -> usize {
@@ -3269,12 +3423,14 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::{
-        build_evidence_items, build_evidence_lanes, build_source_summaries, build_support_catalog,
-        collect_evidence_refs_from_value, context_gather_persist_artifact,
-        context_gather_persist_read_model, context_gather_worker_visible_dir_for,
-        context_noise_metrics, context_pack_artifact_payload, diagnostics_have_hard_failures,
-        optional_infra_os_disabled_diagnostic, optional_infra_os_disabled_source, response_sources,
-        source_selection, ContextGatherArgs, SourceProfile,
+        attach_infra_os_disabled_support_fallback, build_evidence_items, build_evidence_lanes,
+        build_source_summaries, build_support_catalog, collect_evidence_refs_from_value,
+        context_gather_persist_artifact, context_gather_persist_read_model,
+        context_gather_worker_visible_dir_for, context_noise_metrics,
+        context_pack_artifact_payload, dedupe_evidence_search_items,
+        diagnostics_have_hard_failures, optional_infra_os_disabled_diagnostic,
+        optional_infra_os_disabled_source, response_sources, source_selection, ContextGatherArgs,
+        SourceProfile,
     };
 
     fn args(value: serde_json::Value) -> ContextGatherArgs {
@@ -3415,6 +3571,102 @@ mod tests {
                 .and_then(Value::as_str),
             Some("feature_disabled")
         );
+    }
+
+    #[test]
+    fn infra_os_disabled_uses_support_catalog_fallback_for_deploy_ops() {
+        let mut sources = serde_json::Map::new();
+        sources.insert(
+            "infra".to_string(),
+            optional_infra_os_disabled_source("infra", "mission_infra_query"),
+        );
+        sources.insert(
+            "project_registry".to_string(),
+            json!({
+                "id": "payments",
+                "source": "compiled-service-runtime",
+                "serviceRuntime": {
+                    "id": "payments",
+                    "project": "payments",
+                    "health": ["/payments/health/ready"],
+                    "supportCatalog": {
+                        "service_id": "payments",
+                        "project_id": "payments",
+                        "deploy_center_slug": "xjp-payments",
+                        "runtime_target": "gcp-runtime",
+                        "executor": "gcp-agent",
+                        "container": "xjp-payments",
+                        "service_manifest_refs": ["services/payments/service.manifest.toml"],
+                        "db_migration_namespace": "payments"
+                    }
+                }
+            }),
+        );
+
+        attach_infra_os_disabled_support_fallback(&mut sources);
+        let summaries = build_source_summaries(&sources);
+        let infra = summaries.get("infra").expect("infra summary");
+        assert_eq!(
+            infra.get("status").and_then(Value::as_str),
+            Some("feature_disabled")
+        );
+        assert_eq!(
+            infra.get("fallback_status").and_then(Value::as_str),
+            Some("support_catalog_available")
+        );
+        assert_eq!(infra.get("item_count").and_then(Value::as_u64), Some(2));
+        assert_eq!(
+            infra
+                .get("fallback_items")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(2)
+        );
+        let rendered = serde_json::to_string(infra).expect("infra summary json");
+        assert!(rendered.contains("service.manifest.toml"));
+        assert!(rendered.contains("deployment_closure_policy"));
+
+        let lanes = build_evidence_lanes(&sources);
+        assert_eq!(
+            lanes
+                .get("lanes")
+                .and_then(|value| value.get("skill_evidence"))
+                .and_then(|value| value.get("item_count"))
+                .and_then(Value::as_u64),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn context_gather_evidence_search_dedupes_repeated_projections() {
+        let first = missiond_core::types::EvidenceItemInput {
+            id: "evi-a".to_string(),
+            lane_id: "support_refs".to_string(),
+            source_type: "deployment_closure_policy".to_string(),
+            source_id: Some("payments".to_string()),
+            source_ref: None,
+            project_id: Some("payments".to_string()),
+            task_id: None,
+            title: "Deployment closure policy".to_string(),
+            summary: "context gather projection".to_string(),
+            authority_class: "redacted-support-catalog".to_string(),
+            validity: "current_reference".to_string(),
+            privacy_class: "reference".to_string(),
+            freshness: "runtime_or_catalog_bound".to_string(),
+            score: Some(1.0),
+            raw_policy: "secret_refs_only".to_string(),
+            evidence_refs: json!([]),
+            metadata: json!({}),
+        };
+        let mut duplicate = first.clone();
+        duplicate.id = "evi-b".to_string();
+        duplicate.source_ref = Some("/srv/payments".to_string());
+        duplicate.summary = "compiled backfill projection".to_string();
+
+        let (items, deduplicated_count) = dedupe_evidence_search_items(vec![first, duplicate], 10);
+        assert_eq!(items.len(), 1);
+        assert_eq!(deduplicated_count, 1);
+        assert_eq!(items[0].id, "evi-a");
     }
 
     #[test]

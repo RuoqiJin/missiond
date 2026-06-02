@@ -13,4 +13,8 @@
            (event search-quality-fix
              :at "2026-06-02T18:48:00Z"
              :actor codex
-             :summary "mission_memory evidence_search now dedupes repeated context_gather/backfill projections by lane/source/project, and compiled authority backfill emits compact service/support evidence_refs instead of wide runtime payloads.")))
+             :summary "mission_memory evidence_search now dedupes repeated context_gather/backfill projections by lane/source/project, and compiled authority backfill emits compact service/support evidence_refs instead of wide runtime payloads.")
+           (event context-gather-infra-fallback
+             :at "2026-06-02T18:55:24Z"
+             :actor codex
+             :summary "context_gather deploy_ops now preserves infra-os feature_disabled diagnostics while exposing scoped support_catalog/deployment_closure fallback_items and raw/dedup evidence read-model metrics.")))
