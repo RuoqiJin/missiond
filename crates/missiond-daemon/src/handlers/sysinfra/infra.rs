@@ -1042,7 +1042,16 @@ fn query_has_specific_file_token_without_match(
     let Some(project) = normalized_evidence_token(filter.project_id.as_deref()) else {
         return true;
     };
-    project != "missiond" && !contains_evidence_token(&line_haystack, &project)
+    if project == "missiond" || !contains_evidence_token(&line_haystack, &project) {
+        return true;
+    }
+
+    let project = project.as_str();
+    !evidence_query_tokens(query)
+        .into_iter()
+        .filter(|token| !token.contains('.') && !token.contains('/'))
+        .filter(|token| token != project)
+        .any(|token| contains_evidence_token(&line_haystack, &token))
 }
 
 fn evidence_scope_score(
@@ -1904,6 +1913,12 @@ mod tests {
             "missiond",
             "/Users/jinchen/.claude/skills/missiond/SKILL.md",
             "Feature gate: embeddings feature, MUSL build disables ONNX Runtime",
+            &filter,
+        ));
+        assert!(!evidence_matches_scope(
+            "deploy-ops",
+            "/Users/jinchen/.claude/skills/deploy-ops/SKILL.md",
+            "/opt/xiaojinpro/docker-compose.yml — monolith, router, payments, investor-panel",
             &filter,
         ));
         assert!(evidence_matches_scope(
