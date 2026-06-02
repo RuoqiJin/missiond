@@ -20,6 +20,8 @@
 #   MISSIOND_RELEASE_KEEP       number of newest releases to keep, default: 5
 #   MISSIOND_DEPLOY_LOCK_PATH   deploy ownership lock directory, default:
 #                               $root/deploy.lock.d
+#   MISSIOND_DEPLOY_LOCK_STALE_SECS  age before metadata-less lock recovery,
+#                               default: 300
 #   MISSIOND_BACKUP_RETENTION_DAYS  old .bak/.new cleanup age, default: 7
 #   MISSIOND_SOCKET_PATH        IPC socket, default: ~/.missiond/missiond.sock
 #   MISSIOND_LAUNCHCTL_LABEL    launchd label, default: com.missiond.daemon
@@ -112,6 +114,7 @@ MISSIOND_DEPLOY_ENSURE_JARVIS_SLOT="${MISSIOND_DEPLOY_ENSURE_JARVIS_SLOT:-auto}"
 MISSION_WS_PORT="${MISSION_WS_PORT:-9120}"
 RELEASE_KEEP="${MISSIOND_RELEASE_KEEP:-5}"
 DEPLOY_LOCK_PATH="${MISSIOND_DEPLOY_LOCK_PATH:-${INSTALL_ROOT}/deploy.lock.d}"
+DEPLOY_LOCK_STALE_SECS="${MISSIOND_DEPLOY_LOCK_STALE_SECS:-300}"
 BACKUP_RETENTION_DAYS="${MISSIOND_BACKUP_RETENTION_DAYS:-7}"
 APPLY_BACKUP_CLEANUP="${MISSIOND_APPLY_BACKUP_CLEANUP:-0}"
 PREVIOUS_LAUNCHD_PROJECT_ROOT=""
@@ -234,15 +237,26 @@ release_deploy_lock() {
 
 try_recover_stale_deploy_lock() {
   [ -d "$DEPLOY_LOCK_PATH" ] || return 1
-  local owner_pid
+  local owner_pid lock_mtime now age
   owner_pid="$(cat "$DEPLOY_LOCK_PATH/pid" 2>/dev/null || true)"
   case "$owner_pid" in
-    ""|*[!0-9]*) return 1 ;;
+    ""|*[!0-9]*)
+      lock_mtime="$(stat -f %m "$DEPLOY_LOCK_PATH" 2>/dev/null || stat -c %Y "$DEPLOY_LOCK_PATH" 2>/dev/null || echo 0)"
+      now="$(date +%s)"
+      age=$(( now - lock_mtime ))
+      if [ "$age" -lt "$DEPLOY_LOCK_STALE_SECS" ]; then
+        log "deploy-lock: metadata missing but lock is fresh age=${age}s stale_after=${DEPLOY_LOCK_STALE_SECS}s"
+        return 1
+      fi
+      log "deploy-lock: removing stale metadata-less lock $DEPLOY_LOCK_PATH age=${age}s"
+      ;;
+    *)
+      if kill -0 "$owner_pid" >/dev/null 2>&1; then
+        return 1
+      fi
+      log "deploy-lock: removing stale lock $DEPLOY_LOCK_PATH owned by exited pid=$owner_pid"
+      ;;
   esac
-  if kill -0 "$owner_pid" >/dev/null 2>&1; then
-    return 1
-  fi
-  log "deploy-lock: removing stale lock $DEPLOY_LOCK_PATH owned by exited pid=$owner_pid"
   rm -rf "$DEPLOY_LOCK_PATH"
   return 0
 }

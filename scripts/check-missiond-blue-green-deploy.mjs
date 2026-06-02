@@ -73,10 +73,14 @@ function check(root) {
     'MISSIOND_ACTIVE_LINK',
     'MISSIOND_RELEASE_KEEP',
     'MISSIOND_DEPLOY_LOCK_PATH',
+    'MISSIOND_DEPLOY_LOCK_STALE_SECS',
     'DEPLOY_LOCK_PATH="${MISSIOND_DEPLOY_LOCK_PATH:-${INSTALL_ROOT}/deploy.lock.d}"',
+    'DEPLOY_LOCK_STALE_SECS="${MISSIOND_DEPLOY_LOCK_STALE_SECS:-300}"',
     'acquire_deploy_lock',
     'release_deploy_lock',
     'try_recover_stale_deploy_lock',
+    'metadata missing but lock is fresh',
+    'removing stale metadata-less lock',
     'MISSIOND_BACKUP_RETENTION_DAYS',
     'MISSIOND_LAUNCHD_PLIST',
     'MISSIOND_LAUNCHD_PROJECT_ROOT',
@@ -158,8 +162,9 @@ function buildFixture() {
       :note "Release candidates are immutable directories under ~/.xjp-mission/releases/<release-id>; daemon and MCP entrypoints both resolve through active.")))`);
   write(root, FILES.deploy, `
 MISSIOND_INSTALL_ROOT MISSIOND_RELEASES_DIR MISSIOND_ACTIVE_LINK MISSIOND_RELEASE_KEEP MISSIOND_BACKUP_RETENTION_DAYS
-MISSIOND_DEPLOY_LOCK_PATH DEPLOY_LOCK_PATH="\${MISSIOND_DEPLOY_LOCK_PATH:-\${INSTALL_ROOT}/deploy.lock.d}"
-acquire_deploy_lock release_deploy_lock try_recover_stale_deploy_lock deploy ownership guard failed
+MISSIOND_DEPLOY_LOCK_PATH MISSIOND_DEPLOY_LOCK_STALE_SECS DEPLOY_LOCK_PATH="\${MISSIOND_DEPLOY_LOCK_PATH:-\${INSTALL_ROOT}/deploy.lock.d}"
+DEPLOY_LOCK_STALE_SECS="\${MISSIOND_DEPLOY_LOCK_STALE_SECS:-300}"
+acquire_deploy_lock release_deploy_lock try_recover_stale_deploy_lock metadata missing but lock is fresh removing stale metadata-less lock deploy ownership guard failed
 MISSIOND_LAUNCHD_PLIST MISSIOND_LAUNCHD_PROJECT_ROOT
 CARGO_INCREMENTAL="\${CARGO_INCREMENTAL:-0}"
 MISSIOND_DEPLOY_REFRESH_CONTRACTS

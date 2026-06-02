@@ -135,11 +135,15 @@ function checkFiles(root, files) {
     'MISSIOND_ACTIVE_LINK',
     'MISSIOND_RELEASE_KEEP',
     'MISSIOND_DEPLOY_LOCK_PATH',
+    'MISSIOND_DEPLOY_LOCK_STALE_SECS',
     'DEPLOY_LOCK_PATH="${MISSIOND_DEPLOY_LOCK_PATH:-${INSTALL_ROOT}/deploy.lock.d}"',
+    'DEPLOY_LOCK_STALE_SECS="${MISSIOND_DEPLOY_LOCK_STALE_SECS:-300}"',
     'acquire_deploy_lock',
     'release_deploy_lock',
     'try_recover_stale_deploy_lock',
     'deploy-lock: busy',
+    'metadata missing but lock is fresh',
+    'removing stale metadata-less lock',
     'PREVIOUS_LAUNCHD_PROJECT_ROOT',
     'PREVIOUS_RUNTIME_DIR',
     'PREVIOUS_COMPILED_RUNTIME_DIR',
@@ -362,9 +366,10 @@ function buildFixture() {
   writeFixture(root, DEFAULT_FILES.deployDaemon, `
 scripts/deploy-daemon.sh                  # build + blue-green deploy + smoke
 --build-only --no-smoke --debug --fast --cleanup-only --apply-cleanup
-MISSIOND_INSTALL_ROOT MISSIOND_RELEASES_DIR MISSIOND_ACTIVE_LINK MISSIOND_RELEASE_KEEP MISSIOND_DEPLOY_LOCK_PATH MISSIOND_BACKUP_RETENTION_DAYS
+MISSIOND_INSTALL_ROOT MISSIOND_RELEASES_DIR MISSIOND_ACTIVE_LINK MISSIOND_RELEASE_KEEP MISSIOND_DEPLOY_LOCK_PATH MISSIOND_DEPLOY_LOCK_STALE_SECS MISSIOND_BACKUP_RETENTION_DAYS
 DEPLOY_LOCK_PATH="\${MISSIOND_DEPLOY_LOCK_PATH:-\${INSTALL_ROOT}/deploy.lock.d}"
-acquire_deploy_lock release_deploy_lock try_recover_stale_deploy_lock deploy-lock: busy
+DEPLOY_LOCK_STALE_SECS="\${MISSIOND_DEPLOY_LOCK_STALE_SECS:-300}"
+acquire_deploy_lock release_deploy_lock try_recover_stale_deploy_lock deploy-lock: busy metadata missing but lock is fresh removing stale metadata-less lock
 PREVIOUS_LAUNCHD_PROJECT_ROOT PREVIOUS_RUNTIME_DIR PREVIOUS_COMPILED_RUNTIME_DIR
 MISSIOND_BIN_PATH MISSIOND_MCP_BIN_PATH MISSIOND_SOCKET_PATH MISSIOND_LAUNCHCTL_LABEL MISSIOND_DEPLOY_TIMEOUT MISSIOND_DEPLOY_SMOKE_TIMEOUT
 MISSIOND_USE_SCCACHE
