@@ -270,6 +270,9 @@ function checkFiles(root, files) {
     'support_catalog',
     'deployment_closure',
     'deployment_closure_policy',
+    'load_compiled_project_universe',
+    'compiled_service_runtime_payload_for_project',
+    'supportCatalog',
     'compiled_deployment_policy_for_service',
     'build_deployment_closure_support',
     'authority_order',
@@ -1104,6 +1107,7 @@ CREATE TABLE IF NOT EXISTS skill_evidence_items;
 SourceProfile; source_profile; source_selection; include_credentials; include_raw_sources;
 include_board; include_conversations; conversation_time_range;
 evidence_lanes; evidence_items; support_catalog; authority_order; noise_diagnostics; context_noise_metrics; build_support_catalog; build_evidence_items; persist_evidence_lane_projection; record_context_gather_run; upsert_evidence_items; runtime_truth; project_ssot; reviewed_kb; active_board; skill_evidence; conversation_audit; cold_archive; support_refs; context_pack_artifact_payload;
+load_compiled_project_universe; compiled_service_runtime_payload_for_project; supportCatalog;
 credential_lane_opt_in; selection.include_credentials; selection.include_raw_sources; raw_sources_omitted;
 "board_tasks"; "conversation_logs"; "credential_refs"; "mission_board_query"; "mission_conversation_query"; "scope": "active"; "time_range"; last_30d;
 `);

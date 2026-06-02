@@ -10,7 +10,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::context::v3_blueprint_runtime::{EvidenceLaneRuntimeConfig, EvidenceLaneRuntimeEntry};
+use crate::context::v3_blueprint_runtime::{
+    load_compiled_project_universe, CompiledServiceRuntimeEntry, CompiledServiceSupportCatalog,
+    EvidenceLaneRuntimeConfig, EvidenceLaneRuntimeEntry,
+};
 use crate::feature_gates;
 use crate::handlers::comm::conversation;
 use crate::handlers::sysinfra::infra;
@@ -1150,7 +1153,10 @@ fn evidence_source_item_count(key: &str, value: &Value) -> usize {
 
 fn build_support_catalog(sources: &serde_json::Map<String, Value>) -> Value {
     let project = first_project_payload(sources);
-    let service = first_service_runtime_payload(sources);
+    let project_id_hint = text_from_sources(&[project], &["id", "project_id", "projectId"]);
+    let compiled_service = compiled_service_runtime_payload_for_project(project_id_hint.as_deref());
+    let source_service = first_service_runtime_payload(sources);
+    let service = compiled_service.as_ref().or(source_service);
     let service_catalog = service.and_then(|value| {
         value
             .get("supportCatalog")
@@ -1158,7 +1164,8 @@ fn build_support_catalog(sources: &serde_json::Map<String, Value>) -> Value {
     });
     let credential_refs = redacted_credential_refs(sources);
     let credential_ref_count = credential_refs.len();
-    let project_id = text_from_sources(&[project], &["id", "project_id", "projectId"])
+    let project_id = project_id_hint
+        .or_else(|| text_from_sources(&[service_catalog, service], &["project_id", "projectId"]))
         .or_else(|| text_from_sources(&[service], &["project"]));
     let service_id = text_from_sources(
         &[service, service_catalog],
@@ -1215,6 +1222,7 @@ fn build_support_catalog(sources: &serde_json::Map<String, Value>) -> Value {
         "project_id": project_id,
         "service_id": service_id,
         "resolver_source": text_from_sources(&[project], &["source"])
+            .or_else(|| text_from_sources(&[service], &["source", "sourceKind", "source_kind"]))
             .or_else(|| text_from_sources(&[service_catalog], &["resolver_source", "resolverSource"])),
         "deploy_center_slug": deploy_center_slug,
         "runtime_target": {
@@ -1474,6 +1482,75 @@ fn first_service_runtime_payload<'a>(
                     })
             })
         })
+}
+
+fn compiled_service_runtime_payload_for_project(project_id: Option<&str>) -> Option<Value> {
+    let lookup = normalized_lookup_key(project_id)?;
+    let project_root = crate::helpers::missiond_project_root();
+    let universe = load_compiled_project_universe(&project_root, None);
+    let payload = universe.payload?;
+    payload
+        .services
+        .iter()
+        .find(|service| compiled_service_matches_lookup(service, &lookup))
+        .map(compiled_service_runtime_entry_to_value)
+}
+
+fn compiled_service_matches_lookup(service: &CompiledServiceRuntimeEntry, lookup: &str) -> bool {
+    [service.id.as_deref(), service.project.as_deref()]
+        .into_iter()
+        .flatten()
+        .filter_map(|value| normalized_lookup_key(Some(value)))
+        .any(|value| value == lookup)
+}
+
+fn compiled_service_runtime_entry_to_value(service: &CompiledServiceRuntimeEntry) -> Value {
+    json!({
+        "source": "compiled-project-universe",
+        "sourceKind": "compiled-runtime",
+        "id": service.id,
+        "project": service.project,
+        "root": service.root,
+        "intent": service.intent,
+        "backend": service.backend,
+        "frontend": service.frontend,
+        "operations": service.operations,
+        "environment": service.environment,
+        "publicBaseUrl": service.public_base_url,
+        "frontendUrl": service.frontend_url,
+        "apiBaseUrl": service.api_base_url,
+        "domains": service.domains,
+        "health": service.health,
+        "dependencies": service.dependencies,
+        "opsCapability": service.ops_capability,
+        "surface": service.surface,
+        "supportCatalog": service
+            .support_catalog
+            .as_ref()
+            .map(compiled_support_catalog_to_value)
+            .unwrap_or(Value::Null),
+    })
+}
+
+fn compiled_support_catalog_to_value(catalog: &CompiledServiceSupportCatalog) -> Value {
+    json!({
+        "service_id": catalog.service_id,
+        "project_id": catalog.project_id,
+        "domains": catalog.domains,
+        "public_base_url": catalog.public_base_url,
+        "frontend_url": catalog.frontend_url,
+        "api_base_url": catalog.api_base_url,
+        "health": catalog.health,
+        "dependencies": catalog.dependencies,
+        "deploy_center_slug": catalog.deploy_center_slug,
+        "runtime_target": catalog.runtime_target,
+        "executor": catalog.executor,
+        "container": catalog.container,
+        "service_manifest_refs": catalog.service_manifest_refs,
+        "source_evidence": catalog.source_evidence,
+        "db_migration_namespace": catalog.db_migration_namespace,
+        "database_namespace": catalog.database_namespace,
+    })
 }
 
 fn text_from_sources(sources: &[Option<&Value>], keys: &[&str]) -> Option<String> {
