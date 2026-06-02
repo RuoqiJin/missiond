@@ -2766,6 +2766,8 @@ fn deployment_event_relay_diagnostics(
             "enable": "DEPLOY_EVENT_RELAY_ENABLED=true",
             "webhook_url": ["MISSIOND_DEPLOY_EVENT_WEBHOOK_URL", "MISSIOND_EVENTBRIDGE_URL"],
             "webhook_token": ["MISSIOND_DEPLOY_EVENT_WEBHOOK_TOKEN", "MISSIOND_EXTERNAL_WEBHOOK_TOKEN"],
+            "manifest_secret_store_namespace": "xjp-deploy-center",
+            "manifest_required_secret_store_keys": deployment_event_relay_manifest_required_secret_store_keys(),
             "optional_poll_interval": "DEPLOY_EVENT_RELAY_POLL_INTERVAL_SECS",
             "optional_batch_limit": "DEPLOY_EVENT_RELAY_BATCH_LIMIT"
         },
@@ -2792,6 +2794,7 @@ fn deployment_event_relay_next_actions(
         "deploy_center_relay_absent_or_disabled" => {
             if local_config_probe_status == Some("relay_env_names_present") {
                 json!([
+                    "run Deploy Center config-health/manifest-verify and confirm Secret Store namespace xjp-deploy-center contains DEPLOY_EVENT_RELAY_ENABLED, MISSIOND_EVENTBRIDGE_URL, and MISSIOND_EXTERNAL_WEBHOOK_TOKEN key names",
                     "verify Deploy Center runtime env values are populated, not only declared in compose/manifest",
                     "verify MISSIOND_EVENTBRIDGE_URL or MISSIOND_DEPLOY_EVENT_WEBHOOK_URL is reachable from the Deploy Center runtime",
                     "compare MISSIOND_EXTERNAL_WEBHOOK_TOKEN or MISSIOND_DEPLOY_EVENT_WEBHOOK_TOKEN with the MissionD receiver token without printing values",
@@ -2953,10 +2956,41 @@ fn deployment_event_relay_local_config_probe(support_catalog: Option<&Value>) ->
         "service_root": service_root,
         "repo_root": repo_root.as_ref().map(|path| path.display().to_string()),
         "secret_policy": "Only env variable names and file presence are reported. Secret values are not read or emitted.",
+        "secret_store_key_probe": deployment_event_relay_secret_store_key_probe(),
         "missing_env_groups": missing_env_groups,
         "config_files": checked_config_files,
         "code_refs": checked_code_refs,
     })
+}
+
+fn deployment_event_relay_secret_store_key_probe() -> Value {
+    json!({
+        "status": "not_checked",
+        "reason": "mission_context_gather does not read Secret Store key/value material; Deploy Center config-health and manifest-verify own the live Secret Store key adoption check.",
+        "authority": "deploy-center config-health manifest_secret_store_env plus manifest-verify gate",
+        "expected_namespace": "xjp-deploy-center",
+        "required_key_names": deployment_event_relay_manifest_required_secret_store_keys(),
+        "accepted_runtime_alias_groups": deployment_event_relay_env_groups()
+            .into_iter()
+            .map(|(group, names)| json!({
+                "group": group,
+                "accepted_env_names": names,
+            }))
+            .collect::<Vec<_>>(),
+        "safe_check_surfaces": [
+            "/api/deploy/projects/xjp-deploy-center/config-health?force=true",
+            "xjp secret list -n xjp-deploy-center --output json"
+        ],
+        "secret_policy": "Only Secret Store key names may be checked here; secret values must not be read or emitted."
+    })
+}
+
+fn deployment_event_relay_manifest_required_secret_store_keys() -> Vec<&'static str> {
+    vec![
+        "DEPLOY_EVENT_RELAY_ENABLED",
+        "MISSIOND_EVENTBRIDGE_URL",
+        "MISSIOND_EXTERNAL_WEBHOOK_TOKEN",
+    ]
 }
 
 fn deployment_event_relay_env_names() -> Vec<&'static str> {
@@ -6130,6 +6164,11 @@ mod tests {
         assert!(actions.as_array().is_some_and(|items| items
             .iter()
             .any(|item| item.as_str().is_some_and(|text| text.contains("reachable")))));
+        assert!(actions
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| item
+                .as_str()
+                .is_some_and(|text| text.contains("Secret Store namespace xjp-deploy-center")))));
     }
 
     #[test]
@@ -6192,6 +6231,20 @@ mod tests {
             .is_some_and(|items| items
                 .iter()
                 .any(|item| { item.get("group").and_then(Value::as_str) == Some("enable") })));
+        assert_eq!(
+            probe
+                .get("secret_store_key_probe")
+                .and_then(|value| value.get("expected_namespace"))
+                .and_then(Value::as_str),
+            Some("xjp-deploy-center")
+        );
+        assert!(probe
+            .get("secret_store_key_probe")
+            .and_then(|value| value.get("required_key_names"))
+            .and_then(Value::as_array)
+            .is_some_and(|items| items
+                .iter()
+                .any(|item| item.as_str() == Some("MISSIOND_EXTERNAL_WEBHOOK_TOKEN"))));
         assert!(probe
             .get("code_refs")
             .and_then(Value::as_array)
