@@ -11,6 +11,7 @@ use std::{
 };
 
 use crate::context::v3_blueprint_runtime::{EvidenceLaneRuntimeConfig, EvidenceLaneRuntimeEntry};
+use crate::feature_gates;
 use crate::handlers::comm::conversation;
 use crate::handlers::sysinfra::infra;
 use crate::state::AppState;
@@ -210,6 +211,40 @@ fn source_selection_with_allowed_lanes(
             args.include_raw_sources,
         ),
     }
+}
+
+fn infra_os_feature_enabled() -> bool {
+    feature_gates::optional_feature_enabled(feature_gates::INFRA_OS_ENV)
+}
+
+fn optional_infra_os_disabled_source(kind: &str, tool: &str) -> Value {
+    json!({
+        "schema": "missiond.optional-source-status.v1",
+        "kind": kind,
+        "status": "feature_disabled",
+        "feature": "infra-os",
+        "layer": "full-os",
+        "tool": tool,
+        "enable_env": feature_gates::INFRA_OS_ENV,
+        "enable_all_env": feature_gates::FULL_OS_ENV,
+        "reason": "infra, daemon update, power, and external OS operations are optional operations layers",
+        "item_count": 0,
+        "items": [],
+        "credentialRefs": [],
+        "authority": "infra-os optional layer is disabled; support_catalog and project SSOT remain available",
+        "redaction": "credential values are never emitted"
+    })
+}
+
+fn optional_infra_os_disabled_diagnostic(source: &str) -> Value {
+    json!({
+        "source": source,
+        "status": "feature_disabled",
+        "feature": "infra-os",
+        "enable_env": feature_gates::INFRA_OS_ENV,
+        "enable_all_env": feature_gates::FULL_OS_ENV,
+        "message": "infra-os optional layer is disabled in kernel-core mode; enable the feature for live infra skill evidence or credential refs"
+    })
 }
 
 fn load_evidence_lane_policy() -> (EvidenceLaneRuntimeConfig, String, Option<Value>) {
@@ -563,45 +598,61 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     }
 
     if selection.include_infra {
-        let infra_payload = if let Some(target_id) = args.infra_target.as_deref() {
-            json!({"action": "get", "id": target_id})
+        if !infra_os_feature_enabled() {
+            diagnostics.push(optional_infra_os_disabled_diagnostic("infra"));
+            sources.insert(
+                "infra".to_string(),
+                optional_infra_os_disabled_source("infra", "mission_infra_query"),
+            );
         } else {
-            json!({
-                "action": "skill_evidence",
-                "skill": args.skill.clone(),
-                "target_id": args.infra_target.clone(),
-                "query": query,
-                "project_id": effective_project_id.clone(),
-                "limit": limit
-            })
-        };
-        insert_subcall(
-            &mut sources,
-            &mut diagnostics,
-            "infra",
-            infra::handle(state, "mission_infra_query", infra_payload).await,
-        );
-    }
-
-    if selection.include_credentials {
-        insert_subcall(
-            &mut sources,
-            &mut diagnostics,
-            "credential_refs",
-            infra::handle(
-                state,
-                "mission_infra_query",
+            let infra_payload = if let Some(target_id) = args.infra_target.as_deref() {
+                json!({"action": "get", "id": target_id})
+            } else {
                 json!({
-                    "action": "credential_refs",
-                    "target_id": args.infra_target.clone(),
+                    "action": "skill_evidence",
                     "skill": args.skill.clone(),
+                    "target_id": args.infra_target.clone(),
                     "query": query,
                     "project_id": effective_project_id.clone(),
                     "limit": limit
-                }),
-            )
-            .await,
-        );
+                })
+            };
+            insert_subcall(
+                &mut sources,
+                &mut diagnostics,
+                "infra",
+                infra::handle(state, "mission_infra_query", infra_payload).await,
+            );
+        }
+    }
+
+    if selection.include_credentials {
+        if !infra_os_feature_enabled() {
+            diagnostics.push(optional_infra_os_disabled_diagnostic("credential_refs"));
+            sources.insert(
+                "credential_refs".to_string(),
+                optional_infra_os_disabled_source("credential_refs", "mission_infra_query"),
+            );
+        } else {
+            insert_subcall(
+                &mut sources,
+                &mut diagnostics,
+                "credential_refs",
+                infra::handle(
+                    state,
+                    "mission_infra_query",
+                    json!({
+                        "action": "credential_refs",
+                        "target_id": args.infra_target.clone(),
+                        "skill": args.skill.clone(),
+                        "query": query,
+                        "project_id": effective_project_id.clone(),
+                        "limit": limit
+                    }),
+                )
+                .await,
+            );
+        }
     }
 
     if selection.include_board {
@@ -2335,6 +2386,12 @@ fn summarize_source(key: &str, value: &Value) -> Value {
         }
         "infra" => {
             let mut map = summary_base(key);
+            insert_field(&mut map, value, "status");
+            insert_field(&mut map, value, "feature");
+            insert_field(&mut map, value, "layer");
+            insert_field(&mut map, value, "enable_env");
+            insert_field(&mut map, value, "enable_all_env");
+            insert_compact_field(&mut map, value, "reason", 220);
             insert_field(&mut map, value, "authority");
             insert_field(&mut map, value, "redaction");
             map.insert(
@@ -2359,6 +2416,12 @@ fn summarize_source(key: &str, value: &Value) -> Value {
         }
         "credential_refs" => {
             let mut map = summary_base(key);
+            insert_field(&mut map, value, "status");
+            insert_field(&mut map, value, "feature");
+            insert_field(&mut map, value, "layer");
+            insert_field(&mut map, value, "enable_env");
+            insert_field(&mut map, value, "enable_all_env");
+            insert_compact_field(&mut map, value, "reason", 220);
             map.insert(
                 "credential_ref_count".to_string(),
                 json!(array_len(value.get("credentialRefs"))),
@@ -3082,8 +3145,9 @@ mod tests {
     use super::{
         build_evidence_items, build_evidence_lanes, build_source_summaries, build_support_catalog,
         collect_evidence_refs_from_value, context_gather_worker_visible_dir_for,
-        context_noise_metrics, context_pack_artifact_payload, response_sources, source_selection,
-        ContextGatherArgs, SourceProfile,
+        context_noise_metrics, context_pack_artifact_payload,
+        optional_infra_os_disabled_diagnostic, optional_infra_os_disabled_source, response_sources,
+        source_selection, ContextGatherArgs, SourceProfile,
     };
 
     fn args(value: serde_json::Value) -> ContextGatherArgs {
@@ -3139,6 +3203,59 @@ mod tests {
         assert_eq!(
             context_gather_worker_visible_dir_for(project_root, runtime_dir, false),
             Path::new("/release/source/.missiond/v3/runtime/context-gather-worker")
+        );
+    }
+
+    #[test]
+    fn infra_os_disabled_sources_are_visible_but_not_evidence_items() {
+        let mut sources = serde_json::Map::new();
+        sources.insert(
+            "infra".to_string(),
+            optional_infra_os_disabled_source("infra", "mission_infra_query"),
+        );
+        sources.insert(
+            "credential_refs".to_string(),
+            optional_infra_os_disabled_source("credential_refs", "mission_infra_query"),
+        );
+
+        let summaries = build_source_summaries(&sources);
+        assert_eq!(
+            summaries
+                .get("infra")
+                .and_then(|value| value.get("status"))
+                .and_then(Value::as_str),
+            Some("feature_disabled")
+        );
+        assert_eq!(
+            summaries
+                .get("credential_refs")
+                .and_then(|value| value.get("feature"))
+                .and_then(Value::as_str),
+            Some("infra-os")
+        );
+
+        let lanes = build_evidence_lanes(&sources);
+        assert_eq!(
+            lanes
+                .get("lanes")
+                .and_then(|value| value.get("skill_evidence"))
+                .and_then(|value| value.get("item_count"))
+                .and_then(Value::as_u64),
+            Some(0)
+        );
+        assert_eq!(
+            lanes
+                .get("lanes")
+                .and_then(|value| value.get("support_refs"))
+                .and_then(|value| value.get("item_count"))
+                .and_then(Value::as_u64),
+            Some(0)
+        );
+        assert_eq!(
+            optional_infra_os_disabled_diagnostic("infra")
+                .get("status")
+                .and_then(Value::as_str),
+            Some("feature_disabled")
         );
     }
 
