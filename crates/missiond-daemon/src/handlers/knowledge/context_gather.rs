@@ -1449,7 +1449,12 @@ fn evidence_lane_from_policy(
         lane.freshness.as_str(),
         lane.injectable_by_default,
     );
-    if lane.lane_id == "support_refs" && support_catalog_has_content(support_catalog) {
+    let support_ref_count = if lane.lane_id == "support_refs" {
+        support_refs_compact_item_count(support_catalog)
+    } else {
+        0
+    };
+    if support_ref_count > 0 {
         if let Some(object) = lane_value.as_object_mut() {
             let source_count = object
                 .get("source_count")
@@ -1460,7 +1465,7 @@ fn evidence_lane_from_policy(
                 .get("item_count")
                 .and_then(Value::as_u64)
                 .unwrap_or(0)
-                + 1;
+                + support_ref_count as u64;
             object.insert("source_count".to_string(), json!(source_count));
             object.insert("item_count".to_string(), json!(item_count));
             if let Some(source_keys) = object.get_mut("source_keys").and_then(Value::as_array_mut) {
@@ -1474,6 +1479,20 @@ fn evidence_lane_from_policy(
         }
     }
     lane_value
+}
+
+fn support_refs_compact_item_count(support_catalog: &Value) -> usize {
+    if !support_catalog_has_content(support_catalog) {
+        return 0;
+    }
+    let mut count = 1;
+    if support_catalog
+        .get("deployment_closure")
+        .is_some_and(deployment_closure_has_identity_content)
+    {
+        count += 1;
+    }
+    count
 }
 
 fn source_keys_for_lane(lane_id: &str) -> Vec<&'static str> {
@@ -2278,7 +2297,7 @@ fn build_evidence_items(
         );
         if let Some(deployment_closure) = support_catalog
             .get("deployment_closure")
-            .filter(|value| !json_value_is_empty(value))
+            .filter(|value| deployment_closure_has_identity_content(value))
         {
             push_evidence_item(
                 &mut items,
@@ -5496,6 +5515,36 @@ mod tests {
             .is_some_and(|keys| keys
                 .iter()
                 .any(|value| value.as_str() == Some("support_catalog"))));
+
+        let scoped_catalog_with_closure = json!({
+            "schema": "missiond.support-catalog.v1",
+            "project_id": "payments",
+            "service_id": "payments",
+            "deploy_center_slug": "xjp-payments",
+            "deployment_closure": {
+                "project_id": "payments",
+                "service_id": "payments",
+                "deploy_center_slug": "xjp-payments",
+                "runtime_target": "gcp-runtime"
+            }
+        });
+        let lanes = build_evidence_lanes_from_policy_with_support_catalog(
+            &sources,
+            &EvidenceLaneRuntimeConfig::default(),
+            &scoped_catalog_with_closure,
+        );
+        let support_refs = lanes
+            .get("lanes")
+            .and_then(|value| value.get("support_refs"))
+            .expect("support refs lane");
+        assert_eq!(
+            support_refs.get("source_count").and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            support_refs.get("item_count").and_then(Value::as_u64),
+            Some(2)
+        );
     }
 
     #[test]
@@ -5682,6 +5731,37 @@ mod tests {
             .iter()
             .any(|item| item.source_type == "support_catalog"
                 || item.source_type == "deployment_closure_policy"));
+    }
+
+    #[test]
+    fn generic_deployment_closure_does_not_project_support_policy_item() {
+        let sources = serde_json::Map::new();
+        let summaries = build_source_summaries(&sources);
+        let catalog = json!({
+            "schema": "missiond.support-catalog.v1",
+            "project_id": "payments",
+            "service_id": "payments",
+            "deployment_closure": {
+                "schema": "missiond.deployment-closure-support.v1",
+                "closure_required_fields": ["ReleaseEvidence", "ClosureVerdict"],
+                "diagnostic_terms": ["service.manifest.toml", "runtime digest"]
+            }
+        });
+
+        let items = build_evidence_items(
+            &sources,
+            &summaries,
+            &catalog,
+            SourceProfile::DeployOps,
+            Some("payments"),
+            None,
+        );
+        assert!(items
+            .iter()
+            .any(|item| item.source_type == "support_catalog"));
+        assert!(!items
+            .iter()
+            .any(|item| item.source_type == "deployment_closure_policy"));
     }
 
     #[test]

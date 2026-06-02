@@ -238,6 +238,7 @@ function checkFiles(root, files) {
     'mission_context_gather source_profile=deploy_ops infra skill_evidence MUST recognize deployment-closure evidence anchors',
     'skill-file context fallback may admit sibling evidence only when the returned line itself carries a strong closure anchor',
     'mission_context_gather evidence_lanes.skill_evidence.item_count MUST count compact injectable skill metadata/project links/infra items',
+    'mission_context_gather evidence_lanes.support_refs.item_count MUST count compact injectable support evidence items',
     'mission_context_gather source_profile=deploy_ops MUST query bounded MissionD EventBridge deployment_events from event_log domain system::external_service_event',
     'mission_context_gather deployment_events MUST expose drop_reason_counts and sample_dropped_events diagnostics',
     'source_summaries.deployment_events.status',
@@ -1078,6 +1079,7 @@ function buildFixture() {
                          "mission_context_gather source_profile=deploy_ops infra skill_evidence MUST recognize deployment-closure evidence anchors"
 		                 "skill-file context fallback may admit sibling evidence only when the returned line itself carries a strong closure anchor"
                          "mission_context_gather evidence_lanes.skill_evidence.item_count MUST count compact injectable skill metadata/project links/infra items"
+                         "mission_context_gather evidence_lanes.support_refs.item_count MUST count compact injectable support evidence items"
                          "mission_context_gather source_profile=deploy_ops MUST query bounded MissionD EventBridge deployment_events from event_log domain system::external_service_event"
                          "mission_context_gather deployment_events MUST expose drop_reason_counts and sample_dropped_events diagnostics"
                          "source_summaries.deployment_events.status"
