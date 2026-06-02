@@ -1052,13 +1052,6 @@ fn lacks_line_anchor_for_broad_deploy_query(line: &str, filter: &InfraEvidenceFi
     }
 
     let line_haystack = line.to_ascii_lowercase();
-    let project_token = normalized_evidence_token(filter.project_id.as_deref());
-    if project_token.as_deref().is_some_and(|project| {
-        project != "missiond" && contains_evidence_token(&line_haystack, project)
-    }) {
-        return false;
-    }
-
     query_tokens
         .iter()
         .filter(|token| is_deploy_drift_anchor_token(token))
@@ -1785,8 +1778,6 @@ fn is_deploy_drift_anchor_token(token: &str) -> bool {
             | "marker"
             | "volume"
             | "volumes"
-            | "service.manifest.toml"
-            | "service.manifest"
     )
 }
 
@@ -2101,6 +2092,18 @@ mod tests {
             "xjp-deploy-center",
             "/Users/jinchen/.claude/skills/xjp-deploy-center/SKILL.md",
             "**OSS 中转策略**: GA CI 构建 docker image → docker save → Deploy Center 触发 → ECS Agent 下载。Build stage 必须 DISABLED。",
+            &deploy_runtime_filter,
+        ));
+        assert!(!evidence_matches_scope(
+            "xjp-pg-prod",
+            "/Users/jinchen/.claude/skills/xjp-pg-prod/SKILL.md",
+            "| xjp-monolith-app | `postgres:<R>@10.146.0.4:6432/log_center`(+ router/timeline/payments/deploy_center/knowledge env 同) |",
+            &deploy_runtime_filter,
+        ));
+        assert!(!evidence_matches_scope(
+            "xiaojinpro-backend",
+            "/Users/jinchen/.claude/skills/xiaojinpro-backend/SKILL.md",
+            "Router → Payments: `POST /payments/internal/credits/spend`",
             &deploy_runtime_filter,
         ));
         let volume_override_score = evidence_scope_score(
