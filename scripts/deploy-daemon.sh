@@ -18,6 +18,8 @@
 #   MISSIOND_ACTIVE_LINK        active symlink, default: $root/active
 #   MISSIOND_RELEASES_DIR       releases dir, default: $root/releases
 #   MISSIOND_RELEASE_KEEP       number of newest releases to keep, default: 5
+#   MISSIOND_DEPLOY_LOCK_PATH   deploy ownership lock directory, default:
+#                               $root/deploy.lock.d
 #   MISSIOND_BACKUP_RETENTION_DAYS  old .bak/.new cleanup age, default: 7
 #   MISSIOND_SOCKET_PATH        IPC socket, default: ~/.missiond/missiond.sock
 #   MISSIOND_LAUNCHCTL_LABEL    launchd label, default: com.missiond.daemon
@@ -109,11 +111,13 @@ SMOKE_TIMEOUT="${MISSIOND_DEPLOY_SMOKE_TIMEOUT:-45}"
 MISSIOND_DEPLOY_ENSURE_JARVIS_SLOT="${MISSIOND_DEPLOY_ENSURE_JARVIS_SLOT:-auto}"
 MISSION_WS_PORT="${MISSION_WS_PORT:-9120}"
 RELEASE_KEEP="${MISSIOND_RELEASE_KEEP:-5}"
+DEPLOY_LOCK_PATH="${MISSIOND_DEPLOY_LOCK_PATH:-${INSTALL_ROOT}/deploy.lock.d}"
 BACKUP_RETENTION_DAYS="${MISSIOND_BACKUP_RETENTION_DAYS:-7}"
 APPLY_BACKUP_CLEANUP="${MISSIOND_APPLY_BACKUP_CLEANUP:-0}"
 PREVIOUS_LAUNCHD_PROJECT_ROOT=""
 PREVIOUS_RUNTIME_DIR=""
 PREVIOUS_COMPILED_RUNTIME_DIR=""
+DEPLOY_LOCK_HELD=0
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
@@ -207,6 +211,67 @@ print_timing_summary() {
   for i in "${!TIMING_NAMES[@]}"; do
     log "timing-summary: ${TIMING_NAMES[$i]}=${TIMING_SECS[$i]}s"
   done
+}
+
+release_deploy_lock() {
+  if [ "$DEPLOY_LOCK_HELD" -ne 1 ]; then
+    return 0
+  fi
+  case "$DEPLOY_LOCK_PATH" in
+    ""|"/"|"$HOME"|"$INSTALL_ROOT"|"$RELEASES_DIR")
+      log "deploy-lock: refuse to remove unsafe lock path $DEPLOY_LOCK_PATH"
+      return 0
+      ;;
+  esac
+  if [ -f "$DEPLOY_LOCK_PATH/pid" ] && [ "$(cat "$DEPLOY_LOCK_PATH/pid" 2>/dev/null || true)" = "$$" ]; then
+    rm -rf "$DEPLOY_LOCK_PATH"
+    log "deploy-lock: released $DEPLOY_LOCK_PATH"
+  else
+    log "deploy-lock: owner changed before release; left $DEPLOY_LOCK_PATH untouched"
+  fi
+  DEPLOY_LOCK_HELD=0
+}
+
+try_recover_stale_deploy_lock() {
+  [ -d "$DEPLOY_LOCK_PATH" ] || return 1
+  local owner_pid
+  owner_pid="$(cat "$DEPLOY_LOCK_PATH/pid" 2>/dev/null || true)"
+  case "$owner_pid" in
+    ""|*[!0-9]*) return 1 ;;
+  esac
+  if kill -0 "$owner_pid" >/dev/null 2>&1; then
+    return 1
+  fi
+  log "deploy-lock: removing stale lock $DEPLOY_LOCK_PATH owned by exited pid=$owner_pid"
+  rm -rf "$DEPLOY_LOCK_PATH"
+  return 0
+}
+
+acquire_deploy_lock() {
+  mkdir -p "$INSTALL_ROOT"
+  if ! mkdir "$DEPLOY_LOCK_PATH" 2>/dev/null; then
+    try_recover_stale_deploy_lock || true
+  fi
+  if ! mkdir "$DEPLOY_LOCK_PATH" 2>/dev/null; then
+    log "deploy-lock: busy $DEPLOY_LOCK_PATH"
+    if [ -f "$DEPLOY_LOCK_PATH/owner" ]; then
+      sed 's/^/[deploy-lock-owner] /' "$DEPLOY_LOCK_PATH/owner" >&2 || true
+    fi
+    return 1
+  fi
+  DEPLOY_LOCK_HELD=1
+  trap release_deploy_lock EXIT
+  {
+    printf 'schema=missiond.deploy-lock.v1\n'
+    printf 'pid=%s\n' "$$"
+    printf 'repo_root=%s\n' "$REPO_ROOT"
+    printf 'install_root=%s\n' "$INSTALL_ROOT"
+    printf 'active_link=%s\n' "$ACTIVE_LINK"
+    printf 'profile=%s\n' "$PROFILE"
+    printf 'started_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$DEPLOY_LOCK_PATH/owner"
+  printf '%s\n' "$$" > "$DEPLOY_LOCK_PATH/pid"
+  log "deploy-lock: acquired $DEPLOY_LOCK_PATH"
 }
 
 codesign_or_verify() {
@@ -505,6 +570,88 @@ plist_read_string() {
   [ -f "$plist" ] || return 1
   [ -x "$buddy" ] || return 1
   "$buddy" -c "Print :${key}" "$plist" 2>/dev/null || return 1
+}
+
+json_string_field() {
+  local file="$1"
+  local key="$2"
+  node - "$file" "$key" <<'NODE'
+const fs = require("node:fs");
+const [file, key] = process.argv.slice(2);
+const value = JSON.parse(fs.readFileSync(file, "utf8"))[key];
+if (typeof value !== "string") process.exit(2);
+process.stdout.write(value);
+NODE
+}
+
+assert_active_release_owned() {
+  local phase="$1"
+  local active manifest release_id manifest_project_root manifest_runtime_dir manifest_compiled_runtime_dir daemon_link mcp_link
+  active="$(resolve_link_target "$ACTIVE_LINK" 2>/dev/null || true)"
+  if [ "$active" != "$CANDIDATE_DIR" ]; then
+    log "ownership: active mismatch phase=$phase expected=$CANDIDATE_DIR actual=${active:-none}"
+    return 1
+  fi
+  manifest="$active/release-manifest.json"
+  if [ ! -f "$manifest" ]; then
+    log "ownership: missing active release manifest phase=$phase manifest=$manifest"
+    return 1
+  fi
+  release_id="$(json_string_field "$manifest" "release_id" 2>/dev/null || true)"
+  manifest_project_root="$(json_string_field "$manifest" "launchd_project_root" 2>/dev/null || true)"
+  manifest_runtime_dir="$(json_string_field "$manifest" "runtime_dir" 2>/dev/null || true)"
+  manifest_compiled_runtime_dir="$(json_string_field "$manifest" "compiled_runtime_dir" 2>/dev/null || true)"
+  if [ "$release_id" != "$RELEASE_ID" ]; then
+    log "ownership: release manifest mismatch phase=$phase expected=$RELEASE_ID actual=${release_id:-missing}"
+    return 1
+  fi
+  if [ "$manifest_project_root" != "$LAUNCHD_PROJECT_ROOT" ] ||
+    [ "$manifest_runtime_dir" != "$RUNTIME_DIR" ] ||
+    [ "$manifest_compiled_runtime_dir" != "$COMPILED_RUNTIME_DIR" ]; then
+    log "ownership: manifest runtime roots mismatch phase=$phase"
+    log "ownership: expected project=$LAUNCHD_PROJECT_ROOT runtime=$RUNTIME_DIR compiled=$COMPILED_RUNTIME_DIR"
+    log "ownership: manifest project=${manifest_project_root:-missing} runtime=${manifest_runtime_dir:-missing} compiled=${manifest_compiled_runtime_dir:-missing}"
+    return 1
+  fi
+  if [ ! -L "$BIN_PATH" ] || [ ! -L "$MCP_BIN_PATH" ]; then
+    log "ownership: stable entrypoints must be symlinks phase=$phase"
+    return 1
+  fi
+  daemon_link="$(readlink "$BIN_PATH" 2>/dev/null || true)"
+  mcp_link="$(readlink "$MCP_BIN_PATH" 2>/dev/null || true)"
+  if [ "$daemon_link" != "$ACTIVE_LINK/bin/missiond" ] ||
+    [ "$mcp_link" != "$ACTIVE_LINK/bin/mission-mcp" ]; then
+    log "ownership: stable entrypoints mismatch phase=$phase daemon=${daemon_link:-missing} mcp=${mcp_link:-missing}"
+    return 1
+  fi
+  log "ownership: active release verified phase=$phase release=$RELEASE_ID"
+}
+
+assert_launchd_runtime_owned() {
+  local phase="$1"
+  local program working_dir project_root orchestrator_root runtime_dir compiled_runtime_dir
+  if [ ! -f "$LAUNCHD_PLIST" ]; then
+    log "ownership: launchd plist absent phase=$phase; skipped runtime-root guard"
+    return 0
+  fi
+  program="$(plist_read_string "$LAUNCHD_PLIST" "ProgramArguments:0" || plist_read_string "$LAUNCHD_PLIST" "Program" || true)"
+  working_dir="$(plist_read_string "$LAUNCHD_PLIST" "WorkingDirectory" || true)"
+  project_root="$(plist_read_string "$LAUNCHD_PLIST" "EnvironmentVariables:MISSIOND_PROJECT_ROOT" || true)"
+  orchestrator_root="$(plist_read_string "$LAUNCHD_PLIST" "EnvironmentVariables:MISSIOND_ORCHESTRATOR_ROOT" || true)"
+  runtime_dir="$(plist_read_string "$LAUNCHD_PLIST" "EnvironmentVariables:MISSIOND_RUNTIME_DIR" || true)"
+  compiled_runtime_dir="$(plist_read_string "$LAUNCHD_PLIST" "EnvironmentVariables:MISSIOND_COMPILED_RUNTIME_DIR" || true)"
+  if [ "$program" != "$BIN_PATH" ] ||
+    [ "$working_dir" != "$LAUNCHD_PROJECT_ROOT" ] ||
+    [ "$project_root" != "$LAUNCHD_PROJECT_ROOT" ] ||
+    [ "$orchestrator_root" != "$LAUNCHD_PROJECT_ROOT" ] ||
+    [ "$runtime_dir" != "$RUNTIME_DIR" ] ||
+    [ "$compiled_runtime_dir" != "$COMPILED_RUNTIME_DIR" ]; then
+    log "ownership: launchd runtime roots mismatch phase=$phase"
+    log "ownership: expected program=$BIN_PATH project=$LAUNCHD_PROJECT_ROOT runtime=$RUNTIME_DIR compiled=$COMPILED_RUNTIME_DIR"
+    log "ownership: launchd program=${program:-missing} wd=${working_dir:-missing} project=${project_root:-missing} orchestrator=${orchestrator_root:-missing} runtime=${runtime_dir:-missing} compiled=${compiled_runtime_dir:-missing}"
+    return 1
+  fi
+  log "ownership: launchd runtime roots verified phase=$phase"
 }
 
 capture_launchd_runtime_state() {
@@ -860,6 +1007,11 @@ cleanup_repo_runtime_cache() {
 
 mkdir -p "$INSTALL_ROOT" "$RELEASES_DIR" "$(dirname "$SOCK_PATH")" "$COMPILED_RUNTIME_DIR"
 
+if [ "$DO_DEPLOY" -eq 1 ] || { [ "$CLEANUP_ONLY" -eq 1 ] && [ "$APPLY_CLEANUP" -eq 1 ]; }; then
+  acquire_deploy_lock ||
+    fail "another MissionD deploy/cleanup owns $DEPLOY_LOCK_PATH; retry after it finishes or remove a verified stale lock" 1
+fi
+
 if [ "$CLEANUP_ONLY" -eq 1 ]; then
   PREVIOUS_ACTIVE="$(resolve_link_target "$ACTIVE_LINK" 2>/dev/null || true)"
   cleanup_old_releases "$APPLY_CLEANUP"
@@ -953,6 +1105,8 @@ fi
 record_timing "pre-switch-mcp-smoke" "$PRE_SWITCH_SMOKE_START"
 
 switch_active_release "$CANDIDATE_DIR"
+assert_active_release_owned "post-switch" ||
+  fail "deploy ownership guard failed after active switch; refusing to continue" 4
 ensure_default_mcp_config
 
 KICKSTART_START="$(date +%s)"
@@ -960,6 +1114,10 @@ if ! restart_daemon_supervisor; then
   rollback_with_smoke "$PREVIOUS_ACTIVE" || true
   fail "launchctl reload/kickstart failed; rollback attempted" 4
 fi
+assert_active_release_owned "post-launchd" ||
+  fail "deploy ownership guard failed after launchd restart; refusing to continue" 4
+assert_launchd_runtime_owned "post-launchd" ||
+  fail "deploy ownership guard failed: launchd runtime roots do not match active release" 4
 record_timing "launchd-kickstart" "$KICKSTART_START"
 
 SOCKET_WAIT_START="$(date +%s)"
@@ -980,6 +1138,10 @@ if ! post_switch_smoke; then
   rollback_with_smoke "$PREVIOUS_ACTIVE" || true
   fail "smoke check failed; rollback attempted" 6
 fi
+assert_active_release_owned "post-mcp-smoke" ||
+  fail "deploy ownership guard failed after MCP smoke; refusing to continue" 6
+assert_launchd_runtime_owned "post-mcp-smoke" ||
+  fail "deploy ownership guard failed after MCP smoke: launchd roots drifted" 6
 record_timing "post-switch-mcp-smoke" "$POST_SMOKE_START"
 
 JARVIS_SLOT_START="$(date +%s)"
@@ -987,11 +1149,17 @@ if ! post_switch_jarvis_slot_ensure; then
   rollback_with_smoke "$PREVIOUS_ACTIVE" || true
   fail "Jarvis default slot ensure failed; rollback attempted" 6
 fi
+assert_active_release_owned "post-jarvis-smoke" ||
+  fail "deploy ownership guard failed after Jarvis smoke; refusing to continue" 6
 record_timing "post-switch-jarvis-slot-ensure" "$JARVIS_SLOT_START"
 
 CLEANUP_START="$(date +%s)"
 cleanup_old_releases 1
 cleanup_repo_runtime_cache
+assert_active_release_owned "post-cleanup" ||
+  fail "deploy ownership guard failed after cleanup; refusing to report success" 6
+assert_launchd_runtime_owned "post-cleanup" ||
+  fail "deploy ownership guard failed after cleanup: launchd roots drifted" 6
 record_timing "cleanup" "$CLEANUP_START"
 print_timing_summary
 log "deploy: done. active_release=$RELEASE_ID previous=${PREVIOUS_ACTIVE:-none}"

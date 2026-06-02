@@ -104,6 +104,8 @@ function checkFiles(root, files) {
     'Deploy smoke timeout MUST be configurable through MISSIOND_DEPLOY_SMOKE_TIMEOUT',
     'Deploy scripts MUST emit timing for cargo-build',
     'Dev-only fast deploy may select debug profile and sccache',
+    'Deploy scripts MUST serialize active-switch and apply-cleanup mutations through a deploy ownership lock',
+    'Deploy scripts MUST verify after active switch, launchd restart, smoke, and cleanup',
     'AST repository-wide startup full sync MUST be opt-in through MISSIOND_AST_FULL_SYNC_ON_STARTUP',
     'M6 MissionD formatting MUST be converged',
     'Rust formatter edition MUST be derived from workspace Cargo.toml',
@@ -132,6 +134,12 @@ function checkFiles(root, files) {
     'MISSIOND_RELEASES_DIR',
     'MISSIOND_ACTIVE_LINK',
     'MISSIOND_RELEASE_KEEP',
+    'MISSIOND_DEPLOY_LOCK_PATH',
+    'DEPLOY_LOCK_PATH="${MISSIOND_DEPLOY_LOCK_PATH:-${INSTALL_ROOT}/deploy.lock.d}"',
+    'acquire_deploy_lock',
+    'release_deploy_lock',
+    'try_recover_stale_deploy_lock',
+    'deploy-lock: busy',
     'PREVIOUS_LAUNCHD_PROJECT_ROOT',
     'PREVIOUS_RUNTIME_DIR',
     'PREVIOUS_COMPILED_RUNTIME_DIR',
@@ -154,6 +162,11 @@ function checkFiles(root, files) {
     '"compiled_runtime_dir"',
     'atomic_symlink_update',
     'switch_active_release',
+    'assert_active_release_owned',
+    'assert_launchd_runtime_owned',
+    'deploy ownership guard failed',
+    'ownership: active release verified',
+    'ownership: launchd runtime roots verified',
     'capture_launchd_runtime_state',
     'restart_daemon_supervisor_for_runtime',
     'rollback_to_previous',
@@ -313,10 +326,12 @@ function buildFixture() {
        "Blue-green rollback MUST switch active back to the previous release."
        "Blue-green rollback MUST restore launchd WorkingDirectory, MISSIOND_PROJECT_ROOT, MISSIOND_RUNTIME_DIR, and MISSIOND_COMPILED_RUNTIME_DIR captured before the switch."
        "Release cleanup MUST keep active, previous, and newest retained releases."
-       "IPC smoke MUST retry after socket readiness and then rollback on failure."
+       "Socket readiness MUST be proven by bounded MCP initialize smoke."
        "Deploy smoke timeout MUST be configurable through MISSIOND_DEPLOY_SMOKE_TIMEOUT."
        "Deploy scripts MUST emit timing for cargo-build."
        "Dev-only fast deploy may select debug profile and sccache."
+       "Deploy scripts MUST serialize active-switch and apply-cleanup mutations through a deploy ownership lock."
+       "Deploy scripts MUST verify after active switch, launchd restart, smoke, and cleanup."
        "AST repository-wide startup full sync MUST be opt-in through MISSIOND_AST_FULL_SYNC_ON_STARTUP."
        "M6 MissionD formatting MUST be converged."
        "Rust formatter edition MUST be derived from workspace Cargo.toml."
@@ -347,7 +362,9 @@ function buildFixture() {
   writeFixture(root, DEFAULT_FILES.deployDaemon, `
 scripts/deploy-daemon.sh                  # build + blue-green deploy + smoke
 --build-only --no-smoke --debug --fast --cleanup-only --apply-cleanup
-MISSIOND_INSTALL_ROOT MISSIOND_RELEASES_DIR MISSIOND_ACTIVE_LINK MISSIOND_RELEASE_KEEP MISSIOND_BACKUP_RETENTION_DAYS
+MISSIOND_INSTALL_ROOT MISSIOND_RELEASES_DIR MISSIOND_ACTIVE_LINK MISSIOND_RELEASE_KEEP MISSIOND_DEPLOY_LOCK_PATH MISSIOND_BACKUP_RETENTION_DAYS
+DEPLOY_LOCK_PATH="\${MISSIOND_DEPLOY_LOCK_PATH:-\${INSTALL_ROOT}/deploy.lock.d}"
+acquire_deploy_lock release_deploy_lock try_recover_stale_deploy_lock deploy-lock: busy
 PREVIOUS_LAUNCHD_PROJECT_ROOT PREVIOUS_RUNTIME_DIR PREVIOUS_COMPILED_RUNTIME_DIR
 MISSIOND_BIN_PATH MISSIOND_MCP_BIN_PATH MISSIOND_SOCKET_PATH MISSIOND_LAUNCHCTL_LABEL MISSIOND_DEPLOY_TIMEOUT MISSIOND_DEPLOY_SMOKE_TIMEOUT
 MISSIOND_USE_SCCACHE
@@ -363,6 +380,11 @@ release-manifest.json
 "compiled_runtime_dir"
 atomic_symlink_update
 switch_active_release
+assert_active_release_owned
+assert_launchd_runtime_owned
+deploy ownership guard failed
+ownership: active release verified
+ownership: launchd runtime roots verified
 capture_launchd_runtime_state
 restart_daemon_supervisor_for_runtime
 rollback_to_previous
@@ -372,6 +394,9 @@ codesign_or_verify "$CANDIDATE_DIR/bin/missiond"
 codesign_or_verify "$CANDIDATE_DIR/bin/mission-mcp"
 launchctl kickstart -k "gui/$(id -u)/$LABEL"
 lsof "$SOCK_PATH"
+ready: IPC initialize succeeded
+[wait-smoke]
+socket exists but IPC initialize is not ready yet
 run_mcp_initialize_smoke()
 validate_default_mcp_config
 node -e
