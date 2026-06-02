@@ -93,6 +93,9 @@ function check(root) {
     'preserving active release owner root',
     'MISSIOND_RELEASE_SOURCE_SNAPSHOT',
     'MISSIOND_RELEASE_ALLOW_DIRTY_SOURCE',
+    'CANDIDATE_COMPILED_RUNTIME_DIR',
+    'release-local compiled runtime dir',
+    'build-only temporary compiled runtime dir',
     'CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"',
     'MISSIOND_DEPLOY_REFRESH_CONTRACTS',
     'node scripts/project-v3-contracts.mjs --check --json',
@@ -106,6 +109,7 @@ function check(root) {
     'compiled-runtime-config.json',
     'compiled-project-universe.json',
     'compiled-workflows.json',
+    'MISSIOND_COMPILED_RUNTIME_DIR',
     'file_sha256',
     'release-manifest.json',
     '"schema":"missiond.release-manifest.v1"',
@@ -180,7 +184,7 @@ function buildFixture() {
       :code ["scripts/deploy-daemon.sh" "scripts/check-missiond-blue-green-deploy.mjs"]
       :note "Release candidates are immutable directories under ~/.xjp-mission/releases/<release-id>; daemon and MCP entrypoints both resolve through active; release source snapshots MUST NOT become the next release_owner_root.")))`);
   write(root, FILES.deploy, `
-MISSIOND_INSTALL_ROOT MISSIOND_RELEASES_DIR MISSIOND_ACTIVE_LINK MISSIOND_RELEASE_KEEP MISSIOND_BACKUP_RETENTION_DAYS MISSIOND_DEPLOY_OWNER_ROOT MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT MISSIOND_DEPLOY_EXPECTED_ACTIVE_RELEASE MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER MISSIOND_DEPLOY_ALLOW_ACTIVE_RELEASE_RACE MISSIOND_DEPLOY_ALLOW_COMMIT_REGRESSION MISSIOND_RELEASE_SOURCE_SNAPSHOT MISSIOND_RELEASE_ALLOW_DIRTY_SOURCE
+MISSIOND_INSTALL_ROOT MISSIOND_RELEASES_DIR MISSIOND_ACTIVE_LINK MISSIOND_RELEASE_KEEP MISSIOND_BACKUP_RETENTION_DAYS MISSIOND_DEPLOY_OWNER_ROOT MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT MISSIOND_DEPLOY_EXPECTED_ACTIVE_RELEASE MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER MISSIOND_DEPLOY_ALLOW_ACTIVE_RELEASE_RACE MISSIOND_DEPLOY_ALLOW_COMMIT_REGRESSION MISSIOND_RELEASE_SOURCE_SNAPSHOT MISSIOND_RELEASE_ALLOW_DIRTY_SOURCE CANDIDATE_COMPILED_RUNTIME_DIR release-local compiled runtime dir build-only temporary compiled runtime dir
 MISSIOND_LAUNCHD_PLIST MISSIOND_LAUNCHD_PROJECT_ROOT
 select_deploy_owner_root read_active_manifest_string_early is_stable_owner_root_candidate preserving active release owner root capture_expected_active_release assert_active_release_matches_expected assert_candidate_commit_not_behind_active active_release_git_sha git merge-base --is-ancestor
 CARGO_INCREMENTAL="\${CARGO_INCREMENTAL:-0}"
@@ -191,7 +195,7 @@ typed-lisp-runtime-compile
 typed Lisp contract ABI verification failed
 typed Lisp runtime compile failed
 typed_lisp_runtime_manifest_json typed_lisp_runtime
-compiled-v3-blueprint.json compiled-runtime-config.json compiled-project-universe.json compiled-workflows.json file_sha256
+compiled-v3-blueprint.json compiled-runtime-config.json compiled-project-universe.json compiled-workflows.json MISSIOND_COMPILED_RUNTIME_DIR file_sha256
 release-manifest.json "schema":"missiond.release-manifest.v1" daemon_sha256 mcp_sha256 release_owner_root git_full_sha active_git_sha commit_regression_override expected_active_release REPO_ID="$(basename "$DEPLOY_OWNER_ROOT")" create_release_source_snapshot release-source-snapshot
   atomic_symlink_update switch_active_release assert_active_project_root_can_mutate project-root mutation guard verified active release generation guard verified active commit ancestry guard verified active release belongs to another project root active release changed during deploy build candidate commit is not a descendant of active release commit rollback_to_previous cleanup_old_releases create_legacy_release_if_needed
 ensure_launchd_runtime_root restart_daemon_supervisor MISSIOND_PROJECT_ROOT MISSIOND_ORCHESTRATOR_ROOT launchctl bootstrap launchd: runtime root

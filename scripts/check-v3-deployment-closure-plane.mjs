@@ -23,6 +23,7 @@ const required = [
   ['shard', 'release_lease_conflict'],
   ['shard', 'candidate git_full_sha'],
   ['shard', 'commit-regression override'],
+  ['shard', 'compiled runtime projections as release artifacts'],
   ['blueprint', 'deployment-closure-plane'],
   ['blueprint', 'shards/deployment-closure-plane.lisp'],
   ['index', 'shards/deployment-closure-plane.lisp'],
@@ -45,6 +46,9 @@ const required = [
   ['deployDaemon', 'expected_active_commit'],
   ['deployDaemon', 'git_full_sha'],
   ['deployDaemon', 'commit-ancestry-guard'],
+  ['deployDaemon', 'release-local compiled runtime dir'],
+  ['deployDaemon', 'MISSIOND_COMPILED_RUNTIME_DIR'],
+  ['deployDaemon', 'compiled-runtime'],
 ];
 
 const diagnostics = [];

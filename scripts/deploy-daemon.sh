@@ -52,6 +52,10 @@
 #                               projection inputs are dirty; default: 0
 #   MISSIOND_RUNTIME_DIR        runtime artifact root, default:
 #                               ~/.missiond/runtime/<deploy-owner-root-name>
+#   MISSIOND_COMPILED_RUNTIME_DIR  compiled runtime projection dir. Deploy
+#                               switches launchd to a release-local compiled
+#                               dir under the candidate release so failed or
+#                               stale deploys cannot poison the running ABI.
 #   MISSIOND_CLEAN_REPO_RUNTIME_CACHE  after a successful deploy, prune repo
 #                               .missiond/v3/runtime cache when external
 #                               runtime dirs are verified, default: 1
@@ -275,11 +279,21 @@ MISSIOND_RELEASE_SOURCE_SNAPSHOT="${MISSIOND_RELEASE_SOURCE_SNAPSHOT:-1}"
 REPO_ID="$(basename "$DEPLOY_OWNER_ROOT")"
 RUNTIME_DIR="${MISSIOND_RUNTIME_DIR:-${HOME}/.missiond/runtime/${REPO_ID}}"
 COMPILED_RUNTIME_DIR="${MISSIOND_COMPILED_RUNTIME_DIR:-${RUNTIME_DIR}/compiled}"
+BUILD_ONLY_RUNTIME_TMP=""
+CANDIDATE_DIR=""
+CANDIDATE_COMPILED_RUNTIME_DIR=""
+RELEASE_ID=""
 export MISSIOND_RUNTIME_DIR="$RUNTIME_DIR"
 export MISSIOND_COMPILED_RUNTIME_DIR="$COMPILED_RUNTIME_DIR"
 
 log() { printf '[deploy-daemon] %s\n' "$*" >&2; }
 fail() { printf '[deploy-daemon] FAIL: %s\n' "$*" >&2; exit "${2:-1}"; }
+cleanup_build_only_runtime_tmp() {
+  if [ -n "$BUILD_ONLY_RUNTIME_TMP" ] && [ -d "$BUILD_ONLY_RUNTIME_TMP" ]; then
+    rm -rf "$BUILD_ONLY_RUNTIME_TMP"
+  fi
+}
+trap cleanup_build_only_runtime_tmp EXIT
 
 ensure_codex_app_cli_on_path() {
   if command -v codex >/dev/null 2>&1; then
@@ -1259,7 +1273,7 @@ cleanup_repo_runtime_cache() {
 GIT_FULL_SHA="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 GIT_SHA="$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
 
-mkdir -p "$INSTALL_ROOT" "$RELEASES_DIR" "$(dirname "$SOCK_PATH")" "$COMPILED_RUNTIME_DIR"
+mkdir -p "$INSTALL_ROOT" "$RELEASES_DIR" "$(dirname "$SOCK_PATH")"
 capture_expected_active_release
 
 if [ "$DO_DEPLOY" -eq 1 ] || { [ "$CLEANUP_ONLY" -eq 1 ] && [ "$APPLY_CLEANUP" -eq 1 ]; }; then
@@ -1282,6 +1296,21 @@ fi
 command -v cargo >/dev/null 2>&1 || fail "cargo not on PATH" 1
 command -v node >/dev/null 2>&1 || fail "node not on PATH; typed Lisp runtime compile cannot run" 1
 command -v dune >/dev/null 2>&1 || fail "dune not on PATH; typed Lisp contract compile cannot run" 1
+if [ "$DO_DEPLOY" -eq 1 ]; then
+  RELEASE_ID="${MISSIOND_RELEASE_ID:-$(date -u +%Y%m%dT%H%M%SZ)-${GIT_SHA}-${PROFILE}}"
+  CANDIDATE_DIR="$RELEASES_DIR/$RELEASE_ID"
+  [ ! -e "$CANDIDATE_DIR" ] || fail "candidate release already exists: $CANDIDATE_DIR" 1
+  CANDIDATE_COMPILED_RUNTIME_DIR="$CANDIDATE_DIR/compiled-runtime"
+  COMPILED_RUNTIME_DIR="$CANDIDATE_COMPILED_RUNTIME_DIR"
+  export MISSIOND_COMPILED_RUNTIME_DIR="$COMPILED_RUNTIME_DIR"
+  log "typed-lisp: using release-local compiled runtime dir $COMPILED_RUNTIME_DIR"
+else
+  BUILD_ONLY_RUNTIME_TMP="$(mktemp -d "${TMPDIR:-/tmp}/missiond-build-only-runtime.XXXXXX")"
+  COMPILED_RUNTIME_DIR="$BUILD_ONLY_RUNTIME_TMP/compiled"
+  export MISSIOND_COMPILED_RUNTIME_DIR="$COMPILED_RUNTIME_DIR"
+  log "typed-lisp: using build-only temporary compiled runtime dir $COMPILED_RUNTIME_DIR"
+fi
+mkdir -p "$COMPILED_RUNTIME_DIR"
 if [ "${MISSIOND_USE_SCCACHE:-0}" = "1" ] && command -v sccache >/dev/null 2>&1; then
   export RUSTC_WRAPPER="${RUSTC_WRAPPER:-sccache}"
   log "build: using RUSTC_WRAPPER=$RUSTC_WRAPPER"
@@ -1333,10 +1362,6 @@ fi
 RELEASE_START="$(date +%s)"
 PREVIOUS_ACTIVE="$(create_legacy_release_if_needed || true)"
 capture_launchd_runtime_state
-RELEASE_ID="${MISSIOND_RELEASE_ID:-$(date -u +%Y%m%dT%H%M%SZ)-${GIT_SHA}-${PROFILE}}"
-CANDIDATE_DIR="$RELEASES_DIR/$RELEASE_ID"
-
-[ ! -e "$CANDIDATE_DIR" ] || fail "candidate release already exists: $CANDIDATE_DIR" 1
 mkdir -p "$CANDIDATE_DIR/bin"
 SOURCE_SNAPSHOT_START="$(date +%s)"
 CANDIDATE_LAUNCHD_PROJECT_ROOT="$(create_release_source_snapshot "$CANDIDATE_DIR/source")"
