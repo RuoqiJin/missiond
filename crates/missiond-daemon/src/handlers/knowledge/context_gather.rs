@@ -2989,6 +2989,14 @@ fn context_noise_metrics(
                     .get("freshness_filtered_count")
                     .cloned()
                     .unwrap_or_else(|| json!(0)),
+                "compiled_policy_filtered_count": evidence_item_search
+                    .get("compiled_policy_filtered_count")
+                    .cloned()
+                    .unwrap_or_else(|| json!(0)),
+                "runtime_environment_filtered_count": evidence_item_search
+                    .get("runtime_environment_filtered_count")
+                    .cloned()
+                    .unwrap_or_else(|| json!(0)),
                 "incomplete_filtered_count": evidence_item_search
                     .get("incomplete_filtered_count")
                     .cloned()
@@ -4707,6 +4715,8 @@ mod tests {
                 "hit_count": 0,
                 "raw_hit_count": 2,
                 "freshness_filtered_count": 2,
+                "compiled_policy_filtered_count": 1,
+                "runtime_environment_filtered_count": 1,
                 "incomplete_filtered_count": 1,
                 "deduplicated_count": 0,
                 "truncated_count": 0,
@@ -4725,6 +4735,20 @@ mod tests {
                 .and_then(|value| value.get("freshness_filtered_count"))
                 .and_then(Value::as_u64),
             Some(2)
+        );
+        assert_eq!(
+            metrics
+                .get("evidence_item_read_model")
+                .and_then(|value| value.get("compiled_policy_filtered_count"))
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            metrics
+                .get("evidence_item_read_model")
+                .and_then(|value| value.get("runtime_environment_filtered_count"))
+                .and_then(Value::as_u64),
+            Some(1)
         );
         assert_eq!(
             metrics

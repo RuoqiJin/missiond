@@ -11,4 +11,8 @@
            (event verification
              :at "2026-06-02T20:22:27Z"
              :actor codex
-             :summary "Implemented runtime_environment compiled_runtime_dir freshness filtering for persisted evidence_items, added regression coverage, regenerated V3 projections, and verified cargo context_gather tests, cargo check, memory KB isomorphism normal/dry-fixture, runtime path hygiene, source hygiene, deployment closure plane, project contracts, and diff whitespace.")))
+             :summary "Implemented runtime_environment compiled_runtime_dir freshness filtering for persisted evidence_items, added regression coverage, regenerated V3 projections, and verified cargo context_gather tests, cargo check, memory KB isomorphism normal/dry-fixture, runtime path hygiene, source hygiene, deployment closure plane, project contracts, and diff whitespace.")
+           (event metrics-followup
+             :at "2026-06-02T20:27:25Z"
+             :actor codex
+             :summary "Live smoke confirmed stale runtime_environment items were filtered, then exposed compiled_policy_filtered_count and runtime_environment_filtered_count through context_noise_metrics.evidence_item_read_model to match the V3 contract; verified context_gather tests, memory KB isomorphism, and diff whitespace.")))
