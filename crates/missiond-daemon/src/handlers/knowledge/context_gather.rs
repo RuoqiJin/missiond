@@ -1063,7 +1063,12 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     }
 
     attach_infra_os_disabled_support_fallback(&mut sources);
-    let evidence_lanes = build_evidence_lanes_from_policy(&sources, &evidence_lane_policy);
+    let support_catalog = build_support_catalog(&sources);
+    let evidence_lanes = build_evidence_lanes_from_policy_with_support_catalog(
+        &sources,
+        &evidence_lane_policy,
+        &support_catalog,
+    );
     let authority_order = authority_order();
     let noise_diagnostics = noise_diagnostics(profile, selection, &sources);
     let context_noise_metrics = context_noise_metrics(
@@ -1075,7 +1080,6 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         &evidence_item_search,
     );
     let source_summaries = build_source_summaries(&sources);
-    let support_catalog = build_support_catalog(&sources);
     evidence_item_inputs.extend(build_evidence_items(
         &sources,
         &source_summaries,
@@ -1400,13 +1404,21 @@ fn build_evidence_lanes_from_policy(
     sources: &serde_json::Map<String, Value>,
     policy: &EvidenceLaneRuntimeConfig,
 ) -> Value {
+    build_evidence_lanes_from_policy_with_support_catalog(sources, policy, &Value::Null)
+}
+
+fn build_evidence_lanes_from_policy_with_support_catalog(
+    sources: &serde_json::Map<String, Value>,
+    policy: &EvidenceLaneRuntimeConfig,
+    support_catalog: &Value,
+) -> Value {
     let lanes = policy
         .lanes
         .iter()
         .map(|lane| {
             (
                 lane.lane_id.clone(),
-                evidence_lane_from_policy(sources, lane),
+                evidence_lane_from_policy(sources, lane, support_catalog),
             )
         })
         .collect::<serde_json::Map<_, _>>();
@@ -1419,11 +1431,12 @@ fn build_evidence_lanes_from_policy(
 fn evidence_lane_from_policy(
     sources: &serde_json::Map<String, Value>,
     lane: &EvidenceLaneRuntimeEntry,
+    support_catalog: &Value,
 ) -> Value {
     let keys = source_keys_for_lane(lane.lane_id.as_str());
     let role = lane.source_types.join(", ");
     let validity = lane.validity.join(", ");
-    evidence_lane(
+    let mut lane_value = evidence_lane(
         sources,
         lane.lane_id.as_str(),
         lane.authority_class.as_str(),
@@ -1435,7 +1448,32 @@ fn evidence_lane_from_policy(
         validity.as_str(),
         lane.freshness.as_str(),
         lane.injectable_by_default,
-    )
+    );
+    if lane.lane_id == "support_refs" && support_catalog_has_content(support_catalog) {
+        if let Some(object) = lane_value.as_object_mut() {
+            let source_count = object
+                .get("source_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                + 1;
+            let item_count = object
+                .get("item_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                + 1;
+            object.insert("source_count".to_string(), json!(source_count));
+            object.insert("item_count".to_string(), json!(item_count));
+            if let Some(source_keys) = object.get_mut("source_keys").and_then(Value::as_array_mut) {
+                if !source_keys
+                    .iter()
+                    .any(|value| value.as_str() == Some("support_catalog"))
+                {
+                    source_keys.push(json!("support_catalog"));
+                }
+            }
+        }
+    }
+    lane_value
 }
 
 fn source_keys_for_lane(lane_id: &str) -> Vec<&'static str> {
@@ -1446,7 +1484,7 @@ fn source_keys_for_lane(lane_id: &str) -> Vec<&'static str> {
         "active_board" => vec!["board_tasks"],
         "skill_evidence" => vec!["skill_context", "infra"],
         "conversation_audit" => vec!["conversation_logs"],
-        "support_refs" => vec!["project_resolution", "project_registry", "credential_refs"],
+        "support_refs" => vec!["credential_refs"],
         "cold_archive" => Vec::new(),
         _ => Vec::new(),
     }
@@ -4441,12 +4479,14 @@ mod tests {
 
     use serde_json::{json, Value};
 
+    use crate::context::v3_blueprint_runtime::EvidenceLaneRuntimeConfig;
+
     use super::{
         attach_infra_os_disabled_support_fallback, build_evidence_items, build_evidence_lanes,
-        build_source_summaries, build_support_catalog, collect_evidence_refs_from_value,
-        context_gather_persist_artifact, context_gather_persist_read_model,
-        context_gather_worker_visible_dir_for, context_noise_metrics,
-        context_pack_artifact_payload, dedupe_evidence_search_items,
+        build_evidence_lanes_from_policy_with_support_catalog, build_source_summaries,
+        build_support_catalog, collect_evidence_refs_from_value, context_gather_persist_artifact,
+        context_gather_persist_read_model, context_gather_worker_visible_dir_for,
+        context_noise_metrics, context_pack_artifact_payload, dedupe_evidence_search_items,
         deployment_event_filter_timeline_row, deployment_event_item_from_timeline_row,
         diagnostics_have_hard_failures, evidence_item_id,
         evidence_item_read_model_scope_allows_search, evidence_item_uses_stable_projection_id,
@@ -5276,6 +5316,72 @@ mod tests {
                 .and_then(|value| value.as_u64()),
             Some(1)
         );
+    }
+
+    #[test]
+    fn support_refs_lane_counts_only_real_support_catalog_or_credentials() {
+        let mut sources = serde_json::Map::new();
+        sources.insert(
+            "project_resolution".to_string(),
+            json!({"status": "unresolved", "candidate_count": 2}),
+        );
+        let empty_catalog = json!({
+            "schema": "missiond.support-catalog.v1",
+            "authority": "compiled-project-service-runtime-plus-redacted-support-refs",
+            "runtime_target": {},
+            "urls": {},
+            "manifest_refs": {},
+            "endpoints": {},
+            "database": {},
+            "secret_policy": "redacted"
+        });
+        let lanes = build_evidence_lanes_from_policy_with_support_catalog(
+            &sources,
+            &EvidenceLaneRuntimeConfig::default(),
+            &empty_catalog,
+        );
+        let support_refs = lanes
+            .get("lanes")
+            .and_then(|value| value.get("support_refs"))
+            .expect("support refs lane");
+        assert_eq!(
+            support_refs.get("source_count").and_then(Value::as_u64),
+            Some(0)
+        );
+        assert_eq!(
+            support_refs.get("item_count").and_then(Value::as_u64),
+            Some(0)
+        );
+
+        let scoped_catalog = json!({
+            "schema": "missiond.support-catalog.v1",
+            "project_id": "payments",
+            "service_id": "payments",
+            "deploy_center_slug": "xjp-payments"
+        });
+        let lanes = build_evidence_lanes_from_policy_with_support_catalog(
+            &sources,
+            &EvidenceLaneRuntimeConfig::default(),
+            &scoped_catalog,
+        );
+        let support_refs = lanes
+            .get("lanes")
+            .and_then(|value| value.get("support_refs"))
+            .expect("support refs lane");
+        assert_eq!(
+            support_refs.get("source_count").and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            support_refs.get("item_count").and_then(Value::as_u64),
+            Some(1)
+        );
+        assert!(support_refs
+            .get("source_keys")
+            .and_then(Value::as_array)
+            .is_some_and(|keys| keys
+                .iter()
+                .any(|value| value.as_str() == Some("support_catalog"))));
     }
 
     #[test]
