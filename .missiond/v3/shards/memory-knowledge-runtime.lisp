@@ -140,7 +140,8 @@
                 (step s2 :logic "source=projects/support/all prewarms local compact evidence_items from compiled_project_universe and compiled service support catalogs without raw conversation scans, even when xjp-memory is the configured remote provider")
                 (step s3 :logic "index skill/support evidence through compact evidence_items and skill_evidence_items projections")
                 (step s4 :logic "credential_refs are counted only unless include_credentials=true; secret values are never indexed")
-                (step s5 :logic "mark conversation/skill derived facts needs_review until explicit promotion"))
+                (step s5 :logic "mark conversation/skill derived facts needs_review until explicit promotion")
+                (step s6 :logic "isolate large async context-gather futures from project/support authority backfill so compiled authority prewarm cannot stack-overflow daemon worker threads"))
          :egress [conversation_episodes conversation_fact_extracts skill_evidence_items evidence_items])
        (function memory-context-injection-policy
          :entry [resident-master context-pack-builder worker-brief]

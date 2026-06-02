@@ -1152,9 +1152,7 @@ struct XjpMemoryHttpResponse {
 fn parse_xjp_memory_http_endpoint(base_url: &str, path: &str) -> Result<XjpMemoryHttpEndpoint> {
     let trimmed = base_url.trim().trim_end_matches('/');
     let without_scheme = trimmed.strip_prefix("http://").ok_or_else(|| {
-        anyhow!(
-            "xjp-memory direct transport only supports http:// provider URLs; got {base_url}"
-        )
+        anyhow!("xjp-memory direct transport only supports http:// provider URLs; got {base_url}")
     })?;
     let (authority, base_path) = without_scheme
         .split_once('/')
@@ -1282,8 +1280,8 @@ fn parse_direct_http_response(bytes: &[u8]) -> Result<XjpMemoryHttpResponse> {
 
 async fn handle_provider_status(state: &AppState, args: Value) -> Result<ToolResult> {
     let selection = MemoryProviderSelection::from_env();
-    let probe_remote = get_bool_any(&args, &["probe", "probeRemote", "include_remote_probe"])
-        .unwrap_or(false);
+    let probe_remote =
+        get_bool_any(&args, &["probe", "probeRemote", "include_remote_probe"]).unwrap_or(false);
     if probe_remote {
         if let MemoryProviderSelection::XjpMemory { base_url, token } = &selection {
             return call_xjp_memory(
@@ -1447,7 +1445,9 @@ fn provider_evidence_search_payload(args: &Value) -> Value {
 
 async fn local_evidence_search_response(state: &AppState, args: &Value) -> Result<Value> {
     let input = EvidenceSearchInput {
-        query: get_string_any(args, &["query"]).unwrap_or_default().to_string(),
+        query: get_string_any(args, &["query"])
+            .unwrap_or_default()
+            .to_string(),
         allowed_lanes: get_string_list_any(args, &["allowed_lanes", "allowedLanes", "lanes"]),
         project_id: get_string_any(args, &["project", "projectId", "project_id"])
             .map(ToOwned::to_owned),
@@ -1801,7 +1801,7 @@ async fn local_evidence_backfill_response(state: &AppState, args: &Value) -> Res
     if matches!(source, "skill" | "skills" | "all") {
         let query = get_string_any(args, &["query"])
             .unwrap_or("deploy rollback migration smoke health credential database service");
-        let context_result = super::context_gather::handle(
+        let context_result = Box::pin(super::context_gather::handle(
             state,
             "mission_context_gather",
             json!({
@@ -1815,7 +1815,7 @@ async fn local_evidence_backfill_response(state: &AppState, args: &Value) -> Res
                 "persist": true,
                 "limit": limit.min(25),
             }),
-        )
+        ))
         .await?;
         let context_payload = tool_result_to_value(&context_result);
         results.insert(
@@ -1846,7 +1846,8 @@ async fn handle_provider_evidence_backfill(state: &AppState, args: Value) -> Res
     match MemoryProviderSelection::from_env() {
         MemoryProviderSelection::XjpMemory { base_url, token } => {
             if source_requests_compiled_authority(source) {
-                let mut payload = local_evidence_backfill_response(state, &args).await?;
+                let mut payload =
+                    Box::pin(local_evidence_backfill_response(state, &args)).await?;
                 if let Some(object) = payload.as_object_mut() {
                     object.insert(
                         "provider_bridge".to_string(),
@@ -1871,7 +1872,7 @@ async fn handle_provider_evidence_backfill(state: &AppState, args: Value) -> Res
             .await
         }
         MemoryProviderSelection::LocalPostgresCompatibility => {
-            let payload = local_evidence_backfill_response(state, &args).await?;
+            let payload = Box::pin(local_evidence_backfill_response(state, &args)).await?;
             Ok(ToolResult::json_pretty(&payload))
         }
         MemoryProviderSelection::NullMemory => Ok(ToolResult::structured_error(

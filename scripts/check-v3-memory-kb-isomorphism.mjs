@@ -245,6 +245,7 @@ function checkFiles(root, files) {
     'source=projects/support/all prewarms local compact evidence_items from compiled_project_universe and compiled service support catalogs without raw conversation scans, even when xjp-memory is the configured remote provider',
     'mission_memory.provider_status MUST NOT require remote HTTP by default; remote health probing is explicit with probe=true.',
     'credential_refs are counted only unless include_credentials=true; secret values are never indexed',
+    'isolate large async context-gather futures from project/support authority backfill',
     'deployment_closure_policy',
     'ReleaseLease',
     'RuntimeObservation',
@@ -517,6 +518,8 @@ function checkFiles(root, files) {
     'parse_xjp_memory_http_endpoint',
     'Content-Length',
     'source_matches_any',
+    'Box::pin(local_evidence_backfill_response',
+    'Box::pin(super::context_gather::handle',
     'support_catalog',
     'deployment_closure_policy',
     'credential_refs_indexed',
@@ -1024,10 +1027,11 @@ function buildFixture() {
 		                 "mission_context_gather support_catalog MUST project compiled service runtime plus compiled-deployment-policy into deployment_closure evidence"
 		                 "return a configuration snapshot by default; use bounded direct HTTP loopback transport for xjp-memory provider calls and only probe /v1/memory/provider_status when probe=true"
 		                 "MissionD authority evidence lanes are served from local evidence_items even when xjp-memory is configured as the remote memory provider"
-		                 "source=projects/support/all prewarms local compact evidence_items from compiled_project_universe and compiled service support catalogs without raw conversation scans, even when xjp-memory is the configured remote provider"
-		                 "mission_memory.provider_status MUST NOT require remote HTTP by default; remote health probing is explicit with probe=true."
-		                 "credential_refs are counted only unless include_credentials=true; secret values are never indexed"
-		                 "mission_context_gather MUST aggregate runtime_environment, KB, active SSOT, project registry, skill operational evidence, infra evidence, active Board task records, and bounded conversation logs through authority-aware evidence lanes"
+			                 "source=projects/support/all prewarms local compact evidence_items from compiled_project_universe and compiled service support catalogs without raw conversation scans, even when xjp-memory is the configured remote provider"
+			                 "mission_memory.provider_status MUST NOT require remote HTTP by default; remote health probing is explicit with probe=true."
+			                 "credential_refs are counted only unless include_credentials=true; secret values are never indexed"
+                         "isolate large async context-gather futures from project/support authority backfill"
+			                 "mission_context_gather MUST aggregate runtime_environment, KB, active SSOT, project registry, skill operational evidence, infra evidence, active Board task records, and bounded conversation logs through authority-aware evidence lanes"
 	                 "Board/task/workflow records are searchable retrieval evidence"
 	                 "Mutating skill files under ~/.claude/skills, ~/.codex/skills, or project skill directories MUST be represented as a BoardTask/work-order and delegated to a ClaudeCode skill-maintainer or deploy-ops lane."])
 	  (evidence-lane-policy
@@ -1348,7 +1352,7 @@ _dedupe_merge_events;
 `);
 	  writeFixture(root, DEFAULT_FILES.memory, `
 	MemoryKbRuntimeConfig; load_memory_kb_config; V3_BLUEPRINT_CONFIG_ERROR; pending_message_limit; tool_result_preview_chars; assistant_preview_chars; get_pending_realtime_messages_with_limit(pending_msg_limit); MAX_PENDING_BATCH_REPLAYS; classify_memory_input_noise; deployment-monitor; deployment-event-response; xjp_build_wait; xjp_deploy_watch; build_started; agent_update_failed; reported_digest_missing; runtime-report; worker-instruction; provider-preamble; inputSkipDiagnostics; inputFilter; mark_pending_batch_served; pending_payload; MEMORY_PENDING_ALREADY_SERVED; ToolResult::structured_error;
-	load_compiled_project_universe; CompiledEvidenceBackfill; compiled_project_universe; compiled_service_runtime; source_requests_compiled_authority; local_evidence_search_response; local_evidence_backfill_response; provider_bridge; xjp_memory_direct_http; parse_xjp_memory_http_endpoint; Content-Length; source_matches_any; support_catalog; deployment_closure_policy; credential_refs_indexed; include_credentials; raw_conversation_scanned;
+		load_compiled_project_universe; CompiledEvidenceBackfill; compiled_project_universe; compiled_service_runtime; source_requests_compiled_authority; local_evidence_search_response; local_evidence_backfill_response; provider_bridge; xjp_memory_direct_http; parse_xjp_memory_http_endpoint; Content-Length; source_matches_any; Box::pin(local_evidence_backfill_response; Box::pin(super::context_gather::handle; support_catalog; deployment_closure_policy; credential_refs_indexed; include_credentials; raw_conversation_scanned;
 	`);
 	  writeFixture(root, DEFAULT_FILES.learningMod, `
 	LearningEngineRuntimeConfig; decision_harvest_interval_secs; cooccurrence_refresh_interval_secs; V3 learning-engine-policy unavailable;
