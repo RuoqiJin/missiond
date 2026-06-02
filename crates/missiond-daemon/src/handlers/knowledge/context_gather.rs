@@ -345,10 +345,42 @@ async fn search_evidence_item_read_model(
     state: &AppState,
     query: &str,
     allowed_lanes: &[String],
+    profile: SourceProfile,
     project_id: Option<&str>,
     task_id: Option<&str>,
     limit: usize,
 ) -> (Vec<EvidenceItemInput>, Value) {
+    if !evidence_item_read_model_scope_allows_search(profile, project_id) {
+        return (
+            Vec::new(),
+            json!({
+                "schema": "missiond.evidence-item-search.v1",
+                "ok": true,
+                "source": "postgres.evidence_items",
+                "query": query,
+                "allowed_lanes": allowed_lanes,
+                "project_id": project_id,
+                "task_id": task_id,
+                "source_profile": profile.as_str(),
+                "include_global": false,
+                "scope_skipped": true,
+                "scope_skip_reason": "unresolved_unscoped_context_requires_project_or_full_debug",
+                "limit": limit,
+                "read_limit": 0,
+                "raw_hit_count": 0,
+                "freshness_filtered_count": 0,
+                "compiled_policy_filtered_count": 0,
+                "runtime_environment_filtered_count": 0,
+                "incomplete_filtered_count": 0,
+                "deduplicated_count": 0,
+                "truncated_count": 0,
+                "hit_count": 0,
+                "lane_counts": {},
+                "filter_before_vector": true,
+            }),
+        );
+    }
+
     let input = EvidenceSearchInput {
         query: query.to_string(),
         allowed_lanes: allowed_lanes.to_vec(),
@@ -382,7 +414,9 @@ async fn search_evidence_item_read_model(
                     "allowed_lanes": allowed_lanes,
                     "project_id": project_id,
                     "task_id": task_id,
+                    "source_profile": profile.as_str(),
                     "include_global": true,
+                    "scope_skipped": false,
                     "limit": limit,
                     "read_limit": input.limit,
                     "raw_hit_count": raw_hit_count,
@@ -408,7 +442,9 @@ async fn search_evidence_item_read_model(
                 "allowed_lanes": allowed_lanes,
                 "project_id": project_id,
                 "task_id": task_id,
+                "source_profile": profile.as_str(),
                 "include_global": true,
+                "scope_skipped": false,
                 "limit": input.limit,
                 "raw_hit_count": 0,
                 "freshness_filtered_count": 0,
@@ -424,6 +460,13 @@ async fn search_evidence_item_read_model(
             }),
         ),
     }
+}
+
+fn evidence_item_read_model_scope_allows_search(
+    profile: SourceProfile,
+    project_id: Option<&str>,
+) -> bool {
+    profile == SourceProfile::FullDebug || normalized_scope_value(project_id).is_some()
 }
 
 #[derive(Debug, Clone)]
@@ -851,6 +894,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         state,
         &query,
         &allowed_lanes,
+        profile,
         effective_project_id.as_deref(),
         args.task_id.as_deref(),
         limit,
@@ -4073,7 +4117,7 @@ mod tests {
         context_gather_worker_visible_dir_for, context_noise_metrics,
         context_pack_artifact_payload, dedupe_evidence_search_items,
         deployment_event_item_from_timeline_row, diagnostics_have_hard_failures, evidence_item_id,
-        evidence_item_uses_stable_projection_id,
+        evidence_item_read_model_scope_allows_search, evidence_item_uses_stable_projection_id,
         filter_incomplete_deployment_closure_evidence_items,
         filter_stale_compiled_policy_evidence_items_with_fingerprint,
         filter_stale_runtime_environment_evidence_items_with_dir,
@@ -4142,6 +4186,26 @@ mod tests {
         assert!(selection.include_infra);
         assert!(selection.include_credentials);
         assert!(!selection.include_conversations);
+    }
+
+    #[test]
+    fn evidence_read_model_skips_unscoped_non_debug_profiles() {
+        assert!(!evidence_item_read_model_scope_allows_search(
+            SourceProfile::IntentDefault,
+            None
+        ));
+        assert!(!evidence_item_read_model_scope_allows_search(
+            SourceProfile::ConversationAudit,
+            Some(" ")
+        ));
+        assert!(evidence_item_read_model_scope_allows_search(
+            SourceProfile::ConversationAudit,
+            Some("payments")
+        ));
+        assert!(evidence_item_read_model_scope_allows_search(
+            SourceProfile::FullDebug,
+            None
+        ));
     }
 
     #[test]
