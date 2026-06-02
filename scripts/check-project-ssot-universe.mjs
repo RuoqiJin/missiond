@@ -14,7 +14,7 @@ Checks MissionD multi-project SSOT registry convergence:
     XJP services, PCEA, plus App + external-infra projects and independent
     app projects xiaojinpro-frontend, search-center, palm-era,
     chat-translator, long-image-service, wechat-publisher, problem-tutor,
-    jinstudio, and daily-spark.
+    jinstudio, daily-spark, good-things-daily, and diandian.
   - V3 service-runtime-universe exposes production service deployment facts.
   - V3 service-layer-template standardizes new product-service-layer scaffolds.
   - project-ssot-convergence workflow exists.
@@ -83,6 +83,8 @@ const PROJECT_CHECKERS = new Map([
   ['wechat-publisher', ['bash', ['.missiond/check.sh']]],
   ['problem-tutor', ['bash', ['.missiond/check.sh']]],
   ['daily-spark', ['bash', ['.missiond/check.sh']]],
+  ['good-things-daily', ['bash', ['.missiond/check.sh']]],
+  ['diandian', ['bash', ['.missiond/check.sh']]],
 ]);
 
 function main() {

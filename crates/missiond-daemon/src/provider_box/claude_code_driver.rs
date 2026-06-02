@@ -21,6 +21,7 @@ use super::types::{
     DIAG_MODEL_SWITCH_UNVERIFIED, DIAG_PROVIDER_BOX_INVALID_REQUEST,
     DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE, DIAG_PROVIDER_CONTROL_ACTION_UNSUPPORTED,
     DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED, DIAG_PROVIDER_DURABLE_FINAL_MISSING,
+    DIAG_PROVIDER_MCP_RECONNECT_UNVERIFIED, DIAG_PROVIDER_MCP_STATUS_UNAVAILABLE,
     DIAG_PROVIDER_TEXT_ONLY_VIOLATION, DIAG_PROVIDER_UPSTREAM_UNAVAILABLE,
 };
 
@@ -80,6 +81,16 @@ struct ClaudeCodeJsonlAnalysis {
     final_text: Option<String>,
     violation: Option<Value>,
     upstream_error: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClaudeCodeMcpServerEntry {
+    name: String,
+    selected: bool,
+    status: String,
+    connected: bool,
+    auth: Option<String>,
+    tools_summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,6 +223,30 @@ impl ClaudeCodeProviderDriver {
             .as_ref()
             .and_then(|worker| worker.get("allow_hidden_logout").and_then(Value::as_bool))
             .unwrap_or(false)
+    }
+
+    fn request_mcp_server(request: &ProviderInteractionRequest) -> String {
+        request
+            .desired_worker
+            .as_ref()
+            .and_then(|worker| {
+                worker
+                    .get("mcp_server")
+                    .or_else(|| worker.get("server"))
+                    .and_then(Value::as_str)
+            })
+            .or_else(|| {
+                request.tool_policy.as_ref().and_then(|policy| {
+                    policy
+                        .get("mcp_server")
+                        .or_else(|| policy.get("server"))
+                        .and_then(Value::as_str)
+                })
+            })
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("missiond")
+            .to_string()
     }
 
     fn request_launch_model(request: &ProviderInteractionRequest) -> Option<String> {
@@ -887,6 +922,489 @@ impl ClaudeCodeProviderDriver {
             }
         }
         Some(observation)
+    }
+
+    async fn ensure_ready_for_mcp_command(
+        &self,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+    ) -> Option<ClaudeCodeObservation> {
+        let mut observation = self.observe(slot_id).await;
+        for _ in 0..2 {
+            if !is_claude_code_mcp_surface(&observation) {
+                break;
+            }
+            observation = self
+                .write_step(
+                    result,
+                    slot_id,
+                    PtyStepAction::key("escape"),
+                    "\x1b",
+                    Some("close ClaudeCode MCP page before reopening /mcp".to_string()),
+                )
+                .await;
+        }
+
+        if !is_ready_for_claude_code_text(&observation) {
+            observation = self
+                .wait_step_until(
+                    result,
+                    slot_id,
+                    Duration::from_secs(8),
+                    Some("wait for ClaudeCode prompt idle before /mcp".to_string()),
+                    is_ready_for_claude_code_text,
+                )
+                .await;
+        }
+        if !is_ready_for_claude_code_text(&observation) {
+            result.status = ProviderBoxStatus::Blocked;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_MCP_STATUS_UNAVAILABLE,
+                "ClaudeCode MCP status requires an idle composer or an MCP page that can be closed",
+                json!({
+                    "slot_id": slot_id,
+                    "reason": observation.snapshot.reason,
+                    "state": observation.snapshot.state,
+                    "blocked_kind": observation.snapshot.blocked_kind,
+                }),
+            ));
+            let status = self.pty.get_status(slot_id).await;
+            result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
+            return None;
+        }
+        if let Some(text) = claude_code_composer_text(&observation) {
+            if !text.trim().is_empty() {
+                result.status = ProviderBoxStatus::Blocked;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_MCP_STATUS_UNAVAILABLE,
+                    "ClaudeCode composer is not empty; refusing to append /mcp command",
+                    json!({
+                        "slot_id": slot_id,
+                        "composer_text_preview": text.chars().take(120).collect::<String>(),
+                        "safe_alternative": "clear the composer before probing MCP status",
+                    }),
+                ));
+                let status = self.pty.get_status(slot_id).await;
+                result.slot_status =
+                    Some(slot_status_value(slot_id, status.as_ref(), &observation));
+                return None;
+            }
+        }
+        Some(observation)
+    }
+
+    async fn open_mcp_servers_locked(
+        &self,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+    ) -> Option<ClaudeCodeObservation> {
+        let _ = self.ensure_ready_for_mcp_command(result, slot_id).await?;
+        let _ = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::text("/mcp"),
+                "/mcp",
+                Some("type ClaudeCode /mcp command".to_string()),
+            )
+            .await;
+        let mut observation = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::key("enter"),
+                "\r",
+                Some("execute ClaudeCode /mcp command".to_string()),
+            )
+            .await;
+        if !is_claude_code_mcp_list_screen(&observation)
+            && claude_code_staged_command_matches(&observation, "/mcp")
+        {
+            observation = self
+                .write_step(
+                    result,
+                    slot_id,
+                    PtyStepAction::key("enter"),
+                    "\r",
+                    Some("execute staged ClaudeCode /mcp command".to_string()),
+                )
+                .await;
+        }
+        if !is_claude_code_mcp_list_screen(&observation) {
+            observation = self
+                .wait_step_until(
+                    result,
+                    slot_id,
+                    Duration::from_secs(8),
+                    Some("wait for ClaudeCode MCP server list".to_string()),
+                    is_claude_code_mcp_list_screen,
+                )
+                .await;
+        }
+        if is_claude_code_mcp_list_screen(&observation) {
+            Some(observation)
+        } else {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_MCP_STATUS_UNAVAILABLE,
+                "ClaudeCode /mcp did not render a recognizable MCP server list",
+                json!({
+                    "slot_id": slot_id,
+                    "reason": observation.snapshot.reason,
+                    "state": observation.snapshot.state,
+                    "screen_excerpt": bounded_text_excerpt(&observation.text, 1200),
+                }),
+            ));
+            let status = self.pty.get_status(slot_id).await;
+            result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
+            None
+        }
+    }
+
+    async fn collect_mcp_status_locked(
+        &self,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+        mut observation: ClaudeCodeObservation,
+    ) -> (Vec<ClaudeCodeMcpServerEntry>, ClaudeCodeObservation) {
+        let mut servers: Vec<ClaudeCodeMcpServerEntry> = Vec::new();
+        let mut seen = HashSet::new();
+        for _ in 0..=36 {
+            for entry in extract_claude_code_mcp_server_entries_from_screen(&observation.text) {
+                let key = entry.name.to_ascii_lowercase();
+                if seen.insert(key) {
+                    servers.push(entry);
+                }
+            }
+            if !is_claude_code_mcp_list_screen(&observation)
+                || !claude_code_mcp_has_more_below(&observation)
+            {
+                break;
+            }
+            observation = self
+                .write_step(
+                    result,
+                    slot_id,
+                    PtyStepAction::key("down"),
+                    "\x1b[B",
+                    Some("scroll ClaudeCode MCP server list".to_string()),
+                )
+                .await;
+        }
+        (servers, observation)
+    }
+
+    async fn refresh_mcp_status_locked(
+        &self,
+        request: &ProviderInteractionRequest,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+    ) {
+        let target = Self::request_mcp_server(request);
+        let Some(observation) = self.open_mcp_servers_locked(result, slot_id).await else {
+            return;
+        };
+        let (servers, observation) = self
+            .collect_mcp_status_locked(result, slot_id, observation)
+            .await;
+        let status = self.pty.get_status(slot_id).await;
+        result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
+        result.mcp_status = Some(claude_code_mcp_status_value(
+            request,
+            slot_id,
+            &target,
+            &servers,
+            &observation,
+        ));
+        if servers.is_empty() {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_MCP_STATUS_UNAVAILABLE,
+                "ClaudeCode MCP status page was recognized but no server rows were parsed",
+                json!({
+                    "slot_id": slot_id,
+                    "target_server": target,
+                    "screen_excerpt": bounded_text_excerpt(&observation.text, 1200),
+                }),
+            ));
+        } else {
+            result.status = ProviderBoxStatus::Completed;
+            result.durable_source = Some("claude_code:/mcp".to_string());
+        }
+    }
+
+    async fn select_mcp_server_locked(
+        &self,
+        request: &ProviderInteractionRequest,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+        mut observation: ClaudeCodeObservation,
+        target: &str,
+    ) -> Option<ClaudeCodeObservation> {
+        for _ in 0..=48 {
+            let entries = extract_claude_code_mcp_server_entries_from_screen(&observation.text);
+            if entries
+                .iter()
+                .any(|entry| entry.selected && claude_code_mcp_server_name_eq(&entry.name, target))
+            {
+                return Some(observation);
+            }
+            if let Some(target_index) = entries
+                .iter()
+                .position(|entry| claude_code_mcp_server_name_eq(&entry.name, target))
+            {
+                let selected_index = entries.iter().position(|entry| entry.selected).unwrap_or(0);
+                let (key_name, key_bytes, steps) = if target_index >= selected_index {
+                    ("down", "\x1b[B", target_index - selected_index)
+                } else {
+                    ("up", "\x1b[A", selected_index - target_index)
+                };
+                for _ in 0..steps {
+                    observation = self
+                        .write_step(
+                            result,
+                            slot_id,
+                            PtyStepAction::key(key_name),
+                            key_bytes,
+                            Some(format!("navigate ClaudeCode MCP list to {target}")),
+                        )
+                        .await;
+                }
+                continue;
+            }
+
+            if !claude_code_mcp_has_more_below(&observation) {
+                result.mcp_status = Some(claude_code_mcp_status_value(
+                    request,
+                    slot_id,
+                    target,
+                    &entries,
+                    &observation,
+                ));
+                result.status = ProviderBoxStatus::Failed;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_MCP_STATUS_UNAVAILABLE,
+                    "ClaudeCode MCP server was not found in the /mcp list",
+                    json!({
+                        "slot_id": slot_id,
+                        "target_server": target,
+                        "visible_servers": entries.iter().map(|entry| entry.name.clone()).collect::<Vec<_>>(),
+                    }),
+                ));
+                return None;
+            }
+
+            observation = self
+                .write_step(
+                    result,
+                    slot_id,
+                    PtyStepAction::key("down"),
+                    "\x1b[B",
+                    Some(format!("scan ClaudeCode MCP list for {target}")),
+                )
+                .await;
+        }
+
+        result.status = ProviderBoxStatus::Unverified;
+        result.add_diagnostic(ProviderBoxDiagnostic::error(
+            DIAG_PROVIDER_MCP_RECONNECT_UNVERIFIED,
+            "ClaudeCode MCP target could not be selected within the bounded navigation budget",
+            json!({
+                "slot_id": slot_id,
+                "target_server": target,
+                "screen_excerpt": bounded_text_excerpt(&observation.text, 1200),
+            }),
+        ));
+        None
+    }
+
+    async fn reconnect_mcp_locked(
+        &self,
+        request: &ProviderInteractionRequest,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+    ) {
+        let target = Self::request_mcp_server(request);
+        let Some(observation) = self.open_mcp_servers_locked(result, slot_id).await else {
+            return;
+        };
+        let Some(_) = self
+            .select_mcp_server_locked(request, result, slot_id, observation, &target)
+            .await
+        else {
+            return;
+        };
+
+        let mut observation = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::key("enter"),
+                "\r",
+                Some(format!("open ClaudeCode MCP details for {target}")),
+            )
+            .await;
+        if !claude_code_mcp_detail_screen_for(&observation, &target) {
+            observation = self
+                .wait_step_until(
+                    result,
+                    slot_id,
+                    Duration::from_secs(6),
+                    Some(format!("wait for ClaudeCode MCP details for {target}")),
+                    |obs| claude_code_mcp_detail_screen_for(obs, &target),
+                )
+                .await;
+        }
+        if !claude_code_mcp_reconnect_action_selected(&observation) {
+            let Some((selected_index, target_index)) =
+                claude_code_mcp_detail_action_positions(&observation, "reconnect")
+            else {
+                result.status = ProviderBoxStatus::Unverified;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_MCP_RECONNECT_UNVERIFIED,
+                    "ClaudeCode MCP details page did not expose Reconnect as an action",
+                    json!({
+                        "slot_id": slot_id,
+                        "target_server": target,
+                        "screen_excerpt": bounded_text_excerpt(&observation.text, 1200),
+                    }),
+                ));
+                let status = self.pty.get_status(slot_id).await;
+                result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
+                result.mcp_status = Some(claude_code_mcp_status_value(
+                    request,
+                    slot_id,
+                    &target,
+                    &extract_claude_code_mcp_server_entries_from_screen(&observation.text),
+                    &observation,
+                ));
+                return;
+            };
+
+            let (key_name, key_bytes, steps) = if selected_index <= target_index {
+                ("down", "\x1b[B", target_index - selected_index)
+            } else {
+                ("up", "\x1b[A", selected_index - target_index)
+            };
+            for _ in 0..steps {
+                observation = self
+                    .write_step(
+                        result,
+                        slot_id,
+                        PtyStepAction::key(key_name),
+                        key_bytes,
+                        Some(format!(
+                            "navigate ClaudeCode MCP details action to Reconnect for {target}"
+                        )),
+                    )
+                    .await;
+            }
+
+            if !claude_code_mcp_reconnect_action_selected(&observation) {
+                observation = self
+                    .wait_step_until(
+                        result,
+                        slot_id,
+                        Duration::from_secs(3),
+                        Some(format!(
+                            "wait for ClaudeCode MCP Reconnect action to become selected for {target}"
+                        )),
+                        claude_code_mcp_reconnect_action_selected,
+                    )
+                    .await;
+            }
+        }
+
+        if !claude_code_mcp_reconnect_action_selected(&observation) {
+            result.status = ProviderBoxStatus::Unverified;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_MCP_RECONNECT_UNVERIFIED,
+                "ClaudeCode MCP details page did not select Reconnect after navigation",
+                json!({
+                    "slot_id": slot_id,
+                    "target_server": target,
+                    "screen_excerpt": bounded_text_excerpt(&observation.text, 1200),
+                }),
+            ));
+            let status = self.pty.get_status(slot_id).await;
+            result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
+            result.mcp_status = Some(claude_code_mcp_status_value(
+                request,
+                slot_id,
+                &target,
+                &extract_claude_code_mcp_server_entries_from_screen(&observation.text),
+                &observation,
+            ));
+            return;
+        }
+
+        let _ = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::key("enter"),
+                "\r",
+                Some(format!("execute ClaudeCode MCP reconnect for {target}")),
+            )
+            .await;
+        observation = self
+            .wait_step_until(
+                result,
+                slot_id,
+                Duration::from_secs(12),
+                Some(format!(
+                    "wait for ClaudeCode MCP reconnect outcome for {target}"
+                )),
+                |obs| {
+                    is_ready_for_claude_code_text(obs)
+                        && claude_code_mcp_reconnect_outcome(&obs.text, &target).is_some()
+                },
+            )
+            .await;
+
+        let outcome = claude_code_mcp_reconnect_outcome(&observation.text, &target);
+        if outcome.as_deref() == Some("failed") {
+            result.status = ProviderBoxStatus::Failed;
+            result.final_text = claude_code_mcp_reconnect_line(&observation.text, &target);
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_MCP_RECONNECT_UNVERIFIED,
+                "ClaudeCode MCP reconnect reported failure",
+                json!({
+                    "slot_id": slot_id,
+                    "target_server": target,
+                    "outcome_line": result.final_text.clone(),
+                }),
+            ));
+            self.refresh_mcp_status_locked(request, result, slot_id)
+                .await;
+            result.status = ProviderBoxStatus::Failed;
+            return;
+        }
+
+        self.refresh_mcp_status_locked(request, result, slot_id)
+            .await;
+        let connected = result
+            .mcp_status
+            .as_ref()
+            .and_then(|status| status.get("target_connected"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if connected {
+            result.status = ProviderBoxStatus::Completed;
+            result.final_text = Some(format!("ClaudeCode MCP server {target} is connected"));
+        } else {
+            result.status = ProviderBoxStatus::Unverified;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_MCP_RECONNECT_UNVERIFIED,
+                "ClaudeCode MCP reconnect did not verify the target server as connected",
+                json!({
+                    "slot_id": slot_id,
+                    "target_server": target,
+                    "outcome": outcome,
+                    "mcp_status": result.mcp_status,
+                }),
+            ));
+        }
     }
 
     async fn set_permissions_locked(
@@ -1651,7 +2169,7 @@ impl ClaudeCodeProviderDriver {
                     "error": err.to_string(),
                 }),
             ));
-            let _ = self.pty.kill(&slot_id).await;
+            let _ = self.pty.force_kill(&slot_id).await;
             return false;
         }
 
@@ -1666,7 +2184,7 @@ impl ClaudeCodeProviderDriver {
                 queue_wait_ms,
             )
             .await;
-        let _ = self.pty.kill(&slot_id).await;
+        let _ = self.pty.force_kill(&slot_id).await;
         ok
     }
 
@@ -1723,18 +2241,7 @@ impl ProviderDriver for ClaudeCodeProviderDriver {
     }
 
     fn capabilities(&self) -> ProviderDriverCapabilities {
-        ProviderDriverCapabilities {
-            submit_turn: false,
-            switch_model: true,
-            usage_probe: false,
-            model_catalog: false,
-            pure_text_guard: true,
-            control_action: true,
-            pty_step: false,
-            status: true,
-            mcp_status: false,
-            mcp_reconnect: false,
-        }
+        claude_code_provider_capabilities()
     }
 
     async fn status(&self, request: &ProviderInteractionRequest) -> ProviderBoxResult {
@@ -1992,6 +2499,314 @@ impl ProviderDriver for ClaudeCodeProviderDriver {
             .await;
         }
         result
+    }
+
+    async fn mcp_status(&self, request: &ProviderInteractionRequest) -> ProviderBoxResult {
+        let mut result = ProviderBoxResult::base(request, ProviderBoxStatus::Unknown);
+        let Some(slot_id) = self.ensure_slot(request, &mut result).await else {
+            return result;
+        };
+        result.slot_id = Some(slot_id.clone());
+        let lock = self.slot_lock(&slot_id).await;
+        let _guard = lock.lock().await;
+        self.refresh_mcp_status_locked(request, &mut result, &slot_id)
+            .await;
+        result
+    }
+
+    async fn mcp_reconnect(&self, request: &ProviderInteractionRequest) -> ProviderBoxResult {
+        let mut result = ProviderBoxResult::base(request, ProviderBoxStatus::Unknown);
+        let Some(slot_id) = self.ensure_slot(request, &mut result).await else {
+            return result;
+        };
+        result.slot_id = Some(slot_id.clone());
+        let lock = self.slot_lock(&slot_id).await;
+        let _guard = lock.lock().await;
+        self.reconnect_mcp_locked(request, &mut result, &slot_id)
+            .await;
+        result
+    }
+}
+
+fn claude_code_provider_capabilities() -> ProviderDriverCapabilities {
+    ProviderDriverCapabilities {
+        submit_turn: false,
+        switch_model: true,
+        usage_probe: false,
+        model_catalog: false,
+        pure_text_guard: true,
+        control_action: true,
+        pty_step: false,
+        status: true,
+        mcp_status: true,
+        mcp_reconnect: true,
+    }
+}
+
+fn is_claude_code_mcp_list_screen(observation: &ClaudeCodeObservation) -> bool {
+    observation
+        .text
+        .to_ascii_lowercase()
+        .contains("manage mcp servers")
+}
+
+fn is_claude_code_mcp_detail_screen(observation: &ClaudeCodeObservation) -> bool {
+    let lower = observation.text.to_ascii_lowercase();
+    lower.contains("mcp server")
+        && lower.contains("status:")
+        && lower.contains("config location:")
+        && lower.contains("reconnect")
+}
+
+fn is_claude_code_mcp_surface(observation: &ClaudeCodeObservation) -> bool {
+    is_claude_code_mcp_list_screen(observation) || is_claude_code_mcp_detail_screen(observation)
+}
+
+fn claude_code_mcp_has_more_below(observation: &ClaudeCodeObservation) -> bool {
+    observation
+        .text
+        .lines()
+        .map(|line| line.trim())
+        .any(|line| line.starts_with('↓') && line.to_ascii_lowercase().contains("more below"))
+}
+
+fn extract_claude_code_mcp_server_entries_from_screen(text: &str) -> Vec<ClaudeCodeMcpServerEntry> {
+    text.lines()
+        .filter_map(parse_claude_code_mcp_server_entry)
+        .collect()
+}
+
+fn parse_claude_code_mcp_server_entry(line: &str) -> Option<ClaudeCodeMcpServerEntry> {
+    let normalized = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = normalized.trim_start();
+    let selected = trimmed.starts_with('❯') || trimmed.starts_with('>') || trimmed.starts_with('›');
+    let row = trimmed
+        .trim_start_matches(|c: char| matches!(c, '❯' | '>' | '›' | '●'))
+        .trim_start();
+    if !row.contains('·') {
+        return None;
+    }
+    let parts = row.split('·').map(str::trim).collect::<Vec<_>>();
+    let name = parts.first()?.trim();
+    let lower_name = name.to_ascii_lowercase();
+    if name.is_empty()
+        || name.starts_with('↑')
+        || name.starts_with('↓')
+        || name.starts_with('⚠')
+        || name.eq_ignore_ascii_case("claude.ai")
+        || name.ends_with("MCPs")
+        || name.contains("MCPs (")
+        || lower_name.contains("setup issue")
+    {
+        return None;
+    }
+    let marker = parts.get(1).copied().unwrap_or_default();
+    let (status, connected, auth) = claude_code_mcp_marker_status(marker);
+    Some(ClaudeCodeMcpServerEntry {
+        name: name.to_string(),
+        selected,
+        status,
+        connected,
+        auth,
+        tools_summary: parts.get(2).map(|value| value.to_string()),
+    })
+}
+
+fn claude_code_mcp_marker_status(marker: &str) -> (String, bool, Option<String>) {
+    let lower = marker.to_ascii_lowercase();
+    if lower.contains("connected") || marker.contains('✔') || marker.contains('✓') {
+        ("connected".to_string(), true, None)
+    } else if lower.contains("failed") || marker.contains('✘') || marker.contains('✗') {
+        ("failed".to_string(), false, None)
+    } else if lower.contains("needs authentication") || marker.contains('△') {
+        (
+            "needs_authentication".to_string(),
+            false,
+            Some("needs authentication".to_string()),
+        )
+    } else if lower.contains("disabled") || marker.contains('◯') {
+        ("disabled".to_string(), false, None)
+    } else {
+        ("unknown".to_string(), false, None)
+    }
+}
+
+fn claude_code_mcp_status_value(
+    request: &ProviderInteractionRequest,
+    slot_id: &str,
+    target: &str,
+    servers: &[ClaudeCodeMcpServerEntry],
+    observation: &ClaudeCodeObservation,
+) -> Value {
+    let selected_server = servers
+        .iter()
+        .find(|entry| entry.selected)
+        .map(|entry| entry.name.clone());
+    let target_entry = servers
+        .iter()
+        .find(|entry| claude_code_mcp_server_name_eq(&entry.name, target));
+    let aggregate_status = if servers.is_empty() {
+        "unknown"
+    } else if target_entry
+        .as_ref()
+        .is_some_and(|entry| entry.status == "failed")
+    {
+        "target_failed"
+    } else if target_entry.as_ref().is_some_and(|entry| entry.connected) {
+        "target_connected"
+    } else if servers.iter().all(|entry| entry.connected) {
+        "connected"
+    } else {
+        "degraded"
+    };
+    json!({
+        "schema": "missiond.provider-box.claude-code-mcp-status.v1",
+        "provider": request.provider.clone().or_else(|| Some("claude_code".to_string())),
+        "engine": CliEngine::ClaudeCode,
+        "slot_id": slot_id,
+        "source": "claude_code:/mcp",
+        "observed_at": chrono::Utc::now().to_rfc3339(),
+        "status": aggregate_status,
+        "target_server": target,
+        "target_status": target_entry.map(|entry| entry.status.clone()),
+        "target_connected": target_entry.is_some_and(|entry| entry.connected),
+        "selected_server": selected_server,
+        "reconnect_action_visible": claude_code_mcp_reconnect_action_visible(observation),
+        "servers": servers
+            .iter()
+            .map(|entry| {
+                json!({
+                    "name": entry.name,
+                    "selected": entry.selected,
+                    "status": entry.status,
+                    "connected": entry.connected,
+                    "auth": entry.auth,
+                    "tools_summary": entry.tools_summary,
+                })
+            })
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn claude_code_mcp_server_name_eq(observed: &str, target: &str) -> bool {
+    observed.trim().eq_ignore_ascii_case(target.trim())
+}
+
+fn claude_code_mcp_detail_screen_for(observation: &ClaudeCodeObservation, target: &str) -> bool {
+    if !is_claude_code_mcp_detail_screen(observation) {
+        return false;
+    }
+    let normalized_target = target.replace('-', " ").to_ascii_lowercase();
+    observation.text.lines().any(|line| {
+        let lower = line
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase();
+        lower.ends_with(" mcp server") && lower.replace('-', " ").contains(&normalized_target)
+    })
+}
+
+fn claude_code_mcp_reconnect_action_selected(observation: &ClaudeCodeObservation) -> bool {
+    observation.text.lines().any(|line| {
+        let normalized = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        let lower = normalized.to_ascii_lowercase();
+        (normalized.trim_start().starts_with('❯')
+            || normalized.trim_start().starts_with('>')
+            || normalized.trim_start().starts_with('›'))
+            && lower.contains("reconnect")
+    })
+}
+
+fn claude_code_mcp_reconnect_action_visible(observation: &ClaudeCodeObservation) -> bool {
+    claude_code_mcp_detail_action_positions(observation, "reconnect").is_some()
+}
+
+fn claude_code_mcp_detail_action_positions(
+    observation: &ClaudeCodeObservation,
+    target_action: &str,
+) -> Option<(usize, usize)> {
+    let target_action = target_action.trim().to_ascii_lowercase();
+    if target_action.is_empty() {
+        return None;
+    }
+
+    let mut selected_index = None;
+    let mut target_index = None;
+    let mut action_index = 0usize;
+
+    for line in observation.text.lines() {
+        let trimmed = line.trim_start();
+        let selected = trimmed.starts_with('❯') || trimmed.starts_with('>') || trimmed.starts_with('›');
+        let candidate = if selected {
+            trimmed
+                .chars()
+                .skip(1)
+                .collect::<String>()
+                .trim_start()
+                .to_string()
+        } else {
+            trimmed.to_string()
+        };
+        let Some((number, label)) = candidate.split_once('.') else {
+            continue;
+        };
+        if !number.trim().chars().all(|ch| ch.is_ascii_digit()) {
+            continue;
+        }
+        let label = label.trim();
+        if label.is_empty() {
+            continue;
+        }
+
+        if selected {
+            selected_index = Some(action_index);
+        }
+        if label.to_ascii_lowercase().contains(&target_action) {
+            target_index = Some(action_index);
+        }
+        action_index += 1;
+    }
+
+    selected_index.zip(target_index)
+}
+
+fn claude_code_mcp_reconnect_outcome(text: &str, target: &str) -> Option<String> {
+    let target = target.to_ascii_lowercase();
+    for line in text.lines().rev().take(40) {
+        let lower = line.to_ascii_lowercase();
+        if !lower.contains("reconnect") || !lower.contains(&target) {
+            continue;
+        }
+        if lower.contains("failed") || lower.contains("error") {
+            return Some("failed".to_string());
+        }
+        if lower.contains("reconnected") || lower.contains("connected") || lower.contains("success")
+        {
+            return Some("connected".to_string());
+        }
+    }
+    None
+}
+
+fn claude_code_mcp_reconnect_line(text: &str, target: &str) -> Option<String> {
+    let target = target.to_ascii_lowercase();
+    text.lines().rev().find_map(|line| {
+        let lower = line.to_ascii_lowercase();
+        if lower.contains("reconnect") && lower.contains(&target) {
+            Some(line.trim().to_string())
+        } else {
+            None
+        }
+    })
+}
+
+fn bounded_text_excerpt(text: &str, max_chars: usize) -> String {
+    let chars = text.chars().collect::<Vec<_>>();
+    if chars.len() <= max_chars {
+        text.to_string()
+    } else {
+        chars[chars.len() - max_chars..].iter().collect()
     }
 }
 
@@ -2517,10 +3332,17 @@ mod tests {
     use missiond_core::types::CliEngine;
     use missiond_core::SessionState;
 
+    use crate::provider_box::types::{BoxCommand, ProviderInteractionRequest};
+
     use super::{
         analyze_claude_code_jsonl_after_cursor, claude_code_jsonl_cursor_for_session,
-        claude_code_jsonl_event_is_text_only_violation, claude_code_permission_cycle_steps,
-        claude_code_staged_command_matches, find_claude_code_session_jsonl,
+        claude_code_jsonl_event_is_text_only_violation,
+        claude_code_mcp_detail_action_positions, claude_code_mcp_reconnect_action_selected,
+        claude_code_mcp_reconnect_action_visible, claude_code_mcp_reconnect_line,
+        claude_code_mcp_reconnect_outcome, claude_code_mcp_status_value,
+        claude_code_provider_capabilities,
+        claude_code_permission_cycle_steps, claude_code_staged_command_matches,
+        extract_claude_code_mcp_server_entries_from_screen, find_claude_code_session_jsonl,
         is_claude_code_logout_success, normalize_claude_code_model_target,
         normalize_claude_code_permission_mode, ClaudeCodeJsonlCursor, ClaudeCodeModelTarget,
         ClaudeCodeObservation, ClaudeCodePermissionMode,
@@ -2536,6 +3358,17 @@ mod tests {
             text: owned.join("\n"),
             snapshot: recognize_screen(CliEngine::ClaudeCode, &owned, SessionState::Idle),
         }
+    }
+
+    #[test]
+    fn claude_code_driver_capabilities_expose_mcp_status_and_reconnect() {
+        let caps = claude_code_provider_capabilities();
+
+        assert!(caps.mcp_status);
+        assert!(caps.mcp_reconnect);
+        assert!(caps.status);
+        assert!(caps.switch_model);
+        assert!(caps.control_action);
     }
 
     #[test]
@@ -2688,6 +3521,116 @@ mod tests {
             "⏵⏵ auto mode on (shift+tab to cycle)",
         ]);
         assert!(!is_claude_code_logout_success(&idle));
+    }
+
+    #[test]
+    fn claude_code_mcp_parser_extracts_list_rows() {
+        let obs = observation(&[
+            "  Manage MCP servers",
+            "  12 servers",
+            "  ⚠ 2 setup issues: MCP · /doctor",
+            "    Local MCPs (/Users/jinchen/.claude.json [project: /private/tmp/missiond-search-noise-fix])",
+            "  ❯ chrome-devtools · ✔ connected · 29 tools",
+            "    missiond-fail-demo · ✘ failed",
+            "    claude.ai Gmail · △ needs authentication",
+            "    computer-use · ◯ disabled",
+            "    missiond · ✔ connected · 100 tools",
+            "  ※ Run claude --debug to see error logs",
+            "  https://code.claude.com/docs/en/mcp for help",
+        ]);
+        let entries = extract_claude_code_mcp_server_entries_from_screen(&obs.text);
+        assert_eq!(entries.len(), 5);
+        assert!(!entries
+            .iter()
+            .any(|entry| entry.name.to_ascii_lowercase().contains("setup issue")));
+        assert_eq!(entries[0].name, "chrome-devtools");
+        assert!(entries[0].selected);
+        assert!(entries[0].connected);
+        assert_eq!(entries[1].status, "failed");
+        assert_eq!(entries[2].status, "needs_authentication");
+        assert_eq!(entries[3].status, "disabled");
+        assert_eq!(entries[4].tools_summary.as_deref(), Some("100 tools"));
+    }
+
+    #[test]
+    fn claude_code_mcp_status_value_marks_target_failed() {
+        let obs = observation(&[
+            "  Manage MCP servers",
+            "  ❯ missiond-fail-demo · ✘ failed",
+            "    missiond · ✔ connected · 100 tools",
+            "  https://code.claude.com/docs/en/mcp for help",
+        ]);
+        let entries = extract_claude_code_mcp_server_entries_from_screen(&obs.text);
+        let request = ProviderInteractionRequest::new(BoxCommand::McpStatus, CliEngine::ClaudeCode);
+        let value = claude_code_mcp_status_value(
+            &request,
+            "slot-claude-code-default",
+            "missiond-fail-demo",
+            &entries,
+            &obs,
+        );
+        assert_eq!(
+            value.pointer("/status").and_then(|v| v.as_str()),
+            Some("target_failed")
+        );
+        assert_eq!(
+            value.pointer("/target_status").and_then(|v| v.as_str()),
+            Some("failed")
+        );
+        assert_eq!(
+            value.pointer("/target_connected").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn claude_code_mcp_reconnect_outcome_parses_failure_banner() {
+        let text = "❯ /mcp\n  ⎿  Failed to reconnect to missiond-fail-demo: -32000\n❯";
+        assert_eq!(
+            claude_code_mcp_reconnect_outcome(text, "missiond-fail-demo").as_deref(),
+            Some("failed")
+        );
+        assert_eq!(
+            claude_code_mcp_reconnect_line(text, "missiond-fail-demo").as_deref(),
+            Some("⎿  Failed to reconnect to missiond-fail-demo: -32000")
+        );
+    }
+
+    #[test]
+    fn claude_code_mcp_detail_actions_detect_reconnect_position() {
+        let obs = observation(&[
+            "  Missiond MCP Server",
+            "",
+            "  Status:           ✔ connected",
+            "  Command:          /Users/jinchen/.xjp-mission/mission-mcp",
+            "  Tools: 100 tools",
+            "",
+            "  ❯ 1. View tools",
+            "    2. Reconnect",
+            "    3. Disable",
+            "",
+            "  ↑/↓ to navigate · Enter to select · Esc to back",
+        ]);
+
+        assert!(claude_code_mcp_reconnect_action_visible(&obs));
+        assert!(!claude_code_mcp_reconnect_action_selected(&obs));
+        assert_eq!(
+            claude_code_mcp_detail_action_positions(&obs, "reconnect"),
+            Some((0, 1))
+        );
+
+        let obs = observation(&[
+            "  Missiond MCP Server",
+            "    1. View tools",
+            "  ❯ 2. Reconnect",
+            "    3. Disable",
+        ]);
+        assert!(claude_code_mcp_reconnect_action_visible(&obs));
+        assert!(claude_code_mcp_reconnect_action_selected(&obs));
+        assert_eq!(
+            claude_code_mcp_detail_action_positions(&obs, "reconnect"),
+            Some((1, 1))
+        );
     }
 
     #[test]

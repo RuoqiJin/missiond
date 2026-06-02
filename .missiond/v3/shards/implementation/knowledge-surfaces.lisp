@@ -216,6 +216,7 @@
              "crates/missiond-mcp/src/tools/comm/codex_ops.rs"
              "crates/missiond-mcp/src/tools/comm/tool_directory.rs"
              "crates/missiond-mcp/src/tools/comm/agent_navigation.rs"
+             "crates/missiond-cli/src/main.rs"
              "crates/missiond-daemon/src/handlers/mod.rs"
              "crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"
              "crates/missiond-daemon/src/handlers/comm/capability_usage.rs"
@@ -225,7 +226,7 @@
              "crates/missiond-daemon/src/handlers/comm/tool_directory.rs"
              "crates/missiond-daemon/src/handlers/comm/agent_navigation.rs"
              "scripts/check-v3-capability-governance-isomorphism.mjs"]
-      :note "Runtime-projected V3 destination for capability usage, audit, Codex ops, MCP tool-family governance, and the control-plane capability ledger. capability_usage/runtime.rs owns snapshot/report/candidates/mark/ack, source lanes, semantic hint review, protected source/target policy, review sidecar persistence, and observability. Runtime authority is capability_grants/capability_audit_events, created by mission_task_delegate/mission_swarm_run and enforced by task_result_put, worker_settle, Board claim/update, and sandbox spawn gates; tool-name allowlists are compatibility projections only. audit.rs owns mission_audit; codex_ops.rs owns mission_codex_ops; tool_directory.rs is read-only; agent_navigation.rs may append only the agent-navigation review sidecar.")
+      :note "Runtime-projected V3 destination for capability usage, audit, Codex ops, MCP tool-family governance, and the control-plane capability ledger. capability_usage/runtime.rs owns snapshot/report/candidates/mark/ack, source lanes, semantic hint review, protected source/target policy, review sidecar persistence, and observability. Runtime authority is capability_grants/capability_audit_events, created by mission_task_delegate/mission_swarm_run and enforced by task_result_put, worker_settle, Board claim/update, and sandbox spawn gates; tool-name allowlists are compatibility projections only. audit.rs owns mission_audit; codex_ops.rs owns mission_codex_ops; tool_directory.rs is read-only and projects agent-engine CLI/MCP surface preference. missiond-cli is the shell-native sibling adapter for Codex/operator workflows over the same daemon IPC tools; missiond-mcp remains the MCP schema/discovery surface for ClaudeCode. agent_navigation.rs may append only the agent-navigation review sidecar.")
 
 (surface skill-runtime
       :status "code-aligned"

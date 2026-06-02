@@ -9,6 +9,7 @@ members = [
     "crates/missiond-pty",
     "crates/missiond-core",
     "crates/missiond-runner",
+    "crates/missiond-cli",
     "crates/missiond-mcp",
     "crates/missiond-attach",
     "crates/missiond-daemon",
@@ -117,4 +118,5 @@ semantic-terminal = { path = "../semantic-terminal/crates/semantic-terminal" }
 missiond-pty = { version = "0.1.0", path = "crates/missiond-pty" }
 missiond-core = { version = "0.1.0", path = "crates/missiond-core" }
 missiond-runner = { version = "0.1.0", path = "crates/missiond-runner" }
+missiond-cli = { version = "0.1.0", path = "crates/missiond-cli" }
 missiond-mcp = { version = "0.1.0", path = "crates/missiond-mcp" }

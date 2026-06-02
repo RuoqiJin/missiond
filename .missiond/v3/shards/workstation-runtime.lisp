@@ -576,8 +576,10 @@
 	    :rationale
 	        "Wave33 evidence: a delegated BoardTask was sent twice — once via spawner.initial_prompt fire-and-forget, then again via Autopilot pty.send — and the slot's TextOutputEvent::Complete arrived without Autopilot transitioning the BoardTask to done. Single ownership of prompt+close eliminates the orphaned-task class entirely.")
     (claude-code-mcp-recovery
-      :desc "Lisp-owned ClaudeCode MCP reconnect ritual and missing-MCP incident contract; the mounting and reconnect navigation are Lisp-pinned, never tool-registry-decided at runtime."
+      :desc "Lisp-owned ClaudeCode MCP status/reconnect ritual and missing-MCP incident contract; the mounting and reconnect navigation are Lisp-pinned, target server selection is by observed row name, never by tool-registry-decided shortcuts."
       :reconnect-keystrokes ["/mcp" "<enter>" "<arrow-down>*N" "<enter>" "<enter>"]
+      :status-keystrokes ["/mcp" "<enter>" "<arrow-down>*scan"]
+      :target-server-field "mcp_server"
       :forbid-numeric-shortcut true
       :missing-incident-kind "claude_code_mcp_missing"
       :reconnect-failed-incident-kind "claude_code_mcp_reconnect_failed"
@@ -586,9 +588,11 @@
       :surfaces ["crates/missiond-pty/src/session.rs::Session::mcp_reconnect_sequence"
                  "crates/missiond-pty/src/session.rs::PTYSession::mcp_reconnect"
                  "crates/missiond-pty/src/manager.rs::PTYManager::mcp_reconnect"
+                 "crates/missiond-daemon/src/provider_box/claude_code_driver.rs::ClaudeCodeProviderDriver::mcp_status"
+                 "crates/missiond-daemon/src/provider_box/claude_code_driver.rs::ClaudeCodeProviderDriver::mcp_reconnect"
                  "crates/missiond-daemon/src/workers/local/pty_event_worker.rs::handle_mcp_tool_error"
                  "crates/missiond-daemon/src/engine/master_control.rs::spawn_incident_event_sub"]
-      :rationale "Claude Code's /mcp picker numeric shortcuts have shifted between TUI versions; arrow-key navigation is the only stable substrate. When supports_mcp=true is advertised but no mission_* tool surfaces after slot ready, the worker is operating without orchestration tools and the master must be woken via a durable incident, not a silent reconnect retry loop."))
+      :rationale "Claude Code's /mcp picker numeric shortcuts have shifted between TUI versions; arrow-key navigation is the only stable substrate. Provider-box MCP status scans visible rows and pages with arrows, and MCP reconnect opens the target server details page, verifies Reconnect is selected, then verifies outcome. When supports_mcp=true is advertised but no mission_* tool surfaces after slot ready, the worker is operating without orchestration tools and the master must be woken via a durable incident, not a silent reconnect retry loop."))
 
   (workstation-policy-shards
     :desc "Split workstation-config invariants into policy shards so runtime, checkers, and agents can reason over one small policy at a time."
@@ -886,6 +890,7 @@
     :rules
       ["Boot capsule is a compact contract and MUST NOT contain secrets, raw provider logs, bulk chat history, or unreviewed KB dumps."
        "mission_context_boot is the public retrieval surface for external new conversations and resident/worker startup."
+       "Codex boot context MUST remind Codex workstations to prefer missiond-cli/xjp-cli for MissionD/XJP tool operations, with missiond-mcp/xjp-mcp as compatibility or diagnostics fallback."
        "Every confirmed durable user intent that should survive a fresh conversation becomes an intent_memory_candidate, then active memory only after review or high-confidence evidence."]
     :checker "node scripts/check-v3-codex-boot-context-isomorphism.mjs")
 

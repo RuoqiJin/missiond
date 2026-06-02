@@ -19,6 +19,7 @@ const checks = [
       'L1-current-task',
       'L2-grounded-facts',
       'L3-cold-evidence',
+      'missiond-cli/xjp-cli',
     ],
   ],
   [
@@ -31,6 +32,10 @@ const checks = [
       'accepted_shard_id',
       'task-result-artifact',
       'PTY is diagnostic only',
+      'missiond-cli',
+      'xjp-cli',
+      'missiond-mcp',
+      'xjp-mcp',
     ],
   ],
   [

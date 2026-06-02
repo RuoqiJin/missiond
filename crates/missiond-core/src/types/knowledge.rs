@@ -170,3 +170,68 @@ pub struct KBOperationRow {
     pub executed_at: Option<String>,
     pub error: Option<String>,
 }
+
+// ============ Evidence Lane Read Models ============
+
+/// Compact searchable evidence item. This is a projection over raw sources, not
+/// a promotion into long-term KB truth.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvidenceItemInput {
+    pub id: String,
+    pub lane_id: String,
+    pub source_type: String,
+    #[serde(default)]
+    pub source_id: Option<String>,
+    #[serde(default)]
+    pub source_ref: Option<String>,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub task_id: Option<String>,
+    pub title: String,
+    pub summary: String,
+    pub authority_class: String,
+    pub validity: String,
+    pub privacy_class: String,
+    pub freshness: String,
+    #[serde(default)]
+    pub score: Option<f64>,
+    pub raw_policy: String,
+    #[serde(default = "default_evidence_refs")]
+    pub evidence_refs: serde_json::Value,
+    #[serde(default = "default_evidence_metadata")]
+    pub metadata: serde_json::Value,
+}
+
+/// Persistent metric row for one mission_context_gather call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextGatherRunInput {
+    pub id: String,
+    pub query: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub task_id: Option<String>,
+    pub source_profile: String,
+    #[serde(default = "default_evidence_metadata")]
+    pub lane_counts: serde_json::Value,
+    #[serde(default = "default_evidence_metadata")]
+    pub metrics: serde_json::Value,
+    pub raw_sources_included: bool,
+    pub credential_opt_in: bool,
+    pub conversation_opt_in: bool,
+    #[serde(default)]
+    pub resolver_source: Option<String>,
+    #[serde(default)]
+    pub runtime_root_consistent: Option<bool>,
+    #[serde(default)]
+    pub artifact_hash: Option<String>,
+    #[serde(default = "default_evidence_refs")]
+    pub diagnostics: serde_json::Value,
+}
+
+fn default_evidence_metadata() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
+}

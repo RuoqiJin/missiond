@@ -29,6 +29,7 @@ const DEFAULT_FILES = {
   mcpCodexOps: 'crates/missiond-mcp/src/tools/comm/codex_ops.rs',
   mcpToolDirectory: 'crates/missiond-mcp/src/tools/comm/tool_directory.rs',
   mcpAgentNavigation: 'crates/missiond-mcp/src/tools/comm/agent_navigation.rs',
+  missiondCli: 'crates/missiond-cli/src/main.rs',
   v2Source: '.missiond/v2/intent-capability-governance.lisp',
 };
 
@@ -94,8 +95,17 @@ function checkFiles(root, files) {
     ':status runtime-projected',
     '(capability-governance-policy',
     '(mcp-tool-governance-policy',
+    ':agent-tool-surface-governance',
     ':primary-families',
     ':directory-tool mission_tool_directory',
+    'missiond-cli',
+    'xjp-cli',
+    'missiond-mcp',
+    'xjp-mcp',
+    'agent codex-cli',
+    'agent claude-code',
+    'crates/missiond-cli/src/main.rs',
+    'agent-engine CLI/MCP surface preference',
     ':review-sidecar ".missiond/v3/runtime/capability-usage-review.json"',
     ':protected-tool-patterns',
     ':protected-flow-patterns',
@@ -215,6 +225,15 @@ function checkFiles(root, files) {
     'lookup_tool',
     'deprecated',
     'guide_tool_directory',
+    'agent_engine',
+    'preferredSurfaceForAgent',
+    'preferredSurfaces',
+    'missiond-cli',
+    'xjp-cli',
+    'missiond-mcp',
+    'xjp-mcp',
+    'cli-first',
+    'mcp-first',
     'PROJECT_AGENT_NAVIGATION_REL',
     'mission_board',
     'mission_workflow',
@@ -272,6 +291,23 @@ function checkFiles(root, files) {
     '"explain"',
     '"deprecated"',
     '"guide"',
+    '"agent_engine"',
+    '"codex-cli"',
+    '"claude-code"',
+  ]);
+
+  requireAll(diagnostics, files.missiondCli, sources.missiondCli, [
+    'missiond-cli',
+    'ToolsCommand',
+    'List',
+    'Schema',
+    'Call',
+    'CODEX_SESSION_ID',
+    'SESSION_ID',
+    'format!("cli-{}"',
+    '"tools/call"',
+    'all_tools',
+    'get_tool',
   ]);
 
   requireAll(diagnostics, files.mcpAgentNavigation, sources.mcpAgentNavigation, [
@@ -335,8 +371,15 @@ function buildFixture() {
              "crates/missiond-mcp/src/tools/comm/codex_ops.rs"
              "crates/missiond-mcp/src/tools/comm/tool_directory.rs"
              "crates/missiond-mcp/src/tools/comm/agent_navigation.rs"
+             "crates/missiond-cli/src/main.rs"
              "scripts/check-v3-capability-governance-isomorphism.mjs"]
-      :note "capability_usage.rs is the thin capability-governance facade; capability_usage/runtime.rs owns snapshot/report/candidates/mark/ack; audit.rs owns mission_audit trace/detail/stats/export; codex_ops.rs owns mission_codex_ops recent/thread/tool_stats; tool_directory.rs owns read-only mission_tool_directory list/recommend/lookup/explain/deprecated/guide; agent_navigation.rs owns mission_agent_navigation catalog/review/feedback/suggest_entries."))
+      :note "capability_usage.rs is the thin capability-governance facade; capability_usage/runtime.rs owns snapshot/report/candidates/mark/ack; audit.rs owns mission_audit trace/detail/stats/export; codex_ops.rs owns mission_codex_ops recent/thread/tool_stats; tool_directory.rs owns read-only mission_tool_directory list/recommend/lookup/explain/deprecated/guide and projects agent-engine CLI/MCP surface preference; missiond-cli is the shell-native sibling adapter for Codex/operator workflows over the same daemon IPC tools; agent_navigation.rs owns mission_agent_navigation catalog/review/feedback/suggest_entries."))
+  (mcp-tool-governance-policy
+    :agent-tool-surface-governance
+      ((surface-pair missiond :cli missiond-cli :mcp missiond-mcp)
+       (surface-pair xjp :cli xjp-cli :mcp xjp-mcp)
+       (agent codex-cli :preferred-surfaces [missiond-cli xjp-cli])
+       (agent claude-code :preferred-surfaces [missiond-mcp xjp-mcp])))
   (compression-contract
     :checks ["node scripts/check-v3-capability-governance-isomorphism.mjs"]))`,
   );
@@ -366,7 +409,7 @@ function buildFixture() {
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.toolDirectory),
-    'mission_tool_directory ToolFamily FAMILIES recommend lookup_tool deprecated guide_tool_directory PROJECT_AGENT_NAVIGATION_REL mission_board mission_workflow mission_workstation mission_context mission_memory mission_universe mission_ops mission_router',
+    'mission_tool_directory ToolFamily FAMILIES recommend lookup_tool deprecated guide_tool_directory agent_engine preferredSurfaceForAgent preferredSurfaces missiond-cli xjp-cli missiond-mcp xjp-mcp cli-first mcp-first PROJECT_AGENT_NAVIGATION_REL mission_board mission_workflow mission_workstation mission_context mission_memory mission_universe mission_ops mission_router',
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.agentNavigation),
@@ -386,7 +429,11 @@ function buildFixture() {
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.mcpToolDirectory),
-    'ToolDefinition::new "mission_tool_directory" "recommend" "lookup" "explain" "deprecated" "guide"',
+    'ToolDefinition::new "mission_tool_directory" "recommend" "lookup" "explain" "deprecated" "guide" "agent_engine" "codex-cli" "claude-code"',
+  );
+  fs.writeFileSync(
+    path.join(root, DEFAULT_FILES.missiondCli),
+    'missiond-cli ToolsCommand List Schema Call CODEX_SESSION_ID SESSION_ID format!("cli-{}" "tools/call" all_tools get_tool',
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.mcpAgentNavigation),

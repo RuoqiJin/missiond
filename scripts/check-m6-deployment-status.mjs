@@ -18,9 +18,10 @@ from deploy-center status/provenance evidence.
 `;
 
 const BLUEPRINT = '.missiond/v3/missiond-blueprint.lisp';
+const SERVICE_RUNTIME = '.missiond/v3/shards/universe/service-runtime.lisp';
 const DEFAULT_BASE_URL = process.env.DEPLOY_CENTER_PUBLIC_BASE_URL ?? 'https://auth.xiaojinpro.com';
 
-const DEPLOYMENT_MAP = {
+const STATIC_DEPLOYMENT_MAP = {
   auth: {
     slugs: ['xjp-auth-center'],
     components: [
@@ -71,12 +72,13 @@ const DEPLOYMENT_MAP = {
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   const m6Projects = readM6Projects(process.cwd());
+  const deploymentMap = buildDeploymentMap(process.cwd());
   const selectedProjects = selectProjects(m6Projects, opts.project);
   const deployStatus = await fetchDeployStatus(opts.baseUrl);
   const recentDeployments = deployStatus?.recent_deployments ?? [];
   const projects = [];
   for (const projectId of selectedProjects) {
-    projects.push(await classifyProject(projectId, recentDeployments, opts.baseUrl));
+    projects.push(await classifyProject(projectId, recentDeployments, opts.baseUrl, deploymentMap));
   }
   const blocking = projects.filter((project) => !['deployed-current', 'no-deploy-target'].includes(project.status));
   const result = {
@@ -189,13 +191,14 @@ function fetchJson(url) {
   });
 }
 
-async function classifyProject(projectId, recentDeployments, baseUrl) {
-  const map = DEPLOYMENT_MAP[projectId];
+async function classifyProject(projectId, recentDeployments, baseUrl, deploymentMap) {
+  const map = deploymentMap[projectId];
   if (!map) {
     return {
       project_id: projectId,
       status: 'no-deploy-target',
-      reason: 'project is M6 but has no deploy-center production target mapping in MissionD deployment checker',
+      reason:
+        'project is M6 but has no deploy-center production target mapping in MissionD deployment checker or service-runtime SSOT',
       deploy_slugs: [],
       latest_deploy: null,
       changed_paths_since_deploy: [],
@@ -259,6 +262,97 @@ async function classifyProject(projectId, recentDeployments, baseUrl) {
     component_deploys: components,
     regional_targets: regionalTargets,
   };
+}
+
+function buildDeploymentMap(root) {
+  const map = { ...STATIC_DEPLOYMENT_MAP };
+  for (const service of readServiceRuntimeDeployments(root)) {
+    if (!service.project || !service.slug || !service.root) continue;
+    if (map[service.project]) {
+      if (!map[service.project].slugs.includes(service.slug)) {
+        map[service.project] = {
+          ...map[service.project],
+          slugs: [...map[service.project].slugs, service.slug],
+        };
+      }
+      continue;
+    }
+    const component = componentFromServiceRoot(service.root, service.slug);
+    map[service.project] = {
+      slugs: [service.slug],
+      source: SERVICE_RUNTIME,
+      components: [
+        {
+          ...component,
+          service_id: service.id,
+          source: SERVICE_RUNTIME,
+        },
+      ],
+    };
+  }
+  return map;
+}
+
+function readServiceRuntimeDeployments(root) {
+  const file = path.join(root, SERVICE_RUNTIME);
+  if (!fs.existsSync(file)) return [];
+  const source = fs.readFileSync(file, 'utf8');
+  const services = [];
+  const re = /\(service\s+:id\s+([a-zA-Z0-9_-]+)([\s\S]*?):surface\s+service-runtime-universe\)/g;
+  let match;
+  while ((match = re.exec(source))) {
+    const [, id, body] = match;
+    const deployment = firstDeployCenterDeployment(body);
+    if (!deployment) continue;
+    services.push({
+      id,
+      project: readSymbol(body, 'project') || id,
+      root: readString(body, 'root'),
+      slug: deployment.dcSlug,
+    });
+  }
+  return services;
+}
+
+function firstDeployCenterDeployment(body) {
+  const re = /:deployment\s+\(([^)]*)\)/g;
+  let match;
+  while ((match = re.exec(body))) {
+    const deployment = match[1];
+    if (!/:substrate\s+deploy-center\b/.test(deployment)) continue;
+    const dcSlug = readString(deployment, 'dc_slug') || readString(deployment, 'project');
+    if (dcSlug) return { dcSlug };
+  }
+  return null;
+}
+
+function readString(body, field) {
+  const match = new RegExp(`:${field}\\s+"([^"]+)"`).exec(body);
+  return match?.[1] ?? null;
+}
+
+function readSymbol(body, field) {
+  const match = new RegExp(`:${field}\\s+([a-zA-Z0-9_-]+)`).exec(body);
+  return match?.[1] ?? null;
+}
+
+function componentFromServiceRoot(serviceRoot, slug) {
+  const repo = findGitRoot(serviceRoot);
+  if (!repo) {
+    return { slug, repo: serviceRoot, paths: ['.'] };
+  }
+  const relative = path.relative(repo, serviceRoot) || '.';
+  return { slug, repo, paths: [relative] };
+}
+
+function findGitRoot(start) {
+  let current = path.resolve(start);
+  while (true) {
+    if (fs.existsSync(path.join(current, '.git'))) return current;
+    const parent = path.dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
 }
 
 function regionalDeploymentTargets(projectId, componentsCurrent) {

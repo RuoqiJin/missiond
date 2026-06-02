@@ -159,7 +159,7 @@
              "crates/missiond-mcp/src/tools/sysinfra/global_instruction.rs"
              "scripts/check-v3-sysinfra-control-isomorphism.mjs"
              "scripts/check-v3-infrastructure-universe-isomorphism.mjs"]
-      :note "Code-aligned V3 sysinfra surface. infra.rs owns infra query/ops, skill evidence, credential refs, and runtime target projection; project/reconcile reports runtime and credential drift. permission, power, system, and global-instruction handlers own their MCP tools. Learned permissions are scoped, non-blanket for Bash, TTL-governed with expires_at/source_evidence/renew_policy/audit_trail, and renewed only from provider-confirmation use. Long blue-green/self-update and infra-evidence anchors live in blueprint-notes#note-021.")
+      :note "Code-aligned V3 sysinfra surface. infra.rs owns infra query/ops, skill evidence, credential refs, and runtime target projection; project/reconcile reports runtime and credential drift. permission, power, system, and global-instruction handlers own their MCP tools. ClaudeCode instruction and MCP discovery projections should remind ClaudeCode workstations to prefer missiond-mcp/xjp-mcp, using missiond-cli/xjp-cli only for gap-fill or diagnostics. Learned permissions are scoped, non-blanket for Bash, TTL-governed with expires_at/source_evidence/renew_policy/audit_trail, and renewed only from provider-confirmation use. Long blue-green/self-update and infra-evidence anchors live in blueprint-notes#note-021.")
 
 (surface runtime-load-explanation
       :status "code-aligned"

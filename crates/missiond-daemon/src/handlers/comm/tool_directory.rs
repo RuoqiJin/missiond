@@ -19,6 +19,8 @@ struct Args {
     action: String,
     intent: Option<String>,
     query: Option<String>,
+    #[serde(default, alias = "agent_engine")]
+    agent_engine: Option<String>,
     #[serde(default, alias = "entry_id")]
     entry_id: Option<String>,
     project: Option<String>,
@@ -311,53 +313,76 @@ const FAMILIES: &[ToolFamily] = &[
 pub(crate) async fn handle(_state: &AppState, _name: &str, args: Value) -> Result<ToolResult> {
     let args: Args = serde_json::from_value(args)?;
     match args.action.as_str() {
-        "list" => Ok(ToolResult::json_pretty(&json!({
-            "schema": "missiond.tool-directory.v1",
-            "families": FAMILIES.iter().map(|family| render_family(*family, args.include_compatibility)).collect::<Vec<_>>(),
-            "compatibilityNote": "Family ids are the preferred selection layer; currentTools remain callable MCP tools for compatibility."
-        }))),
-        "recommend" => {
-            let intent = args.intent.or(args.query).unwrap_or_default();
-            let matches = recommend(&intent);
-            Ok(ToolResult::json_pretty(&json!({
+        "list" => Ok(ToolResult::json_pretty(&with_agent_surface_preference(
+            json!({
                 "schema": "missiond.tool-directory.v1",
-                "intent": intent,
-                "recommendations": matches.iter().map(|family| render_family(*family, true)).collect::<Vec<_>>(),
-                "fallback": "If no recommendation is precise enough, ask mission_tool_directory(action=\"list\") and use the lowest-danger family that owns the surface."
-            })))
+                "families": FAMILIES.iter().map(|family| render_family(*family, args.include_compatibility)).collect::<Vec<_>>(),
+                "compatibilityNote": "Family ids are the preferred selection layer; currentTools remain callable MCP tools for compatibility."
+            }),
+            &args,
+        ))),
+        "recommend" => {
+            let intent = args
+                .intent
+                .clone()
+                .or_else(|| args.query.clone())
+                .unwrap_or_default();
+            let matches = recommend(&intent);
+            Ok(ToolResult::json_pretty(&with_agent_surface_preference(
+                json!({
+                    "schema": "missiond.tool-directory.v1",
+                    "intent": intent,
+                    "recommendations": matches.iter().map(|family| render_family(*family, true)).collect::<Vec<_>>(),
+                    "fallback": "If no recommendation is precise enough, ask mission_tool_directory(action=\"list\") and use the lowest-danger family that owns the surface."
+                }),
+                &args,
+            )))
         }
         "lookup" => {
-            let tool = args.tool.ok_or_else(|| anyhow!("lookup requires tool"))?;
+            let tool = args
+                .tool
+                .clone()
+                .ok_or_else(|| anyhow!("lookup requires tool"))?;
             let family = lookup_tool(&tool);
-            Ok(ToolResult::json_pretty(&json!({
-                "schema": "missiond.tool-directory.v1",
-                "tool": tool,
-                "family": family.map(|family| render_family(family, true)),
-                "found": family.is_some()
-            })))
+            Ok(ToolResult::json_pretty(&with_agent_surface_preference(
+                json!({
+                    "schema": "missiond.tool-directory.v1",
+                    "tool": tool,
+                    "family": family.map(|family| render_family(family, true)),
+                    "found": family.is_some()
+                }),
+                &args,
+            )))
         }
         "explain" => {
             let family_id = args
                 .family
+                .clone()
                 .ok_or_else(|| anyhow!("explain requires family"))?;
             let family =
                 find_family(&family_id).ok_or_else(|| anyhow!("unknown family: {}", family_id))?;
-            Ok(ToolResult::json_pretty(&json!({
-                "schema": "missiond.tool-directory.v1",
-                "family": render_family(family, args.include_compatibility),
-                "agentRule": "Use this family first, then call the listed compatibility tools only for the specific operation."
-            })))
+            Ok(ToolResult::json_pretty(&with_agent_surface_preference(
+                json!({
+                    "schema": "missiond.tool-directory.v1",
+                    "family": render_family(family, args.include_compatibility),
+                    "agentRule": "Use this family first, then call the listed compatibility tools only for the specific operation."
+                }),
+                &args,
+            )))
         }
         "deprecated" => {
-            if let Some(tool) = args.tool {
+            if let Some(tool) = args.tool.clone() {
                 let family = lookup_tool(&tool);
-                return Ok(ToolResult::json_pretty(&json!({
-                    "schema": "missiond.tool-directory.v1",
-                    "tool": tool,
-                    "preferredFamily": family.map(|family| family.id),
-                    "preferredSurface": family.map(|family| family.primary_surface),
-                    "status": if family.is_some() { "compatibility-tool" } else { "unknown" }
-                })));
+                return Ok(ToolResult::json_pretty(&with_agent_surface_preference(
+                    json!({
+                        "schema": "missiond.tool-directory.v1",
+                        "tool": tool,
+                        "preferredFamily": family.map(|family| family.id),
+                        "preferredSurface": family.map(|family| family.primary_surface),
+                        "status": if family.is_some() { "compatibility-tool" } else { "unknown" }
+                    }),
+                    &args,
+                )));
             }
             let limit = args.limit.unwrap_or(50);
             let tools = FAMILIES
@@ -373,15 +398,63 @@ pub(crate) async fn handle(_state: &AppState, _name: &str, args: Value) -> Resul
                 })
                 .take(limit)
                 .collect::<Vec<_>>();
-            Ok(ToolResult::json_pretty(&json!({
-                "schema": "missiond.tool-directory.v1",
-                "tools": tools,
-                "limit": limit
-            })))
+            Ok(ToolResult::json_pretty(&with_agent_surface_preference(
+                json!({
+                    "schema": "missiond.tool-directory.v1",
+                    "tools": tools,
+                    "limit": limit
+                }),
+                &args,
+            )))
         }
-        "guide" => Ok(ToolResult::json_pretty(&guide_tool_directory(&args))),
+        "guide" => Ok(ToolResult::json_pretty(&with_agent_surface_preference(
+            guide_tool_directory(&args),
+            &args,
+        ))),
         other => Ok(ToolResult::error(format!("Unknown action: {other}"))),
     }
+}
+
+fn with_agent_surface_preference(mut value: Value, args: &Args) -> Value {
+    if let Some(preference) = preferred_surface_for_agent(args.agent_engine.as_deref()) {
+        value["preferredSurfaceForAgent"] = preference;
+    }
+    value
+}
+
+fn preferred_surface_for_agent(agent_engine: Option<&str>) -> Option<Value> {
+    let normalized = agent_engine?.trim().to_lowercase().replace('_', "-");
+    if normalized.is_empty() {
+        return None;
+    }
+    let preference = match normalized.as_str() {
+        "codex" | "codex-cli" => json!({
+            "agentEngine": "codex-cli",
+            "mode": "cli-first",
+            "preferredSurfaces": ["missiond-cli", "xjp-cli"],
+            "fallbackSurfaces": ["missiond-mcp", "xjp-mcp"],
+            "rule": "Codex CLI workstations should prefer shell-native CLI tools for MissionD/XJP operations; MCP remains a compatibility and diagnostics fallback.",
+            "missiondHint": "Use missiond-cli tools list/schema/call before direct MissionD MCP tools when the CLI is available.",
+            "xjpHint": "Use xjp-cli before xjp-mcp for XJP deploy/router/storage/operator operations when the CLI has parity."
+        }),
+        "claude" | "claudecode" | "claude-code" => json!({
+            "agentEngine": "claude-code",
+            "mode": "mcp-first",
+            "preferredSurfaces": ["missiond-mcp", "xjp-mcp"],
+            "fallbackSurfaces": ["missiond-cli", "xjp-cli"],
+            "rule": "ClaudeCode workstations should prefer MCP schemas, descriptions, and session-local MCP context; CLI tools are gap-fill or diagnostics surfaces.",
+            "missiondHint": "Use missiond-mcp tools and mission_tool_directory recommendations before missiond-cli.",
+            "xjpHint": "Use xjp-mcp before xjp-cli for XJP deploy/router/storage/operator operations when the MCP server is mounted."
+        }),
+        other => json!({
+            "agentEngine": other,
+            "mode": "unknown",
+            "preferredSurfaces": [],
+            "fallbackSurfaces": ["missiond-mcp", "missiond-cli", "xjp-mcp", "xjp-cli"],
+            "rule": "Unknown agent engine: no CLI/MCP surface preference is asserted."
+        }),
+    };
+    Some(preference)
 }
 
 fn guide_tool_directory(args: &Args) -> Value {
@@ -755,6 +828,48 @@ mod tests {
     fn recommend_router_from_embedding_intent() {
         let matches = recommend("test qwen embedding and rerank through router");
         assert!(matches.iter().any(|family| family.id == "mission_router"));
+    }
+
+    #[test]
+    fn codex_agent_surface_preference_is_cli_first() {
+        let preference = preferred_surface_for_agent(Some("codex-cli")).expect("preference");
+        assert_eq!(
+            preference.pointer("/mode").and_then(Value::as_str),
+            Some("cli-first")
+        );
+        assert_eq!(
+            preference
+                .pointer("/preferredSurfaces/0")
+                .and_then(Value::as_str),
+            Some("missiond-cli")
+        );
+        assert_eq!(
+            preference
+                .pointer("/fallbackSurfaces/0")
+                .and_then(Value::as_str),
+            Some("missiond-mcp")
+        );
+    }
+
+    #[test]
+    fn claude_agent_surface_preference_is_mcp_first() {
+        let preference = preferred_surface_for_agent(Some("claude_code")).expect("preference");
+        assert_eq!(
+            preference.pointer("/mode").and_then(Value::as_str),
+            Some("mcp-first")
+        );
+        assert_eq!(
+            preference
+                .pointer("/preferredSurfaces/0")
+                .and_then(Value::as_str),
+            Some("missiond-mcp")
+        );
+        assert_eq!(
+            preference
+                .pointer("/fallbackSurfaces/0")
+                .and_then(Value::as_str),
+            Some("missiond-cli")
+        );
     }
 
     #[test]

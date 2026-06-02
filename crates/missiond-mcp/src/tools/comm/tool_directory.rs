@@ -4,7 +4,7 @@ use serde_json::json;
 pub fn definitions() -> Vec<ToolDefinition> {
     vec![ToolDefinition::new(
         "mission_tool_directory",
-        "MissionD MCP tool directory and intent router. Use this first when unsure which MissionD tool family owns a task. Actions: list, recommend, lookup, explain, deprecated, guide.",
+        "MissionD MCP tool directory and intent router. Use this first when unsure which MissionD tool family owns a task. Pass agent_engine=claude-code for MCP-first ClaudeCode guidance or agent_engine=codex-cli for CLI-first Codex guidance. Actions: list, recommend, lookup, explain, deprecated, guide.",
         json!({
             "type": "object",
             "required": ["action"],
@@ -21,6 +21,16 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "query": {
                     "type": "string",
                     "description": "[recommend|guide] Alias for intent"
+                },
+                "agent_engine": {
+                    "type": "string",
+                    "enum": ["codex-cli", "claude-code"],
+                    "description": "Optional agent engine id. codex-cli returns missiond-cli/xjp-cli preferred surfaces; claude-code returns missiond-mcp/xjp-mcp preferred surfaces."
+                },
+                "agentEngine": {
+                    "type": "string",
+                    "enum": ["codex-cli", "claude-code"],
+                    "description": "camelCase alias for agent_engine"
                 },
                 "entry_id": {
                     "type": "string",

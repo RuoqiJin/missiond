@@ -23,6 +23,11 @@
 #   MISSIOND_LAUNCHCTL_LABEL    launchd label, default: com.missiond.daemon
 #   MISSIOND_LAUNCHD_PLIST      launchd plist, default: ~/Library/LaunchAgents/$label.plist
 #   MISSIOND_LAUNCHD_PROJECT_ROOT  project root written into launchd, default: current git root
+#   MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT  expected launchd_project_root for
+#                               the currently active release before mutating
+#                               active/apply-cleanup; default: selected launchd root
+#   MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER  explicit 1/true override for
+#                               switching active from another project root
 #   MISSIOND_RUNTIME_DIR        runtime artifact root, default: ~/.missiond/runtime/<repo-name>
 #   MISSIOND_CLEAN_REPO_RUNTIME_CACHE  after a successful deploy, prune repo
 #                               .missiond/v3/runtime cache when external
@@ -117,7 +122,41 @@ PREVIOUS_COMPILED_RUNTIME_DIR=""
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
-LAUNCHD_PROJECT_ROOT="${MISSIOND_LAUNCHD_PROJECT_ROOT:-$REPO_ROOT}"
+
+is_transient_repo_root() {
+  case "$1" in
+    /tmp/*|/private/tmp/*|/var/folders/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+read_launchd_plist_string_early() {
+  local key="$1"
+  [ -f "$LAUNCHD_PLIST" ] || return 1
+  [ -x /usr/libexec/PlistBuddy ] || return 1
+  /usr/libexec/PlistBuddy -c "Print :${key}" "$LAUNCHD_PLIST" 2>/dev/null || return 1
+}
+
+select_launchd_project_root() {
+  if [ -n "${MISSIOND_LAUNCHD_PROJECT_ROOT:-}" ]; then
+    printf '%s\n' "$MISSIOND_LAUNCHD_PROJECT_ROOT"
+    return 0
+  fi
+  if is_transient_repo_root "$REPO_ROOT"; then
+    local existing_root
+    existing_root="$(read_launchd_plist_string_early "WorkingDirectory" || true)"
+    if [ -n "$existing_root" ] && ! is_transient_repo_root "$existing_root" && [ -d "$existing_root/.missiond/v3" ]; then
+      printf '[deploy-daemon] launchd: preserving existing stable project root %s; current repo root is transient %s\n' "$existing_root" "$REPO_ROOT" >&2
+      printf '%s\n' "$existing_root"
+      return 0
+    fi
+  fi
+  printf '%s\n' "$REPO_ROOT"
+}
+
+LAUNCHD_PROJECT_ROOT="$(select_launchd_project_root)"
+MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT="${MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT:-$LAUNCHD_PROJECT_ROOT}"
+MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER="${MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER:-0}"
 REPO_ID="$(basename "$REPO_ROOT")"
 RUNTIME_DIR="${MISSIOND_RUNTIME_DIR:-${HOME}/.missiond/runtime/${REPO_ID}}"
 COMPILED_RUNTIME_DIR="${MISSIOND_COMPILED_RUNTIME_DIR:-${RUNTIME_DIR}/compiled}"
@@ -507,6 +546,51 @@ plist_read_string() {
   "$buddy" -c "Print :${key}" "$plist" 2>/dev/null || return 1
 }
 
+json_string_field() {
+  local file="$1"
+  local key="$2"
+  node - "$file" "$key" <<'NODE'
+const fs = require("node:fs");
+const [file, key] = process.argv.slice(2);
+const value = JSON.parse(fs.readFileSync(file, "utf8"))[key];
+if (typeof value !== "string") process.exit(2);
+process.stdout.write(value);
+NODE
+}
+
+assert_active_project_root_can_mutate() {
+  local phase="$1"
+  local active manifest active_project_root launchd_project_root expected_root
+  expected_root="${MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT:-$LAUNCHD_PROJECT_ROOT}"
+  if truthy_env_value "$MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER"; then
+    log "ownership: project-root takeover explicitly allowed phase=$phase expected_active_root=$expected_root candidate_root=$LAUNCHD_PROJECT_ROOT"
+    return 0
+  fi
+  active="$(resolve_link_target "$ACTIVE_LINK" 2>/dev/null || true)"
+  if [ -z "$active" ]; then
+    log "ownership: no active release link phase=$phase; project-root guard allows initial deploy"
+    return 0
+  fi
+  manifest="$active/release-manifest.json"
+  if [ ! -f "$manifest" ]; then
+    log "ownership: active release has no manifest phase=$phase active=$active; project-root guard allows legacy migration"
+    return 0
+  fi
+  active_project_root="$(json_string_field "$manifest" "launchd_project_root" 2>/dev/null || true)"
+  if [ -n "$active_project_root" ] && [ "$active_project_root" != "$expected_root" ]; then
+    log "ownership: active project-root mismatch phase=$phase expected=$expected_root active_project_root=$active_project_root active=$active"
+    log "ownership: set MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER=1 only for an intentional cross-root active release takeover"
+    return 1
+  fi
+  launchd_project_root="$(plist_read_string "$LAUNCHD_PLIST" "WorkingDirectory" || true)"
+  if [ -n "$launchd_project_root" ] && [ "$launchd_project_root" != "$expected_root" ]; then
+    log "ownership: launchd project-root mismatch phase=$phase expected=$expected_root launchd_project_root=$launchd_project_root"
+    log "ownership: set MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER=1 only for an intentional cross-root launchd takeover"
+    return 1
+  fi
+  log "ownership: project-root mutation guard verified phase=$phase root=$expected_root"
+}
+
 capture_launchd_runtime_state() {
   PREVIOUS_LAUNCHD_PROJECT_ROOT="$(plist_read_string "$LAUNCHD_PLIST" "WorkingDirectory" || true)"
   PREVIOUS_RUNTIME_DIR="$(plist_read_string "$LAUNCHD_PLIST" "EnvironmentVariables:MISSIOND_RUNTIME_DIR" || true)"
@@ -860,6 +944,11 @@ cleanup_repo_runtime_cache() {
 
 mkdir -p "$INSTALL_ROOT" "$RELEASES_DIR" "$(dirname "$SOCK_PATH")" "$COMPILED_RUNTIME_DIR"
 
+if [ "$DO_DEPLOY" -eq 1 ] || { [ "$CLEANUP_ONLY" -eq 1 ] && [ "$APPLY_CLEANUP" -eq 1 ]; }; then
+  assert_active_project_root_can_mutate "pre-mutation" ||
+    fail "active release belongs to another project root; refusing to mutate active without MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER=1" 1
+fi
+
 if [ "$CLEANUP_ONLY" -eq 1 ]; then
   PREVIOUS_ACTIVE="$(resolve_link_target "$ACTIVE_LINK" 2>/dev/null || true)"
   cleanup_old_releases "$APPLY_CLEANUP"
@@ -952,6 +1041,8 @@ if ! pre_switch_mcp_smoke "$CANDIDATE_DIR/bin/mission-mcp"; then
 fi
 record_timing "pre-switch-mcp-smoke" "$PRE_SWITCH_SMOKE_START"
 
+assert_active_project_root_can_mutate "pre-switch" ||
+  fail "active release changed to another project root before switch; refusing to continue" 4
 switch_active_release "$CANDIDATE_DIR"
 ensure_default_mcp_config
 

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use missiond_core::types::{ContextGatherRunInput, EvidenceItemInput};
 use missiond_mcp::tools::{ToolContent, ToolResult};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -476,6 +477,16 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     let context_noise_metrics =
         context_noise_metrics(profile, selection, &sources, &evidence_lanes);
     let source_summaries = build_source_summaries(&sources);
+    let support_catalog = build_support_catalog(&sources);
+    let evidence_item_inputs = build_evidence_items(
+        &sources,
+        &source_summaries,
+        &support_catalog,
+        profile,
+        effective_project_id.as_deref(),
+        args.task_id.as_deref(),
+    );
+    let evidence_items = serde_json::to_value(&evidence_item_inputs).unwrap_or_else(|_| json!([]));
     let response_sources =
         response_sources(&sources, &source_summaries, selection.include_raw_sources);
     let evidence_refs = if selection.include_raw_sources {
@@ -548,6 +559,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "raw_sources_policy": raw_sources_policy(selection.include_raw_sources),
         "source_profile": profile.as_str(),
         "evidence_lanes": evidence_lanes,
+        "evidence_items": evidence_items,
+        "support_catalog": support_catalog,
         "authority_order": authority_order,
         "noise_diagnostics": noise_diagnostics,
         "context_noise_metrics": context_noise_metrics,

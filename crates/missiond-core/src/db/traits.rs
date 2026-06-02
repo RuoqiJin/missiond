@@ -904,6 +904,16 @@ pub trait KbStore: Send + Sync {
 }
 
 // ============================================================================
+// EvidenceLaneStore — typed compact evidence and context-gather metrics
+// ============================================================================
+
+#[async_trait]
+pub trait EvidenceLaneStore: Send + Sync {
+    async fn upsert_evidence_items(&self, items: &[EvidenceItemInput]) -> DbResult<usize>;
+    async fn record_context_gather_run(&self, run: &ContextGatherRunInput) -> DbResult<()>;
+}
+
+// ============================================================================
 // 8. BoardStore — Tasks, claiming, flow, dependencies, notes, questions
 // Source: board.rs + question.rs
 // ============================================================================
@@ -1885,6 +1895,7 @@ pub trait MissionStore:
     ConversationStore
     + MessageStore
     + KbStore
+    + EvidenceLaneStore
     + BoardStore
     + TimelineStore
     + SlotStore

@@ -59,4 +59,6 @@
     (maturity :id long-image-service :current M6 :target M6 :gap [])
     (maturity :id wechat-publisher :current M6 :target M6 :gap [])
     (maturity :id problem-tutor :current M5 :target M6 :gap [postgres-durable-persistence router-model-alias-verification final-m6-report])
-    (maturity :id daily-spark :current M6 :target M6 :gap []))
+    (maturity :id daily-spark :current M6 :target M6 :gap [])
+    (maturity :id good-things-daily :current M2 :target M6 :gap [production-postgres-provision vercel-domain-cutover api-domain-cutover xjp-router-live-smoke scheduled-job-runner final-m6-report])
+    (maturity :id diandian :current M2 :target M6 :gap [app-store-release-readiness haptics-audio-device-smoke daily-journal-persistence-regression accessibility-pass final-m6-report]))

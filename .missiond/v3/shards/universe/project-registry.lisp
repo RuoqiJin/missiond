@@ -375,6 +375,19 @@
       :checks ["bash .missiond/check.sh"]
       :missiond-role "registered mobile control client; iPhone entry for Jarvis/MissionD, using Auth JWT and Jarvis HTTPS proxy to control the Mac mini MissionD node"
       :surface project-registry)
+    (project :id diandian
+      :aliases ["等待小岛" "点点" "点点花园" "AI 等待室" "等待花园"]
+      :kind ios-swiftui-app
+      :management-domain product-service-layer
+      :runtime-layer mobile-client
+      :root "/Users/jinchen/development/diandian"
+      :intent ".missiond/intent.lisp"
+      :frontend ".missiond/frontend/diandian-ios-blueprint.lisp"
+      :operations ".missiond/operations/diandian-operations-blueprint.lisp"
+      :status incubating-project
+      :checks ["bash .missiond/check.sh"]
+      :missiond-role "registered independent iOS app; local-only SwiftUI decompression ritual for AI waiting time, with daily tap garden, local UserDefaults journal, no backend, no auth, and no network dependency in the MVP"
+      :surface project-registry)
     (project :id xiaojinpro-frontend
       :aliases [xiaojinpro-web "xiaojinpro.top" "小金Pro官网" "小金Pro前端"]
       :kind nextjs-platform-frontend
@@ -531,4 +544,18 @@
       :status project-ssot-owned
       :checks ["bash .missiond/check.sh"]
       :missiond-role "registered independent app; Daily Spark production runs on Vercel frontend spark.xiaojinpro.top plus GCP VM self-hosted Supabase-compatible backend/database at api.spark.xiaojinpro.top"
+      :surface project-registry)
+    (project :id good-things-daily
+      :aliases ["世界好事日报" "Good Things Daily" goodnews "goodnews.xiaojinpro.top" "goodnews-api.xiaojinpro.top"]
+      :kind rust-nextjs-service
+      :management-domain product-service-layer
+      :runtime-layer product-fullstack
+      :root "/Users/jinchen/Projects/good-things-daily"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/good-things-daily-backend-blueprint.lisp"
+      :frontend ".missiond/frontend/good-things-daily-frontend-blueprint.lisp"
+      :operations ".missiond/operations/good-things-daily-operations-blueprint.lisp"
+      :status incubating-project
+      :checks ["bash .missiond/check.sh"]
+      :missiond-role "registered independent app; public evidence-backed world good news daily with RSS/GDELT ingest, xjp-router claude-opus-4-6 generated titles, Vercel frontend at goodnews.xiaojinpro.top, and GCP VM Rust API/Postgres at goodnews-api.xiaojinpro.top"
       :surface project-registry))

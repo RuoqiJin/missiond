@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use missiond_core::event::events::{BoardEvent, IncidentEvent, QuestionEvent, SlotEvent};
 use missiond_core::event::subscription::{CursorFlush, StartFrom, SubscriptionOpts};
@@ -13,7 +13,7 @@ use missiond_core::{PTYSlot, PTYSpawnOptions, SessionState};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::process::Command;
-use tokio::sync::{watch, Notify, RwLock};
+use tokio::sync::{watch, Mutex, Notify, RwLock};
 use tracing::{info, warn};
 
 use crate::bus::BusServices;
@@ -148,6 +148,14 @@ const MASTER_PHASES: &[&str] = &[
 ];
 
 static MASTER_CONTROL_RUNTIME: OnceLock<Arc<MasterControlRuntime>> = OnceLock::new();
+static CODEX_MCP_READY_CACHE: OnceLock<Arc<Mutex<Option<CodexMcpReadyCache>>>> = OnceLock::new();
+const CODEX_MCP_READY_CACHE_TTL_SECS: u64 = 60;
+
+#[derive(Debug, Clone)]
+struct CodexMcpReadyCache {
+    checked_at: Instant,
+    ready: bool,
+}
 
 #[derive(Debug)]
 pub(crate) struct MasterControlRuntime {
@@ -1845,11 +1853,38 @@ fn runtime_load_explanation(
 }
 
 pub(crate) async fn probe_codex_mcp_ready() -> bool {
-    let output = tokio::time::timeout(
-        Duration::from_secs(5),
-        Command::new("codex").args(["mcp", "list"]).output(),
-    )
-    .await;
+    let cache = CODEX_MCP_READY_CACHE
+        .get_or_init(|| Arc::new(Mutex::new(None)))
+        .clone();
+    {
+        let guard = cache.lock().await;
+        if let Some(cached) = guard.as_ref() {
+            if cached.checked_at.elapsed() < Duration::from_secs(CODEX_MCP_READY_CACHE_TTL_SECS) {
+                return cached.ready;
+            }
+        }
+    }
+
+    let mut guard = cache.lock().await;
+    if let Some(cached) = guard.as_ref() {
+        if cached.checked_at.elapsed() < Duration::from_secs(CODEX_MCP_READY_CACHE_TTL_SECS) {
+            return cached.ready;
+        }
+    }
+
+    let ready = probe_codex_mcp_ready_uncached().await;
+    *guard = Some(CodexMcpReadyCache {
+        checked_at: Instant::now(),
+        ready,
+    });
+    ready
+}
+
+async fn probe_codex_mcp_ready_uncached() -> bool {
+    let mut command = Command::new("codex");
+    command.args(["mcp", "list"]);
+    command.kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(3), command.output()).await;
     match output {
         Ok(Ok(output)) => {
             let stdout = String::from_utf8_lossy(&output.stdout);

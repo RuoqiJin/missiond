@@ -68,6 +68,14 @@ const FALLBACK_AGY_SLOT: SlotDef = {
   engine: 'agy',
 };
 
+const FALLBACK_CLAUDE_CODE_SLOT: SlotDef = {
+  id: 'slot-claude-code-default',
+  label: 'slot-claude-code-default',
+  role: 'coder',
+  provider: 'claude_code',
+  engine: 'claude_code',
+};
+
 const FALLBACK_CODEX_SLOT: SlotDef = {
   id: 'slot-codex-code-worker',
   label: 'slot-codex-code-worker',
@@ -76,6 +84,7 @@ const FALLBACK_CODEX_SLOT: SlotDef = {
   engine: 'codex',
 };
 
+const DEFAULT_TEACH_SLOT_ID = FALLBACK_CLAUDE_CODE_SLOT.id;
 const TEACHABLE_ENGINES = new Set(['agy', 'codex', 'claude_code', 'claude-code', 'gemini']);
 
 function normalizedSlotText(slot: SlotDef) {
@@ -91,11 +100,12 @@ function isTeachableCliSlot(slot: SlotDef) {
 function sortTeachSlots(a: SlotDef, b: SlotDef) {
   const order = (slot: SlotDef) => {
     const text = normalizedSlotText(slot);
-    if (text.includes('codex')) return 0;
-    if (text.includes('agy')) return 1;
-    if (text.includes('claude')) return 2;
-    if (text.includes('gemini')) return 3;
-    return 4;
+    if (slot.id === DEFAULT_TEACH_SLOT_ID) return 0;
+    if (text.includes('claude')) return 1;
+    if (text.includes('codex')) return 2;
+    if (text.includes('agy')) return 3;
+    if (text.includes('gemini')) return 4;
+    return 5;
   };
   return order(a) - order(b) || a.id.localeCompare(b.id);
 }
@@ -133,11 +143,11 @@ function isDangerousText(value: string) {
 export function PtyTeachingPanel({ slots, refreshSlots }: PtyTeachingPanelProps) {
   const teachSlots = useMemo(() => {
     const projected = slots.filter(isTeachableCliSlot).sort(sortTeachSlots);
-    return projected.length > 0 ? projected : [FALLBACK_CODEX_SLOT, FALLBACK_AGY_SLOT];
+    return projected.length > 0 ? projected : [FALLBACK_CLAUDE_CODE_SLOT, FALLBACK_CODEX_SLOT, FALLBACK_AGY_SLOT];
   }, [slots]);
   const [slotId, setSlotId] = useState(() => {
-    if (typeof window === 'undefined') return '';
-    return localStorage.getItem('board:teachSlot') || '';
+    if (typeof window === 'undefined') return DEFAULT_TEACH_SLOT_ID;
+    return localStorage.getItem('board:teachSlot') || DEFAULT_TEACH_SLOT_ID;
   });
   const [status, setStatus] = useState<PtyStatus | null>(null);
   const [text, setText] = useState('');
@@ -157,7 +167,10 @@ export function PtyTeachingPanel({ slots, refreshSlots }: PtyTeachingPanelProps)
   const lastKeepAliveSpawnAtRef = useRef(0);
 
   const selectedSlot = useMemo(
-    () => teachSlots.find((slot) => slot.id === slotId) ?? teachSlots[0] ?? null,
+    () => teachSlots.find((slot) => slot.id === slotId)
+      ?? teachSlots.find((slot) => slot.id === DEFAULT_TEACH_SLOT_ID)
+      ?? teachSlots[0]
+      ?? null,
     [teachSlots, slotId],
   );
   const selectedSlotId = selectedSlot?.id ?? '';

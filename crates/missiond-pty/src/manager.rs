@@ -1071,6 +1071,38 @@ impl PTYManager {
         Ok(())
     }
 
+    /// Force kill a session without writing any graceful exit command into the PTY.
+    ///
+    /// Use this for private ephemeral lanes where any extra input can contaminate
+    /// the current user turn before the provider has fully committed it.
+    pub async fn force_kill(&self, slot_id: &str) -> Result<()> {
+        self.auto_restart_slots.write().await.remove(slot_id);
+        self.spawn_options_by_slot.write().await.remove(slot_id);
+
+        let session = {
+            let mut sessions = self.sessions.write().await;
+            sessions.remove(slot_id)
+        };
+
+        if let Some(session) = session {
+            let mut session = session.write().await;
+            session.kill().await;
+        }
+
+        {
+            let mut agent_info = self.agent_info.write().await;
+            if let Some(info) = agent_info.get_mut(slot_id) {
+                info.state = SessionState::Exited;
+                info.pid = None;
+                info.status_text = None;
+                info.recognition = Some(session_state_snapshot(info.engine, info.state));
+            }
+        }
+
+        info!(slot_id = slot_id, "PTY session force killed");
+        Ok(())
+    }
+
     /// Restart a session
     pub async fn restart(&self, slot: &Slot, options: PTYSpawnOptions) -> Result<PTYAgentInfo> {
         self.kill(&slot.id).await?;

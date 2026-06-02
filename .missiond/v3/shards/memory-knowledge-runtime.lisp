@@ -30,17 +30,34 @@
     :primary-families [mission_board mission_workflow mission_workstation mission_context mission_memory mission_universe mission_ops mission_router mission_tool_directory]
     :directory-tool mission_tool_directory
     :max-primary-families 12
-    :xjp-cli-mcp-parity
-      ((authority tools/xjp-mcp)
-       (operator-shell xjp-cli)
-       (audit-command "xjp mcp parity --json")
-       (rule "XJP MCP is the latest ClaudeCode/MissionD tool authority; xjp-cli is an operator shell and must expose parity gaps rather than implying it contains every deploy/router/storage/cloudflare tool."))
+    :agent-tool-surface-governance
+      ((principle
+         :rule "Capability authority is shared; the preferred operator surface is agent-engine specific and must be projected by mission_tool_directory.")
+       (surface-pair missiond
+         :cli missiond-cli
+         :mcp missiond-mcp
+         :parity-command "missiond-cli tools list --json"
+         :rule "missiond-cli is the shell-native Codex/operator adapter over the same daemon IPC tools as missiond-mcp; it must not copy business logic from MCP handlers.")
+       (surface-pair xjp
+         :cli xjp-cli
+         :mcp xjp-mcp
+         :parity-command "xjp mcp parity --json"
+         :rule "xjp-cli and xjp-mcp are sibling XJP ops surfaces; parity gaps must be exposed instead of relying on operator memory.")
+       (agent codex-cli
+         :preferred-surfaces [missiond-cli xjp-cli]
+         :fallback-surfaces [missiond-mcp xjp-mcp]
+         :rule "Codex CLI workstations prefer shell-native CLI tools for MissionD/XJP operations; MCP remains compatibility and diagnostics fallback.")
+       (agent claude-code
+         :preferred-surfaces [missiond-mcp xjp-mcp]
+         :fallback-surfaces [missiond-cli xjp-cli]
+         :rule "ClaudeCode workstations prefer MCP schemas, tool descriptions, and session-local MCP context; CLI tools are gap-fill or diagnostics surfaces."))
     :metadata-required [tool_family primary_action tier danger_level intent_examples preferred_surface compatibility_tools]
     :agent-rule "When unsure, call mission_tool_directory(action=\"recommend\", intent=...) before selecting a lower-level MCP tool. Tool families are a selection/readability layer; compatibility tools remain stable for existing workers."
     :invariants
       ["mission_tool_directory MUST expose list/recommend/lookup/explain/deprecated/guide actions over the primary tool-family catalog and remain read-only."
        "mission_agent_navigation owns catalog/review/feedback/suggest_entries; feedback may append only .missiond/v3/runtime/agent-navigation-review.json and must not mutate Board, KB, project registries, SSOT shards, or sibling repositories."
        "Public tools MAY remain numerous, but every high-frequency tool must map to a primary family and preferred surface."
+       "mission_tool_directory(agent_engine=codex-cli) MUST return CLI-first MissionD/XJP surfaces; mission_tool_directory(agent_engine=claude-code) MUST return MCP-first MissionD/XJP surfaces."
        "Deprecated/raw tools MUST return a preferredFamily/preferredSurface hint instead of relying on operator memory."
        "MCP tool-family guide semantics must be read-only; the only allowed navigation write is mission_agent_navigation feedback appending its review sidecar."])
 

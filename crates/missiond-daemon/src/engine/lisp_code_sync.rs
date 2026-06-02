@@ -12,7 +12,7 @@ use notify::Watcher;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::process::Command;
-use tokio::sync::{watch, RwLock};
+use tokio::sync::{watch, Mutex, RwLock};
 use tracing::{info, warn};
 
 use crate::bus::BusServices;
@@ -30,8 +30,17 @@ const LISP_CODE_SYNC_STORM_WINDOW_SECS: i64 = 60;
 const LISP_CODE_SYNC_STORM_PRECREATE_THRESHOLD: usize = 4;
 const LISP_CODE_SYNC_RECONCILER_LEASE_SECS: i64 = 120;
 const LISP_CODE_SYNC_RECONCILER_BATCH_LIMIT: i64 = 16;
+const LISP_CODE_SYNC_STATUS_CACHE_TTL: Duration = Duration::from_secs(5);
 
 static LISP_CODE_SYNC_RUNTIME: OnceLock<Arc<LispCodeSyncRuntime>> = OnceLock::new();
+static LISP_CODE_SYNC_STATUS_CACHE: OnceLock<Arc<Mutex<Option<LispCodeSyncStatusCache>>>> =
+    OnceLock::new();
+
+#[derive(Clone)]
+struct LispCodeSyncStatusCache {
+    captured_at: Instant,
+    snapshot: Value,
+}
 
 #[derive(Debug)]
 struct LispCodeSyncRuntime {
@@ -182,6 +191,25 @@ pub(crate) async fn status_snapshot() -> Value {
 }
 
 pub(crate) async fn status_snapshot_for_state(state: &AppState) -> Value {
+    let cache = LISP_CODE_SYNC_STATUS_CACHE
+        .get_or_init(|| Arc::new(Mutex::new(None)))
+        .clone();
+    {
+        let guard = cache.lock().await;
+        if let Some(cached) = guard.as_ref() {
+            if cached.captured_at.elapsed() < LISP_CODE_SYNC_STATUS_CACHE_TTL {
+                return cached.snapshot.clone();
+            }
+        }
+    }
+
+    let mut guard = cache.lock().await;
+    if let Some(cached) = guard.as_ref() {
+        if cached.captured_at.elapsed() < LISP_CODE_SYNC_STATUS_CACHE_TTL {
+            return cached.snapshot.clone();
+        }
+    }
+
     let mut snapshot = runtime().snapshot().await;
     if let Some(obj) = snapshot.as_object_mut() {
         obj.insert(
@@ -193,6 +221,10 @@ pub(crate) async fn status_snapshot_for_state(state: &AppState) -> Value {
             collect_queue_status_for_state(state).await,
         );
     }
+    *guard = Some(LispCodeSyncStatusCache {
+        captured_at: Instant::now(),
+        snapshot: snapshot.clone(),
+    });
     snapshot
 }
 

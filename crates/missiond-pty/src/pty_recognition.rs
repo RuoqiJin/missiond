@@ -1807,6 +1807,7 @@ fn recognize_claude_code(lines: &[String]) -> PtyRecognitionSnapshot {
     let current_activity = has_current_claude_activity_line(lines);
     let identity = extract_claude_code_screen_identity(lines);
     let startup_signals = extract_claude_code_startup_config_signals(lines, &lower);
+    let mcp = extract_claude_code_mcp_screen(lines);
 
     if let Some((kind, reason)) = provider_unavailable_match(&lower) {
         return PtyRecognitionSnapshot::new(
@@ -1864,6 +1865,21 @@ fn recognize_claude_code(lines: &[String]) -> PtyRecognitionSnapshot {
         .with_elapsed(elapsed)
         .with_screen_identity(identity)
         .with_screen_signals(startup_signals)
+        .with_source("tui_source_signature");
+    }
+
+    if let Some(mcp) = mcp {
+        return PtyRecognitionSnapshot::new(
+            CliEngine::ClaudeCode,
+            PtyCanonicalState::Blocked,
+            0.92,
+            "claude_code:mcp_servers",
+        )
+        .with_blocked_kind("mcp_servers")
+        .with_phase("mcp_status")
+        .with_elapsed(elapsed)
+        .with_screen_identity(identity)
+        .with_screen_mcp(Some(mcp))
         .with_source("tui_source_signature");
     }
 
@@ -1946,6 +1962,159 @@ fn recognize_claude_code(lines: &[String]) -> PtyRecognitionSnapshot {
         "claude_code:no_match",
     )
     .with_screen_identity(identity)
+}
+
+fn extract_claude_code_mcp_screen(lines: &[String]) -> Option<ProviderMcpScreen> {
+    let text = joined_text(lines);
+    let lower = text.to_ascii_lowercase();
+    let list_screen = lower.contains("manage mcp servers")
+        && (lower.contains("code.claude.com/docs/en/mcp")
+            || lower.contains("↑/↓ to navigate")
+            || lower.contains("mcp servers"));
+    let detail_screen = lower.contains("mcp server")
+        && lower.contains("status:")
+        && lower.contains("config location:")
+        && lower.contains("reconnect");
+    if !list_screen && !detail_screen {
+        return None;
+    }
+
+    let mut servers = Vec::new();
+    let mut failed_servers = Vec::new();
+    let title = if detail_screen {
+        lines
+            .iter()
+            .map(|line| normalize_identity_value(line))
+            .find(|line| line.to_ascii_lowercase().ends_with(" mcp server"))
+            .unwrap_or_else(|| "MCP Server".to_string())
+    } else {
+        "Manage MCP servers".to_string()
+    };
+
+    if detail_screen {
+        let name = title
+            .strip_suffix(" MCP Server")
+            .unwrap_or(title.as_str())
+            .trim()
+            .to_string();
+        let status = lines
+            .iter()
+            .filter_map(|line| {
+                normalize_identity_value(line)
+                    .strip_prefix("Status:")
+                    .map(|value| claude_code_mcp_status_from_marker(value.trim()).0)
+            })
+            .next()
+            .unwrap_or_else(|| "unknown".to_string());
+        let connected = status == "connected";
+        if status == "failed" {
+            failed_servers.push(name.clone());
+        }
+        servers.push(ProviderMcpServer {
+            name,
+            status,
+            connected,
+            ..ProviderMcpServer::default()
+        });
+    } else {
+        for line in lines {
+            let cleaned = normalize_identity_value(line);
+            let trimmed = strip_claude_code_mcp_selection(&cleaned);
+            let Some(server) = parse_claude_code_mcp_server_row(trimmed) else {
+                continue;
+            };
+            if server.status == "failed"
+                && !failed_servers
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case(&server.name))
+            {
+                failed_servers.push(server.name.clone());
+            }
+            servers.push(server);
+        }
+    }
+
+    let status = if servers.is_empty() {
+        "unknown"
+    } else if servers.iter().any(|server| server.status == "failed") {
+        "degraded"
+    } else if servers
+        .iter()
+        .any(|server| matches!(server.status.as_str(), "needs_authentication" | "disabled"))
+    {
+        "degraded"
+    } else if servers.iter().any(|server| server.connected) {
+        "connected"
+    } else {
+        "unknown"
+    }
+    .to_string();
+
+    Some(ProviderMcpScreen {
+        title,
+        status,
+        servers,
+        failed_servers,
+        startup_incomplete: false,
+        startup_running: false,
+        verbose: detail_screen,
+    })
+}
+
+fn strip_claude_code_mcp_selection(line: &str) -> &str {
+    line.trim_start()
+        .trim_start_matches(|c: char| matches!(c, '❯' | '>' | '›' | '●'))
+        .trim_start()
+}
+
+fn parse_claude_code_mcp_server_row(line: &str) -> Option<ProviderMcpServer> {
+    let parts = line.split('·').map(str::trim).collect::<Vec<_>>();
+    if parts.len() < 2 {
+        return None;
+    }
+    let name = parts.first()?.trim();
+    let lower_name = name.to_ascii_lowercase();
+    if name.is_empty()
+        || name.starts_with('↑')
+        || name.starts_with('↓')
+        || name.starts_with('⚠')
+        || name.eq_ignore_ascii_case("claude.ai")
+        || name.ends_with("MCPs")
+        || name.contains("MCPs (")
+        || lower_name.contains("setup issue")
+    {
+        return None;
+    }
+
+    let marker = parts.get(1).copied().unwrap_or_default();
+    let (status, auth) = claude_code_mcp_status_from_marker(marker);
+    let connected = status == "connected";
+    Some(ProviderMcpServer {
+        name: name.to_string(),
+        status,
+        connected,
+        auth,
+        tools_summary: parts.get(2).map(|value| value.to_string()),
+        ..ProviderMcpServer::default()
+    })
+}
+
+fn claude_code_mcp_status_from_marker(marker: &str) -> (String, Option<String>) {
+    let lower = marker.to_ascii_lowercase();
+    if lower.contains("connected") || marker.contains('✔') || marker.contains('✓') {
+        ("connected".to_string(), None)
+    } else if lower.contains("failed") || marker.contains('✘') || marker.contains('✗') {
+        ("failed".to_string(), None)
+    } else if lower.contains("needs authentication") || marker.contains('△') {
+        (
+            "needs_authentication".to_string(),
+            Some("needs authentication".to_string()),
+        )
+    } else if lower.contains("disabled") || marker.contains('◯') {
+        ("disabled".to_string(), None)
+    } else {
+        ("unknown".to_string(), None)
+    }
 }
 
 fn extract_claude_code_screen_identity(lines: &[String]) -> Option<ProviderScreenIdentity> {
@@ -4598,6 +4767,71 @@ mod tests {
         ]));
         assert_eq!(result.state, PtyCanonicalState::Blocked);
         assert_eq!(result.blocked_kind.as_deref(), Some("confirmation"));
+    }
+
+    #[test]
+    fn claude_code_mcp_list_is_structured_status_page() {
+        let result = recognize_claude_code(&lines(&[
+            "  Manage MCP servers",
+            "  12 servers",
+            "  ⚠ 2 setup issues: MCP · /doctor",
+            "",
+            "    Local MCPs (/Users/jinchen/.claude.json [project: /private/tmp/missiond-search-noise-fix])",
+            "  ❯ chrome-devtools · ✔ connected · 29 tools",
+            "    missiond-fail-demo · ✘ failed",
+            "",
+            "    User MCPs (/Users/jinchen/.claude.json)",
+            "    context7 · ✔ connected · 2 tools",
+            "    claude.ai Gmail · △ needs authentication",
+            "",
+            "    Built-in MCPs (always available)",
+            "    computer-use · ◯ disabled",
+            "    missiond · ✔ connected · 100 tools",
+            "  ※ Run claude --debug to see error logs",
+            "  https://code.claude.com/docs/en/mcp for help",
+            " ↑/↓ to navigate · Enter to confirm · Esc to cancel",
+        ]));
+        assert_eq!(result.state, PtyCanonicalState::Blocked);
+        assert_eq!(result.reason, "claude_code:mcp_servers");
+        assert_eq!(result.blocked_kind.as_deref(), Some("mcp_servers"));
+        let mcp = result.screen_mcp.expect("mcp screen");
+        assert_eq!(mcp.status, "degraded");
+        assert_eq!(mcp.failed_servers, vec!["missiond-fail-demo".to_string()]);
+        assert!(!mcp
+            .servers
+            .iter()
+            .any(|server| server.name.to_ascii_lowercase().contains("setup issue")));
+        assert!(mcp
+            .servers
+            .iter()
+            .any(|server| server.name == "missiond" && server.connected));
+        assert!(mcp.servers.iter().any(|server| {
+            server.name == "claude.ai Gmail" && server.status == "needs_authentication"
+        }));
+    }
+
+    #[test]
+    fn claude_code_mcp_detail_is_structured_status_page() {
+        let result = recognize_claude_code(&lines(&[
+            "  Missiond-fail-demo MCP Server",
+            "",
+            "  Status:           ✘ failed",
+            "  Command:          /bin/sh",
+            "  Args:             -c echo missiond-fail-demo-stderr >&2; exit 1",
+            "  Config location:  /Users/jinchen/.claude.json [project: /private/tmp/missiond-search-noise-fix]",
+            "",
+            "  ❯ 1. Reconnect",
+            "    2. Disable",
+            "",
+            "  ↑/↓ to navigate · Enter to select · Esc to back",
+        ]));
+        assert_eq!(result.state, PtyCanonicalState::Blocked);
+        assert_eq!(result.reason, "claude_code:mcp_servers");
+        let mcp = result.screen_mcp.expect("mcp detail");
+        assert_eq!(mcp.title, "Missiond-fail-demo MCP Server");
+        assert_eq!(mcp.servers[0].name, "Missiond-fail-demo");
+        assert_eq!(mcp.servers[0].status, "failed");
+        assert_eq!(mcp.failed_servers, vec!["Missiond-fail-demo".to_string()]);
     }
 
     #[test]

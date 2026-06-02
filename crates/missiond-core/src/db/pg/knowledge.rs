@@ -3,7 +3,7 @@
 use super::PgMissionStore;
 use crate::db::error::DbResult;
 use crate::db::shared::{contains_sensitive_data, infer_kb_type, token_jaccard_similarity};
-use crate::db::traits::KbStore;
+use crate::db::traits::{EvidenceLaneStore, KbStore};
 use crate::types::*;
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -2259,6 +2259,108 @@ impl PgMissionStore {
         }
         let rows = q.fetch_all(&self.pool).await?;
         Ok(rows.into_iter().map(kb_row_to_entry).collect())
+    }
+}
+
+#[async_trait]
+impl EvidenceLaneStore for PgMissionStore {
+    async fn upsert_evidence_items(&self, items: &[EvidenceItemInput]) -> DbResult<usize> {
+        let mut written = 0usize;
+        for item in items {
+            let result = sqlx::query(
+                "INSERT INTO evidence_items (
+                    id, lane_id, source_type, source_id, source_ref, project_id, task_id,
+                    title, summary, authority_class, validity, privacy_class, freshness,
+                    score, raw_policy, evidence_refs, metadata
+                 )
+                 VALUES (
+                    $1, $2, $3, $4, $5, $6, $7,
+                    $8, $9, $10, $11, $12, $13,
+                    $14, $15, $16, $17
+                 )
+                 ON CONFLICT (id) DO UPDATE SET
+                    lane_id = EXCLUDED.lane_id,
+                    source_type = EXCLUDED.source_type,
+                    source_id = EXCLUDED.source_id,
+                    source_ref = EXCLUDED.source_ref,
+                    project_id = EXCLUDED.project_id,
+                    task_id = EXCLUDED.task_id,
+                    title = EXCLUDED.title,
+                    summary = EXCLUDED.summary,
+                    authority_class = EXCLUDED.authority_class,
+                    validity = EXCLUDED.validity,
+                    privacy_class = EXCLUDED.privacy_class,
+                    freshness = EXCLUDED.freshness,
+                    score = EXCLUDED.score,
+                    raw_policy = EXCLUDED.raw_policy,
+                    evidence_refs = EXCLUDED.evidence_refs,
+                    metadata = EXCLUDED.metadata,
+                    updated_at = now()",
+            )
+            .bind(&item.id)
+            .bind(&item.lane_id)
+            .bind(&item.source_type)
+            .bind(item.source_id.as_deref())
+            .bind(item.source_ref.as_deref())
+            .bind(item.project_id.as_deref())
+            .bind(item.task_id.as_deref())
+            .bind(&item.title)
+            .bind(&item.summary)
+            .bind(&item.authority_class)
+            .bind(&item.validity)
+            .bind(&item.privacy_class)
+            .bind(&item.freshness)
+            .bind(item.score)
+            .bind(&item.raw_policy)
+            .bind(&item.evidence_refs)
+            .bind(&item.metadata)
+            .execute(&self.pool)
+            .await?;
+            written += result.rows_affected() as usize;
+        }
+        Ok(written)
+    }
+
+    async fn record_context_gather_run(&self, run: &ContextGatherRunInput) -> DbResult<()> {
+        sqlx::query(
+            "INSERT INTO context_gather_runs (
+                id, query, project_id, task_id, source_profile, lane_counts, metrics,
+                raw_sources_included, credential_opt_in, conversation_opt_in,
+                resolver_source, runtime_root_consistent, artifact_hash, diagnostics
+             )
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+             ON CONFLICT (id) DO UPDATE SET
+                query = EXCLUDED.query,
+                project_id = EXCLUDED.project_id,
+                task_id = EXCLUDED.task_id,
+                source_profile = EXCLUDED.source_profile,
+                lane_counts = EXCLUDED.lane_counts,
+                metrics = EXCLUDED.metrics,
+                raw_sources_included = EXCLUDED.raw_sources_included,
+                credential_opt_in = EXCLUDED.credential_opt_in,
+                conversation_opt_in = EXCLUDED.conversation_opt_in,
+                resolver_source = EXCLUDED.resolver_source,
+                runtime_root_consistent = EXCLUDED.runtime_root_consistent,
+                artifact_hash = EXCLUDED.artifact_hash,
+                diagnostics = EXCLUDED.diagnostics",
+        )
+        .bind(&run.id)
+        .bind(&run.query)
+        .bind(run.project_id.as_deref())
+        .bind(run.task_id.as_deref())
+        .bind(&run.source_profile)
+        .bind(&run.lane_counts)
+        .bind(&run.metrics)
+        .bind(run.raw_sources_included)
+        .bind(run.credential_opt_in)
+        .bind(run.conversation_opt_in)
+        .bind(run.resolver_source.as_deref())
+        .bind(run.runtime_root_consistent)
+        .bind(run.artifact_hash.as_deref())
+        .bind(&run.diagnostics)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 }
 

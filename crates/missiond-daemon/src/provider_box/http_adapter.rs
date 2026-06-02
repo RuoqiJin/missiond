@@ -25,13 +25,22 @@ const CODEX_IMAGE_PROVIDER: &str = "codex_image_generation";
 const CLAUDE_CODE_TEXT_PROVIDER: &str = "claude_code_text";
 const CODEX_RESEARCH_PROMPT_PREFIX: &str = "帮我在互联网上进行详细调研以下问题：";
 const CODEX_IMAGE_PROMPT_PREFIX: &str = "帮我生成一张图片，要求如下：";
-const CODEX_IMAGE_STABLE_PROMPT_SUFFIX: &str = "执行要求：请直接使用 imagegen 技能实际生成图片，不要只描述图片。图片是预览用途，保留在 Codex 默认 generated_images 路径即可；不要复制、移动或写入当前工作区。生成完成后只回复 IMAGE_DONE。";
+const CODEX_IMAGE_STABLE_PROMPT_SUFFIX: &str = "执行要求：请直接调用并使用 imagegen 生成图片，必须实际产出图片文件，不要只描述图片或给出提示词。图片是预览用途，保留在 Codex 默认 generated_images 路径即可；不要复制、移动或写入当前工作区。生成完成后只回复 IMAGE_DONE。";
 const CODEX_TASK_MODEL: &str = "gpt-5.5";
 const CODEX_EXEC_TEXT_DEFAULT_MAX_CONCURRENT: usize = 4;
 const CODEX_EXEC_TEXT_XHIGH_MAX_CONCURRENT: usize = 2;
 const CODEX_EXEC_TASK_MAX_CONCURRENT: usize = 1;
 const CLAUDE_CODE_TEXT_MAX_CONCURRENT: usize = 1;
 const MODEL_CATALOG_LIVE_TIMEOUT_SECS: u64 = 20;
+const STATIC_AGY_TEXT_MODELS: &[&str] = &[
+    "Gemini 3.5 Flash (Medium)",
+    "Gemini 3.5 Flash (High)",
+    "Gemini 3.5 Flash (Low)",
+    "Gemini 3.1 Pro (Low)",
+    "Gemini 3.1 Pro (High)",
+    "Claude Sonnet 4.6 (Thinking)",
+    "Claude Opus 4.6 (Thinking)",
+];
 const PTY_STEP_ALLOWED_KEYS: &[&str] = &[
     "enter",
     "return",
@@ -829,6 +838,25 @@ impl ProviderBoxHttpAdapter {
             interaction.router_export_policy = Some(policy);
         } else {
             interaction.router_export_policy = Some(json!({}));
+        }
+        if !models_live_catalog_requested(&request) {
+            let result = static_models_export_result(
+                &interaction,
+                ProviderBoxDiagnostic::warning(
+                    "MODEL_CATALOG_STATIC_EXPORT",
+                    "Returning static provider-box model sources; live provider catalog discovery requires explicit opt-in",
+                    json!({
+                        "live_catalog": false,
+                        "opt_in_fields": [
+                            "live_catalog",
+                            "refresh_live_catalog",
+                            "live",
+                            "use_live_catalog"
+                        ]
+                    }),
+                ),
+            );
+            return Ok(result_response(result));
         }
         let timeout_secs = request
             .body
@@ -1931,34 +1959,135 @@ fn static_models_export_result(
     diagnostic: ProviderBoxDiagnostic,
 ) -> ProviderBoxResult {
     let mut result = ProviderBoxResult::base(request, ProviderBoxStatus::Completed);
+    let entries = static_agy_model_catalog_entries();
     result.model_catalog = Some(ProviderModelCatalog {
         schema: "missiond.provider-model-catalog.v1".to_string(),
         catalog_id: format!("static-catalog-{}", uuid::Uuid::new_v4().simple()),
-        provider: Some("provider-box-static".to_string()),
-        engine: request.engine,
+        provider: Some("agy_cli".to_string()),
+        engine: CliEngine::Agy,
         account_ref: None,
         discovered_at: chrono::Utc::now().to_rfc3339(),
-        source: Some("provider-box:static-text-only-sources".to_string()),
-        entries: Vec::new(),
+        source: Some("provider-box:static-agy-text-only-sources".to_string()),
+        entries,
         diagnostics: vec![diagnostic.clone()],
     });
-    result.router_export = Some(ProviderRouterExport {
-        schema: "missiond.provider-router-export.v1".to_string(),
-        export_id: format!("static-export-{}", uuid::Uuid::new_v4().simple()),
-        catalog_id: result
-            .model_catalog
-            .as_ref()
-            .map(|catalog| catalog.catalog_id.clone()),
-        provider: Some("provider-box-static".to_string()),
-        engine: request.engine,
-        router_backend_ids: vec!["xjp-router:provider-box-static".to_string()],
-        routeable_entries: Vec::new(),
-        blocked_entries: Vec::new(),
-        policy_ref: Some("interactive-provider-box/static-text-only-sources".to_string()),
-        diagnostics: vec![diagnostic.clone()],
-    });
+    if let Some(catalog) = result.model_catalog.as_ref() {
+        result.router_export = Some(static_agy_router_export(request, catalog, &diagnostic));
+    }
     result.diagnostics.push(diagnostic);
     result
+}
+
+fn static_agy_model_catalog_entries() -> Vec<ProviderModelCatalogEntry> {
+    STATIC_AGY_TEXT_MODELS
+        .iter()
+        .filter(|model| is_agy_text_model_exportable(model))
+        .map(|model| ProviderModelCatalogEntry {
+            provider_model_id: format!("agy:{}", slug_model(model)),
+            display_name: (*model).to_string(),
+            family: model.split_whitespace().next().map(str::to_string),
+            routeable_default: true,
+            switch_capability: "interactive_model_picker".to_string(),
+            usage_probe_capability: "interactive_usage_screen".to_string(),
+            confidence: 0.76,
+        })
+        .collect()
+}
+
+fn static_agy_router_export(
+    request: &ProviderInteractionRequest,
+    catalog: &ProviderModelCatalog,
+    diagnostic: &ProviderBoxDiagnostic,
+) -> ProviderRouterExport {
+    let base_url = request
+        .router_export_policy
+        .as_ref()
+        .and_then(|policy| {
+            policy
+                .get("provider_box_base_url")
+                .and_then(Value::as_str)
+                .or_else(|| policy.get("managed_proxy_base_url").and_then(Value::as_str))
+        })
+        .map(str::to_string)
+        .or_else(|| std::env::var("MISSIOND_PROVIDER_BOX_PROXY_BASE_URL").ok())
+        .or_else(|| std::env::var("MISSIOND_AGY_PROVIDER_BOX_BASE_URL").ok());
+
+    let mut routeable_entries = Vec::new();
+    let mut blocked_entries = Vec::new();
+    for entry in &catalog.entries {
+        if !is_agy_text_model_exportable(&entry.display_name) {
+            continue;
+        }
+        let slug = slug_model(&entry.display_name);
+        let slot_pool_id = agy_slot_pool_id(&entry.display_name);
+        let route = json!({
+            "model_id": format!("agy-{slug}"),
+            "primary": {
+                "provider": "MissionDAgy",
+                "provider_model_id": base_url.clone().unwrap_or_default(),
+                "billing_id": format!("missiond/agy/{slug}"),
+                "timeouts_ms": 300000,
+                "capabilities": {
+                    "text": true,
+                    "tools": false,
+                    "vision": false,
+                    "files": false,
+                    "mcp": false,
+                    "shell": false
+                },
+                "extra": {
+                    "provider": "agy_cli",
+                    "model": entry.display_name,
+                    "slot_pool_id": slot_pool_id,
+                    "slot_policy": {
+                        "kind": "provider_box_managed_pool",
+                        "public_max_concurrent": 1,
+                        "replicas_hidden": true,
+                        "queue_owner": "provider-box"
+                    },
+                    "pure_text": true,
+                    "allow_model_switch": false,
+                    "requires_current_model_verification": true,
+                    "completion_endpoint": "/provider-box/v1/text-only/completions"
+                }
+            }
+        });
+        if base_url.is_some() {
+            routeable_entries.push(route);
+        } else {
+            blocked_entries.push(json!({
+                "entry": route,
+                "reason": "managed proxy provider-box base URL missing"
+            }));
+        }
+    }
+
+    let mut diagnostics = vec![diagnostic.clone()];
+    if base_url.is_none() {
+        diagnostics.push(ProviderBoxDiagnostic::warning(
+            "PROVIDER_ROUTER_EXPORT_PROXY_URL_MISSING",
+            "AGY router export requires MissionD provider-box URL from the self-built proxy deployment program",
+            json!({
+                "env": [
+                    "MISSIOND_PROVIDER_BOX_PROXY_BASE_URL",
+                    "MISSIOND_AGY_PROVIDER_BOX_BASE_URL"
+                ]
+            }),
+        ));
+    }
+
+    ProviderRouterExport {
+        schema: "missiond.provider-router-export.v1".to_string(),
+        export_id: format!("static-export-{}", uuid::Uuid::new_v4().simple()),
+        catalog_id: Some(catalog.catalog_id.clone()),
+        provider: Some("agy_cli".to_string()),
+        engine: CliEngine::Agy,
+        router_backend_ids: vec!["xjp-router:MissionDAgy".to_string()],
+        routeable_entries,
+        blocked_entries,
+        policy_ref: Some("interactive-provider-box/MissionDAgy/text-only".to_string()),
+        diagnostics,
+    }
 }
 
 fn response_media_artifact(slot_status: Option<&Value>) -> Option<Value> {
@@ -3084,6 +3213,26 @@ fn query_field(path: &str, key: &str) -> Option<String> {
     })
 }
 
+fn query_bool_field(path: &str, key: &str) -> Option<bool> {
+    query_field(path, key).and_then(|value| match value.to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "y" | "on" => Some(true),
+        "0" | "false" | "no" | "n" | "off" => Some(false),
+        _ => None,
+    })
+}
+
+fn models_live_catalog_requested(request: &ProviderBoxHttpRequest) -> bool {
+    [
+        "live_catalog",
+        "refresh_live_catalog",
+        "live",
+        "use_live_catalog",
+    ]
+    .into_iter()
+    .find_map(|key| bool_field(&request.body, key).or_else(|| query_bool_field(&request.path, key)))
+    .unwrap_or(false)
+}
+
 fn string_field(body: &Value, key: &str) -> Option<String> {
     body.get(key)
         .and_then(Value::as_str)
@@ -3402,11 +3551,11 @@ mod tests {
             .as_deref()
             .expect("prompt")
             .starts_with(CODEX_IMAGE_PROMPT_PREFIX));
-        assert!(request
-            .prompt
-            .as_deref()
-            .expect("prompt")
-            .contains("只回复 IMAGE_DONE"));
+        let prompt = request.prompt.as_deref().expect("prompt");
+        assert!(prompt.contains("调用并使用 imagegen"));
+        assert!(prompt.contains("必须实际产出图片文件"));
+        assert!(prompt.contains("不要只描述图片"));
+        assert!(prompt.contains("只回复 IMAGE_DONE"));
         assert_eq!(
             request.tool_policy.as_ref().unwrap()["allowed_tools"],
             json!(["image_generation"])
@@ -3653,6 +3802,79 @@ mod tests {
             .expect("router sources")
             .iter()
             .any(|entry| entry["model_id"] == "claude-code-opus-4-8-xhigh"));
+    }
+
+    #[test]
+    fn static_model_export_exposes_agy_sources_without_live_pty_discovery() {
+        let mut request =
+            ProviderInteractionRequest::new(BoxCommand::ModelCatalogExport, CliEngine::Agy);
+        request.router_export_policy = Some(json!({
+            "provider_box_base_url": "https://missiond.example/provider-box"
+        }));
+        let result = static_models_export_result(
+            &request,
+            ProviderBoxDiagnostic::warning(
+                "MODEL_CATALOG_STATIC_EXPORT",
+                "static export",
+                json!({}),
+            ),
+        );
+
+        let response = result_response(result);
+
+        let agy_sources = response.body["provider_text_only_sources"]
+            .as_array()
+            .expect("sources")
+            .iter()
+            .filter(|entry| entry["provider"] == "agy_cli")
+            .collect::<Vec<_>>();
+        assert_eq!(agy_sources.len(), STATIC_AGY_TEXT_MODELS.len());
+        assert!(agy_sources
+            .iter()
+            .any(|entry| entry["model_id"] == "agy-claude-opus-46-thinking"));
+        assert!(!agy_sources
+            .iter()
+            .any(|entry| entry["model_id"] == "agy-gpt-oss-120b-medium"));
+
+        let agy_routes = response.body["router_model_sources"]
+            .as_array()
+            .expect("router sources")
+            .iter()
+            .filter(|entry| {
+                entry["model_id"]
+                    .as_str()
+                    .is_some_and(|model_id| model_id.starts_with("agy-"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(agy_routes.len(), STATIC_AGY_TEXT_MODELS.len());
+        assert!(agy_routes.iter().all(|entry| entry["routeable"] == true));
+        assert!(agy_routes.iter().all(|entry| {
+            entry["text_only_source"]["slot_policy"]["replicas_hidden"] == true
+                && entry["route"]["primary"]["provider"] == "MissionDAgy"
+        }));
+    }
+
+    #[test]
+    fn models_live_catalog_requires_explicit_opt_in() {
+        let default_request = ProviderBoxHttpRequest {
+            method: "GET".to_string(),
+            path: "/provider-box/v1/models".to_string(),
+            headers: HashMap::new(),
+            body: json!({}),
+        };
+        assert!(!models_live_catalog_requested(&default_request));
+
+        let query_request = ProviderBoxHttpRequest {
+            path: "/provider-box/v1/models?live_catalog=true".to_string(),
+            ..default_request.clone()
+        };
+        assert!(models_live_catalog_requested(&query_request));
+
+        let body_request = ProviderBoxHttpRequest {
+            body: json!({"refresh_live_catalog": true}),
+            ..default_request
+        };
+        assert!(models_live_catalog_requested(&body_request));
     }
 
     #[test]
@@ -4345,8 +4567,8 @@ mod tests {
                 control_action: true,
                 pty_step: false,
                 status: true,
-                mcp_status: false,
-                mcp_reconnect: false,
+                mcp_status: true,
+                mcp_reconnect: true,
             },
         );
 
@@ -4361,6 +4583,8 @@ mod tests {
             true
         );
         assert_eq!(caps["slot_controls"]["status"], true);
+        assert_eq!(caps["slot_controls"]["mcp_status"], true);
+        assert_eq!(caps["slot_controls"]["mcp_reconnect"], true);
         assert_eq!(caps["slot_controls"]["input"], false);
         assert!(caps["slot_controls"].get("logout").is_none());
         assert_eq!(caps["slot_controls"]["permissions"]["supported"], true);

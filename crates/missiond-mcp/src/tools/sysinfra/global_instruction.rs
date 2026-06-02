@@ -22,6 +22,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
          通过 临时文件 + atomic rename 落盘, 仅允许操作 ~/.claude/CLAUDE.md; \
          reload: daemon 不持有该文件 (Claude Code 会话启动时一次性读取), \
          返回 manual-reload-required 状态, 不假装 reload 成功。\
+         ClaudeCode instruction projections should prefer missiond-mcp/xjp-mcp, \
+         using missiond-cli/xjp-cli only for gap-fill or diagnostics. \
          Lisp 源: intent-intent-layer.lisp :: global-claudemd-manager + \
          intent-tools.lisp :: future-surface mission_global_instruction。",
         json!({

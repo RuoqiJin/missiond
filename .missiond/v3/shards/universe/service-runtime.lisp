@@ -178,6 +178,23 @@
       :source-evidence [skill:search-center skill:services/search-center]
       :risks [deep-research-live-300-source-artifact-pending cross-domain-benchmark-suite-pending production-browser-oauth-flow-pending provider-secret-activation-pending final-promotion-artifact-verification-pending]
       :surface service-runtime-universe)
+    (service :id payments
+      :project payments
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/payments"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/payments-backend-blueprint.lisp"
+      :environment production
+      :api-base-url "https://auth.xiaojinpro.com/payments"
+      :domains ["auth.xiaojinpro.com"]
+      :deployment (:substrate deploy-center :dc_slug "xjp-payments" :runtime-target gcp-runtime :executor gcp-agent :container "xjp-payments" :default-port 8080 :host-bind "127.0.0.1:3109" :authority release-provenance)
+      :proxy (:kind caddy :domain "auth.xiaojinpro.com" :routes ["/payments" "/payments/*"] :upstream "localhost:3109")
+      :ports (:host 3109 :container 8080)
+      :health ["/payments/health" "/payments/health/ready" "/payments/health/runtime"]
+      :dependencies [xjp-auth xjp-router xjp-pg-prod secret-store stripe wechatpay alipay]
+      :ops-capability deploy-ops
+      :source-evidence [skill:services/payments services/payments/service.manifest.toml payments-provenance-20260602]
+      :risks [stripe-live-secret-pending activation-code-test-channel-required multi-product-payment-config-readiness]
+      :surface service-runtime-universe)
     (service :id xiaojinpro-frontend
       :project xiaojinpro-frontend
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/xiaojinpro-frontend"
@@ -210,7 +227,7 @@
       :dns-records [(:type A :name "speechscribe.top" :content "76.76.21.21" :proxied false :authority cloudflare)
                     (:type CNAME :name "www.speechscribe.top" :content "cname.vercel-dns.com" :proxied false :authority cloudflare)
                     (:type A :name "asr.xiaojinpro.top" :content "76.76.21.21" :proxied false :authority cloudflare)]
-      :deployment (:substrate deploy-center :dc_slug "asr" :runtime-target gcp-runtime :executor gcp-agent :container "xjp-asr" :default-port 8090 :host-bind "127.0.0.1:8089" :authority release-provenance)
+      :deployment (:substrate deploy-center :dc_slug "xjp-asr" :runtime-target gcp-runtime :executor gcp-agent :container "xjp-asr" :default-port 8090 :host-bind "127.0.0.1:8089" :authority release-provenance)
       :frontend-deployment (:substrate vercel :project "rickyjim626s-projects/xjp-asr-web" :production-domain "speechscribe.top" :fallback-domain "xjp-asr-web.vercel.app")
       :proxy (:kind caddy :domain "auth.xiaojinpro.com" :routes ["/asr" "/asr/*"] :upstream "localhost:8089")
       :ports (:host 8089 :container 8090)
@@ -395,6 +412,30 @@
       :health ["/health"]
       :dependencies [forge-catalog? missiond-eventbridge?]
       :ops-capability project-refactor
+      :surface service-runtime-universe)
+    (service :id good-things-daily
+      :project good-things-daily
+      :root "/Users/jinchen/Projects/good-things-daily"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/good-things-daily-backend-blueprint.lisp"
+      :frontend ".missiond/frontend/good-things-daily-frontend-blueprint.lisp"
+      :operations ".missiond/operations/good-things-daily-operations-blueprint.lisp"
+      :environment planned-production
+      :public-base-url "https://goodnews.xiaojinpro.top"
+      :frontend-url "https://goodnews.xiaojinpro.top"
+      :api-base-url "https://goodnews-api.xiaojinpro.top/api"
+      :domains ["goodnews.xiaojinpro.top" "goodnews-api.xiaojinpro.top"]
+      :dns-provider cloudflare
+      :dns-records [(:type CNAME :name "goodnews.xiaojinpro.top" :content "cname.vercel-dns.com" :proxied false :authority xjp-domain-service :status planned)
+                    (:type A :name "goodnews-api.xiaojinpro.top" :content "34.104.147.118" :proxied false :authority xjp-domain-service :status planned)]
+      :deployment (:substrate gcp-vm :runtime-target gcp-runtime :container "good-things-daily-backend" :local-bind "127.0.0.1:4017" :proxy caddy :database "xjp-pg-prod/good_things_daily" :authority deploy-center-provenance)
+      :frontend-deployment (:substrate vercel :project "rickyjim626/good-things-daily" :root-directory "frontend" :production-domain "goodnews.xiaojinpro.top")
+      :health ["https://goodnews.xiaojinpro.top/" "https://goodnews-api.xiaojinpro.top/api/health" "https://goodnews-api.xiaojinpro.top/api/v1/digests/today?lang=zh"]
+      :dependencies [xjp-router xjp-pg-prod secret-store vercel cloudflare xjp-domain-service]
+      :llm-provider (:authority xjp-router :endpoint "/v1/chat/completions" :model "claude-opus-4-6" :env [XJP_ROUTER_BASE_URL XJP_ROUTER_SERVICE_TOKEN GOOD_THINGS_TITLE_MODEL] :rule "Public headlines are generated_title values created through xjp-router claude-opus-4-6; source_title remains evidence only and must not be rendered as the primary public title.")
+      :ops-capability deploy-ops
+      :source-evidence ["/Users/jinchen/Projects/good-things-daily/.missiond/intent.lisp" "/Users/jinchen/Projects/good-things-daily/.missiond/check.sh"]
+      :risks [production-postgres-provision-pending xjp-router-live-smoke-pending vercel-domain-cutover-pending api-domain-cutover-pending scheduled-job-runner-pending]
       :surface service-runtime-universe)
     (capability :id cloudflare-dns
       :provider cloudflare

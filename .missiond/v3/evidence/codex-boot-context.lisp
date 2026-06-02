@@ -14,6 +14,7 @@
           "For deployed MissionD, runtime artifacts live under MISSIOND_RUNTIME_DIR and MISSIOND_COMPILED_RUNTIME_DIR; repo .missiond/v3/runtime/** is dev/cold evidence only and must not be used to declare deployed compiled projections missing."
           "Implementation workers require accepted_shard_id, context_pack_path, write_scope, and write lease; broad objectives are investigation/design work, not code shards."
           "Skill edits route to ClaudeCode skill-maintainer/deploy-ops lanes; Codex owns CLI, architecture, verification, and small control-plane patches."
+          "For MissionD/XJP tool operations, Codex workstations prefer shell-native CLI surfaces: use missiond-cli and xjp-cli first when available; use missiond-mcp/xjp-mcp as compatibility or diagnostics fallback."
           "Deployment facts live in deploy-center, secrets in secret-store, and project identity/maturity in MissionD Universe."
           "Remote node updates, including Mac mini MissionD, sync source through GitHub or XJP codebase/deploy-center lanes, then build and deploy on the target node; ad-hoc rsync/scp from an operator laptop is break-glass only and must not be the normal workflow."
           "PTY is diagnostic only; durable provider logs, EventBus, task-result-artifact, and Board lifecycle are completion authority."])
@@ -26,6 +27,10 @@
      (layer L3-cold-evidence
        :source "explicit audit/debug requests only"
        :fields [raw_conversations historical_board_tasks provider_logs runtime_reports]))
+  :preferred-tool-surfaces
+    ((codex-cli
+       :preferred [missiond-cli xjp-cli]
+       :fallback [missiond-mcp xjp-mcp]))
   :required-tools [mission_context_boot mission_context_gather mission_board mission_workflow mission_task_delegate mission_shared_memory mission_tool_directory]
   :forbidden-content [secret-values raw-provider-logs bulk-chat-history unreviewed-kb-preload]
   :handoff-card
