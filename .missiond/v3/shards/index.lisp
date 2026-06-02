@@ -46,6 +46,13 @@
     :root-include "(include \"shards/ops-infra.lisp\")"
     :surfaces [ops-infra missiond-blue-green-self-update])
 
+  (shard deployment-closure-plane
+    :status compiler-active
+    :domain ops-infra
+    :path "shards/deployment-closure-plane.lisp"
+    :root-include "(include \"shards/deployment-closure-plane.lisp\")"
+    :surfaces [deployment-closure-plane compiled-deployment-policy release-evidence closure-verdict release-lease])
+
   (shard v2-convergence-map
     :status compiler-active
     :domain v2-convergence

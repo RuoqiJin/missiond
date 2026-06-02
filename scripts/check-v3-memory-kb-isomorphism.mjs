@@ -231,6 +231,13 @@ function checkFiles(root, files) {
     'Worker context packs MUST include evidence_lanes, evidence_items, and support_catalog lane summaries by default and omit raw sources',
     'mission_context_gather MUST normalize legacy source calls into typed EvidenceItem lanes',
     'mission_context_gather(persist=true) MUST persist context_gather_runs metrics and evidence_items compact projections',
+    'mission_context_gather source_profile=deploy_ops infra skill_evidence MUST recognize deployment-closure evidence anchors',
+    'mission_context_gather support_catalog MUST project compiled service runtime plus compiled-deployment-policy into deployment_closure evidence',
+    'deployment_closure_policy',
+    'ReleaseLease',
+    'RuntimeObservation',
+    'ReleaseEvidence',
+    'ClosureVerdict',
     'mission_context_gather MUST aggregate runtime_environment, KB, active SSOT, project registry, skill operational evidence, infra evidence, active Board task records, and bounded conversation logs through authority-aware evidence lanes',
     'Board/task/workflow records are searchable retrieval evidence',
     'Mutating skill files under ~/.claude/skills, ~/.codex/skills, or project skill directories MUST be represented as a BoardTask/work-order and delegated to a ClaudeCode skill-maintainer or deploy-ops lane.',
@@ -258,6 +265,10 @@ function checkFiles(root, files) {
     'evidence_lanes',
     'evidence_items',
     'support_catalog',
+    'deployment_closure',
+    'deployment_closure_policy',
+    'compiled_deployment_policy_for_service',
+    'build_deployment_closure_support',
     'authority_order',
     'noise_diagnostics',
     'context_noise_metrics',
@@ -957,10 +968,12 @@ function buildFixture() {
 	    :source_profile [intent_default deploy_ops conversation_audit full_debug]
 	    :fields [evidence_lanes evidence_items support_catalog authority_order noise_diagnostics context_noise_metrics include_raw_sources]
 	    :invariants ["credential_refs MUST NOT be emitted unless include_credentials=true"
-	                 "Worker context packs MUST include evidence_lanes, evidence_items, and support_catalog lane summaries by default and omit raw sources"
-	                 "mission_context_gather MUST normalize legacy source calls into typed EvidenceItem lanes"
-	                 "mission_context_gather(persist=true) MUST persist context_gather_runs metrics and evidence_items compact projections"
-	                 "mission_context_gather MUST aggregate runtime_environment, KB, active SSOT, project registry, skill operational evidence, infra evidence, active Board task records, and bounded conversation logs through authority-aware evidence lanes"
+		                 "Worker context packs MUST include evidence_lanes, evidence_items, and support_catalog lane summaries by default and omit raw sources"
+		                 "mission_context_gather MUST normalize legacy source calls into typed EvidenceItem lanes"
+		                 "mission_context_gather(persist=true) MUST persist context_gather_runs metrics and evidence_items compact projections"
+		                 "mission_context_gather source_profile=deploy_ops infra skill_evidence MUST recognize deployment-closure evidence anchors"
+		                 "mission_context_gather support_catalog MUST project compiled service runtime plus compiled-deployment-policy into deployment_closure evidence"
+		                 "mission_context_gather MUST aggregate runtime_environment, KB, active SSOT, project registry, skill operational evidence, infra evidence, active Board task records, and bounded conversation logs through authority-aware evidence lanes"
 	                 "Board/task/workflow records are searchable retrieval evidence"
 	                 "Mutating skill files under ~/.claude/skills, ~/.codex/skills, or project skill directories MUST be represented as a BoardTask/work-order and delegated to a ClaudeCode skill-maintainer or deploy-ops lane."])
 	  (evidence-lane-policy
@@ -974,7 +987,7 @@ function buildFixture() {
 	    (lane skill_evidence :authority-class evidence_only :source-types [skill_metadata skill_procedure skill_operational_fact skill_warning skill_credential_ref] :default-profiles [deploy_ops] :raw-policy compact_only :privacy-class internal :validity [evidence_only] :freshness version_bound_or_historical :injectable-by-default false :promotion-rules [needs_review-before-kb])
 	    (lane conversation_audit :authority-class provider_durable_conversation_read_model :source-types [conversation_episode conversation_fact_extract conversation_duplicate_group] :default-profiles [conversation_audit] :raw-policy raw_opt_in_only :privacy-class audit :validity [derived_from_conversation] :freshness time_range_bound :injectable-by-default false :promotion-rules [episode-first])
 	    (lane cold_archive :authority-class forensics_only_cold_archive :source-types [archived_session true_user_utterance transcript_dump research_dump raw_provider_log] :default-profiles [full_debug] :raw-policy explicit_path_or_full_debug_only :privacy-class audit :validity [historical_evidence] :freshness cold_archive :injectable-by-default false :promotion-rules [never-default])
-	    (lane support_refs :authority-class redacted_support_catalog :source-types [support_catalog secret_ref] :default-profiles [intent_default] :raw-policy secret_refs_only :privacy-class reference :validity [current_reference] :freshness runtime_or_catalog_bound :injectable-by-default true :promotion-rules [secret-values-never-indexed])
+	    (lane support_refs :authority-class redacted_support_catalog :source-types [support_catalog deployment_closure_policy release_lease runtime_observation release_evidence closure_verdict secret_ref] :default-profiles [intent_default] :raw-policy secret_refs_only :privacy-class reference :validity [current_reference] :freshness runtime_or_catalog_bound :injectable-by-default true :promotion-rules [secret-values-never-indexed deploy-closure-verdict-required])
 	    :read-models ((table conversation_episodes) (table conversation_fact_extracts) (table skill_evidence_items))
 	    :invariants ["support_refs MUST expose secret_ref namespace/key/provenance/availability only"])
 	  (skill-edit-delegation-policy)

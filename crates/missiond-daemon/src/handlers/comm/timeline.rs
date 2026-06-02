@@ -254,14 +254,23 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             let args: Args = serde_json::from_value(args)?;
             let domain = args.domain.trim().to_ascii_lowercase();
             let timeout_ms = args.timeout_ms.unwrap_or(30_000).clamp(100, 300_000) as u64;
+            let mut kind = args.kind;
+            let mut event_kind = args.event_kind;
+            if kind.as_deref().is_some_and(|value| {
+                value.eq_ignore_ascii_case("closure_verdict")
+                    || value.eq_ignore_ascii_case("ClosureVerdict")
+            }) {
+                kind = Some("external_service_event".to_string());
+                event_kind.get_or_insert_with(|| "closure_verdict".to_string());
+            }
             let filter = WaitFilter {
-                kind: args.kind,
+                kind,
                 task_id: args.task_id,
                 slot_id: args.slot_id,
                 status: args.status,
                 service_id: args.service_id,
                 event_id: args.event_id,
-                event_kind: args.event_kind,
+                event_kind,
                 project_id: args.project_id,
                 correlation_id: args.correlation_id,
             };

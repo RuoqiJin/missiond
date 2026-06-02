@@ -854,6 +854,93 @@ process.stdout.write(JSON.stringify({ compiled_dir: compiledDir, projections }))
 NODE
 }
 
+write_self_deploy_closure_files() {
+  local dir="$1"
+  local verdict="$2"
+  local smoke_status="$3"
+  local next_action="$4"
+  SELF_DEPLOY_RELEASE_DIR="$dir" \
+  SELF_DEPLOY_VERDICT="$verdict" \
+  SELF_DEPLOY_SMOKE_STATUS="$smoke_status" \
+  SELF_DEPLOY_NEXT_ACTION="$next_action" \
+  SELF_DEPLOY_ACTIVE_LINK="$ACTIVE_LINK" \
+  SELF_DEPLOY_PREVIOUS_ACTIVE="${PREVIOUS_ACTIVE:-}" \
+  SELF_DEPLOY_EXPECTED_ACTIVE_ROOT="${MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT:-$LAUNCHD_PROJECT_ROOT}" \
+  node <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+
+const dir = process.env.SELF_DEPLOY_RELEASE_DIR;
+const manifestPath = path.join(dir, 'release-manifest.json');
+const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+const now = new Date().toISOString();
+const verdict = process.env.SELF_DEPLOY_VERDICT || 'blocked';
+const smoke = process.env.SELF_DEPLOY_SMOKE_STATUS || 'unknown';
+const blockers = [];
+if (verdict !== 'success') blockers.push(`self_deploy_${verdict}`);
+if (smoke !== 'passed') blockers.push(`smoke_${smoke}`);
+
+const evidence = {
+  schema: 'missiond.release-evidence.v1',
+  authority: 'missiond-self-deploy',
+  deployment_intent: {
+    project: 'missiond',
+    service: 'missiond-daemon',
+    runtime_target: 'local-launchd',
+    change_class: 'missiond-self-update',
+    desired_commit: manifest.git_sha,
+    deployment_policy_hash: manifest.typed_lisp_runtime?.projections?.deploymentPolicy?.source_hash ?? null,
+  },
+  release_candidate: {
+    release_id: manifest.release_id,
+    git_sha: manifest.git_sha,
+    daemon_sha256: manifest.daemon_sha256,
+    mcp_sha256: manifest.mcp_sha256,
+    compiled_runtime_dir: manifest.compiled_runtime_dir,
+    compiled_abi_hash: manifest.typed_lisp_runtime?.projections?.v3?.source_hash ?? null,
+  },
+  release_lease: {
+    service: 'missiond-daemon',
+    runtime_target: 'local-launchd',
+    owner: 'scripts/deploy-daemon.sh',
+    expected_active_root: process.env.SELF_DEPLOY_EXPECTED_ACTIVE_ROOT || null,
+    active_link: process.env.SELF_DEPLOY_ACTIVE_LINK || null,
+    previous_active: process.env.SELF_DEPLOY_PREVIOUS_ACTIVE || null,
+    conflict_policy: 'fail-closed-project-root-guard',
+  },
+  runtime_observation: {
+    active_release_dir: dir,
+    launchd_project_root: manifest.launchd_project_root,
+    runtime_dir: manifest.runtime_dir,
+    compiled_runtime_dir: manifest.compiled_runtime_dir,
+    binary_marker: manifest.daemon_sha256,
+    mcp_marker: manifest.mcp_sha256,
+  },
+  smoke: { status: smoke },
+  secret_availability: { status: 'not_required' },
+  rollback_artifact_refs: process.env.SELF_DEPLOY_PREVIOUS_ACTIVE ? [process.env.SELF_DEPLOY_PREVIOUS_ACTIVE] : [],
+  created_at: now,
+};
+
+const closure = {
+  schema: 'missiond.closure-verdict.v1',
+  authority: 'missiond-self-deploy',
+  release_id: manifest.release_id,
+  project: 'missiond',
+  service: 'missiond-daemon',
+  verdict,
+  typed_diagnostics: blockers,
+  next_action: process.env.SELF_DEPLOY_NEXT_ACTION || null,
+  confidence: verdict === 'success' ? 'high' : 'partial',
+  evidence_ref: 'release-evidence.json',
+  created_at: now,
+};
+
+fs.writeFileSync(path.join(dir, 'release-evidence.json'), `${JSON.stringify(evidence, null, 2)}\n`);
+fs.writeFileSync(path.join(dir, 'closure-verdict.json'), `${JSON.stringify(closure, null, 2)}\n`);
+NODE
+}
+
 cleanup_old_releases() {
   local apply="$1"
   mkdir -p "$RELEASES_DIR"
@@ -1032,6 +1119,7 @@ xattr -d com.apple.quarantine "$CANDIDATE_DIR/bin/mission-mcp" 2>/dev/null || tr
 cat > "$CANDIDATE_DIR/release-manifest.json" <<EOF
 {"schema":"missiond.release-manifest.v1","release_id":"$RELEASE_ID","profile":"$PROFILE","git_sha":"$GIT_SHA","daemon_sha256":"$NEW_HASH","mcp_sha256":"$NEW_MCP_HASH","typed_lisp_runtime":$TYPED_LISP_RUNTIME_MANIFEST,"launchd_project_root":"$LAUNCHD_PROJECT_ROOT","runtime_dir":"$RUNTIME_DIR","compiled_runtime_dir":"$COMPILED_RUNTIME_DIR","created_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","source":"scripts/deploy-daemon.sh"}
 EOF
+write_self_deploy_closure_files "$CANDIDATE_DIR" "blocked" "pending" "complete pre-switch/post-switch smoke before closure"
 log "candidate: $CANDIDATE_DIR"
 
 log "pre-switch smoke: candidate MCP initialize"
@@ -1084,5 +1172,6 @@ CLEANUP_START="$(date +%s)"
 cleanup_old_releases 1
 cleanup_repo_runtime_cache
 record_timing "cleanup" "$CLEANUP_START"
+write_self_deploy_closure_files "$CANDIDATE_DIR" "success" "passed" "release closed"
 print_timing_summary
 log "deploy: done. active_release=$RELEASE_ID previous=${PREVIOUS_ACTIVE:-none}"

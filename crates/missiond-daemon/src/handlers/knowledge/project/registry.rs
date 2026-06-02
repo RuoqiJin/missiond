@@ -162,6 +162,13 @@ pub(super) async fn handle_status(state: &AppState, args: Value) -> Result<ToolR
         target_status
     };
 
+    let production_release = production_release_projection(
+        target
+            .as_ref()
+            .and_then(|target| target.project_id.as_deref()),
+        &runtime_status,
+    );
+
     Ok(ToolResult::json_pretty(&serde_json::json!({
         "ok": matches!(status, "not_requested" | "resolved" | "ambiguous"),
         "schema": "missiond.project-status.v1",
@@ -173,11 +180,7 @@ pub(super) async fn handle_status(state: &AppState, args: Value) -> Result<ToolR
         "compiledRuntime": compiled.runtime,
         "runtime_status": runtime_status,
         "activeRelease": missiond_active_release_status(),
-        "productionRelease": {
-            "authority": "deploy-center",
-            "status": "not_queried",
-            "reason": "MissionD project status reports identity and compiled policy state only; Deploy Center closure/provenance is the runtime release authority."
-        },
+        "productionRelease": production_release,
         "diagnostics": diagnostics,
     })))
 }
@@ -1120,16 +1123,49 @@ fn enrich_project_status_value(value: &mut Value) {
     let mut diagnostics = Vec::new();
     let compiled = load_resolution_universe(&mut diagnostics);
     value["compiledRuntime"] = compiled.runtime.clone();
-    value["runtime_status"] = compiled_runtime_status_from_projection(&compiled.runtime);
+    let runtime_status = compiled_runtime_status_from_projection(&compiled.runtime);
+    value["runtime_status"] = runtime_status.clone();
     value["activeRelease"] = missiond_active_release_status();
-    value["productionRelease"] = serde_json::json!({
-        "authority": "deploy-center",
-        "status": "not_queried",
-        "reason": "MissionD project get reports identity and compiled policy state only; Deploy Center closure/provenance is the runtime release authority."
-    });
+    value["productionRelease"] =
+        production_release_projection(value.get("id").and_then(Value::as_str), &runtime_status);
     if !diagnostics.is_empty() {
         value["diagnostics"] = Value::Array(diagnostics);
     }
+}
+
+fn production_release_projection(project_id: Option<&str>, runtime_status: &Value) -> Value {
+    let project = project_id.unwrap_or("");
+    let policy_hash = runtime_status
+        .get("policy_hash")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let closure_path = if project.is_empty() {
+        Value::Null
+    } else {
+        serde_json::json!(format!("/api/deploy/closure/{}", project))
+    };
+    let evidence_path = if project.is_empty() {
+        Value::Null
+    } else {
+        serde_json::json!("/api/deploy/evidence/:release_id")
+    };
+    serde_json::json!({
+        "authority": "deploy-center",
+        "runtimeFactAuthority": "deploy-center",
+        "closureAuthority": "ReleaseEvidence+ClosureVerdict",
+        "status": "not_queried",
+        "latestClosureVerdict": Value::Null,
+        "compiledDeploymentPolicyHash": policy_hash,
+        "closureApi": closure_path,
+        "evidenceApi": evidence_path,
+        "waitEvent": {
+            "domain": "system",
+            "kind": "closure_verdict",
+            "eventKind": "closure_verdict",
+            "projectId": if project.is_empty() { Value::Null } else { serde_json::json!(project) }
+        },
+        "reason": "MissionD reports identity and compiled policy state only; Deploy Center release evidence and closure verdict are the runtime release authority."
+    })
 }
 
 fn compiled_runtime_status_from_projection(compiled_runtime: &Value) -> Value {

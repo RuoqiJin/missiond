@@ -939,6 +939,7 @@ fn collect_skill_evidence(state: &AppState, filter: InfraEvidenceFilter) -> Vec<
         let Ok(content) = std::fs::read_to_string(&skill.path) else {
             continue;
         };
+        let skill_has_target_context = skill_content_has_query_target(&content, &filter);
         for (idx, line) in content.lines().enumerate() {
             if !is_infra_evidence_line(line) {
                 continue;
@@ -949,12 +950,25 @@ fn collect_skill_evidence(state: &AppState, filter: InfraEvidenceFilter) -> Vec<
                     continue;
                 }
             }
-            if !evidence_matches_scope(skill_name, &skill.path.display().to_string(), line, &filter)
-            {
+            let line_scoped = evidence_matches_scope(
+                skill_name,
+                &skill.path.display().to_string(),
+                line,
+                &filter,
+            );
+            let skill_context_scoped = !line_scoped
+                && skill_has_target_context
+                && skill_target_context_allows_deploy_closure_line(
+                    skill_name, line, &content, &filter,
+                );
+            if !line_scoped && !skill_context_scoped {
                 continue;
             }
-            let score =
+            let mut score =
                 evidence_scope_score(skill_name, &skill.path.display().to_string(), line, &filter);
+            if skill_context_scoped {
+                score += 6;
+            }
             let (excerpt, credential_risk) = redact_skill_evidence_line(line);
             candidates.push((
                 score,
@@ -966,6 +980,7 @@ fn collect_skill_evidence(state: &AppState, filter: InfraEvidenceFilter) -> Vec<
                     "confidence": evidence_confidence(line),
                     "promoteTo": evidence_promotion_target(line),
                     "credentialInlineRisk": credential_risk,
+                    "scopeMatch": if skill_context_scoped { "skill-target-context" } else { "line" },
                     "excerpt": excerpt
                 }),
             ));
@@ -1122,8 +1137,10 @@ fn query_has_specific_file_token_without_match(
     let Some(query) = filter.query.as_deref() else {
         return false;
     };
-    let specific_tokens: Vec<String> = evidence_query_tokens(query)
-        .into_iter()
+    let query_tokens = evidence_query_tokens(query);
+    let specific_tokens: Vec<&str> = query_tokens
+        .iter()
+        .map(String::as_str)
         .filter(|token| token.contains('.') || token.contains('/'))
         .collect();
     if specific_tokens.is_empty() {
@@ -1135,6 +1152,9 @@ fn query_has_specific_file_token_without_match(
         .iter()
         .any(|token| contains_evidence_token(&haystack, token))
     {
+        return false;
+    }
+    if line_matches_deploy_closure_sibling_evidence(line, &query_tokens) {
         return false;
     }
 
@@ -1152,6 +1172,158 @@ fn query_has_specific_file_token_without_match(
         .filter(|token| !token.contains('.') && !token.contains('/'))
         .filter(|token| token != project)
         .any(|token| contains_evidence_token(&line_haystack, &token))
+}
+
+fn line_matches_deploy_closure_sibling_evidence(line: &str, query_tokens: &[String]) -> bool {
+    let line_haystack = line.to_ascii_lowercase();
+    let target_tokens: Vec<&str> = query_tokens
+        .iter()
+        .map(String::as_str)
+        .filter(|token| is_known_project_evidence_token(token))
+        .collect();
+    if !target_tokens.is_empty()
+        && target_tokens
+            .iter()
+            .all(|token| !contains_evidence_token(&line_haystack, token))
+    {
+        return false;
+    }
+
+    let matched_anchor_count = query_tokens
+        .iter()
+        .filter(|token| is_deploy_closure_sibling_anchor_token(token))
+        .filter(|token| deploy_closure_sibling_anchor_matches(&line_haystack, token))
+        .count();
+    matched_anchor_count >= 2
+}
+
+fn skill_target_context_allows_deploy_closure_line(
+    skill_name: &str,
+    line: &str,
+    skill_content: &str,
+    filter: &InfraEvidenceFilter,
+) -> bool {
+    if filter
+        .target_id
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+        || filter
+            .skill
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+    {
+        return false;
+    }
+    if !is_deploy_skill_context_source(skill_name) {
+        return false;
+    }
+    if !skill_content_has_query_target(skill_content, filter) {
+        return false;
+    }
+    if line_mentions_unrequested_foreign_project(line, filter) {
+        return false;
+    }
+    let Some(query) = filter.query.as_deref() else {
+        return false;
+    };
+    if !deployment_closure_phrase_overlap(query, line) {
+        return false;
+    }
+    if is_known_project_evidence_token(skill_name) {
+        let skill_name_haystack = skill_name.to_ascii_lowercase();
+        let query_tokens = evidence_query_tokens(query);
+        if query_tokens
+            .iter()
+            .filter(|token| is_known_project_evidence_token(token))
+            .all(|token| !contains_evidence_token(&skill_name_haystack, token))
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_deploy_skill_context_source(skill_name: &str) -> bool {
+    matches!(
+        skill_name,
+        "deploy-ops"
+            | "backend-deploy"
+            | "deployment-troubleshoot"
+            | "xjp-deploy-agent"
+            | "xjp-deploy-center"
+            | "deploy-center"
+            | "xiaojinpro-backend"
+            | "sqlx-cache"
+            | "payments"
+    )
+}
+
+fn skill_content_has_query_target(content: &str, filter: &InfraEvidenceFilter) -> bool {
+    let Some(query) = filter.query.as_deref() else {
+        return false;
+    };
+    let target_tokens: Vec<String> = evidence_query_tokens(query)
+        .into_iter()
+        .filter(|token| is_known_project_evidence_token(token))
+        .collect();
+    if target_tokens.is_empty() {
+        return false;
+    }
+    let content_haystack = content.to_ascii_lowercase();
+    target_tokens
+        .iter()
+        .any(|token| contains_evidence_token(&content_haystack, token))
+}
+
+fn deployment_closure_phrase_overlap(query: &str, line: &str) -> bool {
+    let query_lower = query.to_ascii_lowercase();
+    let line_lower = line.to_ascii_lowercase();
+    [
+        &["service.manifest.toml", "manifest gate", "manifest"] as &[&str],
+        &["canary", "smoke", "healthcheck", "health check"],
+        &["migration", "sqlx migrate", "relation"],
+        &[
+            "old binary",
+            "binary",
+            "image marker",
+            "entrypoint",
+            "volume override",
+        ],
+    ]
+    .iter()
+    .any(|phrases| {
+        phrases.iter().any(|phrase| query_lower.contains(phrase))
+            && phrases.iter().any(|phrase| line_lower.contains(phrase))
+    })
+}
+
+fn is_deploy_closure_sibling_anchor_token(token: &str) -> bool {
+    matches!(
+        token,
+        "migration"
+            | "relation"
+            | "compose"
+            | "entrypoint"
+            | "binary"
+            | "marker"
+            | "volume"
+            | "volumes"
+    )
+}
+
+fn deploy_closure_sibling_anchor_matches(line_haystack: &str, token: &str) -> bool {
+    match token {
+        "migration" => {
+            contains_evidence_token(line_haystack, "migration")
+                || contains_evidence_token(line_haystack, "migrate")
+                || line_haystack.contains("sqlx migrate")
+        }
+        "volume" | "volumes" => {
+            contains_evidence_token(line_haystack, "volume")
+                || contains_evidence_token(line_haystack, "volumes")
+        }
+        other => contains_evidence_token(line_haystack, other),
+    }
 }
 
 fn evidence_scope_score(
@@ -1292,6 +1464,23 @@ fn is_infra_evidence_line(line: &str) -> bool {
         "tailscale",
         "harbor",
         "secret-store",
+        "service.manifest.toml",
+        "manifest gate",
+        "deploy center provenance",
+        "deploy-center provenance",
+        "canary",
+        "smoke",
+        "docker-compose",
+        "compose",
+        "entrypoint",
+        "old binary",
+        "binary",
+        "image marker",
+        "migration",
+        "sqlx migrate",
+        "relation",
+        "volume override",
+        "volumes",
     ]
     .iter()
     .any(|needle| lower.contains(needle))
@@ -1757,6 +1946,15 @@ fn known_project_evidence_tokens() -> &'static [&'static str] {
     &[
         "asr",
         "speechscribe",
+        "payments",
+        "xjp-payments",
+        "xjp_payments",
+        "xjp-router",
+        "xjp_router",
+        "xjp_auth",
+        "xjp-auth",
+        "xjp-backend",
+        "xjp_backend",
         "pcea",
         "pcea-video-vault",
         "tiermate",
@@ -1766,10 +1964,25 @@ fn known_project_evidence_tokens() -> &'static [&'static str] {
     ]
 }
 
+fn is_known_project_evidence_token(token: &str) -> bool {
+    known_project_evidence_tokens()
+        .iter()
+        .any(|known| *known == token)
+}
+
 fn is_deploy_drift_anchor_token(token: &str) -> bool {
     matches!(
         token,
-        "compose" | "entrypoint" | "binary" | "marker" | "volume" | "volumes"
+        "service.manifest.toml"
+            | "manifest"
+            | "migration"
+            | "relation"
+            | "compose"
+            | "entrypoint"
+            | "binary"
+            | "marker"
+            | "volume"
+            | "volumes"
     )
 }
 
@@ -1996,7 +2209,9 @@ fn maybe_push_skill_target(
 #[cfg(test)]
 mod tests {
     use super::{
-        credential_refs_filtered, evidence_matches_scope, evidence_scope_score, InfraEvidenceFilter,
+        credential_refs_filtered, evidence_matches_scope, evidence_scope_score,
+        is_infra_evidence_line, skill_target_context_allows_deploy_closure_line,
+        InfraEvidenceFilter,
     };
 
     #[test]
@@ -2050,6 +2265,87 @@ mod tests {
             "/Users/jinchen/.claude/skills/deploy-ops/SKILL.md",
             "Payments deploy-agent canary evidence and manifest gate notes",
             &filter,
+        ));
+        assert!(is_infra_evidence_line(
+            "Payments deploy-agent canary evidence and manifest gate notes"
+        ));
+
+        let manifest_filter = InfraEvidenceFilter {
+            target_id: None,
+            skill: None,
+            query: Some(
+                "payments Deploy Center canary service.manifest.toml migration relation payments already exists compose old binary image marker"
+                    .to_string(),
+            ),
+            project_id: Some("missiond".to_string()),
+            limit: 10,
+        };
+        let manifest_line = "Payments service.manifest.toml Manifest Gate canary smoke provenance";
+        let compose_line =
+            "Payments compose volume override kept the old binary image marker running after canary";
+        let migration_line = "sqlx migrate relation payments already exists during canary";
+        assert!(is_infra_evidence_line(manifest_line));
+        assert!(is_infra_evidence_line(compose_line));
+        assert!(is_infra_evidence_line(migration_line));
+        assert!(evidence_matches_scope(
+            "xjp-deploy-center",
+            "/Users/jinchen/.claude/skills/xjp-deploy-center/SKILL.md",
+            manifest_line,
+            &manifest_filter,
+        ));
+        assert!(evidence_matches_scope(
+            "deploy-ops",
+            "/Users/jinchen/.claude/skills/deploy-ops/SKILL.md",
+            compose_line,
+            &manifest_filter,
+        ));
+        assert!(evidence_matches_scope(
+            "sqlx-cache",
+            "/Users/jinchen/.claude/skills/sqlx-cache/SKILL.md",
+            migration_line,
+            &manifest_filter,
+        ));
+        assert!(!evidence_matches_scope(
+            "palm-era",
+            "/Users/jinchen/.claude/skills/palm-era/SKILL.md",
+            "sqlx migrate relation already exists during canary",
+            &manifest_filter,
+        ));
+        assert!(!evidence_matches_scope(
+            "xjp-deploy-agent",
+            "/Users/jinchen/.claude/skills/xjp-deploy-agent/SKILL.md",
+            "deploy.sh runs migrations before docker compose up",
+            &manifest_filter,
+        ));
+        assert!(skill_target_context_allows_deploy_closure_line(
+            "deploy-ops",
+            "CI green only means the image built; Deploy Center canary and smoke decide CD truth",
+            "Payments has an independent Cargo.lock and is deployed through Deploy Center.",
+            &manifest_filter,
+        ));
+        assert!(!skill_target_context_allows_deploy_closure_line(
+            "deploy-ops",
+            "/opt/xiaojinpro/docker-compose.yml -- monolith, router, payments, investor-panel",
+            "Payments has an independent Cargo.lock and is deployed through Deploy Center.",
+            &manifest_filter,
+        ));
+        assert!(!skill_target_context_allows_deploy_closure_line(
+            "independent-app-bootstrap",
+            "Keep ALTER migrations idempotent: ALTER TABLE ... ADD COLUMN IF NOT EXISTS.",
+            "Payments appears here only as generic app bootstrap documentation.",
+            &manifest_filter,
+        ));
+        assert!(!skill_target_context_allows_deploy_closure_line(
+            "palm-era",
+            "sqlx migrate relation already exists during canary",
+            "Palm Era deploy notes without the requested service target.",
+            &manifest_filter,
+        ));
+        assert!(!skill_target_context_allows_deploy_closure_line(
+            "deploy-ops",
+            "xjp-router canary wait can fail while the service is already listening",
+            "Payments has an independent Cargo.lock and is deployed through Deploy Center.",
+            &manifest_filter,
         ));
 
         let deploy_runtime_filter = InfraEvidenceFilter {

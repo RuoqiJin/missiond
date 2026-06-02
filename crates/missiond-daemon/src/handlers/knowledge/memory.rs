@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
-use missiond_mcp::tools::{ToolError, ToolResult};
+use missiond_core::types::{EvidenceSearchInput, KBRememberInput, KnowledgeReviewInput};
+use missiond_mcp::tools::{ToolContent, ToolError, ToolResult};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -103,6 +104,15 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             "query" => handle_inner(state, "mission_memory_query", args).await,
             "remember" => handle_inner(state, "mission_memory_remember", args).await,
             "review" => handle_inner(state, "mission_memory_review", args).await,
+            "evidence_search" | "evidence-search" => {
+                handle_inner(state, "mission_memory_evidence_search", args).await
+            }
+            "evidence_promote" | "evidence-promote" => {
+                handle_inner(state, "mission_memory_evidence_promote", args).await
+            }
+            "evidence_backfill" | "evidence-backfill" => {
+                handle_inner(state, "mission_memory_evidence_backfill", args).await
+            }
             "pending" => handle_inner(state, "mission_memory_pending", args).await,
             "pause" => handle_inner(state, "mission_memory_pause", args).await,
             "token_stats" => {
@@ -196,6 +206,50 @@ fn get_usize_any(value: &Value, keys: &[&str]) -> Option<usize> {
             .and_then(|v| v.as_u64())
             .and_then(|n| usize::try_from(n).ok())
     })
+}
+
+fn get_i64_any(value: &Value, keys: &[&str]) -> Option<i64> {
+    keys.iter().find_map(|key| {
+        value.get(*key).and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_u64().and_then(|n| i64::try_from(n).ok()))
+        })
+    })
+}
+
+fn get_string_list_any(value: &Value, keys: &[&str]) -> Vec<String> {
+    keys.iter()
+        .find_map(|key| value.get(*key))
+        .and_then(|field| match field {
+            Value::Array(items) => Some(
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>(),
+            ),
+            Value::String(text) => Some(
+                text.split(',')
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+fn tool_result_to_value(result: &ToolResult) -> Value {
+    result
+        .content
+        .first()
+        .and_then(|content| match content {
+            ToolContent::Text { text } => serde_json::from_str(text).ok(),
+        })
+        .unwrap_or_else(|| json!({"content": result.content}))
 }
 
 fn provider_scope_from_args(args: &Value) -> Value {
@@ -446,6 +500,356 @@ async fn handle_provider_review(state: &AppState, args: Value) -> Result<ToolRes
     }
 }
 
+fn provider_evidence_search_payload(args: &Value) -> Value {
+    json!({
+        "scope": provider_scope_from_args(args),
+        "query": get_string_any(args, &["query"]).unwrap_or_default(),
+        "allowed_lanes": get_string_list_any(args, &["allowed_lanes", "allowedLanes", "lanes"]),
+        "project_id": get_string_any(args, &["project", "projectId", "project_id"]),
+        "task_id": get_string_any(args, &["taskId", "task_id"]),
+        "include_global": get_bool_any(args, &["include_global", "includeGlobal"]).unwrap_or(true),
+        "limit": get_usize_any(args, &["limit"]).unwrap_or(20).clamp(1, 100),
+    })
+}
+
+async fn handle_provider_evidence_search(state: &AppState, args: Value) -> Result<ToolResult> {
+    match MemoryProviderSelection::from_env() {
+        MemoryProviderSelection::XjpMemory { base_url, token } => {
+            call_xjp_memory(
+                state,
+                &base_url,
+                token.as_deref(),
+                reqwest::Method::POST,
+                "/v1/memory/evidence/search",
+                Some(provider_evidence_search_payload(&args)),
+            )
+            .await
+        }
+        MemoryProviderSelection::LocalPostgresCompatibility => {
+            let input = EvidenceSearchInput {
+                query: get_string_any(&args, &["query"]).unwrap_or_default().to_string(),
+                allowed_lanes: get_string_list_any(&args, &["allowed_lanes", "allowedLanes", "lanes"]),
+                project_id: get_string_any(&args, &["project", "projectId", "project_id"])
+                    .map(ToOwned::to_owned),
+                task_id: get_string_any(&args, &["taskId", "task_id"]).map(ToOwned::to_owned),
+                include_global: get_bool_any(&args, &["include_global", "includeGlobal"])
+                    .unwrap_or(true),
+                limit: get_i64_any(&args, &["limit"]).unwrap_or(20).clamp(1, 100),
+            };
+            let items = state
+                .store
+                .search_evidence_items(&input)
+                .await
+                .map_err(|e| anyhow!("DB error: {}", e))?;
+            Ok(ToolResult::json_pretty(&json!({
+                "ok": true,
+                "schema": "missiond.memory-evidence-search.v1",
+                "provider": "local-postgres-memory",
+                "filter_before_vector": true,
+                "query": input.query,
+                "allowed_lanes": input.allowed_lanes,
+                "project_id": input.project_id,
+                "task_id": input.task_id,
+                "include_global": input.include_global,
+                "count": items.len(),
+                "items": items,
+            })))
+        }
+        MemoryProviderSelection::NullMemory => Ok(ToolResult::structured_error(
+            ToolError::new(
+                "MEMORY_PROVIDER_DISABLED",
+                "mission_memory evidence_search requires a configured memory provider.",
+            )
+            .with_suggestion(format!(
+                "Set {MEMORY_PROVIDER_URL_ENV}=https://.../xjp-memory or {MEMORY_PROVIDER_MODE_ENV}=local-postgres for compatibility."
+            )),
+        )),
+    }
+}
+
+fn promotion_bound_present(args: &Value) -> bool {
+    get_string_any(
+        args,
+        &[
+            "ttl",
+            "ttlDays",
+            "valid_until",
+            "validUntil",
+            "version_bound",
+            "versionBound",
+            "release_id",
+            "releaseId",
+            "commit",
+            "commit_sha",
+            "commitSha",
+        ],
+    )
+    .is_some()
+        || args.get("ttl_days").and_then(Value::as_i64).is_some()
+}
+
+fn evidence_promotion_requires_bound(summary: &str, category: &str) -> bool {
+    let text = format!("{summary} {category}").to_ascii_lowercase();
+    [
+        "deploy",
+        "deployment",
+        "release",
+        "runtime",
+        "config",
+        "dependency",
+        "migration",
+        "database",
+        "image",
+        "compose",
+        "workflow",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+}
+
+fn default_promotion_category(lane_id: &str) -> &'static str {
+    match lane_id {
+        "conversation_audit" => "memory:conversation-evidence",
+        "skill_evidence" => "memory:skill-evidence",
+        "support_refs" => "memory:support-reference",
+        _ => "memory:evidence",
+    }
+}
+
+async fn handle_provider_evidence_promote(state: &AppState, args: Value) -> Result<ToolResult> {
+    match MemoryProviderSelection::from_env() {
+        MemoryProviderSelection::XjpMemory { base_url, token } => {
+            call_xjp_memory(
+                state,
+                &base_url,
+                token.as_deref(),
+                reqwest::Method::POST,
+                "/v1/memory/evidence/promote",
+                Some(args),
+            )
+            .await
+        }
+        MemoryProviderSelection::LocalPostgresCompatibility => {
+            let evidence_id = get_string_any(&args, &["evidence_id", "evidenceId", "id"])
+                .ok_or_else(|| anyhow!("evidence_promote requires evidence_id"))?;
+            let evidence = state
+                .store
+                .get_evidence_item(evidence_id)
+                .await
+                .map_err(|e| anyhow!("DB error: {}", e))?
+                .ok_or_else(|| anyhow!("evidence item not found: {evidence_id}"))?;
+
+            if matches!(evidence.lane_id.as_str(), "runtime_truth" | "project_ssot") {
+                return Ok(ToolResult::structured_error(
+                    ToolError::new(
+                        "EVIDENCE_PROMOTION_NOT_ALLOWED",
+                        "runtime_truth and project_ssot are already authoritative lanes and must not be promoted into KB truth.",
+                    )
+                    .with_suggestion(
+                        "Reference the evidence item directly, or promote only reviewed KB/conversation/skill/support evidence.",
+                    ),
+                ));
+            }
+
+            let category = get_string_any(&args, &["category"])
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| default_promotion_category(&evidence.lane_id).to_string());
+            let key = get_string_any(&args, &["key"])
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| format!("promoted:{}:{}", evidence.lane_id, evidence.id));
+            let summary = get_string_any(&args, &["summary", "text", "content"])
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| evidence.summary.clone());
+
+            if evidence_promotion_requires_bound(&summary, &category)
+                && !promotion_bound_present(&args)
+            {
+                return Ok(ToolResult::structured_error(
+                    ToolError::new(
+                        "EVIDENCE_PROMOTION_BOUND_REQUIRED",
+                        "Deployment/config/dependency evidence must include ttl, valid_until, version_bound, release_id, or commit before promotion.",
+                    )
+                    .with_suggestion(
+                        "Retry with ttlDays, validUntil, versionBound, releaseId, or commitSha.",
+                    ),
+                ));
+            }
+
+            let detail = json!({
+                "schema": "missiond.promoted-evidence-detail.v1",
+                "source": "mission_memory.evidence_promote",
+                "promotion": {
+                    "ttl": get_string_any(&args, &["ttl"]),
+                    "ttl_days": args.get("ttlDays").or_else(|| args.get("ttl_days")).cloned(),
+                    "valid_until": get_string_any(&args, &["validUntil", "valid_until"]),
+                    "version_bound": get_string_any(&args, &["versionBound", "version_bound"]),
+                    "release_id": get_string_any(&args, &["releaseId", "release_id"]),
+                    "commit": get_string_any(&args, &["commit", "commitSha", "commit_sha"]),
+                },
+                "evidence_item": evidence,
+                "extra_detail": args.get("detail").cloned().unwrap_or(Value::Null),
+            });
+            let remember = state
+                .store
+                .kb_remember(&KBRememberInput {
+                    category,
+                    key,
+                    summary,
+                    detail: Some(detail),
+                    source: Some("evidence_lane_promotion".to_string()),
+                    confidence: Some(args.get("confidence").and_then(Value::as_f64).unwrap_or(0.8)),
+                    project_id: get_string_any(&args, &["project", "projectId", "project_id"])
+                        .map(ToOwned::to_owned)
+                        .or_else(|| evidence.project_id.clone()),
+                })
+                .await
+                .map_err(|e| anyhow!("DB error: {}", e))?;
+
+            let review = state
+                .store
+                .kb_review_upsert(&KnowledgeReviewInput {
+                    knowledge_id: remember.entry.id.clone(),
+                    state: "active".to_string(),
+                    batch_id: get_string_any(&args, &["batchId", "batch_id"])
+                        .unwrap_or("evidence-promotion")
+                        .to_string(),
+                    reviewer: get_string_any(&args, &["reviewer"])
+                        .unwrap_or("mission_memory.evidence_promote")
+                        .to_string(),
+                    rationale: get_string_any(&args, &["rationale"])
+                        .unwrap_or("Promoted reviewed compact evidence item into active KB with provenance.")
+                        .to_string(),
+                    evidence_refs: json!({
+                        "evidence_item_id": evidence_id,
+                        "lane_id": remember.entry.detail.as_ref()
+                            .and_then(|detail| detail.get("evidence_item"))
+                            .and_then(|item| item.get("laneId").or_else(|| item.get("lane_id")))
+                            .cloned()
+                            .unwrap_or(Value::Null),
+                        "source": "mission_memory.evidence_promote",
+                    }),
+                    superseded_by: None,
+                    confidence: args.get("reviewConfidence")
+                        .or_else(|| args.get("review_confidence"))
+                        .and_then(Value::as_f64)
+                        .unwrap_or(0.8),
+                    applied_at: None,
+                })
+                .await
+                .map_err(|e| anyhow!("DB error: {}", e))?;
+
+            Ok(ToolResult::json_pretty(&json!({
+                "ok": true,
+                "schema": "missiond.memory-evidence-promotion.v1",
+                "provider": "local-postgres-memory",
+                "promotion": {
+                    "evidence_id": evidence_id,
+                    "knowledge_id": remember.entry.id,
+                    "action": remember.action,
+                    "review_state": review.state,
+                    "non_destructive": true,
+                },
+                "knowledge": remember.entry,
+                "review": review,
+            })))
+        }
+        MemoryProviderSelection::NullMemory => Ok(ToolResult::structured_error(
+            ToolError::new(
+                "MEMORY_PROVIDER_DISABLED",
+                "mission_memory evidence_promote requires a configured memory provider.",
+            )
+            .with_suggestion(format!(
+                "Set {MEMORY_PROVIDER_URL_ENV}=https://.../xjp-memory or {MEMORY_PROVIDER_MODE_ENV}=local-postgres for compatibility."
+            )),
+        )),
+    }
+}
+
+async fn handle_provider_evidence_backfill(state: &AppState, args: Value) -> Result<ToolResult> {
+    match MemoryProviderSelection::from_env() {
+        MemoryProviderSelection::XjpMemory { base_url, token } => {
+            call_xjp_memory(
+                state,
+                &base_url,
+                token.as_deref(),
+                reqwest::Method::POST,
+                "/v1/memory/evidence/backfill",
+                Some(args),
+            )
+            .await
+        }
+        MemoryProviderSelection::LocalPostgresCompatibility => {
+            let source = get_string_any(&args, &["source", "sourceType", "source_type"])
+                .unwrap_or("conversation");
+            let limit = get_i64_any(&args, &["limit"]).unwrap_or(100).clamp(1, 500);
+            let mut results = serde_json::Map::new();
+            if matches!(source, "conversation" | "conversations" | "all") {
+                let count = state
+                    .store
+                    .backfill_conversation_evidence_items(limit)
+                    .await
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+                results.insert(
+                    "conversation".to_string(),
+                    json!({
+                        "evidence_items_written": count,
+                        "raw_deleted": false,
+                        "raw_layer": "conversation_messages",
+                    }),
+                );
+            }
+            if matches!(source, "skill" | "skills" | "all") {
+                let query = get_string_any(&args, &["query"])
+                    .unwrap_or("deploy rollback migration smoke health credential database service");
+                let context_result = super::context_gather::handle(
+                    state,
+                    "mission_context_gather",
+                    json!({
+                        "query": query,
+                        "project": get_string_any(&args, &["project", "projectId", "project_id"]),
+                        "source_profile": "deploy_ops",
+                        "include_skill": true,
+                        "include_infra": true,
+                        "include_credentials": false,
+                        "include_raw_sources": false,
+                        "persist": true,
+                        "limit": limit.min(25),
+                    }),
+                )
+                .await?;
+                let context_payload = tool_result_to_value(&context_result);
+                results.insert(
+                    "skill".to_string(),
+                    json!({
+                        "context_gather_persisted": true,
+                        "evidence_lane_persistence": context_payload.get("evidence_lane_persistence").cloned().unwrap_or(Value::Null),
+                        "raw_deleted": false,
+                        "raw_layer": "skill files and infra support refs",
+                    }),
+                );
+            }
+            Ok(ToolResult::json_pretty(&json!({
+                "ok": true,
+                "schema": "missiond.memory-evidence-backfill.v1",
+                "provider": "local-postgres-memory",
+                "source": source,
+                "limit": limit,
+                "results": results,
+                "non_destructive": true,
+            })))
+        }
+        MemoryProviderSelection::NullMemory => Ok(ToolResult::structured_error(
+            ToolError::new(
+                "MEMORY_PROVIDER_DISABLED",
+                "mission_memory evidence_backfill requires a configured memory provider.",
+            )
+            .with_suggestion(format!(
+                "Set {MEMORY_PROVIDER_URL_ENV}=https://.../xjp-memory or {MEMORY_PROVIDER_MODE_ENV}=local-postgres for compatibility."
+            )),
+        )),
+    }
+}
+
 fn load_memory_kb_config() -> Result<MemoryKbRuntimeConfig> {
     MemoryKbRuntimeConfig::load_for_current_dir()
         .map_err(|err| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", err))
@@ -458,6 +862,9 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
         "mission_memory_query" => handle_provider_query(state, args).await,
         "mission_memory_remember" => handle_provider_remember(state, args).await,
         "mission_memory_review" => handle_provider_review(state, args).await,
+        "mission_memory_evidence_search" => handle_provider_evidence_search(state, args).await,
+        "mission_memory_evidence_promote" => handle_provider_evidence_promote(state, args).await,
+        "mission_memory_evidence_backfill" => handle_provider_evidence_backfill(state, args).await,
 
         // ===== Memory Extraction =====
         // Message-level pipeline tracking: returns pending messages with IDs.
@@ -829,7 +1236,11 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_memory_input_noise, provider_query_payload, provider_remember_payload};
+    use super::{
+        classify_memory_input_noise, evidence_promotion_requires_bound, get_string_list_any,
+        promotion_bound_present, provider_evidence_search_payload, provider_query_payload,
+        provider_remember_payload,
+    };
     use serde_json::json;
 
     #[test]
@@ -907,5 +1318,44 @@ mod tests {
         assert_eq!(payload["scope"]["universe_id"], "xjp");
 
         assert!(provider_remember_payload(&json!({"tags": []})).is_err());
+    }
+
+    #[test]
+    fn evidence_search_payload_normalizes_lane_allowlist() {
+        let payload = provider_evidence_search_payload(&json!({
+            "query": "payments migration",
+            "allowedLanes": ["project_ssot", "reviewed_kb"],
+            "projectId": "payments",
+            "limit": 200
+        }));
+        assert_eq!(payload["query"], "payments migration");
+        assert_eq!(payload["allowed_lanes"][0], "project_ssot");
+        assert_eq!(payload["project_id"], "payments");
+        assert_eq!(payload["limit"], 100);
+
+        let lanes =
+            get_string_list_any(&json!({"lanes": "runtime_truth, support_refs"}), &["lanes"]);
+        assert_eq!(lanes, vec!["runtime_truth", "support_refs"]);
+    }
+
+    #[test]
+    fn evidence_promotion_requires_bounds_for_deploy_config_dependency_facts() {
+        assert!(evidence_promotion_requires_bound(
+            "Payments deploy image changed",
+            "memory:skill-evidence"
+        ));
+        assert!(evidence_promotion_requires_bound(
+            "DB migration namespace points at billing",
+            "memory:support-reference"
+        ));
+        assert!(!evidence_promotion_requires_bound(
+            "User prefers concise final answers",
+            "memory:conversation-evidence"
+        ));
+        assert!(!promotion_bound_present(&json!({"rationale": "reviewed"})));
+        assert!(promotion_bound_present(
+            &json!({"versionBound": "release-2026-06-02"})
+        ));
+        assert!(promotion_bound_present(&json!({"ttl_days": 14})));
     }
 }

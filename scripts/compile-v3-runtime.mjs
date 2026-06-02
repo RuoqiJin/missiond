@@ -437,10 +437,21 @@ function buildDeploymentPolicy(universeJson) {
     const environment = stringOrNull(service?.environment) ?? 'unknown';
     const strict = environment === 'production' || maturity === 'M5' || maturity === 'M6';
     const deployment = deploymentByService.get(serviceId) ?? {};
+    const substrate = stringOrNull(deployment.substrate);
+    const runtimeTarget = stringOrNull(deployment.runtime_target ?? deployment.runtimeTarget);
+    const artifactLane = deployment.artifact_delivery_lane
+      ?? deployment.artifactDeliveryLane
+      ?? deployment.artifact_lane
+      ?? deployment.artifactLane
+      ?? defaultArtifactLaneForDeployment(deployment, strict);
+    const targetSideBuildAllowed = deployment.target_side_build_allowed
+      ?? deployment.targetSideBuildAllowed
+      ?? defaultTargetSideBuildAllowed(deployment, strict);
     rows.push({
       project_id: projectId,
       service_id: serviceId,
       deploy_center_slug: deployment.dc_slug ?? (deployment.substrate === 'deploy-center' ? serviceId : null),
+      runtime_target: runtimeTarget,
       domains: stringArray(service?.domains),
       aliases: stringArray(project?.aliases),
       maturity,
@@ -450,6 +461,21 @@ function buildDeploymentPolicy(universeJson) {
       runtime_digest_required: strict,
       smoke_required: strict,
       db_adoption_required: serviceId.includes('payments') || projectId.includes('payments'),
+      release_lease_required: strict,
+      artifact_lane: artifactLane,
+      target_side_build_allowed: targetSideBuildAllowed,
+      approval_policy: strict ? 'deploy-center-policy-or-explicit-board-approval' : 'project-policy',
+      runtime_fact_authority: 'deploy-center',
+      closure_authority: 'deploy-center-release-evidence',
+      diagnostic_profiles: strict
+        ? ['deploy_provenance_snapshot', 'container_inventory', 'dependency_manifest_scan', 'supply_chain_ioc_scan']
+        : ['deploy_provenance_snapshot'],
+      closure_required_fields: strict
+        ? ['ReleaseLease', 'RuntimeObservation', 'ReleaseEvidence', 'ClosureVerdict']
+        : ['ReleaseEvidence', 'ClosureVerdict'],
+      fail_closed_blockers: strict
+        ? failClosedBlockersFor({ serviceId, projectId, deployment, runtimeTarget, substrate })
+        : [],
     });
   }
 
@@ -467,13 +493,71 @@ function buildDeploymentPolicy(universeJson) {
           immutable_image_required: true,
           runtime_digest_required: true,
           smoke_required: true,
+          release_lease_required: true,
+          target_side_build_allowed: false,
+          approval_policy: 'deploy-center-policy-or-explicit-board-approval',
+          diagnostic_profiles: ['deploy_provenance_snapshot', 'container_inventory', 'dependency_manifest_scan', 'supply_chain_ioc_scan'],
         },
       },
+      closure_state_machine: [
+        'classify_change',
+        'preflight',
+        'build_candidate',
+        'acquire_release_lease',
+        'deploy',
+        'runtime_observe',
+        'deep_smoke',
+        'closure_verdict',
+        'release_or_rollback',
+      ],
+      closure_verdicts: ['success', 'failed', 'blocked', 'stale', 'provenance_partial'],
+      typed_diagnostics: [
+        'reported_digest_missing',
+        'runtime_digest_mismatch',
+        'provenance_partial',
+        'db_adoption_required',
+        'abi_freshness_mismatch',
+        'release_lease_conflict',
+        'deployment_lane_mismatch',
+        'deploy_blocked_by_secret_store',
+      ],
       policies: rows,
       source_units: Array.isArray(payload.source_units) ? payload.source_units : [],
       source_domains: Array.isArray(payload.source_domains) ? payload.source_domains : [],
     },
   };
+}
+
+function defaultArtifactLaneForDeployment(deployment, strict) {
+  const substrate = stringOrNull(deployment?.substrate);
+  const runtimeTarget = stringOrNull(deployment?.runtime_target ?? deployment?.runtimeTarget);
+  if (deployment?.artifact_lanes && Array.isArray(deployment.artifact_lanes) && deployment.artifact_lanes.length > 0) {
+    return deployment.artifact_lanes[0];
+  }
+  if (deployment?.artifact_lane || deployment?.artifactLane) return deployment.artifact_lane ?? deployment.artifactLane;
+  if (substrate === 'deploy-center') return 'cloud-registry-lane';
+  if (substrate === 'vercel') return 'vercel-build-lane';
+  if (runtimeTarget === 'ecs-pcea') return 'cn-oss-bundle-lane';
+  if (runtimeTarget === 'gcp-runtime') return 'cloud-registry-lane';
+  return strict ? 'deploy-center-required-lane' : 'project-defined-lane';
+}
+
+function defaultTargetSideBuildAllowed(deployment, strict) {
+  const lane = defaultArtifactLaneForDeployment(deployment, strict);
+  if (lane === 'macmini-codebase-local-build-lane') return true;
+  if (lane === 'manual-break-glass-lane') return false;
+  return !strict;
+}
+
+function failClosedBlockersFor({ serviceId, projectId, deployment, runtimeTarget, substrate }) {
+  const blockers = [];
+  const deployCenterSlug = deployment?.dc_slug ?? (substrate === 'deploy-center' ? serviceId : null);
+  if (substrate === 'deploy-center' && !deployCenterSlug) blockers.push('deploy_center_slug_missing');
+  if ((substrate === 'deploy-center' || substrate === 'gcp-vm' || substrate === 'aliyun-ecs') && !runtimeTarget) {
+    blockers.push('runtime_target_missing');
+  }
+  if (serviceId.includes('payments') || projectId.includes('payments')) blockers.push('db_adoption_plan_required');
+  return blockers;
 }
 
 function readProjectMaturityMap() {

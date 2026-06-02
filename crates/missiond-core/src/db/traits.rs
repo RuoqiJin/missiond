@@ -909,6 +909,12 @@ pub trait KbStore: Send + Sync {
 
 #[async_trait]
 pub trait EvidenceLaneStore: Send + Sync {
+    async fn get_evidence_item(&self, id: &str) -> DbResult<Option<EvidenceItemInput>>;
+    async fn search_evidence_items(
+        &self,
+        input: &EvidenceSearchInput,
+    ) -> DbResult<Vec<EvidenceItemInput>>;
+    async fn backfill_conversation_evidence_items(&self, limit: i64) -> DbResult<usize>;
     async fn upsert_evidence_items(&self, items: &[EvidenceItemInput]) -> DbResult<usize>;
     async fn record_context_gather_run(&self, run: &ContextGatherRunInput) -> DbResult<()>;
 }

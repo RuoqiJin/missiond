@@ -76,13 +76,13 @@
        (provider local-postgres-memory
          :kind local-postgres
          :use-case single-user-dev-compatible
-         :capabilities [query remember review-overlay conversation-ingest skill-evidence export purge]
+         :capabilities [query remember review-overlay evidence-search evidence-promotion evidence-backfill conversation-ingest skill-evidence export purge]
          :data-owner "local MissionD database compatibility tables"
          :rule "Current MissionD KB/conversation tables are a compatibility provider implementation, not the permanent MissionD Core memory model.")
        (provider xjp-memory
          :kind remote-service
          :use-case private-multi-universe
-         :capabilities [query remember review-overlay conversation-ingest skill-evidence fts embedding rerank context-pack export purge]
+         :capabilities [query remember review-overlay evidence-search evidence-promotion evidence-backfill conversation-ingest skill-evidence fts embedding rerank context-pack export purge]
          :runtime-env [MISSIOND_MEMORY_PROVIDER_URL MISSIOND_MEMORY_PROVIDER_TOKEN]
          :embedding-provider xjp-router
          :rerank-provider xjp-router
@@ -120,6 +120,25 @@
                 (step s2 :logic "exclude superseded/historical/duplicate/stale/delete-candidate/needs-human from default retrieval")
                 (step s3 :logic "keep original evidence available with include_archived=true or state_filter"))
          :egress [review-overlay-state])
+       (function memory-evidence-search-contract
+         :entry [mission_memory.evidence_search mission_context_gather]
+         :core ((step s1 :logic "resolve scope and profile before retrieval")
+                (step s2 :logic "filter allowed evidence lanes before FTS/vector/rerank")
+                (step s3 :logic "return compact EvidenceItem projections with provenance and raw_policy"))
+         :egress [evidence_items])
+       (function memory-evidence-promotion-contract
+         :entry [mission_memory.evidence_promote memory-review-batch-runner]
+         :core ((step s1 :logic "load compact evidence item by id")
+                (step s2 :logic "reject runtime_truth/project_ssot promotion because those lanes are already authoritative")
+                (step s3 :logic "require TTL/version/release/commit bound for deploy/config/dependency facts")
+                (step s4 :logic "write KB only through remember plus active knowledge_review_state evidence overlay"))
+         :egress [knowledge knowledge_review_state])
+       (function memory-evidence-backfill-contract
+         :entry [mission_memory.evidence_backfill maintenance-worker]
+         :core ((step s1 :logic "summarize raw conversations into conversation_episodes/conversation_fact_extracts without deleting conversation_messages")
+                (step s2 :logic "index skill/support evidence through compact evidence_items and skill_evidence_items projections")
+                (step s3 :logic "mark conversation/skill derived facts needs_review until explicit promotion"))
+         :egress [conversation_episodes conversation_fact_extracts skill_evidence_items evidence_items])
        (function memory-context-injection-policy
          :entry [resident-master context-pack-builder worker-brief]
          :core ((step s1 :logic "default to no KB prefetch")
@@ -212,14 +231,14 @@
       :promotion-rules [never-default no-auto-promotion])
     (lane support_refs
       :authority-class redacted_support_catalog
-      :source-types [support_catalog deploy_center_service github_workflow service_manifest db_migration_namespace health_endpoint smoke_endpoint agent_ref secret_ref]
+      :source-types [support_catalog deployment_closure_policy deploy_center_service github_workflow service_manifest db_migration_namespace health_endpoint smoke_endpoint release_lease runtime_observation release_evidence closure_verdict agent_ref secret_ref]
       :default-profiles [intent_default deploy_ops conversation_audit full_debug]
       :raw-policy secret_refs_only
       :privacy-class reference
       :validity [current_reference project_specific]
       :freshness runtime_or_catalog_bound
       :injectable-by-default true
-      :promotion-rules [secret-values-never-indexed provenance-required])
+      :promotion-rules [secret-values-never-indexed provenance-required deploy-closure-verdict-required])
     :profiles
       ((profile intent_default
          :allowed-lanes [runtime_truth project_ssot reviewed_kb active_board support_refs]

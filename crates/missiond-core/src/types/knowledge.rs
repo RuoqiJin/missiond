@@ -204,6 +204,27 @@ pub struct EvidenceItemInput {
     pub metadata: serde_json::Value,
 }
 
+/// Query contract for lane-first compact evidence retrieval.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvidenceSearchInput {
+    pub query: String,
+    #[serde(default)]
+    pub allowed_lanes: Vec<String>,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub task_id: Option<String>,
+    #[serde(default)]
+    pub include_global: bool,
+    #[serde(default = "default_evidence_search_limit")]
+    pub limit: i64,
+}
+
+fn default_evidence_search_limit() -> i64 {
+    12
+}
+
 /// Persistent metric row for one mission_context_gather call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

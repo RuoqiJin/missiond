@@ -6,6 +6,8 @@ use crate::db::shared::{contains_sensitive_data, infer_kb_type, token_jaccard_si
 use crate::db::traits::{EvidenceLaneStore, KbStore};
 use crate::types::*;
 use async_trait::async_trait;
+#[cfg(feature = "postgres")]
+use sqlx::Row;
 use std::collections::HashMap;
 
 /// Helper: convert a sqlx Row into KnowledgeEntry.
@@ -222,6 +224,145 @@ fn review_row_to_state(r: KnowledgeReviewRow) -> KnowledgeReviewState {
         applied_at: r.10,
         is_current: r.11,
     }
+}
+
+#[cfg(feature = "postgres")]
+fn evidence_item_from_row(row: &sqlx::postgres::PgRow) -> Result<EvidenceItemInput, sqlx::Error> {
+    Ok(EvidenceItemInput {
+        id: row.try_get("id")?,
+        lane_id: row.try_get("lane_id")?,
+        source_type: row.try_get("source_type")?,
+        source_id: row.try_get("source_id")?,
+        source_ref: row.try_get("source_ref")?,
+        project_id: row.try_get("project_id")?,
+        task_id: row.try_get("task_id")?,
+        title: row.try_get("title")?,
+        summary: row.try_get("summary")?,
+        authority_class: row.try_get("authority_class")?,
+        validity: row.try_get("validity")?,
+        privacy_class: row.try_get("privacy_class")?,
+        freshness: row.try_get("freshness")?,
+        score: row.try_get("score")?,
+        raw_policy: row.try_get("raw_policy")?,
+        evidence_refs: row.try_get("evidence_refs")?,
+        metadata: row.try_get("metadata")?,
+    })
+}
+
+fn is_skill_evidence_projection(item: &EvidenceItemInput) -> bool {
+    item.lane_id == "skill_evidence" || item.source_type == "skill_credential_ref"
+}
+
+fn skill_evidence_item_type(source_type: &str) -> &'static str {
+    match source_type {
+        "skill_procedure" => "procedure",
+        "skill_operational_fact" | "infra_evidence" => "operational_fact",
+        "skill_warning" => "warning",
+        "skill_credential_ref" => "credential_ref",
+        _ => "metadata",
+    }
+}
+
+fn json_string_field(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        value
+            .get(*key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(ToOwned::to_owned)
+    })
+}
+
+fn json_i32_field(value: &serde_json::Value, keys: &[&str]) -> Option<i32> {
+    keys.iter().find_map(|key| {
+        value
+            .get(*key)
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|value| i32::try_from(value).ok())
+    })
+}
+
+#[cfg(feature = "postgres")]
+async fn upsert_skill_evidence_item_projection(
+    pool: &sqlx::PgPool,
+    item: &EvidenceItemInput,
+) -> DbResult<()> {
+    let item_type = skill_evidence_item_type(item.source_type.as_str());
+    let skill = item
+        .source_id
+        .clone()
+        .or_else(|| json_string_field(&item.metadata, &["skill", "source_skill", "sourceSkill"]))
+        .unwrap_or_else(|| item.title.clone());
+    let source_path = item
+        .source_ref
+        .clone()
+        .or_else(|| json_string_field(&item.metadata, &["source_path", "sourcePath", "path"]))
+        .unwrap_or_else(|| item.source_type.clone());
+    let source_line = json_i32_field(&item.metadata, &["source_line", "sourceLine"]);
+    let service_id = json_string_field(&item.metadata, &["service_id", "serviceId"]);
+    let domain = json_string_field(&item.metadata, &["domain"]);
+    let secret_ref = if item_type == "credential_ref" {
+        item.source_id
+            .clone()
+            .or_else(|| json_string_field(&item.metadata, &["secret_ref", "secretRef"]))
+    } else {
+        None
+    };
+    let credential_inline_risk = item
+        .metadata
+        .get("credential_inline_risk")
+        .or_else(|| item.metadata.get("credentialInlineRisk"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let confidence = item.score.unwrap_or(0.5).clamp(0.0, 1.0);
+    let metadata = serde_json::json!({
+        "evidence_item_id": item.id,
+        "source_type": item.source_type,
+        "raw_policy": item.raw_policy,
+        "projection": "evidence_items.to_skill_evidence_items",
+        "metadata": item.metadata,
+    });
+
+    sqlx::query(
+        "INSERT INTO skill_evidence_items (
+            id, skill, item_type, project_id, service_id, domain,
+            source_path, source_line, title, summary, validity, confidence,
+            secret_ref, credential_inline_risk, evidence_refs, metadata
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+         ON CONFLICT (skill, item_type, source_path, source_line, title) DO UPDATE SET
+            project_id = EXCLUDED.project_id,
+            service_id = EXCLUDED.service_id,
+            domain = EXCLUDED.domain,
+            summary = EXCLUDED.summary,
+            validity = EXCLUDED.validity,
+            confidence = EXCLUDED.confidence,
+            secret_ref = EXCLUDED.secret_ref,
+            credential_inline_risk = EXCLUDED.credential_inline_risk,
+            evidence_refs = EXCLUDED.evidence_refs,
+            metadata = EXCLUDED.metadata,
+            updated_at = now()",
+    )
+    .bind(&item.id)
+    .bind(skill)
+    .bind(item_type)
+    .bind(item.project_id.as_deref())
+    .bind(service_id.as_deref())
+    .bind(domain.as_deref())
+    .bind(source_path)
+    .bind(source_line)
+    .bind(&item.title)
+    .bind(&item.summary)
+    .bind(&item.validity)
+    .bind(confidence)
+    .bind(secret_ref.as_deref())
+    .bind(credential_inline_risk)
+    .bind(&item.evidence_refs)
+    .bind(&metadata)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 #[cfg(feature = "postgres")]
@@ -2265,6 +2406,271 @@ impl PgMissionStore {
 #[cfg(feature = "postgres")]
 #[async_trait]
 impl EvidenceLaneStore for PgMissionStore {
+    async fn get_evidence_item(&self, id: &str) -> DbResult<Option<EvidenceItemInput>> {
+        let row = sqlx::query(
+            "SELECT
+                id, lane_id, source_type, source_id, source_ref, project_id, task_id,
+                title, summary, authority_class, validity, privacy_class, freshness,
+                score, raw_policy, evidence_refs, metadata
+             FROM evidence_items
+             WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|row| evidence_item_from_row(&row)).transpose()?)
+    }
+
+    async fn search_evidence_items(
+        &self,
+        input: &EvidenceSearchInput,
+    ) -> DbResult<Vec<EvidenceItemInput>> {
+        let allowed_lanes = if input.allowed_lanes.is_empty() {
+            vec![
+                "runtime_truth".to_string(),
+                "project_ssot".to_string(),
+                "reviewed_kb".to_string(),
+                "active_board".to_string(),
+                "skill_evidence".to_string(),
+                "conversation_audit".to_string(),
+                "cold_archive".to_string(),
+                "support_refs".to_string(),
+            ]
+        } else {
+            input.allowed_lanes.clone()
+        };
+        let query = input.query.trim();
+        let like_query = format!("%{}%", query);
+        let limit = input.limit.clamp(1, 50);
+        let rows = sqlx::query(
+            "SELECT
+                id, lane_id, source_type, source_id, source_ref, project_id, task_id,
+                title, summary, authority_class, validity, privacy_class, freshness,
+                score, raw_policy, evidence_refs, metadata,
+                CASE
+                    WHEN $1 = '' THEN 0.0
+                    ELSE ts_rank_cd(fts_doc, plainto_tsquery('simple', $1))::double precision
+                END AS search_score
+             FROM evidence_items
+             WHERE lane_id = ANY($2::text[])
+               AND ($3::text IS NULL OR project_id = $3 OR ($4::boolean AND project_id IS NULL))
+               AND ($5::text IS NULL OR task_id = $5 OR task_id IS NULL)
+               AND (
+                    $1 = ''
+                    OR fts_doc @@ plainto_tsquery('simple', $1)
+                    OR title ILIKE $6
+                    OR summary ILIKE $6
+                    OR source_ref ILIKE $6
+               )
+             ORDER BY
+                (project_id = $3) DESC NULLS LAST,
+                (task_id = $5) DESC NULLS LAST,
+                search_score DESC,
+                COALESCE(score, 0.0) DESC,
+                updated_at DESC
+             LIMIT $7",
+        )
+        .bind(query)
+        .bind(&allowed_lanes)
+        .bind(input.project_id.as_deref())
+        .bind(input.include_global)
+        .bind(input.task_id.as_deref())
+        .bind(&like_query)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut items = Vec::with_capacity(rows.len());
+        for row in rows {
+            let search_score: Option<f64> = row.try_get("search_score")?;
+            let mut item = evidence_item_from_row(&row)?;
+            item.score = item.score.or(search_score);
+            items.push(item);
+        }
+        Ok(items)
+    }
+
+    async fn backfill_conversation_evidence_items(&self, limit: i64) -> DbResult<usize> {
+        let limit = limit.clamp(1, 500);
+        let (count,): (i64,) = sqlx::query_as(
+            "WITH candidates AS (
+                SELECT
+                    c.id AS conversation_id,
+                    COALESCE(NULLIF(c.project_id, ''), NULLIF(c.project, '')) AS project_id,
+                    NULLIF(c.task_id, '') AS task_id,
+                    COALESCE(NULLIF(c.conversation_type, ''), 'user') AS conversation_type,
+                    NULLIF(c.jsonl_path, '') AS jsonl_path,
+                    COALESCE(
+                        NULLIF(c.llm_summary, ''),
+                        NULLIF(c.rolling_summary, ''),
+                        NULLIF(c.session_timeline, ''),
+                        CONCAT('Conversation ', c.id, ' has ', COALESCE(c.message_count, 0), ' messages.')
+                    ) AS summary,
+                    COALESCE(NULLIF(c.updated_at, ''), NULLIF(c.ended_at, ''), NULLIF(c.started_at, '')) AS freshness_marker
+                FROM conversations c
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM conversation_episodes e WHERE e.conversation_id = c.id
+                )
+                ORDER BY COALESCE(NULLIF(c.updated_at, ''), NULLIF(c.ended_at, ''), NULLIF(c.started_at, '')) DESC NULLS LAST
+                LIMIT $1
+             ),
+             upsert_episodes AS (
+                INSERT INTO conversation_episodes (
+                    id, conversation_id, project_id, task_id, conversation_type,
+                    topic, outcome, summary, staleness, review_state,
+                    derived_from_conversation, evidence_refs, metadata
+                )
+                SELECT
+                    'conv-episode-' || substr(md5(conversation_id), 1, 20),
+                    conversation_id,
+                    project_id,
+                    task_id,
+                    conversation_type,
+                    'conversation-summary',
+                    'summarized-for-audit',
+                    summary,
+                    'unknown',
+                    'needs_review',
+                    TRUE,
+                    jsonb_build_array(jsonb_build_object(
+                        'source', 'conversation_messages',
+                        'conversation_id', conversation_id,
+                        'raw_policy', 'raw_opt_in_only'
+                    )),
+                    jsonb_build_object(
+                        'projection', 'backfill_conversation_evidence_items',
+                        'jsonl_path', jsonl_path,
+                        'freshness_marker', freshness_marker
+                    )
+                FROM candidates
+                ON CONFLICT (id) DO UPDATE SET
+                    project_id = EXCLUDED.project_id,
+                    task_id = EXCLUDED.task_id,
+                    conversation_type = EXCLUDED.conversation_type,
+                    summary = EXCLUDED.summary,
+                    evidence_refs = EXCLUDED.evidence_refs,
+                    metadata = EXCLUDED.metadata,
+                    updated_at = now()
+                RETURNING id, conversation_id, project_id, task_id, conversation_type, summary, evidence_refs
+             ),
+             upsert_facts AS (
+                INSERT INTO conversation_fact_extracts (
+                    id, episode_id, conversation_id, project_id, fact_key,
+                    fact_summary, validity, staleness, confidence,
+                    derived_from_conversation, source_message_ids, evidence_refs
+                )
+                SELECT
+                    'conv-fact-' || substr(md5(conversation_id || ':summary'), 1, 20),
+                    id,
+                    conversation_id,
+                    project_id,
+                    'conversation-summary:' || conversation_id,
+                    summary,
+                    'needs_review',
+                    'unknown',
+                    0.5,
+                    TRUE,
+                    '[]'::jsonb,
+                    evidence_refs
+                FROM upsert_episodes
+                ON CONFLICT (conversation_id, fact_key) DO UPDATE SET
+                    episode_id = EXCLUDED.episode_id,
+                    project_id = EXCLUDED.project_id,
+                    fact_summary = EXCLUDED.fact_summary,
+                    validity = EXCLUDED.validity,
+                    staleness = EXCLUDED.staleness,
+                    evidence_refs = EXCLUDED.evidence_refs,
+                    updated_at = now()
+                RETURNING id, episode_id, conversation_id, project_id, fact_key, fact_summary, evidence_refs
+             ),
+             upsert_episode_evidence AS (
+                INSERT INTO evidence_items (
+                    id, lane_id, source_type, source_id, source_ref, project_id, task_id,
+                    title, summary, authority_class, validity, privacy_class, freshness,
+                    score, raw_policy, evidence_refs, metadata
+                )
+                SELECT
+                    'evi-conv-episode-' || substr(md5(conversation_id), 1, 20),
+                    'conversation_audit',
+                    'conversation_episode',
+                    id,
+                    conversation_id,
+                    project_id,
+                    task_id,
+                    'Conversation episode',
+                    summary,
+                    'provider_durable_conversation_read_model',
+                    'derived_from_conversation',
+                    'audit',
+                    'time_range_bound',
+                    0.5,
+                    'raw_opt_in_only',
+                    evidence_refs,
+                    jsonb_build_object(
+                        'projection', 'conversation_episode',
+                        'conversation_id', conversation_id,
+                        'conversation_type', conversation_type,
+                        'review_state', 'needs_review'
+                    )
+                FROM upsert_episodes
+                ON CONFLICT (id) DO UPDATE SET
+                    project_id = EXCLUDED.project_id,
+                    task_id = EXCLUDED.task_id,
+                    summary = EXCLUDED.summary,
+                    evidence_refs = EXCLUDED.evidence_refs,
+                    metadata = EXCLUDED.metadata,
+                    updated_at = now()
+                RETURNING id
+             ),
+             upsert_fact_evidence AS (
+                INSERT INTO evidence_items (
+                    id, lane_id, source_type, source_id, source_ref, project_id, task_id,
+                    title, summary, authority_class, validity, privacy_class, freshness,
+                    score, raw_policy, evidence_refs, metadata
+                )
+                SELECT
+                    'evi-conv-fact-' || substr(md5(conversation_id || ':' || fact_key), 1, 20),
+                    'conversation_audit',
+                    'conversation_fact_extract',
+                    id,
+                    conversation_id,
+                    project_id,
+                    NULL,
+                    fact_key,
+                    fact_summary,
+                    'provider_durable_conversation_read_model',
+                    'needs_review',
+                    'audit',
+                    'time_range_bound',
+                    0.5,
+                    'raw_opt_in_only',
+                    evidence_refs,
+                    jsonb_build_object(
+                        'projection', 'conversation_fact_extract',
+                        'episode_id', episode_id,
+                        'conversation_id', conversation_id,
+                        'review_state', 'needs_review'
+                    )
+                FROM upsert_facts
+                ON CONFLICT (id) DO UPDATE SET
+                    project_id = EXCLUDED.project_id,
+                    summary = EXCLUDED.summary,
+                    evidence_refs = EXCLUDED.evidence_refs,
+                    metadata = EXCLUDED.metadata,
+                    updated_at = now()
+                RETURNING id
+             )
+             SELECT
+                (SELECT COUNT(*) FROM upsert_episode_evidence)
+                + (SELECT COUNT(*) FROM upsert_fact_evidence)",
+        )
+        .bind(limit)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count as usize)
+    }
+
     async fn upsert_evidence_items(&self, items: &[EvidenceItemInput]) -> DbResult<usize> {
         let mut written = 0usize;
         for item in items {
@@ -2318,6 +2724,9 @@ impl EvidenceLaneStore for PgMissionStore {
             .execute(&self.pool)
             .await?;
             written += result.rows_affected() as usize;
+            if is_skill_evidence_projection(item) {
+                upsert_skill_evidence_item_projection(&self.pool, item).await?;
+            }
         }
         Ok(written)
     }

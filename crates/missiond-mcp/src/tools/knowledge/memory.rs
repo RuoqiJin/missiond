@@ -9,12 +9,12 @@ pub fn definitions() -> Vec<ToolDefinition> {
         // ===== mission_memory =====
         ToolDefinition::new(
             "mission_memory",
-            "记忆与 Token 管理。provider_status/query/remember/review: 可插拔 memory provider; pending: 待分析对话; pause: 暂停/恢复; token_stats: Token 消耗统计",
+            "记忆与 Token 管理。provider_status/query/remember/review/evidence_search/evidence_promote/evidence_backfill: 可插拔 memory provider; pending: 待分析对话; pause: 暂停/恢复; token_stats: Token 消耗统计",
             json!({
                 "type": "object",
                 "required": ["action"],
                 "properties": {
-                    "action": {"type": "string", "enum": ["provider_status", "status", "query", "remember", "review", "pending", "pause", "token_stats"]},
+                    "action": {"type": "string", "enum": ["provider_status", "status", "query", "remember", "review", "evidence_search", "evidence_promote", "evidence_backfill", "pending", "pause", "token_stats"]},
                     "query": {"type": "string", "description": "[query] 检索文本"},
                     "text": {"type": "string", "description": "[remember] 写入文本"},
                     "tags": {"type": "array", "description": "[remember] 标签"},
@@ -26,6 +26,15 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "includeArchived": {"type": "boolean", "description": "[query] 是否包含 archived/review 非 active 记录"},
                     "limit": {"type": "integer", "description": "[query] 返回数量"},
                     "memoryId": {"type": "string", "description": "[review] xjp-memory memory id"},
+                    "evidenceId": {"type": "string", "description": "[evidence_promote] evidence_items id"},
+                    "allowedLanes": {"type": "array", "description": "[evidence_search] 允许检索的 typed evidence lanes"},
+                    "lanes": {"type": "array", "description": "[evidence_search] allowedLanes alias"},
+                    "source": {"type": "string", "description": "[evidence_backfill] conversation/skills/all"},
+                    "ttlDays": {"type": "integer", "description": "[evidence_promote] deployment/config/dependency promotion TTL"},
+                    "validUntil": {"type": "string", "description": "[evidence_promote] promotion validity bound"},
+                    "versionBound": {"type": "string", "description": "[evidence_promote] version/release dependency bound"},
+                    "releaseId": {"type": "string", "description": "[evidence_promote] release authority bound"},
+                    "commitSha": {"type": "string", "description": "[evidence_promote] commit/version authority bound"},
                     "state": {"type": "string", "description": "[review] review state"},
                     "rationale": {"type": "string", "description": "[review] review rationale"},
                     "reviewer": {"type": "string", "description": "[review] reviewer id"},

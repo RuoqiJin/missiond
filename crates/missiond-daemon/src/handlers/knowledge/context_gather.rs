@@ -1,14 +1,16 @@
 use anyhow::Result;
-use missiond_core::types::{ContextGatherRunInput, EvidenceItemInput};
+use missiond_core::types::{ContextGatherRunInput, EvidenceItemInput, EvidenceSearchInput};
 use missiond_mcp::tools::{ToolContent, ToolResult};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashSet,
     env, fs,
     path::{Path, PathBuf},
 };
 
+use crate::context::v3_blueprint_runtime::{EvidenceLaneRuntimeConfig, EvidenceLaneRuntimeEntry};
 use crate::handlers::comm::conversation;
 use crate::handlers::sysinfra::infra;
 use crate::state::AppState;
@@ -161,29 +163,192 @@ fn flag(default: bool, override_value: Option<bool>) -> bool {
 }
 
 fn source_selection(args: &ContextGatherArgs, profile: SourceProfile) -> SourceSelection {
+    let policy = EvidenceLaneRuntimeConfig::default();
+    let allowed_lanes = allowed_lanes_for_profile(&policy, profile);
+    source_selection_with_allowed_lanes(args, profile, &allowed_lanes)
+}
+
+fn source_selection_with_allowed_lanes(
+    args: &ContextGatherArgs,
+    profile: SourceProfile,
+    allowed_lanes: &[String],
+) -> SourceSelection {
     let explicit_skill = normalized_scope_value(args.skill.as_deref()).is_some();
     let explicit_infra = normalized_scope_value(args.infra_target.as_deref()).is_some();
     let deploy_ops = profile == SourceProfile::DeployOps;
     let conversation_audit = profile == SourceProfile::ConversationAudit;
     let full_debug = profile == SourceProfile::FullDebug;
+    let lane_enabled = |lane_id: &str| allowed_lanes.iter().any(|lane| lane == lane_id);
 
     SourceSelection {
-        include_project: flag(true, args.include_project),
-        include_ssot: flag(true, args.include_ssot),
-        include_kb: flag(true, args.include_kb),
+        include_project: flag(
+            lane_enabled("project_ssot") || lane_enabled("support_refs"),
+            args.include_project,
+        ),
+        include_ssot: flag(lane_enabled("project_ssot"), args.include_ssot),
+        include_kb: flag(lane_enabled("reviewed_kb"), args.include_kb),
         include_skill: flag(
-            full_debug || deploy_ops || explicit_skill,
+            lane_enabled("skill_evidence") && (full_debug || deploy_ops || explicit_skill),
             args.include_skill,
         ),
         include_infra: flag(
-            full_debug || deploy_ops || explicit_infra || explicit_skill,
+            lane_enabled("skill_evidence")
+                && (full_debug || deploy_ops || explicit_infra || explicit_skill),
             args.include_infra,
         ),
-        include_board: flag(true, args.include_board),
-        include_conversations: flag(full_debug || conversation_audit, args.include_conversations),
-        include_credentials: flag(full_debug || deploy_ops, args.include_credentials),
-        include_raw_sources: flag(full_debug, args.include_raw_sources),
+        include_board: flag(lane_enabled("active_board"), args.include_board),
+        include_conversations: flag(
+            lane_enabled("conversation_audit") && (full_debug || conversation_audit),
+            args.include_conversations,
+        ),
+        include_credentials: flag(
+            lane_enabled("support_refs") && (full_debug || deploy_ops),
+            args.include_credentials,
+        ),
+        include_raw_sources: flag(
+            lane_enabled("cold_archive") && full_debug,
+            args.include_raw_sources,
+        ),
     }
+}
+
+fn load_evidence_lane_policy() -> (EvidenceLaneRuntimeConfig, String, Option<Value>) {
+    match EvidenceLaneRuntimeConfig::load_for_current_dir() {
+        Ok(policy) => (policy, "compiled-v3".to_string(), None),
+        Err(err) => (
+            EvidenceLaneRuntimeConfig::default(),
+            "embedded-defaults-fallback".to_string(),
+            Some(json!({
+                "source": "evidence_lane_policy",
+                "error": err.to_string(),
+                "fallback": "embedded-defaults"
+            })),
+        ),
+    }
+}
+
+fn allowed_lanes_for_profile(
+    policy: &EvidenceLaneRuntimeConfig,
+    profile: SourceProfile,
+) -> Vec<String> {
+    policy
+        .profiles
+        .iter()
+        .find(|entry| entry.profile == profile.as_str())
+        .map(|entry| entry.allowed_lanes.clone())
+        .filter(|lanes| !lanes.is_empty())
+        .unwrap_or_else(|| default_allowed_lanes_for_profile(profile))
+}
+
+fn default_allowed_lanes_for_profile(profile: SourceProfile) -> Vec<String> {
+    let lanes = match profile {
+        SourceProfile::IntentDefault => &[
+            "runtime_truth",
+            "project_ssot",
+            "reviewed_kb",
+            "active_board",
+            "support_refs",
+        ][..],
+        SourceProfile::DeployOps => &[
+            "runtime_truth",
+            "project_ssot",
+            "reviewed_kb",
+            "active_board",
+            "support_refs",
+            "skill_evidence",
+        ],
+        SourceProfile::ConversationAudit => &[
+            "runtime_truth",
+            "project_ssot",
+            "reviewed_kb",
+            "active_board",
+            "support_refs",
+            "conversation_audit",
+        ],
+        SourceProfile::FullDebug => &[
+            "runtime_truth",
+            "project_ssot",
+            "reviewed_kb",
+            "active_board",
+            "support_refs",
+            "skill_evidence",
+            "conversation_audit",
+            "cold_archive",
+        ],
+    };
+    lanes.iter().map(|lane| (*lane).to_string()).collect()
+}
+
+async fn search_evidence_item_read_model(
+    state: &AppState,
+    query: &str,
+    allowed_lanes: &[String],
+    project_id: Option<&str>,
+    task_id: Option<&str>,
+    limit: usize,
+) -> (Vec<EvidenceItemInput>, Value) {
+    let input = EvidenceSearchInput {
+        query: query.to_string(),
+        allowed_lanes: allowed_lanes.to_vec(),
+        project_id: project_id.map(ToOwned::to_owned),
+        task_id: task_id.map(ToOwned::to_owned),
+        include_global: true,
+        limit: (limit.saturating_mul(2)).clamp(1, 50) as i64,
+    };
+
+    match state.store.search_evidence_items(&input).await {
+        Ok(items) => {
+            let lane_counts = lane_counts_for_evidence_items(&items);
+            (
+                items,
+                json!({
+                    "schema": "missiond.evidence-item-search.v1",
+                    "ok": true,
+                    "source": "postgres.evidence_items",
+                    "query": query,
+                    "allowed_lanes": allowed_lanes,
+                    "project_id": project_id,
+                    "task_id": task_id,
+                    "include_global": true,
+                    "limit": input.limit,
+                    "hit_count": lane_counts.values().filter_map(Value::as_u64).sum::<u64>(),
+                    "lane_counts": lane_counts,
+                    "filter_before_vector": true,
+                }),
+            )
+        }
+        Err(err) => (
+            Vec::new(),
+            json!({
+                "schema": "missiond.evidence-item-search.v1",
+                "ok": false,
+                "source": "postgres.evidence_items",
+                "query": query,
+                "allowed_lanes": allowed_lanes,
+                "project_id": project_id,
+                "task_id": task_id,
+                "include_global": true,
+                "limit": input.limit,
+                "hit_count": 0,
+                "lane_counts": {},
+                "filter_before_vector": true,
+                "error": err.to_string(),
+            }),
+        ),
+    }
+}
+
+fn lane_counts_for_evidence_items(items: &[EvidenceItemInput]) -> serde_json::Map<String, Value> {
+    let mut counts = serde_json::Map::new();
+    for item in items {
+        let count = counts
+            .get(item.lane_id.as_str())
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            + 1;
+        counts.insert(item.lane_id.clone(), json!(count));
+    }
+    counts
 }
 
 fn normalized_scope_value(value: Option<&str>) -> Option<String> {
@@ -245,7 +410,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 
     let args: ContextGatherArgs = serde_json::from_value(args)?;
     let profile = SourceProfile::from_arg(args.source_profile.as_deref());
-    let selection = source_selection(&args, profile);
+    let (evidence_lane_policy, evidence_lane_policy_source, evidence_lane_policy_diagnostic) =
+        load_evidence_lane_policy();
+    let allowed_lanes = allowed_lanes_for_profile(&evidence_lane_policy, profile);
+    let selection = source_selection_with_allowed_lanes(&args, profile, &allowed_lanes);
     let query = normalized_query(&args);
     if query.is_empty()
         && args.project_id.is_none()
@@ -260,6 +428,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     let limit = args.limit.clamp(1, 25);
     let mut sources = serde_json::Map::new();
     let mut diagnostics = Vec::new();
+    if let Some(diagnostic) = evidence_lane_policy_diagnostic {
+        diagnostics.push(diagnostic);
+    }
     let mut project_resolution_payload: Option<Value> = None;
     sources.insert(
         "runtime_environment".to_string(),
@@ -325,6 +496,16 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             );
         }
     }
+
+    let (mut evidence_item_inputs, evidence_item_search) = search_evidence_item_read_model(
+        state,
+        &query,
+        &allowed_lanes,
+        effective_project_id.as_deref(),
+        args.task_id.as_deref(),
+        limit,
+    )
+    .await;
 
     if selection.include_ssot {
         let payload = if let Some(project_id) = effective_project_id.as_deref() {
@@ -471,21 +652,28 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         );
     }
 
-    let evidence_lanes = build_evidence_lanes(&sources);
+    let evidence_lanes = build_evidence_lanes_from_policy(&sources, &evidence_lane_policy);
     let authority_order = authority_order();
     let noise_diagnostics = noise_diagnostics(profile, selection, &sources);
-    let context_noise_metrics =
-        context_noise_metrics(profile, selection, &sources, &evidence_lanes);
+    let context_noise_metrics = context_noise_metrics(
+        profile,
+        selection,
+        &sources,
+        &evidence_lanes,
+        &allowed_lanes,
+        &evidence_item_search,
+    );
     let source_summaries = build_source_summaries(&sources);
     let support_catalog = build_support_catalog(&sources);
-    let evidence_item_inputs = build_evidence_items(
+    evidence_item_inputs.extend(build_evidence_items(
         &sources,
         &source_summaries,
         &support_catalog,
         profile,
         effective_project_id.as_deref(),
         args.task_id.as_deref(),
-    );
+    ));
+    dedupe_evidence_items(&mut evidence_item_inputs);
     let evidence_items = serde_json::to_value(&evidence_item_inputs).unwrap_or_else(|_| json!([]));
     let response_sources =
         response_sources(&sources, &source_summaries, selection.include_raw_sources);
@@ -558,6 +746,12 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "raw_sources_omitted": !selection.include_raw_sources,
         "raw_sources_policy": raw_sources_policy(selection.include_raw_sources),
         "source_profile": profile.as_str(),
+        "evidence_lane_policy": {
+            "schema": "missiond.evidence-lane-policy-runtime.v1",
+            "source": evidence_lane_policy_source,
+            "allowed_lanes": allowed_lanes,
+        },
+        "evidence_item_search": evidence_item_search,
         "evidence_lanes": evidence_lanes,
         "evidence_items": evidence_items,
         "support_catalog": support_catalog,
@@ -765,115 +959,63 @@ fn authority_order() -> Value {
 }
 
 fn build_evidence_lanes(sources: &serde_json::Map<String, Value>) -> Value {
+    build_evidence_lanes_from_policy(sources, &EvidenceLaneRuntimeConfig::default())
+}
+
+fn build_evidence_lanes_from_policy(
+    sources: &serde_json::Map<String, Value>,
+    policy: &EvidenceLaneRuntimeConfig,
+) -> Value {
+    let lanes = policy
+        .lanes
+        .iter()
+        .map(|lane| {
+            (
+                lane.lane_id.clone(),
+                evidence_lane_from_policy(sources, lane),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
     json!({
         "schema": "missiond.context-gather-evidence-lanes.v1",
-        "lanes": {
-            "runtime_truth": evidence_lane(
-                sources,
-                "runtime_truth",
-                "runtime-env-and-monitor",
-                "deployed runtime paths, compiled runtime locations, release/health/smoke status, and monitor endpoints",
-                &["runtime_environment"],
-                &["intent_default", "deploy_ops", "conversation_audit", "full_debug"],
-                "compact_only",
-                "operational",
-                "current_rule",
-                "hot_runtime",
-                true,
-            ),
-            "project_ssot": evidence_lane(
-                sources,
-                "project_ssot",
-                "file-first-lisp-and-compiled-project-universe",
-                "project identity plus active Lisp/compiled project facts",
-                &["project_resolution", "project_registry", "ssot"],
-                &["intent_default", "deploy_ops", "conversation_audit", "full_debug"],
-                "compact_only",
-                "internal",
-                "current_rule",
-                "compiled_runtime_bound",
-                true,
-            ),
-            "reviewed_kb": evidence_lane(
-                sources,
-                "reviewed_kb",
-                "knowledge_review_state",
-                "curated active KB retrieval after review overlay",
-                &["kb"],
-                &["intent_default", "deploy_ops", "conversation_audit", "full_debug"],
-                "compact_only",
-                "internal",
-                "active_fact",
-                "ttl_or_review_bound",
-                true,
-            ),
-            "active_board": evidence_lane(
-                sources,
-                "active_board",
-                "board_projection",
-                "active Board task coordination records",
-                &["board_tasks"],
-                &["intent_default", "deploy_ops", "conversation_audit", "full_debug"],
-                "compact_only",
-                "internal",
-                "current_state",
-                "active_task_bound",
-                true,
-            ),
-            "skill_evidence": evidence_lane(
-                sources,
-                "skill_evidence",
-                "evidence-only",
-                "skill and infra operational hints; not runtime truth",
-                &["skill_context", "infra"],
-                &["deploy_ops", "full_debug"],
-                "compact_only",
-                "internal",
-                "evidence_only",
-                "version_bound_or_historical",
-                false,
-            ),
-            "conversation_audit": evidence_lane(
-                sources,
-                "conversation_audit",
-                "provider_durable_conversation_read_model",
-                "bounded query-scoped conversation episode/fact evidence; raw messages remain opt-in",
-                &["conversation_logs"],
-                &["conversation_audit", "full_debug"],
-                "raw_opt_in_only",
-                "audit",
-                "derived_from_conversation",
-                "time_range_bound",
-                false,
-            ),
-            "cold_archive": evidence_lane(
-                sources,
-                "cold_archive",
-                "forensics-only-cold-archive",
-                "archived sessions, transcript dumps, raw provider logs, and research dumps",
-                &[],
-                &["full_debug"],
-                "explicit_path_or_full_debug_only",
-                "audit",
-                "historical_evidence",
-                "cold_archive",
-                false,
-            ),
-            "support_refs": evidence_lane(
-                sources,
-                "support_refs",
-                "redacted-support-catalog",
-                "deploy center, service manifest, endpoint, database/migration, agent, and secret-ref provenance",
-                &["project_resolution", "project_registry", "credential_refs"],
-                &["intent_default", "deploy_ops", "conversation_audit", "full_debug"],
-                "secret_refs_only",
-                "reference",
-                "current_reference",
-                "runtime_or_catalog_bound",
-                true,
-            ),
-        }
+        "lanes": lanes
     })
+}
+
+fn evidence_lane_from_policy(
+    sources: &serde_json::Map<String, Value>,
+    lane: &EvidenceLaneRuntimeEntry,
+) -> Value {
+    let keys = source_keys_for_lane(lane.lane_id.as_str());
+    let role = lane.source_types.join(", ");
+    let validity = lane.validity.join(", ");
+    evidence_lane(
+        sources,
+        lane.lane_id.as_str(),
+        lane.authority_class.as_str(),
+        role.as_str(),
+        &keys,
+        &lane.default_profiles,
+        lane.raw_policy.as_str(),
+        lane.privacy_class.as_str(),
+        validity.as_str(),
+        lane.freshness.as_str(),
+        lane.injectable_by_default,
+    )
+}
+
+fn source_keys_for_lane(lane_id: &str) -> Vec<&'static str> {
+    match lane_id {
+        "runtime_truth" => vec!["runtime_environment"],
+        "project_ssot" => vec!["project_resolution", "project_registry", "ssot"],
+        "reviewed_kb" => vec!["kb"],
+        "active_board" => vec!["board_tasks"],
+        "skill_evidence" => vec!["skill_context", "infra"],
+        "conversation_audit" => vec!["conversation_logs"],
+        "support_refs" => vec!["project_resolution", "project_registry", "credential_refs"],
+        "cold_archive" => Vec::new(),
+        _ => Vec::new(),
+    }
 }
 
 fn evidence_lane(
@@ -882,7 +1024,7 @@ fn evidence_lane(
     authority_class: &str,
     role: &str,
     keys: &[&str],
-    default_profiles: &[&str],
+    default_profiles: &[String],
     raw_policy: &str,
     privacy_class: &str,
     validity: &str,
@@ -955,23 +1097,71 @@ fn build_support_catalog(sources: &serde_json::Map<String, Value>) -> Value {
     });
     let credential_refs = redacted_credential_refs(sources);
     let credential_ref_count = credential_refs.len();
+    let project_id = text_from_sources(&[project], &["id", "project_id", "projectId"])
+        .or_else(|| text_from_sources(&[service], &["project"]));
+    let service_id = text_from_sources(
+        &[service, service_catalog],
+        &["id", "service_id", "serviceId"],
+    );
+    let deploy_center_slug = text_from_sources(
+        &[service_catalog, service],
+        &[
+            "deploy_center_slug",
+            "deployCenterSlug",
+            "deployCenter",
+            "deploy_center",
+        ],
+    );
+    let runtime_target = text_from_sources(
+        &[service_catalog, service],
+        &["runtime_target", "runtimeTarget", "surface"],
+    );
+    let service_manifest_refs = string_list_from_sources(
+        &[service_catalog, service],
+        &[
+            "service_manifest_refs",
+            "serviceManifestRefs",
+            "source_evidence",
+            "sourceEvidence",
+        ],
+    );
+    let health_endpoints = string_list_from_sources(
+        &[service_catalog, service],
+        &["health", "health_endpoints", "healthEndpoints"],
+    );
+    let smoke_endpoints = string_list_from_sources(
+        &[service_catalog, service],
+        &["smoke", "smoke_endpoints", "smokeEndpoints"],
+    );
+    let deployment_policy =
+        compiled_deployment_policy_for_service(project_id.as_deref(), service_id.as_deref());
+    let deployment_closure = build_deployment_closure_support(
+        project_id.as_deref(),
+        service_id.as_deref(),
+        deploy_center_slug.as_deref(),
+        runtime_target.as_deref(),
+        service_manifest_refs.as_slice(),
+        health_endpoints.as_slice(),
+        smoke_endpoints.as_slice(),
+        service_catalog,
+        service,
+        deployment_policy.as_ref(),
+    );
 
     json!({
         "schema": "missiond.support-catalog.v1",
         "authority": "compiled-project-service-runtime-plus-redacted-support-refs",
-        "project_id": text_from_sources(&[project], &["id", "project_id", "projectId"])
-            .or_else(|| text_from_sources(&[service], &["project"])),
-        "service_id": text_from_sources(&[service, service_catalog], &["id", "service_id", "serviceId"]),
+        "project_id": project_id,
+        "service_id": service_id,
         "resolver_source": text_from_sources(&[project], &["source"])
             .or_else(|| text_from_sources(&[service_catalog], &["resolver_source", "resolverSource"])),
-        "deploy_center_slug": text_from_sources(
-            &[service_catalog, service],
-            &["deploy_center_slug", "deployCenterSlug", "deployCenter", "deploy_center"],
-        ),
+        "deploy_center_slug": deploy_center_slug,
         "runtime_target": {
             "environment": text_from_sources(&[service_catalog, service], &["environment"]),
-            "target": text_from_sources(&[service_catalog, service], &["runtime_target", "runtimeTarget", "surface"]),
+            "target": runtime_target,
             "ops_capability": text_from_sources(&[service_catalog, service], &["ops_capability", "opsCapability"]),
+            "executor": text_from_sources(&[service_catalog, service], &["executor"]),
+            "container": text_from_sources(&[service_catalog, service], &["container"]),
         },
         "urls": {
             "public_base_url": text_from_sources(&[service_catalog, service], &["public_base_url", "publicBaseUrl"]),
@@ -985,14 +1175,11 @@ fn build_support_catalog(sources: &serde_json::Map<String, Value>) -> Value {
             "backend": text_from_sources(&[service_catalog, service], &["backend"]),
             "frontend": text_from_sources(&[service_catalog, service], &["frontend"]),
             "operations": text_from_sources(&[service_catalog, service], &["operations"]),
-            "service_manifest_refs": string_list_from_sources(
-                &[service_catalog, service],
-                &["service_manifest_refs", "serviceManifestRefs", "source_evidence", "sourceEvidence"],
-            ),
+            "service_manifest_refs": service_manifest_refs,
         },
         "endpoints": {
-            "health": string_list_from_sources(&[service_catalog, service], &["health", "health_endpoints", "healthEndpoints"]),
-            "smoke": string_list_from_sources(&[service_catalog, service], &["smoke", "smoke_endpoints", "smokeEndpoints"]),
+            "health": health_endpoints,
+            "smoke": smoke_endpoints,
         },
         "dependencies": string_list_from_sources(&[service_catalog, service], &["dependencies"]),
         "database": {
@@ -1006,10 +1193,192 @@ fn build_support_catalog(sources: &serde_json::Map<String, Value>) -> Value {
             ),
         },
         "agent_refs": string_list_from_sources(&[service_catalog, service], &["agent_refs", "agentRefs", "vm_refs", "vmRefs"]),
+        "deployment_closure": deployment_closure,
         "credential_refs": credential_refs,
         "credential_ref_count": credential_ref_count,
         "secret_policy": "Only secret namespace/key references and availability state are exposed. Secret values are not indexed or injected."
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_deployment_closure_support(
+    project_id: Option<&str>,
+    service_id: Option<&str>,
+    deploy_center_slug: Option<&str>,
+    runtime_target: Option<&str>,
+    service_manifest_refs: &[String],
+    health_endpoints: &[String],
+    smoke_endpoints: &[String],
+    service_catalog: Option<&Value>,
+    service: Option<&Value>,
+    deployment_policy: Option<&Value>,
+) -> Value {
+    if service_catalog.is_none()
+        && service.is_none()
+        && deployment_policy.is_none()
+        && deploy_center_slug.is_none()
+        && runtime_target.is_none()
+        && service_manifest_refs.is_empty()
+    {
+        return Value::Null;
+    }
+    let policy = deployment_policy.and_then(|value| value.get("policy"));
+    json!({
+        "schema": "missiond.deployment-closure-support.v1",
+        "authority": "compiled-service-runtime-plus-compiled-deployment-policy",
+        "project_id": project_id,
+        "service_id": service_id,
+        "deploy_center_slug": deploy_center_slug,
+        "runtime_target": runtime_target,
+        "executor": text_from_sources(&[service_catalog, service], &["executor"]),
+        "container": text_from_sources(&[service_catalog, service], &["container"]),
+        "manifest_refs": service_manifest_refs,
+        "health_endpoints": health_endpoints,
+        "smoke_endpoints": smoke_endpoints,
+        "policy_source": deployment_policy
+            .and_then(|value| value.get("source"))
+            .cloned()
+            .unwrap_or(Value::Null),
+        "policy_path": deployment_policy
+            .and_then(|value| value.get("path"))
+            .cloned()
+            .unwrap_or(Value::Null),
+        "policy_hash": deployment_policy
+            .and_then(|value| value.get("source_hash"))
+            .cloned()
+            .unwrap_or(Value::Null),
+        "runtime_fact_authority": text_from_sources(&[policy], &["runtime_fact_authority", "runtimeFactAuthority"])
+            .or_else(|| Some("deploy-center".to_string())),
+        "closure_authority": text_from_sources(&[policy], &["closure_authority", "closureAuthority"])
+            .or_else(|| Some("ReleaseEvidence+ClosureVerdict".to_string())),
+        "required_gates": {
+            "manifest_required": bool_from_sources(&[policy], &["manifest_required", "manifestRequired"]),
+            "immutable_image_required": bool_from_sources(&[policy], &["immutable_image_required", "immutableImageRequired"]),
+            "runtime_digest_required": bool_from_sources(&[policy], &["runtime_digest_required", "runtimeDigestRequired"]),
+            "smoke_required": bool_from_sources(&[policy], &["smoke_required", "smokeRequired"]),
+            "db_adoption_required": bool_from_sources(&[policy], &["db_adoption_required", "dbAdoptionRequired"]),
+            "release_lease_required": bool_from_sources(&[policy], &["release_lease_required", "releaseLeaseRequired"]),
+        },
+        "artifact_lane": text_from_sources(&[policy], &["artifact_lane", "artifactLane"]),
+        "target_side_build_allowed": bool_from_sources(&[policy], &["target_side_build_allowed", "targetSideBuildAllowed"]),
+        "approval_policy": text_from_sources(&[policy], &["approval_policy", "approvalPolicy"]),
+        "closure_required_fields": string_list_from_sources(&[policy], &["closure_required_fields", "closureRequiredFields"]),
+        "fail_closed_blockers": string_list_from_sources(&[policy], &["fail_closed_blockers", "failClosedBlockers"]),
+        "diagnostic_profiles": string_list_from_sources(&[policy], &["diagnostic_profiles", "diagnosticProfiles"]),
+        "closure_state_machine": deployment_policy
+            .and_then(|value| value.get("closure_state_machine"))
+            .cloned()
+            .unwrap_or(Value::Null),
+        "closure_verdicts": deployment_policy
+            .and_then(|value| value.get("closure_verdicts"))
+            .cloned()
+            .unwrap_or(Value::Null),
+        "typed_diagnostics": deployment_policy
+            .and_then(|value| value.get("typed_diagnostics"))
+            .cloned()
+            .unwrap_or(Value::Null),
+        "diagnostic_terms": [
+            "service.manifest.toml",
+            "manifest gate",
+            "Deploy Center canary",
+            "smoke",
+            "runtime digest",
+            "running image digest",
+            "binary marker",
+            "image marker",
+            "entrypoint",
+            "old binary",
+            "compose",
+            "volume override",
+            "_sqlx_migrations",
+            "db adoption",
+            "ReleaseLease",
+            "RuntimeObservation",
+            "ReleaseEvidence",
+            "ClosureVerdict",
+        ],
+        "rule": "GitHub workflow success, curl probes, and local git state are diagnostic only; Deploy Center ReleaseEvidence plus ClosureVerdict is the closure authority."
+    })
+}
+
+fn compiled_deployment_policy_for_service(
+    project_id: Option<&str>,
+    service_id: Option<&str>,
+) -> Option<Value> {
+    let project_key = normalized_lookup_key(project_id);
+    let service_key = normalized_lookup_key(service_id);
+    for path in compiled_deployment_policy_candidates() {
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        let payload = value.get("payload").unwrap_or(&value);
+        let Some(policy) = payload
+            .get("policies")
+            .and_then(Value::as_array)
+            .and_then(|policies| {
+                policies.iter().find(|policy| {
+                    policy_matches_lookup(policy, "project_id", project_key.as_deref())
+                        || policy_matches_lookup(policy, "projectId", project_key.as_deref())
+                        || policy_matches_lookup(policy, "service_id", service_key.as_deref())
+                        || policy_matches_lookup(policy, "serviceId", service_key.as_deref())
+                })
+            })
+        else {
+            continue;
+        };
+        return Some(json!({
+            "source": "compiled-deployment-policy",
+            "path": path.display().to_string(),
+            "source_hash": value.get("source_hash").cloned().unwrap_or(Value::Null),
+            "policy": policy,
+            "closure_state_machine": payload.get("closure_state_machine").cloned().unwrap_or(Value::Null),
+            "closure_verdicts": payload.get("closure_verdicts").cloned().unwrap_or(Value::Null),
+            "typed_diagnostics": payload.get("typed_diagnostics").cloned().unwrap_or(Value::Null),
+        }));
+    }
+    None
+}
+
+fn compiled_deployment_policy_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(dir) = env::var("MISSIOND_COMPILED_RUNTIME_DIR") {
+        candidates.push(PathBuf::from(dir).join("compiled-deployment-policy.json"));
+    }
+    if let Ok(dir) = env::var("MISSIOND_RUNTIME_DIR") {
+        candidates.push(PathBuf::from(dir).join("compiled/compiled-deployment-policy.json"));
+    }
+    if let Ok(root) = env::var("MISSIOND_PROJECT_ROOT") {
+        candidates.push(
+            PathBuf::from(root)
+                .join(".missiond/v3/runtime/compiled/compiled-deployment-policy.json"),
+        );
+    }
+    if let Ok(root) = env::current_dir() {
+        candidates.push(root.join(".missiond/v3/runtime/compiled/compiled-deployment-policy.json"));
+    }
+    candidates
+}
+
+fn normalized_lookup_key(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.replace('_', "-").to_ascii_lowercase())
+}
+
+fn policy_matches_lookup(policy: &Value, key: &str, lookup: Option<&str>) -> bool {
+    let Some(lookup) = lookup else {
+        return false;
+    };
+    policy
+        .get(key)
+        .and_then(Value::as_str)
+        .and_then(|value| normalized_lookup_key(Some(value)))
+        .as_deref()
+        == Some(lookup)
 }
 
 fn first_project_payload<'a>(sources: &'a serde_json::Map<String, Value>) -> Option<&'a Value> {
@@ -1060,6 +1429,14 @@ fn text_field(value: &Value, key: &str) -> Option<String> {
         .map(str::trim)
         .filter(|text| !text.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn bool_from_sources(sources: &[Option<&Value>], keys: &[&str]) -> Option<bool> {
+    sources.iter().find_map(|source| {
+        let source = source.as_ref()?;
+        keys.iter()
+            .find_map(|key| source.get(*key).and_then(Value::as_bool))
+    })
 }
 
 fn string_list_from_sources(sources: &[Option<&Value>], keys: &[&str]) -> Vec<String> {
@@ -1253,6 +1630,25 @@ fn build_evidence_items(
             profile,
             None,
         );
+        if let Some(deployment_closure) = support_catalog
+            .get("deployment_closure")
+            .filter(|value| !json_value_is_empty(value))
+        {
+            push_evidence_item(
+                &mut items,
+                "support_refs",
+                "deployment_closure_policy",
+                source_id.as_deref(),
+                None,
+                project_id,
+                task_id,
+                "Deployment closure policy",
+                &deployment_closure_summary(deployment_closure),
+                deployment_closure,
+                profile,
+                None,
+            );
+        }
     }
 
     if let Some(source) = sources.get("credential_refs") {
@@ -1277,6 +1673,24 @@ fn build_evidence_items(
     }
 
     items
+}
+
+fn deployment_closure_summary(value: &Value) -> String {
+    let service = text_field(value, "service_id").unwrap_or_else(|| "service".to_string());
+    let deploy_center =
+        text_field(value, "deploy_center_slug").unwrap_or_else(|| "deploy-center".to_string());
+    let runtime =
+        text_field(value, "runtime_target").unwrap_or_else(|| "runtime-target".to_string());
+    let manifest_refs = string_list_field(value, "manifest_refs").join(", ");
+    let closure_fields = string_list_field(value, "closure_required_fields").join(", ");
+    let blockers = string_list_field(value, "fail_closed_blockers").join(", ");
+    let diagnostic_terms = string_list_field(value, "diagnostic_terms").join(", ");
+    compact_text(
+        &format!(
+            "{service} deployment closure support: deploy center slug {deploy_center}; runtime target {runtime}; manifest refs [{manifest_refs}]; required closure records [{closure_fields}]; fail-closed blockers [{blockers}]. Search anchors: {diagnostic_terms}. GitHub workflow success and curl probes are diagnostics only; Deploy Center ReleaseEvidence plus ClosureVerdict is the authority for canary/smoke/runtime digest/binary marker/db adoption closure.",
+        ),
+        1200,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1503,6 +1917,11 @@ fn evidence_item_id(
     format!("evi-{}", short_sha256(&input, 16))
 }
 
+fn dedupe_evidence_items(items: &mut Vec<EvidenceItemInput>) {
+    let mut seen = HashSet::new();
+    items.retain(|item| seen.insert(item.id.clone()));
+}
+
 fn short_sha256(input: &str, hex_chars: usize) -> String {
     let digest = Sha256::digest(input.as_bytes());
     digest
@@ -1668,6 +2087,8 @@ fn context_noise_metrics(
     selection: SourceSelection,
     sources: &serde_json::Map<String, Value>,
     evidence_lanes: &Value,
+    allowed_lanes: &[String],
+    evidence_item_search: &Value,
 ) -> Value {
     let lane_counts = evidence_lanes
         .get("lanes")
@@ -1696,14 +2117,35 @@ fn context_noise_metrics(
     json!({
         "schema": "missiond.context-noise-metrics.v1",
         "source_profile": profile.as_str(),
+        "allowed_lanes": allowed_lanes,
         "raw_source_count": sources.len(),
         "lane_counts": lane_counts,
+        "evidence_item_read_model": {
+            "ok": evidence_item_search
+                .get("ok")
+                .cloned()
+                .unwrap_or(Value::Bool(false)),
+            "hit_count": evidence_item_search
+                .get("hit_count")
+                .cloned()
+                .unwrap_or_else(|| json!(0)),
+            "lane_counts": evidence_item_search
+                .get("lane_counts")
+                .cloned()
+                .unwrap_or_else(|| json!({})),
+            "filter_before_vector": evidence_item_search
+                .get("filter_before_vector")
+                .cloned()
+                .unwrap_or(Value::Bool(true)),
+        },
         "conversation_lane_enabled": selection.include_conversations,
         "credential_lane_enabled": selection.include_credentials,
         "raw_sources_in_artifact": selection.include_raw_sources,
         "raw_sources_in_response": selection.include_raw_sources,
         "raw_sources_omitted": !selection.include_raw_sources,
         "filtered_semantic_conversation_hits": filtered_semantic_conversation_hits(sources),
+        "conversation_cross_project_drops": conversation_cross_project_drops(sources),
+        "skill_low_confidence_drops": skill_low_confidence_drops(sources),
         "conversation_filtering": "conversation search owns project/time/type filter metrics; context-gather records whether the lane was enabled."
     })
 }
@@ -1715,6 +2157,50 @@ fn filtered_semantic_conversation_hits(sources: &serde_json::Map<String, Value>)
             value
                 .get("filteredSemanticHits")
                 .or_else(|| value.get("filtered_semantic_hits"))
+        })
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+fn conversation_cross_project_drops(sources: &serde_json::Map<String, Value>) -> Value {
+    sources
+        .get("conversation_logs")
+        .and_then(|value| {
+            value
+                .get("crossProjectDrops")
+                .or_else(|| value.get("cross_project_drops"))
+                .or_else(|| {
+                    value
+                        .get("filterMetrics")
+                        .or_else(|| value.get("filter_metrics"))
+                        .and_then(|metrics| {
+                            metrics
+                                .get("crossProjectDrops")
+                                .or_else(|| metrics.get("cross_project_drops"))
+                        })
+                })
+        })
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+fn skill_low_confidence_drops(sources: &serde_json::Map<String, Value>) -> Value {
+    sources
+        .get("skill_context")
+        .and_then(|value| {
+            value
+                .get("lowConfidenceDrops")
+                .or_else(|| value.get("low_confidence_drops"))
+                .or_else(|| {
+                    value
+                        .get("filterMetrics")
+                        .or_else(|| value.get("filter_metrics"))
+                        .and_then(|metrics| {
+                            metrics
+                                .get("lowConfidenceDrops")
+                                .or_else(|| metrics.get("low_confidence_drops"))
+                        })
+                })
         })
         .cloned()
         .unwrap_or(Value::Null)
@@ -2740,7 +3226,15 @@ mod tests {
         let args = args(json!({"query": "audit", "source_profile": "conversation_audit"}));
         let profile = SourceProfile::from_arg(args.source_profile.as_deref());
         let selection = source_selection(&args, profile);
-        let metrics = context_noise_metrics(profile, selection, &sources, &lanes);
+        let allowed_lanes = super::default_allowed_lanes_for_profile(profile);
+        let metrics = context_noise_metrics(
+            profile,
+            selection,
+            &sources,
+            &lanes,
+            &allowed_lanes,
+            &json!({"ok": true, "hit_count": 0, "lane_counts": {}}),
+        );
         assert_eq!(
             metrics
                 .get("filtered_semantic_conversation_hits")
@@ -2786,6 +3280,60 @@ mod tests {
         let rendered = serde_json::to_string(&catalog).expect("support catalog json");
         assert!(rendered.contains("PAYMENTS_DB_URL"));
         assert!(!rendered.contains("postgres://should-not-appear"));
+    }
+
+    #[test]
+    fn support_catalog_projects_deployment_closure_evidence() {
+        let mut sources = serde_json::Map::new();
+        sources.insert(
+            "project_registry".to_string(),
+            json!({
+                "id": "payments",
+                "source": "compiled-service-runtime",
+                "serviceRuntime": {
+                    "id": "payments",
+                    "project": "payments",
+                    "health": ["/payments/health/ready"],
+                    "supportCatalog": {
+                        "service_id": "payments",
+                        "project_id": "payments",
+                        "deploy_center_slug": "xjp-payments",
+                        "runtime_target": "gcp-runtime",
+                        "executor": "gcp-agent",
+                        "container": "xjp-payments",
+                        "service_manifest_refs": ["services/payments/service.manifest.toml"],
+                        "db_migration_namespace": "payments"
+                    }
+                }
+            }),
+        );
+
+        let summaries = build_source_summaries(&sources);
+        let catalog = build_support_catalog(&sources);
+        let closure = catalog
+            .get("deployment_closure")
+            .expect("deployment closure support");
+        let rendered = serde_json::to_string(closure).expect("deployment closure json");
+        assert!(rendered.contains("service.manifest.toml"));
+        assert!(rendered.contains("ReleaseEvidence"));
+        assert!(rendered.contains("ClosureVerdict"));
+
+        let items = build_evidence_items(
+            &sources,
+            &summaries,
+            &catalog,
+            SourceProfile::DeployOps,
+            Some("payments"),
+            None,
+        );
+        let deployment_item = items
+            .iter()
+            .find(|item| item.source_type == "deployment_closure_policy")
+            .expect("deployment closure evidence item");
+        assert_eq!(deployment_item.lane_id, "support_refs");
+        assert!(deployment_item.summary.contains("canary"));
+        assert!(deployment_item.summary.contains("binary marker"));
+        assert!(deployment_item.summary.contains("db adoption"));
     }
 
     #[test]

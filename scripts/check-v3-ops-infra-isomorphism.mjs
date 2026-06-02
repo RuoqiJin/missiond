@@ -104,6 +104,7 @@ function checkFiles(root, files) {
     'Deploy smoke timeout MUST be configurable through MISSIOND_DEPLOY_SMOKE_TIMEOUT',
     'Deploy scripts MUST emit timing for cargo-build',
     'Dev-only fast deploy may select debug profile and sccache',
+    'Deploy scripts MUST reject active/apply-cleanup mutations when the current active release manifest or launchd WorkingDirectory belongs to a different project root',
     'AST repository-wide startup full sync MUST be opt-in through MISSIOND_AST_FULL_SYNC_ON_STARTUP',
     'M6 MissionD formatting MUST be converged',
     'Rust formatter edition MUST be derived from workspace Cargo.toml',
@@ -132,6 +133,8 @@ function checkFiles(root, files) {
     'MISSIOND_RELEASES_DIR',
     'MISSIOND_ACTIVE_LINK',
     'MISSIOND_RELEASE_KEEP',
+    'MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT',
+    'MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER',
     'PREVIOUS_LAUNCHD_PROJECT_ROOT',
     'PREVIOUS_RUNTIME_DIR',
     'PREVIOUS_COMPILED_RUNTIME_DIR',
@@ -154,6 +157,9 @@ function checkFiles(root, files) {
     '"compiled_runtime_dir"',
     'atomic_symlink_update',
     'switch_active_release',
+    'assert_active_project_root_can_mutate',
+    'project-root mutation guard verified',
+    'active release belongs to another project root',
     'capture_launchd_runtime_state',
     'restart_daemon_supervisor_for_runtime',
     'rollback_to_previous',
@@ -317,6 +323,7 @@ function buildFixture() {
        "Deploy smoke timeout MUST be configurable through MISSIOND_DEPLOY_SMOKE_TIMEOUT."
        "Deploy scripts MUST emit timing for cargo-build."
        "Dev-only fast deploy may select debug profile and sccache."
+       "Deploy scripts MUST reject active/apply-cleanup mutations when the current active release manifest or launchd WorkingDirectory belongs to a different project root."
        "AST repository-wide startup full sync MUST be opt-in through MISSIOND_AST_FULL_SYNC_ON_STARTUP."
        "M6 MissionD formatting MUST be converged."
        "Rust formatter edition MUST be derived from workspace Cargo.toml."
@@ -347,7 +354,7 @@ function buildFixture() {
   writeFixture(root, DEFAULT_FILES.deployDaemon, `
 scripts/deploy-daemon.sh                  # build + blue-green deploy + smoke
 --build-only --no-smoke --debug --fast --cleanup-only --apply-cleanup
-MISSIOND_INSTALL_ROOT MISSIOND_RELEASES_DIR MISSIOND_ACTIVE_LINK MISSIOND_RELEASE_KEEP MISSIOND_BACKUP_RETENTION_DAYS
+MISSIOND_INSTALL_ROOT MISSIOND_RELEASES_DIR MISSIOND_ACTIVE_LINK MISSIOND_RELEASE_KEEP MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER MISSIOND_BACKUP_RETENTION_DAYS
 PREVIOUS_LAUNCHD_PROJECT_ROOT PREVIOUS_RUNTIME_DIR PREVIOUS_COMPILED_RUNTIME_DIR
 MISSIOND_BIN_PATH MISSIOND_MCP_BIN_PATH MISSIOND_SOCKET_PATH MISSIOND_LAUNCHCTL_LABEL MISSIOND_DEPLOY_TIMEOUT MISSIOND_DEPLOY_SMOKE_TIMEOUT
 MISSIOND_USE_SCCACHE
@@ -363,6 +370,9 @@ release-manifest.json
 "compiled_runtime_dir"
 atomic_symlink_update
 switch_active_release
+assert_active_project_root_can_mutate
+project-root mutation guard verified
+active release belongs to another project root
 capture_launchd_runtime_state
 restart_daemon_supervisor_for_runtime
 rollback_to_previous
