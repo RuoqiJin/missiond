@@ -2547,6 +2547,11 @@ async fn deployment_events_source(
                     }
                 }
             }
+            let relay_diagnostics = deployment_event_relay_diagnostics(
+                candidate_count,
+                matching_count,
+                &observed_candidates,
+            );
             let status = if events.is_empty() {
                 "no_matching_deploy_center_events"
             } else {
@@ -2570,6 +2575,7 @@ async fn deployment_events_source(
                 "candidate_count": candidate_count,
                 "accepted_event_kinds": DEPLOYMENT_EVENT_RELEVANT_KINDS,
                 "observed_candidates": observed_candidates,
+                "relay_diagnostics": relay_diagnostics,
                 "filtered_count": matching_count,
                 "returned_count": events.len(),
                 "dropped_count": candidate_count.saturating_sub(matching_count),
@@ -2593,6 +2599,11 @@ async fn deployment_events_source(
             "candidate_count": 0,
             "accepted_event_kinds": DEPLOYMENT_EVENT_RELEVANT_KINDS,
             "observed_candidates": deployment_event_empty_observed_candidate_summary(),
+            "relay_diagnostics": deployment_event_relay_diagnostics(
+                0,
+                0,
+                &deployment_event_empty_observed_candidate_summary(),
+            ),
             "filtered_count": 0,
             "returned_count": 0,
             "dropped_count": 0,
@@ -2711,6 +2722,54 @@ fn deployment_event_observed_candidate_summary(rows: &[missiond_core::db::Timeli
         "event_kind_counts": deployment_event_count_object(event_kind_counts, 12),
         "event_source_counts": deployment_event_count_object(event_source_counts, 8),
         "event_authority_counts": deployment_event_count_object(event_authority_counts, 8),
+    })
+}
+
+fn deployment_event_relay_diagnostics(
+    candidate_count: usize,
+    matching_count: usize,
+    observed_candidates: &Value,
+) -> Value {
+    let deploy_center_candidate_count = observed_candidates
+        .get("deploy_center_candidate_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let accepted_kind_candidate_count = observed_candidates
+        .get("accepted_kind_candidate_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let inferred_gap = if matching_count > 0 {
+        "ok"
+    } else if candidate_count == 0 {
+        "no_external_service_events_in_window"
+    } else if deploy_center_candidate_count == 0 {
+        "deploy_center_relay_absent_or_disabled"
+    } else if accepted_kind_candidate_count == 0 {
+        "deploy_center_relay_emitted_no_deploy_event_kinds"
+    } else {
+        "deploy_center_scope_mismatch_or_missing_project_service_scope"
+    };
+
+    json!({
+        "schema": "missiond.deployment-event-relay-diagnostics.v1",
+        "inferred_gap": inferred_gap,
+        "expected_producer_service_id": "deploy-center",
+        "expected_missiond_webhook_path": "/webhooks/deploy-center-event",
+        "expected_source_authority": "deploy-center.deploy_events",
+        "expected_deploy_center_env": {
+            "enable": "DEPLOY_EVENT_RELAY_ENABLED=true",
+            "webhook_url": ["MISSIOND_DEPLOY_EVENT_WEBHOOK_URL", "MISSIOND_EVENTBRIDGE_URL"],
+            "webhook_token": ["MISSIOND_DEPLOY_EVENT_WEBHOOK_TOKEN", "MISSIOND_EXTERNAL_WEBHOOK_TOKEN"],
+            "optional_poll_interval": "DEPLOY_EVENT_RELAY_POLL_INTERVAL_SECS",
+            "optional_batch_limit": "DEPLOY_EVENT_RELAY_BATCH_LIMIT"
+        },
+        "interpretation": match inferred_gap {
+            "deploy_center_relay_absent_or_disabled" => "EventBridge has external events, but none are from deploy-center; inspect Deploy Center runtime env/compose for DEPLOY_EVENT_RELAY_ENABLED and MissionD webhook URL/token.",
+            "deploy_center_relay_emitted_no_deploy_event_kinds" => "Deploy Center producer is visible, but recent events are not accepted deployment evidence kinds; inspect relay event_kind mapping.",
+            "deploy_center_scope_mismatch_or_missing_project_service_scope" => "Deploy Center deployment events exist, but they do not match the resolved project/service/deploy slug; inspect relay payload scope fields.",
+            "no_external_service_events_in_window" => "MissionD event_log has no recent external_service_event candidates in the deployment_events read window.",
+            _ => "Scoped Deploy Center deployment events are available.",
+        },
     })
 }
 
@@ -4024,6 +4083,7 @@ fn summarize_source(key: &str, value: &Value) -> Value {
             insert_field(&mut map, value, "candidate_count");
             insert_field(&mut map, value, "accepted_event_kinds");
             insert_field(&mut map, value, "observed_candidates");
+            insert_field(&mut map, value, "relay_diagnostics");
             insert_field(&mut map, value, "filtered_count");
             insert_field(&mut map, value, "returned_count");
             insert_field(&mut map, value, "dropped_count");
@@ -4911,9 +4971,10 @@ mod tests {
         context_noise_metrics, context_pack_artifact_payload, dedupe_evidence_items,
         dedupe_evidence_search_items, deployment_event_drop_reason_is_sample_worthy,
         deployment_event_filter_timeline_row, deployment_event_item_from_timeline_row,
-        deployment_event_observed_candidate_summary, diagnostics_have_hard_failures,
-        evidence_item_id, evidence_item_read_model_scope_allows_search,
-        evidence_item_uses_stable_projection_id, filter_deployment_closure_policy_evidence_items,
+        deployment_event_observed_candidate_summary, deployment_event_relay_diagnostics,
+        diagnostics_have_hard_failures, evidence_item_id,
+        evidence_item_read_model_scope_allows_search, evidence_item_uses_stable_projection_id,
+        filter_deployment_closure_policy_evidence_items,
         filter_incomplete_deployment_closure_evidence_items,
         filter_stale_compiled_policy_evidence_items_with_fingerprint,
         filter_stale_runtime_environment_evidence_items_with_dir,
@@ -5784,6 +5845,37 @@ mod tests {
     }
 
     #[test]
+    fn deployment_event_relay_diagnostics_identifies_disabled_or_absent_relay() {
+        let observed = json!({
+            "candidate_count": 16,
+            "deploy_center_candidate_count": 0,
+            "accepted_kind_candidate_count": 0,
+            "observed_deploy_center_source": false,
+            "producer_service_counts": {"missiond-shared-memory": 16}
+        });
+
+        let diagnostics = deployment_event_relay_diagnostics(16, 0, &observed);
+
+        assert_eq!(
+            diagnostics.get("inferred_gap").and_then(Value::as_str),
+            Some("deploy_center_relay_absent_or_disabled")
+        );
+        assert_eq!(
+            diagnostics
+                .get("expected_missiond_webhook_path")
+                .and_then(Value::as_str),
+            Some("/webhooks/deploy-center-event")
+        );
+        assert_eq!(
+            diagnostics
+                .get("expected_deploy_center_env")
+                .and_then(|value| value.get("enable"))
+                .and_then(Value::as_str),
+            Some("DEPLOY_EVENT_RELAY_ENABLED=true")
+        );
+    }
+
+    #[test]
     fn deployment_event_summary_preserves_drop_diagnostics() {
         let source = json!({
             "schema": "missiond.deployment-events-context.v1",
@@ -5803,6 +5895,14 @@ mod tests {
                 "observed_deploy_center_source": false,
                 "observed_accepted_deploy_kind": false,
                 "producer_service_counts": {"missiond-shared-memory": 2}
+            },
+            "relay_diagnostics": {
+                "schema": "missiond.deployment-event-relay-diagnostics.v1",
+                "inferred_gap": "deploy_center_relay_absent_or_disabled",
+                "expected_missiond_webhook_path": "/webhooks/deploy-center-event",
+                "expected_deploy_center_env": {
+                    "enable": "DEPLOY_EVENT_RELAY_ENABLED=true"
+                }
             },
             "filtered_count": 0,
             "returned_count": 0,
@@ -5849,6 +5949,13 @@ mod tests {
                 .and_then(Value::as_array)
                 .map(Vec::len),
             Some(2)
+        );
+        assert_eq!(
+            summary
+                .get("relay_diagnostics")
+                .and_then(|value| value.get("inferred_gap"))
+                .and_then(Value::as_str),
+            Some("deploy_center_relay_absent_or_disabled")
         );
         assert_eq!(
             summary
