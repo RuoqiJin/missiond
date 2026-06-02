@@ -1161,6 +1161,19 @@ fn query_has_specific_file_token_without_match(
 
 fn line_matches_deploy_closure_sibling_evidence(line: &str, query_tokens: &[String]) -> bool {
     let line_haystack = line.to_ascii_lowercase();
+    let target_tokens: Vec<&str> = query_tokens
+        .iter()
+        .map(String::as_str)
+        .filter(|token| is_known_project_evidence_token(token))
+        .collect();
+    if !target_tokens.is_empty()
+        && target_tokens
+            .iter()
+            .all(|token| !contains_evidence_token(&line_haystack, token))
+    {
+        return false;
+    }
+
     let matched_anchor_count = query_tokens
         .iter()
         .filter(|token| is_deploy_closure_sibling_anchor_token(token))
@@ -1818,6 +1831,13 @@ fn known_project_evidence_tokens() -> &'static [&'static str] {
     &[
         "asr",
         "speechscribe",
+        "payments",
+        "xjp-payments",
+        "xjp_payments",
+        "xjp-router",
+        "xjp_auth",
+        "xjp-auth",
+        "xjp-backend",
         "pcea",
         "pcea-video-vault",
         "tiermate",
@@ -1825,6 +1845,12 @@ fn known_project_evidence_tokens() -> &'static [&'static str] {
         "openclaw",
         "aliyun",
     ]
+}
+
+fn is_known_project_evidence_token(token: &str) -> bool {
+    known_project_evidence_tokens()
+        .iter()
+        .any(|known| *known == token)
 }
 
 fn is_deploy_drift_anchor_token(token: &str) -> bool {
@@ -2138,7 +2164,7 @@ mod tests {
         };
         let manifest_line = "Payments service.manifest.toml Manifest Gate canary smoke provenance";
         let compose_line =
-            "compose volume override kept the old binary image marker running after canary";
+            "Payments compose volume override kept the old binary image marker running after canary";
         let migration_line = "sqlx migrate relation payments already exists during canary";
         assert!(is_infra_evidence_line(manifest_line));
         assert!(is_infra_evidence_line(compose_line));
@@ -2159,6 +2185,18 @@ mod tests {
             "sqlx-cache",
             "/Users/jinchen/.claude/skills/sqlx-cache/SKILL.md",
             migration_line,
+            &manifest_filter,
+        ));
+        assert!(!evidence_matches_scope(
+            "palm-era",
+            "/Users/jinchen/.claude/skills/palm-era/SKILL.md",
+            "sqlx migrate relation already exists during canary",
+            &manifest_filter,
+        ));
+        assert!(!evidence_matches_scope(
+            "xjp-deploy-agent",
+            "/Users/jinchen/.claude/skills/xjp-deploy-agent/SKILL.md",
+            "deploy.sh runs migrations before docker compose up",
             &manifest_filter,
         ));
 
