@@ -105,6 +105,7 @@ function checkFiles(root, files) {
     'Deploy scripts MUST emit timing for cargo-build',
     'Dev-only fast deploy may select debug profile and sccache',
     'Deploy scripts MUST serialize active-switch and apply-cleanup mutations through a deploy ownership lock',
+    'Deploy scripts MUST reject active/apply-cleanup mutations when the current active release manifest or launchd WorkingDirectory belongs to a different project root',
     'Deploy scripts MUST verify after active switch, launchd restart, smoke, and cleanup',
     'AST repository-wide startup full sync MUST be opt-in through MISSIOND_AST_FULL_SYNC_ON_STARTUP',
     'M6 MissionD formatting MUST be converged',
@@ -136,6 +137,8 @@ function checkFiles(root, files) {
     'MISSIOND_RELEASE_KEEP',
     'MISSIOND_DEPLOY_LOCK_PATH',
     'MISSIOND_DEPLOY_LOCK_STALE_SECS',
+    'MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT',
+    'MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER',
     'DEPLOY_LOCK_PATH="${MISSIOND_DEPLOY_LOCK_PATH:-${INSTALL_ROOT}/deploy.lock.d}"',
     'DEPLOY_LOCK_STALE_SECS="${MISSIOND_DEPLOY_LOCK_STALE_SECS:-300}"',
     'acquire_deploy_lock',
@@ -169,6 +172,9 @@ function checkFiles(root, files) {
     'switch_active_release',
     'assert_active_release_owned',
     'assert_launchd_runtime_owned',
+    'assert_active_project_root_can_mutate',
+    'project-root mutation guard verified',
+    'active release belongs to another project root',
     'deploy ownership guard failed',
     'ownership: active release verified',
     'ownership: launchd runtime roots verified',
@@ -336,6 +342,7 @@ function buildFixture() {
        "Deploy scripts MUST emit timing for cargo-build."
        "Dev-only fast deploy may select debug profile and sccache."
        "Deploy scripts MUST serialize active-switch and apply-cleanup mutations through a deploy ownership lock."
+       "Deploy scripts MUST reject active/apply-cleanup mutations when the current active release manifest or launchd WorkingDirectory belongs to a different project root."
        "Deploy scripts MUST verify after active switch, launchd restart, smoke, and cleanup."
        "AST repository-wide startup full sync MUST be opt-in through MISSIOND_AST_FULL_SYNC_ON_STARTUP."
        "M6 MissionD formatting MUST be converged."
@@ -367,7 +374,7 @@ function buildFixture() {
   writeFixture(root, DEFAULT_FILES.deployDaemon, `
 scripts/deploy-daemon.sh                  # build + blue-green deploy + smoke
 --build-only --no-smoke --debug --fast --cleanup-only --apply-cleanup
-MISSIOND_INSTALL_ROOT MISSIOND_RELEASES_DIR MISSIOND_ACTIVE_LINK MISSIOND_RELEASE_KEEP MISSIOND_DEPLOY_LOCK_PATH MISSIOND_DEPLOY_LOCK_STALE_SECS MISSIOND_BACKUP_RETENTION_DAYS
+MISSIOND_INSTALL_ROOT MISSIOND_RELEASES_DIR MISSIOND_ACTIVE_LINK MISSIOND_RELEASE_KEEP MISSIOND_DEPLOY_LOCK_PATH MISSIOND_DEPLOY_LOCK_STALE_SECS MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER MISSIOND_BACKUP_RETENTION_DAYS
 DEPLOY_LOCK_PATH="\${MISSIOND_DEPLOY_LOCK_PATH:-\${INSTALL_ROOT}/deploy.lock.d}"
 DEPLOY_LOCK_STALE_SECS="\${MISSIOND_DEPLOY_LOCK_STALE_SECS:-300}"
 acquire_deploy_lock release_deploy_lock try_recover_stale_deploy_lock lock_created=1 deploy-lock: busy metadata missing but lock is fresh removing stale metadata-less lock
@@ -388,6 +395,9 @@ atomic_symlink_update
 switch_active_release
 assert_active_release_owned
 assert_launchd_runtime_owned
+assert_active_project_root_can_mutate
+project-root mutation guard verified
+active release belongs to another project root
 deploy ownership guard failed
 ownership: active release verified
 ownership: launchd runtime roots verified

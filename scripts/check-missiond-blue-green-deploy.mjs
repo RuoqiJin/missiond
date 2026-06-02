@@ -74,6 +74,8 @@ function check(root) {
     'MISSIOND_RELEASE_KEEP',
     'MISSIOND_DEPLOY_LOCK_PATH',
     'MISSIOND_DEPLOY_LOCK_STALE_SECS',
+    'MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT',
+    'MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER',
     'DEPLOY_LOCK_PATH="${MISSIOND_DEPLOY_LOCK_PATH:-${INSTALL_ROOT}/deploy.lock.d}"',
     'DEPLOY_LOCK_STALE_SECS="${MISSIOND_DEPLOY_LOCK_STALE_SECS:-300}"',
     'acquire_deploy_lock',
@@ -107,6 +109,9 @@ function check(root) {
     'switch_active_release',
     'assert_active_release_owned',
     'assert_launchd_runtime_owned',
+    'assert_active_project_root_can_mutate',
+    'project-root mutation guard verified',
+    'active release belongs to another project root',
     'deploy ownership guard failed',
     'ownership: active release verified',
     'ownership: launchd runtime roots verified',
@@ -163,9 +168,9 @@ function buildFixture() {
       :note "Release candidates are immutable directories under ~/.xjp-mission/releases/<release-id>; daemon and MCP entrypoints both resolve through active.")))`);
   write(root, FILES.deploy, `
 MISSIOND_INSTALL_ROOT MISSIOND_RELEASES_DIR MISSIOND_ACTIVE_LINK MISSIOND_RELEASE_KEEP MISSIOND_BACKUP_RETENTION_DAYS
-MISSIOND_DEPLOY_LOCK_PATH MISSIOND_DEPLOY_LOCK_STALE_SECS DEPLOY_LOCK_PATH="\${MISSIOND_DEPLOY_LOCK_PATH:-\${INSTALL_ROOT}/deploy.lock.d}"
+MISSIOND_DEPLOY_LOCK_PATH MISSIOND_DEPLOY_LOCK_STALE_SECS MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER DEPLOY_LOCK_PATH="\${MISSIOND_DEPLOY_LOCK_PATH:-\${INSTALL_ROOT}/deploy.lock.d}"
 DEPLOY_LOCK_STALE_SECS="\${MISSIOND_DEPLOY_LOCK_STALE_SECS:-300}"
-acquire_deploy_lock release_deploy_lock try_recover_stale_deploy_lock lock_created=1 metadata missing but lock is fresh removing stale metadata-less lock deploy ownership guard failed
+acquire_deploy_lock release_deploy_lock try_recover_stale_deploy_lock lock_created=1 metadata missing but lock is fresh removing stale metadata-less lock deploy ownership guard failed active release belongs to another project root
 MISSIOND_LAUNCHD_PLIST MISSIOND_LAUNCHD_PROJECT_ROOT
 CARGO_INCREMENTAL="\${CARGO_INCREMENTAL:-0}"
 MISSIOND_DEPLOY_REFRESH_CONTRACTS
@@ -179,7 +184,7 @@ compiled-v3-blueprint.json compiled-runtime-config.json compiled-project-univers
 release-manifest.json "schema":"missiond.release-manifest.v1" daemon_sha256 mcp_sha256
 atomic_symlink_update switch_active_release rollback_to_previous cleanup_old_releases create_legacy_release_if_needed
 release_complete removed incomplete release
-assert_active_release_owned assert_launchd_runtime_owned ownership: active release verified ownership: launchd runtime roots verified
+assert_active_release_owned assert_launchd_runtime_owned assert_active_project_root_can_mutate project-root mutation guard verified ownership: active release verified ownership: launchd runtime roots verified
 ensure_launchd_runtime_root restart_daemon_supervisor MISSIOND_PROJECT_ROOT MISSIOND_ORCHESTRATOR_ROOT launchctl bootstrap launchd: runtime root
 codesign_or_verify force-sign failed but verified linker signature
 pre-switch smoke: candidate MCP initialize

@@ -22,6 +22,11 @@
 #                               $root/deploy.lock.d
 #   MISSIOND_DEPLOY_LOCK_STALE_SECS  age before metadata-less lock recovery,
 #                               default: 300
+#   MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT  expected launchd_project_root for
+#                               the currently active release before mutating
+#                               active/apply-cleanup; default: this Git root
+#   MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER  explicit 1/true override for
+#                               switching active from another project root
 #   MISSIOND_BACKUP_RETENTION_DAYS  old .bak/.new cleanup age, default: 7
 #   MISSIOND_SOCKET_PATH        IPC socket, default: ~/.missiond/missiond.sock
 #   MISSIOND_LAUNCHCTL_LABEL    launchd label, default: com.missiond.daemon
@@ -131,6 +136,8 @@ DEPLOY_LOCK_HELD=0
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 LAUNCHD_PROJECT_ROOT="${MISSIOND_LAUNCHD_PROJECT_ROOT:-$REPO_ROOT}"
+MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT="${MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT:-$LAUNCHD_PROJECT_ROOT}"
+MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER="${MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER:-0}"
 REPO_ID="$(basename "$REPO_ROOT")"
 RUNTIME_DIR="${MISSIOND_RUNTIME_DIR:-${HOME}/.missiond/runtime/${REPO_ID}}"
 COMPILED_RUNTIME_DIR="${MISSIOND_COMPILED_RUNTIME_DIR:-${RUNTIME_DIR}/compiled}"
@@ -613,6 +620,39 @@ process.stdout.write(value);
 NODE
 }
 
+assert_active_project_root_can_mutate() {
+  local phase="$1"
+  local active manifest active_project_root launchd_project_root expected_root
+  expected_root="${MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT:-$LAUNCHD_PROJECT_ROOT}"
+  if truthy_env_value "$MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER"; then
+    log "ownership: project-root takeover explicitly allowed phase=$phase expected_active_root=$expected_root candidate_root=$LAUNCHD_PROJECT_ROOT"
+    return 0
+  fi
+  active="$(resolve_link_target "$ACTIVE_LINK" 2>/dev/null || true)"
+  if [ -z "$active" ]; then
+    log "ownership: no active release link phase=$phase; project-root guard allows initial deploy"
+    return 0
+  fi
+  manifest="$active/release-manifest.json"
+  if [ ! -f "$manifest" ]; then
+    log "ownership: active release has no manifest phase=$phase active=$active; project-root guard allows legacy migration"
+    return 0
+  fi
+  active_project_root="$(json_string_field "$manifest" "launchd_project_root" 2>/dev/null || true)"
+  if [ -n "$active_project_root" ] && [ "$active_project_root" != "$expected_root" ]; then
+    log "ownership: active project-root mismatch phase=$phase expected=$expected_root active_project_root=$active_project_root active=$active"
+    log "ownership: set MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER=1 only for an intentional cross-root active release takeover"
+    return 1
+  fi
+  launchd_project_root="$(plist_read_string "$LAUNCHD_PLIST" "WorkingDirectory" || true)"
+  if [ -n "$launchd_project_root" ] && [ "$launchd_project_root" != "$expected_root" ]; then
+    log "ownership: launchd project-root mismatch phase=$phase expected=$expected_root launchd_project_root=$launchd_project_root"
+    log "ownership: set MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER=1 only for an intentional cross-root launchd takeover"
+    return 1
+  fi
+  log "ownership: project-root mutation guard verified phase=$phase root=$expected_root"
+}
+
 assert_active_release_owned() {
   local phase="$1"
   local active manifest release_id manifest_project_root manifest_runtime_dir manifest_compiled_runtime_dir daemon_link mcp_link
@@ -1039,6 +1079,8 @@ mkdir -p "$INSTALL_ROOT" "$RELEASES_DIR" "$(dirname "$SOCK_PATH")" "$COMPILED_RU
 if [ "$DO_DEPLOY" -eq 1 ] || { [ "$CLEANUP_ONLY" -eq 1 ] && [ "$APPLY_CLEANUP" -eq 1 ]; }; then
   acquire_deploy_lock ||
     fail "another MissionD deploy/cleanup owns $DEPLOY_LOCK_PATH; retry after it finishes or remove a verified stale lock" 1
+  assert_active_project_root_can_mutate "pre-mutation" ||
+    fail "active release belongs to another project root; refusing to mutate active without MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER=1" 1
 fi
 
 if [ "$CLEANUP_ONLY" -eq 1 ]; then
@@ -1133,6 +1175,8 @@ if ! pre_switch_mcp_smoke "$CANDIDATE_DIR/bin/mission-mcp"; then
 fi
 record_timing "pre-switch-mcp-smoke" "$PRE_SWITCH_SMOKE_START"
 
+assert_active_project_root_can_mutate "pre-switch" ||
+  fail "active release changed to another project root before switch; refusing to continue" 4
 switch_active_release "$CANDIDATE_DIR"
 assert_active_release_owned "post-switch" ||
   fail "deploy ownership guard failed after active switch; refusing to continue" 4
