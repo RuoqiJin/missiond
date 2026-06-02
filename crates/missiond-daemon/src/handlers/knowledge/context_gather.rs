@@ -3567,7 +3567,10 @@ fn summarize_source(key: &str, value: &Value) -> Value {
             insert_field(&mut map, value, "filter_before_injection");
             insert_field(&mut map, value, "candidate_count");
             insert_field(&mut map, value, "filtered_count");
+            insert_field(&mut map, value, "returned_count");
             insert_field(&mut map, value, "dropped_count");
+            insert_field(&mut map, value, "drop_reason_counts");
+            insert_field(&mut map, value, "sample_dropped_events");
             insert_field(&mut map, value, "filters");
             insert_compact_field(&mut map, value, "diagnostic", 260);
             map.insert(
@@ -4451,8 +4454,9 @@ mod tests {
         filter_stale_compiled_policy_evidence_items_with_fingerprint,
         filter_stale_runtime_environment_evidence_items_with_dir,
         optional_infra_os_disabled_diagnostic, optional_infra_os_disabled_source, response_sources,
-        source_selection, support_catalog_has_content, CompiledDeploymentPolicyFingerprint,
-        ContextGatherArgs, DeploymentEventFilterResult, SourceProfile,
+        source_selection, summarize_source, support_catalog_has_content,
+        CompiledDeploymentPolicyFingerprint, ContextGatherArgs, DeploymentEventFilterResult,
+        SourceProfile,
     };
 
     fn args(value: serde_json::Value) -> ContextGatherArgs {
@@ -5100,6 +5104,54 @@ mod tests {
             }
             DeploymentEventFilterResult::Keep(_) => panic!("irrelevant deploy event was kept"),
         }
+    }
+
+    #[test]
+    fn deployment_event_summary_preserves_drop_diagnostics() {
+        let source = json!({
+            "schema": "missiond.deployment-events-context.v1",
+            "status": "no_matching_deploy_center_events",
+            "source": "event_log",
+            "authority": "deploy-center ExternalServiceEvent via MissionD EventBridge",
+            "read_model": "event_log",
+            "event_type": "system::external_service_event",
+            "since": "30d",
+            "filter_before_injection": true,
+            "candidate_count": 2,
+            "filtered_count": 0,
+            "returned_count": 0,
+            "dropped_count": 2,
+            "drop_reason_counts": {"scope_mismatch": 2},
+            "sample_dropped_events": [{
+                "reason": "scope_mismatch",
+                "seq": 7,
+                "target_project_id": "router",
+                "requested_scope": {"project_id": "payments"}
+            }],
+            "events": [],
+            "diagnostic": "No scoped Deploy Center ExternalServiceEvent was found."
+        });
+
+        let summary = summarize_source("deployment_events", &source);
+
+        assert_eq!(
+            summary
+                .get("drop_reason_counts")
+                .and_then(|value| value.get("scope_mismatch"))
+                .and_then(Value::as_u64),
+            Some(2)
+        );
+        assert_eq!(
+            summary
+                .get("sample_dropped_events")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            summary.get("returned_count").and_then(Value::as_u64),
+            Some(0)
+        );
     }
 
     #[test]
