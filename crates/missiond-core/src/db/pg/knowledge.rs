@@ -324,6 +324,57 @@ async fn upsert_skill_evidence_item_projection(
         "metadata": item.metadata,
     });
 
+    let updated = sqlx::query(
+        "UPDATE skill_evidence_items
+         SET
+            skill = $2,
+            item_type = $3,
+            project_id = $4,
+            service_id = $5,
+            domain = $6,
+            source_path = $7,
+            source_line = $8,
+            title = $9,
+            summary = $10,
+            validity = $11,
+            confidence = $12,
+            secret_ref = $13,
+            credential_inline_risk = $14,
+            evidence_refs = $15,
+            metadata = $16,
+            updated_at = now()
+         WHERE id = $1
+            OR (
+                skill = $2
+                AND item_type = $3
+                AND source_path = $7
+                AND source_line IS NOT DISTINCT FROM $8
+                AND title = $9
+            )",
+    )
+    .bind(&item.id)
+    .bind(&skill)
+    .bind(item_type)
+    .bind(item.project_id.as_deref())
+    .bind(service_id.as_deref())
+    .bind(domain.as_deref())
+    .bind(&source_path)
+    .bind(source_line)
+    .bind(&item.title)
+    .bind(&item.summary)
+    .bind(&item.validity)
+    .bind(confidence)
+    .bind(secret_ref.as_deref())
+    .bind(credential_inline_risk)
+    .bind(&item.evidence_refs)
+    .bind(&metadata)
+    .execute(pool)
+    .await?;
+
+    if updated.rows_affected() > 0 {
+        return Ok(());
+    }
+
     sqlx::query(
         "INSERT INTO skill_evidence_items (
             id, skill, item_type, project_id, service_id, domain,
@@ -331,10 +382,15 @@ async fn upsert_skill_evidence_item_projection(
             secret_ref, credential_inline_risk, evidence_refs, metadata
          )
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
-         ON CONFLICT (skill, item_type, source_path, source_line, title) DO UPDATE SET
+         ON CONFLICT (id) DO UPDATE SET
+            skill = EXCLUDED.skill,
+            item_type = EXCLUDED.item_type,
             project_id = EXCLUDED.project_id,
             service_id = EXCLUDED.service_id,
             domain = EXCLUDED.domain,
+            source_path = EXCLUDED.source_path,
+            source_line = EXCLUDED.source_line,
+            title = EXCLUDED.title,
             summary = EXCLUDED.summary,
             validity = EXCLUDED.validity,
             confidence = EXCLUDED.confidence,
@@ -350,7 +406,7 @@ async fn upsert_skill_evidence_item_projection(
     .bind(item.project_id.as_deref())
     .bind(service_id.as_deref())
     .bind(domain.as_deref())
-    .bind(source_path)
+    .bind(&source_path)
     .bind(source_line)
     .bind(&item.title)
     .bind(&item.summary)
