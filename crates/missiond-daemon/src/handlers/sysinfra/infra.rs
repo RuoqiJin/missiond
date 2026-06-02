@@ -1000,6 +1000,9 @@ fn evidence_matches_scope(
     if query_has_specific_file_token_without_match(skill_name, skill_path, line, filter) {
         return false;
     }
+    if lacks_project_anchor_and_query_term_density(skill_name, skill_path, line, filter) {
+        return false;
+    }
     let score = evidence_scope_score(skill_name, skill_path, line, filter);
     if filter
         .query
@@ -1011,6 +1014,61 @@ fn evidence_matches_scope(
         return score > 0;
     }
     score >= 4
+}
+
+fn lacks_project_anchor_and_query_term_density(
+    skill_name: &str,
+    skill_path: &str,
+    line: &str,
+    filter: &InfraEvidenceFilter,
+) -> bool {
+    let Some(query) = filter.query.as_deref() else {
+        return false;
+    };
+    let tokens = evidence_query_tokens(query);
+    if tokens.is_empty() {
+        return false;
+    }
+
+    let line_haystack = line.to_ascii_lowercase();
+    let project_token = normalized_evidence_token(filter.project_id.as_deref());
+    if project_token.as_deref().is_some_and(|project| {
+        project != "missiond" && contains_evidence_token(&line_haystack, project)
+    }) {
+        return false;
+    }
+
+    let match_weight = query_match_weight(skill_name, skill_path, line, filter);
+    match_weight < 3
+}
+
+fn query_match_weight(
+    skill_name: &str,
+    skill_path: &str,
+    line: &str,
+    filter: &InfraEvidenceFilter,
+) -> usize {
+    let Some(query) = filter.query.as_deref() else {
+        return 0;
+    };
+    let line_haystack = line.to_ascii_lowercase();
+    let skill_haystack = format!("{skill_name}\n{skill_path}").to_ascii_lowercase();
+    let project_token = normalized_evidence_token(filter.project_id.as_deref());
+    evidence_query_tokens(query)
+        .iter()
+        .filter(|token| project_token.as_deref() != Some(token.as_str()))
+        .filter(|token| {
+            contains_evidence_token(&line_haystack, token)
+                || contains_evidence_token(&skill_haystack, token)
+        })
+        .map(|token| {
+            if is_weak_target_evidence_token(token) {
+                1
+            } else {
+                2
+            }
+        })
+        .sum()
 }
 
 fn query_has_specific_file_token_without_match(
@@ -1110,6 +1168,10 @@ fn evidence_scope_score(
         } else if contains_evidence_token(&skill_haystack, &term) {
             score += skill_score;
         }
+    }
+    let query_weight = query_match_weight(skill_name, skill_path, line, filter);
+    if query_weight >= 3 {
+        score += query_weight as i64;
     }
     if score == 0
         && normalized_evidence_token(filter.project_id.as_deref()).is_none()
@@ -1668,6 +1730,8 @@ fn is_weak_target_evidence_token(token: &str) -> bool {
             | "docker"
             | "build"
             | "ci"
+            | "volume"
+            | "volumes"
     )
 }
 
@@ -1942,6 +2006,12 @@ mod tests {
             "xjp-deploy-center",
             "/Users/jinchen/.claude/skills/xjp-deploy-center/SKILL.md",
             "compose volume override kept the old binary image running after canary",
+            &deploy_runtime_filter,
+        ));
+        assert!(!evidence_matches_scope(
+            "pcea",
+            "/Users/jinchen/.claude/skills/pcea/SKILL.md",
+            "Postgres volume: `pcea_postgres_data` (fixed compose project storage)",
             &deploy_runtime_filter,
         ));
         let volume_override_score = evidence_scope_score(
