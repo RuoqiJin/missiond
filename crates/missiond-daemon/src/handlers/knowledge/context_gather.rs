@@ -2652,6 +2652,9 @@ fn push_evidence_item(
         source_type,
         source_id,
         source_ref,
+        project_id,
+        task_id,
+        profile,
         &title,
         &summary,
     );
@@ -2758,15 +2761,39 @@ fn evidence_item_id(
     source_type: &str,
     source_id: Option<&str>,
     source_ref: Option<&str>,
+    project_id: Option<&str>,
+    task_id: Option<&str>,
+    profile: SourceProfile,
     title: &str,
     summary: &str,
 ) -> String {
-    let input = format!(
-        "{lane_id}|{source_type}|{}|{}|{title}|{summary}",
-        source_id.unwrap_or(""),
-        source_ref.unwrap_or("")
-    );
+    let input = if evidence_item_uses_stable_projection_id(source_type) {
+        format!(
+            "stable|{}|{lane_id}|{source_type}|project:{}|task:{}|source_id:{}|source_ref:{}|title:{title}",
+            profile.as_str(),
+            project_id.unwrap_or(""),
+            task_id.unwrap_or(""),
+            source_id.unwrap_or(""),
+            source_ref.unwrap_or("")
+        )
+    } else {
+        format!(
+            "content|{}|{lane_id}|{source_type}|project:{}|task:{}|source_id:{}|source_ref:{}|title:{title}|summary:{summary}",
+            profile.as_str(),
+            project_id.unwrap_or(""),
+            task_id.unwrap_or(""),
+            source_id.unwrap_or(""),
+            source_ref.unwrap_or("")
+        )
+    };
     format!("evi-{}", short_sha256(&input, 16))
+}
+
+fn evidence_item_uses_stable_projection_id(source_type: &str) -> bool {
+    matches!(
+        source_type,
+        "runtime_environment" | "support_catalog" | "deployment_closure_policy"
+    )
 }
 
 fn dedupe_evidence_items(items: &mut Vec<EvidenceItemInput>) {
@@ -4045,7 +4072,8 @@ mod tests {
         context_gather_persist_artifact, context_gather_persist_read_model,
         context_gather_worker_visible_dir_for, context_noise_metrics,
         context_pack_artifact_payload, dedupe_evidence_search_items,
-        deployment_event_item_from_timeline_row, diagnostics_have_hard_failures,
+        deployment_event_item_from_timeline_row, diagnostics_have_hard_failures, evidence_item_id,
+        evidence_item_uses_stable_projection_id,
         filter_incomplete_deployment_closure_evidence_items,
         filter_stale_compiled_policy_evidence_items_with_fingerprint,
         filter_stale_runtime_environment_evidence_items_with_dir,
@@ -4304,6 +4332,79 @@ mod tests {
         assert_eq!(items.len(), 2);
         assert_eq!(deduplicated_count, 1);
         assert_eq!(truncated_count, 1);
+    }
+
+    #[test]
+    fn volatile_projection_evidence_ids_ignore_release_specific_summary_text() {
+        assert!(evidence_item_uses_stable_projection_id(
+            "runtime_environment"
+        ));
+        assert!(evidence_item_uses_stable_projection_id(
+            "deployment_closure_policy"
+        ));
+        assert!(!evidence_item_uses_stable_projection_id(
+            "conversation_fact_extract"
+        ));
+
+        let first = evidence_item_id(
+            "runtime_truth",
+            "runtime_environment",
+            None,
+            None,
+            Some("missiond"),
+            None,
+            SourceProfile::IntentDefault,
+            "Runtime truth",
+            r#"{"compiled_runtime_dir":"/release/old/compiled-runtime"}"#,
+        );
+        let second = evidence_item_id(
+            "runtime_truth",
+            "runtime_environment",
+            None,
+            None,
+            Some("missiond"),
+            None,
+            SourceProfile::IntentDefault,
+            "Runtime truth",
+            r#"{"compiled_runtime_dir":"/release/new/compiled-runtime"}"#,
+        );
+        let deploy_ops = evidence_item_id(
+            "runtime_truth",
+            "runtime_environment",
+            None,
+            None,
+            Some("missiond"),
+            None,
+            SourceProfile::DeployOps,
+            "Runtime truth",
+            r#"{"compiled_runtime_dir":"/release/new/compiled-runtime"}"#,
+        );
+        let conversation_first = evidence_item_id(
+            "conversation_audit",
+            "conversation_fact_extract",
+            Some("c1"),
+            None,
+            Some("missiond"),
+            None,
+            SourceProfile::ConversationAudit,
+            "Conversation fact",
+            "old content",
+        );
+        let conversation_second = evidence_item_id(
+            "conversation_audit",
+            "conversation_fact_extract",
+            Some("c1"),
+            None,
+            Some("missiond"),
+            None,
+            SourceProfile::ConversationAudit,
+            "Conversation fact",
+            "new content",
+        );
+
+        assert_eq!(first, second);
+        assert_ne!(first, deploy_ops);
+        assert_ne!(conversation_first, conversation_second);
     }
 
     #[test]

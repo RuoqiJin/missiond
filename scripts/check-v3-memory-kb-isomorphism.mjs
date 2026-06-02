@@ -250,6 +250,7 @@ function checkFiles(root, files) {
     'freshness_filtered_count',
     'compiled_policy_filtered_count',
     'runtime_environment_filtered_count',
+    'mission_context_gather MUST assign stable evidence_item IDs for volatile compact projections runtime_environment, support_catalog, and deployment_closure_policy',
     'mission_context_gather MUST filter persisted generic deploy-closure compact evidence that lacks project/service/deploy-center/runtime identity',
     'incomplete_filtered_count',
     'return a configuration snapshot by default; use bounded direct HTTP loopback transport for xjp-memory provider calls and only probe /v1/memory/provider_status when probe=true',
@@ -318,6 +319,7 @@ function checkFiles(root, files) {
     'filter_stale_runtime_environment_evidence_items',
     'evidence_item_has_stale_runtime_environment_ref',
     'evidence_item_runtime_environment_compiled_dir',
+    'evidence_item_uses_stable_projection_id',
     'raw_hit_count',
     'incomplete_filtered_count',
     'deduplicated_count',
@@ -1074,6 +1076,7 @@ function buildFixture() {
                          "freshness_filtered_count"
                          "compiled_policy_filtered_count"
                          "runtime_environment_filtered_count"
+                         "mission_context_gather MUST assign stable evidence_item IDs for volatile compact projections runtime_environment, support_catalog, and deployment_closure_policy"
                          "mission_context_gather MUST filter persisted generic deploy-closure compact evidence that lacks project/service/deploy-center/runtime identity"
                          "incomplete_filtered_count"
 			                 "return a configuration snapshot by default; use bounded direct HTTP loopback transport for xjp-memory provider calls and only probe /v1/memory/provider_status when probe=true"
@@ -1213,7 +1216,7 @@ CREATE TABLE IF NOT EXISTS skill_evidence_items;
   writeFixture(root, DEFAULT_FILES.contextGather, `
 SourceProfile; source_profile; source_selection; include_credentials; include_raw_sources; persist_read_model; persistReadModel; context_gather_persist_read_model;
 include_board; include_conversations; conversation_time_range;
-	evidence_lanes; evidence_items; support_catalog; deployment_closure; deployment_closure_policy; deployment_events; deploy_center_event; deployment_events_source; deployment_event_item_from_timeline_row; deployment_event_matches_scope; system::external_service_event; authority_order; noise_diagnostics; context_noise_metrics; build_support_catalog; attach_infra_os_disabled_support_fallback; infra_os_disabled_support_fallback_items; support_catalog_available; dedupe_evidence_search_items; evidence_search_dedupe_key; filter_incomplete_deployment_closure_evidence_items; evidence_item_has_incomplete_deployment_closure_placeholder; filter_stale_runtime_environment_evidence_items; evidence_item_has_stale_runtime_environment_ref; evidence_item_runtime_environment_compiled_dir; raw_hit_count; incomplete_filtered_count; deduplicated_count; truncated_count; build_evidence_items; build_deployment_closure_support; persist_evidence_lane_projection; record_context_gather_run; upsert_evidence_items; runtime_truth; project_ssot; reviewed_kb; active_board; skill_evidence; conversation_audit; cold_archive; support_refs; context_pack_artifact_payload;
+	evidence_lanes; evidence_items; support_catalog; deployment_closure; deployment_closure_policy; deployment_events; deploy_center_event; deployment_events_source; deployment_event_item_from_timeline_row; deployment_event_matches_scope; system::external_service_event; authority_order; noise_diagnostics; context_noise_metrics; build_support_catalog; attach_infra_os_disabled_support_fallback; infra_os_disabled_support_fallback_items; support_catalog_available; dedupe_evidence_search_items; evidence_search_dedupe_key; filter_incomplete_deployment_closure_evidence_items; evidence_item_has_incomplete_deployment_closure_placeholder; filter_stale_runtime_environment_evidence_items; evidence_item_has_stale_runtime_environment_ref; evidence_item_runtime_environment_compiled_dir; evidence_item_uses_stable_projection_id; raw_hit_count; incomplete_filtered_count; deduplicated_count; truncated_count; build_evidence_items; build_deployment_closure_support; persist_evidence_lane_projection; record_context_gather_run; upsert_evidence_items; runtime_truth; project_ssot; reviewed_kb; active_board; skill_evidence; conversation_audit; cold_archive; support_refs; context_pack_artifact_payload;
 load_compiled_project_universe; compiled_service_runtime_payload_for_project; supportCatalog; compiled_deployment_policy_for_service;
 credential_lane_opt_in; selection.include_credentials; selection.include_raw_sources; raw_sources_omitted;
 "board_tasks"; "conversation_logs"; "credential_refs"; "mission_board_query"; "mission_conversation_query"; "scope": "active"; "time_range"; last_30d;
