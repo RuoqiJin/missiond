@@ -98,6 +98,9 @@ function checkFiles(root, files) {
     ':entrypoint mission_project.resolve',
     ':resolver-statuses [resolved ambiguous unregistered_candidate not_found stale_runtime]',
     ':compiled-universe-fields [aliases service_ids domains public_base_url frontend_url api_base_url]',
+    'mission_project get MUST accept id/project/project_id/projectId',
+    'db_status',
+    'compiled_status',
     'support_catalog',
     'deploy_center_slug',
     'service_manifest_refs',
@@ -254,6 +257,13 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.registry, sources.registry, [
     'handle_list',
     'handle_get',
+    'project_id_arg',
+    'enrich_project_get_value_with_compiled_identity',
+    'enrich_project_get_value_with_compiled_identity_from_universe',
+    'db_status',
+    'compiled_status',
+    'compiledProject',
+    'serviceRuntime',
     'handle_resolve',
     'missiond.project-resolution.v1',
     'unregistered_candidate',
@@ -324,7 +334,7 @@ function checkFiles(root, files) {
     'dnsProvider',
     'opsCapability',
     'sourceEvidence',
-    'locate_v3_blueprint',
+    'missiond_blueprint_path',
   ]);
 
   requireAll(diagnostics, files.survey, sources.survey, [
@@ -386,6 +396,9 @@ function checkFiles(root, files) {
     '"get"',
     '"resolve"',
     '"query"',
+    '"project"',
+    '"project_id"',
+    '"projectId"',
     '"cwd"',
     '"include_unregistered_candidates"',
     '"set_active"',
@@ -444,6 +457,8 @@ function buildFixture() {
 	    :entrypoint mission_project.resolve
 	    :resolver-statuses [resolved ambiguous unregistered_candidate not_found stale_runtime]
 	    :compiled-universe-fields [aliases service_ids domains public_base_url frontend_url api_base_url]
+	    :rule "mission_project get MUST accept id/project/project_id/projectId and expose db_status plus compiled_status"
+	    :rule "compiled support_catalog MUST carry deploy_center_slug and service_manifest_refs"
 	    :rule "mission_context_gather MUST call mission_project resolve")
 	  (registry-authority-map :authorities ((missiond) (deploy-center) (forge)))
 	  (project-blueprint-registry
@@ -506,6 +521,7 @@ ProjectRegistryRuntimeConfig DEFAULT_PROJECT_UNIVERSE_MANIFEST DEFAULT_PROJECT_I
 .missiond/intent.lisp .jarvis/intent.lisp intent.lisp
 parse_project_registry_policy project-registry-policy intent-path-candidates default-universe-manifest
 env_or_default_universe_manifest nearest_missiond_root UNIVERSE_MANIFEST
+CompiledServiceSupportCatalog support_catalog
 `);
 
   writeFixture(root, DEFAULT_FILES.facade, `
@@ -533,8 +549,10 @@ Unknown project action
 
   writeFixture(root, DEFAULT_FILES.registry, `
 handle_list handle_get handle_set_active handle_sync handle_init handle_import_universe
+project_id_arg enrich_project_get_value_with_compiled_identity enrich_project_get_value_with_compiled_identity_from_universe
+db_status compiled_status compiledProject serviceRuntime
 handle_resolve missiond.project-resolution.v1 unregistered_candidate compiled_service_runtime registration_proposal project_resolution_next_actions
-load_compiled_project_universe CompiledServiceRuntimeEntry compiled_project_to_config
+load_compiled_project_universe CompiledServiceRuntimeEntry supportCatalog compiled_project_to_config
 "source": "compiled-project-universe"
 "schema": "missiond.project-import.compiled-universe.v1"
 "manifestFallback": false
@@ -563,7 +581,7 @@ handle_reconcile missiond.project-registry-reconcile.v1 root_mismatch deploy_fac
 handle_universe service-runtime-universe
 extract_forms(&block, "(service ")
 extract_forms(&block, "(capability ")
-publicBaseUrl dnsProvider opsCapability sourceEvidence locate_v3_blueprint
+publicBaseUrl dnsProvider opsCapability sourceEvidence missiond_blueprint_path
 eventIngest
 `);
 
@@ -614,7 +632,7 @@ fallback_project_id_used_when_no_explicit
   writeFixture(root, DEFAULT_FILES.mcp, `
 ToolDefinition::new
 "mission_project"
-"list" "get" "resolve" "query" "cwd" "include_unregistered_candidates" "set_active" "sync" "init" "context" "memories" "universe" "reconcile" "vault_sync" "import_universe" "survey"
+"list" "get" "resolve" "query" "project" "project_id" "projectId" "cwd" "include_unregistered_candidates" "set_active" "sync" "init" "context" "memories" "universe" "reconcile" "vault_sync" "import_universe" "survey"
 `);
 
   writeFixture(root, DEFAULT_FILES.maturityChecker, `

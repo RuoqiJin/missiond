@@ -10,6 +10,9 @@ pub fn definitions() -> Vec<ToolDefinition> {
             "properties": {
                 "action": {"type": "string", "enum": ["list", "get", "resolve", "set_active", "sync", "init", "context", "memories", "universe", "reconcile", "vault_sync", "import_universe", "survey"], "default": "list"},
                 "id": {"type": "string", "description": "[get/set_active/init/context/memories/universe/vault_sync/survey/resolve] 项目或服务 ID"},
+                "project": {"type": "string", "description": "[get/resolve/context] id alias for callers that use project-scoped tools"},
+                "project_id": {"type": "string", "description": "[get/resolve/context] id alias in snake_case"},
+                "projectId": {"type": "string", "description": "[get/resolve/context] id alias in camelCase"},
                 "query": {"type": "string", "description": "[resolve] 项目名、别名、域名、URL、服务名或用户原始描述"},
                 "cwd": {"type": "string", "description": "[resolve] 当前工作目录，用于最长项目根匹配"},
                 "path": {"type": "string", "description": "[init/resolve] 项目绝对路径或候选路径"},

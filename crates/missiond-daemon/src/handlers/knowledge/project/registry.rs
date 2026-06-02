@@ -83,7 +83,7 @@ pub(super) async fn handle_list(state: &AppState) -> Result<ToolResult> {
 }
 
 pub(super) async fn handle_get(state: &AppState, args: Value) -> Result<ToolResult> {
-    let id = required_str(&args, "id")?;
+    let id = project_id_arg(&args)?;
     let project = state
         .store
         .get_project(id)
@@ -92,6 +92,8 @@ pub(super) async fn handle_get(state: &AppState, args: Value) -> Result<ToolResu
     match project {
         Some(p) => {
             let mut value = db_project_to_value(&p);
+            value["db_status"] = Value::String("found".to_string());
+            enrich_project_get_value_with_compiled_identity(&mut value, id);
             enrich_project_status_value(&mut value);
             Ok(ToolResult::json_pretty(&value))
         }
@@ -1699,6 +1701,7 @@ fn compiled_project_lookup(id: &str) -> Option<Value> {
             "db_status": "missing",
             "compiledProject": compiled_project_to_value(project),
         });
+        enrich_project_get_value_with_compiled_identity_from_universe(&mut value, id, &compiled);
         if !diagnostics.is_empty() {
             value["diagnostics"] = Value::Array(diagnostics);
         }
@@ -1720,11 +1723,83 @@ fn compiled_project_lookup(id: &str) -> Option<Value> {
             "db_status": "missing",
             "serviceRuntime": compiled_service_to_value(service),
         });
+        enrich_project_get_value_with_compiled_identity_from_universe(&mut value, id, &compiled);
         if !diagnostics.is_empty() {
             value["diagnostics"] = Value::Array(diagnostics.clone());
         }
         Some(value)
     })
+}
+
+fn enrich_project_get_value_with_compiled_identity(value: &mut Value, id: &str) {
+    let mut diagnostics = Vec::new();
+    let compiled = load_resolution_universe(&mut diagnostics);
+    enrich_project_get_value_with_compiled_identity_from_universe(value, id, &compiled);
+}
+
+fn enrich_project_get_value_with_compiled_identity_from_universe(
+    value: &mut Value,
+    requested_id: &str,
+    compiled: &ResolutionUniverse,
+) {
+    if !value.is_object() {
+        return;
+    }
+    let mut lookup_keys = vec![requested_id.to_string()];
+    if let Some(id) = value.get("id").and_then(Value::as_str) {
+        lookup_keys.push(id.to_string());
+    }
+    lookup_keys.sort();
+    lookup_keys.dedup();
+
+    let project = lookup_keys.iter().find_map(|key| {
+        let normalized = normalize_key(key);
+        compiled
+            .projects
+            .iter()
+            .find(|project| compiled_project_lookup_matches(project, &normalized))
+    });
+    if let Some(project) = project {
+        value["compiledProject"] = compiled_project_to_value(project);
+        if let Some(project_id) = project.id.as_deref().filter(|id| !id.trim().is_empty()) {
+            value["id"] = Value::String(project_id.to_string());
+        }
+    }
+
+    let compiled_project_id = project.and_then(|project| project.id.as_deref());
+    let service = lookup_keys.iter().find_map(|key| {
+        let normalized = normalize_key(key);
+        compiled.services.iter().find(|service| {
+            compiled_service_lookup_matches(service, &normalized)
+                || compiled_project_id.is_some_and(|project_id| {
+                    service
+                        .project
+                        .as_deref()
+                        .is_some_and(|value| normalize_key(value) == normalize_key(project_id))
+                        || service
+                            .id
+                            .as_deref()
+                            .is_some_and(|value| normalize_key(value) == normalize_key(project_id))
+                })
+        })
+    });
+    if let Some(service) = service {
+        value["serviceRuntime"] = compiled_service_to_value(service);
+        if value.get("id").and_then(Value::as_str).is_none() {
+            if let Some(project_id) = service.project.as_deref().or(service.id.as_deref()) {
+                value["id"] = Value::String(project_id.to_string());
+            }
+        }
+    }
+
+    value["compiled_status"] = Value::String(
+        if value.get("compiledProject").is_some() || value.get("serviceRuntime").is_some() {
+            "found"
+        } else {
+            "missing"
+        }
+        .to_string(),
+    );
 }
 
 fn compiled_project_lookup_matches(
@@ -1764,6 +1839,20 @@ fn first_non_empty(values: [Option<&str>; 4]) -> Option<String> {
         .map(str::trim)
         .find(|value| !value.is_empty())
         .map(str::to_string)
+}
+
+fn project_id_arg(args: &Value) -> Result<&str> {
+    for key in ["id", "project", "project_id", "projectId"] {
+        if let Some(value) = args
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Ok(value);
+        }
+    }
+    Err(anyhow!("id is required"))
 }
 
 fn push_lookup_value(values: &mut Vec<String>, raw: &str) {
@@ -2037,9 +2126,12 @@ fn required_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::{
         compiled_project_lookup_matches, compiled_service_lookup_matches,
-        CompiledProjectUniverseEntry, CompiledServiceRuntimeEntry,
+        enrich_project_get_value_with_compiled_identity_from_universe, project_id_arg,
+        CompiledProjectUniverseEntry, CompiledServiceRuntimeEntry, ResolutionUniverse,
     };
 
     fn compiled_project() -> CompiledProjectUniverseEntry {
@@ -2104,5 +2196,59 @@ mod tests {
         assert!(compiled_service_lookup_matches(&service, "payments-api"));
         assert!(compiled_service_lookup_matches(&service, "payments"));
         assert!(!compiled_service_lookup_matches(&service, "asr"));
+    }
+
+    #[test]
+    fn project_get_accepts_project_id_aliases() {
+        assert_eq!(
+            project_id_arg(&json!({"project": "asr"})).expect("project alias"),
+            "asr"
+        );
+        assert_eq!(
+            project_id_arg(&json!({"project_id": "payments"})).expect("snake alias"),
+            "payments"
+        );
+        assert_eq!(
+            project_id_arg(&json!({"projectId": "deploy-center"})).expect("camel alias"),
+            "deploy-center"
+        );
+    }
+
+    #[test]
+    fn project_get_enriches_db_project_with_compiled_identity() {
+        let mut service = compiled_service();
+        service.id = Some("asr".to_string());
+        service.project = Some("asr".to_string());
+        let universe = ResolutionUniverse {
+            projects: vec![compiled_project()],
+            services: vec![service],
+            runtime: json!({}),
+        };
+        let mut value = json!({
+            "id": "asr",
+            "source": "missiond-db",
+            "db_status": "found"
+        });
+
+        enrich_project_get_value_with_compiled_identity_from_universe(&mut value, "asr", &universe);
+
+        assert_eq!(
+            value.get("compiled_status").and_then(|v| v.as_str()),
+            Some("found")
+        );
+        assert_eq!(
+            value
+                .get("compiledProject")
+                .and_then(|v| v.get("id"))
+                .and_then(|v| v.as_str()),
+            Some("asr")
+        );
+        assert_eq!(
+            value
+                .get("serviceRuntime")
+                .and_then(|v| v.get("project"))
+                .and_then(|v| v.as_str()),
+            Some("asr")
+        );
     }
 }

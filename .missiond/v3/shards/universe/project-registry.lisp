@@ -21,6 +21,7 @@
       ["mission_project resolve is read-only and MUST NOT register or mutate projects."
        "Exact project id/domain/alias matches outrank fuzzy path or conversation evidence."
        "Compiled project-universe MUST expose aliases and service-runtime domains/URLs so ClaudeCode and Codex do not need ad-hoc filesystem grep to identify projects."
+       "mission_project get MUST accept id/project/project_id/projectId, enrich DB-backed and compiled-only projects with compiledProject/serviceRuntime/supportCatalog when available, and expose explicit db_status plus compiled_status so get does not contradict resolve."
        "If compiled project-universe is stale or unavailable, resolve MUST return a structured stale_runtime diagnostic and continue with DB/explicit query facts instead of hard-failing ordinary project discovery."
        "Unknown domains such as a new product site MUST return unregistered_candidate with a registration_proposal rather than treating the project as absent."
        "mission_context_gather MUST call mission_project resolve when query text is present and no explicit project_id is supplied."])
