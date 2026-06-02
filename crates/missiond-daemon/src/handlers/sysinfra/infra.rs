@@ -1122,8 +1122,10 @@ fn query_has_specific_file_token_without_match(
     let Some(query) = filter.query.as_deref() else {
         return false;
     };
-    let specific_tokens: Vec<String> = evidence_query_tokens(query)
-        .into_iter()
+    let query_tokens = evidence_query_tokens(query);
+    let specific_tokens: Vec<&str> = query_tokens
+        .iter()
+        .map(String::as_str)
         .filter(|token| token.contains('.') || token.contains('/'))
         .collect();
     if specific_tokens.is_empty() {
@@ -1135,6 +1137,9 @@ fn query_has_specific_file_token_without_match(
         .iter()
         .any(|token| contains_evidence_token(&haystack, token))
     {
+        return false;
+    }
+    if line_matches_deploy_closure_sibling_evidence(line, &query_tokens) {
         return false;
     }
 
@@ -1152,6 +1157,45 @@ fn query_has_specific_file_token_without_match(
         .filter(|token| !token.contains('.') && !token.contains('/'))
         .filter(|token| token != project)
         .any(|token| contains_evidence_token(&line_haystack, &token))
+}
+
+fn line_matches_deploy_closure_sibling_evidence(line: &str, query_tokens: &[String]) -> bool {
+    let line_haystack = line.to_ascii_lowercase();
+    let matched_anchor_count = query_tokens
+        .iter()
+        .filter(|token| is_deploy_closure_sibling_anchor_token(token))
+        .filter(|token| deploy_closure_sibling_anchor_matches(&line_haystack, token))
+        .count();
+    matched_anchor_count >= 2
+}
+
+fn is_deploy_closure_sibling_anchor_token(token: &str) -> bool {
+    matches!(
+        token,
+        "migration"
+            | "relation"
+            | "compose"
+            | "entrypoint"
+            | "binary"
+            | "marker"
+            | "volume"
+            | "volumes"
+    )
+}
+
+fn deploy_closure_sibling_anchor_matches(line_haystack: &str, token: &str) -> bool {
+    match token {
+        "migration" => {
+            contains_evidence_token(line_haystack, "migration")
+                || contains_evidence_token(line_haystack, "migrate")
+                || line_haystack.contains("sqlx migrate")
+        }
+        "volume" | "volumes" => {
+            contains_evidence_token(line_haystack, "volume")
+                || contains_evidence_token(line_haystack, "volumes")
+        }
+        other => contains_evidence_token(line_haystack, other),
+    }
 }
 
 fn evidence_scope_score(
@@ -1292,6 +1336,23 @@ fn is_infra_evidence_line(line: &str) -> bool {
         "tailscale",
         "harbor",
         "secret-store",
+        "service.manifest.toml",
+        "manifest gate",
+        "deploy center provenance",
+        "deploy-center provenance",
+        "canary",
+        "smoke",
+        "docker-compose",
+        "compose",
+        "entrypoint",
+        "old binary",
+        "binary",
+        "image marker",
+        "migration",
+        "sqlx migrate",
+        "relation",
+        "volume override",
+        "volumes",
     ]
     .iter()
     .any(|needle| lower.contains(needle))
@@ -1769,7 +1830,16 @@ fn known_project_evidence_tokens() -> &'static [&'static str] {
 fn is_deploy_drift_anchor_token(token: &str) -> bool {
     matches!(
         token,
-        "compose" | "entrypoint" | "binary" | "marker" | "volume" | "volumes"
+        "service.manifest.toml"
+            | "manifest"
+            | "migration"
+            | "relation"
+            | "compose"
+            | "entrypoint"
+            | "binary"
+            | "marker"
+            | "volume"
+            | "volumes"
     )
 }
 
@@ -1996,7 +2066,8 @@ fn maybe_push_skill_target(
 #[cfg(test)]
 mod tests {
     use super::{
-        credential_refs_filtered, evidence_matches_scope, evidence_scope_score, InfraEvidenceFilter,
+        credential_refs_filtered, evidence_matches_scope, evidence_scope_score,
+        is_infra_evidence_line, InfraEvidenceFilter,
     };
 
     #[test]
@@ -2050,6 +2121,45 @@ mod tests {
             "/Users/jinchen/.claude/skills/deploy-ops/SKILL.md",
             "Payments deploy-agent canary evidence and manifest gate notes",
             &filter,
+        ));
+        assert!(is_infra_evidence_line(
+            "Payments deploy-agent canary evidence and manifest gate notes"
+        ));
+
+        let manifest_filter = InfraEvidenceFilter {
+            target_id: None,
+            skill: None,
+            query: Some(
+                "payments Deploy Center canary service.manifest.toml migration relation payments already exists compose old binary image marker"
+                    .to_string(),
+            ),
+            project_id: Some("missiond".to_string()),
+            limit: 10,
+        };
+        let manifest_line = "Payments service.manifest.toml Manifest Gate canary smoke provenance";
+        let compose_line =
+            "compose volume override kept the old binary image marker running after canary";
+        let migration_line = "sqlx migrate relation payments already exists during canary";
+        assert!(is_infra_evidence_line(manifest_line));
+        assert!(is_infra_evidence_line(compose_line));
+        assert!(is_infra_evidence_line(migration_line));
+        assert!(evidence_matches_scope(
+            "xjp-deploy-center",
+            "/Users/jinchen/.claude/skills/xjp-deploy-center/SKILL.md",
+            manifest_line,
+            &manifest_filter,
+        ));
+        assert!(evidence_matches_scope(
+            "deploy-ops",
+            "/Users/jinchen/.claude/skills/deploy-ops/SKILL.md",
+            compose_line,
+            &manifest_filter,
+        ));
+        assert!(evidence_matches_scope(
+            "sqlx-cache",
+            "/Users/jinchen/.claude/skills/sqlx-cache/SKILL.md",
+            migration_line,
+            &manifest_filter,
         ));
 
         let deploy_runtime_filter = InfraEvidenceFilter {

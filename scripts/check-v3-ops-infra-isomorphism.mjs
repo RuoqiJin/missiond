@@ -30,6 +30,7 @@ const DEFAULT_FILES = {
   corePgMod: 'crates/missiond-core/src/db/pg/mod.rs',
   coreDbTraits: 'crates/missiond-core/src/db/traits.rs',
   codexIngestionWorker: 'crates/missiond-daemon/src/workers/local/codex_ingestion_worker.rs',
+  sysinfraInfra: 'crates/missiond-daemon/src/handlers/sysinfra/infra.rs',
 };
 
 function main() {
@@ -107,6 +108,7 @@ function checkFiles(root, files) {
     'Deploy scripts MUST serialize active-switch and apply-cleanup mutations through a deploy ownership lock',
     'Deploy scripts MUST reject active/apply-cleanup mutations when the current active release manifest or launchd WorkingDirectory belongs to a different project root',
     'Deploy scripts MUST verify after active switch, launchd restart, smoke, and cleanup',
+    'Infra skill evidence classifiers MUST treat deployment closure facts as infra evidence candidates',
     'AST repository-wide startup full sync MUST be opt-in through MISSIOND_AST_FULL_SYNC_ON_STARTUP',
     'M6 MissionD formatting MUST be converged',
     'Rust formatter edition MUST be derived from workspace Cargo.toml',
@@ -209,6 +211,16 @@ function checkFiles(root, files) {
       message: 'default MCP config heredoc must not emit duplicate JSON objects',
     });
   }
+
+  requireAll(diagnostics, files.sysinfraInfra, sources.sysinfraInfra, [
+    'is_infra_evidence_line',
+    'is_deploy_drift_anchor_token',
+    'service.manifest.toml',
+    'manifest gate',
+    'canary',
+    'sqlx migrate',
+    'volume override',
+  ]);
 
   requireAll(diagnostics, files.cargoFmtTouched, sources.cargoFmtTouched, [
     'scripts/cargo-fmt-touched.sh --check',
@@ -344,6 +356,7 @@ function buildFixture() {
        "Deploy scripts MUST serialize active-switch and apply-cleanup mutations through a deploy ownership lock."
        "Deploy scripts MUST reject active/apply-cleanup mutations when the current active release manifest or launchd WorkingDirectory belongs to a different project root."
        "Deploy scripts MUST verify after active switch, launchd restart, smoke, and cleanup."
+       "Infra skill evidence classifiers MUST treat deployment closure facts as infra evidence candidates."
        "AST repository-wide startup full sync MUST be opt-in through MISSIOND_AST_FULL_SYNC_ON_STARTUP."
        "M6 MissionD formatting MUST be converged."
        "Rust formatter edition MUST be derived from workspace Cargo.toml."
@@ -426,6 +439,13 @@ active_release=$RELEASE_ID
 rollback_with_smoke
 rollback-smoke
 rollback attempted
+`);
+
+  writeFixture(root, DEFAULT_FILES.sysinfraInfra, `
+fn is_infra_evidence_line(line: &str) -> bool {
+  "service.manifest.toml"; "manifest gate"; "canary"; "sqlx migrate"; "volume override";
+}
+fn is_deploy_drift_anchor_token(token: &str) -> bool { true }
 `);
 
   writeFixture(root, DEFAULT_FILES.cargoFmtTouched, `

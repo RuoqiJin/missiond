@@ -213,6 +213,7 @@ function checkFiles(root, files) {
     'bounded conversation logs',
     'Worker context packs MUST include evidence_lanes lane summaries by default and omit raw sources',
     'Deploy-ops skill_context summaries MUST expose high-confidence query-ranked operational_fact_samples',
+    'mission_context_gather source_profile=deploy_ops infra skill_evidence MUST recognize deployment-closure evidence anchors',
     'MCP/search regression wrappers MUST preserve complete JSON-RPC tool responses',
     'mission_context_gather MUST aggregate runtime_environment, KB, active SSOT, project registry, skill operational evidence, infra evidence, active Board task records, and bounded conversation logs through authority-aware evidence lanes',
     'Board/task/workflow records are searchable retrieval evidence',
@@ -890,6 +891,7 @@ function buildFixture() {
 	    :invariants ["credential_refs MUST NOT be emitted unless include_credentials=true"
 	                 "Worker context packs MUST include evidence_lanes lane summaries by default and omit raw sources"
 	                 "Deploy-ops skill_context summaries MUST expose high-confidence query-ranked operational_fact_samples"
+	                 "mission_context_gather source_profile=deploy_ops infra skill_evidence MUST recognize deployment-closure evidence anchors"
 	                 "MCP/search regression wrappers MUST preserve complete JSON-RPC tool responses"
 	                 "mission_context_gather MUST aggregate runtime_environment, KB, active SSOT, project registry, skill operational evidence, infra evidence, active Board task records, and bounded conversation logs through authority-aware evidence lanes"
 	                 "Board/task/workflow records are searchable retrieval evidence"

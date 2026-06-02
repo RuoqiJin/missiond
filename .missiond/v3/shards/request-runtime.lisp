@@ -57,6 +57,7 @@
       ["mission_context_gather MUST expose source_profile, source_summaries, evidence_lanes, authority_order, noise_diagnostics, raw_sources_omitted, and context_noise_metrics."
        "mission_context_gather source_profile=intent_default MUST exclude bounded conversation logs, global skill/infra evidence, and credential_refs unless an explicit opt-in flag or deploy/debug profile enables them."
        "mission_context_gather source_profile=deploy_ops MUST pass query/project scope into mission_infra_query skill_evidence and credential_refs; evidence-only lanes MUST reject unrelated global skill hits."
+       "mission_context_gather source_profile=deploy_ops infra skill_evidence MUST recognize deployment-closure evidence anchors such as service.manifest.toml, manifest gate, canary smoke, migration/relation failures, compose, entrypoint, binary markers, and volume overrides while still applying query/project scope before returning items."
        "mission_context_gather MUST aggregate runtime_environment, KB, active SSOT, project registry, skill operational evidence, infra evidence, active Board task records, and bounded conversation logs through authority-aware evidence lanes rather than one flat prompt preload."
        "Board/task/workflow records are searchable retrieval evidence, not active long-term memory unless promoted by an explicit review workflow."
        "Conversation logs are searched by query and bounded window; they are not default prompt preloads."
