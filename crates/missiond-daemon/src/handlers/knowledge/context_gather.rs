@@ -1545,9 +1545,7 @@ fn evidence_source_item_count(key: &str, value: &Value) -> usize {
             .max(array_len(value.get("data")))
             .max(value.as_array().map(Vec::len).unwrap_or(0)),
         "skill_context" => {
-            array_len(value.get("skills"))
-                + array_len(value.get("project_skill_links"))
-                + array_len(value.get("operational_facts"))
+            array_len(value.get("skills")) + array_len(value.get("project_skill_links"))
         }
         "infra" => array_len(value.get("items")).max(value.as_array().map(Vec::len).unwrap_or(0)),
         "credential_refs" => array_len(value.get("credentialRefs"))
@@ -5392,6 +5390,45 @@ mod tests {
                 .get("source_count")
                 .and_then(|value| value.as_u64()),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn skill_evidence_lane_counts_compact_items_not_raw_operational_facts() {
+        let mut sources = serde_json::Map::new();
+        sources.insert(
+            "skill_context".to_string(),
+            json!({
+                "skills": [{"name": "deploy-ops"}, {"name": "payments"}],
+                "project_skill_links": [{"skill": "payments"}],
+                "operational_facts": [
+                    {"key": "compose", "value": "raw fact 1"},
+                    {"key": "entrypoint", "value": "raw fact 2"},
+                    {"key": "binary marker", "value": "raw fact 3"}
+                ]
+            }),
+        );
+        let lanes = build_evidence_lanes(&sources);
+        let skill_lane = lanes
+            .get("lanes")
+            .and_then(|value| value.get("skill_evidence"))
+            .expect("skill evidence lane");
+        assert_eq!(
+            skill_lane.get("source_count").and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            skill_lane.get("item_count").and_then(Value::as_u64),
+            Some(3)
+        );
+
+        let summaries = build_source_summaries(&sources);
+        assert_eq!(
+            summaries
+                .get("skill_context")
+                .and_then(|value| value.get("operational_fact_count"))
+                .and_then(Value::as_u64),
+            Some(3)
         );
     }
 
