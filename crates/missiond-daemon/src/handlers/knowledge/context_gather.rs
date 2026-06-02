@@ -3132,13 +3132,12 @@ fn dedupe_evidence_items(items: &mut Vec<EvidenceItemInput>) {
 fn evidence_item_projection_dedupe_key(item: &EvidenceItemInput) -> String {
     if evidence_item_uses_stable_projection_id(item.source_type.as_str()) {
         format!(
-            "projection|{}|{}|project:{}|task:{}|source_id:{}|source_ref:{}",
+            "projection|{}|{}|project:{}|task:{}|source_id:{}",
             item.lane_id,
             item.source_type,
             item.project_id.as_deref().unwrap_or(""),
             item.task_id.as_deref().unwrap_or(""),
-            item.source_id.as_deref().unwrap_or(""),
-            item.source_ref.as_deref().unwrap_or("")
+            item.source_id.as_deref().unwrap_or("")
         )
     } else {
         format!("id|{}", item.id)
@@ -4893,7 +4892,7 @@ mod tests {
             lane_id: "support_refs".to_string(),
             source_type: "support_catalog".to_string(),
             source_id: Some("payments".to_string()),
-            source_ref: None,
+            source_ref: Some("/services/payments".to_string()),
             project_id: Some("payments".to_string()),
             task_id: None,
             title: "Support catalog: payments".to_string(),
@@ -4909,6 +4908,7 @@ mod tests {
         };
         let mut current = backfill.clone();
         current.id = "evi-current".to_string();
+        current.source_ref = None;
         current.title = "Support catalog".to_string();
         current.summary = "current context projection".to_string();
         current.score = None;
