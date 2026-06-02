@@ -8,7 +8,7 @@ use crate::types::*;
 use async_trait::async_trait;
 #[cfg(feature = "postgres")]
 use sqlx::Row;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Helper: convert a sqlx Row into KnowledgeEntry.
 fn row_to_knowledge_entry(
@@ -281,6 +281,22 @@ fn json_i32_field(value: &serde_json::Value, keys: &[&str]) -> Option<i32> {
             .and_then(serde_json::Value::as_i64)
             .and_then(|value| i32::try_from(value).ok())
     })
+}
+
+fn evidence_search_terms(query: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut terms = Vec::new();
+    for token in query.split(|ch: char| !ch.is_alphanumeric()) {
+        let token = token.trim().to_ascii_lowercase();
+        if token.chars().count() < 2 || !seen.insert(token.clone()) {
+            continue;
+        }
+        terms.push(token);
+        if terms.len() >= 16 {
+            break;
+        }
+    }
+    terms
 }
 
 #[cfg(feature = "postgres")]
@@ -2498,6 +2514,7 @@ impl EvidenceLaneStore for PgMissionStore {
         };
         let query = input.query.trim();
         let like_query = format!("%{}%", query);
+        let query_terms = evidence_search_terms(query);
         let limit = input.limit.clamp(1, 50);
         let rows = sqlx::query(
             "SELECT
@@ -2507,7 +2524,17 @@ impl EvidenceLaneStore for PgMissionStore {
                 CASE
                     WHEN $1 = '' THEN 0.0
                     ELSE ts_rank_cd(fts_doc, plainto_tsquery('simple', $1))::double precision
-                END AS search_score
+                END AS search_score,
+                CASE
+                    WHEN cardinality($7::text[]) = 0 THEN 0.0
+                    ELSE (
+                        SELECT COUNT(*)::double precision
+                        FROM unnest($7::text[]) AS term(value)
+                        WHERE title ILIKE ('%' || term.value || '%')
+                           OR summary ILIKE ('%' || term.value || '%')
+                           OR COALESCE(source_ref, '') ILIKE ('%' || term.value || '%')
+                    )
+                END AS token_score
              FROM evidence_items
              WHERE lane_id = ANY($2::text[])
                AND ($3::text IS NULL OR project_id = $3 OR ($4::boolean AND project_id IS NULL))
@@ -2518,14 +2545,22 @@ impl EvidenceLaneStore for PgMissionStore {
                     OR title ILIKE $6
                     OR summary ILIKE $6
                     OR source_ref ILIKE $6
+                    OR EXISTS (
+                        SELECT 1
+                        FROM unnest($7::text[]) AS term(value)
+                        WHERE title ILIKE ('%' || term.value || '%')
+                           OR summary ILIKE ('%' || term.value || '%')
+                           OR COALESCE(source_ref, '') ILIKE ('%' || term.value || '%')
+                    )
                )
              ORDER BY
                 (project_id = $3) DESC NULLS LAST,
                 (task_id = $5) DESC NULLS LAST,
                 search_score DESC,
+                token_score DESC,
                 COALESCE(score, 0.0) DESC,
                 updated_at DESC
-             LIMIT $7",
+             LIMIT $8",
         )
         .bind(query)
         .bind(&allowed_lanes)
@@ -2533,6 +2568,7 @@ impl EvidenceLaneStore for PgMissionStore {
         .bind(input.include_global)
         .bind(input.task_id.as_deref())
         .bind(&like_query)
+        .bind(&query_terms)
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
@@ -2540,8 +2576,12 @@ impl EvidenceLaneStore for PgMissionStore {
         let mut items = Vec::with_capacity(rows.len());
         for row in rows {
             let search_score: Option<f64> = row.try_get("search_score")?;
+            let token_score: Option<f64> = row.try_get("token_score")?;
             let mut item = evidence_item_from_row(&row)?;
-            item.score = item.score.or(search_score);
+            let derived_score = search_score.unwrap_or(0.0).max(token_score.unwrap_or(0.0));
+            item.score = item
+                .score
+                .or_else(|| (derived_score > 0.0).then_some(derived_score));
             items.push(item);
         }
         Ok(items)
