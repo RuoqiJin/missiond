@@ -786,17 +786,52 @@ fn evidence_lane(
     keys: &[&str],
 ) -> Value {
     let mut source_keys = Vec::new();
+    let mut item_count = 0usize;
     for key in keys {
-        if sources.contains_key(*key) {
+        let Some(value) = sources.get(*key) else {
+            continue;
+        };
+        let count = evidence_source_item_count(key, value);
+        if count > 0 {
             source_keys.push((*key).to_string());
+            item_count += count;
         }
     }
     json!({
         "authority": authority,
         "role": role,
         "source_count": source_keys.len(),
+        "item_count": item_count,
         "source_keys": source_keys,
     })
+}
+
+fn evidence_source_item_count(key: &str, value: &Value) -> usize {
+    match key {
+        "kb" => array_len(value.get("items"))
+            .max(array_len(value.get("results")))
+            .max(array_len(value.get("data")))
+            .max(value.as_array().map(Vec::len).unwrap_or(0)),
+        "board_tasks" => array_len(value.get("data"))
+            .max(array_len(value.get("items")))
+            .max(array_len(value.get("results"))),
+        "conversation_logs" => array_len(value.get("results"))
+            .max(array_len(value.get("items")))
+            .max(array_len(value.get("data")))
+            .max(value.as_array().map(Vec::len).unwrap_or(0)),
+        "skill_context" => {
+            array_len(value.get("skills"))
+                + array_len(value.get("project_skill_links"))
+                + array_len(value.get("operational_facts"))
+        }
+        "infra" => array_len(value.get("items")).max(value.as_array().map(Vec::len).unwrap_or(0)),
+        "credential_refs" => array_len(value.get("credentialRefs"))
+            .max(array_len(value.get("credential_refs")))
+            .max(value.as_array().map(Vec::len).unwrap_or(0)),
+        _ if value.is_null() => 0,
+        _ if value.as_object().is_some_and(|object| object.is_empty()) => 0,
+        _ => 1,
+    }
 }
 
 fn noise_diagnostics(
@@ -867,9 +902,21 @@ fn context_noise_metrics(
         "raw_sources_in_artifact": selection.include_raw_sources,
         "raw_sources_in_response": selection.include_raw_sources,
         "raw_sources_omitted": !selection.include_raw_sources,
-        "filtered_semantic_conversation_hits": Value::Null,
+        "filtered_semantic_conversation_hits": filtered_semantic_conversation_hits(sources),
         "conversation_filtering": "conversation search owns project/time/type filter metrics; context-gather records whether the lane was enabled."
     })
+}
+
+fn filtered_semantic_conversation_hits(sources: &serde_json::Map<String, Value>) -> Value {
+    sources
+        .get("conversation_logs")
+        .and_then(|value| {
+            value
+                .get("filteredSemanticHits")
+                .or_else(|| value.get("filtered_semantic_hits"))
+        })
+        .cloned()
+        .unwrap_or(Value::Null)
 }
 
 fn response_sources(
@@ -1542,8 +1589,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        build_source_summaries, collect_evidence_refs_from_value, context_pack_artifact_payload,
-        response_sources, source_selection, ContextGatherArgs, SourceProfile,
+        build_evidence_lanes, build_source_summaries, collect_evidence_refs_from_value,
+        context_noise_metrics, context_pack_artifact_payload, response_sources, source_selection,
+        ContextGatherArgs, SourceProfile,
     };
 
     fn args(value: serde_json::Value) -> ContextGatherArgs {
@@ -1648,5 +1696,66 @@ mod tests {
             .and_then(|value| value.get("operational_facts"))
             .and_then(|value| value.as_array())
             .is_some_and(|items| items.len() == 1));
+    }
+
+    #[test]
+    fn evidence_lanes_count_only_non_empty_sources() {
+        let mut sources = serde_json::Map::new();
+        sources.insert(
+            "conversation_logs".to_string(),
+            json!({"results": [], "filteredSemanticHits": 3}),
+        );
+        sources.insert(
+            "runtime_environment".to_string(),
+            json!({"schema": "missiond.runtime-environment-context.v1"}),
+        );
+        let lanes = build_evidence_lanes(&sources);
+        let conversation_lane = lanes
+            .get("lanes")
+            .and_then(|value| value.get("conversation_read_model"))
+            .expect("conversation lane");
+        assert_eq!(
+            conversation_lane
+                .get("source_count")
+                .and_then(|value| value.as_u64()),
+            Some(0)
+        );
+        assert_eq!(
+            conversation_lane
+                .get("item_count")
+                .and_then(|value| value.as_u64()),
+            Some(0)
+        );
+
+        let runtime_lane = lanes
+            .get("lanes")
+            .and_then(|value| value.get("runtime_environment"))
+            .expect("runtime lane");
+        assert_eq!(
+            runtime_lane
+                .get("source_count")
+                .and_then(|value| value.as_u64()),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn context_noise_metrics_reports_filtered_conversation_hits() {
+        let mut sources = serde_json::Map::new();
+        sources.insert(
+            "conversation_logs".to_string(),
+            json!({"results": [], "filteredSemanticHits": 4}),
+        );
+        let lanes = build_evidence_lanes(&sources);
+        let args = args(json!({"query": "audit", "source_profile": "conversation_audit"}));
+        let profile = SourceProfile::from_arg(args.source_profile.as_deref());
+        let selection = source_selection(&args, profile);
+        let metrics = context_noise_metrics(profile, selection, &sources, &lanes);
+        assert_eq!(
+            metrics
+                .get("filtered_semantic_conversation_hits")
+                .and_then(|value| value.as_u64()),
+            Some(4)
+        );
     }
 }
