@@ -153,6 +153,8 @@ function checkFiles(root, files) {
 	    ':aliases [xjp-deploy-center]',
 	    ':root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/deploy-center"',
 	    'xjp-deploy-center is a historical alias for this same canonical service root, not an active Universe project.',
+      ':deployment (:substrate deploy-center :dc_slug "xjp-deploy-center"',
+      'services/deploy-center/service.manifest.toml',
 	    ':id xiaojinpro-backend',
 	    ':root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend"',
 	    ':id deploy-agent',
@@ -476,7 +478,7 @@ function buildFixture() {
       :schema "missiond.service-runtime-universe.v1"
       :rule "mission_project(action=universe)"
       (service :id auth :public-base-url "https://auth.xiaojinpro.com" :dns-provider cloudflare :deployment (:substrate kubernetes :namespace production :deployment "xjp-auth-center") :event-ingest (:endpoint "/webhooks/auth-event" :domain system :event ExternalServiceEvent :source auth-audit-events :token-env MISSIOND_EXTERNAL_WEBHOOK_TOKEN))
-      (service :id deploy-center :event-ingest (:endpoint "/webhooks/deploy-center-event" :domain system :event ExternalServiceEvent) :deployment-confirmation (:checker "node scripts/check-m6-deployment-status.mjs --json"))
+      (service :id deploy-center :deployment (:substrate deploy-center :dc_slug "xjp-deploy-center") :event-ingest (:endpoint "/webhooks/deploy-center-event" :domain system :event ExternalServiceEvent) :deployment-confirmation (:checker "node scripts/check-m6-deployment-status.mjs --json") :source-evidence [services/deploy-center/service.manifest.toml])
       ;; mission_project(action=universe)
       )
     (data-residency-universe
