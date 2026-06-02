@@ -11,6 +11,7 @@ use crate::state::AppState;
 const CONVERSATION_HYBRID_FTS_WEIGHT: f64 = 0.65;
 const CONVERSATION_HYBRID_VEC_WEIGHT: f64 = 0.35;
 const MIN_HYBRID_VECTOR_ONLY_SIMILARITY: f32 = 0.50;
+const CONVERSATION_SEARCH_MATCH_REASON_MAX_CHARS: usize = 420;
 
 fn compact_preview(content: &str, max_chars: usize) -> String {
     let mut out = String::new();
@@ -21,6 +22,19 @@ fn compact_preview(content: &str, max_chars: usize) -> String {
         out.push('…');
     }
     out
+}
+
+fn compact_conversation_match_reason(raw: &str, max_chars: usize) -> (String, bool, usize) {
+    let normalized = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let raw_chars = normalized.chars().count();
+    if raw_chars <= max_chars {
+        return (normalized, false, raw_chars);
+    }
+    let suffix = "...";
+    let take_chars = max_chars.saturating_sub(suffix.chars().count());
+    let mut compact = normalized.chars().take(take_chars).collect::<String>();
+    compact.push_str(suffix);
+    (compact, true, raw_chars)
 }
 
 fn load_conversation_config() -> Result<ConversationIngestionRuntimeConfig> {
@@ -773,6 +787,8 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                 /// Filter by conversation_type (e.g. "gemini_chat")
                 #[serde(alias = "conversation_type", alias = "conversationType")]
                 conversation_type: Option<String>,
+                #[serde(default, alias = "include_raw_match_reason")]
+                include_raw_match_reason: bool,
                 #[serde(alias = "user_id")]
                 user_id: Option<String>,
                 #[serde(alias = "tenant_id")]
@@ -791,6 +807,7 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                 time_range,
                 project,
                 conversation_type,
+                include_raw_match_reason,
                 user_id,
                 tenant_id,
                 application_id,
@@ -1072,7 +1089,7 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                 );
 
                 // Build matchReason: FTS snippet if keyword-matched, llmSummary if vector-only
-                let match_reason = if fts_r.is_some() {
+                let raw_match_reason = if fts_r.is_some() {
                     // FTS hit: get native snippet text from the store.
                     let snippets = state
                         .store
@@ -1100,8 +1117,13 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                             .unwrap_or("(无摘要)")
                     )
                 };
+                let (match_reason, match_reason_truncated, raw_match_reason_chars) =
+                    compact_conversation_match_reason(
+                        &raw_match_reason,
+                        CONVERSATION_SEARCH_MATCH_REASON_MAX_CHARS,
+                    );
 
-                results.push(serde_json::json!({
+                let mut result = serde_json::json!({
                     "sessionId": sid,
                     "project": conv.as_ref().and_then(|c| c.project.as_deref()),
                     "projectId": conv.as_ref().and_then(|c| c.project_id.as_deref()),
@@ -1115,8 +1137,14 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                     "messageCount": conv.as_ref().map(|c| c.message_count),
                     "startedAt": conv.as_ref().map(|c| &c.started_at),
                     "matchReason": match_reason,
+                    "matchReasonTruncated": match_reason_truncated,
+                    "rawMatchReasonChars": raw_match_reason_chars,
                     "cosineSim": sim,
-                }));
+                });
+                if include_raw_match_reason {
+                    result["rawMatchReason"] = serde_json::json!(raw_match_reason);
+                }
+                results.push(result);
             }
 
             Ok(ToolResult::json(&serde_json::json!({
@@ -1130,6 +1158,10 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                 "vecHits": vec_ranked.len(),
                 "filteredSemanticHits": filtered_semantic_hits,
                 "projectDiagnostics": conversation_search_project_diagnostics(project.as_deref(), &project_buckets),
+                "matchReasonPolicy": {
+                    "maxChars": CONVERSATION_SEARCH_MATCH_REASON_MAX_CHARS,
+                    "rawOptIn": "includeRawMatchReason=true"
+                },
             })))
         }
 
@@ -1429,10 +1461,11 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_conversation_project, conversation_search_project_diagnostics,
-        conversation_search_score, keep_conversation_hybrid_candidate,
-        normalize_search_conversation_type, record_project_diagnostic, CanonicalProjectMatch,
-        MIN_HYBRID_VECTOR_ONLY_SIMILARITY,
+        canonical_conversation_project, compact_conversation_match_reason,
+        conversation_search_project_diagnostics, conversation_search_score,
+        keep_conversation_hybrid_candidate, normalize_search_conversation_type,
+        record_project_diagnostic, CanonicalProjectMatch,
+        CONVERSATION_SEARCH_MATCH_REASON_MAX_CHARS, MIN_HYBRID_VECTOR_ONLY_SIMILARITY,
     };
     use missiond_core::types::ProjectConfig;
     use std::collections::BTreeMap;
@@ -1485,6 +1518,17 @@ mod tests {
             None,
             Some(0.1)
         ));
+    }
+
+    #[test]
+    fn compact_match_reason_bounds_direct_search_output() {
+        let raw = "Manifest Gate skipping verify backward compat ".repeat(40);
+        let (compact, truncated, raw_chars) =
+            compact_conversation_match_reason(&raw, CONVERSATION_SEARCH_MATCH_REASON_MAX_CHARS);
+        assert!(truncated);
+        assert!(raw_chars > compact.chars().count());
+        assert!(compact.chars().count() <= CONVERSATION_SEARCH_MATCH_REASON_MAX_CHARS);
+        assert!(compact.ends_with("..."));
     }
 
     #[test]

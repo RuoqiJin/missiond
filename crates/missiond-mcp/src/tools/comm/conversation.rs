@@ -26,6 +26,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "timeRange": {"type": "string", "description": "[search/message_search] 时间范围", "enum": ["last_24h", "last_7d", "last_30d"]},
                     "project": {"type": "string", "description": "[search] 项目过滤"},
                     "excludeSessionId": {"type": "string", "description": "[search] 排除特定会话"},
+                    "includeRawMatchReason": {"type": "boolean", "description": "[search] 返回未压缩 matchReason 原文，默认 false", "default": false},
                     "offset": {"type": "integer", "description": "[search] 分页偏移"},
                     "role": {"type": "string", "description": "[message_search] 消息角色", "enum": ["user", "assistant", "tool_result", "system", "thinking"]},
                     "toolName": {"type": "string", "description": "[message_search] 工具名过滤"},
