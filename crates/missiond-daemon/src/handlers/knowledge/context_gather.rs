@@ -1089,7 +1089,7 @@ fn summarize_source(key: &str, value: &Value) -> Value {
             map.insert(
                 "operational_fact_sample_policy".to_string(),
                 Value::String(
-                    "query-ranked bounded samples; raw operational_facts stay omitted unless include_raw_sources=true or source_profile=full_debug".to_string(),
+                    "high-confidence query-ranked bounded samples (query_match_score>=4); raw operational_facts stay omitted unless include_raw_sources=true or source_profile=full_debug".to_string(),
                 ),
             );
             map.insert("kb_count".to_string(), json!(array_len(value.get("kb"))));
@@ -1202,6 +1202,8 @@ fn summarize_array_source(key: &str, value: &Value, limit: usize) -> Value {
     Value::Object(map)
 }
 
+const MIN_OPERATIONAL_FACT_SAMPLE_SCORE: usize = 4;
+
 fn summarize_skill_operational_fact_samples(value: &Value, limit: usize) -> Value {
     let facts = value
         .get("operational_facts")
@@ -1221,6 +1223,7 @@ fn summarize_skill_operational_fact_samples(value: &Value, limit: usize) -> Valu
         .iter()
         .enumerate()
         .map(|(idx, fact)| (skill_operational_fact_score(fact, &tokens), idx, fact))
+        .filter(|(score, _, _)| *score >= MIN_OPERATIONAL_FACT_SAMPLE_SCORE)
         .collect();
     ranked.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
     Value::Array(
@@ -1918,6 +1921,7 @@ mod tests {
             .get("operational_fact_samples")
             .and_then(|value| value.as_array())
             .expect("compact skill summary should carry ranked operational fact samples");
+        assert_eq!(fact_samples.len(), 1);
         assert_eq!(
             fact_samples
                 .first()

@@ -212,7 +212,7 @@ function checkFiles(root, files) {
     'active Board task records',
     'bounded conversation logs',
     'Worker context packs MUST include evidence_lanes lane summaries by default and omit raw sources',
-    'Deploy-ops skill_context summaries MUST expose query-ranked operational_fact_samples',
+    'Deploy-ops skill_context summaries MUST expose high-confidence query-ranked operational_fact_samples',
     'MCP/search regression wrappers MUST preserve complete JSON-RPC tool responses',
     'mission_context_gather MUST aggregate runtime_environment, KB, active SSOT, project registry, skill operational evidence, infra evidence, active Board task records, and bounded conversation logs through authority-aware evidence lanes',
     'Board/task/workflow records are searchable retrieval evidence',
@@ -245,6 +245,7 @@ function checkFiles(root, files) {
     'context_pack_artifact_payload',
     'operational_fact_samples',
     'summarize_skill_operational_fact_samples',
+    'MIN_OPERATIONAL_FACT_SAMPLE_SCORE',
     'credential_lane_opt_in',
     'selection.include_credentials',
     'selection.include_raw_sources',
@@ -888,7 +889,7 @@ function buildFixture() {
 	    :fields [evidence_lanes authority_order noise_diagnostics context_noise_metrics include_raw_sources]
 	    :invariants ["credential_refs MUST NOT be emitted unless include_credentials=true"
 	                 "Worker context packs MUST include evidence_lanes lane summaries by default and omit raw sources"
-	                 "Deploy-ops skill_context summaries MUST expose query-ranked operational_fact_samples"
+	                 "Deploy-ops skill_context summaries MUST expose high-confidence query-ranked operational_fact_samples"
 	                 "MCP/search regression wrappers MUST preserve complete JSON-RPC tool responses"
 	                 "mission_context_gather MUST aggregate runtime_environment, KB, active SSOT, project registry, skill operational evidence, infra evidence, active Board task records, and bounded conversation logs through authority-aware evidence lanes"
 	                 "Board/task/workflow records are searchable retrieval evidence"
@@ -982,7 +983,7 @@ pub(crate) async fn handle() {
 SourceProfile; source_profile; source_selection; include_credentials; include_raw_sources;
 include_board; include_conversations; conversation_time_range;
 evidence_lanes; authority_order; noise_diagnostics; context_noise_metrics; context_pack_artifact_payload;
-operational_fact_samples; summarize_skill_operational_fact_samples;
+operational_fact_samples; summarize_skill_operational_fact_samples; MIN_OPERATIONAL_FACT_SAMPLE_SCORE;
 credential_lane_opt_in; selection.include_credentials; selection.include_raw_sources; raw_sources_omitted;
 "board_tasks"; "conversation_logs"; "credential_refs"; "mission_board_query"; "mission_conversation_query"; "scope": "active"; "time_range"; last_30d;
 `);
