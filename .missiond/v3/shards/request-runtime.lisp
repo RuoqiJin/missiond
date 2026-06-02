@@ -62,6 +62,7 @@
        "Conversation logs are searched by query and bounded window; they are not default prompt preloads."
        "Tool responses MUST include source_summaries/evidence_lanes lane summaries by default and omit raw sources unless include_raw_sources=true or source_profile=full_debug."
        "Worker context packs MUST include evidence_lanes lane summaries by default and omit raw sources unless include_raw_sources=true or source_profile=full_debug."
+       "Deploy-ops skill_context summaries MUST expose query-ranked operational_fact_samples as bounded compact evidence while still omitting raw operational_facts unless include_raw_sources=true or source_profile=full_debug."
        "MCP/search regression wrappers MUST preserve complete JSON-RPC tool responses when stdout is piped; wrappers must not call process.exit immediately after async console output because that creates false 8KiB truncation diagnostics for context_gather and conversation search."
        "If mission_context_gather cannot answer a source, it returns source-specific diagnostics instead of making the resident master guess."]
     :checker "node scripts/check-v3-memory-kb-isomorphism.mjs")
