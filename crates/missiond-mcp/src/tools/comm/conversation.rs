@@ -15,7 +15,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "action": {"type": "string", "enum": ["list", "get", "search", "message_search", "context", "events", "audit_classification", "backfill_classification", "audit_message_roles", "backfill_message_roles", "turn_backfill", "label_audit", "label_backfill", "gemini_reconcile"], "default": "list"},
                     "status": {"type": "string", "description": "[list] active/completed"},
-                    "conversationType": {"type": "string", "description": "[list] user/worker/meta/system/all"},
+                    "conversationType": {"type": "string", "description": "[list/search] user/worker/meta/system/all/codex/codex_chat/gemini/gemini_chat/subagent/jarvis/history_prompt"},
                     "taskId": {"type": "string", "description": "[list] 按 Board 任务 ID 过滤"},
                     "sessionId": {"type": "string", "description": "[get/search/events/audit_message_roles/backfill_message_roles/turn_backfill/label_backfill] 会话 ID"},
                     "tail": {"type": "integer", "description": "[get] 最近 N 条消息", "default": 50},

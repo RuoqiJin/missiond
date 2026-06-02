@@ -294,7 +294,7 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                 status: Option<String>,
                 #[serde(default, deserialize_with = "lenient::option_i64")]
                 limit: Option<i64>,
-                #[serde(alias = "conversation_type")]
+                #[serde(alias = "conversation_type", alias = "conversationType")]
                 conversation_type: Option<String>,
                 #[serde(alias = "task_id")]
                 task_id: Option<String>,
@@ -771,7 +771,7 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                 time_range: Option<String>,
                 project: Option<String>,
                 /// Filter by conversation_type (e.g. "gemini_chat")
-                #[serde(alias = "conversation_type")]
+                #[serde(alias = "conversation_type", alias = "conversationType")]
                 conversation_type: Option<String>,
                 #[serde(alias = "user_id")]
                 user_id: Option<String>,
@@ -1125,6 +1125,7 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                 "totalHits": total_hits,
                 "query": query,
                 "mode": mode,
+                "conversationTypeFilter": conversation_type,
                 "ftsHits": fts_ranked.len(),
                 "vecHits": vec_ranked.len(),
                 "filteredSemanticHits": filtered_semantic_hits,

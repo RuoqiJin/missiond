@@ -64,6 +64,8 @@ struct ContextGatherArgs {
     include_raw_sources: Option<bool>,
     #[serde(default, alias = "conversationTimeRange")]
     conversation_time_range: Option<String>,
+    #[serde(default, alias = "conversationType", alias = "conversation_type")]
+    conversation_type: Option<String>,
     #[serde(default, alias = "taskId")]
     task_id: Option<String>,
     #[serde(default, alias = "sourceId")]
@@ -463,6 +465,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                         .conversation_time_range
                         .as_deref()
                         .unwrap_or("last_30d"),
+                    "conversation_type": args.conversation_type.clone(),
                     "query_mode": "hybrid"
                 }),
             )
@@ -1197,6 +1200,8 @@ fn summarize_conversation_source(key: &str, value: &Value) -> Value {
         "totalHits",
         "ftsHits",
         "vecHits",
+        "conversationTypeFilter",
+        "conversation_type_filter",
         "filteredSemanticHits",
         "filtered_semantic_hits",
         "projectDiagnostics",
@@ -1693,6 +1698,23 @@ mod tests {
         let selection = source_selection(&args, profile);
         assert!(selection.include_conversations);
         assert!(!selection.include_credentials);
+    }
+
+    #[test]
+    fn context_gather_accepts_conversation_type_aliases() {
+        let camel_args = args(json!({
+            "query": "audit",
+            "source_profile": "conversation_audit",
+            "conversationType": "codex"
+        }));
+        assert_eq!(camel_args.conversation_type.as_deref(), Some("codex"));
+
+        let snake_args = args(json!({
+            "query": "audit",
+            "source_profile": "conversation_audit",
+            "conversation_type": "gemini_chat"
+        }));
+        assert_eq!(snake_args.conversation_type.as_deref(), Some("gemini_chat"));
     }
 
     #[test]
