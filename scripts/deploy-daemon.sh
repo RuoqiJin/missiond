@@ -40,7 +40,8 @@
 #                               snapshot matching compiled runtime; default: 1
 #   MISSIOND_RELEASE_ALLOW_DIRTY_SOURCE  allow source snapshot while V3/runtime
 #                               projection inputs are dirty; default: 0
-#   MISSIOND_RUNTIME_DIR        runtime artifact root, default: ~/.missiond/runtime/<repo-name>
+#   MISSIOND_RUNTIME_DIR        runtime artifact root, default:
+#                               ~/.missiond/runtime/<deploy-owner-root-name>
 #   MISSIOND_CLEAN_REPO_RUNTIME_CACHE  after a successful deploy, prune repo
 #                               .missiond/v3/runtime cache when external
 #                               runtime dirs are verified, default: 1
@@ -257,7 +258,7 @@ DEPLOY_OWNER_ROOT="$(select_deploy_owner_root)"
 MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT="${MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT:-$DEPLOY_OWNER_ROOT}"
 MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER="${MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER:-0}"
 MISSIOND_RELEASE_SOURCE_SNAPSHOT="${MISSIOND_RELEASE_SOURCE_SNAPSHOT:-1}"
-REPO_ID="$(basename "$REPO_ROOT")"
+REPO_ID="$(basename "$DEPLOY_OWNER_ROOT")"
 RUNTIME_DIR="${MISSIOND_RUNTIME_DIR:-${HOME}/.missiond/runtime/${REPO_ID}}"
 COMPILED_RUNTIME_DIR="${MISSIOND_COMPILED_RUNTIME_DIR:-${RUNTIME_DIR}/compiled}"
 export MISSIOND_RUNTIME_DIR="$RUNTIME_DIR"

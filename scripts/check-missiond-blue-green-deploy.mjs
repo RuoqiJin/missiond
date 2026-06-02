@@ -104,6 +104,7 @@ function check(root) {
     'daemon_sha256',
     'mcp_sha256',
     'release_owner_root',
+    'REPO_ID="$(basename "$DEPLOY_OWNER_ROOT")"',
     'create_release_source_snapshot',
     'release-source-snapshot',
     'atomic_symlink_update',
@@ -175,7 +176,7 @@ typed Lisp contract ABI verification failed
 typed Lisp runtime compile failed
 typed_lisp_runtime_manifest_json typed_lisp_runtime
 compiled-v3-blueprint.json compiled-runtime-config.json compiled-project-universe.json compiled-workflows.json file_sha256
-release-manifest.json "schema":"missiond.release-manifest.v1" daemon_sha256 mcp_sha256 release_owner_root create_release_source_snapshot release-source-snapshot
+release-manifest.json "schema":"missiond.release-manifest.v1" daemon_sha256 mcp_sha256 release_owner_root REPO_ID="$(basename "$DEPLOY_OWNER_ROOT")" create_release_source_snapshot release-source-snapshot
   atomic_symlink_update switch_active_release assert_active_project_root_can_mutate project-root mutation guard verified active release belongs to another project root rollback_to_previous cleanup_old_releases create_legacy_release_if_needed
 ensure_launchd_runtime_root restart_daemon_supervisor MISSIOND_PROJECT_ROOT MISSIOND_ORCHESTRATOR_ROOT launchctl bootstrap launchd: runtime root
 release_complete

@@ -107,6 +107,7 @@ function checkFiles(root, files) {
     'Deploy scripts MUST reject active/apply-cleanup mutations when the current active release manifest or launchd WorkingDirectory belongs to a different project root',
     'Deploy owner root MUST default to the current stable git root',
     'release source snapshots MUST NOT become the next release_owner_root',
+    'Default MISSIOND_RUNTIME_DIR namespace MUST derive from DEPLOY_OWNER_ROOT',
     'AST repository-wide startup full sync MUST be opt-in through MISSIOND_AST_FULL_SYNC_ON_STARTUP',
     'M6 MissionD formatting MUST be converged',
     'Rust formatter edition MUST be derived from workspace Cargo.toml',
@@ -154,6 +155,7 @@ function checkFiles(root, files) {
     'print_timing_summary',
     'RUSTC_WRAPPER',
     'release-manifest.json',
+    'REPO_ID="$(basename "$DEPLOY_OWNER_ROOT")"',
     '"launchd_project_root"',
     '"runtime_dir"',
     '"compiled_runtime_dir"',
@@ -332,6 +334,7 @@ function buildFixture() {
        "Dev-only fast deploy may select debug profile and sccache."
        "Deploy scripts MUST reject active/apply-cleanup mutations when the current active release manifest or launchd WorkingDirectory belongs to a different project root."
        "Deploy owner root MUST default to the current stable git root; release source snapshots MUST NOT become the next release_owner_root."
+       "Default MISSIOND_RUNTIME_DIR namespace MUST derive from DEPLOY_OWNER_ROOT."
        "AST repository-wide startup full sync MUST be opt-in through MISSIOND_AST_FULL_SYNC_ON_STARTUP."
        "M6 MissionD formatting MUST be converged."
        "Rust formatter edition MUST be derived from workspace Cargo.toml."
@@ -373,6 +376,7 @@ record_timing "cargo-build"
 print_timing_summary
 RUSTC_WRAPPER
 release-manifest.json
+REPO_ID="$(basename "$DEPLOY_OWNER_ROOT")"
 "launchd_project_root"
 "runtime_dir"
 "compiled_runtime_dir"
