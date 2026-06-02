@@ -27,6 +27,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "project": {"type": "string", "description": "[search] 项目过滤"},
                     "excludeSessionId": {"type": "string", "description": "[search] 排除特定会话"},
                     "includeRawMatchReason": {"type": "boolean", "description": "[search] 返回未压缩 matchReason 原文，默认 false", "default": false},
+                    "collapseSimilar": {"type": "boolean", "description": "[search] 折叠同项目近重复会话命中，默认 true"},
+                    "includeDuplicateSessions": {"type": "boolean", "description": "[search] 返回被折叠的重复会话摘要，默认 false", "default": false},
                     "offset": {"type": "integer", "description": "[search] 分页偏移"},
                     "role": {"type": "string", "description": "[message_search] 消息角色", "enum": ["user", "assistant", "tool_result", "system", "thinking"]},
                     "toolName": {"type": "string", "description": "[message_search] 工具名过滤"},

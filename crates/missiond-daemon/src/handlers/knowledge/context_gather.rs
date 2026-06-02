@@ -1205,6 +1205,7 @@ fn summarize_conversation_source(key: &str, value: &Value) -> Value {
         "filteredSemanticHits",
         "filtered_semantic_hits",
         "projectDiagnostics",
+        "duplicateCollapse",
     ] {
         insert_field(&mut map, value, meta_key);
     }
@@ -1231,6 +1232,9 @@ fn summarize_conversation_source(key: &str, value: &Value) -> Value {
                     insert_field(&mut item_map, item, "conversationType");
                     insert_field(&mut item_map, item, "timestamp");
                     insert_field(&mut item_map, item, "startedAt");
+                    insert_field(&mut item_map, item, "duplicateSessionCount");
+                    insert_field(&mut item_map, item, "matchReasonTruncated");
+                    insert_field(&mut item_map, item, "rawMatchReasonChars");
                     insert_compact_field(&mut item_map, item, "summary", 260);
                     insert_compact_field(&mut item_map, item, "matchReason", 260);
                     insert_compact_field(&mut item_map, item, "snippet", 260);

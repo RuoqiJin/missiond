@@ -37,6 +37,118 @@ fn compact_conversation_match_reason(raw: &str, max_chars: usize) -> (String, bo
     (compact, true, raw_chars)
 }
 
+fn conversation_duplicate_signature(
+    project_id: Option<&str>,
+    raw_match_reason: &str,
+) -> Option<String> {
+    let mut normalized = String::new();
+    let mut last_was_space = true;
+    for ch in raw_match_reason.chars().flat_map(char::to_lowercase) {
+        if ch.is_alphanumeric() {
+            normalized.push(ch);
+            last_was_space = false;
+        } else if !last_was_space {
+            normalized.push(' ');
+            last_was_space = true;
+        }
+    }
+    let tokens = normalized
+        .split_whitespace()
+        .take(80)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if tokens.chars().count() < 48 {
+        return None;
+    }
+    Some(format!(
+        "{}|{}",
+        project_id.unwrap_or("unknown-project"),
+        tokens
+    ))
+}
+
+fn duplicate_session_summary(result: &Value) -> Value {
+    serde_json::json!({
+        "sessionId": result.get("sessionId").cloned().unwrap_or(Value::Null),
+        "status": result.get("status").cloned().unwrap_or(Value::Null),
+        "startedAt": result.get("startedAt").cloned().unwrap_or(Value::Null),
+        "messageCount": result.get("messageCount").cloned().unwrap_or(Value::Null),
+        "projectId": result.get("projectId").cloned().unwrap_or(Value::Null),
+        "canonicalProjectId": result.get("canonicalProjectId").cloned().unwrap_or(Value::Null),
+        "conversationType": result.get("conversationType").cloned().unwrap_or(Value::Null),
+        "rawMatchReasonChars": result.get("rawMatchReasonChars").cloned().unwrap_or(Value::Null),
+        "matchReasonTruncated": result.get("matchReasonTruncated").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn remove_internal_duplicate_signature(result: &mut Value) {
+    if let Some(object) = result.as_object_mut() {
+        object.remove("_duplicateSignature");
+    }
+}
+
+fn collapse_similar_conversation_results(
+    results: Vec<Value>,
+    include_duplicate_sessions: bool,
+) -> (Vec<Value>, usize, usize) {
+    let mut groups: BTreeMap<String, usize> = BTreeMap::new();
+    let mut collapsed = Vec::new();
+    let mut duplicate_groups = 0usize;
+    let mut duplicate_sessions_collapsed = 0usize;
+
+    for mut result in results {
+        let signature = result
+            .get("_duplicateSignature")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        remove_internal_duplicate_signature(&mut result);
+
+        let Some(signature) = signature else {
+            collapsed.push(result);
+            continue;
+        };
+
+        if let Some(existing_index) = groups.get(&signature).copied() {
+            duplicate_sessions_collapsed += 1;
+            if let Some(existing) = collapsed
+                .get_mut(existing_index)
+                .and_then(Value::as_object_mut)
+            {
+                let next_count = existing
+                    .get("duplicateSessionCount")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(1)
+                    + 1;
+                if next_count == 2 {
+                    duplicate_groups += 1;
+                }
+                existing.insert(
+                    "duplicateSessionCount".to_string(),
+                    serde_json::json!(next_count),
+                );
+                if include_duplicate_sessions {
+                    let summary = duplicate_session_summary(&result);
+                    existing
+                        .entry("duplicateSessions".to_string())
+                        .or_insert_with(|| Value::Array(Vec::new()))
+                        .as_array_mut()
+                        .expect("duplicateSessions is initialized as an array")
+                        .push(summary);
+                }
+            }
+            continue;
+        }
+
+        if let Some(object) = result.as_object_mut() {
+            object.insert("duplicateSessionCount".to_string(), serde_json::json!(1));
+        }
+        groups.insert(signature, collapsed.len());
+        collapsed.push(result);
+    }
+
+    (collapsed, duplicate_groups, duplicate_sessions_collapsed)
+}
+
 fn load_conversation_config() -> Result<ConversationIngestionRuntimeConfig> {
     ConversationIngestionRuntimeConfig::load_for_current_dir()
         .map_err(|err| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", err))
@@ -789,6 +901,10 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                 conversation_type: Option<String>,
                 #[serde(default, alias = "include_raw_match_reason")]
                 include_raw_match_reason: bool,
+                #[serde(default, alias = "collapse_similar")]
+                collapse_similar: Option<bool>,
+                #[serde(default, alias = "include_duplicate_sessions")]
+                include_duplicate_sessions: bool,
                 #[serde(alias = "user_id")]
                 user_id: Option<String>,
                 #[serde(alias = "tenant_id")]
@@ -808,6 +924,8 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                 project,
                 conversation_type,
                 include_raw_match_reason,
+                collapse_similar,
+                include_duplicate_sessions,
                 user_id,
                 tenant_id,
                 application_id,
@@ -816,6 +934,7 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
             let top_k = limit.unwrap_or(config.conversation_search_default_limit) as usize;
             let skip = offset.unwrap_or(0) as usize;
             let mode = query_mode.as_deref().unwrap_or("hybrid");
+            let collapse_similar = collapse_similar.unwrap_or(true);
 
             let conversation_type = normalize_search_conversation_type(conversation_type);
 
@@ -1063,7 +1182,12 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
             if skip > 0 {
                 ranked = ranked.into_iter().skip(skip).collect();
             }
-            ranked.truncate(top_k);
+            let enrich_limit = if collapse_similar {
+                top_k.saturating_mul(3).max(top_k)
+            } else {
+                top_k
+            };
+            ranked.truncate(enrich_limit);
 
             // 4. Enrich with snippets (Postgres FTS native) or llmSummary fallback
             let active_projects: Vec<missiond_core::types::ProjectConfig> = {
@@ -1122,6 +1246,12 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                         &raw_match_reason,
                         CONVERSATION_SEARCH_MATCH_REASON_MAX_CHARS,
                     );
+                let duplicate_signature = conversation_duplicate_signature(
+                    canonical_project
+                        .as_ref()
+                        .map(|project| project.id.as_str()),
+                    &raw_match_reason,
+                );
 
                 let mut result = serde_json::json!({
                     "sessionId": sid,
@@ -1141,11 +1271,27 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                     "rawMatchReasonChars": raw_match_reason_chars,
                     "cosineSim": sim,
                 });
+                if let Some(signature) = duplicate_signature {
+                    result["_duplicateSignature"] = serde_json::json!(signature);
+                }
                 if include_raw_match_reason {
                     result["rawMatchReason"] = serde_json::json!(raw_match_reason);
                 }
                 results.push(result);
             }
+
+            let uncollapsed_returned_candidates = results.len();
+            let (mut results, duplicate_groups, duplicate_sessions_collapsed) = if collapse_similar
+            {
+                collapse_similar_conversation_results(results, include_duplicate_sessions)
+            } else {
+                results
+                    .iter_mut()
+                    .for_each(remove_internal_duplicate_signature);
+                (results, 0, 0)
+            };
+            let collapsed_candidate_count = results.len();
+            results.truncate(top_k);
 
             Ok(ToolResult::json(&serde_json::json!({
                 "results": results,
@@ -1161,6 +1307,17 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                 "matchReasonPolicy": {
                     "maxChars": CONVERSATION_SEARCH_MATCH_REASON_MAX_CHARS,
                     "rawOptIn": "includeRawMatchReason=true"
+                },
+                "duplicateCollapse": {
+                    "enabled": collapse_similar,
+                    "policy": "same-project normalized matchReason fingerprint",
+                    "rawOptIn": "includeDuplicateSessions=true",
+                    "disableOptOut": "collapseSimilar=false",
+                    "uncollapsedReturnedCandidates": uncollapsed_returned_candidates,
+                    "collapsedCandidateCount": collapsed_candidate_count,
+                    "duplicateGroups": duplicate_groups,
+                    "duplicateSessionsCollapsed": duplicate_sessions_collapsed,
+                    "includeDuplicateSessions": include_duplicate_sessions,
                 },
             })))
         }
@@ -1461,13 +1618,15 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_conversation_project, compact_conversation_match_reason,
+        canonical_conversation_project, collapse_similar_conversation_results,
+        compact_conversation_match_reason, conversation_duplicate_signature,
         conversation_search_project_diagnostics, conversation_search_score,
         keep_conversation_hybrid_candidate, normalize_search_conversation_type,
         record_project_diagnostic, CanonicalProjectMatch,
         CONVERSATION_SEARCH_MATCH_REASON_MAX_CHARS, MIN_HYBRID_VECTOR_ONLY_SIMILARITY,
     };
     use missiond_core::types::ProjectConfig;
+    use serde_json::json;
     use std::collections::BTreeMap;
 
     fn project(id: &str, path: &str) -> ProjectConfig {
@@ -1529,6 +1688,54 @@ mod tests {
         assert!(raw_chars > compact.chars().count());
         assert!(compact.chars().count() <= CONVERSATION_SEARCH_MATCH_REASON_MAX_CHARS);
         assert!(compact.ends_with("..."));
+    }
+
+    #[test]
+    fn duplicate_collapse_folds_same_project_session_hits() {
+        let raw = "[assistant] Deploy Center canary failed and service.manifest.toml skipped verify backward compat because Manifest Gate was bypassed in the same deployment evidence.";
+        let signature = conversation_duplicate_signature(Some("missiond"), raw).unwrap();
+        let results = vec![
+            json!({
+                "sessionId": "s1",
+                "status": "completed",
+                "startedAt": "2026-06-02T01:00:00Z",
+                "canonicalProjectId": "missiond",
+                "conversationType": "codex_chat",
+                "rawMatchReasonChars": raw.chars().count(),
+                "matchReasonTruncated": false,
+                "_duplicateSignature": signature,
+            }),
+            json!({
+                "sessionId": "s2",
+                "status": "active",
+                "startedAt": "2026-06-02T02:00:00Z",
+                "canonicalProjectId": "missiond",
+                "conversationType": "codex_chat",
+                "rawMatchReasonChars": raw.chars().count(),
+                "matchReasonTruncated": false,
+                "_duplicateSignature": conversation_duplicate_signature(Some("missiond"), raw).unwrap(),
+            }),
+            json!({
+                "sessionId": "s3",
+                "status": "completed",
+                "startedAt": "2026-06-02T03:00:00Z",
+                "canonicalProjectId": "asr",
+                "conversationType": "codex_chat",
+                "rawMatchReasonChars": raw.chars().count(),
+                "matchReasonTruncated": false,
+                "_duplicateSignature": conversation_duplicate_signature(Some("asr"), raw).unwrap(),
+            }),
+        ];
+
+        let (collapsed, duplicate_groups, duplicate_sessions_collapsed) =
+            collapse_similar_conversation_results(results, true);
+        assert_eq!(collapsed.len(), 2);
+        assert_eq!(duplicate_groups, 1);
+        assert_eq!(duplicate_sessions_collapsed, 1);
+        assert_eq!(collapsed[0]["duplicateSessionCount"], 2);
+        assert_eq!(collapsed[0]["duplicateSessions"][0]["sessionId"], "s2");
+        assert!(collapsed[0].get("_duplicateSignature").is_none());
+        assert_eq!(collapsed[1]["duplicateSessionCount"], 1);
     }
 
     #[test]

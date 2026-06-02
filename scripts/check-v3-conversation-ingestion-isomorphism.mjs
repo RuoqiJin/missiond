@@ -135,6 +135,9 @@ function checkFiles(root, files) {
     'Historical conversation event/tool-call backfills MUST NOT run unconditionally on daemon startup',
     'MISSIOND_CONVERSATION_BACKFILL_ON_STARTUP=1',
     'llm_summary/topic embedding generation MUST default to human/Jarvis/direct CLI chat read models only',
+    'mission_conversation_query search MUST collapse same-project near-identical session hits by default',
+    'includeDuplicateSessions=true',
+    'collapseSimilar=false',
     'task-result-artifact',
     'conversation.rs is the thin conversation-ingestion facade',
     'conversation/router.rs owns mission_conversation_query',
@@ -258,6 +261,11 @@ function checkFiles(root, files) {
     'search_conversation_sessions_fts_filtered',
     'get_messages_around',
     'analysis_context.v1',
+    'collapse_similar_conversation_results',
+    'conversation_duplicate_signature',
+    'duplicateCollapse',
+    'collapseSimilar',
+    'includeDuplicateSessions',
   ]);
 
   requireAll(diagnostics, files.events, sources.events, [
@@ -391,6 +399,8 @@ function checkFiles(root, files) {
     '"retrospective"',
     '"trajectory"',
     '"activity"',
+    '"collapseSimilar"',
+    '"includeDuplicateSessions"',
   ]);
 
   requireAll(diagnostics, files.mcpTimeline, sources.mcpTimeline, [
@@ -471,7 +481,7 @@ function buildFixture() {
              "crates/missiond-mcp/src/tools/comm/conversation.rs"
              "crates/missiond-mcp/src/tools/comm/timeline.rs"
              "scripts/check-v3-conversation-ingestion-isomorphism.mjs"]
-      :note "conversation-ingestion-policy read-model default and max limits; UserPromptSubmit context prefetch intent router model and timeout MUST project from conversation-ingestion-policy; Codex vision worker binary/model/idle timeout and CodexCli absolute timeout MUST project from conversation-ingestion-policy; Historical conversation event/tool-call backfills MUST NOT run unconditionally on daemon startup and require MISSIOND_CONVERSATION_BACKFILL_ON_STARTUP=1 or backfill_enabled; llm_summary/topic embedding generation MUST default to human/Jarvis/direct CLI chat read models only; task-result-artifact owns worker/meta final results; conversation.rs is the thin conversation-ingestion facade; conversation/router.rs owns mission_conversation_query; conversation/query.rs owns read-model query actions; when mission_conversation_query list is scoped by taskId and conversationType is omitted, query all provider conversation rows; message-anchored BoardTask id fallback; compaction timeline reconstruction tolerates legacy NULL started_at/message_count rows; conversation/events.rs owns analysis/event egress; conversation/maintenance.rs owns embedding/reconcile work items; timeline.rs owns mission_timeline; retrospective.rs owns retrospective analysis, list, and backfill; vision_worker.rs owns unprocessed image-message extraction through CodexCli."))
+      :note "conversation-ingestion-policy read-model default and max limits; UserPromptSubmit context prefetch intent router model and timeout MUST project from conversation-ingestion-policy; Codex vision worker binary/model/idle timeout and CodexCli absolute timeout MUST project from conversation-ingestion-policy; Historical conversation event/tool-call backfills MUST NOT run unconditionally on daemon startup and require MISSIOND_CONVERSATION_BACKFILL_ON_STARTUP=1 or backfill_enabled; llm_summary/topic embedding generation MUST default to human/Jarvis/direct CLI chat read models only; mission_conversation_query search MUST collapse same-project near-identical session hits by default while includeDuplicateSessions=true and collapseSimilar=false preserve audit access; task-result-artifact owns worker/meta final results; conversation.rs is the thin conversation-ingestion facade; conversation/router.rs owns mission_conversation_query; conversation/query.rs owns read-model query actions; when mission_conversation_query list is scoped by taskId and conversationType is omitted, query all provider conversation rows; message-anchored BoardTask id fallback; compaction timeline reconstruction tolerates legacy NULL started_at/message_count rows; conversation/events.rs owns analysis/event egress; conversation/maintenance.rs owns embedding/reconcile work items; timeline.rs owns mission_timeline; retrospective.rs owns retrospective analysis, list, and backfill; vision_worker.rs owns unprocessed image-message extraction through CodexCli."))
   (compression-contract
     :checks ["node scripts/check-v3-conversation-ingestion-isomorphism.mjs"]))`,
   );
@@ -493,7 +503,7 @@ function buildFixture() {
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.query),
-    'handle_query ConversationIngestionRuntimeConfig load_conversation_config V3_BLUEPRINT_CONFIG_ERROR conversation_get_tail_default conversation_search_default_limit message_search_default_limit context_before_default context_after_default "mission_token_stats" "mission_conversation_list" "mission_conversation_get" "mission_conversation_search" "mission_conversation_analysis_context" "mission_message_search" "mission_user_message_index" "mission_conversation_set_label" "mission_conversation_delete_label" "mission_context_around" hybrid_message_search search_conversation_sessions_fts_filtered get_messages_around analysis_context.v1',
+    'handle_query ConversationIngestionRuntimeConfig load_conversation_config V3_BLUEPRINT_CONFIG_ERROR conversation_get_tail_default conversation_search_default_limit message_search_default_limit context_before_default context_after_default "mission_token_stats" "mission_conversation_list" "mission_conversation_get" "mission_conversation_search" "mission_conversation_analysis_context" "mission_message_search" "mission_user_message_index" "mission_conversation_set_label" "mission_conversation_delete_label" "mission_context_around" hybrid_message_search search_conversation_sessions_fts_filtered get_messages_around analysis_context.v1 collapse_similar_conversation_results conversation_duplicate_signature duplicateCollapse collapseSimilar includeDuplicateSessions',
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.events),
@@ -537,7 +547,7 @@ function buildFixture() {
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.mcpConversation),
-    'ToolDefinition::new "mission_conversation_query" "mission_conversation_analyze" "mission_conversation_reconcile" "mission_retrospective_manage" "mission_embedding_ops" "retrospective" "trajectory" "activity"',
+    'ToolDefinition::new "mission_conversation_query" "mission_conversation_analyze" "mission_conversation_reconcile" "mission_retrospective_manage" "mission_embedding_ops" "retrospective" "trajectory" "activity" "collapseSimilar" "includeDuplicateSessions"',
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.mcpTimeline),
