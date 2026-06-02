@@ -263,10 +263,13 @@ try_recover_stale_deploy_lock() {
 
 acquire_deploy_lock() {
   mkdir -p "$INSTALL_ROOT"
-  if ! mkdir "$DEPLOY_LOCK_PATH" 2>/dev/null; then
+  local lock_created=0
+  if mkdir "$DEPLOY_LOCK_PATH" 2>/dev/null; then
+    lock_created=1
+  else
     try_recover_stale_deploy_lock || true
   fi
-  if ! mkdir "$DEPLOY_LOCK_PATH" 2>/dev/null; then
+  if [ "$lock_created" -ne 1 ] && ! mkdir "$DEPLOY_LOCK_PATH" 2>/dev/null; then
     log "deploy-lock: busy $DEPLOY_LOCK_PATH"
     if [ -f "$DEPLOY_LOCK_PATH/owner" ]; then
       sed 's/^/[deploy-lock-owner] /' "$DEPLOY_LOCK_PATH/owner" >&2 || true
