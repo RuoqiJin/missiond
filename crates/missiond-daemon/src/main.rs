@@ -951,6 +951,13 @@ async fn main() -> Result<()> {
             project_registry.clone(),
             learned.clone(),
         )));
+        provider_runtime.register_driver(Arc::new(provider_box::ClaudeCodeProviderDriver::new(
+            Arc::clone(&pty),
+            Arc::clone(&store),
+            pty_session_uuids_arc.clone(),
+            project_registry.clone(),
+            learned.clone(),
+        )));
         let provider_runtime = Arc::new(provider_runtime);
         let adapter = provider_box::ProviderBoxHttpAdapter::new(Arc::clone(&provider_runtime));
         let callback: missiond_core::ProviderBoxHttpFn = Arc::new(move |request| {
@@ -2594,6 +2601,7 @@ async fn main() -> Result<()> {
                                         extra_env: std::collections::HashMap::new(),
                                         initial_prompt: slot.config.initial_prompt.clone(),
                                         command_override: None,
+                                        ..Default::default()
                                     },
                                     slot.config.env.as_ref(),
                                 )

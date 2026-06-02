@@ -51,14 +51,14 @@
       :fields [id label role running state provider taskClass acceptsBoardTask activeSlot]
       :rule "Terminal slot selection lives inside the Terminal cockpit, lists all projected slots by provider group, keeps labels bounded/truncated, and pairs the PTY with durable conversation/evidence diagnostics.")
     (projection pty-teaching-control
-      :source [mission_pty_send mission_pty_status mission_pty_screen pty-websocket-live-screen operator-lesson mission_pty_spawn]
+      :source [mission_pty_send mission_pty_key mission_pty_text mission_pty_status mission_pty_screen pty-websocket-live-screen operator-lesson mission_pty_spawn]
       :entry ["packages/board/src/components/PtyTeachingPanel.tsx"
               "packages/board/src/components/Terminal.tsx"
               "packages/board/src/app/api/pty/input/route.ts"
               "packages/board/src/app/api/pty/raw/route.ts"
               "packages/board/src/app/api/pty/spawn/route.ts"]
       :fields [slotId text key stepLog websocketScreen afterStepState afterStepScreen guardedAction collapsedLiveMode rawInput operatorShell]
-      :rule "Operator teaching uses the dedicated Teach cockpit instead of generic Terminal controls or tmp live pages. Text and safe key controls write raw human-like bytes through the MissionD PTY WebSocket path, while normal provider turns still use mission_pty_send. The default/collapsed operator view hides controls and renders a stable read-only PTY live screen from mission_pty_screen so the human only watches the CLI. Every operator action samples PTY state/screen after execution and appends a visible step record when controls are expanded. Exit/stop/restart controls must be visually separated and require an explicit second confirmation. CLI help/learning can start an operatorShell diagnostic PTY via mission_pty_spawn(operatorConfirm=true, operatorShell=true); that shell is diagnostic only and must not be used as a provider-box text source.")
+      :rule "Operator teaching uses the dedicated Teach cockpit instead of generic Terminal controls or tmp live pages. Text controls call mission_pty_text, safe key controls call mission_pty_key, and normal provider turns still use mission_pty_send. The default/collapsed operator view hides controls and renders a stable read-only PTY live screen from mission_pty_screen so the human only watches the CLI. Every operator action samples PTY state/screen after execution and appends a visible step record when controls are expanded. Exit/stop/restart controls must be visually separated and require an explicit second confirmation. CLI help/learning can start an operatorShell diagnostic PTY via mission_pty_spawn(operatorConfirm=true, operatorShell=true); that shell is diagnostic only and must not be used as a provider-box text source.")
     (projection eventbus-cache-invalidation
       :source [eventbus-ws]
       :entry ["packages/board/src/eventStream.ts"]

@@ -47,6 +47,7 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use super::extractor::{IncrementalExtractor, StableTextOp, TextAssembler};
+use super::screenshot::{capture_styled_screen, StyledScreenSnapshot};
 use semantic_terminal::{
     default_compiled, maybe_reload_global_patterns, registry_from, ClaudeCodeConfirmParser,
     ClaudeCodeStateParser, ClaudeCodeStatus, ClaudeCodeStatusParser, ClaudeCodeTitle,
@@ -56,8 +57,8 @@ use semantic_terminal::{
 };
 
 use crate::pty_recognition::{
-    recognize_screen, AgyCliStateParser, CodexCliStateParser, GeminiCliUpstreamStateParser,
-    PtyCanonicalState, PtyRecognitionSnapshot,
+    recognize_screen, recognize_styled_screen, AgyCliStateParser, CodexCliStateParser,
+    GeminiCliUpstreamStateParser, PtyCanonicalState, PtyRecognitionSnapshot,
 };
 
 // ========== Types ==========
@@ -218,6 +219,14 @@ pub struct PTYSessionOptions {
     pub approval_policy: Option<String>,
     /// Provider tool policy file when supported, e.g. Gemini CLI `--policy`.
     pub tool_policy_path: Option<PathBuf>,
+    /// ClaudeCode-only `--tools` value. Text-only lanes pass an empty string.
+    pub claude_code_tools: Option<String>,
+    /// ClaudeCode-only `--strict-mcp-config` toggle.
+    pub claude_code_strict_mcp_config: bool,
+    /// ClaudeCode-only `--disable-slash-commands` toggle.
+    pub claude_code_disable_slash_commands: bool,
+    /// Provider-native session id when the CLI supports explicit session binding.
+    pub provider_session_id: Option<String>,
     /// Operator-confirmed diagnostic launch command. Normal provider workers
     /// leave this unset and use the engine-specific command builder.
     pub command_override: Option<String>,
@@ -241,6 +250,10 @@ impl Default for PTYSessionOptions {
             sandbox: None,
             approval_policy: None,
             tool_policy_path: None,
+            claude_code_tools: None,
+            claude_code_strict_mcp_config: false,
+            claude_code_disable_slash_commands: false,
+            provider_session_id: None,
             command_override: None,
         }
     }
@@ -319,6 +332,10 @@ pub struct PTYSession {
     sandbox: Option<String>,
     approval_policy: Option<String>,
     tool_policy_path: Option<PathBuf>,
+    claude_code_tools: Option<String>,
+    claude_code_strict_mcp_config: bool,
+    claude_code_disable_slash_commands: bool,
+    provider_session_id: Option<String>,
     command_override: Option<String>,
 
     // Extra environment variables (slot tracking, etc.)
@@ -368,6 +385,7 @@ pub enum SessionEvent {
 ///
 /// Each engine has different binary, arguments, and flag support.
 /// The working directory is set via CommandBuilder::cwd(), not via CLI flags.
+#[cfg_attr(not(test), allow(dead_code))]
 fn build_cli_command(
     engine: missiond_shared::CliEngine,
     cwd: &std::path::Path,
@@ -380,22 +398,85 @@ fn build_cli_command(
     approval_policy: Option<&str>,
     tool_policy_path: Option<&std::path::Path>,
 ) -> String {
+    build_cli_command_with_claude_options(
+        engine,
+        cwd,
+        mcp_config,
+        dangerously_skip_permissions,
+        model,
+        reasoning_effort,
+        search_enabled,
+        sandbox,
+        approval_policy,
+        tool_policy_path,
+        ClaudeCodeLaunchOptions::default(),
+    )
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ClaudeCodeLaunchOptions<'a> {
+    tools: Option<&'a str>,
+    strict_mcp_config: bool,
+    disable_slash_commands: bool,
+    session_id: Option<&'a str>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_cli_command_with_claude_options(
+    engine: missiond_shared::CliEngine,
+    cwd: &std::path::Path,
+    mcp_config: Option<&std::path::Path>,
+    dangerously_skip_permissions: bool,
+    model: Option<&str>,
+    reasoning_effort: Option<&str>,
+    search_enabled: bool,
+    sandbox: Option<&str>,
+    approval_policy: Option<&str>,
+    tool_policy_path: Option<&std::path::Path>,
+    claude_options: ClaudeCodeLaunchOptions<'_>,
+) -> String {
     use missiond_shared::CliEngine;
 
     match engine {
         CliEngine::ClaudeCode => {
-            let mut parts = format!("claude --add-dir \"{}\"", cwd.display());
+            let mut parts = format!(
+                "claude --add-dir {}",
+                shell_quote(&cwd.display().to_string())
+            );
             if let Some(mcp) = mcp_config {
-                parts.push_str(&format!(" --mcp-config \"{}\"", mcp.display()));
+                parts.push_str(&format!(
+                    " --mcp-config {}",
+                    shell_quote(&mcp.display().to_string())
+                ));
                 info!(mcp_config = %mcp.display(), "MCP config will be injected");
+            }
+            if claude_options.strict_mcp_config {
+                parts.push_str(" --strict-mcp-config");
+                info!("ClaudeCode strict MCP config enabled");
             }
             if dangerously_skip_permissions {
                 parts.push_str(" --dangerously-skip-permissions");
                 info!("Dangerous mode: skipping all permission prompts");
             }
             if let Some(m) = model {
-                parts.push_str(&format!(" --model {}", m));
+                parts.push_str(&format!(" --model {}", shell_quote(m)));
                 info!(model = %m, "Model override for session");
+            }
+            if let Some(effort) = reasoning_effort {
+                parts.push_str(&format!(" --effort {}", shell_quote(effort)));
+                info!(reasoning_effort = %effort, "ClaudeCode reasoning effort override");
+            }
+            if let Some(tools) = claude_options.tools {
+                parts.push_str(&format!(" --tools {}", shell_quote(tools)));
+                info!(tools = %tools, "ClaudeCode tools override");
+            }
+            if claude_options.disable_slash_commands {
+                parts.push_str(" --disable-slash-commands");
+                info!("ClaudeCode slash commands disabled");
+            }
+            if let Some(session_id) = claude_options.session_id {
+                parts.push_str(&format!(" --session-id {}", shell_quote(session_id)));
+                info!(session_id = %session_id, "ClaudeCode explicit session id");
             }
             parts
         }
@@ -455,13 +536,18 @@ fn build_cli_command(
                 parts.push_str(" --search");
                 info!("Codex CLI: search enabled");
             }
-            if let Some(profile) = sandbox {
-                parts.push_str(&format!(" --sandbox {}", shell_quote(profile)));
-                info!(sandbox = %profile, "Codex CLI: sandbox override");
-            }
-            if let Some(policy) = approval_policy {
-                parts.push_str(&format!(" --ask-for-approval {}", shell_quote(policy)));
-                info!(approval_policy = %policy, "Codex CLI: approval policy override");
+            if dangerously_skip_permissions {
+                parts.push_str(" --dangerously-bypass-approvals-and-sandbox");
+                info!("Codex CLI: dangerous bypass of approvals and sandbox enabled");
+            } else {
+                if let Some(profile) = sandbox {
+                    parts.push_str(&format!(" --sandbox {}", shell_quote(profile)));
+                    info!(sandbox = %profile, "Codex CLI: sandbox override");
+                }
+                if let Some(policy) = approval_policy {
+                    parts.push_str(&format!(" --ask-for-approval {}", shell_quote(policy)));
+                    info!(approval_policy = %policy, "Codex CLI: approval policy override");
+                }
             }
             // Codex CLI treats MCP tool calls as a separate approval surface
             // from shell command approval. Worker lanes must be unattended once
@@ -633,6 +719,10 @@ impl PTYSession {
             sandbox: options.sandbox,
             approval_policy: options.approval_policy,
             tool_policy_path: options.tool_policy_path,
+            claude_code_tools: options.claude_code_tools,
+            claude_code_strict_mcp_config: options.claude_code_strict_mcp_config,
+            claude_code_disable_slash_commands: options.claude_code_disable_slash_commands,
+            provider_session_id: options.provider_session_id,
             command_override: options.command_override,
             env: options.env,
             log_file: options.log_file,
@@ -708,6 +798,11 @@ impl PTYSession {
         }
 
         lines.join("\n")
+    }
+
+    pub async fn get_styled_screen(&self) -> StyledScreenSnapshot {
+        let term = self.term.lock().await;
+        capture_styled_screen(&*term)
     }
 
     /// Get raw output replay buffer for late-joining WebSocket clients
@@ -792,7 +887,7 @@ impl PTYSession {
             );
             command.to_string()
         } else {
-            build_cli_command(
+            build_cli_command_with_claude_options(
                 self.engine,
                 &self.cwd,
                 resolved_mcp_config.as_deref(),
@@ -803,6 +898,12 @@ impl PTYSession {
                 self.sandbox.as_deref(),
                 self.approval_policy.as_deref(),
                 self.tool_policy_path.as_deref(),
+                ClaudeCodeLaunchOptions {
+                    tools: self.claude_code_tools.as_deref(),
+                    strict_mcp_config: self.claude_code_strict_mcp_config,
+                    disable_slash_commands: self.claude_code_disable_slash_commands,
+                    session_id: self.provider_session_id.as_deref(),
+                },
             )
         };
 
@@ -1177,43 +1278,30 @@ impl PTYSession {
                 extractor_guard.extract(&*term_guard)
             };
 
-            // Get screen text for state detection (read ALL visible lines)
-            let (last_lines, is_alt_screen) = {
+            // Get styled screen for provider-aware recognition, then project text for semantic parsers.
+            let (styled_screen, is_alt_screen) = {
                 let term_guard = term.lock().await;
                 let is_alt = term_guard
                     .mode()
                     .contains(alacritty_terminal::term::TermMode::ALT_SCREEN);
-                let grid = term_guard.grid();
-                let mut lines = Vec::new();
-                let rows = grid.screen_lines();
-                // Read visible area only: Line(0) to Line(screen_lines - 1)
-                for y in 0..rows {
-                    let Ok(line_idx) = i32::try_from(y) else {
-                        break;
-                    };
-                    let line = alacritty_terminal::index::Line(line_idx);
-                    let row = &grid[line];
-                    // Skip wide-char spacer cells (CJK/emoji second cells)
-                    let text: String = row
-                        .into_iter()
-                        .filter(|cell| {
-                            !cell
-                                .flags
-                                .contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER)
-                        })
-                        .map(|cell| cell.c)
-                        .collect();
-                    lines.push(text.trim_end().to_string());
-                }
-                (lines, is_alt)
+                (capture_styled_screen(&*term_guard), is_alt)
             };
+            let last_lines = styled_screen
+                .lines
+                .iter()
+                .map(|line| line.text.clone())
+                .collect::<Vec<_>>();
 
             // Create ParserContext with current state
             let current_state = *state.read().await;
             let context = ParserContext::new(last_lines.clone())
                 .with_state(current_state_to_semantic(current_state));
 
-            let recognition = recognize_screen(engine, &last_lines, current_state);
+            let recognition = if styled_screen.lines.is_empty() {
+                recognize_screen(engine, &last_lines, current_state)
+            } else {
+                recognize_styled_screen(engine, &styled_screen, current_state)
+            };
             if last_recognition.as_ref() != Some(&recognition) {
                 let _ = event_tx.send(SessionEvent::RecognitionUpdate(recognition.clone()));
                 last_recognition = Some(recognition);
@@ -3123,6 +3211,38 @@ Some prose.
     }
 
     #[test]
+    fn claude_code_command_projects_text_only_launch_flags() {
+        let cmd = build_cli_command_with_claude_options(
+            CliEngine::ClaudeCode,
+            std::path::Path::new("/tmp/missiond text"),
+            Some(std::path::Path::new("/tmp/empty-mcp.json")),
+            false,
+            Some("claude-opus-4-8"),
+            Some("xhigh"),
+            false,
+            None,
+            None,
+            None,
+            ClaudeCodeLaunchOptions {
+                tools: Some(""),
+                strict_mcp_config: true,
+                disable_slash_commands: true,
+                session_id: Some("019e-test-session"),
+            },
+        );
+
+        assert!(cmd.contains("claude --add-dir '/tmp/missiond text'"));
+        assert!(cmd.contains("--mcp-config '/tmp/empty-mcp.json'"));
+        assert!(cmd.contains("--strict-mcp-config"));
+        assert!(cmd.contains("--model 'claude-opus-4-8'"));
+        assert!(cmd.contains("--effort 'xhigh'"));
+        assert!(cmd.contains("--tools ''"));
+        assert!(cmd.contains("--disable-slash-commands"));
+        assert!(cmd.contains("--session-id '019e-test-session'"));
+        assert!(!cmd.contains("--dangerously-skip-permissions"));
+    }
+
+    #[test]
     fn codex_command_projects_model_reasoning_search_sandbox_and_approval() {
         let cmd = build_cli_command(
             CliEngine::Codex,
@@ -3157,6 +3277,48 @@ Some prose.
         assert!(cmd.contains(
             "-c 'mcp_servers.missiond.tools.mission_claim_status.approval_mode=\"approve\"'"
         ));
+    }
+
+    #[test]
+    fn codex_command_supports_approval_sandbox_bypass() {
+        let cmd = build_cli_command(
+            CliEngine::Codex,
+            std::path::Path::new("/tmp/project"),
+            None,
+            true,
+            Some("gpt-5.5"),
+            Some("xhigh"),
+            true,
+            Some("danger-full-access"),
+            Some("never"),
+            None,
+        );
+
+        assert!(cmd.contains("codex --cd '/tmp/project'"));
+        assert!(cmd.contains("--model 'gpt-5.5'"));
+        assert!(cmd.contains("-c 'model_reasoning_effort=\"xhigh\"'"));
+        assert!(cmd.contains("--dangerously-bypass-approvals-and-sandbox"));
+        assert!(!cmd.contains("--sandbox"));
+        assert!(!cmd.contains("--ask-for-approval"));
+    }
+
+    #[test]
+    fn codex_command_omits_reasoning_override_for_default_reasoning() {
+        let cmd = build_cli_command(
+            CliEngine::Codex,
+            std::path::Path::new("/tmp/project"),
+            None,
+            false,
+            Some("gpt-5.5"),
+            None,
+            false,
+            Some("workspace-write"),
+            Some("never"),
+            None,
+        );
+
+        assert!(cmd.contains("--model 'gpt-5.5'"));
+        assert!(!cmd.contains("model_reasoning_effort"));
     }
 
     #[test]

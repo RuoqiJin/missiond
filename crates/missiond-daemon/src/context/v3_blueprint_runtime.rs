@@ -18,9 +18,10 @@ use compiled_envelope::{
     source_domain_bundle_hash, validate_compiled_source_domains, validate_compiled_source_units,
     CompiledRuntimeEnvelope, CompiledSourceDomain, CompiledSourceUnit,
 };
-#[cfg(test)]
-use compiled_runtime::load_compiled_runtime_snapshot;
-use compiled_runtime::{load_compiled_payload, CompiledPayloadLoad, CompiledRuntimeSnapshot};
+pub(crate) use compiled_runtime::CompiledRuntimeSnapshot;
+use compiled_runtime::{
+    load_compiled_payload, load_compiled_runtime_snapshot, CompiledPayloadLoad, CompiledRuntimeLoad,
+};
 use compiled_snapshot::compiled_runtime_snapshot_path;
 use runtime_config_payload::{
     generated_default_runtime_config, CompiledRuntimeConfigPayload, CompiledRuntimeDomainPayload,
@@ -80,7 +81,7 @@ pub(crate) const DEFAULT_PROJECT_INTENT_PATH_CANDIDATES: [&str; 3] = [
 ];
 pub(crate) const DEFAULT_CAPABILITY_REVIEW_SIDECAR: &str =
     ".missiond/v3/runtime/capability-usage-review.json";
-pub(crate) const DEFAULT_PROTECTED_TOOL_PATTERNS: [&str; 12] = [
+pub(crate) const DEFAULT_PROTECTED_TOOL_PATTERNS: [&str; 14] = [
     "mission_execution",
     "mission_intent",
     "mission_forge_",
@@ -91,6 +92,8 @@ pub(crate) const DEFAULT_PROTECTED_TOOL_PATTERNS: [&str; 12] = [
     "mission_kb_ops",
     "mission_audit",
     "mission_pty_signal",
+    "mission_pty_key",
+    "mission_pty_text",
     "mission_pty_confirm",
     "mission_incident",
 ];
@@ -3025,6 +3028,10 @@ pub(crate) fn load_compiled_project_universe(
     }
 }
 
+pub(crate) fn load_compiled_deployment_policy_snapshot(project_root: &Path) -> CompiledRuntimeLoad {
+    load_compiled_runtime_snapshot(project_root, "deployment-policy", None)
+}
+
 #[allow(dead_code)]
 pub(crate) fn load_compiled_workflow_contracts(
     project_root: &Path,
@@ -3790,7 +3797,7 @@ pub(crate) mod tests {
     :default-universe-manifest "$MISSIOND_PROJECTS_DIR/universe.intent.lisp")
   (capability-governance-policy
     :review-sidecar ".missiond/v3/runtime/capability-usage-review.json"
-    :protected-tool-patterns ["mission_execution" "mission_intent" "mission_forge_" "mission_sys_" "mission_daemon_update" "mission_health" "mission_power_control" "mission_kb_ops" "mission_audit" "mission_pty_signal" "mission_pty_confirm" "mission_incident"]
+    :protected-tool-patterns ["mission_execution" "mission_intent" "mission_forge_" "mission_sys_" "mission_daemon_update" "mission_health" "mission_power_control" "mission_kb_ops" "mission_audit" "mission_pty_signal" "mission_pty_key" "mission_pty_text" "mission_pty_confirm" "mission_incident"]
     :protected-flow-patterns ["engineering" "F-execution-log-governance" "F-incident-reaction" "F-capability-usage-monitoring"])
 	  (memory-kb-policy
 	    :pending-message-limit 60

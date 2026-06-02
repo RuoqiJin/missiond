@@ -103,7 +103,19 @@ pub(super) async fn handle_resolve(state: &AppState, args: Value) -> Result<Tool
                 primary_topics.push(project_id.clone());
             }
         }
-        for s in state.skills.search(&search_query).iter().take(3) {
+        for s in state
+            .skills
+            .search(&search_query)
+            .iter()
+            .filter(|skill| {
+                skill_context_candidate_matches_project_or_query(
+                    skill,
+                    args.project_id.as_deref(),
+                    &query,
+                )
+            })
+            .take(3)
+        {
             if primary_topics.iter().any(|topic| topic == &s.name) {
                 continue;
             }
@@ -269,7 +281,10 @@ pub(super) async fn handle_resolve(state: &AppState, args: Value) -> Result<Tool
                 &topics,
                 args.project_id.as_deref(),
                 None,
-            ),
+            )
+            .into_iter()
+            .filter(authoritative_project_skill_link)
+            .collect(),
             Err(_) => Vec::new(),
         }
     } else {
@@ -312,6 +327,165 @@ fn resolve_context_query(
         .or_else(|| skill.map(str::trim).filter(|s| !s.is_empty()))
         .unwrap_or("")
         .to_string()
+}
+
+fn skill_context_candidate_matches_project_or_query(
+    skill: &missiond_core::SkillMeta,
+    project_id: Option<&str>,
+    query: &str,
+) -> bool {
+    let Some(project_id) = project_id else {
+        return true;
+    };
+    if skill_context_skill_matches_project(skill, project_id) {
+        return true;
+    }
+
+    let tokens = skill_context_query_tokens(query, Some(project_id));
+    if tokens.is_empty() {
+        return false;
+    }
+    let name_path = format!("{}\n{}", skill.name, skill.path.display()).to_ascii_lowercase();
+    let description = skill
+        .description
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let aka = skill
+        .aka
+        .as_ref()
+        .map(|values| values.join("\n"))
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    let mut weight = 0usize;
+    for token in tokens {
+        if skill_context_contains_token(&name_path, &token)
+            || skill_context_contains_token(&aka, &token)
+        {
+            weight += 3;
+        } else if skill_context_contains_token(&description, &token) {
+            weight += 1;
+        }
+    }
+    weight >= 4
+}
+
+fn skill_context_skill_matches_project(skill: &missiond_core::SkillMeta, project_id: &str) -> bool {
+    let project_norm = skill_context_normalize_key(project_id);
+    let skill_norm = skill_context_normalize_key(&skill.name);
+    if project_norm.len() >= 3
+        && (skill_norm == project_norm
+            || skill_norm.ends_with(&project_norm)
+            || project_norm.ends_with(&skill_norm))
+    {
+        return true;
+    }
+    let project_lower = project_id.to_ascii_lowercase();
+    let path_lower = skill.path.display().to_string().to_ascii_lowercase();
+    path_lower.contains(&format!("/{project_lower}/")) || path_lower.contains(&project_lower)
+}
+
+fn authoritative_project_skill_link(link: &Value) -> bool {
+    let matched_by = link
+        .get("matchedBy")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if matches!(matched_by, "exact" | "path" | "aka" | "normalized-suffix") {
+        return true;
+    }
+    link.get("confidence")
+        .and_then(Value::as_f64)
+        .is_some_and(|confidence| confidence >= 0.74)
+}
+
+fn skill_context_query_tokens(query: &str, project_id: Option<&str>) -> Vec<String> {
+    let project_norm = project_id.map(skill_context_normalize_key);
+    let mut tokens = Vec::new();
+    for raw in
+        query.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.'))
+    {
+        let token = raw
+            .trim_matches(|ch: char| {
+                !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.')
+            })
+            .to_ascii_lowercase();
+        if token.len() < 3 && !token.chars().any(|ch| ch.is_ascii_digit()) {
+            continue;
+        }
+        if project_norm.as_deref() == Some(skill_context_normalize_key(&token).as_str()) {
+            continue;
+        }
+        if is_generic_skill_context_token(&token) {
+            continue;
+        }
+        if !tokens.iter().any(|existing| existing == &token) {
+            tokens.push(token);
+        }
+    }
+    tokens
+}
+
+fn is_generic_skill_context_token(token: &str) -> bool {
+    matches!(
+        token,
+        "and"
+            | "but"
+            | "for"
+            | "the"
+            | "with"
+            | "without"
+            | "service"
+            | "project"
+            | "runtime"
+            | "query"
+            | "context"
+            | "missing"
+            | "skipping"
+            | "backward"
+            | "compat"
+            | "verify"
+            | "verified"
+            | "status"
+            | "state"
+    )
+}
+
+fn skill_context_normalize_key(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect()
+}
+
+fn skill_context_contains_token(haystack: &str, token: &str) -> bool {
+    if token.chars().any(|ch| matches!(ch, '-' | '_' | '.' | '/')) {
+        return haystack.contains(token);
+    }
+
+    let bytes = haystack.as_bytes();
+    let needle = token.as_bytes();
+    if needle.is_empty() || bytes.len() < needle.len() {
+        return false;
+    }
+    for idx in 0..=bytes.len() - needle.len() {
+        if &bytes[idx..idx + needle.len()] != needle {
+            continue;
+        }
+        let before = idx.checked_sub(1).and_then(|pos| bytes.get(pos)).copied();
+        let after = bytes.get(idx + needle.len()).copied();
+        if before.is_none_or(|ch| !skill_context_is_word_byte(ch))
+            && after.is_none_or(|ch| !skill_context_is_word_byte(ch))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn skill_context_is_word_byte(ch: u8) -> bool {
+    ch.is_ascii_alphanumeric() || ch == b'_'
 }
 
 fn extract_operational_facts_for_skills(skills: &[Value]) -> Vec<Value> {
@@ -426,9 +600,11 @@ fn redact_operational_secret(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_markdown_table_facts, looks_like_operational_fact, redact_operational_secret,
-        resolve_context_query,
+        authoritative_project_skill_link, extract_markdown_table_facts,
+        looks_like_operational_fact, redact_operational_secret, resolve_context_query,
+        skill_context_candidate_matches_project_or_query,
     };
+    use std::path::PathBuf;
 
     #[test]
     fn resolve_context_query_prefers_explicit_query() {
@@ -467,5 +643,73 @@ mod tests {
         let redacted = redact_operational_secret(&facts[1].2);
         assert!(redacted.contains("<redacted>"));
         assert!(!redacted.contains("'1234'"));
+    }
+
+    #[test]
+    fn skill_context_filters_cross_project_query_candidates() {
+        let query =
+            "Payments missing service.manifest.toml Manifest Gate skipping verify backward compat";
+        let payments = skill_meta(
+            "payments",
+            "支付服务。WeChat/Alipay/Stripe 支付 + Credits 钱包。",
+            "/Users/jinchen/.claude/skills/services/payments/SKILL.md",
+        );
+        let astrill = skill_meta(
+            "astrill-gateway",
+            "Astrill VPN 旁路由网关。两台 VM 为局域网设备提供 VPN 出口。",
+            "/Users/jinchen/.claude/skills/astrill-gateway/SKILL.md",
+        );
+        let openclaw = skill_meta(
+            "openclaw",
+            "OpenClaw AI Agent 网关。HostVDS Docker 部署，对接 MissionD Claude Code。",
+            "/Users/jinchen/.claude/skills/openclaw/SKILL.md",
+        );
+
+        assert!(skill_context_candidate_matches_project_or_query(
+            &payments,
+            Some("payments"),
+            query
+        ));
+        assert!(!skill_context_candidate_matches_project_or_query(
+            &astrill,
+            Some("payments"),
+            query
+        ));
+        assert!(!skill_context_candidate_matches_project_or_query(
+            &openclaw,
+            Some("payments"),
+            query
+        ));
+    }
+
+    #[test]
+    fn skill_context_omits_description_only_project_links() {
+        let exact = serde_json::json!({
+            "skill": "payments",
+            "matchedBy": "exact",
+            "confidence": 1.0
+        });
+        let description_only = serde_json::json!({
+            "skill": "auth",
+            "matchedBy": "description",
+            "confidence": 0.62
+        });
+
+        assert!(authoritative_project_skill_link(&exact));
+        assert!(!authoritative_project_skill_link(&description_only));
+    }
+
+    fn skill_meta(name: &str, description: &str, path: &str) -> missiond_core::SkillMeta {
+        missiond_core::SkillMeta {
+            name: name.to_string(),
+            description: Some(description.to_string()),
+            aka: None,
+            allowed_tools: None,
+            path: PathBuf::from(path),
+            requires: None,
+            actions: None,
+            context_hooks: None,
+            triggers: None,
+        }
     }
 }

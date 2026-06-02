@@ -35,6 +35,8 @@
     (maturity :id deploy-center :current M6 :target M6 :gap [])
     (maturity :id xjp-memory :current M6 :target M6 :gap [])
     (maturity :id xjp-eventhub :current M6 :target M6 :gap [])
+    (maturity :id xjp-domain-service :current M3 :target M6 :gap [deploy-center-registration live-dns-readiness multi-zone-runtime-smoke final-m6-report])
+    (maturity :id xjp-mail-service :current M2 :target M6 :gap [google-workspace-provider-mutation gmail-pubsub-e2e service-mailbox-live-smoke final-m6-report])
     (maturity :id xjp-mcp :current M5 :target M6 :gap [tool-policy-ledger mcp-permission-regressions final-m6-report])
     (maturity :id xjp-cli :current M5 :target M6 :gap [command-policy-ledger mcp-parity-regressions final-m6-report])
     (maturity :id deploy-agent :current M6 :target M6 :gap [])

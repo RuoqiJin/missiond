@@ -22,8 +22,10 @@ pub use manager::{
     PermissionPolicy, Slot,
 };
 pub use pty_recognition::{
-    recognize_screen, session_state_snapshot, PtyCanonicalState, PtyRecognitionSnapshot,
+    recognize_screen, recognize_styled_screen, session_state_snapshot, PtyCanonicalState,
+    PtyRecognitionSnapshot,
 };
+pub use screenshot::{CapturedCellFlags, StyledScreenLine, StyledScreenSnapshot, StyledScreenSpan};
 pub use session::{
     ConfirmInfo, ConfirmResponse, McpReconnectOutcome, Message, MessageRole, PTYSession,
     PTYSessionOptions, PermissionDecision, ScreenTextEvent, ScreenTextSource, SessionEvent,

@@ -49,6 +49,7 @@ pub(super) fn compiled_runtime_file_name(kind: &str) -> Option<&'static str> {
         "runtime-domain:control-plane-kernel" => Some("compiled-runtime-control-plane-kernel.json"),
         "runtime-domain:learning-engine" => Some("compiled-runtime-learning-engine.json"),
         "universe" => Some("compiled-project-universe.json"),
+        "deployment-policy" => Some("compiled-deployment-policy.json"),
         "workflows" => Some("compiled-workflows.json"),
         _ => None,
     }
@@ -60,6 +61,7 @@ pub(super) fn compiled_runtime_schema_version(kind: &str) -> Option<&'static str
         "runtime-config" => Some("missiond.compiled-runtime-config.v1"),
         kind if kind.starts_with("runtime-domain:") => Some("missiond.compiled-runtime-domain.v1"),
         "universe" => Some("missiond.compiled-project-universe.v1"),
+        "deployment-policy" => Some("missiond.compiled-deployment-policy.v1"),
         "workflows" => Some("missiond.compiled-workflows.v1"),
         _ => None,
     }

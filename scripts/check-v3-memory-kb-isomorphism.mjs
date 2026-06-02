@@ -195,11 +195,23 @@ function checkFiles(root, files) {
     'mission_kb_review MUST write a non-destructive knowledge_review_state overlay; it MUST NOT mutate or delete the original knowledge row.',
     'mission_kb_query default retrieval MUST honor the review overlay while include_archived=true and state_filter preserve audit access to historical evidence.',
     'grounding-search-aggregate',
+    'source_profile',
+    'intent_default',
+    'deploy_ops',
+    'conversation_audit',
+    'full_debug',
+    'evidence_lanes',
+    'authority_order',
+    'noise_diagnostics',
+    'context_noise_metrics',
+    'include_raw_sources',
+    'credential_refs MUST NOT be emitted unless include_credentials=true',
     'skill-edit-delegation-policy',
     'task-record-indexing',
     'active Board task records',
     'bounded conversation logs',
-    'mission_context_gather MUST aggregate KB, active SSOT, project registry, skill operational evidence, infra evidence, active Board task records, and bounded conversation logs.',
+    'Worker context packs MUST include evidence_lanes lane summaries by default and omit raw sources',
+    'mission_context_gather MUST aggregate runtime_environment, KB, active SSOT, project registry, skill operational evidence, infra evidence, active Board task records, and bounded conversation logs through authority-aware evidence lanes',
     'Board/task/workflow records are searchable retrieval evidence',
     'Mutating skill files under ~/.claude/skills, ~/.codex/skills, or project skill directories MUST be represented as a BoardTask/work-order and delegated to a ClaudeCode skill-maintainer or deploy-ops lane.',
     'mission_kb_query MUST support excludeCategory / exclude_category for explicit category suppression',
@@ -215,11 +227,26 @@ function checkFiles(root, files) {
   ]);
 
   requireAll(diagnostics, files.contextGather, sources.contextGather, [
+    'SourceProfile',
+    'source_profile',
+    'source_selection',
+    'include_credentials',
+    'include_raw_sources',
     'include_board',
     'include_conversations',
     'conversation_time_range',
+    'evidence_lanes',
+    'authority_order',
+    'noise_diagnostics',
+    'context_noise_metrics',
+    'context_pack_artifact_payload',
+    'credential_lane_opt_in',
+    'selection.include_credentials',
+    'selection.include_raw_sources',
+    'raw_sources_omitted',
     '"board_tasks"',
     '"conversation_logs"',
+    '"credential_refs"',
     '"mission_board_query"',
     '"mission_conversation_query"',
     '"scope": "active"',
@@ -230,6 +257,16 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.mcpContextGather, sources.mcpContextGather, [
     'Board task records',
     'bounded conversation logs',
+    'source_profile',
+    'sourceProfile',
+    'intent_default',
+    'deploy_ops',
+    'conversation_audit',
+    'full_debug',
+    'include_credentials',
+    'includeCredentials',
+    'include_raw_sources',
+    'includeRawSources',
     'include_board',
     'include_conversations',
     'conversation_time_range',
@@ -829,6 +866,25 @@ function buildFixture() {
 	                 "mission_memory_pending MUST classify deployment-monitor"
 	                 "Timeline projection SQL MUST cast string-bound since/until parameters as ::timestamptz when comparing against event_log.ts"
 	                 "Timeline Analyst MUST check the Gemini provider gate before collecting timeline evidence or calling Gemini"])
+	  (grounding-search-aggregate
+	    :source_profile [intent_default deploy_ops conversation_audit full_debug]
+	    :fields [evidence_lanes authority_order noise_diagnostics context_noise_metrics include_raw_sources]
+	    :invariants ["credential_refs MUST NOT be emitted unless include_credentials=true"
+	                 "Worker context packs MUST include evidence_lanes lane summaries by default and omit raw sources"
+	                 "mission_context_gather MUST aggregate runtime_environment, KB, active SSOT, project registry, skill operational evidence, infra evidence, active Board task records, and bounded conversation logs through authority-aware evidence lanes"
+	                 "Board/task/workflow records are searchable retrieval evidence"
+	                 "Mutating skill files under ~/.claude/skills, ~/.codex/skills, or project skill directories MUST be represented as a BoardTask/work-order and delegated to a ClaudeCode skill-maintainer or deploy-ops lane."])
+	  (skill-edit-delegation-policy)
+	  (task-record-indexing :records ["active Board task records" "bounded conversation logs"])
+	  (fixture-contract-text
+	    "deployment-monitor covers deploy/build/smoke/rollback/agent-update/provenance diagnostics"
+	    "mission_kb_query MUST support excludeCategory / exclude_category"
+	    "mission_kb_query MUST support excludeCategory / exclude_category for explicit category suppression"
+	    "mission_kb_mutate(action=batch_remember) MUST accept a bounded entries array"
+	    "token_usage_ledger through a Lisp-projected sliding-window token-spend soft guard"
+	    ":token-spend-guard-window-secs"
+	    ":token-spend-guard-soft-limit"
+	    "Memory extraction pending selectors MUST filter MissionD self-referential worker slots")
 	  (implementation-map
     (surface memory-kb
       :status "code-aligned"
@@ -861,6 +917,9 @@ function buildFixture() {
 	             "crates/missiond-daemon/src/engine/learning_engine/idle_explorer.rs"
 	             "crates/missiond-daemon/src/engine/learning_engine/historical_scanner.rs"
 	             "crates/missiond-core/src/db/pg/conversation.rs"
+	             "crates/missiond-daemon/src/handlers/knowledge/context_gather.rs"
+	             "crates/missiond-mcp/src/tools/knowledge/context_gather.rs"
+	             "crates/missiond-daemon/src/handlers/comm/tool_directory.rs"
 	             "scripts/check-v3-memory-kb-isomorphism.mjs"]
 	      :note "memory-kb-policy realtime extraction batch size and preview truncation budgets; knowledge_review_state overlay; projects learning-engine-policy into learning_engine pty send budgets, maintenance cadences, timeline read windows, and KB reflection policy; Realtime extraction MUST claim the extraction lane before running pending-message DB probes; pending realtime SQL MUST use EXISTS/LATERAL LIMIT or bounded materialized-candidate shapes instead of global COUNT(DISTINCT)/ROW_NUMBER scans; deep-analysis active-conversation probes MUST use bounded EXISTS/OFFSET checks instead of full message COUNT scans; kb.rs remains the memory-kb facade; kb/args.rs owns unified KB argument ingress; kb/remember.rs owns remember ingestion, graph edge side effects, embedding trigger, mutation event, and conflict downweighting; kb/quality.rs owns content-quality rejection; kb/compact.rs owns rule-based KB compaction; kb/conflicts.rs owns semantic conflict detection; kb/query.rs owns search/get/list retrieval egress; kb/discovery.rs owns SSH probe discovery and infra KB projection; kb/analyze.rs owns LLM analysis, context-budgeting, and consolidation-plan queue projection; kb/mutate.rs owns forget/update/project mutation side effects; kb/import.rs owns servers_yaml import projection; kb/gc.rs owns stats/stale/duplicates cleanup actions; kb/ops.rs owns queue-status and execute-plan operation egress; kb/beacon.rs owns unified mission_beacon action routing plus legacy beacon list/map/tag/annotate; kb/code_search.rs owns AST code-search egress; kb/review.rs owns non-destructive knowledge_review_state overlay."))
   (compression-contract
@@ -898,17 +957,35 @@ pub(crate) async fn handle() {
   "mission_kb_query"; "mission_kb_mutate"; "mission_kb_ops"; "mission_kb_review"; "mission_beacon"; "mission_kb_remember";
 }`);
 	  writeFixture(root, DEFAULT_FILES.v3Runtime, `
-	MemoryKbRuntimeConfig; LearningEngineRuntimeConfig; parse_memory_kb_policy; parse_learning_engine_policy; DEFAULT_MEMORY_PENDING_MESSAGE_LIMIT; DEFAULT_MEMORY_TOOL_RESULT_PREVIEW_CHARS; DEFAULT_MEMORY_ASSISTANT_PREVIEW_CHARS; memory-kb-policy; :pending-message-limit; :tool-result-preview-chars; :assistant-preview-chars; DEFAULT_LEARNING_REALTIME_EXTRACTION_TIMEOUT_SECS; DEFAULT_LEARNING_REALTIME_EMPTY_BACKOFF_BASE_SECS; DEFAULT_LEARNING_REALTIME_EMPTY_BACKOFF_MAX_SECS; DEFAULT_LEARNING_DEEP_ANALYSIS_ZERO_OUTPUT_FUSE_THRESHOLD; DEFAULT_LEARNING_DEEP_ANALYSIS_ZERO_OUTPUT_FUSE_SECS; DEFAULT_LEARNING_TIMELINE_ANALYSIS_INTERVAL_SECS; DEFAULT_LEARNING_KB_REFLECTION_UTILITY_THRESHOLD; learning-engine-policy; :realtime-extraction-timeout-secs; :realtime-empty-backoff-base-secs; :realtime-empty-backoff-max-secs; :deep-analysis-zero-output-fuse-threshold; :deep-analysis-zero-output-fuse-secs; :cooccurrence-refresh-interval-secs;
+	MemoryKbRuntimeConfig; LearningEngineRuntimeConfig; parse_memory_kb_policy; parse_learning_engine_policy; DEFAULT_MEMORY_PENDING_MESSAGE_LIMIT; DEFAULT_MEMORY_TOOL_RESULT_PREVIEW_CHARS; DEFAULT_MEMORY_ASSISTANT_PREVIEW_CHARS; memory-kb-policy; :pending-message-limit; :tool-result-preview-chars; :assistant-preview-chars; DEFAULT_LEARNING_REALTIME_EXTRACTION_TIMEOUT_SECS; DEFAULT_LEARNING_REALTIME_EMPTY_BACKOFF_BASE_SECS; DEFAULT_LEARNING_REALTIME_EMPTY_BACKOFF_MAX_SECS; DEFAULT_LEARNING_DEEP_ANALYSIS_ZERO_OUTPUT_FUSE_THRESHOLD; DEFAULT_LEARNING_DEEP_ANALYSIS_ZERO_OUTPUT_FUSE_SECS; DEFAULT_LEARNING_TOKEN_SPEND_GUARD_WINDOW_SECS; DEFAULT_LEARNING_TOKEN_SPEND_GUARD_SOFT_LIMIT; DEFAULT_LEARNING_TIMELINE_ANALYSIS_INTERVAL_SECS; DEFAULT_LEARNING_KB_REFLECTION_UTILITY_THRESHOLD; learning-engine-policy; :realtime-extraction-timeout-secs; :realtime-empty-backoff-base-secs; :realtime-empty-backoff-max-secs; :deep-analysis-zero-output-fuse-threshold; :deep-analysis-zero-output-fuse-secs; :token-spend-guard-window-secs; :token-spend-guard-soft-limit; :cooccurrence-refresh-interval-secs;
 	`);
+  writeFixture(root, DEFAULT_FILES.contextGather, `
+SourceProfile; source_profile; source_selection; include_credentials; include_raw_sources;
+include_board; include_conversations; conversation_time_range;
+evidence_lanes; authority_order; noise_diagnostics; context_noise_metrics; context_pack_artifact_payload;
+credential_lane_opt_in; selection.include_credentials; selection.include_raw_sources; raw_sources_omitted;
+"board_tasks"; "conversation_logs"; "credential_refs"; "mission_board_query"; "mission_conversation_query"; "scope": "active"; "time_range"; last_30d;
+`);
+  writeFixture(root, DEFAULT_FILES.mcpContextGather, `
+Board task records; bounded conversation logs; source_profile; sourceProfile; intent_default; deploy_ops; conversation_audit; full_debug;
+include_credentials; includeCredentials; include_raw_sources; includeRawSources;
+include_board; include_conversations; conversation_time_range;
+`);
+  writeFixture(root, DEFAULT_FILES.toolDirectory, `
+mission_context_gather + mission_conversation_* + mission_timeline + mission_audit;
+"mission_context_gather"; "grounding"; "intent";
+`);
   writeFixture(root, DEFAULT_FILES.kbArgs, `
 pub(super) struct KBRememberArgs;
 pub(super) struct KBKeyArgs;
 pub(super) struct KBUpdateArgs;
 pub(super) struct KBSearchArgs;
+pub(super) exclude_category: Option<Value>;
 pub(super) struct KBListArgs;
 pub(super) struct KBImportArgs;
 pub(super) struct KBDiscoverArgs;
 pub(super) struct KBGCArgs;
+pub(super) struct KBBatchRememberArgs;
 pub(super) struct KBReviewArgs {
   pub(super) include_archived: bool,
   pub(super) state_filter: Option<String>,
@@ -950,7 +1027,11 @@ async fn filter_entries_by_review() {
 fn is_sensitive_retrieval_intent() {}
 fn suppress_for_sensitive_retrieval() {
   "architecture:module";
-}`);
+}
+fn parse_excluded_categories() {}
+fn category_is_excluded() {}
+exclude_category;
+`);
   writeFixture(root, DEFAULT_FILES.kbDiscovery, `
 pub(super) async fn handle_kb_discover() {
   KBDiscoverArgs; state.infra.read(); kb_search(&format!("{} password", host), Some("credential")); tokio::process::Command; AsyncWriteExt; StrictHostKeyChecking=no; ConnectTimeout=10; KBRememberInput; source: Some("discovery".to_string()); SSH probe failed;
@@ -1067,13 +1148,13 @@ same_source_session;
 _dedupe_merge_events;
 `);
 	  writeFixture(root, DEFAULT_FILES.memory, `
-	MemoryKbRuntimeConfig; load_memory_kb_config; V3_BLUEPRINT_CONFIG_ERROR; pending_message_limit; tool_result_preview_chars; assistant_preview_chars; get_pending_realtime_messages_with_limit(pending_msg_limit); MAX_PENDING_BATCH_REPLAYS; classify_memory_input_noise; deployment-monitor; runtime-report; worker-instruction; provider-preamble; inputSkipDiagnostics; inputFilter; mark_pending_batch_served; pending_payload; MEMORY_PENDING_ALREADY_SERVED; ToolResult::structured_error;
+	MemoryKbRuntimeConfig; load_memory_kb_config; V3_BLUEPRINT_CONFIG_ERROR; pending_message_limit; tool_result_preview_chars; assistant_preview_chars; get_pending_realtime_messages_with_limit(pending_msg_limit); MAX_PENDING_BATCH_REPLAYS; classify_memory_input_noise; deployment-monitor; deployment-event-response; xjp_build_wait; xjp_deploy_watch; build_started; agent_update_failed; reported_digest_missing; runtime-report; worker-instruction; provider-preamble; inputSkipDiagnostics; inputFilter; mark_pending_batch_served; pending_payload; MEMORY_PENDING_ALREADY_SERVED; ToolResult::structured_error;
 	`);
 	  writeFixture(root, DEFAULT_FILES.learningMod, `
 	LearningEngineRuntimeConfig; decision_harvest_interval_secs; cooccurrence_refresh_interval_secs; V3 learning-engine-policy unavailable;
 	`);
 	  writeFixture(root, DEFAULT_FILES.learningExtraction, `
-	LearningEngineRuntimeConfig; load_learning_engine_config; realtime_extraction_timeout_ms; try_claim_extraction_probe; release_extraction_probe; should_skip_realtime_empty_backoff; should_skip_deep_analysis_zero_output_fuse; record_deep_analysis_completion; deep_analysis_zero_output_fuse_threshold; record_realtime_empty_probe; reset_realtime_empty_backoff; another extraction probe already claimed the lane; kb_consolidation_interval_secs; kb_auto_gc_interval_secs; kb_reflection_interval_secs; kb_reflection_utility_threshold; kb_reflection_max_tokens;
+	LearningEngineRuntimeConfig; load_learning_engine_config; realtime_extraction_timeout_ms; try_claim_extraction_probe; release_extraction_probe; should_skip_realtime_empty_backoff; should_skip_memory_due_to_token_spend_guard; token_spend_guard_window_secs; token_spend_guard_soft_limit; token_stats(None, Some(slot_id); CtlDomain::Memory; should_skip_deep_analysis_zero_output_fuse; record_deep_analysis_completion; deep_analysis_zero_output_fuse_threshold; record_realtime_empty_probe; reset_realtime_empty_backoff; another extraction probe already claimed the lane; kb_consolidation_interval_secs; kb_auto_gc_interval_secs; kb_reflection_interval_secs; kb_reflection_utility_threshold; kb_reflection_max_tokens;
 	`);
 	  writeFixture(root, DEFAULT_FILES.pgConversation, `
 	SELECT COUNT(*) FROM conversations c WHERE EXISTS (SELECT 1 FROM conversation_messages m LIMIT 1);

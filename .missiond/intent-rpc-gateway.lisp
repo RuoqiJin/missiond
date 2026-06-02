@@ -45,7 +45,7 @@
       (tools mission_task_submit mission_task_query mission_task_cancel
              mission_task_delegate))
     (group pty
-      (tools mission_pty_spawn mission_pty_send mission_pty_read
+      (tools mission_pty_spawn mission_pty_send mission_pty_key mission_pty_text mission_pty_read
              mission_pty_status mission_pty_screenshot mission_pty_confirm
              mission_pty_signal))
     (group slot

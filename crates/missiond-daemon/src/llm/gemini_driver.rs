@@ -158,9 +158,14 @@ impl GeminiPtyDriver {
                 sandbox: None,
                 approval_policy: None,
                 tool_policy_path: None,
+                claude_code_tools: None,
+                claude_code_strict_mcp_config: false,
+                claude_code_disable_slash_commands: false,
+                provider_session_id: None,
                 extra_env,
                 initial_prompt: None,
                 command_override: None,
+                ..Default::default()
             },
             None, // No slot_env provided here, could be passed if needed
         )

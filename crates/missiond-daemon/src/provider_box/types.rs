@@ -1,6 +1,7 @@
 use missiond_core::types::CliEngine;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::sync::OnceLock;
 
 pub(crate) const DIAG_SUBMIT_TURN_UNSUPPORTED: &str = "SUBMIT_TURN_UNSUPPORTED";
 pub(crate) const DIAG_MODEL_SWITCH_UNSUPPORTED: &str = "MODEL_SWITCH_UNSUPPORTED";
@@ -17,12 +18,19 @@ pub(crate) const DIAG_PROVIDER_BOX_INVALID_REQUEST: &str = "PROVIDER_BOX_INVALID
 pub(crate) const DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE: &str = "PROVIDER_BOX_SLOT_UNAVAILABLE";
 pub(crate) const DIAG_PROVIDER_TEXT_ONLY_VIOLATION: &str = "PROVIDER_TEXT_ONLY_VIOLATION";
 pub(crate) const DIAG_PROVIDER_DURABLE_FINAL_MISSING: &str = "PROVIDER_DURABLE_FINAL_MISSING";
+pub(crate) const DIAG_PROVIDER_UPSTREAM_UNAVAILABLE: &str = "PROVIDER_UPSTREAM_UNAVAILABLE";
 pub(crate) const DIAG_PROVIDER_CONTROL_ACTION_UNSUPPORTED: &str =
     "PROVIDER_CONTROL_ACTION_UNSUPPORTED";
 pub(crate) const DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED: &str =
     "PROVIDER_CONTROL_ACTION_UNVERIFIED";
 pub(crate) const DIAG_PROVIDER_PTY_STEP_UNSUPPORTED: &str = "PROVIDER_PTY_STEP_UNSUPPORTED";
 pub(crate) const DIAG_PROVIDER_STATUS_UNAVAILABLE: &str = "PROVIDER_STATUS_UNAVAILABLE";
+pub(crate) const DIAG_PROVIDER_MCP_STATUS_UNSUPPORTED: &str = "PROVIDER_MCP_STATUS_UNSUPPORTED";
+pub(crate) const DIAG_PROVIDER_MCP_RECONNECT_UNSUPPORTED: &str =
+    "PROVIDER_MCP_RECONNECT_UNSUPPORTED";
+pub(crate) const DIAG_PROVIDER_MCP_STATUS_UNAVAILABLE: &str = "PROVIDER_MCP_STATUS_UNAVAILABLE";
+pub(crate) const DIAG_PROVIDER_MCP_RECONNECT_UNVERIFIED: &str = "PROVIDER_MCP_RECONNECT_UNVERIFIED";
+pub(crate) const DIAG_PROVIDER_SESSION_ID_UNKNOWN: &str = "PROVIDER_SESSION_ID_UNKNOWN";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -35,10 +43,14 @@ pub(crate) enum BoxCommand {
     SemanticAuthoring,
     GroundedDirectAnswer,
     RunnerOneShot,
+    Research,
+    ImageGeneration,
     Vision,
     ControlAction,
     PtyStep,
     Status,
+    McpStatus,
+    McpReconnect,
 }
 
 impl BoxCommand {
@@ -50,6 +62,8 @@ impl BoxCommand {
                 | Self::SemanticAuthoring
                 | Self::GroundedDirectAnswer
                 | Self::RunnerOneShot
+                | Self::Research
+                | Self::ImageGeneration
                 | Self::Vision
         )
     }
@@ -59,8 +73,12 @@ impl BoxCommand {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ProviderControlAction {
     Input,
+    ClearInput,
     ClearScreen,
+    SetPermissions,
+    SetFastMode,
     Exit,
+    Logout,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,7 +211,18 @@ pub(crate) struct ProviderInteractionRequest {
     pub(crate) provider: Option<String>,
     pub(crate) engine: CliEngine,
     pub(crate) model: Option<String>,
+    #[serde(alias = "reasoning_effort", alias = "model_reasoning_effort")]
     pub(crate) model_profile: Option<String>,
+    pub(crate) provider_box_lane: Option<String>,
+    pub(crate) xjp_request_stage: Option<String>,
+    #[serde(
+        default,
+        alias = "dangerously_skip_permissions",
+        alias = "dangerously_bypass",
+        alias = "bypass_approvals_and_sandbox",
+        alias = "bypass_mode"
+    )]
+    pub(crate) dangerously_bypass_approvals_and_sandbox: bool,
     pub(crate) cwd: Option<String>,
     pub(crate) project_root: Option<String>,
     pub(crate) prompt: Option<String>,
@@ -232,6 +261,9 @@ impl ProviderInteractionRequest {
             engine,
             model: None,
             model_profile: None,
+            provider_box_lane: None,
+            xjp_request_stage: None,
+            dangerously_bypass_approvals_and_sandbox: false,
             cwd: None,
             project_root: None,
             prompt: None,
@@ -499,11 +531,15 @@ pub(crate) struct PtyObservation {
 impl PtyObservation {
     pub(crate) fn text(source: impl Into<String>, text: impl Into<String>) -> Self {
         let text = text.into();
+        let text_excerpt = redact_auth_sensitive_text(&text)
+            .chars()
+            .take(1200)
+            .collect();
         Self {
             observed_at: chrono::Utc::now().to_rfc3339(),
             source: source.into(),
             screen_hash: Some(screen_hash(&text)),
-            text_excerpt: Some(text.chars().take(1200).collect()),
+            text_excerpt: Some(text_excerpt),
             structured_state: None,
         }
     }
@@ -514,11 +550,15 @@ impl PtyObservation {
         structured_state: Value,
     ) -> Self {
         let text = text.into();
+        let text_excerpt = redact_auth_sensitive_text(&text)
+            .chars()
+            .take(1200)
+            .collect();
         Self {
             observed_at: chrono::Utc::now().to_rfc3339(),
             source: source.into(),
             screen_hash: Some(screen_hash(&text)),
-            text_excerpt: Some(text.chars().take(1200).collect()),
+            text_excerpt: Some(text_excerpt),
             structured_state: Some(structured_state),
         }
     }
@@ -589,6 +629,91 @@ impl PtyStepRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub(crate) struct ProviderSessionIdentity {
+    pub(crate) schema: String,
+    pub(crate) provider: Option<String>,
+    pub(crate) engine: CliEngine,
+    pub(crate) slot_id: Option<String>,
+    pub(crate) provider_session_id: Option<String>,
+    pub(crate) provider_session_ref: Option<String>,
+    pub(crate) resume_command: Option<String>,
+    pub(crate) identity_source: String,
+    pub(crate) durable_source: Option<String>,
+    pub(crate) workspace: Option<String>,
+    pub(crate) confidence: String,
+    pub(crate) observed_at: String,
+    #[serde(default)]
+    pub(crate) diagnostics: Vec<ProviderBoxDiagnostic>,
+}
+
+impl ProviderSessionIdentity {
+    pub(crate) fn resolved(
+        provider: impl Into<Option<String>>,
+        engine: CliEngine,
+        slot_id: impl Into<Option<String>>,
+        provider_session_id: impl Into<String>,
+        identity_source: impl Into<String>,
+        durable_source: impl Into<Option<String>>,
+        workspace: impl Into<Option<String>>,
+        confidence: impl Into<String>,
+    ) -> Self {
+        let provider_session_id = provider_session_id.into();
+        let provider_prefix = match engine {
+            CliEngine::Agy => "AGY",
+            CliEngine::Codex => "CODEX",
+            CliEngine::ClaudeCode => "CLAUDECODE",
+            CliEngine::Gemini => "GEMINI",
+        };
+        let resume_command = match engine {
+            CliEngine::Agy => Some(format!("agy --conversation {provider_session_id}")),
+            CliEngine::Codex => Some(format!("codex resume {provider_session_id}")),
+            CliEngine::ClaudeCode | CliEngine::Gemini => None,
+        };
+        Self {
+            schema: "missiond.provider-session-identity.v1".to_string(),
+            provider: provider.into(),
+            engine,
+            slot_id: slot_id.into(),
+            provider_session_ref: Some(format!("{provider_prefix}-{provider_session_id}")),
+            provider_session_id: Some(provider_session_id),
+            resume_command,
+            identity_source: identity_source.into(),
+            durable_source: durable_source.into(),
+            workspace: workspace.into(),
+            confidence: confidence.into(),
+            observed_at: chrono::Utc::now().to_rfc3339(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    pub(crate) fn unknown(
+        provider: impl Into<Option<String>>,
+        engine: CliEngine,
+        slot_id: impl Into<Option<String>>,
+        identity_source: impl Into<String>,
+        workspace: impl Into<Option<String>>,
+        diagnostic: ProviderBoxDiagnostic,
+    ) -> Self {
+        Self {
+            schema: "missiond.provider-session-identity.v1".to_string(),
+            provider: provider.into(),
+            engine,
+            slot_id: slot_id.into(),
+            provider_session_id: None,
+            provider_session_ref: None,
+            resume_command: None,
+            identity_source: identity_source.into(),
+            durable_source: None,
+            workspace: workspace.into(),
+            confidence: "unknown".to_string(),
+            observed_at: chrono::Utc::now().to_rfc3339(),
+            diagnostics: vec![diagnostic],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) struct ProviderBoxResult {
     pub(crate) schema: String,
     pub(crate) turn_id: String,
@@ -596,9 +721,15 @@ pub(crate) struct ProviderBoxResult {
     pub(crate) status: ProviderBoxStatus,
     pub(crate) provider: Option<String>,
     pub(crate) engine: CliEngine,
+    pub(crate) model: Option<String>,
+    pub(crate) model_profile: Option<String>,
+    pub(crate) provider_box_lane: Option<String>,
+    pub(crate) xjp_request_stage: Option<String>,
+    pub(crate) dangerously_bypass_approvals_and_sandbox: bool,
     pub(crate) lease_id: Option<String>,
     pub(crate) slot_id: Option<String>,
     pub(crate) provider_conversation_id: Option<String>,
+    pub(crate) provider_session_identity: Option<ProviderSessionIdentity>,
     pub(crate) durable_source: Option<String>,
     pub(crate) final_text: Option<String>,
     pub(crate) artifact_hash: Option<String>,
@@ -612,6 +743,8 @@ pub(crate) struct ProviderBoxResult {
     pub(crate) model_catalog: Option<ProviderModelCatalog>,
     pub(crate) router_export: Option<ProviderRouterExport>,
     pub(crate) model_switch_result: Option<ModelSwitchResult>,
+    pub(crate) mcp_status: Option<Value>,
+    pub(crate) capabilities: Option<Value>,
 }
 
 impl ProviderBoxResult {
@@ -623,9 +756,16 @@ impl ProviderBoxResult {
             status,
             provider: request.provider.clone(),
             engine: request.engine,
+            model: request.model.clone(),
+            model_profile: request.model_profile.clone(),
+            provider_box_lane: request.provider_box_lane.clone(),
+            xjp_request_stage: request.xjp_request_stage.clone(),
+            dangerously_bypass_approvals_and_sandbox: request
+                .dangerously_bypass_approvals_and_sandbox,
             lease_id: request.lease_id.clone(),
             slot_id: request.slot_id.clone(),
             provider_conversation_id: None,
+            provider_session_identity: None,
             durable_source: None,
             final_text: None,
             artifact_hash: None,
@@ -637,6 +777,8 @@ impl ProviderBoxResult {
             model_catalog: None,
             router_export: None,
             model_switch_result: None,
+            mcp_status: None,
+            capabilities: None,
         }
     }
 
@@ -676,11 +818,40 @@ fn screen_hash(text: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+pub(crate) fn redact_auth_sensitive_text(text: &str) -> String {
+    fn auth_code_re() -> &'static regex::Regex {
+        static RE: OnceLock<regex::Regex> = OnceLock::new();
+        RE.get_or_init(|| {
+            regex::Regex::new(r"\b4/[A-Za-z0-9_-]{20,}\b").expect("valid auth code regex")
+        })
+    }
+    fn oauth_url_re() -> &'static regex::Regex {
+        static RE: OnceLock<regex::Regex> = OnceLock::new();
+        RE.get_or_init(|| {
+            regex::Regex::new(r"https://accounts\.google\.com/o/oauth2/auth[^\s]*")
+                .expect("valid oauth url regex")
+        })
+    }
+    fn oauth_query_secret_re() -> &'static regex::Regex {
+        static RE: OnceLock<regex::Regex> = OnceLock::new();
+        RE.get_or_init(|| {
+            regex::Regex::new(r"(?i)\b(code_challenge|state|client_id)=([^&\s]+)")
+                .expect("valid oauth query secret regex")
+        })
+    }
+
+    let redacted = auth_code_re().replace_all(text, "[REDACTED_AUTH_CODE]");
+    let redacted = oauth_url_re().replace_all(&redacted, "[REDACTED_OAUTH_URL]");
+    oauth_query_secret_re()
+        .replace_all(&redacted, "$1=[REDACTED]")
+        .into_owned()
+}
+
 #[cfg(test)]
 mod step_record_tests {
     use super::{
-        PtyObservation, PtyStepAction, PtyStepRecord, PtyStepVerificationStatus,
-        TimeoutCancelPolicy,
+        redact_auth_sensitive_text, PtyObservation, PtyStepAction, PtyStepRecord,
+        PtyStepVerificationStatus, TimeoutCancelPolicy,
     };
 
     #[test]
@@ -700,6 +871,24 @@ mod step_record_tests {
         assert!(step.before.screen_hash.is_some());
         assert!(step.after.screen_hash.is_some());
         assert_ne!(step.before.screen_hash, step.after.screen_hash);
+    }
+
+    #[test]
+    fn pty_observation_redacts_oauth_codes_and_url_secrets() {
+        let text = concat!(
+            "https://accounts.google.com/o/oauth2/auth?client_id=abc&code_challenge=secret\n",
+            "state=opaque\n",
+            "authorization code...\n",
+            "4/0AeoWuM8X_GD8fCuYb0dWNs_SC20m-OK1uPBuwUEbK0lFSdJ8wMaMsW73MTJlWh9q9qL-JA"
+        );
+        let observation = PtyObservation::text("pty-screen", text);
+        let excerpt = observation.text_excerpt.expect("excerpt");
+
+        assert!(excerpt.contains("[REDACTED_OAUTH_URL]"));
+        assert!(excerpt.contains("state=[REDACTED]"));
+        assert!(excerpt.contains("[REDACTED_AUTH_CODE]"));
+        assert!(!excerpt.contains("0AeoWuM8X"));
+        assert!(redact_auth_sensitive_text("plain text").contains("plain text"));
     }
 
     #[test]

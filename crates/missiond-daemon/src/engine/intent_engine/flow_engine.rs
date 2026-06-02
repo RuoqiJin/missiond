@@ -1063,6 +1063,7 @@ pub(crate) async fn ensure_autopilot_pty(
             extra_env: HashMap::new(),
             initial_prompt: None,
             command_override: None,
+            ..Default::default()
         },
         Some(&final_slot_env),
     )

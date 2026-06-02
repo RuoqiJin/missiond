@@ -610,6 +610,20 @@ export class MissionControl extends TypedEventEmitter {
   }
 
   /**
+   * Send one allowlisted semantic key to a PTY session.
+   */
+  async ptyKey(slotId: string, key: string): Promise<void> {
+    await this.callTool('mission_pty_key', { slotId, key });
+  }
+
+  /**
+   * Type printable text into a PTY session without pressing Enter.
+   */
+  async ptyText(slotId: string, text: string): Promise<void> {
+    await this.callTool('mission_pty_text', { slotId, text });
+  }
+
+  /**
    * Kill a PTY session
    */
   async ptyKill(slotId: string): Promise<void> {

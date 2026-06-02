@@ -149,6 +149,8 @@ pub async fn dispatch_tool<H: MissiondMcp>(handler: &H, name: &str, args: Value)
         | "mission_swarm_run" => handler.handle_task(name, args).await,
         "mission_pty_spawn"
         | "mission_pty_send"
+        | "mission_pty_key"
+        | "mission_pty_text"
         | "mission_pty_read"
         | "mission_pty_status"
         | "mission_pty_screenshot"

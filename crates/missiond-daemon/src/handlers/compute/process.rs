@@ -123,6 +123,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                     extra_env: std::collections::HashMap::new(),
                     initial_prompt: None,
                     command_override: None,
+                    ..Default::default()
                 },
                 slot.config.env.as_ref(),
             )
@@ -203,6 +204,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                     extra_env: std::collections::HashMap::new(),
                     initial_prompt: None,
                     command_override: None,
+                    ..Default::default()
                 },
                 slot.config.env.as_ref(),
             )

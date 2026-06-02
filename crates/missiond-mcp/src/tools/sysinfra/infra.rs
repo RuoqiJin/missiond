@@ -20,6 +20,10 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "service_id": {"type": "string", "description": "[diagnostic_profiles] 服务 ID"},
                     "profile": {"type": "string", "description": "[diagnostic_profiles] deploy_provenance_snapshot/container_inventory/dependency_manifest_scan/supply_chain_ioc_scan"},
                     "skill": {"type": "string", "description": "[skill_evidence] 限定 skill 名称"},
+                    "query": {"type": "string", "description": "[skill_evidence/credential_refs] 查询文本；无 target_id/skill 时用于相关性过滤"},
+                    "project_id": {"type": "string", "description": "[skill_evidence/credential_refs] 项目 ID；无 target_id/skill 时用于项目相关性过滤"},
+                    "projectId": {"type": "string", "description": "project_id alias"},
+                    "project": {"type": "string", "description": "project_id alias"},
                     "limit": {"type": "integer", "description": "[skill_evidence] 最大返回条数"},
                     "role": {"type": "string", "description": "[list] 角色: build/deploy/gpu/vpn/production"},
                     "provider": {"type": "string", "description": "[list] 云厂商: gcp/aliyun/self-hosted"}

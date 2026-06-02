@@ -210,6 +210,16 @@ function main() {
     if (universe) {
       const universePath = path.join(outDir, 'compiled-project-universe.json');
       const universeJson = JSON.parse(fs.readFileSync(universePath, 'utf8'));
+      const deploymentPolicy = buildDeploymentPolicy(universeJson);
+      const deploymentPolicyPath = path.join(outDir, 'compiled-deployment-policy.json');
+      fs.writeFileSync(deploymentPolicyPath, `${JSON.stringify(deploymentPolicy, null, 2)}\n`);
+      results.push({
+        id: 'deployment-policy',
+        ok: (deploymentPolicy.diagnostics ?? []).length === 0,
+        path: deploymentPolicyPath,
+        source_hash: deploymentPolicy.source_hash,
+        diagnostics: deploymentPolicy.diagnostics ?? [],
+      });
       const projectNavigation = buildProjectAgentNavigation({
         semanticJson,
         universeJson,
@@ -407,6 +417,102 @@ function normalizeGateChecks(rows) {
       timeoutMs: positiveIntOrNull(entry?.timeout_ms ?? entry?.timeoutMs) ?? 60_000,
     }))
     .filter((entry) => entry.id && entry.argv.length > 0);
+}
+
+function buildDeploymentPolicy(universeJson) {
+  const payload = universeJson?.payload ?? {};
+  const projects = Array.isArray(payload.projects) ? payload.projects : [];
+  const services = Array.isArray(payload.services) ? payload.services : [];
+  const projectById = new Map(projects.map((project) => [project?.id, project]));
+  const maturityById = readProjectMaturityMap();
+  const deploymentByService = readServiceDeploymentMap();
+  const rows = [];
+
+  for (const service of services) {
+    const serviceId = stringOrNull(service?.id);
+    if (!serviceId) continue;
+    const projectId = stringOrNull(service?.project) ?? serviceId;
+    const project = projectById.get(projectId) ?? projectById.get(serviceId) ?? {};
+    const maturity = maturityById.get(projectId) ?? maturityById.get(serviceId) ?? 'unknown';
+    const environment = stringOrNull(service?.environment) ?? 'unknown';
+    const strict = environment === 'production' || maturity === 'M5' || maturity === 'M6';
+    const deployment = deploymentByService.get(serviceId) ?? {};
+    rows.push({
+      project_id: projectId,
+      service_id: serviceId,
+      deploy_center_slug: deployment.dc_slug ?? (deployment.substrate === 'deploy-center' ? serviceId : null),
+      domains: stringArray(service?.domains),
+      aliases: stringArray(project?.aliases),
+      maturity,
+      environment,
+      manifest_required: strict,
+      immutable_image_required: strict,
+      runtime_digest_required: strict,
+      smoke_required: strict,
+      db_adoption_required: serviceId.includes('payments') || projectId.includes('payments'),
+    });
+  }
+
+  return {
+    schema_version: 'missiond.compiled-deployment-policy.v1',
+    source_hash: universeJson.source_hash,
+    generated_at: null,
+    diagnostics: [],
+    payload: {
+      authority: 'missiond-v3-ssot',
+      runtime_fact_authority: 'deploy-center',
+      gate_defaults: {
+        prod_or_m5_m6: {
+          manifest_required: true,
+          immutable_image_required: true,
+          runtime_digest_required: true,
+          smoke_required: true,
+        },
+      },
+      policies: rows,
+      source_units: Array.isArray(payload.source_units) ? payload.source_units : [],
+      source_domains: Array.isArray(payload.source_domains) ? payload.source_domains : [],
+    },
+  };
+}
+
+function readProjectMaturityMap() {
+  const file = '.missiond/v3/shards/universe/project-maturity.lisp';
+  const map = new Map();
+  let text = '';
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch {
+    return map;
+  }
+  const re = /\(maturity\s+:id\s+([^\s\)]+)[\s\S]*?:current\s+([^\s\)]+)/g;
+  for (const match of text.matchAll(re)) {
+    map.set(match[1], match[2]);
+  }
+  return map;
+}
+
+function readServiceDeploymentMap() {
+  const file = '.missiond/v3/shards/universe/service-runtime.lisp';
+  const map = new Map();
+  let text = '';
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch {
+    return map;
+  }
+  const serviceRe = /\(service\s+:id\s+([^\s\)]+)([\s\S]*?)(?=\n\s*\(service\s+:id\s+|\n\s*\)\s*\)\s*$)/g;
+  for (const serviceMatch of text.matchAll(serviceRe)) {
+    const serviceId = serviceMatch[1];
+    const body = serviceMatch[2];
+    const deploymentMatch = body.match(/:deployment\s+\(([^\)]*)\)/);
+    if (!deploymentMatch) continue;
+    const deployment = deploymentMatch[1];
+    const dcSlug = deployment.match(/:dc_slug\s+"([^"]+)"/)?.[1] ?? null;
+    const substrate = deployment.match(/:substrate\s+([^\s\)]+)/)?.[1] ?? null;
+    map.set(serviceId, { dc_slug: dcSlug, substrate });
+  }
+  return map;
 }
 
 function stringArray(value) {

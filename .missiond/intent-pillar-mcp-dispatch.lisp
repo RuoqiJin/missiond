@@ -14,6 +14,8 @@
       :target "crates/missiond-mcp/src/tools/compute/"
       (tool mission_pty_spawn      :handler "handlers::compute::pty")
       (tool mission_pty_send       :handler "handlers::compute::pty")
+      (tool mission_pty_key        :handler "handlers::compute::pty")
+      (tool mission_pty_text       :handler "handlers::compute::pty")
       (tool mission_pty_read       :handler "handlers::compute::pty")
       (tool mission_pty_screenshot :handler "handlers::compute::pty")
       (tool mission_pty_status     :handler "handlers::compute::pty")
@@ -165,4 +167,3 @@
       (tool mission_incident         :handler "handlers::sysinfra::misc")
       (tool mission_submit_phase_result :handler "handlers::sysinfra::misc")
       (tool mission_gemini_auth      :handler "handlers::sysinfra::misc")))
-

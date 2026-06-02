@@ -19,7 +19,8 @@ use super::session::{
     PermissionDecision, SessionEvent, SessionState, TextOutputEvent,
 };
 use crate::pty_recognition::{
-    is_provider_unavailable_snapshot, session_state_snapshot, PtyRecognitionSnapshot,
+    is_provider_unavailable_snapshot, session_state_snapshot, PtyCanonicalState,
+    PtyRecognitionSnapshot,
 };
 
 // ========== Types ==========
@@ -73,6 +74,14 @@ pub struct PTYSpawnOptions {
     pub approval_policy: Option<String>,
     /// Provider tool policy file when supported, e.g. Gemini CLI `--policy`.
     pub tool_policy_path: Option<PathBuf>,
+    /// ClaudeCode-only `--tools` value. Text-only lanes pass an empty string.
+    pub claude_code_tools: Option<String>,
+    /// ClaudeCode-only `--strict-mcp-config` toggle.
+    pub claude_code_strict_mcp_config: bool,
+    /// ClaudeCode-only `--disable-slash-commands` toggle.
+    pub claude_code_disable_slash_commands: bool,
+    /// Provider-native session id when the CLI supports explicit session binding.
+    pub provider_session_id: Option<String>,
     /// Extra environment variables to inject into the PTY child process
     /// Used for slot tracking (MISSIOND_SLOT_ID, MISSIOND_SESSION_FILE)
     pub extra_env: HashMap<String, String>,
@@ -361,6 +370,10 @@ impl PTYManager {
             sandbox: options.sandbox.clone(),
             approval_policy: options.approval_policy.clone(),
             tool_policy_path: options.tool_policy_path.clone(),
+            claude_code_tools: options.claude_code_tools.clone(),
+            claude_code_strict_mcp_config: options.claude_code_strict_mcp_config,
+            claude_code_disable_slash_commands: options.claude_code_disable_slash_commands,
+            provider_session_id: options.provider_session_id.clone(),
             command_override: options.command_override.clone(),
         })?;
 
@@ -399,12 +412,12 @@ impl PTYManager {
                             let mut info = agent_info_for_forward.write().await;
                             if let Some(entry) = info.get_mut(&slot_id_for_events) {
                                 entry.state = new_state;
-                                if !matches!(new_state, SessionState::Exited | SessionState::Error)
-                                    || !entry
-                                        .recognition
-                                        .as_ref()
-                                        .is_some_and(is_provider_unavailable_snapshot)
-                                {
+                                if !entry.recognition.as_ref().is_some_and(|recognition| {
+                                    preserve_screen_recognition_on_state_change(
+                                        recognition,
+                                        new_state,
+                                    )
+                                }) {
                                     entry.recognition =
                                         Some(session_state_snapshot(entry.engine, new_state));
                                 }
@@ -661,8 +674,22 @@ impl PTYManager {
                             sandbox: restart_options.sandbox.clone(),
                             approval_policy: restart_options.approval_policy.clone(),
                             tool_policy_path: restart_options.tool_policy_path.clone(),
+                            claude_code_tools: restart_options.claude_code_tools.clone(),
+                            claude_code_strict_mcp_config: restart_options
+                                .claude_code_strict_mcp_config,
+                            claude_code_disable_slash_commands: restart_options
+                                .claude_code_disable_slash_commands,
+                            provider_session_id: restart_options.provider_session_id.clone(),
                             command_override: restart_options.command_override.clone(),
                         }) {
+                            let session_rx = new_session.subscribe();
+                            spawn_session_event_forwarder(
+                                manager_event_tx.clone(),
+                                slot_for_restart.id.clone(),
+                                Arc::clone(&manager_info),
+                                session_rx,
+                            );
+
                             // Set up permission check
                             let policy = manager_policy.read().await.clone();
                             let slot_id = slot_for_restart.id.clone();
@@ -944,6 +971,23 @@ impl PTYManager {
         Ok(session.get_screen_text().await)
     }
 
+    /// Get visible screen content with terminal cell style runs.
+    pub async fn get_styled_screen(
+        &self,
+        slot_id: &str,
+    ) -> Result<crate::screenshot::StyledScreenSnapshot> {
+        let session = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .get(slot_id)
+                .cloned()
+                .ok_or_else(|| anyhow!("No PTY session for slot: {}", slot_id))?
+        };
+
+        let session = session.read().await;
+        Ok(session.get_styled_screen().await)
+    }
+
     /// Get raw output replay buffer for late-joining WebSocket clients
     pub async fn get_replay_buffer(&self, slot_id: &str) -> Result<Vec<u8>> {
         let session = {
@@ -1031,6 +1075,15 @@ impl PTYManager {
     pub async fn restart(&self, slot: &Slot, options: PTYSpawnOptions) -> Result<PTYAgentInfo> {
         self.kill(&slot.id).await?;
         self.spawn(slot, options).await
+    }
+
+    /// Return the launch options last used for a slot, if MissionD spawned it.
+    pub async fn get_spawn_options(&self, slot_id: &str) -> Option<PTYSpawnOptions> {
+        self.spawn_options_by_slot
+            .read()
+            .await
+            .get(slot_id)
+            .cloned()
     }
 
     /// Get pending confirmation info for a slot
@@ -1196,6 +1249,152 @@ fn normalize_agent_info(mut info: PTYAgentInfo) -> PTYAgentInfo {
     info
 }
 
+fn spawn_session_event_forwarder(
+    event_tx: broadcast::Sender<ManagerEvent>,
+    slot_id_for_events: String,
+    agent_info_for_forward: Arc<RwLock<HashMap<String, PTYAgentInfo>>>,
+    mut session_rx: broadcast::Receiver<SessionEvent>,
+) {
+    tokio::spawn(async move {
+        while let Ok(event) = session_rx.recv().await {
+            match event {
+                SessionEvent::StateChange {
+                    new_state,
+                    prev_state,
+                } => {
+                    {
+                        let mut info = agent_info_for_forward.write().await;
+                        if let Some(entry) = info.get_mut(&slot_id_for_events) {
+                            entry.state = new_state;
+                            if !entry.recognition.as_ref().is_some_and(|recognition| {
+                                preserve_screen_recognition_on_state_change(recognition, new_state)
+                            }) {
+                                entry.recognition =
+                                    Some(session_state_snapshot(entry.engine, new_state));
+                            }
+                            if !new_state.is_processing() {
+                                entry.status_text = None;
+                            }
+                        }
+                    }
+                    let _ = event_tx.send(ManagerEvent::StateChange {
+                        slot_id: slot_id_for_events.clone(),
+                        new_state,
+                        prev_state,
+                    });
+                }
+                SessionEvent::StatusUpdate(status) => {
+                    let text = format!("{} {}", status.spinner, status.status_text);
+                    let mut info = agent_info_for_forward.write().await;
+                    if let Some(entry) = info.get_mut(&slot_id_for_events) {
+                        entry.status_text = Some(text);
+                    }
+                }
+                SessionEvent::RecognitionUpdate(snapshot) => {
+                    let mut info = agent_info_for_forward.write().await;
+                    if let Some(entry) = info.get_mut(&slot_id_for_events) {
+                        entry.recognition = Some(snapshot);
+                    }
+                }
+                SessionEvent::ConfirmRequired { prompt, info } => {
+                    let _ = event_tx.send(ManagerEvent::ConfirmRequired {
+                        slot_id: slot_id_for_events.clone(),
+                        prompt,
+                        tool_info: info,
+                    });
+                }
+                SessionEvent::Exit(code) => {
+                    {
+                        let mut info = agent_info_for_forward.write().await;
+                        if let Some(entry) = info.get_mut(&slot_id_for_events) {
+                            entry.state = SessionState::Exited;
+                            entry.pid = None;
+                            entry.status_text = None;
+                            if !entry
+                                .recognition
+                                .as_ref()
+                                .is_some_and(is_provider_unavailable_snapshot)
+                            {
+                                entry.recognition =
+                                    Some(session_state_snapshot(entry.engine, entry.state));
+                            }
+                        }
+                    }
+                    let _ = event_tx.send(ManagerEvent::Exited {
+                        slot_id: slot_id_for_events.clone(),
+                        exit_code: code,
+                    });
+                    break;
+                }
+                SessionEvent::TextOutput(TextOutputEvent::Complete {
+                    turn_id,
+                    content,
+                    timestamp,
+                }) => {
+                    let _ = event_tx.send(ManagerEvent::TextComplete {
+                        slot_id: slot_id_for_events.clone(),
+                        turn_id,
+                        content,
+                        timestamp,
+                    });
+                }
+                SessionEvent::ToolOutput(tool_output) => {
+                    if let Some(ref output) = tool_output.output {
+                        if output.contains("No such tool available")
+                            || output.contains("tool_use_error")
+                            || output.contains("MCP error")
+                        {
+                            let error_msg = output.chars().take(500).collect::<String>();
+                            tracing::warn!(
+                                slot_id = %slot_id_for_events,
+                                tool = %tool_output.tool_name,
+                                "MCP tool error detected in PTY"
+                            );
+                            let _ = event_tx.send(ManagerEvent::McpToolError {
+                                slot_id: slot_id_for_events.clone(),
+                                tool_name: tool_output.tool_name.clone(),
+                                error: error_msg,
+                            });
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+}
+
+fn preserve_screen_recognition_on_state_change(
+    recognition: &PtyRecognitionSnapshot,
+    new_state: SessionState,
+) -> bool {
+    if recognition.source == "session_state" {
+        return false;
+    }
+    if is_provider_unavailable_snapshot(recognition) {
+        return true;
+    }
+    match new_state {
+        SessionState::Idle => recognition.state == PtyCanonicalState::Idle,
+        SessionState::SlashMenu => {
+            recognition.state == PtyCanonicalState::Blocked
+                && matches!(
+                    recognition.blocked_kind.as_deref(),
+                    Some("model_picker" | "slash_command_menu" | "slash_command_input")
+                )
+        }
+        SessionState::Confirming => recognition.state == PtyCanonicalState::Blocked,
+        SessionState::Thinking | SessionState::Responding | SessionState::ToolRunning => {
+            recognition.state == PtyCanonicalState::Running
+        }
+        SessionState::Starting => matches!(
+            recognition.state,
+            PtyCanonicalState::Running | PtyCanonicalState::Blocked | PtyCanonicalState::Unknown
+        ),
+        SessionState::Exited | SessionState::Error => false,
+    }
+}
+
 fn enforce_core_spawn_sandbox_policy(slot: &Slot, options: &mut PTYSpawnOptions) {
     use missiond_shared::CliEngine;
 
@@ -1207,7 +1406,21 @@ fn enforce_core_spawn_sandbox_policy(slot: &Slot, options: &mut PTYSpawnOptions)
 
     match slot.engine {
         CliEngine::Codex => {
-            if options.sandbox.as_deref() == Some("danger-full-access") && !privileged_role {
+            if options.dangerously_skip_permissions
+                && !privileged_role
+                && !role.contains("provider-box-codex")
+            {
+                warn!(
+                    slot_id = %slot.id,
+                    role = %slot.role,
+                    "PTY core spawn policy: refusing Codex approval/sandbox bypass for non-privileged worker"
+                );
+                options.dangerously_skip_permissions = false;
+            }
+            if options.dangerously_skip_permissions {
+                options.sandbox = None;
+                options.approval_policy = None;
+            } else if options.sandbox.as_deref() == Some("danger-full-access") && !privileged_role {
                 warn!(
                     slot_id = %slot.id,
                     role = %slot.role,
@@ -1217,8 +1430,7 @@ fn enforce_core_spawn_sandbox_policy(slot: &Slot, options: &mut PTYSpawnOptions)
                 options
                     .approval_policy
                     .get_or_insert_with(|| "never".to_string());
-            }
-            if options.sandbox.is_none() && !privileged_role {
+            } else if options.sandbox.is_none() && !privileged_role {
                 options.sandbox = Some("read-only".to_string());
             }
         }
@@ -1236,12 +1448,26 @@ fn enforce_core_spawn_sandbox_policy(slot: &Slot, options: &mut PTYSpawnOptions)
                 .approval_policy
                 .get_or_insert_with(|| "plan".to_string());
         }
-        CliEngine::ClaudeCode | CliEngine::Agy => {
+        CliEngine::ClaudeCode => {
+            let explicit_allow = options
+                .extra_env
+                .get("MISSIOND_ALLOW_BROAD_SKIP_PERMISSIONS")
+                .is_some_and(|value| value == "true");
+            if options.dangerously_skip_permissions && !privileged_role && !explicit_allow {
+                warn!(
+                    slot_id = %slot.id,
+                    role = %slot.role,
+                    "PTY core spawn policy: disabling Claude Code broad skip-permissions without an explicit capability override"
+                );
+                options.dangerously_skip_permissions = false;
+            }
+        }
+        CliEngine::Agy => {
             if options.dangerously_skip_permissions && !privileged_role {
                 warn!(
                     slot_id = %slot.id,
                     role = %slot.role,
-                    "PTY core spawn policy: disabling broad skip-permissions for non-privileged worker"
+                    "PTY core spawn policy: disabling Agy broad skip-permissions for non-privileged worker"
                 );
                 options.dangerously_skip_permissions = false;
             }
@@ -1299,6 +1525,37 @@ mod tests {
     }
 
     #[test]
+    fn core_spawn_policy_disables_codex_worker_bypass() {
+        let slot = test_slot("coder", CliEngine::Codex);
+        let mut options = PTYSpawnOptions {
+            dangerously_skip_permissions: true,
+            ..Default::default()
+        };
+
+        enforce_core_spawn_sandbox_policy(&slot, &mut options);
+
+        assert!(!options.dangerously_skip_permissions);
+        assert_eq!(options.sandbox.as_deref(), Some("read-only"));
+    }
+
+    #[test]
+    fn core_spawn_policy_allows_codex_provider_box_bypass() {
+        let slot = test_slot("provider-box-codex", CliEngine::Codex);
+        let mut options = PTYSpawnOptions {
+            dangerously_skip_permissions: true,
+            sandbox: Some("danger-full-access".to_string()),
+            approval_policy: Some("never".to_string()),
+            ..Default::default()
+        };
+
+        enforce_core_spawn_sandbox_policy(&slot, &mut options);
+
+        assert!(options.dangerously_skip_permissions);
+        assert!(options.sandbox.is_none());
+        assert!(options.approval_policy.is_none());
+    }
+
+    #[test]
     fn core_spawn_policy_disables_gemini_worker_yolo() {
         let slot = test_slot("gemini_worker", CliEngine::Gemini);
         let mut options = PTYSpawnOptions {
@@ -1326,6 +1583,23 @@ mod tests {
     }
 
     #[test]
+    fn core_spawn_policy_allows_claude_provider_box_explicit_skip_permissions() {
+        let slot = test_slot("provider-box-claude-code", CliEngine::ClaudeCode);
+        let mut options = PTYSpawnOptions {
+            dangerously_skip_permissions: true,
+            extra_env: HashMap::from([(
+                "MISSIOND_ALLOW_BROAD_SKIP_PERMISSIONS".to_string(),
+                "true".to_string(),
+            )]),
+            ..Default::default()
+        };
+
+        enforce_core_spawn_sandbox_policy(&slot, &mut options);
+
+        assert!(options.dangerously_skip_permissions);
+    }
+
+    #[test]
     fn core_spawn_policy_preserves_privileged_orchestrator_options() {
         let slot = test_slot("orchestrator", CliEngine::ClaudeCode);
         let mut options = PTYSpawnOptions {
@@ -1336,6 +1610,58 @@ mod tests {
         enforce_core_spawn_sandbox_policy(&slot, &mut options);
 
         assert!(options.dangerously_skip_permissions);
+    }
+
+    #[test]
+    fn state_change_preserves_specific_auth_missing_screen_recognition() {
+        let recognition = PtyRecognitionSnapshot {
+            provider: CliEngine::Agy,
+            state: PtyCanonicalState::Blocked,
+            confidence: 0.94,
+            reason: "agy:login_method_prompt".to_string(),
+            phase: Some("auth_login_method".to_string()),
+            active_tool: None,
+            elapsed_secs: None,
+            blocked_kind: Some("auth_missing".to_string()),
+            screen_identity: None,
+            screen_usage: None,
+            screen_mcp: None,
+            screen_signals: None,
+            source: "tui_source_signature".to_string(),
+        };
+
+        assert!(preserve_screen_recognition_on_state_change(
+            &recognition,
+            SessionState::Confirming
+        ));
+        assert!(preserve_screen_recognition_on_state_change(
+            &recognition,
+            SessionState::Exited
+        ));
+    }
+
+    #[test]
+    fn state_change_replaces_stale_running_screen_recognition_on_idle() {
+        let recognition = PtyRecognitionSnapshot {
+            provider: CliEngine::Codex,
+            state: PtyCanonicalState::Running,
+            confidence: 0.9,
+            reason: "codex:status_indicator_widget".to_string(),
+            phase: Some("thinking".to_string()),
+            active_tool: None,
+            elapsed_secs: None,
+            blocked_kind: None,
+            screen_identity: None,
+            screen_usage: None,
+            screen_mcp: None,
+            screen_signals: None,
+            source: "screen_fused".to_string(),
+        };
+
+        assert!(!preserve_screen_recognition_on_state_change(
+            &recognition,
+            SessionState::Idle
+        ));
     }
 
     #[test]
@@ -1358,6 +1684,8 @@ mod tests {
                 blocked_kind: None,
                 screen_identity: None,
                 screen_usage: None,
+                screen_mcp: None,
+                screen_signals: None,
                 source: "session_state".to_string(),
             }),
             started_at: Some(1),
@@ -1393,6 +1721,8 @@ mod tests {
                 blocked_kind: Some("billing_or_account".to_string()),
                 screen_identity: None,
                 screen_usage: None,
+                screen_mcp: None,
+                screen_signals: None,
                 source: "screen_final".to_string(),
             }),
             started_at: Some(1),

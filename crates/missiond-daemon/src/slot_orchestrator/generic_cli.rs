@@ -178,6 +178,7 @@ impl EngineController for GenericCliController {
                 extra_env: std::collections::HashMap::new(),
                 initial_prompt: None,
                 command_override: None,
+                ..Default::default()
             },
             None,
         )

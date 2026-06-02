@@ -101,6 +101,8 @@ const MASTER_MCP_APPROVED_TOOLS: &[&str] = &[
     "mission_task_cancel",
     "mission_pty_spawn",
     "mission_pty_send",
+    "mission_pty_key",
+    "mission_pty_text",
     "mission_pty_read",
     "mission_pty_signal",
     "mission_pty_confirm",
@@ -795,6 +797,7 @@ impl MasterControlService {
                 extra_env: std::collections::HashMap::new(),
                 initial_prompt: slot.config.initial_prompt.clone(),
                 command_override: None,
+                ..Default::default()
             },
             slot.config.env.as_ref(),
         )

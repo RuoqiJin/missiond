@@ -44,6 +44,82 @@ function durableConversationFallback(slot?: SlotDef): string[] {
 
 type PTYState = 'unknown' | 'not_running' | 'starting' | 'idle' | 'slash_menu' | 'thinking' | 'responding' | 'tool_running' | 'confirming' | 'error' | 'exited';
 
+interface StyledScreenSpan {
+  text: string;
+  fg_hex?: string;
+  bg_hex?: string;
+  flags?: {
+    bold?: boolean;
+    dim?: boolean;
+    italic?: boolean;
+    underline?: boolean;
+    inverse?: boolean;
+    hidden?: boolean;
+    strikeout?: boolean;
+  };
+}
+
+interface StyledScreenLine {
+  text: string;
+  spans?: StyledScreenSpan[];
+}
+
+interface StyledScreenSnapshot {
+  lines?: StyledScreenLine[];
+}
+
+function BootstrapScreenView({
+  screen,
+  styled,
+  fallback,
+}: {
+  screen: string | null;
+  styled: StyledScreenSnapshot | null;
+  fallback: string;
+}) {
+  if (styled?.lines?.length) {
+    return (
+      <pre className="absolute inset-0 overflow-hidden whitespace-pre-wrap bg-neutral-950 p-3 font-mono text-xs leading-5 text-neutral-300">
+        {styled.lines.map((line, lineIdx) => (
+          <span key={lineIdx}>
+            {(line.spans?.length ? line.spans : [{ text: line.text }]).map((span, spanIdx) => (
+              <span
+                key={spanIdx}
+                style={{
+                  color: span.fg_hex,
+                  backgroundColor:
+                    span.bg_hex && span.bg_hex !== '#1e1e2e' && span.bg_hex !== '#0a0a0a'
+                      ? span.bg_hex
+                      : undefined,
+                  fontWeight: span.flags?.bold ? 700 : undefined,
+                  fontStyle: span.flags?.italic ? 'italic' : undefined,
+                  opacity: span.flags?.dim ? 0.58 : undefined,
+                  textDecoration: [
+                    span.flags?.underline ? 'underline' : '',
+                    span.flags?.strikeout ? 'line-through' : '',
+                  ]
+                    .filter(Boolean)
+                    .join(' ') || undefined,
+                  visibility: span.flags?.hidden ? 'hidden' : undefined,
+                }}
+              >
+                {span.text}
+              </span>
+            ))}
+            {'\n'}
+          </span>
+        ))}
+      </pre>
+    );
+  }
+
+  return (
+    <pre className="absolute inset-0 overflow-hidden whitespace-pre-wrap bg-neutral-950 p-3 font-mono text-xs leading-5 text-neutral-300">
+      {screen || fallback}
+    </pre>
+  );
+}
+
 // --- Error Boundary ---
 class TerminalErrorBoundary extends Component<
   { children: ReactNode; onReset: () => void },
@@ -75,12 +151,15 @@ function TerminalInner({ slotId, slot, activeTask, showHeaderActions = true, ena
   const termRef = useRef<import('@xterm/xterm').Terminal | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const statusProbeTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const reconnectAttemptRef = useRef(0);
   const [wsStatus, setWsStatus] = useState<'connecting' | 'connected' | 'disconnected'>('disconnected');
   const [ptyState, setPtyState] = useState<PTYState>('unknown');
   const [statusText, setStatusText] = useState<string | null>(null);
   const [spawning, setSpawning] = useState(false);
   const [ready, setReady] = useState(false); // xterm initialized
+  const [bootstrapScreen, setBootstrapScreen] = useState<string | null>(null);
+  const [bootstrapStyled, setBootstrapStyled] = useState<StyledScreenSnapshot | null>(null);
   const providerLabel = slotId.includes('gemini')
     ? 'Gemini CLI'
     : slotId.includes('agy')
@@ -170,6 +249,7 @@ function TerminalInner({ slotId, slot, activeTask, showHeaderActions = true, ena
         clearTimeout(reconnectTimerRef.current);
         reconnectTimerRef.current = null;
       }
+      clearStatusProbeTimer();
       wsRef.current?.close();
       wsRef.current = null;
       if ((el as any).__cleanup) {
@@ -181,6 +261,24 @@ function TerminalInner({ slotId, slot, activeTask, showHeaderActions = true, ena
     };
   }, [enableDirectInput]);
 
+  useEffect(() => {
+    let cancelled = false;
+    setBootstrapScreen(null);
+    setBootstrapStyled(null);
+    fetch(`/api/pty/screen?slotId=${encodeURIComponent(slotId)}&lines=80&includeStyle=1`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (!cancelled && typeof data?.screen === 'string' && data.screen.trim()) {
+          setBootstrapScreen(data.screen);
+          if (data?.styled?.lines) setBootstrapStyled(data.styled);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [slotId]);
+
   // --- Connect WS when slotId changes and xterm is ready ---
   useEffect(() => {
     if (!ready) return;
@@ -189,39 +287,65 @@ function TerminalInner({ slotId, slot, activeTask, showHeaderActions = true, ena
 
     // Close previous WS and cancel pending reconnects
     clearReconnectTimer();
+    clearStatusProbeTimer();
     reconnectAttemptRef.current = 0;
     wsRef.current?.close();
     wsRef.current = null;
     safeClear(term);
 
     let cancelled = false;
+    let liveProbeTimer: ReturnType<typeof setInterval> | null = null;
 
-    // Check status first, then connect WS only if running
-    fetch(`/api/pty/status?slotId=${slotId}`)
-      .then((r) => r.json())
-      .then((data) => {
-        if (cancelled) return;
-        if (data.running) {
-          setPtyState(data.state || 'idle');
-          connectWs(term, slotId);
-        } else {
-          setPtyState(data.state === 'exited' ? 'exited' : 'not_running');
-          const fallback = durableConversationFallback(slot);
-          if (fallback.length > 0) {
-            for (const line of fallback) safeWriteln(term, `\x1b[90m${line}\x1b[0m`);
-            safeWriteln(term, `\x1b[90m  Open Logs/Exec for full durable transcript, or press Start to launch ${providerLabel}.\x1b[0m`);
+    const stopLiveProbe = () => {
+      if (liveProbeTimer) {
+        clearInterval(liveProbeTimer);
+        liveProbeTimer = null;
+      }
+    };
+
+    const probeAndConnect = (paintFallback: boolean) => {
+      fetch(`/api/pty/status?slotId=${slotId}`)
+        .then((r) => r.json())
+        .then((data) => {
+          if (cancelled) return;
+          if (data.running) {
+            stopLiveProbe();
+            setPtyState(data.state || 'idle');
+            void paintScreenSnapshot(term, slotId);
+            connectWs(term, slotId);
           } else {
-            safeWriteln(term, `\x1b[90m● No active session. Press Start to launch ${providerLabel}.\x1b[0m`);
+            setPtyState(data.state === 'exited' ? 'exited' : 'not_running');
+            if (paintFallback) {
+              const fallback = durableConversationFallback(slot);
+              if (fallback.length > 0) {
+                for (const line of fallback) safeWriteln(term, `\x1b[90m${line}\x1b[0m`);
+                safeWriteln(term, `\x1b[90m  Open Logs/Exec for full durable transcript, or press Start to launch ${providerLabel}.\x1b[0m`);
+              } else {
+                safeWriteln(term, `\x1b[90m● No active session. Press Start to launch ${providerLabel}.\x1b[0m`);
+              }
+            }
+            if (!liveProbeTimer) {
+              liveProbeTimer = setInterval(() => probeAndConnect(false), 1000);
+            }
           }
-        }
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setPtyState('not_running');
-        safeWriteln(term, '\x1b[90m● Cannot reach missiond.\x1b[0m');
-      });
+        })
+        .catch(() => {
+          if (cancelled) return;
+          setPtyState('not_running');
+          if (paintFallback) safeWriteln(term, '\x1b[90m● Cannot reach missiond.\x1b[0m');
+        });
+    };
 
-    return () => { cancelled = true; };
+    // Check status first, then connect WS only if running. If the slot is
+    // started from the teaching controls while this terminal is mounted, keep
+    // probing until the live PTY appears instead of staying on durable fallback.
+    probeAndConnect(true);
+
+    return () => {
+      cancelled = true;
+      stopLiveProbe();
+      clearStatusProbeTimer();
+    };
   }, [
     slotId,
     ready,
@@ -239,6 +363,37 @@ function TerminalInner({ slotId, slot, activeTask, showHeaderActions = true, ena
       clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
     }
+  }
+
+  function clearStatusProbeTimer() {
+    if (statusProbeTimerRef.current) {
+      clearInterval(statusProbeTimerRef.current);
+      statusProbeTimerRef.current = null;
+    }
+  }
+
+  function startStatusProbe(term: import('@xterm/xterm').Terminal, slot: string) {
+    clearStatusProbeTimer();
+    const probe = () => {
+      fetch(`/api/pty/status?slotId=${encodeURIComponent(slot)}`)
+        .then((r) => r.json())
+        .then((data) => {
+          if (data?.running) {
+            clearStatusProbeTimer();
+            setPtyState(data.state || 'idle');
+            reconnectAttemptRef.current = 0;
+            void paintScreenSnapshot(term, slot);
+            connectWs(term, slot);
+          } else {
+            setPtyState(data?.state === 'exited' ? 'exited' : 'not_running');
+          }
+        })
+        .catch(() => {
+          setPtyState('not_running');
+        });
+    };
+    probe();
+    statusProbeTimerRef.current = setInterval(probe, 1000);
   }
 
   function scheduleReconnect(term: import('@xterm/xterm').Terminal, slot: string) {
@@ -277,6 +432,21 @@ function TerminalInner({ slotId, slot, activeTask, showHeaderActions = true, ena
     } catch { /* swallow dimensions error */ }
   }
 
+  async function paintScreenSnapshot(term: import('@xterm/xterm').Terminal, slot: string) {
+    try {
+      const res = await fetch(`/api/pty/screen?slotId=${encodeURIComponent(slot)}&lines=80&includeStyle=1`);
+      const data = await res.json();
+      if (typeof data?.screen === 'string' && data.screen.trim()) {
+        setBootstrapScreen(data.screen);
+        if (data?.styled?.lines) setBootstrapStyled(data.styled);
+        safeClear(term);
+        safeWrite(term, data.screen.replace(/\n/g, '\r\n'));
+      }
+    } catch {
+      // The WS reconnect path is still the source of truth; snapshot paint is best effort.
+    }
+  }
+
   function connectWs(term: import('@xterm/xterm').Terminal, slot: string) {
     if (wsRef.current?.readyState === WebSocket.OPEN ||
         wsRef.current?.readyState === WebSocket.CONNECTING) return;
@@ -293,16 +463,9 @@ function TerminalInner({ slotId, slot, activeTask, showHeaderActions = true, ena
 
     ws.onopen = () => {
       setWsStatus('connected');
+      clearStatusProbeTimer();
       reconnectAttemptRef.current = 0;
-      fetch(`/api/pty/screen?slotId=${encodeURIComponent(slot)}&lines=80`)
-        .then((r) => r.json())
-        .then((data) => {
-          if (typeof data?.screen === 'string' && data.screen.trim()) {
-            safeClear(term);
-            safeWrite(term, data.screen.replace(/\n/g, '\r\n'));
-          }
-        })
-        .catch(() => {});
+      void paintScreenSnapshot(term, slot);
     };
 
     ws.onmessage = (event) => {
@@ -324,7 +487,7 @@ function TerminalInner({ slotId, slot, activeTask, showHeaderActions = true, ena
           clearReconnectTimer();
           setWsStatus('disconnected');
           setPtyState('not_running');
-          // Server will close with 4003 after this, onclose won't auto-reconnect
+          startStatusProbe(term, slot);
           return;
         } else if (msg.type === 'screenshot_request') {
           const requestId = msg.requestId;
@@ -360,9 +523,13 @@ function TerminalInner({ slotId, slot, activeTask, showHeaderActions = true, ena
 
     ws.onclose = (event) => {
       setWsStatus('disconnected');
-      // 4001 = session not found, 4003 = PTY exited — don't auto-reconnect
+      // 4001 = session not found, 4003 = PTY exited. These are terminal
+      // for the current WS, but Teach/KeepAlive may restart the PTY shortly
+      // after daemon reloads or slot exits, so keep polling status and attach
+      // when the slot is live again.
       if (event.code === 4001 || event.code === 4003) {
-        safeWriteln(term, `\r\n\x1b[90m● Disconnected\x1b[0m`);
+        safeWriteln(term, `\r\n\x1b[90m● Disconnected — waiting for live PTY...\x1b[0m`);
+        startStatusProbe(term, slot);
         return;
       }
       // Auto-reconnect for unexpected disconnects
@@ -538,7 +705,16 @@ function TerminalInner({ slotId, slot, activeTask, showHeaderActions = true, ena
           </div>
         )}
       </div>
-      <div ref={containerRef} className="flex-1 min-h-0" />
+      <div className="relative flex-1 min-h-0">
+        <div ref={containerRef} className="absolute inset-0" />
+        {!ready && (
+          <BootstrapScreenView
+            screen={bootstrapScreen}
+            styled={bootstrapStyled}
+            fallback={`Connecting live ${providerLabel}...`}
+          />
+        )}
+      </div>
     </div>
   );
 }

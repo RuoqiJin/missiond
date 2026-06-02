@@ -6,7 +6,7 @@ use missiond_core::types::CliEngine;
 use serde_json::json;
 
 use super::artifact::ProviderBoxArtifactWriter;
-use super::driver::{ProviderDriver, UnsupportedProviderDriver};
+use super::driver::{ProviderDriver, ProviderDriverCapabilities, UnsupportedProviderDriver};
 use super::types::{
     BoxCommand, ProviderBoxDiagnostic, ProviderBoxResult, ProviderInteractionRequest,
 };
@@ -48,6 +48,8 @@ impl ProviderInteractionBox {
             | BoxCommand::SemanticAuthoring
             | BoxCommand::GroundedDirectAnswer
             | BoxCommand::RunnerOneShot
+            | BoxCommand::Research
+            | BoxCommand::ImageGeneration
             | BoxCommand::Vision => driver.submit_turn(&request).await,
             BoxCommand::ModelSwitch => driver.switch_model(&request).await,
             BoxCommand::UsageProbe => driver.probe_usage(&request).await,
@@ -56,6 +58,8 @@ impl ProviderInteractionBox {
             BoxCommand::ControlAction => driver.control_action(&request).await,
             BoxCommand::PtyStep => driver.pty_step(&request).await,
             BoxCommand::Status => driver.status(&request).await,
+            BoxCommand::McpStatus => driver.mcp_status(&request).await,
+            BoxCommand::McpReconnect => driver.mcp_reconnect(&request).await,
         };
 
         if let Some(writer) = &self.artifact_writer {
@@ -78,6 +82,10 @@ impl ProviderInteractionBox {
         }
 
         Ok(result)
+    }
+
+    pub(crate) fn driver_capabilities(&self, engine: CliEngine) -> ProviderDriverCapabilities {
+        self.driver_for(engine).capabilities()
     }
 
     fn driver_for(&self, engine: CliEngine) -> Arc<dyn ProviderDriver> {

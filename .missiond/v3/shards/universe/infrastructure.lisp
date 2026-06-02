@@ -67,7 +67,7 @@
                    "Provider account credentials such as Aliyun AccessKey are stored once as account-level secrets; capability targets such as DNS, OSS, ECS, or billing reference the account credential instead of duplicating narrower key names."])
     (skill-evidence-contract
       :fields [source_skill source_path source_line confidence last_verified_at promote_to credential_inline_risk excerpt]
-      :rule "Skills are operational guidance and discovery evidence. A skill fact becomes active runtime truth only after reconcile promotes it into deploy-center runtime inventory or MissionD Universe with a source reference.")
+      :rule "Skills are operational guidance and discovery evidence. A skill fact becomes active runtime truth only after reconcile promotes it into deploy-center runtime inventory or MissionD Universe with a source reference. mission_infra_query(action=skill_evidence|credential_refs) MUST apply explicit target_id/skill filters first; without explicit filters, context-gather deploy_ops calls MUST pass project_id/query and the infra lane MUST reject globally scanned skill evidence that does not match the project or query-specific terms.")
     (break-glass-runbook-contract
       :fields [runbook_id target_id service_id source_skill evidence_refs allowed_actions forbidden_actions credential_refs approval_required freshness]
       :rule "Manual ECS/SSH/operator fallback is a break-glass runbook, not the primary deploy path. It is attached to deploy-ops tasks only when deploy-center reports agent_offline/agent_update_failed or provenance cannot be obtained, and it must reference secret-store credential refs instead of inline secrets.")
@@ -207,8 +207,8 @@
       :owner_authority deploy-center
       :deploy_center_executor windows
       :agent_url windows
-      :capabilities [gpu github-runner embedding rerank deploy-agent]
-      :service_ids [router]
+      :capabilities [gpu github-runner embedding rerank deploy-agent video-transcode-runner]
+      :service_ids [router xjp-video-transcode-runner]
       :network_profile privatecloud-build-lan
       :lan_group xjp-zibo-lan
       :freshness skill-derived-unverified

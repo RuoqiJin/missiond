@@ -1,19 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { callTool } from '@/lib/missiond';
 
-const KEY_BYTES: Record<string, string> = {
-  enter: '\r',
-  escape: '\x1b',
-  esc: '\x1b',
-  tab: '\t',
-  up: '\x1b[A',
-  down: '\x1b[B',
-  right: '\x1b[C',
-  left: '\x1b[D',
-  'ctrl-c': '\x03',
-  'ctrl-d': '\x04',
-};
-
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -27,18 +14,23 @@ export async function POST(req: NextRequest) {
 
     if (!slotId) return NextResponse.json({ error: 'Missing slotId' }, { status: 400 });
 
-    const message = key ? KEY_BYTES[key] : text;
-    if (message === undefined) {
-      return NextResponse.json({ error: `Unsupported key: ${key}` }, { status: 400 });
+    if (key) {
+      const result = await callTool('mission_pty_key', { slotId, key });
+      const byteLength =
+        result && typeof result === 'object' && 'byteLength' in result
+          ? Number((result as { byteLength?: unknown }).byteLength)
+          : undefined;
+      return NextResponse.json({ ok: true, slotId, key, bytes: byteLength, result });
     }
+
+    const message = text;
     if (!message) {
       return NextResponse.json({ error: 'Missing text or key' }, { status: 400 });
     }
 
-    const result = await callTool('mission_pty_send', {
+    const result = await callTool('mission_pty_text', {
       slotId,
-      message,
-      waitForResponse: false,
+      text: message,
     });
     return NextResponse.json({ ok: true, slotId, key: key || null, bytes: message.length, result });
   } catch (err) {

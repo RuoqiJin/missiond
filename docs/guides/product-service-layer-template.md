@@ -100,6 +100,35 @@ Use the shared payments service for product, price, order, subscription, entitle
 
 Declare `product_code`, plans, entitlement policy, webhook verification, refund behavior, and billing region before building payment UI.
 
+## Support Mail
+
+Every public product service must declare a support mailbox plan before production promotion.
+
+Default provider is `xjp-mail-service` with Google Workspace as the first physical provider. MissionD owns logical per-service mailbox state; the physical mailbox can be:
+
+- `dedicated_user` for high-value services or strict access boundaries.
+- `alias` for low-volume services, with `target_user` declared explicitly.
+
+Default support mailbox provisioning flow:
+
+```text
+POST https://mail.xiaojins.com/v1/mail/services/<service_id>/mailboxes/plan
+POST https://mail.xiaojins.com/v1/mail/services/<service_id>/mailboxes/apply
+GET  https://mail.xiaojins.com/v1/mail/domains/<domain>/readiness
+```
+
+The plan step must produce Google Workspace DNS requirements for MX, SPF, and DMARC. DNS mutation must go through `xjp-domain-service`; agents must not directly mutate Cloudflare except through an audited break-glass path.
+
+Default env names:
+
+- `MAIL_API_BASE_URL`
+- `MAIL_SERVICE_TOKEN`
+- `SUPPORT_MAILBOX_ADDRESS`
+- `SUPPORT_MAILBOX_KIND`
+- `SUPPORT_MAILBOX_TARGET_USER`
+
+Default agent policy is read/draft-only. Sending requires an approved `mail_agent_actions` row; auto-send is disabled unless the service-specific mail policy explicitly enables it.
+
 ## Database
 
 Default independent DB is Supabase Postgres through session pooler port `5432` with `sslmode=require`.
@@ -165,3 +194,5 @@ Register every new service in:
 - `scripts/check-project-ssot-universe.mjs`
 
 New services default to `incubating-project`, `M2`, target `M6`, with explicit gaps.
+
+Production verification must include auth redirect smoke, Google login redirect smoke, domain readiness, and support mailbox readiness.
