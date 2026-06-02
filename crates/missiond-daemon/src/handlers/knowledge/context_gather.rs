@@ -1,7 +1,7 @@
 use anyhow::Result;
 use missiond_mcp::tools::{ToolContent, ToolResult};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     env, fs,
@@ -475,7 +475,14 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     let noise_diagnostics = noise_diagnostics(profile, selection, &sources);
     let context_noise_metrics =
         context_noise_metrics(profile, selection, &sources, &evidence_lanes);
-    let evidence_refs = collect_evidence_refs(&sources);
+    let source_summaries = build_source_summaries(&sources);
+    let response_sources =
+        response_sources(&sources, &source_summaries, selection.include_raw_sources);
+    let evidence_refs = if selection.include_raw_sources {
+        collect_evidence_refs(&sources)
+    } else {
+        collect_evidence_refs_from_value(&source_summaries)
+    };
     let unresolved = args
         .unknowns
         .iter()
@@ -535,7 +542,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             "unknowns": args.unknowns.clone(),
         "sources_used": sources_used,
         "runtime_environment": runtime_environment,
-        "sources": Value::Object(sources),
+        "sources": response_sources,
+        "source_summaries": source_summaries,
+        "raw_sources_omitted": !selection.include_raw_sources,
+        "raw_sources_policy": raw_sources_policy(selection.include_raw_sources),
         "source_profile": profile.as_str(),
         "evidence_lanes": evidence_lanes,
         "authority_order": authority_order,
@@ -817,6 +827,8 @@ fn noise_diagnostics(
         "credential_lane_opt_in": selection.include_credentials,
         "conversation_lane_opt_in": selection.include_conversations,
         "raw_sources_in_artifact": selection.include_raw_sources,
+        "raw_sources_in_response": selection.include_raw_sources,
+        "raw_sources_omitted": !selection.include_raw_sources,
         "rule": "Default grounding is authority-aware and does not preload conversations, infra skill evidence, or credential refs unless the source profile or explicit include flag opts in."
     })
 }
@@ -853,9 +865,355 @@ fn context_noise_metrics(
         "conversation_lane_enabled": selection.include_conversations,
         "credential_lane_enabled": selection.include_credentials,
         "raw_sources_in_artifact": selection.include_raw_sources,
+        "raw_sources_in_response": selection.include_raw_sources,
+        "raw_sources_omitted": !selection.include_raw_sources,
         "filtered_semantic_conversation_hits": Value::Null,
         "conversation_filtering": "conversation search owns project/time/type filter metrics; context-gather records whether the lane was enabled."
     })
+}
+
+fn response_sources(
+    sources: &serde_json::Map<String, Value>,
+    source_summaries: &Value,
+    include_raw_sources: bool,
+) -> Value {
+    if include_raw_sources {
+        Value::Object(sources.clone())
+    } else {
+        source_summaries.clone()
+    }
+}
+
+fn raw_sources_policy(include_raw_sources: bool) -> &'static str {
+    if include_raw_sources {
+        "Raw legacy sources are included because include_raw_sources=true or source_profile=full_debug."
+    } else {
+        "Raw legacy sources are omitted from the tool response and worker context pack; use source_summaries/evidence_lanes or rerun with include_raw_sources=true/full_debug for diagnostics."
+    }
+}
+
+fn build_source_summaries(sources: &serde_json::Map<String, Value>) -> Value {
+    let mut summaries = serde_json::Map::new();
+    for (key, value) in sources {
+        summaries.insert(key.clone(), summarize_source(key, value));
+    }
+    Value::Object(summaries)
+}
+
+fn summarize_source(key: &str, value: &Value) -> Value {
+    match key {
+        "runtime_environment" => {
+            let mut map = summary_base(key);
+            insert_field(&mut map, value, "authority");
+            insert_field(&mut map, value, "runtime_dir");
+            insert_field(&mut map, value, "compiled_runtime_dir");
+            insert_field(&mut map, value, "repo_runtime_authority");
+            insert_field(&mut map, value, "monitor_endpoints");
+            Value::Object(map)
+        }
+        "project_resolution" => {
+            let mut map = summary_base(key);
+            insert_field(&mut map, value, "status");
+            insert_field(&mut map, value, "matched_project_id");
+            insert_field(&mut map, value, "matchedProjectId");
+            insert_field(&mut map, value, "candidate_count");
+            if let Some(project) = value.get("matched_project") {
+                map.insert("matched_project".to_string(), summarize_project(project));
+            }
+            Value::Object(map)
+        }
+        "project_registry" => {
+            let mut map = summary_base(key);
+            for (name, summarized) in summarize_project(value).as_object().into_iter().flatten() {
+                map.insert(name.clone(), summarized.clone());
+            }
+            Value::Object(map)
+        }
+        "ssot" => {
+            let mut map = summary_base(key);
+            if let Some(text) = value.get("text").and_then(Value::as_str) {
+                map.insert(
+                    "text_preview".to_string(),
+                    Value::String(compact_text(text, 720)),
+                );
+                map.insert("text_chars".to_string(), json!(text.chars().count()));
+            }
+            insert_field(&mut map, value, "path");
+            insert_field(&mut map, value, "source");
+            Value::Object(map)
+        }
+        "kb" => summarize_array_source(key, value, 5),
+        "board_tasks" => {
+            let mut map = summary_base(key);
+            if let Some(meta) = value.get("meta") {
+                map.insert("meta".to_string(), meta.clone());
+            }
+            map.insert(
+                "item_count".to_string(),
+                json!(array_len(value.get("data"))),
+            );
+            map.insert(
+                "items".to_string(),
+                summarize_items(value.get("data"), 5, |item| {
+                    let mut item_map = serde_json::Map::new();
+                    insert_field(&mut item_map, item, "id");
+                    insert_field(&mut item_map, item, "title");
+                    insert_field(&mut item_map, item, "status");
+                    Value::Object(item_map)
+                }),
+            );
+            Value::Object(map)
+        }
+        "skill_context" => {
+            let mut map = summary_base(key);
+            map.insert(
+                "skills".to_string(),
+                summarize_items(value.get("skills"), 10, |item| {
+                    let mut item_map = serde_json::Map::new();
+                    insert_field(&mut item_map, item, "name");
+                    insert_field(&mut item_map, item, "matched_by");
+                    insert_field(&mut item_map, item, "path");
+                    insert_compact_field(&mut item_map, item, "description", 180);
+                    Value::Object(item_map)
+                }),
+            );
+            map.insert(
+                "project_skill_links".to_string(),
+                summarize_items(value.get("project_skill_links"), 6, |item| {
+                    let mut item_map = serde_json::Map::new();
+                    insert_field(&mut item_map, item, "skill");
+                    insert_field(&mut item_map, item, "confidence");
+                    insert_field(&mut item_map, item, "matchedBy");
+                    insert_field(&mut item_map, item, "path");
+                    Value::Object(item_map)
+                }),
+            );
+            map.insert(
+                "operational_fact_count".to_string(),
+                json!(array_len(value.get("operational_facts"))),
+            );
+            map.insert("kb_count".to_string(), json!(array_len(value.get("kb"))));
+            map.insert(
+                "board_count".to_string(),
+                json!(array_len(value.get("board"))),
+            );
+            Value::Object(map)
+        }
+        "infra" => {
+            let mut map = summary_base(key);
+            insert_field(&mut map, value, "authority");
+            insert_field(&mut map, value, "redaction");
+            map.insert(
+                "item_count".to_string(),
+                json!(array_len(value.get("items"))),
+            );
+            map.insert(
+                "items".to_string(),
+                summarize_items(value.get("items"), 5, |item| {
+                    let mut item_map = serde_json::Map::new();
+                    insert_field(&mut item_map, item, "sourceSkill");
+                    insert_field(&mut item_map, item, "sourcePath");
+                    insert_field(&mut item_map, item, "sourceLine");
+                    insert_field(&mut item_map, item, "confidence");
+                    insert_field(&mut item_map, item, "promoteTo");
+                    insert_field(&mut item_map, item, "credentialInlineRisk");
+                    insert_compact_field(&mut item_map, item, "excerpt", 360);
+                    Value::Object(item_map)
+                }),
+            );
+            Value::Object(map)
+        }
+        "credential_refs" => {
+            let mut map = summary_base(key);
+            map.insert(
+                "credential_ref_count".to_string(),
+                json!(array_len(value.get("credentialRefs"))),
+            );
+            map.insert(
+                "credentialRefs".to_string(),
+                summarize_items(value.get("credentialRefs"), 8, |item| {
+                    let mut item_map = serde_json::Map::new();
+                    insert_field(&mut item_map, item, "namespace");
+                    insert_field(&mut item_map, item, "keyName");
+                    insert_field(&mut item_map, item, "targetId");
+                    insert_field(&mut item_map, item, "requiredCapability");
+                    insert_field(&mut item_map, item, "availability");
+                    insert_compact_field(&mut item_map, item, "purpose", 220);
+                    Value::Object(item_map)
+                }),
+            );
+            Value::Object(map)
+        }
+        "conversation_logs" => summarize_conversation_source(key, value),
+        _ => summarize_array_source(key, value, 5),
+    }
+}
+
+fn summary_base(kind: &str) -> serde_json::Map<String, Value> {
+    let mut map = serde_json::Map::new();
+    map.insert(
+        "schema".to_string(),
+        Value::String("missiond.source-summary.v1".to_string()),
+    );
+    map.insert("kind".to_string(), Value::String(kind.to_string()));
+    map
+}
+
+fn summarize_project(value: &Value) -> Value {
+    let mut map = serde_json::Map::new();
+    for key in [
+        "id",
+        "path",
+        "intent_path",
+        "intentPath",
+        "kind",
+        "active",
+        "source",
+        "db_status",
+        "dbStatus",
+        "github_url",
+        "parent_id",
+    ] {
+        insert_field(&mut map, value, key);
+    }
+    Value::Object(map)
+}
+
+fn summarize_array_source(key: &str, value: &Value, limit: usize) -> Value {
+    let mut map = summary_base(key);
+    if let Some(items) = value.as_array() {
+        map.insert("item_count".to_string(), json!(items.len()));
+        map.insert(
+            "items".to_string(),
+            Value::Array(
+                items
+                    .iter()
+                    .take(limit)
+                    .map(summarize_generic_item)
+                    .collect(),
+            ),
+        );
+    } else {
+        map.insert(
+            "shape".to_string(),
+            Value::String(value_shape(value).to_string()),
+        );
+    }
+    Value::Object(map)
+}
+
+fn summarize_conversation_source(key: &str, value: &Value) -> Value {
+    let mut map = summary_base(key);
+    for item_key in ["results", "items", "data"] {
+        if value.get(item_key).and_then(Value::as_array).is_some() {
+            map.insert(
+                "item_count".to_string(),
+                json!(array_len(value.get(item_key))),
+            );
+            map.insert(
+                "items".to_string(),
+                summarize_items(value.get(item_key), 5, |item| {
+                    let mut item_map = serde_json::Map::new();
+                    insert_field(&mut item_map, item, "conversation_id");
+                    insert_field(&mut item_map, item, "conversationId");
+                    insert_field(&mut item_map, item, "session_id");
+                    insert_field(&mut item_map, item, "sessionId");
+                    insert_field(&mut item_map, item, "project");
+                    insert_field(&mut item_map, item, "conversation_type");
+                    insert_field(&mut item_map, item, "timestamp");
+                    insert_compact_field(&mut item_map, item, "snippet", 260);
+                    insert_compact_field(&mut item_map, item, "content", 260);
+                    Value::Object(item_map)
+                }),
+            );
+            return Value::Object(map);
+        }
+    }
+    summarize_array_source(key, value, 5)
+}
+
+fn summarize_generic_item(item: &Value) -> Value {
+    if let Some(object) = item.as_object() {
+        let mut map = serde_json::Map::new();
+        for key in [
+            "id",
+            "key",
+            "title",
+            "category",
+            "source_path",
+            "sourcePath",
+            "path",
+            "status",
+        ] {
+            insert_field(&mut map, item, key);
+        }
+        for key in ["summary", "description", "text", "content", "snippet"] {
+            insert_compact_field(&mut map, item, key, 260);
+        }
+        if map.is_empty() {
+            map.insert("field_count".to_string(), json!(object.len()));
+        }
+        Value::Object(map)
+    } else if let Some(text) = item.as_str() {
+        Value::String(compact_text(text, 260))
+    } else {
+        item.clone()
+    }
+}
+
+fn summarize_items<F>(value: Option<&Value>, limit: usize, mapper: F) -> Value
+where
+    F: Fn(&Value) -> Value,
+{
+    let Some(items) = value.and_then(Value::as_array) else {
+        return Value::Array(Vec::new());
+    };
+    Value::Array(items.iter().take(limit).map(mapper).collect())
+}
+
+fn array_len(value: Option<&Value>) -> usize {
+    value.and_then(Value::as_array).map(Vec::len).unwrap_or(0)
+}
+
+fn insert_field(map: &mut serde_json::Map<String, Value>, value: &Value, key: &str) {
+    if let Some(field) = value.get(key) {
+        map.insert(key.to_string(), field.clone());
+    }
+}
+
+fn insert_compact_field(
+    map: &mut serde_json::Map<String, Value>,
+    value: &Value,
+    key: &str,
+    max_chars: usize,
+) {
+    if let Some(text) = value.get(key).and_then(Value::as_str) {
+        map.insert(
+            key.to_string(),
+            Value::String(compact_text(text, max_chars)),
+        );
+    }
+}
+
+fn compact_text(text: &str, max_chars: usize) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= max_chars {
+        return collapsed;
+    }
+    let mut truncated = collapsed.chars().take(max_chars).collect::<String>();
+    truncated.push_str("...");
+    truncated
+}
+
+fn value_shape(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 fn context_pack_artifact_payload(payload: &Value, include_raw_sources: bool) -> Value {
@@ -1130,8 +1488,12 @@ fn tool_result_to_value(result: ToolResult) -> Value {
 }
 
 fn collect_evidence_refs(sources: &serde_json::Map<String, Value>) -> Vec<Value> {
+    collect_evidence_refs_from_value(&Value::Object(sources.clone()))
+}
+
+fn collect_evidence_refs_from_value(value: &Value) -> Vec<Value> {
     let mut refs = Vec::new();
-    collect_evidence_refs_inner(&Value::Object(sources.clone()), "$", &mut refs);
+    collect_evidence_refs_inner(value, "$", &mut refs);
     refs.truncate(60);
     refs
 }
@@ -1180,7 +1542,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        ContextGatherArgs, SourceProfile, context_pack_artifact_payload, source_selection,
+        build_source_summaries, collect_evidence_refs_from_value, context_pack_artifact_payload,
+        response_sources, source_selection, ContextGatherArgs, SourceProfile,
     };
 
     fn args(value: serde_json::Value) -> ContextGatherArgs {
@@ -1239,5 +1602,51 @@ mod tests {
         );
         let raw = context_pack_artifact_payload(&payload, true);
         assert!(raw.get("sources").is_some());
+    }
+
+    #[test]
+    fn compact_response_sources_omit_raw_skill_operational_facts() {
+        let mut sources = serde_json::Map::new();
+        sources.insert(
+            "skill_context".to_string(),
+            json!({
+                "skills": [{"name": "deploy-ops", "path": "/skills/deploy-ops/SKILL.md", "matched_by": "query"}],
+                "operational_facts": [{
+                    "skill": "deploy-ops",
+                    "source_path": "/skills/deploy-ops/SKILL.md",
+                    "source_line": 174,
+                    "key": "xjp-router docker-compose.yml volumes",
+                    "value": "full raw operational fact"
+                }]
+            }),
+        );
+        let summaries = build_source_summaries(&sources);
+        let compact = response_sources(&sources, &summaries, false);
+        let skill_summary = compact
+            .get("skill_context")
+            .expect("skill context summary in compact response");
+        assert!(skill_summary.get("operational_facts").is_none());
+        assert_eq!(
+            skill_summary
+                .get("operational_fact_count")
+                .and_then(|value| value.as_u64()),
+            Some(1)
+        );
+        let refs = collect_evidence_refs_from_value(&compact);
+        assert!(refs.iter().any(|item| {
+            item.get("value").and_then(|value| value.as_str())
+                == Some("/skills/deploy-ops/SKILL.md")
+        }));
+        assert!(!refs.iter().any(|item| {
+            item.get("value").and_then(|value| value.as_str())
+                == Some("xjp-router docker-compose.yml volumes")
+        }));
+
+        let raw = response_sources(&sources, &summaries, true);
+        assert!(raw
+            .get("skill_context")
+            .and_then(|value| value.get("operational_facts"))
+            .and_then(|value| value.as_array())
+            .is_some_and(|items| items.len() == 1));
     }
 }

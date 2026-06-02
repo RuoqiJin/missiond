@@ -1,7 +1,7 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::state::AppState;
 
@@ -813,9 +813,9 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                                 current = serde_json::Map::new();
                                 current.insert(
                                     "file".into(),
-                                    serde_json::json!(
-                                        line.strip_prefix("CRASH_FILE=").unwrap_or("")
-                                    ),
+                                    serde_json::json!(line
+                                        .strip_prefix("CRASH_FILE=")
+                                        .unwrap_or("")),
                                 );
                             } else if line == "---" {
                                 if !current.is_empty() {
@@ -1007,7 +1007,7 @@ fn evidence_matches_scope(
     {
         return score > 0;
     }
-    score >= 2
+    score >= 4
 }
 
 fn evidence_scope_score(
@@ -1564,7 +1564,19 @@ fn is_generic_evidence_token(token: &str) -> bool {
 fn is_weak_target_evidence_token(token: &str) -> bool {
     matches!(
         token,
-        "gcp" | "ecs" | "bwg" | "vps" | "windows" | "aliyun" | "cloud"
+        "gcp"
+            | "ecs"
+            | "bwg"
+            | "vps"
+            | "windows"
+            | "aliyun"
+            | "cloud"
+            | "image"
+            | "images"
+            | "compose"
+            | "docker"
+            | "build"
+            | "ci"
     )
 }
 
@@ -1768,7 +1780,7 @@ fn maybe_push_skill_target(
 
 #[cfg(test)]
 mod tests {
-    use super::{InfraEvidenceFilter, credential_refs_filtered, evidence_matches_scope};
+    use super::{credential_refs_filtered, evidence_matches_scope, InfraEvidenceFilter};
 
     #[test]
     fn evidence_scope_rejects_unrelated_project_skill_lines() {
@@ -1813,6 +1825,12 @@ mod tests {
             "tiermate",
             "/Users/jinchen/.claude/skills/tiermate/SKILL.md",
             "GCP deploy-agent endpoint and secret-store references",
+            &deploy_runtime_filter,
+        ));
+        assert!(!evidence_matches_scope(
+            "aliyun",
+            "/Users/jinchen/.claude/skills/aliyun/SKILL.md",
+            "| Secret Store CN | secret-store-cn-app | 8091 (127.0.0.1) | Docker Compose, OSS image transfer |",
             &deploy_runtime_filter,
         ));
 
@@ -1865,14 +1883,12 @@ mod tests {
             item.get("keyName").and_then(|value| value.as_str())
                 == Some("cloudflare/CLOUDFLARE_DNS_TOKEN")
         }));
-        assert!(
-            credential_refs_filtered(
-                None,
-                Some("Payments service.manifest.toml missing manifest gate"),
-                Some("payments"),
-            )
-            .is_empty()
-        );
+        assert!(credential_refs_filtered(
+            None,
+            Some("Payments service.manifest.toml missing manifest gate"),
+            Some("payments"),
+        )
+        .is_empty());
         assert!(
             credential_refs_filtered(
                 None,

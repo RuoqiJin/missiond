@@ -34,7 +34,11 @@
          :rule "Default retrieval applies knowledge_review_state overlay and excludes archived/superseded/noise memories.")
        (source ssot-intent
          :tool mission_intent
-         :rule "Active SSOT Lisp is the long-lived project fact authority; cold runtime evidence is opt-in."))
+         :rule "Active SSOT Lisp is the long-lived project fact authority; cold runtime evidence is opt-in.")
+       (source response-source-compaction
+         :tool mission_context_gather
+         :scope default-response
+         :rule "mission_context_gather default responses expose source_summaries plus compact sources and set raw_sources_omitted=true; legacy raw sources are returned only when include_raw_sources=true or source_profile=full_debug. evidence_refs in compact mode are derived from source_summaries, not raw skill/conversation/source payloads."))
     :functions
       ((function context-gather-before-intent
          :entry [user-request BoardTaskCreated external-intent-envelope unknowns-inventory]
@@ -50,12 +54,13 @@
                 (step s3 :logic "make active task records searchable by mission_context_gather without preloading full Board backlog"))
          :egress [fts-document embedding-document retrieval-evidence-ref]))
     :invariants
-      ["mission_context_gather MUST expose source_profile, evidence_lanes, authority_order, noise_diagnostics, and context_noise_metrics."
+      ["mission_context_gather MUST expose source_profile, source_summaries, evidence_lanes, authority_order, noise_diagnostics, raw_sources_omitted, and context_noise_metrics."
        "mission_context_gather source_profile=intent_default MUST exclude bounded conversation logs, global skill/infra evidence, and credential_refs unless an explicit opt-in flag or deploy/debug profile enables them."
        "mission_context_gather source_profile=deploy_ops MUST pass query/project scope into mission_infra_query skill_evidence and credential_refs; evidence-only lanes MUST reject unrelated global skill hits."
        "mission_context_gather MUST aggregate runtime_environment, KB, active SSOT, project registry, skill operational evidence, infra evidence, active Board task records, and bounded conversation logs through authority-aware evidence lanes rather than one flat prompt preload."
        "Board/task/workflow records are searchable retrieval evidence, not active long-term memory unless promoted by an explicit review workflow."
        "Conversation logs are searched by query and bounded window; they are not default prompt preloads."
+       "Tool responses MUST include source_summaries/evidence_lanes lane summaries by default and omit raw sources unless include_raw_sources=true or source_profile=full_debug."
        "Worker context packs MUST include evidence_lanes lane summaries by default and omit raw sources unless include_raw_sources=true or source_profile=full_debug."
        "If mission_context_gather cannot answer a source, it returns source-specific diagnostics instead of making the resident master guess."]
     :checker "node scripts/check-v3-memory-kb-isomorphism.mjs")
@@ -76,7 +81,7 @@
          :schema "missiond.context-gather-artifact.v1"
          :id-field grounding_context_id
          :storage "shared_artifacts(kind=context-gather)"
-         :fields [unknowns query project_id source_profile sources_used evidence_lanes authority_order noise_diagnostics context_noise_metrics evidence_refs diagnostics grounded_intent_summary runtime_environment context_pack_path context_pack_file canonical_context_pack_file]
+         :fields [unknowns query project_id source_profile sources_used source_summaries evidence_lanes authority_order noise_diagnostics context_noise_metrics raw_sources_omitted raw_sources_policy evidence_refs diagnostics grounded_intent_summary runtime_environment context_pack_path context_pack_file canonical_context_pack_file]
          :rule "mission_context_gather(persist=true) returns grounding_context_id, shared-artifact context_pack_path, canonical_context_pack_file under MISSIOND_RUNTIME_DIR, and a bounded worker-readable context_pack_file mirror under ignored .missiond/v3/runtime/context-gather-worker/** for provider CLIs that do not have MissionD MCP mounted; worker prompts receive only this small context slice plus confirmed intent/plan artifact refs and accepted execution metadata, not broad KB/history preloads.")
       (kind task-result-artifact
          :schema "missiond.task-result-artifact.v1"
