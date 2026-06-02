@@ -2753,6 +2753,9 @@ fn deployment_event_relay_diagnostics(
         "deploy_center_scope_mismatch_or_missing_project_service_scope"
     };
 
+    let local_config_probe = deployment_event_relay_local_config_probe(support_catalog);
+    let local_config_probe_status = text_field(&local_config_probe, "status");
+
     json!({
         "schema": "missiond.deployment-event-relay-diagnostics.v1",
         "inferred_gap": inferred_gap,
@@ -2766,8 +2769,11 @@ fn deployment_event_relay_diagnostics(
             "optional_poll_interval": "DEPLOY_EVENT_RELAY_POLL_INTERVAL_SECS",
             "optional_batch_limit": "DEPLOY_EVENT_RELAY_BATCH_LIMIT"
         },
-        "local_config_probe": deployment_event_relay_local_config_probe(support_catalog),
-        "next_actions": deployment_event_relay_next_actions(inferred_gap),
+        "local_config_probe": local_config_probe,
+        "next_actions": deployment_event_relay_next_actions(
+            inferred_gap,
+            local_config_probe_status.as_deref(),
+        ),
         "interpretation": match inferred_gap {
             "deploy_center_relay_absent_or_disabled" => "EventBridge has external events, but none are from deploy-center; inspect Deploy Center runtime env/compose for DEPLOY_EVENT_RELAY_ENABLED and MissionD webhook URL/token.",
             "deploy_center_relay_emitted_no_deploy_event_kinds" => "Deploy Center producer is visible, but recent events are not accepted deployment evidence kinds; inspect relay event_kind mapping.",
@@ -2778,14 +2784,28 @@ fn deployment_event_relay_diagnostics(
     })
 }
 
-fn deployment_event_relay_next_actions(inferred_gap: &str) -> Value {
+fn deployment_event_relay_next_actions(
+    inferred_gap: &str,
+    local_config_probe_status: Option<&str>,
+) -> Value {
     match inferred_gap {
-        "deploy_center_relay_absent_or_disabled" => json!([
-            "check Deploy Center compose/runtime env for DEPLOY_EVENT_RELAY_ENABLED=true",
-            "set one webhook URL env: MISSIOND_DEPLOY_EVENT_WEBHOOK_URL or MISSIOND_EVENTBRIDGE_URL",
-            "set one token env: MISSIOND_DEPLOY_EVENT_WEBHOOK_TOKEN or MISSIOND_EXTERNAL_WEBHOOK_TOKEN",
-            "restart deploy-center and verify deploy-center producer rows appear in MissionD event_log"
-        ]),
+        "deploy_center_relay_absent_or_disabled" => {
+            if local_config_probe_status == Some("relay_env_names_present") {
+                json!([
+                    "verify Deploy Center runtime env values are populated, not only declared in compose/manifest",
+                    "verify MISSIOND_EVENTBRIDGE_URL or MISSIOND_DEPLOY_EVENT_WEBHOOK_URL is reachable from the Deploy Center runtime",
+                    "compare MISSIOND_EXTERNAL_WEBHOOK_TOKEN or MISSIOND_DEPLOY_EVENT_WEBHOOK_TOKEN with the MissionD receiver token without printing values",
+                    "restart deploy-center and verify deploy-center producer rows appear in MissionD event_log"
+                ])
+            } else {
+                json!([
+                    "check Deploy Center compose/runtime env for DEPLOY_EVENT_RELAY_ENABLED=true",
+                    "set one webhook URL env: MISSIOND_DEPLOY_EVENT_WEBHOOK_URL or MISSIOND_EVENTBRIDGE_URL",
+                    "set one token env: MISSIOND_DEPLOY_EVENT_WEBHOOK_TOKEN or MISSIOND_EXTERNAL_WEBHOOK_TOKEN",
+                    "restart deploy-center and verify deploy-center producer rows appear in MissionD event_log"
+                ])
+            }
+        }
         "deploy_center_relay_emitted_no_deploy_event_kinds" => json!([
             "inspect deploy_event_relay event_kind mapping",
             "ensure workflow_run_created/workflow_job_succeeded/artifact_recorded or deploy/smoke/provenance kinds are relayed"
@@ -5180,9 +5200,10 @@ mod tests {
         dedupe_evidence_search_items, deployment_event_drop_reason_is_sample_worthy,
         deployment_event_filter_timeline_row, deployment_event_item_from_timeline_row,
         deployment_event_observed_candidate_summary, deployment_event_relay_diagnostics,
-        deployment_event_relay_local_config_probe, diagnostics_have_hard_failures,
-        evidence_item_id, evidence_item_read_model_scope_allows_search,
-        evidence_item_uses_stable_projection_id, filter_deployment_closure_policy_evidence_items,
+        deployment_event_relay_local_config_probe, deployment_event_relay_next_actions,
+        diagnostics_have_hard_failures, evidence_item_id,
+        evidence_item_read_model_scope_allows_search, evidence_item_uses_stable_projection_id,
+        filter_deployment_closure_policy_evidence_items,
         filter_incomplete_deployment_closure_evidence_items,
         filter_stale_compiled_policy_evidence_items_with_fingerprint,
         filter_stale_runtime_environment_evidence_items_with_dir,
@@ -6092,6 +6113,23 @@ mod tests {
             .get("next_actions")
             .and_then(Value::as_array)
             .is_some_and(|items| !items.is_empty()));
+    }
+
+    #[test]
+    fn deployment_event_relay_next_actions_follow_static_config_status() {
+        let actions = deployment_event_relay_next_actions(
+            "deploy_center_relay_absent_or_disabled",
+            Some("relay_env_names_present"),
+        );
+
+        assert!(actions
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| item
+                .as_str()
+                .is_some_and(|text| text.contains("runtime env values")))));
+        assert!(actions.as_array().is_some_and(|items| items
+            .iter()
+            .any(|item| item.as_str().is_some_and(|text| text.contains("reachable")))));
     }
 
     #[test]
