@@ -437,8 +437,14 @@ function buildDeploymentPolicy(universeJson) {
     const environment = stringOrNull(service?.environment) ?? 'unknown';
     const strict = environment === 'production' || maturity === 'M5' || maturity === 'M6';
     const deployment = deploymentByService.get(serviceId) ?? {};
+    const supportCatalog = service?.support_catalog ?? service?.supportCatalog ?? {};
     const substrate = stringOrNull(deployment.substrate);
-    const runtimeTarget = stringOrNull(deployment.runtime_target ?? deployment.runtimeTarget);
+    const runtimeTarget = stringOrNull(
+      deployment.runtime_target
+      ?? deployment.runtimeTarget
+      ?? supportCatalog.runtime_target
+      ?? supportCatalog.runtimeTarget,
+    );
     const artifactLane = deployment.artifact_delivery_lane
       ?? deployment.artifactDeliveryLane
       ?? deployment.artifact_lane
@@ -450,7 +456,7 @@ function buildDeploymentPolicy(universeJson) {
     rows.push({
       project_id: projectId,
       service_id: serviceId,
-      deploy_center_slug: deployment.dc_slug ?? (deployment.substrate === 'deploy-center' ? serviceId : null),
+      deploy_center_slug: deployment.dc_slug ?? supportCatalog.deploy_center_slug ?? (deployment.substrate === 'deploy-center' ? serviceId : null),
       runtime_target: runtimeTarget,
       domains: stringArray(service?.domains),
       aliases: stringArray(project?.aliases),
@@ -474,7 +480,7 @@ function buildDeploymentPolicy(universeJson) {
         ? ['ReleaseLease', 'RuntimeObservation', 'ReleaseEvidence', 'ClosureVerdict']
         : ['ReleaseEvidence', 'ClosureVerdict'],
       fail_closed_blockers: strict
-        ? failClosedBlockersFor({ serviceId, projectId, deployment, runtimeTarget, substrate })
+        ? failClosedBlockersFor({ serviceId, projectId, deployment, supportCatalog, runtimeTarget, substrate })
         : [],
     });
   }
@@ -549,9 +555,9 @@ function defaultTargetSideBuildAllowed(deployment, strict) {
   return !strict;
 }
 
-function failClosedBlockersFor({ serviceId, projectId, deployment, runtimeTarget, substrate }) {
+function failClosedBlockersFor({ serviceId, projectId, deployment, supportCatalog, runtimeTarget, substrate }) {
   const blockers = [];
-  const deployCenterSlug = deployment?.dc_slug ?? (substrate === 'deploy-center' ? serviceId : null);
+  const deployCenterSlug = deployment?.dc_slug ?? supportCatalog?.deploy_center_slug ?? (substrate === 'deploy-center' ? serviceId : null);
   if (substrate === 'deploy-center' && !deployCenterSlug) blockers.push('deploy_center_slug_missing');
   if ((substrate === 'deploy-center' || substrate === 'gcp-vm' || substrate === 'aliyun-ecs') && !runtimeTarget) {
     blockers.push('runtime_target_missing');
@@ -592,11 +598,45 @@ function readServiceDeploymentMap() {
     const deploymentMatch = body.match(/:deployment\s+\(([^\)]*)\)/);
     if (!deploymentMatch) continue;
     const deployment = deploymentMatch[1];
-    const dcSlug = deployment.match(/:dc_slug\s+"([^"]+)"/)?.[1] ?? null;
-    const substrate = deployment.match(/:substrate\s+([^\s\)]+)/)?.[1] ?? null;
-    map.set(serviceId, { dc_slug: dcSlug, substrate });
+    const dcSlug = keywordValue(deployment, 'dc_slug');
+    const substrate = keywordValue(deployment, 'substrate');
+    const runtimeTarget = keywordValue(deployment, 'runtime-target')
+      ?? keywordValue(deployment, 'runtime_target');
+    const executor = keywordValue(deployment, 'executor');
+    const container = keywordValue(deployment, 'container')
+      ?? keywordValue(deployment, 'container_name')
+      ?? keywordValue(deployment, 'container-name');
+    const artifactDeliveryLane = keywordValue(deployment, 'artifact-delivery-lane')
+      ?? keywordValue(deployment, 'artifact_delivery_lane')
+      ?? keywordValue(deployment, 'artifact-lane')
+      ?? keywordValue(deployment, 'artifact_lane');
+    const targetSideBuildAllowed = boolOrNull(
+      keywordValue(deployment, 'target-side-build-allowed')
+      ?? keywordValue(deployment, 'target_side_build_allowed'),
+    );
+    map.set(serviceId, {
+      dc_slug: dcSlug,
+      substrate,
+      runtime_target: runtimeTarget,
+      executor,
+      container,
+      artifact_delivery_lane: artifactDeliveryLane,
+      target_side_build_allowed: targetSideBuildAllowed,
+    });
   }
   return map;
+}
+
+function keywordValue(text, key) {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = text.match(new RegExp(`:${escaped}\\s+(?:"([^"]+)"|([^\\s\\)]+))`));
+  return match?.[1] ?? match?.[2] ?? null;
+}
+
+function boolOrNull(value) {
+  if (value === 'true' || value === 't') return true;
+  if (value === 'false' || value === 'nil') return false;
+  return null;
 }
 
 function stringArray(value) {
