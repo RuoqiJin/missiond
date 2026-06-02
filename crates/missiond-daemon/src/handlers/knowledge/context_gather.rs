@@ -2551,6 +2551,7 @@ async fn deployment_events_source(
                 candidate_count,
                 matching_count,
                 &observed_candidates,
+                Some(support_catalog),
             );
             let status = if events.is_empty() {
                 "no_matching_deploy_center_events"
@@ -2603,6 +2604,7 @@ async fn deployment_events_source(
                 0,
                 0,
                 &deployment_event_empty_observed_candidate_summary(),
+                Some(support_catalog),
             ),
             "filtered_count": 0,
             "returned_count": 0,
@@ -2729,6 +2731,7 @@ fn deployment_event_relay_diagnostics(
     candidate_count: usize,
     matching_count: usize,
     observed_candidates: &Value,
+    support_catalog: Option<&Value>,
 ) -> Value {
     let deploy_center_candidate_count = observed_candidates
         .get("deploy_center_candidate_count")
@@ -2763,6 +2766,8 @@ fn deployment_event_relay_diagnostics(
             "optional_poll_interval": "DEPLOY_EVENT_RELAY_POLL_INTERVAL_SECS",
             "optional_batch_limit": "DEPLOY_EVENT_RELAY_BATCH_LIMIT"
         },
+        "local_config_probe": deployment_event_relay_local_config_probe(support_catalog),
+        "next_actions": deployment_event_relay_next_actions(inferred_gap),
         "interpretation": match inferred_gap {
             "deploy_center_relay_absent_or_disabled" => "EventBridge has external events, but none are from deploy-center; inspect Deploy Center runtime env/compose for DEPLOY_EVENT_RELAY_ENABLED and MissionD webhook URL/token.",
             "deploy_center_relay_emitted_no_deploy_event_kinds" => "Deploy Center producer is visible, but recent events are not accepted deployment evidence kinds; inspect relay event_kind mapping.",
@@ -2771,6 +2776,209 @@ fn deployment_event_relay_diagnostics(
             _ => "Scoped Deploy Center deployment events are available.",
         },
     })
+}
+
+fn deployment_event_relay_next_actions(inferred_gap: &str) -> Value {
+    match inferred_gap {
+        "deploy_center_relay_absent_or_disabled" => json!([
+            "check Deploy Center compose/runtime env for DEPLOY_EVENT_RELAY_ENABLED=true",
+            "set one webhook URL env: MISSIOND_DEPLOY_EVENT_WEBHOOK_URL or MISSIOND_EVENTBRIDGE_URL",
+            "set one token env: MISSIOND_DEPLOY_EVENT_WEBHOOK_TOKEN or MISSIOND_EXTERNAL_WEBHOOK_TOKEN",
+            "restart deploy-center and verify deploy-center producer rows appear in MissionD event_log"
+        ]),
+        "deploy_center_relay_emitted_no_deploy_event_kinds" => json!([
+            "inspect deploy_event_relay event_kind mapping",
+            "ensure workflow_run_created/workflow_job_succeeded/artifact_recorded or deploy/smoke/provenance kinds are relayed"
+        ]),
+        "deploy_center_scope_mismatch_or_missing_project_service_scope" => json!([
+            "inspect relayed payload project_id/service_id/deploy_center_slug",
+            "compare relayed scope fields with MissionD support_catalog"
+        ]),
+        _ => json!([]),
+    }
+}
+
+fn deployment_event_relay_local_config_probe(support_catalog: Option<&Value>) -> Value {
+    let Some(catalog) = support_catalog else {
+        return json!({
+            "status": "not_available",
+            "checked": false,
+            "reason": "support_catalog_missing",
+        });
+    };
+    let Some(service_root) = catalog
+        .get("manifest_refs")
+        .and_then(|value| text_field(value, "root"))
+    else {
+        return json!({
+            "status": "not_available",
+            "checked": false,
+            "reason": "support_catalog_manifest_root_missing",
+            "service_id": text_field(catalog, "service_id"),
+            "project_id": text_field(catalog, "project_id"),
+            "deploy_center_slug": text_field(catalog, "deploy_center_slug"),
+        });
+    };
+    let service_root_path = Path::new(&service_root);
+    let repo_root = deploy_center_repo_root_from_service_root(service_root_path);
+    let env_groups = deployment_event_relay_env_groups();
+    let config_files = [
+        "services/deploy-center/service.manifest.toml",
+        "services.yaml",
+        "deploy/gcp-vm/docker-compose.prod.yml",
+        "deploy/gcp-vm/docker-compose.split.yml",
+        "deploy/gcp-vm/xjp-postgres-stack/docker-compose.yml",
+    ];
+    let code_refs = [
+        (
+            "services/deploy-center/src/main.rs",
+            &["deploy_event_relay::spawn_from_env"][..],
+        ),
+        (
+            "services/deploy-center/src/workers/deploy_event_relay.rs",
+            &[
+                "DEPLOY_EVENT_RELAY_ENABLED",
+                "MISSIOND_DEPLOY_EVENT_WEBHOOK_URL",
+                "MISSIOND_EVENTBRIDGE_URL",
+                "MISSIOND_DEPLOY_EVENT_WEBHOOK_TOKEN",
+                "MISSIOND_EXTERNAL_WEBHOOK_TOKEN",
+            ][..],
+        ),
+    ];
+
+    let mut observed_env_names = HashSet::new();
+    let mut checked_config_files = Vec::new();
+    for rel in config_files {
+        let abs = repo_root.as_ref().map(|root| root.join(rel));
+        let (exists, present) = abs
+            .as_ref()
+            .and_then(|path| fs::read_to_string(path).ok())
+            .map(|content| {
+                let present = deployment_event_relay_env_names()
+                    .into_iter()
+                    .filter(|name| content.contains(name))
+                    .collect::<Vec<_>>();
+                (true, present)
+            })
+            .unwrap_or((abs.as_ref().is_some_and(|path| path.exists()), Vec::new()));
+        for name in &present {
+            observed_env_names.insert((*name).to_string());
+        }
+        checked_config_files.push(json!({
+            "path": repo_root
+                .as_ref()
+                .map(|root| root.join(rel).display().to_string())
+                .unwrap_or_else(|| rel.to_string()),
+            "exists": exists,
+            "relay_env_names_present": present,
+        }));
+    }
+
+    let checked_code_refs = code_refs
+        .iter()
+        .map(|(rel, needles)| {
+            let abs = repo_root.as_ref().map(|root| root.join(rel));
+            let (exists, present) = abs
+                .as_ref()
+                .and_then(|path| fs::read_to_string(path).ok())
+                .map(|content| {
+                    let present = needles
+                        .iter()
+                        .copied()
+                        .filter(|needle| content.contains(needle))
+                        .collect::<Vec<_>>();
+                    (true, present)
+                })
+                .unwrap_or((abs.as_ref().is_some_and(|path| path.exists()), Vec::new()));
+            json!({
+                "path": repo_root
+                    .as_ref()
+                    .map(|root| root.join(rel).display().to_string())
+                    .unwrap_or_else(|| (*rel).to_string()),
+                "exists": exists,
+                "expected_needles_present": present,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let missing_env_groups = env_groups
+        .iter()
+        .filter(|(_, names)| !names.iter().any(|name| observed_env_names.contains(*name)))
+        .map(|(group, names)| {
+            json!({
+                "group": group,
+                "accepted_env_names": names,
+            })
+        })
+        .collect::<Vec<_>>();
+    let any_config_exists = checked_config_files
+        .iter()
+        .any(|item| item.get("exists").and_then(Value::as_bool) == Some(true));
+    let status = if repo_root.is_none() {
+        "repo_root_unresolved"
+    } else if !any_config_exists {
+        "config_files_missing"
+    } else if missing_env_groups.is_empty() {
+        "relay_env_names_present"
+    } else {
+        "checked_missing_relay_env_names"
+    };
+
+    json!({
+        "status": status,
+        "checked": repo_root.is_some(),
+        "service_id": text_field(catalog, "service_id"),
+        "project_id": text_field(catalog, "project_id"),
+        "deploy_center_slug": text_field(catalog, "deploy_center_slug"),
+        "service_root": service_root,
+        "repo_root": repo_root.as_ref().map(|path| path.display().to_string()),
+        "secret_policy": "Only env variable names and file presence are reported. Secret values are not read or emitted.",
+        "missing_env_groups": missing_env_groups,
+        "config_files": checked_config_files,
+        "code_refs": checked_code_refs,
+    })
+}
+
+fn deployment_event_relay_env_names() -> Vec<&'static str> {
+    deployment_event_relay_env_groups()
+        .into_iter()
+        .flat_map(|(_, names)| names)
+        .collect()
+}
+
+fn deployment_event_relay_env_groups() -> [(&'static str, Vec<&'static str>); 3] {
+    [
+        ("enable", vec!["DEPLOY_EVENT_RELAY_ENABLED"]),
+        (
+            "webhook_url",
+            vec![
+                "MISSIOND_DEPLOY_EVENT_WEBHOOK_URL",
+                "MISSIOND_EVENTBRIDGE_URL",
+            ],
+        ),
+        (
+            "webhook_token",
+            vec![
+                "MISSIOND_DEPLOY_EVENT_WEBHOOK_TOKEN",
+                "MISSIOND_EXTERNAL_WEBHOOK_TOKEN",
+            ],
+        ),
+    ]
+}
+
+fn deploy_center_repo_root_from_service_root(service_root: &Path) -> Option<PathBuf> {
+    service_root
+        .ancestors()
+        .take(6)
+        .find(|path| {
+            path.join("services.yaml").exists()
+                || path
+                    .join("services")
+                    .join("deploy-center")
+                    .join("service.manifest.toml")
+                    .exists()
+        })
+        .map(Path::to_path_buf)
 }
 
 fn deployment_event_count_object(counts: BTreeMap<String, usize>, limit: usize) -> Value {
@@ -4956,7 +5164,7 @@ fn collect_evidence_refs_inner(value: &Value, path: &str, refs: &mut Vec<Value>)
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{fs, path::Path};
 
     use serde_json::{json, Value};
 
@@ -4972,9 +5180,9 @@ mod tests {
         dedupe_evidence_search_items, deployment_event_drop_reason_is_sample_worthy,
         deployment_event_filter_timeline_row, deployment_event_item_from_timeline_row,
         deployment_event_observed_candidate_summary, deployment_event_relay_diagnostics,
-        diagnostics_have_hard_failures, evidence_item_id,
-        evidence_item_read_model_scope_allows_search, evidence_item_uses_stable_projection_id,
-        filter_deployment_closure_policy_evidence_items,
+        deployment_event_relay_local_config_probe, diagnostics_have_hard_failures,
+        evidence_item_id, evidence_item_read_model_scope_allows_search,
+        evidence_item_uses_stable_projection_id, filter_deployment_closure_policy_evidence_items,
         filter_incomplete_deployment_closure_evidence_items,
         filter_stale_compiled_policy_evidence_items_with_fingerprint,
         filter_stale_runtime_environment_evidence_items_with_dir,
@@ -5854,7 +6062,7 @@ mod tests {
             "producer_service_counts": {"missiond-shared-memory": 16}
         });
 
-        let diagnostics = deployment_event_relay_diagnostics(16, 0, &observed);
+        let diagnostics = deployment_event_relay_diagnostics(16, 0, &observed, None);
 
         assert_eq!(
             diagnostics.get("inferred_gap").and_then(Value::as_str),
@@ -5873,6 +6081,92 @@ mod tests {
                 .and_then(Value::as_str),
             Some("DEPLOY_EVENT_RELAY_ENABLED=true")
         );
+        assert_eq!(
+            diagnostics
+                .get("local_config_probe")
+                .and_then(|value| value.get("status"))
+                .and_then(Value::as_str),
+            Some("not_available")
+        );
+        assert!(diagnostics
+            .get("next_actions")
+            .and_then(Value::as_array)
+            .is_some_and(|items| !items.is_empty()));
+    }
+
+    #[test]
+    fn deployment_event_relay_config_probe_reports_missing_compose_env_names() {
+        let root =
+            std::env::temp_dir().join(format!("missiond-relay-probe-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("services/deploy-center/src/workers")).expect("workers dir");
+        fs::create_dir_all(root.join("deploy/gcp-vm/xjp-postgres-stack")).expect("compose dir");
+        fs::write(
+            root.join("services.yaml"),
+            "deploy-center:\n  dc_slug: xjp-deploy-center\n",
+        )
+        .expect("services yaml");
+        fs::write(
+            root.join("services/deploy-center/service.manifest.toml"),
+            "[service]\nname = \"xjp-deploy-center\"\n",
+        )
+        .expect("manifest");
+        fs::write(
+            root.join("deploy/gcp-vm/xjp-postgres-stack/docker-compose.yml"),
+            "services:\n  xjp-deploy-center:\n    image: ghcr.io/xiaojinpro-team/xjp-deploy-center:latest\n",
+        )
+        .expect("compose");
+        fs::write(
+            root.join("services/deploy-center/src/main.rs"),
+            "deploy_event_relay::spawn_from_env();",
+        )
+        .expect("main");
+        fs::write(
+            root.join("services/deploy-center/src/workers/deploy_event_relay.rs"),
+            "DEPLOY_EVENT_RELAY_ENABLED MISSIOND_DEPLOY_EVENT_WEBHOOK_URL MISSIOND_EXTERNAL_WEBHOOK_TOKEN",
+        )
+        .expect("worker");
+        let catalog = json!({
+            "service_id": "deploy-center",
+            "project_id": "deploy-center",
+            "deploy_center_slug": "xjp-deploy-center",
+            "manifest_refs": {
+                "root": root.join("services/deploy-center").display().to_string()
+            }
+        });
+
+        let probe = deployment_event_relay_local_config_probe(Some(&catalog));
+
+        assert_eq!(
+            probe.get("status").and_then(Value::as_str),
+            Some("checked_missing_relay_env_names")
+        );
+        assert_eq!(
+            probe
+                .get("repo_root")
+                .and_then(Value::as_str)
+                .map(Path::new),
+            Some(root.as_path())
+        );
+        assert!(probe
+            .get("missing_env_groups")
+            .and_then(Value::as_array)
+            .is_some_and(|items| items
+                .iter()
+                .any(|item| { item.get("group").and_then(Value::as_str) == Some("enable") })));
+        assert!(probe
+            .get("code_refs")
+            .and_then(Value::as_array)
+            .is_some_and(|items| items.iter().any(|item| {
+                item.get("expected_needles_present")
+                    .and_then(Value::as_array)
+                    .is_some_and(|needles| {
+                        needles.iter().any(|needle| {
+                            needle.as_str() == Some("deploy_event_relay::spawn_from_env")
+                        })
+                    })
+            })));
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

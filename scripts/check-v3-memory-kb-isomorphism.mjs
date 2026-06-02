@@ -251,6 +251,11 @@ function checkFiles(root, files) {
     'mission_context_gather deployment_events sample_dropped_events MUST omit low-value irrelevant_event_kind samples',
     'mission_context_gather deployment_events MUST expose accepted_event_kinds and observed_candidates',
     'mission_context_gather deployment_events MUST expose relay_diagnostics with inferred_gap',
+    'local_config_probe',
+    'resolved deploy-center support_catalog root',
+    'file presence and relay env variable names',
+    'never secret values',
+    'typed next_actions',
     'accepted_event_kinds',
     'observed_candidates',
     'relay_diagnostics',
@@ -340,6 +345,19 @@ function checkFiles(root, files) {
     'DEPLOYMENT_EVENT_RELEVANT_KINDS',
     'deployment_event_observed_candidate_summary',
     'deployment_event_relay_diagnostics',
+    'deployment_event_relay_local_config_probe',
+    'deployment_event_relay_next_actions',
+    'deploy_center_repo_root_from_service_root',
+    'local_config_probe',
+    'checked_missing_relay_env_names',
+    'DEPLOY_EVENT_RELAY_ENABLED',
+    'MISSIOND_DEPLOY_EVENT_WEBHOOK_URL',
+    'MISSIOND_EVENTBRIDGE_URL',
+    'MISSIOND_DEPLOY_EVENT_WEBHOOK_TOKEN',
+    'MISSIOND_EXTERNAL_WEBHOOK_TOKEN',
+    'Only env variable names and file presence are reported',
+    'Secret values are not read or emitted',
+    'next_actions',
     'accepted_event_kinds',
     'observed_candidates',
     'relay_diagnostics',
@@ -1121,6 +1139,11 @@ function buildFixture() {
                          "mission_context_gather deployment_events sample_dropped_events MUST omit low-value irrelevant_event_kind samples"
                          "mission_context_gather deployment_events MUST expose accepted_event_kinds and observed_candidates"
                          "mission_context_gather deployment_events MUST expose relay_diagnostics with inferred_gap"
+                         "local_config_probe"
+                         "resolved deploy-center support_catalog root"
+                         "file presence and relay env variable names"
+                         "never secret values"
+                         "typed next_actions"
                          "accepted_event_kinds"
                          "observed_candidates"
                          "relay_diagnostics"
@@ -1281,7 +1304,7 @@ CREATE TABLE IF NOT EXISTS skill_evidence_items;
   writeFixture(root, DEFAULT_FILES.contextGather, `
 SourceProfile; source_profile; source_selection; include_credentials; include_raw_sources; persist_read_model; persistReadModel; context_gather_persist_read_model;
 include_board; include_conversations; conversation_time_range;
-	evidence_lanes; evidence_items; support_catalog; deployment_closure; deployment_closure_policy; deployment_events; deploy_center_event; deployment_events_source; deployment_event_filter_timeline_row; DeploymentEventFilterResult; deployment_event_drop_sample; deployment_event_drop_reason_is_sample_worthy; deployment_event_item_from_timeline_row; deployment_event_matches_scope; workflow_job_succeeded; artifact_recorded; DEPLOYMENT_EVENT_RELEVANT_KINDS; deployment_event_observed_candidate_summary; deployment_event_relay_diagnostics; accepted_event_kinds; observed_candidates; relay_diagnostics; deploy_center_relay_absent_or_disabled; drop_reason_counts; drop_sample_omitted_counts; sample_dropped_events; system::external_service_event; authority_order; noise_diagnostics; context_noise_metrics; build_support_catalog; support_catalog_response_view; compact_support_catalog_response; deployment_closure_omitted; support_catalog_has_content; support_refs_compact_item_count; deployment_closure_support_allowed; deployment_closure_query_has_anchor; deployment_closure_has_identity_content; attach_infra_os_disabled_support_fallback; infra_os_disabled_support_fallback_items; support_catalog_available; dedupe_evidence_search_items; evidence_search_dedupe_key; filter_incomplete_deployment_closure_evidence_items; filter_deployment_closure_policy_evidence_items; evidence_item_has_incomplete_deployment_closure_placeholder; filter_stale_runtime_environment_evidence_items; evidence_item_has_stale_runtime_environment_ref; evidence_item_runtime_environment_compiled_dir; evidence_item_uses_stable_projection_id; evidence_item_read_model_scope_allows_search; scope_skipped; raw_hit_count; incomplete_filtered_count; deployment_closure_profile_filtered_count; deduplicated_count; truncated_count; operational_fact_count; build_evidence_items; build_evidence_items_with_options; build_deployment_closure_support; persist_evidence_lane_projection; record_context_gather_run; upsert_evidence_items; runtime_truth; project_ssot; reviewed_kb; active_board; skill_evidence; conversation_audit; cold_archive; support_refs; context_pack_artifact_payload;
+	evidence_lanes; evidence_items; support_catalog; deployment_closure; deployment_closure_policy; deployment_events; deploy_center_event; deployment_events_source; deployment_event_filter_timeline_row; DeploymentEventFilterResult; deployment_event_drop_sample; deployment_event_drop_reason_is_sample_worthy; deployment_event_item_from_timeline_row; deployment_event_matches_scope; workflow_job_succeeded; artifact_recorded; DEPLOYMENT_EVENT_RELEVANT_KINDS; deployment_event_observed_candidate_summary; deployment_event_relay_diagnostics; deployment_event_relay_local_config_probe; deployment_event_relay_next_actions; deploy_center_repo_root_from_service_root; local_config_probe; checked_missing_relay_env_names; DEPLOY_EVENT_RELAY_ENABLED; MISSIOND_DEPLOY_EVENT_WEBHOOK_URL; MISSIOND_EVENTBRIDGE_URL; MISSIOND_DEPLOY_EVENT_WEBHOOK_TOKEN; MISSIOND_EXTERNAL_WEBHOOK_TOKEN; next_actions; Only env variable names and file presence are reported; Secret values are not read or emitted; accepted_event_kinds; observed_candidates; relay_diagnostics; deploy_center_relay_absent_or_disabled; drop_reason_counts; drop_sample_omitted_counts; sample_dropped_events; system::external_service_event; authority_order; noise_diagnostics; context_noise_metrics; build_support_catalog; support_catalog_response_view; compact_support_catalog_response; deployment_closure_omitted; support_catalog_has_content; support_refs_compact_item_count; deployment_closure_support_allowed; deployment_closure_query_has_anchor; deployment_closure_has_identity_content; attach_infra_os_disabled_support_fallback; infra_os_disabled_support_fallback_items; support_catalog_available; dedupe_evidence_search_items; evidence_search_dedupe_key; filter_incomplete_deployment_closure_evidence_items; filter_deployment_closure_policy_evidence_items; evidence_item_has_incomplete_deployment_closure_placeholder; filter_stale_runtime_environment_evidence_items; evidence_item_has_stale_runtime_environment_ref; evidence_item_runtime_environment_compiled_dir; evidence_item_uses_stable_projection_id; evidence_item_read_model_scope_allows_search; scope_skipped; raw_hit_count; incomplete_filtered_count; deployment_closure_profile_filtered_count; deduplicated_count; truncated_count; operational_fact_count; build_evidence_items; build_evidence_items_with_options; build_deployment_closure_support; persist_evidence_lane_projection; record_context_gather_run; upsert_evidence_items; runtime_truth; project_ssot; reviewed_kb; active_board; skill_evidence; conversation_audit; cold_archive; support_refs; context_pack_artifact_payload;
 load_compiled_project_universe; compiled_service_runtime_payload_for_project; supportCatalog; compiled_deployment_policy_for_service;
 credential_lane_opt_in; selection.include_credentials; selection.include_raw_sources; raw_sources_omitted;
 "board_tasks"; "conversation_logs"; "credential_refs"; "mission_board_query"; "mission_conversation_query"; "scope": "active"; "time_range"; last_30d;
