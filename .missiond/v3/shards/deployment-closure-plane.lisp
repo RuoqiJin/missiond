@@ -39,7 +39,7 @@
        "Every production deploy writes or references a ReleaseLease before mutating an active symlink, compose target, or service runtime target."
        "Mutable image tags such as :latest are deployment intent only; runtime closure compares immutable target digest with observed running digest."
        "A missing service.manifest.toml, runtime target, deploy-center slug, Secret Store ref, or DB adoption plan is a production blocker, not a warning."
-       "MissionD self-deploy writes release-evidence.json and closure-verdict.json beside release-manifest.json; active symlink changes are lease-owned."
+       "MissionD self-deploy writes release-evidence.json and closure-verdict.json beside release-manifest.json; active symlink changes are lease-owned, and launchd runs from the release-local source snapshot rather than a mutable operator worktree."
        "deploy-ops agents may audit, plan, and collect approved read-only diagnostics by default, but production deploy, rollback, DNS mutation, secret mutation, SSH, and break-glass actions require deploy-center policy or explicit Board/user approval."
        "Production resolver/readiness MUST surface abi_freshness_mismatch when binary/runtime compiled hashes disagree; silent candidate fallback is forbidden for closure decisions."]
     :diagnostics [reported_digest_missing runtime_digest_mismatch provenance_partial db_adoption_required abi_freshness_mismatch release_lease_conflict deployment_lane_mismatch deploy_blocked_by_secret_store target_digest_missing final_runtime_digest_missing final_source_commit_missing source_commit_mismatch]

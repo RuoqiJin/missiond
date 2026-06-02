@@ -22,12 +22,21 @@
 #   MISSIOND_SOCKET_PATH        IPC socket, default: ~/.missiond/missiond.sock
 #   MISSIOND_LAUNCHCTL_LABEL    launchd label, default: com.missiond.daemon
 #   MISSIOND_LAUNCHD_PLIST      launchd plist, default: ~/Library/LaunchAgents/$label.plist
-#   MISSIOND_LAUNCHD_PROJECT_ROOT  project root written into launchd, default: current git root
+#   MISSIOND_LAUNCHD_PROJECT_ROOT  deploy owner root, default: current git root.
+#                               launchd runtime uses a release-local source
+#                               snapshot by default; this root is recorded as
+#                               release_owner_root for ownership checks.
+#   MISSIOND_DEPLOY_OWNER_ROOT  explicit owner root for active mutation guards.
 #   MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT  expected launchd_project_root for
 #                               the currently active release before mutating
-#                               active/apply-cleanup; default: selected launchd root
+#                               active/apply-cleanup; default: deploy owner root
 #   MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER  explicit 1/true override for
 #                               switching active from another project root
+#   MISSIOND_RELEASE_SOURCE_SNAPSHOT  when truthy, launchd points to
+#                               <release>/source, an immutable git-archive
+#                               snapshot matching compiled runtime; default: 1
+#   MISSIOND_RELEASE_ALLOW_DIRTY_SOURCE  allow source snapshot while V3/runtime
+#                               projection inputs are dirty; default: 0
 #   MISSIOND_RUNTIME_DIR        runtime artifact root, default: ~/.missiond/runtime/<repo-name>
 #   MISSIOND_CLEAN_REPO_RUNTIME_CACHE  after a successful deploy, prune repo
 #                               .missiond/v3/runtime cache when external
@@ -155,8 +164,10 @@ select_launchd_project_root() {
 }
 
 LAUNCHD_PROJECT_ROOT="$(select_launchd_project_root)"
-MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT="${MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT:-$LAUNCHD_PROJECT_ROOT}"
+DEPLOY_OWNER_ROOT="${MISSIOND_DEPLOY_OWNER_ROOT:-$LAUNCHD_PROJECT_ROOT}"
+MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT="${MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT:-$DEPLOY_OWNER_ROOT}"
 MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER="${MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER:-0}"
+MISSIOND_RELEASE_SOURCE_SNAPSHOT="${MISSIOND_RELEASE_SOURCE_SNAPSHOT:-1}"
 REPO_ID="$(basename "$REPO_ROOT")"
 RUNTIME_DIR="${MISSIOND_RUNTIME_DIR:-${HOME}/.missiond/runtime/${REPO_ID}}"
 COMPILED_RUNTIME_DIR="${MISSIOND_COMPILED_RUNTIME_DIR:-${RUNTIME_DIR}/compiled}"
@@ -560,10 +571,10 @@ NODE
 
 assert_active_project_root_can_mutate() {
   local phase="$1"
-  local active manifest active_project_root launchd_project_root expected_root
-  expected_root="${MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT:-$LAUNCHD_PROJECT_ROOT}"
+  local active manifest active_owner_root active_project_root manifest_launchd_project_root launchd_project_root expected_root
+  expected_root="${MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT:-$DEPLOY_OWNER_ROOT}"
   if truthy_env_value "$MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER"; then
-    log "ownership: project-root takeover explicitly allowed phase=$phase expected_active_root=$expected_root candidate_root=$LAUNCHD_PROJECT_ROOT"
+    log "ownership: project-root takeover explicitly allowed phase=$phase expected_active_root=$expected_root deploy_owner_root=$DEPLOY_OWNER_ROOT"
     return 0
   fi
   active="$(resolve_link_target "$ACTIVE_LINK" 2>/dev/null || true)"
@@ -576,19 +587,30 @@ assert_active_project_root_can_mutate() {
     log "ownership: active release has no manifest phase=$phase active=$active; project-root guard allows legacy migration"
     return 0
   fi
+  active_owner_root="$(json_string_field "$manifest" "release_owner_root" 2>/dev/null || true)"
   active_project_root="$(json_string_field "$manifest" "launchd_project_root" 2>/dev/null || true)"
-  if [ -n "$active_project_root" ] && [ "$active_project_root" != "$expected_root" ]; then
-    log "ownership: active project-root mismatch phase=$phase expected=$expected_root active_project_root=$active_project_root active=$active"
+  manifest_launchd_project_root="$active_project_root"
+  [ -n "$active_owner_root" ] || active_owner_root="$active_project_root"
+  if [ -n "$active_owner_root" ] && [ "$active_owner_root" != "$expected_root" ]; then
+    log "ownership: active project-root mismatch phase=$phase expected=$expected_root active_owner_root=$active_owner_root active_runtime_root=$active_project_root active=$active"
     log "ownership: set MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER=1 only for an intentional cross-root active release takeover"
     return 1
   fi
   launchd_project_root="$(plist_read_string "$LAUNCHD_PLIST" "WorkingDirectory" || true)"
-  if [ -n "$launchd_project_root" ] && [ "$launchd_project_root" != "$expected_root" ]; then
-    log "ownership: launchd project-root mismatch phase=$phase expected=$expected_root launchd_project_root=$launchd_project_root"
-    log "ownership: set MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER=1 only for an intentional cross-root launchd takeover"
-    return 1
+  if [ -n "$launchd_project_root" ]; then
+    if [ -n "$manifest_launchd_project_root" ]; then
+      if [ "$launchd_project_root" != "$manifest_launchd_project_root" ]; then
+        log "ownership: launchd runtime-root mismatch phase=$phase manifest_runtime_root=$manifest_launchd_project_root launchd_project_root=$launchd_project_root"
+        log "ownership: set MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER=1 only for an intentional launchd/runtime takeover"
+        return 1
+      fi
+    elif [ "$launchd_project_root" != "$expected_root" ]; then
+      log "ownership: launchd project-root mismatch phase=$phase expected=$expected_root launchd_project_root=$launchd_project_root"
+      log "ownership: set MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER=1 only for an intentional cross-root launchd takeover"
+      return 1
+    fi
   fi
-  log "ownership: project-root mutation guard verified phase=$phase root=$expected_root"
+  log "ownership: project-root mutation guard verified phase=$phase owner_root=$expected_root"
 }
 
 capture_launchd_runtime_state() {
@@ -854,6 +876,42 @@ process.stdout.write(JSON.stringify({ compiled_dir: compiledDir, projections }))
 NODE
 }
 
+create_release_source_snapshot() {
+  local dir="$1"
+  if ! truthy_env_value "$MISSIOND_RELEASE_SOURCE_SNAPSHOT"; then
+    printf '%s\n' "$REPO_ROOT"
+    return 0
+  fi
+  command -v tar >/dev/null 2>&1 || fail "tar not on PATH; cannot create release source snapshot" 1
+  if ! truthy_env_value "${MISSIOND_RELEASE_ALLOW_DIRTY_SOURCE:-0}"; then
+    local dirty
+    dirty="$(git status --porcelain -- \
+      .missiond/v3 \
+      scripts/compile-v3-runtime.mjs \
+      scripts/generated \
+      crates/missiond-daemon/src/context/v3_contracts/generated.rs \
+      crates/missiond-daemon/src/context/v3_runtime_defaults/generated.rs \
+      2>/dev/null || true)"
+    if [ -n "$dirty" ]; then
+      printf '%s\n' "$dirty" | sed 's/^/[release-source-dirty] /' >&2
+      fail "release source snapshot requires clean V3/runtime projection inputs; commit/stash them or set MISSIOND_RELEASE_ALLOW_DIRTY_SOURCE=1 for a non-reproducible dev deploy" 1
+    fi
+    mkdir -p "$dir"
+    git archive --format=tar HEAD | tar -xf - -C "$dir"
+  else
+    command -v rsync >/dev/null 2>&1 || fail "rsync not on PATH; cannot create dirty release source snapshot" 1
+    rsync -a --delete \
+      --exclude '.git' \
+      --exclude 'target' \
+      --exclude 'node_modules' \
+      --exclude '.missiond/v3/runtime' \
+      "$REPO_ROOT/" "$dir/"
+  fi
+  [ -d "$dir/.missiond/v3" ] || fail "release source snapshot missing .missiond/v3: $dir" 1
+  log "release-source: snapshot $dir"
+  printf '%s\n' "$dir"
+}
+
 write_self_deploy_closure_files() {
   local dir="$1"
   local verdict="$2"
@@ -896,6 +954,7 @@ const evidence = {
     git_sha: manifest.git_sha,
     daemon_sha256: manifest.daemon_sha256,
     mcp_sha256: manifest.mcp_sha256,
+    source_snapshot: manifest.launchd_project_root,
     compiled_runtime_dir: manifest.compiled_runtime_dir,
     compiled_abi_hash: manifest.typed_lisp_runtime?.projections?.v3?.source_hash ?? null,
   },
@@ -910,6 +969,7 @@ const evidence = {
   },
   runtime_observation: {
     active_release_dir: dir,
+    release_owner_root: manifest.release_owner_root ?? manifest.launchd_project_root,
     launchd_project_root: manifest.launchd_project_root,
     runtime_dir: manifest.runtime_dir,
     compiled_runtime_dir: manifest.compiled_runtime_dir,
@@ -1102,6 +1162,9 @@ CANDIDATE_DIR="$RELEASES_DIR/$RELEASE_ID"
 
 [ ! -e "$CANDIDATE_DIR" ] || fail "candidate release already exists: $CANDIDATE_DIR" 1
 mkdir -p "$CANDIDATE_DIR/bin"
+SOURCE_SNAPSHOT_START="$(date +%s)"
+CANDIDATE_LAUNCHD_PROJECT_ROOT="$(create_release_source_snapshot "$CANDIDATE_DIR/source")"
+record_timing "release-source-snapshot" "$SOURCE_SNAPSHOT_START"
 cp "$ARTIFACT" "$CANDIDATE_DIR/bin/missiond"
 cp "$MCP_ARTIFACT" "$CANDIDATE_DIR/bin/mission-mcp"
 chmod +x "$CANDIDATE_DIR/bin/missiond" "$CANDIDATE_DIR/bin/mission-mcp"
@@ -1117,7 +1180,7 @@ xattr -d com.apple.quarantine "$CANDIDATE_DIR/bin/missiond" 2>/dev/null || true
 xattr -d com.apple.quarantine "$CANDIDATE_DIR/bin/mission-mcp" 2>/dev/null || true
 
 cat > "$CANDIDATE_DIR/release-manifest.json" <<EOF
-{"schema":"missiond.release-manifest.v1","release_id":"$RELEASE_ID","profile":"$PROFILE","git_sha":"$GIT_SHA","daemon_sha256":"$NEW_HASH","mcp_sha256":"$NEW_MCP_HASH","typed_lisp_runtime":$TYPED_LISP_RUNTIME_MANIFEST,"launchd_project_root":"$LAUNCHD_PROJECT_ROOT","runtime_dir":"$RUNTIME_DIR","compiled_runtime_dir":"$COMPILED_RUNTIME_DIR","created_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","source":"scripts/deploy-daemon.sh"}
+{"schema":"missiond.release-manifest.v1","release_id":"$RELEASE_ID","profile":"$PROFILE","git_sha":"$GIT_SHA","daemon_sha256":"$NEW_HASH","mcp_sha256":"$NEW_MCP_HASH","typed_lisp_runtime":$TYPED_LISP_RUNTIME_MANIFEST,"release_owner_root":"$DEPLOY_OWNER_ROOT","launchd_project_root":"$CANDIDATE_LAUNCHD_PROJECT_ROOT","runtime_dir":"$RUNTIME_DIR","compiled_runtime_dir":"$COMPILED_RUNTIME_DIR","created_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","source":"scripts/deploy-daemon.sh"}
 EOF
 write_self_deploy_closure_files "$CANDIDATE_DIR" "blocked" "pending" "complete pre-switch/post-switch smoke before closure"
 log "candidate: $CANDIDATE_DIR"
@@ -1134,6 +1197,7 @@ assert_active_project_root_can_mutate "pre-switch" ||
 switch_active_release "$CANDIDATE_DIR"
 ensure_default_mcp_config
 
+LAUNCHD_PROJECT_ROOT="$CANDIDATE_LAUNCHD_PROJECT_ROOT"
 KICKSTART_START="$(date +%s)"
 if ! restart_daemon_supervisor; then
   rollback_with_smoke "$PREVIOUS_ACTIVE" || true
