@@ -1025,9 +1025,9 @@ fn evidence_scope_score(
     if let Some(project) = normalized_evidence_token(filter.project_id.as_deref()) {
         if project != "missiond" && haystack.contains(&project) {
             score += if line_haystack.contains(&project) {
-                6
+                4
             } else {
-                3
+                2
             };
         }
     }
@@ -1038,9 +1038,9 @@ fn evidence_scope_score(
         .unwrap_or_default()
     {
         if line_haystack.contains(&term) {
-            score += 4;
+            score += 8;
         } else if skill_haystack.contains(&term) {
-            score += 2;
+            score += 4;
         }
     }
     if score == 0
