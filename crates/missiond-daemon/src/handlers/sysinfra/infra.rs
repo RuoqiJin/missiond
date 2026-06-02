@@ -1032,7 +1032,8 @@ fn evidence_scope_score(
     let skill_haystack = format!("{skill_name}\n{skill_path}").to_ascii_lowercase();
     let mut score = 0i64;
 
-    if let Some(project) = normalized_evidence_token(filter.project_id.as_deref()) {
+    let project_token = normalized_evidence_token(filter.project_id.as_deref());
+    if let Some(project) = project_token.as_deref() {
         if project != "missiond" && haystack.contains(&project) {
             score += if line_haystack.contains(&project) {
                 4
@@ -1047,6 +1048,9 @@ fn evidence_scope_score(
         .map(evidence_query_tokens)
         .unwrap_or_default()
     {
+        if project_token.as_deref() == Some(term.as_str()) {
+            continue;
+        }
         let line_score = if is_weak_target_evidence_token(&term) {
             1
         } else {
@@ -1780,7 +1784,9 @@ fn maybe_push_skill_target(
 
 #[cfg(test)]
 mod tests {
-    use super::{credential_refs_filtered, evidence_matches_scope, InfraEvidenceFilter};
+    use super::{
+        credential_refs_filtered, evidence_matches_scope, evidence_scope_score, InfraEvidenceFilter,
+    };
 
     #[test]
     fn evidence_scope_rejects_unrelated_project_skill_lines() {
@@ -1821,6 +1827,22 @@ mod tests {
             "compose volume override kept the old binary image running after canary",
             &deploy_runtime_filter,
         ));
+        let volume_override_score = evidence_scope_score(
+            "deploy-ops",
+            "/Users/jinchen/.claude/skills/deploy-ops/SKILL.md",
+            "| xjp-router docker-compose.yml `volumes: ./config:/app/config:ro` 挂载覆盖镜像内 config | push → CI 构建新镜像 → 部署 → 容器里还是旧 config（挂载优先级高于 image layer） |",
+            &deploy_runtime_filter,
+        );
+        let generic_payments_compose_score = evidence_scope_score(
+            "deploy-ops",
+            "/Users/jinchen/.claude/skills/deploy-ops/SKILL.md",
+            "/opt/xiaojinpro/docker-compose.yml — monolith, router, payments, investor-panel 等",
+            &deploy_runtime_filter,
+        );
+        assert!(
+            volume_override_score > generic_payments_compose_score,
+            "volume override evidence should outrank generic payments compose inventory"
+        );
         assert!(!evidence_matches_scope(
             "tiermate",
             "/Users/jinchen/.claude/skills/tiermate/SKILL.md",
